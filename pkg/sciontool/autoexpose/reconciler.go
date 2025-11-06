@@ -64,10 +64,20 @@ type Reconciler struct {
 	// Only these ports are candidates for auto-unexpose.
 	autoExposed map[int]bool
 
-	// cachedRegistered is the last-known set of registered ports (port -> exposedBy).
-	// Refreshed after register/delete operations or every cacheRefreshInterval ticks.
-	cachedRegistered  map[int]string
-	ticksSinceRefresh int
+	// cachedRegistered is the last-known set of registered ports (port ->
+	// exposedBy). It is fetched from the hub only on the first pass, after
+	// this reconciler's own register or delete, and after a failed pass
+	// (cacheStale); there is no periodic refresh (ptone/scion#5243).
+	cachedRegistered map[int]string
+	cacheStale       bool
+
+	// withdrawn holds ports this reconciler exposed that a later fetch no
+	// longer found in the hub's registry: someone un-exposed them out of
+	// band. They are not exposed again while this reconciler runs, even if
+	// they keep listening or listen again later. They stay in autoExposed
+	// until they stop listening, when the usual delete (a 404 counts as
+	// done) drops them.
+	withdrawn map[int]bool
 
 	// backoff paces reconciles after failures; state is the loop's
 	// current health, used to log only on changes.
@@ -118,10 +128,6 @@ var (
 	logInfo  = log.Info
 )
 
-// cacheRefreshInterval is the number of ticks between forced cache refreshes.
-// Between refreshes, the reconciler uses its local cache to avoid HTTP calls.
-const cacheRefreshInterval = 10
-
 // credentialNotifier is implemented by a hub client that can report a
 // change of the agent credential (hub.Client.CredentialChanged).
 type credentialNotifier interface {
@@ -135,6 +141,7 @@ func NewReconciler(client HubPortClient, cfg Config) *Reconciler {
 		cfg:            cfg,
 		scan:           ScanListeners,
 		autoExposed:    make(map[int]bool),
+		withdrawn:      make(map[int]bool),
 		rejectExpose:   make(map[int]int),
 		rejectUnexpose: make(map[int]int),
 		backoff: backoff.Backoff{
@@ -213,7 +220,7 @@ func (r *Reconciler) nextDelay(err error) time.Duration {
 	// After a failure the next pass always asks the hub for the registered
 	// ports, so a success means the hub answered (not just a warm cache),
 	// and no change made earlier in a failed pass leaves the cache stale.
-	r.ticksSinceRefresh = cacheRefreshInterval
+	r.cacheStale = true
 	if scionhub.IsUnauthorized(err) {
 		delay := r.backoff.AtMax()
 		if r.state != stateUnauthorized {
@@ -306,7 +313,8 @@ func (r *Reconciler) reconcileOnce(ctx context.Context) error {
 		changed = true
 	}
 
-	// Refresh cache if we made changes.
+	// Refresh cache if we made changes. A failed refresh leaves the cache
+	// stale, so the next pass fetches it.
 	if changed {
 		if _, err := r.getRegistered(ctx, true); err != nil {
 			log.Debug("auto-expose: cache refresh after changes failed: %v", err)
@@ -420,6 +428,9 @@ func (r *Reconciler) diffToExpose(wanted map[int]bool, registered map[int]string
 		if _, exists := registered[port]; exists {
 			continue
 		}
+		if r.withdrawn[port] {
+			continue
+		}
 		if r.heldBack(r.rejectExpose, port) {
 			continue
 		}
@@ -444,17 +455,19 @@ func (r *Reconciler) diffToUnexpose(wanted map[int]bool) []int {
 	return result
 }
 
-// getRegistered returns the currently registered ports, using the cache when
-// possible. Pass force=true to always query the Hub.
+// getRegistered returns the currently registered ports. It answers from
+// the cache unless force is set, the cache is empty, or a failed pass marked
+// it stale; there is no periodic refresh (ptone/scion#5243). A fetch adds
+// every port this reconciler exposed that the hub no longer lists to
+// withdrawn.
 func (r *Reconciler) getRegistered(ctx context.Context, force bool) (map[int]string, error) {
-	r.ticksSinceRefresh++
-
-	if !force && r.cachedRegistered != nil && r.ticksSinceRefresh < cacheRefreshInterval {
+	if !force && !r.cacheStale && r.cachedRegistered != nil {
 		return r.cachedRegistered, nil
 	}
 
 	ports, err := r.client.ListPorts(ctx)
 	if err != nil {
+		r.cacheStale = true
 		return r.cachedRegistered, err
 	}
 
@@ -462,9 +475,15 @@ func (r *Reconciler) getRegistered(ctx context.Context, force bool) (map[int]str
 	for _, p := range ports {
 		registered[p.Port] = p.ExposedBy
 	}
+	for port := range r.autoExposed {
+		if _, ok := registered[port]; !ok && !r.withdrawn[port] {
+			r.withdrawn[port] = true
+			log.Info("auto-expose: port %d was un-exposed outside the agent; not exposing it again while the agent runs", port)
+		}
+	}
 
 	r.cachedRegistered = registered
-	r.ticksSinceRefresh = 0
+	r.cacheStale = false
 	return registered, nil
 }
 

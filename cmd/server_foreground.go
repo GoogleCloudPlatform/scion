@@ -1781,6 +1781,10 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 	if err := cfg.Hub.PortProxy.Validate(); err != nil {
 		return err
 	}
+	if err := validateLongLivedRequestSettings(cfg); err != nil {
+		return err
+	}
+	warnUndeclaredPlatformTimeout(cfg, os.Getenv, nil)
 	if err := cfg.Relay.Validate(); err != nil {
 		return err
 	}
@@ -4023,6 +4027,11 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		PlatformAuthSA:       webPlatformAuthSA,
 		SlowRequestThreshold: cfg.SlowRequestThreshold,
 		PerfTrace:            cfg.Hub.PerfTrace,
+		// Events stream bounds (ptone/scion#5230): the maximum age is
+		// clamped to the declared platform request timeout here and
+		// jittered per stream by the web server.
+		SSEMaxConnectionAge:  sseMaxConnectionAgeSetting(cfg),
+		SSEHeartbeatInterval: sseHeartbeatIntervalSetting(cfg),
 
 		ProxyDriverPrincipals:    webProxyDrivers,
 		ProxyDriverTokenAudience: cfg.Auth.Proxy.ProxyDriverTokenAudience(),
@@ -4047,7 +4056,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	if hubSrv != nil {
 		hubSrv.SetEventPublisher(eventPub)
 		startSettingsPropagation(ctx, hubSrv, eventPub)
-		webSrv.SetEventStreamMetrics(hubSrv.EventStreamMetrics())
+		wireWebEventStreamMetrics(webSrv, hubSrv)
 		webSrv.SetAccessSettingsProvider(hubSrv)
 		webSrv.SetProfilingSettingsProvider(hubSrv)
 		webSrv.SetOAuthService(hubSrv.GetOAuthService())

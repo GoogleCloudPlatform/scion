@@ -181,15 +181,26 @@ func warnConduitTargetStreamDeadlines(c config.HubConduitConfig) {
 		"user streams to renewal-capable agents are refused (503 stream_renewal_unavailable) until relay renewals land")
 }
 
-// conduitLifetimeCapSetting returns the configured conduit session lifetime
-// cap (default 3500s). validateServerPreflight has already rejected a
+// conduitLifetimeCapSetting returns the conduit session lifetime cap
+// before the per-session jitter: the configured cap (default 3500s),
+// clamped to 0.8 of the declared platform request timeout
+// (ptone/scion#5245). validateServerPreflight has already rejected a
 // malformed or out-of-range value.
 func conduitLifetimeCapSetting(cfg *config.GlobalConfig) time.Duration {
 	d, err := cfg.Hub.Conduit.LifetimeCapDuration()
 	if err != nil {
-		return config.ConduitDefaultLifetimeCap
+		d = config.ConduitDefaultLifetimeCap
 	}
-	return d
+	return config.EffectiveConduitLifetimeCap(d, platformRequestTimeoutSetting(cfg))
+}
+
+// conduitIngressLifetimeCapSetting returns the lifetime cap a hub in
+// external relay mode sends on the ingress leg: the top of the per-session
+// jitter range of conduitLifetimeCapSetting (ptone/scion#5245). The relay
+// is the one side that jitters; sending the unjittered cap would lower
+// every session above it back to that single value.
+func conduitIngressLifetimeCapSetting(cfg *config.GlobalConfig) time.Duration {
+	return config.ConduitLifetimeCapCeiling(conduitLifetimeCapSetting(cfg), platformRequestTimeoutSetting(cfg) > 0)
 }
 
 // conduitUserStreamAuthzMaxSetting returns the configured authorization
@@ -644,6 +655,8 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 		HopTLS:           hopClientTLS,
 		ReconnectWindow:  conduitReconnectWindowSetting(cfg),
 		LifetimeCap:      conduitLifetimeCapSetting(cfg),
+		// Per-session jitter of the cap (ptone/scion#5245).
+		JitterLifetimeCap: conduitLifetimeJitter(cfg),
 	}); err != nil {
 		return err
 	}
@@ -701,14 +714,7 @@ func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv 
 		slog.Warn("Conduit ingress proxy is off: it requires HMAC relay-peer authentication; conduit dials get 503 conduit_not_serving",
 			"cause", ingressOff, "peer_auth", mode, "fix", "set server.hub.conduit.peer_auth to hmac, or upgrade to the release with the relay-peer ingress header")
 	}
-	if err := hubSrv.StartConduitExternal(ctx, hub.ConduitExternalOptions{
-		InstanceID:      id,
-		PeerAuth:        auth,
-		HopTLS:          hopClientTLS,
-		Ingress:         cfg.Hub.Conduit.IngressValue(),
-		IngressOffCause: ingressOff,
-		LifetimeCap:     conduitLifetimeCapSetting(cfg),
-	}); err != nil {
+	if err := hubSrv.StartConduitExternal(ctx, conduitExternalOptions(cfg, id, auth, hopClientTLS, ingressOff)); err != nil {
 		return err
 	}
 	addr, _, err := serveConduitInternalListenerFn(ctx, cfg.Hub.Conduit.InternalListen, hopServerTLS, hubSrv.ConduitInternalHandler(), wg, errCh)
@@ -717,6 +723,20 @@ func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv 
 	}
 	slog.Info("Conduit external relay mode started: this hub runs no relay", "instance_id", id, "peer_auth", mode, "internal_listen", addr.String())
 	return nil
+}
+
+// conduitExternalOptions builds the options of external relay mode. The
+// lifetime cap is the ingress cap, the top of the relays' per-session
+// jitter range (conduitIngressLifetimeCapSetting; ptone/scion#5245).
+func conduitExternalOptions(cfg *config.GlobalConfig, id string, auth relay.PeerAuth, hopClientTLS *tls.Config, ingressOff string) hub.ConduitExternalOptions {
+	return hub.ConduitExternalOptions{
+		InstanceID:      id,
+		PeerAuth:        auth,
+		HopTLS:          hopClientTLS,
+		Ingress:         cfg.Hub.Conduit.IngressValue(),
+		IngressOffCause: ingressOff,
+		LifetimeCap:     conduitIngressLifetimeCapSetting(cfg),
+	}
 }
 
 // validateConduitIngress applies the startup rules of the conduit ingress

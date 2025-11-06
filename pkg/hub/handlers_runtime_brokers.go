@@ -30,7 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventstreams"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1983,10 +1982,35 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				// Publish SSE event so the frontend receives activity updates.
 				// A row soft-deleted between the slug lookup and this re-read
 				// (a delete finishing concurrently) publishes nothing.
-				// Counted as trigger=heartbeat (ptone/scion#5228); the
-				// publish itself is unchanged.
+				// Only a write that changed a field subscribers see publishes
+				// (ptone/scion#5233): a heartbeat that only bumped last_seen
+				// is silent, and one that carries a real change (a phase,
+				// activity, exit or message) publishes as trigger=change.
+				//
+				// The comparison is against agent, the row read before this
+				// write, not against what clients last received. Two limits
+				// follow. (1) Lost update window: if another writer changed
+				// the row (and published) between that read and this write,
+				// and this write puts the visible fields back to the values
+				// read, the comparison sees no change and clients keep the
+				// other writer's value until the next real change, a resync
+				// or the agent list's own refresh. (2) agent was mutated in
+				// place above by three writers: the AppliedConfig backfill of
+				// HarnessAuth and Profile; store.ApplyBrokerAgentConfig
+				// (Template, Runtime, and AppliedConfig HarnessConfig,
+				// HarnessAuth, HarnessConfigSource, Image and Profile); and
+				// recordHeartbeatRuntimeTarget (AppliedConfig RuntimeTarget and
+				// RuntimeTargetCandidate; it may also create a nil
+				// AppliedConfig). None of those fields is in the status event
+				// or feeds its badges (agentEventBadges reads AppliedConfig
+				// Harness, InlineConfig and ModelSize), so the mutation does
+				// not affect the comparison.
+				// TestAgentStatusEventIgnoresHeartbeatConfigWrites fails if
+				// that stops being true.
 				if updated, err := s.store.GetAgent(ctx, agent.ID); err == nil && updated.DeletedAt.IsZero() {
-					s.events.PublishAgentStatus(eventstreams.WithHeartbeatTrigger(ctx), updated)
+					if agentStatusVisiblyChanged(agent, updated) {
+						s.events.PublishAgentStatus(ctx, updated)
+					}
 					if statusResult.Halted {
 						s.onAgentHalted(ctx, updated, statusResult.HaltedFrom)
 					}

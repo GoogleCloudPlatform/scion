@@ -945,6 +945,29 @@ func TestHosted_PutServerConfig_PortProxyIsLayer0(t *testing.T) {
 	}
 }
 
+// TestHosted_PutServerConfig_LongLivedRequestSettingsAreLayer0: the events
+// stream settings and the platform request timeout are read at startup, so
+// a hosted hub's PUT rejects them as Layer-0 (ptone/scion#5230).
+func TestHosted_PutServerConfig_LongLivedRequestSettingsAreLayer0(t *testing.T) {
+	for body, key := range map[string]string{
+		`{"server":{"hub":{"sse":{"max_connection_age":"5m"}}}}`:  "server.hub.sse.max_connection_age",
+		`{"server":{"hub":{"platform_request_timeout":"900s"}}}`:  "server.hub.platform_request_timeout",
+		`{"server":{"hub":{"sse":{"heartbeat_interval":"20s"}}}}`: "server.hub.sse.heartbeat_interval",
+	} {
+		t.Run(key, func(t *testing.T) {
+			tempSettingsHome(t)
+			srv, _, _ := newSQLiteHubInMode(t, false, nil)
+			rr := putServerConfig(t, srv, body)
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if code, keys := rejectedKeys(t, rr); code != "layer0_rejected" || !reflect.DeepEqual(keys, []string{key}) {
+				t.Errorf("got %q %v, want layer0_rejected [%s]", code, keys, key)
+			}
+		})
+	}
+}
+
 // TestHosted_PutServerConfig_ConduitShutdownGraceIsLayer0: shutdown_grace
 // is read at startup under the server.hub.conduit Layer-0 prefix, so a
 // hosted hub's PUT rejects it as Layer-0.

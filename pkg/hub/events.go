@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -615,13 +616,9 @@ func (p *ChannelEventPublisher) Close() {
 	p.logger().Info("event publisher closed", "subscriber_channels", len(seen))
 }
 
-// PublishAgentStatus publishes an agent status event to both agent-specific
-// and project-scoped subjects (dual-publish pattern).
-//
-// An agent status event published with an eventstreams.WithHeartbeatTrigger
-// context counts as trigger=heartbeat on scion.hub.events.published.
-func (p *eventBuilder) PublishAgentStatus(ctx context.Context, agent *store.Agent) {
-	now := time.Now()
+// agentStatusEvent builds the status event of agent, with the computed
+// launch and deletion views taken at now.
+func agentStatusEvent(agent *store.Agent, now time.Time) AgentStatusEvent {
 	evt := AgentStatusEvent{
 		AgentID:         agent.ID,
 		ProjectID:       agent.ProjectID,
@@ -655,6 +652,34 @@ func (p *eventBuilder) PublishAgentStatus(ctx context.Context, agent *store.Agen
 	// Always set, even when every field is zero (for example before
 	// StartedAt during provisioning), so a cleared message is sent as "".
 	evt.Detail = &detail
+	return evt
+}
+
+// agentStatusVisiblyChanged reports whether after's status event differs
+// from before's, both built at the same instant: whether a status write
+// changed anything a subscriber sees. LastSeen and Updated are not in the
+// event, so a write that only bumps them reports false (ptone/scion#5233).
+// A marshal failure reports true, so the event is published.
+func agentStatusVisiblyChanged(before, after *store.Agent) bool {
+	if before == nil || after == nil {
+		return true
+	}
+	now := time.Now()
+	a, errA := json.Marshal(agentStatusEvent(before, now))
+	b, errB := json.Marshal(agentStatusEvent(after, now))
+	return errA != nil || errB != nil || !bytes.Equal(a, b)
+}
+
+// PublishAgentStatus publishes an agent status event to both agent-specific
+// and project-scoped subjects (dual-publish pattern).
+//
+// An event published with an eventstreams.WithHeartbeatTrigger context
+// counts as trigger=heartbeat on scion.hub.events.published. Since
+// ptone/scion#5233 no production caller sets it (heartbeats that change
+// nothing visible publish nothing), so that series stays at zero as a
+// regression signal.
+func (p *eventBuilder) PublishAgentStatus(ctx context.Context, agent *store.Agent) {
+	evt := agentStatusEvent(agent, time.Now())
 	sink := p.statusSink(ctx)
 	sink("agent."+agent.ID+".status", evt)
 	if agent.ProjectID != "" {

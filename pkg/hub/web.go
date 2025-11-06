@@ -26,6 +26,7 @@ import (
 	"io/fs"
 	"log"
 	"log/slog"
+	mathrand "math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -237,12 +238,19 @@ type WebServerConfig struct {
 	// happens.
 	ProxyDriverTokenAudience string
 	// SSEMaxConnectionAge is the maximum lifetime of an SSE connection before
-	// the server proactively closes it so the client can reconnect cleanly.
-	// Defaults to defaultSSEMaxConnectionAge (3500s) when zero.
+	// the server proactively closes it so the client can reconnect cleanly,
+	// already clamped to the declared platform request timeout
+	// (config.EffectiveSSEMaxAge). Each stream gets a +/-20% jitter on top
+	// (ptone/scion#5230). Defaults to config.SSEDefaultMaxConnectionAge
+	// (10m) when zero or negative.
 	SSEMaxConnectionAge time.Duration
+	// SSEMaxAgeJitter returns the point u in [0, 1) of a stream's maximum
+	// age jitter range (config.JitterLifetime). Nil: math/rand/v2. Tests
+	// pin it.
+	SSEMaxAgeJitter func() float64
 	// SSEHeartbeatInterval is how often the events stream sends a heartbeat
-	// event. Defaults to defaultSSEHeartbeatInterval (30s) when zero or
-	// negative.
+	// event. Defaults to config.SSEDefaultHeartbeatInterval (30s) when zero
+	// or negative.
 	SSEHeartbeatInterval time.Duration
 
 	// PerfTrace turns on performance tracing for the SSE endpoint
@@ -2078,19 +2086,25 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 	return true
 }
 
+// sseMaxAge returns the maximum age of one new events stream: the
+// configured age (default config.SSEDefaultMaxConnectionAge) with a
+// per-stream +/-20% jitter, so streams that connected together do not all
+// reconnect together (ptone/scion#5230).
+func (ws *WebServer) sseMaxAge() time.Duration {
+	base := ws.config.SSEMaxConnectionAge
+	if base <= 0 {
+		base = config.SSEDefaultMaxConnectionAge
+	}
+	u := ws.config.SSEMaxAgeJitter
+	if u == nil {
+		u = mathrand.Float64
+	}
+	return config.JitterLifetime(base, 1, u())
+}
+
 // handleSSE serves the Server-Sent Events endpoint. It subscribes to the
 // configured EventPublisher and streams matching events to the browser.
-// defaultSSEMaxConnectionAge is the default maximum lifetime of an SSE
-// connection. Cloud Run hard-kills connections at 3600s (producing
-// FAILED_PRECONDITION / error code 9); closing at 3500s gives the client a
-// clean EOF so it auto-reconnects per the SSE spec.
-const defaultSSEMaxConnectionAge = 3500 * time.Second
-
-// defaultSSEHeartbeatInterval is the default interval between events stream
-// heartbeats. Keep it well below the web client's stale-stream threshold
-// (75s).
-const defaultSSEHeartbeatInterval = 30 * time.Second
-
+//
 // Route: GET /events?sub=<pattern>&sub=<pattern>...
 func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	if ws.events == nil {
@@ -2239,17 +2253,16 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	// Each tick also re-checks a test identity web session.
 	heartbeatInterval := ws.config.SSEHeartbeatInterval
 	if heartbeatInterval <= 0 {
-		heartbeatInterval = defaultSSEHeartbeatInterval
+		heartbeatInterval = config.SSEDefaultHeartbeatInterval
 	}
 	heartbeat := time.NewTicker(heartbeatInterval)
 	defer heartbeat.Stop()
 
-	// Proactively close before Cloud Run's 3600s hard kill so the client
-	// gets a clean EOF and auto-reconnects per the SSE spec.
-	maxAge := ws.config.SSEMaxConnectionAge
-	if maxAge == 0 {
-		maxAge = defaultSSEMaxConnectionAge
-	}
+	// Close at the stream's jittered maximum age, before the platform's
+	// request timeout, with a reconnect hint so the client reconnects
+	// cleanly (ptone/scion#5230). The age is recorded on the stream.
+	maxAge := ws.sseMaxAge()
+	stream.SetMaxAge(maxAge)
 	reconnectTimer := time.NewTimer(maxAge)
 	defer reconnectTimer.Stop()
 
@@ -2666,11 +2679,13 @@ func (ws *WebServer) expandProjectWildcard(r *http.Request, tokens []string) []s
 	// List every project, a page at a time, and keep those the caller can
 	// read. Every page is drained (ptone/scion#1741): a single page would
 	// silently drop the projects beyond the store's page cap. Any list
-	// error fails closed for the whole expansion.
+	// error fails closed for the whole expansion. Summaries carry every
+	// authorization input (ID, owner, labels) without the per-project
+	// computed fields, which this expansion never reads.
 	var result []string
 	opts := store.ListOptions{Limit: sseProjectWildcardPageSize, SkipTotalCount: true}
 	for {
-		page, err := ws.store.ListProjects(r.Context(), store.ProjectFilter{}, opts)
+		page, err := ws.store.ListProjectSummaries(r.Context(), store.ProjectFilter{}, opts)
 		if err != nil {
 			ws.logger().Warn("expandProjectWildcard: failed to list projects", "error", err)
 			return nil // fail-closed

@@ -375,3 +375,36 @@ func TestRegistryConcurrentRegisterAndClose(t *testing.T) {
 		t.Errorf("closes = %v, want %d in total", got, n)
 	}
 }
+
+// TestStreamMaxAge: the maximum age recorded on a stream shows in Info,
+// in Snapshot and in the close log line (ptone/scion#5230); a stream with
+// none recorded reports 0.
+func TestStreamMaxAge(t *testing.T) {
+	var r Registry
+	logs := &logCapture{}
+	lg := logs.logger()
+	s := r.Register(Key{UserID: "alice", ConnID: "c1"}, 1)
+	other := r.Register(Key{UserID: "bob", ConnID: "c2"}, 1)
+	if got := s.MaxAge(); got != 0 {
+		t.Fatalf("MaxAge before SetMaxAge = %s, want 0", got)
+	}
+	s.SetMaxAge(9*time.Minute + 30*time.Second)
+	if got := s.Info().MaxAge; got != 9*time.Minute+30*time.Second {
+		t.Errorf("Info().MaxAge = %s", got)
+	}
+	if snap := r.UserStreams("alice"); len(snap) != 1 || snap[0].MaxAge != 9*time.Minute+30*time.Second {
+		t.Errorf("UserStreams(alice) = %+v", snap)
+	}
+	s.Close(CloseMaxAge, lg)
+	other.Close(CloseClient, lg)
+	recs := logs.records(t)
+	if len(recs) != 2 {
+		t.Fatalf("got %d close log lines, want 2", len(recs))
+	}
+	if recs[0]["max_age_ms"] != float64(570000) {
+		t.Errorf("close log max_age_ms = %v, want 570000", recs[0]["max_age_ms"])
+	}
+	if recs[1]["max_age_ms"] != float64(0) {
+		t.Errorf("close log max_age_ms without SetMaxAge = %v, want 0", recs[1]["max_age_ms"])
+	}
+}

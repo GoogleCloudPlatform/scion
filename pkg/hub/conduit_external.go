@@ -88,7 +88,10 @@ type ConduitExternalOptions struct {
 	// readiness gauge carries it as the cause attribute.
 	IngressOffCause string
 	// LifetimeCap is the hub's conduit session lifetime cap, sent to relays
-	// on the ingress leg (0 = config.ConduitDefaultLifetimeCap).
+	// on the ingress leg (0 = config.ConduitDefaultLifetimeCap). With a
+	// declared platform request timeout it is the top of the relays'
+	// per-session jitter range (config.ConduitLifetimeCapCeiling), so it
+	// bounds the sessions without undoing their jitter.
 	LifetimeCap time.Duration
 	// AuthzRecheckInterval overrides ServerConfig.ConduitAuthzRecheckInterval
 	// (0 = use it; negative disables the sweep, for tests).

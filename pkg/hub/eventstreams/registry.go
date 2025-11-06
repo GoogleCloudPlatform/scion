@@ -16,9 +16,9 @@
 // Server-Sent Events endpoint) open on one hub instance
 // (ptone/scion#5227), feeds the scion.hub.sse.* metrics from them
 // (ptone/scion#5228), and classifies published events for
-// scion.hub.events.published. It is phase 0 of ptone/scion#5219: it
-// observes only. Phase 1 builds on the Registry for max age, supersede by
-// key and the per-user cap.
+// scion.hub.events.published. Phase 0 of ptone/scion#5219 added it to
+// observe; phase 1 records each stream's jittered maximum age on it
+// (ptone/scion#5230). Supersede by key and the per-user cap come later.
 //
 // The package has no dependency on pkg/hub; the hub's events handler
 // registers each stream after it subscribes and closes it on every exit
@@ -140,8 +140,11 @@ func (k Key) HasClientIDs() bool {
 
 // Info is a point-in-time view of one open stream.
 type Info struct {
-	Key           Key
-	ConnectedAt   time.Time
+	Key         Key
+	ConnectedAt time.Time
+	// MaxAge is the stream's maximum age after jitter (0 until
+	// Stream.SetMaxAge; ptone/scion#5230).
+	MaxAge        time.Duration
 	Subjects      int
 	EventsWritten int64
 	BytesWritten  int64
@@ -155,10 +158,18 @@ type Stream struct {
 	connectedAt time.Time
 	subjects    int
 
+	maxAge atomic.Int64 // time.Duration; 0 until SetMaxAge
 	events atomic.Int64
 	bytes  atomic.Int64
 	closed atomic.Bool
 }
+
+// SetMaxAge records the stream's maximum age (after jitter), so Info and
+// the close log line report it (ptone/scion#5230).
+func (s *Stream) SetMaxAge(d time.Duration) { s.maxAge.Store(int64(d)) }
+
+// MaxAge returns the maximum age recorded by SetMaxAge, or 0.
+func (s *Stream) MaxAge() time.Duration { return time.Duration(s.maxAge.Load()) }
 
 // Key returns the stream's key.
 func (s *Stream) Key() Key { return s.key }
@@ -187,6 +198,7 @@ func (s *Stream) Info() Info {
 	return Info{
 		Key:           s.key,
 		ConnectedAt:   s.connectedAt,
+		MaxAge:        s.MaxAge(),
 		Subjects:      s.subjects,
 		EventsWritten: s.events.Load(),
 		BytesWritten:  s.bytes.Load(),
@@ -214,6 +226,7 @@ func (s *Stream) Close(reason CloseReason, logger *slog.Logger) {
 		slog.String("kind", string(s.key.Kind)),
 		slog.Int("subjects", s.subjects),
 		slog.Int64("duration_ms", lifetime.Milliseconds()),
+		slog.Int64("max_age_ms", s.MaxAge().Milliseconds()),
 		slog.Int64("events_written", s.events.Load()),
 		slog.Int64("bytes_written", s.bytes.Load()),
 		slog.String("reason", string(reason)),

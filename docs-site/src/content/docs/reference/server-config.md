@@ -79,6 +79,8 @@ Controls the central Hub API server.
 | `cors` | object | | CORS configuration (see below). |
 | `conduit` | object | | Conduit relay settings (see [Conduit](#conduit-serverhubconduit)). |
 | `port_proxy` | object | | Agent port proxy settings (see [Port proxy](#port-proxy-serverhubport_proxy)). |
+| `sse` | object | | Browser events stream settings (see [Events streams](#events-streams-serverhubsse)). |
+| `platform_request_timeout` | duration | | Request timeout of the platform in front of the Hub, for example the Cloud Run service timeout. No default. When set, the events stream maximum age and the conduit `lifetime_cap` are lowered to 0.8 of it (see [Platform request timeout](#platform-request-timeout)). Between `"150s"` and `"24h"`. Startup-only: restart required to change. Env: `SCION_SERVER_HUB_PLATFORMREQUESTTIMEOUT`. |
 
 #### CORS (`server.hub.cors`)
 
@@ -106,7 +108,7 @@ Settings for the in-process conduit relay and its stream grants. They take effec
 | `peer_audience` | string | `"scion-conduit-relay-peer"` | With OIDC peer auth, the ID token audience. It must be identical on every hub node. Env: `SCION_SERVER_HUB_CONDUIT_PEERAUDIENCE`. |
 | `reconnect_window` | duration | `"5s"` | Jitter window sent with a planned close: targets redial after a random delay within it. Between `"0s"` and `"5m"`. Flag: `--conduit-reconnect-window`. Env: `SCION_SERVER_HUB_CONDUIT_RECONNECTWINDOW`. |
 | `authz_recheck_interval` | duration | `"60s"` | Period of the authorization re-check sweep of open user streams: port proxy streams (including user requests on the legacy port-forward tunnel), terminal attach streams on the agent's Conduit session, and `scion tunnel` streams. User streams are also re-checked when the user's access changes and when the hub's event connection is re-established; Runtime Broker placement lookups are shared across streams evaluated in the same sweep. A stream whose user lost the permission is closed with `4401 authz_expired` within one interval even if the revocation event is missed; revocations normally close it at once. Between `"1s"` and `"10m"`. Flag: `--conduit-authz-recheck-interval`. Env: `SCION_SERVER_HUB_CONDUIT_AUTHZRECHECKINTERVAL`. |
-| `lifetime_cap` | duration | `"3500s"` | Lifetime cap of a conduit session. Set it below the platform's connection limit (Cloud Run request timeout, load balancer or proxy timeout). 60 seconds before the cap the relay sends `GoAway`: the session takes no new streams, the agent reconnects, and streams still open are closed with `4503 relay_restart` within 30 seconds and never later than the cap. A PTY client sees that close as `4503` and reconnects. Server-sent events are not affected. Between `"90s"` and `"24h"`. Flag: `--conduit-lifetime-cap`. Env: `SCION_SERVER_HUB_CONDUIT_LIFETIMECAP`. |
+| `lifetime_cap` | duration | `"3500s"` | Lifetime cap of a conduit session. Set it below the platform's connection limit (Cloud Run request timeout, load balancer or proxy timeout). 60 seconds before the cap the relay sends `GoAway`: the session takes no new streams, the agent reconnects, and streams still open are closed with `4503 relay_restart` within 30 seconds and never later than the cap. A PTY client sees that close as `4503` and reconnects. Server-sent events are not affected. Between `"90s"` and `"24h"`. When [`platform_request_timeout`](#platform-request-timeout) is set, the cap is lowered to 0.8 of it (never below `"90s"`). Each session gets its own jittered cap so sessions opened together do not all reconnect together: between 80% and 120% of the cap when `platform_request_timeout` is set, and between 80% and 100% of it otherwise, because the cap is then the platform limit itself. Flag: `--conduit-lifetime-cap`. Env: `SCION_SERVER_HUB_CONDUIT_LIFETIMECAP`. |
 | `shutdown_grace` | duration | | Time the platform allows between `SIGTERM` and killing the hub process. No default; the Cloud Run deployment profiles set `"10s"`. While the conduit relay runs, the hub handles `SIGTERM` (and `SIGINT`) by sending `GoAway` to every conduit session before its listeners close, with a drain deadline of at most `shutdown_grace` minus 2 seconds when this key is set (a value of 2 seconds or less gives a 1 ms deadline); when it is unset there is no cap and the drain deadline stays 30 seconds. Agents open a replacement session and streams still open at the deadline are closed with `4503 relay_restart`. In external relay mode with the ingress proxy serving there is no relay in the hub: the hub stops proxying conduit dials, asks the relays to drain the sessions it proxied, and closes the proxied connections still open when that drain step ends (see [Separate Conduit Relays](/scion/hosted/ha/separate-relay/#hub-ingress)). When set, it is also the whole hub process's shutdown budget: the co-located Runtime Broker's shutdown, the HTTP drain and the background teardown each get a share of `shutdown_grace` minus 2 seconds (half of `shutdown_grace` when it is 4 seconds or less), and the process exits within `shutdown_grace` even if a step has not finished (exit status 1 in that case). When it is unset, the drain stays 30 seconds and each shutdown step keeps its own bound, so one stop can take a minute or more (up to 35 seconds for the co-located broker, then up to 30 seconds of HTTP drain): on a hub run by systemd or Kubernetes, set it below the stop timeout (for example `"20s"` for a 30-second stop timeout). From the first `SIGTERM` or `SIGINT`, `/readyz` answers `503` and new requests other than health checks and Runtime Brokers' own requests get `503` with `Retry-After`; a second signal forces the shutdown (exit status 1). Must be a duration greater than 0. Read at startup; a change needs a restart. Env: `SCION_SERVER_HUB_CONDUIT_SHUTDOWNGRACE`. |
 | `proxy_session_max_age` | duration | `"1h"` | How long a user's Conduit session admitted through trusted-proxy authentication (no bearer credential, so no expiry of its own) may open new tunnels, counted from admission. After it, a new tunnel request on that session is refused with `401`; tunnels already open are unaffected. Between `"5m"` and `"1h"`. Env: `SCION_SERVER_HUB_CONDUIT_PROXYSESSIONMAXAGE`. |
 | `stream_authz_max` | object | see description | Authorization interval of open streams, per originating principal kind (`user`, `broker`, `agent`). When a stream reaches its interval, the hub re-checks the principal: if the permission still holds, the stream is renewed for one more interval; if not, it is closed with `4401 authz_expired` (`4404 target_not_found` if the agent is gone). If the check cannot be evaluated (for example a store outage), the stream is never renewed or closed early; it is closed with `4401 authz_expired` at the end of its current interval. Revocations and the `authz_recheck_interval` sweep close a revoked stream sooner, but never extend it. Defaults: `user` `"8h"`, `broker` `"24h"`, `agent` `"24h"`, each between `"1m"` and `"168h"`. Only `user` is enforced today (port proxy streams, including user requests on the legacy port-forward tunnel, terminal attach streams on the agent's Conduit session, and `scion tunnel` streams); the `broker` and `agent` values are validated but not yet applied. Flag: `--conduit-stream-authz-max-user`. Env: `SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_USER`, `SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_BROKER`, `SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_AGENT`. |
@@ -146,6 +148,34 @@ Settings for the agent port proxy (`/api/v1/agents/{id}/ports/{port}/...`) when 
 | :--- | :--- | :--- | :--- |
 | `response_header_timeout` | duration | `"60s"` | How long the proxy waits for the service on the agent port to send its response headers, counted from when the request has been sent. This includes the WebSocket handshake. If the headers do not arrive in time, the proxy cancels the upstream request, answers `504` (code `runtime_error`; a browser gets the proxy error page) and counts it in `scion.hub.port_proxy.upstream_timeout`. The response body has no time limit: server-sent events, downloads, chunked responses and upgraded WebSockets keep flowing once the headers have arrived. Between `"5s"` and `"10m"`; `0` is not accepted. Env: `SCION_SERVER_HUB_PORTPROXY_RESPONSEHEADERTIMEOUT`. |
 | `view_ttl` | duration | `"2h"` | With the `hub.port_view` [experiment](/scion/reference/experiments/) on, how long a page link stays valid. The hub creates one when a user opens an exposed port from the hub. Opening the port's link from the hub again creates a new one. The lifetime is fixed when the link is created; using the link does not extend it. Between `"15m"` and `"24h"`. Env: `SCION_SERVER_HUB_PORTPROXY_VIEWTTL`. |
+
+#### Events streams (`server.hub.sse`)
+
+Settings for the browser events stream (`/events`, server-sent events), which the web UI keeps open for live updates. Read at startup, so a change needs a restart. An invalid value is a startup error. Both are Layer 0: a hosted Hub's server-config API refuses them.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `max_connection_age` | duration | `"10m"` | Maximum age of an events stream. At that age the Hub sends a `reconnect` event and closes the stream, and the browser reconnects at once. Each stream gets its own age between 80% and 120% of this value, so streams opened together do not all reconnect together. When [`platform_request_timeout`](#platform-request-timeout) is set, the value is first lowered to 0.8 of it. Between `"1m"` and `"24h"`. Env: `SCION_SERVER_HUB_SSE_MAXCONNECTIONAGE`. |
+| `heartbeat_interval` | duration | `"30s"` | Interval between the heartbeat events of an events stream. The web client treats a stream that has been silent for 75 seconds as dead, so the maximum is `"1m"`. Between `"5s"` and `"1m"`. Env: `SCION_SERVER_HUB_SSE_HEARTBEATINTERVAL`. |
+
+Each stream's maximum age is recorded on the stream and appears as `max_age_ms` in its `events stream closed` log line.
+
+#### Platform request timeout
+
+Many platforms and proxies end a request after a fixed time, for example the Cloud Run service request timeout (300 seconds by default, at most 3600). Long-lived requests that run into that limit are cut by the platform instead of being ended by the Hub, and while they stay open each one holds a request slot (on Cloud Run, one unit of `containerConcurrency`).
+
+Set `server.hub.platform_request_timeout` to the platform's timeout. The Hub then ends events streams and conduit sessions before it:
+
+- Events stream maximum age: `min(sse.max_connection_age, 0.8 × platform_request_timeout)`, then the per-stream jitter of ±20%. With a 900-second timeout and the defaults, streams end after 8 to 12 minutes, well before 900 seconds.
+- Conduit lifetime cap: `min(conduit.lifetime_cap, 0.8 × platform_request_timeout)`, never below 90 seconds, then the per-session jitter of ±20%.
+
+```yaml
+server:
+  hub:
+    platform_request_timeout: "900s"   # the Cloud Run service timeout
+```
+
+When the Hub runs on a Cloud Run service (`K_SERVICE` is set) and `platform_request_timeout` is not set, it logs one warning at startup that names the setting. Startup continues.
 
 #### Observability export (`server.hub.observability`)
 
@@ -1747,6 +1777,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Conduit relay | `hub.conduit.*` |
 | Separate relay | `relay.*` |
 | Port proxy | `hub.port_proxy.*` |
+| Long-lived requests | `hub.sse.*`, `hub.platform_request_timeout` |
 
 ### Layer 1 — Operational (`hub_settings` table)
 

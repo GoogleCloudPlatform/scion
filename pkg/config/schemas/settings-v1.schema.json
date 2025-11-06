@@ -1746,6 +1746,31 @@
             }
           }
         },
+        "sse": {
+          "type": "object",
+          "description": "Browser events stream (/events) settings. Read at startup; restart required to change. Invalid values are a startup error.",
+          "additionalProperties": false,
+          "properties": {
+            "max_connection_age": {
+              "type": "string",
+              "description": "Maximum age of an events stream. At that age the hub sends a reconnect event and closes the stream, and the browser reconnects. Each stream gets a +/-20% jitter so streams opened together do not end together. When platform_request_timeout is set, the age is first lowered to 0.8 of it (e.g. '10m'; default '10m', between '1m' and '24h').",
+              "x-env-var": "SCION_SERVER_HUB_SSE_MAXCONNECTIONAGE",
+              "x-since": "1"
+            },
+            "heartbeat_interval": {
+              "type": "string",
+              "description": "Interval between events stream heartbeats. The web client treats a stream that has been silent for 75s as dead (e.g. '30s'; default '30s', between '5s' and '1m').",
+              "x-env-var": "SCION_SERVER_HUB_SSE_HEARTBEATINTERVAL",
+              "x-since": "1"
+            }
+          }
+        },
+        "platform_request_timeout": {
+          "type": "string",
+          "description": "Request timeout of the platform in front of the hub, for example the Cloud Run service timeout. When set, the events stream maximum age (sse.max_connection_age) and the conduit session lifetime cap (conduit.lifetime_cap) are lowered to 0.8 of it, so the hub ends long-lived requests before the platform cuts them. On Cloud Run the hub logs a startup warning while it is unset. Read at startup (e.g. '900s'; no default, between '150s' and '24h').",
+          "x-env-var": "SCION_SERVER_HUB_PLATFORMREQUESTTIMEOUT",
+          "x-since": "1"
+        },
         "observability": {
           "type": "object",
           "description": "Switches for the hub's own metrics and trace export. Read at startup; restart required to change. The export project is the hub GCP project ID (SCION_SERVER_HUB_GCPPROJECTID) when set, else the project of the Google Cloud metadata server.",

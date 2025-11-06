@@ -86,7 +86,7 @@ type mockAuthzStore struct {
 	roleDefinitions       map[string]*store.RoleDefinition
 	projects              []store.Project                     // injectable project list for wildcard expansion tests
 	projectMemberships    map[string]*store.ProjectMembership // key: "projectID:userID"
-	listProjectsReturnNil bool                                // when true, ListProjects returns (nil, nil)
+	listProjectsReturnNil bool                                // when true, the project lists return (nil, nil)
 
 	// Project paging (ptone/scion#1741). projectPageSize > 0 serves
 	// projects in pages of that size with an index cursor; it is capped by
@@ -94,8 +94,11 @@ type mockAuthzStore struct {
 	projectPageSize       int
 	listProjectsErrAfter  int  // > 0: calls after this many fail
 	stuckProjectCursor    bool // every page is the first, with the same cursor
-	listProjectsCalls     int
+	listProjectsCalls     int  // list calls of either kind
 	lastListProjectsLimit int
+	// listProjectsFullCalls counts ListProjects calls only (the computed
+	// fields; ListProjectSummaries skips them).
+	listProjectsFullCalls int
 }
 
 // sseMessageIDs returns the message ids of the events written to an SSE body.
@@ -311,7 +314,21 @@ func (m *mockAuthzStore) ListAccessConstraints(_ context.Context, _, _ int) ([]*
 	return nil, nil
 }
 
+// ListProjects serves m.projects like ListProjectSummaries and also counts
+// listProjectsFullCalls, so a test can check that a caller used summaries.
 func (m *mockAuthzStore) ListProjects(_ context.Context, _ store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	m.listProjectsFullCalls++
+	return m.pageProjects(opts)
+}
+
+// ListProjectSummaries serves m.projects, paged per projectPageSize.
+func (m *mockAuthzStore) ListProjectSummaries(_ context.Context, _ store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	return m.pageProjects(opts)
+}
+
+// pageProjects is one list call of either kind (counted in
+// listProjectsCalls).
+func (m *mockAuthzStore) pageProjects(opts store.ListOptions) (*store.ListResult[store.Project], error) {
 	m.listProjectsCalls++
 	m.lastListProjectsLimit = opts.Limit
 	if m.listProjectsReturnNil {

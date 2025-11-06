@@ -63,13 +63,17 @@ func TestServerRoleFlag(t *testing.T) {
 }
 
 // TestValidateRelayRoleConfig: --role relay requires peer_secret, the hub
-// internal URL, its public URL and the internal listener; errors name the
-// setting, never a value.
+// internal URL, its public URL and the internal listener, and refuses an
+// invalid platform_request_timeout like the hub (ptone/scion#5245); errors
+// name the setting, never a value.
 func TestValidateRelayRoleConfig(t *testing.T) {
 	prevCR := relayOnCloudRun
 	t.Cleanup(func() { relayOnCloudRun = prevCR })
 	relayOnCloudRun = func() bool { return false }
 	require.NoError(t, validateRelayRoleConfig(relayRoleTestConfig()))
+	declared := relayRoleTestConfig()
+	declared.Hub.PlatformRequestTimeout = "900s"
+	require.NoError(t, validateRelayRoleConfig(declared), "a valid platform_request_timeout starts the relay")
 	for name, tc := range map[string]struct {
 		mod     func(*config.GlobalConfig)
 		wantErr string
@@ -79,6 +83,8 @@ func TestValidateRelayRoleConfig(t *testing.T) {
 		"no hub internal url":  {func(c *config.GlobalConfig) { c.Relay.HubInternalURL = "" }, "server.relay.hub_internal_url is required"},
 		"no public url":        {func(c *config.GlobalConfig) { c.Relay.PublicURL = "" }, "server.relay.public_url is required"},
 		"no internal listener": {func(c *config.GlobalConfig) { c.Hub.Conduit.InternalListen = "" }, "server.hub.conduit.internal_listen is required"},
+		"timeout too short":    {func(c *config.GlobalConfig) { c.Hub.PlatformRequestTimeout = "30s" }, "server.hub.platform_request_timeout"},
+		"timeout malformed":    {func(c *config.GlobalConfig) { c.Hub.PlatformRequestTimeout = "soon" }, "server.hub.platform_request_timeout"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := relayRoleTestConfig()
