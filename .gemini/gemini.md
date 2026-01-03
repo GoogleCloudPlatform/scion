@@ -27,3 +27,7 @@
 - Ensure all new commands are added via Cobra in the `cmd/` package.
 - **Do not update the local `.scion` folder directly.** It is populated during initialization (`scion init`).
 - **Any changes to the default template must be made in `pkg/config/init.go`** (the config init package), as that is where the seeding logic resides.
+
+## Project use of the scion tool itself
+
+Do not commit changes in the project's own .scion folder to git as part of committing progress on code and docs. These will be managed and commited manually.
