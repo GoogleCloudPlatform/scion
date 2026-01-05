@@ -26,12 +26,14 @@ import (
 type KubernetesRuntime struct {
 	Client           *k8s.Client
 	DefaultNamespace string
+	SyncMode         string
 }
 
 func NewKubernetesRuntime(client *k8s.Client) *KubernetesRuntime {
 	return &KubernetesRuntime{
 		Client:           client,
 		DefaultNamespace: "default",
+		SyncMode:         "tar", // Default
 	}
 }
 
@@ -52,6 +54,14 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		config.Name = fmt.Sprintf("scion-%d", time.Now().UnixNano())
 	}
 
+	// Persist workspace path in annotations for later sync
+	if config.Workspace != "" {
+		if config.Annotations == nil {
+			config.Annotations = make(map[string]string)
+		}
+		config.Annotations["scion.workspace"] = config.Workspace
+	}
+
 	pod := r.buildPod(namespace, config)
 
 	fmt.Printf("  Provisioning pod '%s' in namespace '%s'...\n", config.Name, namespace)
@@ -68,49 +78,52 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	if config.HomeDir != "" {
 		destHome := fmt.Sprintf("/home/%s", config.UnixUsername)
 		fmt.Printf("  Syncing agent home (%s -> %s)...\n", config.HomeDir, destHome)
-		err = r.syncContext(ctx, namespace, createdPod.Name, config.HomeDir, destHome)
+		err = r.syncToPod(ctx, namespace, createdPod.Name, config.HomeDir, destHome)
 		if err != nil {
 			return createdPod.Name, fmt.Errorf("failed to sync home: %w", err)
 		}
 	}
 
 	if config.Workspace != "" {
-		// Check for Mutagen
 		useMutagen := false
-		if mutagen.CheckInstalled() {
-			fmt.Println("  Mutagen detected. Initializing live sync session...")
-			if err := mutagen.StartDaemon(); err != nil {
-				fmt.Printf("  Warning: failed to start mutagen daemon: %s. Falling back to snapshot sync.\n", err)
-			} else {
-				// Construct the Mutagen Kubernetes URL.
-				// Format: kubernetes://<context>/<namespace>/<pod>/<container>:<path>
-				remoteURL := fmt.Sprintf("kubernetes://%s/%s/%s/agent:/workspace",
-					r.Client.CurrentContext, namespace, createdPod.Name)
-
-				// Create Sync
-				err = mutagen.CreateSync(
-					"scion-"+createdPod.Name,
-					config.Workspace,
-					remoteURL,
-					map[string]string{"scion-agent": createdPod.Name},
-				)
-				if err != nil {
-					fmt.Printf("  Warning: failed to create mutagen sync: %s. Falling back to snapshot sync.\n", err)
+		if r.SyncMode == "mutagen" {
+			if mutagen.CheckInstalled() {
+				fmt.Println("  Initializing live sync session (Mutagen)...")
+				if err := mutagen.StartDaemon(); err != nil {
+					fmt.Printf("  Warning: failed to start mutagen daemon: %s. Falling back to snapshot sync.\n", err)
 				} else {
-					fmt.Println("  Waiting for initial sync to complete...")
-					if err := mutagen.WaitForSync("scion-"+createdPod.Name, 60*time.Second); err != nil {
-						fmt.Printf("  Warning: mutagen sync timed out or failed: %s. Proceeding, but sync may be incomplete.\n", err)
+					// Construct the Mutagen Kubernetes URL.
+					// Format: kubernetes://<context>/<namespace>/<pod>/<container>:<path>
+					remoteURL := fmt.Sprintf("kubernetes://%s/%s/%s/agent:/workspace",
+						r.Client.CurrentContext, namespace, createdPod.Name)
+
+					// Create Sync
+					err = mutagen.CreateSync(
+						"scion-"+createdPod.Name,
+						config.Workspace,
+						remoteURL,
+						map[string]string{"scion-agent": createdPod.Name},
+					)
+					if err != nil {
+						fmt.Printf("  Warning: failed to create mutagen sync: %s. Falling back to snapshot sync.\n", err)
 					} else {
-						fmt.Println("  Mutagen sync active.")
-						useMutagen = true
+						fmt.Println("  Waiting for initial sync to complete...")
+						if err := mutagen.WaitForSync("scion-"+createdPod.Name, 60*time.Second); err != nil {
+							fmt.Printf("  Warning: mutagen sync timed out or failed: %s. Proceeding, but sync may be incomplete.\n", err)
+						} else {
+							fmt.Println("  Mutagen sync active.")
+							useMutagen = true
+						}
 					}
 				}
+			} else {
+				fmt.Println("  Warning: Sync mode is 'mutagen' but mutagen is not installed. Falling back to snapshot sync.")
 			}
 		}
 
 		if !useMutagen {
 			fmt.Printf("  Syncing workspace (%s -> /workspace)...\n", config.Workspace)
-			err = r.syncContext(ctx, namespace, createdPod.Name, config.Workspace, "/workspace")
+			err = r.syncToPod(ctx, namespace, createdPod.Name, config.Workspace, "/workspace")
 			if err != nil {
 				return createdPod.Name, fmt.Errorf("failed to sync workspace: %w", err)
 			}
@@ -249,7 +262,7 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 	}
 }
 
-func (r *KubernetesRuntime) syncContext(ctx context.Context, namespace, podName, sourcePath, destPath string) error {
+func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, sourcePath, destPath string) error {
 	fmt.Printf("  Preparing tar archive from %s...\n", sourcePath)
 	tarCmd := exec.CommandContext(ctx, "tar", "-cz", "-C", sourcePath, ".")
 	tarCmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
@@ -264,7 +277,7 @@ func (r *KubernetesRuntime) syncContext(ctx context.Context, namespace, podName,
 
 	// Use sh -c to allow us to ignore certain exit codes if needed, or just to be more flexible.
 	// We use -m to avoid utime errors on the mount point.
-	remoteCmd := fmt.Sprintf("tar -xz -m --no-same-owner --no-same-permissions -C %s", destPath)
+	remoteCmd := fmt.Sprintf("tar -xz -m --no-same-owner --no-same-permissions -C '%s'", destPath)
 	cmd := []string{"sh", "-c", remoteCmd}
 
 	req := r.Client.Clientset.CoreV1().RESTClient().Post().
@@ -318,6 +331,74 @@ func (r *KubernetesRuntime) syncContext(ctx context.Context, namespace, podName,
 	}
 
 	fmt.Printf("  Sync to %s complete.\n", destPath)
+	return nil
+}
+
+func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName, remotePath, localPath string) error {
+	if err := os.MkdirAll(localPath, 0755); err != nil {
+		return fmt.Errorf("failed to create local workspace directory: %w", err)
+	}
+	fmt.Printf("  Preparing remote tar archive from %s...\n", remotePath)
+
+	remoteCmd := fmt.Sprintf("tar -cz -C '%s' .", remotePath)
+	cmd := []string{"sh", "-c", remoteCmd}
+
+	req := r.Client.Clientset.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(podName).
+		Namespace(namespace).
+		SubResource("exec")
+
+	option := &corev1.PodExecOptions{
+		Command: cmd,
+		Stdin:   false,
+		Stdout:  true,
+		Stderr:  true,
+		TTY:     false,
+	}
+
+	req.VersionedParams(
+		option,
+		scheme.ParameterCodec,
+	)
+
+	executor, err := remotecommand.NewSPDYExecutor(r.Client.Config, "POST", req.URL())
+	if err != nil {
+		return err
+	}
+
+	// Prepare local tar
+	tarCmd := exec.CommandContext(ctx, "tar", "-xz", "-m", "-C", localPath)
+	tarCmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
+	stdin, err := tarCmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+
+	if err := tarCmd.Start(); err != nil {
+		return err
+	}
+
+	fmt.Printf("  Streaming archive from pod '%s' (destination: %s)...\n", podName, localPath)
+	var stderr bytes.Buffer
+	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdout: stdin,
+		Stderr: &stderr,
+	})
+
+	// Close stdin to tell local tar that stream is finished
+	stdin.Close()
+	waitErr := tarCmd.Wait()
+
+	if err != nil {
+		return fmt.Errorf("stream failed: %w (remote stderr: %s)", err, stderr.String())
+	}
+
+	if waitErr != nil {
+		return fmt.Errorf("local tar failed: %w", waitErr)
+	}
+
+	fmt.Printf("  Sync from %s complete.\n", remotePath)
 	return nil
 }
 
@@ -639,4 +720,86 @@ func (r *KubernetesRuntime) ImageExists(ctx context.Context, image string) (bool
 func (r *KubernetesRuntime) PullImage(ctx context.Context, image string) error {
 	// Not strictly needed as Pod creation handles pulling.
 	return nil
+}
+
+func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncDirection) error {
+	// Find pod first
+	agents, err := r.List(ctx, map[string]string{"scion.name": id})
+	if err != nil {
+		return fmt.Errorf("failed to list pods: %w", err)
+	}
+
+	var agent *api.AgentInfo
+	for _, a := range agents {
+		if a.ID == id || a.Name == id {
+			agent = &a
+			break
+		}
+	}
+
+	if agent == nil {
+		return fmt.Errorf("agent '%s' pod not found", id)
+	}
+
+	workspacePath := agent.Annotations["scion.workspace"]
+	if workspacePath == "" {
+		return fmt.Errorf("agent '%s' does not have a workspace path recorded", id)
+	}
+
+	// Resolve namespace
+	namespace := r.DefaultNamespace
+	if ns, ok := agent.Labels["scion.namespace"]; ok {
+		namespace = ns
+	} else if ns, ok := agent.Labels["namespace"]; ok {
+		namespace = ns
+	}
+
+	if r.SyncMode == "mutagen" {
+		if !mutagen.CheckInstalled() {
+			return fmt.Errorf("mutagen not installed but sync mode is mutagen")
+		}
+		// Check if sync exists
+		syncName := "scion-" + agent.ID
+		if err := mutagen.WaitForSync(syncName, 1*time.Second); err == nil {
+			fmt.Println("Mutagen sync is already active.")
+			return nil
+		}
+
+		// Try to recreate if missing
+		fmt.Println("Mutagen sync not found. Creating...")
+		if err := mutagen.StartDaemon(); err != nil {
+			return fmt.Errorf("failed to start mutagen daemon: %w", err)
+		}
+
+		// Clean up any existing session for this agent to avoid name collisions
+		_ = mutagen.TerminateSync("scion-agent=" + agent.ID)
+
+		remoteURL := fmt.Sprintf("kubernetes://%s/%s/%s/agent:/workspace",
+			r.Client.CurrentContext, namespace, agent.ID)
+
+		err = mutagen.CreateSync(
+			syncName,
+			workspacePath,
+			remoteURL,
+			map[string]string{"scion-agent": agent.ID},
+		)
+		if err != nil {
+			return fmt.Errorf("failed to create mutagen sync: %w", err)
+		}
+		fmt.Println("Mutagen sync created.")
+		return nil
+	}
+
+	// Default to tar sync (Snapshot)
+	if direction == SyncUnspecified {
+		return fmt.Errorf("direction (to or from) must be specified for tar sync. Example: scion sync to %s", agent.ID)
+	}
+
+	if direction == SyncFrom {
+		fmt.Printf("Syncing workspace (agent -> %s)...\n", workspacePath)
+		return r.syncFromPod(ctx, namespace, agent.ID, "/workspace", workspacePath)
+	}
+
+	fmt.Printf("Syncing workspace (%s -> agent)...\n", workspacePath)
+	return r.syncToPod(ctx, namespace, agent.ID, workspacePath, "/workspace")
 }

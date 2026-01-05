@@ -82,6 +82,11 @@ func GetRuntime(grovePath string, profileName string) Runtime {
 		if rtConfig.Namespace != "" {
 			rt.DefaultNamespace = rtConfig.Namespace
 		}
+		if rtConfig.Sync != "" {
+			rt.SyncMode = rtConfig.Sync
+		} else {
+			rt.SyncMode = "tar" // Implicit default
+		}
 		return rt
 	}
 
@@ -126,5 +131,9 @@ func (e *ErrorRuntime) ImageExists(ctx context.Context, image string) (bool, err
 }
 
 func (e *ErrorRuntime) PullImage(ctx context.Context, image string) error {
+	return e.Err
+}
+
+func (e *ErrorRuntime) Sync(ctx context.Context, id string, direction SyncDirection) error {
 	return e.Err
 }

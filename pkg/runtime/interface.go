@@ -36,4 +36,13 @@ type Runtime interface {
 	Attach(ctx context.Context, id string) error
 	ImageExists(ctx context.Context, image string) (bool, error)
 	PullImage(ctx context.Context, image string) error
+	Sync(ctx context.Context, id string, direction SyncDirection) error
 }
+
+type SyncDirection string
+
+const (
+	SyncTo          SyncDirection = "to"
+	SyncFrom        SyncDirection = "from"
+	SyncUnspecified SyncDirection = ""
+)

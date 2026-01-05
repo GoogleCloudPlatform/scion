@@ -164,3 +164,11 @@ func (r *DockerRuntime) ImageExists(ctx context.Context, image string) (bool, er
 func (r *DockerRuntime) PullImage(ctx context.Context, image string) error {
 	return runInteractiveCommand(r.Command, "pull", image)
 }
+
+func (r *DockerRuntime) Sync(ctx context.Context, id string, direction SyncDirection) error {
+
+	// Docker runtime uses bind mounts, so sync is automatic/noop
+
+	return nil
+
+}

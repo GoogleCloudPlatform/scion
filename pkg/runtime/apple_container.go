@@ -163,3 +163,11 @@ func (r *AppleContainerRuntime) ImageExists(ctx context.Context, image string) (
 func (r *AppleContainerRuntime) PullImage(ctx context.Context, image string) error {
 	return runInteractiveCommand(r.Command, "image", "pull", image)
 }
+
+func (r *AppleContainerRuntime) Sync(ctx context.Context, id string, direction SyncDirection) error {
+
+	// Apple container runtime uses bind mounts (if configured), so sync is likely automatic/noop
+
+	return nil
+
+}

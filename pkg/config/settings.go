@@ -15,6 +15,7 @@ type RuntimeConfig struct {
 	Namespace string            `json:"namespace,omitempty"`
 	Tmux      *bool             `json:"tmux,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
+	Sync      string            `json:"sync,omitempty"`
 }
 
 type HarnessConfig struct {
@@ -222,6 +223,9 @@ func MergeSettings(base *Settings, data []byte) error {
 			}
 			if v.Env != nil {
 				existing.Env = mergeMaps(existing.Env, v.Env)
+			}
+			if v.Sync != "" {
+				existing.Sync = v.Sync
 			}
 			base.Runtimes[k] = existing
 		}

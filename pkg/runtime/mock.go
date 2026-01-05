@@ -14,6 +14,7 @@ type MockRuntime struct {
 	GetLogsFunc     func(ctx context.Context, id string) (string, error)
 	AttachFunc      func(ctx context.Context, id string) error
 	ImageExistsFunc func(ctx context.Context, image string) (bool, error)
+	SyncFunc        func(ctx context.Context, id string, direction SyncDirection) error
 }
 
 func (m *MockRuntime) Name() string {
@@ -71,4 +72,16 @@ func (m *MockRuntime) ImageExists(ctx context.Context, image string) (bool, erro
 
 func (m *MockRuntime) PullImage(ctx context.Context, image string) error {
 	return nil
+}
+
+func (m *MockRuntime) Sync(ctx context.Context, id string, direction SyncDirection) error {
+
+	if m.SyncFunc != nil {
+
+		return m.SyncFunc(ctx, id, direction)
+
+	}
+
+	return nil
+
 }
