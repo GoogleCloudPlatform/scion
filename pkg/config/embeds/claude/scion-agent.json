@@ -1,6 +1,3 @@
 {
-  "harness": "claude",
-  "info": {
-    "template": "claude"
-  }
+  "harness": "claude"
 }

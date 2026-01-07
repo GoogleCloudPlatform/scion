@@ -203,12 +203,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		info.Image = agentImage
 	}
 
-	// We want to write scion-agent.json WITHOUT the Info section to avoid redundancy.
-	// Temporarily ensure Info is nil for marshalling.
-	// Note: previous logic overwrote Info anyway, so we aren't losing merged data 
-	// that wasn't already being discarded.
-	finalScionCfg.Info = nil
-
 	agentCfgData, err := json.MarshalIndent(finalScionCfg, "", "  ")
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to marshal agent config: %w", err)
@@ -378,13 +372,6 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	agentCfg, err := tpl.LoadConfig()
 	if err != nil {
 		return agentDir, agentHome, agentWorkspace, nil, fmt.Errorf("failed to load agent config: %w", err)
-	}
-
-	// If agent-info.json was missing or didn't have template, check scion-agent.json (legacy)
-	if agentInfo == nil || agentInfo.Template == "" {
-		if agentCfg.Info != nil && agentCfg.Info.Template != "" {
-			effectiveTemplate = agentCfg.Info.Template
-		}
 	}
 
 	chain, err := config.GetTemplateChain(effectiveTemplate)

@@ -44,7 +44,7 @@ type ScionConfig struct {
 	Gemini      *GeminiConfig     `json:"gemini,omitempty"`
 
 	// Info contains persisted metadata about the agent
-	Info *AgentInfo `json:"info,omitempty"`
+	Info *AgentInfo `json:"-"`
 }
 
 func (c *ScionConfig) IsDetached() bool {

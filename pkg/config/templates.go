@@ -143,23 +143,6 @@ func CloneTemplate(srcName, destName string, global bool) error {
 		return err
 	}
 
-	// Update scion-agent.json in destination with the new template name
-	scionPath := filepath.Join(destPath, "scion-agent.json")
-	data, err := os.ReadFile(scionPath)
-	if err == nil {
-		var cfg api.ScionConfig
-		if err := json.Unmarshal(data, &cfg); err == nil {
-			if cfg.Info == nil {
-				cfg.Info = &api.AgentInfo{}
-			}
-			cfg.Info.Template = destName
-			newData, err := json.MarshalIndent(cfg, "", "  ")
-			if err == nil {
-				_ = os.WriteFile(scionPath, newData, 0644)
-			}
-		}
-	}
-
 	return nil
 }
 

@@ -2,8 +2,5 @@
   "harness": "gemini",
   "gemini": {
     "auth_selectedType": "gemini-api-key"
-  },
-  "info": {
-    "template": "gemini"
   }
 }

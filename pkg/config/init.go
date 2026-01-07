@@ -7,8 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-
-	"github.com/ptone/scion-agent/pkg/api"
 )
 
 //go:embed all:embeds/*
@@ -75,25 +73,6 @@ func SeedTemplateDir(templateDir, templateName, harness, embedDir, configDirName
 	}
 
 	scionJSONStr := readEmbed("scion-agent.json")
-	var scionConfig api.ScionConfig
-	if err := json.Unmarshal([]byte(scionJSONStr), &scionConfig); err != nil {
-		// Fallback if it's not valid JSON, though it should be
-		// Maybe log warning?
-	} else {
-		// TODO clean up this legacy reference to a "default template"
-		// templates are now named after harness, and default template is a setting
-		if templateName != "" && templateName != "default" {
-			if scionConfig.Info == nil {
-				scionConfig.Info = &api.AgentInfo{}
-			}
-			scionConfig.Info.Template = templateName
-		}
-
-		// Update scionJSONStr with modified config
-		if modifiedData, err := json.MarshalIndent(scionConfig, "", "  "); err == nil {
-			scionJSONStr = string(modifiedData)
-		}
-	}
 
 	mdFile := "gemini.md"
 	claudeJSON := ""
