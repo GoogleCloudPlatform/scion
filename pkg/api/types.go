@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"time"
 )
 
 type AgentK8sMetadata struct {
@@ -78,23 +79,57 @@ type AuthProvider interface {
 	GetAuthConfig(context.Context) (AuthConfig, error)
 }
 
+// AgentInfo contains metadata about a scion agent.
+// It supports both local/solo mode and hosted/distributed mode.
 type AgentInfo struct {
-	ID          string            `json:"id,omitempty"`
-	Name        string            `json:"name"`
-	Template    string            `json:"template"`
-	Grove       string            `json:"grove"`
-	GrovePath   string            `json:"grovePath,omitempty"`
+	// Identity fields
+	ID       string `json:"id,omitempty"`       // Container/runtime ID (legacy, runtime-assigned)
+	AgentID  string `json:"agentId,omitempty"`  // URL-safe slug identifier for the agent
+	Name     string `json:"name"`               // Human-friendly display name
+	Template string `json:"template"`
+
+	// Grove association
+	Grove     string `json:"grove"`               // Grove name (legacy, simple string)
+	GroveID   string `json:"groveId,omitempty"`   // Hosted format: <uuid>__<name>
+	GrovePath string `json:"grovePath,omitempty"` // Filesystem path (solo mode)
+
+	// Metadata
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
-	ContainerStatus string        `json:"containerStatus,omitempty"` // Container status (e.g., Up 2 hours)
-	Status          string            `json:"status,omitempty"`          // Scion agent high-level status (e.g., running, stopped)
-	SessionStatus   string            `json:"sessionStatus,omitempty"`   // Agent session status (e.g., started, waiting, completed)
-	Image       string            `json:"image,omitempty"`
-	Detached    bool              `json:"detached,omitempty"`
-	Runtime     string            `json:"runtime,omitempty"`
-	Profile     string            `json:"profile,omitempty"`
-	Kubernetes  *AgentK8sMetadata `json:"kubernetes,omitempty"`
-	Warnings    []string          `json:"warnings,omitempty"`
+
+	// Status fields
+	ContainerStatus string `json:"containerStatus,omitempty"` // Container status (e.g., Up 2 hours)
+	Status          string `json:"status,omitempty"`          // Scion agent high-level status (e.g., running, stopped)
+	SessionStatus   string `json:"sessionStatus,omitempty"`   // Agent session status (e.g., started, waiting, completed)
+
+	// Runtime configuration
+	Image      string            `json:"image,omitempty"`
+	Detached   bool              `json:"detached,omitempty"`
+	Runtime    string            `json:"runtime,omitempty"`
+	Profile    string            `json:"profile,omitempty"`
+	Kubernetes *AgentK8sMetadata `json:"kubernetes,omitempty"`
+	Warnings   []string          `json:"warnings,omitempty"`
+
+	// Timestamps
+	Created  time.Time `json:"created,omitempty"`  // When the agent was created
+	Updated  time.Time `json:"updated,omitempty"`  // Last modification timestamp
+	LastSeen time.Time `json:"lastSeen,omitempty"` // Last heartbeat/status report
+
+	// Ownership & access
+	CreatedBy  string `json:"createdBy,omitempty"`  // User/system that created the agent
+	OwnerID    string `json:"ownerId,omitempty"`    // Current owner user ID
+	Visibility string `json:"visibility,omitempty"` // Access level: private, team, public
+
+	// Hosted/distributed mode fields
+	RuntimeHostID   string `json:"runtimeHostId,omitempty"`   // ID of the Runtime Host managing this agent
+	RuntimeHostType string `json:"runtimeHostType,omitempty"` // Type: docker, kubernetes, apple
+	RuntimeState    string `json:"runtimeState,omitempty"`    // Low-level runtime state
+	HubEndpoint     string `json:"hubEndpoint,omitempty"`     // Scion Hub URL if connected
+	WebPTYEnabled   bool   `json:"webPtyEnabled,omitempty"`   // Whether web terminal access is available
+	TaskSummary     string `json:"taskSummary,omitempty"`     // Current task description (for dashboard)
+
+	// Optimistic locking
+	StateVersion int64 `json:"stateVersion,omitempty"` // Version for concurrent update detection
 }
 
 type StartOptions struct {
@@ -118,4 +153,54 @@ type StatusEvent struct {
 	Status    string `json:"status"`
 	Message   string `json:"message,omitempty"`
 	Timestamp string `json:"timestamp"`
+}
+
+// Visibility constants for agent and grove access control.
+const (
+	VisibilityPrivate = "private" // Only the owner can access
+	VisibilityTeam    = "team"    // Team members can access
+	VisibilityPublic  = "public"  // Anyone can access (read-only)
+)
+
+// GroveInfo contains metadata about a grove (project/agent group).
+// It supports both local/solo mode and hosted/distributed mode.
+type GroveInfo struct {
+	// Identity fields
+	ID   string `json:"id,omitempty"` // UUID (hosted) or empty (solo)
+	Name string `json:"name"`         // Human-friendly display name
+	Slug string `json:"slug"`         // URL-safe identifier
+
+	// Location
+	Path string `json:"path,omitempty"` // Filesystem path (solo mode)
+
+	// Timestamps
+	Created time.Time `json:"created,omitempty"` // When the grove was created
+	Updated time.Time `json:"updated,omitempty"` // Last modification timestamp
+
+	// Ownership
+	CreatedBy  string `json:"createdBy,omitempty"`  // User/system that created the grove
+	OwnerID    string `json:"ownerId,omitempty"`    // Current owner user ID
+	Visibility string `json:"visibility,omitempty"` // Access level: private, team, public
+
+	// Metadata
+	Labels      map[string]string `json:"labels,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// Hosted mode fields
+	HubEndpoint string `json:"hubEndpoint,omitempty"` // Scion Hub URL if registered
+
+	// Statistics (computed, not persisted)
+	AgentCount int `json:"agentCount,omitempty"` // Number of agents in this grove
+}
+
+// GroveID returns the hosted-format grove ID (<uuid>__<slug>) if available,
+// otherwise returns the Name or Slug as a fallback.
+func (g *GroveInfo) GroveID() string {
+	if g.ID != "" && g.Slug != "" {
+		return g.ID + GroveIDSeparator + g.Slug
+	}
+	if g.Slug != "" {
+		return g.Slug
+	}
+	return g.Name
 }
