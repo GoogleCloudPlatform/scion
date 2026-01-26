@@ -52,6 +52,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV1,
 		migrationV2,
 		migrationV3,
+		migrationV4,
 	}
 
 	// Create migrations table if not exists
@@ -241,6 +242,42 @@ CREATE INDEX IF NOT EXISTS idx_groves_default_runtime_host ON groves(default_run
 const migrationV3 = `
 -- Add local_path column to grove_contributors for tracking filesystem paths per host
 ALTER TABLE grove_contributors ADD COLUMN local_path TEXT;
+`
+
+// Migration V4: Add environment variables and secrets tables
+const migrationV4 = `
+-- Environment variables table
+CREATE TABLE IF NOT EXISTS env_vars (
+	id TEXT PRIMARY KEY,
+	key TEXT NOT NULL,
+	value TEXT NOT NULL,
+	scope TEXT NOT NULL,
+	scope_id TEXT NOT NULL,
+	description TEXT,
+	sensitive INTEGER NOT NULL DEFAULT 0,
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	created_by TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_env_vars_key_scope ON env_vars(key, scope, scope_id);
+CREATE INDEX IF NOT EXISTS idx_env_vars_scope ON env_vars(scope, scope_id);
+
+-- Secrets table
+CREATE TABLE IF NOT EXISTS secrets (
+	id TEXT PRIMARY KEY,
+	key TEXT NOT NULL,
+	encrypted_value TEXT NOT NULL,
+	scope TEXT NOT NULL,
+	scope_id TEXT NOT NULL,
+	description TEXT,
+	version INTEGER NOT NULL DEFAULT 1,
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	created_by TEXT,
+	updated_by TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_secrets_key_scope ON secrets(key, scope, scope_id);
+CREATE INDEX IF NOT EXISTS idx_secrets_scope ON secrets(scope, scope_id);
 `
 
 // Helper functions for JSON marshaling/unmarshaling
@@ -1600,6 +1637,356 @@ func (s *SQLiteStore) UpdateContributorStatus(ctx context.Context, groveID, host
 		return store.ErrNotFound
 	}
 	return nil
+}
+
+// ============================================================================
+// EnvVar Operations
+// ============================================================================
+
+func (s *SQLiteStore) CreateEnvVar(ctx context.Context, envVar *store.EnvVar) error {
+	now := time.Now()
+	envVar.Created = now
+	envVar.Updated = now
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO env_vars (id, key, value, scope, scope_id, description, sensitive, created_at, updated_at, created_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		envVar.ID, envVar.Key, envVar.Value, envVar.Scope, envVar.ScopeID,
+		envVar.Description, envVar.Sensitive,
+		envVar.Created, envVar.Updated, envVar.CreatedBy,
+	)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return store.ErrAlreadyExists
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *SQLiteStore) GetEnvVar(ctx context.Context, key, scope, scopeID string) (*store.EnvVar, error) {
+	envVar := &store.EnvVar{}
+
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, key, value, scope, scope_id, description, sensitive, created_at, updated_at, created_by
+		FROM env_vars WHERE key = ? AND scope = ? AND scope_id = ?
+	`, key, scope, scopeID).Scan(
+		&envVar.ID, &envVar.Key, &envVar.Value, &envVar.Scope, &envVar.ScopeID,
+		&envVar.Description, &envVar.Sensitive,
+		&envVar.Created, &envVar.Updated, &envVar.CreatedBy,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
+	}
+
+	return envVar, nil
+}
+
+func (s *SQLiteStore) UpdateEnvVar(ctx context.Context, envVar *store.EnvVar) error {
+	envVar.Updated = time.Now()
+
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE env_vars SET
+			value = ?, description = ?, sensitive = ?, updated_at = ?
+		WHERE key = ? AND scope = ? AND scope_id = ?
+	`,
+		envVar.Value, envVar.Description, envVar.Sensitive, envVar.Updated,
+		envVar.Key, envVar.Scope, envVar.ScopeID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) UpsertEnvVar(ctx context.Context, envVar *store.EnvVar) (bool, error) {
+	now := time.Now()
+	envVar.Updated = now
+
+	// Check if it already exists
+	existing, err := s.GetEnvVar(ctx, envVar.Key, envVar.Scope, envVar.ScopeID)
+	if err != nil && err != store.ErrNotFound {
+		return false, err
+	}
+
+	if existing != nil {
+		// Update existing
+		envVar.ID = existing.ID
+		envVar.Created = existing.Created
+		envVar.CreatedBy = existing.CreatedBy
+		if err := s.UpdateEnvVar(ctx, envVar); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
+	// Create new
+	envVar.Created = now
+	if err := s.CreateEnvVar(ctx, envVar); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *SQLiteStore) DeleteEnvVar(ctx context.Context, key, scope, scopeID string) error {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM env_vars WHERE key = ? AND scope = ? AND scope_id = ?", key, scope, scopeID)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) ListEnvVars(ctx context.Context, filter store.EnvVarFilter) ([]store.EnvVar, error) {
+	var conditions []string
+	var args []interface{}
+
+	if filter.Scope != "" {
+		conditions = append(conditions, "scope = ?")
+		args = append(args, filter.Scope)
+	}
+	if filter.ScopeID != "" {
+		conditions = append(conditions, "scope_id = ?")
+		args = append(args, filter.ScopeID)
+	}
+	if filter.Key != "" {
+		conditions = append(conditions, "key = ?")
+		args = append(args, filter.Key)
+	}
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, key, value, scope, scope_id, description, sensitive, created_at, updated_at, created_by
+		FROM env_vars %s ORDER BY key
+	`, whereClause)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var envVars []store.EnvVar
+	for rows.Next() {
+		var envVar store.EnvVar
+		if err := rows.Scan(
+			&envVar.ID, &envVar.Key, &envVar.Value, &envVar.Scope, &envVar.ScopeID,
+			&envVar.Description, &envVar.Sensitive,
+			&envVar.Created, &envVar.Updated, &envVar.CreatedBy,
+		); err != nil {
+			return nil, err
+		}
+		envVars = append(envVars, envVar)
+	}
+
+	return envVars, nil
+}
+
+// ============================================================================
+// Secret Operations
+// ============================================================================
+
+func (s *SQLiteStore) CreateSecret(ctx context.Context, secret *store.Secret) error {
+	now := time.Now()
+	secret.Created = now
+	secret.Updated = now
+	secret.Version = 1
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO secrets (id, key, encrypted_value, scope, scope_id, description, version, created_at, updated_at, created_by, updated_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		secret.ID, secret.Key, secret.EncryptedValue, secret.Scope, secret.ScopeID,
+		secret.Description, secret.Version,
+		secret.Created, secret.Updated, secret.CreatedBy, secret.UpdatedBy,
+	)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return store.ErrAlreadyExists
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *SQLiteStore) GetSecret(ctx context.Context, key, scope, scopeID string) (*store.Secret, error) {
+	secret := &store.Secret{}
+
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, key, encrypted_value, scope, scope_id, description, version, created_at, updated_at, created_by, updated_by
+		FROM secrets WHERE key = ? AND scope = ? AND scope_id = ?
+	`, key, scope, scopeID).Scan(
+		&secret.ID, &secret.Key, &secret.EncryptedValue, &secret.Scope, &secret.ScopeID,
+		&secret.Description, &secret.Version,
+		&secret.Created, &secret.Updated, &secret.CreatedBy, &secret.UpdatedBy,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
+	}
+
+	return secret, nil
+}
+
+func (s *SQLiteStore) UpdateSecret(ctx context.Context, secret *store.Secret) error {
+	secret.Updated = time.Now()
+	secret.Version++ // Increment version on each update
+
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE secrets SET
+			encrypted_value = ?, description = ?, version = ?, updated_at = ?, updated_by = ?
+		WHERE key = ? AND scope = ? AND scope_id = ?
+	`,
+		secret.EncryptedValue, secret.Description, secret.Version, secret.Updated, secret.UpdatedBy,
+		secret.Key, secret.Scope, secret.ScopeID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) UpsertSecret(ctx context.Context, secret *store.Secret) (bool, error) {
+	now := time.Now()
+	secret.Updated = now
+
+	// Check if it already exists
+	existing, err := s.GetSecret(ctx, secret.Key, secret.Scope, secret.ScopeID)
+	if err != nil && err != store.ErrNotFound {
+		return false, err
+	}
+
+	if existing != nil {
+		// Update existing
+		secret.ID = existing.ID
+		secret.Created = existing.Created
+		secret.CreatedBy = existing.CreatedBy
+		secret.Version = existing.Version // Will be incremented in UpdateSecret
+		if err := s.UpdateSecret(ctx, secret); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
+	// Create new
+	secret.Created = now
+	if err := s.CreateSecret(ctx, secret); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *SQLiteStore) DeleteSecret(ctx context.Context, key, scope, scopeID string) error {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM secrets WHERE key = ? AND scope = ? AND scope_id = ?", key, scope, scopeID)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) ListSecrets(ctx context.Context, filter store.SecretFilter) ([]store.Secret, error) {
+	var conditions []string
+	var args []interface{}
+
+	if filter.Scope != "" {
+		conditions = append(conditions, "scope = ?")
+		args = append(args, filter.Scope)
+	}
+	if filter.ScopeID != "" {
+		conditions = append(conditions, "scope_id = ?")
+		args = append(args, filter.ScopeID)
+	}
+	if filter.Key != "" {
+		conditions = append(conditions, "key = ?")
+		args = append(args, filter.Key)
+	}
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	// Note: We do NOT select encrypted_value for listing
+	query := fmt.Sprintf(`
+		SELECT id, key, scope, scope_id, description, version, created_at, updated_at, created_by, updated_by
+		FROM secrets %s ORDER BY key
+	`, whereClause)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var secrets []store.Secret
+	for rows.Next() {
+		var secret store.Secret
+		if err := rows.Scan(
+			&secret.ID, &secret.Key, &secret.Scope, &secret.ScopeID,
+			&secret.Description, &secret.Version,
+			&secret.Created, &secret.Updated, &secret.CreatedBy, &secret.UpdatedBy,
+		); err != nil {
+			return nil, err
+		}
+		secrets = append(secrets, secret)
+	}
+
+	return secrets, nil
+}
+
+func (s *SQLiteStore) GetSecretValue(ctx context.Context, key, scope, scopeID string) (string, error) {
+	var encryptedValue string
+
+	err := s.db.QueryRowContext(ctx, `
+		SELECT encrypted_value FROM secrets WHERE key = ? AND scope = ? AND scope_id = ?
+	`, key, scope, scopeID).Scan(&encryptedValue)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", store.ErrNotFound
+		}
+		return "", err
+	}
+
+	return encryptedValue, nil
 }
 
 // Ensure SQLiteStore implements Store interface

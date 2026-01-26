@@ -287,6 +287,66 @@ type ListResult[T any] struct {
 	TotalCount int    `json:"totalCount,omitempty"`
 }
 
+// EnvVar represents an environment variable stored in the Hub database.
+// Environment variables are scoped to users, groves, or runtime hosts.
+type EnvVar struct {
+	// Identity
+	ID  string `json:"id"`  // UUID primary key
+	Key string `json:"key"` // Variable name (e.g., "LOG_LEVEL")
+
+	// Value
+	Value string `json:"value"` // Variable value
+
+	// Scope
+	Scope   string `json:"scope"`   // user, grove, runtime_host
+	ScopeID string `json:"scopeId"` // ID of the scoped entity
+
+	// Metadata
+	Description string `json:"description,omitempty"` // Optional description
+	Sensitive   bool   `json:"sensitive,omitempty"`   // If true, value is masked in responses
+
+	// Timestamps
+	Created time.Time `json:"created"`
+	Updated time.Time `json:"updated"`
+
+	// Ownership
+	CreatedBy string `json:"createdBy,omitempty"`
+}
+
+// Secret represents a secret stored in the Hub database.
+// Secret values are never returned in API responses - only metadata.
+type Secret struct {
+	// Identity
+	ID  string `json:"id"`  // UUID primary key
+	Key string `json:"key"` // Secret name (e.g., "API_KEY")
+
+	// Value (stored encrypted, never returned in API responses)
+	EncryptedValue string `json:"-"` // Encrypted value (never serialized)
+
+	// Scope
+	Scope   string `json:"scope"`   // user, grove, runtime_host
+	ScopeID string `json:"scopeId"` // ID of the scoped entity
+
+	// Metadata
+	Description string `json:"description,omitempty"` // Optional description
+	Version     int    `json:"version"`               // Incremented on each update
+
+	// Timestamps
+	Created time.Time `json:"created"`
+	Updated time.Time `json:"updated"`
+
+	// Ownership
+	CreatedBy string `json:"createdBy,omitempty"`
+	UpdatedBy string `json:"updatedBy,omitempty"`
+}
+
+// Scope constants for environment variables and secrets.
+const (
+	ScopeUser        = "user"
+	ScopeGrove       = "grove"
+	ScopeRuntimeHost = "runtime_host"
+)
+
 // =============================================================================
 // Conversion Functions: Store -> API
 //

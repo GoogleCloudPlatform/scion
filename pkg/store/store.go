@@ -42,6 +42,12 @@ type Store interface {
 
 	// GroveContributor operations
 	GroveContributorStore
+
+	// EnvVar operations
+	EnvVarStore
+
+	// Secret operations
+	SecretStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -258,4 +264,78 @@ type GroveContributorStore interface {
 
 	// UpdateContributorStatus updates a contributor's status and last seen time.
 	UpdateContributorStatus(ctx context.Context, groveID, hostID, status string) error
+}
+
+// EnvVarStore defines environment variable persistence operations.
+type EnvVarStore interface {
+	// CreateEnvVar creates a new environment variable.
+	// Returns ErrAlreadyExists if an env var with the same key+scope+scopeId exists.
+	CreateEnvVar(ctx context.Context, envVar *EnvVar) error
+
+	// GetEnvVar retrieves an environment variable by key, scope, and scopeId.
+	// Returns ErrNotFound if the env var doesn't exist.
+	GetEnvVar(ctx context.Context, key, scope, scopeID string) (*EnvVar, error)
+
+	// UpdateEnvVar updates an existing environment variable.
+	// Returns ErrNotFound if the env var doesn't exist.
+	UpdateEnvVar(ctx context.Context, envVar *EnvVar) error
+
+	// UpsertEnvVar creates or updates an environment variable.
+	// Uses key+scope+scopeId as the unique identifier.
+	UpsertEnvVar(ctx context.Context, envVar *EnvVar) (created bool, err error)
+
+	// DeleteEnvVar removes an environment variable.
+	// Returns ErrNotFound if the env var doesn't exist.
+	DeleteEnvVar(ctx context.Context, key, scope, scopeID string) error
+
+	// ListEnvVars returns environment variables matching the filter criteria.
+	ListEnvVars(ctx context.Context, filter EnvVarFilter) ([]EnvVar, error)
+}
+
+// EnvVarFilter defines criteria for filtering environment variables.
+type EnvVarFilter struct {
+	Scope   string // Required: user, grove, runtime_host
+	ScopeID string // Required: ID of the scoped entity
+	Key     string // Optional: filter by specific key
+}
+
+// SecretStore defines secret persistence operations.
+type SecretStore interface {
+	// CreateSecret creates a new secret.
+	// Returns ErrAlreadyExists if a secret with the same key+scope+scopeId exists.
+	CreateSecret(ctx context.Context, secret *Secret) error
+
+	// GetSecret retrieves secret metadata by key, scope, and scopeId.
+	// Returns ErrNotFound if the secret doesn't exist.
+	// Note: The EncryptedValue is populated but should not be exposed via API.
+	GetSecret(ctx context.Context, key, scope, scopeID string) (*Secret, error)
+
+	// UpdateSecret updates an existing secret.
+	// Increments the version automatically.
+	// Returns ErrNotFound if the secret doesn't exist.
+	UpdateSecret(ctx context.Context, secret *Secret) error
+
+	// UpsertSecret creates or updates a secret.
+	// Uses key+scope+scopeId as the unique identifier.
+	UpsertSecret(ctx context.Context, secret *Secret) (created bool, err error)
+
+	// DeleteSecret removes a secret.
+	// Returns ErrNotFound if the secret doesn't exist.
+	DeleteSecret(ctx context.Context, key, scope, scopeID string) error
+
+	// ListSecrets returns secret metadata matching the filter criteria.
+	// Note: EncryptedValue is NOT populated in the returned secrets.
+	ListSecrets(ctx context.Context, filter SecretFilter) ([]Secret, error)
+
+	// GetSecretValue retrieves the encrypted value of a secret.
+	// This is used internally for environment resolution.
+	// Returns ErrNotFound if the secret doesn't exist.
+	GetSecretValue(ctx context.Context, key, scope, scopeID string) (encryptedValue string, err error)
+}
+
+// SecretFilter defines criteria for filtering secrets.
+type SecretFilter struct {
+	Scope   string // Required: user, grove, runtime_host
+	ScopeID string // Required: ID of the scoped entity
+	Key     string // Optional: filter by specific key
 }

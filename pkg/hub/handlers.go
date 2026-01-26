@@ -784,6 +784,30 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for nested /env path
+	if strings.HasPrefix(subPath, "env") {
+		envPath := strings.TrimPrefix(subPath, "env")
+		envPath = strings.TrimPrefix(envPath, "/")
+		if envPath == "" {
+			s.handleGroveEnvVars(w, r, groveID)
+		} else {
+			s.handleGroveEnvVarByKey(w, r, groveID, envPath)
+		}
+		return
+	}
+
+	// Check for nested /secrets path
+	if strings.HasPrefix(subPath, "secrets") {
+		secretPath := strings.TrimPrefix(subPath, "secrets")
+		secretPath = strings.TrimPrefix(secretPath, "/")
+		if secretPath == "" {
+			s.handleGroveSecrets(w, r, groveID)
+		} else {
+			s.handleGroveSecretByKey(w, r, groveID, secretPath)
+		}
+		return
+	}
+
 	// Otherwise handle as grove resource
 	s.handleGroveByIDInternal(w, r, groveID, subPath)
 }
@@ -1354,6 +1378,87 @@ func (s *Server) listRuntimeHosts(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleRuntimeHostRoutes(w http.ResponseWriter, r *http.Request) {
+	// Extract host ID and remaining path
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/runtime-hosts/")
+	if path == "" {
+		NotFound(w, "RuntimeHost")
+		return
+	}
+
+	// Parse the host ID and subpath
+	parts := strings.SplitN(path, "/", 2)
+	hostID := parts[0]
+	subPath := ""
+	if len(parts) > 1 {
+		subPath = parts[1]
+	}
+
+	// Check for nested /env path
+	if strings.HasPrefix(subPath, "env") {
+		envPath := strings.TrimPrefix(subPath, "env")
+		envPath = strings.TrimPrefix(envPath, "/")
+		if envPath == "" {
+			s.handleHostEnvVars(w, r, hostID)
+		} else {
+			s.handleHostEnvVarByKey(w, r, hostID, envPath)
+		}
+		return
+	}
+
+	// Check for nested /secrets path
+	if strings.HasPrefix(subPath, "secrets") {
+		secretPath := strings.TrimPrefix(subPath, "secrets")
+		secretPath = strings.TrimPrefix(secretPath, "/")
+		if secretPath == "" {
+			s.handleHostSecrets(w, r, hostID)
+		} else {
+			s.handleHostSecretByKey(w, r, hostID, secretPath)
+		}
+		return
+	}
+
+	// Delegate to the original handler for other operations
+	s.handleRuntimeHostByIDInternal(w, r, hostID, subPath)
+}
+
+func (s *Server) handleRuntimeHostByIDInternal(w http.ResponseWriter, r *http.Request, id, subPath string) {
+	if id == "" {
+		NotFound(w, "RuntimeHost")
+		return
+	}
+
+	// Handle heartbeat action
+	if subPath == "heartbeat" && r.Method == http.MethodPost {
+		s.handleHostHeartbeat(w, r, id)
+		return
+	}
+
+	// Handle groves action
+	if subPath == "groves" && r.Method == http.MethodGet {
+		// TODO: Implement getHostGroves endpoint
+		NotFound(w, "RuntimeHost resource")
+		return
+	}
+
+	// Only handle if no subpath (direct resource)
+	if subPath != "" {
+		NotFound(w, "RuntimeHost resource")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		s.getRuntimeHost(w, r, id)
+	case http.MethodPatch:
+		s.updateRuntimeHost(w, r, id)
+	case http.MethodDelete:
+		s.deleteRuntimeHost(w, r, id)
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
 func (s *Server) handleRuntimeHostByID(w http.ResponseWriter, r *http.Request) {
 	id, action := extractAction(r, "/api/v1/runtime-hosts")
 
@@ -1777,6 +1882,790 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ============================================================================
+// Environment Variables Endpoints
+// ============================================================================
+
+type ListEnvVarsResponse struct {
+	EnvVars []store.EnvVar `json:"envVars"`
+	Scope   string         `json:"scope"`
+	ScopeID string         `json:"scopeId"`
+}
+
+type SetEnvVarRequest struct {
+	Value       string `json:"value"`
+	Scope       string `json:"scope,omitempty"`
+	ScopeID     string `json:"scopeId,omitempty"`
+	Description string `json:"description,omitempty"`
+	Sensitive   bool   `json:"sensitive,omitempty"`
+}
+
+type SetEnvVarResponse struct {
+	EnvVar  *store.EnvVar `json:"envVar"`
+	Created bool          `json:"created"`
+}
+
+func (s *Server) handleEnvVars(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.listEnvVars(w, r)
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+func (s *Server) listEnvVars(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	query := r.URL.Query()
+
+	scope := query.Get("scope")
+	if scope == "" {
+		scope = store.ScopeUser
+	}
+	scopeID := query.Get("scopeId")
+
+	// For user scope, use authenticated user ID (placeholder for now)
+	if scope == store.ScopeUser && scopeID == "" {
+		scopeID = "default" // TODO: Get from auth context
+	}
+
+	filter := store.EnvVarFilter{
+		Scope:   scope,
+		ScopeID: scopeID,
+		Key:     query.Get("key"),
+	}
+
+	envVars, err := s.store.ListEnvVars(ctx, filter)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Mask sensitive values
+	for i := range envVars {
+		if envVars[i].Sensitive {
+			envVars[i].Value = "********"
+		}
+	}
+
+	writeJSON(w, http.StatusOK, ListEnvVarsResponse{
+		EnvVars: envVars,
+		Scope:   scope,
+		ScopeID: scopeID,
+	})
+}
+
+func (s *Server) handleEnvVarByKey(w http.ResponseWriter, r *http.Request) {
+	key := extractID(r, "/api/v1/env")
+
+	if key == "" {
+		NotFound(w, "EnvVar")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		s.getEnvVar(w, r, key)
+	case http.MethodPut:
+		s.setEnvVar(w, r, key)
+	case http.MethodDelete:
+		s.deleteEnvVar(w, r, key)
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+func (s *Server) getEnvVar(w http.ResponseWriter, r *http.Request, key string) {
+	ctx := r.Context()
+	query := r.URL.Query()
+
+	scope := query.Get("scope")
+	if scope == "" {
+		scope = store.ScopeUser
+	}
+	scopeID := query.Get("scopeId")
+	if scope == store.ScopeUser && scopeID == "" {
+		scopeID = "default" // TODO: Get from auth context
+	}
+
+	envVar, err := s.store.GetEnvVar(ctx, key, scope, scopeID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Mask sensitive values
+	if envVar.Sensitive {
+		envVar.Value = "********"
+	}
+
+	writeJSON(w, http.StatusOK, envVar)
+}
+
+func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
+	ctx := r.Context()
+
+	var req SetEnvVarRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+
+	if req.Value == "" {
+		ValidationError(w, "value is required", nil)
+		return
+	}
+
+	scope := req.Scope
+	if scope == "" {
+		scope = store.ScopeUser
+	}
+	scopeID := req.ScopeID
+	if scope == store.ScopeUser && scopeID == "" {
+		scopeID = "default" // TODO: Get from auth context
+	}
+
+	envVar := &store.EnvVar{
+		ID:          api.NewUUID(),
+		Key:         key,
+		Value:       req.Value,
+		Scope:       scope,
+		ScopeID:     scopeID,
+		Description: req.Description,
+		Sensitive:   req.Sensitive,
+	}
+
+	created, err := s.store.UpsertEnvVar(ctx, envVar)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Mask sensitive values in response
+	if envVar.Sensitive {
+		envVar.Value = "********"
+	}
+
+	writeJSON(w, http.StatusOK, SetEnvVarResponse{
+		EnvVar:  envVar,
+		Created: created,
+	})
+}
+
+func (s *Server) deleteEnvVar(w http.ResponseWriter, r *http.Request, key string) {
+	ctx := r.Context()
+	query := r.URL.Query()
+
+	scope := query.Get("scope")
+	if scope == "" {
+		scope = store.ScopeUser
+	}
+	scopeID := query.Get("scopeId")
+	if scope == store.ScopeUser && scopeID == "" {
+		scopeID = "default" // TODO: Get from auth context
+	}
+
+	if err := s.store.DeleteEnvVar(ctx, key, scope, scopeID); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ============================================================================
+// Secrets Endpoints
+// ============================================================================
+
+type ListSecretsResponse struct {
+	Secrets []store.Secret `json:"secrets"`
+	Scope   string         `json:"scope"`
+	ScopeID string         `json:"scopeId"`
+}
+
+type SetSecretRequest struct {
+	Value       string `json:"value"`
+	Scope       string `json:"scope,omitempty"`
+	ScopeID     string `json:"scopeId,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+type SetSecretResponse struct {
+	Secret  *store.Secret `json:"secret"`
+	Created bool          `json:"created"`
+}
+
+func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.listSecrets(w, r)
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	query := r.URL.Query()
+
+	scope := query.Get("scope")
+	if scope == "" {
+		scope = store.ScopeUser
+	}
+	scopeID := query.Get("scopeId")
+	if scope == store.ScopeUser && scopeID == "" {
+		scopeID = "default" // TODO: Get from auth context
+	}
+
+	filter := store.SecretFilter{
+		Scope:   scope,
+		ScopeID: scopeID,
+		Key:     query.Get("key"),
+	}
+
+	secrets, err := s.store.ListSecrets(ctx, filter)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, ListSecretsResponse{
+		Secrets: secrets,
+		Scope:   scope,
+		ScopeID: scopeID,
+	})
+}
+
+func (s *Server) handleSecretByKey(w http.ResponseWriter, r *http.Request) {
+	key := extractID(r, "/api/v1/secrets")
+
+	if key == "" {
+		NotFound(w, "Secret")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		s.getSecret(w, r, key)
+	case http.MethodPut:
+		s.setSecret(w, r, key)
+	case http.MethodDelete:
+		s.deleteSecret(w, r, key)
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+func (s *Server) getSecret(w http.ResponseWriter, r *http.Request, key string) {
+	ctx := r.Context()
+	query := r.URL.Query()
+
+	scope := query.Get("scope")
+	if scope == "" {
+		scope = store.ScopeUser
+	}
+	scopeID := query.Get("scopeId")
+	if scope == store.ScopeUser && scopeID == "" {
+		scopeID = "default" // TODO: Get from auth context
+	}
+
+	secret, err := s.store.GetSecret(ctx, key, scope, scopeID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Clear the encrypted value - never expose it
+	secret.EncryptedValue = ""
+
+	writeJSON(w, http.StatusOK, secret)
+}
+
+func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
+	ctx := r.Context()
+
+	var req SetSecretRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+
+	if req.Value == "" {
+		ValidationError(w, "value is required", nil)
+		return
+	}
+
+	scope := req.Scope
+	if scope == "" {
+		scope = store.ScopeUser
+	}
+	scopeID := req.ScopeID
+	if scope == store.ScopeUser && scopeID == "" {
+		scopeID = "default" // TODO: Get from auth context
+	}
+
+	// TODO: In production, encrypt the value before storing
+	// For now, we store it as-is (should use proper encryption)
+	encryptedValue := req.Value
+
+	secret := &store.Secret{
+		ID:             api.NewUUID(),
+		Key:            key,
+		EncryptedValue: encryptedValue,
+		Scope:          scope,
+		ScopeID:        scopeID,
+		Description:    req.Description,
+	}
+
+	created, err := s.store.UpsertSecret(ctx, secret)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Clear the encrypted value from response
+	secret.EncryptedValue = ""
+
+	writeJSON(w, http.StatusOK, SetSecretResponse{
+		Secret:  secret,
+		Created: created,
+	})
+}
+
+func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request, key string) {
+	ctx := r.Context()
+	query := r.URL.Query()
+
+	scope := query.Get("scope")
+	if scope == "" {
+		scope = store.ScopeUser
+	}
+	scopeID := query.Get("scopeId")
+	if scope == store.ScopeUser && scopeID == "" {
+		scopeID = "default" // TODO: Get from auth context
+	}
+
+	if err := s.store.DeleteSecret(ctx, key, scope, scopeID); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ============================================================================
+// Grove-scoped Env and Secrets Endpoints
+// ============================================================================
+
+func (s *Server) handleGroveEnvVars(w http.ResponseWriter, r *http.Request, groveID string) {
+	ctx := r.Context()
+
+	// Verify grove exists
+	_, err := s.store.GetGrove(ctx, groveID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			NotFound(w, "Grove")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		envVars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{
+			Scope:   store.ScopeGrove,
+			ScopeID: groveID,
+		})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		// Mask sensitive values
+		for i := range envVars {
+			if envVars[i].Sensitive {
+				envVars[i].Value = "********"
+			}
+		}
+		writeJSON(w, http.StatusOK, ListEnvVarsResponse{
+			EnvVars: envVars,
+			Scope:   store.ScopeGrove,
+			ScopeID: groveID,
+		})
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+func (s *Server) handleGroveEnvVarByKey(w http.ResponseWriter, r *http.Request, groveID, key string) {
+	ctx := r.Context()
+
+	// Verify grove exists
+	_, err := s.store.GetGrove(ctx, groveID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			NotFound(w, "Grove")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		envVar, err := s.store.GetEnvVar(ctx, key, store.ScopeGrove, groveID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if envVar.Sensitive {
+			envVar.Value = "********"
+		}
+		writeJSON(w, http.StatusOK, envVar)
+
+	case http.MethodPut:
+		var req SetEnvVarRequest
+		if err := readJSON(r, &req); err != nil {
+			BadRequest(w, "Invalid request body: "+err.Error())
+			return
+		}
+		if req.Value == "" {
+			ValidationError(w, "value is required", nil)
+			return
+		}
+		envVar := &store.EnvVar{
+			ID:          api.NewUUID(),
+			Key:         key,
+			Value:       req.Value,
+			Scope:       store.ScopeGrove,
+			ScopeID:     groveID,
+			Description: req.Description,
+			Sensitive:   req.Sensitive,
+		}
+		created, err := s.store.UpsertEnvVar(ctx, envVar)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if envVar.Sensitive {
+			envVar.Value = "********"
+		}
+		writeJSON(w, http.StatusOK, SetEnvVarResponse{EnvVar: envVar, Created: created})
+
+	case http.MethodDelete:
+		if err := s.store.DeleteEnvVar(ctx, key, store.ScopeGrove, groveID); err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+func (s *Server) handleGroveSecrets(w http.ResponseWriter, r *http.Request, groveID string) {
+	ctx := r.Context()
+
+	// Verify grove exists
+	_, err := s.store.GetGrove(ctx, groveID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			NotFound(w, "Grove")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		secrets, err := s.store.ListSecrets(ctx, store.SecretFilter{
+			Scope:   store.ScopeGrove,
+			ScopeID: groveID,
+		})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		writeJSON(w, http.StatusOK, ListSecretsResponse{
+			Secrets: secrets,
+			Scope:   store.ScopeGrove,
+			ScopeID: groveID,
+		})
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+func (s *Server) handleGroveSecretByKey(w http.ResponseWriter, r *http.Request, groveID, key string) {
+	ctx := r.Context()
+
+	// Verify grove exists
+	_, err := s.store.GetGrove(ctx, groveID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			NotFound(w, "Grove")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		secret, err := s.store.GetSecret(ctx, key, store.ScopeGrove, groveID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		secret.EncryptedValue = ""
+		writeJSON(w, http.StatusOK, secret)
+
+	case http.MethodPut:
+		var req SetSecretRequest
+		if err := readJSON(r, &req); err != nil {
+			BadRequest(w, "Invalid request body: "+err.Error())
+			return
+		}
+		if req.Value == "" {
+			ValidationError(w, "value is required", nil)
+			return
+		}
+		secret := &store.Secret{
+			ID:             api.NewUUID(),
+			Key:            key,
+			EncryptedValue: req.Value, // TODO: Encrypt
+			Scope:          store.ScopeGrove,
+			ScopeID:        groveID,
+			Description:    req.Description,
+		}
+		created, err := s.store.UpsertSecret(ctx, secret)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		secret.EncryptedValue = ""
+		writeJSON(w, http.StatusOK, SetSecretResponse{Secret: secret, Created: created})
+
+	case http.MethodDelete:
+		if err := s.store.DeleteSecret(ctx, key, store.ScopeGrove, groveID); err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+// ============================================================================
+// RuntimeHost-scoped Env and Secrets Endpoints
+// ============================================================================
+
+func (s *Server) handleHostEnvVars(w http.ResponseWriter, r *http.Request, hostID string) {
+	ctx := r.Context()
+
+	// Verify host exists
+	_, err := s.store.GetRuntimeHost(ctx, hostID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			NotFound(w, "RuntimeHost")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		envVars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{
+			Scope:   store.ScopeRuntimeHost,
+			ScopeID: hostID,
+		})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		for i := range envVars {
+			if envVars[i].Sensitive {
+				envVars[i].Value = "********"
+			}
+		}
+		writeJSON(w, http.StatusOK, ListEnvVarsResponse{
+			EnvVars: envVars,
+			Scope:   store.ScopeRuntimeHost,
+			ScopeID: hostID,
+		})
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+func (s *Server) handleHostEnvVarByKey(w http.ResponseWriter, r *http.Request, hostID, key string) {
+	ctx := r.Context()
+
+	// Verify host exists
+	_, err := s.store.GetRuntimeHost(ctx, hostID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			NotFound(w, "RuntimeHost")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		envVar, err := s.store.GetEnvVar(ctx, key, store.ScopeRuntimeHost, hostID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if envVar.Sensitive {
+			envVar.Value = "********"
+		}
+		writeJSON(w, http.StatusOK, envVar)
+
+	case http.MethodPut:
+		var req SetEnvVarRequest
+		if err := readJSON(r, &req); err != nil {
+			BadRequest(w, "Invalid request body: "+err.Error())
+			return
+		}
+		if req.Value == "" {
+			ValidationError(w, "value is required", nil)
+			return
+		}
+		envVar := &store.EnvVar{
+			ID:          api.NewUUID(),
+			Key:         key,
+			Value:       req.Value,
+			Scope:       store.ScopeRuntimeHost,
+			ScopeID:     hostID,
+			Description: req.Description,
+			Sensitive:   req.Sensitive,
+		}
+		created, err := s.store.UpsertEnvVar(ctx, envVar)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if envVar.Sensitive {
+			envVar.Value = "********"
+		}
+		writeJSON(w, http.StatusOK, SetEnvVarResponse{EnvVar: envVar, Created: created})
+
+	case http.MethodDelete:
+		if err := s.store.DeleteEnvVar(ctx, key, store.ScopeRuntimeHost, hostID); err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+func (s *Server) handleHostSecrets(w http.ResponseWriter, r *http.Request, hostID string) {
+	ctx := r.Context()
+
+	// Verify host exists
+	_, err := s.store.GetRuntimeHost(ctx, hostID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			NotFound(w, "RuntimeHost")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		secrets, err := s.store.ListSecrets(ctx, store.SecretFilter{
+			Scope:   store.ScopeRuntimeHost,
+			ScopeID: hostID,
+		})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		writeJSON(w, http.StatusOK, ListSecretsResponse{
+			Secrets: secrets,
+			Scope:   store.ScopeRuntimeHost,
+			ScopeID: hostID,
+		})
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+func (s *Server) handleHostSecretByKey(w http.ResponseWriter, r *http.Request, hostID, key string) {
+	ctx := r.Context()
+
+	// Verify host exists
+	_, err := s.store.GetRuntimeHost(ctx, hostID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			NotFound(w, "RuntimeHost")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		secret, err := s.store.GetSecret(ctx, key, store.ScopeRuntimeHost, hostID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		secret.EncryptedValue = ""
+		writeJSON(w, http.StatusOK, secret)
+
+	case http.MethodPut:
+		var req SetSecretRequest
+		if err := readJSON(r, &req); err != nil {
+			BadRequest(w, "Invalid request body: "+err.Error())
+			return
+		}
+		if req.Value == "" {
+			ValidationError(w, "value is required", nil)
+			return
+		}
+		secret := &store.Secret{
+			ID:             api.NewUUID(),
+			Key:            key,
+			EncryptedValue: req.Value, // TODO: Encrypt
+			Scope:          store.ScopeRuntimeHost,
+			ScopeID:        hostID,
+			Description:    req.Description,
+		}
+		created, err := s.store.UpsertSecret(ctx, secret)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		secret.EncryptedValue = ""
+		writeJSON(w, http.StatusOK, SetSecretResponse{Secret: secret, Created: created})
+
+	case http.MethodDelete:
+		if err := s.store.DeleteSecret(ctx, key, store.ScopeRuntimeHost, hostID); err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		MethodNotAllowed(w)
+	}
 }
 
 // ============================================================================

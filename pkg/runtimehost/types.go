@@ -123,14 +123,21 @@ type ListAgentsResponse struct {
 
 // CreateAgentRequest is the request body for creating an agent.
 type CreateAgentRequest struct {
-	RequestID   string            `json:"requestId,omitempty"`
-	AgentID     string            `json:"agentId,omitempty"`
-	Name        string            `json:"name"`
-	GroveID     string            `json:"groveId,omitempty"`
-	UserID      string            `json:"userId,omitempty"`
+	RequestID   string             `json:"requestId,omitempty"`
+	AgentID     string             `json:"agentId,omitempty"`
+	Name        string             `json:"name"`
+	GroveID     string             `json:"groveId,omitempty"`
+	UserID      string             `json:"userId,omitempty"`
 	Config      *CreateAgentConfig `json:"config,omitempty"`
-	HubEndpoint string            `json:"hubEndpoint,omitempty"`
-	AgentToken  string            `json:"agentToken,omitempty"`
+	HubEndpoint string             `json:"hubEndpoint,omitempty"`
+	AgentToken  string             `json:"agentToken,omitempty"`
+
+	// ResolvedEnv contains the fully merged environment variables and secrets
+	// from all applicable scopes (user, grove, runtime host). These are resolved
+	// by the Hub before dispatching the agent creation request.
+	// The Runtime Host should merge these with config.Env, with config.Env
+	// taking precedence over ResolvedEnv.
+	ResolvedEnv map[string]string `json:"resolvedEnv,omitempty"`
 }
 
 // CreateAgentConfig contains configuration for agent creation.

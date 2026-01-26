@@ -167,18 +167,24 @@ func (s *Server) registerRoutes() {
 
 	s.mux.HandleFunc("/api/v1/groves", s.handleGroves)
 	s.mux.HandleFunc("/api/v1/groves/register", s.handleGroveRegister)
-	// Grove-nested agent routes: /api/v1/groves/{groveId}/agents
+	// Grove-nested routes: /api/v1/groves/{groveId}/agents, /api/v1/groves/{groveId}/env, etc.
 	// This handler must come before the generic grove-by-id handler
 	s.mux.HandleFunc("/api/v1/groves/", s.handleGroveRoutes)
 
 	s.mux.HandleFunc("/api/v1/runtime-hosts", s.handleRuntimeHosts)
-	s.mux.HandleFunc("/api/v1/runtime-hosts/", s.handleRuntimeHostByID)
+	s.mux.HandleFunc("/api/v1/runtime-hosts/", s.handleRuntimeHostRoutes)
 
 	s.mux.HandleFunc("/api/v1/templates", s.handleTemplates)
 	s.mux.HandleFunc("/api/v1/templates/", s.handleTemplateByID)
 
 	s.mux.HandleFunc("/api/v1/users", s.handleUsers)
 	s.mux.HandleFunc("/api/v1/users/", s.handleUserByID)
+
+	// Environment variables and secrets (generic endpoints)
+	s.mux.HandleFunc("/api/v1/env", s.handleEnvVars)
+	s.mux.HandleFunc("/api/v1/env/", s.handleEnvVarByKey)
+	s.mux.HandleFunc("/api/v1/secrets", s.handleSecrets)
+	s.mux.HandleFunc("/api/v1/secrets/", s.handleSecretByKey)
 }
 
 // applyMiddleware wraps the handler with middleware.

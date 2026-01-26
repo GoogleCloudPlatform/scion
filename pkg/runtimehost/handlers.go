@@ -184,8 +184,19 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build StartOptions from request
+	// Build merged environment:
+	// 1. Start with resolvedEnv (from Hub, contains user/grove/host vars and secrets)
+	// 2. Override with config.Env (explicitly set in request)
 	env := make(map[string]string)
+
+	// First, apply resolved env from Hub (if present)
+	if len(req.ResolvedEnv) > 0 {
+		for k, v := range req.ResolvedEnv {
+			env[k] = v
+		}
+	}
+
+	// Then, apply config.Env (takes precedence over resolvedEnv)
 	if req.Config != nil && len(req.Config.Env) > 0 {
 		for _, e := range req.Config.Env {
 			parts := strings.SplitN(e, "=", 2)
@@ -196,7 +207,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	opts := api.StartOptions{
-		Name:    req.Name,
+		Name:     req.Name,
 		Detached: boolPtr(true),
 	}
 
@@ -204,8 +215,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		opts.Template = req.Config.Template
 		opts.Image = req.Config.Image
 		opts.Task = req.Config.Task
-		opts.Env = env
 	}
+
+	// Always set env (may be empty, which is fine)
+	opts.Env = env
 
 	// Start the agent
 	agentInfo, err := s.manager.Start(ctx, opts)
