@@ -68,14 +68,18 @@ func TestGroveInitNestedDetection(t *testing.T) {
 		// The enclosing grove check will find ~/.scion
 		grovePath, rootDir, found := config.GetEnclosingGrovePath()
 		assert.True(t, found, "should find global grove")
-		assert.Equal(t, tmpHome, rootDir, "rootDir should be home directory")
+
+		evalTmpHome, _ := filepath.EvalSymlinks(tmpHome)
+		assert.Equal(t, evalTmpHome, rootDir, "rootDir should be home directory")
 
 		// Check if this is the global grove
 		globalDir, err := config.GetGlobalDir()
 		assert.NoError(t, err)
 
 		// grovePath should equal globalDir
-		assert.Equal(t, filepath.Clean(grovePath), filepath.Clean(globalDir),
+		evalGrovePath, _ := filepath.EvalSymlinks(grovePath)
+		evalGlobalDir, _ := filepath.EvalSymlinks(globalDir)
+		assert.Equal(t, evalGrovePath, evalGlobalDir,
 			"found grove should be the global grove - initialization should proceed")
 	})
 

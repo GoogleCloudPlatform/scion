@@ -90,8 +90,13 @@ func TestDevAuthWarning(t *testing.T) {
 		hubEndpoint = origHubEndpoint
 	}()
 
+	// Save and restore HOME
+	origHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", origHome)
+
 	// Create a temp directory for test settings
 	tmpDir := t.TempDir()
+	os.Setenv("HOME", tmpDir)
 	scionDir := filepath.Join(tmpDir, ".scion")
 	if err := os.MkdirAll(scionDir, 0755); err != nil {
 		t.Fatalf("failed to create test .scion dir: %v", err)
@@ -106,12 +111,6 @@ hub:
 `
 	if err := os.WriteFile(settingsPath, []byte(settingsContent), 0644); err != nil {
 		t.Fatalf("failed to write test settings: %v", err)
-	}
-
-	// Create a dev token file
-	devTokenPath := filepath.Join(scionDir, "dev-token")
-	if err := os.WriteFile(devTokenPath, []byte("scion_dev_testtoken123\n"), 0600); err != nil {
-		t.Fatalf("failed to write test dev token: %v", err)
 	}
 
 	tests := []struct {
