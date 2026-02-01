@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,6 +39,7 @@ type UserResponse struct {
 
 // AuthTokenRequest is the request body for /api/v1/auth/token.
 type AuthTokenRequest struct {
+	Provider     string `json:"provider"`     // "google", "github", etc.
 	Code         string `json:"code"`
 	RedirectURI  string `json:"redirectUri"`
 	GrantType    string `json:"grantType"`    // "authorization_code"
@@ -263,12 +265,96 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: In production, exchange the code with the OAuth provider
-	// For now, this endpoint is a placeholder for the full OAuth flow
+	// Default provider to google for now if not specified in request
+	provider := req.Provider
+	if provider == "" {
+		provider = "google"
+		if strings.Contains(req.RedirectURI, "github") {
+			provider = "github"
+		}
+	}
 
-	// For development, return an error indicating the full flow is not implemented
-	writeError(w, http.StatusNotImplemented, "not_implemented",
-		"OAuth code exchange not yet implemented - use /auth/login with provider token", nil)
+	// Map client type string to internal type
+	clientType := ClientTypeCLI
+	oauthClientType := OAuthClientTypeCLI
+	if strings.ToLower(req.ClientType) == "web" {
+		clientType = ClientTypeWeb
+		oauthClientType = OAuthClientTypeWeb
+	}
+
+	// Check if OAuth service is configured
+	if s.oauthService == nil {
+		writeError(w, http.StatusNotImplemented, "not_implemented",
+			"OAuth is not configured on this server", nil)
+		return
+	}
+
+	// Exchange code for user info
+	ctx := r.Context()
+	userInfo, err := s.oauthService.ExchangeCodeForClient(ctx, oauthClientType, provider, req.Code, req.RedirectURI)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "oauth_error",
+			"failed to exchange authorization code: "+err.Error(), nil)
+		return
+	}
+
+	// Find or create user
+	user, err := s.store.GetUserByEmail(ctx, userInfo.Email)
+	if err != nil {
+		// Create new user
+		user = &store.User{
+			ID:          generateID(),
+			Email:       userInfo.Email,
+			DisplayName: userInfo.DisplayName,
+			AvatarURL:   userInfo.AvatarURL,
+			Role:        "member",
+			Status:      "active",
+			Created:     time.Now(),
+			LastLogin:   time.Now(),
+		}
+		if err := s.store.CreateUser(ctx, user); err != nil {
+			InternalError(w)
+			return
+		}
+	} else {
+		// Update last login
+		user.LastLogin = time.Now()
+		if userInfo.AvatarURL != "" && user.AvatarURL == "" {
+			user.AvatarURL = userInfo.AvatarURL
+		}
+		if userInfo.DisplayName != "" && user.DisplayName == "" {
+			user.DisplayName = userInfo.DisplayName
+		}
+		_ = s.store.UpdateUser(ctx, user)
+	}
+
+	// Generate tokens
+	if s.userTokenService == nil {
+		InternalError(w)
+		return
+	}
+
+	accessToken, refreshToken, expiresIn, err := s.userTokenService.GenerateTokenPair(
+		user.ID, user.Email, user.DisplayName, user.Role, clientType,
+	)
+	if err != nil {
+		InternalError(w)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, AuthTokenResponse{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		ExpiresIn:    expiresIn,
+		TokenType:    "Bearer",
+		User: &UserResponse{
+			ID:          user.ID,
+			Email:       user.Email,
+			DisplayName: user.DisplayName,
+			Role:        user.Role,
+			AvatarURL:   user.AvatarURL,
+		},
+	})
 }
 
 // handleAuthRefresh handles POST /api/v1/auth/refresh.

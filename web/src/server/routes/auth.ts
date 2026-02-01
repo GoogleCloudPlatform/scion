@@ -6,7 +6,6 @@
 
 import Router from '@koa/router';
 import type { Context } from 'koa';
-import { OAuth2Client, type TokenPayload } from 'google-auth-library';
 import crypto from 'crypto';
 
 import type { AppConfig } from '../config.js';
@@ -45,26 +44,6 @@ export function createAuthRouter(config: AppConfig): Router {
     authRoutesDebugEnabled = true;
   }
 
-  // Google OAuth client (lazily initialized)
-  let googleClient: OAuth2Client | null = null;
-
-  /**
-   * Get or create Google OAuth client
-   */
-  function getGoogleClient(): OAuth2Client {
-    if (!googleClient) {
-      if (!config.auth.googleClientId || !config.auth.googleClientSecret) {
-        throw new Error('Google OAuth not configured');
-      }
-      googleClient = new OAuth2Client({
-        clientId: config.auth.googleClientId,
-        clientSecret: config.auth.googleClientSecret,
-        redirectUri: `${config.baseUrl}/auth/callback/google`,
-      });
-    }
-    return googleClient;
-  }
-
   /**
    * Generate random state for CSRF protection
    */
@@ -94,6 +73,31 @@ export function createAuthRouter(config: AppConfig): Router {
   router.get('/login/:provider', async (ctx: Context) => {
     const provider = ctx.params.provider as string;
 
+    // Ensure we are on the canonical base URL before starting OAuth flow.
+    // This is critical for session cookies to be available at the callback URL.
+    if (config.baseUrl) {
+      try {
+        const baseUri = new URL(config.baseUrl);
+        const currentHost = ctx.host;
+        const currentProtocol = ctx.protocol;
+        const expectedProtocol = baseUri.protocol.replace(':', '');
+
+        if (currentHost !== baseUri.host || currentProtocol !== expectedProtocol) {
+          authRoutesDebug(`Host or protocol mismatch, redirecting to canonical base URL`, {
+            currentHost,
+            baseHost: baseUri.host,
+            currentProtocol,
+            expectedProtocol,
+          });
+          const targetUrl = new URL(ctx.url, config.baseUrl);
+          ctx.redirect(targetUrl.toString());
+          return;
+        }
+      } catch (e) {
+        authRoutesDebug(`Failed to parse config.baseUrl`, { baseUrl: config.baseUrl });
+      }
+    }
+
     // Store return URL if provided
     const returnTo = ctx.query.returnTo as string | undefined;
     if (returnTo && ctx.session) {
@@ -107,8 +111,6 @@ export function createAuthRouter(config: AppConfig): Router {
         return;
       }
 
-      const client = getGoogleClient();
-
       // Generate state for CSRF protection
       const state = generateState();
       if (ctx.session) {
@@ -116,12 +118,18 @@ export function createAuthRouter(config: AppConfig): Router {
       }
 
       // Generate authorization URL
-      const authUrl = client.generateAuthUrl({
+      const redirectUri = `${config.baseUrl}/auth/callback/google`;
+      const params = new URLSearchParams({
+        client_id: config.auth.googleClientId,
+        redirect_uri: redirectUri,
+        response_type: 'code',
+        scope: 'openid email profile',
+        state: state,
         access_type: 'offline',
-        scope: ['email', 'profile'],
-        state,
         prompt: 'select_account',
       });
+
+      const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
 
       ctx.redirect(authUrl);
       return;
@@ -207,104 +215,71 @@ export function createAuthRouter(config: AppConfig): Router {
     }
 
     try {
-      let user: User;
+      authRoutesDebug(`Exchanging code for Hub tokens`, { provider });
 
-      authRoutesDebug(`Exchanging code for tokens`, { provider });
+      // The redirect URI must match exactly what was sent to the provider
+      const redirectUri = `${config.baseUrl}/auth/callback/${provider}`;
 
-      if (provider === 'google') {
-        user = await handleGoogleCallback(code, config, getGoogleClient());
-      } else if (provider === 'github') {
-        user = await handleGitHubCallback(code, config);
-      } else {
-        ctx.redirect('/auth/error?message=Unknown+OAuth+provider');
-        return;
-      }
-
-      authRoutesDebug(`User authenticated via OAuth`, {
-        userId: user.id,
-        userEmail: user.email,
-        userName: user.name,
+      // Call Hub API to exchange code for Hub-issued tokens (Option A from server-auth-design.md)
+      // This is a single exchange that handles both code validation and Hub session creation.
+      const hubTokenResponse = await fetch(`${config.hubApiUrl}/api/v1/auth/token`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          provider: provider,
+          code: code,
+          redirectUri: redirectUri,
+          grantType: 'authorization_code',
+          clientType: 'web',
+        }),
       });
 
-      // Check if user's email domain is authorized
+      if (!hubTokenResponse.ok) {
+        const errorText = await hubTokenResponse.text();
+        authRoutesDebug(`Hub token exchange failed`, {
+          status: hubTokenResponse.status,
+          error: errorText.substring(0, 200),
+        });
+        throw new Error(`Hub authentication failed: ${hubTokenResponse.statusText}`);
+      }
+
+      const hubTokenData = (await hubTokenResponse.json()) as {
+        accessToken: string;
+        refreshToken: string;
+        expiresIn: number;
+        user: { id: string; email: string; displayName: string; avatarUrl?: string; role: string };
+      };
+
+      const user: User = {
+        id: hubTokenData.user.id,
+        email: hubTokenData.user.email,
+        name: hubTokenData.user.displayName,
+        avatar: hubTokenData.user.avatarUrl,
+      };
+
+      authRoutesDebug(`User authenticated via Hub`, {
+        userId: user.id,
+        userEmail: user.email,
+        hasHubToken: !!hubTokenData.accessToken,
+      });
+
+      // Check if user's email domain is authorized (secondary check, Hub might already do this)
       if (!isEmailAuthorized(user.email, config.auth.authorizedDomains)) {
         authRoutesDebug(`User email domain not authorized`, { email: user.email });
         ctx.redirect('/auth/error?message=Your+email+domain+is+not+authorized');
         return;
       }
 
-      // Exchange OAuth credentials for Hub-issued access token (Option A from server-auth-design.md)
-      authRoutesDebug(`Exchanging OAuth credentials for Hub token`, {
-        hubApiUrl: config.hubApiUrl,
-        provider,
-        userEmail: user.email,
-      });
-
-      let hubAccessToken: string | undefined;
-      let hubRefreshToken: string | undefined;
-      let hubTokenExpiry: number | undefined;
-
-      try {
-        const hubLoginResponse = await fetch(`${config.hubApiUrl}/api/v1/auth/login`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            provider: provider,
-            providerToken: '', // We don't need to pass the provider token for now (Hub trusts web frontend)
-            email: user.email,
-            name: user.name,
-            avatar: user.avatar || '',
-          }),
-        });
-
-        if (hubLoginResponse.ok) {
-          const hubLoginData = (await hubLoginResponse.json()) as {
-            accessToken: string;
-            refreshToken: string;
-            expiresIn: number;
-            user: { id: string; email: string; displayName: string; role: string };
-          };
-
-          hubAccessToken = hubLoginData.accessToken;
-          hubRefreshToken = hubLoginData.refreshToken;
-          hubTokenExpiry = Date.now() + hubLoginData.expiresIn * 1000;
-
-          authRoutesDebug(`Hub token exchange successful`, {
-            expiresIn: hubLoginData.expiresIn,
-            hubUserId: hubLoginData.user?.id,
-          });
-        } else {
-          const errorText = await hubLoginResponse.text();
-          authRoutesDebug(`Hub token exchange failed`, {
-            status: hubLoginResponse.status,
-            error: errorText.substring(0, 200),
-          });
-          // Continue without Hub token - API calls will fail but at least user can see the UI
-        }
-      } catch (hubError) {
-        authRoutesDebug(`Hub token exchange error`, {
-          error: hubError instanceof Error ? hubError.message : String(hubError),
-        });
-        // Continue without Hub token
-      }
-
       // Store user and Hub tokens in session
-      authRoutesDebug(`Storing user in session`, {
-        sessionExists: !!ctx.session,
-        userEmail: user.email,
-        hasHubToken: !!hubAccessToken,
-      });
-
       if (ctx.session) {
         ctx.session.user = user;
-        if (hubAccessToken) {
-          ctx.session.hubAccessToken = hubAccessToken;
-          ctx.session.hubRefreshToken = hubRefreshToken;
-          ctx.session.hubTokenExpiry = hubTokenExpiry;
-        }
-        authRoutesDebug(`User stored in session`, {
+        ctx.session.hubAccessToken = hubTokenData.accessToken;
+        ctx.session.hubRefreshToken = hubTokenData.refreshToken;
+        ctx.session.hubTokenExpiry = Date.now() + hubTokenData.expiresIn * 1000;
+
+        authRoutesDebug(`User and tokens stored in session`, {
           sessionUser: ctx.session.user?.email,
           hasHubAccessToken: !!ctx.session.hubAccessToken,
           sessionKeys: Object.keys(ctx.session),
@@ -474,130 +449,4 @@ export function createAuthRouter(config: AppConfig): Router {
   });
 
   return router;
-}
-
-/**
- * Handle Google OAuth callback
- */
-async function handleGoogleCallback(
-  code: string,
-  config: AppConfig,
-  client: OAuth2Client
-): Promise<User> {
-  // Exchange code for tokens
-  const { tokens } = await client.getToken(code);
-
-  if (!tokens.id_token) {
-    throw new Error('No ID token received from Google');
-  }
-
-  // Verify the ID token
-  const ticket = await client.verifyIdToken({
-    idToken: tokens.id_token,
-    audience: config.auth.googleClientId,
-  });
-
-  const payload = ticket.getPayload();
-  if (!payload) {
-    throw new Error('Invalid token payload');
-  }
-
-  return googlePayloadToUser(payload);
-}
-
-/**
- * Convert Google token payload to User
- */
-function googlePayloadToUser(payload: TokenPayload): User {
-  if (!payload.email) {
-    throw new Error('Email not provided by Google');
-  }
-
-  return {
-    id: `google:${payload.sub}`,
-    email: payload.email,
-    name: payload.name || payload.email.split('@')[0],
-    avatar: payload.picture,
-  };
-}
-
-/**
- * Handle GitHub OAuth callback
- */
-async function handleGitHubCallback(code: string, config: AppConfig): Promise<User> {
-  // Exchange code for access token
-  // Note: redirect_uri must match exactly what was sent in the authorization request
-  const redirectUri = `${config.baseUrl}/auth/callback/github`;
-  const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
-    method: 'POST',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      client_id: config.auth.githubClientId,
-      client_secret: config.auth.githubClientSecret,
-      code,
-      redirect_uri: redirectUri,
-    }),
-  });
-
-  const tokenData = (await tokenResponse.json()) as {
-    access_token?: string;
-    error?: string;
-    error_description?: string;
-  };
-
-  if (tokenData.error || !tokenData.access_token) {
-    throw new Error(tokenData.error_description || 'Failed to get access token');
-  }
-
-  // Get user info
-  const userResponse = await fetch('https://api.github.com/user', {
-    headers: {
-      Authorization: `Bearer ${tokenData.access_token}`,
-      Accept: 'application/json',
-    },
-  });
-
-  const userData = (await userResponse.json()) as {
-    id: number;
-    login: string;
-    name?: string;
-    email?: string;
-    avatar_url?: string;
-  };
-
-  // Get email if not provided in user response
-  let email = userData.email;
-  if (!email) {
-    const emailResponse = await fetch('https://api.github.com/user/emails', {
-      headers: {
-        Authorization: `Bearer ${tokenData.access_token}`,
-        Accept: 'application/json',
-      },
-    });
-
-    const emails = (await emailResponse.json()) as Array<{
-      email: string;
-      primary: boolean;
-      verified: boolean;
-    }>;
-
-    const primaryEmail = emails.find((e) => e.primary && e.verified);
-    if (primaryEmail) {
-      email = primaryEmail.email;
-    }
-  }
-
-  if (!email) {
-    throw new Error('Could not get email from GitHub');
-  }
-
-  return {
-    id: `github:${userData.id}`,
-    email,
-    name: userData.name || userData.login,
-    avatar: userData.avatar_url,
-  };
 }

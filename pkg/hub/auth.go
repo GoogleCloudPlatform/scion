@@ -252,9 +252,17 @@ func isUnauthenticatedEndpoint(path string) bool {
 	if isHealthEndpoint(path) {
 		return true
 	}
-	// OAuth/login endpoints - these are pre-authentication endpoints
+	// OAuth/login/token endpoints - these are pre-authentication or authentication-management endpoints
 	switch path {
 	case "/api/v1/auth/login": // Web frontend OAuth token exchange
+		return true
+	case "/api/v1/auth/token": // OAuth code exchange (unified)
+		return true
+	case "/api/v1/auth/refresh": // Token refresh
+		return true
+	case "/api/v1/auth/validate": // Token validation
+		return true
+	case "/api/v1/auth/logout": // Logout
 		return true
 	case "/api/v1/auth/cli/authorize": // CLI OAuth authorization URL
 		return true

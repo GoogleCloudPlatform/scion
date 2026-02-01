@@ -29,7 +29,6 @@
     "@lit-labs/ssr-client": "^1.1.7",
     "@shoelace-style/shoelace": "^2.19.0",
     "@vaadin/router": "^1.7.5",
-    "google-auth-library": "^10.5.0",
     "koa": "^2.16.0",
     "koa-bodyparser": "^4.4.1",
     "koa-session": "^7.0.2",
