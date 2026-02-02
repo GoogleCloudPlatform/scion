@@ -114,24 +114,32 @@ type AgentDispatcher interface {
 
 // RuntimeHostClient is an interface for communicating with runtime hosts over HTTP.
 // This allows the hub to dispatch operations to remote runtime hosts.
+// All methods take a hostID parameter which is used for HMAC authentication when
+// the client supports it (AuthenticatedHostClient).
 type RuntimeHostClient interface {
 	// CreateAgent creates an agent on a remote runtime host.
-	CreateAgent(ctx context.Context, hostEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error)
+	// hostID is used for HMAC authentication lookup.
+	CreateAgent(ctx context.Context, hostID, hostEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error)
 
 	// StartAgent starts an agent on a remote runtime host.
-	StartAgent(ctx context.Context, hostEndpoint string, agentID string) error
+	// hostID is used for HMAC authentication lookup.
+	StartAgent(ctx context.Context, hostID, hostEndpoint, agentID string) error
 
 	// StopAgent stops an agent on a remote runtime host.
-	StopAgent(ctx context.Context, hostEndpoint string, agentID string) error
+	// hostID is used for HMAC authentication lookup.
+	StopAgent(ctx context.Context, hostID, hostEndpoint, agentID string) error
 
 	// RestartAgent restarts an agent on a remote runtime host.
-	RestartAgent(ctx context.Context, hostEndpoint string, agentID string) error
+	// hostID is used for HMAC authentication lookup.
+	RestartAgent(ctx context.Context, hostID, hostEndpoint, agentID string) error
 
 	// DeleteAgent deletes an agent from a remote runtime host.
-	DeleteAgent(ctx context.Context, hostEndpoint string, agentID string, deleteFiles, removeBranch bool) error
+	// hostID is used for HMAC authentication lookup.
+	DeleteAgent(ctx context.Context, hostID, hostEndpoint, agentID string, deleteFiles, removeBranch bool) error
 
 	// MessageAgent sends a message to an agent on a remote runtime host.
-	MessageAgent(ctx context.Context, hostEndpoint string, agentID string, message string, interrupt bool) error
+	// hostID is used for HMAC authentication lookup.
+	MessageAgent(ctx context.Context, hostID, hostEndpoint, agentID, message string, interrupt bool) error
 }
 
 // RemoteCreateAgentRequest is the request body for creating an agent on a remote runtime host.
@@ -198,6 +206,8 @@ type Server struct {
 	oauthService      *OAuthService       // OAuth service for CLI authentication
 	authConfig        AuthConfig          // Unified auth configuration
 	hostAuthService   *HostAuthService    // Host HMAC authentication service
+	auditLogger       AuditLogger         // Audit logger for security events
+	metrics           MetricsRecorder     // Metrics recorder for host auth
 }
 
 // New creates a new Hub API server.
@@ -263,6 +273,8 @@ func New(cfg ServerConfig, s store.Store) *Server {
 	// Initialize host auth service if enabled
 	if cfg.HostAuthConfig.Enabled {
 		srv.hostAuthService = NewHostAuthService(cfg.HostAuthConfig, s)
+		srv.auditLogger = NewLogAuditLogger("[Hub Audit]", cfg.Debug)
+		srv.metrics = NewHostAuthMetrics()
 		log.Printf("[Hub] Host HMAC authentication enabled")
 	}
 
@@ -384,6 +396,54 @@ func (s *Server) GetHostAuthService() *HostAuthService {
 	return s.hostAuthService
 }
 
+// GetAuditLogger returns the audit logger.
+func (s *Server) GetAuditLogger() AuditLogger {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.auditLogger
+}
+
+// SetAuditLogger sets a custom audit logger.
+func (s *Server) SetAuditLogger(logger AuditLogger) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.auditLogger = logger
+}
+
+// GetMetrics returns the metrics recorder.
+func (s *Server) GetMetrics() MetricsRecorder {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.metrics
+}
+
+// SetMetrics sets a custom metrics recorder.
+func (s *Server) SetMetrics(m MetricsRecorder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.metrics = m
+}
+
+// CreateAuthenticatedDispatcher creates an HTTPAgentDispatcher with authenticated
+// host communication. This dispatcher signs outgoing requests to Runtime Hosts
+// using HMAC authentication based on shared secrets stored in the database.
+func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
+	client := NewAuthenticatedHostClient(s.store, s.config.Debug)
+	dispatcher := NewHTTPAgentDispatcherWithClient(s.store, client, s.config.Debug)
+
+	// Configure token generator if available
+	if s.agentTokenService != nil {
+		dispatcher.SetTokenGenerator(s)
+	}
+
+	// Set Hub endpoint if configured
+	if s.config.HubEndpoint != "" {
+		dispatcher.SetHubEndpoint(s.config.HubEndpoint)
+	}
+
+	return dispatcher
+}
+
 // GenerateAgentToken generates a JWT for an agent.
 // This is a convenience method that delegates to the token service.
 func (s *Server) GenerateAgentToken(agentID, groveID string) (string, error) {
@@ -457,9 +517,10 @@ func (s *Server) Handler() http.Handler {
 
 // registerRoutes sets up all API routes.
 func (s *Server) registerRoutes() {
-	// Health endpoints
+	// Health and metrics endpoints
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	s.mux.HandleFunc("/readyz", s.handleReadyz)
+	s.mux.HandleFunc("/metrics", s.handleMetrics)
 
 	// Authentication endpoints (these routes are handled specially in middleware)
 	s.mux.HandleFunc("/api/v1/auth/login", s.handleAuthLogin)
@@ -509,6 +570,7 @@ func (s *Server) registerRoutes() {
 	// Host registration endpoints (Runtime Host HMAC authentication)
 	s.mux.HandleFunc("/api/v1/hosts", s.handleHostsEndpoint)
 	s.mux.HandleFunc("/api/v1/hosts/join", s.handleHostJoin)
+	s.mux.HandleFunc("/api/v1/hosts/", s.handleHostByIDRoutes)
 }
 
 // applyMiddleware wraps the handler with middleware.
@@ -520,7 +582,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply host auth middleware (checks X-Scion-Host-ID header for HMAC auth)
 	// This runs after unified auth but before the handler, allowing hosts to authenticate
 	if s.hostAuthService != nil {
-		h = HostAuthMiddleware(s.hostAuthService)(h)
+		if s.auditLogger != nil {
+			h = AuditableHostAuthMiddleware(s.hostAuthService, s.auditLogger)(h)
+		} else {
+			h = HostAuthMiddleware(s.hostAuthService)(h)
+		}
 	}
 
 	// Apply unified auth middleware

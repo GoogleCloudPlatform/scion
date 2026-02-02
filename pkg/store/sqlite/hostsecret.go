@@ -81,6 +81,50 @@ func (s *SQLiteStore) GetHostSecret(ctx context.Context, hostID string) (*store.
 	return secret, nil
 }
 
+// GetActiveSecrets retrieves all active and deprecated secrets for a host.
+// This supports dual-secret validation during rotation grace periods.
+func (s *SQLiteStore) GetActiveSecrets(ctx context.Context, hostID string) ([]*store.HostSecret, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT host_id, secret_key, algorithm,
+			created_at, rotated_at, expires_at, status
+		FROM host_secrets
+		WHERE host_id = ? AND status IN (?, ?)
+		ORDER BY created_at DESC
+	`, hostID, store.HostSecretStatusActive, store.HostSecretStatusDeprecated)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var secrets []*store.HostSecret
+	for rows.Next() {
+		secret := &store.HostSecret{}
+		var rotatedAt, expiresAt sql.NullTime
+
+		if err := rows.Scan(
+			&secret.HostID, &secret.SecretKey, &secret.Algorithm,
+			&secret.CreatedAt, &rotatedAt, &expiresAt, &secret.Status,
+		); err != nil {
+			return nil, err
+		}
+
+		if rotatedAt.Valid {
+			secret.RotatedAt = rotatedAt.Time
+		}
+		if expiresAt.Valid {
+			secret.ExpiresAt = expiresAt.Time
+		}
+
+		secrets = append(secrets, secret)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return secrets, nil
+}
+
 // UpdateHostSecret updates an existing host secret.
 func (s *SQLiteStore) UpdateHostSecret(ctx context.Context, secret *store.HostSecret) error {
 	result, err := s.db.ExecContext(ctx, `

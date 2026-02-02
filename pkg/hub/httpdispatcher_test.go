@@ -32,6 +32,7 @@ type mockRuntimeHostClient struct {
 	restartCalled  bool
 	deleteCalled   bool
 	messageCalled  bool
+	lastHostID     string
 	lastEndpoint   string
 	lastAgentID    string
 	lastMessage    string
@@ -40,8 +41,9 @@ type mockRuntimeHostClient struct {
 	returnErr      error
 }
 
-func (m *mockRuntimeHostClient) CreateAgent(ctx context.Context, hostEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
+func (m *mockRuntimeHostClient) CreateAgent(ctx context.Context, hostID, hostEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
 	m.createCalled = true
+	m.lastHostID = hostID
 	m.lastEndpoint = hostEndpoint
 	if m.returnErr != nil {
 		return nil, m.returnErr
@@ -58,29 +60,33 @@ func (m *mockRuntimeHostClient) CreateAgent(ctx context.Context, hostEndpoint st
 	}, nil
 }
 
-func (m *mockRuntimeHostClient) StartAgent(ctx context.Context, hostEndpoint string, agentID string) error {
+func (m *mockRuntimeHostClient) StartAgent(ctx context.Context, hostID, hostEndpoint, agentID string) error {
 	m.startCalled = true
+	m.lastHostID = hostID
 	m.lastEndpoint = hostEndpoint
 	m.lastAgentID = agentID
 	return m.returnErr
 }
 
-func (m *mockRuntimeHostClient) StopAgent(ctx context.Context, hostEndpoint string, agentID string) error {
+func (m *mockRuntimeHostClient) StopAgent(ctx context.Context, hostID, hostEndpoint, agentID string) error {
 	m.stopCalled = true
+	m.lastHostID = hostID
 	m.lastEndpoint = hostEndpoint
 	m.lastAgentID = agentID
 	return m.returnErr
 }
 
-func (m *mockRuntimeHostClient) RestartAgent(ctx context.Context, hostEndpoint string, agentID string) error {
+func (m *mockRuntimeHostClient) RestartAgent(ctx context.Context, hostID, hostEndpoint, agentID string) error {
 	m.restartCalled = true
+	m.lastHostID = hostID
 	m.lastEndpoint = hostEndpoint
 	m.lastAgentID = agentID
 	return m.returnErr
 }
 
-func (m *mockRuntimeHostClient) DeleteAgent(ctx context.Context, hostEndpoint string, agentID string, deleteFiles, removeBranch bool) error {
+func (m *mockRuntimeHostClient) DeleteAgent(ctx context.Context, hostID, hostEndpoint, agentID string, deleteFiles, removeBranch bool) error {
 	m.deleteCalled = true
+	m.lastHostID = hostID
 	m.lastEndpoint = hostEndpoint
 	m.lastAgentID = agentID
 	m.lastDeleteOpts.deleteFiles = deleteFiles
@@ -88,8 +94,9 @@ func (m *mockRuntimeHostClient) DeleteAgent(ctx context.Context, hostEndpoint st
 	return m.returnErr
 }
 
-func (m *mockRuntimeHostClient) MessageAgent(ctx context.Context, hostEndpoint string, agentID string, message string, interrupt bool) error {
+func (m *mockRuntimeHostClient) MessageAgent(ctx context.Context, hostID, hostEndpoint, agentID, message string, interrupt bool) error {
 	m.messageCalled = true
+	m.lastHostID = hostID
 	m.lastEndpoint = hostEndpoint
 	m.lastAgentID = agentID
 	m.lastMessage = message
@@ -294,7 +301,7 @@ func TestHTTPRuntimeHostClient_CreateAgent(t *testing.T) {
 		GroveID: "grove-1",
 	}
 
-	resp, err := client.CreateAgent(context.Background(), server.URL, req)
+	resp, err := client.CreateAgent(context.Background(), "host-1", server.URL, req)
 	if err != nil {
 		t.Fatalf("CreateAgent failed: %v", err)
 	}
@@ -322,7 +329,7 @@ func TestHTTPRuntimeHostClient_StopAgent(t *testing.T) {
 
 	client := NewHTTPRuntimeHostClient()
 
-	err := client.StopAgent(context.Background(), server.URL, "test-agent")
+	err := client.StopAgent(context.Background(), "host-1", server.URL, "test-agent")
 	if err != nil {
 		t.Fatalf("StopAgent failed: %v", err)
 	}
@@ -351,7 +358,7 @@ func TestHTTPRuntimeHostClient_DeleteAgent(t *testing.T) {
 
 	client := NewHTTPRuntimeHostClient()
 
-	err := client.DeleteAgent(context.Background(), server.URL, "test-agent", true, false)
+	err := client.DeleteAgent(context.Background(), "host-1", server.URL, "test-agent", true, false)
 	if err != nil {
 		t.Fatalf("DeleteAgent failed: %v", err)
 	}
@@ -384,7 +391,7 @@ func TestHTTPRuntimeHostClient_MessageAgent(t *testing.T) {
 
 	client := NewHTTPRuntimeHostClient()
 
-	err := client.MessageAgent(context.Background(), server.URL, "test-agent", "Hello!", true)
+	err := client.MessageAgent(context.Background(), "host-1", server.URL, "test-agent", "Hello!", true)
 	if err != nil {
 		t.Fatalf("MessageAgent failed: %v", err)
 	}

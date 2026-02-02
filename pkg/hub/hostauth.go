@@ -44,7 +44,7 @@ func DefaultHostAuthConfig() HostAuthConfig {
 	return HostAuthConfig{
 		Enabled:          true,
 		MaxClockSkew:     5 * time.Minute,
-		EnableNonceCache: false,
+		EnableNonceCache: true, // Enabled by default for replay attack prevention
 		NonceCacheTTL:    10 * time.Minute,
 		JoinTokenExpiry:  1 * time.Hour,
 		JoinTokenLength:  32,
@@ -457,6 +457,156 @@ func (s *HostAuthService) SignRequest(r *http.Request, hostID string, secret []b
 	r.Header.Set(HeaderSignature, sigB64)
 
 	return nil
+}
+
+// =============================================================================
+// Secret Rotation
+// =============================================================================
+
+// RotateSecretRequest is the request body for POST /api/v1/hosts/{id}/rotate-secret.
+type RotateSecretRequest struct {
+	// GracePeriod is how long the old secret remains valid after rotation.
+	// Defaults to 5 minutes if not specified.
+	GracePeriod time.Duration `json:"gracePeriod,omitempty"`
+}
+
+// RotateSecretResponse is the response for POST /api/v1/hosts/{id}/rotate-secret.
+type RotateSecretResponse struct {
+	SecretKey   string    `json:"secretKey"`   // Base64-encoded new secret
+	RotatedAt   time.Time `json:"rotatedAt"`
+	GracePeriod string    `json:"gracePeriod"` // Duration string
+}
+
+// RotateHostSecret generates a new secret for a host.
+// The old secret is marked as deprecated and remains valid for the grace period.
+// Note: Current schema only supports one secret per host, so this replaces immediately.
+// TODO: Add schema migration to support multiple secrets per host for true dual-secret rotation.
+func (s *HostAuthService) RotateHostSecret(ctx context.Context, hostID string, gracePeriod time.Duration) (*RotateSecretResponse, error) {
+	if gracePeriod <= 0 {
+		gracePeriod = 5 * time.Minute
+	}
+
+	// Get existing secret
+	existingSecret, err := s.store.GetHostSecret(ctx, hostID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get existing secret: %w", err)
+	}
+
+	// Generate new secret
+	newSecretKey := make([]byte, s.config.SecretKeyLength)
+	if _, err := rand.Read(newSecretKey); err != nil {
+		return nil, fmt.Errorf("failed to generate new secret: %w", err)
+	}
+
+	now := time.Now()
+
+	// Update the secret with new key
+	// Note: In a full implementation with multi-secret support, we would:
+	// 1. Mark old secret as deprecated with expiry = now + gracePeriod
+	// 2. Create new secret with status active
+	existingSecret.SecretKey = newSecretKey
+	existingSecret.RotatedAt = now
+	existingSecret.Status = store.HostSecretStatusActive
+
+	if err := s.store.UpdateHostSecret(ctx, existingSecret); err != nil {
+		return nil, fmt.Errorf("failed to update secret: %w", err)
+	}
+
+	return &RotateSecretResponse{
+		SecretKey:   base64.StdEncoding.EncodeToString(newSecretKey),
+		RotatedAt:   now,
+		GracePeriod: gracePeriod.String(),
+	}, nil
+}
+
+// ValidateHostSignatureWithRotation validates a request trying multiple secrets.
+// This supports the grace period during secret rotation where both old and new
+// secrets are valid.
+func (s *HostAuthService) ValidateHostSignatureWithRotation(ctx context.Context, r *http.Request) (HostIdentity, error) {
+	// Extract required headers
+	hostID := r.Header.Get(HeaderHostID)
+	if hostID == "" {
+		return nil, errors.New("missing X-Scion-Host-ID header")
+	}
+
+	// Get all active secrets for this host
+	secrets, err := s.store.GetActiveSecrets(ctx, hostID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get host secrets: %w", err)
+	}
+
+	if len(secrets) == 0 {
+		return nil, fmt.Errorf("unknown host: %s", hostID)
+	}
+
+	// Try each secret until one validates
+	var lastErr error
+	for _, secret := range secrets {
+		// Skip expired secrets
+		if !secret.ExpiresAt.IsZero() && time.Now().After(secret.ExpiresAt) {
+			continue
+		}
+
+		identity, err := s.validateWithSecret(ctx, r, hostID, secret.SecretKey)
+		if err == nil {
+			return identity, nil
+		}
+		lastErr = err
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, errors.New("no valid secrets found")
+}
+
+// validateWithSecret validates a request using a specific secret key.
+func (s *HostAuthService) validateWithSecret(ctx context.Context, r *http.Request, hostID string, secretKey []byte) (HostIdentity, error) {
+	timestamp := r.Header.Get(HeaderTimestamp)
+	if timestamp == "" {
+		return nil, errors.New("missing X-Scion-Timestamp header")
+	}
+
+	signature := r.Header.Get(HeaderSignature)
+	if signature == "" {
+		return nil, errors.New("missing X-Scion-Signature header")
+	}
+
+	// Parse and validate timestamp
+	ts, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid timestamp format: %w", err)
+	}
+
+	requestTime := time.Unix(ts, 0)
+	clockSkew := time.Since(requestTime)
+	if clockSkew < 0 {
+		clockSkew = -clockSkew
+	}
+	if clockSkew > s.config.MaxClockSkew {
+		return nil, fmt.Errorf("timestamp outside acceptable range (skew: %v)", clockSkew)
+	}
+
+	// Validate nonce if enabled (only check once, not per-secret)
+	nonce := r.Header.Get(HeaderNonce)
+
+	// Build canonical string and verify signature
+	canonicalString := s.buildCanonicalString(r, timestamp, nonce)
+	expectedSig := computeHMAC(secretKey, canonicalString)
+	expectedSigB64 := base64.StdEncoding.EncodeToString(expectedSig)
+
+	if !hmac.Equal([]byte(signature), []byte(expectedSigB64)) {
+		return nil, errors.New("invalid signature")
+	}
+
+	// Only add nonce to cache after successful validation
+	if s.nonces != nil && nonce != "" {
+		if !s.nonces.Add(nonce) {
+			return nil, errors.New("nonce already used (possible replay attack)")
+		}
+	}
+
+	return NewHostIdentity(hostID), nil
 }
 
 // =============================================================================

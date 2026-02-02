@@ -519,6 +519,11 @@ type HostSecretStore interface {
 	// Returns ErrNotFound if the secret doesn't exist.
 	GetHostSecret(ctx context.Context, hostID string) (*HostSecret, error)
 
+	// GetActiveSecrets retrieves all active and deprecated (within grace period) secrets for a host.
+	// This is used during secret rotation to support dual-secret validation.
+	// Returns an empty slice if no secrets exist.
+	GetActiveSecrets(ctx context.Context, hostID string) ([]*HostSecret, error)
+
 	// UpdateHostSecret updates an existing host secret.
 	// Returns ErrNotFound if the secret doesn't exist.
 	UpdateHostSecret(ctx context.Context, secret *HostSecret) error

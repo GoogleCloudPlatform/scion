@@ -42,7 +42,10 @@ func NewHTTPRuntimeHostClientWithDebug(debug bool) *HTTPRuntimeHostClient {
 }
 
 // CreateAgent creates an agent on a remote runtime host.
-func (c *HTTPRuntimeHostClient) CreateAgent(ctx context.Context, hostEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
+// Note: hostID is unused in this unauthenticated client but is part of the
+// RuntimeHostClient interface for compatibility with AuthenticatedHostClient.
+func (c *HTTPRuntimeHostClient) CreateAgent(ctx context.Context, hostID, hostEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
+	_ = hostID // Unused in unauthenticated client
 	endpoint := fmt.Sprintf("%s/api/v1/agents", hostEndpoint)
 
 	body, err := json.Marshal(req)
@@ -80,7 +83,9 @@ func (c *HTTPRuntimeHostClient) CreateAgent(ctx context.Context, hostEndpoint st
 }
 
 // StartAgent starts an agent on a remote runtime host.
-func (c *HTTPRuntimeHostClient) StartAgent(ctx context.Context, hostEndpoint string, agentID string) error {
+// Note: hostID is unused in this unauthenticated client.
+func (c *HTTPRuntimeHostClient) StartAgent(ctx context.Context, hostID, hostEndpoint, agentID string) error {
+	_ = hostID // Unused in unauthenticated client
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/start", hostEndpoint, url.PathEscape(agentID))
 
 	if c.debug {
@@ -107,7 +112,9 @@ func (c *HTTPRuntimeHostClient) StartAgent(ctx context.Context, hostEndpoint str
 }
 
 // StopAgent stops an agent on a remote runtime host.
-func (c *HTTPRuntimeHostClient) StopAgent(ctx context.Context, hostEndpoint string, agentID string) error {
+// Note: hostID is unused in this unauthenticated client.
+func (c *HTTPRuntimeHostClient) StopAgent(ctx context.Context, hostID, hostEndpoint, agentID string) error {
+	_ = hostID // Unused in unauthenticated client
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/stop", hostEndpoint, url.PathEscape(agentID))
 
 	if c.debug {
@@ -134,7 +141,9 @@ func (c *HTTPRuntimeHostClient) StopAgent(ctx context.Context, hostEndpoint stri
 }
 
 // RestartAgent restarts an agent on a remote runtime host.
-func (c *HTTPRuntimeHostClient) RestartAgent(ctx context.Context, hostEndpoint string, agentID string) error {
+// Note: hostID is unused in this unauthenticated client.
+func (c *HTTPRuntimeHostClient) RestartAgent(ctx context.Context, hostID, hostEndpoint, agentID string) error {
+	_ = hostID // Unused in unauthenticated client
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/restart", hostEndpoint, url.PathEscape(agentID))
 
 	if c.debug {
@@ -161,7 +170,9 @@ func (c *HTTPRuntimeHostClient) RestartAgent(ctx context.Context, hostEndpoint s
 }
 
 // DeleteAgent deletes an agent from a remote runtime host.
-func (c *HTTPRuntimeHostClient) DeleteAgent(ctx context.Context, hostEndpoint string, agentID string, deleteFiles, removeBranch bool) error {
+// Note: hostID is unused in this unauthenticated client.
+func (c *HTTPRuntimeHostClient) DeleteAgent(ctx context.Context, hostID, hostEndpoint, agentID string, deleteFiles, removeBranch bool) error {
+	_ = hostID // Unused in unauthenticated client
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s?deleteFiles=%t&removeBranch=%t",
 		hostEndpoint, url.PathEscape(agentID), deleteFiles, removeBranch)
 
@@ -189,7 +200,9 @@ func (c *HTTPRuntimeHostClient) DeleteAgent(ctx context.Context, hostEndpoint st
 }
 
 // MessageAgent sends a message to an agent on a remote runtime host.
-func (c *HTTPRuntimeHostClient) MessageAgent(ctx context.Context, hostEndpoint string, agentID string, message string, interrupt bool) error {
+// Note: hostID is unused in this unauthenticated client.
+func (c *HTTPRuntimeHostClient) MessageAgent(ctx context.Context, hostID, hostEndpoint, agentID, message string, interrupt bool) error {
+	_ = hostID // Unused in unauthenticated client
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/message", hostEndpoint, url.PathEscape(agentID))
 
 	body, err := json.Marshal(map[string]interface{}{
@@ -329,7 +342,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		req.ResolvedEnv = agent.AppliedConfig.Env
 	}
 
-	resp, err := d.client.CreateAgent(ctx, endpoint, req)
+	resp, err := d.client.CreateAgent(ctx, agent.RuntimeHostID, endpoint, req)
 	if err != nil {
 		return err
 	}
@@ -358,7 +371,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	}
 
 	// Use agent name as identifier (runtime host uses name or ID)
-	return d.client.StartAgent(ctx, endpoint, agent.Name)
+	return d.client.StartAgent(ctx, agent.RuntimeHostID, endpoint, agent.Name)
 }
 
 // DispatchAgentStop stops an agent on the runtime host.
@@ -372,7 +385,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 		return err
 	}
 
-	return d.client.StopAgent(ctx, endpoint, agent.Name)
+	return d.client.StopAgent(ctx, agent.RuntimeHostID, endpoint, agent.Name)
 }
 
 // DispatchAgentRestart restarts an agent on the runtime host.
@@ -386,7 +399,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		return err
 	}
 
-	return d.client.RestartAgent(ctx, endpoint, agent.Name)
+	return d.client.RestartAgent(ctx, agent.RuntimeHostID, endpoint, agent.Name)
 }
 
 // DispatchAgentDelete deletes an agent from the runtime host.
@@ -400,7 +413,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 		return err
 	}
 
-	return d.client.DeleteAgent(ctx, endpoint, agent.Name, deleteFiles, removeBranch)
+	return d.client.DeleteAgent(ctx, agent.RuntimeHostID, endpoint, agent.Name, deleteFiles, removeBranch)
 }
 
 // DispatchAgentMessage sends a message to an agent on the runtime host.
@@ -414,5 +427,5 @@ func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *s
 		return err
 	}
 
-	return d.client.MessageAgent(ctx, endpoint, agent.Name, message, interrupt)
+	return d.client.MessageAgent(ctx, agent.RuntimeHostID, endpoint, agent.Name, message, interrupt)
 }

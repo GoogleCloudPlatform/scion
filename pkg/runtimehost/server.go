@@ -78,6 +78,9 @@ type ServerConfig struct {
 
 	// HostAuthEnabled enables HMAC verification for incoming requests from the Hub.
 	HostAuthEnabled bool
+	// HostAuthStrictMode, when true, requires all requests to be authenticated.
+	// When false (default), unauthenticated requests are allowed for transition periods.
+	HostAuthStrictMode bool
 
 	// Heartbeat settings
 	// HeartbeatEnabled enables periodic heartbeats to the Hub.
@@ -220,9 +223,13 @@ func (s *Server) initHubIntegration() error {
 			Enabled:              true,
 			MaxClockSkew:         5 * time.Minute,
 			SecretKey:            secretKey,
-			AllowUnauthenticated: true, // Allow mixed auth during transition
+			AllowUnauthenticated: !s.config.HostAuthStrictMode, // Configurable strict mode
 		})
-		log.Printf("Host auth middleware enabled")
+		if s.config.HostAuthStrictMode {
+			log.Printf("Host auth middleware enabled (strict mode - all requests must be authenticated)")
+		} else {
+			log.Printf("Host auth middleware enabled (permissive mode - unauthenticated requests allowed)")
+		}
 	}
 
 	log.Printf("Hub integration initialized (endpoint: %s, cache: %s, max: %d MB)",

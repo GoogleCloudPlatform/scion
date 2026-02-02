@@ -3,6 +3,8 @@ package hub
 
 import (
 	"net/http"
+	"strings"
+	"time"
 )
 
 // handleHostsEndpoint handles POST /api/v1/hosts.
@@ -58,6 +60,9 @@ func (s *Server) createHostRegistration(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Log audit event
+	LogRegistrationEvent(r.Context(), s.auditLogger, resp.HostID, req.Name, user.ID(), getClientIP(r))
+
 	writeJSON(w, http.StatusCreated, resp)
 }
 
@@ -112,6 +117,9 @@ func (s *Server) handleHostJoin(w http.ResponseWriter, r *http.Request) {
 	// Complete the join
 	resp, err := s.hostAuthService.CompleteHostJoin(r.Context(), req, hubEndpoint)
 	if err != nil {
+		// Log failed join attempt
+		LogJoinEvent(r.Context(), s.auditLogger, req.HostID, getClientIP(r), false, err.Error())
+
 		// Determine error type and return appropriate response
 		errMsg := err.Error()
 		switch {
@@ -125,6 +133,104 @@ func (s *Server) handleHostJoin(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+
+	// Log successful join
+	LogJoinEvent(r.Context(), s.auditLogger, req.HostID, getClientIP(r), true, "")
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleHostByIDRoutes handles routes under /api/v1/hosts/{id}/...
+func (s *Server) handleHostByIDRoutes(w http.ResponseWriter, r *http.Request) {
+	// Extract host ID and action from path: /api/v1/hosts/{id}/{action}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/hosts/")
+	parts := strings.SplitN(path, "/", 2)
+
+	if len(parts) == 0 || parts[0] == "" {
+		NotFound(w, "host")
+		return
+	}
+
+	hostID := parts[0]
+	action := ""
+	if len(parts) > 1 {
+		action = parts[1]
+	}
+
+	switch action {
+	case "rotate-secret":
+		s.handleHostRotateSecret(w, r, hostID)
+	default:
+		NotFound(w, "host action")
+	}
+}
+
+// handleHostRotateSecret handles POST /api/v1/hosts/{id}/rotate-secret.
+// Rotates the HMAC secret for a host.
+// Requires admin authentication or host self-rotation.
+func (s *Server) handleHostRotateSecret(w http.ResponseWriter, r *http.Request, hostID string) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	// Check if host auth service is available
+	if s.hostAuthService == nil {
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+			"host authentication service not configured", nil)
+		return
+	}
+
+	// Check authorization - either admin user or the host itself
+	user := GetUserIdentityFromContext(r.Context())
+	host := GetHostIdentityFromContext(r.Context())
+
+	authorized := false
+	if user != nil && user.Role() == "admin" {
+		authorized = true
+	} else if host != nil && host.HostID() == hostID {
+		authorized = true
+	}
+
+	if !authorized {
+		Forbidden(w)
+		return
+	}
+
+	// Parse request (optional)
+	var req RotateSecretRequest
+	if r.ContentLength > 0 {
+		if err := readJSON(r, &req); err != nil {
+			BadRequest(w, "invalid request body: "+err.Error())
+			return
+		}
+	}
+
+	// Default grace period
+	gracePeriod := req.GracePeriod
+	if gracePeriod <= 0 {
+		gracePeriod = 5 * time.Minute
+	}
+
+	// Rotate the secret
+	resp, err := s.hostAuthService.RotateHostSecret(r.Context(), hostID, gracePeriod)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"failed to rotate secret: "+err.Error(), nil)
+		return
+	}
+
+	// Log audit event
+	actorID := ""
+	actorType := "system"
+	if user != nil {
+		actorID = user.ID()
+		actorType = "user"
+	} else if host != nil {
+		actorID = host.HostID()
+		actorType = "host"
+	}
+	LogRotateEvent(r.Context(), s.auditLogger, hostID, actorID, actorType, getClientIP(r))
 
 	writeJSON(w, http.StatusOK, resp)
 }

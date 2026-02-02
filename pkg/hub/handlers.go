@@ -96,6 +96,26 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	// Return metrics snapshot if available
+	if s.metrics != nil {
+		snapshot := s.metrics.GetSnapshot()
+		writeJSON(w, http.StatusOK, snapshot)
+		return
+	}
+
+	// No metrics available
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status": "no_metrics",
+		"reason": "metrics not configured",
+	})
+}
+
 // ============================================================================
 // Agent Endpoints
 // ============================================================================
