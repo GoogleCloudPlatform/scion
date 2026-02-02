@@ -42,6 +42,9 @@ These scenarios should work with Hub server and Runtime Host running on differen
 | - `scion hub deregister` | ✅ | |
 | - `scion hub status` | ✅ | |
 | - HMAC-based host authentication | ✅ | `pkg/hub/hostauth.go`, `pkg/runtimehost/hostauth.go` |
+| - Bidirectional HMAC (Hub→Host signing) | ✅ | `pkg/hub/hostclient.go` |
+| - Secret rotation endpoint | ✅ | `POST /api/v1/hosts/{id}/rotate-secret` |
+| - Nonce cache (replay prevention) | ✅ | Enabled by default |
 | **Agent Lifecycle (Hub Mode)** | ✅ Complete | `cmd/create.go`, `cmd/start.go`, `cmd/stop.go`, `cmd/delete.go` |
 | - Create via Hub | ✅ | |
 | - Start via Hub | ✅ | |
@@ -49,10 +52,15 @@ These scenarios should work with Hub server and Runtime Host running on differen
 | - Delete via Hub | ✅ | |
 | **HTTP Dispatcher** | ✅ Complete | `pkg/hub/httpdispatcher.go` |
 | - Dispatch to remote Runtime Hosts via HTTP | ✅ | |
+| - Authenticated dispatch (HMAC-signed) | ✅ | `pkg/hub/hostclient.go` |
 | **Runtime Host API** | ✅ Complete | `pkg/runtimehost/` |
 | - Agent lifecycle endpoints | ✅ | |
 | - Template cache/hydration | ✅ | `pkg/templatecache/` |
 | - Heartbeat to Hub | ✅ | `pkg/runtimehost/heartbeat.go` |
+| - Strict auth mode (configurable) | ✅ | `HostAuthStrictMode` config |
+| **Observability** | ✅ Complete | |
+| - Audit logging | ✅ | `pkg/hub/audit.go` |
+| - Host auth metrics | ✅ | `pkg/hub/metrics.go`, `/metrics` endpoint |
 
 ### 2.2 What's NOT Implemented (Blocking Scenarios)
 
