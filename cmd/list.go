@@ -110,7 +110,56 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		agents[i] = hubAgentToAgentInfo(a)
 	}
 
+	// Client-side enrichment: fetch broker/grove names if not provided by Hub
+	enrichAgentsClientSide(ctx, hubCtx.Client, agents)
+
 	return displayAgents(agents, listAll)
+}
+
+// enrichAgentsClientSide populates Grove and RuntimeBrokerName fields client-side
+// when the Hub doesn't provide them (for backwards compatibility with older Hubs).
+func enrichAgentsClientSide(ctx context.Context, client hubclient.Client, agents []api.AgentInfo) {
+	// Collect unique IDs that need enrichment
+	brokerIDs := make(map[string]struct{})
+	groveIDs := make(map[string]struct{})
+	for _, a := range agents {
+		if a.RuntimeBrokerName == "" && a.RuntimeBrokerID != "" {
+			brokerIDs[a.RuntimeBrokerID] = struct{}{}
+		}
+		if a.Grove == "" && a.GroveID != "" {
+			groveIDs[a.GroveID] = struct{}{}
+		}
+	}
+
+	// Fetch broker names
+	brokerNames := make(map[string]string)
+	for id := range brokerIDs {
+		if broker, err := client.RuntimeBrokers().Get(ctx, id); err == nil {
+			brokerNames[id] = broker.Name
+		}
+	}
+
+	// Fetch grove names
+	groveNames := make(map[string]string)
+	for id := range groveIDs {
+		if grove, err := client.Groves().Get(ctx, id); err == nil {
+			groveNames[id] = grove.Name
+		}
+	}
+
+	// Apply enrichment
+	for i := range agents {
+		if agents[i].RuntimeBrokerName == "" {
+			if name, ok := brokerNames[agents[i].RuntimeBrokerID]; ok {
+				agents[i].RuntimeBrokerName = name
+			}
+		}
+		if agents[i].Grove == "" {
+			if name, ok := groveNames[agents[i].GroveID]; ok {
+				agents[i].Grove = name
+			}
+		}
+	}
 }
 
 // hubAgentToAgentInfo converts a Hub API Agent to a local AgentInfo

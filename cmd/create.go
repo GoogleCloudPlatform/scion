@@ -129,9 +129,17 @@ func createAgentViaHub(hubCtx *HubContext, agentName string) error {
 	if resp.Agent != nil {
 		// Show broker info if available
 		brokerInfo := ""
-		if resp.Agent.RuntimeBrokerName != "" {
-			brokerInfo = fmt.Sprintf(" on broker %s", resp.Agent.RuntimeBrokerName)
+		brokerName := resp.Agent.RuntimeBrokerName
+		// Client-side fallback: fetch broker name if not provided by Hub
+		if brokerName == "" && resp.Agent.RuntimeBrokerID != "" {
+			if broker, err := hubCtx.Client.RuntimeBrokers().Get(ctx, resp.Agent.RuntimeBrokerID); err == nil {
+				brokerName = broker.Name
+			}
+		}
+		if brokerName != "" {
+			brokerInfo = fmt.Sprintf(" on broker %s", brokerName)
 		} else if resp.Agent.RuntimeBrokerID != "" {
+			// Last resort: show broker ID if name lookup failed
 			brokerInfo = fmt.Sprintf(" on broker %s", resp.Agent.RuntimeBrokerID)
 		}
 		fmt.Printf("Agent '%s' created via Hub%s.\n", agentName, brokerInfo)

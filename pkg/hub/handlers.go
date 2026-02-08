@@ -409,8 +409,12 @@ func (s *Server) enrichAgent(ctx context.Context, agent *store.Agent, grove *sto
 			}
 		}
 	} else if agent.RuntimeBrokerID != "" {
-		if b, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID); err == nil {
+		b, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+		if err != nil {
+			slog.Debug("failed to get runtime broker for enrichment", "brokerID", agent.RuntimeBrokerID, "error", err)
+		} else {
 			agent.RuntimeBrokerName = b.Name
+			slog.Debug("enriched agent with broker name", "agentID", agent.AgentID, "brokerName", b.Name)
 			if agent.Runtime == "" && len(b.Profiles) > 0 {
 				for _, p := range b.Profiles {
 					if p.Available {
