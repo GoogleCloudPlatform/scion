@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ptone/scion-agent/pkg/agent"
+	"github.com/ptone/scion-agent/pkg/agentcache"
 	"github.com/ptone/scion-agent/pkg/api"
 	"github.com/ptone/scion-agent/pkg/config"
 	"github.com/ptone/scion-agent/pkg/hubclient"
@@ -109,6 +110,9 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 	for i, a := range resp.Agents {
 		agents[i] = hubAgentToAgentInfo(a)
 	}
+
+	// Update agent name cache for completion
+	updateAgentNameCache(resp.Agents)
 
 	// Client-side enrichment: fetch broker/grove names if not provided by Hub
 	enrichAgentsClientSide(ctx, hubCtx.Client, agents)
@@ -409,6 +413,33 @@ func containsStr(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// updateAgentNameCache updates the agent name cache with the given Hub agents.
+// This is called after successful Hub API calls to keep the completion cache fresh.
+func updateAgentNameCache(agents []hubclient.Agent) {
+	if len(agents) == 0 {
+		return
+	}
+
+	// Extract agent names
+	names := make([]string, 0, len(agents))
+	for _, a := range agents {
+		if a.Name != "" {
+			names = append(names, a.Name)
+		}
+	}
+
+	// Generate cache key for the current grove path
+	resolvedPath, _ := config.GetResolvedProjectDir(grovePath)
+	if resolvedPath == "" {
+		return
+	}
+
+	cacheKey := agentcache.GenerateCacheKey(resolvedPath)
+
+	// Write to cache (silently ignore errors)
+	_ = agentcache.WriteCache(cacheKey, names)
 }
 
 func init() {
