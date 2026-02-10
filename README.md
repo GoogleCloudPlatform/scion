@@ -104,6 +104,9 @@ The project uses SQLite for storage. Due to the high memory requirements of the 
   ```bash
   go build ./cmd/scion
   ```
+## Disclaimers
+
+This is not an officially supported Google product. This project is not eligible for the [Google Open Source Software Vulnerability Rewards Program](https://bughunters.google.com/open-source-security)
 
 ## License
 
