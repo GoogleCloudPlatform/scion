@@ -32,18 +32,22 @@ case "${TARGET}" in
   all)
     echo "Submitting full build (core-base -> scion-base -> harnesses) to Cloud Build..."
     CONFIG="image-build/cloudbuild.yaml"
+    SUBSTITUTIONS="_SHORT_SHA=${SHORT_SHA},_COMMIT_SHA=${COMMIT_SHA}"
     ;;
   core-base)
     echo "Submitting core-base build to Cloud Build..."
     CONFIG="image-build/cloudbuild-core-base.yaml"
+    SUBSTITUTIONS="_SHORT_SHA=${SHORT_SHA}"
     ;;
   scion-base)
     echo "Submitting scion-base build to Cloud Build..."
     CONFIG="image-build/cloudbuild-scion-base.yaml"
+    SUBSTITUTIONS="_SHORT_SHA=${SHORT_SHA},_COMMIT_SHA=${COMMIT_SHA}"
     ;;
   harnesses)
     echo "Submitting harnesses build to Cloud Build..."
     CONFIG="image-build/cloudbuild-harnesses.yaml"
+    SUBSTITUTIONS="_SHORT_SHA=${SHORT_SHA}"
     ;;
   *)
     echo "Unknown target: ${TARGET}"
@@ -60,7 +64,7 @@ esac
 
 gcloud builds submit --async \
   --project="${PROJECT}" \
-  --substitutions="SHORT_SHA=${SHORT_SHA},COMMIT_SHA=${COMMIT_SHA}" \
+  --substitutions="${SUBSTITUTIONS}" \
   --config="${CONFIG}" .
 
 echo ""
