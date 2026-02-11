@@ -20,7 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     make \
-    && curl -fsSL https://d2lang.com/install.sh | sh -s -- \
+    && curl -fsSL https://d2lang.com/install.sh | sh -s -- --version v0.7.1 \
+    && d2 --version \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

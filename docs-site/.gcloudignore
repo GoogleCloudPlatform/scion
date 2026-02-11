@@ -20,7 +20,6 @@ dist/
 .DS_Store
 
 # Infrastructure files (usually not needed in the build context unless specific)
-.dockerignore
 cloudbuild.yaml
 .gcloudignore
 
