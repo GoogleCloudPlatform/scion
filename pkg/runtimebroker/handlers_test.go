@@ -633,6 +633,61 @@ func TestCreateAgentProvisionOnlyWithTask(t *testing.T) {
 	}
 }
 
+func TestCreateAgentWithWorkspace(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{
+		"name": "workspace-agent",
+		"config": {"template": "claude", "workspace": "./zz-ecommerce-site"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+
+	// Verify Start was called and workspace was passed through
+	if !mgr.startCalled {
+		t.Error("expected Start to be called")
+	}
+	if mgr.lastOpts.Workspace != "./zz-ecommerce-site" {
+		t.Errorf("expected workspace './zz-ecommerce-site', got '%s'", mgr.lastOpts.Workspace)
+	}
+}
+
+func TestCreateAgentProvisionOnlyWithWorkspace(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{
+		"name": "ws-provision-agent",
+		"id": "agent-uuid-ws",
+		"slug": "ws-provision-agent",
+		"provisionOnly": true,
+		"config": {"template": "claude", "workspace": "./my-subfolder", "task": "do work"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+
+	// Verify Provision was called with the workspace
+	if !mgr.provisionCalled {
+		t.Error("expected Provision to be called")
+	}
+	if mgr.lastOpts.Workspace != "./my-subfolder" {
+		t.Errorf("expected workspace './my-subfolder', got '%s'", mgr.lastOpts.Workspace)
+	}
+}
+
 func TestStartAgentEndpoint(t *testing.T) {
 	srv := newTestServer()
 

@@ -387,6 +387,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool) e
 		RuntimeBrokerID: runtimeBrokerID,
 		Task:          task,
 		Branch:        branch,
+		Workspace:     workspace,
 		Resume:        resume,
 		Attach:        attach,
 	}

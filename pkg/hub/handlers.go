@@ -392,20 +392,22 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			agent.Detached = true
 		}
 		agent.AppliedConfig = &store.AgentAppliedConfig{
-			Image:   req.Config.Image,
-			Env:     req.Config.Env,
-			Model:   req.Config.Model,
-			Harness: s.getHarnessFromTemplate(resolvedTemplate, req.Template),
-			Task:    req.Task,
-			Attach:  req.Attach,
+			Image:     req.Config.Image,
+			Env:       req.Config.Env,
+			Model:     req.Config.Model,
+			Harness:   s.getHarnessFromTemplate(resolvedTemplate, req.Template),
+			Task:      req.Task,
+			Attach:    req.Attach,
+			Workspace: req.Workspace,
 		}
 	} else {
 		agent.Detached = true
 		// Store task even when no config override is provided
 		agent.AppliedConfig = &store.AgentAppliedConfig{
-			Harness: s.getHarnessFromTemplate(resolvedTemplate, req.Template),
-			Task:    req.Task,
-			Attach:  req.Attach,
+			Harness:   s.getHarnessFromTemplate(resolvedTemplate, req.Template),
+			Task:      req.Task,
+			Attach:    req.Attach,
+			Workspace: req.Workspace,
 		}
 	}
 
@@ -1738,20 +1740,22 @@ func (s *Server) createGroveAgent(w http.ResponseWriter, r *http.Request, groveI
 			agent.Detached = true
 		}
 		agent.AppliedConfig = &store.AgentAppliedConfig{
-			Image:   req.Config.Image,
-			Env:     req.Config.Env,
-			Model:   req.Config.Model,
-			Harness: s.getHarnessFromTemplate(resolvedTemplate, req.Template),
-			Task:    req.Task,
-			Attach:  req.Attach,
+			Image:     req.Config.Image,
+			Env:       req.Config.Env,
+			Model:     req.Config.Model,
+			Harness:   s.getHarnessFromTemplate(resolvedTemplate, req.Template),
+			Task:      req.Task,
+			Attach:    req.Attach,
+			Workspace: req.Workspace,
 		}
 	} else {
 		agent.Detached = true
 		// Store task even when no config override is provided
 		agent.AppliedConfig = &store.AgentAppliedConfig{
-			Harness: s.getHarnessFromTemplate(resolvedTemplate, req.Template),
-			Task:    req.Task,
-			Attach:  req.Attach,
+			Harness:   s.getHarnessFromTemplate(resolvedTemplate, req.Template),
+			Task:      req.Task,
+			Attach:    req.Attach,
+			Workspace: req.Workspace,
 		}
 	}
 

@@ -675,6 +675,54 @@ func TestHTTPAgentDispatcher_DispatchAgentProvision_PassesTaskThrough(t *testing
 	}
 }
 
+func TestHTTPAgentDispatcher_DispatchAgentCreate_WithWorkspace(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	// Create a runtime broker
+	broker := &store.RuntimeBroker{
+		ID:       "host-1",
+		Name:     "test-host",
+		Slug:     "test-host",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false)
+
+	agent := &store.Agent{
+		ID:              "agent-1",
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		GroveID:         "grove-1",
+		RuntimeBrokerID: "host-1",
+		AppliedConfig: &store.AgentAppliedConfig{
+			Harness:   "claude",
+			Task:      "do something",
+			Workspace: "./subfolder",
+		},
+	}
+
+	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	if err != nil {
+		t.Fatalf("DispatchAgentCreate failed: %v", err)
+	}
+
+	if !mockClient.createCalled {
+		t.Fatal("expected CreateAgent to be called")
+	}
+	if mockClient.lastCreateReq.Config == nil {
+		t.Fatal("expected config to be present")
+	}
+	if mockClient.lastCreateReq.Config.Workspace != "./subfolder" {
+		t.Errorf("expected Workspace './subfolder', got '%s'", mockClient.lastCreateReq.Config.Workspace)
+	}
+}
+
 func TestHTTPAgentDispatcher_DispatchAgentCreate_DoesNotSetProvisionOnly(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)

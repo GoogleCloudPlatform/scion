@@ -299,6 +299,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		opts.Template = req.Config.Template
 		opts.Image = req.Config.Image
 		opts.Task = req.Config.Task
+		opts.Workspace = req.Config.Workspace
 	}
 
 	// Debug log grove path
