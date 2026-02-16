@@ -111,7 +111,7 @@ func TestLoadVersionedSettings_DefaultsOnly(t *testing.T) {
 
 	assert.Equal(t, "1", vs.SchemaVersion)
 	assert.Equal(t, "local", vs.ActiveProfile)
-	assert.Equal(t, "gemini", vs.DefaultTemplate)
+	assert.Equal(t, "default", vs.DefaultTemplate)
 	assert.Equal(t, "gemini", vs.DefaultHarnessConfig)
 	// harness_configs block is no longer in default settings (lives on disk as harness-config dirs)
 	assert.Contains(t, vs.Runtimes, "docker")
@@ -634,7 +634,7 @@ func TestLoadEffectiveSettings_NoUserFiles(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "local", vs.ActiveProfile)
-	assert.Equal(t, "gemini", vs.DefaultTemplate)
+	assert.Equal(t, "default", vs.DefaultTemplate)
 	// Defaults flow through legacy path since no user files, so we get harness warnings
 	// from the adaptation of embedded defaults
 	_ = warnings

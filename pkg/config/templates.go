@@ -401,7 +401,7 @@ func UpdateDefaultTemplates(global bool, harnesses []api.Harness) error {
 }
 
 func DeleteTemplate(name string, global bool) error {
-	if name == "default" || name == "gemini" || name == "claude" || name == "opencode" || name == "codex" {
+	if name == "default" {
 		return fmt.Errorf("cannot delete protected template: %s", name)
 	}
 

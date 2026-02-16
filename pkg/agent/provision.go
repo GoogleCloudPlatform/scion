@@ -619,7 +619,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		// Just log or ignore
 	}
 	config.PrintDeprecationWarnings(vsWarnings)
-	defaultTemplate := "gemini"
+	defaultTemplate := "default"
 	if vs != nil && vs.DefaultTemplate != "" {
 		defaultTemplate = vs.DefaultTemplate
 	}

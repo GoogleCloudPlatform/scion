@@ -187,9 +187,8 @@ func SeedHarnessConfig(targetDir string, h api.Harness, force bool) error {
 			return err
 		}
 
-		// Skip config.yaml (already handled) and scion-agent.yaml (template-only)
-		switch relPath {
-		case "config.yaml", "scion-agent.yaml":
+		// Skip config.yaml (already handled separately)
+		if relPath == "config.yaml" {
 			return nil
 		}
 
@@ -219,7 +218,7 @@ func mapEmbedFileToHomePath(homeDir, configDir, fileName string) string {
 	switch fileName {
 	case "bashrc":
 		return filepath.Join(homeDir, ".bashrc")
-	case "settings.json", "system_prompt.md", "claude.md", "gemini.md":
+	case "settings.json", "system_prompt.md":
 		if configDir != "" {
 			return filepath.Join(homeDir, configDir, fileName)
 		}

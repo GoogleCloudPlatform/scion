@@ -25,7 +25,7 @@ active_profile: local
 
 # Default harness template for new agents
 # Env: SCION_DEFAULT_TEMPLATE
-default_template: gemini
+default_template: default
 
 # Default harness-config for new agents
 # Env: SCION_DEFAULT_HARNESS_CONFIG

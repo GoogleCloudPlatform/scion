@@ -119,9 +119,9 @@ func TestRunTemplateDelete_ProtectedTemplate(t *testing.T) {
 	noHub = true
 	autoConfirm = true
 
-	createTestTemplate(t, tmpHome, "claude")
+	createTestTemplate(t, tmpHome, "default")
 
-	err := runTemplateDelete(nil, []string{"claude"})
+	err := runTemplateDelete(nil, []string{"default"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot delete protected template")
 }

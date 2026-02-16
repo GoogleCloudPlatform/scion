@@ -45,8 +45,8 @@ func TestLoadSettings(t *testing.T) {
 	if s.ActiveProfile != "local" {
 		t.Errorf("expected active profile 'local', got '%s'", s.ActiveProfile)
 	}
-	if s.DefaultTemplate != "gemini" {
-		t.Errorf("expected default template 'gemini', got '%s'", s.DefaultTemplate)
+	if s.DefaultTemplate != "default" {
+		t.Errorf("expected default template 'default', got '%s'", s.DefaultTemplate)
 	}
 
 	// 2. Test Global overrides
