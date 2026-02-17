@@ -194,6 +194,68 @@ func TestBuildAgentEnv(t *testing.T) {
 	}
 }
 
+func TestBuildAgentEnv_HubEndpointOverride(t *testing.T) {
+	t.Run("scion config hub endpoint overrides extraEnv", func(t *testing.T) {
+		scionCfg := &api.ScionConfig{
+			Hub: &api.AgentHubConfig{
+				Endpoint: "https://tunnel.example.com",
+			},
+		}
+
+		// Simulate what Start() does: set hub endpoint in opts.Env from broker,
+		// then override with scion config hub endpoint.
+		extraEnv := map[string]string{
+			"SCION_HUB_ENDPOINT": "http://localhost:9810",
+			"SCION_HUB_URL":     "http://localhost:9810",
+		}
+
+		// Apply the override logic from Start()
+		if scionCfg.Hub != nil && scionCfg.Hub.Endpoint != "" {
+			extraEnv["SCION_HUB_ENDPOINT"] = scionCfg.Hub.Endpoint
+			extraEnv["SCION_HUB_URL"] = scionCfg.Hub.Endpoint
+		}
+
+		env, _ := buildAgentEnv(scionCfg, extraEnv)
+
+		envMap := make(map[string]string)
+		for _, e := range env {
+			parts := strings.SplitN(e, "=", 2)
+			if len(parts) == 2 {
+				envMap[parts[0]] = parts[1]
+			}
+		}
+
+		if got := envMap["SCION_HUB_ENDPOINT"]; got != "https://tunnel.example.com" {
+			t.Errorf("expected SCION_HUB_ENDPOINT='https://tunnel.example.com', got %q", got)
+		}
+		if got := envMap["SCION_HUB_URL"]; got != "https://tunnel.example.com" {
+			t.Errorf("expected SCION_HUB_URL='https://tunnel.example.com', got %q", got)
+		}
+	})
+
+	t.Run("no hub config preserves extraEnv", func(t *testing.T) {
+		scionCfg := &api.ScionConfig{}
+		extraEnv := map[string]string{
+			"SCION_HUB_ENDPOINT": "https://hub.example.com",
+			"SCION_HUB_URL":     "https://hub.example.com",
+		}
+
+		env, _ := buildAgentEnv(scionCfg, extraEnv)
+
+		envMap := make(map[string]string)
+		for _, e := range env {
+			parts := strings.SplitN(e, "=", 2)
+			if len(parts) == 2 {
+				envMap[parts[0]] = parts[1]
+			}
+		}
+
+		if got := envMap["SCION_HUB_ENDPOINT"]; got != "https://hub.example.com" {
+			t.Errorf("expected SCION_HUB_ENDPOINT='https://hub.example.com', got %q", got)
+		}
+	})
+}
+
 func TestScionCreatorEnvVar(t *testing.T) {
 	t.Run("SCION_CREATOR is set from OS user when not present", func(t *testing.T) {
 		env := make(map[string]string)

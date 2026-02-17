@@ -763,4 +763,31 @@ func TestMergeScionConfig_NewFields(t *testing.T) {
 			t.Errorf("expected DefaultHarnessConfig='gemini', got %q", got.DefaultHarnessConfig)
 		}
 	})
+
+	t.Run("hub endpoint override replaces base", func(t *testing.T) {
+		base := &api.ScionConfig{Hub: &api.AgentHubConfig{Endpoint: "https://base-hub.example.com"}}
+		override := &api.ScionConfig{Hub: &api.AgentHubConfig{Endpoint: "https://override-hub.example.com"}}
+		got := MergeScionConfig(base, override)
+		if got.Hub == nil || got.Hub.Endpoint != "https://override-hub.example.com" {
+			t.Errorf("expected Hub.Endpoint='https://override-hub.example.com', got %v", got.Hub)
+		}
+	})
+
+	t.Run("hub nil override keeps base", func(t *testing.T) {
+		base := &api.ScionConfig{Hub: &api.AgentHubConfig{Endpoint: "https://base-hub.example.com"}}
+		override := &api.ScionConfig{}
+		got := MergeScionConfig(base, override)
+		if got.Hub == nil || got.Hub.Endpoint != "https://base-hub.example.com" {
+			t.Errorf("expected Hub.Endpoint='https://base-hub.example.com', got %v", got.Hub)
+		}
+	})
+
+	t.Run("hub override on nil base", func(t *testing.T) {
+		base := &api.ScionConfig{}
+		override := &api.ScionConfig{Hub: &api.AgentHubConfig{Endpoint: "https://new-hub.example.com"}}
+		got := MergeScionConfig(base, override)
+		if got.Hub == nil || got.Hub.Endpoint != "https://new-hub.example.com" {
+			t.Errorf("expected Hub.Endpoint='https://new-hub.example.com', got %v", got.Hub)
+		}
+	})
 }

@@ -171,6 +171,13 @@ type GeminiConfig struct {
 	AuthSelectedType string `json:"auth_selectedType,omitempty" yaml:"auth_selectedType,omitempty"`
 }
 
+// AgentHubConfig holds hub connection settings that can be specified per-agent
+// or per-template in scion-agent.yaml. When set, these take highest priority
+// for the agent's hub endpoint, overriding grove settings and server config.
+type AgentHubConfig struct {
+	Endpoint string `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
+}
+
 type ScionConfig struct {
 	Harness       string            `json:"harness,omitempty" yaml:"harness,omitempty"`
 	HarnessConfig string            `json:"harness_config,omitempty" yaml:"harness_config,omitempty"`
@@ -187,6 +194,7 @@ type ScionConfig struct {
 	Services    []ServiceSpec     `json:"services,omitempty" yaml:"services,omitempty"`
 	MaxTurns    int               `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
 	MaxDuration string            `json:"max_duration,omitempty" yaml:"max_duration,omitempty"`
+	Hub         *AgentHubConfig   `json:"hub,omitempty" yaml:"hub,omitempty"`
 
 	// Agnostic template fields (Phase 2)
 	AgentInstructions  string `json:"agent_instructions,omitempty" yaml:"agent_instructions,omitempty"`

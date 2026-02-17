@@ -608,6 +608,14 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 	if override.MaxDuration != "" {
 		result.MaxDuration = override.MaxDuration
 	}
+	if override.Hub != nil {
+		if result.Hub == nil {
+			result.Hub = &api.AgentHubConfig{}
+		}
+		if override.Hub.Endpoint != "" {
+			result.Hub.Endpoint = override.Hub.Endpoint
+		}
+	}
 	if override.AgentInstructions != "" {
 		result.AgentInstructions = override.AgentInstructions
 	}

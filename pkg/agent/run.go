@@ -264,6 +264,12 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		if finalScionCfg.MaxDuration != "" {
 			opts.Env["SCION_MAX_DURATION"] = finalScionCfg.MaxDuration
 		}
+		// Agent-level hub endpoint takes highest priority, overriding
+		// grove settings and server config values passed via opts.Env.
+		if finalScionCfg.Hub != nil && finalScionCfg.Hub.Endpoint != "" {
+			opts.Env["SCION_HUB_ENDPOINT"] = finalScionCfg.Hub.Endpoint
+			opts.Env["SCION_HUB_URL"] = finalScionCfg.Hub.Endpoint
+		}
 	}
 
 	agentEnv, envWarnings := buildAgentEnv(finalScionCfg, opts.Env)
