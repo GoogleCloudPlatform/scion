@@ -69,6 +69,7 @@ const (
 	StatusStopped      AgentStatus = "stopped"
 	StatusError        AgentStatus = "error"
 	StatusShuttingDown AgentStatus = "shutting_down"
+	StatusCloning      AgentStatus = "cloning"
 )
 
 // StatusUpdate represents a status update request.
@@ -79,11 +80,12 @@ const (
 // - TaskSummary: Current task description.
 // - Heartbeat: If true, only updates last_seen without changing status.
 type StatusUpdate struct {
-	Status        AgentStatus `json:"status,omitempty"`
-	SessionStatus AgentStatus `json:"sessionStatus,omitempty"`
-	Message       string      `json:"message,omitempty"`
-	TaskSummary   string      `json:"taskSummary,omitempty"`
-	Heartbeat     bool        `json:"heartbeat,omitempty"`
+	Status        AgentStatus       `json:"status,omitempty"`
+	SessionStatus AgentStatus       `json:"sessionStatus,omitempty"`
+	Message       string            `json:"message,omitempty"`
+	TaskSummary   string            `json:"taskSummary,omitempty"`
+	Heartbeat     bool              `json:"heartbeat,omitempty"`
+	Metadata      map[string]string `json:"metadata,omitempty"`
 }
 
 // Client is a Hub API client for sciontool.
@@ -255,6 +257,15 @@ func (c *Client) ReportRunning(ctx context.Context, message string) error {
 	return c.UpdateStatus(ctx, StatusUpdate{
 		Status:  StatusRunning,
 		Message: message,
+	})
+}
+
+// ReportCloning reports that the agent is cloning a git repository.
+func (c *Client) ReportCloning(ctx context.Context, message string, metadata map[string]string) error {
+	return c.UpdateStatus(ctx, StatusUpdate{
+		Status:   StatusCloning,
+		Message:  message,
+		Metadata: metadata,
 	})
 }
 

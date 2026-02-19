@@ -118,14 +118,15 @@ type AgentFilter struct {
 
 // AgentStatusUpdate contains fields for status-only updates.
 type AgentStatusUpdate struct {
-	Status          string `json:"status,omitempty"`
-	Message         string `json:"message,omitempty"`
-	ConnectionState string `json:"connectionState,omitempty"`
-	ContainerStatus string `json:"containerStatus,omitempty"`
-	SessionStatus   string `json:"sessionStatus,omitempty"`
-	RuntimeState    string `json:"runtimeState,omitempty"`
-	TaskSummary     string `json:"taskSummary,omitempty"`
-	Heartbeat       bool   `json:"heartbeat,omitempty"`
+	Status          string            `json:"status,omitempty"`
+	Message         string            `json:"message,omitempty"`
+	ConnectionState string            `json:"connectionState,omitempty"`
+	ContainerStatus string            `json:"containerStatus,omitempty"`
+	SessionStatus   string            `json:"sessionStatus,omitempty"`
+	RuntimeState    string            `json:"runtimeState,omitempty"`
+	TaskSummary     string            `json:"taskSummary,omitempty"`
+	Heartbeat       bool              `json:"heartbeat,omitempty"`
+	Metadata        map[string]string `json:"metadata,omitempty"`
 }
 
 // GroveStore defines grove-related persistence operations.

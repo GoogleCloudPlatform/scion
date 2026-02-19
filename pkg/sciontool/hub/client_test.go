@@ -193,6 +193,19 @@ func TestClient_ConvenienceMethods(t *testing.T) {
 		assert.Equal(t, "running now", lastStatus.Message)
 	})
 
+	t.Run("ReportCloning", func(t *testing.T) {
+		metadata := map[string]string{
+			"repository": "github.com/org/repo",
+			"branch":     "main",
+		}
+		err := client.ReportCloning(ctx, "Cloning repository", metadata)
+		require.NoError(t, err)
+		assert.Equal(t, StatusCloning, lastStatus.Status)
+		assert.Equal(t, "Cloning repository", lastStatus.Message)
+		assert.Equal(t, "github.com/org/repo", lastStatus.Metadata["repository"])
+		assert.Equal(t, "main", lastStatus.Metadata["branch"])
+	})
+
 	t.Run("ReportBusy", func(t *testing.T) {
 		err := client.ReportBusy(ctx, "processing")
 		require.NoError(t, err)

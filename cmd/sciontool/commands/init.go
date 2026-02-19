@@ -5,13 +5,16 @@ Copyright 2025 The Scion Authors.
 package commands
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -25,6 +28,7 @@ import (
 	"github.com/ptone/scion-agent/pkg/sciontool/services"
 	"github.com/ptone/scion-agent/pkg/sciontool/supervisor"
 	"github.com/ptone/scion-agent/pkg/sciontool/telemetry"
+	"github.com/ptone/scion-agent/pkg/util"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -188,6 +192,17 @@ func runInit(args []string) int {
 	if err := lifecycleManager.RunPreStart(); err != nil {
 		log.Error("Pre-start hooks failed: %v", err)
 		// Continue anyway - hooks failing shouldn't prevent startup
+	}
+
+	// Clone git workspace if configured (hub-first git groves)
+	if err := gitCloneWorkspace(); err != nil {
+		log.Error("Git clone failed: %v", err)
+		if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
+			hubCtx, hubCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			hubClient.ReportError(hubCtx, fmt.Sprintf("git clone failed: %v", err))
+			hubCancel()
+		}
+		return 1
 	}
 
 	// Read and start sidecar services
@@ -438,4 +453,122 @@ func setupHostUser() (int, int) {
 	}
 
 	return uid, gid
+}
+
+// gitCloneWorkspace clones a git repository into /workspace when SCION_GIT_CLONE_URL
+// is set. This supports hub-first git groves where the repository must be cloned
+// before the harness starts. Returns nil if no clone URL is configured (non-git workspace).
+func gitCloneWorkspace() error {
+	cloneURL := os.Getenv("SCION_GIT_CLONE_URL")
+	if cloneURL == "" {
+		return nil
+	}
+
+	workspacePath := "/workspace"
+
+	// Check if workspace already has content (stop/start scenario)
+	if !isWorkspaceEmpty(workspacePath) {
+		log.Info("Workspace already populated, skipping git clone")
+		return nil
+	}
+
+	token := os.Getenv("GITHUB_TOKEN")
+	branch := os.Getenv("SCION_GIT_BRANCH")
+	if branch == "" {
+		branch = "main"
+	}
+	depthStr := os.Getenv("SCION_GIT_DEPTH")
+	if depthStr == "" {
+		depthStr = "1"
+	}
+	agentName := os.Getenv("SCION_AGENT_NAME")
+
+	// Report cloning status to Hub
+	normalizedURL := util.NormalizeGitRemote(cloneURL)
+	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
+		hubCtx, hubCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		hubClient.ReportCloning(hubCtx, "Cloning repository", map[string]string{
+			"repository": normalizedURL,
+			"branch":     branch,
+		})
+		hubCancel()
+	}
+
+	log.Info("Cloning repository %s (branch: %s, depth: %s)", normalizedURL, branch, depthStr)
+
+	// Build authenticated URL (never log this)
+	authURL := buildAuthenticatedURL(cloneURL, token)
+
+	// Run git clone
+	cloneArgs := []string{"clone", "--depth", depthStr, "--branch", branch, authURL, workspacePath}
+	cmd := exec.Command("git", cloneArgs...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		errOutput := sanitizeGitOutput(stderr.String(), token)
+		return fmt.Errorf("git clone failed: %s (check that GITHUB_TOKEN is set and has Contents read access)", errOutput)
+	}
+
+	// Configure git identity
+	gitConfigs := []struct {
+		key, value string
+	}{
+		{"user.name", fmt.Sprintf("Scion Agent (%s)", agentName)},
+		{"user.email", "agent@scion.dev"},
+	}
+	for _, cfg := range gitConfigs {
+		if err := exec.Command("git", "-C", workspacePath, "config", cfg.key, cfg.value).Run(); err != nil {
+			return fmt.Errorf("failed to set git config %s: %w", cfg.key, err)
+		}
+	}
+
+	// Configure credential helper for subsequent push operations
+	credentialHelper := `!f() { echo "password=${GITHUB_TOKEN}"; echo "username=oauth2"; }; f`
+	if err := exec.Command("git", "-C", workspacePath, "config", "credential.helper", credentialHelper).Run(); err != nil {
+		return fmt.Errorf("failed to configure git credential helper: %w", err)
+	}
+
+	// Create and checkout agent feature branch
+	branchName := "scion/" + agentName
+	if err := exec.Command("git", "-C", workspacePath, "checkout", "-b", branchName).Run(); err != nil {
+		return fmt.Errorf("failed to create branch %s: %w", branchName, err)
+	}
+
+	log.Info("Git clone complete: %s on branch %s", normalizedURL, branchName)
+	return nil
+}
+
+// sanitizeGitOutput replaces any occurrence of the token in git output with "***".
+func sanitizeGitOutput(output, token string) string {
+	if token == "" {
+		return output
+	}
+	return strings.ReplaceAll(output, token, "***")
+}
+
+// buildAuthenticatedURL constructs an HTTPS URL with embedded OAuth2 credentials.
+// If no token is provided, the original URL is returned unchanged.
+func buildAuthenticatedURL(cloneURL, token string) string {
+	if token == "" {
+		return cloneURL
+	}
+
+	parsed, err := url.Parse(cloneURL)
+	if err != nil || parsed.Scheme == "" {
+		// If URL can't be parsed, return as-is (git will handle the error)
+		return cloneURL
+	}
+
+	parsed.User = url.UserPassword("oauth2", token)
+	return parsed.String()
+}
+
+// isWorkspaceEmpty returns true if the directory doesn't exist or contains no entries.
+func isWorkspaceEmpty(path string) bool {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return true
+	}
+	return len(entries) == 0
 }
