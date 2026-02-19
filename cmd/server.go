@@ -82,9 +82,11 @@ var (
 	adminEmails string
 
 	// Web frontend flags
-	enableWeb    bool
-	webPort      int
-	webAssetsDir string
+	enableWeb       bool
+	webPort         int
+	webAssetsDir    string
+	webSessionSecret string
+	webBaseURL       string
 )
 
 // serverCmd represents the server command
@@ -619,13 +621,54 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		if webHost == "" {
 			webHost = "0.0.0.0"
 		}
+
+		// Allow env var overrides for session/OAuth config
+		if webSessionSecret == "" {
+			webSessionSecret = os.Getenv("SCION_SERVER_SESSION_SECRET")
+		}
+		if webBaseURL == "" {
+			webBaseURL = os.Getenv("SCION_SERVER_BASE_URL")
+		}
+		if webBaseURL == "" {
+			webBaseURL = fmt.Sprintf("http://localhost:%d", webPort)
+		}
+
+		// Resolve authorized domains and admin email list for the web server
+		var webAuthorizedDomains []string
+		var webAdminEmails []string
+		if len(cfg.Auth.AuthorizedDomains) > 0 {
+			webAuthorizedDomains = cfg.Auth.AuthorizedDomains
+		}
+		if adminEmails != "" {
+			for _, email := range strings.Split(adminEmails, ",") {
+				email = strings.TrimSpace(email)
+				if email != "" {
+					webAdminEmails = append(webAdminEmails, email)
+				}
+			}
+		} else if len(cfg.Hub.AdminEmails) > 0 {
+			webAdminEmails = cfg.Hub.AdminEmails
+		}
+
 		webCfg := hub.WebServerConfig{
-			Port:      webPort,
-			Host:      webHost,
-			AssetsDir: webAssetsDir,
-			Debug:     enableDebug,
+			Port:              webPort,
+			Host:              webHost,
+			AssetsDir:         webAssetsDir,
+			Debug:             enableDebug,
+			SessionSecret:     webSessionSecret,
+			BaseURL:           webBaseURL,
+			DevAuthToken:      devAuthToken,
+			AuthorizedDomains: webAuthorizedDomains,
+			AdminEmails:       webAdminEmails,
 		}
 		webSrv := hub.NewWebServer(webCfg)
+
+		// Wire Hub services into WebServer if Hub is enabled
+		if hubSrv != nil {
+			webSrv.SetOAuthService(hubSrv.GetOAuthService())
+			webSrv.SetStore(hubSrv.GetStore())
+			webSrv.SetUserTokenService(hubSrv.GetUserTokenService())
+		}
 
 		log.Printf("Starting Web Frontend on %s:%d", webCfg.Host, webCfg.Port)
 		wg.Add(1)
@@ -1257,6 +1300,8 @@ func init() {
 	serverStartCmd.Flags().BoolVar(&enableWeb, "enable-web", false, "Enable the web frontend")
 	serverStartCmd.Flags().IntVar(&webPort, "web-port", 8080, "Web frontend port")
 	serverStartCmd.Flags().StringVar(&webAssetsDir, "web-assets-dir", "", "Path to client assets directory (overrides embedded)")
+	serverStartCmd.Flags().StringVar(&webSessionSecret, "session-secret", "", "Session cookie signing secret (auto-generated if empty)")
+	serverStartCmd.Flags().StringVar(&webBaseURL, "base-url", "", "Public base URL for OAuth redirects (e.g., https://scion.example.com)")
 
 	// Admin bootstrap flags
 	serverStartCmd.Flags().StringVar(&adminEmails, "admin-emails", "", "Comma-separated list of email addresses to auto-promote to admin role")

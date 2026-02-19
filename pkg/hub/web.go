@@ -16,6 +16,9 @@ package hub
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -24,11 +27,49 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gorilla/sessions"
+	"github.com/ptone/scion-agent/pkg/apiclient"
+	"github.com/ptone/scion-agent/pkg/store"
 	"github.com/ptone/scion-agent/web"
 )
 
 // shoelaceVersion is the Shoelace CDN version used by the SPA shell.
 const shoelaceVersion = "2.19.0"
+
+// webSessionName is the cookie name for web sessions.
+const webSessionName = "scion_sess"
+
+// Session key constants for storing values in the gorilla session map.
+const (
+	sessKeyUserID          = "uid"
+	sessKeyUserEmail       = "email"
+	sessKeyUserName        = "name"
+	sessKeyUserAvatar      = "avatar"
+	sessKeyReturnTo        = "returnTo"
+	sessKeyOAuthState      = "oauthState"
+	sessKeyHubAccessToken  = "hubAccessToken"
+	sessKeyHubRefreshToken = "hubRefreshToken"
+	sessKeyHubTokenExpiry  = "hubTokenExpiry"
+)
+
+// webUserContextKey is the key for storing the web session user in the request context.
+type webUserContextKey struct{}
+
+// webSessionUser represents an authenticated user from the web session.
+type webSessionUser struct {
+	UserID    string `json:"id"`
+	Email     string `json:"email"`
+	Name      string `json:"displayName"`
+	AvatarURL string `json:"avatarUrl,omitempty"`
+}
+
+// getWebSessionUser retrieves the web session user from the request context.
+func getWebSessionUser(ctx context.Context) *webSessionUser {
+	if u, ok := ctx.Value(webUserContextKey{}).(*webSessionUser); ok {
+		return u
+	}
+	return nil
+}
 
 // WebServerConfig holds configuration for the web frontend server.
 type WebServerConfig struct {
@@ -41,16 +82,30 @@ type WebServerConfig struct {
 	AssetsDir string
 	// Debug enables verbose debug logging.
 	Debug bool
+	// SessionSecret is the HMAC key for signing session cookies.
+	SessionSecret string
+	// BaseURL is the public URL for OAuth redirects (e.g., "https://scion.example.com").
+	BaseURL string
+	// DevAuthToken is the dev token for auto-login (empty = disabled).
+	DevAuthToken string
+	// AuthorizedDomains is the list of allowed email domains (empty = all allowed).
+	AuthorizedDomains []string
+	// AdminEmails is the list of bootstrap admin emails (bypass domain check).
+	AdminEmails []string
 }
 
 // WebServer serves the web frontend SPA shell and static assets.
 type WebServer struct {
-	config      WebServerConfig
-	httpServer  *http.Server
-	mux         *http.ServeMux
-	assets      fs.FS     // embedded or nil
-	assetsDisk  string    // filesystem override path, or ""
-	shellTmpl   *template.Template
+	config       WebServerConfig
+	httpServer   *http.Server
+	mux          *http.ServeMux
+	assets       fs.FS              // embedded or nil
+	assetsDisk   string             // filesystem override path, or ""
+	shellTmpl    *template.Template
+	sessionStore *sessions.CookieStore
+	oauthService *OAuthService
+	store        store.Store
+	userTokenSvc *UserTokenService
 }
 
 // spaShellTemplate is the Go html/template for the SPA shell page.
@@ -232,6 +287,28 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 		mux:    http.NewServeMux(),
 	}
 
+	// Initialize session store
+	sessionKey := cfg.SessionSecret
+	if sessionKey == "" {
+		// Generate a random key for development/testing
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			slog.Error("Failed to generate session secret", "error", err)
+		}
+		sessionKey = hex.EncodeToString(b)
+		slog.Warn("No session secret configured, using random key (sessions will not persist across restarts)")
+	}
+
+	cookieStore := sessions.NewCookieStore([]byte(sessionKey))
+	cookieStore.Options = &sessions.Options{
+		Path:     "/",
+		MaxAge:   86400, // 24 hours
+		HttpOnly: true,
+		Secure:   strings.HasPrefix(cfg.BaseURL, "https://"),
+		SameSite: http.SameSiteLaxMode,
+	}
+	ws.sessionStore = cookieStore
+
 	// Resolve asset source
 	if cfg.AssetsDir != "" {
 		ws.assetsDisk = cfg.AssetsDir
@@ -260,10 +337,32 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	return ws
 }
 
+// SetOAuthService sets the OAuth service for web OAuth flows.
+func (ws *WebServer) SetOAuthService(svc *OAuthService) {
+	ws.oauthService = svc
+}
+
+// SetStore sets the data store for user lookup/creation.
+func (ws *WebServer) SetStore(s store.Store) {
+	ws.store = s
+}
+
+// SetUserTokenService sets the user token service for Hub JWT generation.
+func (ws *WebServer) SetUserTokenService(svc *UserTokenService) {
+	ws.userTokenSvc = svc
+}
+
 // registerRoutes sets up the web server routes.
 func (ws *WebServer) registerRoutes() {
 	ws.mux.HandleFunc("/healthz", ws.handleHealthz)
 	ws.mux.Handle("/assets/", ws.staticHandler())
+	// Auth routes (no session auth required)
+	ws.mux.HandleFunc("/auth/login/", ws.handleOAuthLogin)
+	ws.mux.HandleFunc("/auth/callback/", ws.handleOAuthCallback)
+	ws.mux.HandleFunc("/auth/logout", ws.handleLogout)
+	ws.mux.HandleFunc("/auth/me", ws.handleAuthMe)
+	ws.mux.HandleFunc("/auth/debug", ws.handleAuthDebug)
+	// SPA catch-all (protected by session auth middleware)
 	ws.mux.HandleFunc("/", ws.spaHandler())
 }
 
@@ -349,6 +448,451 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 	}
 }
 
+// isPublicRoute returns true for routes that do not require authentication.
+func isPublicRoute(path string) bool {
+	switch {
+	case path == "/healthz":
+		return true
+	case strings.HasPrefix(path, "/assets/"):
+		return true
+	case strings.HasPrefix(path, "/auth/"):
+		return true
+	case path == "/login":
+		return true
+	case path == "/favicon.ico":
+		return true
+	default:
+		return false
+	}
+}
+
+// isBrowserRequest returns true if the request appears to come from a browser.
+func isBrowserRequest(r *http.Request) bool {
+	accept := r.Header.Get("Accept")
+	return strings.Contains(accept, "text/html")
+}
+
+// devAuthMiddleware auto-populates the session with the dev user identity
+// when a dev token is configured and no user is already in the session.
+func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
+	if ws.config.DevAuthToken == "" {
+		return next
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		session, err := ws.sessionStore.Get(r, webSessionName)
+		if err != nil {
+			// Session decode error — create fresh session
+			session, _ = ws.sessionStore.New(r, webSessionName)
+		}
+
+		// If user already in session, load into context and continue
+		if uid, ok := session.Values[sessKeyUserID].(string); ok && uid != "" {
+			user := &webSessionUser{
+				UserID:    uid,
+				Email:     sessionString(session, sessKeyUserEmail),
+				Name:      sessionString(session, sessKeyUserName),
+				AvatarURL: sessionString(session, sessKeyUserAvatar),
+			}
+			ctx := context.WithValue(r.Context(), webUserContextKey{}, user)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		// No user — auto-login with dev identity
+		devUser := &webSessionUser{
+			UserID:    "dev-user",
+			Email:     "dev@localhost",
+			Name:      "Development User",
+			AvatarURL: "",
+		}
+
+		session.Values[sessKeyUserID] = devUser.UserID
+		session.Values[sessKeyUserEmail] = devUser.Email
+		session.Values[sessKeyUserName] = devUser.Name
+		session.Values[sessKeyUserAvatar] = devUser.AvatarURL
+		if err := session.Save(r, w); err != nil {
+			slog.Error("Failed to save dev-auth session", "error", err)
+		}
+
+		ctx := context.WithValue(r.Context(), webUserContextKey{}, devUser)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// sessionAuthMiddleware protects web routes by requiring an authenticated session.
+func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip auth for public routes
+		if isPublicRoute(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// If user already in context (e.g., set by devAuthMiddleware), proceed
+		if getWebSessionUser(r.Context()) != nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Load session
+		session, err := ws.sessionStore.Get(r, webSessionName)
+		if err != nil {
+			session, _ = ws.sessionStore.New(r, webSessionName)
+		}
+
+		// Check for user in session
+		if uid, ok := session.Values[sessKeyUserID].(string); ok && uid != "" {
+			user := &webSessionUser{
+				UserID:    uid,
+				Email:     sessionString(session, sessKeyUserEmail),
+				Name:      sessionString(session, sessKeyUserName),
+				AvatarURL: sessionString(session, sessKeyUserAvatar),
+			}
+			ctx := context.WithValue(r.Context(), webUserContextKey{}, user)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		// No authenticated user
+		if isBrowserRequest(r) {
+			// Store returnTo for post-login redirect
+			session.Values[sessKeyReturnTo] = r.URL.Path
+			_ = session.Save(r, w)
+			http.Redirect(w, r, "/auth/login", http.StatusFound)
+			return
+		}
+
+		// Non-browser request: return 401 JSON
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "authentication required",
+		})
+	})
+}
+
+// handleOAuthLogin initiates the OAuth flow for a given provider.
+// Route: GET /auth/login/{provider}
+// Also handles GET /auth/login (redirects to /login page).
+func (ws *WebServer) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
+	// Extract provider from path: /auth/login/{provider}
+	provider := strings.TrimPrefix(r.URL.Path, "/auth/login/")
+	provider = strings.TrimSuffix(provider, "/")
+
+	// If no provider specified, redirect to SPA login page
+	if provider == "" {
+		session, err := ws.sessionStore.Get(r, webSessionName)
+		if err != nil {
+			session, _ = ws.sessionStore.New(r, webSessionName)
+		}
+		if returnTo := r.URL.Query().Get("returnTo"); returnTo != "" {
+			session.Values[sessKeyReturnTo] = returnTo
+			_ = session.Save(r, w)
+		}
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+
+	// Validate provider
+	if provider != "google" && provider != "github" {
+		http.Error(w, "unsupported OAuth provider", http.StatusBadRequest)
+		return
+	}
+
+	// Check that OAuth service is available
+	if ws.oauthService == nil {
+		http.Error(w, "OAuth not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	if !ws.oauthService.IsProviderConfiguredForClient(OAuthClientTypeWeb, provider) {
+		http.Error(w, fmt.Sprintf("OAuth provider %s is not configured", provider), http.StatusBadRequest)
+		return
+	}
+
+	// Generate state for CSRF protection
+	stateBytes := make([]byte, 32)
+	if _, err := rand.Read(stateBytes); err != nil {
+		http.Error(w, "failed to generate state", http.StatusInternalServerError)
+		return
+	}
+	state := hex.EncodeToString(stateBytes)
+
+	// Store state in session
+	session, err := ws.sessionStore.Get(r, webSessionName)
+	if err != nil {
+		session, _ = ws.sessionStore.New(r, webSessionName)
+	}
+	session.Values[sessKeyOAuthState] = state
+	if err := session.Save(r, w); err != nil {
+		slog.Error("Failed to save OAuth state to session", "error", err)
+		http.Error(w, "session error", http.StatusInternalServerError)
+		return
+	}
+
+	// Build redirect URI
+	redirectURI := ws.config.BaseURL + "/auth/callback/" + provider
+
+	// Get authorization URL
+	authURL, err := ws.oauthService.GetAuthorizationURLForClient(OAuthClientTypeWeb, provider, redirectURI, state)
+	if err != nil {
+		slog.Error("Failed to generate OAuth URL", "provider", provider, "error", err)
+		http.Error(w, "failed to generate auth URL", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+// handleOAuthCallback handles the OAuth provider callback.
+// Route: GET /auth/callback/{provider}
+func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	// Extract provider
+	provider := strings.TrimPrefix(r.URL.Path, "/auth/callback/")
+	provider = strings.TrimSuffix(provider, "/")
+
+	if provider != "google" && provider != "github" {
+		http.Error(w, "unsupported OAuth provider", http.StatusBadRequest)
+		return
+	}
+
+	if ws.oauthService == nil || ws.store == nil {
+		http.Error(w, "OAuth not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Load session
+	session, err := ws.sessionStore.Get(r, webSessionName)
+	if err != nil {
+		slog.Error("Failed to load session for callback", "error", err)
+		http.Redirect(w, r, "/login?error=session_error", http.StatusFound)
+		return
+	}
+
+	// Validate state (CSRF protection)
+	expectedState, _ := session.Values[sessKeyOAuthState].(string)
+	actualState := r.URL.Query().Get("state")
+	if expectedState == "" || !apiclient.ValidateDevToken(actualState, expectedState) {
+		slog.Warn("OAuth state mismatch", "provider", provider)
+		http.Redirect(w, r, "/login?error=state_mismatch", http.StatusFound)
+		return
+	}
+
+	// Clear state from session
+	delete(session.Values, sessKeyOAuthState)
+
+	// Check for error from provider
+	if errParam := r.URL.Query().Get("error"); errParam != "" {
+		slog.Warn("OAuth provider returned error", "provider", provider, "error", errParam)
+		http.Redirect(w, r, "/login?error="+errParam, http.StatusFound)
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		http.Redirect(w, r, "/login?error=no_code", http.StatusFound)
+		return
+	}
+
+	// Build redirect URI (must match the one used in the login request)
+	redirectURI := ws.config.BaseURL + "/auth/callback/" + provider
+
+	// Exchange code for user info (direct function call, no HTTP)
+	ctx := r.Context()
+	userInfo, err := ws.oauthService.ExchangeCodeForClient(ctx, OAuthClientTypeWeb, provider, code, redirectURI)
+	if err != nil {
+		slog.Error("OAuth code exchange failed", "provider", provider, "error", err)
+		http.Redirect(w, r, "/login?error=exchange_failed", http.StatusFound)
+		return
+	}
+
+	// Check email authorization
+	if !isEmailAuthorized(userInfo.Email, ws.config.AuthorizedDomains, ws.config.AdminEmails) {
+		slog.Warn("Unauthorized email domain", "email", userInfo.Email)
+		http.Redirect(w, r, "/login?error=unauthorized_domain", http.StatusFound)
+		return
+	}
+
+	// Find or create user
+	user, err := ws.store.GetUserByEmail(ctx, userInfo.Email)
+	if err != nil {
+		// Create new user
+		role := determineUserRole(userInfo.Email, ws.config.AdminEmails)
+		user = &store.User{
+			ID:          generateID(),
+			Email:       userInfo.Email,
+			DisplayName: userInfo.DisplayName,
+			AvatarURL:   userInfo.AvatarURL,
+			Role:        role,
+			Status:      "active",
+			Created:     time.Now(),
+			LastLogin:   time.Now(),
+		}
+		if err := ws.store.CreateUser(ctx, user); err != nil {
+			slog.Error("Failed to create user", "email", userInfo.Email, "error", err)
+			http.Redirect(w, r, "/login?error=user_create_failed", http.StatusFound)
+			return
+		}
+	} else {
+		// Update last login
+		user.LastLogin = time.Now()
+		if userInfo.AvatarURL != "" && user.AvatarURL == "" {
+			user.AvatarURL = userInfo.AvatarURL
+		}
+		if userInfo.DisplayName != "" && user.DisplayName == "" {
+			user.DisplayName = userInfo.DisplayName
+		}
+		if err := ws.store.UpdateUser(ctx, user); err != nil {
+			slog.Warn("Failed to update user on login", "email", userInfo.Email, "error", err)
+		}
+	}
+
+	// Generate Hub tokens if token service is available
+	if ws.userTokenSvc != nil {
+		accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
+			user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
+		)
+		if err != nil {
+			slog.Warn("Failed to generate Hub tokens", "error", err)
+		} else {
+			session.Values[sessKeyHubAccessToken] = accessToken
+			session.Values[sessKeyHubRefreshToken] = refreshToken
+			session.Values[sessKeyHubTokenExpiry] = time.Now().Add(time.Duration(expiresIn) * time.Second).UnixMilli()
+		}
+	}
+
+	// Store user info in session
+	session.Values[sessKeyUserID] = user.ID
+	session.Values[sessKeyUserEmail] = user.Email
+	session.Values[sessKeyUserName] = user.DisplayName
+	session.Values[sessKeyUserAvatar] = user.AvatarURL
+
+	// Get returnTo and clear it
+	returnTo, _ := session.Values[sessKeyReturnTo].(string)
+	delete(session.Values, sessKeyReturnTo)
+
+	if err := session.Save(r, w); err != nil {
+		slog.Error("Failed to save session after OAuth callback", "error", err)
+		http.Redirect(w, r, "/login?error=session_error", http.StatusFound)
+		return
+	}
+
+	if returnTo == "" {
+		returnTo = "/"
+	}
+	http.Redirect(w, r, returnTo, http.StatusFound)
+}
+
+// handleLogout clears the session and redirects to login (or returns JSON for API).
+// Route: GET /auth/logout, POST /auth/logout
+func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
+	session, err := ws.sessionStore.Get(r, webSessionName)
+	if err != nil {
+		session, _ = ws.sessionStore.New(r, webSessionName)
+	}
+
+	// Clear all session values
+	for key := range session.Values {
+		delete(session.Values, key)
+	}
+	session.Options.MaxAge = -1 // Delete cookie
+	if err := session.Save(r, w); err != nil {
+		slog.Error("Failed to clear session on logout", "error", err)
+	}
+
+	if isBrowserRequest(r) {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+// handleAuthMe returns the current user from the session as JSON.
+// Route: GET /auth/me
+func (ws *WebServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
+	// Check context first (set by devAuthMiddleware or sessionAuthMiddleware)
+	if user := getWebSessionUser(r.Context()); user != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(user)
+		return
+	}
+
+	// Fall back to loading from session directly
+	session, err := ws.sessionStore.Get(r, webSessionName)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "authentication required"})
+		return
+	}
+
+	uid, ok := session.Values[sessKeyUserID].(string)
+	if !ok || uid == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "authentication required"})
+		return
+	}
+
+	user := &webSessionUser{
+		UserID:    uid,
+		Email:     sessionString(session, sessKeyUserEmail),
+		Name:      sessionString(session, sessKeyUserName),
+		AvatarURL: sessionString(session, sessKeyUserAvatar),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(user)
+}
+
+// handleAuthDebug returns session debug info (debug mode only).
+// Route: GET /auth/debug
+func (ws *WebServer) handleAuthDebug(w http.ResponseWriter, r *http.Request) {
+	if !ws.config.Debug {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	session, err := ws.sessionStore.Get(r, webSessionName)
+	if err != nil {
+		session, _ = ws.sessionStore.New(r, webSessionName)
+	}
+
+	debug := map[string]interface{}{
+		"sessionIsNew": session.IsNew,
+		"hasUser":      session.Values[sessKeyUserID] != nil,
+		"config": map[string]interface{}{
+			"baseURL":        ws.config.BaseURL,
+			"devAuthEnabled": ws.config.DevAuthToken != "",
+			"oauthConfigured": ws.oauthService != nil,
+			"storeConfigured": ws.store != nil,
+		},
+	}
+
+	if uid, ok := session.Values[sessKeyUserID].(string); ok {
+		debug["user"] = map[string]string{
+			"id":    uid,
+			"email": sessionString(session, sessKeyUserEmail),
+			"name":  sessionString(session, sessKeyUserName),
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(debug)
+}
+
+// sessionString is a helper to safely extract a string from session values.
+func sessionString(session *sessions.Session, key string) string {
+	if v, ok := session.Values[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
 // securityHeadersMiddleware adds security headers to all responses.
 func (ws *WebServer) securityHeadersMiddleware(next http.Handler) http.Handler {
 	// Build CSP matching the Koa server's policy (web/src/server/config.ts:154-162)
@@ -391,10 +935,28 @@ func (ws *WebServer) loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// buildHandler constructs the full middleware chain and returns the HTTP handler.
+func (ws *WebServer) buildHandler() http.Handler {
+	var handler http.Handler = ws.mux
+
+	// Session auth middleware (innermost, checks session for protected routes)
+	handler = ws.sessionAuthMiddleware(handler)
+
+	// Dev-auth middleware (auto-populates session when dev token configured)
+	handler = ws.devAuthMiddleware(handler)
+
+	// Security headers
+	handler = ws.securityHeadersMiddleware(handler)
+
+	// Request logging (outermost)
+	handler = ws.loggingMiddleware(handler)
+
+	return handler
+}
+
 // Start starts the web frontend HTTP server.
 func (ws *WebServer) Start(ctx context.Context) error {
-	handler := ws.securityHeadersMiddleware(ws.mux)
-	handler = ws.loggingMiddleware(handler)
+	handler := ws.buildHandler()
 
 	ws.httpServer = &http.Server{
 		Addr:         fmt.Sprintf("%s:%d", ws.config.Host, ws.config.Port),
@@ -437,7 +999,5 @@ func (ws *WebServer) Shutdown(ctx context.Context) error {
 
 // Handler returns the HTTP handler for testing without starting a listener.
 func (ws *WebServer) Handler() http.Handler {
-	handler := ws.securityHeadersMiddleware(ws.mux)
-	handler = ws.loggingMiddleware(handler)
-	return handler
+	return ws.buildHandler()
 }

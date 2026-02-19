@@ -545,6 +545,20 @@ func (s *Server) GetAPIKeyService() *APIKeyService {
 	return s.apiKeyService
 }
 
+// GetOAuthService returns the OAuth service.
+func (s *Server) GetOAuthService() *OAuthService {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.oauthService
+}
+
+// GetStore returns the data store.
+func (s *Server) GetStore() store.Store {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.store
+}
+
 // GetBrokerAuthService returns the broker authentication service.
 func (s *Server) GetBrokerAuthService() *BrokerAuthService {
 	s.mu.RLock()
