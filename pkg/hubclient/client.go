@@ -17,6 +17,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -176,6 +177,11 @@ type HealthResponse struct {
 	ScionVersion string            `json:"scionVersion"`
 	Uptime       string            `json:"uptime"`
 	Checks       map[string]string `json:"checks,omitempty"`
+
+	// Composite sub-component health (present in combo mode).
+	Web    json.RawMessage `json:"web,omitempty"`
+	Hub    json.RawMessage `json:"hub,omitempty"`
+	Broker json.RawMessage `json:"broker,omitempty"`
 }
 
 // Option configures a Hub client.

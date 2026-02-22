@@ -33,6 +33,12 @@ type HealthResponse struct {
 	Checks  map[string]string `json:"checks,omitempty"`
 }
 
+// HealthStatus returns the status string from the health response.
+// This enables interface-based status checking from the web handler.
+func (h *HealthResponse) HealthStatus() string {
+	return h.Status
+}
+
 // BrokerInfoResponse is the response for the /api/v1/info endpoint.
 type BrokerInfoResponse struct {
 	BrokerID     string              `json:"brokerId"`

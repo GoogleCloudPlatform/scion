@@ -660,6 +660,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// Start Web Frontend if enabled
+	var webSrv *hub.WebServer
 	if enableWeb {
 		webHost := cfg.Hub.Host
 		if webHost == "" {
@@ -705,7 +706,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			AuthorizedDomains: webAuthorizedDomains,
 			AdminEmails:       webAdminEmails,
 		}
-		webSrv := hub.NewWebServer(webCfg)
+		webSrv = hub.NewWebServer(webCfg)
 
 		// Create shared event publisher for real-time SSE
 		eventPub := hub.NewChannelEventPublisher()
@@ -720,6 +721,12 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 			// Mount Hub API on Web server — single port serves both.
 			webSrv.MountHubAPI(hubSrv.Handler(), hubSrv.CleanupResources)
+
+			// Register Hub health provider for composite /healthz
+			localHubSrv := hubSrv // capture for closure
+			webSrv.SetHubHealthProvider(func(ctx context.Context) interface{} {
+				return localHubSrv.GetHealthInfo(ctx)
+			})
 		}
 
 		log.Printf("Starting Web Frontend on %s:%d", webCfg.Host, webCfg.Port)
@@ -909,6 +916,13 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 		// Create Runtime Broker server
 		rhSrv := runtimebroker.New(rhCfg, mgr, rt)
+
+		// Register Broker health provider for composite web /healthz
+		if webSrv != nil {
+			webSrv.SetBrokerHealthProvider(func(ctx context.Context) interface{} {
+				return rhSrv.GetHealthInfo(ctx)
+			})
+		}
 
 		log.Printf("Starting Runtime Broker API server on %s:%d",
 			cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)

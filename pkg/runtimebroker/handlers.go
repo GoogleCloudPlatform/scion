@@ -37,12 +37,10 @@ import (
 // Health Endpoints
 // ============================================================================
 
-func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
-		return
-	}
-
+// GetHealthInfo returns the current health status of the Runtime Broker server.
+// This can be called directly by co-located components (e.g., the WebServer)
+// to build composite health responses without making an HTTP round-trip.
+func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	checks := make(map[string]string)
 
 	// Check runtime availability
@@ -60,13 +58,21 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp := HealthResponse{
+	return &HealthResponse{
 		Status:  status,
 		Version: s.version,
 		Uptime:  time.Since(s.startTime).Round(time.Second).String(),
 		Checks:  checks,
 	}
+}
 
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	resp := s.GetHealthInfo(r.Context())
 	writeJSON(w, http.StatusOK, resp)
 }
 

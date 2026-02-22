@@ -52,16 +52,14 @@ type HealthStats struct {
 	Groves         int `json:"groves,omitempty"`
 }
 
-func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
-		return
-	}
-
+// GetHealthInfo returns the current health status of the Hub server.
+// This can be called directly by co-located components (e.g., the WebServer)
+// to build composite health responses without making an HTTP round-trip.
+func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	checks := make(map[string]string)
 
 	// Check database
-	if err := s.store.Ping(r.Context()); err != nil {
+	if err := s.store.Ping(ctx); err != nil {
 		checks["database"] = "unhealthy"
 	} else {
 		checks["database"] = "healthy"
@@ -69,13 +67,13 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 	// Get stats
 	stats := &HealthStats{}
-	if agentResult, err := s.store.ListAgents(r.Context(), store.AgentFilter{Status: store.AgentStatusRunning}, store.ListOptions{Limit: 1}); err == nil {
+	if agentResult, err := s.store.ListAgents(ctx, store.AgentFilter{Status: store.AgentStatusRunning}, store.ListOptions{Limit: 1}); err == nil {
 		stats.ActiveAgents = agentResult.TotalCount
 	}
-	if groveResult, err := s.store.ListGroves(r.Context(), store.GroveFilter{}, store.ListOptions{Limit: 1}); err == nil {
+	if groveResult, err := s.store.ListGroves(ctx, store.GroveFilter{}, store.ListOptions{Limit: 1}); err == nil {
 		stats.Groves = groveResult.TotalCount
 	}
-	if brokerResult, err := s.store.ListRuntimeBrokers(r.Context(), store.RuntimeBrokerFilter{Status: store.BrokerStatusOnline}, store.ListOptions{Limit: 1}); err == nil {
+	if brokerResult, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{Status: store.BrokerStatusOnline}, store.ListOptions{Limit: 1}); err == nil {
 		stats.ConnectedBrokers = brokerResult.TotalCount
 	}
 
@@ -87,7 +85,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp := HealthResponse{
+	return &HealthResponse{
 		Status:       status,
 		Version:      "0.1.0", // TODO: Get from build info
 		ScionVersion: version.Short(),
@@ -95,7 +93,21 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		Checks:       checks,
 		Stats:        stats,
 	}
+}
 
+// HealthStatus returns the status string from the health response.
+// This enables interface-based status checking from the web handler.
+func (h *HealthResponse) HealthStatus() string {
+	return h.Status
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	resp := s.GetHealthInfo(r.Context())
 	writeJSON(w, http.StatusOK, resp)
 }
 

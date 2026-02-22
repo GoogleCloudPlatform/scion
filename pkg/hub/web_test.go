@@ -283,16 +283,129 @@ func TestWebHealthz(t *testing.T) {
 		t.Errorf("expected Content-Type application/json, got %q", ct)
 	}
 
-	bodyStr := string(body)
-	if !strings.Contains(bodyStr, `"status":"ok"`) {
-		t.Errorf("expected status ok in response: %s", bodyStr)
+	// Parse the composite response
+	var result CompositeHealthResponse
+	require.NoError(t, json.Unmarshal(body, &result))
+
+	// Top-level backward-compatible fields
+	assert.Equal(t, "healthy", result.Status)
+	assert.NotEmpty(t, result.ScionVersion)
+	assert.NotEmpty(t, result.Version)
+	assert.NotEmpty(t, result.Uptime)
+
+	// Web sub-object
+	assert.NotNil(t, result.Web)
+	webMap, ok := result.Web.(map[string]interface{})
+	require.True(t, ok, "web should be a JSON object, got %T", result.Web)
+	assert.Equal(t, "ok", webMap["status"])
+
+	// No hub/broker in standalone mode
+	assert.Nil(t, result.Hub)
+	assert.Nil(t, result.Broker)
+}
+
+func TestWebHealthz_CompositeMode(t *testing.T) {
+	ws := newTestWebServer(t, WebServerConfig{})
+
+	// Register mock hub health provider
+	ws.SetHubHealthProvider(func(ctx context.Context) interface{} {
+		return &HealthResponse{
+			Status:       "healthy",
+			Version:      "0.1.0",
+			ScionVersion: "abc1234",
+			Uptime:       "5m0s",
+			Checks:       map[string]string{"database": "healthy"},
+			Stats:        &HealthStats{ConnectedBrokers: 1, ActiveAgents: 2, Groves: 3},
+		}
+	})
+
+	// Register mock broker health provider
+	type brokerHealth struct {
+		Status  string            `json:"status"`
+		Version string            `json:"version"`
+		Uptime  string            `json:"uptime"`
+		Checks  map[string]string `json:"checks,omitempty"`
 	}
-	if !strings.Contains(bodyStr, `"component":"web"`) {
-		t.Errorf("expected component web in response: %s", bodyStr)
-	}
-	if !strings.Contains(bodyStr, `"scionVersion":`) {
-		t.Errorf("expected scionVersion in response: %s", bodyStr)
-	}
+	ws.SetBrokerHealthProvider(func(ctx context.Context) interface{} {
+		return &brokerHealth{
+			Status:  "healthy",
+			Version: "0.1.0",
+			Uptime:  "5m0s",
+			Checks:  map[string]string{"docker": "available"},
+		}
+	})
+
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	rec := httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	body, _ := io.ReadAll(resp.Body)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result map[string]interface{}
+	require.NoError(t, json.Unmarshal(body, &result))
+
+	// Top-level fields from hub health
+	assert.Equal(t, "healthy", result["status"])
+	assert.Equal(t, "0.1.0", result["version"])
+	assert.Equal(t, "abc1234", result["scionVersion"])
+	assert.Equal(t, "5m0s", result["uptime"])
+
+	// Web sub-object
+	webObj, ok := result["web"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "ok", webObj["status"])
+
+	// Hub sub-object
+	hubObj, ok := result["hub"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "healthy", hubObj["status"])
+	hubChecks, _ := hubObj["checks"].(map[string]interface{})
+	assert.Equal(t, "healthy", hubChecks["database"])
+	hubStats, _ := hubObj["stats"].(map[string]interface{})
+	assert.Equal(t, float64(1), hubStats["connectedBrokers"])
+
+	// Broker sub-object
+	brokerObj, ok := result["broker"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "healthy", brokerObj["status"])
+	brokerChecks, _ := brokerObj["checks"].(map[string]interface{})
+	assert.Equal(t, "available", brokerChecks["docker"])
+}
+
+func TestWebHealthz_DegradedHub(t *testing.T) {
+	ws := newTestWebServer(t, WebServerConfig{})
+
+	// Register a degraded hub health provider
+	ws.SetHubHealthProvider(func(ctx context.Context) interface{} {
+		return &HealthResponse{
+			Status:       "degraded",
+			Version:      "0.1.0",
+			ScionVersion: "abc1234",
+			Uptime:       "1m0s",
+			Checks:       map[string]string{"database": "unhealthy"},
+		}
+	})
+
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	rec := httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	body, _ := io.ReadAll(resp.Body)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result map[string]interface{}
+	require.NoError(t, json.Unmarshal(body, &result))
+
+	// Top-level status should be degraded because hub is degraded
+	assert.Equal(t, "degraded", result["status"])
+
+	// Hub sub-object should show degraded
+	hubObj, ok := result["hub"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "degraded", hubObj["status"])
 }
 
 func TestIsHashedAsset(t *testing.T) {

@@ -34,6 +34,32 @@ import (
 	"github.com/ptone/scion-agent/web"
 )
 
+// HealthProvider is a function that returns the health info for a component.
+// The returned value is serialized as a JSON sub-object in the composite
+// health response. The concrete type is intentionally left as interface{}
+// so that the web server does not import hub or runtimebroker types directly.
+type HealthProvider func(ctx context.Context) interface{}
+
+// WebHealthInfo holds the web server's own health information.
+type WebHealthInfo struct {
+	Status         string `json:"status"`
+	AssetsDir      string `json:"assetsDir"`
+	AssetsEmbedded bool   `json:"assetsEmbedded"`
+}
+
+// CompositeHealthResponse is the top-level health response returned by the
+// web server's /healthz endpoint. It includes backward-compatible top-level
+// fields (status, version, scionVersion, uptime) plus per-component sub-objects.
+type CompositeHealthResponse struct {
+	Status       string      `json:"status"`
+	Version      string      `json:"version"`
+	ScionVersion string      `json:"scionVersion"`
+	Uptime       string      `json:"uptime,omitempty"`
+	Web          interface{} `json:"web"`
+	Hub          interface{} `json:"hub,omitempty"`
+	Broker       interface{} `json:"broker,omitempty"`
+}
+
 // shoelaceVersion is the Shoelace CDN version used by the SPA shell.
 const shoelaceVersion = "2.19.0"
 
@@ -110,6 +136,11 @@ type WebServer struct {
 	events       *ChannelEventPublisher // nil when no publisher configured
 	hubHandler   http.Handler           // mounted Hub API handler, or nil
 	hubShutdown  func(context.Context) error // Hub resource cleanup, or nil
+	startTime    time.Time
+
+	// Health providers for composite health response (combo mode)
+	hubHealthProvider    HealthProvider
+	brokerHealthProvider HealthProvider
 }
 
 // spaShellTemplate is the Go html/template for the SPA shell page.
@@ -289,8 +320,9 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	}
 
 	ws := &WebServer{
-		config: cfg,
-		mux:    http.NewServeMux(),
+		config:    cfg,
+		mux:       http.NewServeMux(),
+		startTime: time.Now(),
 	}
 
 	// Initialize session store
@@ -361,6 +393,20 @@ func (ws *WebServer) SetUserTokenService(svc *UserTokenService) {
 // SetEventPublisher sets the event publisher for real-time SSE streaming.
 func (ws *WebServer) SetEventPublisher(pub *ChannelEventPublisher) {
 	ws.events = pub
+}
+
+// SetHubHealthProvider registers a health provider for the Hub component.
+// When set, the web server's /healthz endpoint includes Hub health in the
+// composite response.
+func (ws *WebServer) SetHubHealthProvider(p HealthProvider) {
+	ws.hubHealthProvider = p
+}
+
+// SetBrokerHealthProvider registers a health provider for the Runtime Broker
+// component. When set, the web server's /healthz endpoint includes broker
+// health in the composite response.
+func (ws *WebServer) SetBrokerHealthProvider(p HealthProvider) {
+	ws.brokerHealthProvider = p
 }
 
 // MountHubAPI mounts the Hub API handler on the web server so both are
@@ -445,11 +491,62 @@ func (ws *WebServer) registerRoutes() {
 }
 
 // handleHealthz returns the web server health status.
+// In standalone mode, only the web sub-object is included.
+// In combo mode (with hub/broker health providers), a composite response
+// is returned with backward-compatible top-level fields.
 func (ws *WebServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	webHealth := &WebHealthInfo{
+		Status:         "ok",
+		AssetsDir:      ws.config.AssetsDir,
+		AssetsEmbedded: web.AssetsEmbedded,
+	}
+
+	resp := CompositeHealthResponse{
+		Status:       "healthy",
+		Version:      "0.1.0",
+		ScionVersion: version.Short(),
+		Web:          webHealth,
+	}
+
+	// Include Hub health if a provider is registered.
+	if ws.hubHealthProvider != nil {
+		hubHealth := ws.hubHealthProvider(ctx)
+		resp.Hub = hubHealth
+
+		// Inherit top-level version/uptime from hub health if available.
+		if h, ok := hubHealth.(interface{ HealthStatus() string }); ok {
+			if h.HealthStatus() != "healthy" {
+				resp.Status = "degraded"
+			}
+		}
+		// Use hub's uptime as the authoritative uptime.
+		if h, ok := hubHealth.(*HealthResponse); ok {
+			resp.Uptime = h.Uptime
+			resp.Version = h.Version
+			resp.ScionVersion = h.ScionVersion
+		}
+	} else {
+		// No hub provider — use the web server's own uptime.
+		resp.Uptime = time.Since(ws.startTime).Round(time.Second).String()
+	}
+
+	// Include Broker health if a provider is registered.
+	if ws.brokerHealthProvider != nil {
+		brokerHealth := ws.brokerHealthProvider(ctx)
+		resp.Broker = brokerHealth
+
+		if h, ok := brokerHealth.(interface{ HealthStatus() string }); ok {
+			if h.HealthStatus() != "healthy" {
+				resp.Status = "degraded"
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `{"status":"ok","component":"web","assetsDir":"%s","assetsEmbedded":%t,"scionVersion":"%s"}`,
-		ws.config.AssetsDir, web.AssetsEmbedded, version.Short())
+	json.NewEncoder(w).Encode(resp)
 }
 
 // staticHandler returns an http.Handler that serves static assets.
