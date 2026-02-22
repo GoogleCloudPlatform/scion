@@ -617,13 +617,13 @@ User: scion start researcher --broker prod-gke "analyze auth module"
 5. ~~Add `SecretInfo` to gather response types~~
 6. ~~Update CLI gather to render secret descriptions~~
 
-### Phase 3: CLI Interactive Secret Input
+### Phase 3: CLI Interactive Secret Input — **Completed**
 
-1. Add hidden input prompt (using `golang.org/x/term`) for secret-eligible keys in `gatherAndSubmitEnv()`
-2. Distinguish secret-eligible vs env-only keys in gather logic
-3. Add guidance message about permanent storage
-4. Add help text for file-type secrets guiding users to `scion hub secret set --type file`
-5. Tests for interactive flow (mock stdin)
+1. ~~Add hidden input prompt (using `golang.org/x/term`) for secret-eligible keys in `gatherAndSubmitEnv()`~~
+2. ~~Distinguish secret-eligible vs env-only keys in gather logic~~
+3. ~~Add guidance message about permanent storage~~
+4. ~~Add help text for file-type secrets guiding users to `scion hub secret set --type file`~~
+5. ~~Tests for interactive flow (mock stdin)~~
 
 ### Phase 4: K8s Native Secret Mounting
 
