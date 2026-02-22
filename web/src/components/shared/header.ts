@@ -21,7 +21,7 @@
  */
 
 import { LitElement, html, css } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { customElement, property } from 'lit/decorators.js';
 
 import type { User } from '../../shared/types.js';
 
@@ -50,12 +50,6 @@ export class ScionHeader extends LitElement {
    */
   @property({ type: Boolean })
   showMobileMenu = false;
-
-  /**
-   * Whether user menu is open
-   */
-  @state()
-  _menuOpen = false;
 
   static override styles = css`
     :host {
@@ -125,18 +119,6 @@ export class ScionHeader extends LitElement {
       gap: 0.75rem;
     }
 
-    .user-name {
-      font-size: 0.875rem;
-      font-weight: 500;
-      color: var(--scion-text, #1e293b);
-    }
-
-    @media (max-width: 640px) {
-      .user-name {
-        display: none;
-      }
-    }
-
     .sign-in-link {
       display: inline-flex;
       align-items: center;
@@ -155,39 +137,56 @@ export class ScionHeader extends LitElement {
       background: var(--scion-primary-hover, #2563eb);
     }
 
-    /* User dropdown styles */
-    .user-dropdown {
-      position: relative;
-    }
-
-    .user-button {
+    .user-buttons {
       display: flex;
       align-items: center;
       gap: 0.5rem;
-      padding: 0.25rem;
-      background: transparent;
-      border: none;
-      border-radius: 9999px;
-      cursor: pointer;
-      transition: background 0.15s ease;
     }
 
-    .user-button:hover {
+    .profile-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 1rem;
+      border-radius: 0.5rem;
       background: var(--scion-bg-subtle, #f1f5f9);
+      color: var(--scion-text, #1e293b);
+      text-decoration: none;
+      font-size: 0.875rem;
+      font-weight: 500;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      transition:
+        background 0.15s ease,
+        border-color 0.15s ease;
     }
 
-    .user-avatar {
-      --size: 2rem;
+    .profile-link:hover {
+      background: var(--scion-border, #e2e8f0);
+      border-color: var(--scion-text-muted, #64748b);
     }
 
-    .dropdown-icon {
-      font-size: 0.75rem;
+    .sign-out-button {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 1rem;
+      border-radius: 0.5rem;
+      background: transparent;
       color: var(--scion-text-muted, #64748b);
-      transition: transform 0.15s ease;
+      font-size: 0.875rem;
+      font-weight: 500;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      cursor: pointer;
+      transition:
+        background 0.15s ease,
+        color 0.15s ease,
+        border-color 0.15s ease;
     }
 
-    .user-dropdown[open] .dropdown-icon {
-      transform: rotate(180deg);
+    .sign-out-button:hover {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      color: var(--scion-text, #1e293b);
+      border-color: var(--scion-text-muted, #64748b);
     }
   `;
 
@@ -233,49 +232,18 @@ export class ScionHeader extends LitElement {
       `;
     }
 
-    const initials = this.getInitials(this.user.name);
-
     return html`
-      <span class="user-name">${this.user.name}</span>
-      <sl-dropdown class="user-dropdown" placement="bottom-end">
-        <button slot="trigger" class="user-button" aria-label="User menu">
-          <sl-avatar
-            class="user-avatar"
-            initials="${initials}"
-            image="${this.user.avatar || ''}"
-            label="${this.user.name}"
-          ></sl-avatar>
-          <sl-icon name="chevron-down" class="dropdown-icon"></sl-icon>
+      <div class="user-buttons">
+        <a href="/profile" class="profile-link">
+          <sl-icon name="person"></sl-icon>
+          Profile
+        </a>
+        <button class="sign-out-button" @click=${(): void => this.handleLogout()}>
+          <sl-icon name="box-arrow-right"></sl-icon>
+          Sign out
         </button>
-        <sl-menu>
-          <sl-menu-item>
-            <sl-icon slot="prefix" name="person"></sl-icon>
-            Profile
-          </sl-menu-item>
-          <sl-menu-item>
-            <sl-icon slot="prefix" name="gear"></sl-icon>
-            Settings
-          </sl-menu-item>
-          <sl-divider></sl-divider>
-          <sl-menu-item @click=${(): void => this.handleLogout()}>
-            <sl-icon slot="prefix" name="box-arrow-right"></sl-icon>
-            Sign out
-          </sl-menu-item>
-        </sl-menu>
-      </sl-dropdown>
+      </div>
     `;
-  }
-
-  /**
-   * Get initials from user name
-   */
-  private getInitials(name: string): string {
-    return name
-      .split(' ')
-      .map((n) => n[0])
-      .join('')
-      .toUpperCase()
-      .slice(0, 2);
   }
 
   /**
