@@ -37,6 +37,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
 )
@@ -107,11 +108,38 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		config.Annotations["scion.username"] = config.UnixUsername
 	}
 
+	// Create K8s Secret or SecretProviderClass before the pod
+	if len(config.ResolvedSecrets) > 0 {
+		useGKEPath := r.GKEMode
+		if useGKEPath {
+			hasRef := false
+			for _, s := range config.ResolvedSecrets {
+				if s.Ref != "" {
+					hasRef = true
+					break
+				}
+			}
+			useGKEPath = hasRef
+		}
+
+		if useGKEPath {
+			if _, err := r.createSecretProviderClass(ctx, namespace, config.Name, config.ResolvedSecrets, config.Labels); err != nil {
+				return "", fmt.Errorf("failed to create SecretProviderClass: %w", err)
+			}
+		} else {
+			if _, err := r.createAgentSecret(ctx, namespace, config.Name, config.ResolvedSecrets, config.Labels); err != nil {
+				return "", fmt.Errorf("failed to create agent secret: %w", err)
+			}
+		}
+	}
+
 	pod := r.buildPod(namespace, config)
 
 	fmt.Printf("  Provisioning pod '%s' in namespace '%s'...\n", config.Name, namespace)
 	createdPod, err := r.Client.Clientset.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
+		// Clean up orphaned secrets on pod creation failure
+		r.cleanupAgentSecrets(ctx, namespace, config.Name)
 		return "", fmt.Errorf("failed to create pod: %w", err)
 	}
 
@@ -199,6 +227,210 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	return createdPod.Name, nil
 }
 
+// createAgentSecret creates a K8s Secret containing all resolved secret values.
+// Environment-type secrets are stored as individual keys; variable-type secrets
+// are marshaled together as JSON under a "secrets.json" key. File-type secrets
+// are stored as individual keys named by secret name.
+// Returns the secret name, or empty string if no secrets need to be created.
+func (r *KubernetesRuntime) createAgentSecret(ctx context.Context, namespace, agentName string, secrets []api.ResolvedSecret, labels map[string]string) (string, error) {
+	if len(secrets) == 0 {
+		return "", nil
+	}
+
+	secretName := fmt.Sprintf("scion-agent-%s", agentName)
+	data := make(map[string][]byte)
+
+	// Collect variable-type secrets for JSON aggregation
+	varSecrets := make(map[string]string)
+
+	for _, s := range secrets {
+		switch s.Type {
+		case "environment":
+			data[s.Name] = []byte(s.Value)
+		case "file":
+			data[s.Name] = []byte(s.Value)
+		case "variable":
+			varSecrets[s.Target] = s.Value
+		}
+	}
+
+	if len(varSecrets) > 0 {
+		jsonData, err := json.Marshal(varSecrets)
+		if err != nil {
+			return "", fmt.Errorf("failed to marshal variable secrets: %w", err)
+		}
+		data["secrets.json"] = jsonData
+	}
+
+	if len(data) == 0 {
+		return "", nil
+	}
+
+	// Build labels for cleanup
+	secretLabels := map[string]string{
+		"scion.agent": agentName,
+	}
+	for k, v := range labels {
+		if strings.HasPrefix(k, "scion.") {
+			secretLabels[k] = v
+		}
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: namespace,
+			Labels:    secretLabels,
+		},
+		Data: data,
+	}
+
+	_, err := r.Client.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to create agent secret: %w", err)
+	}
+
+	return secretName, nil
+}
+
+// createSecretProviderClass creates a SecretProviderClass CRD for GKE
+// Secrets Store CSI driver integration. It maps GCP Secret Manager
+// references to K8s-synced secrets for environment variable injection.
+func (r *KubernetesRuntime) createSecretProviderClass(ctx context.Context, namespace, agentName string, secrets []api.ResolvedSecret, labels map[string]string) (string, error) {
+	spcName := fmt.Sprintf("scion-agent-%s", agentName)
+	envSecretName := fmt.Sprintf("scion-agent-%s-env", agentName)
+
+	// Build the GCP SM secrets parameter as YAML
+	type gcpSecretEntry struct {
+		ResourceName string `json:"resourceName"`
+		FileName     string `json:"fileName"`
+	}
+	var gcpSecrets []gcpSecretEntry
+	for _, s := range secrets {
+		if s.Ref == "" {
+			continue
+		}
+		gcpSecrets = append(gcpSecrets, gcpSecretEntry{
+			ResourceName: fmt.Sprintf("%s/versions/latest", s.Ref),
+			FileName:     s.Name,
+		})
+	}
+
+	if len(gcpSecrets) == 0 {
+		return "", nil
+	}
+
+	secretsParam, err := json.Marshal(gcpSecrets)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal secrets parameter: %w", err)
+	}
+
+	// Build secretObjects for env-type secrets (synced to a K8s Secret)
+	type secretObjectData struct {
+		Key        string `json:"key"`
+		ObjectName string `json:"objectName"`
+	}
+	type secretObject struct {
+		SecretName string             `json:"secretName"`
+		Type       string             `json:"type"`
+		Data       []secretObjectData `json:"data"`
+	}
+
+	var envData []secretObjectData
+	for _, s := range secrets {
+		if s.Ref == "" || s.Type != "environment" {
+			continue
+		}
+		envData = append(envData, secretObjectData{
+			Key:        s.Name,
+			ObjectName: s.Name,
+		})
+	}
+
+	var secretObjects []secretObject
+	if len(envData) > 0 {
+		secretObjects = append(secretObjects, secretObject{
+			SecretName: envSecretName,
+			Type:       "Opaque",
+			Data:       envData,
+		})
+	}
+
+	// Build labels
+	spcLabels := map[string]string{
+		"scion.agent": agentName,
+	}
+	for k, v := range labels {
+		if strings.HasPrefix(k, "scion.") {
+			spcLabels[k] = v
+		}
+	}
+
+	spec := map[string]interface{}{
+		"provider": "gcp",
+		"parameters": map[string]interface{}{
+			"secrets": string(secretsParam),
+		},
+	}
+	if len(secretObjects) > 0 {
+		soJSON, _ := json.Marshal(secretObjects)
+		var soSlice []interface{}
+		json.Unmarshal(soJSON, &soSlice)
+		spec["secretObjects"] = soSlice
+	}
+
+	spc := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "secrets-store.csi.x-k8s.io/v1",
+			"kind":       "SecretProviderClass",
+			"metadata": map[string]interface{}{
+				"name":      spcName,
+				"namespace": namespace,
+				"labels":    toStringInterfaceMap(spcLabels),
+			},
+			"spec": spec,
+		},
+	}
+
+	_, err = r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace).Create(ctx, spc, metav1.CreateOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to create SecretProviderClass: %w", err)
+	}
+
+	return spcName, nil
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+// toStringInterfaceMap converts map[string]string to map[string]interface{} for unstructured objects.
+func toStringInterfaceMap(m map[string]string) map[string]interface{} {
+	result := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		result[k] = v
+	}
+	return result
+}
+
+// cleanupAgentSecrets removes K8s Secrets and (if GKE mode) SecretProviderClasses
+// associated with an agent, identified by the scion.agent label.
+func (r *KubernetesRuntime) cleanupAgentSecrets(ctx context.Context, namespace, agentName string) {
+	selector := fmt.Sprintf("scion.agent=%s", agentName)
+
+	// Delete K8s Secrets
+	_ = r.Client.Clientset.CoreV1().Secrets(namespace).DeleteCollection(ctx,
+		metav1.DeleteOptions{},
+		metav1.ListOptions{LabelSelector: selector},
+	)
+
+	// Delete SecretProviderClasses if GKE mode
+	if r.GKEMode {
+		_ = r.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(namespace).DeleteCollection(ctx,
+			metav1.DeleteOptions{},
+			metav1.ListOptions{LabelSelector: selector},
+		)
+	}
+}
+
 func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) *corev1.Pod {
 	// Command Resolution
 	var cmd []string
@@ -231,15 +463,139 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) *corev1
 		}
 	}
 
-	// Auth Injection (Temporary M1 Solution)
-	if config.Auth.GeminiAPIKey != "" {
-		envVars = append(envVars, corev1.EnvVar{Name: "GEMINI_API_KEY", Value: config.Auth.GeminiAPIKey})
-	}
-	if config.Auth.AnthropicAPIKey != "" {
-		envVars = append(envVars, corev1.EnvVar{Name: "ANTHROPIC_API_KEY", Value: config.Auth.AnthropicAPIKey})
-	}
-	if config.Auth.GoogleAPIKey != "" {
-		envVars = append(envVars, corev1.EnvVar{Name: "GOOGLE_API_KEY", Value: config.Auth.GoogleAPIKey})
+	// Secret mounting: determine strategy and inject secrets
+	var extraVolumes []corev1.Volume
+	var extraVolumeMounts []corev1.VolumeMount
+
+	if len(config.ResolvedSecrets) > 0 {
+		// Check if we should use the GKE CSI path
+		useGKEPath := r.GKEMode
+		if useGKEPath {
+			hasRef := false
+			for _, s := range config.ResolvedSecrets {
+				if s.Ref != "" {
+					hasRef = true
+					break
+				}
+			}
+			useGKEPath = hasRef
+		}
+
+		agentSecretName := fmt.Sprintf("scion-agent-%s", config.Name)
+
+		if useGKEPath {
+			// GKE path: CSI volume for file-type secrets, secretKeyRef to -env secret for env vars
+			spcName := fmt.Sprintf("scion-agent-%s", config.Name)
+			envSecretName := fmt.Sprintf("scion-agent-%s-env", config.Name)
+
+			// Add CSI volume (required for secretObjects sync)
+			extraVolumes = append(extraVolumes, corev1.Volume{
+				Name: "secrets-store",
+				VolumeSource: corev1.VolumeSource{
+					CSI: &corev1.CSIVolumeSource{
+						Driver:   "secrets-store.csi.x-k8s.io",
+						ReadOnly: boolPtr(true),
+						VolumeAttributes: map[string]string{
+							"secretProviderClass": spcName,
+						},
+					},
+				},
+			})
+			extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{
+				Name:      "secrets-store",
+				MountPath: "/mnt/secrets-store",
+				ReadOnly:  true,
+			})
+
+			for _, s := range config.ResolvedSecrets {
+				switch s.Type {
+				case "environment":
+					envVars = append(envVars, corev1.EnvVar{
+						Name: s.Target,
+						ValueFrom: &corev1.EnvVarSource{
+							SecretKeyRef: &corev1.SecretKeySelector{
+								LocalObjectReference: corev1.LocalObjectReference{Name: envSecretName},
+								Key:                  s.Name,
+							},
+						},
+					})
+				case "file":
+					target := expandTildeTarget(s.Target, fmt.Sprintf("/home/%s", config.UnixUsername))
+					extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{
+						Name:      "secrets-store",
+						MountPath: target,
+						SubPath:   s.Name,
+						ReadOnly:  true,
+					})
+				}
+			}
+		} else {
+			// Fallback path: K8s Secret with secretKeyRef for env, volume subPath for files
+			hasFileSecrets := false
+			hasVariableSecrets := false
+			for _, s := range config.ResolvedSecrets {
+				switch s.Type {
+				case "environment":
+					envVars = append(envVars, corev1.EnvVar{
+						Name: s.Target,
+						ValueFrom: &corev1.EnvVarSource{
+							SecretKeyRef: &corev1.SecretKeySelector{
+								LocalObjectReference: corev1.LocalObjectReference{Name: agentSecretName},
+								Key:                  s.Name,
+							},
+						},
+					})
+				case "file":
+					hasFileSecrets = true
+				case "variable":
+					hasVariableSecrets = true
+				}
+			}
+
+			if hasFileSecrets || hasVariableSecrets {
+				extraVolumes = append(extraVolumes, corev1.Volume{
+					Name: "agent-secrets",
+					VolumeSource: corev1.VolumeSource{
+						Secret: &corev1.SecretVolumeSource{
+							SecretName: agentSecretName,
+						},
+					},
+				})
+			}
+
+			for _, s := range config.ResolvedSecrets {
+				if s.Type == "file" {
+					target := expandTildeTarget(s.Target, fmt.Sprintf("/home/%s", config.UnixUsername))
+					extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{
+						Name:      "agent-secrets",
+						MountPath: target,
+						SubPath:   s.Name,
+						ReadOnly:  true,
+					})
+				}
+			}
+
+			if hasVariableSecrets {
+				scionDir := fmt.Sprintf("/home/%s/.scion", config.UnixUsername)
+				extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{
+					Name:      "agent-secrets",
+					MountPath: scionDir + "/secrets.json",
+					SubPath:   "secrets.json",
+					ReadOnly:  true,
+				})
+			}
+		}
+	} else if config.Auth.GeminiAPIKey != "" || config.Auth.AnthropicAPIKey != "" || config.Auth.GoogleAPIKey != "" {
+		// Backward-compatible M1 auth fallback (only when no ResolvedSecrets)
+		if config.Auth.GeminiAPIKey != "" {
+			envVars = append(envVars, corev1.EnvVar{Name: "GEMINI_API_KEY", Value: config.Auth.GeminiAPIKey})
+		}
+		if config.Auth.AnthropicAPIKey != "" {
+			envVars = append(envVars, corev1.EnvVar{Name: "ANTHROPIC_API_KEY", Value: config.Auth.AnthropicAPIKey})
+		}
+		if config.Auth.GoogleAPIKey != "" {
+			envVars = append(envVars, corev1.EnvVar{Name: "GOOGLE_API_KEY", Value: config.Auth.GoogleAPIKey})
+		}
 	}
 
 	// Pass host user UID/GID for container user synchronization
@@ -283,6 +639,14 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) *corev1
 			},
 			RestartPolicy: corev1.RestartPolicyNever,
 		},
+	}
+
+	// Append secret volumes and mounts
+	if len(extraVolumes) > 0 {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, extraVolumes...)
+	}
+	if len(extraVolumeMounts) > 0 {
+		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, extraVolumeMounts...)
 	}
 
 	// Apply resource requests/limits from the common resource spec.
@@ -611,6 +975,10 @@ func (r *KubernetesRuntime) Delete(ctx context.Context, id string) error {
 	}
 
 	namespace := r.DefaultNamespace
+
+	// Clean up agent secrets and SecretProviderClasses before deleting the pod
+	r.cleanupAgentSecrets(ctx, namespace, id)
+
 	// 'id' is the pod name
 	// Use GracePeriodSeconds=0 for immediate termination since Delete is used
 	// for force-removal (e.g. scion rm), not graceful shutdown.
