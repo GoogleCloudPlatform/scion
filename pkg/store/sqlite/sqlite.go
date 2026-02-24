@@ -87,6 +87,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV15,
 		migrationV16,
 		migrationV17,
+		migrationV18,
 	}
 
 	// Create migrations table if not exists
@@ -530,6 +531,40 @@ CREATE INDEX IF NOT EXISTS idx_harness_configs_scope_id ON harness_configs(scope
 const migrationV17 = `
 ALTER TABLE agents ADD COLUMN deleted_at TIMESTAMP;
 CREATE INDEX IF NOT EXISTS idx_agents_deleted ON agents(status, deleted_at) WHERE status = 'deleted';
+`
+
+// Migration V18: Notification subscriptions and notifications tables
+const migrationV18 = `
+CREATE TABLE IF NOT EXISTS notification_subscriptions (
+	id TEXT PRIMARY KEY,
+	agent_id TEXT NOT NULL,
+	subscriber_type TEXT NOT NULL DEFAULT 'agent',
+	subscriber_id TEXT NOT NULL,
+	grove_id TEXT NOT NULL,
+	trigger_statuses TEXT NOT NULL,
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	created_by TEXT NOT NULL,
+	FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_notification_subs_agent ON notification_subscriptions(agent_id);
+CREATE INDEX IF NOT EXISTS idx_notification_subs_grove ON notification_subscriptions(grove_id);
+
+CREATE TABLE IF NOT EXISTS notifications (
+	id TEXT PRIMARY KEY,
+	subscription_id TEXT NOT NULL,
+	agent_id TEXT NOT NULL,
+	grove_id TEXT NOT NULL,
+	subscriber_type TEXT NOT NULL,
+	subscriber_id TEXT NOT NULL,
+	status TEXT NOT NULL,
+	message TEXT NOT NULL,
+	dispatched INTEGER NOT NULL DEFAULT 0,
+	acknowledged INTEGER NOT NULL DEFAULT 0,
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (subscription_id) REFERENCES notification_subscriptions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_subscriber ON notifications(subscriber_type, subscriber_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_grove ON notifications(grove_id);
 `
 
 // Helper functions for JSON marshaling/unmarshaling

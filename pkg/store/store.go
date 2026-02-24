@@ -78,6 +78,9 @@ type Store interface {
 
 	// Broker Secret operations (Runtime Broker authentication)
 	BrokerSecretStore
+
+	// Notification operations (Agent Status Notification System)
+	NotificationStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -641,4 +644,52 @@ type BrokerSecretStore interface {
 
 	// CleanExpiredJoinTokens removes all expired join tokens.
 	CleanExpiredJoinTokens(ctx context.Context) error
+}
+
+// =============================================================================
+// Notifications (Agent Status Notification System)
+// =============================================================================
+
+// NotificationStore manages notification subscriptions and notification records.
+type NotificationStore interface {
+	// CreateNotificationSubscription creates a new notification subscription.
+	CreateNotificationSubscription(ctx context.Context, sub *NotificationSubscription) error
+
+	// GetNotificationSubscriptions returns all subscriptions for a watched agent.
+	GetNotificationSubscriptions(ctx context.Context, agentID string) ([]NotificationSubscription, error)
+
+	// GetNotificationSubscriptionsByGrove returns all subscriptions within a grove.
+	GetNotificationSubscriptionsByGrove(ctx context.Context, groveID string) ([]NotificationSubscription, error)
+
+	// DeleteNotificationSubscription deletes a subscription by ID.
+	// Returns ErrNotFound if the subscription doesn't exist.
+	DeleteNotificationSubscription(ctx context.Context, id string) error
+
+	// DeleteNotificationSubscriptionsForAgent deletes all subscriptions for a watched agent.
+	// No error on zero rows affected.
+	DeleteNotificationSubscriptionsForAgent(ctx context.Context, agentID string) error
+
+	// CreateNotification creates a new notification record.
+	CreateNotification(ctx context.Context, notif *Notification) error
+
+	// GetNotifications returns notifications for a subscriber.
+	// If onlyUnacknowledged is true, only unacknowledged notifications are returned.
+	// Results are ordered by created_at DESC.
+	GetNotifications(ctx context.Context, subscriberType, subscriberID string, onlyUnacknowledged bool) ([]Notification, error)
+
+	// AcknowledgeNotification marks a notification as acknowledged.
+	// Returns ErrNotFound if the notification doesn't exist.
+	AcknowledgeNotification(ctx context.Context, id string) error
+
+	// AcknowledgeAllNotifications marks all notifications for a subscriber as acknowledged.
+	// No error on zero rows affected.
+	AcknowledgeAllNotifications(ctx context.Context, subscriberType, subscriberID string) error
+
+	// MarkNotificationDispatched marks a notification as dispatched.
+	// Returns ErrNotFound if the notification doesn't exist.
+	MarkNotificationDispatched(ctx context.Context, id string) error
+
+	// GetLastNotificationStatus returns the status of the most recent notification
+	// for a given subscription. Returns ("", nil) if no notifications exist.
+	GetLastNotificationStatus(ctx context.Context, subscriptionID string) (string, error)
 }

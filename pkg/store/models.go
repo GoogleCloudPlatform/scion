@@ -16,6 +16,7 @@
 package store
 
 import (
+	"strings"
 	"time"
 
 	"github.com/ptone/scion-agent/pkg/api"
@@ -478,6 +479,55 @@ const (
 	BrokerStatusOffline  = "offline"
 	BrokerStatusDegraded = "degraded"
 )
+
+// =============================================================================
+// Notifications (Agent Status Notification System)
+// =============================================================================
+
+// SubscriberType constants define what kind of entity receives notifications.
+const (
+	SubscriberTypeAgent = "agent"
+	SubscriberTypeUser  = "user"
+)
+
+// NotificationSubscription represents a subscription to agent status changes.
+type NotificationSubscription struct {
+	ID             string   `json:"id"`             // UUID primary key
+	AgentID        string   `json:"agentId"`        // Agent being watched
+	SubscriberType string   `json:"subscriberType"` // "agent" or "user"
+	SubscriberID   string   `json:"subscriberId"`   // Slug or ID of the subscriber
+	GroveID        string   `json:"groveId"`        // Grove scope
+	TriggerStatuses []string `json:"triggerStatuses"` // e.g. ["COMPLETED", "WAITING_FOR_INPUT"]
+	CreatedAt      time.Time `json:"createdAt"`
+	CreatedBy      string   `json:"createdBy"`
+}
+
+// MatchesStatus returns true if the given status matches any of the subscription's
+// trigger statuses. Comparison is case-insensitive.
+func (s *NotificationSubscription) MatchesStatus(status string) bool {
+	normalized := strings.ToUpper(status)
+	for _, trigger := range s.TriggerStatuses {
+		if strings.ToUpper(trigger) == normalized {
+			return true
+		}
+	}
+	return false
+}
+
+// Notification represents a notification record generated from a subscription match.
+type Notification struct {
+	ID             string    `json:"id"`             // UUID primary key
+	SubscriptionID string    `json:"subscriptionId"` // FK to NotificationSubscription
+	AgentID        string    `json:"agentId"`        // Agent that triggered the notification
+	GroveID        string    `json:"groveId"`
+	SubscriberType string    `json:"subscriberType"` // "agent" or "user"
+	SubscriberID   string    `json:"subscriberId"`
+	Status         string    `json:"status"`         // Trigger status (UPPER CASE)
+	Message        string    `json:"message"`
+	Dispatched     bool      `json:"dispatched"`     // Whether dispatch was attempted
+	Acknowledged   bool      `json:"acknowledged"`   // Whether acknowledged (for human targets)
+	CreatedAt      time.Time `json:"createdAt"`
+}
 
 // ListOptions provides pagination and filtering for list operations.
 type ListOptions struct {
