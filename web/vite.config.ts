@@ -27,6 +27,16 @@ function mockApiPlugin(): Plugin {
         name: 'mock-api',
         configureServer(server) {
             server.middlewares.use((req, res, next) => {
+                if (req.url === '/auth/me') {
+                    res.setHeader('Content-Type', 'application/json');
+                    res.statusCode = 200;
+                    res.end(JSON.stringify({
+                        id: 'dev-user',
+                        email: 'dev@scion.local',
+                        displayName: 'Dev User',
+                    }));
+                    return;
+                }
                 if (req.url === '/auth/providers') {
                     res.setHeader('Content-Type', 'application/json');
                     res.statusCode = 200;

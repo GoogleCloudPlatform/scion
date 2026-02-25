@@ -20,7 +20,7 @@
  * Handles client-side routing and real-time state management via SSE.
  */
 
-import type { PageData } from '../shared/types.js';
+import type { PageData, User } from '../shared/types.js';
 import { stateManager } from './state.js';
 
 // Import Shoelace base path config (needed for icons).
@@ -70,6 +70,29 @@ import '../components/pages/brokers.js';
 import '../components/pages/not-found.js';
 import '../components/pages/login.js';
 
+/** Current authenticated user, fetched once on init */
+let currentUser: User | null = null;
+
+/**
+ * Fetch the current authenticated user from the backend session.
+ * Returns null if not authenticated.
+ */
+async function fetchCurrentUser(): Promise<User | null> {
+  try {
+    const res = await fetch('/auth/me', { credentials: 'include' });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return {
+      id: data.id,
+      email: data.email,
+      name: data.displayName || data.name || '',
+      avatar: data.avatarUrl || data.avatar,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Route configuration mapping URL patterns to page component tag names
  */
@@ -101,6 +124,9 @@ async function init(): Promise<void> {
   const initialData = getInitialData();
   if (initialData) {
     console.info('[Scion] Initial page data:', initialData.path);
+    if (initialData.user) {
+      currentUser = initialData.user;
+    }
     if (initialData.data) {
       stateManager.hydrate(
         initialData.data as {
@@ -109,6 +135,11 @@ async function init(): Promise<void> {
         }
       );
     }
+  }
+
+  // Fetch current user from session if not provided by SSR
+  if (!currentUser) {
+    currentUser = await fetchCurrentUser();
   }
 
   // Wait for custom elements to be defined
@@ -198,8 +229,9 @@ function renderRoute(path: string): void {
     appContainer.appendChild(page);
   } else {
     // Wrapped pages render inside the app shell
-    const shell = document.createElement('scion-app') as HTMLElement & { currentPath: string };
+    const shell = document.createElement('scion-app') as HTMLElement & { currentPath: string; user: User | null };
     shell.currentPath = path;
+    shell.user = currentUser;
     const page = document.createElement(tag);
     shell.appendChild(page);
     appContainer.appendChild(shell);
