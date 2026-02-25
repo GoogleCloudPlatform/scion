@@ -69,7 +69,6 @@ Group=scion
 WorkingDirectory=%s
 EnvironmentFile=/home/scion/.scion/hub.env
 Environment=\"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"
-Environment=\"SCION_SERVER_AUTH_AUTHORIZEDDOMAINS=google.com\"
 # Use journald for log management
 StandardOutput=journal
 StandardError=journal
