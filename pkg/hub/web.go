@@ -123,6 +123,10 @@ type WebServerConfig struct {
 	AuthorizedDomains []string
 	// AdminEmails is the list of bootstrap admin emails (bypass domain check).
 	AdminEmails []string
+	// AdminMode restricts access to admin users only (maintenance mode).
+	AdminMode bool
+	// MaintenanceMessage is the custom message shown during admin mode.
+	MaintenanceMessage string
 }
 
 // WebServer serves the web frontend SPA shell and static assets.
@@ -1296,6 +1300,11 @@ func (ws *WebServer) buildHandler() http.Handler {
 
 	// Session auth middleware (innermost, checks session for protected routes)
 	handler = ws.sessionAuthMiddleware(handler)
+
+	// Admin mode middleware (after session auth, so session user is available)
+	if ws.config.AdminMode {
+		handler = ws.adminModeWebMiddleware(handler)
+	}
 
 	// Dev-auth middleware (auto-populates session when dev token configured)
 	handler = ws.devAuthMiddleware(handler)

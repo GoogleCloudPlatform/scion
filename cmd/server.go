@@ -283,6 +283,18 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		cfg.Storage.Provider = "gcs"
 	}
 
+	// Resolve admin mode settings from config and env vars.
+	// SCION_SERVER_ADMIN_MODE maps to admin.mode due to underscore splitting,
+	// so we read these env vars directly (consistent with SESSION_SECRET, BASE_URL, etc.).
+	adminMode := cfg.AdminMode
+	if v := os.Getenv("SCION_SERVER_ADMIN_MODE"); v != "" {
+		adminMode = v == "true" || v == "1" || v == "yes"
+	}
+	maintenanceMessage := cfg.MaintenanceMessage
+	if v := os.Getenv("SCION_SERVER_MAINTENANCE_MESSAGE"); v != "" {
+		maintenanceMessage = v
+	}
+
 	// Ensure global directory exists and settings are initialized.
 	// This is required for persisting the runtime broker identity.
 	globalDir, err := config.GetGlobalDir()
@@ -555,6 +567,8 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			HubEndpoint:           hubEndpoint,
 			SoftDeleteRetention:   cfg.Hub.SoftDeleteRetention,
 			SoftDeleteRetainFiles: cfg.Hub.SoftDeleteRetainFiles,
+			AdminMode:            adminMode,
+			MaintenanceMessage:   maintenanceMessage,
 			BrokerAuthConfig:     hub.DefaultBrokerAuthConfig(), // Enable broker HMAC authentication
 			OAuthConfig: hub.OAuthConfig{
 				Web: hub.OAuthClientConfig{
@@ -714,15 +728,17 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 
 		webCfg := hub.WebServerConfig{
-			Port:              webPort,
-			Host:              webHost,
-			AssetsDir:         webAssetsDir,
-			Debug:             enableDebug,
-			SessionSecret:     webSessionSecret,
-			BaseURL:           webBaseURL,
-			DevAuthToken:      devAuthToken,
-			AuthorizedDomains: webAuthorizedDomains,
-			AdminEmails:       webAdminEmails,
+			Port:               webPort,
+			Host:               webHost,
+			AssetsDir:          webAssetsDir,
+			Debug:              enableDebug,
+			SessionSecret:      webSessionSecret,
+			BaseURL:            webBaseURL,
+			DevAuthToken:       devAuthToken,
+			AuthorizedDomains:  webAuthorizedDomains,
+			AdminEmails:        webAdminEmails,
+			AdminMode:          adminMode,
+			MaintenanceMessage: maintenanceMessage,
 		}
 		webSrv = hub.NewWebServer(webCfg)
 

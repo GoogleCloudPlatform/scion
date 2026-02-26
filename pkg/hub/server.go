@@ -90,6 +90,10 @@ type ServerConfig struct {
 	SoftDeleteRetention time.Duration
 	// SoftDeleteRetainFiles controls whether workspace files are preserved during soft-delete.
 	SoftDeleteRetainFiles bool
+	// AdminMode restricts access to admin users only (maintenance mode).
+	AdminMode bool
+	// MaintenanceMessage is the custom message shown during admin mode.
+	MaintenanceMessage string
 }
 
 // DefaultServerConfig returns the default server configuration.
@@ -1007,6 +1011,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 		} else {
 			h = BrokerAuthMiddleware(s.brokerAuthService)(h)
 		}
+	}
+
+	// Apply admin mode middleware (after auth, so identity is available)
+	if s.config.AdminMode {
+		h = adminModeMiddleware(s.config.MaintenanceMessage)(h)
 	}
 
 	// Apply unified auth middleware

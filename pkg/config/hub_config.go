@@ -170,6 +170,10 @@ type GlobalConfig struct {
 	// Logging settings
 	LogLevel  string `json:"logLevel" yaml:"logLevel" koanf:"logLevel"`
 	LogFormat string `json:"logFormat" yaml:"logFormat" koanf:"logFormat"` // text, json
+
+	// Admin mode settings
+	AdminMode          bool   `json:"adminMode" yaml:"adminMode" koanf:"adminMode"`
+	MaintenanceMessage string `json:"maintenanceMessage" yaml:"maintenanceMessage" koanf:"maintenanceMessage"`
 }
 
 // SecretsConfig holds configuration for the secrets backend.
@@ -374,6 +378,8 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 		"secrets.gcpCredentials": defaults.Secrets.GCPCredentials,
 		"logLevel":               defaults.LogLevel,
 		"logFormat":              defaults.LogFormat,
+		"adminMode":              defaults.AdminMode,
+		"maintenanceMessage":     defaults.MaintenanceMessage,
 	}, "."), nil); err != nil {
 		return nil, err
 	}
@@ -491,6 +497,8 @@ func envKeyToConfigKey(envKey string) string {
 		"adminemails":       "adminEmails",
 		"gcpprojectid":      "gcpProjectId",
 		"gcpcredentials":    "gcpCredentials",
+		"adminmode":          "adminMode",
+		"maintenancemessage": "maintenanceMessage",
 	}
 
 	// Split by underscore, convert each part
