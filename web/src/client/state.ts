@@ -27,18 +27,20 @@
 
 import { SSEClient } from './sse-client.js';
 import type { SSEUpdateEvent } from './sse-client.js';
-import type { Agent, Grove } from '../shared/types.js';
+import type { Agent, Grove, RuntimeBroker } from '../shared/types.js';
 
 /** Subscription scope matches view context */
 export type ViewScope =
   | { type: 'dashboard' }
   | { type: 'grove'; groveId: string }
-  | { type: 'agent-detail'; groveId: string; agentId: string };
+  | { type: 'agent-detail'; groveId: string; agentId: string }
+  | { type: 'brokers-list' };
 
 /** Full in-memory state for the current scope */
 export interface AppState {
   agents: Map<string, Agent>;
   groves: Map<string, Grove>;
+  brokers: Map<string, RuntimeBroker>;
   deletedGroveIds: Set<string>;
   connected: boolean;
   scope: ViewScope | null;
@@ -48,6 +50,7 @@ export interface AppState {
 export type StateEventType =
   | 'agents-updated'
   | 'groves-updated'
+  | 'brokers-updated'
   | 'connected'
   | 'disconnected'
   | 'scope-changed';
@@ -56,6 +59,7 @@ export class StateManager extends EventTarget {
   private state: AppState = {
     agents: new Map(),
     groves: new Map(),
+    brokers: new Map(),
     deletedGroveIds: new Set(),
     connected: false,
     scope: null,
@@ -116,6 +120,7 @@ export class StateManager extends EventTarget {
     // Clear state from previous scope
     this.state.agents.clear();
     this.state.groves.clear();
+    this.state.brokers.clear();
     this.state.deletedGroveIds.clear();
 
     const subjects = this.subjectsForScope(scope);
@@ -144,12 +149,17 @@ export class StateManager extends EventTarget {
         // Keep grove subscription for breadcrumb/sidebar freshness.
         // Add agent-specific subscription for heavy events (harness output).
         return [`grove.${scope.groveId}.>`, `agent.${scope.agentId}.>`];
+
+      case 'brokers-list':
+        // All broker-scoped events: status changes
+        return ['broker.>'];
     }
   }
 
   private scopeEquals(a: ViewScope, b: ViewScope): boolean {
     if (a.type !== b.type) return false;
     if (a.type === 'dashboard' && b.type === 'dashboard') return true;
+    if (a.type === 'brokers-list' && b.type === 'brokers-list') return true;
     if (a.type === 'grove' && b.type === 'grove') return a.groveId === b.groveId;
     if (a.type === 'agent-detail' && b.type === 'agent-detail') {
       return a.groveId === b.groveId && a.agentId === b.agentId;
@@ -165,6 +175,14 @@ export class StateManager extends EventTarget {
   private handleUpdate(update: SSEUpdateEvent): void {
     const { subject, data } = update;
     const parts = subject.split('.');
+
+    // Broker-scoped events: broker.{brokerId}.{eventType}
+    if (parts[0] === 'broker' && parts.length >= 3) {
+      const brokerId = parts[1];
+      const eventType = parts[2];
+      this.handleBrokerEvent(brokerId, eventType, data);
+      return;
+    }
 
     // Agent-scoped events: agent.{agentId}.{eventType}
     if (parts[0] === 'agent' && parts.length >= 3) {
@@ -236,6 +254,21 @@ export class StateManager extends EventTarget {
     this.notify('groves-updated');
   }
 
+  private handleBrokerEvent(brokerId: string, eventType: string, data: unknown): void {
+    if (eventType === 'deleted') {
+      this.state.brokers.delete(brokerId);
+    } else {
+      // Merge delta into existing broker state
+      const existing = this.state.brokers.get(brokerId) || ({} as RuntimeBroker);
+      const delta = data as Partial<RuntimeBroker>;
+      // Map brokerId field from event payload to id
+      const id = (delta as Record<string, unknown>).brokerId as string || brokerId;
+      const updated = { ...existing, ...delta, id };
+      this.state.brokers.set(id, updated as RuntimeBroker);
+    }
+    this.notify('brokers-updated');
+  }
+
   private notify(event: StateEventType): void {
     this.dispatchEvent(new CustomEvent(event, { detail: this.state }));
   }
@@ -264,6 +297,14 @@ export class StateManager extends EventTarget {
 
   getGrove(id: string): Grove | undefined {
     return this.state.groves.get(id);
+  }
+
+  getBrokers(): RuntimeBroker[] {
+    return Array.from(this.state.brokers.values());
+  }
+
+  getBroker(id: string): RuntimeBroker | undefined {
+    return this.state.brokers.get(id);
   }
 
   getDeletedGroveIds(): Set<string> {

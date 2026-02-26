@@ -24,6 +24,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, RuntimeBroker } from '../../shared/types.js';
+import { stateManager } from '../../client/state.js';
 import '../shared/status-badge.js';
 
 @customElement('scion-page-brokers')
@@ -51,6 +52,9 @@ export class ScionPageBrokers extends LitElement {
    */
   @state()
   private error: string | null = null;
+
+  private boundOnBrokersUpdated = this.onBrokersUpdated.bind(this);
+  private relativeTimeInterval: ReturnType<typeof setInterval> | null = null;
 
   static override styles = css`
     :host {
@@ -252,6 +256,36 @@ export class ScionPageBrokers extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.loadBrokers();
+
+    // Subscribe to broker SSE events
+    stateManager.setScope({ type: 'brokers-list' });
+    stateManager.addEventListener('brokers-updated', this.boundOnBrokersUpdated as EventListener);
+
+    // Periodically re-render to keep relative timestamps fresh
+    this.relativeTimeInterval = setInterval(() => this.requestUpdate(), 15_000);
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    stateManager.removeEventListener(
+      'brokers-updated',
+      this.boundOnBrokersUpdated as EventListener
+    );
+    if (this.relativeTimeInterval) {
+      clearInterval(this.relativeTimeInterval);
+      this.relativeTimeInterval = null;
+    }
+  }
+
+  private onBrokersUpdated(): void {
+    const updatedBrokers = stateManager.getBrokers();
+    const brokerMap = new Map(this.brokers.map((b) => [b.id, b]));
+
+    for (const broker of updatedBrokers) {
+      brokerMap.set(broker.id, { ...brokerMap.get(broker.id), ...broker });
+    }
+
+    this.brokers = Array.from(brokerMap.values());
   }
 
   private async loadBrokers(): Promise<void> {
