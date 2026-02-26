@@ -1413,3 +1413,61 @@ func TestCreateAgentGroveSlugNotUsedWhenGrovePathSet(t *testing.T) {
 		t.Errorf("expected GrovePath %q, got %q", "/projects/my-local-grove/.scion", mgr.lastOpts.GrovePath)
 	}
 }
+
+func TestStartAgentGroveSlugResolvesGrovePath(t *testing.T) {
+	// When the startAgent handler receives groveSlug with no grovePath
+	// (hub-native grove), it should resolve GrovePath from the slug.
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	// Start uses the agent name from the URL path
+	body := `{"groveSlug": "my-hub-grove"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/hub-native-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+
+	if !mgr.startCalled {
+		t.Fatal("expected Start to be called")
+	}
+
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		t.Fatalf("failed to get global dir: %v", err)
+	}
+
+	expectedPath := filepath.Join(globalDir, "groves", "my-hub-grove")
+	if mgr.lastOpts.GrovePath != expectedPath {
+		t.Errorf("expected GrovePath %q, got %q", expectedPath, mgr.lastOpts.GrovePath)
+	}
+}
+
+func TestStartAgentGroveSlugNotUsedWhenGrovePathSet(t *testing.T) {
+	// When startAgent receives both grovePath and groveSlug,
+	// grovePath takes precedence.
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	body := `{"grovePath": "/projects/my-local-grove/.scion", "groveSlug": "my-hub-grove"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/local-grove-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+
+	if !mgr.startCalled {
+		t.Fatal("expected Start to be called")
+	}
+
+	// GrovePath should remain as explicitly provided, not overridden by GroveSlug
+	if mgr.lastOpts.GrovePath != "/projects/my-local-grove/.scion" {
+		t.Errorf("expected GrovePath %q, got %q", "/projects/my-local-grove/.scion", mgr.lastOpts.GrovePath)
+	}
+}

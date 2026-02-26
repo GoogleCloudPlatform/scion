@@ -101,7 +101,7 @@ func (c *HTTPRuntimeBrokerClient) CreateAgent(ctx context.Context, brokerID, bro
 
 // StartAgent starts an agent on a remote runtime broker.
 // Note: brokerID is unused in this unauthenticated client.
-func (c *HTTPRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, task, grovePath string) (*RemoteAgentResponse, error) {
+func (c *HTTPRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, task, grovePath, groveSlug string) (*RemoteAgentResponse, error) {
 	_ = brokerID // Unused in unauthenticated client
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/start", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
 
@@ -115,6 +115,9 @@ func (c *HTTPRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brok
 	}
 	if grovePath != "" {
 		payload["grovePath"] = grovePath
+	}
+	if groveSlug != "" {
+		payload["groveSlug"] = groveSlug
 	}
 
 	var body io.Reader
@@ -929,8 +932,19 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		}
 	}
 
+	// For hub-native groves (no git remote AND no local provider path on this
+	// broker), propagate the grove slug so the broker can resolve the workspace
+	// at the conventional path (~/.scion/groves/<slug>/).
+	var groveSlug string
+	if agent.GroveID != "" && grovePath == "" {
+		grove, err := d.store.GetGrove(ctx, agent.GroveID)
+		if err == nil && grove.GitRemote == "" {
+			groveSlug = grove.Slug
+		}
+	}
+
 	// Use agent name as identifier (runtime broker uses name or ID)
-	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Name, task, grovePath)
+	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Name, task, grovePath, groveSlug)
 	if err != nil {
 		return err
 	}

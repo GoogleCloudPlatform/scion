@@ -55,6 +55,7 @@ type mockRuntimeBrokerClient struct {
 	lastAgentID     string
 	lastTask        string
 	lastGrovePath   string
+	lastGroveSlug   string
 	lastMessage     string
 	lastInterrupt   bool
 	lastCreateReq   *RemoteCreateAgentRequest
@@ -84,13 +85,14 @@ func (m *mockRuntimeBrokerClient) CreateAgent(ctx context.Context, brokerID, bro
 	}, nil
 }
 
-func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, task, grovePath string) (*RemoteAgentResponse, error) {
+func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, task, grovePath, groveSlug string) (*RemoteAgentResponse, error) {
 	m.startCalled = true
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
 	m.lastTask = task
 	m.lastGrovePath = grovePath
+	m.lastGroveSlug = groveSlug
 	if m.returnErr != nil {
 		return nil, m.returnErr
 	}
@@ -963,6 +965,117 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_WithGroveProviderPath(t *testing
 	// Verify broker response was applied to the agent
 	if agent.Status != "running" {
 		t.Errorf("expected agent status 'running', got '%s'", agent.Status)
+	}
+	// With a local provider path, groveSlug should not be set
+	if mockClient.lastGroveSlug != "" {
+		t.Errorf("expected empty groveSlug when provider has local path, got %q", mockClient.lastGroveSlug)
+	}
+}
+
+func TestHTTPAgentDispatcher_DispatchAgentStart_HubNativeGrove(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	// Create a hub-native grove (no git remote)
+	grove := &store.Grove{
+		ID:   "grove-hub",
+		Name: "My Hub Grove",
+		Slug: "my-hub-grove",
+		// No GitRemote — this is a hub-native grove
+	}
+	if err := memStore.CreateGrove(ctx, grove); err != nil {
+		t.Fatalf("failed to create grove: %v", err)
+	}
+
+	// Create a runtime broker with no local provider path for this grove
+	broker := &store.RuntimeBroker{
+		ID:       "broker-1",
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false)
+
+	agent := &store.Agent{
+		ID:              "agent-hub-1",
+		Name:            "hub-agent",
+		Slug:            "hub-agent",
+		GroveID:         "grove-hub",
+		RuntimeBrokerID: "broker-1",
+	}
+
+	err := dispatcher.DispatchAgentStart(ctx, agent, "")
+	if err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+
+	if !mockClient.startCalled {
+		t.Fatal("expected StartAgent to be called")
+	}
+	// No local provider path — grovePath should be empty
+	if mockClient.lastGrovePath != "" {
+		t.Errorf("expected empty grovePath for hub-native grove, got %q", mockClient.lastGrovePath)
+	}
+	// GroveSlug should be set so the broker can resolve the path
+	if mockClient.lastGroveSlug != "my-hub-grove" {
+		t.Errorf("expected groveSlug 'my-hub-grove', got %q", mockClient.lastGroveSlug)
+	}
+}
+
+func TestHTTPAgentDispatcher_DispatchAgentStart_GroveSlugNotSetWhenHasGitRemote(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	// Create a grove with a git remote (not hub-native)
+	grove := &store.Grove{
+		ID:        "grove-git",
+		Name:      "Git Grove",
+		Slug:      "git-grove",
+		GitRemote: "https://github.com/user/repo.git",
+	}
+	if err := memStore.CreateGrove(ctx, grove); err != nil {
+		t.Fatalf("failed to create grove: %v", err)
+	}
+
+	broker := &store.RuntimeBroker{
+		ID:       "broker-1",
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false)
+
+	agent := &store.Agent{
+		ID:              "agent-git-1",
+		Name:            "git-agent",
+		Slug:            "git-agent",
+		GroveID:         "grove-git",
+		RuntimeBrokerID: "broker-1",
+	}
+
+	err := dispatcher.DispatchAgentStart(ctx, agent, "")
+	if err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+
+	if !mockClient.startCalled {
+		t.Fatal("expected StartAgent to be called")
+	}
+	// Grove has a git remote, so groveSlug should NOT be set
+	if mockClient.lastGroveSlug != "" {
+		t.Errorf("expected empty groveSlug for grove with git remote, got %q", mockClient.lastGroveSlug)
 	}
 }
 

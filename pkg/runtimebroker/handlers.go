@@ -817,10 +817,11 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
-	// Read optional task and grovePath from request body
+	// Read optional task, grovePath, and groveSlug from request body
 	var startReq struct {
 		Task      string `json:"task"`
 		GrovePath string `json:"grovePath"`
+		GroveSlug string `json:"groveSlug"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&startReq); err != nil {
@@ -828,7 +829,25 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id string) {
 		}
 	}
 
-	slog.Debug("startAgent called", "id", id, "task", startReq.Task, "grovePath", startReq.GrovePath)
+	slog.Debug("startAgent called", "id", id, "task", startReq.Task, "grovePath", startReq.GrovePath, "groveSlug", startReq.GroveSlug)
+
+	// For hub-native groves (GroveSlug set, no local provider path), resolve
+	// the conventional grove path (~/.scion/groves/<slug>/) so the agent is
+	// started in the correct location instead of the broker's local grove.
+	if startReq.GroveSlug != "" && startReq.GrovePath == "" {
+		globalDir, err := config.GetGlobalDir()
+		if err != nil {
+			RuntimeError(w, "Failed to get global dir: "+err.Error())
+			return
+		}
+		startReq.GrovePath = filepath.Join(globalDir, "groves", startReq.GroveSlug)
+		if s.config.Debug {
+			slog.Debug("Resolved hub-native grove path from slug in startAgent",
+				"slug", startReq.GroveSlug,
+				"path", startReq.GrovePath,
+			)
+		}
+	}
 
 	// Build start options
 	opts := api.StartOptions{
