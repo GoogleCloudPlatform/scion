@@ -22,6 +22,8 @@
 
 import { LitElement, html, css } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
+import { getStateDisplay } from '../../shared/agent-state-display.js';
+import type { StatusVariant } from '../../shared/agent-state-display.js';
 
 /**
  * Supported status types
@@ -60,21 +62,17 @@ export type StatusType =
  * Status configuration with variant and icon
  */
 interface StatusConfig {
-  variant: 'success' | 'warning' | 'danger' | 'primary' | 'neutral';
+  variant: StatusVariant;
   icon?: string;
+  emoji?: string;
   pulse?: boolean;
 }
 
-const STATUS_MAP: Record<StatusType, StatusConfig> = {
-  // Agent/Container statuses
-  running: { variant: 'success', icon: 'play-circle', pulse: false },
-  stopped: { variant: 'neutral', icon: 'stop-circle', pulse: false },
-  provisioning: { variant: 'warning', icon: 'hourglass-split', pulse: true },
-  cloning: { variant: 'warning', icon: 'arrow-down-circle', pulse: true },
-  starting: { variant: 'warning', icon: 'arrow-repeat', pulse: true },
-  stopping: { variant: 'warning', icon: 'arrow-repeat', pulse: true },
-  error: { variant: 'danger', icon: 'exclamation-triangle', pulse: false },
-
+/**
+ * Statuses that are NOT agent phases/activities (health, semantic, general).
+ * These don't have emoji since they aren't agent states.
+ */
+const NON_AGENT_STATUS_MAP: Partial<Record<StatusType, StatusConfig>> = {
   // Health statuses
   healthy: { variant: 'success', icon: 'check-circle', pulse: false },
   unhealthy: { variant: 'danger', icon: 'x-circle', pulse: false },
@@ -84,19 +82,6 @@ const STATUS_MAP: Record<StatusType, StatusConfig> = {
   active: { variant: 'success', icon: 'circle-fill', pulse: false },
   inactive: { variant: 'neutral', icon: 'circle', pulse: false },
 
-  // Agent lifecycle phase
-  created: { variant: 'neutral', icon: 'circle', pulse: false },
-
-  // Agent activity states
-  idle: { variant: 'success', icon: 'circle-fill', pulse: false },
-  thinking: { variant: 'primary', icon: 'lightning-charge', pulse: true },
-  executing: { variant: 'primary', icon: 'gear', pulse: true },
-  waiting_for_input: { variant: 'warning', icon: 'chat-dots', pulse: false },
-  completed: { variant: 'success', icon: 'check-circle', pulse: false },
-  limits_exceeded: { variant: 'danger', icon: 'exclamation-octagon', pulse: false },
-  stalled: { variant: 'warning', icon: 'hourglass-bottom', pulse: false },
-  offline: { variant: 'neutral', icon: 'wifi-off', pulse: false },
-
   // Semantic statuses
   success: { variant: 'success', pulse: false },
   warning: { variant: 'warning', pulse: false },
@@ -104,6 +89,26 @@ const STATUS_MAP: Record<StatusType, StatusConfig> = {
   info: { variant: 'primary', pulse: false },
   neutral: { variant: 'neutral', pulse: false },
 };
+
+/**
+ * Resolve a StatusType to its visual configuration.
+ * Agent phases/activities are looked up from the shared definition file;
+ * non-agent statuses use the local fallback map.
+ */
+function resolveStatusConfig(status: StatusType): StatusConfig {
+  // Try the shared agent-state definitions first
+  const stateDisplay = getStateDisplay(status);
+  if (stateDisplay.icon) {
+    return {
+      variant: stateDisplay.variant,
+      icon: stateDisplay.icon,
+      emoji: stateDisplay.emoji,
+      pulse: stateDisplay.pulse,
+    };
+  }
+  // Fall back to non-agent statuses
+  return NON_AGENT_STATUS_MAP[status] || { variant: 'neutral', pulse: false };
+}
 
 @customElement('scion-status-badge')
 export class ScionStatusBadge extends LitElement {
@@ -173,11 +178,18 @@ export class ScionStatusBadge extends LitElement {
       font-size: 0.875em;
     }
 
-    .badge.small sl-icon {
+    .badge .emoji {
+      font-size: 0.875em;
+      line-height: 1;
+    }
+
+    .badge.small sl-icon,
+    .badge.small .emoji {
       font-size: 0.75em;
     }
 
-    .badge.large sl-icon {
+    .badge.large sl-icon,
+    .badge.large .emoji {
       font-size: 1em;
     }
 
@@ -285,13 +297,17 @@ export class ScionStatusBadge extends LitElement {
   `;
 
   override render() {
-    const config = STATUS_MAP[this.status] || STATUS_MAP.neutral;
+    const config = resolveStatusConfig(this.status);
     const displayLabel = this.label || this.status;
     const shouldPulse = this.showPulse && config.pulse;
 
     return html`
       <span class="badge ${config.variant} ${this.size} ${shouldPulse ? 'pulse' : ''}">
-        ${this.showIcon && config.icon ? html`<sl-icon name="${config.icon}"></sl-icon>` : ''}
+        ${config.emoji
+          ? html`<span class="emoji">${config.emoji}</span>`
+          : this.showIcon && config.icon
+            ? html`<sl-icon name="${config.icon}"></sl-icon>`
+            : ''}
         ${displayLabel}
       </span>
     `;
