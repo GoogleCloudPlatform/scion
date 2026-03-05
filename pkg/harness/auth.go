@@ -161,3 +161,44 @@ func ValidateAuth(resolved *api.ResolvedAuth) error {
 
 	return nil
 }
+
+// RequiredAuthEnvKeys maps a (harnessName, authSelectedType) pair to the
+// env var key groups required by that combination. Each inner slice is a
+// set of alternatives — any one key satisfying the group is sufficient
+// (e.g., GEMINI_API_KEY or GOOGLE_API_KEY for gemini api-key auth).
+// Returns nil for unknown/unset combinations or harnesses with no
+// intrinsic auth requirements (e.g., generic).
+func RequiredAuthEnvKeys(harnessName, authSelectedType string) [][]string {
+	if authSelectedType == "" {
+		return nil
+	}
+
+	switch harnessName {
+	case "claude":
+		switch authSelectedType {
+		case "api-key":
+			return [][]string{{"ANTHROPIC_API_KEY"}}
+		case "vertex-ai":
+			return [][]string{{"GOOGLE_CLOUD_PROJECT"}, {"GOOGLE_CLOUD_REGION"}}
+		}
+	case "gemini":
+		switch authSelectedType {
+		case "api-key":
+			return [][]string{{"GEMINI_API_KEY", "GOOGLE_API_KEY"}}
+		case "vertex-ai":
+			return [][]string{{"GOOGLE_CLOUD_PROJECT"}}
+		}
+	case "opencode":
+		switch authSelectedType {
+		case "api-key":
+			return [][]string{{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}}
+		}
+	case "codex":
+		switch authSelectedType {
+		case "api-key":
+			return [][]string{{"CODEX_API_KEY", "OPENAI_API_KEY"}}
+		}
+	}
+
+	return nil
+}

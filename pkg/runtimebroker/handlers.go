@@ -30,6 +30,7 @@ import (
 	"github.com/ptone/scion-agent/pkg/api"
 	"github.com/ptone/scion-agent/pkg/config"
 	"github.com/ptone/scion-agent/pkg/gcp"
+	"github.com/ptone/scion-agent/pkg/harness"
 	"github.com/ptone/scion-agent/pkg/templatecache"
 )
 
@@ -1211,15 +1212,17 @@ func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id str
 }
 
 // extractRequiredEnvKeys determines the set of env keys required by the agent's
-// harness and settings profile. It uses a two-phase approach:
+// harness, auth type, and settings profile. It uses a multi-phase approach:
 //
-// Phase 1 (harness-aware): Resolves the active harness-config name, loads the
-// on-disk harness-config directory to determine the harness type and auth method,
-// then calls the harness's RequiredEnvKeys() method to get intrinsic requirements.
+// Phase 1 (auth-aware): Resolves the harness type and auth_selected_type from
+// on-disk harness-config and settings, then calls RequiredAuthEnvKeys() to get
+// intrinsic credential requirements for the (harness, authType) pair.
 //
 // Phase 2 (settings-based): Extracts keys with empty values from settings
 // harness_configs[*].env and profiles[*].env, allowing users to declare custom
 // env requirements.
+//
+// Phase 3 (secrets): Collects explicitly-declared secrets from settings and templates.
 func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[string]api.SecretKeyInfo) {
 	required := make(map[string]struct{})
 
@@ -1239,7 +1242,91 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 		profileName = settings.ActiveProfile
 	}
 
-	// Phase 1: Settings-based empty-value env key extraction
+	// Phase 1: Auth-aware env key extraction
+	// Resolve harness type and auth_selected_type, then derive required keys.
+	secretInfo := make(map[string]api.SecretKeyInfo)
+	harnessConfigName := s.resolveHarnessConfigName(req, settings)
+	if harnessConfigName != "" {
+		var harnessType, authType string
+
+		// Try on-disk harness-config directory first
+		if req.GrovePath != "" {
+			if hcDir, err := config.FindHarnessConfigDir(harnessConfigName, req.GrovePath); err == nil {
+				harnessType = hcDir.Config.Harness
+				authType = hcDir.Config.AuthSelectedType
+			}
+		}
+
+		// Settings harness_configs entry can provide/override
+		if settings != nil {
+			if hcfg, ok := settings.HarnessConfigs[harnessConfigName]; ok {
+				if harnessType == "" {
+					harnessType = hcfg.Harness
+				}
+				if authType == "" {
+					authType = hcfg.AuthSelectedType
+				}
+			}
+		}
+
+		// Profile harness_overrides can override auth type
+		if profileName != "" && settings != nil {
+			if profile, ok := settings.Profiles[profileName]; ok {
+				if override, ok := profile.HarnessOverrides[harnessConfigName]; ok {
+					if override.AuthSelectedType != "" {
+						authType = override.AuthSelectedType
+					}
+				}
+			}
+		}
+
+		// Template-level auth_selectedType takes highest precedence
+		if req.Config != nil && req.Config.Template != "" && req.GrovePath != "" {
+			if tmpl, err := config.FindTemplateInGrovePath(req.Config.Template, req.GrovePath); err == nil {
+				if cfg, err := tmpl.LoadConfig(); err == nil && cfg != nil && cfg.AuthSelectedType != "" {
+					authType = cfg.AuthSelectedType
+				}
+			}
+		}
+
+		// Resolve auth key groups and check satisfaction
+		if keyGroups := harness.RequiredAuthEnvKeys(harnessType, authType); len(keyGroups) > 0 {
+			// Build lookup of already-satisfied keys
+			envKeys := make(map[string]struct{})
+			for k, v := range req.ResolvedEnv {
+				if v != "" {
+					envKeys[k] = struct{}{}
+				}
+			}
+			for _, sec := range req.ResolvedSecrets {
+				if sec.Type == "environment" || sec.Type == "" {
+					envKeys[sec.Target] = struct{}{}
+				}
+			}
+
+			for _, group := range keyGroups {
+				satisfied := false
+				for _, key := range group {
+					if _, ok := envKeys[key]; ok {
+						satisfied = true
+						break
+					}
+					if brokerVal := os.Getenv(key); brokerVal != "" {
+						satisfied = true
+						break
+					}
+				}
+				if !satisfied {
+					// Add the canonical (first) key as required
+					canonicalKey := group[0]
+					required[canonicalKey] = struct{}{}
+					secretInfo[canonicalKey] = api.SecretKeyInfo{Source: "auth"}
+				}
+			}
+		}
+	}
+
+	// Phase 2: Settings-based empty-value env key extraction
 	if settings != nil {
 		// Get profile env keys
 		if profileName != "" && settings.Profiles != nil {
@@ -1270,15 +1357,16 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 		}
 	}
 
-	// Phase 2: Secrets declarations from settings and template
-	secretInfo := make(map[string]api.SecretKeyInfo)
+	// Phase 3: Secrets declarations from settings and template
 
-	// 2a: Settings-derived empty-value env keys are secret-eligible
+	// 3a: Settings-derived empty-value env keys are secret-eligible
 	for k := range required {
-		secretInfo[k] = api.SecretKeyInfo{Source: "settings"}
+		if _, exists := secretInfo[k]; !exists {
+			secretInfo[k] = api.SecretKeyInfo{Source: "settings"}
+		}
 	}
 
-	// 2b: Settings harness_configs[*].secrets
+	// 3b: Settings harness_configs[*].secrets
 	if settings != nil {
 		for _, hcfg := range settings.HarnessConfigs {
 			for _, sec := range hcfg.Secrets {

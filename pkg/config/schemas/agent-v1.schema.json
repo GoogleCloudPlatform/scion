@@ -90,6 +90,7 @@
     },
     "auth_selectedType": {
       "type": "string",
+      "enum": ["api-key", "auth-file", "vertex-ai"],
       "description": "Authentication mechanism to use (e.g., api-key, vertex-ai, auth-file)."
     },
     "hub": {

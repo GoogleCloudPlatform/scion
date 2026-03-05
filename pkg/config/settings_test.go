@@ -265,7 +265,7 @@ func TestMergeSettingsAuthSelectedType(t *testing.T) {
 	base := &Settings{
 		Harnesses: map[string]HarnessConfig{
 			"gemini": {
-				AuthSelectedType: "gemini-api-key",
+				AuthSelectedType: "api-key",
 			},
 		},
 	}

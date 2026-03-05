@@ -360,6 +360,70 @@ func TestGatherAuthWithEnv_NilOverlay(t *testing.T) {
 	}
 }
 
+func TestRequiredAuthEnvKeys(t *testing.T) {
+	tests := []struct {
+		name     string
+		harness  string
+		authType string
+		want     [][]string
+	}{
+		// Claude
+		{"claude api-key", "claude", "api-key", [][]string{{"ANTHROPIC_API_KEY"}}},
+		{"claude auth-file", "claude", "auth-file", nil},
+		{"claude vertex-ai", "claude", "vertex-ai", [][]string{{"GOOGLE_CLOUD_PROJECT"}, {"GOOGLE_CLOUD_REGION"}}},
+
+		// Gemini
+		{"gemini api-key", "gemini", "api-key", [][]string{{"GEMINI_API_KEY", "GOOGLE_API_KEY"}}},
+		{"gemini auth-file", "gemini", "auth-file", nil},
+		{"gemini vertex-ai", "gemini", "vertex-ai", [][]string{{"GOOGLE_CLOUD_PROJECT"}}},
+
+		// OpenCode
+		{"opencode api-key", "opencode", "api-key", [][]string{{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}}},
+		{"opencode auth-file", "opencode", "auth-file", nil},
+
+		// Codex
+		{"codex api-key", "codex", "api-key", [][]string{{"CODEX_API_KEY", "OPENAI_API_KEY"}}},
+		{"codex auth-file", "codex", "auth-file", nil},
+
+		// Generic
+		{"generic api-key", "generic", "api-key", nil},
+		{"generic vertex-ai", "generic", "vertex-ai", nil},
+
+		// Unknown/empty
+		{"empty harness", "", "api-key", nil},
+		{"empty auth type", "claude", "", nil},
+		{"both empty", "", "", nil},
+		{"unknown harness", "unknown", "api-key", nil},
+		{"unknown auth type", "claude", "unknown", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := RequiredAuthEnvKeys(tt.harness, tt.authType)
+			if tt.want == nil {
+				if got != nil {
+					t.Errorf("RequiredAuthEnvKeys(%q, %q) = %v, want nil", tt.harness, tt.authType, got)
+				}
+				return
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("RequiredAuthEnvKeys(%q, %q) returned %d groups, want %d", tt.harness, tt.authType, len(got), len(tt.want))
+			}
+			for i, group := range got {
+				if len(group) != len(tt.want[i]) {
+					t.Errorf("group %d: got %v, want %v", i, group, tt.want[i])
+					continue
+				}
+				for j, key := range group {
+					if key != tt.want[i][j] {
+						t.Errorf("group %d key %d: got %q, want %q", i, j, key, tt.want[i][j])
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestGatherAuthWithEnv_EmptyOverlayValueFallsThrough(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "process-gemini")
 

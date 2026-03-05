@@ -230,6 +230,7 @@
         },
         "auth_selected_type": {
           "type": "string",
+          "enum": ["api-key", "auth-file", "vertex-ai"],
           "description": "Authentication mechanism to use (e.g., api-key, vertex-ai, auth-file)."
         },
         "secrets": {
@@ -292,7 +293,10 @@
           "items": { "$ref": "#/$defs/volumeMount" }
         },
         "resources": { "$ref": "#/$defs/resourceSpec" },
-        "auth_selected_type": { "type": "string" }
+        "auth_selected_type": {
+          "type": "string",
+          "enum": ["api-key", "auth-file", "vertex-ai"]
+        }
       },
       "additionalProperties": false
     },

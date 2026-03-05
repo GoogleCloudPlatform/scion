@@ -189,10 +189,19 @@ func TestProvisionGeminiAgentSettings(t *testing.T) {
 		t.Fatalf("failed to unmarshal agent settings.json: %v", err)
 	}
 
-	security := settings["security"].(map[string]interface{})
-	auth := security["auth"].(map[string]interface{})
+	security, ok := settings["security"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected security block in settings.json")
+	}
+	auth, ok := security["auth"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected security.auth block in settings.json")
+	}
+	// The embed no longer hardcodes selectedType; Provision() sets it dynamically
+	// from the harness-config's auth_selected_type ("api-key"), mapped to the
+	// Gemini CLI internal format ("gemini-api-key").
 	if auth["selectedType"] != "gemini-api-key" {
-		t.Errorf("expected selectedType gemini-api-key, got %v", auth["selectedType"])
+		t.Errorf("expected selectedType gemini-api-key (mapped from api-key), got %v", auth["selectedType"])
 	}
 }
 

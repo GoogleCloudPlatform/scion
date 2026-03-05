@@ -1,9 +1,7 @@
 {
   "yolo": true,
   "security": {
-    "auth": {
-      "selectedType": "gemini-api-key"
-    },
+    "auth": {},
     "folderTrust": {
       "enabled": false
     }

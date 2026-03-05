@@ -2398,7 +2398,7 @@ profiles:
         tmux: true
         harness_overrides:
             gemini:
-                auth_selectedType: oauth-personal
+                auth_selectedType: auth-file
     remote:
         runtime: kubernetes
         tmux: true
@@ -2426,7 +2426,7 @@ profiles:
 
 	require.Contains(t, vs.Profiles, "local")
 	require.Contains(t, vs.Profiles["local"].HarnessOverrides, "gemini")
-	assert.Equal(t, "oauth-personal", vs.Profiles["local"].HarnessOverrides["gemini"].AuthSelectedType)
+	assert.Equal(t, "auth-file", vs.Profiles["local"].HarnessOverrides["gemini"].AuthSelectedType)
 
 	// Also verify the raw YAML contains snake_case, not camelCase
 	assert.Contains(t, string(newData), "auth_selected_type")

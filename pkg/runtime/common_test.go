@@ -80,7 +80,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 				Harness: &harness.GeminiCLI{},
 				Name:    "test-agent",
 				ResolvedAuth: &api.ResolvedAuth{
-					Method: "gemini-api-key",
+					Method: "api-key",
 					EnvVars: map[string]string{
 						"GEMINI_API_KEY":          "sk-123",
 						"GEMINI_DEFAULT_AUTH_TYPE": "gemini-api-key",
@@ -157,7 +157,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 				Harness: &harness.GeminiCLI{},
 				Name:    "test-agent",
 				ResolvedAuth: &api.ResolvedAuth{
-					Method: "gemini-api-key",
+					Method: "api-key",
 					EnvVars: map[string]string{
 						"GOOGLE_API_KEY":           "google-123",
 						"GOOGLE_CLOUD_PROJECT":     "my-project",
