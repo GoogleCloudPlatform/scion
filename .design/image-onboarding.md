@@ -238,12 +238,12 @@ This writes to `~/.scion/settings.yaml` (global) or `.scion/settings.yaml` (grov
 8. **Create `image-build/scripts/setup-cloud-build.sh`.** ✅
    - One-time GCP Artifact Registry setup (APIs, repo, IAM).
 
-### Phase 3: GitHub Actions
+### Phase 3: GitHub Actions ✅ DONE
 
-9. **Add `.github/workflows/build-images.yml`.**
+9. **Add `.github/workflows/build-images.yml`.** ✅
    - Reusable workflow for GHCR builds.
    - `workflow_dispatch` for manual triggers.
-   - Optionally add `workflow_call` for use as a reusable workflow in forks.
+   - `workflow_call` for use as a reusable workflow in forks.
 
 ### Phase 4: Documentation
 

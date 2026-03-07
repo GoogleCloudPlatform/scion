@@ -25,6 +25,7 @@ All image-related scripts live under `scripts/`. GitHub Actions workflows remain
 | `scripts/trigger-cloudbuild.sh` | Submit a build to Google Cloud Build |
 | `scripts/pull-containers.sh` | Pull pre-built images (auto-detects runtime) |
 | `scripts/setup-cloud-build.sh` | One-time GCP setup (APIs, Artifact Registry, permissions) |
+| `.github/workflows/build-images.yml` | GitHub Actions workflow for building and pushing images |
 
 ### Quick Start: Build Your Own Images
 
@@ -45,6 +46,15 @@ image-build/scripts/setup-cloud-build.sh --project my-project
 # Trigger a build
 image-build/scripts/trigger-cloudbuild.sh --project my-project
 ```
+
+### Quick Start: GitHub Actions (GHCR)
+
+1. Fork the repo.
+2. Go to **Actions** > **Build Scion Images** > **Run workflow**.
+3. Enter `ghcr.io/<your-username>` as the registry.
+4. Run `scion config set image_registry ghcr.io/<your-username>`.
+
+The workflow is also available as a reusable workflow via `workflow_call` for use in downstream repos.
 
 ## Cloud Build Configs
 
