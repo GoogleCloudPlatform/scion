@@ -1,3 +1,46 @@
+# Release Notes (Mar 7, 2026)
+
+This release marks a major leap in agent observability with the launch of the Cloud Log Viewer and structured messaging pipeline. It also introduces significant UI overhauls for agent management, enhanced GCP integration, and a new workstation-class daemon mode for the Scion server.
+
+## 🚀 Features
+* **Cloud Log Viewer & Structured Messaging (Phases 1-5):** Completed the end-to-end implementation of the Cloud Log Viewer and structured message pipeline. This includes a new Hub API for log retrieval, a dedicated "Messages" tab in the Web UI, and a multi-stage message broker adapter for reliable delivery and external notifications.
+* **Agent Detail UI Overhaul:** Re-architected the agent detail page into a high-density tabbed layout featuring dedicated "Status", "Configuration", and "Messages" tabs. Added a new telemetry configuration card, breadcrumb navigation improvements, and a back button for the configuration flow.
+* **Workstation & Daemon Management:** Introduced a workstation-optimized "daemon" mode for `scion server`. This allows the server to run as a persistent background process with integrated lifecycle management, simplified configuration, and automated combined-server detection for local brokers.
+* **GCP & Metrics Integration:** Enhanced Google Cloud visibility with a native Cloud Monitoring exporter, trace-log correlation across logging pipelines, and automated injection of `SCION_GROVE_ID` and GCP labels (agent/grove) into all log streams.
+* **Image Management & Build Automation:** Consolidated image build scripts and introduced support for custom `image_registry` settings. Added GitHub Actions workflows for automated building and delivery of Scion harness images.
+* **Security & Authorization Hardening:** Strengthened the security posture by enforcing per-agent authorization for workspace routes, mandatory read authorization for all resource endpoints, and nonce-based HMAC validation for broker communication.
+* **First-Run Experience:** Added a new `scion install` command and a streamlined first-run experience to simplify initial project setup and dependency verification.
+* **Bulk Operations:** Added a "Stop All" button to the Web UI for efficient bulk shutdown of all agents within a grove.
+* **Harness Capability Gating:** Introduced capability-based gating for advanced agent configuration, ensuring only supported features are exposed based on the selected harness.
+
+## 🐛 Fixes
+* **UI Performance & Reliability:** Optimized the agent detail page by parallelizing API fetches and eliminating redundant data loads. Resolved rendering issues in the messages tab and added handling for null entries in message logs.
+* **Auth & Environment Injection:** Fixed multiple issues with environment variable and profile injection, specifically resolving signing errors in combined-server mode and ensuring profile variables are applied before auth overlays.
+* **Runtime & Broker Stability:** Improved Podman error handling and force-deletion reliability. Fixed a bug where `agent-limits.json` lacked correct permissions after creation and ensured `InlineConfig` is correctly propagated during agent restarts.
+* **Logging Precision:** Established a dedicated HTTP request log stream using the standard `HttpRequest` format and removed misleading debug logs when running in GCP-native mode.
+* **Build System:** Fixed a race condition in `make all` by ensuring web assets are fully built before the Go binary compilation begins.
+
+# Release Notes (Mar 6, 2026)
+
+This release introduces Just-In-Time (JIT) agent configuration, an advanced agent creation interface, and native GCP telemetry integration, while centralizing profile management at the global level.
+
+## ⚠️ BREAKING CHANGES
+* **Global Profile Management:** Runtime `profiles` and `runtimes` are no longer supported in grove-level `settings.yaml`. These must now be managed exclusively at the global/broker level (`~/.scion/settings.yaml`). Existing grove-specific profiles must be migrated to the global configuration.
+
+## 🚀 Features
+* **Just-In-Time (JIT) Agent Configuration:** Completed Phases 1 & 2 of the inline agent configuration refactor. Agents now support dynamic, late-bound configuration overrides at runtime, enabling more flexible and adaptive agent behavior.
+* **Advanced Agent Creation Form:** Launched a comprehensive advanced configuration interface in the Web UI. This allows for granular control over agent parameters, including model selection, resource limits, and specific harness settings during creation.
+* **GCP-Native Telemetry Integration:** Introduced native support for Google Cloud Trace and Cloud Logging telemetry exporters. The system now automatically detects GCP credentials and configures the appropriate exporter mode, facilitating seamless observability in Google Cloud environments.
+* **Enhanced Developer Workflow:** Improved the developer experience with automated mounting of the `sciontool` binary and a dedicated `SCION_DEV_BINARIES` directory, enabling rapid iteration and testing of local changes within agent containers.
+* **Branding & UI Refresh:** Updated the application branding with a new seedling logo and favicon, and added detailed visibility of the resolved harness authentication method in the agent detail view.
+* **Local Networking Automation:** Automated the computation of the `ContainerHubEndpoint` for Podman and Docker when running in combined hub-broker mode, simplifying local setup and networking.
+
+## 🐛 Fixes
+* **Telemetry & Auth Propagation:** Resolved several issues where telemetry settings, harness authentication, and configuration overrides were not consistently propagated through all broker and agent startup paths.
+* **Agent Lifecycle Stability:** Fixed a bug where provisioning agents were not correctly cleaned up after an aborted environment-gathering session.
+* **Claude Harness Authentication:** Corrected Vertex AI authentication detection for the Claude harness when using file-based secrets.
+* **Data Integrity:** Fixed a bug in the advanced agent creation form where the applied configuration was not correctly populated with resolved values.
+
 # Release Notes (Mar 5, 2026)
 
 This release introduces a major overhaul of the agent authentication pipeline, automated token refresh, and critical stability fixes for container removal and terminal reliability.
