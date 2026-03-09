@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# hack/gce-certs.sh - Setup Cloud DNS and obtain Let's Encrypt certificates
+# scripts/starter-hub/gce-certs.sh - Setup Cloud DNS and obtain Let's Encrypt certificates
 
 set -euo pipefail
 

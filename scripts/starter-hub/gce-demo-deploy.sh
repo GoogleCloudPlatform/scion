@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# hack/gce-demo-deploy.sh - One-stop deployment for the Scion Demo Hub
+# scripts/starter-hub/gce-demo-deploy.sh - One-stop deployment for the Scion Demo Hub
 
 set -euo pipefail
 
@@ -22,22 +22,22 @@ echo "=== Scion Demo Full Deployment ==="
 # Step 1: Provision Infrastructure
 echo ""
 echo "--- Step 1: Provisioning Infrastructure ---"
-./hack/gce-demo-provision.sh
+./scripts/starter-hub/gce-demo-provision.sh
 
 # Step 2: Telemetry Service Account
 echo ""
 echo "--- Step 2: Creating Telemetry Service Account ---"
-./hack/gce-demo-telemetry-sa.sh
+./scripts/starter-hub/gce-demo-telemetry-sa.sh
 
 # Step 3: Setup Repository
 echo ""
 echo "--- Step 3: Setting up Repository ---"
-./hack/gce-demo-setup-repo.sh
+./scripts/starter-hub/gce-demo-setup-repo.sh
 
 # Step 4: Build and Start Hub
 echo ""
 echo "--- Step 4: Building and Starting Hub ---"
-./hack/gce-start-hub.sh --full
+./scripts/starter-hub/gce-start-hub.sh --full
 
 echo ""
 echo "=== Full Deployment Complete ==="

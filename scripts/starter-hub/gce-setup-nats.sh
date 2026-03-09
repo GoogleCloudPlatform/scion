@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# hack/gce-setup-nats.sh - Setup NATS Server with systemd on GCE demo instance
+# scripts/starter-hub/gce-setup-nats.sh - Setup NATS Server with systemd on GCE demo instance
 #
 # ARCHIVED: This script is superseded by the in-process ChannelEventPublisher
 # (pkg/hub/events.go). The Go binary now handles real-time event distribution

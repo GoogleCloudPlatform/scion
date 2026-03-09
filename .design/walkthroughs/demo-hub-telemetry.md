@@ -18,7 +18,7 @@ local development telemetry QA, see [telemetry-gcp.md](telemetry-gcp.md).
 - GCP project `deploy-demo-test` (or your target project)
 - `gcloud` CLI installed and authenticated with project access
 - SSH access to the `scion-demo` instance (`gcloud compute ssh scion-demo --zone us-central1-a`)
-- The instance was provisioned with `hack/gce-demo-provision.sh`
+- The instance was provisioned with `scripts/starter-hub/gce-demo-provision.sh`
 
 ---
 
@@ -164,14 +164,14 @@ itself.
 ### 2.1 Environment variables
 
 The following environment variables control Hub-side telemetry. They should
-be managed in the `hub.env` file (see `hack/hub.env.example` for the
+be managed in the `hub.env` file (see `scripts/starter-hub/hub.env.example` for the
 template). The systemd unit loads this file via
 `EnvironmentFile=/home/scion/.scion/hub.env`.
 
 To set up, copy the example and fill in values:
 
 ```bash
-cp hack/hub.env.example .scratch/hub.env
+cp scripts/starter-hub/hub.env.example .scratch/hub.env
 # Edit .scratch/hub.env with your values
 ```
 
@@ -221,7 +221,7 @@ EOF
 '
 ```
 
-Alternatively, re-run `hack/gce-start-hub.sh` which will upload your local
+Alternatively, re-run `scripts/starter-hub/gce-start-hub.sh` which will upload your local
 `.scratch/hub.env` and regenerate the systemd unit.
 
 ### 2.3 Verify Hub telemetry initialized
@@ -480,9 +480,9 @@ gcloud compute ssh scion-demo --zone us-central1-a --command '
 
 | Script | Purpose |
 |--------|---------|
-| `hack/gce-demo-provision.sh` | Create GCE instance with APIs and IAM roles |
-| `hack/gce-start-hub.sh` | Build, deploy, and start Hub with OTEL config |
-| `hack/hub.env.example` | Template for `.scratch/hub.env` |
+| `scripts/starter-hub/gce-demo-provision.sh` | Create GCE instance with APIs and IAM roles |
+| `scripts/starter-hub/gce-start-hub.sh` | Build, deploy, and start Hub with OTEL config |
+| `scripts/starter-hub/hub.env.example` | Template for `.scratch/hub.env` |
 
 ---
 

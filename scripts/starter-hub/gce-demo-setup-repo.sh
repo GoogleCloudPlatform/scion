@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# hack/gce-demo-setup-repo.sh - Setup SSH deploy key and clone the repo on GCE
+# scripts/starter-hub/gce-demo-setup-repo.sh - Setup SSH deploy key and clone the repo on GCE
 
 set -euo pipefail
 

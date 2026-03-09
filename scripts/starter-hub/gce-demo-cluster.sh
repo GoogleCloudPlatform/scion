@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# hack/gce-demo-cluster.sh - Create or delete a GKE Autopilot cluster for Scion Demo
+# scripts/starter-hub/gce-demo-cluster.sh - Create or delete a GKE Autopilot cluster for Scion Demo
 
 set -euo pipefail
 

@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# hack/gce-start-hub.sh - Build and start Scion Hub on GCE with Caddy Reverse Proxy
+# scripts/starter-hub/gce-start-hub.sh - Build and start Scion Hub on GCE with Caddy Reverse Proxy
 #
-# Usage: hack/gce-start-hub.sh [--full] [--reset-db]
+# Usage: scripts/starter-hub/gce-start-hub.sh [--full] [--reset-db]
 #
 #   Default (fast): push → pull → build → restart → health check
 #   --full:         Also uploads config files, installs Caddy, updates systemd/Caddy

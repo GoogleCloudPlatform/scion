@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# hack/gce-demo-telemetry-sa.sh - Create GCP service account for agent telemetry export
+# scripts/starter-hub/gce-demo-telemetry-sa.sh - Create GCP service account for agent telemetry export
 #
 # Creates a dedicated, least-privilege service account for writing telemetry
 # data (traces, logs, metrics) to Google Cloud Observability. A JSON key is
@@ -21,8 +21,8 @@
 # system.
 #
 # Usage:
-#   ./hack/gce-demo-telemetry-sa.sh          # Create SA, grant roles, download key
-#   ./hack/gce-demo-telemetry-sa.sh delete    # Remove SA and local key file
+#   ./scripts/starter-hub/gce-demo-telemetry-sa.sh          # Create SA, grant roles, download key
+#   ./scripts/starter-hub/gce-demo-telemetry-sa.sh delete    # Remove SA and local key file
 #
 # The key file is written to .scratch/telemetry-gcp-credentials.json
 # (git-ignored). It should be uploaded to the Hub as a file-type secret named

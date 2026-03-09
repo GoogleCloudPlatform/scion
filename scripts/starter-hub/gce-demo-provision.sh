@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# hack/gce-demo-provision.sh - Provision or delete a GCE VM for Scion Demo
+# scripts/starter-hub/gce-demo-provision.sh - Provision or delete a GCE VM for Scion Demo
 
 set -euo pipefail
 
@@ -23,7 +23,7 @@ FIREWALL_RULE="scion-demo-allow-http-https"
 REGION=${REGION:-"us-central1"}
 ZONE=${ZONE:-"us-central1-a"}
 PROJECT_ID=$(gcloud config get-value project 2>/dev/null)
-CLOUD_INIT_FILE="hack/gce-demo-cloud-init.yaml"
+CLOUD_INIT_FILE="scripts/starter-hub/gce-demo-cloud-init.yaml"
 
 if [[ -z "$PROJECT_ID" ]]; then
     echo "Error: PROJECT_ID is not set and could not be determined from gcloud config."
@@ -57,13 +57,13 @@ function delete_resources() {
     fi
 
     # Optional Cluster deletion
-    if [[ -f "hack/gce-demo-cluster.sh" ]]; then
-        ./hack/gce-demo-cluster.sh delete
+    if [[ -f "scripts/starter-hub/gce-demo-cluster.sh" ]]; then
+        ./scripts/starter-hub/gce-demo-cluster.sh delete
     fi
 
     # Telemetry SA deletion
-    if [[ -f "hack/gce-demo-telemetry-sa.sh" ]]; then
-        ./hack/gce-demo-telemetry-sa.sh delete
+    if [[ -f "scripts/starter-hub/gce-demo-telemetry-sa.sh" ]]; then
+        ./scripts/starter-hub/gce-demo-telemetry-sa.sh delete
     fi
 
     echo "=== Deletion Complete ==="
@@ -190,7 +190,7 @@ gcloud compute instances create "${INSTANCE_NAME}" \
 
 # Cluster creation
 if [[ "${CREATE_CLUSTER:-}" == "true" ]]; then
-    ./hack/gce-demo-cluster.sh
+    ./scripts/starter-hub/gce-demo-cluster.sh
 fi
 
 echo ""

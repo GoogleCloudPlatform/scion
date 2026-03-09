@@ -11,9 +11,7 @@ Developer convenience scripts for local development, testing, and infrastructure
 | `smoke_test.sh` | Run basic functionality smoke tests |
 | `test_auth.sh` / `test_oauth.sh` | Test authentication flows |
 | `run-claude.sh` | Run the Claude harness locally |
-| `gce-demo-deploy.sh` | One-stop deployment for the Scion Demo Hub |
-| `gce-demo-telemetry-sa.sh` | Create/delete the GCP telemetry service account and key |
-| `gce-demo-*.sh` | Provision and configure GCE demo instances and clusters |
+| ~~`gce-demo-*.sh`~~ | Moved to [`scripts/starter-hub/`](../scripts/starter-hub/) |
 | `create-cluster.sh` | Create a Kubernetes cluster |
 | `merge-work.sh` | Merge agent work branches |
 | `version.sh` | Display version information |

@@ -45,7 +45,7 @@ gcloud auth application-default login --project "$GCP_PROJECT"
 
 For CI or remote brokers, use a service account with the `roles/cloudtrace.agent`
 and `roles/monitoring.metricWriter` roles (this matches the `scion-demo-sa`
-created by `hack/gce-demo-provision.sh`):
+created by `scripts/starter-hub/gce-demo-provision.sh`):
 
 ```bash
 gcloud iam service-accounts create scion-demo-sa \
