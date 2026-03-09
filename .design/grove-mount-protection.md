@@ -1,7 +1,8 @@
 # Grove Mount Protection: Agent Isolation from `.scion` Directory
 
-**Status**: Proposal / Open for Review
+**Status**: Accepted
 **Date**: 2026-03-08
+**Updated**: 2026-03-09
 
 ## Problem Statement
 
@@ -43,24 +44,86 @@ Workspace:   <path>                     →  /workspace       (bind mount, rw)
 
 ---
 
-## Proposed Approaches
+## Decisions
 
-### Approach 1: Externalize Grove Data (Non-Git Groves)
+### Storage Architecture
 
-Move grove state out of the project directory entirely for non-git groves.
+**Non-git groves**: Externalize grove data entirely (Approach 1).
+
+**Git groves**: Split storage — worktrees stay in-repo, agent homes move external (Approach 2). This has the advantage that `.scion/templates/` with custom project templates can be committed to git.
+
+### Directory Layout
+
+All `.scion` configuration folders (other than the special global `~/.scion/`) are stored externally:
+
+```
+~/.scion/grove-configs/<grove-slug>__<short-uuid>/.scion/    # All grove configs
+~/.scion/groves/<grove-name>/                                 # Hub-native workspaces only (pure workspace holder)
+```
+
+This separation means `~/.scion/groves/` is a "pure" workspaces directory, and all configs are isolated from workspace content — whether those workspaces are hub-native (created via hub→broker) or linked by a user from the broker filesystem to a hub.
+
+### Grove Path Naming
+
+Use `<grove-slug>__<short-uuid>` format for grove-config paths. The short-uuid must be sufficient to route from a marker file to the correct location in `~/.scion/grove-configs/` space.
+
+### Marker File Format
+
+For non-git groves, `.scion` becomes a YAML file (without extension) containing:
+
+```yaml
+grove-id: <uuid>
+grove-name: my-project
+grove-slug: my-project
+```
+
+- `grove-name`: Based on the current working directory name
+- `grove-slug`: Slugified version of the name
+- `grove-id`: Hub/global UUID (consistent across brokers for linked groves)
+
+### Settings File
+
+The `settings.yaml` file in `~/.scion/grove-configs/<grove-slug>__<short-uuid>/.scion/` must include a `workspace-path` field. This is the path stored in the broker provider record so that a broker server knows what workspace to mount for a linked grove.
+
+### UUID Source
+
+The UUID is a hub/global UUID. Linked groves on different brokers all share the same UUID. A grove-broker combo is constrained to be 1:1 with a hub for now.
+
+### Migration Strategy
+
+This is a hard breaking change. If an older-style folder grove is detected, bail and print an error directing the user to reinitialize. Mark migration-check code with a TODO for removal at a later release date.
+
+### Orphan Cleanup
+
+Use the existing `scion grove` command group:
+- `scion grove prune` — clean up orphaned grove configs
+- `scion grove reconnect` — re-establish the workspace path in settings.yaml if a linked grove was moved
+
+### Hub API Consolidation
+
+Audit and ensure that all in-container CLI operations use the Hub API (via `SCION_HUB_ENDPOINT`), eliminating filesystem access to grove data. This makes mount-level protections defense-in-depth rather than the primary control. **This is a separate phase of work.**
+
+### Local Mode
+
+Support behavioral differences in CLI when `hub.enabled` is true vs false. Local mode is supported but may have weaker isolation guarantees.
+
+---
+
+## Approach Details
+
+### Non-Git Groves: Externalized Grove Data
+
+Move grove state out of the project directory entirely.
 
 **Mechanism:**
 
 When `scion init` runs in a non-git project:
 
-1. Generate a UUID for the grove
-2. Create grove data directory at `~/.scion/groves/<uuid>/.scion/` (agents, templates, settings)
-3. Write a **marker file** at `<project>/.scion` (not a directory) containing:
-   ```yaml
-   grove-id: <uuid>
-   grove-name: my-project
-   ```
-4. The container mounts only the project directory; the `.scion` marker file is inert
+1. Generate a UUID for the grove (hub-sourced when hub is available)
+2. Create grove config directory at `~/.scion/grove-configs/<grove-slug>__<short-uuid>/.scion/` (agents, templates, settings)
+3. Write `workspace-path` to `settings.yaml` in the grove config
+4. Write a **marker file** at `<project>/.scion` (not a directory) containing the YAML fields above
+5. The container mounts only the project directory; the `.scion` marker file is inert
 
 **Code impact:**
 
@@ -70,48 +133,38 @@ The following functions in `pkg/config/paths.go` check `info.IsDir()` and would 
 - `RequireGrovePath()` (line 231)
 - `GetEnclosingGrovePath()` (line 261)
 
-These would need to: detect `.scion` as a file, parse the grove-id, and resolve to `~/.scion/groves/<uuid>/.scion/`.
+These would need to: detect `.scion` as a file, parse the grove-id/slug, and resolve to `~/.scion/grove-configs/<grove-slug>__<short-uuid>/.scion/`.
 
 Additionally affected:
 - `GetProjectAgentsDir()` / `GetProjectTemplatesDir()` — must follow the indirection
 - `InitProject()` in `pkg/config/init.go` — rewrite to create file + external directory
-- `GetGroveName()` — currently slugifies the parent directory; would need to read the marker file or continue deriving from the project directory name
+- `GetGroveName()` — read from the marker file or derive from the project directory name
 
-**Pros:**
-- Complete isolation: no sensitive data in the project directory
-- Unifies with the hub-native grove model (already uses `~/.scion/groves/`)
-- Container mount of the workspace is inherently safe
+### Git Groves: Split Storage
 
-**Cons:**
-- Breaking change requiring a migration path for existing groves
-- When `rm -rf <project>`, the `~/.scion/groves/<uuid>/` data is orphaned (needs cleanup tooling)
-- UUIDs in filesystem paths are not human-friendly (consider `<slug>-<short-uuid>` as compromise)
-
-### Approach 2: Split Storage for Git Groves
-
-For git-based groves, worktrees must remain inside the repo (they rely on `--relative-paths` for container mounting). The `.scion` directory cannot be fully externalized. Instead, split it:
+For git-based groves, worktrees must remain inside the repo (they rely on `--relative-paths` for container mounting). The `.scion` directory stays as a directory but agent homes move external.
 
 **Mechanism:**
 
 ```
 <repo>/.scion/                      (gitignored, remains a directory)
-├── config.yaml                     settings, templates, grove config
+├── config.yaml                     settings, grove config
 ├── settings.yaml
-├── templates/
+├── templates/                      custom templates (committable to git)
 ├── grove-id                        file with UUID for cross-referencing
 └── agents/
     └── <name>/
         └── workspace/              git worktree (relative paths work)
 
-~/.scion/groves/<uuid>/             (external, never mounted into containers)
+~/.scion/grove-configs/<grove-slug>__<short-uuid>/   (external, never mounted into containers)
 └── agents/
     └── <name>/
         └── home/                   agent home with secrets
 ```
 
 - **Worktree mechanics** stay in `<repo>/.scion/agents/<name>/workspace/` (because git relative paths require this)
-- **Agent homes with secrets** move to `~/.scion/groves/<uuid>/agents/<name>/home/`
-- The `config.HomeDir` in `RunConfig` already points to a specific path independent of workspace — changing it from `.scion/agents/<name>/home` to `~/.scion/groves/<uuid>/agents/<name>/home` is straightforward
+- **Agent homes with secrets** move to `~/.scion/grove-configs/<grove-slug>__<short-uuid>/agents/<name>/home/`
+- The `config.HomeDir` in `RunConfig` already points to a specific path independent of workspace — changing it from `.scion/agents/<name>/home` to the external path is straightforward
 
 **Code impact:**
 
@@ -120,89 +173,119 @@ For git-based groves, worktrees must remain inside the repo (they rely on `--rel
 - Agent deletion (`pkg/agent/delete.go`): Must clean up both locations
 - `scion list`: Must reconcile state from two directories
 
-**Pros:**
-- Worktree compatibility preserved
-- Agent homes (with secrets) completely outside the repo mount
-- Git-based protection (gitignore) remains as defense-in-depth for config/templates
+---
 
-**Cons:**
-- Split-brain: grove state in two locations complicates lifecycle management
-- On multi-broker setups, `~/.scion/groves/<uuid>` would have different UUIDs on different machines for the same grove
-- More complex cleanup on agent deletion
+## Implementation Phases
 
-### Approach 3: Mount-Level Exclusion (Simpler Alternative for Git Groves)
+### Phase 1: Mount-Level Quick Fix (Immediate)
 
-Instead of splitting directories, fix the mount logic to never expose `.scion/` to containers.
+Close the active vulnerability with minimal code changes while the structural work is planned and implemented.
 
-**Mechanism:**
+**Scope:**
+- Modify `buildCommonRunArgs()` in `pkg/runtime/common.go` to add a tmpfs shadow mount over `.scion/` when the full repo root is mounted:
+  ```
+  --mount type=tmpfs,destination=/repo-root/.scion
+  ```
+- Enforce `.scion` in `.gitignore` during `scion init` for git repos
+- Add a startup warning if `.scion` is not gitignored when starting agents
 
-1. **Eliminate the full-repo fallback**: In `buildCommonRunArgs()` (`common.go:156-172`), always mount only `.git` + workspace, never the entire repo root. Adjust paths so git operations work with separated mounts.
+**Deliverables:**
+- Updated `pkg/runtime/common.go` with tmpfs shadow mount
+- Updated `pkg/config/init.go` with gitignore enforcement
+- Tests for mount argument generation
 
-2. **Shadow mount for safety**: When the full repo root must be mounted (if eliminating the fallback proves infeasible), add a tmpfs overlay:
-   ```
-   --mount type=tmpfs,destination=/repo-root/.scion
-   ```
-   This shadows the `.scion/` bind mount content with an empty tmpfs, making it invisible inside the container.
+### Phase 2: Externalize Non-Git Groves
 
-3. **Require `.scion` in `.gitignore`**: Enforce during `scion init` for git repos. Warn or error if `.scion` is not gitignored when starting agents.
+Implement the marker-file approach for non-git groves, creating the `grove-configs` external directory structure.
 
-**Code impact:**
-- `pkg/runtime/common.go`: Modify the fallback branch (lines 165-172) or add tmpfs shadow mount
-- `pkg/config/init.go`: Add `.gitignore` validation/enforcement
-- Potentially `pkg/agent/run.go`: Add validation before agent start
+**Scope:**
+- Implement marker file creation in `InitProject()` for non-git groves
+- Update path resolution functions in `pkg/config/paths.go` to handle file-marker indirection
+- Create `~/.scion/grove-configs/<grove-slug>__<short-uuid>/.scion/` directory structure
+- Add `workspace-path` to `settings.yaml` schema
+- Add old-style grove detection with hard error and TODO for removal
+- Update agent provisioning to use external home paths for non-git groves
 
-**Pros:**
-- Minimal code change — fixes the mount logic rather than restructuring storage
-- No migration needed for existing groves
-- No split-brain directory management
+**Deliverables:**
+- Updated `pkg/config/paths.go` with marker file resolution
+- Updated `pkg/config/init.go` with external grove creation
+- Updated `pkg/agent/provision.go` for external home paths
+- Updated settings schema with `workspace-path`
+- Migration error detection
+- Tests for marker file resolution and external grove lifecycle
 
-**Cons:**
-- Defense depends on mount configuration correctness (not structural)
-- `.gitignore` is a convention, not a hard guarantee (agents could modify it, history could contain `.scion/`)
-- Non-git workspaces still need a different solution (Approach 1)
+### Phase 3: Split Storage for Git Groves
+
+Move agent homes out of the repo `.scion/` directory for git-based groves while keeping worktrees in-repo.
+
+**Scope:**
+- Generate and store `grove-id` in `<repo>/.scion/grove-id` during init
+- Create `~/.scion/grove-configs/<grove-slug>__<short-uuid>/` for git groves
+- Move agent home provisioning to external path
+- Update agent deletion to clean up both locations
+- Update `scion list` to reconcile split state
+- Ensure templates remain in `<repo>/.scion/templates/` (committable)
+
+**Deliverables:**
+- Updated `pkg/config/init.go` with grove-id generation for git groves
+- Updated `pkg/agent/provision.go` for split home paths
+- Updated `pkg/agent/delete.go` for dual-location cleanup
+- Updated listing/reconciliation logic
+- Tests for split storage lifecycle
+
+### Phase 4: Grove Management Commands
+
+Add CLI commands for grove lifecycle management.
+
+**Scope:**
+- `scion grove prune` — detect and clean up orphaned grove configs in `~/.scion/grove-configs/`
+- `scion grove reconnect` — update `workspace-path` in settings.yaml when a linked grove has moved
+- `scion grove list` — show all known groves with their status and paths
+
+**Deliverables:**
+- New commands in `cmd/`
+- Grove registry/discovery logic
+- Tests for prune and reconnect scenarios
+
+### Phase 5: Hub API Consolidation (Separate Work Session)
+
+Audit and ensure all in-container CLI operations route through the Hub API, eliminating filesystem-based grove data access from within containers.
+
+**Scope:**
+- Audit `sciontool` commands for filesystem access to grove data
+- Route all state queries through `SCION_HUB_ENDPOINT`
+- Support behavioral differences based on `hub.enabled`
+- Mount-level protections become defense-in-depth
+
+**Deliverables:**
+- Audited and updated `sciontool` command set
+- Hub API coverage for all in-container operations
+- Tests for hub-enabled vs hub-disabled behavior
 
 ---
 
 ## Comparison Matrix
 
-| Concern | Approach 1 (Externalize Non-Git) | Approach 2 (Split Git) | Approach 3 (Mount Exclusion) |
-|---|---|---|---|
-| Non-git grove protection | Strong | N/A | Partial (needs tmpfs shadow) |
-| Git grove protection | N/A | Strong | Medium (mount-dependent) |
-| Code complexity | Medium (~10 resolution sites) | Medium (provisioning + cleanup) | Low (~1-2 files) |
-| Breaking change | Yes (migration needed) | Yes (home relocation) | No |
-| Hub model convergence | Good (unifies with hub-native) | Partial | None |
-| Defense model | Structural (data not present) | Structural (data not present) | Configurational (data masked) |
-| Multi-broker compat | UUID divergence issue | UUID divergence issue | No issue |
+| Concern | Non-Git (Externalize) | Git (Split Storage) |
+|---|---|---|
+| Protection model | Strong — data not in project dir | Strong — homes not in repo mount |
+| Worktree compatibility | N/A | Preserved (worktrees stay in-repo) |
+| Code complexity | Medium (~10 resolution sites) | Medium (provisioning + cleanup) |
+| Template committability | Templates in external config | Templates in `.scion/templates/` (in git) |
+| Hub model convergence | Good (unifies with hub-native) | Partial |
+| Defense model | Structural (data not present) | Structural (data not present) |
 
 ---
 
-## Recommended Combination
+## Open Questions (Resolved)
 
-These approaches are not mutually exclusive. A layered strategy:
-
-1. **Approach 3 (Mount Exclusion)** — Implement immediately as a low-effort fix. Eliminate the full-repo fallback mount or add tmpfs shadow. This closes the active vulnerability without breaking changes.
-
-2. **Approach 1 (Externalize Non-Git)** — Implement for non-git groves as a structural improvement. This aligns with the hub-native grove model and provides strong isolation by design.
-
-3. **Approach 2 (Split Git) vs Approach 3 (Mount Exclusion)** — For git groves, evaluate whether the structural split (Approach 2) is worth the complexity over the simpler mount-level fix (Approach 3). The mount fix may be sufficient given that git worktrees already exclude `.scion/` from the working tree.
-
----
-
-## Open Questions
-
-1. **UUID vs slug for grove paths**: Hub-native groves currently use slugs (`~/.scion/groves/<slug>/`). Should externalized linked groves also use slugs (risk of collision) or UUIDs (ugly paths)? A hybrid like `<slug>-<short-uuid>` could work.
-
-2. **Marker file format**: Should `.scion` as a file be plain text (`grove-id: <uuid>`) or structured YAML? YAML is more extensible but heavier for a single field.
-
-3. **Migration path**: Existing groves have `.scion/` as a directory with active agents. A `scion upgrade` or `scion migrate` command would be needed. Should this be automatic on first CLI invocation or explicit?
-
-4. **Orphan cleanup**: When `.scion` is a marker file and the project directory is deleted, `~/.scion/groves/<uuid>/` is orphaned. Options: periodic GC, `scion prune`, or a grove registry that tracks liveness.
-
-5. **Multi-broker UUID divergence**: If grove data lives at `~/.scion/groves/<uuid>/` on each broker, different brokers would have different UUIDs for the same grove. Should the UUID come from the Hub (consistent) or be generated locally? Hub-sourced UUIDs require Hub connectivity during init.
-
-6. **Git history exposure**: Even with `.gitignore`, if `.scion/` was ever committed, it remains in git objects. Should `scion init` check for this and warn? Should agents be prevented from running `git show` on paths under `.scion/`?
-
-7. **Hub API consolidation**: The scion CLI inside containers (`sciontool`) already routes most operations through the Hub API via `SCION_HUB_ENDPOINT`. Should we audit and ensure that *all* in-container CLI operations use the API, eliminating any need for filesystem access to grove data? This would make the mount-level protections defense-in-depth rather than the primary control.
-
-8. **Local (non-hub) mode**: Approaches 1-3 all work without a Hub. But if we pursue API consolidation (question 7), local mode would need a lightweight local API server or accept weaker isolation. Is local mode a first-class security target?
+| Question | Resolution |
+|---|---|
+| UUID vs slug for grove paths | Use `<grove-slug>__<short-uuid>` hybrid |
+| Marker file format | YAML without extension; includes `grove-name`, `grove-slug`, `grove-id` |
+| Migration path | Hard breaking change; bail with error on old-style groves; TODO for removal |
+| Orphan cleanup | `scion grove prune` and `scion grove reconnect` |
+| Multi-broker UUID divergence | Not an issue — UUID is hub/global, shared across brokers |
+| Git history exposure | Not a concern — not using mount-only approach for git groves |
+| Hub API consolidation | Yes, but in Phase 5 as a separate work session |
+| Local mode | Support via `hub.enabled` behavioral differences |
