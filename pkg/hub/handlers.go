@@ -3507,6 +3507,12 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 			resources[i] = brokerResource(&result.Items[i])
 		}
 		caps = s.authzService.ComputeCapabilitiesBatch(ctx, ident, resources, "broker")
+		// Auto-provide brokers grant dispatch to all authenticated users.
+		for i, broker := range result.Items {
+			if broker.AutoProvide && i < len(caps) && !capabilityAllows(caps[i], ActionDispatch) {
+				caps[i].Actions = append(caps[i].Actions, string(ActionDispatch))
+			}
+		}
 	}
 
 	// If filtering by groveId, include grove-specific provider data (like localPath)
@@ -3705,6 +3711,10 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: *broker}
 	if ident := GetIdentityFromContext(ctx); ident != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, ident, brokerResource(broker))
+		// Auto-provide brokers grant dispatch to all authenticated users.
+		if broker.AutoProvide && !capabilityAllows(resp.Cap, ActionDispatch) {
+			resp.Cap.Actions = append(resp.Cap.Actions, string(ActionDispatch))
+		}
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -3821,6 +3831,11 @@ func (s *Server) checkBrokerDispatchAccess(ctx context.Context, w http.ResponseW
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return false
+	}
+	// Auto-provide brokers are shared infrastructure (e.g. a combo hub-broker
+	// server's default broker) and are dispatchable by any authenticated user.
+	if broker.AutoProvide {
+		return true
 	}
 	decision := s.authzService.CheckAccess(ctx, userIdent, brokerResource(broker), ActionDispatch)
 	if !decision.Allowed {
@@ -6763,9 +6778,14 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 
 // canDispatchToBroker checks whether the current user has dispatch permission on a broker
 // without writing an HTTP response. Returns true if allowed (or if no user identity is present).
+// Auto-provide brokers are dispatchable by any authenticated user since they are
+// shared infrastructure (e.g. a combo hub-broker server's default broker).
 func (s *Server) canDispatchToBroker(ctx context.Context, broker *store.RuntimeBroker) bool {
 	userIdent := GetUserIdentityFromContext(ctx)
 	if userIdent == nil {
+		return true
+	}
+	if broker.AutoProvide {
 		return true
 	}
 	decision := s.authzService.CheckAccess(ctx, userIdent, brokerResource(broker), ActionDispatch)

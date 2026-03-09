@@ -185,6 +185,27 @@ func TestBrokerAuthz_Dispatch_NonOwnerDenied(t *testing.T) {
 	assert.NotEqual(t, http.StatusCreated, rec.Code)
 }
 
+func TestBrokerAuthz_Dispatch_AutoProvide_NonOwnerAllowed(t *testing.T) {
+	srv, s, _, bob, _, grove, broker := setupBrokerAuthzTest(t)
+	ctx := context.Background()
+
+	// Mark the broker as auto-provide — shared infrastructure available to all users
+	broker.AutoProvide = true
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+	// Bob (not the broker owner) should be allowed to dispatch on an auto-provide broker.
+	// The request may fail downstream (no dispatcher), but NOT with 403 or "no broker available".
+	rec := doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:    "dispatch-autoprovide-test",
+		GroveID: grove.ID,
+	})
+	assert.NotEqual(t, http.StatusForbidden, rec.Code,
+		"non-owner should not get 403 on auto-provide broker; got: %s", rec.Body.String())
+	// Should not get "no broker available" either — the auto-provide broker should be selected
+	assert.NotEqual(t, http.StatusServiceUnavailable, rec.Code,
+		"auto-provide broker should be available to non-owner; got: %s", rec.Body.String())
+}
+
 func TestBrokerAuthz_Dispatch_AdminBypass(t *testing.T) {
 	srv, _, _, _, admin, grove, _ := setupBrokerAuthzTest(t)
 
@@ -286,6 +307,30 @@ func TestBrokerAuthz_Capabilities_OwnerSeesDispatch(t *testing.T) {
 		"owner should see 'update' in capabilities")
 	assert.Contains(t, resp.Cap.Actions, "delete",
 		"owner should see 'delete' in capabilities")
+}
+
+func TestBrokerAuthz_Capabilities_AutoProvide_NonOwnerSeesDispatch(t *testing.T) {
+	srv, s, _, bob, _, _, broker := setupBrokerAuthzTest(t)
+	ctx := context.Background()
+
+	// Mark the broker as auto-provide
+	broker.AutoProvide = true
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+	rec := doRequestAsUser(t, srv, bob, http.MethodGet,
+		"/api/v1/runtime-brokers/"+broker.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp RuntimeBrokerWithCapabilities
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.NotNil(t, resp.Cap, "capabilities should be present")
+	assert.Contains(t, resp.Cap.Actions, "dispatch",
+		"non-owner should see 'dispatch' on auto-provide broker")
+	// Non-owner should still NOT see update/delete
+	assert.NotContains(t, resp.Cap.Actions, "update",
+		"non-owner should NOT see 'update' even on auto-provide broker")
+	assert.NotContains(t, resp.Cap.Actions, "delete",
+		"non-owner should NOT see 'delete' even on auto-provide broker")
 }
 
 func TestBrokerAuthz_Capabilities_NonOwnerNoDispatch(t *testing.T) {
