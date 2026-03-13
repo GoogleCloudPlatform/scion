@@ -1,3 +1,96 @@
+# Release Notes (Mar 12, 2026)
+
+This release focuses on enhancing persistent storage and system observability. It introduces **Grove Shared Directories**, enabling agents within a grove to share and persist mutable state via the filesystem (with native Kubernetes support). Additionally, the metrics pipeline has been significantly enriched with labels for harness type, model, and grove ID, providing deeper insights into agent performance and costs.
+
+## 🚀 Features
+* **Grove Shared Directories (Phase 1 & 2):** Introduced a persistent, mutable storage layer shared between agents within a single grove.
+    * Added support for both local filesystem storage and Kubernetes PersistentVolumeClaims (PVCs) with grove-scoped lifecycle management.
+    * New CLI commands added: `scion shared-dir list`, `create`, `remove`, and `info` for managing shared volumes.
+    * Shared volumes can be mounted at standard paths (`/scion-volumes/<name>`) or within the workspace (`/workspace/.scion-volumes/<name>`) (consolidated from commits 838b1b9, a8d50f8, 8b860c0).
+* **Enhanced Telemetry & Metrics Pipeline:** Major overhaul of the metrics pipeline for improved observability and aggregation.
+    * Enriched OTel resource attributes with `scion.harness`, `scion.model`, `scion.broker`, and `grove_id`.
+    * Expanded Codex-specific telemetry to capture tool usage, tool input/output, and detailed token counts (input, output, cached).
+    * Injected `SCION_HARNESS` and `SCION_MODEL` environment variables into agent containers to enable harness-aware telemetry (consolidated from commit 8246a76).
+
+## 🐛 Fixes
+* **Metrics & Telemetry Reliability:**
+    * Resolved an issue where tool and API metrics were not recorded from unpaired end events.
+    * Corrected the wiring of token and model metrics in the hook-to-OTel pipeline (consolidated from commits 2a64f02, 43f1bf0).
+* **Agent Lifecycle & Configuration:**
+    * Corrected an issue where custom branch names were not properly passed during the final environment setup path of agent creation (commit 46eee6d).
+    * Updated the default model configuration for the Codex harness to `gpt-5.4` (commit fbfc950).
+* **Maintenance:** Fixed broken documentation links in the repository README (commit 0f55876).
+
+# Release Notes (Mar 11, 2026)
+
+This release focuses on improving agent lifecycle flexibility and enhancing the web-based terminal experience. It introduces support for targeting specific git branches during agent creation and provides better visibility into template versions, alongside critical fixes for runtime stability and authentication.
+
+## 🚀 Features
+* **Custom Branch Targeting:** Added a branch name field to the agent creation flow and enabled cloning of agent branches from origin. This allows users to direct agents to specific branches immediately upon creation, improving workflow flexibility (consolidated from commits 182c323, 2d50def, 11c36a8).
+* **Web Terminal & Tmux Interactivity:** Introduced a tmux mouse toggle (via `C-b m`) and a toolbar button in the web terminal. This release also resolves persistent copy-paste issues in the web interface and adds comprehensive documentation for terminal options (consolidated from commits 9a41138, 9371859, 616250a).
+* **Enhanced Template Traceability:** Updated the CLI and Web UI to display template IDs and hashes, providing clear visibility into the exact configuration version associated with each agent.
+
+## 🐛 Fixes
+* **Runtime & Broker Stability:**
+    * **Podman Reliability:** Resolved an issue where Podman containers would fail to restart correctly from the Hub or Broker.
+    * **Double-Daemonization:** Prevented the broker from double-daemonizing during start or restart operations.
+* **Agent Attachment Reliability:** Added a readiness check for tmux sessions before attachment, ensuring more reliable connections when attaching to running agents.
+* **Authentication & Secret Injection:** Corrected a bug where environment-type secrets were not properly injected into the execution environment during authentication resolution.
+* **Grove & Workspace Management:**
+    * **Multi-Hub Compatibility:** Fixed a regression where git-based groves were incorrectly rejected in multi-hub environments.
+    * **Cleanup & Resolution:** Improved hub-native grove path resolution during agent deletion and enhanced detection of orphaned grove configurations.
+* **Configuration & Compatibility:**
+    * **Legacy Key Support:** Updated `config get` to support legacy v1 settings keys like `image_registry`.
+    * **Fallback Logic:** Improved `env-gather` and harness configuration to correctly fall back to global settings when local context is missing.
+* **Documentation & Polish:** Performed final pre-launch polish on philosophical documentation and refined the agent creation UX by defaulting runtime profiles to "Use broker default."
+
+# Release Notes (Mar 10, 2026)
+
+This release focuses on streamlining system administration and enhancing visibility into agent operations. It introduces a comprehensive Web-based server configuration editor and a native runtime profile selector for agent creation, alongside critical improvements to telemetry reliability and Hub connectivity.
+
+## 🚀 Features
+* **Web Admin Server Configuration Editor:** Launched a full-featured settings editor at `/admin/server-config` (admin-only). This allows administrators to view and modify the global `settings.yaml` through the Web UI with support for tabbed navigation, sensitive field masking, and hot-reloading of key settings like log levels, telemetry defaults, and admin emails.
+* **Runtime Profile Selector:** Added a dynamic profile selector to the agent creation form. After selecting a broker, users can now choose from the available runtime profiles defined on that broker, simplifying execution environment selection.
+* **Standardized Issue & Feedback Templates:** Introduced official bug report and feature request templates to the repository to improve the quality and consistency of community contributions.
+
+## 🐛 Fixes
+* **Telemetry Configuration Reliability:** Corrected an issue where the telemetry opt-in checkbox on the agent configuration page wouldn't correctly reflect the global settings defaults.
+* **Hub Connectivity Precision:** Enhanced agent startup logic to prioritize Hub-dispatched endpoints over local broker configuration, ensuring correct Hub communication in distributed and multi-hub environments.
+* **Logging Observability & Traceability:**
+    * **Agent Lifecycle Traceability:** Added `agent_id` to all broker-side agent lifecycle log events to improve cross-traceability and audit capabilities.
+    * **Connectivity Debugging:** Stopped redacting `SCION_HUB_ENDPOINT` and `SCION_HUB_URL` in agent environment logs to facilitate easier debugging of connectivity issues.
+* **Documentation & Licensing:** Restructured internal documentation for improved clarity, updated the installation guide, and completed the application of standard license headers across all source files.
+
+# Release Notes (Mar 9, 2026)
+
+This release marks a significant milestone with the official transition of the project to the Google Cloud Platform organization, including a full module rename. It also introduces critical enhancements for agent autonomy with the enablement of the Scion CLI inside agent containers, alongside major improvements to administrative observability and real-time event reliability.
+
+## ⚠️ BREAKING CHANGES
+* **Project Rebranding & Module Rename:** The Go module has been renamed from `github.com/ptone/scion-agent` to `github.com/GoogleCloudPlatform/scion`. All internal package imports and external references have been updated to reflect the transition to the Google Cloud Platform organization.
+
+## 🚀 Features
+* **Autonomous In-Container CLI:** Enabled the Scion CLI within agent containers, providing agents with the ability to interact with the Hub API natively using their provisioned authenticated service context.
+* **Admin User Activity Tracking:** Introduced "Last Seen" timestamps and sortable columns to the Admin Users dashboard to improve system administration and audit capabilities.
+* **Enhanced Event Integrity:** Refined the Server-Sent Event (SSE) pipeline to ensure full agent snapshots are sent in `created` events, preventing incomplete UI states during high-concurrency creation.
+
+## 🐛 Fixes
+* **Log Query Precision:** Optimized agent log retrieval by filtering out internal HTTP request logs from the primary agent cloud logging view.
+* **Infrastructure & Connectivity:**
+    * Prioritized public Hub endpoints for production dispatches, reducing reliance on local network bridges.
+    * Implemented defensive fallbacks for Hub environment variables within agent containers.
+    * Resolved IAM role assignment issues for Hub service accounts.
+* **UI/UX Consistency:**
+    * Enforced name slugification across all CLI and Web input boundaries to prevent routing collisions.
+    * Eliminated "white-flash" artifacts during OAuth redirects for users in dark mode.
+    * Implemented automatic scrolling to error banners on form submissions.
+    * Switched to SPA-native navigation for terminal back-links, improving navigation responsiveness.
+* **System Stability:**
+    * Resolved directory creation and path resolution bugs in split-storage (git-grove) configurations.
+    * Fixed `lstat` errors for non-existent grove configuration files in containerized environments.
+    * Corrected image registry resolution logic to prevent redundant prompts when already configured.
+    * Resolved test failures across four critical categories on the main branch.
+* **Harness Improvements:** Refined the Codex harness with improved configuration formatting and support for sandbox/bypass-approval flags.
+
 # Release Notes (Mar 8, 2026)
 
 This release delivers a complete maturation of the Kubernetes runtime, introduces significant architectural enhancements for agent isolation and security, and drastically improves Web UI performance with optimistic updates and connection pooling.
@@ -314,7 +407,7 @@ This period focused heavily on unifying the Hub API and Web Server architectures
 ## 🚀 Features
 * **Web Frontend Enhancements:** Added a new Brokers list page, implemented full client-side routing for the Vite dev server, and unified OAuth provider detection via a new `/auth/providers` endpoint.
 * **Agent Environment:** Added support for injecting harness-specific telemetry and hub environment variables directly into agent containers based on grove settings.
-* **Git Operations:** Added cloning status indicators and improved git clone config parity during grove-scoped agent creation.
+* **Git Operations:** Added cloning status indicators and improved git_clone config parity during grove-scoped agent creation.
 
 ## 🐛 Fixes
 * **Real-time UI Updates:** Fixed the Server-Sent Events (SSE) format to ensure real-time UI updates correctly broadcast agent state changes.
