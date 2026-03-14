@@ -17,7 +17,11 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
+	"strings"
+	"syscall"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/spf13/cobra"
@@ -452,6 +456,115 @@ func runSettingsMigration() error {
 	return migrationErr
 }
 
+var configDirCmd = &cobra.Command{
+	Use:   "dir",
+	Short: "Print the path to the grove config directory",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		if err != nil {
+			return err
+		}
+		if isJSONOutput() {
+			return outputJSON(map[string]string{"path": projectDir})
+		}
+		fmt.Println(projectDir)
+		return nil
+	},
+}
+
+var configCdConfigCmd = &cobra.Command{
+	Use:   "cd-config",
+	Short: "Open a shell in the grove config directory",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		if err != nil {
+			return err
+		}
+		return execShellInDir(projectDir)
+	},
+}
+
+var configCdGroveCmd = &cobra.Command{
+	Use:   "cd-grove",
+	Short: "Open a shell in the grove workspace directory",
+	Long: `Open a shell in the grove workspace directory.
+
+For external groves (non-git), navigates to the workspace path stored in settings.
+For git groves, navigates to the project root (parent of the .scion directory).`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		if err != nil {
+			return err
+		}
+
+		workspacePath, err := resolveGroveWorkspace(projectDir)
+		if err != nil {
+			return err
+		}
+
+		return execShellInDir(workspacePath)
+	},
+}
+
+// resolveGroveWorkspace returns the workspace path for a grove given its config dir.
+// For external groves (under ~/.scion/grove-configs/), the workspace path is read from settings.
+// For git groves, the workspace is the parent directory of the .scion config dir.
+func resolveGroveWorkspace(configDir string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	groveConfigsDir := filepath.Join(home, config.GlobalDir, "grove-configs")
+
+	if strings.HasPrefix(configDir, groveConfigsDir) {
+		// External grove — workspace path is recorded in settings
+		settings, err := config.LoadSettings(configDir)
+		if err != nil {
+			return "", fmt.Errorf("failed to load grove settings: %w", err)
+		}
+		if settings.WorkspacePath == "" {
+			return "", fmt.Errorf("no workspace path found in grove settings; the grove may be orphaned")
+		}
+		if _, err := os.Stat(settings.WorkspacePath); err != nil {
+			return "", fmt.Errorf("workspace path does not exist: %s", settings.WorkspacePath)
+		}
+		return settings.WorkspacePath, nil
+	}
+
+	// Git grove — workspace is the project root (parent of .scion dir)
+	parent := filepath.Dir(configDir)
+	if _, err := os.Stat(parent); err != nil {
+		return "", fmt.Errorf("grove workspace does not exist: %s", parent)
+	}
+	return parent, nil
+}
+
+// execShellInDir changes to the given directory and replaces the current process
+// with a new interactive shell session.
+func execShellInDir(dir string) error {
+	if err := os.Chdir(dir); err != nil {
+		return fmt.Errorf("error changing directory to '%s': %v", dir, err)
+	}
+
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "bash"
+	}
+
+	shellPath, err := exec.LookPath(shell)
+	if err != nil {
+		if _, statErr := os.Stat("/bin/bash"); statErr == nil {
+			shellPath = "/bin/bash"
+		} else if _, statErr := os.Stat("/bin/sh"); statErr == nil {
+			shellPath = "/bin/sh"
+		} else {
+			return fmt.Errorf("error finding shell '%s': %v", shell, err)
+		}
+	}
+
+	return syscall.Exec(shellPath, []string{shell}, os.Environ())
+}
+
 func init() {
 	rootCmd.AddCommand(configCmd)
 	configCmd.AddCommand(configListCmd)
@@ -459,6 +572,9 @@ func init() {
 	configCmd.AddCommand(configGetCmd)
 	configCmd.AddCommand(configValidateCmd)
 	configCmd.AddCommand(configMigrateCmd)
+	configCmd.AddCommand(configDirCmd)
+	configCmd.AddCommand(configCdConfigCmd)
+	configCmd.AddCommand(configCdGroveCmd)
 
 	configSetCmd.Flags().BoolVar(&configGlobal, "global", false, "Set configuration globally (~/.scion/settings.json)")
 	configMigrateCmd.Flags().BoolVar(&configMigrateDryRun, "dry-run", false, "Preview changes without writing files")
