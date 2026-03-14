@@ -1843,18 +1843,14 @@ func newAgentDispatcherAdapter(mgr agent.Manager, s store.Store, brokerID string
 // DispatchAgentCreate implements hub.AgentDispatcher.
 // It starts the agent on the runtime broker and updates the hub store with runtime info.
 func (d *agentDispatcherAdapter) DispatchAgentCreate(ctx context.Context, hubAgent *store.Agent) error {
-	// Look up the local path for this grove on this runtime broker
-	var grovePath string
-	if hubAgent.GroveID != "" && d.brokerID != "" {
-		provider, err := d.store.GetGroveProvider(ctx, hubAgent.GroveID, d.brokerID)
-		if err != nil {
-			log.Printf("Warning: failed to get grove provider for path lookup: %v", err)
-		} else if provider.LocalPath != "" {
-			grovePath = provider.LocalPath
-		}
-	}
-
+	grovePath := d.resolveGrovePath(ctx, hubAgent.GroveID)
 	opts := d.buildStartOptions(hubAgent, grovePath, false)
+
+	// Ensure grove ID label is present for tracking
+	if hubAgent.Labels == nil {
+		hubAgent.Labels = make(map[string]string)
+	}
+	hubAgent.Labels["scion.grove"] = hubAgent.GroveID
 
 	// Start the agent on the runtime broker
 	agentInfo, err := d.manager.Start(ctx, opts)
@@ -1880,17 +1876,14 @@ func (d *agentDispatcherAdapter) DispatchAgentCreate(ctx context.Context, hubAge
 // DispatchAgentStart implements hub.AgentDispatcher.
 // For co-located runtime brokers, this resumes a stopped agent.
 func (d *agentDispatcherAdapter) DispatchAgentStart(ctx context.Context, hubAgent *store.Agent, task string) error {
-	var grovePath string
-	if hubAgent.GroveID != "" && d.brokerID != "" {
-		provider, err := d.store.GetGroveProvider(ctx, hubAgent.GroveID, d.brokerID)
-		if err != nil {
-			log.Printf("Warning: failed to get grove provider for path lookup: %v", err)
-		} else if provider.LocalPath != "" {
-			grovePath = provider.LocalPath
-		}
-	}
-
+	grovePath := d.resolveGrovePath(ctx, hubAgent.GroveID)
 	opts := d.buildStartOptions(hubAgent, grovePath, true)
+
+	// Ensure grove ID label is present for tracking
+	if hubAgent.Labels == nil {
+		hubAgent.Labels = make(map[string]string)
+	}
+	hubAgent.Labels["scion.grove"] = hubAgent.GroveID
 	if task != "" {
 		opts.Task = task
 	}
@@ -1942,17 +1935,14 @@ func (d *agentDispatcherAdapter) DispatchAgentRestart(ctx context.Context, hubAg
 		log.Printf("Warning: failed to stop agent during restart: %v", err)
 	}
 
-	var grovePath string
-	if hubAgent.GroveID != "" && d.brokerID != "" {
-		provider, err := d.store.GetGroveProvider(ctx, hubAgent.GroveID, d.brokerID)
-		if err != nil {
-			log.Printf("Warning: failed to get grove provider for path lookup: %v", err)
-		} else if provider.LocalPath != "" {
-			grovePath = provider.LocalPath
-		}
-	}
-
+	grovePath := d.resolveGrovePath(ctx, hubAgent.GroveID)
 	opts := d.buildStartOptions(hubAgent, grovePath, true)
+
+	// Ensure grove ID label is present for tracking
+	if hubAgent.Labels == nil {
+		hubAgent.Labels = make(map[string]string)
+	}
+	hubAgent.Labels["scion.grove"] = hubAgent.GroveID
 
 	agentInfo, err := d.manager.Start(ctx, opts)
 	if err != nil {
@@ -1980,12 +1970,6 @@ func (d *agentDispatcherAdapter) buildStartOptions(hubAgent *store.Agent, groveP
 		env = hubAgent.AppliedConfig.Env
 	}
 
-	// Add grove ID label for tracking
-	if hubAgent.Labels == nil {
-		hubAgent.Labels = make(map[string]string)
-	}
-	hubAgent.Labels["scion.grove"] = hubAgent.GroveID
-
 	opts := api.StartOptions{
 		Name:      hubAgent.Name,
 		Template:  hubAgent.Template,
@@ -2003,6 +1987,17 @@ func (d *agentDispatcherAdapter) buildStartOptions(hubAgent *store.Agent, groveP
 		}
 	}
 	return opts
+}
+func (d *agentDispatcherAdapter) resolveGrovePath(ctx context.Context, groveID string) string {
+	if groveID == "" || d.brokerID == "" {
+		return ""
+	}
+	provider, err := d.store.GetGroveProvider(ctx, groveID, d.brokerID)
+	if err != nil {
+		log.Printf("Warning: failed to get grove provider for path lookup: %v", err)
+		return ""
+	}
+	return provider.LocalPath
 }
 
 // DispatchAgentDelete implements hub.AgentDispatcher.
