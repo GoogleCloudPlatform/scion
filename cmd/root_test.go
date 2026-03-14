@@ -29,7 +29,10 @@ func TestFormatFlagCheck(t *testing.T) {
 	origFormat := outputFormat
 	defer func() { outputFormat = origFormat }()
 
-	// We assume git checks pass in this environment, or we handle failures.
+	// Bypass the git and workspace checks for this specific test
+	origGlobal := globalMode
+	globalMode = true
+	defer func() { globalMode = origGlobal }()
 
 	// Build a fake interactive command for testing rejection
 	fakeAttachCmd := &cobra.Command{Use: "attach"}
