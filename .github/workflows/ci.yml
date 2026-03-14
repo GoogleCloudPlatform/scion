@@ -1,0 +1,87 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24' # Node.js 24 (LTS)
+          cache: 'npm'
+          cache-dependency-path: 'web/package-lock.json'
+
+      - name: Build Web UI
+        working-directory: ./web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Verify Web Build
+        run: ls -la web/dist
+
+      - name: Format Check
+        run: |
+          if [ "$(gofmt -l . | wc -l)" -gt 0 ]; then
+            echo "Files need formatting. Run 'go fmt ./...'"
+            gofmt -d .
+            exit 1
+          fi
+
+      - name: Vet Code
+        run: make lint
+
+      - name: Run Tests
+        run: make test-fast
+
+      - name: Build Binary
+        run: make build
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          # Only run on changes in PRs to avoid noise from existing issues
+          only-new-issues: true
