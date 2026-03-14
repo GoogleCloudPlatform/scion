@@ -38,8 +38,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/broker"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/broker"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
@@ -1854,34 +1854,7 @@ func (d *agentDispatcherAdapter) DispatchAgentCreate(ctx context.Context, hubAge
 		}
 	}
 
-	// Build StartOptions from the hub agent record
-	env := make(map[string]string)
-	if hubAgent.AppliedConfig != nil && hubAgent.AppliedConfig.Env != nil {
-		env = hubAgent.AppliedConfig.Env
-	}
-
-	// Add grove ID label for tracking
-	if hubAgent.Labels == nil {
-		hubAgent.Labels = make(map[string]string)
-	}
-	hubAgent.Labels["scion.grove"] = hubAgent.GroveID
-
-	opts := api.StartOptions{
-		Name:      hubAgent.Name,
-		Template:  hubAgent.Template,
-		Image:     hubAgent.Image,
-		Env:       env,
-		Detached:  &hubAgent.Detached,
-		GrovePath: grovePath, // Pass the local filesystem path for this grove
-	}
-
-	if hubAgent.AppliedConfig != nil {
-		opts.HarnessConfig = hubAgent.AppliedConfig.HarnessConfig
-		// Pass the task through to the runtime broker
-		if hubAgent.AppliedConfig.Task != "" {
-			opts.Task = hubAgent.AppliedConfig.Task
-		}
-	}
+	opts := d.buildStartOptions(hubAgent, grovePath, false)
 
 	// Start the agent on the runtime broker
 	agentInfo, err := d.manager.Start(ctx, opts)
@@ -1907,10 +1880,39 @@ func (d *agentDispatcherAdapter) DispatchAgentCreate(ctx context.Context, hubAge
 // DispatchAgentStart implements hub.AgentDispatcher.
 // For co-located runtime brokers, this resumes a stopped agent.
 func (d *agentDispatcherAdapter) DispatchAgentStart(ctx context.Context, hubAgent *store.Agent, task string) error {
-	// For now, starting an existing agent is not fully supported in the manager
-	// The manager's Start method creates new agents, not resumes existing ones
-	// TODO: Implement proper agent resume functionality in the manager
-	log.Printf("DispatchAgentStart called for agent %s (not fully implemented)", hubAgent.Name)
+	var grovePath string
+	if hubAgent.GroveID != "" && d.brokerID != "" {
+		provider, err := d.store.GetGroveProvider(ctx, hubAgent.GroveID, d.brokerID)
+		if err != nil {
+			log.Printf("Warning: failed to get grove provider for path lookup: %v", err)
+		} else if provider.LocalPath != "" {
+			grovePath = provider.LocalPath
+		}
+	}
+
+	opts := d.buildStartOptions(hubAgent, grovePath, true)
+	if task != "" {
+		opts.Task = task
+	}
+
+	// Start the agent on the runtime broker
+	agentInfo, err := d.manager.Start(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("failed to start agent: %w", err)
+	}
+
+	// Update the hub agent record with runtime information
+	hubAgent.Phase = string(state.PhaseRunning)
+	hubAgent.ContainerStatus = agentInfo.ContainerStatus
+	if agentInfo.ID != "" {
+		hubAgent.RuntimeState = "container:" + agentInfo.ID
+	}
+	hubAgent.LastSeen = time.Now()
+
+	if err := d.store.UpdateAgent(ctx, hubAgent); err != nil {
+		log.Printf("Warning: failed to update agent with runtime info: %v", err)
+	}
+
 	return nil
 }
 
@@ -1940,16 +1942,67 @@ func (d *agentDispatcherAdapter) DispatchAgentRestart(ctx context.Context, hubAg
 		log.Printf("Warning: failed to stop agent during restart: %v", err)
 	}
 
-	// TODO: Implement proper restart with start after stop
-	// For now, just update phase
+	var grovePath string
+	if hubAgent.GroveID != "" && d.brokerID != "" {
+		provider, err := d.store.GetGroveProvider(ctx, hubAgent.GroveID, d.brokerID)
+		if err != nil {
+			log.Printf("Warning: failed to get grove provider for path lookup: %v", err)
+		} else if provider.LocalPath != "" {
+			grovePath = provider.LocalPath
+		}
+	}
+
+	opts := d.buildStartOptions(hubAgent, grovePath, true)
+
+	agentInfo, err := d.manager.Start(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("failed to restart agent: %w", err)
+	}
+
 	hubAgent.Phase = string(state.PhaseRunning)
+	hubAgent.ContainerStatus = agentInfo.ContainerStatus
+	if agentInfo.ID != "" {
+		hubAgent.RuntimeState = "container:" + agentInfo.ID
+	}
 	hubAgent.LastSeen = time.Now()
 
 	if err := d.store.UpdateAgent(ctx, hubAgent); err != nil {
-		log.Printf("Warning: failed to update agent status: %v", err)
+		log.Printf("Warning: failed to update agent with runtime info: %v", err)
 	}
 
 	return nil
+}
+
+func (d *agentDispatcherAdapter) buildStartOptions(hubAgent *store.Agent, grovePath string, resume bool) api.StartOptions {
+	// Build StartOptions from the hub agent record
+	env := make(map[string]string)
+	if hubAgent.AppliedConfig != nil && hubAgent.AppliedConfig.Env != nil {
+		env = hubAgent.AppliedConfig.Env
+	}
+
+	// Add grove ID label for tracking
+	if hubAgent.Labels == nil {
+		hubAgent.Labels = make(map[string]string)
+	}
+	hubAgent.Labels["scion.grove"] = hubAgent.GroveID
+
+	opts := api.StartOptions{
+		Name:      hubAgent.Name,
+		Template:  hubAgent.Template,
+		Image:     hubAgent.Image,
+		Env:       env,
+		Detached:  &hubAgent.Detached,
+		GrovePath: grovePath,
+		Resume:    resume,
+	}
+
+	if hubAgent.AppliedConfig != nil {
+		opts.HarnessConfig = hubAgent.AppliedConfig.HarnessConfig
+		if hubAgent.AppliedConfig.Task != "" {
+			opts.Task = hubAgent.AppliedConfig.Task
+		}
+	}
+	return opts
 }
 
 // DispatchAgentDelete implements hub.AgentDispatcher.
