@@ -100,13 +100,16 @@ function resolveStatusConfig(status: StatusType): StatusConfig {
   // Try the shared agent-state definitions first
   const stateDisplay = getStateDisplay(status);
   if (stateDisplay.icon) {
-    return {
+    const config: StatusConfig = {
       variant: stateDisplay.variant,
       icon: stateDisplay.icon,
       emoji: stateDisplay.emoji,
       pulse: stateDisplay.pulse,
-      label: stateDisplay.label,
     };
+    if (stateDisplay.label !== undefined) {
+      config.label = stateDisplay.label;
+    }
+    return config;
   }
   // Fall back to non-agent statuses
   return NON_AGENT_STATUS_MAP[status] || { variant: 'neutral', pulse: false };

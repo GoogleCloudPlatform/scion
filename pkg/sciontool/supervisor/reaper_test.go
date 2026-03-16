@@ -6,10 +6,14 @@ package supervisor
 
 import (
 	"os"
+	"runtime"
 	"testing"
 )
 
 func TestSnapshotProcessNames(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("skipping test on non-linux platform")
+	}
 	names := snapshotProcessNames()
 
 	// We should find at least our own process in the snapshot.
