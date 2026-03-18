@@ -62,16 +62,17 @@ type CreateScheduledEventRequest struct {
 
 // ScheduledEvent represents a scheduled event returned by the Hub API.
 type ScheduledEvent struct {
-	ID        string     `json:"id"`
-	GroveID   string     `json:"groveId"`
-	EventType string     `json:"eventType"`
-	FireAt    time.Time  `json:"fireAt"`
-	Payload   string     `json:"payload"`
-	Status    string     `json:"status"`
-	CreatedAt time.Time  `json:"createdAt"`
-	CreatedBy string     `json:"createdBy"`
-	FiredAt   *time.Time `json:"firedAt,omitempty"`
-	Error     string     `json:"error,omitempty"`
+	ID         string     `json:"id"`
+	GroveID    string     `json:"groveId"`
+	EventType  string     `json:"eventType"`
+	FireAt     time.Time  `json:"fireAt"`
+	Payload    string     `json:"payload"`
+	Status     string     `json:"status"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	CreatedBy  string     `json:"createdBy"`
+	FiredAt    *time.Time `json:"firedAt,omitempty"`
+	Error      string     `json:"error,omitempty"`
+	ScheduleID string     `json:"scheduleId,omitempty"`
 }
 
 // ListScheduledEventsOptions configures scheduled event listing.

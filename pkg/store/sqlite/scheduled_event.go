@@ -46,11 +46,12 @@ func (s *SQLiteStore) CreateScheduledEvent(ctx context.Context, event *store.Sch
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO scheduled_events (
 			id, grove_id, event_type, fire_at, payload, status,
-			created_at, created_by, fired_at, error
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			created_at, created_by, fired_at, error, schedule_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		event.ID, event.GroveID, event.EventType, event.FireAt, event.Payload, event.Status,
 		event.CreatedAt, nullableString(event.CreatedBy), nullableTime(timeFromPtr(event.FiredAt)), nullableString(event.Error),
+		nullableString(event.ScheduleID),
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -70,14 +71,15 @@ func (s *SQLiteStore) GetScheduledEvent(ctx context.Context, id string) (*store.
 	var createdBy sql.NullString
 	var firedAt sql.NullTime
 	var errMsg sql.NullString
+	var scheduleID sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, grove_id, event_type, fire_at, payload, status,
-			created_at, created_by, fired_at, error
+			created_at, created_by, fired_at, error, schedule_id
 		FROM scheduled_events WHERE id = ?
 	`, id).Scan(
 		&event.ID, &event.GroveID, &event.EventType, &event.FireAt, &event.Payload, &event.Status,
-		&event.CreatedAt, &createdBy, &firedAt, &errMsg,
+		&event.CreatedAt, &createdBy, &firedAt, &errMsg, &scheduleID,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -95,6 +97,9 @@ func (s *SQLiteStore) GetScheduledEvent(ctx context.Context, id string) (*store.
 	if errMsg.Valid {
 		event.Error = errMsg.String
 	}
+	if scheduleID.Valid {
+		event.ScheduleID = scheduleID.String
+	}
 
 	return event, nil
 }
@@ -104,7 +109,7 @@ func (s *SQLiteStore) GetScheduledEvent(ctx context.Context, id string) (*store.
 func (s *SQLiteStore) ListPendingScheduledEvents(ctx context.Context) ([]store.ScheduledEvent, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, grove_id, event_type, fire_at, payload, status,
-			created_at, created_by, fired_at, error
+			created_at, created_by, fired_at, error, schedule_id
 		FROM scheduled_events
 		WHERE status = ?
 		ORDER BY fire_at ASC
@@ -164,6 +169,10 @@ func (s *SQLiteStore) ListScheduledEvents(ctx context.Context, filter store.Sche
 		conditions = append(conditions, "status = ?")
 		args = append(args, filter.Status)
 	}
+	if filter.ScheduleID != "" {
+		conditions = append(conditions, "schedule_id = ?")
+		args = append(args, filter.ScheduleID)
+	}
 
 	whereClause := ""
 	if len(conditions) > 0 {
@@ -188,7 +197,7 @@ func (s *SQLiteStore) ListScheduledEvents(ctx context.Context, filter store.Sche
 
 	query := fmt.Sprintf(`
 		SELECT id, grove_id, event_type, fire_at, payload, status,
-			created_at, created_by, fired_at, error
+			created_at, created_by, fired_at, error, schedule_id
 		FROM scheduled_events %s
 		ORDER BY created_at DESC
 		LIMIT ?
@@ -199,19 +208,19 @@ func (s *SQLiteStore) ListScheduledEvents(ctx context.Context, filter store.Sche
 	if opts.Cursor != "" {
 		query = fmt.Sprintf(`
 			SELECT id, grove_id, event_type, fire_at, payload, status,
-				created_at, created_by, fired_at, error
+				created_at, created_by, fired_at, error, schedule_id
 			FROM scheduled_events %s AND id < ?
 			ORDER BY created_at DESC
 			LIMIT ?
 		`, whereClause)
 		if whereClause == "" {
-			query = fmt.Sprintf(`
+			query = `
 				SELECT id, grove_id, event_type, fire_at, payload, status,
-					created_at, created_by, fired_at, error
+					created_at, created_by, fired_at, error, schedule_id
 				FROM scheduled_events WHERE id < ?
 				ORDER BY created_at DESC
 				LIMIT ?
-			`)
+			`
 		}
 		queryArgs = append(args, opts.Cursor, limit+1) //nolint:gocritic
 	}
@@ -277,10 +286,11 @@ func scanScheduledEvents(rows *sql.Rows) ([]store.ScheduledEvent, error) {
 		var createdBy sql.NullString
 		var firedAt sql.NullTime
 		var errMsg sql.NullString
+		var scheduleID sql.NullString
 
 		if err := rows.Scan(
 			&event.ID, &event.GroveID, &event.EventType, &event.FireAt, &event.Payload, &event.Status,
-			&event.CreatedAt, &createdBy, &firedAt, &errMsg,
+			&event.CreatedAt, &createdBy, &firedAt, &errMsg, &scheduleID,
 		); err != nil {
 			return nil, err
 		}
@@ -293,6 +303,9 @@ func scanScheduledEvents(rows *sql.Rows) ([]store.ScheduledEvent, error) {
 		}
 		if errMsg.Valid {
 			event.Error = errMsg.String
+		}
+		if scheduleID.Valid {
+			event.ScheduleID = scheduleID.String
 		}
 		events = append(events, event)
 	}

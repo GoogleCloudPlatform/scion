@@ -70,6 +70,9 @@ type Client interface {
 	// ScheduledEvents returns the scheduled event operations interface scoped to a grove.
 	ScheduledEvents(groveID string) ScheduledEventService
 
+	// Schedules returns the recurring schedule operations interface scoped to a grove.
+	Schedules(groveID string) ScheduleService
+
 	// GCPServiceAccounts returns the GCP service account operations interface scoped to a grove.
 	GCPServiceAccounts(groveID string) GCPServiceAccountService
 
@@ -190,6 +193,11 @@ func (c *client) Subscriptions() SubscriptionService {
 // ScheduledEvents returns the scheduled event operations interface scoped to a grove.
 func (c *client) ScheduledEvents(groveID string) ScheduledEventService {
 	return &scheduledEventService{c: c, groveID: groveID}
+}
+
+// Schedules returns the recurring schedule operations interface scoped to a grove.
+func (c *client) Schedules(groveID string) ScheduleService {
+	return &scheduleService{c: c, groveID: groveID}
 }
 
 // GCPServiceAccounts returns the GCP service account operations interface scoped to a grove.

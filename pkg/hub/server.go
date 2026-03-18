@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/robfig/cron/v3"
 )
 
 const (
@@ -1184,6 +1185,95 @@ func (s *Server) messageEventHandler() EventHandler {
 	}
 }
 
+// evaluateSchedulesHandler returns a recurring handler that evaluates due
+// recurring schedules and fires their events. It queries active schedules
+// whose next_run_at has passed, executes the action, and updates next_run_at.
+func (s *Server) evaluateSchedulesHandler() func(ctx context.Context) {
+	return func(ctx context.Context) {
+		now := time.Now().UTC()
+		dueSchedules, err := s.store.ListDueSchedules(ctx, now)
+		if err != nil {
+			slog.Error("schedule-evaluator: failed to list due schedules",
+				"subsystem", "scheduler", "error", err)
+			return
+		}
+
+		if len(dueSchedules) == 0 {
+			return
+		}
+
+		slog.Debug("schedule-evaluator: evaluating due schedules",
+			"subsystem", "scheduler", "count", len(dueSchedules))
+
+		for _, sched := range dueSchedules {
+			s.executeSchedule(ctx, sched, now)
+		}
+	}
+}
+
+// executeSchedule fires a single recurring schedule and updates its state.
+func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now time.Time) {
+	log := slog.With("subsystem", "scheduler",
+		"schedule_id", sched.ID, "schedule_name", sched.Name,
+		"grove_id", sched.GroveID)
+
+	// Compute next run time
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	cronSchedule, err := parser.Parse(sched.CronExpr)
+	if err != nil {
+		log.Error("schedule-evaluator: invalid cron expression",
+			"cron_expr", sched.CronExpr, "error", err)
+		_ = s.store.UpdateScheduleAfterRun(ctx, sched.ID, now, time.Time{},
+			fmt.Sprintf("invalid cron expression: %v", err))
+		return
+	}
+	nextRunAt := cronSchedule.Next(now)
+
+	// Create a one-shot event from the schedule
+	evt := store.ScheduledEvent{
+		ID:         api.NewUUID(),
+		GroveID:    sched.GroveID,
+		EventType:  sched.EventType,
+		FireAt:     now,
+		Payload:    sched.Payload,
+		Status:     store.ScheduledEventPending,
+		CreatedBy:  sched.CreatedBy,
+		ScheduleID: sched.ID,
+	}
+
+	if err := s.store.CreateScheduledEvent(ctx, &evt); err != nil {
+		log.Error("schedule-evaluator: failed to create event", "error", err)
+		_ = s.store.UpdateScheduleAfterRun(ctx, sched.ID, now, nextRunAt,
+			fmt.Sprintf("failed to create event: %v", err))
+		return
+	}
+
+	// Execute the event immediately
+	var errMsg string
+	handler, ok := s.scheduler.GetEventHandler(sched.EventType)
+	if !ok {
+		errMsg = fmt.Sprintf("unknown event type: %s", sched.EventType)
+		log.Error("schedule-evaluator: unknown event type", "event_type", sched.EventType)
+	} else {
+		handlerCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		if handlerErr := handler(handlerCtx, evt); handlerErr != nil {
+			errMsg = handlerErr.Error()
+			log.Warn("schedule-evaluator: event handler failed", "error", handlerErr)
+		} else {
+			log.Info("schedule-evaluator: schedule fired successfully")
+		}
+		cancel()
+	}
+
+	// Update event status
+	firedAt := time.Now()
+	status := store.ScheduledEventFired
+	_ = s.store.UpdateScheduledEventStatus(ctx, evt.ID, status, &firedAt, errMsg)
+
+	// Update schedule run state
+	_ = s.store.UpdateScheduleAfterRun(ctx, sched.ID, now, nextRunAt, errMsg)
+}
+
 // StartBackgroundServices initializes and starts the scheduler and notification
 // dispatcher. It is called by Start() for standalone mode and must be called
 // explicitly in combined mode (Hub mounted on WebServer) since Start() is
@@ -1203,6 +1293,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 		s.scheduler.RegisterRecurring("soft-delete-purge", 60, s.purgeHandler())
 	}
 	s.scheduler.RegisterEventHandler("message", s.messageEventHandler())
+	s.scheduler.RegisterRecurring("schedule-evaluator", 1, s.evaluateSchedulesHandler())
 	s.scheduler.Start(ctx)
 
 	// Start notification dispatcher (uses the current event publisher).

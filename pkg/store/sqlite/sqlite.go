@@ -106,6 +106,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV29,
 		migrationV30,
 		migrationV31,
+		migrationV32,
 	}
 
 	// Create migrations table if not exists
@@ -756,6 +757,34 @@ CREATE INDEX IF NOT EXISTS idx_notification_subs_subscriber ON notification_subs
 -- Unique constraint: one subscription per (scope, target, subscriber, grove)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_subs_unique
 	ON notification_subscriptions(scope, COALESCE(agent_id, ''), subscriber_type, subscriber_id, grove_id);
+`
+
+// Migration V32: Recurring schedules table and schedule_id FK on scheduled_events.
+const migrationV32 = `
+CREATE TABLE IF NOT EXISTS schedules (
+	id TEXT PRIMARY KEY,
+	grove_id TEXT NOT NULL,
+	name TEXT NOT NULL,
+	cron_expr TEXT NOT NULL,
+	event_type TEXT NOT NULL,
+	payload TEXT NOT NULL DEFAULT '{}',
+	status TEXT NOT NULL DEFAULT 'active',
+	next_run_at TIMESTAMP,
+	last_run_at TIMESTAMP,
+	last_run_status TEXT,
+	last_run_error TEXT,
+	run_count INTEGER NOT NULL DEFAULT 0,
+	error_count INTEGER NOT NULL DEFAULT 0,
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	created_by TEXT,
+	updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (grove_id) REFERENCES groves(id) ON DELETE CASCADE,
+	UNIQUE(grove_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_grove ON schedules(grove_id);
+CREATE INDEX IF NOT EXISTS idx_schedules_next_run ON schedules(next_run_at) WHERE status = 'active';
+
+ALTER TABLE scheduled_events ADD COLUMN schedule_id TEXT DEFAULT '';
 `
 
 // Helper functions for JSON marshaling/unmarshaling

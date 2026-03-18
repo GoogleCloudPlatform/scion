@@ -85,6 +85,9 @@ type Store interface {
 	// ScheduledEvent operations (One-Shot Timers)
 	ScheduledEventStore
 
+	// Schedule operations (Recurring Schedules)
+	ScheduleStore
+
 	// GCP Service Account operations (GCP Identity for Agents)
 	GCPServiceAccountStore
 }
@@ -795,6 +798,43 @@ type ScheduledEventStore interface {
 
 	// PurgeOldScheduledEvents removes non-pending events older than cutoff.
 	PurgeOldScheduledEvents(ctx context.Context, cutoff time.Time) (int, error)
+}
+
+// =============================================================================
+// Recurring Schedules (Cron-Based)
+// =============================================================================
+
+// ScheduleStore manages user-defined recurring schedules.
+type ScheduleStore interface {
+	// CreateSchedule creates a new recurring schedule.
+	// Returns ErrAlreadyExists if a schedule with the same grove_id+name exists.
+	CreateSchedule(ctx context.Context, schedule *Schedule) error
+
+	// GetSchedule retrieves a schedule by ID.
+	// Returns ErrNotFound if the schedule doesn't exist.
+	GetSchedule(ctx context.Context, id string) (*Schedule, error)
+
+	// ListSchedules returns schedules matching the filter criteria.
+	ListSchedules(ctx context.Context, filter ScheduleFilter, opts ListOptions) (*ListResult[Schedule], error)
+
+	// UpdateSchedule updates an existing schedule (name, cron_expr, payload, status).
+	// Returns ErrNotFound if the schedule doesn't exist.
+	UpdateSchedule(ctx context.Context, schedule *Schedule) error
+
+	// UpdateScheduleStatus updates only the status of a schedule.
+	// Returns ErrNotFound if the schedule doesn't exist.
+	UpdateScheduleStatus(ctx context.Context, id string, status string) error
+
+	// UpdateScheduleAfterRun updates a schedule after a run completes.
+	// Sets last_run_at, next_run_at, run counters, and error status.
+	UpdateScheduleAfterRun(ctx context.Context, id string, ranAt time.Time, nextRunAt time.Time, errMsg string) error
+
+	// DeleteSchedule removes a schedule by ID.
+	// Returns ErrNotFound if the schedule doesn't exist.
+	DeleteSchedule(ctx context.Context, id string) error
+
+	// ListDueSchedules returns active schedules whose next_run_at has passed.
+	ListDueSchedules(ctx context.Context, now time.Time) ([]Schedule, error)
 }
 
 // =============================================================================

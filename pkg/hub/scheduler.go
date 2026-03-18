@@ -100,6 +100,12 @@ func (s *Scheduler) RegisterEventHandler(eventType string, handler EventHandler)
 	s.eventHandlers[eventType] = handler
 }
 
+// GetEventHandler returns the handler for the given event type, if registered.
+func (s *Scheduler) GetEventHandler(eventType string) (EventHandler, bool) {
+	handler, ok := s.eventHandlers[eventType]
+	return handler, ok
+}
+
 // RegisterRecurring registers a recurring handler that runs every intervalMinutes
 // minutes. All handlers must be registered before Start is called.
 //

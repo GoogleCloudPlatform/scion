@@ -3065,6 +3065,14 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for nested /schedules path (recurring schedules)
+	if strings.HasPrefix(subPath, "schedules") {
+		schedulePath := strings.TrimPrefix(subPath, "schedules")
+		schedulePath = strings.TrimPrefix(schedulePath, "/")
+		s.handleSchedules(w, r, groveID, schedulePath)
+		return
+	}
+
 	// Check for nested /settings path
 	if subPath == "settings" {
 		s.handleGroveSettings(w, r, groveID)
