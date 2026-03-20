@@ -48,6 +48,12 @@
 - **Runtime Broker:** A compute node that executes agents. Brokers register the Groves they serve.
 - **Templates:** Configuration blueprints for agents. Managed via the Hub, supporting versioning and storage (GCS/Local).
 
+### Agent Communication & Discovery
+- **Hub-Mediated Messaging**: Agents communicate via the Hub rather than direct P2P. They use the Hub's message broker (pub/sub) to send direct messages (`POST /api/v1/agents/{id}/message`) or grove-wide broadcasts (`POST /api/v1/groves/{id}/broadcast`).
+- **Discovery**: Agents discover peers by querying the Hub for agents within their grove (`GET /api/v1/groves/{id}/agents`). Isolation is enforced; agents can typically only see others within their assigned grove.
+- **Registration**: Agents are registered in the Hub's central store upon creation. The Hub tracks their lifecycle via heartbeats and status updates sent by the `sciontool` inside the agent container.
+- **Asynchronous Delivery**: The Hub's `MessageBrokerProxy` handles the asynchronous routing of messages to the correct Runtime Broker for delivery to the container.
+
 ## Project Structure
 - `cmd/`: CLI command definitions (using Cobra). Each file corresponds to a `scion` subcommand.
 - `pkg/`: Core logic implementation.
