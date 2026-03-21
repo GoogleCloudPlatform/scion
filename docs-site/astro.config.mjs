@@ -30,7 +30,7 @@ export default defineConfig({
 			plugins: [starlightLinksValidator()],
 			title: 'Scion',
 			social: [
-				{ icon: 'github', label: 'GitHub', href: 'https://github.com/google/scion' },
+				{ icon: 'github', label: 'GitHub', href: 'https://github.com/GoogleCloudPlatform/scion' },
 			],
 			sidebar: [
 				{

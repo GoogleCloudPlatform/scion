@@ -1,6 +1,6 @@
 # Scion Documentation Site
 
-This is the documentation site for [Scion](https://github.com/google/scion), built using [Starlight](https://starlight.astro.build/).
+This is the documentation site for [Scion](https://github.com/GoogleCloudPlatform/scion), built using [Starlight](https://starlight.astro.build/).
 
 ## 🚀 Project Structure
 
