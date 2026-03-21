@@ -1590,7 +1590,7 @@ export class ScionPageGroveDetail extends LitElement {
               <th class="hide-mobile">Template</th>
               <th class="status-col">Status</th>
               <th class="hide-mobile">Task</th>
-              <th>Actions</th>
+              <th style="text-align: right">Actions</th>
             </tr>
           </thead>
           <tbody>
