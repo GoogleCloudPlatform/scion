@@ -51,13 +51,14 @@ func DefaultHeartbeatConfig() HeartbeatConfig {
 
 // HeartbeatService sends periodic heartbeats to the Hub.
 type HeartbeatService struct {
-	client      hubclient.RuntimeBrokerService
-	brokerID    string
-	interval    time.Duration
-	manager     agent.Manager
-	version     string
-	groveFilter func(groveID string) bool // returns true if this grove belongs to this hub
-	log         *slog.Logger
+	client            hubclient.RuntimeBrokerService
+	brokerID          string
+	interval          time.Duration
+	manager           agent.Manager
+	auxiliaryManagers func() []agent.Manager // optional: returns managers for non-default runtimes
+	version           string
+	groveFilter       func(groveID string) bool // returns true if this grove belongs to this hub
+	log               *slog.Logger
 
 	mu     sync.Mutex
 	stopCh chan struct{}
@@ -192,11 +193,31 @@ func (s *HeartbeatService) gatherGroveAgents() []hubclient.GroveHeartbeat {
 		return nil
 	}
 
-	// List all agents managed by this broker
+	// List all agents managed by this broker (default runtime)
 	agents, err := s.manager.List(context.Background(), nil)
 	if err != nil {
 		s.log.Error("Failed to list agents for heartbeat", "error", err)
 		return nil
+	}
+
+	// Also include agents from auxiliary runtimes (e.g. Kubernetes)
+	if s.auxiliaryManagers != nil {
+		seen := make(map[string]bool)
+		for _, ag := range agents {
+			seen[ag.Name] = true
+		}
+		for _, auxMgr := range s.auxiliaryManagers() {
+			auxAgents, auxErr := auxMgr.List(context.Background(), nil)
+			if auxErr != nil {
+				continue
+			}
+			for _, ag := range auxAgents {
+				if !seen[ag.Name] {
+					seen[ag.Name] = true
+					agents = append(agents, ag)
+				}
+			}
+		}
 	}
 
 	// Group agents by grove

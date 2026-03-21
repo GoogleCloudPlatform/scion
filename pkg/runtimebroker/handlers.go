@@ -203,6 +203,31 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Also list agents from auxiliary runtimes (e.g. Kubernetes)
+	s.auxiliaryRuntimesMu.RLock()
+	auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
+	for k, v := range s.auxiliaryRuntimes {
+		auxRuntimes[k] = v
+	}
+	s.auxiliaryRuntimesMu.RUnlock()
+
+	seen := make(map[string]bool)
+	for _, ag := range agents {
+		seen[ag.Name] = true
+	}
+	for _, aux := range auxRuntimes {
+		auxAgents, auxErr := aux.Manager.List(ctx, filter)
+		if auxErr != nil {
+			continue
+		}
+		for _, ag := range auxAgents {
+			if !seen[ag.Name] {
+				seen[ag.Name] = true
+				agents = append(agents, ag)
+			}
+		}
+	}
+
 	// Convert to API response format
 	responses := make([]AgentResponse, 0, len(agents))
 	for _, agent := range agents {

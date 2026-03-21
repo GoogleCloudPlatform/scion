@@ -744,6 +744,11 @@ func (s *Server) Start(ctx context.Context) error {
 		)
 	}
 
+	// Discover auxiliary runtimes (e.g. Kubernetes) from grove settings
+	// so that agents running on non-default runtimes can be found after
+	// a broker restart.
+	s.discoverAuxiliaryRuntimes()
+
 	// Start all hub connections' services
 	s.hubMu.RLock()
 	for name, conn := range s.hubConnections {
@@ -813,6 +818,84 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // This is useful for testing without starting a listener.
 func (s *Server) Handler() http.Handler {
 	return s.applyMiddleware(s.mux)
+}
+
+// getAuxiliaryManagers returns the managers for all registered auxiliary runtimes.
+func (s *Server) getAuxiliaryManagers() []agent.Manager {
+	s.auxiliaryRuntimesMu.RLock()
+	defer s.auxiliaryRuntimesMu.RUnlock()
+
+	managers := make([]agent.Manager, 0, len(s.auxiliaryRuntimes))
+	for _, aux := range s.auxiliaryRuntimes {
+		managers = append(managers, aux.Manager)
+	}
+	return managers
+}
+
+// discoverAuxiliaryRuntimes scans grove settings for runtime profiles that
+// resolve to a runtime different from the broker's default. Any discovered
+// non-default runtimes are registered as auxiliary runtimes so that agents
+// running on them (e.g. Kubernetes pods) can be found after a broker restart.
+func (s *Server) discoverAuxiliaryRuntimes() {
+	defaultRT := s.runtime.Name()
+
+	// Collect grove paths to scan
+	var grovePaths []string
+
+	// Hub-native groves: ~/.scion/groves/<slug>/.scion/
+	globalDir, err := config.GetGlobalDir()
+	if err == nil {
+		grovesDir := filepath.Join(globalDir, "groves")
+		entries, err := os.ReadDir(grovesDir)
+		if err == nil {
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				scionDir := filepath.Join(grovesDir, e.Name(), ".scion")
+				if _, err := os.Stat(scionDir); err == nil {
+					grovePaths = append(grovePaths, scionDir)
+				}
+			}
+		}
+	}
+
+	// Current project dir
+	if pd, _ := config.GetResolvedProjectDir(""); pd != "" {
+		grovePaths = append(grovePaths, pd)
+	}
+
+	discovered := make(map[string]bool)
+
+	for _, gp := range grovePaths {
+		vs, _, _ := config.LoadEffectiveSettings(gp)
+		if vs == nil {
+			continue
+		}
+
+		for profileName := range vs.Profiles {
+			_, runtimeType, err := vs.ResolveRuntime(profileName)
+			if err != nil || runtimeType == defaultRT || discovered[runtimeType] {
+				continue
+			}
+			discovered[runtimeType] = true
+
+			resolved := agent.ResolveRuntime(gp, "", profileName)
+			if resolved.Name() == "error" {
+				slog.Warn("Failed to resolve auxiliary runtime",
+					"runtime", runtimeType, "profile", profileName)
+				continue
+			}
+
+			mgr := agent.NewManager(resolved)
+			s.auxiliaryRuntimesMu.Lock()
+			s.auxiliaryRuntimes[resolved.Name()] = auxiliaryRuntime{Runtime: resolved, Manager: mgr}
+			s.auxiliaryRuntimesMu.Unlock()
+
+			slog.Info("Discovered auxiliary runtime from grove settings",
+				"runtime", resolved.Name(), "profile", profileName)
+		}
+	}
 }
 
 // LookupContainerID implements AgentLookup interface.

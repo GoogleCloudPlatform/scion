@@ -205,6 +205,93 @@ func TestListAgents(t *testing.T) {
 	}
 }
 
+func TestListAgentsIncludesAuxiliaryRuntimes(t *testing.T) {
+	srv := newTestServer()
+
+	// Add an auxiliary runtime with a K8s agent not on the default runtime
+	auxMgr := &mockManager{
+		agents: []api.AgentInfo{
+			{
+				ID:              "k8s-pod-1",
+				Name:            "k8s-agent",
+				Phase:           "running",
+				ContainerStatus: "Running",
+				Runtime:         "kubernetes",
+			},
+		},
+	}
+	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var resp ListAgentsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Should include 2 default + 1 auxiliary = 3
+	if resp.TotalCount != 3 {
+		t.Errorf("expected totalCount 3, got %d", resp.TotalCount)
+	}
+
+	// Verify the K8s agent is included
+	found := false
+	for _, ag := range resp.Agents {
+		if ag.Name == "k8s-agent" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected k8s-agent from auxiliary runtime to be in list")
+	}
+}
+
+func TestListAgentsDeduplicatesAcrossRuntimes(t *testing.T) {
+	srv := newTestServer()
+
+	// Add an auxiliary runtime that has an agent with the same name as one on the default runtime
+	auxMgr := &mockManager{
+		agents: []api.AgentInfo{
+			{
+				ID:              "k8s-pod-1",
+				Name:            "test-agent-1", // same name as default
+				Phase:           "running",
+				ContainerStatus: "Running",
+			},
+		},
+	}
+	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	var resp ListAgentsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Should still be 2, not 3, because test-agent-1 is deduplicated
+	if resp.TotalCount != 2 {
+		t.Errorf("expected totalCount 2 (deduplicated), got %d", resp.TotalCount)
+	}
+}
+
 func TestGetAgent(t *testing.T) {
 	srv := newTestServer()
 

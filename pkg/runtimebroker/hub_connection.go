@@ -110,6 +110,7 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 				groveFilter,
 				logging.Subsystem("broker.heartbeat"),
 			)
+			hc.Heartbeat.auxiliaryManagers = server.getAuxiliaryManagers
 			hc.Heartbeat.SetVersion(server.version)
 			hc.Heartbeat.Start(ctx)
 			slog.Info("Heartbeat started for hub connection", "name", hc.Name, "interval", interval)

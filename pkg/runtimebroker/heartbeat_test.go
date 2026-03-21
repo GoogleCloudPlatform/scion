@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
@@ -393,5 +394,54 @@ func TestDefaultHeartbeatConfig(t *testing.T) {
 	}
 	if !cfg.Enabled {
 		t.Error("Expected Enabled to be true by default")
+	}
+}
+
+func TestHeartbeatService_IncludesAuxiliaryRuntimes(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+
+	// Default manager has docker agents
+	defaultMgr := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "docker-agent", GroveID: "grove-1", Phase: "running"},
+		},
+	}
+
+	// Auxiliary manager has K8s agents
+	auxMgr := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "k8s-agent", GroveID: "grove-1", Phase: "running", Activity: "thinking"},
+		},
+	}
+
+	svc := NewHeartbeatService(client, "test-host", time.Hour, defaultMgr, nil, slog.Default())
+	svc.auxiliaryManagers = func() []agent.Manager { return []agent.Manager{auxMgr} }
+
+	err := svc.ForceHeartbeat(context.Background())
+	if err != nil {
+		t.Fatalf("ForceHeartbeat failed: %v", err)
+	}
+
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 {
+		t.Fatalf("Expected 1 heartbeat call, got %d", len(calls))
+	}
+
+	heartbeat := calls[0].Heartbeat
+	if len(heartbeat.Groves) != 1 {
+		t.Fatalf("Expected 1 grove, got %d", len(heartbeat.Groves))
+	}
+
+	grove := heartbeat.Groves[0]
+	if grove.AgentCount != 2 {
+		t.Errorf("Expected 2 agents (docker + k8s), got %d", grove.AgentCount)
+	}
+
+	agentMap := make(map[string]hubclient.AgentHeartbeat)
+	for _, ag := range grove.Agents {
+		agentMap[ag.Slug] = ag
+	}
+	if _, ok := agentMap["k8s-agent"]; !ok {
+		t.Error("Expected k8s-agent from auxiliary runtime in heartbeat")
 	}
 }
