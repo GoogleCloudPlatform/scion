@@ -106,37 +106,8 @@ func NewLogAuditLogger(prefix string, debug bool) *LogAuditLogger {
 	}
 }
 
-// LogBrokerAuthEvent logs a broker authentication event to the standard logger.
+// LogBrokerAuthEvent is a no-op implementation satisfying the AuditLogger interface.
 func (l *LogAuditLogger) LogBrokerAuthEvent(ctx context.Context, event *BrokerAuthEvent) error {
-	level := slog.LevelInfo
-	if !event.Success {
-		level = slog.LevelWarn
-	}
-
-	attrs := []slog.Attr{
-		slog.String("event_type", string(event.EventType)),
-		slog.Bool("success", event.Success),
-		slog.String("broker_id", event.BrokerID),
-		slog.String("ip_address", event.IPAddress),
-	}
-
-	if event.FailReason != "" {
-		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
-	}
-
-	if event.ActorID != "" {
-		attrs = append(attrs, slog.String("actor_id", event.ActorID))
-		attrs = append(attrs, slog.String("actor_type", event.ActorType))
-	}
-
-	if l.debug && len(event.Details) > 0 {
-		for k, v := range event.Details {
-			attrs = append(attrs, slog.String(k, v))
-		}
-	}
-
-	slog.LogAttrs(ctx, level, "Broker auth audit event", attrs...)
-
 	return nil
 }
 
