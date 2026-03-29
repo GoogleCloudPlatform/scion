@@ -717,7 +717,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// than the raw templateName which may be a cache path or remote URI.
 	displayTemplateName := templateName
 	if len(chain) > 0 {
-		displayTemplateName = chain[0].Name
+		displayTemplateName = chain[len(chain)-1].Name
 	}
 	info := &api.AgentInfo{
 		Grove:         groveName,

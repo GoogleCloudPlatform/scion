@@ -823,6 +823,90 @@ profiles:
 	}
 }
 
+func TestStartResolvesHarnessConfigFromNamedTemplate(t *testing.T) {
+	// Regression test: when a non-default template bundles a custom harness-config
+	// (e.g. .scion/templates/test4/harness-configs/claude2), the template name
+	// stored in agent-info.json must be the derived template name (e.g. "test4"),
+	// not the base "default" template. Previously, displayTemplateName used
+	// chain[0].Name which was always "default" for non-default templates, causing
+	// Start to fail to reconstruct the template chain and miss the bundled
+	// harness-config.
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	originalHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", originalHome)
+	os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+
+	// Create a "default" template (required as base layer)
+	defaultTplDir := filepath.Join(globalScionDir, "templates", "default")
+	os.MkdirAll(defaultTplDir, 0755)
+	os.WriteFile(filepath.Join(defaultTplDir, "scion-agent.yaml"), []byte("default_harness_config: claude\n"), 0644)
+
+	// Seed the default "claude" harness-config at global level
+	claudeHcDir := filepath.Join(globalScionDir, "harness-configs", "claude")
+	os.MkdirAll(filepath.Join(claudeHcDir, "home"), 0755)
+	os.WriteFile(filepath.Join(claudeHcDir, "config.yaml"), []byte("harness: claude\nuser: scion\nimage: scion-claude:latest\n"), 0644)
+
+	// Create a non-default template "test4" with a bundled harness-config "claude2"
+	test4TplDir := filepath.Join(globalScionDir, "templates", "test4")
+	os.MkdirAll(test4TplDir, 0755)
+	os.WriteFile(filepath.Join(test4TplDir, "scion-agent.yaml"), []byte("default_harness_config: claude2\n"), 0644)
+
+	claude2HcDir := filepath.Join(test4TplDir, "harness-configs", "claude2")
+	os.MkdirAll(filepath.Join(claude2HcDir, "home"), 0755)
+	os.WriteFile(filepath.Join(claude2HcDir, "config.yaml"), []byte("harness: claude\nuser: scion\nimage: custom-claude:latest\n"), 0644)
+
+	// Minimal global settings
+	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	// Create project grove
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	os.MkdirAll(projectScionDir, 0755)
+
+	// Capture the RunConfig
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+
+	mgr := NewManager(mockRT)
+
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:      "test-agent",
+		Template:  "test4",
+		GrovePath: projectScionDir,
+		NoAuth:    true,
+	})
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// The harness-config "claude2" specifies image "custom-claude:latest"
+	// If the template name was incorrectly stored as "default", this would
+	// fall back to the default image instead.
+	if capturedConfig.UnixUsername != "scion" {
+		t.Errorf("expected UnixUsername = %q, got %q", "scion", capturedConfig.UnixUsername)
+	}
+}
+
 func TestStartReturnsRunningStatus(t *testing.T) {
 	// This tests the early-return path when a container is already running.
 	// The runtime's List() may return a stale Status (e.g. "created") from the
