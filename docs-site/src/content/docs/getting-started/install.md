@@ -86,6 +86,13 @@ The easiest way to get these images is to fork this repo, and then go to the "Ac
 
 You will then use your `ghcr.io/myorg` registry for the scion setting.
 
+If you have the repository cloned locally, you can also build directly with the CLI:
+
+```bash
+scion images build --registry ghcr.io/myorg --push
+scion config set image_registry ghcr.io/myorg
+```
+
 See [Building Containers](/scion/advanced-local/custom-images/) for more details
 
 ## Configuration

@@ -247,6 +247,45 @@ Manages Scion server components (Hub and Broker).
 - `scion server start`: Start one or more server components.
     - Flags: `--enable-hub`, `--enable-runtime-broker`, `--port`, `--db`, `--dev-auth`.
 
+## Image Management
+
+### `scion images`
+
+Commands for building and managing Scion container images.
+
+#### `scion images build`
+
+Builds Scion container images locally using `docker buildx`. Must be run from within a clone of the Scion source repository (or use `--source`).
+
+**Usage:** `scion images build --registry <registry> [flags]`
+
+- **Flags:**
+    - `--registry <path>`: **(Required)** Target registry path (e.g., `ghcr.io/myorg`).
+    - `--target <target>`: Build target — `common` (scion-base + harnesses), `all` (full rebuild including core-base), `core-base`, or `harnesses`. (default: `common`)
+    - `--push`: Push images to the registry after building.
+    - `--platform <plat>`: Target platform(s). Use `all` for `linux/amd64,linux/arm64`, or specify directly.
+    - `--tag <tag>`: Image tag. (default: `latest`)
+    - `--source <path>`: Path to a Scion source repository clone. (default: current directory)
+
+**Example:**
+```bash
+# From within a clone of the scion repo
+scion images build --registry ghcr.io/myorg --push
+
+# With all options
+scion images build \
+  --registry ghcr.io/myorg \
+  --target all \
+  --platform all \
+  --tag v1.0 \
+  --push
+```
+
+After building, configure Scion to use the registry:
+```bash
+scion config set image_registry ghcr.io/myorg
+```
+
 ## Miscellaneous
 
 ### `scion version`

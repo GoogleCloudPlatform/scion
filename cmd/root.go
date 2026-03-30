@@ -76,6 +76,8 @@ return an error instead of blocking.`,
 		// - help, version, completion (built-in or explicit)
 		// - init, grove init (creates grove)
 		// - server (runs hub server, doesn't need local grove)
+		// - doctor (diagnostic tool)
+		// - images (builds container images, used before grove/registry exist)
 		cmdName := cmd.Name()
 		parentName := ""
 		if cmd.Parent() != nil {
@@ -84,7 +86,7 @@ return an error instead of blocking.`,
 
 		requiresGrove := true
 		switch cmdName {
-		case "help", "version", "completion", "server", "doctor":
+		case "help", "version", "completion", "server", "doctor", "images":
 			requiresGrove = false
 		case "init":
 			// Both top-level init and grove init don't require existing grove
@@ -94,7 +96,7 @@ return an error instead of blocking.`,
 			requiresGrove = false
 		}
 		// Grove subcommands operate on all groves, not just the current one
-		if parentName == "grove" {
+		if parentName == "grove" || parentName == "images" {
 			requiresGrove = false
 		}
 
