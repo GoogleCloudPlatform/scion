@@ -1126,9 +1126,15 @@ func gitCloneWorkspace(uid, gid int) error {
 	// matching the pattern used by shared-workspace groves. When GitHub App
 	// token refresh is enabled, use sciontool's credential-helper command
 	// which handles on-demand token refresh from the Hub.
-	agentHomeDir := os.Getenv("HOME")
-	if agentHomeDir == "" {
-		agentHomeDir = "/home/scion"
+	// When sciontool runs as root (HOME=/root) but git executes as the target
+	// UID (e.g. 502), writing to /root/.gitconfig fails with permission denied.
+	// Use the scion user's actual home directory instead.
+	agentHomeDir := "/home/scion"
+	if uid == 0 {
+		// Running as root — use root's HOME directly.
+		if h := os.Getenv("HOME"); h != "" {
+			agentHomeDir = h
+		}
 	}
 	gitconfigPath := filepath.Join(agentHomeDir, ".gitconfig")
 
