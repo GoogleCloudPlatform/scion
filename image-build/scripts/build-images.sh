@@ -121,7 +121,7 @@ ensure_builder() {
 build_core_base() {
   echo "==> Building core-base..."
   docker buildx build \
-    "${PLATFORM_ARGS[@]}" \
+    ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
     -t "${REGISTRY}/core-base:${TAG}" \
     -f "${IMAGE_BUILD_DIR}/core-base/Dockerfile" \
     ${PUSH} ${LOAD_ARG} \
@@ -133,7 +133,7 @@ build_scion_base() {
   local base_tag="${1:-latest}"
   echo "==> Building scion-base..."
   docker buildx build \
-    "${PLATFORM_ARGS[@]}" \
+    ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
     --build-arg "BASE_IMAGE=${REGISTRY}/core-base:${base_tag}" \
     --build-arg "GIT_COMMIT=$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)" \
     -t "${REGISTRY}/scion-base:${TAG}" \
@@ -148,7 +148,7 @@ build_harness() {
   local base_tag="${2:-latest}"
   echo "==> Building scion-${name}..."
   docker buildx build \
-    "${PLATFORM_ARGS[@]}" \
+    ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
     --build-arg "BASE_IMAGE=${REGISTRY}/scion-base:${base_tag}" \
     -t "${REGISTRY}/scion-${name}:${TAG}" \
     -f "${IMAGE_BUILD_DIR}/${name}/Dockerfile" \
