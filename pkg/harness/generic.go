@@ -136,9 +136,6 @@ func (g *Generic) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error) {
 
 	if auth.GoogleAppCredentials != "" {
 		adcContainerPath := "~/.config/gcloud/application_default_credentials.json"
-		if auth.GoogleAppCredentialsExplicit {
-			result.EnvVars["GOOGLE_APPLICATION_CREDENTIALS"] = adcContainerPath
-		}
 		result.Files = append(result.Files, api.FileMapping{
 			SourcePath:    auth.GoogleAppCredentials,
 			ContainerPath: adcContainerPath,

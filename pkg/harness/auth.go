@@ -72,9 +72,6 @@ func GatherAuthWithEnv(env map[string]string, localSources bool) api.AuthConfig 
 		GoogleAppCredentials: lookup("GOOGLE_APPLICATION_CREDENTIALS"),
 	}
 
-	// Mark whether GOOGLE_APPLICATION_CREDENTIALS was explicitly set via env var
-	auth.GoogleAppCredentialsExplicit = auth.GoogleAppCredentials != ""
-
 	// File-sourced fields: check well-known paths (skip in broker mode)
 	if localSources {
 		home, _ := os.UserHomeDir()
@@ -121,10 +118,9 @@ func OverlayFileSecrets(auth *api.AuthConfig, secrets []api.ResolvedSecret) {
 		name := s.Name
 
 		switch {
-		case name == "GOOGLE_APPLICATION_CREDENTIALS" ||
+		case name == "gcloud-adc" ||
 			strings.HasSuffix(target, "/application_default_credentials.json"):
 			auth.GoogleAppCredentials = target
-			auth.GoogleAppCredentialsExplicit = false // container GCP SDK auto-discovers well-known path
 		case name == "GEMINI_OAUTH_CREDS" ||
 			strings.HasSuffix(target, "/oauth_creds.json"):
 			auth.OAuthCreds = target
@@ -215,7 +211,7 @@ func RequiredAuthSecrets(harnessName, authSelectedType string) []api.RequiredSec
 		if effectiveType == "vertex-ai" {
 			return []api.RequiredSecret{
 				{
-					Key:         "GOOGLE_APPLICATION_CREDENTIALS",
+					Key:         "gcloud-adc",
 					Type:        "file",
 					Description: "Google Cloud Application Default Credentials (ADC) file for vertex-ai authentication",
 				},
@@ -243,12 +239,12 @@ func DetectAuthTypeFromFileSecrets(harnessName string, fileSecretNames map[strin
 		if _, ok := fileSecretNames["GEMINI_OAUTH_CREDS"]; ok {
 			return "auth-file"
 		}
-		if _, ok := fileSecretNames["GOOGLE_APPLICATION_CREDENTIALS"]; ok {
+		if _, ok := fileSecretNames["gcloud-adc"]; ok {
 			return "vertex-ai"
 		}
 	case "claude":
 		// Auto-detect priority: api-key → ADC (vertex-ai)
-		if _, ok := fileSecretNames["GOOGLE_APPLICATION_CREDENTIALS"]; ok {
+		if _, ok := fileSecretNames["gcloud-adc"]; ok {
 			return "vertex-ai"
 		}
 	case "codex":

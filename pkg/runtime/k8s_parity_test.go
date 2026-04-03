@@ -143,7 +143,7 @@ func TestBuildPod_ResolvedAuth_ComposesWithSecrets(t *testing.T) {
 		ResolvedAuth: &api.ResolvedAuth{
 			Method: "vertex-ai",
 			EnvVars: map[string]string{
-				"GOOGLE_APPLICATION_CREDENTIALS": "/home/scion/.config/gcloud/adc.json",
+				"GOOGLE_CLOUD_PROJECT": "my-project",
 			},
 		},
 	}
@@ -166,8 +166,8 @@ func TestBuildPod_ResolvedAuth_ComposesWithSecrets(t *testing.T) {
 		t.Error("API_KEY should come from secretKeyRef (ResolvedSecrets)")
 	}
 	// ResolvedAuth env should also be present (no longer mutually exclusive)
-	if envMap["GOOGLE_APPLICATION_CREDENTIALS"] != "/home/scion/.config/gcloud/adc.json" {
-		t.Error("GOOGLE_APPLICATION_CREDENTIALS should be set from ResolvedAuth")
+	if envMap["GOOGLE_CLOUD_PROJECT"] != "my-project" {
+		t.Error("GOOGLE_CLOUD_PROJECT should be set from ResolvedAuth")
 	}
 }
 

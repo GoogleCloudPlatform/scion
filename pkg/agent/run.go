@@ -954,8 +954,7 @@ func isAuthEnvKey(key string) bool {
 		"ANTHROPIC_VERTEX_PROJECT_ID",
 		"GOOGLE_CLOUD_REGION",
 		"CLOUD_ML_REGION",
-		"GOOGLE_CLOUD_LOCATION",
-		"GOOGLE_APPLICATION_CREDENTIALS":
+		"GOOGLE_CLOUD_LOCATION":
 		return true
 	default:
 		return false
@@ -964,7 +963,7 @@ func isAuthEnvKey(key string) bool {
 
 func authFileKind(name, target string) string {
 	switch {
-	case name == "GOOGLE_APPLICATION_CREDENTIALS" || strings.HasSuffix(target, "/application_default_credentials.json"):
+	case name == "gcloud-adc" || strings.HasSuffix(target, "/application_default_credentials.json"):
 		return "adc"
 	case name == "GEMINI_OAUTH_CREDS" || strings.HasSuffix(target, "/oauth_creds.json"):
 		return "gemini-oauth"

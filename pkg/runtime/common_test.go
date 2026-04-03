@@ -136,8 +136,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 				ResolvedAuth: &api.ResolvedAuth{
 					Method: "compute-default-credentials",
 					EnvVars: map[string]string{
-						"GEMINI_DEFAULT_AUTH_TYPE":       "compute-default-credentials",
-						"GOOGLE_APPLICATION_CREDENTIALS": "/home/scion/.config/gcp/application_default_credentials.json",
+						"GEMINI_DEFAULT_AUTH_TYPE": "compute-default-credentials",
 					},
 					Files: []api.FileMapping{
 						{SourcePath: adcFile, ContainerPath: "~/.config/gcp/application_default_credentials.json"},
@@ -147,7 +146,6 @@ func TestBuildCommonRunArgs(t *testing.T) {
 			},
 			wantIn: []string{
 				"-v", fmt.Sprintf("%s:/home/scion/.config/gcp/application_default_credentials.json:ro", adcFile),
-				"-e", "GOOGLE_APPLICATION_CREDENTIALS=/home/scion/.config/gcp/application_default_credentials.json",
 				"-e", "GEMINI_DEFAULT_AUTH_TYPE=compute-default-credentials",
 			},
 		},

@@ -478,7 +478,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		util.Debugf("[auth]   hasGeminiAPIKey=%t, hasGoogleAPIKey=%t", localAuth.GeminiAPIKey != "", localAuth.GoogleAPIKey != "")
 		util.Debugf("[auth]   hasAnthropicAPIKey=%t", localAuth.AnthropicAPIKey != "")
 		util.Debugf("[auth]   hasOAuthCreds=%t (%s)", localAuth.OAuthCreds != "", localAuth.OAuthCreds)
-		util.Debugf("[auth]   hasGoogleAppCredentials=%t (explicit=%t)", localAuth.GoogleAppCredentials != "", localAuth.GoogleAppCredentialsExplicit)
+		util.Debugf("[auth]   hasGoogleAppCredentials=%t", localAuth.GoogleAppCredentials != "")
 		util.Debugf("[auth]   cloudProject=%q, cloudRegion=%q", localAuth.GoogleCloudProject, localAuth.GoogleCloudRegion)
 	}
 
@@ -678,7 +678,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		util.Debugf("[auth]   hasGeminiAPIKey=%t, hasGoogleAPIKey=%t", localAuth.GeminiAPIKey != "", localAuth.GoogleAPIKey != "")
 		util.Debugf("[auth]   hasAnthropicAPIKey=%t", localAuth.AnthropicAPIKey != "")
 		util.Debugf("[auth]   hasOAuthCreds=%t (%s)", localAuth.OAuthCreds != "", localAuth.OAuthCreds)
-		util.Debugf("[auth]   hasGoogleAppCredentials=%t (explicit=%t)", localAuth.GoogleAppCredentials != "", localAuth.GoogleAppCredentialsExplicit)
+		util.Debugf("[auth]   hasGoogleAppCredentials=%t", localAuth.GoogleAppCredentials != "")
 		util.Debugf("[auth]   cloudProject=%q, cloudRegion=%q", localAuth.GoogleCloudProject, localAuth.GoogleCloudRegion)
 	}
 

@@ -77,7 +77,7 @@ scion hub secret set GEMINI_API_KEY "AIza..."
 Uses Google Cloud's Vertex AI endpoints with Application Default Credentials (ADC).
 
 **Required Sources:**
-- `GOOGLE_APPLICATION_CREDENTIALS`: Path to the ADC JSON file (automatically discovered at `~/.config/gcloud/application_default_credentials.json` if present locally).
+- ADC JSON file: Automatically discovered at `~/.config/gcloud/application_default_credentials.json` if present locally. In Hub mode, upload via the `gcloud-adc` file secret.
 - `GOOGLE_CLOUD_PROJECT`: Your Google Cloud project ID.
 - `GOOGLE_CLOUD_REGION`: The region (e.g., `us-east5`). Required for Claude, optional but recommended for Gemini.
 
@@ -90,17 +90,21 @@ scion start --harness claude my-agent
 ```
 
 **Hub Setup:**
-For Hub mode, you must upload the ADC file as a file-type secret and set the environment variables via the Web Interface or CLI:
+For Hub mode, you must upload the ADC file as the `gcloud-adc` file secret and set the environment variables via the Web Interface or CLI:
 ```bash
-# 1. Upload the credential file
+# 1. Upload the ADC credential file (written to ~/.config/gcloud/application_default_credentials.json in container)
 scion hub secret set --type file \
   --target ~/.config/gcloud/application_default_credentials.json \
-  GOOGLE_APPLICATION_CREDENTIALS @~/.config/gcloud/application_default_credentials.json
+  gcloud-adc @~/.config/gcloud/application_default_credentials.json
 
 # 2. Set the environment variables
 scion hub secret set GOOGLE_CLOUD_PROJECT "my-project"
 scion hub secret set GOOGLE_CLOUD_REGION "us-east5"
 ```
+
+:::note
+The `gcloud-adc` secret writes the ADC file to the well-known GCP path inside the container. The GCP SDK auto-discovers it there, so Scion does **not** set the `GOOGLE_APPLICATION_CREDENTIALS` environment variable. If you need to use `GOOGLE_APPLICATION_CREDENTIALS` for other purposes (e.g., pointing to a non-standard path), set it up as a separate environment-type secret alongside a file secret that writes the credential file.
+:::
 
 ### Harness specific credential file (`auth-file`)
 

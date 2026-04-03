@@ -205,11 +205,10 @@ func TestGeminiResolveAuth_ExplicitAuthFileMissing(t *testing.T) {
 func TestGeminiResolveAuth_ExplicitVertexAI(t *testing.T) {
 	g := &GeminiCLI{}
 	auth := api.AuthConfig{
-		SelectedType:                 "vertex-ai",
-		GoogleCloudProject:           "proj",
-		GoogleCloudRegion:            "us-east1",
-		GoogleAppCredentials:         "/path/to/adc.json",
-		GoogleAppCredentialsExplicit: true,
+		SelectedType:         "vertex-ai",
+		GoogleCloudProject:   "proj",
+		GoogleCloudRegion:    "us-east1",
+		GoogleAppCredentials: "/path/to/adc.json",
 	}
 	result, err := g.ResolveAuth(auth)
 	if err != nil {

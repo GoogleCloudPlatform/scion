@@ -438,10 +438,10 @@ func TestRequiredAuthSecrets(t *testing.T) {
 		wantKey  string
 		wantType string
 	}{
-		{"claude vertex-ai", "claude", "vertex-ai", false, "GOOGLE_APPLICATION_CREDENTIALS", "file"},
-		{"gemini vertex-ai", "gemini", "vertex-ai", false, "GOOGLE_APPLICATION_CREDENTIALS", "file"},
-		{"opencode vertex-ai", "opencode", "vertex-ai", false, "GOOGLE_APPLICATION_CREDENTIALS", "file"},
-		{"codex vertex-ai", "codex", "vertex-ai", false, "GOOGLE_APPLICATION_CREDENTIALS", "file"},
+		{"claude vertex-ai", "claude", "vertex-ai", false, "gcloud-adc", "file"},
+		{"gemini vertex-ai", "gemini", "vertex-ai", false, "gcloud-adc", "file"},
+		{"opencode vertex-ai", "opencode", "vertex-ai", false, "gcloud-adc", "file"},
+		{"codex vertex-ai", "codex", "vertex-ai", false, "gcloud-adc", "file"},
 		{"claude api-key", "claude", "api-key", true, "", ""},
 		{"gemini api-key", "gemini", "api-key", true, "", ""},
 		{"claude empty auth type", "claude", "", true, "", ""},
@@ -491,15 +491,15 @@ func TestDetectAuthTypeFromFileSecrets(t *testing.T) {
 			"auth-file",
 		},
 		{
-			"gemini with GOOGLE_APPLICATION_CREDENTIALS",
+			"gemini with gcloud-adc",
 			"gemini",
-			map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}},
+			map[string]struct{}{"gcloud-adc": {}},
 			"vertex-ai",
 		},
 		{
 			"gemini with both OAuth and ADC prefers OAuth",
 			"gemini",
-			map[string]struct{}{"GEMINI_OAUTH_CREDS": {}, "GOOGLE_APPLICATION_CREDENTIALS": {}},
+			map[string]struct{}{"GEMINI_OAUTH_CREDS": {}, "gcloud-adc": {}},
 			"auth-file",
 		},
 		{
@@ -521,9 +521,9 @@ func TestDetectAuthTypeFromFileSecrets(t *testing.T) {
 			"auth-file",
 		},
 		{
-			"claude with GOOGLE_APPLICATION_CREDENTIALS",
+			"claude with gcloud-adc",
 			"claude",
-			map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}},
+			map[string]struct{}{"gcloud-adc": {}},
 			"vertex-ai",
 		},
 		{
@@ -747,14 +747,11 @@ func TestOverlayFileSecrets(t *testing.T) {
 		{
 			name: "ADC by name",
 			secrets: []api.ResolvedSecret{
-				{Name: "GOOGLE_APPLICATION_CREDENTIALS", Type: "file", Target: "/home/gemini/.config/gcloud/application_default_credentials.json"},
+				{Name: "gcloud-adc", Type: "file", Target: "/home/gemini/.config/gcloud/application_default_credentials.json"},
 			},
 			check: func(t *testing.T, auth api.AuthConfig) {
 				if auth.GoogleAppCredentials != "/home/gemini/.config/gcloud/application_default_credentials.json" {
 					t.Errorf("GoogleAppCredentials = %q, want ADC path", auth.GoogleAppCredentials)
-				}
-				if auth.GoogleAppCredentialsExplicit {
-					t.Errorf("GoogleAppCredentialsExplicit should be false for ADC overlay")
 				}
 			},
 		},
@@ -805,7 +802,7 @@ func TestOverlayFileSecrets(t *testing.T) {
 		{
 			name: "non-file secrets are skipped",
 			secrets: []api.ResolvedSecret{
-				{Name: "GOOGLE_APPLICATION_CREDENTIALS", Type: "environment", Target: "GOOGLE_APPLICATION_CREDENTIALS", Value: "/some/path"},
+				{Name: "gcloud-adc", Type: "environment", Target: "gcloud-adc", Value: "/some/path"},
 			},
 			check: func(t *testing.T, auth api.AuthConfig) {
 				if auth.GoogleAppCredentials != "" {

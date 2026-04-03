@@ -362,7 +362,7 @@ func (c *ClaudeCode) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error)
 		return c.resolveVertexAI(auth), nil
 	}
 
-	return nil, fmt.Errorf("claude: no valid auth method found; set ANTHROPIC_API_KEY for direct API access, or provide GOOGLE_APPLICATION_CREDENTIALS + GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_REGION for Vertex AI")
+	return nil, fmt.Errorf("claude: no valid auth method found; set ANTHROPIC_API_KEY for direct API access, or provide ADC (gcloud-adc secret or ~/.config/gcloud/application_default_credentials.json) + GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_REGION for Vertex AI")
 }
 
 func (c *ClaudeCode) resolveVertexAI(auth api.AuthConfig) *api.ResolvedAuth {
@@ -376,9 +376,6 @@ func (c *ClaudeCode) resolveVertexAI(auth api.AuthConfig) *api.ResolvedAuth {
 		},
 	}
 	if auth.GoogleAppCredentials != "" {
-		if auth.GoogleAppCredentialsExplicit {
-			result.EnvVars["GOOGLE_APPLICATION_CREDENTIALS"] = adcContainerPath
-		}
 		result.Files = append(result.Files, api.FileMapping{
 			SourcePath:    auth.GoogleAppCredentials,
 			ContainerPath: adcContainerPath,

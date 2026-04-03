@@ -1755,7 +1755,7 @@ func TestBuildAuthEnvOverlay_EmptyValueOverriddenBySecret(t *testing.T) {
 func TestFilterResolvedSecretsForResolvedAuth(t *testing.T) {
 	secrets := []api.ResolvedSecret{
 		{Name: "GEMINI_API_KEY", Type: "environment", Target: "GEMINI_API_KEY", Value: "gemini"},
-		{Name: "GOOGLE_APPLICATION_CREDENTIALS", Type: "file", Target: "/home/scion/.config/gcloud/application_default_credentials.json", Value: "adc"},
+		{Name: "gcloud-adc", Type: "file", Target: "/home/scion/.config/gcloud/application_default_credentials.json", Value: "adc"},
 		{Name: "NOT_AUTH_SECRET", Type: "environment", Target: "NOT_AUTH_SECRET", Value: "keep"},
 	}
 	resolved := &api.ResolvedAuth{
@@ -1780,8 +1780,8 @@ func TestFilterResolvedSecretsForResolvedAuth(t *testing.T) {
 	if _, ok := got["NOT_AUTH_SECRET"]; !ok {
 		t.Error("expected NOT_AUTH_SECRET to be kept")
 	}
-	if _, ok := got["GOOGLE_APPLICATION_CREDENTIALS"]; ok {
-		t.Error("expected GOOGLE_APPLICATION_CREDENTIALS to be dropped for api-key auth")
+	if _, ok := got["gcloud-adc"]; ok {
+		t.Error("expected gcloud-adc to be dropped for api-key auth")
 	}
 }
 

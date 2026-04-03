@@ -378,9 +378,6 @@ func (g *GeminiCLI) resolveExplicit(auth api.AuthConfig) (*api.ResolvedAuth, err
 		}
 		if auth.GoogleAppCredentials != "" {
 			adcContainerPath := "~/.config/gcloud/application_default_credentials.json"
-			if auth.GoogleAppCredentialsExplicit {
-				result.EnvVars["GOOGLE_APPLICATION_CREDENTIALS"] = adcContainerPath
-			}
 			result.Files = append(result.Files, api.FileMapping{
 				SourcePath:    auth.GoogleAppCredentials,
 				ContainerPath: adcContainerPath,
@@ -448,9 +445,6 @@ func (g *GeminiCLI) resolveAutoDetect(auth api.AuthConfig) (*api.ResolvedAuth, e
 					ContainerPath: adcContainerPath,
 				},
 			},
-		}
-		if auth.GoogleAppCredentialsExplicit {
-			result.EnvVars["GOOGLE_APPLICATION_CREDENTIALS"] = adcContainerPath
 		}
 		if auth.GoogleCloudRegion != "" {
 			result.EnvVars["GOOGLE_CLOUD_REGION"] = auth.GoogleCloudRegion
