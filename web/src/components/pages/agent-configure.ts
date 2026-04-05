@@ -830,6 +830,7 @@ export class ScionPageAgentConfigure extends LitElement {
           <sl-option value="api-key">Provider API Key</sl-option>
           <sl-option value="vertex-ai" ?disabled=${this.isUnsupported(vertexCap)}>Vertex Model Garden</sl-option>
           <sl-option value="auth-file" ?disabled=${this.isUnsupported(authFileCap)}>Harness credential file</sl-option>
+          <sl-option value="manual">Manual</sl-option>
         </sl-select>
         ${this.authMethod && this.isUnsupported(selectedAuthCap || undefined)
           ? html`<div class="hint">${this.supportReason(selectedAuthCap || undefined)}</div>`

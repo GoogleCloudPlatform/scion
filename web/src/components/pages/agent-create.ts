@@ -1021,6 +1021,7 @@ export class ScionPageAgentCreate extends LitElement {
               <sl-option value="api-key">Provider API Key</sl-option>
               <sl-option value="vertex-ai">Vertex Model Garden</sl-option>
               <sl-option value="auth-file">Harness credential file</sl-option>
+              <sl-option value="manual">Manual</sl-option>
             </sl-select>
             <div class="hint">Override the authentication method for the harness.</div>
           </div>
