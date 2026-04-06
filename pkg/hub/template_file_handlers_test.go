@@ -162,7 +162,7 @@ func TestHandleTemplateFileList(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/templates/"+tmpl.ID+"/files", nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
@@ -196,7 +196,7 @@ func TestHandleTemplateFileRead(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/templates/"+tmpl.ID+"/files/CLAUDE.md", nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
@@ -227,7 +227,7 @@ func TestHandleTemplateFileRead_NotFound(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/templates/"+tmpl.ID+"/files/nonexistent.md", nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
@@ -247,7 +247,7 @@ func TestHandleTemplateFileWrite(t *testing.T) {
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
@@ -294,7 +294,7 @@ func TestHandleTemplateFileWrite_NewFile(t *testing.T) {
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
@@ -329,7 +329,7 @@ func TestHandleTemplateFileWrite_LockedTemplate(t *testing.T) {
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
@@ -348,7 +348,7 @@ func TestHandleTemplateFileWrite_ConflictHash(t *testing.T) {
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
@@ -366,7 +366,7 @@ func TestHandleTemplateFileDelete(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/templates/"+tmpl.ID+"/files/home/.bashrc", nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", w.Code, w.Body.String())
@@ -405,7 +405,7 @@ func TestHandleTemplateFileDelete_LockedTemplate(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/templates/"+tmpl.ID+"/files/CLAUDE.md", nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
@@ -421,7 +421,7 @@ func TestHandleTemplateFileDelete_NotFound(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/templates/tmpl-test-1/files/nonexistent.md", nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
@@ -464,7 +464,7 @@ func TestHandleTemplateFileUpload(t *testing.T) {
 		"config.yaml": []byte("key: value\n"),
 	})
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
@@ -513,7 +513,7 @@ func TestHandleTemplateFileUpload_MultipleFiles(t *testing.T) {
 		"config.json":  []byte(`{"setting": true}`),
 	})
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
@@ -554,7 +554,7 @@ func TestHandleTemplateFileUpload_LockedTemplate(t *testing.T) {
 		"config.yaml": []byte("key: value"),
 	})
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
@@ -578,7 +578,7 @@ func TestHandleTemplateFileUpload_NoFiles(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/files", &buf)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
@@ -599,7 +599,7 @@ func TestHandleTemplateFileUpload_OverwriteExisting(t *testing.T) {
 		"CLAUDE.md": []byte("# New Content"),
 	})
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())

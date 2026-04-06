@@ -153,7 +153,7 @@ func TestServer_SigningKeysExcludedFromResolve(t *testing.T) {
 
 	// Resolve secrets as if dispatching an agent — signing keys must not appear.
 	backend := secret.NewLocalBackend(s, "test-hub-resolve")
-	resolved, err := backend.Resolve(ctx, "", "", "", nil)
+	resolved, err := backend.Resolve(context.Background(), "", "", "", nil)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}

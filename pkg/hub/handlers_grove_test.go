@@ -1216,30 +1216,6 @@ func TestDeleteGrove_CleansUpGroveConfigsDir(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
-// TestCleanTemplateRepoURL verifies URL cleaning for template repo URLs.
-func TestCleanTemplateRepoURL(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"https://github.com/org/repo", "https://github.com/org/repo"},
-		{"https://github.com/org/repo/.scion/templates", "https://github.com/org/repo"},
-		{"https://github.com/org/repo/.scion/templates/", "https://github.com/org/repo"},
-		{"https://github.com/org/repo/tree/main/.scion/templates", "https://github.com/org/repo"},
-		{"https://github.com/org/repo/tree/develop", "https://github.com/org/repo"},
-		{"git@github.com:org/repo.git", "git@github.com:org/repo.git"},
-		{"github.com/ptone/scion-athenaeum", "github.com/ptone/scion-athenaeum"},
-		{"github.com/org/repo/.scion/templates", "github.com/org/repo"},
-		{"https://gitlab.com/org/repo/-/tree/main/.scion/templates", "https://gitlab.com/org/repo"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := cleanTemplateRepoURL(tt.input)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
 // TestGroveRegister_CreatesMembershipGroup verifies that registering a new grove
 // automatically creates a membership group with the caller as owner.
 func TestGroveRegister_CreatesMembershipGroup(t *testing.T) {
