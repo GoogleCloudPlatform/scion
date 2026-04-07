@@ -89,9 +89,9 @@ hub:
   endpoint: "https://hub.example.com"
   # Hub admin user for system-level operations
   user: "chat-app@example.com"
-  # Path to a file containing the Hub bearer token.
-  # If omitted, the app falls back to device authorization flow.
-  credentials: "/path/to/hub-token"
+  # Path to the Hub's user signing key file (base64-encoded, 32 bytes).
+  # The chat app uses this to mint impersonation tokens for hub users.
+  signing_key: "/path/to/user-signing-key"
 
 # Broker plugin RPC server settings.
 # The Hub connects to this address as a self-managed plugin.

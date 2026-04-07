@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -62,28 +63,48 @@ func main() {
 	defer store.Close()
 	log.Info("state database initialized", "path", dbPath)
 
-	// Create Hub admin client.
-	var hubOpts []hubclient.Option
-	if cfg.Hub.Credentials != "" {
-		token, err := os.ReadFile(cfg.Hub.Credentials)
-		if err != nil {
-			log.Error("failed to read hub credentials", "error", err)
-			os.Exit(1)
-		}
-		hubOpts = append(hubOpts, hubclient.WithBearerToken(strings.TrimSpace(string(token))))
-	} else {
-		hubOpts = append(hubOpts, hubclient.WithAutoDevAuth())
+	// Load hub signing key.
+	if cfg.Hub.SigningKey == "" {
+		log.Error("hub signing_key is required")
+		os.Exit(1)
+	}
+	signingKeyData, err := os.ReadFile(cfg.Hub.SigningKey)
+	if err != nil {
+		log.Error("failed to read hub signing key", "path", cfg.Hub.SigningKey, "error", err)
+		os.Exit(1)
+	}
+	signingKey, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(signingKeyData)))
+	if err != nil {
+		log.Error("failed to decode hub signing key (expected base64)", "error", err)
+		os.Exit(1)
 	}
 
-	adminClient, err := hubclient.New(cfg.Hub.Endpoint, hubOpts...)
+	minter, err := identity.NewTokenMinter(signingKey)
+	if err != nil {
+		log.Error("failed to create token minter", "error", err)
+		os.Exit(1)
+	}
+
+	// Mint an admin token for the configured hub user.
+	if cfg.Hub.User == "" {
+		log.Error("hub user is required")
+		os.Exit(1)
+	}
+	adminToken, err := minter.MintToken(cfg.Hub.User, cfg.Hub.User, "admin", 1*time.Hour)
+	if err != nil {
+		log.Error("failed to mint admin token", "error", err)
+		os.Exit(1)
+	}
+
+	adminClient, err := hubclient.New(cfg.Hub.Endpoint, hubclient.WithBearerToken(adminToken))
 	if err != nil {
 		log.Error("failed to create hub client", "error", err)
 		os.Exit(1)
 	}
-	log.Info("hub client initialized", "endpoint", cfg.Hub.Endpoint)
+	log.Info("hub client initialized", "endpoint", cfg.Hub.Endpoint, "admin_user", cfg.Hub.User)
 
 	// Create identity mapper.
-	idMapper := identity.NewMapper(store, adminClient, cfg.Hub.Endpoint, log.With("component", "identity"))
+	idMapper := identity.NewMapper(store, adminClient, cfg.Hub.Endpoint, minter, log.With("component", "identity"))
 
 	// Create broker server with a nil handler; wired to the notification relay below.
 	broker := chatapp.NewBrokerServer(nil, log.With("component", "broker"))

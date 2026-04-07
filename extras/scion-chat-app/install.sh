@@ -200,7 +200,7 @@ cat > "${TMPDIR}/scion-chat-app.yaml" <<EOF
 hub:
   endpoint: "${SCION_HUB_ENDPOINT}"
   user: "${CHAT_APP_HUB_USER}"
-  credentials: "${CHAT_APP_HUB_CREDENTIALS:-}"
+  signing_key: "${CHAT_APP_HUB_SIGNING_KEY:-}"
 
 plugin:
   listen_address: "localhost:9090"

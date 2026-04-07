@@ -18,10 +18,75 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
+
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
+
+const (
+	tokenIssuer   = "scion-hub"
+	tokenAudience = "scion-hub-api"
+	// impersonationTokenDuration is how long per-request impersonation tokens last.
+	impersonationTokenDuration = 15 * time.Minute
+)
+
+// tokenClaims mirrors the hub's UserTokenClaims structure.
+type tokenClaims struct {
+	jwt.Claims
+	UserID      string `json:"uid"`
+	Email       string `json:"email"`
+	DisplayName string `json:"name,omitempty"`
+	Role        string `json:"role"`
+	TokenType   string `json:"type"`
+	ClientType  string `json:"client"`
+}
+
+// TokenMinter creates signed user JWTs using the hub's signing key.
+type TokenMinter struct {
+	signer jose.Signer
+}
+
+// NewTokenMinter creates a minter from a raw signing key (32 bytes, HS256).
+func NewTokenMinter(signingKey []byte) (*TokenMinter, error) {
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.HS256, Key: signingKey},
+		(&jose.SignerOptions{}).WithType("JWT"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating signer: %w", err)
+	}
+	return &TokenMinter{signer: signer}, nil
+}
+
+// MintToken creates a signed JWT for the given user identity.
+func (m *TokenMinter) MintToken(userID, email, role string, duration time.Duration) (string, error) {
+	now := time.Now()
+	claims := tokenClaims{
+		Claims: jwt.Claims{
+			Issuer:    tokenIssuer,
+			Subject:   userID,
+			Audience:  jwt.Audience{tokenAudience},
+			IssuedAt:  jwt.NewNumericDate(now),
+			Expiry:    jwt.NewNumericDate(now.Add(duration)),
+			NotBefore: jwt.NewNumericDate(now),
+		},
+		UserID:     userID,
+		Email:      email,
+		Role:       role,
+		TokenType:  "access",
+		ClientType: "api",
+	}
+
+	token, err := jwt.Signed(m.signer).Claims(claims).Serialize()
+	if err != nil {
+		return "", fmt.Errorf("signing token: %w", err)
+	}
+	return token, nil
+}
 
 // ChatUserInfo holds basic chat user information for identity mapping.
 type ChatUserInfo struct {
@@ -40,15 +105,17 @@ type Mapper struct {
 	store     *state.Store
 	hubClient hubclient.Client
 	hubURL    string
+	minter    *TokenMinter
 	log       *slog.Logger
 }
 
 // NewMapper creates a new identity mapper.
-func NewMapper(store *state.Store, hubClient hubclient.Client, hubURL string, log *slog.Logger) *Mapper {
+func NewMapper(store *state.Store, hubClient hubclient.Client, hubURL string, minter *TokenMinter, log *slog.Logger) *Mapper {
 	return &Mapper{
 		store:     store,
 		hubClient: hubClient,
 		hubURL:    hubURL,
+		minter:    minter,
 		log:       log,
 	}
 }
@@ -114,16 +181,13 @@ func (m *Mapper) Unregister(platformUserID, platform string) error {
 }
 
 // ClientFor creates a hubclient.Client authenticated as the mapped Hub user.
-func (m *Mapper) ClientFor(ctx context.Context, mapping *state.UserMapping) (hubclient.Client, error) {
-	resp, err := m.hubClient.Tokens().Create(ctx, &hubclient.CreateTokenRequest{
-		Name:   fmt.Sprintf("chat-app-impersonation-%s", mapping.HubUserID),
-		Scopes: []string{"agents:read", "agents:write", "groves:read", "messages:write"},
-	})
+func (m *Mapper) ClientFor(_ context.Context, mapping *state.UserMapping) (hubclient.Client, error) {
+	token, err := m.minter.MintToken(mapping.HubUserID, mapping.HubUserEmail, "member", impersonationTokenDuration)
 	if err != nil {
-		return nil, fmt.Errorf("creating impersonation token: %w", err)
+		return nil, fmt.Errorf("minting impersonation token: %w", err)
 	}
 
-	return hubclient.New(m.hubURL, hubclient.WithBearerToken(resp.Token))
+	return hubclient.New(m.hubURL, hubclient.WithBearerToken(token))
 }
 
 // ResolveOrAutoRegister tries to resolve a user, and if not found, attempts auto-registration.

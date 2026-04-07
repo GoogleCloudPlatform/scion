@@ -26,9 +26,9 @@ type Config struct {
 
 // HubConfig holds connection details for the Scion Hub.
 type HubConfig struct {
-	Endpoint    string `yaml:"endpoint"`
-	User        string `yaml:"user"`
-	Credentials string `yaml:"credentials"`
+	Endpoint   string `yaml:"endpoint"`
+	User       string `yaml:"user"`
+	SigningKey string `yaml:"signing_key"`
 }
 
 // PluginConfig holds broker plugin RPC server settings.

@@ -4,7 +4,7 @@ go 1.25.4
 
 require (
 	github.com/GoogleCloudPlatform/scion v0.0.0-00010101000000-000000000000
-	github.com/hashicorp/go-hclog v1.6.3
+	github.com/go-jose/go-jose/v4 v4.1.3
 	github.com/hashicorp/go-plugin v1.7.0
 	github.com/mattn/go-sqlite3 v1.14.28
 	golang.org/x/oauth2 v0.36.0
@@ -16,6 +16,7 @@ require (
 	github.com/fatih/color v1.13.0 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/hashicorp/go-hclog v1.6.3 // indirect
 	github.com/hashicorp/yamux v0.1.2 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
