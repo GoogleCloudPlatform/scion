@@ -288,8 +288,10 @@ func loadConfig(path string) (*chatapp.Config, error) {
 	return &cfg, nil
 }
 
-// discoverSigningKey searches GCP Secret Manager for a secret with the label
-// scion-name=user_signing_key and returns its latest version value and resource name.
+// discoverSigningKey searches GCP Secret Manager for a secret matching the
+// local hub instance. It filters by scion-name=user_signing_key and
+// scion-hub-hostname matching the local hostname, which uniquely identifies
+// the hub in a multi-hub project.
 func discoverSigningKey(ctx context.Context, projectID string) (value, resourceName string, err error) {
 	client, err := secretmanager.NewClient(ctx)
 	if err != nil {
@@ -297,14 +299,26 @@ func discoverSigningKey(ctx context.Context, projectID string) (value, resourceN
 	}
 	defer client.Close()
 
+	hostname, err := os.Hostname()
+	if err != nil {
+		return "", "", fmt.Errorf("getting hostname for label match: %w", err)
+	}
+	// Labels are stored lowercase (sanitizeLabel in the hub).
+	hostnameLabel := strings.ToLower(hostname)
+
+	filter := fmt.Sprintf(
+		"labels.scion-name=user_signing_key AND labels.scion-hub-hostname=%s",
+		hostnameLabel,
+	)
+
 	it := client.ListSecrets(ctx, &smpb.ListSecretsRequest{
 		Parent: fmt.Sprintf("projects/%s", projectID),
-		Filter: `labels.scion-name=user_signing_key`,
+		Filter: filter,
 	})
 
 	secret, err := it.Next()
 	if err == iterator.Done {
-		return "", "", fmt.Errorf("no secret with label scion-name=user_signing_key found in project %s", projectID)
+		return "", "", fmt.Errorf("no secret with labels scion-name=user_signing_key, scion-hub-hostname=%s found in project %s", hostnameLabel, projectID)
 	}
 	if err != nil {
 		return "", "", fmt.Errorf("listing secrets: %w", err)
