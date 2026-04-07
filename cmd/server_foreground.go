@@ -244,7 +244,8 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			}()
 		} else {
 			// Combined mode: Hub API is mounted on the Web server.
-			hubSrv.StartBackgroundServices(ctx)
+			// Background services (scheduler, notification dispatcher) are
+			// started after initWebServer sets the ChannelEventPublisher.
 			log.Printf("Hub API will be mounted on Web server (port %d)", webPort)
 			wg.Add(1)
 			go func() {
@@ -259,6 +260,12 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	var webSrv *hub.WebServer
 	if enableWeb {
 		webSrv = initWebServer(cfg, hubSrv, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger)
+
+		// In combined mode, start Hub background services now that the
+		// ChannelEventPublisher has been wired by initWebServer.
+		if enableHub && hubSrv != nil {
+			hubSrv.StartBackgroundServices(ctx)
+		}
 
 		log.Printf("Starting Web Frontend on %s:%d", cfg.Hub.Host, webPort)
 		wg.Add(1)
@@ -277,11 +284,49 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 14. Set up dispatcher and notification dispatcher
+	// 14. Set up dispatcher, message broker, and notification dispatcher.
+	// This must happen after the ChannelEventPublisher is set (step 11/12)
+	// so that StartMessageBroker and StartNotificationDispatcher can
+	// create their proxies with the real event publisher.
 	if enableHub && hubSrv != nil {
 		dispatcher := hubSrv.CreateAuthenticatedDispatcher()
 		hubSrv.SetDispatcher(dispatcher)
 		log.Printf("Agent dispatcher configured (HTTP-based)")
+
+		// Initialize message broker from versioned settings
+		if vs, err := config.LoadVersionedSettings(""); err == nil && vs.Server != nil && vs.Server.MessageBroker != nil && vs.Server.MessageBroker.Enabled {
+			brokerType := vs.Server.MessageBroker.Type
+			if brokerType == "" {
+				brokerType = "inprocess"
+			}
+			switch brokerType {
+			case "inprocess":
+				b := broker.NewInProcessBroker(logging.Subsystem("hub.broker.inprocess"))
+				hubSrv.StartMessageBroker(b)
+				log.Printf("Message broker started: type=%s", brokerType)
+			default:
+				// Try loading as a plugin broker
+				if pluginMgr.HasPlugin(scionplugin.PluginTypeBroker, brokerType) {
+					b, pluginErr := pluginMgr.GetBroker(brokerType)
+					if pluginErr != nil {
+						log.Printf("Warning: failed to get broker plugin %q: %v", brokerType, pluginErr)
+					} else {
+						hubSrv.StartMessageBroker(b)
+						log.Printf("Message broker started: type=%s (plugin)", brokerType)
+					}
+				} else {
+					log.Printf("Warning: unknown message broker type %q (no plugin loaded), skipping", brokerType)
+				}
+			}
+
+			// Wire the broker proxy as the host callbacks target for broker plugins.
+			// This enables plugin-initiated subscriptions via the HostCallbacks
+			// reverse channel (the proxy implements plugin.HostCallbacks).
+			if proxy := hubSrv.GetMessageBrokerProxy(); proxy != nil {
+				pluginMgr.SetBrokerHostCallbacks(proxy)
+			}
+		}
+
 		hubSrv.StartNotificationDispatcher()
 	}
 
@@ -717,39 +762,9 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		log.Printf("Notification channels configured: %d channel(s) registered", registry.Len())
 	}
 
-	// Initialize message broker from versioned settings
-	if vs, err := config.LoadVersionedSettings(""); err == nil && vs.Server != nil && vs.Server.MessageBroker != nil && vs.Server.MessageBroker.Enabled {
-		brokerType := vs.Server.MessageBroker.Type
-		if brokerType == "" {
-			brokerType = "inprocess"
-		}
-		switch brokerType {
-		case "inprocess":
-			b := broker.NewInProcessBroker(logging.Subsystem("hub.broker.inprocess"))
-			hubSrv.StartMessageBroker(b)
-			log.Printf("Message broker started: type=%s", brokerType)
-		default:
-			// Try loading as a plugin broker
-			if pluginMgr.HasPlugin(scionplugin.PluginTypeBroker, brokerType) {
-				b, pluginErr := pluginMgr.GetBroker(brokerType)
-				if pluginErr != nil {
-					log.Printf("Warning: failed to get broker plugin %q: %v", brokerType, pluginErr)
-				} else {
-					hubSrv.StartMessageBroker(b)
-					log.Printf("Message broker started: type=%s (plugin)", brokerType)
-				}
-			} else {
-				log.Printf("Warning: unknown message broker type %q (no plugin loaded), skipping", brokerType)
-			}
-		}
-
-		// Wire the broker proxy as the host callbacks target for broker plugins.
-		// This enables plugin-initiated subscriptions via the HostCallbacks
-		// reverse channel (the proxy implements plugin.HostCallbacks).
-		if proxy := hubSrv.GetMessageBrokerProxy(); proxy != nil {
-			pluginMgr.SetBrokerHostCallbacks(proxy)
-		}
-	}
+	// NOTE: Message broker initialization is deferred to the main startup
+	// flow (after the event publisher is set) so that StartMessageBroker
+	// can create its proxy with the ChannelEventPublisher.
 
 	// Initialize storage
 	initHubStorage(ctx, hubSrv, cfg, globalDir)
