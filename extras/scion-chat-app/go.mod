@@ -5,7 +5,7 @@ go 1.25.4
 require (
 	cloud.google.com/go/secretmanager v1.16.0
 	github.com/GoogleCloudPlatform/scion v0.0.0-00010101000000-000000000000
-	github.com/go-jose/go-jose/v4 v4.1.3
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/hashicorp/go-plugin v1.7.0
 	github.com/mattn/go-sqlite3 v1.14.28
 	golang.org/x/oauth2 v0.36.0
