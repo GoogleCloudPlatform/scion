@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -87,6 +89,53 @@ func (m *TokenMinter) MintToken(userID, email, role string, duration time.Durati
 	}
 	return token, nil
 }
+
+// MintingAuth implements apiclient.Authenticator by minting fresh JWTs
+// on demand. Tokens are cached and re-minted when they approach expiry.
+type MintingAuth struct {
+	minter   *TokenMinter
+	userID   string
+	email    string
+	role     string
+	duration time.Duration
+
+	mu      sync.Mutex
+	token   string
+	expires time.Time
+}
+
+// NewMintingAuth creates an authenticator that mints tokens for the given user.
+func NewMintingAuth(minter *TokenMinter, userID, email, role string, duration time.Duration) *MintingAuth {
+	return &MintingAuth{
+		minter:   minter,
+		userID:   userID,
+		email:    email,
+		role:     role,
+		duration: duration,
+	}
+}
+
+// ApplyAuth sets the Authorization header with a fresh or cached token.
+func (a *MintingAuth) ApplyAuth(req *http.Request) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Re-mint if token is missing or within 1 minute of expiry.
+	if a.token == "" || time.Now().After(a.expires.Add(-1*time.Minute)) {
+		token, err := a.minter.MintToken(a.userID, a.email, a.role, a.duration)
+		if err != nil {
+			return fmt.Errorf("minting auth token: %w", err)
+		}
+		a.token = token
+		a.expires = time.Now().Add(a.duration)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+a.token)
+	return nil
+}
+
+// Refresh is a no-op; MintingAuth handles refresh transparently in ApplyAuth.
+func (a *MintingAuth) Refresh() (bool, error) { return false, nil }
 
 // ChatUserInfo holds basic chat user information for identity mapping.
 type ChatUserInfo struct {

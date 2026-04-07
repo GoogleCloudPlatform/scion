@@ -85,18 +85,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Mint an admin token for the configured hub user.
+	// Create auto-refreshing admin auth for the configured hub user.
 	if cfg.Hub.User == "" {
 		log.Error("hub user is required")
 		os.Exit(1)
 	}
-	adminToken, err := minter.MintToken(cfg.Hub.User, cfg.Hub.User, "admin", 1*time.Hour)
-	if err != nil {
-		log.Error("failed to mint admin token", "error", err)
-		os.Exit(1)
-	}
+	adminAuth := identity.NewMintingAuth(minter, cfg.Hub.User, cfg.Hub.User, "admin", 15*time.Minute)
 
-	adminClient, err := hubclient.New(cfg.Hub.Endpoint, hubclient.WithBearerToken(adminToken))
+	adminClient, err := hubclient.New(cfg.Hub.Endpoint, hubclient.WithAuthenticator(adminAuth))
 	if err != nil {
 		log.Error("failed to create hub client", "error", err)
 		os.Exit(1)
