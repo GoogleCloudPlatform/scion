@@ -201,6 +201,7 @@ hub:
   endpoint: "${SCION_HUB_ENDPOINT}"
   user: "${CHAT_APP_HUB_USER}"
   signing_key: "${CHAT_APP_HUB_SIGNING_KEY:-}"
+  signing_key_secret: "${CHAT_APP_HUB_SIGNING_KEY_SECRET:-}"
 
 plugin:
   listen_address: "localhost:9090"
