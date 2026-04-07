@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -87,6 +88,14 @@ func NewCommandRouter(
 		pendingAuth:    make(map[string]*pendingDeviceAuth),
 		pendingDeletes: make(map[string]string),
 	}
+}
+
+// hubHostname returns the hostname portion of the hub URL.
+func (r *CommandRouter) hubHostname() string {
+	if u, err := url.Parse(r.hubURL); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return r.hubURL
 }
 
 // SetMessenger sets the messenger after construction, breaking the
@@ -1003,7 +1012,7 @@ func (r *CommandRouter) cmdInfo(ctx context.Context, event *ChatEvent, args []st
 	card := Card{
 		Header: CardHeader{
 			Title:    "Scion Info",
-			Subtitle: fmt.Sprintf("Space: %s", event.SpaceID),
+			Subtitle: fmt.Sprintf("Hub: %s", r.hubHostname()),
 		},
 		Sections: []CardSection{
 			{
