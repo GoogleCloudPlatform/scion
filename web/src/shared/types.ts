@@ -500,6 +500,7 @@ export interface Secret {
   injectionMode: InjectionMode;
   allowProgeny?: boolean;
   version: number;
+  secretRef?: string;
   created: string;
   updated: string;
   createdBy?: string;

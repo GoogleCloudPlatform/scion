@@ -58,6 +58,9 @@ export class ScionSecretList extends LitElement {
   // Delete
   @state() private deletingKey: string | null = null;
 
+  // Copy-to-clipboard feedback
+  @state() private copiedSecretKey: string | null = null;
+
   static override styles = [resourceStyles];
 
   override connectedCallback(): void {
@@ -225,6 +228,19 @@ export class ScionSecretList extends LitElement {
     }
   }
 
+  private async copySecretRef(secret: Secret): Promise<void> {
+    if (!secret.secretRef) return;
+    try {
+      await navigator.clipboard.writeText(secret.secretRef);
+      this.copiedSecretKey = secret.key;
+      setTimeout(() => {
+        this.copiedSecretKey = null;
+      }, 1500);
+    } catch {
+      // Silently fail if clipboard is unavailable
+    }
+  }
+
   // ── Rendering ────────────────────────────────────────────────────────
 
   override render() {
@@ -355,7 +371,15 @@ export class ScionSecretList extends LitElement {
           : nothing}
         <td class="description-cell hide-mobile">${secret.description || '\u2014'}</td>
         <td>
-          <span class="version-badge">v${secret.version}</span>
+          ${secret.secretRef
+            ? html`<sl-tooltip content=${this.copiedSecretKey === secret.key ? 'Copied!' : secret.secretRef} hoist>
+                <span
+                  class="version-badge version-badge-copyable"
+                  @click=${() => this.copySecretRef(secret)}
+                  title=""
+                >v${secret.version}</span>
+              </sl-tooltip>`
+            : html`<span class="version-badge">v${secret.version}</span>`}
         </td>
         <td class="hide-mobile">
           <span class="meta-text">${this.formatRelativeTime(secret.updated)}</span>

@@ -201,6 +201,14 @@ export const resourceStyles = css`
     font-family: var(--scion-font-mono, monospace);
   }
 
+  .version-badge-copyable {
+    cursor: pointer;
+  }
+
+  .version-badge-copyable:hover {
+    background: var(--scion-bg-hover, #e2e8f0);
+  }
+
   /* ── Empty / Loading / Error states ─────────────────────────────────── */
 
   .empty-state {
