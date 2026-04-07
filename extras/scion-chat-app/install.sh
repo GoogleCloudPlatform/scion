@@ -309,19 +309,21 @@ else
     # 5a. Add the googlechat plugin entry under server.plugins.broker.
     # The plugins key must be nested under "server:" in settings.yaml,
     # NOT at the root level, to match the V1ServerConfig schema.
-    if grep -q 'googlechat' "${SETTINGS_FILE}"; then
-        substep "settings.yaml already has googlechat plugin config"
-    else
-        # Remove any stale root-level plugins: block (from earlier install
-        # versions that incorrectly placed it at the root).
-        if grep -q '^plugins:' "${SETTINGS_FILE}"; then
-            substep "removing stale root-level plugins: block"
-            sudo sed -i '/^plugins:/,/^[^ ]/{ /^[^ ]/!d; /^plugins:/d; }' "${SETTINGS_FILE}"
-        fi
 
+    # First, fix any stale root-level plugins: block left by earlier
+    # install versions that incorrectly placed it outside server:.
+    if grep -q '^plugins:' "${SETTINGS_FILE}"; then
+        substep "removing stale root-level plugins: block (must be under server:)"
+        sudo sed -i '/^plugins:/,/^[^ ]/{ /^[^ ]/!d; /^plugins:/d; }' "${SETTINGS_FILE}"
+        HUB_SETTINGS_CHANGED=1
+    fi
+
+    # Check if googlechat is correctly nested under server.plugins.
+    if grep -qE '^\s+plugins:' "${SETTINGS_FILE}" && grep -q 'googlechat' "${SETTINGS_FILE}"; then
+        substep "settings.yaml already has googlechat plugin config under server"
+    else
         # Insert under server: (plugins must be a child of server in the schema).
         sudo sed -i '/^\s*server:/a\    plugins:\n        broker:\n            googlechat:\n                self_managed: true\n                address: "localhost:9090"' "${SETTINGS_FILE}"
-
         substep "settings.yaml updated with googlechat plugin config under server"
         HUB_SETTINGS_CHANGED=1
     fi
