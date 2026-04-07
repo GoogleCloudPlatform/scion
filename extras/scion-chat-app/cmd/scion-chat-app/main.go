@@ -16,7 +16,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -109,6 +111,14 @@ func main() {
 		log.Error("failed to decode hub signing key (expected base64)", "error", err)
 		os.Exit(1)
 	}
+
+	// Log key fingerprint for debugging key mismatch issues.
+	keyHash := sha256.Sum256(signingKey)
+	log.Info("signing key loaded",
+		"key_len", len(signingKey),
+		"key_sha256", hex.EncodeToString(keyHash[:8]),
+		"b64_len", len(signingKeyB64),
+	)
 
 	minter, err := identity.NewTokenMinter(signingKey)
 	if err != nil {
@@ -311,6 +321,11 @@ func discoverSigningKey(ctx context.Context, projectID string) (value, resourceN
 		hostnameLabel,
 	)
 
+	slog.Debug("searching Secret Manager for signing key",
+		"filter", filter,
+		"parent", fmt.Sprintf("projects/%s", projectID),
+	)
+
 	it := client.ListSecrets(ctx, &smpb.ListSecretsRequest{
 		Parent: fmt.Sprintf("projects/%s", projectID),
 		Filter: filter,
@@ -323,6 +338,11 @@ func discoverSigningKey(ctx context.Context, projectID string) (value, resourceN
 	if err != nil {
 		return "", "", fmt.Errorf("listing secrets: %w", err)
 	}
+
+	slog.Debug("found signing key secret",
+		"name", secret.Name,
+		"labels", secret.Labels,
+	)
 
 	resp, err := client.AccessSecretVersion(ctx, &smpb.AccessSecretVersionRequest{
 		Name: secret.Name + "/versions/latest",
@@ -370,5 +390,7 @@ func initLogger(cfg chatapp.LoggingConfig) *slog.Logger {
 	} else {
 		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})
 	}
-	return slog.New(handler)
+	logger := slog.New(handler)
+	slog.SetDefault(logger)
+	return logger
 }

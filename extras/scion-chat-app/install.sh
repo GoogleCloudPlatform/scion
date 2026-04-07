@@ -229,7 +229,7 @@ notifications:
     - LIMITS_EXCEEDED
 
 logging:
-  level: "debug"
+  level: "${CHAT_APP_LOG_LEVEL:-info}"
   format: "json"
 EOF
 sudo install -m 600 -o scion -g scion "${TMPDIR}/scion-chat-app.yaml" "${CONFIG_FILE}"
