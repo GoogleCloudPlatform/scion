@@ -17,13 +17,13 @@ package chatapp
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
-	"github.com/hashicorp/go-hclog"
 	goplugin "github.com/hashicorp/go-plugin"
 )
 
@@ -167,14 +167,19 @@ func (b *BrokerServer) CancelSubscription(pattern string) error {
 }
 
 // Serve starts the go-plugin RPC server on the given address.
-// The Hub's plugin manager connects to this server.
+// The Hub's plugin manager connects to this server as a self-managed plugin.
+//
+// We use goplugin.RPCServer directly instead of goplugin.Serve() because
+// Serve() is designed for plugin binaries launched by a parent process — it
+// checks for the magic cookie env var and calls os.Exit(1) when it is absent.
+// As a self-managed plugin we own our own process lifecycle, so we just need
+// to speak the go-plugin net/rpc protocol on a listener we control.
 func (b *BrokerServer) Serve(listenAddr string) (*PluginServer, error) {
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("listening on %s: %w", listenAddr, err)
 	}
 
-	// Create the go-plugin server configuration
 	pluginMap := map[string]goplugin.Plugin{
 		plugin.BrokerPluginName: &plugin.BrokerPlugin{
 			Impl: b,
@@ -187,24 +192,21 @@ func (b *BrokerServer) Serve(listenAddr string) (*PluginServer, error) {
 		log:      b.log,
 	}
 
-	// Create a go-plugin server
-	cfg := &goplugin.ServeConfig{
-		HandshakeConfig: goplugin.HandshakeConfig{
-			ProtocolVersion:  plugin.BrokerPluginProtocolVersion,
-			MagicCookieKey:   plugin.MagicCookieKey,
-			MagicCookieValue: plugin.MagicCookieValue,
-		},
+	// Create dummy stdout/stderr readers for the go-plugin stream protocol.
+	// Self-managed plugins don't pipe stdio to the host, so these are
+	// never-closing readers that the stream copiers will block on harmlessly.
+	stdoutR, _ := io.Pipe()
+	stderrR, _ := io.Pipe()
+
+	doneCh := make(chan struct{})
+	rpcServer := &goplugin.RPCServer{
 		Plugins: pluginMap,
-		Logger: hclog.New(&hclog.LoggerOptions{
-			Name:   "scion-chat-app",
-			Level:  hclog.Info,
-			Output: &slogWriter{log: b.log},
-		}),
+		Stdout:  stdoutR,
+		Stderr:  stderrR,
+		DoneCh:  doneCh,
 	}
 
-	// For self-managed plugins, we serve on a TCP listener
-	// The Hub connects to us rather than starting us
-	go goplugin.Serve(cfg)
+	go rpcServer.Serve(listener)
 
 	b.log.Info("broker plugin RPC server started", "address", listenAddr)
 	server.addr = listener.Addr().String()
@@ -231,14 +233,4 @@ func (s *PluginServer) Close() error {
 		return s.listener.Close()
 	}
 	return nil
-}
-
-// slogWriter adapts slog.Logger for hclog output.
-type slogWriter struct {
-	log *slog.Logger
-}
-
-func (w *slogWriter) Write(p []byte) (n int, err error) {
-	w.log.Info(string(p))
-	return len(p), nil
 }
