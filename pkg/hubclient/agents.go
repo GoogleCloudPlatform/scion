@@ -83,6 +83,10 @@ type AgentService interface {
 	// GetLogs retrieves agent logs.
 	GetLogs(ctx context.Context, agentID string, opts *GetLogsOptions) (string, error)
 
+	// SendOutboundMessage sends a message from an agent to a human inbox.
+	// Used when agents need to communicate with users (e.g., asking questions).
+	SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) error
+
 	// GetCloudLogs retrieves structured log entries from Cloud Logging.
 	GetCloudLogs(ctx context.Context, agentID string, opts *GetCloudLogsOptions) (*CloudLogsResponse, error)
 
@@ -436,6 +440,24 @@ func (s *agentService) SendStructuredMessage(ctx context.Context, agentID string
 		Notify:            notify,
 	}
 	resp, err := s.c.transport.Post(ctx, s.agentPath(agentID)+"/message", body, nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+// OutboundMessageRequest is the request body for sending an agent-to-human outbound message.
+type OutboundMessageRequest struct {
+	Recipient   string `json:"recipient,omitempty"`
+	RecipientID string `json:"recipient_id,omitempty"`
+	Msg         string `json:"msg"`
+	Type        string `json:"type,omitempty"`
+	Urgent      bool   `json:"urgent,omitempty"`
+}
+
+// SendOutboundMessage sends a message from an agent to a human inbox.
+func (s *agentService) SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) error {
+	resp, err := s.c.transport.Post(ctx, s.agentPath(agentID)+"/outbound-message", msg, nil)
 	if err != nil {
 		return err
 	}

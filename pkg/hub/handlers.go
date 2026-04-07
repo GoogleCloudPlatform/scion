@@ -4206,6 +4206,8 @@ func (s *Server) handleGroveAgentAction(w http.ResponseWriter, r *http.Request, 
 		s.submitAgentEnv(w, r, groveID, agentID)
 	case "restore":
 		s.restoreAgent(w, r, agent.ID)
+	case "outbound-message":
+		s.handleAgentOutboundMessage(w, r, agent.ID)
 	default:
 		NotFound(w, "Action")
 	}

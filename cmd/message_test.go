@@ -555,6 +555,117 @@ func TestSendMessageViaHub_NotifyFlag(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestSendOutboundMessageViaHub(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	groveID := "grove-msg-outbound"
+
+	var receivedMsg *hubclient.OutboundMessageRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/groves/"+groveID+"/agents/my-agent/outbound-message":
+			var msg hubclient.OutboundMessageRequest
+			json.NewDecoder(r.Body).Decode(&msg)
+			receivedMsg = &msg
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:   client,
+		Endpoint: server.URL,
+		GroveID:  groveID,
+	}
+
+	t.Setenv("SCION_AGENT_NAME", "my-agent")
+
+	err = sendOutboundMessageViaHub(hubCtx, "user:alice", "I need help", false)
+	require.NoError(t, err)
+
+	require.NotNil(t, receivedMsg)
+	assert.Equal(t, "user:alice", receivedMsg.Recipient)
+	assert.Equal(t, "I need help", receivedMsg.Msg)
+	assert.Equal(t, "instruction", receivedMsg.Type)
+	assert.False(t, receivedMsg.Urgent)
+}
+
+func TestSendOutboundMessageViaHub_RequiresAgentContext(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:   client,
+		Endpoint: server.URL,
+		GroveID:  "grove-test",
+	}
+
+	t.Setenv("SCION_AGENT_NAME", "")
+
+	err = sendOutboundMessageViaHub(hubCtx, "user:alice", "hello", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SCION_AGENT_NAME not set")
+}
+
+func TestUserRecipientFlagValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		raw     bool
+		in      string
+		wantErr string
+	}{
+		{
+			name:    "raw with user recipient not allowed",
+			args:    []string{"user:alice", "hello"},
+			raw:     true,
+			wantErr: "--raw cannot be used with user recipients",
+		},
+		{
+			name:    "scheduled with user recipient not allowed",
+			args:    []string{"user:alice", "hello"},
+			in:      "30m",
+			wantErr: "--in/--at cannot be used with user recipients",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origRaw := msgRaw
+			origIn := msgIn
+			defer func() {
+				msgRaw = origRaw
+				msgIn = origIn
+			}()
+
+			msgRaw = tc.raw
+			msgIn = tc.in
+
+			err := messageCmd.RunE(messageCmd, tc.args)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
 func TestNotifyFlagValidation(t *testing.T) {
 	tests := []struct {
 		name      string

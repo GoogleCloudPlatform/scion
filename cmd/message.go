@@ -43,25 +43,43 @@ var msgNotify bool
 
 // messageCmd represents the message command
 var messageCmd = &cobra.Command{
-	Use:     "message [agent] <message>",
+	Use:     "message [recipient] <message>",
 	Aliases: []string{"msg"},
-	Short:   "Send a message to an agent's harness",
-	Long: `Sends a message to a running agent's harness by enqueuing it into the tmux session.
-If --broadcast is used, the agent name can be omitted and the message will be sent to all running agents.`,
+	Short:   "Send a message to an agent or user",
+	Long: `Sends a message to a running agent's harness or to a user's inbox.
+
+Recipients:
+  <agent-name>       Send to an agent (default, same as agent:<name>)
+  agent:<name>       Send to an agent explicitly
+  user:<name>        Send to a user's inbox (Hub mode only)
+
+If --broadcast is used, the recipient can be omitted and the message will be sent to all running agents.
+
+Examples:
+  scion message my-agent "Please review the PR"
+  scion message user:alice "I need clarification on the auth module"`,
 	Args:              cobra.MinimumNArgs(1),
 	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var agentName string
+		var userRecipient string
 		var message string
 
 		if msgBroadcast || msgAll {
 			message = strings.Join(args, " ")
 		} else {
 			if len(args) < 2 {
-				return fmt.Errorf("agent name and message are required unless --broadcast is used")
+				return fmt.Errorf("recipient and message are required unless --broadcast is used")
 			}
-			agentName = api.Slugify(args[0])
+			recipient := args[0]
 			message = strings.Join(args[1:], " ")
+
+			if strings.HasPrefix(recipient, "user:") {
+				userRecipient = recipient
+			} else {
+				// Strip optional "agent:" prefix for backwards compatibility
+				agentName = api.Slugify(strings.TrimPrefix(recipient, "agent:"))
+			}
 		}
 
 		// Validate scheduling flags
@@ -93,6 +111,19 @@ If --broadcast is used, the agent name can be omitted and the message will be se
 			return fmt.Errorf("--notify cannot be combined with --broadcast or --all")
 		}
 
+		// Validate user-recipient restrictions
+		if userRecipient != "" {
+			if msgBroadcast || msgAll {
+				return fmt.Errorf("user recipients cannot be combined with --broadcast or --all")
+			}
+			if msgRaw {
+				return fmt.Errorf("--raw cannot be used with user recipients")
+			}
+			if msgIn != "" || msgAt != "" {
+				return fmt.Errorf("--in/--at cannot be used with user recipients")
+			}
+		}
+
 		// Validate attachments
 		if len(msgAttach) > messages.MaxAttachments {
 			return fmt.Errorf("too many attachments: %d (max %d)", len(msgAttach), messages.MaxAttachments)
@@ -101,7 +132,10 @@ If --broadcast is used, the agent name can be omitted and the message will be se
 		// Check if Hub should be used
 		var hubCtx *HubContext
 		var err error
-		if msgAll {
+		if userRecipient != "" {
+			// User recipient: skip sync (no agent involved)
+			hubCtx, err = CheckHubAvailabilityWithOptions(grovePath, true)
+		} else if msgAll {
 			// Cross-grove operation: skip sync
 			hubCtx, err = CheckHubAvailabilityWithOptions(grovePath, true)
 		} else if msgBroadcast {
@@ -115,6 +149,11 @@ If --broadcast is used, the agent name can be omitted and the message will be se
 			return err
 		}
 
+		// User recipients require Hub mode
+		if userRecipient != "" && hubCtx == nil {
+			return fmt.Errorf("sending messages to users requires Hub mode (use 'scion hub enable' first)")
+		}
+
 		// Handle scheduled messages
 		if msgIn != "" || msgAt != "" {
 			if hubCtx == nil {
@@ -126,6 +165,11 @@ If --broadcast is used, the agent name can be omitted and the message will be se
 		// --notify requires Hub mode
 		if msgNotify && hubCtx == nil {
 			return fmt.Errorf("--notify requires Hub mode (use 'scion hub enable' first)")
+		}
+
+		// User-targeted messages: route to outbound-message endpoint
+		if userRecipient != "" {
+			return sendOutboundMessageViaHub(hubCtx, userRecipient, message, msgInterrupt)
 		}
 
 		if hubCtx != nil {
@@ -383,6 +427,44 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 		if notify {
 			fmt.Printf("Subscribed to notifications for agent '%s'.\n", agentName)
 		}
+	}
+	return nil
+}
+
+func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message string, urgent bool) error {
+	if !isJSONOutput() {
+		PrintUsingHub(hubCtx.Endpoint)
+	}
+
+	// Determine the sending agent's name. This command is intended for use
+	// by agents running inside containers, where SCION_AGENT_NAME is set.
+	senderAgent := os.Getenv("SCION_AGENT_NAME")
+	if senderAgent == "" {
+		return fmt.Errorf("sending messages to users is only supported from within an agent container (SCION_AGENT_NAME not set)")
+	}
+
+	groveID, err := GetGroveID(hubCtx)
+	if err != nil {
+		return wrapHubError(err)
+	}
+	agentSvc := hubCtx.Client.GroveAgents(groveID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	outMsg := &hubclient.OutboundMessageRequest{
+		Recipient: userRecipient,
+		Msg:       message,
+		Type:      "instruction",
+		Urgent:    urgent,
+	}
+
+	if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
+		return wrapHubError(fmt.Errorf("failed to send message to %s: %w", userRecipient, err))
+	}
+
+	if !isJSONOutput() {
+		fmt.Printf("Message sent to %s via Hub.\n", userRecipient)
 	}
 	return nil
 }
