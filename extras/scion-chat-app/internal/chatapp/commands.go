@@ -156,6 +156,8 @@ func (r *CommandRouter) handleCommand(ctx context.Context, event *ChatEvent) err
 		return r.cmdUnsubscribe(ctx, event, args)
 	case "message", "msg":
 		return r.cmdMessage(ctx, event, args)
+	case "info":
+		return r.cmdInfo(ctx, event, args)
 	case "help":
 		return r.cmdHelp(ctx, event)
 	default:
@@ -916,6 +918,72 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 	return r.reply(ctx, event, reply)
 }
 
+func (r *CommandRouter) cmdInfo(ctx context.Context, event *ChatEvent, args []string) error {
+	// User registration state
+	registrationStatus := "Not registered"
+	registeredEmail := ""
+	mapping, err := r.idMapper.Resolve(event.UserID, event.Platform)
+	if err != nil {
+		return fmt.Errorf("checking registration: %w", err)
+	}
+	if mapping != nil {
+		registrationStatus = "Registered"
+		registeredEmail = mapping.HubUserEmail
+	}
+
+	// Grove linkage state
+	linkStatus := "Not linked"
+	groveSlug := ""
+	var link *state.SpaceLink
+	link, err = r.store.GetSpaceLink(event.SpaceID, event.Platform)
+	if err != nil {
+		return fmt.Errorf("checking space link: %w", err)
+	}
+	if link != nil {
+		linkStatus = "Linked"
+		groveSlug = link.GroveSlug
+	}
+
+	// Build info card
+	widgets := []Widget{
+		{Type: WidgetKeyValue, Label: "Registration", Content: registrationStatus},
+	}
+	if registeredEmail != "" {
+		widgets = append(widgets, Widget{Type: WidgetKeyValue, Label: "Hub Email", Content: registeredEmail})
+	}
+	widgets = append(widgets, Widget{Type: WidgetKeyValue, Label: "Grove Link", Content: linkStatus})
+	if groveSlug != "" {
+		widgets = append(widgets, Widget{Type: WidgetKeyValue, Label: "Grove", Content: groveSlug})
+	}
+
+	// If linked and registered, fetch agent count from the grove
+	if link != nil && mapping != nil {
+		client, clientErr := r.idMapper.ClientFor(ctx, mapping)
+		if clientErr == nil {
+			grove, groveErr := client.Groves().Get(ctx, link.GroveSlug)
+			if groveErr == nil {
+				widgets = append(widgets, Widget{Type: WidgetKeyValue, Label: "Agents", Content: fmt.Sprintf("%d", grove.AgentCount)})
+			}
+		}
+	}
+
+	card := Card{
+		Header: CardHeader{
+			Title:    "Scion Info",
+			Subtitle: fmt.Sprintf("Space: %s", event.SpaceID),
+		},
+		Sections: []CardSection{
+			{
+				Header:  "Space & Identity",
+				Widgets: widgets,
+			},
+		},
+	}
+
+	_, err = r.messenger.SendCard(ctx, event.SpaceID, card)
+	return err
+}
+
 func (r *CommandRouter) cmdHelp(ctx context.Context, event *ChatEvent) error {
 	help := `*Scion Chat Bot Commands:*
 
@@ -930,6 +998,7 @@ func (r *CommandRouter) cmdHelp(ctx context.Context, event *ChatEvent) error {
 • ` + "`/scion message [--thread <id>] <agent> <text>`" + ` — Send a message to an agent
 
 *Space & Identity:*
+• ` + "`/scion info`" + ` — Show registration, grove link, and agent info
 • ` + "`/scion link <grove-slug>`" + ` — Link this space to a grove
 • ` + "`/scion unlink`" + ` — Unlink this space
 • ` + "`/scion register`" + ` — Register your chat account
