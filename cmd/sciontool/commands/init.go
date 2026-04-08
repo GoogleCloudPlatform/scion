@@ -1002,14 +1002,8 @@ func gitCloneWorkspace(uid, gid int, agentHome string) error {
 		}
 	}
 
-	// Ensure the workspace directory is owned by the target user when running
-	// as root. Non-root containers cannot chown, and Kubernetes pods may
-	// already be running as the correct user/group via securityContext.
-	if uid > 0 && os.Getuid() == 0 {
-		if err := os.Chown(workspacePath, uid, gid); err != nil {
-			log.Error("Failed to chown workspace to UID=%d GID=%d: %v", uid, gid, err)
-		}
-	}
+	currentEUID := os.Geteuid()
+	ensureWorkspaceOwnership(workspacePath, uid, gid, currentEUID, os.Chown)
 
 	token := os.Getenv("GITHUB_TOKEN")
 	branch := os.Getenv("SCION_GIT_BRANCH")
@@ -1221,6 +1215,22 @@ func gitCloneWorkspace(uid, gid int, agentHome string) error {
 
 	log.Info("Git clone complete: %s on branch %s", normalizedURL, branchName)
 	return nil
+}
+
+func ensureWorkspaceOwnership(workspacePath string, uid, gid, currentEUID int, chown func(string, int, int) error) {
+	// Only root can successfully chown a mounted workspace. In restricted
+	// Kubernetes pods the init process may already be running as the scion
+	// user, so attempting chown here just adds noise before git init.
+	if uid <= 0 {
+		return
+	}
+	if currentEUID != 0 {
+		log.Info("Skipping workspace chown for %s; running as non-root UID=%d", workspacePath, currentEUID)
+		return
+	}
+	if err := chown(workspacePath, uid, gid); err != nil {
+		log.Error("Failed to chown workspace to UID=%d GID=%d: %v", uid, gid, err)
+	}
 }
 
 // configureSharedWorkspaceGit sets up git credentials for shared-workspace

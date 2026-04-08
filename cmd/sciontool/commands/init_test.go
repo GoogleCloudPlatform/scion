@@ -745,7 +745,6 @@ func TestGitCloneWorkspace_NonZeroUIDChownsWorkspace(t *testing.T) {
 		t.Errorf("expected a git failure error, got: %v", err)
 	}
 }
-
 func TestConfigureGitCommand_SkipsCredentialOverrideWhenAlreadyRunningAsTargetUser(t *testing.T) {
 	cmd := exec.CommandContext(context.Background(), "git", "status")
 
@@ -772,5 +771,36 @@ func TestConfigureGitCommand_SkipsCredentialOverrideForNonRootDifferentTarget(t 
 	}
 	if cmd.SysProcAttr != nil {
 		t.Fatalf("expected no credential override for non-root process, got %#v", cmd.SysProcAttr)
+	}
+}
+
+func TestEnsureWorkspaceOwnership_SkipsChownWhenNonRoot(t *testing.T) {
+	chownCalled := false
+	chown := func(string, int, int) error {
+		chownCalled = true
+		return nil
+	}
+
+	ensureWorkspaceOwnership("/workspace", 1000, 1000, 1000, chown)
+
+	if chownCalled {
+		t.Fatal("expected chown to be skipped when already running as non-root")
+	}
+}
+
+func TestEnsureWorkspaceOwnership_ChownsWhenRoot(t *testing.T) {
+	var gotPath string
+	var gotUID, gotGID int
+	chown := func(path string, uid, gid int) error {
+		gotPath = path
+		gotUID = uid
+		gotGID = gid
+		return nil
+	}
+
+	ensureWorkspaceOwnership("/workspace", 1000, 1000, 0, chown)
+
+	if gotPath != "/workspace" || gotUID != 1000 || gotGID != 1000 {
+		t.Fatalf("unexpected chown call: path=%q uid=%d gid=%d", gotPath, gotUID, gotGID)
 	}
 }
