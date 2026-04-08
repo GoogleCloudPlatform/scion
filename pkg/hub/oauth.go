@@ -137,6 +137,19 @@ func (s *OAuthService) IsProviderConfiguredForClient(clientType OAuthClientType,
 	return cfg.IsProviderConfigured(provider)
 }
 
+// ConfiguredProvidersForClient returns the configured OAuth providers for the
+// given client type in stable display order.
+func (s *OAuthService) ConfiguredProvidersForClient(clientType OAuthClientType) []string {
+	providers := make([]string, 0, 2)
+	for _, provider := range []string{"google", "github"} {
+		if s.IsProviderConfiguredForClient(clientType, provider) {
+			providers = append(providers, provider)
+		}
+	}
+
+	return providers
+}
+
 // OAuthUserInfo contains user information retrieved from an OAuth provider.
 type OAuthUserInfo struct {
 	ID          string

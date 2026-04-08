@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
@@ -39,11 +40,14 @@ type AuthService interface {
 	// GetWSTicket gets a short-lived WebSocket authentication ticket.
 	GetWSTicket(ctx context.Context) (*WSTicketResponse, error)
 
+	// GetAuthProviders returns configured OAuth providers for a client type.
+	GetAuthProviders(ctx context.Context, clientType string) (*AuthProvidersResponse, error)
+
 	// GetAuthURL returns the OAuth authorization URL for CLI login.
-	GetAuthURL(ctx context.Context, callbackURL, state string) (*AuthURLResponse, error)
+	GetAuthURL(ctx context.Context, callbackURL, state, provider string) (*AuthURLResponse, error)
 
 	// ExchangeCode exchanges an authorization code for tokens.
-	ExchangeCode(ctx context.Context, code, callbackURL string) (*CLITokenResponse, error)
+	ExchangeCode(ctx context.Context, code, callbackURL, provider string) (*CLITokenResponse, error)
 
 	// RequestDeviceCode initiates the device authorization flow.
 	RequestDeviceCode(ctx context.Context, provider string) (*DeviceCodeResponse, error)
@@ -87,6 +91,13 @@ type WSTicketResponse struct {
 // AuthURLResponse is the response containing the OAuth authorization URL.
 type AuthURLResponse struct {
 	URL string `json:"url"`
+}
+
+// AuthProvidersResponse is the response containing configured OAuth providers
+// for a given client type.
+type AuthProvidersResponse struct {
+	ClientType string   `json:"clientType"`
+	Providers  []string `json:"providers"`
 }
 
 // CLITokenResponse is the response from CLI token exchange.
@@ -147,14 +158,41 @@ func (s *authService) GetWSTicket(ctx context.Context) (*WSTicketResponse, error
 	return apiclient.DecodeResponse[WSTicketResponse](resp)
 }
 
+// GetAuthProviders returns configured OAuth providers for a client type.
+func (s *authService) GetAuthProviders(ctx context.Context, clientType string) (*AuthProvidersResponse, error) {
+	query := url.Values{}
+	query.Set("clientType", clientType)
+
+	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/auth/providers", query, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode >= 400 {
+		return nil, apiclient.ParseErrorResponse(resp)
+	}
+
+	var result AuthProvidersResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode auth providers response: %w", err)
+	}
+
+	return &result, nil
+}
+
 // GetAuthURL returns the OAuth authorization URL for CLI login.
-func (s *authService) GetAuthURL(ctx context.Context, callbackURL, state string) (*AuthURLResponse, error) {
+func (s *authService) GetAuthURL(ctx context.Context, callbackURL, state, provider string) (*AuthURLResponse, error) {
 	body := struct {
 		CallbackURL string `json:"callbackUrl"`
 		State       string `json:"state"`
+		Provider    string `json:"provider,omitempty"`
 	}{
 		CallbackURL: callbackURL,
 		State:       state,
+		Provider:    provider,
 	}
 	resp, err := s.c.transport.Post(ctx, "/api/v1/auth/cli/authorize", body, nil)
 	if err != nil {
@@ -164,13 +202,15 @@ func (s *authService) GetAuthURL(ctx context.Context, callbackURL, state string)
 }
 
 // ExchangeCode exchanges an authorization code for tokens.
-func (s *authService) ExchangeCode(ctx context.Context, code, callbackURL string) (*CLITokenResponse, error) {
+func (s *authService) ExchangeCode(ctx context.Context, code, callbackURL, provider string) (*CLITokenResponse, error) {
 	body := struct {
 		Code        string `json:"code"`
 		CallbackURL string `json:"callbackUrl"`
+		Provider    string `json:"provider,omitempty"`
 	}{
 		Code:        code,
 		CallbackURL: callbackURL,
+		Provider:    provider,
 	}
 	resp, err := s.c.transport.Post(ctx, "/api/v1/auth/cli/token", body, nil)
 	if err != nil {

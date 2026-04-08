@@ -26,11 +26,19 @@ import (
 
 // mockAuthService implements hubclient.AuthService for testing.
 type mockAuthService struct {
-	deviceCodeResp *hubclient.DeviceCodeResponse
-	deviceCodeErr  error
-	pollResponses  []*hubclient.DeviceTokenPollResponse
-	pollErrors     []error
-	pollIndex      int
+	deviceCodeResp     *hubclient.DeviceCodeResponse
+	deviceCodeErr      error
+	pollResponses      []*hubclient.DeviceTokenPollResponse
+	pollErrors         []error
+	pollIndex          int
+	requestedProviders []string
+	polledProviders    []string
+}
+
+type mockDeviceFlowNotImplementedError struct{}
+
+func (mockDeviceFlowNotImplementedError) Error() string {
+	return "not implemented"
 }
 
 func (m *mockAuthService) Login(ctx context.Context, req *hubclient.LoginRequest) (*hubclient.LoginResponse, error) {
@@ -48,18 +56,23 @@ func (m *mockAuthService) Me(ctx context.Context) (*hubclient.User, error) {
 func (m *mockAuthService) GetWSTicket(ctx context.Context) (*hubclient.WSTicketResponse, error) {
 	return nil, fmt.Errorf("not implemented")
 }
-func (m *mockAuthService) GetAuthURL(ctx context.Context, callbackURL, state string) (*hubclient.AuthURLResponse, error) {
-	return nil, fmt.Errorf("not implemented")
+func (m *mockAuthService) GetAuthProviders(ctx context.Context, clientType string) (*hubclient.AuthProvidersResponse, error) {
+	return nil, mockDeviceFlowNotImplementedError{}
 }
-func (m *mockAuthService) ExchangeCode(ctx context.Context, code, callbackURL string) (*hubclient.CLITokenResponse, error) {
-	return nil, fmt.Errorf("not implemented")
+func (m *mockAuthService) GetAuthURL(ctx context.Context, callbackURL, state, provider string) (*hubclient.AuthURLResponse, error) {
+	return nil, mockDeviceFlowNotImplementedError{}
+}
+func (m *mockAuthService) ExchangeCode(ctx context.Context, code, callbackURL, provider string) (*hubclient.CLITokenResponse, error) {
+	return nil, mockDeviceFlowNotImplementedError{}
 }
 
 func (m *mockAuthService) RequestDeviceCode(ctx context.Context, provider string) (*hubclient.DeviceCodeResponse, error) {
+	m.requestedProviders = append(m.requestedProviders, provider)
 	return m.deviceCodeResp, m.deviceCodeErr
 }
 
 func (m *mockAuthService) PollDeviceToken(ctx context.Context, deviceCode, provider string) (*hubclient.DeviceTokenPollResponse, error) {
+	m.polledProviders = append(m.polledProviders, provider)
 	if m.pollIndex >= len(m.pollResponses) {
 		return nil, fmt.Errorf("no more poll responses")
 	}
@@ -96,7 +109,7 @@ func TestDeviceFlowAuth_Success(t *testing.T) {
 		},
 	}
 
-	d := NewDeviceFlowAuth(mock)
+	d := NewDeviceFlowAuth(mock, "github")
 	var buf bytes.Buffer
 	d.output = &buf
 
@@ -116,6 +129,14 @@ func TestDeviceFlowAuth_Success(t *testing.T) {
 	}
 	if resp.User == nil || resp.User.Email != "test@example.com" {
 		t.Error("expected user email 'test@example.com'")
+	}
+	if len(mock.requestedProviders) != 1 || mock.requestedProviders[0] != "github" {
+		t.Fatalf("expected RequestDeviceCode to use provider github, got %v", mock.requestedProviders)
+	}
+	for _, provider := range mock.polledProviders {
+		if provider != "github" {
+			t.Fatalf("expected PollDeviceToken provider github, got %v", mock.polledProviders)
+		}
 	}
 
 	// Check output contains the user code
@@ -143,7 +164,7 @@ func TestDeviceFlowAuth_SlowDown(t *testing.T) {
 		},
 	}
 
-	d := NewDeviceFlowAuth(mock)
+	d := NewDeviceFlowAuth(mock, "google")
 	d.output = &bytes.Buffer{}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -173,7 +194,7 @@ func TestDeviceFlowAuth_ExpiredToken(t *testing.T) {
 		},
 	}
 
-	d := NewDeviceFlowAuth(mock)
+	d := NewDeviceFlowAuth(mock, "google")
 	d.output = &bytes.Buffer{}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -201,7 +222,7 @@ func TestDeviceFlowAuth_ContextCancellation(t *testing.T) {
 		pollResponses: []*hubclient.DeviceTokenPollResponse{},
 	}
 
-	d := NewDeviceFlowAuth(mock)
+	d := NewDeviceFlowAuth(mock, "google")
 	d.output = &bytes.Buffer{}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -222,7 +243,7 @@ func TestDeviceFlowAuth_DeviceCodeError(t *testing.T) {
 		deviceCodeErr: fmt.Errorf("network error"),
 	}
 
-	d := NewDeviceFlowAuth(mock)
+	d := NewDeviceFlowAuth(mock, "google")
 	d.output = &bytes.Buffer{}
 
 	_, err := d.Authenticate(context.Background())

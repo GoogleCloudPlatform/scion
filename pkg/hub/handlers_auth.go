@@ -116,6 +116,12 @@ type CLIAuthAuthorizeRequest struct {
 	Provider    string `json:"provider,omitempty"` // "google" (default) or "github"
 }
 
+// CLIAuthProvidersResponse is the response for GET /api/v1/auth/providers.
+type CLIAuthProvidersResponse struct {
+	ClientType string   `json:"clientType"`
+	Providers  []string `json:"providers"`
+}
+
 // CLIAuthAuthorizeResponse is the response for /api/v1/auth/cli/authorize.
 type CLIAuthAuthorizeResponse struct {
 	URL string `json:"url"`
@@ -782,6 +788,48 @@ func (s *Server) handleCLIAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, CLIAuthAuthorizeResponse{
 		URL: authURL,
 	})
+}
+
+// handleCLIAuthProviders handles GET /api/v1/auth/providers.
+// This endpoint returns configured OAuth providers for a given client type.
+func (s *Server) handleCLIAuthProviders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	clientTypeParam := strings.TrimSpace(r.URL.Query().Get("clientType"))
+	if clientTypeParam == "" {
+		ValidationError(w, "missing required query parameter: clientType", map[string]interface{}{
+			"required": []string{"clientType"},
+		})
+		return
+	}
+
+	var clientType OAuthClientType
+	switch clientTypeParam {
+	case string(OAuthClientTypeWeb):
+		clientType = OAuthClientTypeWeb
+	case string(OAuthClientTypeCLI):
+		clientType = OAuthClientTypeCLI
+	case string(OAuthClientTypeDevice):
+		clientType = OAuthClientTypeDevice
+	default:
+		ValidationError(w, "invalid clientType", map[string]interface{}{
+			"allowed": []string{string(OAuthClientTypeWeb), string(OAuthClientTypeCLI), string(OAuthClientTypeDevice)},
+		})
+		return
+	}
+
+	resp := CLIAuthProvidersResponse{
+		ClientType: clientTypeParam,
+		Providers:  []string{},
+	}
+	if s.oauthService != nil {
+		resp.Providers = s.oauthService.ConfiguredProvidersForClient(clientType)
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleCLIAuthToken handles POST /api/v1/auth/cli/token.

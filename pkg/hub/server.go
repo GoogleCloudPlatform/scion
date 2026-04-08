@@ -1953,6 +1953,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/auth/me", s.handleAuthMe)
 	s.mux.HandleFunc("/api/v1/auth/tokens", s.handleTokens)
 	s.mux.HandleFunc("/api/v1/auth/tokens/", s.handleTokenByID)
+	s.mux.HandleFunc("/api/v1/auth/providers", s.handleCLIAuthProviders)
 
 	// CLI OAuth endpoints (unauthenticated - used for login)
 	s.mux.HandleFunc("/api/v1/auth/cli/authorize", s.handleCLIAuthAuthorize)

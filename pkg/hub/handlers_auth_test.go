@@ -406,6 +406,56 @@ func TestCLIDeviceAuthorize_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+func TestCLIAuthProviders_ReturnsConfiguredProviders(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.oauthService = NewOAuthService(OAuthConfig{
+		CLI: OAuthClientConfig{
+			GitHub: OAuthProviderConfig{
+				ClientID:     "cli-gh-id",
+				ClientSecret: "cli-gh-secret",
+			},
+		},
+		Device: OAuthClientConfig{
+			GitHub: OAuthProviderConfig{
+				ClientID:     "device-gh-id",
+				ClientSecret: "device-gh-secret",
+			},
+		},
+	})
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/auth/providers?clientType=device", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp CLIAuthProvidersResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.ClientType != "device" {
+		t.Fatalf("expected clientType device, got %q", resp.ClientType)
+	}
+	if len(resp.Providers) != 1 || resp.Providers[0] != "github" {
+		t.Fatalf("expected providers [github], got %v", resp.Providers)
+	}
+}
+
+func TestCLIAuthProviders_InvalidClientType(t *testing.T) {
+	srv, _ := testServer(t)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/auth/providers?clientType=desktop", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCLIDeviceToken_MissingDeviceCode(t *testing.T) {
 	srv, _ := testServer(t)
 

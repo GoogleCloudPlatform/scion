@@ -307,6 +307,8 @@ func isUnauthenticatedEndpoint(path string) bool {
 		return true
 	case "/api/v1/auth/logout": // Logout
 		return true
+	case "/api/v1/auth/providers": // OAuth provider discovery for CLI login
+		return true
 	case "/api/v1/auth/cli/authorize": // CLI OAuth authorization URL
 		return true
 	case "/api/v1/auth/cli/token": // CLI OAuth token exchange

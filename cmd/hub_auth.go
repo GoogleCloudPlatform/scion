@@ -15,8 +15,10 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -31,6 +33,38 @@ var (
 	hubAuthHubURL    string
 	hubAuthNoBrowser bool
 )
+
+const (
+	hubAuthProviderGoogle = "google"
+	hubAuthProviderGitHub = "github"
+	hubAuthClientTypeCLI  = "cli"
+	hubAuthClientTypeDev  = "device"
+)
+
+type invalidHubAuthProviderError struct {
+	provider string
+}
+
+func (e invalidHubAuthProviderError) Error() string {
+	return fmt.Sprintf("invalid provider %q: must be google or github", e.provider)
+}
+
+type noHubAuthProvidersConfiguredError struct {
+	clientType string
+}
+
+func (e noHubAuthProvidersConfiguredError) Error() string {
+	return fmt.Sprintf("no OAuth providers configured for %s flow", e.clientType)
+}
+
+type multipleHubAuthProvidersConfiguredError struct {
+	clientType string
+	providers  []string
+}
+
+func (e multipleHubAuthProvidersConfiguredError) Error() string {
+	return fmt.Sprintf("multiple OAuth providers configured for %s flow (%s); specify one with --provider", e.clientType, strings.Join(e.providers, ", "))
+}
 
 // hubAuthCmd represents the auth subcommand under hub
 var hubAuthCmd = &cobra.Command{
@@ -60,7 +94,8 @@ that you can enter on any device with a browser.
 Example:
   scion hub auth login
   scion hub auth login --hub-url https://hub.example.com
-  scion hub auth login --no-browser`,
+  scion hub auth login --no-browser
+  scion hub auth login --provider github`,
 	RunE: runHubAuthLogin,
 }
 
@@ -80,6 +115,7 @@ func init() {
 	// Flags for login command
 	hubAuthLoginCmd.Flags().StringVar(&hubAuthHubURL, "hub-url", "", "Hub server URL (defaults to configured endpoint)")
 	hubAuthLoginCmd.Flags().BoolVar(&hubAuthNoBrowser, "no-browser", false, "Use device flow instead of opening a browser")
+	hubAuthLoginCmd.Flags().String("provider", "", "OAuth provider to use (google or github)")
 }
 
 func runHubAuthLogin(cmd *cobra.Command, args []string) error {
@@ -101,17 +137,25 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 	}
 
 	var tokenResp *hubclient.CLITokenResponse
+	provider, err := cmd.Flags().GetString("provider")
+	if err != nil {
+		return fmt.Errorf("failed to read provider flag: %w", err)
+	}
 
 	if hubAuthNoBrowser || util.IsHeadlessEnvironment() {
+		provider, err := resolveHubAuthProvider(cmd.Context(), client.Auth(), hubAuthClientTypeDev, provider)
+		if err != nil {
+			return err
+		}
 		// Device authorization flow for headless environments
-		deviceAuth := auth.NewDeviceFlowAuth(client.Auth())
+		deviceAuth := auth.NewDeviceFlowAuth(client.Auth(), provider)
 		tokenResp, err = deviceAuth.Authenticate(cmd.Context())
 		if err != nil {
 			return fmt.Errorf("device flow authentication failed: %w", err)
 		}
 	} else {
 		// Browser-based OAuth flow
-		tokenResp, err = runBrowserAuthFlow(cmd, client)
+		tokenResp, err = runBrowserAuthFlow(cmd, client, provider)
 		if err != nil {
 			return err
 		}
@@ -121,7 +165,12 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 }
 
 // runBrowserAuthFlow performs the browser-based OAuth flow.
-func runBrowserAuthFlow(cmd *cobra.Command, client hubclient.Client) (*hubclient.CLITokenResponse, error) {
+func runBrowserAuthFlow(cmd *cobra.Command, client hubclient.Client, requestedProvider string) (*hubclient.CLITokenResponse, error) {
+	provider, err := resolveHubAuthProvider(cmd.Context(), client.Auth(), hubAuthClientTypeCLI, requestedProvider)
+	if err != nil {
+		return nil, err
+	}
+
 	// Start localhost callback server
 	authServer := auth.NewLocalhostAuthServer()
 	callbackURL, state, err := authServer.Start(cmd.Context())
@@ -131,7 +180,7 @@ func runBrowserAuthFlow(cmd *cobra.Command, client hubclient.Client) (*hubclient
 	defer authServer.Shutdown()
 
 	// Get OAuth URL from Hub
-	authResp, err := client.Auth().GetAuthURL(cmd.Context(), callbackURL, state)
+	authResp, err := client.Auth().GetAuthURL(cmd.Context(), callbackURL, state, provider)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get auth URL: %w", err)
 	}
@@ -151,7 +200,7 @@ func runBrowserAuthFlow(cmd *cobra.Command, client hubclient.Client) (*hubclient
 	}
 
 	// Exchange code for token
-	tokenResp, err := client.Auth().ExchangeCode(cmd.Context(), code, callbackURL)
+	tokenResp, err := client.Auth().ExchangeCode(cmd.Context(), code, callbackURL, provider)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get token: %w", err)
 	}
@@ -226,4 +275,28 @@ func getDefaultHubURL() string {
 	}
 
 	return settings.GetHubEndpoint()
+}
+
+func resolveHubAuthProvider(ctx context.Context, authSvc hubclient.AuthService, clientType, requestedProvider string) (string, error) {
+	if requestedProvider != "" {
+		provider := strings.ToLower(strings.TrimSpace(requestedProvider))
+		if provider != hubAuthProviderGoogle && provider != hubAuthProviderGitHub {
+			return "", invalidHubAuthProviderError{provider: requestedProvider}
+		}
+		return provider, nil
+	}
+
+	resp, err := authSvc.GetAuthProviders(ctx, clientType)
+	if err != nil {
+		return "", fmt.Errorf("failed to discover OAuth providers: %w", err)
+	}
+
+	switch len(resp.Providers) {
+	case 0:
+		return "", noHubAuthProvidersConfiguredError{clientType: clientType}
+	case 1:
+		return resp.Providers[0], nil
+	default:
+		return "", multipleHubAuthProvidersConfiguredError{clientType: clientType, providers: resp.Providers}
+	}
 }
