@@ -659,11 +659,13 @@ func (hc *BrokerConnection) Close() {
 	hc.streams = make(map[string]*StreamProxy)
 	hc.streamsMu.Unlock()
 
-	// Cancel all pending requests
+	// Drop all pending requests. We deliberately do NOT close the response
+	// channels here: doing so races with handleResponse trying to send on
+	// them (send-on-closed panic), and would also cause TunnelRequest's
+	// `case resp := <-respCh` to unblock with a nil response and return it
+	// as a success. TunnelRequest already observes hc.ctx.Done() (cancelled
+	// by hc.cancel() above), which is the correct unblock path.
 	hc.pendingMu.Lock()
-	for _, ch := range hc.pendingRequests {
-		close(ch)
-	}
 	hc.pendingRequests = make(map[string]chan *wsprotocol.ResponseEnvelope)
 	hc.pendingMu.Unlock()
 
