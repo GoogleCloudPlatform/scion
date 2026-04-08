@@ -919,9 +919,9 @@ func TestHubConnection_Stop(t *testing.T) {
 // Phase 3: Co-located + Remote Combo Tests
 // ============================================================================
 
-func TestColocated_LocalConnection_SkipsHeartbeat(t *testing.T) {
-	// When a connection is marked as IsColocated, Start() should NOT create
-	// a heartbeat service (the internal DB loop handles it instead).
+func TestColocated_LocalConnection_GetsHeartbeat(t *testing.T) {
+	// Co-located connections still need the broker heartbeat path so the hub
+	// receives lifecycle updates from the embedded runtime broker.
 	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
 	srv := newTestServerWithInMemoryCreds(creds)
 
@@ -937,7 +937,7 @@ func TestColocated_LocalConnection_SkipsHeartbeat(t *testing.T) {
 		t.Error("expected 'local' connection to be marked as co-located")
 	}
 
-	// Start the connection (heartbeat should be skipped for co-located)
+	// Start the connection and verify the heartbeat service is created.
 	cfg := srv.config
 	cfg.HeartbeatEnabled = true
 	cfg.ControlChannelEnabled = false // disable control channel for this test
@@ -950,8 +950,8 @@ func TestColocated_LocalConnection_SkipsHeartbeat(t *testing.T) {
 		t.Fatalf("Start failed: %v", err)
 	}
 
-	if conn.Heartbeat != nil {
-		t.Error("expected co-located connection to NOT have heartbeat service")
+	if conn.Heartbeat == nil {
+		t.Error("expected co-located connection to have heartbeat service")
 	}
 }
 
@@ -995,8 +995,8 @@ func TestColocated_RemoteConnection_GetsHeartbeat(t *testing.T) {
 }
 
 func TestColocated_ComboMode_HeartbeatPerConnection(t *testing.T) {
-	// In combo mode (co-located local + remote), verify that only the remote
-	// connection gets heartbeat while local is skipped.
+	// In combo mode (co-located local + remote), verify that both connections
+	// get heartbeat services.
 	tmpDir := t.TempDir()
 	credDir := filepath.Join(tmpDir, "hub-credentials")
 	if err := os.MkdirAll(credDir, 0700); err != nil {
@@ -1054,7 +1054,7 @@ func TestColocated_ComboMode_HeartbeatPerConnection(t *testing.T) {
 	}
 	srv.hubMu.RUnlock()
 
-	// Verify: local has no heartbeat, remote does
+	// Verify: both local and remote connections have heartbeat services.
 	srv.hubMu.RLock()
 	localConn := srv.hubConnections["local"]
 	remoteConn := srv.hubConnections["hub-prod"]
@@ -1068,8 +1068,8 @@ func TestColocated_ComboMode_HeartbeatPerConnection(t *testing.T) {
 		t.Error("expected 'local' to be co-located")
 	}
 
-	if localConn.Heartbeat != nil {
-		t.Error("expected co-located 'local' connection to NOT have heartbeat")
+	if localConn.Heartbeat == nil {
+		t.Error("expected co-located 'local' connection to have heartbeat")
 	}
 
 	if remoteConn.IsColocated {

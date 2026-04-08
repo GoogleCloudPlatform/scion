@@ -56,8 +56,7 @@ type HubConnection struct {
 	ControlChannel *ControlChannelClient
 
 	// IsColocated indicates this connection is to a co-located hub running in
-	// the same process. Co-located connections skip HTTP heartbeat because an
-	// internal database heartbeat loop handles status updates directly.
+	// the same process.
 	IsColocated bool
 
 	// TemplatesDir is the local filesystem path to the templates directory
@@ -89,9 +88,7 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 	hasValidCredentials := hc.Credentials != nil && hc.Credentials.SecretKey != ""
 
 	// Start heartbeat service if enabled.
-	// Co-located connections skip HTTP heartbeat because an internal
-	// database heartbeat loop handles status updates directly.
-	if server.config.HeartbeatEnabled && !hc.IsColocated && hc.HubClient != nil && hc.BrokerID != "" {
+	if server.config.HeartbeatEnabled && hc.HubClient != nil && hc.BrokerID != "" {
 		if !hasValidCredentials {
 			slog.Warn("Skipping heartbeat for connection: no valid credentials", "name", hc.Name)
 		} else {
