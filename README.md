@@ -16,7 +16,7 @@ Rather than prescribing rigid orchestration patterns, Scion takes a "less is mor
 
 [Relics of Athenaeum](https://github.com/ptone/scion-athenaeum) is an "agent game" that demonstrates multi-agent orchestration defined entirely in markdown. A group of agents collaborate to solve computational puzzles, coordinating through group and direct messaging — all running in containers on off-the-shelf harnesses.
 
-<a href="https://github.com/ptone/scion-athenaeum"><img width="425" height="238" alt="Relics of Athenaeum" src="https://github.com/user-attachments/assets/cbee74a3-f3aa-4739-b423-0a83d5dd4c13" /></a>&nbsp;<a href="https://www.youtube.com/watch?v=w16bsh6lFL8"><img width="300" height="200" alt="Visualization of agent coordination" src="https://github.comuser-attachments/assets/a615da24-33d8-4882-abe1-95adea4ed79a" /></a>
+<a href="https://github.com/ptone/scion-athenaeum"><img width="425" height="238" alt="Relics of Athenaeum" src="https://github.com/user-attachments/assets/cbee74a3-f3aa-4739-b423-0a83d5dd4c13" /></a>&nbsp;<a href="https://www.youtube.com/watch?v=w16bsh6lFL8"><img width="300" height="200" alt="Visualization of agent coordination" src="https://github.com/user-attachments/assets/a615da24-33d8-4882-abe1-95adea4ed79a" /></a>
 
 The visualization above replays the actual telemetry collected from messages and file access in the shared workspace while the agents solved the challenges of the game. While this is a "game", the same process of team definition works for software engineering, data research, and platform engineering workflows.
 
