@@ -50,9 +50,10 @@ type HarnessPromptCapabilities struct {
 
 // HarnessAuthCapabilities describes support for auth mode selections.
 type HarnessAuthCapabilities struct {
-	APIKey   CapabilityField `json:"api_key"`
-	AuthFile CapabilityField `json:"auth_file"`
-	VertexAI CapabilityField `json:"vertex_ai"`
+	APIKey     CapabilityField `json:"api_key"`
+	OAuthToken CapabilityField `json:"oauth_token"`
+	AuthFile   CapabilityField `json:"auth_file"`
+	VertexAI   CapabilityField `json:"vertex_ai"`
 }
 
 // HarnessAdvancedCapabilities describes advanced field support for a harness.

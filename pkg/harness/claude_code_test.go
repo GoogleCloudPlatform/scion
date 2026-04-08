@@ -414,6 +414,83 @@ func TestClaudeResolveAuth_APIKey(t *testing.T) {
 	}
 }
 
+func TestClaudeResolveAuth_OAuthToken(t *testing.T) {
+	c := &ClaudeCode{}
+	auth := api.AuthConfig{ClaudeOAuthToken: "cco_test-token-123"}
+	result, err := c.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Method != "oauth-token" {
+		t.Errorf("Method = %q, want %q", result.Method, "oauth-token")
+	}
+	if result.EnvVars["CLAUDE_CODE_OAUTH_TOKEN"] != "cco_test-token-123" {
+		t.Errorf("CLAUDE_CODE_OAUTH_TOKEN = %q, want %q", result.EnvVars["CLAUDE_CODE_OAUTH_TOKEN"], "cco_test-token-123")
+	}
+	if len(result.Files) != 0 {
+		t.Errorf("expected no files, got %d", len(result.Files))
+	}
+}
+
+func TestClaudeResolveAuth_OAuthToken_Explicit(t *testing.T) {
+	c := &ClaudeCode{}
+	auth := api.AuthConfig{
+		SelectedType:     "oauth-token",
+		ClaudeOAuthToken: "cco_explicit-token",
+	}
+	result, err := c.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Method != "oauth-token" {
+		t.Errorf("Method = %q, want %q", result.Method, "oauth-token")
+	}
+}
+
+func TestClaudeResolveAuth_OAuthToken_ExplicitMissing(t *testing.T) {
+	c := &ClaudeCode{}
+	auth := api.AuthConfig{SelectedType: "oauth-token"}
+	_, err := c.ResolveAuth(auth)
+	if err == nil {
+		t.Fatal("expected error for explicit oauth-token with no token")
+	}
+	if !strings.Contains(err.Error(), "CLAUDE_CODE_OAUTH_TOKEN") {
+		t.Errorf("error should mention CLAUDE_CODE_OAUTH_TOKEN: %v", err)
+	}
+}
+
+func TestClaudeResolveAuth_APIKeyWinsOverOAuth(t *testing.T) {
+	c := &ClaudeCode{}
+	auth := api.AuthConfig{
+		AnthropicAPIKey:  "sk-ant-key",
+		ClaudeOAuthToken: "cco_token",
+	}
+	result, err := c.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Method != "api-key" {
+		t.Errorf("API key should win over OAuth token; Method = %q, want %q", result.Method, "api-key")
+	}
+}
+
+func TestClaudeResolveAuth_OAuthWinsOverVertex(t *testing.T) {
+	c := &ClaudeCode{}
+	auth := api.AuthConfig{
+		ClaudeOAuthToken:     "cco_token",
+		GoogleAppCredentials: "/path/to/adc.json",
+		GoogleCloudProject:   "my-project",
+		GoogleCloudRegion:    "us-central1",
+	}
+	result, err := c.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Method != "oauth-token" {
+		t.Errorf("OAuth token should win over Vertex; Method = %q, want %q", result.Method, "oauth-token")
+	}
+}
+
 func TestClaudeResolveAuth_VertexAI(t *testing.T) {
 	c := &ClaudeCode{}
 	auth := api.AuthConfig{
@@ -494,6 +571,9 @@ func TestClaudeResolveAuth_NoCreds(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
 		t.Errorf("error should mention ANTHROPIC_API_KEY: %v", err)
+	}
+	if !strings.Contains(err.Error(), "CLAUDE_CODE_OAUTH_TOKEN") {
+		t.Errorf("error should mention CLAUDE_CODE_OAUTH_TOKEN: %v", err)
 	}
 }
 

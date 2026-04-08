@@ -366,7 +366,8 @@ type AuthConfig struct {
 	OAuthCreds           string
 
 	// Anthropic auth
-	AnthropicAPIKey string
+	AnthropicAPIKey  string
+	ClaudeOAuthToken string
 
 	// OpenAI/Codex auth
 	OpenAIAPIKey     string

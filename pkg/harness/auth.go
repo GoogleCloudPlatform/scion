@@ -54,11 +54,12 @@ func GatherAuthWithEnv(env map[string]string, localSources bool) api.AuthConfig 
 
 	auth := api.AuthConfig{
 		// Env-var sourced fields
-		GeminiAPIKey:    lookup("GEMINI_API_KEY"),
-		GoogleAPIKey:    lookup("GOOGLE_API_KEY"),
-		AnthropicAPIKey: lookup("ANTHROPIC_API_KEY"),
-		OpenAIAPIKey:    lookup("OPENAI_API_KEY"),
-		CodexAPIKey:     lookup("CODEX_API_KEY"),
+		GeminiAPIKey:     lookup("GEMINI_API_KEY"),
+		GoogleAPIKey:     lookup("GOOGLE_API_KEY"),
+		AnthropicAPIKey:  lookup("ANTHROPIC_API_KEY"),
+		ClaudeOAuthToken: lookup("CLAUDE_CODE_OAUTH_TOKEN"),
+		OpenAIAPIKey:     lookup("OPENAI_API_KEY"),
+		CodexAPIKey:      lookup("CODEX_API_KEY"),
 		GoogleCloudProject: util.FirstNonEmpty(
 			lookup("GOOGLE_CLOUD_PROJECT"),
 			lookup("GCP_PROJECT"),
@@ -269,7 +270,14 @@ func DetectAuthTypeFromFileSecrets(harnessName string, fileSecretNames map[strin
 // so vertex-ai auth can be used without a gcloud-adc file secret.
 func DetectAuthTypeFromEnvVars(harnessName string, envKeys map[string]struct{}) string {
 	switch harnessName {
-	case "claude", "gemini":
+	case "claude":
+		if _, ok := envKeys["CLAUDE_CODE_OAUTH_TOKEN"]; ok {
+			return "oauth-token"
+		}
+		if _, ok := envKeys["GOOGLE_APPLICATION_CREDENTIALS"]; ok {
+			return "vertex-ai"
+		}
+	case "gemini":
 		if _, ok := envKeys["GOOGLE_APPLICATION_CREDENTIALS"]; ok {
 			return "vertex-ai"
 		}
@@ -312,6 +320,8 @@ func RequiredAuthEnvKeys(harnessName, authSelectedType string) [][]string {
 		switch effectiveType {
 		case "api-key":
 			return [][]string{{"ANTHROPIC_API_KEY"}}
+		case "oauth-token":
+			return [][]string{{"CLAUDE_CODE_OAUTH_TOKEN"}}
 		case "vertex-ai":
 			return [][]string{{"GOOGLE_CLOUD_PROJECT"}, {"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"}}
 		}
