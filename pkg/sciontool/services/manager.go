@@ -87,7 +87,7 @@ func (svc *managedService) isExited() bool {
 	return svc.exited
 }
 
-// exitCodeLocked returns the most recently recorded exit code.
+// snapshotExitCode returns the most recently recorded exit code.
 func (svc *managedService) snapshotExitCode() int {
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
