@@ -324,14 +324,17 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Default provider to google for now if not specified in request
+	// Default provider if not specified in request
 	provider := req.Provider
 	if provider == "" {
-		provider = "google"
 		if strings.Contains(req.RedirectURI, "github") {
 			provider = "github"
+		} else if s.oauthService != nil {
+			provider = s.oauthService.DefaultProviderForClient(OAuthClientTypeWeb)
+		} else {
+			provider = "google"
 		}
-		slog.Debug("OAuth provider inferred from redirect URI", "provider", provider)
+		slog.Debug("OAuth provider inferred", "provider", provider)
 	}
 
 	// Validate provider is a known value
@@ -753,10 +756,14 @@ func (s *Server) handleCLIAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Default to Google if no provider specified
+	// Default provider if not specified
 	provider := req.Provider
 	if provider == "" {
-		provider = "google"
+		if s.oauthService != nil {
+			provider = s.oauthService.DefaultProviderForClient(OAuthClientTypeCLI)
+		} else {
+			provider = "google"
+		}
 	}
 
 	// Check if OAuth service is configured
@@ -854,10 +861,14 @@ func (s *Server) handleCLIAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Default to Google if no provider specified
+	// Default provider if not specified
 	provider := req.Provider
 	if provider == "" {
-		provider = "google"
+		if s.oauthService != nil {
+			provider = s.oauthService.DefaultProviderForClient(OAuthClientTypeCLI)
+		} else {
+			provider = "google"
+		}
 	}
 
 	// Check if OAuth service is configured
@@ -1001,7 +1012,11 @@ func (s *Server) handleCLIDeviceAuthorize(w http.ResponseWriter, r *http.Request
 
 	provider := req.Provider
 	if provider == "" {
-		provider = "google"
+		if s.oauthService != nil {
+			provider = s.oauthService.DefaultProviderForClient(OAuthClientTypeDevice)
+		} else {
+			provider = "google"
+		}
 	}
 
 	if s.oauthService == nil {
@@ -1055,7 +1070,11 @@ func (s *Server) handleCLIDeviceToken(w http.ResponseWriter, r *http.Request) {
 
 	provider := req.Provider
 	if provider == "" {
-		provider = "google"
+		if s.oauthService != nil {
+			provider = s.oauthService.DefaultProviderForClient(OAuthClientTypeDevice)
+		} else {
+			provider = "google"
+		}
 	}
 
 	if s.oauthService == nil {

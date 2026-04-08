@@ -157,6 +157,15 @@ func (s *OAuthService) ConfiguredProvidersForClient(clientType OAuthClientType) 
 	return providers
 }
 
+// DefaultProviderForClient returns the first configured OAuth provider for a
+// client type, following the standard provider order.
+func (s *OAuthService) DefaultProviderForClient(clientType OAuthClientType) string {
+	if providers := s.ConfiguredProvidersForClient(clientType); len(providers) > 0 {
+		return providers[0]
+	}
+	return "google"
+}
+
 // OAuthUserInfo contains user information retrieved from an OAuth provider.
 type OAuthUserInfo struct {
 	ID          string
