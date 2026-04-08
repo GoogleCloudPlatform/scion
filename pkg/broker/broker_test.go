@@ -158,6 +158,42 @@ func TestInProcessBroker_BroadcastTopic(t *testing.T) {
 	wg.Wait()
 }
 
+// TestInProcessBroker_PropagatesPublisherContext verifies that the context
+// passed to Publish is delivered to the subscriber handler. Regression for a
+// bug where the dispatcher replaced the real ctx with context.Background(),
+// preventing handlers from honoring cancellation or carrying publisher values.
+func TestInProcessBroker_PropagatesPublisherContext(t *testing.T) {
+	b := newTestBroker()
+	defer b.Close()
+
+	type ctxKey string
+	const key ctxKey = "trace"
+
+	got := make(chan string, 1)
+	_, err := b.Subscribe("scion.grove.g1.broadcast", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
+		v, _ := ctx.Value(key).(string)
+		got <- v
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.WithValue(context.Background(), key, "abc123")
+	msg := messages.NewInstruction("u:a", "grove:g1", "hi")
+	if err := b.Publish(ctx, "scion.grove.g1.broadcast", msg); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case v := <-got:
+		if v != "abc123" {
+			t.Fatalf("handler got ctx value %q, want %q — publisher ctx was not propagated", v, "abc123")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for handler")
+	}
+}
+
 func TestInProcessBroker_Unsubscribe(t *testing.T) {
 	b := newTestBroker()
 	defer b.Close()

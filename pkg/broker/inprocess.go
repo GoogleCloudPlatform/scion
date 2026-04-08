@@ -37,7 +37,10 @@ type subscriber struct {
 }
 
 // publishedMessage pairs a topic with its message for channel delivery.
+// The publisher's context travels with the message so that subscriber
+// handlers can honor cancellation and deadlines from the publish side.
 type publishedMessage struct {
+	ctx   context.Context
 	topic string
 	msg   *messages.StructuredMessage
 }
@@ -80,7 +83,7 @@ func (b *InProcessBroker) Publish(ctx context.Context, topic string, msg *messag
 		return ErrBrokerClosed
 	}
 
-	pm := publishedMessage{topic: topic, msg: msg}
+	pm := publishedMessage{ctx: ctx, topic: topic, msg: msg}
 
 	for _, sub := range b.subscribers {
 		if subjectMatchesPattern(sub.pattern, topic) {
@@ -113,11 +116,16 @@ func (b *InProcessBroker) Subscribe(pattern string, handler MessageHandler) (Sub
 		done:    make(chan struct{}),
 	}
 
-	// Start a dispatch goroutine for this subscriber
+	// Start a dispatch goroutine for this subscriber. The publisher's context
+	// rides along in pm.ctx so handlers can honor cancellation/deadlines.
 	go func() {
 		defer close(sub.done)
 		for pm := range sub.ch {
-			sub.handler(context.Background(), pm.topic, pm.msg)
+			ctx := pm.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			sub.handler(ctx, pm.topic, pm.msg)
 		}
 	}()
 
