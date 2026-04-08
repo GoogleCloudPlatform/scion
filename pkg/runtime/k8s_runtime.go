@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
@@ -1569,8 +1570,14 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 
 		status := string(p.Status.Phase)
 		agentStatus := ""
-		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
-			agentStatus = "ended"
+		switch p.Status.Phase {
+		case corev1.PodSucceeded:
+			agentStatus = string(state.PhaseStopped)
+		case corev1.PodFailed:
+			agentStatus = string(state.PhaseError)
+		case corev1.PodPending, corev1.PodRunning, corev1.PodUnknown:
+			// Non-terminal pod phases are represented via ContainerStatus and
+			// local agent-info state until the agent exits.
 		}
 
 		// Try to get more detail from container status
@@ -1581,7 +1588,11 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 				} else if cs.State.Terminated != nil {
 					status = fmt.Sprintf("%s (%s)", p.Status.Phase, cs.State.Terminated.Reason)
 					if agentStatus == "" {
-						agentStatus = "ended"
+						if cs.State.Terminated.ExitCode == 0 {
+							agentStatus = string(state.PhaseStopped)
+						} else {
+							agentStatus = string(state.PhaseError)
+						}
 					}
 				}
 				break

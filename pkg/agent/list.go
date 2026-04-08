@@ -73,13 +73,16 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 			scionJSON := filepath.Join(agentDir, "scion-agent.json")
 			agentHome := config.GetAgentHomePath(agents[i].GrovePath, agents[i].Name)
 			agentInfoJSON := filepath.Join(agentHome, "agent-info.json")
+			terminalPhase := terminalRuntimePhase(agents[i])
 
 			// Try agent-info.json first for latest status from container
 			if data, err := os.ReadFile(agentInfoJSON); err == nil {
 				var info api.AgentInfo
 				if err := json.Unmarshal(data, &info); err == nil {
-					agents[i].Phase = info.Phase
-					agents[i].Activity = info.Activity
+					if terminalPhase == "" {
+						agents[i].Phase = info.Phase
+						agents[i].Activity = info.Activity
+					}
 					if agents[i].Runtime == "" {
 						agents[i].Runtime = info.Runtime
 					}
@@ -94,6 +97,12 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 						agents[i].Detail = info.Detail
 					}
 				}
+			}
+
+			if terminalPhase != "" {
+				agents[i].Phase = terminalPhase
+				agents[i].Activity = ""
+				_ = persistAgentInfoState(agentInfoJSON, terminalPhase, "")
 			}
 
 			// Use agent-info.json mtime as LastSeen for local agents
@@ -238,4 +247,47 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 	}
 
 	return agents, nil
+}
+
+func terminalRuntimePhase(agent api.AgentInfo) string {
+	switch state.Phase(agent.Phase) {
+	case state.PhaseStopped, state.PhaseError:
+		return agent.Phase
+	case state.PhaseCreated, state.PhaseProvisioning, state.PhaseCloning,
+		state.PhaseStarting, state.PhaseRunning, state.PhaseStopping:
+		return ""
+	}
+	if agent.Phase != "ended" {
+		return ""
+	}
+	containerStatus := strings.ToLower(agent.ContainerStatus)
+	if strings.Contains(containerStatus, "failed") {
+		return string(state.PhaseError)
+	}
+	return string(state.PhaseStopped)
+}
+
+func persistAgentInfoState(path, phase, activity string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	var info api.AgentInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return err
+	}
+
+	if info.Phase == phase && info.Activity == activity {
+		return nil
+	}
+
+	info.Phase = phase
+	info.Activity = activity
+
+	updated, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, updated, 0644)
 }

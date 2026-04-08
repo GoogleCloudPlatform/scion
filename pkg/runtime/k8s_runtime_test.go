@@ -18,6 +18,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,7 +29,7 @@ import (
 
 func TestKubernetesRuntime_List(t *testing.T) {
 	// Create a fake clientset
-	clientset := k8sfake.NewSimpleClientset()
+	clientset := k8sfake.NewClientset()
 
 	// Create a pod that mimics what we expect
 	pod := &corev1.Pod{
@@ -88,8 +89,100 @@ func TestKubernetesRuntime_List(t *testing.T) {
 	}
 }
 
+func TestKubernetesRuntime_List_TerminalPhases(t *testing.T) {
+	clientset := k8sfake.NewClientset()
+	scheme := k8sruntime.NewScheme()
+	fc := fake.NewSimpleDynamicClient(scheme)
+	client := k8s.NewTestClient(fc, clientset)
+	r := NewKubernetesRuntime(client)
+
+	pods := []*corev1.Pod{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "completed-agent",
+				Namespace: "default",
+				Labels: map[string]string{
+					"scion.name": "completed-agent",
+				},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodSucceeded,
+				ContainerStatuses: []corev1.ContainerStatus{
+					{
+						Name: "agent",
+						State: corev1.ContainerState{
+							Terminated: &corev1.ContainerStateTerminated{
+								Reason:   "Completed",
+								ExitCode: 0,
+							},
+						},
+					},
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Image: "test-image"}},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "failed-agent",
+				Namespace: "default",
+				Labels: map[string]string{
+					"scion.name": "failed-agent",
+				},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodFailed,
+				ContainerStatuses: []corev1.ContainerStatus{
+					{
+						Name: "agent",
+						State: corev1.ContainerState{
+							Terminated: &corev1.ContainerStateTerminated{
+								Reason:   "Error",
+								ExitCode: 1,
+							},
+						},
+					},
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Image: "test-image"}},
+			},
+		},
+	}
+
+	for _, pod := range pods {
+		if _, err := clientset.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("failed to create pod %q: %v", pod.Name, err)
+		}
+	}
+
+	agents, err := r.List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+
+	got := map[string]api.AgentInfo{}
+	for _, agent := range agents {
+		got[agent.Name] = agent
+	}
+
+	if got["completed-agent"].Phase != "stopped" {
+		t.Errorf("completed-agent phase = %q, want %q", got["completed-agent"].Phase, "stopped")
+	}
+	if got["completed-agent"].ContainerStatus != "Succeeded (Completed)" {
+		t.Errorf("completed-agent container status = %q, want %q", got["completed-agent"].ContainerStatus, "Succeeded (Completed)")
+	}
+	if got["failed-agent"].Phase != "error" {
+		t.Errorf("failed-agent phase = %q, want %q", got["failed-agent"].Phase, "error")
+	}
+	if got["failed-agent"].ContainerStatus != "Failed (Error)" {
+		t.Errorf("failed-agent container status = %q, want %q", got["failed-agent"].ContainerStatus, "Failed (Error)")
+	}
+}
+
 func TestKubernetesRuntime_BuildPod_Env(t *testing.T) {
-	clientset := k8sfake.NewSimpleClientset()
+	clientset := k8sfake.NewClientset()
 	scheme := k8sruntime.NewScheme()
 	fc := fake.NewSimpleDynamicClient(scheme)
 	client := k8s.NewTestClient(fc, clientset)
