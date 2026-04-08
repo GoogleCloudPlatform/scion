@@ -57,15 +57,18 @@ func TestManager_StartAndShutdown(t *testing.T) {
 	if len(mgr.services) != 2 {
 		t.Fatalf("expected 2 services, got %d", len(mgr.services))
 	}
-	for _, svc := range mgr.services {
-		if svc.exited {
+	svcs := make([]*managedService, len(mgr.services))
+	copy(svcs, mgr.services)
+	mgr.mu.Unlock()
+	for _, svc := range svcs {
+		if svc.isExited() {
 			t.Errorf("service %s should be running", svc.spec.Name)
 		}
-		if svc.cmd == nil || svc.cmd.Process == nil {
+		cmd, _ := svc.snapshotProcess()
+		if cmd == nil || cmd.Process == nil {
 			t.Errorf("service %s has no process", svc.spec.Name)
 		}
 	}
-	mgr.mu.Unlock()
 
 	// Shutdown
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -75,8 +78,8 @@ func TestManager_StartAndShutdown(t *testing.T) {
 	}
 
 	// Verify services have exited
-	for _, svc := range mgr.services {
-		if !svc.exited {
+	for _, svc := range svcs {
+		if !svc.isExited() {
 			t.Errorf("service %s should have exited after shutdown", svc.spec.Name)
 		}
 	}
@@ -103,8 +106,8 @@ func TestManager_RestartOnFailure(t *testing.T) {
 
 	mgr.mu.Lock()
 	svc := mgr.services[0]
-	failures := svc.failures
 	mgr.mu.Unlock()
+	failures := svc.currentFailures()
 
 	if failures == 0 {
 		t.Error("expected at least one restart attempt for on-failure policy")
@@ -137,10 +140,10 @@ func TestManager_RestartAlways(t *testing.T) {
 
 	mgr.mu.Lock()
 	svc := mgr.services[0]
+	mgr.mu.Unlock()
 	// With "always" and exit code 0, failures still increment (consecutive exits)
 	// but it should still be restarting
-	abandoned := svc.abandoned
-	mgr.mu.Unlock()
+	abandoned := svc.isAbandoned()
 
 	// The process exits immediately with 0, so failures increment each time
 	// After 3, it should be abandoned
@@ -176,13 +179,13 @@ func TestManager_RestartNo(t *testing.T) {
 
 	mgr.mu.Lock()
 	svc := mgr.services[0]
-	if !svc.exited {
+	mgr.mu.Unlock()
+	if !svc.isExited() {
 		t.Error("expected service to have exited")
 	}
-	if svc.failures != 0 {
-		t.Errorf("expected 0 failures (no restart), got %d", svc.failures)
+	if f := svc.currentFailures(); f != 0 {
+		t.Errorf("expected 0 failures (no restart), got %d", f)
 	}
-	mgr.mu.Unlock()
 
 	cancel()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -211,13 +214,13 @@ func TestManager_MaxRestarts(t *testing.T) {
 
 	mgr.mu.Lock()
 	svc := mgr.services[0]
-	if !svc.abandoned {
+	mgr.mu.Unlock()
+	if !svc.isAbandoned() {
 		t.Error("expected service to be abandoned after max restarts")
 	}
-	if svc.failures < maxConsecutiveFailures {
-		t.Errorf("expected at least %d failures, got %d", maxConsecutiveFailures, svc.failures)
+	if f := svc.currentFailures(); f < maxConsecutiveFailures {
+		t.Errorf("expected at least %d failures, got %d", maxConsecutiveFailures, f)
 	}
-	mgr.mu.Unlock()
 
 	cancel()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)

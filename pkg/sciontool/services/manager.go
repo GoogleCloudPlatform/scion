@@ -39,7 +39,22 @@ type Manager struct {
 }
 
 type managedService struct {
-	spec      api.ServiceSpec
+	// immutable after construction
+	spec     api.ServiceSpec
+	logDir   string
+	uid, gid int
+	username string
+	env      []string // merged environment
+
+	// log file handles (opened once, closed on shutdown)
+	stdoutFile    *os.File
+	stderrFile    *os.File
+	lifecycleFile *os.File
+
+	// mu guards all fields below. They are mutated from several goroutines:
+	// the supervisor loop (monitorService), the Wait goroutine spawned in
+	// start(), the reset-failures goroutine, and the Manager.Shutdown path.
+	mu        sync.Mutex
 	cmd       *exec.Cmd
 	cancel    context.CancelFunc
 	done      chan struct{}
@@ -47,15 +62,87 @@ type managedService struct {
 	exitCode  int
 	failures  int  // consecutive failure count
 	abandoned bool // true after maxConsecutiveFailures consecutive failures
-	logDir    string
-	uid, gid  int
-	username  string
-	env       []string // merged environment
+}
 
-	// log file handles
-	stdoutFile    *os.File
-	stderrFile    *os.File
-	lifecycleFile *os.File
+// snapshotDone returns the current done channel. Callers receive on it to
+// wait for the (current) process to exit; the channel is replaced on every
+// restart, so callers must re-snapshot after calling start().
+func (svc *managedService) snapshotDone() <-chan struct{} {
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	return svc.done
+}
+
+// snapshotProcess returns the current *exec.Cmd and whether it has exited.
+func (svc *managedService) snapshotProcess() (*exec.Cmd, bool) {
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	return svc.cmd, svc.exited
+}
+
+// isExited reports whether the current process has exited.
+func (svc *managedService) isExited() bool {
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	return svc.exited
+}
+
+// exitCodeLocked returns the most recently recorded exit code.
+func (svc *managedService) snapshotExitCode() int {
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	return svc.exitCode
+}
+
+// isAbandoned reports whether the supervisor has given up restarting.
+func (svc *managedService) isAbandoned() bool {
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	return svc.abandoned
+}
+
+// markAbandoned marks the service as permanently stopped.
+func (svc *managedService) markAbandoned() {
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.abandoned = true
+}
+
+// recordFailure increments and returns the consecutive failure counter.
+func (svc *managedService) recordFailure() int {
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.failures++
+	return svc.failures
+}
+
+// currentFailures returns the current failure counter without mutating it.
+func (svc *managedService) currentFailures() int {
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	return svc.failures
+}
+
+// resetFailuresIfRunning clears the failure counter, but only if the current
+// process has not yet exited. Called from the delayed reset goroutine.
+func (svc *managedService) resetFailuresIfRunning() {
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	if !svc.exited {
+		svc.failures = 0
+	}
+}
+
+// markExited records the process exit code, flips the exited flag, and
+// closes the done channel to wake up waiters. Must be called exactly once
+// per start() invocation.
+func (svc *managedService) markExited(exitCode int) {
+	svc.mu.Lock()
+	svc.exitCode = exitCode
+	svc.exited = true
+	done := svc.done
+	svc.mu.Unlock()
+	close(done)
 }
 
 // New creates a new service Manager with the given grace period for shutdown.
@@ -146,10 +233,11 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 
 	// Send SIGTERM to all running services
 	for _, svc := range services {
-		if svc.cmd != nil && svc.cmd.Process != nil && !svc.exited {
+		cmd, exited := svc.snapshotProcess()
+		if cmd != nil && cmd.Process != nil && !exited {
 			svc.writeLifecycle("Service stopped (shutdown)")
 			log.TaggedInfo("service:"+svc.spec.Name, "Sending SIGTERM for shutdown")
-			_ = svc.cmd.Process.Signal(syscall.SIGTERM)
+			_ = cmd.Process.Signal(syscall.SIGTERM)
 		}
 	}
 
@@ -157,9 +245,9 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	allDone := make(chan struct{})
 	go func() {
 		for _, svc := range services {
-			if !svc.exited {
+			if !svc.isExited() {
 				select {
-				case <-svc.done:
+				case <-svc.snapshotDone():
 				case <-ctx.Done():
 					return
 				}
@@ -174,16 +262,17 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		// Grace period expired, SIGKILL remaining
 		for _, svc := range services {
-			if svc.cmd != nil && svc.cmd.Process != nil && !svc.exited {
+			cmd, exited := svc.snapshotProcess()
+			if cmd != nil && cmd.Process != nil && !exited {
 				log.TaggedInfo("service:"+svc.spec.Name, "Grace period expired, sending SIGKILL")
-				_ = svc.cmd.Process.Signal(syscall.SIGKILL)
+				_ = cmd.Process.Signal(syscall.SIGKILL)
 			}
 		}
 		// Wait briefly for SIGKILL to take effect
 		for _, svc := range services {
-			if !svc.exited {
+			if !svc.isExited() {
 				select {
-				case <-svc.done:
+				case <-svc.snapshotDone():
 				case <-time.After(2 * time.Second):
 				}
 			}
@@ -218,9 +307,12 @@ func (svc *managedService) start() error {
 		return err
 	}
 
+	done := make(chan struct{})
+	svc.mu.Lock()
 	svc.cmd = cmd
 	svc.exited = false
-	svc.done = make(chan struct{})
+	svc.done = done
+	svc.mu.Unlock()
 
 	svc.writeLifecycle("Service started (PID %d)", cmd.Process.Pid)
 	log.TaggedInfo("service:"+svc.spec.Name, "Started (PID %d)", cmd.Process.Pid)
@@ -237,11 +329,9 @@ func (svc *managedService) start() error {
 				exitCode = 1
 			}
 		}
-		svc.exitCode = exitCode
-		svc.exited = true
 		svc.writeLifecycle("Service exited (code %d)", exitCode)
 		log.TaggedInfo("service:"+svc.spec.Name, "Exited (code %d)", exitCode)
-		close(svc.done)
+		svc.markExited(exitCode)
 	}()
 
 	return nil
@@ -251,12 +341,12 @@ func (m *Manager) monitorService(ctx context.Context, svc *managedService) {
 	for {
 		// Wait for the current process to exit
 		select {
-		case <-svc.done:
+		case <-svc.snapshotDone():
 		case <-ctx.Done():
 			return
 		}
 
-		if svc.abandoned {
+		if svc.isAbandoned() {
 			return
 		}
 
@@ -271,7 +361,7 @@ func (m *Manager) monitorService(ctx context.Context, svc *managedService) {
 		case "no":
 			return
 		case "on-failure":
-			shouldRestart = svc.exitCode != 0
+			shouldRestart = svc.snapshotExitCode() != 0
 		case "always":
 			shouldRestart = true
 		}
@@ -280,18 +370,18 @@ func (m *Manager) monitorService(ctx context.Context, svc *managedService) {
 			return
 		}
 
-		svc.failures++
-		if svc.failures >= maxConsecutiveFailures {
-			svc.abandoned = true
+		failures := svc.recordFailure()
+		if failures >= maxConsecutiveFailures {
+			svc.markAbandoned()
 			svc.writeLifecycle("Restart limit reached (%d consecutive failures)", maxConsecutiveFailures)
 			log.TaggedInfo("service:"+svc.spec.Name, "Restart limit reached (%d consecutive failures)", maxConsecutiveFailures)
 			return
 		}
 
 		// Exponential backoff: 1s, 2s, 4s
-		backoff := time.Duration(1<<uint(svc.failures-1)) * time.Second
-		svc.writeLifecycle("Restart attempt %d (backoff %s)", svc.failures, backoff)
-		log.TaggedInfo("service:"+svc.spec.Name, "Restart attempt %d (backoff %s)", svc.failures, backoff)
+		backoff := time.Duration(1<<uint(failures-1)) * time.Second
+		svc.writeLifecycle("Restart attempt %d (backoff %s)", failures, backoff)
+		log.TaggedInfo("service:"+svc.spec.Name, "Restart attempt %d (backoff %s)", failures, backoff)
 
 		select {
 		case <-time.After(backoff):
@@ -299,7 +389,6 @@ func (m *Manager) monitorService(ctx context.Context, svc *managedService) {
 			return
 		}
 
-		startTime := time.Now()
 		if err := svc.start(); err != nil {
 			svc.writeLifecycle("Restart failed: %v", err)
 			log.TaggedInfo("service:"+svc.spec.Name, "Restart failed: %v", err)
@@ -307,17 +396,18 @@ func (m *Manager) monitorService(ctx context.Context, svc *managedService) {
 			continue
 		}
 
-		// If the process runs for more than 10 seconds, reset failure counter
-		go func(startedAt time.Time) {
+		// If the new process runs for more than 10 seconds, reset the failure
+		// counter. Capture the done channel AFTER svc.start() so this goroutine
+		// watches the new process, not the old one.
+		newDone := svc.snapshotDone()
+		go func() {
 			select {
 			case <-time.After(10 * time.Second):
-				if !svc.exited {
-					svc.failures = 0
-				}
-			case <-svc.done:
+				svc.resetFailuresIfRunning()
+			case <-newDone:
 				// Exited before 10s — failure counter stays
 			}
-		}(startTime)
+		}()
 	}
 }
 
