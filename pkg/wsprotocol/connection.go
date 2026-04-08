@@ -309,11 +309,19 @@ func ParseMessage[T any](data []byte) (*T, error) {
 }
 
 // Dial creates a WebSocket connection to the given URL.
+//
+// When err is non-nil and resp is also non-nil (e.g. the server rejected the
+// handshake with an HTTP status), the caller is responsible for closing
+// resp.Body — otherwise the underlying connection leaks. This matches
+// gorilla/websocket's Dialer.DialContext contract.
 func Dial(ctx context.Context, url string, headers http.Header) (*Connection, *http.Response, error) {
 	return DialWithConfig(ctx, url, headers, DefaultConnectionConfig())
 }
 
 // DialWithConfig creates a WebSocket connection with custom configuration.
+//
+// When err is non-nil and resp is also non-nil, the caller is responsible
+// for closing resp.Body (see Dial).
 func DialWithConfig(ctx context.Context, url string, headers http.Header, config ConnectionConfig) (*Connection, *http.Response, error) {
 	dialer := websocket.Dialer{
 		ReadBufferSize:  config.ReadBufferSize,

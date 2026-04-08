@@ -219,10 +219,16 @@ func (c *ControlChannelClient) doConnect() error {
 		return fmt.Errorf("failed to build auth headers: %w", err)
 	}
 
-	// Connect
+	// Connect. gorilla/websocket's Dialer returns a non-nil *http.Response on
+	// handshake failure (e.g. 401/403), and the application is responsible
+	// for closing resp.Body in that case — otherwise the transport holds the
+	// connection open and leaks the file descriptor. Drain-and-close before
+	// returning the error.
 	conn, resp, err := wsprotocol.Dial(c.ctx, wsURL, headers)
 	if err != nil {
 		if resp != nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
 			return fmt.Errorf("websocket dial failed (status %d): %w", resp.StatusCode, err)
 		}
 		return fmt.Errorf("websocket dial failed: %w", err)
