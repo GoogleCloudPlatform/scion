@@ -34,23 +34,16 @@ var (
 	hubAuthNoBrowser bool
 )
 
-const (
-	hubAuthProviderGoogle = "google"
-	hubAuthProviderGitHub = "github"
-	hubAuthClientTypeCLI  = "cli"
-	hubAuthClientTypeDev  = "device"
-)
-
 type invalidHubAuthProviderError struct {
 	provider string
 }
 
 func (e invalidHubAuthProviderError) Error() string {
-	return fmt.Sprintf("invalid provider %q: must be google or github", e.provider)
+	return fmt.Sprintf("invalid provider %q: must be one of %s", e.provider, strings.Join(hubclient.OAuthProviderOrder(), ", "))
 }
 
 type noHubAuthProvidersConfiguredError struct {
-	clientType string
+	clientType hubclient.OAuthClientType
 }
 
 func (e noHubAuthProvidersConfiguredError) Error() string {
@@ -58,7 +51,7 @@ func (e noHubAuthProvidersConfiguredError) Error() string {
 }
 
 type multipleHubAuthProvidersConfiguredError struct {
-	clientType string
+	clientType hubclient.OAuthClientType
 	providers  []string
 }
 
@@ -143,7 +136,7 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 	}
 
 	if hubAuthNoBrowser || util.IsHeadlessEnvironment() {
-		provider, err := resolveHubAuthProvider(cmd.Context(), client.Auth(), hubAuthClientTypeDev, provider)
+		provider, err := resolveHubAuthProvider(cmd.Context(), client.Auth(), hubclient.OAuthClientTypeDevice, provider)
 		if err != nil {
 			return err
 		}
@@ -166,7 +159,7 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 
 // runBrowserAuthFlow performs the browser-based OAuth flow.
 func runBrowserAuthFlow(cmd *cobra.Command, client hubclient.Client, requestedProvider string) (*hubclient.CLITokenResponse, error) {
-	provider, err := resolveHubAuthProvider(cmd.Context(), client.Auth(), hubAuthClientTypeCLI, requestedProvider)
+	provider, err := resolveHubAuthProvider(cmd.Context(), client.Auth(), hubclient.OAuthClientTypeCLI, requestedProvider)
 	if err != nil {
 		return nil, err
 	}
@@ -277,16 +270,16 @@ func getDefaultHubURL() string {
 	return settings.GetHubEndpoint()
 }
 
-func resolveHubAuthProvider(ctx context.Context, authSvc hubclient.AuthService, clientType, requestedProvider string) (string, error) {
+func resolveHubAuthProvider(ctx context.Context, authSvc hubclient.AuthService, clientType hubclient.OAuthClientType, requestedProvider string) (string, error) {
 	if requestedProvider != "" {
 		provider := strings.ToLower(strings.TrimSpace(requestedProvider))
-		if provider != hubAuthProviderGoogle && provider != hubAuthProviderGitHub {
+		if !hubclient.IsKnownOAuthProvider(provider) {
 			return "", invalidHubAuthProviderError{provider: requestedProvider}
 		}
 		return provider, nil
 	}
 
-	resp, err := authSvc.GetAuthProviders(ctx, clientType)
+	resp, err := authSvc.GetAuthProviders(ctx, string(clientType))
 	if err != nil {
 		return "", fmt.Errorf("failed to discover OAuth providers: %w", err)
 	}

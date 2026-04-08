@@ -209,6 +209,24 @@ func TestDeviceFlowAuth_ExpiredToken(t *testing.T) {
 	}
 }
 
+func TestDeviceFlowAuth_RequiresProvider(t *testing.T) {
+	mock := &mockAuthService{}
+
+	d := NewDeviceFlowAuth(mock, "")
+	d.output = &bytes.Buffer{}
+
+	_, err := d.Authenticate(context.Background())
+	if err == nil {
+		t.Fatal("expected error when provider is empty")
+	}
+	if err.Error() != "device flow provider is required" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(mock.requestedProviders) != 0 {
+		t.Fatalf("expected no device code request, got providers %v", mock.requestedProviders)
+	}
+}
+
 func TestDeviceFlowAuth_ContextCancellation(t *testing.T) {
 	mock := &mockAuthService{
 		deviceCodeResp: &hubclient.DeviceCodeResponse{

@@ -23,6 +23,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
 // OAuthProviderConfig holds OAuth credentials for a single provider.
@@ -45,9 +47,9 @@ func (c *OAuthClientConfig) IsConfigured() bool {
 // IsProviderConfigured returns true if the specified provider is configured.
 func (c *OAuthClientConfig) IsProviderConfigured(provider string) bool {
 	switch provider {
-	case googleOAuthProvider:
+	case hubclient.OAuthProviderGoogle:
 		return c.Google.ClientID != "" && c.Google.ClientSecret != ""
-	case githubOAuthProvider:
+	case hubclient.OAuthProviderGitHub:
 		return c.GitHub.ClientID != "" && c.GitHub.ClientSecret != ""
 	default:
 		return false
@@ -57,9 +59,9 @@ func (c *OAuthClientConfig) IsProviderConfigured(provider string) bool {
 // GetProvider returns the provider config for the specified provider.
 func (c *OAuthClientConfig) GetProvider(provider string) OAuthProviderConfig {
 	switch provider {
-	case googleOAuthProvider:
+	case hubclient.OAuthProviderGoogle:
 		return c.Google
-	case githubOAuthProvider:
+	case hubclient.OAuthProviderGitHub:
 		return c.GitHub
 	default:
 		return OAuthProviderConfig{}
@@ -88,26 +90,20 @@ func (c *OAuthConfig) IsProviderConfigured(provider string) bool {
 	return c.Web.IsProviderConfigured(provider) || c.CLI.IsProviderConfigured(provider) || c.Device.IsProviderConfigured(provider)
 }
 
-// ClientType represents the type of client (web or CLI).
-type OAuthClientType string
+// OAuthClientType represents the type of client (web or CLI).
+type OAuthClientType = hubclient.OAuthClientType
 
 const (
-	googleOAuthProvider = "google"
-	githubOAuthProvider = "github"
-
 	// OAuthClientTypeWeb is for web browser-based OAuth flows.
-	OAuthClientTypeWeb OAuthClientType = "web"
+	OAuthClientTypeWeb = hubclient.OAuthClientTypeWeb
 	// OAuthClientTypeCLI is for CLI localhost callback OAuth flows.
-	OAuthClientTypeCLI OAuthClientType = "cli"
+	OAuthClientTypeCLI = hubclient.OAuthClientTypeCLI
 	// OAuthClientTypeDevice is for device authorization grant (headless) flows.
-	OAuthClientTypeDevice OAuthClientType = "device"
+	OAuthClientTypeDevice = hubclient.OAuthClientTypeDevice
 )
 
 func oauthProviderOrder() []string {
-	return []string{
-		googleOAuthProvider,
-		githubOAuthProvider,
-	}
+	return hubclient.OAuthProviderOrder()
 }
 
 // OAuthService handles OAuth operations for authentication.
@@ -203,9 +199,9 @@ func (s *OAuthService) GetAuthorizationURLForClient(clientType OAuthClientType, 
 	cfg := s.getClientConfig(clientType)
 
 	switch provider {
-	case googleOAuthProvider:
+	case hubclient.OAuthProviderGoogle:
 		return s.getGoogleAuthURLWithConfig(cfg.Google, callbackURL, state)
-	case githubOAuthProvider:
+	case hubclient.OAuthProviderGitHub:
 		return s.getGitHubAuthURLWithConfig(cfg.GitHub, callbackURL, state)
 	default:
 		return "", fmt.Errorf("unsupported OAuth provider: %s", provider)

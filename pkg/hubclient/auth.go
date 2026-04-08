@@ -23,6 +23,33 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
+type OAuthClientType string
+
+const (
+	OAuthProviderGoogle = "google"
+	OAuthProviderGitHub = "github"
+
+	OAuthClientTypeWeb    OAuthClientType = "web"
+	OAuthClientTypeCLI    OAuthClientType = "cli"
+	OAuthClientTypeDevice OAuthClientType = "device"
+)
+
+func OAuthProviderOrder() []string {
+	return []string{
+		OAuthProviderGoogle,
+		OAuthProviderGitHub,
+	}
+}
+
+func IsKnownOAuthProvider(provider string) bool {
+	for _, candidate := range OAuthProviderOrder() {
+		if provider == candidate {
+			return true
+		}
+	}
+	return false
+}
+
 // AuthService handles authentication operations.
 type AuthService interface {
 	// Login performs user login.

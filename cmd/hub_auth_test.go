@@ -68,7 +68,7 @@ func TestResolveHubAuthProvider_ExplicitProvider(t *testing.T) {
 	t.Parallel()
 
 	authSvc := &mockHubAuthService{}
-	got, err := resolveHubAuthProvider(context.Background(), authSvc, "device", "GitHub")
+	got, err := resolveHubAuthProvider(context.Background(), authSvc, hubclient.OAuthClientTypeDevice, "GitHub")
 	if err != nil {
 		t.Fatalf("resolveHubAuthProvider returned error: %v", err)
 	}
@@ -81,11 +81,11 @@ func TestResolveHubAuthProvider_InvalidExplicitProvider(t *testing.T) {
 	t.Parallel()
 
 	authSvc := &mockHubAuthService{}
-	_, err := resolveHubAuthProvider(context.Background(), authSvc, "cli", "gitlab")
+	_, err := resolveHubAuthProvider(context.Background(), authSvc, hubclient.OAuthClientTypeCLI, "gitlab")
 	if err == nil {
 		t.Fatal("expected error for invalid provider")
 	}
-	if !strings.Contains(err.Error(), "must be google or github") {
+	if !strings.Contains(err.Error(), "must be one of google, github") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -95,12 +95,12 @@ func TestResolveHubAuthProvider_AutoSelectSingleProvider(t *testing.T) {
 
 	authSvc := &mockHubAuthService{
 		providersResp: &hubclient.AuthProvidersResponse{
-			ClientType: "device",
+			ClientType: string(hubclient.OAuthClientTypeDevice),
 			Providers:  []string{"github"},
 		},
 	}
 
-	got, err := resolveHubAuthProvider(context.Background(), authSvc, "device", "")
+	got, err := resolveHubAuthProvider(context.Background(), authSvc, hubclient.OAuthClientTypeDevice, "")
 	if err != nil {
 		t.Fatalf("resolveHubAuthProvider returned error: %v", err)
 	}
@@ -114,12 +114,12 @@ func TestResolveHubAuthProvider_MultipleProviders(t *testing.T) {
 
 	authSvc := &mockHubAuthService{
 		providersResp: &hubclient.AuthProvidersResponse{
-			ClientType: "cli",
-			Providers:  []string{"google", "github"},
+			ClientType: string(hubclient.OAuthClientTypeCLI),
+			Providers:  hubclient.OAuthProviderOrder(),
 		},
 	}
 
-	_, err := resolveHubAuthProvider(context.Background(), authSvc, "cli", "")
+	_, err := resolveHubAuthProvider(context.Background(), authSvc, hubclient.OAuthClientTypeCLI, "")
 	if err == nil {
 		t.Fatal("expected error for multiple providers")
 	}
@@ -133,12 +133,12 @@ func TestResolveHubAuthProvider_NoProviders(t *testing.T) {
 
 	authSvc := &mockHubAuthService{
 		providersResp: &hubclient.AuthProvidersResponse{
-			ClientType: "device",
+			ClientType: string(hubclient.OAuthClientTypeDevice),
 			Providers:  []string{},
 		},
 	}
 
-	_, err := resolveHubAuthProvider(context.Background(), authSvc, "device", "")
+	_, err := resolveHubAuthProvider(context.Background(), authSvc, hubclient.OAuthClientTypeDevice, "")
 	if err == nil {
 		t.Fatal("expected error when no providers are configured")
 	}
