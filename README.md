@@ -32,12 +32,46 @@ See the full [Installation Guide](https://googlecloudplatform.github.io/scion/ge
 go install github.com/GoogleCloudPlatform/scion/cmd/scion@latest
 ```
 
+If you've cloned the repo and want the **web UI** included, use `make all` (not `make build`):
+
+```bash
+make all    # builds web frontend + Go binary with embedded assets
+```
+
+> **Note:** `make build` compiles only the Go binary without web assets. The web UI will return 404s if you use `make build` alone. Use `make all` for a fully functional server with the browser-based frontend.
+
+### Build Container Images
+
+Fork the repo and use the **Build Scion Images** GitHub Actions workflow, or build locally.
+
+**GitHub Actions:** Go to Actions > "Build Scion Images" > Run workflow. Fill in:
+- **Container registry**: `ghcr.io/<your-github-username>` (e.g., `ghcr.io/myuser`)
+- **Build target**: `all` (required for first-time builds — `common` assumes `core-base` already exists in your registry)
+- **Image tag**: `latest`
+- **Target platform(s)**: Match your machine architecture (see note below)
+
+> **Important — Apple Silicon users:** GitHub Actions runners are x86_64. Building `linux/arm64` images on these runners uses QEMU emulation and can take **over an hour**. For much faster builds, build locally instead:
+>
+> ```bash
+> # Log in to GHCR
+> gh auth token | docker login ghcr.io -u <your-username> --password-stdin
+>
+> # Build and push (minutes on native arm64 vs. 1hr+ on GitHub Actions)
+> image-build/scripts/build-images.sh \
+>   --registry ghcr.io/<your-username> \
+>   --target all \
+>   --tag latest \
+>   --platform linux/arm64 \
+>   --push
+> ```
+
 ### Initialize your machine and a Grove (project)
 
 Navigate to your project and create a Scion grove (the `.scion` directory that holds agent config) - use the registry where you built images:
 
 ```bash
 scion init --machine
+scion config set --global image_registry ghcr.io/<your-username>
 cd my-project
 scion init
 ```
@@ -89,6 +123,31 @@ scion start debug "Help me debug this error" --attach
 | **Runtime Broker** | A machine (laptop or VM) offering its runtimes to a Hub |
 
 Not all concepts apply in every scenario — local mode is simpler. See [Concepts](https://googlecloudplatform.github.io/scion/concepts/) for the full picture.
+
+## Workstation Server with Tailscale
+
+The [workstation server](https://googlecloudplatform.github.io/scion/advanced-local/workstation-server/) runs Hub, Runtime Broker, and the web frontend as a single daemon. Combined with [Tailscale](https://tailscale.com/), you can orchestrate agents from any device on your tailnet.
+
+```bash
+# Start the server (binds to localhost by default)
+scion server start
+
+# Expose via Tailscale (HTTPS + your tailnet hostname, no config changes needed)
+tailscale serve 8080
+```
+
+Access the web UI at `https://<your-tailscale-hostname>:8080/` from any device on your tailnet.
+
+This approach keeps scion bound to loopback with its defaults — Tailscale handles network exposure and TLS termination. No need to use `--host 0.0.0.0`.
+
+Other useful server commands:
+
+| Command | Description |
+|---------|-------------|
+| `scion server status` | Check component health and daemon PID |
+| `scion server stop` | Stop the daemon |
+| `scion server restart` | Restart (picks up new binary after `make all`) |
+| `scion server install` | Generate a launchd (macOS) or systemd (Linux) service file |
 
 ## Documentation
 

@@ -16,10 +16,10 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .PHONY: all build install test test-fast vet lint golangci-lint web web-typecheck fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries
 
-## all: Build the web frontend, then compile the Go binary with embedded assets
+## all: Build the web frontend + Go binary with embedded assets (required for the web UI)
 all: web install
 
-## build: Compile the scion binary into ./build/
+## build: Compile the scion binary into ./build/ (without web assets — web UI will 404)
 build:
 	@echo "Building $(BINARY)..."
 	@mkdir -p $(BUILD_DIR)
