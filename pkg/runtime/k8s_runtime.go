@@ -970,8 +970,14 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 
 	// Security context: set FSGroup from host GID for volume permission alignment.
 	hostGID := int64(os.Getgid())
+	runAsNonRoot := true
+	allowPrivilegeEscalation := false
 	podSecurityContext := &corev1.PodSecurityContext{
-		FSGroup: &hostGID,
+		FSGroup:      &hostGID,
+		RunAsNonRoot: &runAsNonRoot,
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
 	}
 
 	// Determine image pull policy
@@ -1008,6 +1014,12 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 					WorkingDir:      "/workspace",
 					Stdin:           true,
 					TTY:             true,
+					SecurityContext: &corev1.SecurityContext{
+						AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+						Capabilities: &corev1.Capabilities{
+							Drop: []corev1.Capability{"ALL"},
+						},
+					},
 					VolumeMounts: []corev1.VolumeMount{
 						{Name: "workspace", MountPath: "/workspace"},
 					},
