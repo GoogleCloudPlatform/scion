@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,9 +90,19 @@ func StartComponent(component, executable string, args []string, globalDir strin
 		return fmt.Errorf("failed to write PID file: %w", err)
 	}
 
+	// Background reaper. This goroutine is intentionally untracked: a daemon
+	// starter by definition fire-and-forgets the child, and the goroutine's
+	// lifetime is bounded by the child process lifetime. We surface any Wait
+	// error (which may carry OS-level exit status) so operators can tell a
+	// clean exit from an unexpected one.
 	go func() {
-		_ = cmd.Wait()
-		logFile.Close()
+		defer logFile.Close()
+		if err := cmd.Wait(); err != nil {
+			slog.Warn("Daemon component exited with error",
+				"component", component,
+				"pid", cmd.Process.Pid,
+				"error", err)
+		}
 	}()
 
 	return nil
