@@ -18,6 +18,9 @@ FROM ${BASE_IMAGE}
 
 ARG CODEX_CLI_VERSION=latest
 
+RUN mkdir -p /home/scion/.codex /home/scion/.codex/skills && \
+  chown -R scion:scion /home/scion/.codex
+
 # install codex and clean up
 RUN npm install -g @openai/codex@${CODEX_CLI_VERSION} \
   && npm cache clean --force
