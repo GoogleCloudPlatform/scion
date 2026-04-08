@@ -27,9 +27,11 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 )
 
 func TestClient_ListSandboxClaims(t *testing.T) {
@@ -271,5 +273,72 @@ users:
 
 	if client.CurrentContext != "test-context" {
 		t.Errorf("expected CurrentContext 'test-context', got %q", client.CurrentContext)
+	}
+}
+
+func testKubeconfigLoadError() error {
+	return fmt.Errorf("no kubeconfig found: %w", os.ErrNotExist)
+}
+
+func TestNewClientWithContext_FallsBackToInClusterConfig(t *testing.T) {
+	client, err := newClientWithContext(
+		"",
+		"",
+		func(kubeconfigPath, contextName string) (*rest.Config, string, error) {
+			return nil, "", testKubeconfigLoadError()
+		},
+		func() (*rest.Config, error) {
+			return &rest.Config{Host: "https://10.43.0.1:443"}, nil
+		},
+		func(config *rest.Config) (dynamic.Interface, error) {
+			return dynamic.NewForConfig(config)
+		},
+		func(config *rest.Config) (kubernetes.Interface, error) {
+			return kubernetes.NewForConfig(config)
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewClientWithContext should fall back to in-cluster config: %v", err)
+	}
+
+	if client.CurrentContext != "in-cluster" {
+		t.Errorf("expected CurrentContext 'in-cluster', got %q", client.CurrentContext)
+	}
+
+	if client.Config.Host != "https://10.43.0.1:443" {
+		t.Errorf("expected in-cluster host to be used, got %q", client.Config.Host)
+	}
+}
+
+func TestNewClientWithContext_DoesNotFallBackWhenContextExplicit(t *testing.T) {
+	inClusterCalled := false
+	loadErr := testKubeconfigLoadError()
+	_, err := newClientWithContext(
+		"",
+		"explicit-context",
+		func(kubeconfigPath, contextName string) (*rest.Config, string, error) {
+			return nil, "", loadErr
+		},
+		func() (*rest.Config, error) {
+			inClusterCalled = true
+			return &rest.Config{Host: "https://10.43.0.1:443"}, nil
+		},
+		func(config *rest.Config) (dynamic.Interface, error) {
+			return dynamic.NewForConfig(config)
+		},
+		func(config *rest.Config) (kubernetes.Interface, error) {
+			return kubernetes.NewForConfig(config)
+		},
+	)
+	if err == nil {
+		t.Fatal("expected error when explicit context kubeconfig resolution fails")
+	}
+
+	if !strings.Contains(err.Error(), loadErr.Error()) {
+		t.Fatalf("expected original kubeconfig load error, got: %v", err)
+	}
+
+	if inClusterCalled {
+		t.Fatal("expected in-cluster fallback to be skipped when context is explicit")
 	}
 }

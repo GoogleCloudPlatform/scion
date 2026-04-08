@@ -61,10 +61,43 @@ func NewClient(kubeconfigPath string) (*Client, error) {
 // NewClientWithContext creates a Kubernetes client targeting a specific context.
 // If contextName is empty, the current context from the kubeconfig is used.
 func NewClientWithContext(kubeconfigPath, contextName string) (*Client, error) {
-	var config *rest.Config
-	var err error
-	var currentContext string
+	return newClientWithContext(
+		kubeconfigPath,
+		contextName,
+		loadClientConfig,
+		rest.InClusterConfig,
+		func(config *rest.Config) (dynamic.Interface, error) {
+			return dynamic.NewForConfig(config)
+		},
+		func(config *rest.Config) (kubernetes.Interface, error) {
+			return kubernetes.NewForConfig(config)
+		},
+	)
+}
 
+func newClientWithContext(
+	kubeconfigPath,
+	contextName string,
+	loadConfig func(string, string) (*rest.Config, string, error),
+	inClusterConfig func() (*rest.Config, error),
+	newDynamicClient func(*rest.Config) (dynamic.Interface, error),
+	newClientset func(*rest.Config) (kubernetes.Interface, error),
+) (*Client, error) {
+	config, currentContext, err := loadConfig(kubeconfigPath, contextName)
+	if err != nil {
+		if kubeconfigPath == "" && contextName == "" {
+			config, err = inClusterConfig()
+			if err == nil {
+				return newClientFromConfig(config, "in-cluster", newDynamicClient, newClientset)
+			}
+		}
+		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
+	}
+
+	return newClientFromConfig(config, currentContext, newDynamicClient, newClientset)
+}
+
+func loadClientConfig(kubeconfigPath, contextName string) (*rest.Config, string, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if kubeconfigPath != "" {
 		loadingRules.ExplicitPath = kubeconfigPath
@@ -80,11 +113,12 @@ func NewClientWithContext(kubeconfigPath, contextName string) (*Client, error) {
 		overrides,
 	)
 
-	config, err = configLoader.ClientConfig()
+	config, err := configLoader.ClientConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
+		return nil, "", err
 	}
 
+	currentContext := ""
 	rawConfig, err := configLoader.RawConfig()
 	if err == nil {
 		if contextName != "" {
@@ -94,12 +128,21 @@ func NewClientWithContext(kubeconfigPath, contextName string) (*Client, error) {
 		}
 	}
 
-	dynClient, err := dynamic.NewForConfig(config)
+	return config, currentContext, nil
+}
+
+func newClientFromConfig(
+	config *rest.Config,
+	currentContext string,
+	newDynamicClient func(*rest.Config) (dynamic.Interface, error),
+	newClientset func(*rest.Config) (kubernetes.Interface, error),
+) (*Client, error) {
+	dynClient, err := newDynamicClient(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
 	}
 
-	clientset, err := kubernetes.NewForConfig(config)
+	clientset, err := newClientset(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create kubernetes clientset: %w", err)
 	}
