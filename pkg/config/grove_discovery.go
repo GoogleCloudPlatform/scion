@@ -190,10 +190,30 @@ func groveInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug str
 	if settings, err := LoadSettings(configPath); err == nil {
 		gi.GroveID = settings.GroveID
 	}
+	if gi.GroveID == "" {
+		if marker, workspacePath, err := readWorkspaceMarkerForSlug(slug); err == nil {
+			gi.GroveID = marker.GroveID
+			gi.WorkspacePath = workspacePath
+		}
+	}
 	if gi.AgentCount == 0 {
 		gi.Status = GroveStatusOrphaned
 	}
 	return gi
+}
+
+func readWorkspaceMarkerForSlug(slug string) (*GroveMarker, string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, "", err
+	}
+	workspacePath := filepath.Join(home, GlobalDir, "groves", slug)
+	markerPath := filepath.Join(workspacePath, DotScion)
+	marker, err := ReadGroveMarker(markerPath)
+	if err != nil {
+		return nil, "", err
+	}
+	return marker, workspacePath, nil
 }
 
 // groveInfoFromGitExternal builds a GroveInfo for a legacy git grove's external agents

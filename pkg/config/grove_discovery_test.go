@@ -500,6 +500,60 @@ func TestDiscoverGroves_GitGroveWithExternalConfig(t *testing.T) {
 	}
 }
 
+func TestDiscoverGroves_GitGroveWithExternalConfigUsesWorkspaceMarkerGroveID(t *testing.T) {
+	tmpHome := t.TempDir()
+	origHome := os.Getenv("HOME")
+	if err := os.Setenv("HOME", tmpHome); err != nil {
+		t.Fatalf("Setenv HOME failed: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME failed: %v", err)
+		}
+	}()
+
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755); err != nil {
+		t.Fatalf("mkdir .scion: %v", err)
+	}
+
+	groveDir := filepath.Join(tmpHome, ".scion", "grove-configs", "newrepo__ccdd1122")
+	scionDir := filepath.Join(groveDir, ".scion")
+	agentsDir := filepath.Join(scionDir, "agents", "worker1", "home")
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		t.Fatalf("mkdir agents dir: %v", err)
+	}
+
+	workspaceDir := filepath.Join(tmpHome, ".scion", "groves", "newrepo")
+	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
+		t.Fatalf("mkdir workspace dir: %v", err)
+	}
+	if err := WriteWorkspaceMarker(workspaceDir, "3c619ec9-517e-4321-8c6a-4757f6a95607", "newrepo", "newrepo"); err != nil {
+		t.Fatalf("WriteWorkspaceMarker failed: %v", err)
+	}
+
+	groves, err := DiscoverGroves()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var gitGrove *GroveInfo
+	for i := range groves {
+		if groves[i].Name == "newrepo" {
+			gitGrove = &groves[i]
+			break
+		}
+	}
+	if gitGrove == nil {
+		t.Fatal("expected to find git grove with external config")
+	}
+	if gitGrove.GroveID != "3c619ec9-517e-4321-8c6a-4757f6a95607" {
+		t.Fatalf("GroveID = %q, want %q", gitGrove.GroveID, "3c619ec9-517e-4321-8c6a-4757f6a95607")
+	}
+	if gitGrove.WorkspacePath != workspaceDir {
+		t.Fatalf("WorkspacePath = %q, want %q", gitGrove.WorkspacePath, workspaceDir)
+	}
+}
+
 func TestDiscoverGroves_GroveConfigNoScionNoAgents(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
