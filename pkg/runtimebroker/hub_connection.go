@@ -68,6 +68,12 @@ type HubConnection struct {
 
 	Status ConnectionStatus
 	mu     sync.RWMutex
+
+	// ccWg tracks the control-channel Connect goroutine spawned in Start so
+	// that Stop / Reinitialize can wait for it to exit before replacing or
+	// clearing ControlChannel. Without this, Reinitialize can race with the
+	// previous Connect goroutine and leak goroutines across reconnects.
+	ccWg sync.WaitGroup
 }
 
 // GetStatus returns the current connection status.
@@ -102,7 +108,7 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 
 			groveFilter := server.buildGroveFilterForHub(hc.HubEndpoint)
 
-			hc.Heartbeat = NewHeartbeatService(
+			hb := NewHeartbeatService(
 				hc.HubClient.RuntimeBrokers(),
 				hc.BrokerID,
 				interval,
@@ -110,9 +116,12 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 				groveFilter,
 				logging.Subsystem("broker.heartbeat"),
 			)
-			hc.Heartbeat.auxiliaryManagers = server.getAuxiliaryManagers
-			hc.Heartbeat.SetVersion(server.version)
-			hc.Heartbeat.Start(ctx)
+			hb.auxiliaryManagers = server.getAuxiliaryManagers
+			hb.SetVersion(server.version)
+			hc.mu.Lock()
+			hc.Heartbeat = hb
+			hc.mu.Unlock()
+			hb.Start(ctx)
 			slog.Info("Heartbeat started for hub connection", "name", hc.Name, "interval", interval)
 		}
 	}
@@ -136,9 +145,16 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 				Debug:               server.config.Debug,
 			}
 
-			hc.ControlChannel = NewControlChannelClient(ccConfig, server.Handler(), server, hc.Name, logging.Subsystem("broker.control-channel"))
+			cc := NewControlChannelClient(ccConfig, server.Handler(), server, hc.Name, logging.Subsystem("broker.control-channel"))
+			hc.mu.Lock()
+			hc.ControlChannel = cc
+			hc.mu.Unlock()
+			// Capture cc locally so the goroutine doesn't race with Stop()
+			// nil-ing hc.ControlChannel out from under it.
+			hc.ccWg.Add(1)
 			go func() {
-				if err := hc.ControlChannel.Connect(ctx); err != nil {
+				defer hc.ccWg.Done()
+				if err := cc.Connect(ctx); err != nil {
 					if ctx.Err() != nil {
 						slog.Info("Control channel stopped", "name", hc.Name)
 					} else {
@@ -155,16 +171,28 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 }
 
 // Stop stops the heartbeat and control channel services for this connection.
+// Stop waits for any in-flight control-channel Connect goroutine to return
+// before clearing ControlChannel so that a subsequent Start / Reinitialize
+// cannot race with the previous incarnation.
 func (hc *HubConnection) Stop() {
-	if hc.ControlChannel != nil {
+	hc.mu.Lock()
+	cc := hc.ControlChannel
+	hc.ControlChannel = nil
+	hb := hc.Heartbeat
+	hc.Heartbeat = nil
+	hc.mu.Unlock()
+
+	if cc != nil {
 		slog.Info("Stopping control channel for connection", "name", hc.Name)
-		hc.ControlChannel.Close()
-		hc.ControlChannel = nil
+		cc.Close()
 	}
-	if hc.Heartbeat != nil {
+	// Wait for the Connect goroutine launched in Start to observe the close
+	// and exit. Safe to call even when no goroutine is outstanding.
+	hc.ccWg.Wait()
+
+	if hb != nil {
 		slog.Info("Stopping heartbeat for connection", "name", hc.Name)
-		hc.Heartbeat.Stop()
-		hc.Heartbeat = nil
+		hb.Stop()
 	}
 	hc.setStatus(ConnectionStatusDisconnected)
 }
