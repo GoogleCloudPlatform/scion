@@ -401,13 +401,13 @@ func TestListPreservesRuntimeTerminalStateForKubernetes(t *testing.T) {
 	}{
 		{
 			name:            "legacy ended maps completed pod to stopped",
-			runtimePhase:    "ended",
+			runtimePhase:    runtime.LegacyAgentPhaseEnded,
 			containerStatus: "Succeeded (Completed)",
 			wantPhase:       string(state.PhaseStopped),
 		},
 		{
 			name:            "legacy ended maps failed pod to error",
-			runtimePhase:    "ended",
+			runtimePhase:    runtime.LegacyAgentPhaseEnded,
 			containerStatus: "Failed (Error)",
 			wantPhase:       string(state.PhaseError),
 		},

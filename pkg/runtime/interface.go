@@ -78,4 +78,8 @@ const (
 	SyncTo          SyncDirection = "to"
 	SyncFrom        SyncDirection = "from"
 	SyncUnspecified SyncDirection = ""
+
+	// LegacyAgentPhaseEnded is the historical terminal phase returned by some
+	// runtime list implementations before Scion standardized on stopped/error.
+	LegacyAgentPhaseEnded = "ended"
 )

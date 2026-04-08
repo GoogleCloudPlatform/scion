@@ -25,7 +25,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
+
+const legacyFailedContainerStatusPrefix = "failed"
 
 func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
 	agents, err := m.Runtime.List(ctx, filter)
@@ -257,11 +260,11 @@ func terminalRuntimePhase(agent api.AgentInfo) string {
 		state.PhaseStarting, state.PhaseRunning, state.PhaseStopping:
 		return ""
 	}
-	if agent.Phase != "ended" {
+	if agent.Phase != scionruntime.LegacyAgentPhaseEnded {
 		return ""
 	}
 	containerStatus := strings.ToLower(agent.ContainerStatus)
-	if strings.Contains(containerStatus, "failed") {
+	if strings.Contains(containerStatus, legacyFailedContainerStatusPrefix) {
 		return string(state.PhaseError)
 	}
 	return string(state.PhaseStopped)
