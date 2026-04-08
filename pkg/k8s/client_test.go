@@ -16,6 +16,7 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -280,6 +281,8 @@ func testKubeconfigLoadError() error {
 	return fmt.Errorf("no kubeconfig found: %w", os.ErrNotExist)
 }
 
+var errMissingServiceAccountToken = errors.New("service account token missing")
+
 func TestNewClientWithContext_FallsBackToInClusterConfig(t *testing.T) {
 	client, err := newClientWithContext(
 		"",
@@ -340,5 +343,37 @@ func TestNewClientWithContext_DoesNotFallBackWhenContextExplicit(t *testing.T) {
 
 	if inClusterCalled {
 		t.Fatal("expected in-cluster fallback to be skipped when context is explicit")
+	}
+}
+
+func TestNewClientWithContext_ReportsBothKubeconfigAndInClusterErrors(t *testing.T) {
+	loadErr := testKubeconfigLoadError()
+
+	_, err := newClientWithContext(
+		"",
+		"",
+		func(kubeconfigPath, contextName string) (*rest.Config, string, error) {
+			return nil, "", loadErr
+		},
+		func() (*rest.Config, error) {
+			return nil, errMissingServiceAccountToken
+		},
+		func(config *rest.Config) (dynamic.Interface, error) {
+			return dynamic.NewForConfig(config)
+		},
+		func(config *rest.Config) (kubernetes.Interface, error) {
+			return kubernetes.NewForConfig(config)
+		},
+	)
+	if err == nil {
+		t.Fatal("expected error when kubeconfig and in-cluster config both fail")
+	}
+
+	if !strings.Contains(err.Error(), loadErr.Error()) {
+		t.Fatalf("expected kubeconfig error context, got: %v", err)
+	}
+
+	if !errors.Is(err, errMissingServiceAccountToken) {
+		t.Fatalf("expected wrapped in-cluster error, got: %v", err)
 	}
 }

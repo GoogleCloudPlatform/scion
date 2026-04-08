@@ -85,13 +85,19 @@ func newClientWithContext(
 ) (*Client, error) {
 	config, currentContext, err := loadConfig(kubeconfigPath, contextName)
 	if err != nil {
+		kubeconfigErr := err
 		if kubeconfigPath == "" && contextName == "" {
 			config, err = inClusterConfig()
 			if err == nil {
 				return newClientFromConfig(config, "in-cluster", newDynamicClient, newClientset)
 			}
+			return nil, fmt.Errorf(
+				"failed to load kubeconfig and in-cluster config: kubeconfig=%s: in-cluster=%w",
+				kubeconfigErr.Error(),
+				err,
+			)
 		}
-		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
+		return nil, fmt.Errorf("failed to load kubeconfig: %w", kubeconfigErr)
 	}
 
 	return newClientFromConfig(config, currentContext, newDynamicClient, newClientset)
