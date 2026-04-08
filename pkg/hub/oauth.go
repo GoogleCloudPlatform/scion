@@ -150,8 +150,9 @@ func (s *OAuthService) IsProviderConfiguredForClient(clientType OAuthClientType,
 // ConfiguredProvidersForClient returns the configured OAuth providers for the
 // given client type in stable display order.
 func (s *OAuthService) ConfiguredProvidersForClient(clientType OAuthClientType) []string {
-	providers := make([]string, 0, 2)
-	for _, provider := range oauthProviderOrder() {
+	order := oauthProviderOrder()
+	providers := make([]string, 0, len(order))
+	for _, provider := range order {
 		if s.IsProviderConfiguredForClient(clientType, provider) {
 			providers = append(providers, provider)
 		}
