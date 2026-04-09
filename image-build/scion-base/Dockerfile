@@ -71,6 +71,11 @@ RUN useradd -m -s /bin/zsh -u 1000 scion && \
     echo "scion ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/scion && \
     chmod 0440 /etc/sudoers.d/scion
 
+# Precreate shared Scion home state so mounted file secrets and runtime
+# config writes do not force root-owned parent directories at startup.
+RUN mkdir -p /home/scion/.scion && \
+    chown -R scion:scion /home/scion
+
 # Set ownership for npm global directory
 # TODO: Consider making npm-global world read-write (chmod) instead of chown
 # to scion. This would decouple it from the scion UID and avoid any ownership
