@@ -6,9 +6,11 @@ package commands
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -741,5 +743,34 @@ func TestGitCloneWorkspace_NonZeroUIDChownsWorkspace(t *testing.T) {
 	errMsg := err.Error()
 	if !strings.Contains(errMsg, "git clone failed") && !strings.Contains(errMsg, "git init failed") && !strings.Contains(errMsg, "git remote add failed") && !strings.Contains(errMsg, "failed") {
 		t.Errorf("expected a git failure error, got: %v", err)
+	}
+}
+
+func TestConfigureGitCommand_SkipsCredentialOverrideWhenAlreadyRunningAsTargetUser(t *testing.T) {
+	cmd := exec.CommandContext(context.Background(), "git", "status")
+
+	configureGitCommand(cmd, os.Getuid(), os.Getgid())
+
+	if !slices.Contains(cmd.Env, "GIT_TERMINAL_PROMPT=0") {
+		t.Fatal("expected GIT_TERMINAL_PROMPT=0 to be set")
+	}
+	if cmd.SysProcAttr != nil {
+		t.Fatalf("expected no credential override when already running as target user, got %#v", cmd.SysProcAttr)
+	}
+}
+
+func TestConfigureGitCommand_SkipsCredentialOverrideForNonRootDifferentTarget(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("test only covers non-root behavior")
+	}
+
+	cmd := exec.CommandContext(context.Background(), "git", "status")
+	configureGitCommand(cmd, os.Getuid()+1, os.Getgid())
+
+	if !slices.Contains(cmd.Env, "GIT_TERMINAL_PROMPT=0") {
+		t.Fatal("expected GIT_TERMINAL_PROMPT=0 to be set")
+	}
+	if cmd.SysProcAttr != nil {
+		t.Fatalf("expected no credential override for non-root process, got %#v", cmd.SysProcAttr)
 	}
 }

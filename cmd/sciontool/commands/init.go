@@ -1002,10 +1002,10 @@ func gitCloneWorkspace(uid, gid int, agentHome string) error {
 		}
 	}
 
-	// Ensure the workspace directory is owned by the target user. The
-	// directory may have been created on the host by a root broker process
-	// and bind-mounted into the container as root-owned.
-	if uid > 0 {
+	// Ensure the workspace directory is owned by the target user when running
+	// as root. Non-root containers cannot chown, and Kubernetes pods may
+	// already be running as the correct user/group via securityContext.
+	if uid > 0 && os.Getuid() == 0 {
 		if err := os.Chown(workspacePath, uid, gid); err != nil {
 			log.Error("Failed to chown workspace to UID=%d GID=%d: %v", uid, gid, err)
 		}
@@ -1026,15 +1026,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string) error {
 	// interactive credential prompts so git fails immediately instead of
 	// hanging when authentication is required but no token is available.
 	setupGitCmd := func(cmd *exec.Cmd) {
-		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-		if uid > 0 {
-			cmd.SysProcAttr = &syscall.SysProcAttr{
-				Credential: &syscall.Credential{
-					Uid: uint32(uid),
-					Gid: uint32(gid),
-				},
-			}
-		}
+		configureGitCommand(cmd, uid, gid)
 	}
 
 	// Report cloning status to Hub
@@ -1273,6 +1265,29 @@ func configureSharedWorkspaceGit(agentHome string) {
 		if out, err := cmd.CombinedOutput(); err != nil {
 			log.Error("Failed to set git config %s: %s %v", cfg.key, string(out), err)
 		}
+	}
+}
+
+func configureGitCommand(cmd *exec.Cmd, uid, gid int) {
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if uid <= 0 {
+		return
+	}
+
+	currentUID := os.Getuid()
+	currentGID := os.Getgid()
+	if currentUID == uid && currentGID == gid {
+		return
+	}
+	if currentUID != 0 {
+		return
+	}
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid: uint32(uid),
+			Gid: uint32(gid),
+		},
 	}
 }
 
