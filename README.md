@@ -136,7 +136,7 @@ scion server start
 tailscale serve 8080
 ```
 
-Access the web UI at `https://<your-tailscale-hostname>:8080/` from any device on your tailnet.
+Access the web UI at `https://<your-tailscale-hostname>/` from any device on your tailnet.
 
 This approach keeps scion bound to loopback with its defaults — Tailscale handles network exposure and TLS termination. No need to use `--host 0.0.0.0`.
 
