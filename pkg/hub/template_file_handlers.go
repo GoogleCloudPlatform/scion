@@ -206,6 +206,11 @@ func (s *Server) handleTemplateFileRead(w http.ResponseWriter, r *http.Request, 
 }
 
 // handleTemplateFileWrite writes content to a template file.
+// Supports two modes:
+//   - JSON body (Content-Type: application/json): existing behavior with TemplateFileWriteRequest
+//   - Raw binary body (any other Content-Type): writes raw request body to storage directly.
+//     Used by the local storage proxy flow where clients PUT file content to hub URLs
+//     instead of file:// signed URLs.
 func (s *Server) handleTemplateFileWrite(w http.ResponseWriter, r *http.Request, templateID, filePath string) {
 	ctx := r.Context()
 
@@ -217,6 +222,19 @@ func (s *Server) handleTemplateFileWrite(w http.ResponseWriter, r *http.Request,
 
 	if template.Locked {
 		Forbidden(w)
+		return
+	}
+
+	stor := s.GetStorage()
+	if stor == nil {
+		RuntimeError(w, "Storage not configured")
+		return
+	}
+
+	// Detect raw binary upload vs JSON request
+	contentType := r.Header.Get("Content-Type")
+	if contentType != "" && contentType != "application/json" && !strings.HasPrefix(contentType, "application/json;") {
+		s.handleTemplateFileWriteRaw(w, r, template, filePath, stor)
 		return
 	}
 
@@ -235,12 +253,6 @@ func (s *Server) handleTemplateFileWrite(w http.ResponseWriter, r *http.Request,
 				return
 			}
 		}
-	}
-
-	stor := s.GetStorage()
-	if stor == nil {
-		RuntimeError(w, "Storage not configured")
-		return
 	}
 
 	// Upload content to storage
@@ -292,6 +304,66 @@ func (s *Server) handleTemplateFileWrite(w http.ResponseWriter, r *http.Request,
 		Hash:    fileHash,
 		ModTime: template.Updated.UTC().Format("2006-01-02T15:04:05Z"),
 	})
+}
+
+// handleTemplateFileWriteRaw handles raw binary PUT uploads to a template file.
+// Used by the local storage proxy flow: instead of file:// signed URLs, the hub
+// returns HTTP URLs pointing to this endpoint, and the client PUTs file content directly.
+func (s *Server) handleTemplateFileWriteRaw(w http.ResponseWriter, r *http.Request, template *store.Template, filePath string, stor storage.Storage) {
+	ctx := r.Context()
+
+	data, err := io.ReadAll(io.LimitReader(r.Body, maxUploadFileSize+1))
+	if err != nil {
+		RuntimeError(w, "Failed to read request body")
+		return
+	}
+	if int64(len(data)) > maxUploadFileSize {
+		BadRequest(w, fmt.Sprintf("File %q exceeds 50MB limit", filePath))
+		return
+	}
+
+	// Upload to storage
+	objectPath := template.StoragePath + "/" + filePath
+	_, err = stor.Upload(ctx, objectPath, bytes.NewReader(data), storage.UploadOptions{
+		ContentType: "application/octet-stream",
+	})
+	if err != nil {
+		RuntimeError(w, "Failed to write file to storage")
+		return
+	}
+
+	// Compute file hash
+	h := sha256.Sum256(data)
+	fileHash := "sha256:" + hex.EncodeToString(h[:])
+	fileSize := int64(len(data))
+
+	// Update the manifest
+	fileFound := false
+	for i := range template.Files {
+		if template.Files[i].Path == filePath {
+			template.Files[i].Size = fileSize
+			template.Files[i].Hash = fileHash
+			fileFound = true
+			break
+		}
+	}
+	if !fileFound {
+		template.Files = append(template.Files, store.TemplateFile{
+			Path: filePath,
+			Size: fileSize,
+			Hash: fileHash,
+		})
+	}
+
+	// Recompute content hash
+	template.ContentHash = computeContentHash(template.Files)
+
+	if err := s.store.UpdateTemplate(ctx, template); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
 }
 
 // handleTemplateFileUpload handles multipart file uploads to a template.

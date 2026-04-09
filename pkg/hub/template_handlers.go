@@ -276,6 +276,11 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 	if len(req.Files) > 0 && stor != nil {
 		uploadURLs, manifestURL, err := generateUploadURLs(ctx, stor, storagePath, req.Files)
 		if err == nil || len(uploadURLs) > 0 {
+			// For local storage, rewrite file:// URLs to HTTP proxy URLs
+			if stor.Provider() == storage.ProviderLocal {
+				hubURL := requestBaseURL(r)
+				uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "templates", template.ID, r.Header.Get("Authorization"))
+			}
 			response.UploadURLs = uploadURLs
 			response.ManifestURL = manifestURL
 		}
@@ -539,6 +544,12 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 	if len(uploadURLs) == 0 && len(req.Files) > 0 {
 		RuntimeError(w, "Failed to generate upload URLs")
 		return
+	}
+
+	// For local storage, rewrite file:// URLs to HTTP proxy URLs
+	if stor.Provider() == storage.ProviderLocal {
+		hubURL := requestBaseURL(r)
+		uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "templates", id, r.Header.Get("Authorization"))
 	}
 
 	response := UploadResponse{

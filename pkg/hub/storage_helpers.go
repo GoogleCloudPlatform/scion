@@ -16,6 +16,8 @@ package hub
 
 import (
 	"context"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -122,4 +124,51 @@ func generateDownloadURLs(ctx context.Context, stor storage.Storage, basePath st
 	}
 
 	return downloadURLs, manifestURL, expires, nil
+}
+
+// rewriteLocalUploadURLs rewrites file:// URLs to HTTP proxy URLs pointing to
+// the hub's own file upload endpoint. This is necessary because local storage
+// generates file:// signed URLs that reference server-side paths, which are not
+// accessible when the client is on a different machine.
+//
+// For each URL with a file:// scheme, it is replaced with:
+//
+//	<hubEndpoint>/api/v1/<resourceType>/<resourceID>/files/<filePath>
+//
+// with method PUT. The client's authenticated HTTP transport handles auth.
+// requestBaseURL derives the external base URL from the incoming HTTP request.
+// It uses X-Forwarded-Proto and X-Forwarded-Host if set (reverse proxy), falling
+// back to the request's TLS state and Host header.
+func requestBaseURL(r *http.Request) string {
+	scheme := "http"
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		scheme = proto
+	} else if r.TLS != nil {
+		scheme = "https"
+	}
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	return scheme + "://" + host
+}
+
+func rewriteLocalUploadURLs(urls []UploadURLInfo, hubEndpoint, resourceType, resourceID, authHeader string) []UploadURLInfo {
+	if hubEndpoint == "" {
+		return urls
+	}
+	hubEndpoint = strings.TrimRight(hubEndpoint, "/")
+	for i := range urls {
+		if strings.HasPrefix(urls[i].URL, "file://") {
+			urls[i].URL = hubEndpoint + "/api/v1/" + resourceType + "/" + resourceID + "/files/" + urls[i].Path
+			urls[i].Method = "PUT"
+			urls[i].Headers = map[string]string{
+				"Content-Type": "application/octet-stream",
+			}
+			if authHeader != "" {
+				urls[i].Headers["Authorization"] = authHeader
+			}
+		}
+	}
+	return urls
 }
