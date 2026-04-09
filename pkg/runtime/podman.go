@@ -109,18 +109,18 @@ func (r *PodmanRuntime) Name() string {
 	return "podman"
 }
 
-// execUser returns the user to pass to podman exec. In rootless mode, the
-// child process runs as root (UID 0) inside the container because the host
-// user's UID is mapped to container UID 0 and privilege drop is skipped.
-// Exec must match that UID so it can find the tmux session and access the
-// same files.
-// ExecUser implements Runtime. In rootless mode, the child process runs as
-// root (UID 0) because the host user is mapped to container UID 0 and
-// privilege drop is skipped. Exec must match that UID.
+// ExecUser implements Runtime. Always returns "scion" because sciontool
+// init drops privileges to the scion user (via SCION_HOST_UID) before
+// launching the tmux session — even in rootless mode. The exec user must
+// match the tmux socket owner (UID 1000 = scion), not the container's
+// initial PID 1 user.
+//
+// The previous behaviour returned "root" for rootless podman, assuming
+// the host UID mapped to container UID 0 and no privilege drop occurred.
+// This was incorrect when the image starts as root (USER root) and
+// sciontool drops to scion, placing the tmux socket at /tmp/tmux-1000/
+// while the broker looked at /tmp/tmux-0/.
 func (r *PodmanRuntime) ExecUser() string {
-	if r.Rootless {
-		return "root"
-	}
 	return "scion"
 }
 

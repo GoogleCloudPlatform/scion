@@ -91,7 +91,7 @@ echo "$@"
 		}
 	})
 
-	t.Run("rootless uses root user", func(t *testing.T) {
+	t.Run("rootless uses scion user", func(t *testing.T) {
 		rt := &PodmanRuntime{
 			Command:  mockPodman,
 			Rootless: true,
@@ -102,11 +102,8 @@ echo "$@"
 			t.Fatalf("runtime.Exec failed: %v", err)
 		}
 
-		if !strings.Contains(out, "--user root") {
-			t.Errorf("expected '--user root' in exec output, got %q", out)
-		}
-		if strings.Contains(out, "--user scion") {
-			t.Errorf("should not contain '--user scion' in rootless mode, got %q", out)
+		if !strings.Contains(out, "--user scion") {
+			t.Errorf("expected '--user scion' in exec output, got %q", out)
 		}
 	})
 }
@@ -119,10 +116,10 @@ func TestPodmanRuntime_ExecUserMethod(t *testing.T) {
 		}
 	})
 
-	t.Run("rootless returns root", func(t *testing.T) {
+	t.Run("rootless returns scion", func(t *testing.T) {
 		rt := &PodmanRuntime{Rootless: true}
-		if got := rt.ExecUser(); got != "root" {
-			t.Errorf("expected 'root', got %q", got)
+		if got := rt.ExecUser(); got != "scion" {
+			t.Errorf("expected 'scion', got %q", got)
 		}
 	})
 }
