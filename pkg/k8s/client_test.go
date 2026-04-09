@@ -277,9 +277,7 @@ users:
 	}
 }
 
-func testKubeconfigLoadError() error {
-	return fmt.Errorf("no kubeconfig found: %w", os.ErrNotExist)
-}
+var errKubeconfigLoad = fmt.Errorf("no kubeconfig found: %w", os.ErrNotExist)
 
 var errMissingServiceAccountToken = errors.New("service account token missing")
 
@@ -288,7 +286,7 @@ func TestNewClientWithContext_FallsBackToInClusterConfig(t *testing.T) {
 		"",
 		"",
 		func(kubeconfigPath, contextName string) (*rest.Config, string, error) {
-			return nil, "", testKubeconfigLoadError()
+			return nil, "", errKubeconfigLoad
 		},
 		func() (*rest.Config, error) {
 			return &rest.Config{Host: "https://10.43.0.1:443"}, nil
@@ -315,29 +313,24 @@ func TestNewClientWithContext_FallsBackToInClusterConfig(t *testing.T) {
 
 func TestNewClientWithContext_DoesNotFallBackWhenContextExplicit(t *testing.T) {
 	inClusterCalled := false
-	loadErr := testKubeconfigLoadError()
 	_, err := newClientWithContext(
 		"",
 		"explicit-context",
 		func(kubeconfigPath, contextName string) (*rest.Config, string, error) {
-			return nil, "", loadErr
+			return nil, "", errKubeconfigLoad
 		},
 		func() (*rest.Config, error) {
 			inClusterCalled = true
 			return &rest.Config{Host: "https://10.43.0.1:443"}, nil
 		},
-		func(config *rest.Config) (dynamic.Interface, error) {
-			return dynamic.NewForConfig(config)
-		},
-		func(config *rest.Config) (kubernetes.Interface, error) {
-			return kubernetes.NewForConfig(config)
-		},
+		nil, // unreachable: loadConfig fails and no fallback is attempted
+		nil,
 	)
 	if err == nil {
 		t.Fatal("expected error when explicit context kubeconfig resolution fails")
 	}
 
-	if !strings.Contains(err.Error(), loadErr.Error()) {
+	if !errors.Is(err, errKubeconfigLoad) {
 		t.Fatalf("expected original kubeconfig load error, got: %v", err)
 	}
 
@@ -347,33 +340,27 @@ func TestNewClientWithContext_DoesNotFallBackWhenContextExplicit(t *testing.T) {
 }
 
 func TestNewClientWithContext_ReportsBothKubeconfigAndInClusterErrors(t *testing.T) {
-	loadErr := testKubeconfigLoadError()
-
 	_, err := newClientWithContext(
 		"",
 		"",
 		func(kubeconfigPath, contextName string) (*rest.Config, string, error) {
-			return nil, "", loadErr
+			return nil, "", errKubeconfigLoad
 		},
 		func() (*rest.Config, error) {
 			return nil, errMissingServiceAccountToken
 		},
-		func(config *rest.Config) (dynamic.Interface, error) {
-			return dynamic.NewForConfig(config)
-		},
-		func(config *rest.Config) (kubernetes.Interface, error) {
-			return kubernetes.NewForConfig(config)
-		},
+		nil, // unreachable: both config paths fail
+		nil,
 	)
 	if err == nil {
 		t.Fatal("expected error when kubeconfig and in-cluster config both fail")
 	}
 
-	if !strings.Contains(err.Error(), loadErr.Error()) {
-		t.Fatalf("expected kubeconfig error context, got: %v", err)
+	if !errors.Is(err, errKubeconfigLoad) {
+		t.Fatalf("expected kubeconfig error in chain, got: %v", err)
 	}
 
 	if !errors.Is(err, errMissingServiceAccountToken) {
-		t.Fatalf("expected wrapped in-cluster error, got: %v", err)
+		t.Fatalf("expected in-cluster error in chain, got: %v", err)
 	}
 }

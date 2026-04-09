@@ -16,6 +16,7 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -91,10 +92,11 @@ func newClientWithContext(
 			if err == nil {
 				return newClientFromConfig(config, "in-cluster", newDynamicClient, newClientset)
 			}
-			return nil, fmt.Errorf(
-				"failed to load kubeconfig and in-cluster config: kubeconfig=%s: in-cluster=%w",
-				kubeconfigErr.Error(),
-				err,
+			return nil, fmt.Errorf("failed to load kubeconfig and in-cluster config: %w",
+				errors.Join(
+					fmt.Errorf("kubeconfig: %w", kubeconfigErr),
+					fmt.Errorf("in-cluster: %w", err),
+				),
 			)
 		}
 		return nil, fmt.Errorf("failed to load kubeconfig: %w", kubeconfigErr)
