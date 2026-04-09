@@ -18,8 +18,10 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -173,7 +175,7 @@ func (s *Server) handleTemplateFileRead(w http.ResponseWriter, r *http.Request, 
 		objectPath := template.StoragePath + "/" + filePath
 		reader, _, err := stor.Download(ctx, objectPath)
 		if err != nil {
-			if err == storage.ErrNotFound {
+			if errors.Is(err, storage.ErrNotFound) {
 				NotFound(w, "Template file")
 				return
 			}
@@ -183,8 +185,11 @@ func (s *Server) handleTemplateFileRead(w http.ResponseWriter, r *http.Request, 
 		defer reader.Close()
 
 		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filePath+`"`)
 		w.WriteHeader(http.StatusOK)
-		io.Copy(w, reader)
+		if _, err := io.Copy(w, reader); err != nil {
+			slog.Error("Error streaming file to client", "path", objectPath, "error", err)
+		}
 		return
 	}
 

@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -160,8 +161,8 @@ func rewriteLocalUploadURLs(urls []UploadURLInfo, hubEndpoint, resourceType, res
 	hubEndpoint = strings.TrimRight(hubEndpoint, "/")
 	for i := range urls {
 		if strings.HasPrefix(urls[i].URL, "file://") {
-			urls[i].URL = hubEndpoint + "/api/v1/" + resourceType + "/" + resourceID + "/files/" + urls[i].Path
-			urls[i].Method = "PUT"
+			urls[i].URL = fmt.Sprintf("%s/api/v1/%s/%s/files/%s", hubEndpoint, resourceType, resourceID, urls[i].Path)
+			urls[i].Method = http.MethodPut
 			urls[i].Headers = map[string]string{
 				"Content-Type": "application/octet-stream",
 			}
