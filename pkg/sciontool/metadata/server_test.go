@@ -37,6 +37,25 @@ func freePort(t *testing.T) int {
 	return port
 }
 
+func TestShouldAttemptMetadataInterception(t *testing.T) {
+	tests := []struct {
+		name string
+		uid  int
+		want bool
+	}{
+		{name: "root", uid: 0, want: true},
+		{name: "non-root", uid: 1000, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldAttemptMetadataInterception(tt.uid); got != tt.want {
+				t.Fatalf("shouldAttemptMetadataInterception(%d) = %v, want %v", tt.uid, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMetadataServer_HealthCheck(t *testing.T) {
 	port := freePort(t)
 	srv := New(Config{

@@ -54,6 +54,11 @@ type Config struct {
 	TokenFunc func() string
 }
 
+const (
+	modeBlock  = "block"
+	modeAssign = "assign"
+)
+
 // ConfigFromEnv reads metadata server configuration from environment variables.
 // Returns nil if SCION_METADATA_MODE is not set.
 func ConfigFromEnv() *Config {
@@ -167,36 +172,41 @@ func (s *Server) Start(ctx context.Context) error {
 	// Set up network-level interception for the GCE metadata server IP.
 	//
 	// For block mode: we apply BOTH a REDIRECT (so GCP SDKs hitting the IP
-	// get a clean HTTP 403 from the sidecar) AND a filter-level REJECT or
-	// route-level block as defense-in-depth. If the nat REDIRECT is
-	// ineffective for any reason (wrong iptables backend, missing kernel
-	// module), the filter/route block ensures the real metadata server is
-	// unreachable. The REJECT rule is placed after the nat REDIRECT in
-	// processing order, so when REDIRECT works the REJECT never fires.
+	// get a clean HTTP 403 from the sidecar) AND a filter-level REJECT as
+	// defense-in-depth.
 	//
 	// For assign mode: only the REDIRECT is needed.
-	if err := setupIPTablesRedirect(s.config.Port); err != nil {
-		// Non-fatal: iptables may not be available (no NET_ADMIN cap, non-Docker runtime).
-		// The GCE_METADATA_HOST / GCE_METADATA_ROOT env vars are the primary mechanism.
-		log.Debug("iptables redirect not available: %v", err)
-	} else {
-		s.iptablesConfigured = true
-	}
-
-	if s.config.Mode == "block" {
-		// Defense-in-depth: block traffic to the metadata IP at the
-		// filter/route level so that even if the nat REDIRECT fails or
-		// is bypassed, direct access to the real metadata server is denied.
-		method, err := setupMetadataBlock()
-		if err != nil {
-			log.Error("metadata block: failed to block metadata IP — direct access to %s may still be possible: %v", metadataIP, err)
+	//
+	// In non-root containers (notably hosted Kubernetes agents), iptables
+	// interception is not available. In that case the metadata env vars are the
+	// primary mechanism and we skip the interception setup entirely to avoid
+	// misleading warnings.
+	if shouldAttemptMetadataInterception(os.Getuid()) {
+		if err := setupIPTablesRedirect(s.config.Port); err != nil {
+			// Non-fatal: iptables may not be available (no NET_ADMIN cap, non-Docker runtime).
+			// The GCE_METADATA_HOST / GCE_METADATA_ROOT env vars are the primary mechanism.
+			log.Debug("iptables redirect not available: %v", err)
 		} else {
-			s.metadataBlocked = method
+			s.iptablesConfigured = true
 		}
+
+		if s.config.Mode == modeBlock {
+			// Defense-in-depth: block traffic to the metadata IP at the
+			// filter level so that even if the nat REDIRECT fails or
+			// is bypassed, direct access to the real metadata server is denied.
+			method, err := setupMetadataBlock()
+			if err != nil {
+				log.Error("metadata block: failed to block metadata IP — direct access to %s may still be possible: %v", metadataIP, err)
+			} else {
+				s.metadataBlocked = method
+			}
+		}
+	} else {
+		log.Debug("Skipping metadata IP interception: process is not running as root")
 	}
 
 	// Start proactive refresh if in assign mode
-	if s.config.Mode == "assign" {
+	if s.config.Mode == modeAssign {
 		go s.proactiveRefreshLoop(ctx)
 	}
 
@@ -214,6 +224,10 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+func shouldAttemptMetadataInterception(uid int) bool {
+	return uid == 0
 }
 
 // Stop gracefully shuts down the server.
@@ -279,7 +293,7 @@ func isRecursive(r *http.Request) bool {
 }
 
 func (s *Server) handleServiceAccountList(w http.ResponseWriter, r *http.Request) {
-	if s.config.Mode == "block" {
+	if s.config.Mode == modeBlock {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
@@ -327,7 +341,7 @@ func (s *Server) handleServiceAccount(w http.ResponseWriter, r *http.Request, pa
 		return
 	}
 
-	if s.config.Mode == "block" {
+	if s.config.Mode == modeBlock {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
