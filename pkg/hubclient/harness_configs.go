@@ -15,9 +15,16 @@
 package hubclient
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"mime/multipart"
+	"net/http"
 	"net/url"
+	"os"
+	"path"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -54,6 +61,12 @@ type HarnessConfigService interface {
 
 	// DownloadFile downloads a file from the given signed URL.
 	DownloadFile(ctx context.Context, url string) ([]byte, error)
+
+	// UploadFilesMultipart uploads harness config files through the Hub API.
+	UploadFilesMultipart(ctx context.Context, id string, files []FileInfo) error
+
+	// ReadFile reads a harness config file through the Hub API.
+	ReadFile(ctx context.Context, id, filePath string) ([]byte, error)
 }
 
 // harnessConfigService is the implementation of HarnessConfigService.
@@ -118,6 +131,11 @@ type HarnessConfigManifest struct {
 // HarnessConfigFinalizeRequest is the request body for finalizing a harness config upload.
 type HarnessConfigFinalizeRequest struct {
 	Manifest *HarnessConfigManifest `json:"manifest"`
+}
+
+type harnessConfigFileContentResponse struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
 }
 
 // List returns harness configs matching the filter criteria.
@@ -253,9 +271,80 @@ func (s *harnessConfigService) DownloadFile(ctx context.Context, signedURL strin
 	return client.DownloadFile(ctx, signedURL)
 }
 
+// UploadFilesMultipart uploads harness config files through the Hub API.
+func (s *harnessConfigService) UploadFilesMultipart(ctx context.Context, id string, files []FileInfo) error {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	for _, file := range files {
+		if err := appendMultipartFile(writer, file); err != nil {
+			return err
+		}
+	}
+
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("finalize multipart body: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		s.c.transport.BaseURL+"/api/v1/harness-configs/"+id+"/files", &body)
+	if err != nil {
+		return fmt.Errorf("create multipart upload request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := s.c.transport.Do(ctx, req)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+// ReadFile reads a harness config file through the Hub API.
+func (s *harnessConfigService) ReadFile(ctx context.Context, id, filePath string) ([]byte, error) {
+	endpoint := "/api/v1/harness-configs/" + id + "/files/" + escapePathSegments(filePath)
+	resp, err := s.c.transport.Get(ctx, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := apiclient.DecodeResponse[harnessConfigFileContentResponse](resp)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(result.Content), nil
+}
+
 func (s *harnessConfigService) getTransferClient() *transfer.Client {
 	if s.transferClient == nil {
 		s.transferClient = transfer.NewClient(s.c.transport.HTTPClient)
 	}
 	return s.transferClient
+}
+
+func appendMultipartFile(writer *multipart.Writer, file FileInfo) error {
+	src, err := os.Open(file.FullPath)
+	if err != nil {
+		return fmt.Errorf("open file for multipart upload: %w", err)
+	}
+	defer src.Close()
+
+	part, err := writer.CreateFormFile(file.Path, path.Base(file.Path))
+	if err != nil {
+		return fmt.Errorf("create multipart form file: %w", err)
+	}
+
+	if _, err := io.Copy(part, src); err != nil {
+		return fmt.Errorf("copy file into multipart body: %w", err)
+	}
+
+	return nil
+}
+
+func escapePathSegments(filePath string) string {
+	parts := strings.Split(filePath, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
 }

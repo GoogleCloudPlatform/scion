@@ -212,7 +212,14 @@ func (s *Server) handleHarnessConfigByID(w http.ResponseWriter, r *http.Request)
 		s.handleHarnessConfigFinalize(w, r, hcID)
 	case "download":
 		s.handleHarnessConfigDownload(w, r, hcID)
+	case "files":
+		s.handleHarnessConfigFiles(w, r, hcID, "")
 	default:
+		if strings.HasPrefix(action, "files/") {
+			filePath := strings.TrimPrefix(action, "files/")
+			s.handleHarnessConfigFiles(w, r, hcID, filePath)
+			return
+		}
 		NotFound(w, "HarnessConfig action")
 	}
 }

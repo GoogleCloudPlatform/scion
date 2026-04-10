@@ -553,24 +553,8 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, harnessT
 
 	// Upload files
 	fmt.Printf("Uploading %d file(s)...\n", len(uploadResp.UploadURLs))
-	for _, urlInfo := range uploadResp.UploadURLs {
-		fileInfo := localFileMap[urlInfo.Path]
-		if fileInfo == nil {
-			fmt.Printf("  Warning: no matching file for %s\n", urlInfo.Path)
-			continue
-		}
-
-		f, err := os.Open(fileInfo.FullPath)
-		if err != nil {
-			return fmt.Errorf("failed to open %s: %w", fileInfo.Path, err)
-		}
-
-		err = hubCtx.Client.HarnessConfigs().UploadFile(ctx, urlInfo.URL, urlInfo.Method, urlInfo.Headers, f)
-		f.Close()
-		if err != nil {
-			return fmt.Errorf("failed to upload %s: %w", fileInfo.Path, err)
-		}
-		fmt.Printf("  Uploaded: %s\n", fileInfo.Path)
+	if err := uploadHarnessConfigFiles(ctx, hubCtx.Client.HarnessConfigs(), hcID, localFileMap, filesToUpload, uploadResp.UploadURLs); err != nil {
+		return err
 	}
 
 	// Build manifest
@@ -607,14 +591,8 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, harnessT
 			if fileInfo == nil {
 				continue
 			}
-			f, openErr := os.Open(fileInfo.FullPath)
-			if openErr != nil {
-				return fmt.Errorf("failed to open %s: %w", fileInfo.Path, openErr)
-			}
-			uploadErr := hubCtx.Client.HarnessConfigs().UploadFile(ctx, urlInfo.URL, urlInfo.Method, urlInfo.Headers, f)
-			f.Close()
-			if uploadErr != nil {
-				return fmt.Errorf("failed to upload %s: %w", fileInfo.Path, uploadErr)
+			if err := uploadHarnessConfigFileBySignedURL(ctx, hubCtx.Client.HarnessConfigs(), fileInfo, urlInfo); err != nil {
+				return err
 			}
 			fmt.Printf("  Re-uploaded: %s\n", fileInfo.Path)
 		}
@@ -681,6 +659,7 @@ func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, t
 	}
 
 	fmt.Printf("Downloading %d files to %s...\n", len(downloadResp.Files), destPath)
+	useHubFileRead := hasLocalDownloadURLs(downloadResp.Files)
 	for _, fileInfo := range downloadResp.Files {
 		filePath := filepath.Join(destPath, filepath.FromSlash(fileInfo.Path))
 
@@ -688,9 +667,9 @@ func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, t
 			return fmt.Errorf("failed to create directory for %s: %w", fileInfo.Path, err)
 		}
 
-		content, err := hubCtx.Client.HarnessConfigs().DownloadFile(ctx, fileInfo.URL)
+		content, err := downloadHarnessConfigContent(ctx, hubCtx.Client.HarnessConfigs(), hc.ID, fileInfo, useHubFileRead)
 		if err != nil {
-			return fmt.Errorf("failed to download %s: %w", fileInfo.Path, err)
+			return err
 		}
 
 		if err := os.WriteFile(filePath, content, 0644); err != nil {
