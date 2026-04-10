@@ -621,33 +621,41 @@ func initDevAuth(cfg *config.GlobalConfig, globalDir string) (string, error) {
 
 // resolveHubEndpoint determines the Hub's public endpoint URL.
 func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Settings) string {
-	hubEndpoint := cfg.Hub.Endpoint
-	if hubEndpoint == "" && enableHub {
-		if webBaseURL != "" {
-			hubEndpoint = strings.TrimRight(webBaseURL, "/")
-			if enableDebug {
-				log.Printf("Hub endpoint resolved from --base-url flag: %s", hubEndpoint)
-			}
-		} else if baseURL := os.Getenv("SCION_SERVER_BASE_URL"); baseURL != "" {
-			hubEndpoint = strings.TrimRight(baseURL, "/")
-			if enableDebug {
-				log.Printf("Hub endpoint resolved from SCION_SERVER_BASE_URL: %s", hubEndpoint)
-			}
-		} else {
-			port := cfg.Hub.Port
-			if enableWeb {
-				port = webPort
-			}
-			hubEndpoint = fmt.Sprintf("http://localhost:%d", port)
-			if enableDebug {
-				log.Printf("Auto-computed hub endpoint for combo mode: %s", hubEndpoint)
-			}
-		}
-	} else if hubEndpoint == "" {
-		hubEndpoint = brokerSettings.GetHubEndpoint()
+	if cfg.Hub.Endpoint != "" {
+		return cfg.Hub.Endpoint
+	}
+
+	if !enableHub {
+		hubEndpoint := brokerSettings.GetHubEndpoint()
 		if hubEndpoint != "" && enableDebug {
 			log.Printf("Hub endpoint resolved from grove settings: %s", hubEndpoint)
 		}
+		return hubEndpoint
+	}
+
+	if webBaseURL != "" {
+		hubEndpoint := strings.TrimRight(webBaseURL, "/")
+		if enableDebug {
+			log.Printf("Hub endpoint resolved from --base-url flag: %s", hubEndpoint)
+		}
+		return hubEndpoint
+	}
+
+	if baseURL := os.Getenv("SCION_SERVER_BASE_URL"); baseURL != "" {
+		hubEndpoint := strings.TrimRight(baseURL, "/")
+		if enableDebug {
+			log.Printf("Hub endpoint resolved from SCION_SERVER_BASE_URL: %s", hubEndpoint)
+		}
+		return hubEndpoint
+	}
+
+	port := cfg.Hub.Port
+	if enableWeb {
+		port = webPort
+	}
+	hubEndpoint := fmt.Sprintf("http://localhost:%d", port)
+	if enableDebug {
+		log.Printf("Auto-computed hub endpoint for combo mode: %s", hubEndpoint)
 	}
 	return hubEndpoint
 }
