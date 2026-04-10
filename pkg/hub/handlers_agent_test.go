@@ -4006,3 +4006,55 @@ func TestHandleAgentExec_DispatchesToRuntimeBroker(t *testing.T) {
 	assert.Equal(t, "terminal output", resp.Output)
 	assert.Equal(t, 0, resp.ExitCode)
 }
+
+func TestHandleGroveAgentExec_DispatchesToRuntimeBroker(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	grove := &store.Grove{
+		ID:   "grove-exec-grove-route",
+		Name: "Exec Grove Route",
+		Slug: "exec-grove-route",
+	}
+	require.NoError(t, s.CreateGrove(ctx, grove))
+
+	broker := &store.RuntimeBroker{
+		ID:     "broker-exec-grove-route",
+		Name:   "Exec Broker Grove Route",
+		Slug:   "exec-broker-grove-route",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
+		GroveID:    grove.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     store.BrokerStatusOnline,
+	}))
+
+	agent := &store.Agent{
+		ID:              "agent-exec-grove-route",
+		Slug:            "agent-exec-grove-route",
+		Name:            "Exec Agent Grove Route",
+		GroveID:         grove.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	srv.SetDispatcher(&createAgentDispatcher{execOutput: "terminal output"})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+grove.ID+"/agents/"+agent.Slug+"/exec", map[string]interface{}{
+		"command": []string{"echo", "hello"},
+		"timeout": 10,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "response body: %s", rec.Body.String())
+
+	var resp struct {
+		Output   string `json:"output"`
+		ExitCode int    `json:"exitCode"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "terminal output", resp.Output)
+	assert.Equal(t, 0, resp.ExitCode)
+}
