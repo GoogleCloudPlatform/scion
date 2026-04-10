@@ -996,6 +996,8 @@ func authFileKind(name, target string) string {
 		return "codex-auth"
 	case name == "OPENCODE_AUTH" || strings.HasSuffix(target, "/opencode/auth.json"):
 		return "opencode-auth"
+	case name == "CLAUDE_CREDENTIALS" || strings.HasSuffix(target, "/.claude/.credentials.json"):
+		return "claude-credentials"
 	default:
 		return ""
 	}

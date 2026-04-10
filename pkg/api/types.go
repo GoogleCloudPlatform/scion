@@ -366,8 +366,9 @@ type AuthConfig struct {
 	OAuthCreds           string
 
 	// Anthropic auth
-	AnthropicAPIKey  string
-	ClaudeOAuthToken string
+	AnthropicAPIKey       string
+	ClaudeOAuthToken      string
+	ClaudeCredentialsFile string // Path to ~/.claude/.credentials.json
 
 	// OpenAI/Codex auth
 	OpenAIAPIKey     string

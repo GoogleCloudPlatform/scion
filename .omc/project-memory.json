@@ -1,0 +1,218 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1775793250506,
+  "projectRoot": "/Users/donovanyohan/Documents/Programs/personal/scion/.worktrees/everest",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Go",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "go.mod"
+        ]
+      },
+      {
+        "name": "C/C++",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "Makefile"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "go",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "make build",
+    "testCommand": "make test",
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "examples",
+      "scripts"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "changelog": {
+      "path": "changelog",
+      "purpose": null,
+      "fileCount": 43,
+      "lastAccessed": 1775793250141,
+      "keyFiles": [
+        "2026-02-19-changelog.md",
+        "2026-02-20-changelog.md",
+        "2026-02-21-changelog.md",
+        "2026-02-22-changelog.md",
+        "2026-02-23-changelog.md"
+      ]
+    },
+    "cmd": {
+      "path": "cmd",
+      "purpose": null,
+      "fileCount": 83,
+      "lastAccessed": 1775793250142,
+      "keyFiles": [
+        "attach.go",
+        "broker.go",
+        "broker_test.go",
+        "cdw.go",
+        "clean.go"
+      ]
+    },
+    "docs-repo": {
+      "path": "docs-repo",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1775793250143,
+      "keyFiles": [
+        "code-of-conduct.md",
+        "contributing.md"
+      ]
+    },
+    "docs-site": {
+      "path": "docs-site",
+      "purpose": null,
+      "fileCount": 13,
+      "lastAccessed": 1775793250145,
+      "keyFiles": [
+        "AGENTS.md",
+        "Dockerfile",
+        "README.md",
+        "astro.config.mjs",
+        "check-d2.sh"
+      ]
+    },
+    "examples": {
+      "path": "examples",
+      "purpose": "Example code",
+      "fileCount": 0,
+      "lastAccessed": 1775793250147,
+      "keyFiles": []
+    },
+    "extras": {
+      "path": "extras",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1775793250150,
+      "keyFiles": []
+    },
+    "hack": {
+      "path": "hack",
+      "purpose": null,
+      "fileCount": 12,
+      "lastAccessed": 1775793250152,
+      "keyFiles": [
+        "README.md",
+        "cleanup.sh",
+        "create-cluster.sh",
+        "dist.sh",
+        "install.sh"
+      ]
+    },
+    "image-build": {
+      "path": "image-build",
+      "purpose": null,
+      "fileCount": 6,
+      "lastAccessed": 1775793250155,
+      "keyFiles": [
+        "README.md",
+        "cloudbuild-common.yaml",
+        "cloudbuild-core-base.yaml",
+        "cloudbuild-harnesses.yaml",
+        "cloudbuild-scion-base.yaml"
+      ]
+    },
+    "pkg": {
+      "path": "pkg",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1775793250156,
+      "keyFiles": []
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 5,
+      "lastAccessed": 1775793250159,
+      "keyFiles": [
+        "README.md",
+        "checktemplate-2.sh",
+        "hub-env-integration-test.sh",
+        "hub-secret-integration-test.sh",
+        "template-integration-test.sh"
+      ]
+    },
+    "skills": {
+      "path": "skills",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1775793250162,
+      "keyFiles": [
+        "README.md"
+      ]
+    },
+    "web": {
+      "path": "web",
+      "purpose": null,
+      "fileCount": 13,
+      "lastAccessed": 1775793250166,
+      "keyFiles": [
+        "AGENTS.md",
+        "OAUTH_LOCAL_WALKTHROUGH.md",
+        "README.md",
+        "embed.go",
+        "embed_stub.go"
+      ]
+    },
+    "pkg/api": {
+      "path": "pkg/api",
+      "purpose": "API routes",
+      "fileCount": 9,
+      "lastAccessed": 1775793250178,
+      "keyFiles": [
+        "content.go",
+        "content_test.go",
+        "harness.go"
+      ]
+    },
+    "pkg/config": {
+      "path": "pkg/config",
+      "purpose": "Configuration files",
+      "fileCount": 42,
+      "lastAccessed": 1775793250179,
+      "keyFiles": [
+        "agent_settings.go",
+        "agent_settings_test.go",
+        "auth.go"
+      ]
+    },
+    "web/dist": {
+      "path": "web/dist",
+      "purpose": "Distribution/build output",
+      "fileCount": 0,
+      "lastAccessed": 1775793250181,
+      "keyFiles": []
+    }
+  },
+  "hotPaths": [],
+  "userDirectives": []
+}

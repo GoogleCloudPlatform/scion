@@ -139,6 +139,10 @@ func TestGatherAuth_FileDiscovery(t *testing.T) {
 	os.MkdirAll(filepath.Dir(opencodePath), 0755)
 	os.WriteFile(opencodePath, []byte(`{"dummy":"opencode"}`), 0644)
 
+	claudeCredsPath := filepath.Join(tmpHome, ".claude", ".credentials.json")
+	os.MkdirAll(filepath.Dir(claudeCredsPath), 0755)
+	os.WriteFile(claudeCredsPath, []byte(`{"claudeAiOauth":{"accessToken":"sk-ant-oat01-test-token"}}`), 0600)
+
 	auth := GatherAuth()
 
 	if auth.GoogleAppCredentials != adcPath {
@@ -152,6 +156,12 @@ func TestGatherAuth_FileDiscovery(t *testing.T) {
 	}
 	if auth.OpenCodeAuthFile != opencodePath {
 		t.Errorf("OpenCodeAuthFile = %q, want %q", auth.OpenCodeAuthFile, opencodePath)
+	}
+	if auth.ClaudeCredentialsFile != claudeCredsPath {
+		t.Errorf("ClaudeCredentialsFile = %q, want %q", auth.ClaudeCredentialsFile, claudeCredsPath)
+	}
+	if auth.ClaudeOAuthToken != "sk-ant-oat01-test-token" {
+		t.Errorf("ClaudeOAuthToken = %q, want %q", auth.ClaudeOAuthToken, "sk-ant-oat01-test-token")
 	}
 }
 
@@ -204,6 +214,12 @@ func TestGatherAuth_NoFiles(t *testing.T) {
 	}
 	if auth.OpenCodeAuthFile != "" {
 		t.Errorf("OpenCodeAuthFile = %q, want empty", auth.OpenCodeAuthFile)
+	}
+	if auth.ClaudeCredentialsFile != "" {
+		t.Errorf("ClaudeCredentialsFile = %q, want empty", auth.ClaudeCredentialsFile)
+	}
+	if auth.ClaudeOAuthToken != "" {
+		t.Errorf("ClaudeOAuthToken = %q, want empty", auth.ClaudeOAuthToken)
 	}
 }
 
@@ -886,6 +902,28 @@ func TestOverlayFileSecrets(t *testing.T) {
 			},
 		},
 		{
+			name: "Claude credentials by name",
+			secrets: []api.ResolvedSecret{
+				{Name: "CLAUDE_CREDENTIALS", Type: "file", Target: "/home/gemini/.claude/.credentials.json"},
+			},
+			check: func(t *testing.T, auth api.AuthConfig) {
+				if auth.ClaudeCredentialsFile != "/home/gemini/.claude/.credentials.json" {
+					t.Errorf("ClaudeCredentialsFile = %q, want claude credentials path", auth.ClaudeCredentialsFile)
+				}
+			},
+		},
+		{
+			name: "Claude credentials by target suffix",
+			secrets: []api.ResolvedSecret{
+				{Name: "my-claude-creds", Type: "file", Target: "/home/gemini/.claude/.credentials.json"},
+			},
+			check: func(t *testing.T, auth api.AuthConfig) {
+				if auth.ClaudeCredentialsFile != "/home/gemini/.claude/.credentials.json" {
+					t.Errorf("ClaudeCredentialsFile = %q, want claude credentials path", auth.ClaudeCredentialsFile)
+				}
+			},
+		},
+		{
 			name: "non-file secrets are skipped",
 			secrets: []api.ResolvedSecret{
 				{Name: "gcloud-adc", Type: "environment", Target: "gcloud-adc", Value: "/some/path"},
@@ -904,5 +942,65 @@ func TestOverlayFileSecrets(t *testing.T) {
 			OverlayFileSecrets(&auth, tt.secrets)
 			tt.check(t, auth)
 		})
+	}
+}
+
+func TestExtractClaudeOAuthToken(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		expected string
+	}{
+		{
+			name:     "valid credentials file",
+			content:  `{"claudeAiOauth":{"accessToken":"sk-ant-oat01-test-token"}}`,
+			expected: "sk-ant-oat01-test-token",
+		},
+		{
+			name:     "valid credentials with extra fields",
+			content:  `{"claudeAiOauth":{"accessToken":"sk-ant-oat01-abc123","refreshToken":"refresh-xyz","expiresAt":1739781600000}}`,
+			expected: "sk-ant-oat01-abc123",
+		},
+		{
+			name:     "missing accessToken",
+			content:  `{"claudeAiOauth":{"refreshToken":"refresh-xyz"}}`,
+			expected: "",
+		},
+		{
+			name:     "missing claudeAiOauth object",
+			content:  `{"otherField":"value"}`,
+			expected: "",
+		},
+		{
+			name:     "invalid JSON",
+			content:  `{"invalid json`,
+			expected: "",
+		},
+		{
+			name:     "empty JSON object",
+			content:  `{}`,
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpFile := filepath.Join(t.TempDir(), ".credentials.json")
+			if err := os.WriteFile(tmpFile, []byte(tt.content), 0600); err != nil {
+				t.Fatalf("failed to write test file: %v", err)
+			}
+
+			result := extractClaudeOAuthToken(tmpFile)
+			if result != tt.expected {
+				t.Errorf("extractClaudeOAuthToken() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestExtractClaudeOAuthToken_FileNotFound(t *testing.T) {
+	result := extractClaudeOAuthToken("/nonexistent/path/.credentials.json")
+	if result != "" {
+		t.Errorf("extractClaudeOAuthToken() = %q, want empty string for non-existent file", result)
 	}
 }

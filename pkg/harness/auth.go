@@ -100,10 +100,43 @@ func GatherAuthWithEnv(env map[string]string, localSources bool) api.AuthConfig 
 			if _, err := os.Stat(opencodePath); err == nil {
 				auth.OpenCodeAuthFile = opencodePath
 			}
+
+			// Check for Claude credentials file and extract OAuth token if present
+			claudeCredsPath := filepath.Join(home, ".claude", ".credentials.json")
+			if _, err := os.Stat(claudeCredsPath); err == nil {
+				auth.ClaudeCredentialsFile = claudeCredsPath
+				// Extract the access token from the credentials file if not already set via env
+				if auth.ClaudeOAuthToken == "" {
+					if token := extractClaudeOAuthToken(claudeCredsPath); token != "" {
+						auth.ClaudeOAuthToken = token
+					}
+				}
+			}
 		}
 	}
 
 	return auth
+}
+
+// extractClaudeOAuthToken reads the Claude credentials file and extracts
+// the OAuth access token from the claudeAiOauth.accessToken field.
+func extractClaudeOAuthToken(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+
+	var creds struct {
+		ClaudeAiOauth struct {
+			AccessToken string `json:"accessToken"`
+		} `json:"claudeAiOauth"`
+	}
+
+	if err := json.Unmarshal(data, &creds); err != nil {
+		return ""
+	}
+
+	return creds.ClaudeAiOauth.AccessToken
 }
 
 // OverlayFileSecrets bridges file-type ResolvedSecrets from the hub into
@@ -132,6 +165,9 @@ func OverlayFileSecrets(auth *api.AuthConfig, secrets []api.ResolvedSecret) {
 		case name == "OPENCODE_AUTH" ||
 			strings.HasSuffix(target, "/opencode/auth.json"):
 			auth.OpenCodeAuthFile = target
+		case name == "CLAUDE_CREDENTIALS" ||
+			strings.HasSuffix(target, "/.claude/.credentials.json"):
+			auth.ClaudeCredentialsFile = target
 		}
 	}
 }
