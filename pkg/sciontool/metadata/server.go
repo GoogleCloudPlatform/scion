@@ -181,29 +181,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// interception is not available. In that case the metadata env vars are the
 	// primary mechanism and we skip the interception setup entirely to avoid
 	// misleading warnings.
-	if shouldAttemptMetadataInterception(os.Getuid()) {
-		if err := setupIPTablesRedirect(s.config.Port); err != nil {
-			// Non-fatal: iptables may not be available (no NET_ADMIN cap, non-Docker runtime).
-			// The GCE_METADATA_HOST / GCE_METADATA_ROOT env vars are the primary mechanism.
-			log.Debug("iptables redirect not available: %v", err)
-		} else {
-			s.iptablesConfigured = true
-		}
-
-		if s.config.Mode == modeBlock {
-			// Defense-in-depth: block traffic to the metadata IP at the
-			// filter level so that even if the nat REDIRECT fails or
-			// is bypassed, direct access to the real metadata server is denied.
-			method, err := setupMetadataBlock()
-			if err != nil {
-				log.Error("metadata block: failed to block metadata IP — direct access to %s may still be possible: %v", metadataIP, err)
-			} else {
-				s.metadataBlocked = method
-			}
-		}
-	} else {
-		log.Debug("Skipping metadata IP interception: process is not running as root")
-	}
+	s.configureMetadataInterception(os.Getuid())
 
 	// Start proactive refresh if in assign mode
 	if s.config.Mode == modeAssign {
@@ -228,6 +206,36 @@ func (s *Server) Start(ctx context.Context) error {
 
 func shouldAttemptMetadataInterception(uid int) bool {
 	return uid == 0
+}
+
+func (s *Server) configureMetadataInterception(uid int) {
+	if !shouldAttemptMetadataInterception(uid) {
+		log.Debug("Skipping metadata IP interception: process is not running as root")
+		return
+	}
+
+	if err := setupIPTablesRedirect(s.config.Port); err != nil {
+		// Non-fatal: iptables may not be available (no NET_ADMIN cap, non-Docker runtime).
+		// The GCE_METADATA_HOST / GCE_METADATA_ROOT env vars are the primary mechanism.
+		log.Debug("iptables redirect not available: %v", err)
+	} else {
+		s.iptablesConfigured = true
+	}
+
+	if s.config.Mode != modeBlock {
+		return
+	}
+
+	// Defense-in-depth: block traffic to the metadata IP at the filter level
+	// so that even if the nat REDIRECT fails or is bypassed, direct access to
+	// the real metadata server is denied.
+	method, err := setupMetadataBlock()
+	if err != nil {
+		log.Error("metadata block: failed to block metadata IP — direct access to %s may still be possible: %v", metadataIP, err)
+		return
+	}
+
+	s.metadataBlocked = method
 }
 
 // Stop gracefully shuts down the server.
