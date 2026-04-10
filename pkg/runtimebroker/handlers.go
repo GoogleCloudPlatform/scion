@@ -895,29 +895,34 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, groveID
 }
 
 func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, groveID, action string) {
-	if r.Method != http.MethodPost {
+	method, ok := api.RuntimeBrokerAgentActionMethod(action)
+	if !ok {
+		NotFound(w, "Action")
+		return
+	}
+	if r.Method != method {
 		MethodNotAllowed(w)
 		return
 	}
 
 	switch action {
-	case "start":
+	case api.AgentActionStart:
 		s.startAgent(w, r, id, groveID)
-	case "stop":
+	case api.AgentActionStop:
 		s.stopAgent(w, r, id, groveID)
-	case "restart":
+	case api.AgentActionRestart:
 		s.restartAgent(w, r, id, groveID)
-	case "message":
+	case api.AgentActionMessage:
 		s.sendMessage(w, r, id, groveID)
-	case "exec":
+	case api.AgentActionExec:
 		s.execCommand(w, r, id)
-	case "logs":
+	case api.AgentActionLogs:
 		s.getLogs(w, r, id, groveID)
-	case "stats":
+	case api.AgentActionStats:
 		s.getStats(w, r, id, groveID)
-	case "has-prompt":
+	case api.AgentActionHasPrompt:
 		s.checkAgentPrompt(w, r, id, groveID)
-	case "finalize-env":
+	case api.AgentActionFinalizeEnv:
 		s.finalizeEnv(w, r, id)
 	default:
 		NotFound(w, "Action")

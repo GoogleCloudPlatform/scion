@@ -1302,11 +1302,11 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Handle message-logs (GET endpoints for message audit log)
-	if action == agentActionMessageLogs {
+	if action == api.AgentActionMessageLogs {
 		s.handleAgentMessageLogs(w, r, id)
 		return
 	}
-	if action == agentActionMessageLogsStream {
+	if action == api.AgentActionMessageLogsStream {
 		s.handleAgentMessageLogsStream(w, r, id)
 		return
 	}
@@ -1632,10 +1632,10 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 	// For actions other than status/token refresh and outbound-message
 	// (self-access), we require user or agent authentication
 	// with appropriate scopes. Self-access endpoints enforce their own auth checks.
-	if action != agentActionStatus &&
-		action != agentActionTokenRefresh &&
-		action != agentActionRefreshToken &&
-		action != agentActionOutboundMessage {
+	if action != api.AgentActionStatus &&
+		action != api.AgentActionTokenRefresh &&
+		action != api.AgentActionRefreshToken &&
+		action != api.AgentActionOutboundMessage {
 		userIdent := GetUserIdentityFromContext(r.Context())
 		agentIdent := GetAgentIdentityFromContext(r.Context())
 		if userIdent == nil && agentIdent == nil {
@@ -1676,23 +1676,23 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 	}
 
 	switch action {
-	case agentActionStatus:
+	case api.AgentActionStatus:
 		s.updateAgentStatus(w, r, id)
-	case agentActionStart, agentActionStop, agentActionRestart:
+	case api.AgentActionStart, api.AgentActionStop, api.AgentActionRestart:
 		s.handleAgentLifecycle(w, r, id, action)
-	case agentActionMessage:
+	case api.AgentActionMessage:
 		s.handleAgentMessage(w, r, id)
-	case agentActionExec:
+	case api.AgentActionExec:
 		s.handleAgentExec(w, r, id)
-	case agentActionRestore:
+	case api.AgentActionRestore:
 		s.restoreAgent(w, r, id)
-	case agentActionTokenRefresh:
+	case api.AgentActionTokenRefresh:
 		s.handleAgentTokenRefresh(w, r, id)
-	case agentActionRefreshToken:
+	case api.AgentActionRefreshToken:
 		s.handleAgentGitHubTokenRefresh(w, r, id)
-	case agentActionOutboundMessage:
+	case api.AgentActionOutboundMessage:
 		s.handleAgentOutboundMessage(w, r, id)
-	case agentActionMessages:
+	case api.AgentActionMessages:
 		s.handleAgentMessages(w, r, id)
 	default:
 		NotFound(w, "Action")
@@ -2444,7 +2444,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	dispatcher := s.GetDispatcher()
 
 	switch action {
-	case agentActionStart:
+	case api.AgentActionStart:
 		newPhase = string(state.PhaseRunning)
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "")
@@ -2454,7 +2454,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				newPhase = agent.Phase
 			}
 		}
-	case agentActionStop:
+	case api.AgentActionStop:
 		newPhase = string(state.PhaseStopped)
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
 			// Before stopping, sync workspace back for hub-native groves on remote brokers.
@@ -2462,7 +2462,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			s.syncWorkspaceOnStop(ctx, agent)
 			dispatchErr = dispatcher.DispatchAgentStop(ctx, agent)
 		}
-	case agentActionRestart:
+	case api.AgentActionRestart:
 		newPhase = string(state.PhaseRunning)
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
 			// Restart is implemented as stop + start so that env vars
@@ -2495,12 +2495,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	}
 	// When stopping, also update container status so the hub immediately
 	// reflects the stopped state without waiting for the next heartbeat.
-	if action == agentActionStop {
+	if action == api.AgentActionStop {
 		statusUpdate.ContainerStatus = "stopped"
 		statusUpdate.Activity = ""
 	}
 	// When starting or restarting, propagate container status from broker response
-	if (action == agentActionStart || action == agentActionRestart) && agent.ContainerStatus != "" {
+	if (action == api.AgentActionStart || action == api.AgentActionRestart) && agent.ContainerStatus != "" {
 		statusUpdate.ContainerStatus = agent.ContainerStatus
 	}
 	if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
@@ -3794,11 +3794,11 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check for nested /message-logs path (grove-level message audit log)
-	if subPath == agentActionMessageLogs {
+	if subPath == api.AgentActionMessageLogs {
 		s.handleGroveMessageLogs(w, r, groveID)
 		return
 	}
-	if subPath == agentActionMessageLogsStream {
+	if subPath == api.AgentActionMessageLogsStream {
 		s.handleGroveMessageLogsStream(w, r, groveID)
 		return
 	}
@@ -4256,13 +4256,13 @@ func (s *Server) handleGroveAgentAction(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Message-logs actions are GET endpoints; handle before the POST-only gate.
-	if action == agentActionMessageLogs || action == agentActionMessageLogsStream {
+	if action == api.AgentActionMessageLogs || action == api.AgentActionMessageLogsStream {
 		resolvedAgent, err := s.resolveGroveAgent(r.Context(), groveID, agentID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		if action == agentActionMessageLogs {
+		if action == api.AgentActionMessageLogs {
 			s.handleAgentMessageLogs(w, r, resolvedAgent.ID)
 		} else {
 			s.handleAgentMessageLogsStream(w, r, resolvedAgent.ID)
@@ -4298,7 +4298,7 @@ func (s *Server) handleGroveAgentAction(w http.ResponseWriter, r *http.Request, 
 
 	// For interactive actions, enforce policy-based authorization (owner or admin only)
 	switch action {
-	case agentActionStart, agentActionStop, agentActionRestart, agentActionMessage, agentActionExec:
+	case api.AgentActionStart, api.AgentActionStop, api.AgentActionRestart, api.AgentActionMessage, api.AgentActionExec:
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 			decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionAttach)
 			if !decision.Allowed {
@@ -4310,19 +4310,19 @@ func (s *Server) handleGroveAgentAction(w http.ResponseWriter, r *http.Request, 
 	}
 
 	switch action {
-	case agentActionStatus:
+	case api.AgentActionStatus:
 		s.updateAgentStatus(w, r, agent.ID)
-	case agentActionStart, agentActionStop, agentActionRestart:
+	case api.AgentActionStart, api.AgentActionStop, api.AgentActionRestart:
 		s.handleAgentLifecycle(w, r, agent.ID, action)
-	case agentActionMessage:
+	case api.AgentActionMessage:
 		s.handleAgentMessage(w, r, agent.ID)
-	case agentActionExec:
+	case api.AgentActionExec:
 		s.handleAgentExec(w, r, agent.ID)
-	case agentActionEnv:
+	case api.AgentActionEnv:
 		s.submitAgentEnv(w, r, groveID, agentID)
-	case agentActionRestore:
+	case api.AgentActionRestore:
 		s.restoreAgent(w, r, agent.ID)
-	case agentActionOutboundMessage:
+	case api.AgentActionOutboundMessage:
 		s.handleAgentOutboundMessage(w, r, agent.ID)
 	default:
 		NotFound(w, "Action")
