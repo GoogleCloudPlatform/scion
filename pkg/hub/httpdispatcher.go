@@ -586,8 +586,8 @@ func (d *HTTPAgentDispatcher) applyBrokerResponse(agent *store.Agent, resp *Remo
 
 // DispatchAgentCreate creates and starts an agent on the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) error {
-	if agent.RuntimeBrokerID == "" {
-		return fmt.Errorf("agent has no runtime broker assigned")
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
 	}
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -611,8 +611,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 
 // DispatchAgentProvision provisions an agent on the runtime broker without starting it.
 func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
-	if agent.RuntimeBrokerID == "" {
-		return fmt.Errorf("agent has no runtime broker assigned")
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
 	}
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -656,8 +656,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 // If the broker returns 202 with env requirements, it returns the requirements
 // as the first value instead of an error.
 func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
-	if agent.RuntimeBrokerID == "" {
-		return nil, fmt.Errorf("agent has no runtime broker assigned")
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return nil, err
 	}
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -691,8 +691,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 
 // DispatchFinalizeEnv sends gathered env vars to the broker to complete agent creation.
 func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error {
-	if agent.RuntimeBrokerID == "" {
-		return fmt.Errorf("agent has no runtime broker assigned")
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
 	}
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -859,8 +859,8 @@ func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.
 
 // DispatchAgentStart starts an agent on the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string) error {
-	if agent.RuntimeBrokerID == "" {
-		return fmt.Errorf("agent has no runtime broker assigned")
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
 	}
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -1050,8 +1050,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 
 // DispatchAgentStop stops an agent on the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *store.Agent) error {
-	if agent.RuntimeBrokerID == "" {
-		return fmt.Errorf("agent has no runtime broker assigned")
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
 	}
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -1066,8 +1066,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 // It generates a fresh auth token so the restarted container has valid
 // Hub credentials, preventing auth loss across container restarts.
 func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *store.Agent) error {
-	if agent.RuntimeBrokerID == "" {
-		return fmt.Errorf("agent has no runtime broker assigned")
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
 	}
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -1117,8 +1117,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 
 // DispatchAgentDelete deletes an agent from the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *store.Agent, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
-	if agent.RuntimeBrokerID == "" {
-		return fmt.Errorf("agent has no runtime broker assigned")
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
 	}
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -1131,8 +1131,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 
 // DispatchAgentMessage sends a message to an agent on the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
-	if agent.RuntimeBrokerID == "" {
-		return fmt.Errorf("agent has no runtime broker assigned")
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
 	}
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -1145,8 +1145,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *s
 
 // DispatchAgentLogs retrieves agent.log content from the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentLogs(ctx context.Context, agent *store.Agent, tail int) (string, error) {
-	if agent.RuntimeBrokerID == "" {
-		return "", fmt.Errorf("agent has no runtime broker assigned")
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return "", err
 	}
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -1159,8 +1159,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentLogs(ctx context.Context, agent *stor
 
 // DispatchAgentExec executes a command in an agent on the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentExec(ctx context.Context, agent *store.Agent, command []string, timeout int) (string, error) {
-	if agent.RuntimeBrokerID == "" {
-		return "", fmt.Errorf("agent has no runtime broker assigned")
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return "", err
 	}
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -1173,8 +1173,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentExec(ctx context.Context, agent *stor
 
 // DispatchCheckAgentPrompt checks if an agent has a non-empty prompt.md file.
 func (d *HTTPAgentDispatcher) DispatchCheckAgentPrompt(ctx context.Context, agent *store.Agent) (bool, error) {
-	if agent.RuntimeBrokerID == "" {
-		return false, fmt.Errorf("agent has no runtime broker assigned")
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return false, err
 	}
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
