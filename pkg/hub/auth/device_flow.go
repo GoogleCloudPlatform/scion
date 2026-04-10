@@ -16,11 +16,14 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
@@ -46,7 +49,7 @@ func NewDeviceFlowAuth(client hubclient.AuthService) *DeviceFlowAuth {
 // 4. Returns the token response on success
 func (d *DeviceFlowAuth) Authenticate(ctx context.Context) (*hubclient.CLITokenResponse, error) {
 	// Request device code
-	codeResp, err := d.client.RequestDeviceCode(ctx, "google")
+	codeResp, provider, err := d.requestDeviceCode(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to request device code: %w", err)
 	}
@@ -78,7 +81,7 @@ func (d *DeviceFlowAuth) Authenticate(ctx context.Context) (*hubclient.CLITokenR
 			return nil, fmt.Errorf("device authorization expired")
 		}
 
-		pollResp, err := d.client.PollDeviceToken(ctx, codeResp.DeviceCode, "google")
+		pollResp, err := d.client.PollDeviceToken(ctx, codeResp.DeviceCode, provider)
 		if err != nil {
 			return nil, fmt.Errorf("failed to poll device token: %w", err)
 		}
@@ -103,4 +106,32 @@ func (d *DeviceFlowAuth) Authenticate(ctx context.Context) (*hubclient.CLITokenR
 			return nil, fmt.Errorf("unexpected device token status: %s", pollResp.Status)
 		}
 	}
+}
+
+func (d *DeviceFlowAuth) requestDeviceCode(ctx context.Context) (*hubclient.DeviceCodeResponse, string, error) {
+	providers := []string{"google", "github"}
+	var lastErr error
+
+	for _, provider := range providers {
+		codeResp, err := d.client.RequestDeviceCode(ctx, provider)
+		if err == nil {
+			return codeResp, provider, nil
+		}
+		if !isProviderNotConfiguredError(err) {
+			return nil, "", err
+		}
+		lastErr = err
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no device flow providers available")
+	}
+	return nil, "", lastErr
+}
+
+func isProviderNotConfiguredError(err error) bool {
+	var apiErr *apiclient.APIError
+	return errors.As(err, &apiErr) &&
+		apiErr.Code == apiclient.ErrCodeValidationError &&
+		strings.Contains(apiErr.Message, "OAuth provider not configured for device flow")
 }
