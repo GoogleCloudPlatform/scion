@@ -21,18 +21,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
 // mockAuthService implements hubclient.AuthService for testing.
 type mockAuthService struct {
-	deviceCodeResp     *hubclient.DeviceCodeResponse
-	deviceCodeErr      error
-	pollResponses      []*hubclient.DeviceTokenPollResponse
-	pollErrors         []error
-	pollIndex          int
-	requestedProviders []string
-	polledProviders    []string
+	deviceCodeResp        *hubclient.DeviceCodeResponse
+	deviceCodeErr         error
+	requestDeviceCodeFunc func(ctx context.Context, provider string) (*hubclient.DeviceCodeResponse, error)
+	pollResponses         []*hubclient.DeviceTokenPollResponse
+	pollErrors            []error
+	pollIndex             int
+	pollDeviceTokenFunc   func(ctx context.Context, deviceCode, provider string) (*hubclient.DeviceTokenPollResponse, error)
+	requestedProviders    []string
+	polledProviders       []string
 }
 
 type mockDeviceFlowNotImplementedError struct{}
@@ -68,11 +71,17 @@ func (m *mockAuthService) ExchangeCode(ctx context.Context, code, callbackURL, p
 
 func (m *mockAuthService) RequestDeviceCode(ctx context.Context, provider string) (*hubclient.DeviceCodeResponse, error) {
 	m.requestedProviders = append(m.requestedProviders, provider)
+	if m.requestDeviceCodeFunc != nil {
+		return m.requestDeviceCodeFunc(ctx, provider)
+	}
 	return m.deviceCodeResp, m.deviceCodeErr
 }
 
 func (m *mockAuthService) PollDeviceToken(ctx context.Context, deviceCode, provider string) (*hubclient.DeviceTokenPollResponse, error) {
 	m.polledProviders = append(m.polledProviders, provider)
+	if m.pollDeviceTokenFunc != nil {
+		return m.pollDeviceTokenFunc(ctx, deviceCode, provider)
+	}
 	if m.pollIndex >= len(m.pollResponses) {
 		return nil, fmt.Errorf("no more poll responses")
 	}
@@ -92,7 +101,7 @@ func TestDeviceFlowAuth_Success(t *testing.T) {
 			UserCode:        "ABCD-1234",
 			VerificationURL: "https://example.com/device",
 			ExpiresIn:       300,
-			Interval:        1, // 1 second for fast test
+			Interval:        1,
 		},
 		pollResponses: []*hubclient.DeviceTokenPollResponse{
 			{Status: "authorization_pending"},
@@ -122,10 +131,10 @@ func TestDeviceFlowAuth_Success(t *testing.T) {
 	}
 
 	if resp.AccessToken != "test-access-token" {
-		t.Errorf("expected access token 'test-access-token', got %q", resp.AccessToken)
+		t.Errorf("expected access token %q, got %q", "test-access-token", resp.AccessToken)
 	}
 	if resp.RefreshToken != "test-refresh-token" {
-		t.Errorf("expected refresh token 'test-refresh-token', got %q", resp.RefreshToken)
+		t.Errorf("expected refresh token %q, got %q", "test-refresh-token", resp.RefreshToken)
 	}
 	if resp.User == nil || resp.User.Email != "test@example.com" {
 		t.Error("expected user email 'test@example.com'")
@@ -139,7 +148,6 @@ func TestDeviceFlowAuth_Success(t *testing.T) {
 		}
 	}
 
-	// Check output contains the user code
 	output := buf.String()
 	if !bytes.Contains([]byte(output), []byte("ABCD-1234")) {
 		t.Error("expected output to contain user code")
@@ -176,7 +184,7 @@ func TestDeviceFlowAuth_SlowDown(t *testing.T) {
 	}
 
 	if resp.AccessToken != "token" {
-		t.Errorf("expected access token 'token', got %q", resp.AccessToken)
+		t.Errorf("expected access token %q, got %q", "token", resp.AccessToken)
 	}
 }
 
@@ -189,9 +197,7 @@ func TestDeviceFlowAuth_ExpiredToken(t *testing.T) {
 			ExpiresIn:       300,
 			Interval:        1,
 		},
-		pollResponses: []*hubclient.DeviceTokenPollResponse{
-			{Status: "expired_token"},
-		},
+		pollResponses: []*hubclient.DeviceTokenPollResponse{{Status: "expired_token"}},
 	}
 
 	d := NewDeviceFlowAuth(mock, "google")
@@ -236,7 +242,6 @@ func TestDeviceFlowAuth_ContextCancellation(t *testing.T) {
 			ExpiresIn:       300,
 			Interval:        1,
 		},
-		// No poll responses — context will cancel before we poll
 		pollResponses: []*hubclient.DeviceTokenPollResponse{},
 	}
 
@@ -244,7 +249,6 @@ func TestDeviceFlowAuth_ContextCancellation(t *testing.T) {
 	d.output = &bytes.Buffer{}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	// Cancel immediately
 	cancel()
 
 	_, err := d.Authenticate(ctx)
@@ -257,9 +261,7 @@ func TestDeviceFlowAuth_ContextCancellation(t *testing.T) {
 }
 
 func TestDeviceFlowAuth_DeviceCodeError(t *testing.T) {
-	mock := &mockAuthService{
-		deviceCodeErr: fmt.Errorf("network error"),
-	}
+	mock := &mockAuthService{deviceCodeErr: fmt.Errorf("network error")}
 
 	d := NewDeviceFlowAuth(mock, "google")
 	d.output = &bytes.Buffer{}
@@ -267,5 +269,55 @@ func TestDeviceFlowAuth_DeviceCodeError(t *testing.T) {
 	_, err := d.Authenticate(context.Background())
 	if err == nil {
 		t.Fatal("expected error from device code request")
+	}
+}
+
+func TestDeviceFlowAuth_FallsBackToGitHubWhenGoogleUnavailable(t *testing.T) {
+	mock := &mockAuthService{
+		requestDeviceCodeFunc: func(ctx context.Context, provider string) (*hubclient.DeviceCodeResponse, error) {
+			if provider == "google" {
+				return nil, &apiclient.APIError{
+					StatusCode: 400,
+					Code:       apiclient.ErrCodeValidationError,
+					Message:    "OAuth provider not configured for device flow: google",
+				}
+			}
+			if provider == "github" {
+				return &hubclient.DeviceCodeResponse{
+					DeviceCode:      "github-device-code",
+					UserCode:        "GH-1234",
+					VerificationURL: "https://github.com/login/device",
+					ExpiresIn:       300,
+					Interval:        1,
+				}, nil
+			}
+			return nil, fmt.Errorf("unexpected provider: %s", provider)
+		},
+		pollDeviceTokenFunc: func(ctx context.Context, deviceCode, provider string) (*hubclient.DeviceTokenPollResponse, error) {
+			if provider != "github" {
+				return nil, fmt.Errorf("expected github provider during polling, got %s", provider)
+			}
+			return &hubclient.DeviceTokenPollResponse{
+				AccessToken: "github-access-token",
+				ExpiresIn:   3600,
+			}, nil
+		},
+	}
+
+	d := NewDeviceFlowAuth(mock)
+	d.output = &bytes.Buffer{}
+
+	resp, err := d.Authenticate(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.AccessToken != "github-access-token" {
+		t.Fatalf("expected github access token, got %q", resp.AccessToken)
+	}
+	if got, want := mock.requestedProviders, []string{"google", "github"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("expected provider fallback google -> github, got %v", mock.requestedProviders)
+	}
+	if got, want := mock.polledProviders, []string{"github"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("expected github polling provider, got %v", mock.polledProviders)
 	}
 }
