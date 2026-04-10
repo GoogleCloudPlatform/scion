@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,7 +106,12 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 			if terminalPhase != "" {
 				agents[i].Phase = terminalPhase
 				agents[i].Activity = ""
-				_ = persistAgentInfoState(agentInfoJSON, terminalPhase, "")
+				// Terminal pod phases mean the harness should already be exiting,
+				// so this is a best-effort convergence write rather than a
+				// continuously contended state update.
+				if err := persistAgentInfoState(agentInfoJSON, terminalPhase, ""); err != nil {
+					slog.Debug("failed to persist terminal agent state", "path", agentInfoJSON, "err", err)
+				}
 			}
 
 			// Use agent-info.json mtime as LastSeen for local agents
@@ -275,6 +281,10 @@ func persistAgentInfoState(path, phase, activity string) error {
 	if err != nil {
 		return err
 	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
 
 	var info api.AgentInfo
 	if err := json.Unmarshal(data, &info); err != nil {
@@ -292,5 +302,10 @@ func persistAgentInfoState(path, phase, activity string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, updated, 0644)
+
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, updated, fi.Mode()); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }

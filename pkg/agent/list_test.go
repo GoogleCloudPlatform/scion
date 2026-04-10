@@ -491,3 +491,51 @@ func TestListPreservesRuntimeTerminalStateForKubernetes(t *testing.T) {
 		})
 	}
 }
+
+func TestPersistAgentInfoState_AtomicallyRewritesAndPreservesMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	infoPath := filepath.Join(tmpDir, "agent-info.json")
+
+	info := api.AgentInfo{
+		Name:     "agent",
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityThinking),
+	}
+	data, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(infoPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := persistAgentInfoState(infoPath, string(state.PhaseStopped), ""); err != nil {
+		t.Fatalf("persistAgentInfoState() error = %v", err)
+	}
+
+	updatedData, err := os.ReadFile(infoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updated api.AgentInfo
+	if err := json.Unmarshal(updatedData, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Phase != string(state.PhaseStopped) {
+		t.Fatalf("Phase = %q, want %q", updated.Phase, state.PhaseStopped)
+	}
+	if updated.Activity != "" {
+		t.Fatalf("Activity = %q, want empty", updated.Activity)
+	}
+
+	fi, err := os.Stat(infoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0600 {
+		t.Fatalf("mode = %o, want %o", fi.Mode().Perm(), os.FileMode(0600))
+	}
+	if _, err := os.Stat(infoPath + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("temp file should not remain, stat err = %v", err)
+	}
+}
