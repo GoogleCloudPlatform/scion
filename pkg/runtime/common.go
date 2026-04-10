@@ -739,3 +739,20 @@ func writeSecretMap(homeDir string, containerHome string, secrets []api.Resolved
 
 	return os.WriteFile(filepath.Join(secretsDir, "secret-map.json"), data, 0600)
 }
+
+// phaseFromContainerStatus derives an agent phase from a container status string.
+// Container runtimes (podman, docker, apple) report status strings like
+// "Up 5 minutes", "Exited (0) 3 hours ago", or "Created". This function
+// maps those to lifecycle phases so heartbeats report accurate state
+// regardless of whether agent-info.json has been updated.
+func phaseFromContainerStatus(status string) string {
+	lower := strings.ToLower(status)
+	switch {
+	case strings.HasPrefix(lower, "up") || lower == "running":
+		return "running"
+	case strings.HasPrefix(lower, "exited") || lower == "stopped":
+		return "stopped"
+	default:
+		return "created"
+	}
+}

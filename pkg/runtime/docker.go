@@ -185,7 +185,7 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 				ContainerID:     d.ID,
 				Name:            agentName,
 				ContainerStatus: d.Status,
-				Phase:           "created", // Default phase, updated by AgentManager logic
+				Phase:           phaseFromContainerStatus(d.Status),
 				Image:           d.Image,
 				Labels:          labels,
 				Annotations:     labels,

@@ -269,7 +269,7 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 				ContainerID:     c.Id,
 				Name:            name,
 				ContainerStatus: c.Status,
-				Phase:           "created",
+				Phase:           phaseFromContainerStatus(c.Status),
 				Image:           c.Image,
 				Labels:          labels,
 				Annotations:     labels,
