@@ -73,6 +73,45 @@ func (r *KubernetesRuntime) ExecUser() string {
 	return "scion"
 }
 
+func shellQuote(arg string) string {
+	return fmt.Sprintf("'%s'", strings.ReplaceAll(arg, "'", "'\"'\"'"))
+}
+
+func shellJoin(args []string) string {
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		quoted[i] = shellQuote(arg)
+	}
+	return strings.Join(quoted, " ")
+}
+
+func wrapExecCommandForUser(username string, cmd []string) []string {
+	if username == "" {
+		username = "scion"
+	}
+
+	shellCmd := shellJoin(cmd)
+	wrapper := fmt.Sprintf(
+		`if [ "$(id -un)" = %s ]; then exec %s; else exec su - %s -c %s; fi`,
+		shellQuote(username),
+		shellCmd,
+		shellQuote(username),
+		shellQuote(shellCmd),
+	)
+	return []string{"/bin/sh", "-lc", wrapper}
+}
+
+func (r *KubernetesRuntime) execUsername(ctx context.Context, namespace, podName string) string {
+	pod, err := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return "scion"
+	}
+	if u := strings.TrimSpace(pod.Annotations["scion.username"]); u != "" {
+		return u
+	}
+	return "scion"
+}
+
 // resolveNamespace determines the namespace for a pod by looking up the
 // scion.namespace annotation on the pod itself. Falls back to DefaultNamespace
 // if the pod is not found or has no annotation.
@@ -1728,7 +1767,7 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 
 	option := &corev1.PodExecOptions{
 		Container: "agent",
-		Command:   []string{"su", "-", username, "-c", "tmux attach -t scion"},
+		Command:   wrapExecCommandForUser(username, []string{"tmux", "attach", "-t", "scion"}),
 		Stdin:     true,
 		Stdout:    true,
 		Stderr:    true,
@@ -1982,17 +2021,11 @@ func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (
 		Namespace(namespace).
 		SubResource("exec")
 
-	// Wrap command with su to run as the scion user (K8s exec has no --user flag).
-	// Shell-quote each argument to handle spaces and special characters.
-	quoted := make([]string, len(cmd))
-	for i, arg := range cmd {
-		quoted[i] = fmt.Sprintf("'%s'", strings.ReplaceAll(arg, "'", "'\"'\"'"))
-	}
-	suCmd := []string{"su", "-", "scion", "-c", strings.Join(quoted, " ")}
+	username := r.execUsername(ctx, namespace, podName)
 
 	option := &corev1.PodExecOptions{
 		Container: "agent",
-		Command:   suCmd,
+		Command:   wrapExecCommandForUser(username, cmd),
 		Stdin:     false,
 		Stdout:    true,
 		Stderr:    true,

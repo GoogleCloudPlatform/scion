@@ -17,7 +17,6 @@ package runtime
 import (
 	"context"
 	"embed"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic/fake"
@@ -373,43 +373,56 @@ func TestCreateAuthFileSecret(t *testing.T) {
 
 // --- K8s exec user context parity (matches Docker/Podman --user scion) ---
 
-func TestK8sExec_WrapsCommandWithSu(t *testing.T) {
-	// Verify that Exec wraps commands with su to run as the scion user,
-	// matching the --user scion flag used by Docker/Podman runtimes.
+func TestK8sExec_WrapsCommandWithUserAwareShell(t *testing.T) {
 	cmd := []string{"tmux", "send-keys", "-t", "scion:0", "hello world", "Enter"}
 
-	// Simulate the wrapping logic from Exec
-	quoted := make([]string, len(cmd))
-	for i, arg := range cmd {
-		quoted[i] = fmt.Sprintf("'%s'", strings.ReplaceAll(arg, "'", "'\"'\"'"))
+	wrapped := wrapExecCommandForUser("scion", cmd)
+	if len(wrapped) != 3 {
+		t.Fatalf("expected 3-part shell command, got %v", wrapped)
 	}
-	suCmd := []string{"su", "-", "scion", "-c", strings.Join(quoted, " ")}
-
-	if suCmd[0] != "su" || suCmd[1] != "-" || suCmd[2] != "scion" || suCmd[3] != "-c" {
-		t.Fatalf("expected su - scion -c prefix, got: %v", suCmd[:4])
+	if wrapped[0] != "/bin/sh" || wrapped[1] != "-lc" {
+		t.Fatalf("expected /bin/sh -lc wrapper, got %v", wrapped[:2])
 	}
 
-	// The -c argument should contain all original args, properly quoted
-	shellCmd := suCmd[4]
+	shellCmd := wrapped[2]
+	if !strings.Contains(shellCmd, `id -un`) {
+		t.Fatalf("expected current-user check in %q", shellCmd)
+	}
+	if !strings.Contains(shellCmd, `exec su - 'scion' -c`) {
+		t.Fatalf("expected su fallback in %q", shellCmd)
+	}
 	for _, arg := range cmd {
 		if !strings.Contains(shellCmd, arg) {
-			t.Errorf("shell command %q should contain argument %q", shellCmd, arg)
+			t.Errorf("wrapped shell command %q should contain argument %q", shellCmd, arg)
 		}
 	}
 }
 
 func TestK8sExec_QuotesSingleQuotesInArgs(t *testing.T) {
-	cmd := []string{"echo", "it's a test"}
-
-	quoted := make([]string, len(cmd))
-	for i, arg := range cmd {
-		quoted[i] = fmt.Sprintf("'%s'", strings.ReplaceAll(arg, "'", "'\"'\"'"))
-	}
-	shellCmd := strings.Join(quoted, " ")
+	shellCmd := shellJoin([]string{"echo", "it's a test"})
 
 	// The single quote in "it's" should be escaped
 	if !strings.Contains(shellCmd, "'\"'\"'") {
 		t.Errorf("expected escaped single quote in %q", shellCmd)
+	}
+}
+
+func TestK8sExecUsername_UsesAnnotationWhenPresent(t *testing.T) {
+	clientset := k8sfake.NewSimpleClientset()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   "scion",
+			Name:        "agent",
+			Annotations: map[string]string{"scion.username": "carver"},
+		},
+	}
+	if _, err := clientset.CoreV1().Pods("scion").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("failed to create pod: %v", err)
+	}
+
+	rt := &KubernetesRuntime{Client: &k8s.Client{Clientset: clientset}}
+	if got := rt.execUsername(context.Background(), "scion", "agent"); got != "carver" {
+		t.Fatalf("got username %q, want carver", got)
 	}
 }
 
