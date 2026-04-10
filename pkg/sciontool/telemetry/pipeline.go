@@ -77,7 +77,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 
 	// Create cloud exporter if configured
 	if p.config.IsCloudConfigured() {
-		exporter, err := NewCloudExporter(p.config)
+		exporter, err := NewCloudExporter(ctx, p.config)
 		if err != nil {
 			log.Error("Failed to create cloud exporter: %v", err)
 			// Continue without cloud export - receiver can still work for local debugging

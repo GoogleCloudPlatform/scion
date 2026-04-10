@@ -21,8 +21,6 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"google.golang.org/api/option"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 )
 
 // Providers holds SDK TracerProvider, LoggerProvider, and MeterProvider for OTel export.
@@ -147,28 +145,18 @@ func newGCPProviders(ctx context.Context, config *Config, res *resource.Resource
 
 // newOTLPProviders creates providers using standard OTLP gRPC exporters.
 func newOTLPProviders(ctx context.Context, config *Config, res *resource.Resource, batch bool) (*Providers, error) {
-	// Load GCP dial options if credentials are configured
-	var gcpDialOpts []grpc.DialOption
-	if config.GCPCredentialsFile != "" && !config.Insecure {
-		var err error
-		gcpDialOpts, err = loadGCPDialOptions(ctx, config.GCPCredentialsFile)
-		if err != nil {
-			return nil, fmt.Errorf("loading GCP credentials: %w", err)
-		}
+	gcpDialOpts, err := loadSecureGCPDialOptions(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("loading GCP credentials: %w", err)
 	}
 
 	// Create trace exporter (gRPC)
 	traceOpts := []otlptracegrpc.Option{
 		otlptracegrpc.WithEndpoint(config.Endpoint),
 	}
-	if config.Insecure {
-		traceOpts = append(traceOpts, otlptracegrpc.WithInsecure())
-	} else {
-		tlsConfig, err := loadOTLPTLSConfig(config.CAFile)
-		if err != nil {
-			return nil, fmt.Errorf("loading OTLP TLS config: %w", err)
-		}
-		traceOpts = append(traceOpts, otlptracegrpc.WithTLSCredentials(credentials.NewTLS(tlsConfig)))
+	traceOpts, err = appendOTLPTraceGRPCSecurityOption(traceOpts, config)
+	if err != nil {
+		return nil, fmt.Errorf("loading OTLP TLS config: %w", err)
 	}
 	for _, do := range gcpDialOpts {
 		traceOpts = append(traceOpts, otlptracegrpc.WithDialOption(do))
@@ -182,15 +170,10 @@ func newOTLPProviders(ctx context.Context, config *Config, res *resource.Resourc
 	logOpts := []otlploggrpc.Option{
 		otlploggrpc.WithEndpoint(config.Endpoint),
 	}
-	if config.Insecure {
-		logOpts = append(logOpts, otlploggrpc.WithInsecure())
-	} else {
-		tlsConfig, err := loadOTLPTLSConfig(config.CAFile)
-		if err != nil {
-			_ = traceExporter.Shutdown(ctx)
-			return nil, fmt.Errorf("loading OTLP TLS config: %w", err)
-		}
-		logOpts = append(logOpts, otlploggrpc.WithTLSCredentials(credentials.NewTLS(tlsConfig)))
+	logOpts, err = appendOTLPLogGRPCSecurityOption(logOpts, config)
+	if err != nil {
+		_ = traceExporter.Shutdown(ctx)
+		return nil, fmt.Errorf("loading OTLP TLS config: %w", err)
 	}
 	for _, do := range gcpDialOpts {
 		logOpts = append(logOpts, otlploggrpc.WithDialOption(do))
@@ -205,16 +188,11 @@ func newOTLPProviders(ctx context.Context, config *Config, res *resource.Resourc
 	metricOpts := []otlpmetricgrpc.Option{
 		otlpmetricgrpc.WithEndpoint(config.Endpoint),
 	}
-	if config.Insecure {
-		metricOpts = append(metricOpts, otlpmetricgrpc.WithInsecure())
-	} else {
-		tlsConfig, err := loadOTLPTLSConfig(config.CAFile)
-		if err != nil {
-			_ = traceExporter.Shutdown(ctx)
-			_ = logExporter.Shutdown(ctx)
-			return nil, fmt.Errorf("loading OTLP TLS config: %w", err)
-		}
-		metricOpts = append(metricOpts, otlpmetricgrpc.WithTLSCredentials(credentials.NewTLS(tlsConfig)))
+	metricOpts, err = appendOTLPMetricGRPCSecurityOption(metricOpts, config)
+	if err != nil {
+		_ = traceExporter.Shutdown(ctx)
+		_ = logExporter.Shutdown(ctx)
+		return nil, fmt.Errorf("loading OTLP TLS config: %w", err)
 	}
 	for _, do := range gcpDialOpts {
 		metricOpts = append(metricOpts, otlpmetricgrpc.WithDialOption(do))
