@@ -81,6 +81,9 @@ func (d *brokerMockDispatcher) DispatchAgentCreateWithGather(ctx context.Context
 func (d *brokerMockDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
 	return "", nil
 }
+func (d *brokerMockDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, error) {
+	return "", nil
+}
 func (d *brokerMockDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error {
 	return nil
 }

@@ -150,6 +150,9 @@ func (d *mockDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent 
 func (d *mockDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
 	return "", nil
 }
+func (d *mockDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, error) {
+	return "", nil
+}
 func (d *mockDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
 	return nil
 }

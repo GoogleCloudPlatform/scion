@@ -753,6 +753,7 @@ type createAgentDispatcher struct {
 	createPhase  string // status to set on agent during DispatchAgentCreate
 	deleteCalled bool
 	deleteErr    error
+	execOutput   string
 }
 
 func (d *createAgentDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) error {
@@ -809,6 +810,9 @@ func (d *failingCreateDispatcher) DispatchAgentDelete(_ context.Context, _ *stor
 }
 func (d *createAgentDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
 	return "", nil
+}
+func (d *createAgentDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, error) {
+	return d.execOutput, nil
 }
 func (d *createAgentDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
 	return nil
@@ -3949,4 +3953,56 @@ func TestPreserveTerminalPhase(t *testing.T) {
 
 		assert.Equal(t, string(state.PhaseRunning), agent.Phase)
 	})
+}
+
+func TestHandleAgentExec_DispatchesToRuntimeBroker(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	grove := &store.Grove{
+		ID:   "grove-exec",
+		Name: "Exec Grove",
+		Slug: "exec-grove",
+	}
+	require.NoError(t, s.CreateGrove(ctx, grove))
+
+	broker := &store.RuntimeBroker{
+		ID:     "broker-exec",
+		Name:   "Exec Broker",
+		Slug:   "exec-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
+		GroveID:    grove.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     store.BrokerStatusOnline,
+	}))
+
+	agent := &store.Agent{
+		ID:              "agent-exec-1",
+		Slug:            "agent-exec-1",
+		Name:            "Exec Agent",
+		GroveID:         grove.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	srv.SetDispatcher(&createAgentDispatcher{execOutput: "terminal output"})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/exec", map[string]interface{}{
+		"command": []string{"echo", "hello"},
+		"timeout": 10,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "response body: %s", rec.Body.String())
+
+	var resp struct {
+		Output   string `json:"output"`
+		ExitCode int    `json:"exitCode"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "terminal output", resp.Output)
+	assert.Equal(t, 0, resp.ExitCode)
 }

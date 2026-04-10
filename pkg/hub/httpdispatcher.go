@@ -91,6 +91,10 @@ func (c *HTTPRuntimeBrokerClient) GetAgentLogs(ctx context.Context, brokerID, br
 	return c.transport.GetAgentLogs(ctx, brokerID, brokerEndpoint, agentID, groveID, tail)
 }
 
+func (c *HTTPRuntimeBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, command []string, timeout int) (string, error) {
+	return c.transport.ExecAgent(ctx, brokerID, brokerEndpoint, agentID, groveID, command, timeout)
+}
+
 func (c *HTTPRuntimeBrokerClient) CleanupGrove(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error {
 	return c.transport.CleanupGrove(ctx, brokerID, brokerEndpoint, groveSlug)
 }
@@ -1151,6 +1155,20 @@ func (d *HTTPAgentDispatcher) DispatchAgentLogs(ctx context.Context, agent *stor
 	}
 
 	return d.client.GetAgentLogs(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.GroveID, tail)
+}
+
+// DispatchAgentExec executes a command in an agent on the runtime broker.
+func (d *HTTPAgentDispatcher) DispatchAgentExec(ctx context.Context, agent *store.Agent, command []string, timeout int) (string, error) {
+	if agent.RuntimeBrokerID == "" {
+		return "", fmt.Errorf("agent has no runtime broker assigned")
+	}
+
+	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		return "", err
+	}
+
+	return d.client.ExecAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.GroveID, command, timeout)
 }
 
 // DispatchCheckAgentPrompt checks if an agent has a non-empty prompt.md file.

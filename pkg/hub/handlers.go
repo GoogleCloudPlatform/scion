@@ -1679,6 +1679,8 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 		s.handleAgentLifecycle(w, r, id, action)
 	case "message":
 		s.handleAgentMessage(w, r, id)
+	case "exec":
+		s.handleAgentExec(w, r, id)
 	case "restore":
 		s.restoreAgent(w, r, id)
 	case "token/refresh":
@@ -1692,6 +1694,50 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 	default:
 		NotFound(w, "Action")
 	}
+}
+
+func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id string) {
+	ctx := r.Context()
+
+	var req struct {
+		Command []string `json:"command"`
+		Timeout int      `json:"timeout,omitempty"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	if len(req.Command) == 0 {
+		ValidationError(w, "command is required", nil)
+		return
+	}
+
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		ServiceNotReady(w, "Exec dispatch is not available yet — the server may still be starting up")
+		return
+	}
+
+	agent, err := s.store.GetAgent(ctx, id)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if agent.RuntimeBrokerID == "" {
+		ServiceNotReady(w, "Agent has no runtime broker assigned — the server may still be starting up")
+		return
+	}
+
+	output, err := dispatcher.DispatchAgentExec(ctx, agent, req.Command, req.Timeout)
+	if err != nil {
+		RuntimeError(w, "Failed to execute command on runtime broker: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"output":   output,
+		"exitCode": 0,
+	})
 }
 
 // handleAgentTokenRefresh handles POST /api/v1/agents/{id}/token/refresh.

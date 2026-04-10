@@ -83,6 +83,11 @@ func (c *AuthenticatedBrokerClient) GetAgentLogs(ctx context.Context, brokerID, 
 	return c.transport.GetAgentLogs(ctx, brokerID, brokerEndpoint, agentID, groveID, tail)
 }
 
+// ExecAgent executes a command in an agent on a remote runtime broker with HMAC authentication.
+func (c *AuthenticatedBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, command []string, timeout int) (string, error) {
+	return c.transport.ExecAgent(ctx, brokerID, brokerEndpoint, agentID, groveID, command, timeout)
+}
+
 // CleanupGrove asks a broker to remove its local hub-native grove directory with HMAC authentication.
 func (c *AuthenticatedBrokerClient) CleanupGrove(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error {
 	return c.transport.CleanupGrove(ctx, brokerID, brokerEndpoint, groveSlug)

@@ -291,6 +291,37 @@ func (c *ControlChannelBrokerClient) GetAgentLogs(ctx context.Context, brokerID,
 	return string(resp.Body), nil
 }
 
+// ExecAgent executes a command in an agent via control channel.
+func (c *ControlChannelBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, command []string, timeout int) (string, error) {
+	_ = brokerEndpoint
+	path := fmt.Sprintf("/api/v1/agents/%s/exec", url.PathEscape(agentID))
+	query := ""
+	if groveID != "" {
+		query = "groveId=" + url.QueryEscape(groveID)
+	}
+
+	body, err := json.Marshal(map[string]interface{}{
+		"command": command,
+		"timeout": timeout,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, brokerID, "POST", path, query, body)
+	if err != nil {
+		return "", err
+	}
+
+	var result struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+	return result.Output, nil
+}
+
 func (c *ControlChannelBrokerClient) CleanupGrove(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error {
 	_ = brokerEndpoint
 	path := fmt.Sprintf("/api/v1/groves/%s", url.PathEscape(groveSlug))
@@ -507,6 +538,14 @@ func (c *HybridBrokerClient) GetAgentLogs(ctx context.Context, brokerID, brokerE
 		return c.controlChannel.GetAgentLogs(ctx, brokerID, brokerEndpoint, agentID, groveID, tail)
 	}
 	return c.httpClient.GetAgentLogs(ctx, brokerID, brokerEndpoint, agentID, groveID, tail)
+}
+
+// ExecAgent executes a command in an agent, preferring control channel.
+func (c *HybridBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, command []string, timeout int) (string, error) {
+	if c.useControlChannel(brokerID) {
+		return c.controlChannel.ExecAgent(ctx, brokerID, brokerEndpoint, agentID, groveID, command, timeout)
+	}
+	return c.httpClient.ExecAgent(ctx, brokerID, brokerEndpoint, agentID, groveID, command, timeout)
 }
 
 func (c *HybridBrokerClient) CleanupGrove(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error {

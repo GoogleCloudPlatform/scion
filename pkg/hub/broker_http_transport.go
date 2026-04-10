@@ -411,6 +411,38 @@ func (t *brokerHTTPTransport) GetAgentLogs(ctx context.Context, brokerID, broker
 	return string(body), nil
 }
 
+func (t *brokerHTTPTransport) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, command []string, timeout int) (string, error) {
+	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/exec", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
+	if groveID != "" {
+		endpoint += "?groveId=" + url.QueryEscape(groveID)
+	}
+
+	body, err := json.Marshal(map[string]interface{}{
+		"command": command,
+		"timeout": timeout,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := t.doRequest(ctx, brokerID, http.MethodPost, endpoint, body)
+	if err != nil {
+		return "", fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return "", brokerHTTPError(resp)
+	}
+
+	var result struct {
+		Output string `json:"output"`
+	}
+	if err := t.decodeResponse(resp, &result); err != nil {
+		return "", err
+	}
+	return result.Output, nil
+}
+
 func (t *brokerHTTPTransport) CleanupGrove(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error {
 	endpoint := fmt.Sprintf("%s/api/v1/groves/%s", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(groveSlug))
 	resp, err := t.doRequest(ctx, brokerID, http.MethodDelete, endpoint, nil)
