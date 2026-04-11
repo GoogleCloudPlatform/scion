@@ -136,7 +136,7 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 	}
 
 	if hubAuthNoBrowser || util.IsHeadlessEnvironment() {
-		provider, err := resolveHubAuthProvider(cmd.Context(), client.Auth(), hubclient.OAuthClientTypeDevice, provider)
+		provider, err := resolveExplicitDeviceFlowProvider(cmd.Context(), client.Auth(), provider)
 		if err != nil {
 			return err
 		}
@@ -155,6 +155,13 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 	}
 
 	return storeTokenAndPrintResult(hubURL, tokenResp)
+}
+
+func resolveExplicitDeviceFlowProvider(ctx context.Context, authSvc hubclient.AuthService, requestedProvider string) (string, error) {
+	if strings.TrimSpace(requestedProvider) == "" {
+		return "", nil
+	}
+	return resolveHubAuthProvider(ctx, authSvc, hubclient.OAuthClientTypeDevice, requestedProvider)
 }
 
 // runBrowserAuthFlow performs the browser-based OAuth flow.

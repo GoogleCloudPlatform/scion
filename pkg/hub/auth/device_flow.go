@@ -40,6 +40,9 @@ type DeviceFlowAuth struct {
 
 // NewDeviceFlowAuth creates a new DeviceFlowAuth.
 func NewDeviceFlowAuth(client hubclient.AuthService, provider ...string) *DeviceFlowAuth {
+	if len(provider) > 1 {
+		panic("NewDeviceFlowAuth accepts at most one provider")
+	}
 	selectedProvider := ""
 	providerExplicit := false
 	if len(provider) > 0 {
@@ -143,7 +146,10 @@ func (d *DeviceFlowAuth) requestDeviceCode(ctx context.Context) (*hubclient.Devi
 
 func isProviderNotConfiguredError(err error) bool {
 	var apiErr *apiclient.APIError
+	// Fallback is intentionally keyed off the current server-side validation
+	// message until the API exposes a dedicated error code for this condition.
+	// Match a shorter substring to reduce coupling to exact wording.
 	return errors.As(err, &apiErr) &&
 		apiErr.Code == apiclient.ErrCodeValidationError &&
-		strings.Contains(apiErr.Message, "OAuth provider not configured for device flow")
+		strings.Contains(strings.ToLower(apiErr.Message), "provider not configured")
 }

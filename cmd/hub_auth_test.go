@@ -146,3 +146,36 @@ func TestResolveHubAuthProvider_NoProviders(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestResolveExplicitDeviceFlowProvider_ImplicitProviderSkipsResolution(t *testing.T) {
+	t.Parallel()
+
+	authSvc := &mockHubAuthService{
+		providersResp: &hubclient.AuthProvidersResponse{
+			ClientType: string(hubclient.OAuthClientTypeDevice),
+			Providers:  hubclient.OAuthProviderOrder(),
+		},
+	}
+
+	got, err := resolveExplicitDeviceFlowProvider(context.Background(), authSvc, "")
+	if err != nil {
+		t.Fatalf("resolveExplicitDeviceFlowProvider returned error: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("resolveExplicitDeviceFlowProvider = %q, want empty string", got)
+	}
+}
+
+func TestResolveExplicitDeviceFlowProvider_ExplicitProviderUsesValidation(t *testing.T) {
+	t.Parallel()
+
+	authSvc := &mockHubAuthService{}
+
+	got, err := resolveExplicitDeviceFlowProvider(context.Background(), authSvc, "GitHub")
+	if err != nil {
+		t.Fatalf("resolveExplicitDeviceFlowProvider returned error: %v", err)
+	}
+	if got != "github" {
+		t.Fatalf("resolveExplicitDeviceFlowProvider = %q, want github", got)
+	}
+}
