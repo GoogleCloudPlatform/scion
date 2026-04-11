@@ -23,6 +23,9 @@ const (
 	AgentActionFinalizeEnv       = "finalize-env"
 )
 
+// RuntimeBrokerAgentActionMethod returns the HTTP method for actions routed
+// through runtimebroker handleAgentAction. It intentionally does not cover
+// every agent action defined in this package.
 func RuntimeBrokerAgentActionMethod(action string) (string, bool) {
 	switch action {
 	case AgentActionLogs, AgentActionStats, AgentActionHasPrompt:
