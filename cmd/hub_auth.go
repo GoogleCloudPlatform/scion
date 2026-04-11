@@ -141,7 +141,7 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		// Device authorization flow for headless environments
-		deviceAuth := auth.NewDeviceFlowAuth(client.Auth(), provider)
+		deviceAuth := newDeviceFlowAuth(client.Auth(), provider)
 		tokenResp, err = deviceAuth.Authenticate(cmd.Context())
 		if err != nil {
 			return fmt.Errorf("device flow authentication failed: %w", err)
@@ -155,6 +155,13 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 	}
 
 	return storeTokenAndPrintResult(hubURL, tokenResp)
+}
+
+func newDeviceFlowAuth(authSvc hubclient.AuthService, provider string) *auth.DeviceFlowAuth {
+	if strings.TrimSpace(provider) == "" {
+		return auth.NewDeviceFlowAuth(authSvc)
+	}
+	return auth.NewDeviceFlowAuth(authSvc, provider)
 }
 
 func resolveExplicitDeviceFlowProvider(ctx context.Context, authSvc hubclient.AuthService, requestedProvider string) (string, error) {
