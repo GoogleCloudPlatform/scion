@@ -754,6 +754,7 @@ type createAgentDispatcher struct {
 	deleteCalled bool
 	deleteErr    error
 	execOutput   string
+	execExitCode int
 }
 
 func (d *createAgentDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) error {
@@ -811,8 +812,8 @@ func (d *failingCreateDispatcher) DispatchAgentDelete(_ context.Context, _ *stor
 func (d *createAgentDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
 	return "", nil
 }
-func (d *createAgentDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, error) {
-	return d.execOutput, nil
+func (d *createAgentDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
+	return d.execOutput, d.execExitCode, nil
 }
 func (d *createAgentDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
 	return nil

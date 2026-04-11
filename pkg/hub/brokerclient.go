@@ -84,7 +84,7 @@ func (c *AuthenticatedBrokerClient) GetAgentLogs(ctx context.Context, brokerID, 
 }
 
 // ExecAgent executes a command in an agent on a remote runtime broker with HMAC authentication.
-func (c *AuthenticatedBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, command []string, timeout int) (string, error) {
+func (c *AuthenticatedBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, command []string, timeout int) (string, int, error) {
 	return c.transport.ExecAgent(ctx, brokerID, brokerEndpoint, agentID, groveID, command, timeout)
 }
 

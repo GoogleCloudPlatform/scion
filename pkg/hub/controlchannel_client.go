@@ -292,7 +292,7 @@ func (c *ControlChannelBrokerClient) GetAgentLogs(ctx context.Context, brokerID,
 }
 
 // ExecAgent executes a command in an agent via control channel.
-func (c *ControlChannelBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, command []string, timeout int) (string, error) {
+func (c *ControlChannelBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, command []string, timeout int) (string, int, error) {
 	_ = brokerEndpoint
 	path := fmt.Sprintf("/api/v1/agents/%s/exec", url.PathEscape(agentID))
 	query := ""
@@ -305,21 +305,22 @@ func (c *ControlChannelBrokerClient) ExecAgent(ctx context.Context, brokerID, br
 		"timeout": timeout,
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
+		return "", 0, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	resp, err := c.doRequest(ctx, brokerID, "POST", path, query, body)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 
 	var result struct {
-		Output string `json:"output"`
+		Output   string `json:"output"`
+		ExitCode int    `json:"exitCode"`
 	}
 	if err := json.Unmarshal(resp.Body, &result); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
+		return "", 0, fmt.Errorf("failed to decode response: %w", err)
 	}
-	return result.Output, nil
+	return result.Output, result.ExitCode, nil
 }
 
 func (c *ControlChannelBrokerClient) CleanupGrove(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error {
@@ -541,7 +542,7 @@ func (c *HybridBrokerClient) GetAgentLogs(ctx context.Context, brokerID, brokerE
 }
 
 // ExecAgent executes a command in an agent, preferring control channel.
-func (c *HybridBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, command []string, timeout int) (string, error) {
+func (c *HybridBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, command []string, timeout int) (string, int, error) {
 	if c.useControlChannel(brokerID) {
 		return c.controlChannel.ExecAgent(ctx, brokerID, brokerEndpoint, agentID, groveID, command, timeout)
 	}

@@ -20,4 +20,3 @@ const (
 	AgentActionHasPrompt         = "has-prompt"
 	AgentActionFinalizeEnv       = "finalize-env"
 )
-

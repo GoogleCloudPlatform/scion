@@ -1279,6 +1279,13 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 
+	// Apply timeout if specified.
+	if req.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(req.Timeout)*time.Second)
+		defer cancel()
+	}
+
 	// Resolve the correct runtime for this agent (may be on an auxiliary runtime like K8s).
 	// Exec doesn't receive groveID from query params (internal operation).
 	rt := s.resolveRuntimeForAgent(ctx, id, "")

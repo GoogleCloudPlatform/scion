@@ -89,8 +89,8 @@ func (d *recordingDispatcher) DispatchAgentCreateWithGather(_ context.Context, _
 func (d *recordingDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
 	return "", nil
 }
-func (d *recordingDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, error) {
-	return "", nil
+func (d *recordingDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
+	return "", 0, nil
 }
 func (d *recordingDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
 	return nil

@@ -59,8 +59,8 @@ func (noopDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent *st
 func (noopDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
 	return "", nil
 }
-func (noopDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, error) {
-	return "", nil
+func (noopDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
+	return "", 0, nil
 }
 func (noopDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
 	return nil

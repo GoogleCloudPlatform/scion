@@ -1714,6 +1714,10 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 		ValidationError(w, "command is required", nil)
 		return
 	}
+	if req.Timeout < 0 {
+		ValidationError(w, "timeout must be non-negative", nil)
+		return
+	}
 
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
@@ -1726,20 +1730,23 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	if agent.RuntimeBrokerID == "" {
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		ServiceNotReady(w, "Agent has no runtime broker assigned — the server may still be starting up")
 		return
 	}
 
-	output, err := dispatcher.DispatchAgentExec(ctx, agent, req.Command, req.Timeout)
+	output, exitCode, err := dispatcher.DispatchAgentExec(ctx, agent, req.Command, req.Timeout)
 	if err != nil {
 		RuntimeError(w, "Failed to execute command on runtime broker: "+err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"output":   output,
-		"exitCode": 0,
+	writeJSON(w, http.StatusOK, struct {
+		Output   string `json:"output"`
+		ExitCode int    `json:"exitCode"`
+	}{
+		Output:   output,
+		ExitCode: exitCode,
 	})
 }
 

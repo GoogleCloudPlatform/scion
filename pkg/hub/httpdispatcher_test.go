@@ -147,14 +147,14 @@ func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, bro
 	return m.returnErr
 }
 
-func (m *mockRuntimeBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, command []string, timeout int) (string, error) {
+func (m *mockRuntimeBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, command []string, timeout int) (string, int, error) {
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
 	if m.returnErr != nil {
-		return "", m.returnErr
+		return "", 0, m.returnErr
 	}
-	return "mock exec output", nil
+	return "mock exec output", 0, nil
 }
 
 func (m *mockRuntimeBrokerClient) MessageAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {

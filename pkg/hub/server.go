@@ -224,7 +224,8 @@ type AgentDispatcher interface {
 	DispatchAgentLogs(ctx context.Context, agent *store.Agent, tail int) (string, error)
 
 	// DispatchAgentExec executes a command in an agent on the runtime broker.
-	DispatchAgentExec(ctx context.Context, agent *store.Agent, command []string, timeout int) (string, error)
+	// Returns the command output, exit code, and any error.
+	DispatchAgentExec(ctx context.Context, agent *store.Agent, command []string, timeout int) (string, int, error)
 
 	// DispatchCheckAgentPrompt checks if an agent has a non-empty prompt.md file.
 	DispatchCheckAgentPrompt(ctx context.Context, agent *store.Agent) (bool, error)
@@ -301,7 +302,8 @@ type RuntimeBrokerClient interface {
 	// ExecAgent executes a command in an agent on a remote runtime broker.
 	// brokerID is used for HMAC authentication lookup.
 	// groveID scopes the lookup to a specific grove (required for uniqueness).
-	ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, command []string, timeout int) (string, error)
+	// Returns the command output, exit code, and any error.
+	ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, command []string, timeout int) (string, int, error)
 
 	// CleanupGrove asks a broker to remove its local hub-native grove directory.
 	// brokerID is used for HMAC authentication lookup.
