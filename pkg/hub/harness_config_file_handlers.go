@@ -264,8 +264,15 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		BadRequest(w, "Failed to parse multipart form: "+err.Error())
+	// Apply total request body size limit
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadTotalSize)
+
+	if err := r.ParseMultipartForm(maxUploadTotalSize); err != nil {
+		if err.Error() == "http: request body too large" {
+			BadRequest(w, "Request body exceeds 100MB limit")
+			return
+		}
+		BadRequest(w, "Invalid multipart form: "+err.Error())
 		return
 	}
 	if r.MultipartForm == nil || len(r.MultipartForm.File) == 0 {
