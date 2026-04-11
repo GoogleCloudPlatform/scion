@@ -402,6 +402,38 @@ func TestOAuthService_GetAuthorizationURLForClient(t *testing.T) {
 	})
 }
 
+func TestOAuthService_DefaultProviderForClient(t *testing.T) {
+	t.Run("returns google when both providers configured", func(t *testing.T) {
+		service := NewOAuthService(OAuthConfig{
+			CLI: OAuthClientConfig{
+				Google: OAuthProviderConfig{ClientID: "g-id", ClientSecret: "g-secret"},
+				GitHub: OAuthProviderConfig{ClientID: "gh-id", ClientSecret: "gh-secret"},
+			},
+		})
+		if got := service.DefaultProviderForClient(OAuthClientTypeCLI); got != "google" {
+			t.Errorf("DefaultProviderForClient(CLI) = %q, want %q", got, "google")
+		}
+	})
+
+	t.Run("returns github when only github configured", func(t *testing.T) {
+		service := NewOAuthService(OAuthConfig{
+			CLI: OAuthClientConfig{
+				GitHub: OAuthProviderConfig{ClientID: "gh-id", ClientSecret: "gh-secret"},
+			},
+		})
+		if got := service.DefaultProviderForClient(OAuthClientTypeCLI); got != "github" {
+			t.Errorf("DefaultProviderForClient(CLI) = %q, want %q", got, "github")
+		}
+	})
+
+	t.Run("returns google when no providers configured", func(t *testing.T) {
+		service := NewOAuthService(OAuthConfig{})
+		if got := service.DefaultProviderForClient(OAuthClientTypeCLI); got != "google" {
+			t.Errorf("DefaultProviderForClient(CLI) = %q, want %q", got, "google")
+		}
+	})
+}
+
 func TestOAuthService_IsProviderConfiguredForClient(t *testing.T) {
 	config := OAuthConfig{
 		Web: OAuthClientConfig{
