@@ -1,0 +1,40 @@
+schema_version: "1"
+
+active_profile: remote
+
+# Replace this with the registry where you pushed the Scion harness images.
+image_registry: ghcr.io/example
+
+runtimes:
+  kubernetes:
+    type: kubernetes
+    namespace: scion
+    list_all_namespaces: false
+
+profiles:
+  remote:
+    runtime: kubernetes
+
+server:
+  hub:
+    host: 0.0.0.0
+    # This default matches `kubectl port-forward svc/scion 8080:80`.
+    public_url: http://127.0.0.1:8080
+  broker:
+    enabled: true
+    hub_endpoint: http://127.0.0.1:8080
+    # Agent pods need a cluster-reachable endpoint, not the port-forward URL.
+    container_hub_endpoint: http://scion.scion.svc.cluster.local
+    broker_name: scion-k8s
+    broker_nickname: scion
+  database:
+    driver: sqlite
+    url: /home/scion/.scion/hub.db
+  storage:
+    provider: local
+    local_path: /home/scion/.scion/storage
+  auth:
+    # Convenient for evaluation. Disable this before exposing Scion publicly.
+    dev_mode: true
+  secrets:
+    backend: local

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: scion
+spec:
+  selector:
+    app.kubernetes.io/name: scion
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+    - name: broker
+      port: 9800
+      targetPort: broker
+      protocol: TCP
