@@ -153,6 +153,12 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	// so we don't use --init to avoid competing init processes.
 	newArgs := []string{"run", "-t"}
 
+	// In rootless mode, map the host user's UID into the container so that
+	// bind-mounted files have the correct ownership on both sides.
+	if r.Rootless {
+		newArgs = append(newArgs, "--userns=keep-id")
+	}
+
 	// Apply resource constraints from config.
 	if config.Resources != nil {
 		if config.Resources.Limits.Memory != "" {
