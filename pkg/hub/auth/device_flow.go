@@ -121,7 +121,7 @@ func (d *DeviceFlowAuth) Authenticate(ctx context.Context) (*hubclient.CLITokenR
 }
 
 func (d *DeviceFlowAuth) requestDeviceCode(ctx context.Context) (*hubclient.DeviceCodeResponse, string, error) {
-	providers := []string{"google", "github"}
+	providers := hubclient.OAuthProviderOrder()
 	if d.providerExplicit {
 		providers = []string{d.provider}
 	}
@@ -138,9 +138,6 @@ func (d *DeviceFlowAuth) requestDeviceCode(ctx context.Context) (*hubclient.Devi
 		lastErr = err
 	}
 
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no device flow providers available")
-	}
 	return nil, "", lastErr
 }
 
