@@ -427,6 +427,19 @@ func TestK8sExecTargetUsername_UsesAnnotationWhenPresent(t *testing.T) {
 	}
 }
 
+func TestK8sExecTargetUsername_FallsBackWhenAnnotationInvalid(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   "scion",
+			Name:        "agent",
+			Annotations: map[string]string{"scion.username": "--help"},
+		},
+	}
+	if got := execTargetUsername(pod); got != "scion" {
+		t.Fatalf("got username %q, want scion", got)
+	}
+}
+
 func TestK8sPodRunsAsNonRoot(t *testing.T) {
 	runAsUser := int64(1000)
 	runAsNonRoot := true
@@ -477,7 +490,6 @@ func TestK8sPodRunsAsNonRoot(t *testing.T) {
 }
 
 func TestK8sAttach_ResolvesUsernameFromAnnotations(t *testing.T) {
-	// Verify that Attach reads the username from scion.username annotation
 	tests := []struct {
 		name        string
 		annotations map[string]string
@@ -498,17 +510,18 @@ func TestK8sAttach_ResolvesUsernameFromAnnotations(t *testing.T) {
 			annotations: map[string]string{"scion.username": ""},
 			wantUser:    "scion",
 		},
+		{
+			name:        "defaults to scion when annotation invalid",
+			annotations: map[string]string{"scion.username": "bad user"},
+			wantUser:    "scion",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Simulate the username resolution logic from Attach
-			username := "scion"
-			if u, ok := tt.annotations["scion.username"]; ok && u != "" {
-				username = u
-			}
-			if username != tt.wantUser {
-				t.Errorf("got username %q, want %q", username, tt.wantUser)
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: tt.annotations}}
+			if got := execTargetUsername(pod); got != tt.wantUser {
+				t.Errorf("got username %q, want %q", got, tt.wantUser)
 			}
 		})
 	}

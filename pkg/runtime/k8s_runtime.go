@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -73,9 +74,11 @@ func (r *KubernetesRuntime) ExecUser() string {
 	return "scion"
 }
 
+var validExecUsername = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+
 func execTargetUsername(pod *corev1.Pod) string {
 	if pod != nil {
-		if u := strings.TrimSpace(pod.Annotations["scion.username"]); u != "" {
+		if u := strings.TrimSpace(pod.Annotations["scion.username"]); u != "" && validExecUsername.MatchString(u) {
 			return u
 		}
 	}
@@ -149,6 +152,8 @@ func (r *KubernetesRuntime) commandForExec(ctx context.Context, namespace, podNa
 	}
 
 	targetUser := execTargetUsername(pod)
+	// Probe the live pod user at exec time instead of caching it because the
+	// effective exec user is a property of the running container state.
 	currentUser, err := r.currentExecUser(ctx, namespace, podName)
 	if err == nil && currentUser != "" {
 		return buildExecCommandForUser(currentUser, targetUser, cmd), nil
