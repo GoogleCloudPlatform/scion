@@ -42,7 +42,7 @@ func classifyLaunchRuntimeError(err error, resolvedImage string) error {
 		return nil
 	}
 	if errors.Is(err, exec.ErrNotFound) || isTmuxShellNotFoundError(err) {
-		return fmt.Errorf("failed to launch container: %w in image %q: %w", ErrTmuxBinaryNotFound, resolvedImage, err)
+		return fmt.Errorf("failed to launch container in image %q: %w: %w", resolvedImage, ErrTmuxBinaryNotFound, err)
 	}
 	return fmt.Errorf("failed to launch container: %w", err)
 }
