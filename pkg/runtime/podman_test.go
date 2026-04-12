@@ -124,6 +124,57 @@ func TestPodmanRuntime_ExecUserMethod(t *testing.T) {
 	})
 }
 
+func TestPodmanRuntime_Run_RootlessKeepID(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockPodman := filepath.Join(tmpDir, "mock-podman")
+
+	script := `#!/bin/sh
+echo "$@"
+`
+	if err := os.WriteFile(mockPodman, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock podman: %v", err)
+	}
+
+	t.Run("rootless adds --userns=keep-id with uid/gid mapping and env var", func(t *testing.T) {
+		rt := &PodmanRuntime{Command: mockPodman, Rootless: true}
+		config := RunConfig{
+			Harness:      &harness.GeminiCLI{},
+			Name:         "test-agent",
+			UnixUsername: "scion",
+			Image:        "scion-agent:latest",
+			Task:         "hello",
+		}
+		out, err := rt.Run(context.Background(), config)
+		if err != nil {
+			t.Fatalf("runtime.Run failed: %v", err)
+		}
+		if !strings.Contains(out, "--userns=keep-id:uid=1000,gid=1000") {
+			t.Errorf("expected '--userns=keep-id:uid=1000,gid=1000' in output, got %q", out)
+		}
+		if !strings.Contains(out, "SCION_KEEPID_UID=1000") {
+			t.Errorf("expected 'SCION_KEEPID_UID=1000' env var in output, got %q", out)
+		}
+	})
+
+	t.Run("rootful omits --userns=keep-id", func(t *testing.T) {
+		rt := &PodmanRuntime{Command: mockPodman, Rootless: false}
+		config := RunConfig{
+			Harness:      &harness.GeminiCLI{},
+			Name:         "test-agent",
+			UnixUsername: "scion",
+			Image:        "scion-agent:latest",
+			Task:         "hello",
+		}
+		out, err := rt.Run(context.Background(), config)
+		if err != nil {
+			t.Fatalf("runtime.Run failed: %v", err)
+		}
+		if strings.Contains(out, "--userns=keep-id") {
+			t.Errorf("did not expect '--userns=keep-id' in output, got %q", out)
+		}
+	})
+}
+
 func TestPodmanRuntime_List_JSONArray(t *testing.T) {
 	// Create a mock podman that returns Podman-style JSON array output
 	tmpDir := t.TempDir()

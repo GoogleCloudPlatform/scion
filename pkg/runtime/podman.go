@@ -153,10 +153,25 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	// so we don't use --init to avoid competing init processes.
 	newArgs := []string{"run", "-t"}
 
-	// In rootless mode, map the host user's UID into the container so that
-	// bind-mounted files have the correct ownership on both sides.
+	// In rootless mode, map the host user's UID into the container as UID
+	// 1000 (the scion user created in the Dockerfile). This ensures:
+	//  1. Bind-mounted files have correct host-user ownership on both sides.
+	//  2. The process runs as the scion user (UID 1000) inside the container,
+	//     so harness config in /home/scion is accessible.
+	// Without the uid/gid mapping, --userns=keep-id would only work when the
+	// host user happens to be UID 1000. The explicit mapping handles any host
+	// UID (e.g., 501 on macOS).
+	//
+	// SCION_KEEPID_UID tells sciontool init that the host user is mapped to
+	// this container UID via keep-id, so it should drop privileges to that
+	// UID early instead of trying to remap the scion user via usermod.
+	// This env var is necessary because /proc/self/uid_map inside the
+	// container only shows the mapping to the immediate parent namespace
+	// (Podman's namespace), not the host — so init cannot derive this from
+	// the uid_map alone.
 	if r.Rootless {
-		newArgs = append(newArgs, "--userns=keep-id")
+		newArgs = append(newArgs, "--userns=keep-id:uid=1000,gid=1000")
+		newArgs = append(newArgs, "-e", "SCION_KEEPID_UID=1000")
 	}
 
 	// Apply resource constraints from config.

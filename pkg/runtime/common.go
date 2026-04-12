@@ -308,6 +308,22 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 	}
 
+	// Pre-create parent directories on the host for any volume targeting a
+	// path under the container home directory.  When the home dir is itself a
+	// bind mount, the container runtime (crun/runc) will try to mkdir the
+	// mount-point inside that mount.  On rootless Podman with VirtioFS (macOS)
+	// this fails with "Permission denied" unless the directory already exists.
+	if config.HomeDir != "" {
+		containerHome := util.GetHomeDir(config.UnixUsername)
+		for _, tgt := range volumeOrder {
+			if strings.HasPrefix(tgt, containerHome+"/") {
+				rel := strings.TrimPrefix(tgt, containerHome+"/")
+				hostDir := filepath.Join(config.HomeDir, rel)
+				_ = os.MkdirAll(hostDir, 0755)
+			}
+		}
+	}
+
 	// Add all registered volumes
 	for _, tgt := range volumeOrder {
 		addArg("-v", volumeMap[tgt])

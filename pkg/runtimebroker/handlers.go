@@ -2022,22 +2022,24 @@ func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, groveID string)
 }
 
 // resolveManagerForOpts returns the appropriate agent.Manager for the given
-// start options. If opts.Profile resolves to a different runtime than the
-// broker's default, a temporary manager is created with the profile-specific
-// runtime. Otherwise the broker's shared manager is returned.
+// start options. It loads the grove's settings to determine the effective
+// runtime. If the resolved runtime differs from the broker's default, a
+// temporary manager is created and cached. Otherwise the broker's shared
+// manager is returned.
+//
+// When opts.Profile is empty, the grove's active profile (from settings.yaml)
+// is used. This ensures the broker respects the grove's configured runtime
+// even when no explicit --profile flag is passed.
 func (s *Server) resolveManagerForOpts(opts api.StartOptions) agent.Manager {
-	if opts.Profile == "" {
-		return s.manager
-	}
-
-	// Load settings to check if the profile explicitly specifies a different runtime.
-	// If no settings exist or the profile isn't defined, stick with the default manager.
+	// Load settings to check if the profile/active-profile specifies a
+	// different runtime than the broker's auto-detected default.
 	projectDir, _ := config.GetResolvedProjectDir(opts.GrovePath)
 	vs, _, _ := config.LoadEffectiveSettings(projectDir)
 	if vs == nil {
 		return s.manager
 	}
 
+	// ResolveRuntime("") uses vs.ActiveProfile as the fallback.
 	_, runtimeType, err := vs.ResolveRuntime(opts.Profile)
 	if err != nil {
 		// Profile or its runtime not found in settings; use default
@@ -2048,14 +2050,19 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) agent.Manager {
 		return s.manager
 	}
 
-	// Profile specifies a different runtime - resolve and create a manager.
+	// Settings specify a different runtime - resolve and create a manager.
 	// Cache it as an auxiliary manager so LookupContainerID can find agents
 	// created on non-default runtimes (e.g. K8s pods when default is docker).
+	//
+	// Use opts.Profile for ResolveRuntime so it picks up the same profile
+	// that was just checked. When empty, GetRuntime falls back to settings
+	// the same way ResolveRuntime does.
 	resolved := agent.ResolveRuntime(opts.GrovePath, opts.Name, opts.Profile)
 
 	if s.config.Debug {
-		s.agentLifecycleLog.Debug("Profile resolved to different runtime",
+		s.agentLifecycleLog.Debug("Settings resolved to different runtime",
 			"agent", opts.Name, "profile", opts.Profile,
+			"activeProfile", vs.ActiveProfile,
 			"defaultRuntime", s.runtime.Name(),
 			"resolvedRuntime", resolved.Name(),
 		)

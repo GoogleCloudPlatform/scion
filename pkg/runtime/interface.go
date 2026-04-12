@@ -66,9 +66,9 @@ type Runtime interface {
 	// GetWorkspacePath returns the host path to the container's /workspace mount.
 	// This is used for workspace sync operations.
 	GetWorkspacePath(ctx context.Context, id string) (string, error)
-	// ExecUser returns the container user for exec/attach commands. Most
-	// runtimes return "scion". Rootless Podman returns "root" because the
-	// child process runs as UID 0 (which maps to the unprivileged host user).
+	// ExecUser returns the container user for exec/attach commands.
+	// All runtimes return "scion" — the tmux session runs under the scion
+	// user after sciontool init sets up the environment.
 	ExecUser() string
 }
 

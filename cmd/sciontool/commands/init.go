@@ -96,7 +96,7 @@ func runInit(args []string) int {
 	}
 
 	// Log startup
-	log.Info("sciontool init starting as PID %d", os.Getpid())
+	log.Info("sciontool init starting as PID %d (uid=%d, gid=%d, euid=%d, egid=%d)", os.Getpid(), os.Getuid(), os.Getgid(), os.Geteuid(), os.Getegid())
 	log.Info("Child command: %v", childArgs)
 	log.Info("Grace period: %s", gracePeriod)
 
@@ -113,6 +113,7 @@ func runInit(args []string) int {
 
 	// Set up scion user UID/GID to match host user
 	targetUID, targetGID, rootless := setupHostUser()
+	log.Info("setupHostUser result: targetUID=%d, targetGID=%d, rootless=%v (now euid=%d, egid=%d)", targetUID, targetGID, rootless, os.Geteuid(), os.Getegid())
 
 	// Chown the log file so the scion user can write to it even if it was created by root
 	if targetUID != 0 {
@@ -327,6 +328,22 @@ func runInit(args []string) int {
 		}
 	}
 
+	// Pre-flight checks: verify key paths are accessible before launching child
+	if rootless {
+		if _, err := os.Stat(agentHome); err != nil {
+			log.Error("Pre-flight: agent home %s is not accessible: %v", agentHome, err)
+		} else if f, err := os.CreateTemp(agentHome, ".scion-preflight-*"); err != nil {
+			log.Error("Pre-flight: cannot write to agent home %s: %v (uid=%d)", agentHome, err, os.Geteuid())
+		} else {
+			os.Remove(f.Name())
+			f.Close()
+			log.Debug("Pre-flight: agent home %s is writable (uid=%d)", agentHome, os.Geteuid())
+		}
+		if _, err := exec.LookPath("tmux"); err != nil {
+			log.Error("Pre-flight: tmux not found on PATH: %v", err)
+		}
+	}
+
 	// Create supervisor with configuration
 	config := supervisor.Config{
 		GracePeriod: gracePeriod,
@@ -375,14 +392,15 @@ func runInit(args []string) int {
 
 	// Wait a moment for process to start, then run post-start hooks
 	// Use a short timeout to detect immediate startup failures
+	log.Debug("Waiting for child process startup (100ms check)...")
 	select {
 	case result := <-exitChan:
 		// Child exited immediately - likely a startup error
 		if result.err != nil {
-			log.Error("Supervisor error: %v", result.err)
+			log.Error("Child exited immediately with error: %v (uid=%d, gid=%d)", result.err, os.Geteuid(), os.Getegid())
 			return 1
 		}
-		log.Info("Child exited with code %d", result.code)
+		log.Info("Child exited immediately with code %d (uid=%d, gid=%d)", result.code, os.Geteuid(), os.Getegid())
 		return result.code
 	case <-time.After(100 * time.Millisecond):
 		// Process appears to be running, execute post-start hooks
@@ -784,8 +802,21 @@ func watchLimitsTriggerFile(ctx context.Context, ch chan<- struct{}) {
 }
 
 func setupHostUser() (int, int, bool) {
-	// Only run if we're root and env vars are set
+	// Only run privilege operations if we're root. When running under
+	// --userns=keep-id (rootless Podman), PID 1 starts as the scion user
+	// (UID 1000) rather than root. In that case, no usermod/groupmod/chown
+	// is needed — the UID already matches the scion user and bind-mounted
+	// files have correct host ownership via the keep-id mapping. We return
+	// rootless=true so the supervisor sets HOME/USER/LOGNAME without
+	// attempting a credential drop.
 	if os.Getuid() != 0 {
+		if scionUser, err := user.Lookup("scion"); err == nil {
+			scionUID, _ := strconv.Atoi(scionUser.Uid)
+			if os.Getuid() == scionUID {
+				log.Info("Already running as scion user (UID %d) in rootless mode, skipping privilege operations", scionUID)
+				return 0, 0, true
+			}
+		}
 		log.Debug("Not running as root, skipping user setup")
 		return 0, 0, false
 	}
@@ -809,10 +840,53 @@ func setupHostUser() (int, int, bool) {
 		return 0, 0, false
 	}
 
+	// Check if the runtime signaled a keep-id user namespace mapping via
+	// SCION_KEEPID_UID (e.g. --userns=keep-id:uid=1000,gid=1000). In this
+	// case, container UID 1000 (scion) already maps to the host user's UID,
+	// so bind-mount ownership is correct without remapping.
+	// However, PID 1 is still UID 0 (from the Dockerfile), which maps to a
+	// subordinate UID in the nested namespace — NOT the host user. Container
+	// UID 0 therefore cannot write to the bind-mounted /home/scion (owned by
+	// the host user). We must drop privileges to the scion user early so
+	// that init's own writes (agent-info.json, scion-env, etc.) succeed.
+	//
+	// Note: We cannot derive this from /proc/self/uid_map because rootless
+	// Podman uses nested namespaces — the uid_map shows the mapping to the
+	// immediate parent namespace, not the host.
+	if keepIDStr := os.Getenv("SCION_KEEPID_UID"); keepIDStr != "" {
+		log.Debug("Keep-id env detected: SCION_KEEPID_UID=%s, current euid=%d, egid=%d", keepIDStr, os.Geteuid(), os.Getegid())
+		keepIDUID, parseErr := strconv.Atoi(keepIDStr)
+		if parseErr == nil {
+			if scionUser, err := user.Lookup("scion"); err == nil {
+				scionUID, _ := strconv.Atoi(scionUser.Uid)
+				scionGID, _ := strconv.Atoi(scionUser.Gid)
+				log.Debug("Keep-id: scion user lookup: UID=%d, GID=%d, keepIDUID=%d", scionUID, scionGID, keepIDUID)
+				if keepIDUID == scionUID {
+					log.Info("Keep-id mode: host user mapped to scion (container UID %d); performing early privilege drop", scionUID)
+					if err := syscall.Setgroups([]int{scionGID}); err != nil {
+						log.Error("Failed to setgroups([%d]): %v", scionGID, err)
+					}
+					if err := syscall.Setgid(scionGID); err != nil {
+						log.Error("Failed to setgid(%d): %v — continuing as root, writes to /home/scion may fail", scionGID, err)
+					}
+					if err := syscall.Setuid(scionUID); err != nil {
+						log.Error("Failed to setuid(%d): %v — continuing as root, writes to /home/scion may fail", scionUID, err)
+					}
+					log.Info("Keep-id privilege drop complete: now euid=%d, egid=%d", os.Geteuid(), os.Getegid())
+					return 0, 0, true
+				}
+			} else {
+				log.Error("Keep-id: failed to look up scion user: %v", err)
+			}
+		} else {
+			log.Error("Keep-id: failed to parse SCION_KEEPID_UID=%q: %v", keepIDStr, parseErr)
+		}
+	}
+
 	// Check if the target UID is mapped in the current user namespace.
-	// In rootless Podman, the host user's UID is mapped to container UID 0,
-	// and only a limited range of subordinate UIDs are available inside the
-	// container. If the target UID falls outside any mapped range, chown
+	// In rootless Podman without keep-id, the host user's UID is mapped to
+	// container UID 0, and only a limited range of subordinate UIDs are
+	// available. If the target UID falls outside any mapped range, chown
 	// and credential-based exec would fail with EINVAL. In this case, skip
 	// remapping and run as container root (which IS the host user).
 	if !isUIDMapped(uid) {

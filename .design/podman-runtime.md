@@ -65,12 +65,18 @@ Scion's existing UID/GID synchronization mechanism in `sciontool init` (`cmd/sci
 **Rootful Podman**: This flow works identically to Docker — the container starts as real root and `sciontool init` can freely modify users and drop privileges.
 
 **Rootless Podman**: This is where the key difference lies. In rootless mode:
-- The container runs inside a user namespace where the invoking user is mapped to UID 0 (root) inside the container.
+- The container runs inside a user namespace where the invoking user is mapped to UID 0 (root) inside the container by default.
 - `usermod`/`groupmod` operate on `/etc/passwd` and `/etc/group` inside the container's filesystem layer, which still works within the user namespace.
 - Bind-mounted files appear owned by the mapped UID. By default, the host user's UID maps to root (UID 0) inside the container.
-- The `--userns=keep-id` flag can map the host user's UID to the same UID inside the container instead of to root, but this conflicts with Scion's "start as root, then drop privileges" model.
 
-**Decision**: Use the default user namespace mapping (host UID → container UID 0) and let `sciontool init` handle the remapping as it does today. The `SCION_HOST_UID`/`SCION_HOST_GID` values passed will be the host user's actual UID/GID. Since `usermod`/`groupmod` modify the in-container user database (which is writable in the overlay), this works even in a user namespace. The bind-mounted files will be accessible because rootless Podman maps the host user to container root, and `sciontool init` runs as that mapped root. Do **not** use `--userns=keep-id`.
+The default mapping (host UID → container UID 0) allows `sciontool init` to run privileged operations (usermod, chown) and then drop to the remapped scion user. However, there is a fundamental flaw: after remapping the scion user to the host UID (e.g., 1000), container UID 1000 maps to a **subordinate host UID** (e.g., 100999), not to the actual host user. This makes bind-mounted files unreadable by the host user after the container exits.
+
+**Decision**: Use `--userns=keep-id:uid=1000,gid=1000` to map the host user's UID directly to container UID 1000 (the scion user). This ensures:
+1. Bind-mounted files have correct host-user ownership on both sides.
+2. The container process runs as the scion user (UID 1000), so harness config in `/home/scion` is accessible without remapping.
+3. Works for any host UID (e.g., 501 on macOS, 1000 on Linux) because the `uid=1000` parameter explicitly maps the host user to container UID 1000.
+
+The trade-off is that `sciontool init` cannot perform privileged operations (usermod, groupmod, chown) since PID 1 is no longer root. This is acceptable because with keep-id mapping, the process is already running as the correct container user — no remapping or privilege drop is needed. `setupHostUser()` detects this case (not root, but running as the scion user) and signals `rootless=true` to the supervisor, which sets HOME/USER/LOGNAME without attempting a credential drop.
 
 **Decision**: `PodmanRuntime` should detect rootless mode (via `podman info`) and log the mode at **debug** level. This aids troubleshooting without adding noise at normal log levels.
 
@@ -194,7 +200,7 @@ If CI runs in a container or restricted environment, rootless Podman may not be 
 | 2 | **Rootless diagnostics** | Detect rootless mode via `podman info` and log at debug level. |
 | 3 | **Podman Machine mount validation** | Validate workspace is within `$HOME` on macOS; error with guidance if not. |
 | 4 | **Code structure** | Independent implementation (duplicate from Docker) for clean separation. |
-| 5 | **Rootless UID/GID strategy** | Use default user namespace mapping; let `sciontool init` handle remapping. No `--userns=keep-id`. |
+| 5 | **Rootless UID/GID strategy** | Use `--userns=keep-id:uid=1000,gid=1000` to map host user to container scion user (UID 1000). `sciontool init` detects the non-root scion user and skips privilege operations. |
 | 6 | **Image registry compatibility** | Not an issue — harness configs provide fully-qualified image names. |
 | 7 | **Podman version floor** | Podman 4.x+ minimum; check version during detection and error on older versions. |
 
