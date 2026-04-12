@@ -235,3 +235,58 @@ func TestKubernetesRuntime_BuildPod_Env(t *testing.T) {
 		t.Errorf("LOGNAME not found in pod env")
 	}
 }
+
+func TestSelectLogContainer(t *testing.T) {
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+		want string
+	}{
+		{
+			name: "single container",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "agent"}},
+				},
+			},
+			want: "agent",
+		},
+		{
+			name: "prefers agent container in multi-container pod",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "sync-helper"},
+						{Name: "agent"},
+					},
+				},
+			},
+			want: "agent",
+		},
+		{
+			name: "falls back to first container",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "main"},
+						{Name: "sidecar"},
+					},
+				},
+			},
+			want: "main",
+		},
+		{
+			name: "empty pod",
+			pod:  &corev1.Pod{},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := selectLogContainer(tt.pod); got != tt.want {
+				t.Fatalf("selectLogContainer() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

@@ -1661,7 +1661,14 @@ func (r *KubernetesRuntime) GetLogs(ctx context.Context, id string) (string, err
 		namespace = r.resolveNamespace(ctx, podName)
 	}
 
-	req := r.Client.Clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{})
+	pod, err := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+
+	req := r.Client.Clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
+		Container: selectLogContainer(pod),
+	})
 	podLogs, err := req.Stream(ctx)
 	if err != nil {
 		return "", err
@@ -1674,6 +1681,23 @@ func (r *KubernetesRuntime) GetLogs(ctx context.Context, id string) (string, err
 	}
 
 	return string(data), nil
+}
+
+func selectLogContainer(pod *corev1.Pod) string {
+	if pod == nil || len(pod.Spec.Containers) == 0 {
+		return ""
+	}
+	if len(pod.Spec.Containers) == 1 {
+		return pod.Spec.Containers[0].Name
+	}
+	for _, container := range pod.Spec.Containers {
+		// Hosted pods may include sidecars, but the interactive Scion process runs
+		// in the container named "agent". Prefer that container when present.
+		if container.Name == "agent" {
+			return container.Name
+		}
+	}
+	return pod.Spec.Containers[0].Name
 }
 
 func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
