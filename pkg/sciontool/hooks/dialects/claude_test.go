@@ -101,12 +101,52 @@ func TestClaudeDialect_StopEventExtractsAssistantText(t *testing.T) {
 	assert.Equal(t, "All done.", event.Data.AssistantText)
 }
 
+func TestClaudeDialect_StopEventPrefersLastAssistantMessage(t *testing.T) {
+	// Claude Code 2.1+ includes the final assistant text directly in
+	// the Stop hook payload. When present, we must use it in preference
+	// to reading the transcript file (which may be mid-flush when the
+	// hook fires, producing an empty or stale extraction).
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "t.jsonl")
+	// Write a transcript that would yield "from transcript" if read.
+	content := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"from transcript"}]}}` + "\n"
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(content), 0o600))
+
+	d := NewClaudeDialect()
+	event, err := d.Parse(map[string]interface{}{
+		"hook_event_name":        "Stop",
+		"transcript_path":        transcriptPath,
+		"last_assistant_message": "from payload",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "from payload", event.Data.AssistantText,
+		"payload field must win over transcript extraction")
+}
+
+func TestClaudeDialect_StopEventFallsBackToTranscript(t *testing.T) {
+	// When last_assistant_message is absent (older Claude Code or other
+	// harnesses), fall back to reading the transcript file.
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "t.jsonl")
+	content := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"fallback text"}]}}` + "\n"
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(content), 0o600))
+
+	d := NewClaudeDialect()
+	event, err := d.Parse(map[string]interface{}{
+		"hook_event_name": "Stop",
+		"transcript_path": transcriptPath,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "fallback text", event.Data.AssistantText)
+}
+
 func TestClaudeDialect_NonStopEventDoesNotExtract(t *testing.T) {
 	d := NewClaudeDialect()
 	event, err := d.Parse(map[string]interface{}{
-		"hook_event_name": "PreToolUse",
-		"transcript_path": "/does/not/exist",
-		"tool_name":       "Read",
+		"hook_event_name":        "PreToolUse",
+		"transcript_path":        "/does/not/exist",
+		"last_assistant_message": "ignored",
+		"tool_name":              "Read",
 	})
 	require.NoError(t, err)
 	assert.Empty(t, event.Data.AssistantText)

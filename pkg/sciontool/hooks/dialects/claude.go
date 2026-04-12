@@ -91,13 +91,26 @@ func (d *ClaudeDialect) Parse(data map[string]interface{}) (*hooks.Event, error)
 	// Extract file_path from tool_input/tool_response objects
 	extractFilePath(data, &event.Data)
 
-	// For end-of-turn events (Stop / SubagentStop), Claude Code passes a
-	// transcript_path to the JSONL conversation log. Extract the text
-	// content of the final assistant turn so downstream handlers can
-	// surface it as an outbound agent→user message without having to
-	// re-ingest the whole transcript themselves.
+	// For end-of-turn events (Stop / SubagentStop), Claude Code passes
+	// the final assistant text so downstream handlers can surface it as
+	// an outbound agent→user message.
+	//
+	// Preferred source: the top-level "last_assistant_message" field,
+	// which Claude Code 2.1+ includes in the Stop hook payload directly.
+	// This is authoritative and race-free: the payload is handed to the
+	// hook process as structured JSON, not via a file that may still be
+	// flushing when we read it.
+	//
+	// Fallback: read "transcript_path" (a JSONL conversation log) and
+	// collect text from the trailing contiguous run of assistant entries.
+	// The transcript fallback covers older Claude Code versions that
+	// omit last_assistant_message and any harness that exposes only the
+	// transcript. It is racy against the harness's own writes, so it is
+	// strictly a fallback, not the primary path.
 	if event.Name == hooks.EventAgentEnd {
-		if path := getString(data, "transcript_path"); path != "" {
+		if text := strings.TrimSpace(getString(data, "last_assistant_message")); text != "" {
+			event.Data.AssistantText = text
+		} else if path := getString(data, "transcript_path"); path != "" {
 			if text := extractFinalAssistantText(path); text != "" {
 				event.Data.AssistantText = text
 			}
