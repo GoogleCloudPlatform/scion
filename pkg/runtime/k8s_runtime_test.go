@@ -16,6 +16,9 @@ package runtime
 
 import (
 	"context"
+	"errors"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -25,6 +28,7 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic/fake"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func TestKubernetesRuntime_List(t *testing.T) {
@@ -233,5 +237,169 @@ func TestKubernetesRuntime_BuildPod_Env(t *testing.T) {
 	}
 	if !foundLogname {
 		t.Errorf("LOGNAME not found in pod env")
+	}
+}
+
+func TestSelectLogContainer(t *testing.T) {
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+		want string
+	}{
+		{
+			name: "single container",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "agent"}},
+				},
+			},
+			want: "agent",
+		},
+		{
+			name: "prefers agent container in multi-container pod",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "sync-helper"},
+						{Name: "agent"},
+					},
+				},
+			},
+			want: "agent",
+		},
+		{
+			name: "falls back to first container",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "main"},
+						{Name: "sidecar"},
+					},
+				},
+			},
+			want: "main",
+		},
+		{
+			name: "empty pod",
+			pod:  &corev1.Pod{},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := selectLogContainer(tt.pod); got != tt.want {
+				t.Fatalf("selectLogContainer() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestKubernetesRuntime_ResolvePodTargetFromHostedSlug(t *testing.T) {
+	clientset := k8sfake.NewClientset()
+	scheme := k8sruntime.NewScheme()
+	fc := fake.NewSimpleDynamicClient(scheme)
+	client := k8s.NewTestClient(fc, clientset)
+	r := NewKubernetesRuntime(client)
+	r.DefaultNamespace = "scion-int"
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "global--test-agent",
+			Namespace: "scion-int",
+			Labels: map[string]string{
+				"scion.name": "test-agent",
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "agent", Image: "test-image"}},
+		},
+	}
+
+	if _, err := clientset.CoreV1().Pods("scion-int").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("failed to create pod: %v", err)
+	}
+
+	namespace, podName, agent, err := r.resolvePodTarget(context.Background(), "test-agent")
+	if err != nil {
+		t.Fatalf("resolvePodTarget failed: %v", err)
+	}
+	if namespace != "scion-int" {
+		t.Fatalf("namespace = %q, want %q", namespace, "scion-int")
+	}
+	if podName != "global--test-agent" {
+		t.Fatalf("podName = %q, want %q", podName, "global--test-agent")
+	}
+	if agent == nil {
+		t.Fatal("agent metadata was nil")
+	}
+	if agent.Kubernetes == nil || agent.Kubernetes.PodName != "global--test-agent" {
+		t.Fatalf("agent kubernetes metadata = %#v", agent.Kubernetes)
+	}
+}
+
+func TestKubernetesRuntime_CommandForExec_SkipsProbeForNonRootPod(t *testing.T) {
+	clientset := k8sfake.NewClientset()
+	scheme := k8sruntime.NewScheme()
+	fc := fake.NewSimpleDynamicClient(scheme)
+	client := k8s.NewTestClient(fc, clientset)
+	r := NewKubernetesRuntime(client)
+
+	runAsNonRoot := true
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "nonroot-agent",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"scion.username": "scion",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "agent",
+				Image: "test-image",
+				SecurityContext: &corev1.SecurityContext{
+					RunAsNonRoot: &runAsNonRoot,
+				},
+			}},
+		},
+	}
+
+	if _, err := clientset.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("failed to create pod: %v", err)
+	}
+
+	got, err := r.commandForExec(context.Background(), "default", "nonroot-agent", []string{"pwd"})
+	if err != nil {
+		t.Fatalf("commandForExec failed: %v", err)
+	}
+	want := []string{"pwd"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("commandForExec() = %#v, want %#v", got, want)
+	}
+}
+
+func TestKubernetesRuntime_ResolvePodTarget_PropagatesListError(t *testing.T) {
+	clientset := k8sfake.NewClientset()
+	listErr := errors.New("boom")
+	clientset.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, listErr
+	})
+
+	scheme := k8sruntime.NewScheme()
+	fc := fake.NewSimpleDynamicClient(scheme)
+	client := k8s.NewTestClient(fc, clientset)
+	r := NewKubernetesRuntime(client)
+
+	_, _, _, err := r.resolvePodTarget(context.Background(), "test-agent")
+	if err == nil {
+		t.Fatal("resolvePodTarget unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "failed to list agents for resolution") {
+		t.Fatalf("resolvePodTarget error = %v, want list resolution context", err)
+	}
+	if !strings.Contains(err.Error(), listErr.Error()) {
+		t.Fatalf("resolvePodTarget error = %v, want original list error", err)
 	}
 }

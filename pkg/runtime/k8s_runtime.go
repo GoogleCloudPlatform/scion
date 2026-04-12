@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -73,6 +74,97 @@ func (r *KubernetesRuntime) ExecUser() string {
 	return "scion"
 }
 
+var validExecUsername = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+
+func execTargetUsername(pod *corev1.Pod) string {
+	if pod != nil {
+		if u := strings.TrimSpace(pod.Annotations["scion.username"]); u != "" && validExecUsername.MatchString(u) {
+			return u
+		}
+	}
+	return "scion"
+}
+
+func shellQuote(arg string) string {
+	return fmt.Sprintf("'%s'", strings.ReplaceAll(arg, "'", "'\"'\"'"))
+}
+
+func shellJoin(args []string) string {
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		quoted[i] = shellQuote(arg)
+	}
+	return strings.Join(quoted, " ")
+}
+
+func buildExecCommandForUser(currentUser, targetUser string, cmd []string) []string {
+	if targetUser == "" {
+		targetUser = "scion"
+	}
+	if currentUser == "" || currentUser == targetUser || targetUser == "root" {
+		return append([]string(nil), cmd...)
+	}
+	return []string{"su", "-", targetUser, "-c", shellJoin(cmd)}
+}
+
+func podRunsAsNonRoot(pod *corev1.Pod, containerName string) bool {
+	if pod == nil {
+		return false
+	}
+	if pod.Spec.SecurityContext != nil {
+		if pod.Spec.SecurityContext.RunAsUser != nil {
+			return *pod.Spec.SecurityContext.RunAsUser != 0
+		}
+		if pod.Spec.SecurityContext.RunAsNonRoot != nil && *pod.Spec.SecurityContext.RunAsNonRoot {
+			return true
+		}
+	}
+	for _, container := range pod.Spec.Containers {
+		if container.Name != containerName {
+			continue
+		}
+		if container.SecurityContext == nil {
+			return false
+		}
+		if container.SecurityContext.RunAsUser != nil {
+			return *container.SecurityContext.RunAsUser != 0
+		}
+		if container.SecurityContext.RunAsNonRoot != nil && *container.SecurityContext.RunAsNonRoot {
+			return true
+		}
+		return false
+	}
+	return false
+}
+
+func (r *KubernetesRuntime) currentExecUser(ctx context.Context, namespace, podName string) (string, error) {
+	out, err := r.execInPod(ctx, namespace, podName, []string{"id", "-un"})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func (r *KubernetesRuntime) commandForExec(ctx context.Context, namespace, podName string, cmd []string) ([]string, error) {
+	pod, err := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	targetUser := execTargetUsername(pod)
+	if podRunsAsNonRoot(pod, "agent") {
+		return append([]string(nil), cmd...), nil
+	}
+	// Only probe the live pod user when the pod spec does not already tell us
+	// the agent container runs as non-root. That keeps the common non-root path
+	// to a single API read instead of a read plus an extra exec round-trip.
+	currentUser, err := r.currentExecUser(ctx, namespace, podName)
+	if err == nil && currentUser != "" {
+		return buildExecCommandForUser(currentUser, targetUser, cmd), nil
+	}
+	return buildExecCommandForUser("root", targetUser, cmd), nil
+}
+
 // resolveNamespace determines the namespace for a pod by looking up the
 // scion.namespace annotation on the pod itself. Falls back to DefaultNamespace
 // if the pod is not found or has no annotation.
@@ -101,6 +193,40 @@ func (r *KubernetesRuntime) resolveNamespace(ctx context.Context, podName string
 	}
 
 	return r.DefaultNamespace
+}
+
+func podTargetFromAgent(agent api.AgentInfo) (namespace, podName string, ok bool) {
+	if agent.Kubernetes != nil {
+		namespace = agent.Kubernetes.Namespace
+		podName = agent.Kubernetes.PodName
+	}
+	if podName == "" {
+		podName = agent.ContainerID
+	}
+	return namespace, podName, namespace != "" && podName != ""
+}
+
+func (r *KubernetesRuntime) resolvePodTarget(ctx context.Context, id string) (namespace, podName string, agent *api.AgentInfo, err error) {
+	if strings.Contains(id, "/") {
+		parts := strings.SplitN(id, "/", 2)
+		return parts[0], parts[1], nil, nil
+	}
+
+	agents, err := r.List(ctx, map[string]string{"scion.name": id})
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to list agents for resolution: %w", err)
+	}
+	for i := range agents {
+		candidate := agents[i]
+		namespace, podName, ok := podTargetFromAgent(candidate)
+		if ok {
+			return namespace, podName, &candidate, nil
+		}
+	}
+
+	podName = id
+	namespace = r.resolveNamespace(ctx, podName)
+	return namespace, podName, nil, nil
 }
 
 // parseResourceSafe parses a Kubernetes resource quantity string, returning a
@@ -1650,18 +1776,19 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 }
 
 func (r *KubernetesRuntime) GetLogs(ctx context.Context, id string) (string, error) {
-	namespace := r.DefaultNamespace
-	podName := id
-
-	if strings.Contains(id, "/") {
-		parts := strings.SplitN(id, "/", 2)
-		namespace = parts[0]
-		podName = parts[1]
-	} else {
-		namespace = r.resolveNamespace(ctx, podName)
+	namespace, podName, _, err := r.resolvePodTarget(ctx, id)
+	if err != nil {
+		return "", err
 	}
 
-	req := r.Client.Clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{})
+	pod, err := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+
+	req := r.Client.Clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
+		Container: selectLogContainer(pod),
+	})
 	podLogs, err := req.Stream(ctx)
 	if err != nil {
 		return "", err
@@ -1676,39 +1803,36 @@ func (r *KubernetesRuntime) GetLogs(ctx context.Context, id string) (string, err
 	return string(data), nil
 }
 
-func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
-	podName := id
-	namespace := r.DefaultNamespace
-
-	if strings.Contains(id, "/") {
-		parts := strings.SplitN(id, "/", 2)
-		namespace = parts[0]
-		podName = parts[1]
-	} else {
-		namespace = r.resolveNamespace(ctx, podName)
+func selectLogContainer(pod *corev1.Pod) string {
+	if pod == nil || len(pod.Spec.Containers) == 0 {
+		return ""
 	}
-
-	// Find pod first to check status
-	agents, err := r.List(ctx, map[string]string{"scion.name": id})
-	if err != nil {
-		return fmt.Errorf("failed to list pods: %w", err)
+	if len(pod.Spec.Containers) == 1 {
+		return pod.Spec.Containers[0].Name
 	}
-
-	var agent *api.AgentInfo
-	for _, a := range agents {
-		if a.ContainerID == id || a.Name == id {
-			agent = &a
-			break
+	for _, container := range pod.Spec.Containers {
+		// Hosted pods may include sidecars, but the interactive Scion process runs
+		// in the container named "agent". Prefer that container when present.
+		if container.Name == "agent" {
+			return container.Name
 		}
 	}
+	return pod.Spec.Containers[0].Name
+}
 
-	if agent == nil {
-		return fmt.Errorf("agent '%s' pod not found. It may have been deleted.", id)
+func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
+	namespace, podName, _, err := r.resolvePodTarget(ctx, id)
+	if err != nil {
+		return fmt.Errorf("failed to resolve pod target: %w", err)
+	}
+	pod, err := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("agent '%s' pod not found. It may have been deleted: %w", id, err)
 	}
 
 	// For Kubernetes, we want to ensure it is in Running phase
-	if !strings.EqualFold(agent.ContainerStatus, string(corev1.PodRunning)) {
-		return fmt.Errorf("agent '%s' is not running (status: %s). Use 'scion start %s' to resume it.", id, agent.ContainerStatus, id)
+	if pod.Status.Phase != corev1.PodRunning {
+		return fmt.Errorf("agent '%s' is not running (status: %s). Use 'scion start %s' to resume it.", id, pod.Status.Phase, id)
 	}
 
 	fmt.Printf("Attaching to pod '%s' (use Ctrl-b d to detach)...\n", podName)
@@ -1721,10 +1845,7 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 
 	// Determine the container username so we attach as the correct user
 	// (K8s exec has no --user flag; we use su to switch from root).
-	username := "scion"
-	if u, ok := agent.Annotations["scion.username"]; ok && u != "" {
-		username = u
-	}
+	username := execTargetUsername(pod)
 
 	option := &corev1.PodExecOptions{
 		Container: "agent",
@@ -1965,15 +2086,9 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 }
 
 func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
-	namespace := r.DefaultNamespace
-	podName := id
-
-	if strings.Contains(id, "/") {
-		parts := strings.SplitN(id, "/", 2)
-		namespace = parts[0]
-		podName = parts[1]
-	} else {
-		namespace = r.resolveNamespace(ctx, podName)
+	namespace, podName, _, err := r.resolvePodTarget(ctx, id)
+	if err != nil {
+		return "", err
 	}
 
 	req := r.Client.Clientset.CoreV1().RESTClient().Post().
@@ -1982,17 +2097,14 @@ func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (
 		Namespace(namespace).
 		SubResource("exec")
 
-	// Wrap command with su to run as the scion user (K8s exec has no --user flag).
-	// Shell-quote each argument to handle spaces and special characters.
-	quoted := make([]string, len(cmd))
-	for i, arg := range cmd {
-		quoted[i] = fmt.Sprintf("'%s'", strings.ReplaceAll(arg, "'", "'\"'\"'"))
+	execCmd, err := r.commandForExec(ctx, namespace, podName, cmd)
+	if err != nil {
+		return "", err
 	}
-	suCmd := []string{"su", "-", "scion", "-c", strings.Join(quoted, " ")}
 
 	option := &corev1.PodExecOptions{
 		Container: "agent",
-		Command:   suCmd,
+		Command:   execCmd,
 		Stdin:     false,
 		Stdout:    true,
 		Stderr:    true,
