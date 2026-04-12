@@ -14,7 +14,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build install test test-fast vet lint golangci-lint web web-typecheck fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries
+.PHONY: all build install test test-fast vet lint golangci-lint web web-typecheck fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries ko-build-local
 
 ## all: Build the web frontend, then compile the Go binary with embedded assets
 all: web install
@@ -90,6 +90,15 @@ container-binaries: container-sciontool container-scion
 	@echo ""
 	@echo "Dev binaries ready in $(CONTAINER_DIR)/"
 	@echo "Usage: export SCION_DEV_BINARIES=$(CONTAINER_DIR)"
+
+## ko-build-local: Build the hub container image locally with ko (loads into local Docker)
+ko-build-local: web
+	@echo "Building hub container image with ko..."
+	@VERSION=$$(git describe --tags --exact-match 2>/dev/null || echo "dev") \
+		COMMIT=$$(git rev-parse HEAD 2>/dev/null || echo "unknown") \
+		BUILD_TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
+		KO_DOCKER_REPO=ko.local \
+		ko build ./cmd/scion --bare --local
 
 ## web-typecheck: Run TypeScript type checking on the web frontend
 web-typecheck:
