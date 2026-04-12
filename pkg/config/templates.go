@@ -820,6 +820,12 @@ func mergeTelemetryConfig(base, override *api.TelemetryConfig) *api.TelemetryCon
 			if override.Cloud.TLS.CAFile != "" {
 				result.Cloud.TLS.CAFile = override.Cloud.TLS.CAFile
 			}
+			if override.Cloud.TLS.CertFile != "" {
+				result.Cloud.TLS.CertFile = override.Cloud.TLS.CertFile
+			}
+			if override.Cloud.TLS.KeyFile != "" {
+				result.Cloud.TLS.KeyFile = override.Cloud.TLS.KeyFile
+			}
 		}
 		if override.Cloud.Batch != nil {
 			if result.Cloud.Batch == nil {

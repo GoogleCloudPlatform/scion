@@ -258,6 +258,8 @@ type TelemetryTLS struct {
 	Enabled            *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
 	InsecureSkipVerify *bool  `json:"insecure_skip_verify,omitempty" yaml:"insecure_skip_verify,omitempty"`
 	CAFile             string `json:"ca_file,omitempty" yaml:"ca_file,omitempty"`
+	CertFile           string `json:"cert_file,omitempty" yaml:"cert_file,omitempty"`
+	KeyFile            string `json:"key_file,omitempty" yaml:"key_file,omitempty"`
 }
 
 // TelemetryBatch holds batch export settings.
