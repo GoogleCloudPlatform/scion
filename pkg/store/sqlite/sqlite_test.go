@@ -2149,7 +2149,7 @@ func TestMarkStalledAgents(t *testing.T) {
 	heartbeatRecency := time.Now().Add(-2 * time.Minute)
 
 	// --- Should be marked stalled: stale activity + recent heartbeat ---
-	stalledActivities := []string{"idle", "thinking", "executing", "waiting_for_input"}
+	stalledActivities := []string{"thinking", "executing"}
 	var expectedIDs []string
 	for _, activity := range stalledActivities {
 		agent := &store.Agent{
@@ -2256,6 +2256,36 @@ func TestMarkStalledAgents(t *testing.T) {
 		staleActivityTime, recentHeartbeat, alreadyOfflineAgent.ID)
 	require.NoError(t, err)
 
+	// Idle activity (normal waiting state — stale activity + recent heartbeat must NOT stall)
+	idleAgent := &store.Agent{
+		ID: api.NewUUID(), Slug: "idle-waiting", Name: "Idle Waiting",
+		Template: "claude", GroveID: grove.ID, Phase: string(state.PhaseCreated),
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, idleAgent))
+	require.NoError(t, s.UpdateAgentStatus(ctx, idleAgent.ID, store.AgentStatusUpdate{
+		Phase: "running", Activity: "idle",
+	}))
+	_, err = s.db.ExecContext(ctx,
+		"UPDATE agents SET last_activity_event = ?, last_seen = ? WHERE id = ?",
+		staleActivityTime, recentHeartbeat, idleAgent.ID)
+	require.NoError(t, err)
+
+	// waiting_for_input activity (sticky waiting state — must NOT stall)
+	waitingAgent := &store.Agent{
+		ID: api.NewUUID(), Slug: "waiting-for-input", Name: "Waiting For Input",
+		Template: "claude", GroveID: grove.ID, Phase: string(state.PhaseCreated),
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, waitingAgent))
+	require.NoError(t, s.UpdateAgentStatus(ctx, waitingAgent.ID, store.AgentStatusUpdate{
+		Phase: "running", Activity: "waiting_for_input",
+	}))
+	_, err = s.db.ExecContext(ctx,
+		"UPDATE agents SET last_activity_event = ?, last_seen = ? WHERE id = ?",
+		staleActivityTime, recentHeartbeat, waitingAgent.ID)
+	require.NoError(t, err)
+
 	// Execute
 	agents, err := s.MarkStalledAgents(ctx, activityThreshold, heartbeatRecency)
 	require.NoError(t, err)
@@ -2305,6 +2335,14 @@ func TestMarkStalledAgents(t *testing.T) {
 	a, err = s.GetAgent(ctx, alreadyOfflineAgent.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "offline", a.Activity)
+
+	a, err = s.GetAgent(ctx, idleAgent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "idle", a.Activity, "idle agent should not be marked stalled")
+
+	a, err = s.GetAgent(ctx, waitingAgent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "waiting_for_input", a.Activity, "waiting_for_input agent should not be marked stalled")
 }
 
 func TestMarkStalledAgents_Idempotent(t *testing.T) {
@@ -2331,7 +2369,7 @@ func TestMarkStalledAgents_Idempotent(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
-		Phase: "running", Activity: "idle",
+		Phase: "running", Activity: "thinking",
 	}))
 	_, err := s.db.ExecContext(ctx,
 		"UPDATE agents SET last_activity_event = ?, last_seen = ? WHERE id = ?",

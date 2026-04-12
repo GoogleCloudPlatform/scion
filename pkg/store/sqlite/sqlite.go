@@ -1742,7 +1742,7 @@ func (s *SQLiteStore) MarkStalledAgents(ctx context.Context, activityThreshold, 
 	// - Have a stale last_activity_event (older than activityThreshold)
 	// - Have a recent heartbeat (last_seen >= heartbeatRecency) — process is alive
 	// - Are in the running phase
-	// - Are not already in a terminal/sticky activity or already stalled/offline
+	// - Are not already in a terminal/sticky/waiting activity or already stalled/offline
 	_, err = tx.ExecContext(ctx, `
 		UPDATE agents SET
 			stalled_from_activity = activity,
