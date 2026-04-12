@@ -281,7 +281,7 @@ func TestDefaultKubernetesNamespace(t *testing.T) {
 }
 
 func TestNewKubernetesRuntime_UsesDetectedNamespace(t *testing.T) {
-	clientset := k8sfake.NewSimpleClientset()
+	clientset := k8sfake.NewClientset()
 	scheme := k8sruntime.NewScheme()
 	fc := fake.NewSimpleDynamicClient(scheme)
 	client := k8s.NewTestClient(fc, clientset)
