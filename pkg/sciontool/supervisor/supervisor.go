@@ -125,8 +125,9 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 		err := chownRecursive(home, s.config.UID, s.config.GID)
 		if err != nil {
 			log.Error("Failed to chown home directory %s: %v", home, err)
+		} else {
+			log.Debug("Chowned %s to %d:%d", home, s.config.UID, s.config.GID)
 		}
-		log.Debug("Chowned %s to %d:%d", home, s.config.UID, s.config.GID)
 	}
 
 	// Apply SCION_EXTRA_PATH: prepend its value to PATH, then remove it from env.
