@@ -933,6 +933,7 @@ export class ScionPageAgentDetail extends LitElement {
             agentId=${this.agentId}
             agentName=${this.agent.name || ''}
             ?canSend=${can(this.agent._capabilities, 'message')}
+            ?cloudLogging=${this.agent.cloudLogging || false}
           ></scion-agent-message-viewer>
         </sl-tab-panel>
         <sl-tab-panel name="configuration">${this.renderConfigurationTab()}</sl-tab-panel>

@@ -74,6 +74,15 @@ export class ScionAgentMessageViewer extends LitElement {
   canSend = false;
 
   /**
+   * Whether Cloud Logging is available for this agent. When false, the
+   * viewer skips Cloud-Logging-only paths: the fallback fetch from
+   * /message-logs and the SSE stream from /message-logs/stream. The hub
+   * message store path still works and is the primary source regardless.
+   */
+  @property({ type: Boolean })
+  cloudLogging = false;
+
+  /**
    * Custom API URL for fetching message logs.
    * When set, overrides the default agent-scoped URL.
    * Query params (tail, since) are appended automatically.
@@ -406,7 +415,11 @@ export class ScionAgentMessageViewer extends LitElement {
         }
       }
 
-      // Fallback: Cloud Logging proxy (for pre-migration records or when Hub is unavailable)
+      // Fallback: Cloud Logging proxy (for pre-migration records or when Hub is unavailable).
+      // Skipped when Cloud Logging is unavailable — the /message-logs endpoint returns 501
+      // in that case, which would turn an empty hub-store result into a user-facing error
+      // instead of the intended "No messages found" empty state.
+      if (!this.cloudLogging && !this.logsUrl) return;
       const baseUrl = this.resolvedLogsUrl;
       if (!baseUrl) return;
 
@@ -748,6 +761,11 @@ export class ScionAgentMessageViewer extends LitElement {
   }
 
   private renderToolbar() {
+    // The Stream toggle subscribes to /message-logs/stream, which is a
+    // Cloud-Logging-only endpoint. Only show it when Cloud Logging (or a
+    // custom streamUrl override) is available, otherwise the toggle would
+    // silently fail for non-CL deployments.
+    const streamAvailable = this.cloudLogging || this.streamUrl !== '';
     return html`
       <div class="toolbar">
         ${this.streaming
@@ -763,12 +781,16 @@ export class ScionAgentMessageViewer extends LitElement {
           <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
           Refresh
         </sl-button>
-        <span class="toolbar-label">Stream</span>
-        <sl-switch
-          size="small"
-          ?checked=${this.streaming}
-          @sl-change=${this.handleStreamToggle}
-        ></sl-switch>
+        ${streamAvailable
+          ? html`
+              <span class="toolbar-label">Stream</span>
+              <sl-switch
+                size="small"
+                ?checked=${this.streaming}
+                @sl-change=${this.handleStreamToggle}
+              ></sl-switch>
+            `
+          : nothing}
       </div>
     `;
   }
