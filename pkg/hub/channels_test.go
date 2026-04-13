@@ -448,3 +448,167 @@ func TestFormatSlackMessage(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Discord channel tests
+// ---------------------------------------------------------------------------
+
+func TestNewChannelRegistry_ValidDiscord(t *testing.T) {
+	configs := []ChannelConfig{
+		{Type: "discord", Params: map[string]string{"webhook_url": "https://discord.com/api/webhooks/123456789/abcDEF_token"}},
+	}
+	registry := NewChannelRegistry(configs, slog.Default())
+	assert.Equal(t, 1, registry.Len())
+}
+
+func TestDiscordChannel_Validate(t *testing.T) {
+	tests := []struct {
+		name        string
+		params      map[string]string
+		wantErr     bool
+		errContains string
+	}{
+		{"valid discord.com", map[string]string{"webhook_url": "https://discord.com/api/webhooks/123/abc"}, false, ""},
+		{"valid discordapp.com", map[string]string{"webhook_url": "https://discordapp.com/api/webhooks/123/abc"}, false, ""},
+		{"valid ptb.discord.com", map[string]string{"webhook_url": "https://ptb.discord.com/api/webhooks/123/abc"}, false, ""},
+		{"valid canary.discord.com", map[string]string{"webhook_url": "https://canary.discord.com/api/webhooks/123/abc"}, false, ""},
+		{"missing url", map[string]string{}, true, ""},
+		{"wrong scheme", map[string]string{"webhook_url": "http://discord.com/api/webhooks/123/abc"}, true, ""},
+		{"wrong domain", map[string]string{"webhook_url": "https://example.com/api/webhooks/123/abc"}, true, ""},
+		{"slack suffix rejected", map[string]string{"webhook_url": "https://discord.com/api/webhooks/123/abc/slack"}, true, "slack"},
+		{"github domain", map[string]string{"webhook_url": "https://hooks.slack.com/services/T00/B00/xxx"}, true, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ch := NewDiscordChannel(tt.params)
+			err := ch.Validate()
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errContains != "" {
+					assert.Contains(t, err.Error(), tt.errContains)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestDiscordChannel_Deliver(t *testing.T) {
+	var received []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		buf := make([]byte, r.ContentLength)
+		r.Body.Read(buf)
+		received = buf
+		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	ch := &DiscordChannel{webhookURL: server.URL, client: http.DefaultClient}
+
+	msg := messages.NewNotification("agent:worker", "user:alice", "task done", messages.TypeStateChange)
+	err := ch.Deliver(context.Background(), msg)
+	require.NoError(t, err)
+
+	var payload discordPayload
+	require.NoError(t, json.Unmarshal(received, &payload))
+	require.Len(t, payload.Embeds, 1)
+	assert.Equal(t, discordColorStateChange, payload.Embeds[0].Color)
+	assert.Contains(t, payload.Embeds[0].Description, "task done")
+	assert.Contains(t, payload.Embeds[0].Title, "agent:worker")
+	assert.Equal(t, "", payload.Content)
+	// AllowedMentions must be set with parse: [] to prevent @everyone/@here
+	require.NotNil(t, payload.AllowedMentions)
+	parsedJSON, err := json.Marshal(payload.AllowedMentions)
+	require.NoError(t, err)
+	assert.Contains(t, string(parsedJSON), `"parse":[]`)
+}
+
+func TestDiscordChannel_UrgentMention(t *testing.T) {
+	var received []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		buf := make([]byte, r.ContentLength)
+		r.Body.Read(buf)
+		received = buf
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	ch := &DiscordChannel{
+		webhookURL:      server.URL,
+		mentionOnUrgent: "<@&9876543210>",
+		client:          http.DefaultClient,
+	}
+
+	msg := messages.NewNotification("agent:worker", "user:alice", "urgent task", messages.TypeInputNeeded)
+	msg.Urgent = true
+	err := ch.Deliver(context.Background(), msg)
+	require.NoError(t, err)
+
+	var payload discordPayload
+	require.NoError(t, json.Unmarshal(received, &payload))
+	assert.Contains(t, payload.Content, "<@&9876543210>")
+	// Urgent messages use the dedicated urgent colour
+	assert.Equal(t, discordColorUrgent, payload.Embeds[0].Color)
+	require.NotNil(t, payload.AllowedMentions)
+	assert.Contains(t, payload.AllowedMentions.Roles, "9876543210")
+	assert.NotContains(t, payload.AllowedMentions.Parse, "everyone")
+	assert.NotContains(t, payload.AllowedMentions.Parse, "users")
+}
+
+func TestDiscordChannel_ColorByType(t *testing.T) {
+	tests := []struct {
+		msgType     string
+		wantColor   int
+	}{
+		{messages.TypeStateChange, discordColorStateChange},
+		{messages.TypeInputNeeded, discordColorInputNeeded},
+		{messages.TypeInstruction, discordColorInstruction},
+	}
+	for _, tt := range tests {
+		t.Run(tt.msgType, func(t *testing.T) {
+			msg := messages.NewNotification("agent:worker", "user:alice", "msg", tt.msgType)
+			payload := formatDiscordPayload(msg, "")
+			require.Len(t, payload.Embeds, 1)
+			assert.Equal(t, tt.wantColor, payload.Embeds[0].Color)
+		})
+	}
+}
+
+func TestDiscordChannel_TruncateLongMsg(t *testing.T) {
+	longMsg := strings.Repeat("A", 5000)
+	msg := messages.NewNotification("agent:worker", "user:alice", longMsg, messages.TypeStateChange)
+	payload := formatDiscordPayload(msg, "")
+	require.Len(t, payload.Embeds, 1)
+	assert.LessOrEqual(t, len([]rune(payload.Embeds[0].Description)), 2048)
+	assert.True(t,
+		strings.HasSuffix(payload.Embeds[0].Description, "...") ||
+			strings.HasSuffix(payload.Embeds[0].Description, "…(truncated)"),
+		"description should end with an ellipsis marker")
+	// Total embed text should be under 6000 chars
+	totalLen := len(payload.Embeds[0].Title) + len(payload.Embeds[0].Description)
+	assert.Less(t, totalLen, 6000)
+}
+
+func TestDiscordChannel_DeliverFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	ch := &DiscordChannel{webhookURL: server.URL, client: http.DefaultClient}
+	msg := messages.NewNotification("agent:worker", "user:alice", "completed", messages.TypeStateChange)
+	err := ch.Deliver(context.Background(), msg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "500")
+}
+
+func TestFormatDiscordPayload_URLRejectsSlackSuffix(t *testing.T) {
+	ch := NewDiscordChannel(map[string]string{"webhook_url": "https://discord.com/api/webhooks/1/2/slack"})
+	err := ch.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "slack")
+}
