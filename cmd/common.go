@@ -321,10 +321,10 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	// Validate --harness-auth value
 	if harnessAuthFlag != "" {
 		switch harnessAuthFlag {
-		case "api-key", "vertex-ai", "auth-file":
+		case "api-key", "oauth-token", "auth-file", "vertex-ai":
 			// valid
 		default:
-			return fmt.Errorf("invalid --harness-auth value %q: must be one of api-key, vertex-ai, auth-file", harnessAuthFlag)
+			return fmt.Errorf("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai", harnessAuthFlag)
 		}
 	}
 

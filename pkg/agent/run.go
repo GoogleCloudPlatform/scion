@@ -363,13 +363,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		if opts.BrokerMode {
 			harness.OverlayFileSecrets(&auth, opts.ResolvedSecrets)
 		}
-		util.Debugf("auth: gathered credentials — selectedType=%q, hasGeminiKey=%t, hasGoogleKey=%t, hasOAuth=%t, hasADC=%t, hasAnthropicKey=%t, cloudProject=%q, gcpMetadataMode=%q, brokerMode=%t",
+		util.Debugf("auth: gathered credentials — selectedType=%q, hasGeminiKey=%t, hasGoogleKey=%t, hasOAuth=%t, hasADC=%t, hasAnthropicKey=%t, hasClaudeOAuthToken=%t, hasClaudeAuthFile=%t, cloudProject=%q, gcpMetadataMode=%q, brokerMode=%t",
 			auth.SelectedType,
 			auth.GeminiAPIKey != "",
 			auth.GoogleAPIKey != "",
 			auth.OAuthCreds != "",
 			auth.GoogleAppCredentials != "",
 			auth.AnthropicAPIKey != "",
+			auth.ClaudeOAuthToken != "",
+			auth.ClaudeAuthFile != "",
 			auth.GoogleCloudProject,
 			auth.GCPMetadataMode,
 			opts.BrokerMode,
@@ -1064,6 +1066,7 @@ func isAuthEnvKey(key string) bool {
 	case "GEMINI_API_KEY",
 		"GOOGLE_API_KEY",
 		"ANTHROPIC_API_KEY",
+		"CLAUDE_CODE_OAUTH_TOKEN",
 		"OPENAI_API_KEY",
 		"CODEX_API_KEY",
 		"GOOGLE_CLOUD_PROJECT",
@@ -1088,6 +1091,8 @@ func authFileKind(name, target string) string {
 		return "codex-auth"
 	case name == "OPENCODE_AUTH" || strings.HasSuffix(target, "/opencode/auth.json"):
 		return "opencode-auth"
+	case name == "CLAUDE_AUTH" || strings.HasSuffix(target, "/.claude/.credentials.json"):
+		return "claude-auth"
 	default:
 		return ""
 	}

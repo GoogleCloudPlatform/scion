@@ -148,6 +148,8 @@ export class ScionPageAgentConfigure extends LitElement {
     switch (method) {
       case 'api-key':
         return authCaps.api_key;
+      case 'oauth-token':
+        return authCaps.oauth_token;
       case 'auth-file':
         return authCaps.auth_file;
       case 'vertex-ai':
@@ -778,6 +780,7 @@ export class ScionPageAgentConfigure extends LitElement {
 
   private renderGeneralTab() {
     const authFileCap = this.harnessCapabilities?.auth.auth_file;
+    const oauthTokenCap = this.harnessCapabilities?.auth.oauth_token;
     const vertexCap = this.harnessCapabilities?.auth.vertex_ai;
     const telemetryCap = this.harnessCapabilities?.telemetry.enabled;
     const selectedAuthCap = this.authFieldForMethod(this.authMethod);
@@ -828,6 +831,7 @@ export class ScionPageAgentConfigure extends LitElement {
         >
           <sl-option value="">Auto Detected</sl-option>
           <sl-option value="api-key">Provider API Key</sl-option>
+          <sl-option value="oauth-token" ?disabled=${this.isUnsupported(oauthTokenCap)}>OAuth Token (env var)</sl-option>
           <sl-option value="vertex-ai" ?disabled=${this.isUnsupported(vertexCap)}>Vertex Model Garden</sl-option>
           <sl-option value="auth-file" ?disabled=${this.isUnsupported(authFileCap)}>Harness credential file</sl-option>
         </sl-select>

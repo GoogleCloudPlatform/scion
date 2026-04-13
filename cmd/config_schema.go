@@ -66,7 +66,7 @@ func configSchemaFields() []schemaField {
 		{Name: "image", Type: "string", Description: "Container image"},
 		{Name: "model", Type: "string", Description: "LLM model to use"},
 		{Name: "user", Type: "string", Description: "Container unix user"},
-		{Name: "auth_selected_type", Type: "string", Description: "Auth method (api-key, vertex-ai, auth-file)"},
+		{Name: "auth_selected_type", Type: "string", Description: "Auth method (api-key, oauth-token, auth-file, vertex-ai)"},
 		{Name: "task", Type: "string", Description: "Task prompt for the agent"},
 		{Name: "branch", Type: "string", Description: "Git branch for the agent workspace"},
 		{Name: "system_prompt", Type: "string", Description: "System prompt (inline text or file:// URI)"},

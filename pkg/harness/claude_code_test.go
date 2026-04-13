@@ -543,6 +543,166 @@ func TestClaudeResolveAuth_VertexAI_ExplicitWithGCPSA(t *testing.T) {
 	}
 }
 
+func TestClaudeResolveAuth_OAuthToken(t *testing.T) {
+	c := &ClaudeCode{}
+	auth := api.AuthConfig{ClaudeOAuthToken: "sk-ant-oat-test"}
+	result, err := c.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Method != "oauth-token" {
+		t.Errorf("Method = %q, want %q", result.Method, "oauth-token")
+	}
+	if result.EnvVars["CLAUDE_CODE_OAUTH_TOKEN"] != "sk-ant-oat-test" {
+		t.Errorf("CLAUDE_CODE_OAUTH_TOKEN = %q, want %q", result.EnvVars["CLAUDE_CODE_OAUTH_TOKEN"], "sk-ant-oat-test")
+	}
+	if len(result.Files) != 0 {
+		t.Errorf("expected no files for oauth-token, got %d", len(result.Files))
+	}
+}
+
+func TestClaudeResolveAuth_OAuthToken_Explicit(t *testing.T) {
+	c := &ClaudeCode{}
+	auth := api.AuthConfig{
+		SelectedType:     "oauth-token",
+		ClaudeOAuthToken: "sk-ant-oat-test",
+	}
+	result, err := c.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Method != "oauth-token" {
+		t.Errorf("Method = %q, want %q", result.Method, "oauth-token")
+	}
+}
+
+func TestClaudeResolveAuth_OAuthToken_ExplicitMissing(t *testing.T) {
+	c := &ClaudeCode{}
+	auth := api.AuthConfig{SelectedType: "oauth-token"}
+	_, err := c.ResolveAuth(auth)
+	if err == nil {
+		t.Fatal("expected error for oauth-token with no token")
+	}
+	if !strings.Contains(err.Error(), "CLAUDE_CODE_OAUTH_TOKEN") {
+		t.Errorf("error should mention CLAUDE_CODE_OAUTH_TOKEN: %v", err)
+	}
+}
+
+func TestClaudeResolveAuth_CredentialsFile(t *testing.T) {
+	c := &ClaudeCode{}
+	auth := api.AuthConfig{ClaudeAuthFile: "/host/home/.claude/.credentials.json"}
+	result, err := c.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Method != "auth-file" {
+		t.Errorf("Method = %q, want %q", result.Method, "auth-file")
+	}
+	if len(result.EnvVars) != 0 {
+		t.Errorf("expected no env vars for auth-file, got %v", result.EnvVars)
+	}
+	if len(result.Files) != 1 {
+		t.Fatalf("expected 1 file mapping, got %d", len(result.Files))
+	}
+	if result.Files[0].SourcePath != "/host/home/.claude/.credentials.json" {
+		t.Errorf("SourcePath = %q", result.Files[0].SourcePath)
+	}
+	if result.Files[0].ContainerPath != "~/.claude/.credentials.json" {
+		t.Errorf("ContainerPath = %q, want ~/.claude/.credentials.json", result.Files[0].ContainerPath)
+	}
+}
+
+func TestClaudeResolveAuth_CredentialsFile_Explicit(t *testing.T) {
+	c := &ClaudeCode{}
+	auth := api.AuthConfig{
+		SelectedType:   "auth-file",
+		ClaudeAuthFile: "/host/home/.claude/.credentials.json",
+	}
+	result, err := c.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Method != "auth-file" {
+		t.Errorf("Method = %q, want %q", result.Method, "auth-file")
+	}
+}
+
+func TestClaudeResolveAuth_CredentialsFile_ExplicitMissing(t *testing.T) {
+	c := &ClaudeCode{}
+	auth := api.AuthConfig{SelectedType: "auth-file"}
+	_, err := c.ResolveAuth(auth)
+	if err == nil {
+		t.Fatal("expected error for auth-file with no credentials file")
+	}
+	if !strings.Contains(err.Error(), ".credentials.json") {
+		t.Errorf("error should mention .credentials.json: %v", err)
+	}
+}
+
+func TestClaudeResolveAuth_Priority(t *testing.T) {
+	// Auto-detect priority: API key → OAuth token → credentials file → Vertex AI.
+	c := &ClaudeCode{}
+
+	// API key wins over everything else
+	auth := api.AuthConfig{
+		AnthropicAPIKey:      "sk-ant-apikey",
+		ClaudeOAuthToken:     "sk-ant-oat",
+		ClaudeAuthFile:       "/host/.claude/.credentials.json",
+		GoogleAppCredentials: "/host/adc.json",
+		GoogleCloudProject:   "proj",
+		GoogleCloudRegion:    "us-central1",
+	}
+	result, err := c.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Method != "api-key" {
+		t.Errorf("api-key should win; Method = %q", result.Method)
+	}
+
+	// OAuth token wins over credentials file and Vertex
+	auth = api.AuthConfig{
+		ClaudeOAuthToken:     "sk-ant-oat",
+		ClaudeAuthFile:       "/host/.claude/.credentials.json",
+		GoogleAppCredentials: "/host/adc.json",
+		GoogleCloudProject:   "proj",
+		GoogleCloudRegion:    "us-central1",
+	}
+	result, err = c.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Method != "oauth-token" {
+		t.Errorf("oauth-token should win over auth-file/vertex; Method = %q", result.Method)
+	}
+
+	// Credentials file wins over Vertex
+	auth = api.AuthConfig{
+		ClaudeAuthFile:       "/host/.claude/.credentials.json",
+		GoogleAppCredentials: "/host/adc.json",
+		GoogleCloudProject:   "proj",
+		GoogleCloudRegion:    "us-central1",
+	}
+	result, err = c.ResolveAuth(auth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Method != "auth-file" {
+		t.Errorf("auth-file should win over vertex-ai; Method = %q", result.Method)
+	}
+}
+
+func TestClaudeResolveAuth_UnknownType(t *testing.T) {
+	c := &ClaudeCode{}
+	_, err := c.ResolveAuth(api.AuthConfig{SelectedType: "bogus"})
+	if err == nil {
+		t.Fatal("expected error for unknown auth type")
+	}
+	if !strings.Contains(err.Error(), "oauth-token") || !strings.Contains(err.Error(), "auth-file") {
+		t.Errorf("error should list valid types including oauth-token and auth-file: %v", err)
+	}
+}
+
 func TestClaudeResolveAuth_APIKeyWinsOverGCPSA(t *testing.T) {
 	c := &ClaudeCode{}
 	auth := api.AuthConfig{

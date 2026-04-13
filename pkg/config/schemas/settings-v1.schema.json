@@ -263,8 +263,8 @@
         },
         "auth_selected_type": {
           "type": "string",
-          "enum": ["api-key", "auth-file", "vertex-ai"],
-          "description": "Authentication mechanism to use (e.g., api-key, vertex-ai, auth-file)."
+          "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai"],
+          "description": "Authentication mechanism to use (e.g., api-key, oauth-token, vertex-ai, auth-file)."
         },
         "secrets": {
           "type": "array",
@@ -332,7 +332,7 @@
         "resources": { "$ref": "#/$defs/resourceSpec" },
         "auth_selected_type": {
           "type": "string",
-          "enum": ["api-key", "auth-file", "vertex-ai"]
+          "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai"]
         }
       },
       "additionalProperties": false

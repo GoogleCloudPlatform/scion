@@ -28,6 +28,7 @@ func TestGatherAuth_EnvVars(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "gemini-key")
 	t.Setenv("GOOGLE_API_KEY", "google-key")
 	t.Setenv("ANTHROPIC_API_KEY", "anthropic-key")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "claude-oauth-tok")
 	t.Setenv("OPENAI_API_KEY", "openai-key")
 	t.Setenv("CODEX_API_KEY", "codex-key")
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "my-project")
@@ -44,6 +45,9 @@ func TestGatherAuth_EnvVars(t *testing.T) {
 	}
 	if auth.AnthropicAPIKey != "anthropic-key" {
 		t.Errorf("AnthropicAPIKey = %q, want %q", auth.AnthropicAPIKey, "anthropic-key")
+	}
+	if auth.ClaudeOAuthToken != "claude-oauth-tok" {
+		t.Errorf("ClaudeOAuthToken = %q, want %q", auth.ClaudeOAuthToken, "claude-oauth-tok")
 	}
 	if auth.OpenAIAPIKey != "openai-key" {
 		t.Errorf("OpenAIAPIKey = %q, want %q", auth.OpenAIAPIKey, "openai-key")
@@ -139,6 +143,10 @@ func TestGatherAuth_FileDiscovery(t *testing.T) {
 	os.MkdirAll(filepath.Dir(opencodePath), 0755)
 	os.WriteFile(opencodePath, []byte(`{"dummy":"opencode"}`), 0644)
 
+	claudeCredsPath := filepath.Join(tmpHome, ".claude", ".credentials.json")
+	os.MkdirAll(filepath.Dir(claudeCredsPath), 0755)
+	os.WriteFile(claudeCredsPath, []byte(`{"claudeAiOauth":{"accessToken":"rotating"}}`), 0644)
+
 	auth := GatherAuth()
 
 	if auth.GoogleAppCredentials != adcPath {
@@ -152,6 +160,15 @@ func TestGatherAuth_FileDiscovery(t *testing.T) {
 	}
 	if auth.OpenCodeAuthFile != opencodePath {
 		t.Errorf("OpenCodeAuthFile = %q, want %q", auth.OpenCodeAuthFile, opencodePath)
+	}
+	if auth.ClaudeAuthFile != claudeCredsPath {
+		t.Errorf("ClaudeAuthFile = %q, want %q", auth.ClaudeAuthFile, claudeCredsPath)
+	}
+	// The file must be treated opaquely — we must NOT have read/parsed
+	// any content out of it into ClaudeOAuthToken. That field only comes
+	// from the CLAUDE_CODE_OAUTH_TOKEN env var.
+	if auth.ClaudeOAuthToken != "" {
+		t.Errorf("ClaudeOAuthToken = %q, want empty (must not scrape from credentials file)", auth.ClaudeOAuthToken)
 	}
 }
 
@@ -204,6 +221,9 @@ func TestGatherAuth_NoFiles(t *testing.T) {
 	}
 	if auth.OpenCodeAuthFile != "" {
 		t.Errorf("OpenCodeAuthFile = %q, want empty", auth.OpenCodeAuthFile)
+	}
+	if auth.ClaudeAuthFile != "" {
+		t.Errorf("ClaudeAuthFile = %q, want empty", auth.ClaudeAuthFile)
 	}
 }
 
@@ -369,6 +389,7 @@ func TestRequiredAuthEnvKeys(t *testing.T) {
 	}{
 		// Claude
 		{"claude api-key", "claude", "api-key", [][]string{{"ANTHROPIC_API_KEY"}}},
+		{"claude oauth-token", "claude", "oauth-token", [][]string{{"CLAUDE_CODE_OAUTH_TOKEN"}}},
 		{"claude auth-file", "claude", "auth-file", nil},
 		{"claude vertex-ai", "claude", "vertex-ai", [][]string{{"GOOGLE_CLOUD_PROJECT"}, {"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"}}},
 
@@ -524,7 +545,10 @@ func TestDetectAuthTypeFromEnvVars(t *testing.T) {
 		wantType string
 	}{
 		{"claude with GAC", "claude", map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}}, "vertex-ai"},
+		{"claude with CLAUDE_CODE_OAUTH_TOKEN", "claude", map[string]struct{}{"CLAUDE_CODE_OAUTH_TOKEN": {}}, "oauth-token"},
+		{"claude prefers OAuth token over GAC", "claude", map[string]struct{}{"CLAUDE_CODE_OAUTH_TOKEN": {}, "GOOGLE_APPLICATION_CREDENTIALS": {}}, "oauth-token"},
 		{"gemini with GAC", "gemini", map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}}, "vertex-ai"},
+		{"gemini with CLAUDE_CODE_OAUTH_TOKEN", "gemini", map[string]struct{}{"CLAUDE_CODE_OAUTH_TOKEN": {}}, ""},
 		{"claude without GAC", "claude", map[string]struct{}{}, ""},
 		{"gemini without GAC", "gemini", map[string]struct{}{}, ""},
 		{"opencode with GAC", "opencode", map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}}, ""},
@@ -591,6 +615,18 @@ func TestDetectAuthTypeFromFileSecrets(t *testing.T) {
 			"claude",
 			map[string]struct{}{"gcloud-adc": {}},
 			"vertex-ai",
+		},
+		{
+			"claude with CLAUDE_AUTH",
+			"claude",
+			map[string]struct{}{"CLAUDE_AUTH": {}},
+			"auth-file",
+		},
+		{
+			"claude prefers CLAUDE_AUTH over gcloud-adc",
+			"claude",
+			map[string]struct{}{"CLAUDE_AUTH": {}, "gcloud-adc": {}},
+			"auth-file",
 		},
 		{
 			"claude with no file secrets",
@@ -822,6 +858,9 @@ func TestGatherAuthWithEnv_BrokerMode(t *testing.T) {
 	if auth.OAuthCreds != "" {
 		t.Errorf("OAuthCreds = %q, want empty (filesystem should not be scanned)", auth.OAuthCreds)
 	}
+	if auth.ClaudeAuthFile != "" {
+		t.Errorf("ClaudeAuthFile = %q, want empty (filesystem should not be scanned)", auth.ClaudeAuthFile)
+	}
 }
 
 func TestOverlayFileSecrets(t *testing.T) {
@@ -882,6 +921,28 @@ func TestOverlayFileSecrets(t *testing.T) {
 			check: func(t *testing.T, auth api.AuthConfig) {
 				if auth.OpenCodeAuthFile != "/home/gemini/.local/share/opencode/auth.json" {
 					t.Errorf("OpenCodeAuthFile = %q, want opencode path", auth.OpenCodeAuthFile)
+				}
+			},
+		},
+		{
+			name: "Claude credentials by name",
+			secrets: []api.ResolvedSecret{
+				{Name: "CLAUDE_AUTH", Type: "file", Target: "/home/agent/.claude/.credentials.json"},
+			},
+			check: func(t *testing.T, auth api.AuthConfig) {
+				if auth.ClaudeAuthFile != "/home/agent/.claude/.credentials.json" {
+					t.Errorf("ClaudeAuthFile = %q, want credentials path", auth.ClaudeAuthFile)
+				}
+			},
+		},
+		{
+			name: "Claude credentials by target suffix",
+			secrets: []api.ResolvedSecret{
+				{Name: "my-claude-creds", Type: "file", Target: "/home/agent/.claude/.credentials.json"},
+			},
+			check: func(t *testing.T, auth api.AuthConfig) {
+				if auth.ClaudeAuthFile == "" {
+					t.Error("ClaudeAuthFile should be set from target suffix match")
 				}
 			},
 		},

@@ -90,8 +90,8 @@
     },
     "auth_selectedType": {
       "type": "string",
-      "enum": ["api-key", "auth-file", "vertex-ai"],
-      "description": "Authentication mechanism to use (e.g., api-key, vertex-ai, auth-file)."
+      "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai"],
+      "description": "Authentication mechanism to use (e.g., api-key, oauth-token, vertex-ai, auth-file)."
     },
     "hub": {
       "type": "object",

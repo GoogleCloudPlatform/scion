@@ -148,6 +148,10 @@ func validateConfigAgainstHarnessCapabilities(cfg *api.ScionConfig, caps api.Har
 			if caps.Auth.APIKey.Support == api.SupportNo {
 				issues["auth_selectedType"] = supportReason(caps.Auth.APIKey)
 			}
+		case "oauth-token":
+			if caps.Auth.OAuthToken.Support == api.SupportNo {
+				issues["auth_selectedType"] = supportReason(caps.Auth.OAuthToken)
+			}
 		case "auth-file":
 			if caps.Auth.AuthFile.Support == api.SupportNo {
 				issues["auth_selectedType"] = supportReason(caps.Auth.AuthFile)

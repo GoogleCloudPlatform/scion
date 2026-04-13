@@ -352,6 +352,7 @@ export interface HarnessAdvancedCapabilities {
   auth: {
     api_key: CapabilityField;
     auth_file: CapabilityField;
+    oauth_token: CapabilityField;
     vertex_ai: CapabilityField;
   };
 }

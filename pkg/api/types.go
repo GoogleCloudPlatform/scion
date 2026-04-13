@@ -367,7 +367,9 @@ type AuthConfig struct {
 	OAuthCreds           string
 
 	// Anthropic auth
-	AnthropicAPIKey string
+	AnthropicAPIKey  string
+	ClaudeOAuthToken string // CLAUDE_CODE_OAUTH_TOKEN (long-lived, from `claude setup-token`)
+	ClaudeAuthFile   string // ~/.claude/.credentials.json path (rotating refresh-token store)
 
 	// OpenAI/Codex auth
 	OpenAIAPIKey     string
@@ -410,7 +412,7 @@ type AgentInfo struct {
 	Name          string `json:"name"`                  // Human-friendly display name
 	Template      string `json:"template"`
 	HarnessConfig string `json:"harnessConfig,omitempty"` // Resolved harness-config name
-	HarnessAuth   string `json:"harnessAuth,omitempty"`   // Resolved harness auth method (api-key, vertex-ai, auth-file)
+	HarnessAuth   string `json:"harnessAuth,omitempty"`   // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
 
 	// Grove association
 	Grove     string `json:"grove"`               // Grove name (legacy, simple string)
@@ -568,7 +570,7 @@ type StartOptions struct {
 	TemplateName      string // Human-friendly template slug (overrides Template for labels when hydration replaces Template with a cache path)
 	Profile           string
 	HarnessConfig     string
-	HarnessAuth       string // Late-binding override for auth_selected_type (api-key, vertex-ai, auth-file)
+	HarnessAuth       string // Late-binding override for auth_selected_type (api-key, oauth-token, auth-file, vertex-ai)
 	Image             string
 	GrovePath         string
 	Env               map[string]string

@@ -47,7 +47,7 @@ func TestAdvancedCapabilitiesDefaults(t *testing.T) {
 			expectMaxTurns:      api.SupportYes,
 			expectMaxModelCalls: api.SupportNo,
 			expectMaxDuration:   api.SupportYes,
-			expectAuthFile:      api.SupportNo,
+			expectAuthFile:      api.SupportYes,
 			expectVertexAI:      api.SupportYes,
 			expectSystemPrompt:  api.SupportYes,
 		},

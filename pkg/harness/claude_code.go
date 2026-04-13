@@ -53,9 +53,10 @@ func (c *ClaudeCode) AdvancedCapabilities() api.HarnessAdvancedCapabilities {
 			AgentInstructions: api.CapabilityField{Support: api.SupportYes},
 		},
 		Auth: api.HarnessAuthCapabilities{
-			APIKey:   api.CapabilityField{Support: api.SupportYes},
-			AuthFile: api.CapabilityField{Support: api.SupportNo, Reason: "Claude does not support auth-file mode"},
-			VertexAI: api.CapabilityField{Support: api.SupportYes},
+			APIKey:     api.CapabilityField{Support: api.SupportYes},
+			AuthFile:   api.CapabilityField{Support: api.SupportYes},
+			OAuthToken: api.CapabilityField{Support: api.SupportYes},
+			VertexAI:   api.CapabilityField{Support: api.SupportYes},
 		},
 	}
 }
@@ -121,6 +122,12 @@ func (c *ClaudeCode) Provision(ctx context.Context, agentName, agentDir, agentHo
 	switch cfg.AuthSelectedType {
 	case "api-key":
 		envUpdates = map[string]string{"ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"}
+	case "oauth-token":
+		envUpdates = map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN}"}
+	case "auth-file":
+		// No env updates — the credentials file is mounted into the
+		// container at ~/.claude/.credentials.json and Claude Code reads
+		// and refreshes it natively.
 	case "vertex-ai":
 		// NOTE: gcloud credentials are mounted by buildCommonRunArgs in
 		// pkg/runtime/common.go, gated on !BrokerMode.  Do NOT add a
@@ -341,17 +348,37 @@ func (c *ClaudeCode) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error)
 					"ANTHROPIC_API_KEY": auth.AnthropicAPIKey,
 				},
 			}, nil
+		case "oauth-token":
+			if auth.ClaudeOAuthToken == "" {
+				return nil, fmt.Errorf("claude: auth type %q selected but no OAuth token found; set CLAUDE_CODE_OAUTH_TOKEN (generate with `claude setup-token`)", auth.SelectedType)
+			}
+			return &api.ResolvedAuth{
+				Method: "oauth-token",
+				EnvVars: map[string]string{
+					"CLAUDE_CODE_OAUTH_TOKEN": auth.ClaudeOAuthToken,
+				},
+			}, nil
+		case "auth-file":
+			if auth.ClaudeAuthFile == "" {
+				return nil, fmt.Errorf("claude: auth type %q selected but no credentials file found; expected ~/.claude/.credentials.json", auth.SelectedType)
+			}
+			return &api.ResolvedAuth{
+				Method: "auth-file",
+				Files: []api.FileMapping{
+					{SourcePath: auth.ClaudeAuthFile, ContainerPath: "~/.claude/.credentials.json"},
+				},
+			}, nil
 		case "vertex-ai":
 			if auth.GoogleCloudProject == "" || auth.GoogleCloudRegion == "" {
 				return nil, fmt.Errorf("claude: auth type %q selected but GOOGLE_CLOUD_PROJECT and/or GOOGLE_CLOUD_REGION not set", auth.SelectedType)
 			}
 			return c.resolveVertexAI(auth), nil
 		default:
-			return nil, fmt.Errorf("claude: unknown auth type %q; valid types are: api-key, vertex-ai", auth.SelectedType)
+			return nil, fmt.Errorf("claude: unknown auth type %q; valid types are: api-key, oauth-token, auth-file, vertex-ai", auth.SelectedType)
 		}
 	}
 
-	// Auto-detect preference order: API key → Vertex AI → error
+	// Auto-detect preference order: API key → OAuth token → credentials file → Vertex AI → error
 
 	// 1. Anthropic API key (direct)
 	if auth.AnthropicAPIKey != "" {
@@ -363,14 +390,38 @@ func (c *ClaudeCode) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error)
 		}, nil
 	}
 
-	// 2. Vertex AI — requires project + region, plus either ADC file or
+	// 2. CLAUDE_CODE_OAUTH_TOKEN (long-lived subscription token from
+	//    `claude setup-token`). Higher priority than the credentials file
+	//    because it does not rotate and therefore survives long sessions.
+	if auth.ClaudeOAuthToken != "" {
+		return &api.ResolvedAuth{
+			Method: "oauth-token",
+			EnvVars: map[string]string{
+				"CLAUDE_CODE_OAUTH_TOKEN": auth.ClaudeOAuthToken,
+			},
+		}, nil
+	}
+
+	// 3. ~/.claude/.credentials.json — rotating refresh-token store managed
+	//    by Claude Code. We mount the file into the container so Claude Code
+	//    can read and refresh it natively rather than scraping a snapshot.
+	if auth.ClaudeAuthFile != "" {
+		return &api.ResolvedAuth{
+			Method: "auth-file",
+			Files: []api.FileMapping{
+				{SourcePath: auth.ClaudeAuthFile, ContainerPath: "~/.claude/.credentials.json"},
+			},
+		}, nil
+	}
+
+	// 4. Vertex AI — requires project + region, plus either ADC file or
 	//    a GCP service account via the metadata server (assign mode).
 	hasVertexCreds := auth.GoogleAppCredentials != "" || auth.GCPMetadataMode == "assign"
 	if hasVertexCreds && auth.GoogleCloudProject != "" && auth.GoogleCloudRegion != "" {
 		return c.resolveVertexAI(auth), nil
 	}
 
-	return nil, fmt.Errorf("claude: no valid auth method found; set ANTHROPIC_API_KEY for direct API access, or provide ADC (gcloud-adc secret, GCP service account, or ~/.config/gcloud/application_default_credentials.json) + GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_REGION for Vertex AI")
+	return nil, fmt.Errorf("claude: no valid auth method found; set ANTHROPIC_API_KEY for direct API access, CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) or ~/.claude/.credentials.json for subscription auth, or provide ADC (gcloud-adc secret, GCP service account, or ~/.config/gcloud/application_default_credentials.json) + GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_REGION for Vertex AI")
 }
 
 func (c *ClaudeCode) resolveVertexAI(auth api.AuthConfig) *api.ResolvedAuth {

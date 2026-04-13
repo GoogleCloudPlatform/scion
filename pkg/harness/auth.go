@@ -54,11 +54,12 @@ func GatherAuthWithEnv(env map[string]string, localSources bool) api.AuthConfig 
 
 	auth := api.AuthConfig{
 		// Env-var sourced fields
-		GeminiAPIKey:    lookup("GEMINI_API_KEY"),
-		GoogleAPIKey:    lookup("GOOGLE_API_KEY"),
-		AnthropicAPIKey: lookup("ANTHROPIC_API_KEY"),
-		OpenAIAPIKey:    lookup("OPENAI_API_KEY"),
-		CodexAPIKey:     lookup("CODEX_API_KEY"),
+		GeminiAPIKey:     lookup("GEMINI_API_KEY"),
+		GoogleAPIKey:     lookup("GOOGLE_API_KEY"),
+		AnthropicAPIKey:  lookup("ANTHROPIC_API_KEY"),
+		ClaudeOAuthToken: lookup("CLAUDE_CODE_OAUTH_TOKEN"),
+		OpenAIAPIKey:     lookup("OPENAI_API_KEY"),
+		CodexAPIKey:      lookup("CODEX_API_KEY"),
 		GoogleCloudProject: util.FirstNonEmpty(
 			lookup("GOOGLE_CLOUD_PROJECT"),
 			lookup("GCP_PROJECT"),
@@ -99,6 +100,16 @@ func GatherAuthWithEnv(env map[string]string, localSources bool) api.AuthConfig 
 			if _, err := os.Stat(opencodePath); err == nil {
 				auth.OpenCodeAuthFile = opencodePath
 			}
+
+			// Claude Code's rotating credentials store. Unlike Gemini/Codex/
+			// OpenCode we do NOT parse this file — we treat it as an opaque
+			// file to mount into the container so Claude Code can read and
+			// refresh it natively. The access token inside rotates; scraping
+			// it at gather time would hand the container a stale snapshot.
+			claudeCredsPath := filepath.Join(home, ".claude", ".credentials.json")
+			if _, err := os.Stat(claudeCredsPath); err == nil {
+				auth.ClaudeAuthFile = claudeCredsPath
+			}
 		}
 	}
 
@@ -131,6 +142,9 @@ func OverlayFileSecrets(auth *api.AuthConfig, secrets []api.ResolvedSecret) {
 		case name == "OPENCODE_AUTH" ||
 			strings.HasSuffix(target, "/opencode/auth.json"):
 			auth.OpenCodeAuthFile = target
+		case name == "CLAUDE_AUTH" ||
+			strings.HasSuffix(target, "/.claude/.credentials.json"):
+			auth.ClaudeAuthFile = target
 		}
 	}
 }
@@ -247,7 +261,10 @@ func DetectAuthTypeFromFileSecrets(harnessName string, fileSecretNames map[strin
 			return "vertex-ai"
 		}
 	case "claude":
-		// Auto-detect priority: api-key → ADC (vertex-ai)
+		// Auto-detect priority: api-key → oauth-token (env) → auth-file → ADC (vertex-ai)
+		if _, ok := fileSecretNames["CLAUDE_AUTH"]; ok {
+			return "auth-file"
+		}
 		if _, ok := fileSecretNames["gcloud-adc"]; ok {
 			return "vertex-ai"
 		}
@@ -269,7 +286,14 @@ func DetectAuthTypeFromFileSecrets(harnessName string, fileSecretNames map[strin
 // so vertex-ai auth can be used without a gcloud-adc file secret.
 func DetectAuthTypeFromEnvVars(harnessName string, envKeys map[string]struct{}) string {
 	switch harnessName {
-	case "claude", "gemini":
+	case "claude":
+		if _, ok := envKeys["CLAUDE_CODE_OAUTH_TOKEN"]; ok {
+			return "oauth-token"
+		}
+		if _, ok := envKeys["GOOGLE_APPLICATION_CREDENTIALS"]; ok {
+			return "vertex-ai"
+		}
+	case "gemini":
 		if _, ok := envKeys["GOOGLE_APPLICATION_CREDENTIALS"]; ok {
 			return "vertex-ai"
 		}
@@ -312,6 +336,10 @@ func RequiredAuthEnvKeys(harnessName, authSelectedType string) [][]string {
 		switch effectiveType {
 		case "api-key":
 			return [][]string{{"ANTHROPIC_API_KEY"}}
+		case "oauth-token":
+			return [][]string{{"CLAUDE_CODE_OAUTH_TOKEN"}}
+		case "auth-file":
+			return nil
 		case "vertex-ai":
 			return [][]string{{"GOOGLE_CLOUD_PROJECT"}, {"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"}}
 		}

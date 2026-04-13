@@ -56,7 +56,7 @@ func init() {
 	startCmd.Flags().StringVar(&harnessConfigFlag, "harness-config", "", "Named harness configuration to use")
 	startCmd.Flags().StringVar(&harnessConfigFlag, "harness", "", "Named harness configuration to use (alias for --harness-config)")
 
-	startCmd.Flags().StringVar(&harnessAuthFlag, "harness-auth", "", "Override auth method for the harness (api-key, vertex-ai, auth-file)")
+	startCmd.Flags().StringVar(&harnessAuthFlag, "harness-auth", "", "Override auth method for the harness (api-key, oauth-token, auth-file, vertex-ai)")
 
 	// Notification flag
 	startCmd.Flags().BoolVar(&notify, "notify", false, "Get notified when the spawned agent reaches a terminal state")
