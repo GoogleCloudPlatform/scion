@@ -170,6 +170,48 @@ func TestHubAuthLoginDoesNotRequireImageRegistry(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
+	origGlobalMode := globalMode
+	origGrovePath := grovePath
+	origProfile := profile
+	origOutputFormat := outputFormat
+	origNoHub := noHub
+	origNonInteractive := nonInteractive
+	origAutoConfirm := autoConfirm
+	defer func() {
+		globalMode = origGlobalMode
+		grovePath = origGrovePath
+		profile = origProfile
+		outputFormat = origOutputFormat
+		noHub = origNoHub
+		nonInteractive = origNonInteractive
+		autoConfirm = origAutoConfirm
+	}()
+
+	t.Setenv("SCION_HOST_UID", "")
+
+	// Create a temp home with a global .scion dir but NO image_registry
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755); err != nil {
+		t.Fatalf("failed to create test global scion dir: %v", err)
+	}
+
+	globalMode = true
+	grovePath = ""
+	profile = ""
+	outputFormat = ""
+	noHub = true
+	nonInteractive = true
+	autoConfirm = true
+
+	// serverStartCmd is a subcommand of serverCmd — its Name() is "start",
+	// not "server". The PersistentPreRunE should still skip the image_registry
+	// check because it's in the server subtree.
+	err := rootCmd.PersistentPreRunE(serverStartCmd, []string{})
+	assert.NoError(t, err, "server start should not require image_registry")
+}
+
 func TestDevAuthWarning(t *testing.T) {
 	// Save and restore original flags
 	origNoHub := noHub

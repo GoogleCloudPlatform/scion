@@ -84,13 +84,17 @@ return an error instead of blocking.`,
 
 		requiresGrove := true
 		switch cmdName {
-		case "help", "version", "completion", "server", "doctor":
+		case "help", "version", "completion", "doctor":
 			requiresGrove = false
 		case "init":
 			// Both top-level init and grove init don't require existing grove
 			requiresGrove = false
 		case "scion":
 			// Root command itself doesn't require grove
+			requiresGrove = false
+		}
+		// Server subcommands run the hub server and don't need a local grove
+		if commandInSubtree(cmd, "server") {
 			requiresGrove = false
 		}
 		// Grove subcommands operate on all groves, not just the current one
@@ -141,14 +145,10 @@ return an error instead of blocking.`,
 		// Skip in hub context (inside a container, the agent is already
 		// running — image_registry is not needed).
 		requiresRegistry := requiresGrove
-		switch cmdName {
-		case "config", "doctor":
-			requiresRegistry = false
-		}
 		if commandInSubtree(cmd, "config") {
 			requiresRegistry = false
 		}
-		if commandInSubtree(cmd, "hub") {
+		if commandInSubtree(cmd, "hub") || commandInSubtree(cmd, "server") {
 			requiresRegistry = false
 		}
 		if requiresRegistry && config.IsHubContext() {
