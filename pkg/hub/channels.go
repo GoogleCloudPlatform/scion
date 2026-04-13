@@ -127,12 +127,14 @@ func (r *ChannelRegistry) matchesFilter(cfg ChannelConfig, msg *messages.Structu
 // newChannelFromConfig creates a NotificationChannel from a ChannelConfig.
 func newChannelFromConfig(cfg ChannelConfig) (NotificationChannel, error) {
 	switch cfg.Type {
-	case "webhook":
-		return NewWebhookChannel(cfg.Params), nil
-	case "slack":
-		return NewSlackChannel(cfg.Params), nil
+	case "discord":
+		return NewDiscordChannel(cfg.Params), nil
 	case "email":
 		return NewEmailChannel(cfg.Params), nil
+	case "slack":
+		return NewSlackChannel(cfg.Params), nil
+	case "webhook":
+		return NewWebhookChannel(cfg.Params), nil
 	default:
 		return nil, fmt.Errorf("unknown notification channel type: %q", cfg.Type)
 	}
