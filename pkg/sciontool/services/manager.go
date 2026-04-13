@@ -389,6 +389,14 @@ func (m *Manager) monitorService(ctx context.Context, svc *managedService) {
 			return
 		}
 
+		// Check context again to avoid race condition where backoff expires
+		// just as context is cancelled.
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		if err := svc.start(); err != nil {
 			svc.writeLifecycle("Restart failed: %v", err)
 			log.TaggedInfo("service:"+svc.spec.Name, "Restart failed: %v", err)
