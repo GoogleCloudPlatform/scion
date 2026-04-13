@@ -460,6 +460,15 @@ runtimes:
 	if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
 		t.Fatal(err)
 	}
+
+	// Create dummy templates to satisfy FindTemplate
+	templatesDir := filepath.Join(groveDir, "templates")
+	if err := os.MkdirAll(templatesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(templatesDir, "claude"), 0755); err != nil {
+		t.Fatal(err)
+	}
 	mgr := &envCapturingManager{}
 	srv := New(cfg, mgr, &runtime.MockRuntime{})
 

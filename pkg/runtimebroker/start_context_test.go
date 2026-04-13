@@ -59,6 +59,18 @@ runtimes:
 		t.Fatal(err)
 	}
 
+	// Create dummy templates to satisfy FindTemplate
+	templatesDir := filepath.Join(dotScion, "templates")
+	if err := os.MkdirAll(templatesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(templatesDir, "default"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(templatesDir, "claude"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
 	cfg.ForceRuntime = "mock"
 	mgr := &envCapturingManager{}
 	rt := &runtime.MockRuntime{}
