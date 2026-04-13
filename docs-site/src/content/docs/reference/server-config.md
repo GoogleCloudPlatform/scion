@@ -179,3 +179,161 @@ When `server.hub.public_url` is not explicitly set, the Hub endpoint injected in
 4. Auto-computed `http://localhost:{port}` (last resort).
 
 For local development where the Hub runs on `localhost` but agents are in containers, set `server.broker.container_hub_endpoint` to a container-accessible address like `http://host.containers.internal:8080`.
+
+## Notification channels
+
+Notification channels deliver agent messages to external systems. Configure them
+under `server.hub.notification_channels` as a list of channel objects. Each object
+has a `type`, a `params` map, and optional filters.
+
+```yaml
+server:
+  hub:
+    notification_channels:
+      - type: <channel-type>
+        params:
+          # channel-specific key/value pairs
+        filter_urgent_only: false   # if true, only deliver urgent messages
+        filter_types:               # if set, only deliver these message types
+          - input-needed
+          - state-change
+```
+
+### Slack channel
+
+Delivers notifications via a Slack incoming webhook using Slack's `text` payload
+format.
+
+**Type:** `slack`
+
+**Parameters:**
+
+| Param              | Required | Description |
+|--------------------|----------|-------------|
+| `webhook_url`      | yes      | Slack incoming webhook URL (must use `https://`). |
+| `channel`          | no       | Override the webhook's default channel. |
+| `mention_on_urgent`| no       | Mention string added when `msg.Urgent == true` (e.g. `@here`, `@channel`). |
+
+**Example:**
+
+```yaml
+notification_channels:
+  - type: slack
+    params:
+      webhook_url: https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXX
+      mention_on_urgent: "@here"
+```
+
+### Webhook channel
+
+Delivers notifications as a raw HTTP POST to an arbitrary URL. Use this when you
+need the full structured payload without truncation or when integrating with a
+custom receiver.
+
+**Type:** `webhook`
+
+**Parameters:**
+
+| Param         | Required | Description |
+|---------------|----------|-------------|
+| `webhook_url` | yes      | Destination URL (must use `https://`). |
+
+**Example:**
+
+```yaml
+notification_channels:
+  - type: webhook
+    params:
+      webhook_url: https://example.com/scion-notifications
+```
+
+### Email channel
+
+Delivers notifications by email.
+
+**Type:** `email`
+
+**Parameters:**
+
+| Param    | Required | Description |
+|----------|----------|-------------|
+| `to`     | yes      | Recipient email address. |
+| `from`   | no       | Sender address override. |
+| `smtp`   | no       | SMTP server host:port. |
+
+**Example:**
+
+```yaml
+notification_channels:
+  - type: email
+    params:
+      to: oncall@example.com
+```
+
+### Discord channel
+
+Delivers notifications via a Discord incoming webhook using Discord's native
+webhook format (rich embeds, colour-coded severity, allowed-mentions-controlled
+role/user pings). Unlike the Slack channel, the Discord channel targets the
+Discord-native endpoint — the `/slack`-compatibility suffix is explicitly
+rejected because it dilutes what each channel type means and silently hides
+the user's real intent.
+
+**Type:** `discord`
+
+**Parameters:**
+
+| Param               | Required | Description |
+|---------------------|----------|-------------|
+| `webhook_url`       | yes      | Discord incoming webhook URL. Must use `https://` and one of the allowed Discord hosts: `discord.com`, `discordapp.com`, `ptb.discord.com`, `canary.discord.com`. Path must begin with `/api/webhooks/` and must not end with `/slack`. |
+| `mention_on_urgent` | no       | Mention string applied when `msg.Urgent == true`. Use Discord mention syntax: `<@&ROLE_ID>` for a role, `<@USER_ID>` for a user. `@here` and `@everyone` are intentionally **not** supported — the channel sets `allowed_mentions.parse: []` so Discord will not resolve them even if present. |
+| `username`          | no       | Override the webhook's default username for delivered messages. |
+| `avatar_url`        | no       | Override the webhook's default avatar for delivered messages. |
+
+**Embed colours by message type:**
+
+| Type                  | Colour | Hex       |
+|-----------------------|--------|-----------|
+| `state-change`        | blue   | `#3498db` |
+| `input-needed`        | yellow | `#f1c40f` |
+| `instruction`         | grey   | `#95a5a6` |
+| *(urgent — any type)* | red    | `#e74c3c` (overrides the type colour) |
+
+**Truncation:** Discord caps embed descriptions at 2048 characters and total
+embed payload at 6000 characters. Messages longer than that are truncated
+with a `…(truncated)` marker — use the webhook channel type if you need the
+full structured payload without truncation.
+
+**Example:**
+
+```yaml
+notification_channels:
+  - type: discord
+    params:
+      webhook_url: https://discord.com/api/webhooks/123456789012345678/abcDEFghiJKLmnoPQR_stu
+      mention_on_urgent: "<@&987654321098765432>"
+      username: Scion Hub
+    filter_urgent_only: false
+    filter_types:
+      - input-needed
+      - state-change
+```
+
+:::note[Migrating from a Slack-compat Discord webhook]
+Earlier scion releases had no Discord channel type — operators could route
+notifications to a Discord webhook by using `type: slack` with a webhook URL
+ending in `/slack` (Discord's Slack-compatibility endpoint). That approach
+produces plain-text messages with no embeds, colours, or mentions.
+
+To migrate:
+
+1. Remove the `/slack` suffix from the webhook URL.
+2. Change `type: slack` to `type: discord`.
+3. If you previously used `mention_on_urgent: "@here"`, replace it with a
+   Discord role mention (`"<@&ROLE_ID>"`) — `@here` is not supported via the
+   native Discord webhook format (the channel sets `allowed_mentions.parse: []`
+   which prevents Discord from resolving `@here` and `@everyone`).
+4. Reload the hub config. Validation will reject the old `/slack`-suffixed
+   URL so a misconfiguration will surface on startup rather than silently
+   falling back.
+:::
