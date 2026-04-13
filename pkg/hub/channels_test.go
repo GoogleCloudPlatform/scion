@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -561,8 +562,8 @@ func TestDiscordChannel_UrgentMention(t *testing.T) {
 
 func TestDiscordChannel_ColorByType(t *testing.T) {
 	tests := []struct {
-		msgType     string
-		wantColor   int
+		msgType   string
+		wantColor int
 	}{
 		{messages.TypeStateChange, discordColorStateChange},
 		{messages.TypeInputNeeded, discordColorInputNeeded},
