@@ -20,6 +20,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
+// hasLocalSignedURLs returns true if any URL uses the file:// scheme, indicating
+// the Hub uses local storage. In that case the entire batch must fall back to
+// Hub API uploads since file:// URLs are unreachable from remote clients.
 func hasLocalSignedURLs(urls []hubclient.UploadURLInfo) bool {
 	for _, info := range urls {
 		if strings.HasPrefix(info.URL, "file://") {
@@ -29,6 +32,9 @@ func hasLocalSignedURLs(urls []hubclient.UploadURLInfo) bool {
 	return false
 }
 
+// hasLocalDownloadURLs returns true if any URL uses the file:// scheme, indicating
+// the Hub uses local storage. In that case the entire batch must fall back to
+// Hub API downloads since file:// URLs are unreachable from remote clients.
 func hasLocalDownloadURLs(urls []hubclient.DownloadURLInfo) bool {
 	for _, info := range urls {
 		if strings.HasPrefix(info.URL, "file://") {

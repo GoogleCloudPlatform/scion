@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -89,6 +90,11 @@ func (s *Server) handleHarnessConfigFileList(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleHarnessConfigFileRead(w http.ResponseWriter, r *http.Request, id, filePath string) {
+	if err := validateWorkspaceFilePath(filePath); err != nil {
+		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
+		return
+	}
+
 	ctx := r.Context()
 
 	hc, err := s.store.GetHarnessConfig(ctx, id)
@@ -156,6 +162,11 @@ func (s *Server) handleHarnessConfigFileRead(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Request, id, filePath string) {
+	if err := validateWorkspaceFilePath(filePath); err != nil {
+		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
+		return
+	}
+
 	ctx := r.Context()
 
 	hc, err := s.store.GetHarnessConfig(ctx, id)
@@ -167,6 +178,9 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 		Forbidden(w)
 		return
 	}
+
+	// Limit request body size for both JSON and raw content paths.
+	r.Body = http.MaxBytesReader(w, r.Body, maxHarnessConfigFileSize+4096)
 
 	var req HarnessConfigFileWriteRequest
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
@@ -289,6 +303,10 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 	files := hc.Files
 	entries := make([]HarnessConfigFileEntry, 0, len(r.MultipartForm.File))
 	for filePath, headers := range r.MultipartForm.File {
+		if err := validateWorkspaceFilePath(filePath); err != nil {
+			BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
+			return
+		}
 		if len(headers) == 0 {
 			continue
 		}
@@ -310,7 +328,7 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 		}
 
 		objectPath := hc.StoragePath + "/" + filePath
-		_, err = stor.Upload(ctx, objectPath, strings.NewReader(string(data)), storage.UploadOptions{})
+		_, err = stor.Upload(ctx, objectPath, bytes.NewReader(data), storage.UploadOptions{})
 		if err != nil {
 			RuntimeError(w, "Failed to write file to storage")
 			return
@@ -361,6 +379,11 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleHarnessConfigFileDelete(w http.ResponseWriter, r *http.Request, id, filePath string) {
+	if err := validateWorkspaceFilePath(filePath); err != nil {
+		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
+		return
+	}
+
 	ctx := r.Context()
 
 	hc, err := s.store.GetHarnessConfig(ctx, id)
