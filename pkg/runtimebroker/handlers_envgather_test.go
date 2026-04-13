@@ -31,6 +31,12 @@ import (
 func newTestServerWithGrovePath(t *testing.T, settingsYAML string) (*Server, *envCapturingManager, string) {
 	t.Helper()
 
+	// Isolate HOME so LoadEffectiveSettings does not merge the developer's
+	// personal ~/.scion/settings.yaml (which may declare harness-config
+	// auth_selected_type values that would override the test fixture).
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
 	// Create temp grove directory with settings
 	// LoadEffectiveSettings expects a dir that contains settings.yaml directly
 	groveDir := t.TempDir()
@@ -478,6 +484,12 @@ func TestCreateAgent_IdempotentByRequestID(t *testing.T) {
 // that has a harness-config directory and optional settings YAML.
 func newTestServerWithHarnessConfig(t *testing.T, harnessConfigName, configYAML, settingsYAML string) (*Server, *envCapturingManager, string) {
 	t.Helper()
+
+	// Isolate HOME so LoadEffectiveSettings does not merge the developer's
+	// personal ~/.scion/settings.yaml (which may declare harness-config
+	// auth_selected_type values that would override the test fixture).
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
 
 	groveDir := t.TempDir()
 
