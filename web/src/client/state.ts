@@ -389,28 +389,40 @@ export class StateManager extends EventTarget {
    * complete baseline data. Does not trigger notifications — the
    * calling component already holds the data from its own fetch.
    */
-  seedAgents(agents: Agent[]): void {
+  seedAgents(agents: Agent[], clear = false): void {
+    if (clear) {
+      this.state.agents.clear();
+    }
     for (const agent of agents) {
       this.state.agents.set(agent.id, agent);
     }
+    this.notify('agents-updated');
   }
 
   /**
    * Seed the groves map with full objects from a REST API response.
    */
-  seedGroves(groves: Grove[]): void {
+  seedGroves(groves: Grove[], clear = false): void {
+    if (clear) {
+      this.state.groves.clear();
+    }
     for (const grove of groves) {
       this.state.groves.set(grove.id, grove);
     }
+    this.notify('groves-updated');
   }
 
   /**
    * Seed the brokers map with full objects from a REST API response.
    */
-  seedBrokers(brokers: RuntimeBroker[]): void {
+  seedBrokers(brokers: RuntimeBroker[], clear = false): void {
+    if (clear) {
+      this.state.brokers.clear();
+    }
     for (const broker of brokers) {
       this.state.brokers.set(broker.id, broker);
     }
+    this.notify('brokers-updated');
   }
 
   /** Expose the SSE client for debug instrumentation */
