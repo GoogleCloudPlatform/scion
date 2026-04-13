@@ -34,11 +34,13 @@ Build images locally and push to your registry:
 
 ```bash
 # Build scion-base + all harness images, then push
-image-build/scripts/build-images.sh --registry ghcr.io/myorg --push
+scion images build --registry ghcr.io/myorg --push
 
 # Configure Scion to use them
 scion config set image_registry ghcr.io/myorg
 ```
+
+`scion images build` must be run from within a clone of the Scion source repository (or pass `--source <path>`). It wraps `image-build/scripts/build-images.sh` and accepts the same flags — see [Build Script Reference](#build-script-reference) below.
 
 ### Option 2: GitHub Actions (GHCR)
 
