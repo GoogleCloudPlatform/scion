@@ -74,6 +74,10 @@ No restart of polkit or the scion-hub service is required — polkit picks up ne
 | `scripts/starter-hub/gce-start-hub.sh` | Added polkit rule installation to the full-deploy infrastructure config phase |
 | `.design/server-routine-maintenance.md` | Added **Privileges** note to the Rebuild Server Executor section documenting the polkit dependency |
 
-## Why Not Sudo?
+## Why Not Sudo (for systemctl)?
 
 The `scion` user does not have sudo access on the hub server, and granting it would require either a sudoers entry or adding the user to a privileged group. Polkit is the intended authorization mechanism for systemd unit management and provides finer-grained control — the rule authorizes exactly one user for exactly one service, without granting any broader shell-level privilege escalation.
+
+## Companion Fix: Binary Installation Sudoers Rule
+
+The rebuild-server executor also needs to install the compiled binary into `/usr/local/bin/`, which the `scion` user cannot write to. Unlike systemd management (which has polkit), filesystem operations require a sudoers rule. The deploy script installs a narrowly-scoped entry at `/etc/sudoers.d/scion-install-binary` that permits only the exact `install` command with the specific source and destination paths. See `pkg/hub/maintenance_executors.go` for the executor implementation.

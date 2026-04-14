@@ -64,7 +64,7 @@ func TestSecretMigrationExecutor_NoSecrets(t *testing.T) {
 	// A full integration test would require GCP SM mock infrastructure.
 }
 
-func TestRebuildServerExecutor_BuildsToTempThenRenames(t *testing.T) {
+func TestRebuildServerExecutor_BuildsToStagingThenInstalls(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("rebuild-server only runs on linux")
 	}
@@ -76,7 +76,7 @@ func TestRebuildServerExecutor_BuildsToTempThenRenames(t *testing.T) {
 	binaryDest := filepath.Join(binDir, "scion")
 
 	// Create stub scripts that record their invocation to a shared log file.
-	for _, cmd := range []string{"git", "make", "go", "mv", "systemctl"} {
+	for _, cmd := range []string{"git", "make", "go", "sudo", "systemctl"} {
 		script := fmt.Sprintf("#!/bin/sh\necho '%s' \"$@\" >> '%s'\n", cmd, logFile)
 		stubPath := filepath.Join(stubDir, cmd)
 		if err := os.WriteFile(stubPath, []byte(script), 0o755); err != nil {
@@ -104,26 +104,28 @@ func TestRebuildServerExecutor_BuildsToTempThenRenames(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimSpace(string(logData)), "\n")
 
-	// Expect 5 commands: git pull, make web, go build, mv, systemctl restart.
+	// Expect 5 commands: git pull, make web, go build, sudo install, systemctl restart.
 	if len(lines) != 5 {
 		t.Fatalf("expected 5 commands, got %d:\n%s", len(lines), string(logData))
 	}
 
-	// Verify go build targets the temp path, not the final binary.
+	// Verify go build targets the staging path inside the repo dir, not the final binary.
 	goLine := lines[2]
-	tmpBinary := binaryDest + ".new"
-	if !strings.Contains(goLine, "-o "+tmpBinary) {
-		t.Errorf("go build should target temp path %q, got: %s", tmpBinary, goLine)
+	stagingBinary := filepath.Join(repoDir, "scion.rebuild")
+	if !strings.Contains(goLine, "-o "+stagingBinary) {
+		t.Errorf("go build should target staging path %q, got: %s", stagingBinary, goLine)
 	}
 	if strings.Contains(goLine, "-o "+binaryDest+" ") {
 		t.Errorf("go build must NOT target the final binary directly, got: %s", goLine)
 	}
 
-	// Verify mv renames temp binary to final destination.
-	mvLine := lines[3]
-	expectedMv := fmt.Sprintf("mv %s %s", tmpBinary, binaryDest)
-	if !strings.Contains(mvLine, expectedMv) {
-		t.Errorf("expected mv command %q, got: %s", expectedMv, mvLine)
+	// Verify sudo install moves the staging binary to the final destination.
+	sudoLine := lines[3]
+	if !strings.Contains(sudoLine, "sudo install") {
+		t.Errorf("expected sudo install command, got: %s", sudoLine)
+	}
+	if !strings.Contains(sudoLine, stagingBinary) || !strings.Contains(sudoLine, binaryDest) {
+		t.Errorf("sudo install should reference staging %q and dest %q, got: %s", stagingBinary, binaryDest, sudoLine)
 	}
 }
 

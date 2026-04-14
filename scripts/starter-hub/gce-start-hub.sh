@@ -347,6 +347,23 @@ POLKIT_EOF
         echo "  -> Polkit rule unchanged"
     fi
 
+    # Install sudoers rule to allow scion user to install rebuilt binary
+    # (needed for the web-based "Rebuild Server from Git" maintenance task)
+    SUDOERS_RULE="/etc/sudoers.d/scion-install-binary"
+    cat > /tmp/scion-install-binary <<SUDOERS_EOF
+# Allow scion user to install rebuilt server binary without a password.
+# Scoped to the exact install command used by the rebuild-server maintenance task.
+scion ALL=(root) NOPASSWD: /usr/bin/install -m 755 /home/scion/scion/scion.rebuild /usr/local/bin/scion
+SUDOERS_EOF
+    if ! diff -q /tmp/scion-install-binary "$SUDOERS_RULE" >/dev/null 2>&1; then
+        sudo mv /tmp/scion-install-binary "$SUDOERS_RULE"
+        sudo chmod 440 "$SUDOERS_RULE"
+        echo "  -> Sudoers rule installed (scion user can install rebuilt binary)"
+    else
+        rm -f /tmp/scion-install-binary
+        echo "  -> Sudoers rule unchanged"
+    fi
+
     # Fix certificate permissions for Caddy (only if certs exist)
     if [ -d /etc/letsencrypt/live ]; then
         echo "  -> Fixing certificate permissions..."

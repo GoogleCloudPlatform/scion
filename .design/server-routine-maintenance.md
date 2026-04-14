@@ -315,13 +315,18 @@ type RebuildServerExecutor struct {
 Steps:
 1. `git pull` in the repo directory.
 2. `make web` to rebuild frontend assets.
-3. `go build -o {binaryDest} ./cmd/scion` to rebuild the binary.
-4. `systemctl restart {serviceName}` to restart.
-5. Health check loop (poll `/healthz` endpoint).
+3. `go build -o {repoPath}/scion.rebuild ./cmd/scion` to rebuild the binary into a staging path inside the repo directory (where the service user has write access).
+4. `sudo install -m 755 {repoPath}/scion.rebuild {binaryDest}` to install the binary to the final destination.
+5. `systemctl restart {serviceName}` to restart.
+6. Health check loop (poll `/healthz` endpoint).
 
 **Safety:** The rebuild executor only runs on Linux (where systemd is available). Returns an error on other platforms with a message directing the operator to restart manually.
 
-**Privileges:** The restart step uses `systemctl restart` which requires authorization via polkit. The deployment script (`gce-start-hub.sh`) installs a polkit rule at `/etc/polkit-1/rules.d/50-scion-hub-restart.rules` that grants the `scion` user permission to manage the `scion-hub.service` unit without interactive authentication.
+**Privileges:** Two privilege grants are required, both installed by the deployment script (`gce-start-hub.sh`):
+- **Binary installation:** A sudoers rule at `/etc/sudoers.d/scion-install-binary` allows the `scion` user to run the specific `install` command for placing the rebuilt binary into `/usr/local/bin/`. The rule is narrowly scoped to the exact source and destination paths.
+- **Service restart:** A polkit rule at `/etc/polkit-1/rules.d/50-scion-hub-restart.rules` grants the `scion` user permission to manage the `scion-hub.service` unit without interactive authentication.
+
+**Why staging + sudo install:** The service user cannot write directly to `/usr/local/bin/`, and writing directly to the running binary would fail with `ETXTBSY` on Linux. Building to a staging path in the repo directory (owned by the service user) avoids both problems. The `install` command atomically creates a new file at the destination rather than overwriting in-place.
 
 **Graceful shutdown:** The hub process handles the restart by building the new binary, installing it, then signaling itself via systemd. The new process picks up the existing database and configuration.
 

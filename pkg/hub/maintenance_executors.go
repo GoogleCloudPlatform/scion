@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -258,12 +259,14 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 	log.Debug("Starting rebuild-server",
 		"repo_path", repoPath, "binary_dest", binaryDest, "service_name", serviceName)
 
-	// Build to a temporary path first, then atomically rename into place.
-	// Writing directly to binaryDest fails with ETXTBSY when the binary is
-	// the currently-running server process. rename(2) replaces the directory
-	// entry without opening the file for writing, so it succeeds even while
-	// the old binary is still executing.
-	tmpBinary := binaryDest + ".new"
+	// Build to a staging path inside the repo directory (where the service user
+	// has write access), then use "sudo install" to place it into the final
+	// destination (e.g., /usr/local/bin/scion). This avoids two problems:
+	//   1. ETXTBSY — writing directly to a running binary fails on Linux.
+	//   2. Permission denied — the service user typically cannot write to
+	//      /usr/local/bin/. A sudoers rule grants the narrow privilege to
+	//      install from this staging path to the binary destination.
+	stagingBinary := filepath.Join(repoPath, "scion.rebuild")
 
 	steps := []struct {
 		name string
@@ -273,8 +276,8 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 	}{
 		{"Pulling latest code", "git", []string{"pull"}, repoPath},
 		{"Building web assets", "make", []string{"web"}, repoPath},
-		{"Building server binary", "go", []string{"build", "-o", tmpBinary, "./cmd/scion"}, repoPath},
-		{"Installing server binary", "mv", []string{tmpBinary, binaryDest}, ""},
+		{"Building server binary", "go", []string{"build", "-o", stagingBinary, "./cmd/scion"}, repoPath},
+		{"Installing server binary", "sudo", []string{"install", "-m", "755", stagingBinary, binaryDest}, ""},
 		{"Restarting service", "systemctl", []string{"restart", serviceName}, ""},
 	}
 
