@@ -19,6 +19,10 @@ package hub
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -58,4 +62,108 @@ func TestSecretMigrationExecutor_NoSecrets(t *testing.T) {
 	// We can't easily mock a GCPBackend without a real GCP client,
 	// but we can test the local-backend error path above.
 	// A full integration test would require GCP SM mock infrastructure.
+}
+
+func TestRebuildServerExecutor_BuildsToTempThenRenames(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("rebuild-server only runs on linux")
+	}
+
+	repoDir := t.TempDir()
+	binDir := t.TempDir()
+	stubDir := t.TempDir()
+	logFile := filepath.Join(t.TempDir(), "commands.log")
+	binaryDest := filepath.Join(binDir, "scion")
+
+	// Create stub scripts that record their invocation to a shared log file.
+	for _, cmd := range []string{"git", "make", "go", "mv", "systemctl"} {
+		script := fmt.Sprintf("#!/bin/sh\necho '%s' \"$@\" >> '%s'\n", cmd, logFile)
+		stubPath := filepath.Join(stubDir, cmd)
+		if err := os.WriteFile(stubPath, []byte(script), 0o755); err != nil {
+			t.Fatalf("failed to write stub %s: %v", cmd, err)
+		}
+	}
+
+	t.Setenv("PATH", stubDir+":"+os.Getenv("PATH"))
+
+	executor := &RebuildServerExecutor{
+		repoPath:    repoDir,
+		binaryDest:  binaryDest,
+		serviceName: "test-scion",
+	}
+
+	var buf bytes.Buffer
+	err := executor.Run(context.Background(), &buf, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("failed to read command log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(logData)), "\n")
+
+	// Expect 5 commands: git pull, make web, go build, mv, systemctl restart.
+	if len(lines) != 5 {
+		t.Fatalf("expected 5 commands, got %d:\n%s", len(lines), string(logData))
+	}
+
+	// Verify go build targets the temp path, not the final binary.
+	goLine := lines[2]
+	tmpBinary := binaryDest + ".new"
+	if !strings.Contains(goLine, "-o "+tmpBinary) {
+		t.Errorf("go build should target temp path %q, got: %s", tmpBinary, goLine)
+	}
+	if strings.Contains(goLine, "-o "+binaryDest+" ") {
+		t.Errorf("go build must NOT target the final binary directly, got: %s", goLine)
+	}
+
+	// Verify mv renames temp binary to final destination.
+	mvLine := lines[3]
+	expectedMv := fmt.Sprintf("mv %s %s", tmpBinary, binaryDest)
+	if !strings.Contains(mvLine, expectedMv) {
+		t.Errorf("expected mv command %q, got: %s", expectedMv, mvLine)
+	}
+}
+
+func TestRebuildServerExecutor_NonLinux(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("this test verifies non-linux rejection")
+	}
+
+	executor := &RebuildServerExecutor{
+		repoPath:    "/tmp/fake",
+		binaryDest:  "/tmp/fake/scion",
+		serviceName: "test",
+	}
+
+	var buf bytes.Buffer
+	err := executor.Run(context.Background(), &buf, nil)
+	if err == nil {
+		t.Fatal("expected error on non-linux, got nil")
+	}
+	if !strings.Contains(err.Error(), "only supported on Linux") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestRebuildServerExecutor_MissingRepoPath(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("rebuild-server only runs on linux")
+	}
+
+	executor := &RebuildServerExecutor{
+		binaryDest:  "/tmp/fake/scion",
+		serviceName: "test",
+	}
+
+	var buf bytes.Buffer
+	err := executor.Run(context.Background(), &buf, nil)
+	if err == nil {
+		t.Fatal("expected error for missing repo path, got nil")
+	}
+	if !strings.Contains(err.Error(), "no repository path") {
+		t.Errorf("unexpected error: %v", err)
+	}
 }

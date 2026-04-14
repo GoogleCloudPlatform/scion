@@ -258,6 +258,13 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 	log.Debug("Starting rebuild-server",
 		"repo_path", repoPath, "binary_dest", binaryDest, "service_name", serviceName)
 
+	// Build to a temporary path first, then atomically rename into place.
+	// Writing directly to binaryDest fails with ETXTBSY when the binary is
+	// the currently-running server process. rename(2) replaces the directory
+	// entry without opening the file for writing, so it succeeds even while
+	// the old binary is still executing.
+	tmpBinary := binaryDest + ".new"
+
 	steps := []struct {
 		name string
 		cmd  string
@@ -266,7 +273,8 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 	}{
 		{"Pulling latest code", "git", []string{"pull"}, repoPath},
 		{"Building web assets", "make", []string{"web"}, repoPath},
-		{"Building server binary", "go", []string{"build", "-o", binaryDest, "./cmd/scion"}, repoPath},
+		{"Building server binary", "go", []string{"build", "-o", tmpBinary, "./cmd/scion"}, repoPath},
+		{"Installing server binary", "mv", []string{tmpBinary, binaryDest}, ""},
 		{"Restarting service", "systemctl", []string{"restart", serviceName}, ""},
 	}
 
