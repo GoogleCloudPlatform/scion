@@ -1724,6 +1724,10 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 		return fmt.Errorf("agent '%s' pod not found. It may have been deleted.", id)
 	}
 
+	// Use the actual pod name (ContainerID) which may include a grove prefix
+	// (e.g., "sciontest--hello" instead of just "hello")
+	podName = agent.ContainerID
+
 	// For Kubernetes, we want to ensure it is in Running phase
 	if !strings.EqualFold(agent.ContainerStatus, string(corev1.PodRunning)) {
 		return fmt.Errorf("agent '%s' is not running (status: %s). Use 'scion start %s' to resume it.", id, agent.ContainerStatus, id)
@@ -1744,9 +1748,17 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 		username = u
 	}
 
+	// Build the exec command. If the container already runs as the target
+	// user (common on GKE Autopilot where allowPrivilegeEscalation=false),
+	// skip the su wrapper — it would prompt for a password.
+	// Use a shell wrapper that checks the current user at runtime.
+	execCmd := []string{"sh", "-c", fmt.Sprintf(
+		`if [ "$(whoami)" = "%s" ]; then exec tmux attach -t scion; else exec su - %s -c "tmux attach -t scion"; fi`,
+		username, username)}
+
 	option := &corev1.PodExecOptions{
 		Container: "agent",
-		Command:   []string{"su", "-", username, "-c", "tmux attach -t scion"},
+		Command:   execCmd,
 		Stdin:     true,
 		Stdout:    true,
 		Stderr:    true,
