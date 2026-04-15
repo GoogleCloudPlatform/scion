@@ -337,7 +337,7 @@ SUDOERS_EOF
     fi
 
     # Clean up legacy polkit rule if present (replaced by sudoers above).
-    # Polkit 0.105 (common on Ubuntu) doesn't support JavaScript rules, so the
+    # Polkit 0.105 (common on Ubuntu) does not support JavaScript rules, so the
     # old .rules file was silently ignored.
     if [ -f /etc/polkit-1/rules.d/50-scion-hub-restart.rules ]; then
         sudo rm -f /etc/polkit-1/rules.d/50-scion-hub-restart.rules
