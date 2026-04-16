@@ -2621,11 +2621,13 @@ type StopAllAgentsResponse struct {
 	Stopped int             `json:"stopped"`
 	Failed  int             `json:"failed"`
 	Total   int             `json:"total"`
+	Scope   string          `json:"scope,omitempty"` // "all" or "own"
 	Results []stopAllResult `json:"results"`
 }
 
 // handleStopAllAgents stops all running agents, optionally scoped to a grove.
-// Requires admin role. Fans out stop operations concurrently to each broker.
+// Global (groveID=="") requires platform admin. Grove-scoped allows any grove
+// member: owners/admins stop all agents, regular members stop only their own.
 func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, groveID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
@@ -2634,18 +2636,43 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, gro
 
 	ctx := r.Context()
 
-	// Require admin role
 	userIdent := GetUserIdentityFromContext(ctx)
-	if userIdent == nil || userIdent.Role() != "admin" {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"Only admins can stop all agents", nil)
+	if userIdent == nil {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+			"Authentication required", nil)
 		return
 	}
 
-	// List running agents (optionally scoped to grove)
+	// Determine authorization and scope
+	scope := "all"
 	filter := store.AgentFilter{
 		GroveID: groveID,
 		Phase:   string(state.PhaseRunning),
+	}
+
+	if groveID == "" {
+		// Global stop-all: platform admin only
+		if userIdent.Role() != "admin" {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Only admins can stop all agents", nil)
+			return
+		}
+	} else {
+		// Grove-scoped stop-all: any grove member allowed
+		isAdmin := userIdent.Role() == "admin"
+		if !isAdmin {
+			groveRole := s.resolveUserGroveRole(ctx, groveID, userIdent.ID())
+			if groveRole == "" {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden,
+					"You are not a member of this grove", nil)
+				return
+			}
+			// Regular members can only stop their own agents
+			if groveRole != store.GroupMemberRoleOwner && groveRole != store.GroupMemberRoleAdmin {
+				filter.OwnerID = userIdent.ID()
+				scope = "own"
+			}
+		}
 	}
 
 	result, err := s.store.ListAgents(ctx, filter, store.ListOptions{
@@ -2659,6 +2686,7 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, gro
 	agents := result.Items
 	if len(agents) == 0 {
 		writeJSON(w, http.StatusOK, StopAllAgentsResponse{
+			Scope:   scope,
 			Results: []stopAllResult{},
 		})
 		return
@@ -2736,8 +2764,30 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, gro
 		Stopped: stopped,
 		Failed:  failed,
 		Total:   len(results),
+		Scope:   scope,
 		Results: results,
 	})
+}
+
+// resolveUserGroveRole returns the user's role in the grove's members group.
+// Returns "" if the user is not a member of the grove.
+func (s *Server) resolveUserGroveRole(ctx context.Context, groveID, userID string) string {
+	groups, err := s.store.ListGroups(ctx, store.GroupFilter{
+		GroveID:   groveID,
+		GroupType: store.GroupTypeExplicit,
+	}, store.ListOptions{Limit: 10})
+	if err != nil || len(groups.Items) == 0 {
+		return ""
+	}
+
+	for _, g := range groups.Items {
+		membership, err := s.store.GetGroupMembership(ctx, g.ID, store.GroupMemberTypeUser, userID)
+		if err != nil {
+			continue
+		}
+		return membership.Role
+	}
+	return ""
 }
 
 // ============================================================================
@@ -3202,16 +3252,16 @@ func (s *Server) createGroveMembersGroupAndPolicy(ctx context.Context, grove *st
 		}
 	}
 
-	// Create grove-level policy for member agent creation
+	// Create grove-level policy for member agent creation and stop-all
 	policyName := "grove:" + grove.Slug + ":member-create-agents"
 	policy := &store.Policy{
 		ID:           api.NewUUID(),
 		Name:         policyName,
-		Description:  "Allow grove members to create agents",
+		Description:  "Allow grove members to create and stop agents",
 		ScopeType:    "grove",
 		ScopeID:      grove.ID,
 		ResourceType: "agent",
-		Actions:      []string{"create"},
+		Actions:      []string{"create", "stop_all"},
 		Effect:       "allow",
 	}
 	if err := s.store.CreatePolicy(ctx, policy); err != nil {
@@ -3229,10 +3279,26 @@ func (s *Server) createGroveMembersGroupAndPolicy(ctx context.Context, grove *st
 			return
 		}
 		policy = &existing.Items[0]
+		needsUpdate := false
 		if policy.ScopeID != grove.ID {
 			policy.ScopeID = grove.ID
+			needsUpdate = true
+		}
+		// Backfill: ensure stop_all action is present for existing groves
+		hasStopAll := false
+		for _, a := range policy.Actions {
+			if a == "stop_all" {
+				hasStopAll = true
+				break
+			}
+		}
+		if !hasStopAll {
+			policy.Actions = append(policy.Actions, "stop_all")
+			needsUpdate = true
+		}
+		if needsUpdate {
 			if updateErr := s.store.UpdatePolicy(ctx, policy); updateErr != nil {
-				slog.Warn("failed to update existing grove member policy scope",
+				slog.Warn("failed to update existing grove member policy",
 					"grove_id", grove.ID, "policy", policyName, "error", updateErr.Error())
 			}
 		}

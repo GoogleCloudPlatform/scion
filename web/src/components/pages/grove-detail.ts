@@ -890,11 +890,15 @@ export class ScionPageGroveDetail extends LitElement {
   }
 
   private async handleStopAll(): Promise<void> {
-    if (!confirm('Are you sure you want to stop all running agents in this grove?')) {
+    const isGroveAdmin = can(this.grove?._capabilities, 'manage');
+    const confirmMsg = isGroveAdmin
+      ? 'Are you sure you want to stop all running agents in this grove?'
+      : 'Are you sure you want to stop all of your running agents in this grove?';
+    if (!confirm(confirmMsg)) {
       return;
     }
 
-    // Optimistic: mark all running agents as "stopping"
+    // Optimistic: mark running agents as "stopping"
     this.agents = this.agents.map(a =>
       isAgentRunning(a) ? { ...a, phase: 'stopping' as const } : a
     );
@@ -906,18 +910,18 @@ export class ScionPageGroveDetail extends LitElement {
       });
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, 'Failed to stop all agents'));
+        throw new Error(await extractApiError(response, 'Failed to stop agents'));
       }
 
-      const result = (await response.json()) as { stopped: number; failed: number };
+      const result = (await response.json()) as { stopped: number; failed: number; scope?: string };
       if (result.failed > 0) {
         alert(`Stopped ${result.stopped} agents, ${result.failed} failed.`);
       }
 
       this.backgroundRefresh();
     } catch (err) {
-      console.error('Failed to stop all agents:', err);
-      alert(err instanceof Error ? err.message : 'Failed to stop all agents');
+      console.error('Failed to stop agents:', err);
+      alert(err instanceof Error ? err.message : 'Failed to stop agents');
       this.backgroundRefresh();
     } finally {
       this.stopAllLoading = false;
