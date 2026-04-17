@@ -43,6 +43,10 @@ type CreateScheduleRequest struct {
 	Template string `json:"template,omitempty"`
 	Task     string `json:"task,omitempty"`
 	Branch   string `json:"branch,omitempty"`
+
+	// Fields for "workflow_run" events — mutually exclusive with agent-message fields.
+	WorkflowSource string `json:"workflowSource,omitempty"` // Raw YAML of the duckflux workflow (required for workflow_run)
+	WorkflowInputs string `json:"workflowInputs,omitempty"` // JSON inputs for the workflow run (optional)
 }
 
 // UpdateScheduleRequest is the API request for updating a recurring schedule.
@@ -157,8 +161,8 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, groveID 
 		ValidationError(w, "eventType is required", nil)
 		return
 	}
-	if req.EventType != "message" && req.EventType != "dispatch_agent" {
-		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: message, dispatch_agent)", req.EventType), nil)
+	if req.EventType != "message" && req.EventType != "dispatch_agent" && req.EventType != "workflow_run" {
+		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: message, dispatch_agent, workflow_run)", req.EventType), nil)
 		return
 	}
 
@@ -212,6 +216,27 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, groveID 
 		payload = string(payloadBytes)
 	}
 
+	// Validate and extract workflow_run fields.
+	workflowSource := ""
+	workflowInputs := ""
+	if req.EventType == "workflow_run" {
+		if req.WorkflowSource == "" {
+			ValidationError(w, "workflowSource is required for workflow_run schedules", nil)
+			return
+		}
+		workflowSource = req.WorkflowSource
+		workflowInputs = req.WorkflowInputs
+		if workflowInputs == "" {
+			workflowInputs = "{}"
+		} else if !json.Valid([]byte(workflowInputs)) {
+			ValidationError(w, "workflowInputs must be valid JSON", nil)
+			return
+		}
+		if payload == "" {
+			payload = "{}" // placeholder to satisfy NOT NULL constraint
+		}
+	}
+
 	// Compute next run time
 	nextRunAt := cronSchedule.Next(time.Now().UTC())
 
@@ -222,15 +247,17 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, groveID 
 	}
 
 	schedule := store.Schedule{
-		ID:        api.NewUUID(),
-		GroveID:   groveID,
-		Name:      req.Name,
-		CronExpr:  req.CronExpr,
-		EventType: req.EventType,
-		Payload:   payload,
-		Status:    store.ScheduleStatusActive,
-		NextRunAt: &nextRunAt,
-		CreatedBy: createdBy,
+		ID:             api.NewUUID(),
+		GroveID:        groveID,
+		Name:           req.Name,
+		CronExpr:       req.CronExpr,
+		EventType:      req.EventType,
+		Payload:        payload,
+		Status:         store.ScheduleStatusActive,
+		NextRunAt:      &nextRunAt,
+		CreatedBy:      createdBy,
+		WorkflowSource: workflowSource,
+		WorkflowInputs: workflowInputs,
 	}
 
 	if err := s.store.CreateSchedule(r.Context(), &schedule); err != nil {

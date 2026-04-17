@@ -27,7 +27,7 @@ import (
 
 // CreateScheduledEventRequest is the API request for creating a scheduled event.
 type CreateScheduledEventRequest struct {
-	EventType string `json:"eventType"`         // Required: "message" or "dispatch_agent"
+	EventType string `json:"eventType"`         // Required: "message", "dispatch_agent", or "workflow_run"
 	FireAt    string `json:"fireAt,omitempty"`  // ISO 8601 absolute time
 	FireIn    string `json:"fireIn,omitempty"`  // Duration string (e.g. "30m")
 	Payload   string `json:"payload,omitempty"` // Raw JSON payload (advanced)
@@ -43,6 +43,10 @@ type CreateScheduledEventRequest struct {
 	Template string `json:"template,omitempty"`
 	Task     string `json:"task,omitempty"`
 	Branch   string `json:"branch,omitempty"`
+
+	// Fields for "workflow_run" events — mutually exclusive with agent-message fields.
+	WorkflowSource string `json:"workflowSource,omitempty"` // Raw YAML of the duckflux workflow (required for workflow_run)
+	WorkflowInputs string `json:"workflowInputs,omitempty"` // JSON inputs for the workflow run (optional)
 }
 
 // ScheduledEventResponse is the API response for a single scheduled event.
@@ -113,8 +117,8 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, gr
 		ValidationError(w, "eventType is required", nil)
 		return
 	}
-	if req.EventType != "message" && req.EventType != "dispatch_agent" {
-		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: message, dispatch_agent)", req.EventType), nil)
+	if req.EventType != "message" && req.EventType != "dispatch_agent" && req.EventType != "workflow_run" {
+		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: message, dispatch_agent, workflow_run)", req.EventType), nil)
 		return
 	}
 
@@ -198,6 +202,27 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, gr
 		payload = string(payloadBytes)
 	}
 
+	// Validate and extract workflow_run fields.
+	workflowSource := ""
+	workflowInputs := ""
+	if req.EventType == "workflow_run" {
+		if req.WorkflowSource == "" {
+			ValidationError(w, "workflowSource is required for workflow_run events", nil)
+			return
+		}
+		workflowSource = req.WorkflowSource
+		workflowInputs = req.WorkflowInputs
+		if workflowInputs == "" {
+			workflowInputs = "{}"
+		} else if !json.Valid([]byte(workflowInputs)) {
+			ValidationError(w, "workflowInputs must be valid JSON", nil)
+			return
+		}
+		if payload == "" {
+			payload = "{}" // placeholder to satisfy NOT NULL constraint
+		}
+	}
+
 	// Determine creator identity
 	createdBy := ""
 	if identity := GetIdentityFromContext(r.Context()); identity != nil {
@@ -205,13 +230,15 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, gr
 	}
 
 	evt := store.ScheduledEvent{
-		ID:        api.NewUUID(),
-		GroveID:   groveID,
-		EventType: req.EventType,
-		FireAt:    fireAt,
-		Payload:   payload,
-		Status:    store.ScheduledEventPending,
-		CreatedBy: createdBy,
+		ID:             api.NewUUID(),
+		GroveID:        groveID,
+		EventType:      req.EventType,
+		FireAt:         fireAt,
+		Payload:        payload,
+		Status:         store.ScheduledEventPending,
+		CreatedBy:      createdBy,
+		WorkflowSource: workflowSource,
+		WorkflowInputs: workflowInputs,
 	}
 
 	if err := s.scheduler.ScheduleEvent(r.Context(), evt); err != nil {

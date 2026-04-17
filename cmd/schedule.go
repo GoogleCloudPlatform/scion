@@ -28,19 +28,21 @@ import (
 
 // Schedule command flags
 var (
-	scheduleType      string
-	scheduleStatus    string
-	scheduleIn        string
-	scheduleAt        string
-	scheduleAgent     string
-	scheduleMessage   string
-	scheduleInterrupt bool
-	scheduleName      string
-	scheduleCron      string
-	scheduleListType  string // "events", "recurring", "all"
-	scheduleTemplate  string
-	scheduleTask      string
-	scheduleBranch    string
+	scheduleType       string
+	scheduleStatus     string
+	scheduleIn         string
+	scheduleAt         string
+	scheduleAgent      string
+	scheduleMessage    string
+	scheduleInterrupt  bool
+	scheduleName       string
+	scheduleCron       string
+	scheduleListType   string // "events", "recurring", "all"
+	scheduleTemplate   string
+	scheduleTask       string
+	scheduleBranch     string
+	scheduleWorkflow   string // path to workflow YAML file
+	scheduleInputsFile string // path to JSON inputs file
 )
 
 // scheduleCmd is the top-level command group for schedule management.
@@ -418,9 +420,13 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--in and --at are mutually exclusive")
 	}
 
-	// Validate type-specific flags
+	// Validate type-specific flags and mutual exclusion.
+	var workflowSource, workflowInputs string
 	switch scheduleType {
 	case "message":
+		if scheduleWorkflow != "" {
+			return fmt.Errorf("--workflow cannot be used with event type %q", scheduleType)
+		}
 		if scheduleAgent == "" {
 			return fmt.Errorf("--agent is required for message events")
 		}
@@ -428,11 +434,33 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("--message is required for message events")
 		}
 	case "dispatch_agent":
+		if scheduleWorkflow != "" {
+			return fmt.Errorf("--workflow cannot be used with event type %q", scheduleType)
+		}
 		if scheduleAgent == "" {
 			return fmt.Errorf("--agent is required for dispatch_agent events (the name of the agent to create)")
 		}
+	case "workflow_run":
+		if scheduleAgent != "" || scheduleMessage != "" {
+			return fmt.Errorf("--agent and --message cannot be used with --workflow (workflow_run events)")
+		}
+		if scheduleWorkflow == "" {
+			return fmt.Errorf("--workflow is required for workflow_run events")
+		}
+		yamlBytes, err := os.ReadFile(scheduleWorkflow)
+		if err != nil {
+			return fmt.Errorf("failed to read workflow file %q: %w", scheduleWorkflow, err)
+		}
+		workflowSource = string(yamlBytes)
+		if scheduleInputsFile != "" {
+			inputBytes, err := os.ReadFile(scheduleInputsFile)
+			if err != nil {
+				return fmt.Errorf("failed to read inputs file %q: %w", scheduleInputsFile, err)
+			}
+			workflowInputs = string(inputBytes)
+		}
 	default:
-		return fmt.Errorf("unsupported event type: %q (supported: message, dispatch_agent)", scheduleType)
+		return fmt.Errorf("unsupported event type: %q (supported: message, dispatch_agent, workflow_run)", scheduleType)
 	}
 
 	hubCtx, err := CheckHubAvailabilityWithOptions(grovePath, true)
@@ -453,13 +481,15 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	req := &hubclient.CreateScheduledEventRequest{
-		EventType: scheduleType,
-		AgentName: scheduleAgent,
-		Message:   scheduleMessage,
-		Interrupt: scheduleInterrupt,
-		Template:  scheduleTemplate,
-		Task:      scheduleTask,
-		Branch:    scheduleBranch,
+		EventType:      scheduleType,
+		AgentName:      scheduleAgent,
+		Message:        scheduleMessage,
+		Interrupt:      scheduleInterrupt,
+		Template:       scheduleTemplate,
+		Task:           scheduleTask,
+		Branch:         scheduleBranch,
+		WorkflowSource: workflowSource,
+		WorkflowInputs: workflowInputs,
 	}
 
 	if scheduleIn != "" {
@@ -498,9 +528,13 @@ func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--type is required")
 	}
 
-	// Validate type-specific flags
+	// Validate type-specific flags and mutual exclusion.
+	var workflowSource, workflowInputs string
 	switch scheduleType {
 	case "message":
+		if scheduleWorkflow != "" {
+			return fmt.Errorf("--workflow cannot be used with event type %q", scheduleType)
+		}
 		if scheduleAgent == "" {
 			return fmt.Errorf("--agent is required for message schedules")
 		}
@@ -508,11 +542,33 @@ func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("--message is required for message schedules")
 		}
 	case "dispatch_agent":
+		if scheduleWorkflow != "" {
+			return fmt.Errorf("--workflow cannot be used with event type %q", scheduleType)
+		}
 		if scheduleAgent == "" {
 			return fmt.Errorf("--agent is required for dispatch_agent schedules (the name of the agent to create)")
 		}
+	case "workflow_run":
+		if scheduleAgent != "" || scheduleMessage != "" {
+			return fmt.Errorf("--agent and --message cannot be used with --workflow (workflow_run schedules)")
+		}
+		if scheduleWorkflow == "" {
+			return fmt.Errorf("--workflow is required for workflow_run schedules")
+		}
+		yamlBytes, err := os.ReadFile(scheduleWorkflow)
+		if err != nil {
+			return fmt.Errorf("failed to read workflow file %q: %w", scheduleWorkflow, err)
+		}
+		workflowSource = string(yamlBytes)
+		if scheduleInputsFile != "" {
+			inputBytes, err := os.ReadFile(scheduleInputsFile)
+			if err != nil {
+				return fmt.Errorf("failed to read inputs file %q: %w", scheduleInputsFile, err)
+			}
+			workflowInputs = string(inputBytes)
+		}
 	default:
-		return fmt.Errorf("unsupported event type: %q (supported: message, dispatch_agent)", scheduleType)
+		return fmt.Errorf("unsupported event type: %q (supported: message, dispatch_agent, workflow_run)", scheduleType)
 	}
 
 	hubCtx, err := CheckHubAvailabilityWithOptions(grovePath, true)
@@ -533,15 +589,17 @@ func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
 	}
 
 	req := &hubclient.CreateScheduleRequest{
-		Name:      scheduleName,
-		CronExpr:  scheduleCron,
-		EventType: scheduleType,
-		AgentName: scheduleAgent,
-		Message:   scheduleMessage,
-		Interrupt: scheduleInterrupt,
-		Template:  scheduleTemplate,
-		Task:      scheduleTask,
-		Branch:    scheduleBranch,
+		Name:           scheduleName,
+		CronExpr:       scheduleCron,
+		EventType:      scheduleType,
+		AgentName:      scheduleAgent,
+		Message:        scheduleMessage,
+		Interrupt:      scheduleInterrupt,
+		Template:       scheduleTemplate,
+		Task:           scheduleTask,
+		Branch:         scheduleBranch,
+		WorkflowSource: workflowSource,
+		WorkflowInputs: workflowInputs,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -805,7 +863,7 @@ func init() {
 	scheduleListCmd.Flags().StringVar(&scheduleListType, "show", "", "Filter by resource type: events, recurring, or all (default: all)")
 
 	// Create one-shot flags
-	scheduleCreateCmd.Flags().StringVar(&scheduleType, "type", "", "Event type (required: message, dispatch_agent)")
+	scheduleCreateCmd.Flags().StringVar(&scheduleType, "type", "", "Event type (required: message, dispatch_agent, workflow_run)")
 	scheduleCreateCmd.Flags().StringVar(&scheduleIn, "in", "", "Schedule after a duration (e.g. 30m, 1h)")
 	scheduleCreateCmd.Flags().StringVar(&scheduleAt, "at", "", "Schedule at an absolute time (ISO 8601)")
 	scheduleCreateCmd.Flags().StringVar(&scheduleAgent, "agent", "", "Target agent name")
@@ -814,15 +872,19 @@ func init() {
 	scheduleCreateCmd.Flags().StringVar(&scheduleTemplate, "template", "", "Agent template (for dispatch_agent events)")
 	scheduleCreateCmd.Flags().StringVar(&scheduleTask, "task", "", "Task/prompt for the agent (for dispatch_agent events)")
 	scheduleCreateCmd.Flags().StringVar(&scheduleBranch, "branch", "", "Git branch name (for dispatch_agent events)")
+	scheduleCreateCmd.Flags().StringVar(&scheduleWorkflow, "workflow", "", "Path to duckflux workflow YAML file (for workflow_run events)")
+	scheduleCreateCmd.Flags().StringVar(&scheduleInputsFile, "inputs-file", "", "Path to JSON inputs file (for workflow_run events, optional)")
 
 	// Create recurring flags
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleName, "name", "", "Schedule name (required)")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleCron, "cron", "", "Cron expression (required, 5-field: minute hour day month weekday)")
-	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleType, "type", "", "Event type (required: message, dispatch_agent)")
+	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleType, "type", "", "Event type (required: message, dispatch_agent, workflow_run)")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleAgent, "agent", "", "Target agent name (for message: name or 'all'; for dispatch_agent: name to create)")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleMessage, "message", "", "Message body (for message events)")
 	scheduleCreateRecurringCmd.Flags().BoolVar(&scheduleInterrupt, "interrupt", false, "Interrupt the agent (for message events)")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleTemplate, "template", "", "Agent template (for dispatch_agent events)")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleTask, "task", "", "Task/prompt for the agent (for dispatch_agent events)")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleBranch, "branch", "", "Git branch name (for dispatch_agent events)")
+	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleWorkflow, "workflow", "", "Path to duckflux workflow YAML file (for workflow_run schedules)")
+	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleInputsFile, "inputs-file", "", "Path to JSON inputs file (for workflow_run schedules, optional)")
 }

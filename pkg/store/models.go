@@ -1040,7 +1040,7 @@ type MessageFilter struct {
 type ScheduledEvent struct {
 	ID         string     `json:"id"`
 	GroveID    string     `json:"groveId"`
-	EventType  string     `json:"eventType"` // "message", "status_update"
+	EventType  string     `json:"eventType"` // "message", "dispatch_agent", "workflow_run"
 	FireAt     time.Time  `json:"fireAt"`    // When to fire (UTC)
 	Payload    string     `json:"payload"`   // JSON blob (handler-specific)
 	Status     string     `json:"status"`    // pending, fired, cancelled, expired
@@ -1049,6 +1049,10 @@ type ScheduledEvent struct {
 	FiredAt    *time.Time `json:"firedAt,omitempty"`
 	Error      string     `json:"error,omitempty"`
 	ScheduleID string     `json:"scheduleId,omitempty"` // FK to schedules.id for recurring schedule fires
+
+	// Workflow-run fields (non-empty only when EventType == "workflow_run").
+	WorkflowSource string `json:"workflowSource,omitempty"` // Raw YAML of the duckflux workflow
+	WorkflowInputs string `json:"workflowInputs,omitempty"` // JSON inputs for the workflow run
 }
 
 // ScheduledEventStatus constants
@@ -1077,7 +1081,7 @@ type Schedule struct {
 	GroveID       string     `json:"groveId"`
 	Name          string     `json:"name"`
 	CronExpr      string     `json:"cronExpr"`  // Standard 5-field cron expression (UTC)
-	EventType     string     `json:"eventType"` // "message" (future: "dispatch_agent")
+	EventType     string     `json:"eventType"` // "message", "dispatch_agent", "workflow_run"
 	Payload       string     `json:"payload"`   // JSON: handler-specific configuration
 	Status        string     `json:"status"`    // active, paused, deleted
 	NextRunAt     *time.Time `json:"nextRunAt,omitempty"`
@@ -1089,6 +1093,10 @@ type Schedule struct {
 	CreatedAt     time.Time  `json:"createdAt"`
 	CreatedBy     string     `json:"createdBy,omitempty"`
 	UpdatedAt     time.Time  `json:"updatedAt"`
+
+	// Workflow-run fields (non-empty only when EventType == "workflow_run").
+	WorkflowSource string `json:"workflowSource,omitempty"` // Raw YAML of the duckflux workflow
+	WorkflowInputs string `json:"workflowInputs,omitempty"` // JSON inputs for the workflow run
 }
 
 // ScheduleStatus constants

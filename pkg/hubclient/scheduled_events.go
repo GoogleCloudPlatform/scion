@@ -61,6 +61,10 @@ type CreateScheduledEventRequest struct {
 	Template  string `json:"template,omitempty"`
 	Task      string `json:"task,omitempty"`
 	Branch    string `json:"branch,omitempty"`
+
+	// Fields for workflow_run events.
+	WorkflowSource string `json:"workflowSource,omitempty"`
+	WorkflowInputs string `json:"workflowInputs,omitempty"`
 }
 
 // ScheduledEvent represents a scheduled event returned by the Hub API.

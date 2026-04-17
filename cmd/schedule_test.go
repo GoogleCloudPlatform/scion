@@ -155,3 +155,133 @@ func TestScheduleCommandStructure(t *testing.T) {
 	assert.Contains(t, names, "cancel <id>")
 	assert.Contains(t, names, "create")
 }
+
+// ============================================================================
+// Workflow schedule validation tests (Phase 4a)
+// ============================================================================
+
+func TestScheduleCreateWorkflowRunValidation(t *testing.T) {
+	// Save and restore all flags touched in the tests.
+	save := func() (string, string, string, string, string, string, string) {
+		return scheduleType, scheduleIn, scheduleAt, scheduleAgent, scheduleMessage, scheduleWorkflow, scheduleInputsFile
+	}
+	restore := func(typ, in, at, agent, msg, wf, inp string) {
+		scheduleType = typ
+		scheduleIn = in
+		scheduleAt = at
+		scheduleAgent = agent
+		scheduleMessage = msg
+		scheduleWorkflow = wf
+		scheduleInputsFile = inp
+	}
+	typ, in, at, agent, msg, wf, inp := save()
+	defer restore(typ, in, at, agent, msg, wf, inp)
+
+	t.Run("workflow_run requires --workflow", func(t *testing.T) {
+		scheduleType = "workflow_run"
+		scheduleIn = "30m"
+		scheduleAt = ""
+		scheduleAgent = ""
+		scheduleMessage = ""
+		scheduleWorkflow = "" // missing
+		scheduleInputsFile = ""
+		err := runScheduleCreate(nil, nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "--workflow is required")
+	})
+
+	t.Run("workflow_run rejects --agent", func(t *testing.T) {
+		scheduleType = "workflow_run"
+		scheduleIn = "1h"
+		scheduleAt = ""
+		scheduleAgent = "some-agent" // must not be set
+		scheduleMessage = ""
+		scheduleWorkflow = "some.yaml"
+		scheduleInputsFile = ""
+		err := runScheduleCreate(nil, nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "--agent and --message cannot be used with --workflow")
+	})
+
+	t.Run("workflow_run rejects --message", func(t *testing.T) {
+		scheduleType = "workflow_run"
+		scheduleIn = "1h"
+		scheduleAt = ""
+		scheduleAgent = ""
+		scheduleMessage = "hello" // must not be set
+		scheduleWorkflow = "some.yaml"
+		scheduleInputsFile = ""
+		err := runScheduleCreate(nil, nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "--agent and --message cannot be used with --workflow")
+	})
+
+	t.Run("message type rejects --workflow", func(t *testing.T) {
+		scheduleType = "message"
+		scheduleIn = "30m"
+		scheduleAt = ""
+		scheduleAgent = "worker-1"
+		scheduleMessage = "hi"
+		scheduleWorkflow = "some.yaml" // must not be set for message type
+		scheduleInputsFile = ""
+		err := runScheduleCreate(nil, nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "--workflow cannot be used with event type")
+	})
+
+	t.Run("workflow_run reads yaml file and propagates error on missing file", func(t *testing.T) {
+		scheduleType = "workflow_run"
+		scheduleIn = "30m"
+		scheduleAt = ""
+		scheduleAgent = ""
+		scheduleMessage = ""
+		scheduleWorkflow = "/nonexistent/path/flow.duck.yaml"
+		scheduleInputsFile = ""
+		err := runScheduleCreate(nil, nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to read workflow file")
+	})
+}
+
+func TestScheduleCreateRecurringWorkflowRunValidation(t *testing.T) {
+	save := func() (string, string, string, string, string, string, string) {
+		return scheduleType, scheduleName, scheduleCron, scheduleAgent, scheduleMessage, scheduleWorkflow, scheduleInputsFile
+	}
+	restore := func(typ, name, cron, agent, msg, wf, inp string) {
+		scheduleType = typ
+		scheduleName = name
+		scheduleCron = cron
+		scheduleAgent = agent
+		scheduleMessage = msg
+		scheduleWorkflow = wf
+		scheduleInputsFile = inp
+	}
+	typ, name, cron, agent, msg, wf, inp := save()
+	defer restore(typ, name, cron, agent, msg, wf, inp)
+
+	t.Run("workflow_run requires --workflow", func(t *testing.T) {
+		scheduleType = "workflow_run"
+		scheduleName = "my-sched"
+		scheduleCron = "0 * * * *"
+		scheduleAgent = ""
+		scheduleMessage = ""
+		scheduleWorkflow = ""
+		scheduleInputsFile = ""
+		err := runScheduleCreateRecurring(nil, nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "--workflow is required")
+	})
+
+	t.Run("workflow_run rejects --agent", func(t *testing.T) {
+		scheduleType = "workflow_run"
+		scheduleName = "my-sched"
+		scheduleCron = "0 * * * *"
+		scheduleAgent = "bad-agent"
+		scheduleMessage = ""
+		scheduleWorkflow = "flow.yaml"
+		scheduleInputsFile = ""
+		err := runScheduleCreateRecurring(nil, nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "--agent and --message cannot be used with --workflow")
+	})
+}

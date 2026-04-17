@@ -121,6 +121,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV43,
 		migrationV44,
 		migrationV45,
+		migrationV46,
 	}
 
 	// Create migrations table if not exists
@@ -1088,6 +1089,15 @@ ALTER TABLE gcp_service_accounts ADD COLUMN managed_by TEXT NOT NULL DEFAULT '';
 // Migration V45: Add allow_progeny column to secrets table
 const migrationV45 = `
 ALTER TABLE secrets ADD COLUMN allow_progeny INTEGER NOT NULL DEFAULT 0;
+`
+
+// Migration V46: Add workflow_source and workflow_inputs columns to scheduled_events
+// and schedules tables to support the workflow_run event kind (Phase 4a).
+const migrationV46 = `
+ALTER TABLE scheduled_events ADD COLUMN workflow_source TEXT NOT NULL DEFAULT '';
+ALTER TABLE scheduled_events ADD COLUMN workflow_inputs TEXT NOT NULL DEFAULT '';
+ALTER TABLE schedules ADD COLUMN workflow_source TEXT NOT NULL DEFAULT '';
+ALTER TABLE schedules ADD COLUMN workflow_inputs TEXT NOT NULL DEFAULT '';
 `
 
 // Helper functions for JSON marshaling/unmarshaling

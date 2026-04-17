@@ -46,12 +46,14 @@ func (s *SQLiteStore) CreateScheduledEvent(ctx context.Context, event *store.Sch
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO scheduled_events (
 			id, grove_id, event_type, fire_at, payload, status,
-			created_at, created_by, fired_at, error, schedule_id
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			created_at, created_by, fired_at, error, schedule_id,
+			workflow_source, workflow_inputs
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		event.ID, event.GroveID, event.EventType, event.FireAt, event.Payload, event.Status,
 		event.CreatedAt, nullableString(event.CreatedBy), nullableTime(timeFromPtr(event.FiredAt)), nullableString(event.Error),
 		nullableString(event.ScheduleID),
+		event.WorkflowSource, event.WorkflowInputs,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -75,11 +77,13 @@ func (s *SQLiteStore) GetScheduledEvent(ctx context.Context, id string) (*store.
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, grove_id, event_type, fire_at, payload, status,
-			created_at, created_by, fired_at, error, schedule_id
+			created_at, created_by, fired_at, error, schedule_id,
+			COALESCE(workflow_source, ''), COALESCE(workflow_inputs, '')
 		FROM scheduled_events WHERE id = ?
 	`, id).Scan(
 		&event.ID, &event.GroveID, &event.EventType, &event.FireAt, &event.Payload, &event.Status,
 		&event.CreatedAt, &createdBy, &firedAt, &errMsg, &scheduleID,
+		&event.WorkflowSource, &event.WorkflowInputs,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -109,7 +113,8 @@ func (s *SQLiteStore) GetScheduledEvent(ctx context.Context, id string) (*store.
 func (s *SQLiteStore) ListPendingScheduledEvents(ctx context.Context) ([]store.ScheduledEvent, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, grove_id, event_type, fire_at, payload, status,
-			created_at, created_by, fired_at, error, schedule_id
+			created_at, created_by, fired_at, error, schedule_id,
+			COALESCE(workflow_source, ''), COALESCE(workflow_inputs, '')
 		FROM scheduled_events
 		WHERE status = ?
 		ORDER BY fire_at ASC
@@ -197,7 +202,8 @@ func (s *SQLiteStore) ListScheduledEvents(ctx context.Context, filter store.Sche
 
 	query := fmt.Sprintf(`
 		SELECT id, grove_id, event_type, fire_at, payload, status,
-			created_at, created_by, fired_at, error, schedule_id
+			created_at, created_by, fired_at, error, schedule_id,
+			COALESCE(workflow_source, ''), COALESCE(workflow_inputs, '')
 		FROM scheduled_events %s
 		ORDER BY created_at DESC
 		LIMIT ?
@@ -208,7 +214,8 @@ func (s *SQLiteStore) ListScheduledEvents(ctx context.Context, filter store.Sche
 	if opts.Cursor != "" {
 		query = fmt.Sprintf(`
 			SELECT id, grove_id, event_type, fire_at, payload, status,
-				created_at, created_by, fired_at, error, schedule_id
+				created_at, created_by, fired_at, error, schedule_id,
+				COALESCE(workflow_source, ''), COALESCE(workflow_inputs, '')
 			FROM scheduled_events %s AND id < ?
 			ORDER BY created_at DESC
 			LIMIT ?
@@ -216,7 +223,8 @@ func (s *SQLiteStore) ListScheduledEvents(ctx context.Context, filter store.Sche
 		if whereClause == "" {
 			query = `
 				SELECT id, grove_id, event_type, fire_at, payload, status,
-					created_at, created_by, fired_at, error, schedule_id
+					created_at, created_by, fired_at, error, schedule_id,
+					COALESCE(workflow_source, ''), COALESCE(workflow_inputs, '')
 				FROM scheduled_events WHERE id < ?
 				ORDER BY created_at DESC
 				LIMIT ?
@@ -291,6 +299,7 @@ func scanScheduledEvents(rows *sql.Rows) ([]store.ScheduledEvent, error) {
 		if err := rows.Scan(
 			&event.ID, &event.GroveID, &event.EventType, &event.FireAt, &event.Payload, &event.Status,
 			&event.CreatedAt, &createdBy, &firedAt, &errMsg, &scheduleID,
+			&event.WorkflowSource, &event.WorkflowInputs,
 		); err != nil {
 			return nil, err
 		}

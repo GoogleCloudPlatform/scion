@@ -72,6 +72,10 @@ type CreateScheduleRequest struct {
 	Template  string `json:"template,omitempty"`
 	Task      string `json:"task,omitempty"`
 	Branch    string `json:"branch,omitempty"`
+
+	// Fields for workflow_run schedules.
+	WorkflowSource string `json:"workflowSource,omitempty"`
+	WorkflowInputs string `json:"workflowInputs,omitempty"`
 }
 
 // UpdateScheduleRequest is the client-side request for updating a schedule.

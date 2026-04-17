@@ -309,17 +309,19 @@ func TestSchedulerNoHandlers(t *testing.T) {
 // by the Scheduler; all other Store interface methods panic if called.
 type mockScheduledEventStore struct {
 	store.Store // embed to satisfy the interface; unused methods panic
-	mu          sync.Mutex
-	events      map[string]*store.ScheduledEvent
-	agents      map[string]*store.Agent
-	groves      map[string]*store.Grove
+	mu           sync.Mutex
+	events       map[string]*store.ScheduledEvent
+	agents       map[string]*store.Agent
+	groves       map[string]*store.Grove
+	workflowRuns map[string]*store.WorkflowRun
 }
 
 func newMockStore() *mockScheduledEventStore {
 	return &mockScheduledEventStore{
-		events: make(map[string]*store.ScheduledEvent),
-		agents: make(map[string]*store.Agent),
-		groves: make(map[string]*store.Grove),
+		events:       make(map[string]*store.ScheduledEvent),
+		agents:       make(map[string]*store.Agent),
+		groves:       make(map[string]*store.Grove),
+		workflowRuns: make(map[string]*store.WorkflowRun),
 	}
 }
 
@@ -458,6 +460,45 @@ func (m *mockScheduledEventStore) getEvent(id string) *store.ScheduledEvent {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.events[id]
+}
+
+// WorkflowRun methods for workflowRunEventHandler tests.
+
+func (m *mockScheduledEventStore) CreateWorkflowRun(_ context.Context, run *store.WorkflowRun) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.workflowRuns == nil {
+		m.workflowRuns = make(map[string]*store.WorkflowRun)
+	}
+	cp := *run
+	m.workflowRuns[run.ID] = &cp
+	return nil
+}
+
+func (m *mockScheduledEventStore) GetWorkflowRun(_ context.Context, id string) (*store.WorkflowRun, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.workflowRuns == nil {
+		return nil, store.ErrNotFound
+	}
+	r, ok := m.workflowRuns[id]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	cp := *r
+	return &cp, nil
+}
+
+func (m *mockScheduledEventStore) ListWorkflowRuns(_ context.Context, _ store.WorkflowRunListOptions) (*store.ListResult[store.WorkflowRun], error) {
+	return &store.ListResult[store.WorkflowRun]{}, nil
+}
+
+func (m *mockScheduledEventStore) CancelWorkflowRun(_ context.Context, _ string) (*store.WorkflowRun, error) {
+	return nil, store.ErrNotFound
+}
+
+func (m *mockScheduledEventStore) TransitionWorkflowRun(_ context.Context, _ string, _ store.WorkflowRunTransition, _ []string) (*store.WorkflowRun, error) {
+	return nil, nil
 }
 
 func TestOneShotTimerFiresAtCorrectTime(t *testing.T) {
@@ -1263,5 +1304,192 @@ func TestDispatchAgentEventHandler_CreatesAgentNoDispatcher(t *testing.T) {
 	}
 	if !found {
 		t.Error("agent was not created in the store")
+	}
+}
+
+// ============================================================================
+// WorkflowRun Event Handler Tests
+// ============================================================================
+
+func TestWorkflowRunEventHandler_EmptySource(t *testing.T) {
+	ms := newMockStore()
+	ms.groves["grove-1"] = &store.Grove{ID: "grove-1", Name: "test-grove"}
+
+	srv := &Server{store: ms}
+	handler := srv.workflowRunEventHandler()
+
+	ctx := context.Background()
+	evt := store.ScheduledEvent{
+		ID:             "wr-empty-1",
+		GroveID:        "grove-1",
+		EventType:      "workflow_run",
+		WorkflowSource: "", // missing source
+	}
+
+	err := handler(ctx, evt)
+	if err == nil {
+		t.Fatal("expected error for empty workflow_source")
+	}
+	if !strings.Contains(err.Error(), "empty workflow_source") {
+		t.Errorf("expected 'empty workflow_source' in error, got: %s", err)
+	}
+}
+
+func TestWorkflowRunEventHandler_GroveNotFound(t *testing.T) {
+	ms := newMockStore()
+	// grove not registered
+
+	srv := &Server{store: ms}
+	handler := srv.workflowRunEventHandler()
+
+	ctx := context.Background()
+	evt := store.ScheduledEvent{
+		ID:             "wr-nogrove-1",
+		GroveID:        "nonexistent-grove",
+		EventType:      "workflow_run",
+		WorkflowSource: "flow: hello",
+	}
+
+	err := handler(ctx, evt)
+	if err == nil {
+		t.Fatal("expected error when grove does not exist")
+	}
+	if !strings.Contains(err.Error(), "no longer exists") {
+		t.Errorf("expected 'no longer exists' in error, got: %s", err)
+	}
+}
+
+func TestWorkflowRunEventHandler_CreatesRunNoDispatcher(t *testing.T) {
+	ms := newMockStore()
+	ms.groves["grove-1"] = &store.Grove{ID: "grove-1", Name: "test-grove"}
+
+	// Server without a workflow dispatcher (nil).
+	srv := &Server{store: ms, workflowDispatcher: nil}
+	handler := srv.workflowRunEventHandler()
+
+	ctx := context.Background()
+	userID := "user-abc"
+	evt := store.ScheduledEvent{
+		ID:             "wr-ok-1",
+		GroveID:        "grove-1",
+		EventType:      "workflow_run",
+		WorkflowSource: "flow:\n  name: test",
+		WorkflowInputs: `{"key":"value"}`,
+		CreatedBy:      userID,
+	}
+
+	err := handler(ctx, evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify a WorkflowRun was created in the store.
+	if len(ms.workflowRuns) != 1 {
+		t.Fatalf("expected 1 WorkflowRun in store, got %d", len(ms.workflowRuns))
+	}
+
+	var run *store.WorkflowRun
+	for _, r := range ms.workflowRuns {
+		run = r
+	}
+
+	if run.GroveID != "grove-1" {
+		t.Errorf("expected groveID 'grove-1', got %q", run.GroveID)
+	}
+	if run.SourceYaml != "flow:\n  name: test" {
+		t.Errorf("unexpected source yaml: %q", run.SourceYaml)
+	}
+	if run.InputsJSON != `{"key":"value"}` {
+		t.Errorf("unexpected inputs json: %q", run.InputsJSON)
+	}
+	if run.Status != store.WorkflowRunStatusQueued {
+		t.Errorf("expected status %q, got %q", store.WorkflowRunStatusQueued, run.Status)
+	}
+	if run.CreatedByUserID == nil || *run.CreatedByUserID != userID {
+		t.Errorf("expected created_by_user_id %q", userID)
+	}
+}
+
+func TestWorkflowRunEventHandler_DefaultsEmptyInputs(t *testing.T) {
+	ms := newMockStore()
+	ms.groves["grove-1"] = &store.Grove{ID: "grove-1", Name: "test-grove"}
+
+	srv := &Server{store: ms}
+	handler := srv.workflowRunEventHandler()
+
+	ctx := context.Background()
+	evt := store.ScheduledEvent{
+		ID:             "wr-inputs-default-1",
+		GroveID:        "grove-1",
+		EventType:      "workflow_run",
+		WorkflowSource: "flow: minimal",
+		WorkflowInputs: "", // empty — should default to "{}"
+	}
+
+	err := handler(ctx, evt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, r := range ms.workflowRuns {
+		if r.InputsJSON != "{}" {
+			t.Errorf("expected inputs JSON '{}', got %q", r.InputsJSON)
+		}
+	}
+}
+
+func TestScheduleWorkflowRunFires(t *testing.T) {
+	// End-to-end: register workflow_run handler on the scheduler, fire an event,
+	// verify a WorkflowRun lands in the store.
+	ms := newMockStore()
+	ms.groves["grove-1"] = &store.Grove{ID: "grove-1", Name: "test-grove"}
+
+	srv := &Server{store: ms, workflowDispatcher: nil}
+	s := newTestSchedulerWithStore(1*time.Second, ms)
+	s.RegisterEventHandler("workflow_run", srv.workflowRunEventHandler())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	evt := store.ScheduledEvent{
+		ID:             "wr-sched-1",
+		GroveID:        "grove-1",
+		EventType:      "workflow_run",
+		FireAt:         time.Now().Add(50 * time.Millisecond),
+		WorkflowSource: "flow:\n  name: sched-test",
+		Status:         store.ScheduledEventPending,
+		CreatedBy:      "user-sched",
+	}
+	if err := ms.CreateScheduledEvent(ctx, &evt); err != nil {
+		t.Fatal(err)
+	}
+	s.scheduleTimer(ctx, evt)
+
+	// Wait for timer to fire.
+	deadline := time.After(1 * time.Second)
+	for {
+		ms.mu.Lock()
+		count := len(ms.workflowRuns)
+		ms.mu.Unlock()
+		if count > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for WorkflowRun to be created")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	for _, r := range ms.workflowRuns {
+		if r.GroveID != "grove-1" {
+			t.Errorf("unexpected groveID: %q", r.GroveID)
+		}
+		if r.Status != store.WorkflowRunStatusQueued {
+			t.Errorf("expected queued, got %q", r.Status)
+		}
 	}
 }

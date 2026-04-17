@@ -1718,6 +1718,67 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 	}
 }
 
+// workflowRunEventHandler returns an EventHandler that creates a WorkflowRun
+// and hands off to the WorkflowRunDispatcher (Phase 4a).
+// The run is created with status "queued" and stamped with the schedule's
+// creator as created_by_user_id. Dispatch is fire-and-forget.
+func (s *Server) workflowRunEventHandler() EventHandler {
+	return func(ctx context.Context, evt store.ScheduledEvent) error {
+		if evt.WorkflowSource == "" {
+			return fmt.Errorf("workflow_run event %s has empty workflow_source", evt.ID)
+		}
+
+		// Verify the grove still exists.
+		if _, err := s.store.GetGrove(ctx, evt.GroveID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("grove %q no longer exists", evt.GroveID)
+			}
+			return fmt.Errorf("failed to resolve grove %q: %w", evt.GroveID, err)
+		}
+
+		// Normalise inputs.
+		inputsJSON := evt.WorkflowInputs
+		if inputsJSON == "" {
+			inputsJSON = "{}"
+		}
+
+		// Stamp creator from the schedule/event creator (user ID).
+		var createdByUserID *string
+		if evt.CreatedBy != "" {
+			id := evt.CreatedBy
+			createdByUserID = &id
+		}
+
+		run := &store.WorkflowRun{
+			ID:              api.NewUUID(),
+			GroveID:         evt.GroveID,
+			SourceYaml:      evt.WorkflowSource,
+			InputsJSON:      inputsJSON,
+			Status:          store.WorkflowRunStatusQueued,
+			CreatedByUserID: createdByUserID,
+		}
+
+		if err := s.store.CreateWorkflowRun(ctx, run); err != nil {
+			return fmt.Errorf("failed to create WorkflowRun for event %s: %w", evt.ID, err)
+		}
+
+		slog.Info("Scheduler: workflow_run event created WorkflowRun",
+			"eventID", evt.ID,
+			"runID", run.ID,
+			"groveID", evt.GroveID)
+
+		// Fire-and-forget dispatch — does not block the scheduler.
+		if s.workflowDispatcher != nil {
+			s.workflowDispatcher.DispatchAsync(run.ID)
+		} else {
+			slog.Warn("Scheduler: no workflow dispatcher available, run queued but not dispatched",
+				"eventID", evt.ID, "runID", run.ID)
+		}
+
+		return nil
+	}
+}
+
 // evaluateSchedulesHandler returns a recurring handler that evaluates due
 // recurring schedules and fires their events. It queries active schedules
 // whose next_run_at has passed, executes the action, and updates next_run_at.
@@ -1764,14 +1825,16 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 
 	// Create a one-shot event from the schedule
 	evt := store.ScheduledEvent{
-		ID:         api.NewUUID(),
-		GroveID:    sched.GroveID,
-		EventType:  sched.EventType,
-		FireAt:     now,
-		Payload:    sched.Payload,
-		Status:     store.ScheduledEventPending,
-		CreatedBy:  sched.CreatedBy,
-		ScheduleID: sched.ID,
+		ID:             api.NewUUID(),
+		GroveID:        sched.GroveID,
+		EventType:      sched.EventType,
+		FireAt:         now,
+		Payload:        sched.Payload,
+		Status:         store.ScheduledEventPending,
+		CreatedBy:      sched.CreatedBy,
+		ScheduleID:     sched.ID,
+		WorkflowSource: sched.WorkflowSource,
+		WorkflowInputs: sched.WorkflowInputs,
 	}
 
 	if err := s.store.CreateScheduledEvent(ctx, &evt); err != nil {
@@ -1827,6 +1890,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	}
 	s.scheduler.RegisterEventHandler("message", s.messageEventHandler())
 	s.scheduler.RegisterEventHandler("dispatch_agent", s.dispatchAgentEventHandler())
+	s.scheduler.RegisterEventHandler("workflow_run", s.workflowRunEventHandler())
 	s.scheduler.RegisterRecurring("schedule-evaluator", 1, s.evaluateSchedulesHandler())
 
 	// Register GitHub App health check if the app is configured

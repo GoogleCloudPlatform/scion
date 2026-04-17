@@ -50,8 +50,9 @@ func (s *SQLiteStore) CreateSchedule(ctx context.Context, schedule *store.Schedu
 		INSERT INTO schedules (
 			id, grove_id, name, cron_expr, event_type, payload, status,
 			next_run_at, last_run_at, last_run_status, last_run_error,
-			run_count, error_count, created_at, created_by, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			run_count, error_count, created_at, created_by, updated_at,
+			workflow_source, workflow_inputs
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		schedule.ID, schedule.GroveID, schedule.Name, schedule.CronExpr,
 		schedule.EventType, schedule.Payload, schedule.Status,
@@ -60,6 +61,7 @@ func (s *SQLiteStore) CreateSchedule(ctx context.Context, schedule *store.Schedu
 		nullableString(schedule.LastRunStatus), nullableString(schedule.LastRunError),
 		schedule.RunCount, schedule.ErrorCount,
 		schedule.CreatedAt, nullableString(schedule.CreatedBy), schedule.UpdatedAt,
+		schedule.WorkflowSource, schedule.WorkflowInputs,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -82,7 +84,8 @@ func (s *SQLiteStore) GetSchedule(ctx context.Context, id string) (*store.Schedu
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, grove_id, name, cron_expr, event_type, payload, status,
 			next_run_at, last_run_at, last_run_status, last_run_error,
-			run_count, error_count, created_at, created_by, updated_at
+			run_count, error_count, created_at, created_by, updated_at,
+			COALESCE(workflow_source, ''), COALESCE(workflow_inputs, '')
 		FROM schedules WHERE id = ?
 	`, id).Scan(
 		&schedule.ID, &schedule.GroveID, &schedule.Name, &schedule.CronExpr,
@@ -90,6 +93,7 @@ func (s *SQLiteStore) GetSchedule(ctx context.Context, id string) (*store.Schedu
 		&nextRunAt, &lastRunAt, &lastRunStatus, &lastRunError,
 		&schedule.RunCount, &schedule.ErrorCount,
 		&schedule.CreatedAt, &createdBy, &schedule.UpdatedAt,
+		&schedule.WorkflowSource, &schedule.WorkflowInputs,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -162,7 +166,8 @@ func (s *SQLiteStore) ListSchedules(ctx context.Context, filter store.ScheduleFi
 	query := fmt.Sprintf(`
 		SELECT id, grove_id, name, cron_expr, event_type, payload, status,
 			next_run_at, last_run_at, last_run_status, last_run_error,
-			run_count, error_count, created_at, created_by, updated_at
+			run_count, error_count, created_at, created_by, updated_at,
+			COALESCE(workflow_source, ''), COALESCE(workflow_inputs, '')
 		FROM schedules %s
 		ORDER BY created_at DESC
 		LIMIT ?
@@ -298,7 +303,8 @@ func (s *SQLiteStore) ListDueSchedules(ctx context.Context, now time.Time) ([]st
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, grove_id, name, cron_expr, event_type, payload, status,
 			next_run_at, last_run_at, last_run_status, last_run_error,
-			run_count, error_count, created_at, created_by, updated_at
+			run_count, error_count, created_at, created_by, updated_at,
+			COALESCE(workflow_source, ''), COALESCE(workflow_inputs, '')
 		FROM schedules
 		WHERE status = ? AND next_run_at IS NOT NULL AND next_run_at <= ?
 		ORDER BY next_run_at ASC
@@ -337,6 +343,7 @@ func scanSchedules(rows *sql.Rows) ([]store.Schedule, error) {
 			&nextRunAt, &lastRunAt, &lastRunStatus, &lastRunError,
 			&schedule.RunCount, &schedule.ErrorCount,
 			&schedule.CreatedAt, &createdBy, &schedule.UpdatedAt,
+			&schedule.WorkflowSource, &schedule.WorkflowInputs,
 		); err != nil {
 			return nil, err
 		}
