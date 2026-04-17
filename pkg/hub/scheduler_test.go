@@ -308,7 +308,7 @@ func TestSchedulerNoHandlers(t *testing.T) {
 // timer scheduling. It only implements the ScheduledEventStore methods needed
 // by the Scheduler; all other Store interface methods panic if called.
 type mockScheduledEventStore struct {
-	store.Store // embed to satisfy the interface; unused methods panic
+	store.Store  // embed to satisfy the interface; unused methods panic
 	mu           sync.Mutex
 	events       map[string]*store.ScheduledEvent
 	agents       map[string]*store.Agent

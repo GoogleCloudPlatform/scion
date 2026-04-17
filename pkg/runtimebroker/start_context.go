@@ -202,8 +202,13 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// 3. Hub auth token
 	if in.AgentToken != "" {
 		env["SCION_AUTH_TOKEN"] = in.AgentToken
+		// SCION_AGENT_TOKEN is the canonical name for the agent JWT inside
+		// the container. `scion workflow run --via-hub` reads this via
+		// hubclient.WithAutoAgentAuth() so agents can invoke workflow runs
+		// without needing additional configuration.
+		env["SCION_AGENT_TOKEN"] = in.AgentToken
 		if s.config.Debug {
-			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN set from agent token", "agent_id", in.AgentID, "length", len(in.AgentToken))
+			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN/SCION_AGENT_TOKEN set from agent token", "agent_id", in.AgentID, "length", len(in.AgentToken))
 		}
 	} else if devToken := os.Getenv("SCION_AUTH_TOKEN"); devToken != "" {
 		env["SCION_AUTH_TOKEN"] = devToken

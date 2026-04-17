@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -364,6 +365,28 @@ func WithHMACAuth(brokerID string, secretKey []byte) Option {
 		c.transport.Auth = &apiclient.HMACAuth{
 			BrokerID:  brokerID,
 			SecretKey: secretKey,
+		}
+	}
+}
+
+// AgentTokenEnvVar is the canonical environment variable that agent containers
+// use to carry their Hub JWT. Set by the runtime broker when provisioning an
+// agent container (alongside SCION_AUTH_TOKEN for backwards compatibility).
+const AgentTokenEnvVar = "SCION_AGENT_TOKEN"
+
+// WithAutoAgentAuth attempts to load an agent JWT automatically from the
+// SCION_AGENT_TOKEN environment variable. When set, the client sends the
+// JWT via the X-Scion-Agent-Token header (agent auth path). If the variable
+// is unset the option is a no-op, allowing the caller to chain additional
+// auth options as fallbacks.
+func WithAutoAgentAuth() Option {
+	return func(c *client) {
+		token := os.Getenv(AgentTokenEnvVar)
+		if token != "" {
+			c.transport.Auth = &apiclient.AgentTokenAuth{Token: token}
+			if util.DebugEnabled() {
+				util.Debugf("Agent auth token loaded from %s", AgentTokenEnvVar)
+			}
 		}
 	}
 }

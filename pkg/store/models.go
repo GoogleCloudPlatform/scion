@@ -152,6 +152,12 @@ const (
 	WorkspaceModePerAgent = "per-agent"
 )
 
+// LabelAllowWorkflowInvocation is a grove label that opts the grove into
+// agent-initiated workflow runs. When set to "true", agents whose JWT
+// carries the grove:workflow:run scope may create workflow runs in this grove.
+// Default is disabled (opt-in).
+const LabelAllowWorkflowInvocation = "scion.dev/allow-workflow-invocation"
+
 // Grove represents a project/agent group in the Hub database.
 type Grove struct {
 	// Identity
@@ -202,6 +208,13 @@ type Grove struct {
 // single shared workspace clone instead of per-agent clones.
 func (g *Grove) IsSharedWorkspace() bool {
 	return g.GitRemote != "" && g.Labels[LabelWorkspaceMode] == WorkspaceModeShared
+}
+
+// AllowsWorkflowInvocation reports whether agent-initiated workflow runs are
+// enabled for this grove. Agents must additionally hold the grove:workflow:run
+// scope in their JWT (opt-in at the grove level, default false).
+func (g *Grove) AllowsWorkflowInvocation() bool {
+	return g.Labels[LabelAllowWorkflowInvocation] == "true"
 }
 
 // RuntimeBroker represents a compute node in the Hub database.

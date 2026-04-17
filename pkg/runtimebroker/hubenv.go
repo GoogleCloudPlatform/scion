@@ -34,6 +34,7 @@ var safeEnvLogKeys = map[string]struct{}{
 	"SCION_HUB_ENDPOINT":      {},
 	"SCION_HUB_URL":           {},
 	"SCION_TELEMETRY_ENABLED": {},
+	// SCION_AGENT_TOKEN is excluded (redacted) — it is a JWT credential.
 }
 
 func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHubEndpoint string, resolvedEnv map[string]string, grovePath, containerHubEndpoint, runtimeName string) string {

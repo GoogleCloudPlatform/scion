@@ -55,6 +55,9 @@ const (
 	ScopeAgentNotify AgentTokenScope = "grove:agent:notify"
 	// ScopeAgentTokenRefresh allows the agent to refresh its own token before expiry.
 	ScopeAgentTokenRefresh AgentTokenScope = "agent:token:refresh"
+	// ScopeWorkflowRun allows the agent to create workflow runs in its own grove.
+	// Only granted when the grove's allow_workflow_invocation setting is true (opt-in).
+	ScopeWorkflowRun AgentTokenScope = "grove:workflow:run"
 	// ScopeGCPTokenPrefix is the prefix for GCP token scopes.
 	// Full scope format: "grove:gcp:token:<sa-id>"
 	ScopeGCPTokenPrefix = "grove:gcp:token:"

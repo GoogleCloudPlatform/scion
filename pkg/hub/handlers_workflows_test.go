@@ -340,3 +340,146 @@ func TestWorkflowRun_Cancel_Idempotent_QueuedToCancel(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&resp))
 	assert.Equal(t, "canceled", resp.Run.Status)
 }
+
+// ============================================================================
+// Phase 4b: Agent-initiated workflow run tests
+// ============================================================================
+
+// agentTokenForTest generates a signed agent JWT for use in handler tests.
+// The token is signed with the test server's agentTokenService key.
+func agentTokenForTest(t *testing.T, srv *Server, agentID, groveID string, scopes []AgentTokenScope) string {
+	t.Helper()
+	srv.mu.RLock()
+	svc := srv.agentTokenService
+	srv.mu.RUnlock()
+	require.NotNil(t, svc, "agent token service must be initialized")
+	token, err := svc.GenerateAgentToken(agentID, groveID, scopes, nil)
+	require.NoError(t, err)
+	return token
+}
+
+// setupWorkflowRunTestWithAllowFlag creates a grove with optional AllowWorkflowInvocation.
+func setupWorkflowRunTestWithAllow(t *testing.T, allowWorkflow bool) (*Server, store.Store, string) {
+	t.Helper()
+	srv, s := testServerWithEnt(t)
+	ctx := context.Background()
+
+	groveID := uuid.New().String()
+	labels := map[string]string{}
+	if allowWorkflow {
+		labels[store.LabelAllowWorkflowInvocation] = "true"
+	}
+	grove := &store.Grove{
+		ID:     groveID,
+		Name:   "Agent Workflow Test Grove",
+		Slug:   "agent-wf-test-" + groveID[:8],
+		Labels: labels,
+	}
+	require.NoError(t, s.CreateGrove(ctx, grove))
+	return srv, s, groveID
+}
+
+// TestWorkflowRun_Agent_WithScope_CreatesRun verifies that an agent JWT carrying
+// grove:workflow:run scope can create a run when the grove allows it.
+func TestWorkflowRun_Agent_WithScope_CreatesRun(t *testing.T) {
+	srv, _, groveID := setupWorkflowRunTestWithAllow(t, true)
+
+	// Agent ID must be a valid UUID because the ent adapter stores it as uuid.UUID.
+	agentID := uuid.New().String()
+	agentToken := agentTokenForTest(t, srv, agentID, groveID, []AgentTokenScope{
+		ScopeAgentStatusUpdate,
+		ScopeWorkflowRun,
+	})
+
+	req := api.WorkflowRunCreateRequest{
+		GroveID:    groveID,
+		SourceYAML: "version: \"0.7\"\nname: agent-run\nsteps:\n  - name: hi\n    exec: echo hi\n",
+	}
+
+	rec := doRequestWithAgentToken(t, srv, http.MethodPost,
+		"/api/v1/groves/"+groveID+"/workflows/runs", req, agentToken)
+	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var resp api.WorkflowRunResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.NotEmpty(t, resp.Run.ID)
+	assert.Equal(t, groveID, resp.Run.GroveID)
+	assert.Equal(t, "queued", resp.Run.Status)
+	// created_by_agent_id must be stamped, user id must be nil.
+	require.NotNil(t, resp.Run.CreatedBy.AgentID, "createdBy.agentId should be set")
+	assert.Equal(t, agentID, *resp.Run.CreatedBy.AgentID)
+	assert.Nil(t, resp.Run.CreatedBy.UserID, "createdBy.userId should be nil for agent-initiated runs")
+}
+
+// TestWorkflowRun_Agent_WithoutScope_IsRejected verifies that an agent JWT
+// without the grove:workflow:run scope receives 403.
+func TestWorkflowRun_Agent_WithoutScope_IsRejected(t *testing.T) {
+	srv, _, groveID := setupWorkflowRunTestWithAllow(t, true)
+
+	// Token has only status scope, not workflow:run.
+	agentToken := agentTokenForTest(t, srv, uuid.New().String(), groveID, []AgentTokenScope{
+		ScopeAgentStatusUpdate,
+	})
+
+	req := api.WorkflowRunCreateRequest{
+		GroveID:    groveID,
+		SourceYAML: "version: \"0.7\"\nname: hello\n",
+	}
+
+	rec := doRequestWithAgentToken(t, srv, http.MethodPost,
+		"/api/v1/groves/"+groveID+"/workflows/runs", req, agentToken)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+}
+
+// TestWorkflowRun_Agent_WrongGrove_IsRejected verifies that an agent JWT whose
+// grove ID does not match the request grove receives 403.
+func TestWorkflowRun_Agent_WrongGrove_IsRejected(t *testing.T) {
+	srv, s, groveID := setupWorkflowRunTestWithAllow(t, true)
+	ctx := context.Background()
+
+	// Create a second grove.
+	otherGroveID := uuid.New().String()
+	otherGrove := &store.Grove{
+		ID:   otherGroveID,
+		Name: "Other Grove",
+		Slug: "other-grove-" + otherGroveID[:8],
+		Labels: map[string]string{
+			store.LabelAllowWorkflowInvocation: "true",
+		},
+	}
+	require.NoError(t, s.CreateGrove(ctx, otherGrove))
+
+	// Token is for groveID but request targets otherGroveID.
+	agentToken := agentTokenForTest(t, srv, uuid.New().String(), groveID, []AgentTokenScope{
+		ScopeWorkflowRun,
+	})
+
+	req := api.WorkflowRunCreateRequest{
+		GroveID:    otherGroveID,
+		SourceYAML: "version: \"0.7\"\nname: hello\n",
+	}
+
+	rec := doRequestWithAgentToken(t, srv, http.MethodPost,
+		"/api/v1/groves/"+otherGroveID+"/workflows/runs", req, agentToken)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+}
+
+// TestWorkflowRun_Agent_GroveNotOptIn_IsRejected verifies that even with the
+// workflow:run scope, a grove that does not opt in returns 403.
+func TestWorkflowRun_Agent_GroveNotOptIn_IsRejected(t *testing.T) {
+	// allowWorkflow=false: grove does not have LabelAllowWorkflowInvocation.
+	srv, _, groveID := setupWorkflowRunTestWithAllow(t, false)
+
+	agentToken := agentTokenForTest(t, srv, uuid.New().String(), groveID, []AgentTokenScope{
+		ScopeWorkflowRun,
+	})
+
+	req := api.WorkflowRunCreateRequest{
+		GroveID:    groveID,
+		SourceYAML: "version: \"0.7\"\nname: hello\n",
+	}
+
+	rec := doRequestWithAgentToken(t, srv, http.MethodPost,
+		"/api/v1/groves/"+groveID+"/workflows/runs", req, agentToken)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+}

@@ -371,6 +371,53 @@ func TestWithAgentToken(t *testing.T) {
 	}
 }
 
+func TestWithAutoAgentAuth_EnvSet(t *testing.T) {
+	// When SCION_AGENT_TOKEN is set, WithAutoAgentAuth should send it via
+	// X-Scion-Agent-Token and NOT set an Authorization header.
+	t.Setenv(AgentTokenEnvVar, "my-auto-agent-jwt")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		agentToken := r.Header.Get("X-Scion-Agent-Token")
+		if agentToken != "my-auto-agent-jwt" {
+			t.Errorf("expected X-Scion-Agent-Token 'my-auto-agent-jwt', got %q", agentToken)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		authHeader := r.Header.Get("Authorization")
+		if authHeader != "" {
+			t.Errorf("expected empty Authorization header when using agent token, got %q", authHeader)
+		}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(HealthResponse{Status: "ok"})
+	}))
+	defer server.Close()
+
+	client, _ := New(server.URL, WithAutoAgentAuth())
+	_, err := client.Health(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWithAutoAgentAuth_EnvUnset(t *testing.T) {
+	// When SCION_AGENT_TOKEN is not set, WithAutoAgentAuth is a no-op and
+	// the client sends no auth header.
+	t.Setenv(AgentTokenEnvVar, "") // explicitly unset
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// No auth header expected.
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(HealthResponse{Status: "ok"})
+	}))
+	defer server.Close()
+
+	client, _ := New(server.URL, WithAutoAgentAuth())
+	_, err := client.Health(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestEnvList(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

@@ -158,27 +158,7 @@ func (s *Server) createWorkflowRun(w http.ResponseWriter, r *http.Request, grove
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	_ = grove // future: use grove for broker selection
-
-	// Authorization: user must have write access to the grove.
-	userIdent := GetUserIdentityFromContext(ctx)
-	if userIdent == nil {
-		// Only user-created runs supported in Phase 3b.
-		Forbidden(w)
-		return
-	}
-	decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-		Type:       "workflow_run",
-		ParentType: "grove",
-		ParentID:   groveID,
-		OwnerID:    grove.CreatedBy,
-	}, ActionCreate)
-	if !decision.Allowed {
-		Forbidden(w)
-		return
-	}
-
-	// Build inputs JSON.
+	// Build inputs JSON early so we can use it for both auth paths.
 	inputsJSON := req.Inputs
 	if inputsJSON == "" {
 		inputsJSON = "{}"
@@ -187,15 +167,61 @@ func (s *Server) createWorkflowRun(w http.ResponseWriter, r *http.Request, grove
 		return
 	}
 
-	// Stamp the creator.
-	userIDStr := userIdent.ID()
+	// Authorization: either a user with write access, or an agent with the
+	// grove:workflow:run scope whose grove ID matches the request grove.
+	var createdByUserID *string
+	var createdByAgentID *string
+
+	agentIdent := GetAgentIdentityFromContext(ctx)
+	userIdent := GetUserIdentityFromContext(ctx)
+
+	switch {
+	case agentIdent != nil:
+		// Agent path: scope and grove isolation checks.
+		if !agentIdent.HasScope(ScopeWorkflowRun) {
+			Forbidden(w)
+			return
+		}
+		if agentIdent.GroveID() != groveID {
+			Forbidden(w)
+			return
+		}
+		// Verify the grove opts in to agent-initiated workflow runs.
+		if !grove.AllowsWorkflowInvocation() {
+			Forbidden(w)
+			return
+		}
+		agentID := agentIdent.ID()
+		createdByAgentID = &agentID
+
+	case userIdent != nil:
+		// User path: standard access-control check.
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+			Type:       "workflow_run",
+			ParentType: "grove",
+			ParentID:   groveID,
+			OwnerID:    grove.CreatedBy,
+		}, ActionCreate)
+		if !decision.Allowed {
+			Forbidden(w)
+			return
+		}
+		userID := userIdent.ID()
+		createdByUserID = &userID
+
+	default:
+		Forbidden(w)
+		return
+	}
+
 	run := &store.WorkflowRun{
-		ID:              api.NewUUID(),
-		GroveID:         groveID,
-		SourceYaml:      req.SourceYAML,
-		InputsJSON:      inputsJSON,
-		Status:          store.WorkflowRunStatusQueued,
-		CreatedByUserID: &userIDStr,
+		ID:               api.NewUUID(),
+		GroveID:          groveID,
+		SourceYaml:       req.SourceYAML,
+		InputsJSON:       inputsJSON,
+		Status:           store.WorkflowRunStatusQueued,
+		CreatedByUserID:  createdByUserID,
+		CreatedByAgentID: createdByAgentID,
 	}
 
 	if err := s.store.CreateWorkflowRun(ctx, run); err != nil {

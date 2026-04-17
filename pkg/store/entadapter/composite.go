@@ -340,7 +340,74 @@ func (c *CompositeStore) CreateWorkflowRun(ctx context.Context, run *store.Workf
 			_ = err
 		}
 	}
+	// Ensure the agent shadow record exists in the Ent database.
+	// The agent's grove_id comes from the run itself since the handler
+	// already validated grove isolation (agentIdent.GroveID() == run.GroveID).
+	if run.CreatedByAgentID != nil {
+		if err := c.ensureEntAgentForRun(ctx, *run.CreatedByAgentID, run.GroveID); err != nil {
+			// Non-fatal: if the shadow record cannot be created (e.g. agent
+			// exists in base store but was just deleted), proceed without it.
+			// The FK field will be silently dropped by workflowrun_store when
+			// the UUID parse fails; here the UUID is valid so we accept the risk.
+			_ = err
+		}
+	}
 	return c.workflowRuns.CreateWorkflowRun(ctx, run)
+}
+
+// ensureEntAgentForRun ensures an agent shadow record exists in Ent for a
+// workflow run's created_by_agent_id FK. Unlike ensureEntAgent (which requires
+// the agent to be in the base store), this falls back to creating a minimal
+// stub using only the agent ID and grove ID when the base-store lookup fails.
+// This handles agent-JWT-initiated runs where the agent JWT is valid but the
+// agent was not yet synced to the local replica store (e.g. in tests).
+func (c *CompositeStore) ensureEntAgentForRun(ctx context.Context, agentID, groveID string) error {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return err
+	}
+
+	// Check if agent already exists in Ent.
+	if _, getErr := c.client.Agent.Get(ctx, uid); getErr == nil {
+		return nil
+	} else if !ent.IsNotFound(getErr) {
+		return fmt.Errorf("checking ent agent existence: %w", getErr)
+	}
+
+	// Ensure the grove exists in Ent first (required FK on Agent).
+	if groveID != "" {
+		if err := c.ensureEntGrove(ctx, groveID); err != nil {
+			return fmt.Errorf("ensuring grove for agent shadow: %w", err)
+		}
+	}
+
+	groveUID, err := parseUUID(groveID)
+	if err != nil {
+		return err
+	}
+
+	// Try to fetch full details from the base store for a richer shadow record.
+	name := "agent-" + uid.String()[:8]
+	slug := name
+	a, baseErr := c.Store.GetAgent(ctx, agentID)
+	if baseErr == nil {
+		name = a.Name
+		slug = a.Slug
+	}
+
+	_, err = c.client.Agent.Create().
+		SetID(uid).
+		SetName(name).
+		SetSlug(slug).
+		SetGroveID(groveUID).
+		Save(ctx)
+	if err != nil {
+		if ent.IsConstraintError(err) {
+			return nil // created concurrently — that is fine
+		}
+		return fmt.Errorf("creating shadow agent in ent for run: %w", err)
+	}
+	return nil
 }
 
 func (c *CompositeStore) GetWorkflowRun(ctx context.Context, id string) (*store.WorkflowRun, error) {

@@ -8130,6 +8130,7 @@ func (s *Server) populateAgentConfig(agent *store.Agent, grove *store.Grove, res
 		// These act as pre-populated defaults for the advanced config form and
 		// ensure the hub agent record reflects the effective configuration.
 		// Explicit request values (already set) take precedence.
+
 		if resolvedTemplate.Image != "" && agent.AppliedConfig.Image == "" {
 			agent.AppliedConfig.Image = resolvedTemplate.Image
 		}
@@ -8193,6 +8194,24 @@ func (s *Server) populateAgentConfig(agent *store.Agent, grove *store.Grove, res
 				}
 				agent.AppliedConfig.InlineConfig.Telemetry.Enabled = &b
 			}
+		}
+	}
+
+	// Grant grove:workflow:run scope when the grove opts in to agent-initiated
+	// workflow runs. This is merged into HubAccessScopes so the dispatcher
+	// includes it in the agent JWT. The scope is not added automatically
+	// (opt-in, default off).
+	if grove != nil && grove.AllowsWorkflowInvocation() {
+		workflowRunScope := string(ScopeWorkflowRun)
+		already := false
+		for _, sc := range agent.AppliedConfig.HubAccessScopes {
+			if sc == workflowRunScope {
+				already = true
+				break
+			}
+		}
+		if !already {
+			agent.AppliedConfig.HubAccessScopes = append(agent.AppliedConfig.HubAccessScopes, workflowRunScope)
 		}
 	}
 }

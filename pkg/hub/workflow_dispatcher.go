@@ -278,9 +278,9 @@ func (d *WorkflowRunDispatcher) HandleWorkflowOutputEvent(ctx context.Context, b
 
 	now := time.Now()
 	transition := store.WorkflowRunTransition{
-		Status:     status,
-		FinishedAt: &now,
-		ResultJSON: payload.ResultJSON,
+		Status:       status,
+		FinishedAt:   &now,
+		ResultJSON:   payload.ResultJSON,
 		ErrorMessage: payload.Error,
 	}
 	if payload.TraceKey != "" {
