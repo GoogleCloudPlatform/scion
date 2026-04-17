@@ -94,5 +94,5 @@ func init() {
 	workflowRunCmd.Flags().StringVar(&workflowRunEventBackend, "event-backend", "memory", "Event hub backend: memory, nats, or redis")
 	workflowRunCmd.Flags().BoolVarP(&workflowRunVerbose, "verbose", "v", false, "Enable extra diagnostic output")
 	workflowRunCmd.Flags().BoolVarP(&workflowRunQuiet, "quiet", "q", false, "Suppress info logs on stderr")
-	workflowRunCmd.Flags().BoolVar(&workflowRunLocal, "local", true, "Force local subprocess dispatch (always on in Phase 1; reserved for future --hub default)")
+	workflowRunCmd.Flags().BoolVar(&workflowRunLocal, "local", false, "Force local subprocess dispatch (reserved; Phase 1 is always local regardless of this flag)")
 }
