@@ -22,17 +22,26 @@ import (
 var workflowCmd = &cobra.Command{
 	Use:   "workflow",
 	Short: "Manage duckflux workflow runs",
-	Long: `Run and validate duckflux workflow files.
+	Long: `Run and validate duckflux workflow files locally or via the Hub.
 
-In Phase 1 (current), all subcommands delegate directly to the local quack
-CLI as a subprocess. No Hub or container involvement is required; quack must
-be present on PATH.
+Local mode (default): delegates to the quack CLI subprocess. quack must be
+present on PATH.
 
-Hub dispatch (--hub flag) and remote workflow management (list, get, logs,
-cancel) will be available from Phase 3 onwards.
+  npm install -g @duckflux/runner
 
-Install quack:
-  npm install -g @duckflux/runner`,
+Hub mode (--hub flag on run): dispatches the workflow to the configured Hub.
+The source file is uploaded and executed remotely on a Runtime Broker.
+Use --wait (default: auto) to stream logs and block until the run completes.
+
+Remote management subcommands (require Hub):
+
+  scion workflow list         List recent runs for the current grove.
+  scion workflow get <id>     Show run details (status, timestamps, broker, trace URL).
+  scion workflow logs <id>    Replay or stream run log events (-f to follow live).
+  scion workflow cancel <id>  Request cancellation of an in-progress run.
+
+All remote subcommands respect the global --hub, --grove, and --format flags.
+Use --format json (or --json on list/get) for machine-readable output.`,
 }
 
 func init() {
