@@ -21,10 +21,13 @@
  */
 
 import { LitElement, html, css } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData } from '../../shared/types.js';
+import type { PageData, Agent, Grove } from '../../shared/types.js';
+import { isAgentRunning } from '../../shared/types.js';
 import '../shared/status-badge.js';
+import { stateManager } from '../../client/state.js';
+import { apiFetch } from '../../client/api.js';
 
 @customElement('scion-page-home')
 export class ScionPageHome extends LitElement {
@@ -33,6 +36,73 @@ export class ScionPageHome extends LitElement {
    */
   @property({ type: Object })
   pageData: PageData | null = null;
+
+  @state()
+  private agents: Agent[] = [];
+
+  @state()
+  private groves: Grove[] = [];
+
+  private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
+  private boundOnGrovesUpdated = this.onGrovesUpdated.bind(this);
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    stateManager.setScope({ type: 'dashboard' });
+    
+    this.agents = stateManager.getAgents();
+    this.groves = stateManager.getGroves();
+
+    stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
+    stateManager.addEventListener('groves-updated', this.boundOnGrovesUpdated as EventListener);
+
+    void this.loadData();
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
+    stateManager.removeEventListener('groves-updated', this.boundOnGrovesUpdated as EventListener);
+  }
+
+  private onAgentsUpdated(): void {
+    this.agents = stateManager.getAgents();
+  }
+
+  private onGrovesUpdated(): void {
+    this.groves = stateManager.getGroves();
+  }
+
+  private get activeAgentCount(): number {
+    return this.agents.filter(a => isAgentRunning(a)).length;
+  }
+
+  private async loadData(): Promise<void> {
+    try {
+      const [agentsResp, grovesResp] = await Promise.all([
+        apiFetch('/api/v1/agents'),
+        apiFetch('/api/v1/groves')
+      ]);
+
+      if (!this.isConnected || stateManager.currentScope?.type !== 'dashboard') return;
+
+      if (agentsResp.ok) {
+        const data = await agentsResp.json();
+        const agents = Array.isArray(data) ? data : data.agents || [];
+        this.agents = agents;
+        stateManager.seedAgents(agents);
+      }
+
+      if (grovesResp.ok) {
+        const data = await grovesResp.json();
+        const groves = Array.isArray(data) ? data : data.groves || [];
+        this.groves = groves;
+        stateManager.seedGroves(groves);
+      }
+    } catch (err) {
+      console.error('Failed to load data for dashboard:', err);
+    }
+  }
 
   static override styles = css`
     :host {
@@ -242,7 +312,7 @@ export class ScionPageHome extends LitElement {
         <div class="stat-card">
           <h3>Active Agents</h3>
           <div class="stat-value">
-            <span>--</span>
+            <span>${this.activeAgentCount}</span>
           </div>
           <div class="stat-change">
             <scion-status-badge status="success" label="Ready" size="small"></scion-status-badge>
@@ -250,7 +320,7 @@ export class ScionPageHome extends LitElement {
         </div>
         <div class="stat-card">
           <h3>Groves</h3>
-          <div class="stat-value">--</div>
+          <div class="stat-value">${this.groves.length}</div>
           <div class="stat-change">Project workspaces</div>
         </div>
         <div class="stat-card">

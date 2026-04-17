@@ -397,6 +397,7 @@ export class StateManager extends EventTarget {
 
   /**
    * Seed the groves map with full objects from a REST API response.
+   * Does not trigger notifications.
    */
   seedGroves(groves: Grove[]): void {
     for (const grove of groves) {
@@ -406,6 +407,7 @@ export class StateManager extends EventTarget {
 
   /**
    * Seed the brokers map with full objects from a REST API response.
+   * Does not trigger notifications.
    */
   seedBrokers(brokers: RuntimeBroker[]): void {
     for (const broker of brokers) {
