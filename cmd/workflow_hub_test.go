@@ -247,3 +247,27 @@ func TestBuildInputsJSON_EmptyReturnsEmpty(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "", out, "empty inputs should return empty string")
 }
+
+// TestLoadSettingsForWorkflow_UnloadablePathReturnsNonNil verifies that when
+// config.LoadSettings fails (e.g. grovePath is bogus), loadSettingsForWorkflow
+// returns a non-nil *config.Settings so downstream GetHubEndpoint / getHubClient
+// calls don't nil-deref. Regression guard for a panic that would fire if
+// --hub is used with SCION_HUB_ENDPOINT set but no local settings.yaml.
+func TestLoadSettingsForWorkflow_UnloadablePathReturnsNonNil(t *testing.T) {
+	origGrovePath := grovePath
+	defer func() { grovePath = origGrovePath }()
+
+	// Point grovePath at a nonexistent location that will cause config loaders
+	// to error. The function should swallow the error but still return a
+	// usable (empty) Settings instead of nil.
+	grovePath = "/nonexistent/path/that/should/not/load"
+
+	settings, err := loadSettingsForWorkflow()
+	require.NoError(t, err)
+	require.NotNil(t, settings, "loadSettingsForWorkflow must not return nil; GetHubEndpoint would panic")
+
+	// GetHubEndpoint on the empty settings must not panic.
+	assert.NotPanics(t, func() {
+		_ = GetHubEndpoint(settings)
+	}, "GetHubEndpoint on empty settings must not panic")
+}

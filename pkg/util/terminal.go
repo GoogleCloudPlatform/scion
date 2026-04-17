@@ -21,6 +21,16 @@ import (
 )
 
 // IsTerminal returns true if the current process is running in an interactive terminal.
+// Checks whether stdin is attached to a TTY.
 func IsTerminal() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
+// IsStdoutTerminal returns true if stdout is attached to a TTY (i.e., the
+// process output is NOT being piped or redirected to a file).
+//
+// Use this when deciding whether human-oriented output (progress bars, colors,
+// streaming logs, auto --wait defaults) should be emitted.
+func IsStdoutTerminal() bool {
+	return term.IsTerminal(int(os.Stdout.Fd()))
 }

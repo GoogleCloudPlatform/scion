@@ -178,8 +178,8 @@ func runWorkflowRunViaHub(cmd *cobra.Command, file string) error {
 		return fmt.Errorf("creating workflow run: %w", err)
 	}
 
-	// Determine --wait default: true when stdout is a TTY.
-	waitForRun := util.IsTerminal()
+	// Determine --wait default: true when stdout is a TTY (user is not piping output).
+	waitForRun := util.IsStdoutTerminal()
 	if workflowRunWait != nil {
 		waitForRun = *workflowRunWait
 	}
@@ -233,13 +233,18 @@ func runWorkflowRunViaHub(cmd *cobra.Command, file string) error {
 	return nil
 }
 
-// loadSettingsForWorkflow loads settings. Returns nil if no settings file is found;
-// getHubClient and GetHubEndpoint both handle nil *config.Settings gracefully.
+// loadSettingsForWorkflow loads settings. On load error it returns an empty
+// (but non-nil) *config.Settings so callers can still proceed when the Hub
+// endpoint is supplied via --hub or SCION_HUB_ENDPOINT. Returning a nil
+// *config.Settings here would panic in GetHubEndpoint (the nil-receiver's
+// method dereferences s.Hub).
 func loadSettingsForWorkflow() (*config.Settings, error) {
 	settings, err := config.LoadSettings(grovePath)
 	if err != nil {
 		// Not fatal: Hub endpoint may be provided via flags or env vars.
-		return nil, nil //nolint:nilerr
+		// Return an empty Settings so getHubClient/GetHubEndpoint can still
+		// consult env/flags without nil-deref.
+		return &config.Settings{}, nil //nolint:nilerr
 	}
 	return settings, nil
 }
