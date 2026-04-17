@@ -148,6 +148,22 @@ RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.
 RUN ARCH=$(dpkg --print-architecture) && \
     curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b /usr/local/bin
 
+# Install quack (duckflux workflow runner) — available at /usr/local/bin/quack in all agent containers.
+# QUACK_VERSION is pinned and overridable at build time via --build-arg QUACK_VERSION=...
+# TARGETARCH is provided automatically by Docker BuildKit during multi-arch builds (buildx).
+ARG QUACK_VERSION=0.7.3
+ARG TARGETARCH
+RUN set -eux; \
+    case "$TARGETARCH" in \
+        amd64) QUACK_ARCH=x64 ;; \
+        arm64) QUACK_ARCH=arm64 ;; \
+        *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /usr/local/bin/quack \
+        "https://github.com/duckflux/runtime-js/releases/download/v${QUACK_VERSION}/quack-linux-${QUACK_ARCH}"; \
+    chmod +x /usr/local/bin/quack; \
+    quack version
+
 # Setup npm global directory
 RUN mkdir -p /usr/local/share/npm-global
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global

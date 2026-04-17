@@ -90,7 +90,7 @@ func ValidateLocal(ctx context.Context, req RunLocalRequest) (*RunLocalResult, e
 func runQuack(ctx context.Context, subcmd string, req RunLocalRequest) (*RunLocalResult, error) {
 	quackPath, err := exec.LookPath("quack")
 	if err != nil {
-		return nil, fmt.Errorf("%w: install with 'npm install -g @duckflux/runner' or use a Scion agent image with quack baked in (available from Phase 2)", ErrQuackNotFound)
+		return nil, fmt.Errorf("%w: install with 'npm install -g @duckflux/runner' or use the default Scion agent image (quack is pre-installed)", ErrQuackNotFound)
 	}
 
 	args := []string{subcmd, req.File}

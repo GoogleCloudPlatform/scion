@@ -15,6 +15,8 @@ core-base          System dependencies (Go, Node, Python)
 
 Each harness directory contains a `Dockerfile` that extends `scion-base` with harness-specific tooling.
 
+`quack` (the duckflux workflow runner) is installed at `/usr/local/bin/quack` in `core-base`, so it is available in every Scion agent container. The pinned version is `QUACK_VERSION=0.7.3` and can be overridden at build time with `--build-arg QUACK_VERSION=...`.
+
 ## Scripts
 
 All image-related scripts live under `scripts/`. GitHub Actions workflows remain in `.github/workflows/` per GitHub convention.
