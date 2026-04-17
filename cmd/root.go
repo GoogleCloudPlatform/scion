@@ -97,6 +97,10 @@ return an error instead of blocking.`,
 		if commandInSubtree(cmd, "server") {
 			requiresGrove = false
 		}
+		// Workflow subcommands operate locally (Phase 1) without a grove
+		if commandInSubtree(cmd, "workflow") {
+			requiresGrove = false
+		}
 		// Grove subcommands operate on all groves, not just the current one
 		if parentName == "grove" {
 			requiresGrove = false
@@ -148,7 +152,7 @@ return an error instead of blocking.`,
 		if commandInSubtree(cmd, "config") {
 			requiresRegistry = false
 		}
-		if commandInSubtree(cmd, "hub") || commandInSubtree(cmd, "server") {
+		if commandInSubtree(cmd, "hub") || commandInSubtree(cmd, "server") || commandInSubtree(cmd, "workflow") {
 			requiresRegistry = false
 		}
 		if requiresRegistry && config.IsHubContext() {

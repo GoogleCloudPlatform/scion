@@ -1,0 +1,3 @@
+flow:
+  - type: exec
+    run: echo "hello from workflow"
