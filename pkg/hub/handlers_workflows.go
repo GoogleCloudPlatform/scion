@@ -372,7 +372,7 @@ func (s *Server) cancelWorkflowRun(w http.ResponseWriter, r *http.Request, runID
 //
 // Each WebSocket text message is a JSON object with an "event" field:
 //
-//	{"event":"log","stream":"stdout","chunk":"<base64>","ts":"<RFC3339Nano>"}
+//	{"event":"log","stream":"stdout","line":"<plain UTF-8 text>","ts":"<RFC3339Nano>"}
 //	{"event":"status","status":"running","ts":"<RFC3339Nano>"}
 //	{"event":"terminal","status":"succeeded","exitCode":0,"ts":"<RFC3339Nano>"}
 //	{"event":"error","message":"..."}
@@ -445,7 +445,7 @@ func (s *Server) streamWorkflowRunLogs(w http.ResponseWriter, r *http.Request, r
 		sendMsg(map[string]interface{}{
 			"event":  "log",
 			"stream": entry.Stream,
-			"chunk":  entry.Chunk,
+			"line":   entry.Line,
 			"ts":     entry.Timestamp.UTC().Format(time.RFC3339Nano),
 		})
 	}
@@ -495,7 +495,7 @@ func (s *Server) streamWorkflowRunLogs(w http.ResponseWriter, r *http.Request, r
 					sendMsg(map[string]interface{}{
 						"event":  "log",
 						"stream": evt.Log.Stream,
-						"chunk":  evt.Log.Chunk,
+						"line":   evt.Log.Line,
 						"ts":     evt.Log.Timestamp.UTC().Format(time.RFC3339Nano),
 					})
 				}

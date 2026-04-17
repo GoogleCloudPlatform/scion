@@ -37,7 +37,7 @@ var (
 	workflowRunVerbose      bool
 	workflowRunQuiet        bool
 	workflowRunLocal        bool
-	workflowRunHub          bool
+	workflowRunViaHub       bool
 	workflowRunWait         *bool // nil means auto-detect via TTY
 	workflowRunGroveID      string
 )
@@ -48,13 +48,13 @@ var workflowRunCmd = &cobra.Command{
 	Short: "Run a duckflux workflow locally or via the Hub",
 	Long: `Execute a duckflux workflow file.
 
-Without --hub, delegates directly to the local quack CLI (Phase 1 behavior):
+Without --via-hub, delegates directly to the local quack CLI (Phase 1 behavior):
   quack must be available on PATH. Exit codes are propagated directly:
     0  workflow completed successfully
     1  CLI/usage error (e.g. missing file, bad flags)
     2  workflow executed but ended with success=false
 
-With --hub, the workflow is dispatched to the configured Hub instead of
+With --via-hub, the workflow is dispatched to the configured Hub instead of
 running locally. The source file is read and sent to the Hub API.
 
   --wait (default: true when stdout is a TTY, false in scripts/pipes):
@@ -69,9 +69,9 @@ Examples:
   scion workflow run flow.duck.yaml
   scion workflow run flow.duck.yaml --input name=world --input count=3
   scion workflow run flow.duck.yaml --input-file inputs.json --trace-dir ./trace
-  scion workflow run flow.duck.yaml --hub
-  scion workflow run flow.duck.yaml --hub --wait=false
-  scion workflow run flow.duck.yaml --hub --grove my-grove-id`,
+  scion workflow run flow.duck.yaml --via-hub
+  scion workflow run flow.duck.yaml --via-hub --wait=false
+  scion workflow run flow.duck.yaml --via-hub --grove my-grove-id`,
 	Args: cobra.ExactArgs(1),
 	RunE: runWorkflowRun,
 }
@@ -84,7 +84,7 @@ func runWorkflowRun(cmd *cobra.Command, args []string) error {
 	}
 
 	// Hub mode: dispatch to Hub API.
-	if workflowRunHub {
+	if workflowRunViaHub {
 		return runWorkflowRunViaHub(cmd, file)
 	}
 
@@ -241,7 +241,7 @@ func runWorkflowRunViaHub(cmd *cobra.Command, file string) error {
 func loadSettingsForWorkflow() (*config.Settings, error) {
 	settings, err := config.LoadSettings(grovePath)
 	if err != nil {
-		// Not fatal: Hub endpoint may be provided via flags or env vars.
+		// Not fatal: Hub endpoint may be provided via --via-hub flag or env vars.
 		// Return an empty Settings so getHubClient/GetHubEndpoint can still
 		// consult env/flags without nil-deref.
 		return &config.Settings{}, nil //nolint:nilerr
@@ -303,7 +303,7 @@ func init() {
 	workflowRunCmd.Flags().BoolVar(&workflowRunLocal, "local", false, "Force local subprocess dispatch (Phase 1 behavior)")
 
 	// Hub dispatch flags.
-	workflowRunCmd.Flags().BoolVar(&workflowRunHub, "hub", false, "Dispatch workflow run via the Hub instead of running locally")
+	workflowRunCmd.Flags().BoolVar(&workflowRunViaHub, "via-hub", false, "Dispatch workflow run via the Hub instead of running locally")
 	workflowRunCmd.Flags().StringVar(&workflowRunGroveID, "grove-id", "", "Grove ID for Hub dispatch (overrides grove resolution)")
 
 	// --wait flag: tri-state (unset = auto, true, false).

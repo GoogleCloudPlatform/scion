@@ -450,15 +450,68 @@ func TestWorkflowExecutor_SendEventPayloads(t *testing.T) {
 		p := wsprotocol.WorkflowLogPayload{
 			RunID:     "r4",
 			Stream:    "stdout",
-			Chunk:     []byte("hello world\n"),
+			Line:      "hello world\n",
 			Timestamp: time.Now().Format(time.RFC3339Nano),
 		}
 		data, _ := json.Marshal(p)
 		var back wsprotocol.WorkflowLogPayload
 		require.NoError(t, json.Unmarshal(data, &back))
 		assert.Equal(t, "stdout", back.Stream)
-		assert.Equal(t, p.Chunk, back.Chunk)
+		assert.Equal(t, p.Line, back.Line)
 	})
+}
+
+// TestWorkflowLogWireFormat verifies that the log wire format emitted by the
+// executor matches design §3.4: a plain UTF-8 string in the "line" field, with
+// no base64 encoding. This is a round-trip test: executor emits an event via
+// testEventSink, the payload is marshalled to JSON, and the "line" field is
+// decoded back as a plain string.
+func TestWorkflowLogWireFormat(t *testing.T) {
+	sink := &eventSink{}
+	rt := &fakeRuntime{
+		ContainerID: "ctr-wire",
+		Logs:        "log line one\nlog line two\n",
+		Phase:       "stopped",
+	}
+	ex := newContainerTestExecutor(rt, sink)
+
+	req := workflowRunRequest{
+		RunID:      "run-wire",
+		GroveID:    "grove-1",
+		SourceYAML: "version: \"0.7\"\nname: test\n",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	run := &activeWorkflowRun{runID: req.RunID, cancel: cancel, startedAt: time.Now()}
+	ex.mu.Lock()
+	ex.runs[req.RunID] = run
+	ex.mu.Unlock()
+
+	ex.executeRun(ctx, "", req, run, cancel)
+
+	// Find the first log event and verify the JSON wire format.
+	for _, ev := range sink.all() {
+		if ev.eventType != wsprotocol.EventWorkflowLog {
+			continue
+		}
+
+		// Unmarshal as a raw map to inspect the wire field names directly.
+		var raw map[string]interface{}
+		require.NoError(t, json.Unmarshal(ev.payload, &raw), "log event must be valid JSON")
+
+		// Design §3.4 specifies "line" (plain string), not "chunk" (base64).
+		lineVal, hasLine := raw["line"]
+		require.True(t, hasLine, "log event must have a 'line' field (not 'chunk')")
+		lineStr, isStr := lineVal.(string)
+		require.True(t, isStr, "'line' field must be a plain string")
+		assert.NotEmpty(t, lineStr, "'line' field must not be empty")
+
+		_, hasChunk := raw["chunk"]
+		assert.False(t, hasChunk, "log event must NOT have a 'chunk' field")
+		return
+	}
+	t.Fatal("expected at least one workflow_log event")
 }
 
 // ---------------------------------------------------------------------------
@@ -506,7 +559,7 @@ func TestExecutor_RunSucceeds(t *testing.T) {
 		if ev.eventType == wsprotocol.EventWorkflowLog {
 			var p wsprotocol.WorkflowLogPayload
 			require.NoError(t, json.Unmarshal(ev.payload, &p))
-			if strings.Contains(string(p.Chunk), "hello") {
+			if strings.Contains(p.Line, "hello") {
 				gotLog = true
 			}
 		}
@@ -765,7 +818,7 @@ func TestExecutor_RunSucceeds_LogPolling(t *testing.T) {
 		if ev.eventType == wsprotocol.EventWorkflowLog {
 			var p wsprotocol.WorkflowLogPayload
 			_ = json.Unmarshal(ev.payload, &p)
-			if strings.Contains(string(p.Chunk), "line") {
+			if strings.Contains(p.Line, "line") {
 				gotContent = true
 			}
 		}

@@ -26,10 +26,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
 
-// WorkflowLogEntry is a single buffered log chunk for a workflow run.
+// WorkflowLogEntry is a single buffered log line for a workflow run.
 type WorkflowLogEntry struct {
 	Stream    string
-	Chunk     []byte
+	Line      string // plain UTF-8 text (matches the client-facing wire format, design §3.4)
 	Timestamp time.Time
 }
 
@@ -322,7 +322,7 @@ func (d *WorkflowRunDispatcher) HandleWorkflowOutputEvent(ctx context.Context, b
 func (d *WorkflowRunDispatcher) HandleWorkflowLogEvent(brokerID string, payload wsprotocol.WorkflowLogPayload) {
 	entry := WorkflowLogEntry{
 		Stream:    payload.Stream,
-		Chunk:     payload.Chunk,
+		Line:      payload.Line,
 		Timestamp: time.Now(),
 	}
 

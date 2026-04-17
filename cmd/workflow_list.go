@@ -97,15 +97,14 @@ func runWorkflowList(cmd *cobra.Command, args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tSTATUS\tCREATED\tSOURCE")
+	fmt.Fprintln(w, "ID\tSTATUS\tCREATED")
 	for _, run := range runs {
 		id := run.ID
 		if len(id) > 8 {
 			id = id[:8]
 		}
 		created := formatRelativeTime(run.CreatedAt)
-		source := "-"
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", id, run.Status, created, source)
+		fmt.Fprintf(w, "%s\t%s\t%s\n", id, run.Status, created)
 	}
 	w.Flush()
 

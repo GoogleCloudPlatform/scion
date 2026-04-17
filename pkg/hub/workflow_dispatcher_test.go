@@ -107,7 +107,7 @@ func TestWorkflowRunDispatcher_Subscribe_Replay(t *testing.T) {
 	// Manually inject buffered logs.
 	entry := WorkflowLogEntry{
 		Stream:    "stdout",
-		Chunk:     []byte("hello\n"),
+		Line:      "hello\n",
 		Timestamp: time.Now(),
 	}
 	d.logsMu.Lock()
@@ -120,7 +120,7 @@ func TestWorkflowRunDispatcher_Subscribe_Replay(t *testing.T) {
 
 	require.Len(t, buffered, 1)
 	assert.Equal(t, "stdout", buffered[0].Stream)
-	assert.Equal(t, []byte("hello\n"), buffered[0].Chunk)
+	assert.Equal(t, "hello\n", buffered[0].Line)
 
 	// Sub channel should start empty (no live events yet).
 	assert.Empty(t, sub)
@@ -163,7 +163,7 @@ func TestWorkflowRunDispatcher_HandleWorkflowLogEvent(t *testing.T) {
 	payload := wsprotocol.WorkflowLogPayload{
 		RunID:     runID,
 		Stream:    "stderr",
-		Chunk:     []byte("an error line\n"),
+		Line:      "an error line\n",
 		Timestamp: time.Now().Format(time.RFC3339Nano),
 	}
 	d.HandleWorkflowLogEvent("broker-1", payload)
@@ -174,7 +174,7 @@ func TestWorkflowRunDispatcher_HandleWorkflowLogEvent(t *testing.T) {
 		require.Equal(t, WorkflowRunEventLog, evt.Kind)
 		require.NotNil(t, evt.Log)
 		assert.Equal(t, "stderr", evt.Log.Stream)
-		assert.Equal(t, []byte("an error line\n"), evt.Log.Chunk)
+		assert.Equal(t, "an error line\n", evt.Log.Line)
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for log event")
 	}
@@ -184,7 +184,7 @@ func TestWorkflowRunDispatcher_HandleWorkflowLogEvent(t *testing.T) {
 	logs := d.logs[runID]
 	d.logsMu.RUnlock()
 	require.Len(t, logs, 1)
-	assert.Equal(t, "an error line\n", string(logs[0].Chunk))
+	assert.Equal(t, "an error line\n", logs[0].Line)
 }
 
 func TestWorkflowRunDispatcher_HandleWorkflowStatusEvent(t *testing.T) {

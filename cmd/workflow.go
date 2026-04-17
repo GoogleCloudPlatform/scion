@@ -29,7 +29,7 @@ present on PATH.
 
   npm install -g @duckflux/runner
 
-Hub mode (--hub flag on run): dispatches the workflow to the configured Hub.
+Hub mode (--via-hub flag on run): dispatches the workflow to the configured Hub.
 The source file is uploaded and executed remotely on a Runtime Broker.
 Use --wait (default: auto) to stream logs and block until the run completes.
 

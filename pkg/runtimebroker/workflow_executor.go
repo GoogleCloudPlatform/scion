@@ -444,8 +444,8 @@ func (e *WorkflowExecutor) pollContainerUntilDone(
 
 		// Forward newly appended bytes as a single log event.
 		if len(currentLogs) > len(prevLogs) {
-			newChunk := currentLogs[len(prevLogs):]
-			e.sendLogEvent(connName, runID, "stdout", []byte(newChunk))
+			newLine := currentLogs[len(prevLogs):]
+			e.sendLogEvent(connName, runID, "stdout", newLine)
 			prevLogs = currentLogs
 		}
 
@@ -477,7 +477,7 @@ func (e *WorkflowExecutor) pollContainerUntilDone(
 			// Drain remaining logs.
 			finalLogs, _ := e.rt.GetLogs(runCtx, containerID)
 			if len(finalLogs) > len(prevLogs) {
-				e.sendLogEvent(connName, runID, "stdout", []byte(finalLogs[len(prevLogs):]))
+				e.sendLogEvent(connName, runID, "stdout", finalLogs[len(prevLogs):])
 			}
 			// Map phase to exit code: "error" phase means the container exited
 			// non-zero. The runtime does not expose the raw exit code via AgentInfo,
@@ -519,12 +519,12 @@ func (e *WorkflowExecutor) sendStatusEvent(connName, runID, status string) {
 	e.sendEvent(connName, wsprotocol.EventWorkflowStatus, payload)
 }
 
-// sendLogEvent sends a workflow_log event chunk to the Hub.
-func (e *WorkflowExecutor) sendLogEvent(connName, runID, stream string, chunk []byte) {
+// sendLogEvent sends a workflow_log event line to the Hub.
+func (e *WorkflowExecutor) sendLogEvent(connName, runID, stream string, line string) {
 	payload := wsprotocol.WorkflowLogPayload{
 		RunID:     runID,
 		Stream:    stream,
-		Chunk:     chunk,
+		Line:      line,
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	e.sendEvent(connName, wsprotocol.EventWorkflowLog, payload)

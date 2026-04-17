@@ -245,7 +245,7 @@ type WorkflowOutputPayload struct {
 type WorkflowLogPayload struct {
 	RunID     string `json:"runId"`
 	Stream    string `json:"stream"` // "stdout" or "stderr"
-	Chunk     []byte `json:"chunk"`
+	Line      string `json:"line"`   // plain UTF-8 text; matches the client-facing wire format (design §3.4)
 	Timestamp string `json:"timestamp"`
 }
 
