@@ -121,6 +121,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV43,
 		migrationV44,
 		migrationV45,
+		migrationV46,
 	}
 
 	// Create migrations table if not exists
@@ -1088,6 +1089,14 @@ ALTER TABLE gcp_service_accounts ADD COLUMN managed_by TEXT NOT NULL DEFAULT '';
 // Migration V45: Add allow_progeny column to secrets table
 const migrationV45 = `
 ALTER TABLE secrets ADD COLUMN allow_progeny INTEGER NOT NULL DEFAULT 0;
+`
+
+// Migration V46: Add delegation_enabled column to agents table.
+// Backfills the Ent-side field used by the policy engine to mark agents
+// whose creator relationship is policy-addressable. Required before
+// Phase 2 of the Ent migration points Ent at hub.db.
+const migrationV46 = `
+ALTER TABLE agents ADD COLUMN delegation_enabled INTEGER NOT NULL DEFAULT 0;
 `
 
 // Helper functions for JSON marshaling/unmarshaling
