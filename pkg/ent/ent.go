@@ -14,12 +14,31 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/grove"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/grovecontributor"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/grovesyncstate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperationrun"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/messagerecord"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/notificationsubscription"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
 )
 
 // ent aliases to avoid import conflicts in user's code.
@@ -80,14 +99,33 @@ var (
 func checkColumn(t, c string) error {
 	initCheck.Do(func() {
 		columnCheck = sql.NewColumnCheck(map[string]func(string) bool{
-			accesspolicy.Table:    accesspolicy.ValidColumn,
-			agent.Table:           agent.ValidColumn,
-			group.Table:           group.ValidColumn,
-			groupmembership.Table: groupmembership.ValidColumn,
-			grove.Table:           grove.ValidColumn,
-			policybinding.Table:   policybinding.ValidColumn,
-			runtimebroker.Table:   runtimebroker.ValidColumn,
-			user.Table:            user.ValidColumn,
+			accesspolicy.Table:             accesspolicy.ValidColumn,
+			agent.Table:                    agent.ValidColumn,
+			brokerjointoken.Table:          brokerjointoken.ValidColumn,
+			brokersecret.Table:             brokersecret.ValidColumn,
+			envvar.Table:                   envvar.ValidColumn,
+			gcpserviceaccount.Table:        gcpserviceaccount.ValidColumn,
+			githubinstallation.Table:       githubinstallation.ValidColumn,
+			group.Table:                    group.ValidColumn,
+			groupmembership.Table:          groupmembership.ValidColumn,
+			grove.Table:                    grove.ValidColumn,
+			grovecontributor.Table:         grovecontributor.ValidColumn,
+			grovesyncstate.Table:           grovesyncstate.ValidColumn,
+			harnessconfig.Table:            harnessconfig.ValidColumn,
+			maintenanceoperation.Table:     maintenanceoperation.ValidColumn,
+			maintenanceoperationrun.Table:  maintenanceoperationrun.ValidColumn,
+			messagerecord.Table:            messagerecord.ValidColumn,
+			notification.Table:             notification.ValidColumn,
+			notificationsubscription.Table: notificationsubscription.ValidColumn,
+			policybinding.Table:            policybinding.ValidColumn,
+			runtimebroker.Table:            runtimebroker.ValidColumn,
+			schedule.Table:                 schedule.ValidColumn,
+			scheduledevent.Table:           scheduledevent.ValidColumn,
+			secret.Table:                   secret.ValidColumn,
+			subscriptiontemplate.Table:     subscriptiontemplate.ValidColumn,
+			template.Table:                 template.ValidColumn,
+			user.Table:                     user.ValidColumn,
+			useraccesstoken.Table:          useraccesstoken.ValidColumn,
 		})
 	})
 	return columnCheck(t, c)
