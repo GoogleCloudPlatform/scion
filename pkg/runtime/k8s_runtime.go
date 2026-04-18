@@ -53,6 +53,13 @@ type KubernetesRuntime struct {
 	ListAllNamespaces bool // When true, List() queries all namespaces for scion pods
 }
 
+// agentContainerName is the name of the primary scion agent container in
+// every pod we create. It must be specified on every PodExec call so that
+// admission-controller-injected sidecars (Istio, Linkerd, Dynatrace, etc.)
+// do not cause the API server to reject the exec request with an
+// "a container name must be specified" error.
+const agentContainerName = "agent"
+
 var serviceAccountNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
 func NewKubernetesRuntime(client *k8s.Client) *KubernetesRuntime {
@@ -1041,7 +1048,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			SecurityContext: podSecurityContext,
 			Containers: []corev1.Container{
 				{
-					Name:            "agent",
+					Name:            agentContainerName,
 					Image:           config.Image,
 					Command:         cmd,
 					Env:             envVars,
@@ -1315,7 +1322,7 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 			// Check container statuses for more detail
 			var containerStatus *corev1.ContainerStatus
 			for _, cs := range pod.Status.ContainerStatuses {
-				if cs.Name == "agent" {
+				if cs.Name == agentContainerName {
 					containerStatus = &cs
 					break
 				}
@@ -1417,11 +1424,12 @@ func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, s
 		SubResource("exec")
 
 	option := &corev1.PodExecOptions{
-		Command: cmd,
-		Stdin:   true,
-		Stdout:  true,
-		Stderr:  true,
-		TTY:     false,
+		Container: agentContainerName,
+		Command:   cmd,
+		Stdin:     true,
+		Stdout:    true,
+		Stderr:    true,
+		TTY:       false,
 	}
 
 	req.VersionedParams(
@@ -1480,11 +1488,12 @@ func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName,
 		SubResource("exec")
 
 	option := &corev1.PodExecOptions{
-		Command: cmd,
-		Stdin:   false,
-		Stdout:  true,
-		Stderr:  true,
-		TTY:     false,
+		Container: agentContainerName,
+		Command:   cmd,
+		Stdin:     false,
+		Stdout:    true,
+		Stderr:    true,
+		TTY:       false,
 	}
 
 	req.VersionedParams(
@@ -1624,7 +1633,7 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 
 		// Try to get more detail from container status
 		for _, cs := range p.Status.ContainerStatuses {
-			if cs.Name == "agent" {
+			if cs.Name == agentContainerName {
 				if cs.State.Waiting != nil {
 					status = fmt.Sprintf("%s (%s)", p.Status.Phase, cs.State.Waiting.Reason)
 				} else if cs.State.Terminated != nil {
@@ -1763,7 +1772,7 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 		username)}
 
 	option := &corev1.PodExecOptions{
-		Container: "agent",
+		Container: agentContainerName,
 		Command:   execCmd,
 		Stdin:     true,
 		Stdout:    true,
@@ -2027,7 +2036,7 @@ func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (
 	suCmd := []string{"su", "-", "scion", "-c", strings.Join(quoted, " ")}
 
 	option := &corev1.PodExecOptions{
-		Container: "agent",
+		Container: agentContainerName,
 		Command:   suCmd,
 		Stdin:     false,
 		Stdout:    true,
@@ -2072,7 +2081,7 @@ func (r *KubernetesRuntime) execInPod(ctx context.Context, namespace, podName st
 		SubResource("exec")
 
 	option := &corev1.PodExecOptions{
-		Container: "agent",
+		Container: agentContainerName,
 		Command:   cmd,
 		Stdin:     false,
 		Stdout:    true,
