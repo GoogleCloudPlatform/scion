@@ -17,7 +17,6 @@ package runtime
 import (
 	"context"
 	"embed"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic/fake"
@@ -373,39 +373,40 @@ func TestCreateAuthFileSecret(t *testing.T) {
 
 // --- K8s exec user context parity (matches Docker/Podman --user scion) ---
 
-func TestK8sExec_WrapsCommandWithSu(t *testing.T) {
-	// Verify that Exec wraps commands with su to run as the scion user,
-	// matching the --user scion flag used by Docker/Podman runtimes.
+func TestK8sExec_BuildCommandForMatchingUserReturnsRawArgv(t *testing.T) {
 	cmd := []string{"tmux", "send-keys", "-t", "scion:0", "hello world", "Enter"}
 
-	// Simulate the wrapping logic from Exec
-	quoted := make([]string, len(cmd))
-	for i, arg := range cmd {
-		quoted[i] = fmt.Sprintf("'%s'", strings.ReplaceAll(arg, "'", "'\"'\"'"))
+	got := buildExecCommandForUser("scion", "scion", cmd)
+	if len(got) != len(cmd) {
+		t.Fatalf("expected raw argv %v, got %v", cmd, got)
 	}
-	suCmd := []string{"su", "-", "scion", "-c", strings.Join(quoted, " ")}
-
-	if suCmd[0] != "su" || suCmd[1] != "-" || suCmd[2] != "scion" || suCmd[3] != "-c" {
-		t.Fatalf("expected su - scion -c prefix, got: %v", suCmd[:4])
+	for i := range cmd {
+		if got[i] != cmd[i] {
+			t.Fatalf("expected raw argv %v, got %v", cmd, got)
+		}
 	}
+}
 
-	// The -c argument should contain all original args, properly quoted
-	shellCmd := suCmd[4]
+func TestK8sExec_BuildCommandForDifferentUserFallsBackToSu(t *testing.T) {
+	cmd := []string{"tmux", "attach", "-t", "scion"}
+
+	got := buildExecCommandForUser("root", "scion", cmd)
+	if len(got) != 5 {
+		t.Fatalf("expected su argv, got %v", got)
+	}
+	if got[0] != "su" || got[1] != "-" || got[2] != "scion" || got[3] != "-c" {
+		t.Fatalf("expected su - scion -c prefix, got %v", got[:4])
+	}
+	shellCmd := got[4]
 	for _, arg := range cmd {
 		if !strings.Contains(shellCmd, arg) {
-			t.Errorf("shell command %q should contain argument %q", shellCmd, arg)
+			t.Errorf("su shell command %q should contain argument %q", shellCmd, arg)
 		}
 	}
 }
 
 func TestK8sExec_QuotesSingleQuotesInArgs(t *testing.T) {
-	cmd := []string{"echo", "it's a test"}
-
-	quoted := make([]string, len(cmd))
-	for i, arg := range cmd {
-		quoted[i] = fmt.Sprintf("'%s'", strings.ReplaceAll(arg, "'", "'\"'\"'"))
-	}
-	shellCmd := strings.Join(quoted, " ")
+	shellCmd := shellJoin([]string{"echo", "it's a test"})
 
 	// The single quote in "it's" should be escaped
 	if !strings.Contains(shellCmd, "'\"'\"'") {
@@ -413,8 +414,82 @@ func TestK8sExec_QuotesSingleQuotesInArgs(t *testing.T) {
 	}
 }
 
+func TestK8sExecTargetUsername_UsesAnnotationWhenPresent(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   "scion",
+			Name:        "agent",
+			Annotations: map[string]string{"scion.username": "carver"},
+		},
+	}
+	if got := execTargetUsername(pod); got != "carver" {
+		t.Fatalf("got username %q, want carver", got)
+	}
+}
+
+func TestK8sExecTargetUsername_FallsBackWhenAnnotationInvalid(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   "scion",
+			Name:        "agent",
+			Annotations: map[string]string{"scion.username": "--help"},
+		},
+	}
+	if got := execTargetUsername(pod); got != "scion" {
+		t.Fatalf("got username %q, want scion", got)
+	}
+}
+
+func TestK8sPodRunsAsNonRoot(t *testing.T) {
+	runAsUser := int64(1000)
+	runAsNonRoot := true
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+		want bool
+	}{
+		{
+			name: "pod security context runAsUser",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					SecurityContext: &corev1.PodSecurityContext{RunAsUser: &runAsUser},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "container security context runAsNonRoot",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:            "agent",
+						SecurityContext: &corev1.SecurityContext{RunAsNonRoot: &runAsNonRoot},
+					}},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "no security context",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "agent"}},
+				},
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := podRunsAsNonRoot(tt.pod, "agent"); got != tt.want {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestK8sAttach_ResolvesUsernameFromAnnotations(t *testing.T) {
-	// Verify that Attach reads the username from scion.username annotation
 	tests := []struct {
 		name        string
 		annotations map[string]string
@@ -435,17 +510,18 @@ func TestK8sAttach_ResolvesUsernameFromAnnotations(t *testing.T) {
 			annotations: map[string]string{"scion.username": ""},
 			wantUser:    "scion",
 		},
+		{
+			name:        "defaults to scion when annotation invalid",
+			annotations: map[string]string{"scion.username": "bad user"},
+			wantUser:    "scion",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Simulate the username resolution logic from Attach
-			username := "scion"
-			if u, ok := tt.annotations["scion.username"]; ok && u != "" {
-				username = u
-			}
-			if username != tt.wantUser {
-				t.Errorf("got username %q, want %q", username, tt.wantUser)
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: tt.annotations}}
+			if got := execTargetUsername(pod); got != tt.wantUser {
+				t.Errorf("got username %q, want %q", got, tt.wantUser)
 			}
 		})
 	}
