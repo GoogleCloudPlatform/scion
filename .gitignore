@@ -2,6 +2,8 @@
 .scion/agents
 .scion/harness-configs
 .scion/settings.yaml
+.scion/grove-id
+.scion/state.yaml
 # binaries
 /build/
 /.build/
