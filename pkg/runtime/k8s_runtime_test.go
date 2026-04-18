@@ -49,6 +49,7 @@ func TestKubernetesRuntime_List(t *testing.T) {
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
+					Name:  agentContainerName,
 					Image: "test-image",
 				},
 			},

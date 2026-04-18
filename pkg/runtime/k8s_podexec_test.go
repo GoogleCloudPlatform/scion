@@ -144,10 +144,9 @@ func TestBuildPod_AgentContainerName(t *testing.T) {
 }
 
 // TestKubernetesRuntime_List_MultiContainerPod simulates a pod that has
-// had additional containers injected by an admission controller (e.g., an
-// Istio sidecar named istio-proxy). List should still locate the agent
-// container's status and report the agent correctly, ignoring the sidecar
-// container statuses.
+// had additional containers injected by an admission controller (e.g., a
+// sidecar proxy). List should still locate the agent container's status
+// and report the agent correctly, ignoring the sidecar container statuses.
 func TestKubernetesRuntime_List_MultiContainerPod(t *testing.T) {
 	rt, clientset, _ := newTestK8sRuntime()
 
@@ -161,17 +160,18 @@ func TestKubernetesRuntime_List_MultiContainerPod(t *testing.T) {
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
+				// sidecar first so any index-0 assumption picks the wrong container
+				{Name: "sidecar", Image: "sidecar:latest"},
 				{Name: agentContainerName, Image: "scion-agent:latest"},
-				{Name: "istio-proxy", Image: "istio/proxyv2:latest"},
 			},
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			ContainerStatuses: []corev1.ContainerStatus{
-				// Order intentionally flipped to ensure the loop searches by
+				// Order intentionally non-matching to ensure the loop searches by
 				// name rather than relying on index 0.
 				{
-					Name: "istio-proxy",
+					Name: "sidecar",
 					State: corev1.ContainerState{
 						Running: &corev1.ContainerStateRunning{},
 					},
@@ -201,5 +201,8 @@ func TestKubernetesRuntime_List_MultiContainerPod(t *testing.T) {
 
 	if agents[0].Name != "sidecar-agent" {
 		t.Errorf("agent name = %q, want %q", agents[0].Name, "sidecar-agent")
+	}
+	if agents[0].Image != "scion-agent:latest" {
+		t.Errorf("agent image = %q, want %q", agents[0].Image, "scion-agent:latest")
 	}
 }

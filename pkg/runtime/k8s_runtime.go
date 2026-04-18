@@ -1655,6 +1655,14 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			grovePath = p.Labels["scion.grove_path"]
 		}
 
+		var agentImage string
+		for _, c := range p.Spec.Containers {
+			if c.Name == agentContainerName {
+				agentImage = c.Image
+				break
+			}
+		}
+
 		agents = append(agents, api.AgentInfo{
 			ContainerID:     p.Name, // Pod name serves as the container identifier
 			Name:            p.Labels["scion.name"],
@@ -1666,7 +1674,7 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			Annotations:     p.Annotations,
 			ContainerStatus: status,
 			Phase:           agentStatus,
-			Image:           p.Spec.Containers[0].Image,
+			Image:           agentImage,
 			Runtime:         r.Name(),
 			Kubernetes: &api.AgentK8sMetadata{
 				Namespace: p.Namespace,
@@ -1689,7 +1697,7 @@ func (r *KubernetesRuntime) GetLogs(ctx context.Context, id string) (string, err
 		namespace = r.resolveNamespace(ctx, podName)
 	}
 
-	req := r.Client.Clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{})
+	req := r.Client.Clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{Container: agentContainerName})
 	podLogs, err := req.Stream(ctx)
 	if err != nil {
 		return "", err
