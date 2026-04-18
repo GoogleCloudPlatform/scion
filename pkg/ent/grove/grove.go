@@ -25,16 +25,28 @@ const (
 	FieldLabels = "labels"
 	// FieldAnnotations holds the string denoting the annotations field in the database.
 	FieldAnnotations = "annotations"
-	// FieldCreated holds the string denoting the created field in the database.
-	FieldCreated = "created"
-	// FieldUpdated holds the string denoting the updated field in the database.
-	FieldUpdated = "updated"
+	// FieldCreatedAt holds the string denoting the created_at field in the database.
+	FieldCreatedAt = "created_at"
+	// FieldUpdatedAt holds the string denoting the updated_at field in the database.
+	FieldUpdatedAt = "updated_at"
 	// FieldCreatedBy holds the string denoting the created_by field in the database.
 	FieldCreatedBy = "created_by"
 	// FieldOwnerID holds the string denoting the owner_id field in the database.
 	FieldOwnerID = "owner_id"
 	// FieldVisibility holds the string denoting the visibility field in the database.
 	FieldVisibility = "visibility"
+	// FieldDefaultRuntimeBrokerID holds the string denoting the default_runtime_broker_id field in the database.
+	FieldDefaultRuntimeBrokerID = "default_runtime_broker_id"
+	// FieldSharedDirs holds the string denoting the shared_dirs field in the database.
+	FieldSharedDirs = "shared_dirs"
+	// FieldGithubInstallationID holds the string denoting the github_installation_id field in the database.
+	FieldGithubInstallationID = "github_installation_id"
+	// FieldGithubPermissions holds the string denoting the github_permissions field in the database.
+	FieldGithubPermissions = "github_permissions"
+	// FieldGithubAppStatus holds the string denoting the github_app_status field in the database.
+	FieldGithubAppStatus = "github_app_status"
+	// FieldGitIdentity holds the string denoting the git_identity field in the database.
+	FieldGitIdentity = "git_identity"
 	// EdgeAgents holds the string denoting the agents edge name in mutations.
 	EdgeAgents = "agents"
 	// Table holds the table name of the grove in the database.
@@ -56,11 +68,17 @@ var Columns = []string{
 	FieldGitRemote,
 	FieldLabels,
 	FieldAnnotations,
-	FieldCreated,
-	FieldUpdated,
+	FieldCreatedAt,
+	FieldUpdatedAt,
 	FieldCreatedBy,
 	FieldOwnerID,
 	FieldVisibility,
+	FieldDefaultRuntimeBrokerID,
+	FieldSharedDirs,
+	FieldGithubInstallationID,
+	FieldGithubPermissions,
+	FieldGithubAppStatus,
+	FieldGitIdentity,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -78,12 +96,12 @@ var (
 	NameValidator func(string) error
 	// SlugValidator is a validator for the "slug" field. It is called by the builders before save.
 	SlugValidator func(string) error
-	// DefaultCreated holds the default value on creation for the "created" field.
-	DefaultCreated func() time.Time
-	// DefaultUpdated holds the default value on creation for the "updated" field.
-	DefaultUpdated func() time.Time
-	// UpdateDefaultUpdated holds the default value on update for the "updated" field.
-	UpdateDefaultUpdated func() time.Time
+	// DefaultCreatedAt holds the default value on creation for the "created_at" field.
+	DefaultCreatedAt func() time.Time
+	// DefaultUpdatedAt holds the default value on creation for the "updated_at" field.
+	DefaultUpdatedAt func() time.Time
+	// UpdateDefaultUpdatedAt holds the default value on update for the "updated_at" field.
+	UpdateDefaultUpdatedAt func() time.Time
 	// DefaultVisibility holds the default value on creation for the "visibility" field.
 	DefaultVisibility string
 	// DefaultID holds the default value on creation for the "id" field.
@@ -113,14 +131,14 @@ func ByGitRemote(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldGitRemote, opts...).ToFunc()
 }
 
-// ByCreated orders the results by the created field.
-func ByCreated(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldCreated, opts...).ToFunc()
+// ByCreatedAt orders the results by the created_at field.
+func ByCreatedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCreatedAt, opts...).ToFunc()
 }
 
-// ByUpdated orders the results by the updated field.
-func ByUpdated(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldUpdated, opts...).ToFunc()
+// ByUpdatedAt orders the results by the updated_at field.
+func ByUpdatedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldUpdatedAt, opts...).ToFunc()
 }
 
 // ByCreatedBy orders the results by the created_by field.
@@ -136,6 +154,16 @@ func ByOwnerID(opts ...sql.OrderTermOption) OrderOption {
 // ByVisibility orders the results by the visibility field.
 func ByVisibility(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldVisibility, opts...).ToFunc()
+}
+
+// ByDefaultRuntimeBrokerID orders the results by the default_runtime_broker_id field.
+func ByDefaultRuntimeBrokerID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDefaultRuntimeBrokerID, opts...).ToFunc()
+}
+
+// ByGithubInstallationID orders the results by the github_installation_id field.
+func ByGithubInstallationID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldGithubInstallationID, opts...).ToFunc()
 }
 
 // ByAgentsCount orders the results by agents count.

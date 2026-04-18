@@ -24,6 +24,8 @@ type Tx struct {
 	Grove *GroveClient
 	// PolicyBinding is the client for interacting with the PolicyBinding builders.
 	PolicyBinding *PolicyBindingClient
+	// RuntimeBroker is the client for interacting with the RuntimeBroker builders.
+	RuntimeBroker *RuntimeBrokerClient
 	// User is the client for interacting with the User builders.
 	User *UserClient
 
@@ -163,6 +165,7 @@ func (tx *Tx) init() {
 	tx.GroupMembership = NewGroupMembershipClient(tx.config)
 	tx.Grove = NewGroveClient(tx.config)
 	tx.PolicyBinding = NewPolicyBindingClient(tx.config)
+	tx.RuntimeBroker = NewRuntimeBrokerClient(tx.config)
 	tx.User = NewUserClient(tx.config)
 }
 

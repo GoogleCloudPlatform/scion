@@ -18,14 +18,24 @@ import (
 	"time"
 
 	"entgo.io/ent"
+	"entgo.io/ent/dialect/entsql"
+	"entgo.io/ent/schema"
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
+	"entgo.io/ent/schema/index"
 	"github.com/google/uuid"
 )
 
 // User holds the schema definition for the User entity.
 type User struct {
 	ent.Schema
+}
+
+// Annotations set the table name.
+func (User) Annotations() []schema.Annotation {
+	return []schema.Annotation{
+		entsql.Annotation{Table: "users"},
+	}
 }
 
 // Fields of the User.
@@ -49,10 +59,14 @@ func (User) Fields() []ent.Field {
 			Default("active"),
 		field.JSON("preferences", &UserPreferences{}).
 			Optional(),
-		field.Time("created").
+		field.Time("created_at").
 			Default(time.Now).
 			Immutable(),
 		field.Time("last_login").
+			Optional().
+			Nillable(),
+		// V27: last_seen for presence tracking.
+		field.Time("last_seen").
 			Optional().
 			Nillable(),
 	}
@@ -68,5 +82,13 @@ func (User) Edges() []ent.Edge {
 			Ref("user"),
 		edge.From("policy_bindings", PolicyBinding.Type).
 			Ref("user"),
+	}
+}
+
+// Indexes of the User, named to match raw SQL DDL.
+func (User) Indexes() []ent.Index {
+	return []ent.Index{
+		index.Fields("email").
+			StorageKey("idx_users_email"),
 	}
 }

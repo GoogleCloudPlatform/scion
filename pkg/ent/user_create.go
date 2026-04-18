@@ -86,16 +86,16 @@ func (_c *UserCreate) SetPreferences(v *schema.UserPreferences) *UserCreate {
 	return _c
 }
 
-// SetCreated sets the "created" field.
-func (_c *UserCreate) SetCreated(v time.Time) *UserCreate {
-	_c.mutation.SetCreated(v)
+// SetCreatedAt sets the "created_at" field.
+func (_c *UserCreate) SetCreatedAt(v time.Time) *UserCreate {
+	_c.mutation.SetCreatedAt(v)
 	return _c
 }
 
-// SetNillableCreated sets the "created" field if the given value is not nil.
-func (_c *UserCreate) SetNillableCreated(v *time.Time) *UserCreate {
+// SetNillableCreatedAt sets the "created_at" field if the given value is not nil.
+func (_c *UserCreate) SetNillableCreatedAt(v *time.Time) *UserCreate {
 	if v != nil {
-		_c.SetCreated(*v)
+		_c.SetCreatedAt(*v)
 	}
 	return _c
 }
@@ -110,6 +110,20 @@ func (_c *UserCreate) SetLastLogin(v time.Time) *UserCreate {
 func (_c *UserCreate) SetNillableLastLogin(v *time.Time) *UserCreate {
 	if v != nil {
 		_c.SetLastLogin(*v)
+	}
+	return _c
+}
+
+// SetLastSeen sets the "last_seen" field.
+func (_c *UserCreate) SetLastSeen(v time.Time) *UserCreate {
+	_c.mutation.SetLastSeen(v)
+	return _c
+}
+
+// SetNillableLastSeen sets the "last_seen" field if the given value is not nil.
+func (_c *UserCreate) SetNillableLastSeen(v *time.Time) *UserCreate {
+	if v != nil {
+		_c.SetLastSeen(*v)
 	}
 	return _c
 }
@@ -246,9 +260,9 @@ func (_c *UserCreate) defaults() {
 		v := user.DefaultStatus
 		_c.mutation.SetStatus(v)
 	}
-	if _, ok := _c.mutation.Created(); !ok {
-		v := user.DefaultCreated()
-		_c.mutation.SetCreated(v)
+	if _, ok := _c.mutation.CreatedAt(); !ok {
+		v := user.DefaultCreatedAt()
+		_c.mutation.SetCreatedAt(v)
 	}
 	if _, ok := _c.mutation.ID(); !ok {
 		v := user.DefaultID()
@@ -290,8 +304,8 @@ func (_c *UserCreate) check() error {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "User.status": %w`, err)}
 		}
 	}
-	if _, ok := _c.mutation.Created(); !ok {
-		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "User.created"`)}
+	if _, ok := _c.mutation.CreatedAt(); !ok {
+		return &ValidationError{Name: "created_at", err: errors.New(`ent: missing required field "User.created_at"`)}
 	}
 	return nil
 }
@@ -352,13 +366,17 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 		_spec.SetField(user.FieldPreferences, field.TypeJSON, value)
 		_node.Preferences = value
 	}
-	if value, ok := _c.mutation.Created(); ok {
-		_spec.SetField(user.FieldCreated, field.TypeTime, value)
-		_node.Created = value
+	if value, ok := _c.mutation.CreatedAt(); ok {
+		_spec.SetField(user.FieldCreatedAt, field.TypeTime, value)
+		_node.CreatedAt = value
 	}
 	if value, ok := _c.mutation.LastLogin(); ok {
 		_spec.SetField(user.FieldLastLogin, field.TypeTime, value)
 		_node.LastLogin = &value
+	}
+	if value, ok := _c.mutation.LastSeen(); ok {
+		_spec.SetField(user.FieldLastSeen, field.TypeTime, value)
+		_node.LastSeen = &value
 	}
 	if nodes := _c.mutation.CreatedAgentsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{

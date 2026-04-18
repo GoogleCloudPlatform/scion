@@ -22,6 +22,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/grove"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 )
 
@@ -42,6 +43,8 @@ type Client struct {
 	Grove *GroveClient
 	// PolicyBinding is the client for interacting with the PolicyBinding builders.
 	PolicyBinding *PolicyBindingClient
+	// RuntimeBroker is the client for interacting with the RuntimeBroker builders.
+	RuntimeBroker *RuntimeBrokerClient
 	// User is the client for interacting with the User builders.
 	User *UserClient
 }
@@ -61,6 +64,7 @@ func (c *Client) init() {
 	c.GroupMembership = NewGroupMembershipClient(c.config)
 	c.Grove = NewGroveClient(c.config)
 	c.PolicyBinding = NewPolicyBindingClient(c.config)
+	c.RuntimeBroker = NewRuntimeBrokerClient(c.config)
 	c.User = NewUserClient(c.config)
 }
 
@@ -160,6 +164,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		GroupMembership: NewGroupMembershipClient(cfg),
 		Grove:           NewGroveClient(cfg),
 		PolicyBinding:   NewPolicyBindingClient(cfg),
+		RuntimeBroker:   NewRuntimeBrokerClient(cfg),
 		User:            NewUserClient(cfg),
 	}, nil
 }
@@ -186,6 +191,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		GroupMembership: NewGroupMembershipClient(cfg),
 		Grove:           NewGroveClient(cfg),
 		PolicyBinding:   NewPolicyBindingClient(cfg),
+		RuntimeBroker:   NewRuntimeBrokerClient(cfg),
 		User:            NewUserClient(cfg),
 	}, nil
 }
@@ -217,7 +223,7 @@ func (c *Client) Close() error {
 func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
 		c.AccessPolicy, c.Agent, c.Group, c.GroupMembership, c.Grove, c.PolicyBinding,
-		c.User,
+		c.RuntimeBroker, c.User,
 	} {
 		n.Use(hooks...)
 	}
@@ -228,7 +234,7 @@ func (c *Client) Use(hooks ...Hook) {
 func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
 		c.AccessPolicy, c.Agent, c.Group, c.GroupMembership, c.Grove, c.PolicyBinding,
-		c.User,
+		c.RuntimeBroker, c.User,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -249,6 +255,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.Grove.mutate(ctx, m)
 	case *PolicyBindingMutation:
 		return c.PolicyBinding.mutate(ctx, m)
+	case *RuntimeBrokerMutation:
+		return c.RuntimeBroker.mutate(ctx, m)
 	case *UserMutation:
 		return c.User.mutate(ctx, m)
 	default:
@@ -1358,6 +1366,139 @@ func (c *PolicyBindingClient) mutate(ctx context.Context, m *PolicyBindingMutati
 	}
 }
 
+// RuntimeBrokerClient is a client for the RuntimeBroker schema.
+type RuntimeBrokerClient struct {
+	config
+}
+
+// NewRuntimeBrokerClient returns a client for the RuntimeBroker from the given config.
+func NewRuntimeBrokerClient(c config) *RuntimeBrokerClient {
+	return &RuntimeBrokerClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `runtimebroker.Hooks(f(g(h())))`.
+func (c *RuntimeBrokerClient) Use(hooks ...Hook) {
+	c.hooks.RuntimeBroker = append(c.hooks.RuntimeBroker, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `runtimebroker.Intercept(f(g(h())))`.
+func (c *RuntimeBrokerClient) Intercept(interceptors ...Interceptor) {
+	c.inters.RuntimeBroker = append(c.inters.RuntimeBroker, interceptors...)
+}
+
+// Create returns a builder for creating a RuntimeBroker entity.
+func (c *RuntimeBrokerClient) Create() *RuntimeBrokerCreate {
+	mutation := newRuntimeBrokerMutation(c.config, OpCreate)
+	return &RuntimeBrokerCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of RuntimeBroker entities.
+func (c *RuntimeBrokerClient) CreateBulk(builders ...*RuntimeBrokerCreate) *RuntimeBrokerCreateBulk {
+	return &RuntimeBrokerCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *RuntimeBrokerClient) MapCreateBulk(slice any, setFunc func(*RuntimeBrokerCreate, int)) *RuntimeBrokerCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &RuntimeBrokerCreateBulk{err: fmt.Errorf("calling to RuntimeBrokerClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*RuntimeBrokerCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &RuntimeBrokerCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for RuntimeBroker.
+func (c *RuntimeBrokerClient) Update() *RuntimeBrokerUpdate {
+	mutation := newRuntimeBrokerMutation(c.config, OpUpdate)
+	return &RuntimeBrokerUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *RuntimeBrokerClient) UpdateOne(_m *RuntimeBroker) *RuntimeBrokerUpdateOne {
+	mutation := newRuntimeBrokerMutation(c.config, OpUpdateOne, withRuntimeBroker(_m))
+	return &RuntimeBrokerUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *RuntimeBrokerClient) UpdateOneID(id string) *RuntimeBrokerUpdateOne {
+	mutation := newRuntimeBrokerMutation(c.config, OpUpdateOne, withRuntimeBrokerID(id))
+	return &RuntimeBrokerUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for RuntimeBroker.
+func (c *RuntimeBrokerClient) Delete() *RuntimeBrokerDelete {
+	mutation := newRuntimeBrokerMutation(c.config, OpDelete)
+	return &RuntimeBrokerDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *RuntimeBrokerClient) DeleteOne(_m *RuntimeBroker) *RuntimeBrokerDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *RuntimeBrokerClient) DeleteOneID(id string) *RuntimeBrokerDeleteOne {
+	builder := c.Delete().Where(runtimebroker.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &RuntimeBrokerDeleteOne{builder}
+}
+
+// Query returns a query builder for RuntimeBroker.
+func (c *RuntimeBrokerClient) Query() *RuntimeBrokerQuery {
+	return &RuntimeBrokerQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeRuntimeBroker},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a RuntimeBroker entity by its id.
+func (c *RuntimeBrokerClient) Get(ctx context.Context, id string) (*RuntimeBroker, error) {
+	return c.Query().Where(runtimebroker.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *RuntimeBrokerClient) GetX(ctx context.Context, id string) *RuntimeBroker {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *RuntimeBrokerClient) Hooks() []Hook {
+	return c.hooks.RuntimeBroker
+}
+
+// Interceptors returns the client interceptors.
+func (c *RuntimeBrokerClient) Interceptors() []Interceptor {
+	return c.inters.RuntimeBroker
+}
+
+func (c *RuntimeBrokerClient) mutate(ctx context.Context, m *RuntimeBrokerMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&RuntimeBrokerCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&RuntimeBrokerUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&RuntimeBrokerUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&RuntimeBrokerDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown RuntimeBroker mutation op: %q", m.Op())
+	}
+}
+
 // UserClient is a client for the User schema.
 type UserClient struct {
 	config
@@ -1575,10 +1716,10 @@ func (c *UserClient) mutate(ctx context.Context, m *UserMutation) (Value, error)
 type (
 	hooks struct {
 		AccessPolicy, Agent, Group, GroupMembership, Grove, PolicyBinding,
-		User []ent.Hook
+		RuntimeBroker, User []ent.Hook
 	}
 	inters struct {
 		AccessPolicy, Agent, Group, GroupMembership, Grove, PolicyBinding,
-		User []ent.Interceptor
+		RuntimeBroker, User []ent.Interceptor
 	}
 )

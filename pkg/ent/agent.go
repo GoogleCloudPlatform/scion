@@ -3,6 +3,7 @@
 package ent
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -28,20 +29,68 @@ type Agent struct {
 	Template string `json:"template,omitempty"`
 	// GroveID holds the value of the "grove_id" field.
 	GroveID uuid.UUID `json:"grove_id,omitempty"`
-	// Status holds the value of the "status" field.
-	Status agent.Status `json:"status,omitempty"`
+	// Labels holds the value of the "labels" field.
+	Labels map[string]string `json:"labels,omitempty"`
+	// Annotations holds the value of the "annotations" field.
+	Annotations map[string]string `json:"annotations,omitempty"`
+	// Phase holds the value of the "phase" field.
+	Phase string `json:"phase,omitempty"`
+	// Activity holds the value of the "activity" field.
+	Activity string `json:"activity,omitempty"`
+	// ToolName holds the value of the "tool_name" field.
+	ToolName string `json:"tool_name,omitempty"`
+	// ConnectionState holds the value of the "connection_state" field.
+	ConnectionState string `json:"connection_state,omitempty"`
+	// ContainerStatus holds the value of the "container_status" field.
+	ContainerStatus string `json:"container_status,omitempty"`
+	// RuntimeState holds the value of the "runtime_state" field.
+	RuntimeState string `json:"runtime_state,omitempty"`
+	// StalledFromActivity holds the value of the "stalled_from_activity" field.
+	StalledFromActivity string `json:"stalled_from_activity,omitempty"`
+	// CurrentTurns holds the value of the "current_turns" field.
+	CurrentTurns int `json:"current_turns,omitempty"`
+	// CurrentModelCalls holds the value of the "current_model_calls" field.
+	CurrentModelCalls int `json:"current_model_calls,omitempty"`
+	// StartedAt holds the value of the "started_at" field.
+	StartedAt *time.Time `json:"started_at,omitempty"`
+	// Image holds the value of the "image" field.
+	Image string `json:"image,omitempty"`
+	// Detached holds the value of the "detached" field.
+	Detached bool `json:"detached,omitempty"`
+	// Runtime holds the value of the "runtime" field.
+	Runtime string `json:"runtime,omitempty"`
+	// RuntimeBrokerID holds the value of the "runtime_broker_id" field.
+	RuntimeBrokerID *uuid.UUID `json:"runtime_broker_id,omitempty"`
+	// WebPtyEnabled holds the value of the "web_pty_enabled" field.
+	WebPtyEnabled bool `json:"web_pty_enabled,omitempty"`
+	// TaskSummary holds the value of the "task_summary" field.
+	TaskSummary string `json:"task_summary,omitempty"`
+	// Message holds the value of the "message" field.
+	Message string `json:"message,omitempty"`
+	// AppliedConfig holds the value of the "applied_config" field.
+	AppliedConfig json.RawMessage `json:"applied_config,omitempty"`
+	// CreatedAt holds the value of the "created_at" field.
+	CreatedAt time.Time `json:"created_at,omitempty"`
+	// UpdatedAt holds the value of the "updated_at" field.
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	// LastSeen holds the value of the "last_seen" field.
+	LastSeen *time.Time `json:"last_seen,omitempty"`
+	// LastActivityEvent holds the value of the "last_activity_event" field.
+	LastActivityEvent *time.Time `json:"last_activity_event,omitempty"`
+	// DeletedAt holds the value of the "deleted_at" field.
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
 	// CreatedBy holds the value of the "created_by" field.
 	CreatedBy *uuid.UUID `json:"created_by,omitempty"`
 	// OwnerID holds the value of the "owner_id" field.
 	OwnerID *uuid.UUID `json:"owner_id,omitempty"`
-	// DelegationEnabled holds the value of the "delegation_enabled" field.
-	DelegationEnabled bool `json:"delegation_enabled,omitempty"`
 	// Visibility holds the value of the "visibility" field.
 	Visibility string `json:"visibility,omitempty"`
-	// Created holds the value of the "created" field.
-	Created time.Time `json:"created,omitempty"`
-	// Updated holds the value of the "updated" field.
-	Updated time.Time `json:"updated,omitempty"`
+	// DelegationEnabled holds the value of the "delegation_enabled" field.
+	DelegationEnabled bool `json:"delegation_enabled,omitempty"`
+	// Ancestry holds the value of the "ancestry" field.
+	Ancestry []string `json:"ancestry,omitempty"`
+	// StateVersion holds the value of the "state_version" field.
+	StateVersion int64 `json:"state_version,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the AgentQuery when eager-loading is set.
 	Edges        AgentEdges `json:"edges"`
@@ -121,13 +170,17 @@ func (*Agent) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case agent.FieldCreatedBy, agent.FieldOwnerID:
+		case agent.FieldRuntimeBrokerID, agent.FieldCreatedBy, agent.FieldOwnerID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
-		case agent.FieldDelegationEnabled:
+		case agent.FieldLabels, agent.FieldAnnotations, agent.FieldAppliedConfig, agent.FieldAncestry:
+			values[i] = new([]byte)
+		case agent.FieldDetached, agent.FieldWebPtyEnabled, agent.FieldDelegationEnabled:
 			values[i] = new(sql.NullBool)
-		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldVisibility:
+		case agent.FieldCurrentTurns, agent.FieldCurrentModelCalls, agent.FieldStateVersion:
+			values[i] = new(sql.NullInt64)
+		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldVisibility:
 			values[i] = new(sql.NullString)
-		case agent.FieldCreated, agent.FieldUpdated:
+		case agent.FieldStartedAt, agent.FieldCreatedAt, agent.FieldUpdatedAt, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldDeletedAt:
 			values[i] = new(sql.NullTime)
 		case agent.FieldID, agent.FieldGroveID:
 			values[i] = new(uuid.UUID)
@@ -176,11 +229,166 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 			} else if value != nil {
 				_m.GroveID = *value
 			}
-		case agent.FieldStatus:
+		case agent.FieldLabels:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field labels", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.Labels); err != nil {
+					return fmt.Errorf("unmarshal field labels: %w", err)
+				}
+			}
+		case agent.FieldAnnotations:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field annotations", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.Annotations); err != nil {
+					return fmt.Errorf("unmarshal field annotations: %w", err)
+				}
+			}
+		case agent.FieldPhase:
 			if value, ok := values[i].(*sql.NullString); !ok {
-				return fmt.Errorf("unexpected type %T for field status", values[i])
+				return fmt.Errorf("unexpected type %T for field phase", values[i])
 			} else if value.Valid {
-				_m.Status = agent.Status(value.String)
+				_m.Phase = value.String
+			}
+		case agent.FieldActivity:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field activity", values[i])
+			} else if value.Valid {
+				_m.Activity = value.String
+			}
+		case agent.FieldToolName:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field tool_name", values[i])
+			} else if value.Valid {
+				_m.ToolName = value.String
+			}
+		case agent.FieldConnectionState:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field connection_state", values[i])
+			} else if value.Valid {
+				_m.ConnectionState = value.String
+			}
+		case agent.FieldContainerStatus:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field container_status", values[i])
+			} else if value.Valid {
+				_m.ContainerStatus = value.String
+			}
+		case agent.FieldRuntimeState:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field runtime_state", values[i])
+			} else if value.Valid {
+				_m.RuntimeState = value.String
+			}
+		case agent.FieldStalledFromActivity:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field stalled_from_activity", values[i])
+			} else if value.Valid {
+				_m.StalledFromActivity = value.String
+			}
+		case agent.FieldCurrentTurns:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field current_turns", values[i])
+			} else if value.Valid {
+				_m.CurrentTurns = int(value.Int64)
+			}
+		case agent.FieldCurrentModelCalls:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field current_model_calls", values[i])
+			} else if value.Valid {
+				_m.CurrentModelCalls = int(value.Int64)
+			}
+		case agent.FieldStartedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field started_at", values[i])
+			} else if value.Valid {
+				_m.StartedAt = new(time.Time)
+				*_m.StartedAt = value.Time
+			}
+		case agent.FieldImage:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field image", values[i])
+			} else if value.Valid {
+				_m.Image = value.String
+			}
+		case agent.FieldDetached:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field detached", values[i])
+			} else if value.Valid {
+				_m.Detached = value.Bool
+			}
+		case agent.FieldRuntime:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field runtime", values[i])
+			} else if value.Valid {
+				_m.Runtime = value.String
+			}
+		case agent.FieldRuntimeBrokerID:
+			if value, ok := values[i].(*sql.NullScanner); !ok {
+				return fmt.Errorf("unexpected type %T for field runtime_broker_id", values[i])
+			} else if value.Valid {
+				_m.RuntimeBrokerID = new(uuid.UUID)
+				*_m.RuntimeBrokerID = *value.S.(*uuid.UUID)
+			}
+		case agent.FieldWebPtyEnabled:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field web_pty_enabled", values[i])
+			} else if value.Valid {
+				_m.WebPtyEnabled = value.Bool
+			}
+		case agent.FieldTaskSummary:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field task_summary", values[i])
+			} else if value.Valid {
+				_m.TaskSummary = value.String
+			}
+		case agent.FieldMessage:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field message", values[i])
+			} else if value.Valid {
+				_m.Message = value.String
+			}
+		case agent.FieldAppliedConfig:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field applied_config", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.AppliedConfig); err != nil {
+					return fmt.Errorf("unmarshal field applied_config: %w", err)
+				}
+			}
+		case agent.FieldCreatedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field created_at", values[i])
+			} else if value.Valid {
+				_m.CreatedAt = value.Time
+			}
+		case agent.FieldUpdatedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field updated_at", values[i])
+			} else if value.Valid {
+				_m.UpdatedAt = value.Time
+			}
+		case agent.FieldLastSeen:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field last_seen", values[i])
+			} else if value.Valid {
+				_m.LastSeen = new(time.Time)
+				*_m.LastSeen = value.Time
+			}
+		case agent.FieldLastActivityEvent:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field last_activity_event", values[i])
+			} else if value.Valid {
+				_m.LastActivityEvent = new(time.Time)
+				*_m.LastActivityEvent = value.Time
+			}
+		case agent.FieldDeletedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field deleted_at", values[i])
+			} else if value.Valid {
+				_m.DeletedAt = new(time.Time)
+				*_m.DeletedAt = value.Time
 			}
 		case agent.FieldCreatedBy:
 			if value, ok := values[i].(*sql.NullScanner); !ok {
@@ -196,29 +404,31 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 				_m.OwnerID = new(uuid.UUID)
 				*_m.OwnerID = *value.S.(*uuid.UUID)
 			}
-		case agent.FieldDelegationEnabled:
-			if value, ok := values[i].(*sql.NullBool); !ok {
-				return fmt.Errorf("unexpected type %T for field delegation_enabled", values[i])
-			} else if value.Valid {
-				_m.DelegationEnabled = value.Bool
-			}
 		case agent.FieldVisibility:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field visibility", values[i])
 			} else if value.Valid {
 				_m.Visibility = value.String
 			}
-		case agent.FieldCreated:
-			if value, ok := values[i].(*sql.NullTime); !ok {
-				return fmt.Errorf("unexpected type %T for field created", values[i])
+		case agent.FieldDelegationEnabled:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field delegation_enabled", values[i])
 			} else if value.Valid {
-				_m.Created = value.Time
+				_m.DelegationEnabled = value.Bool
 			}
-		case agent.FieldUpdated:
-			if value, ok := values[i].(*sql.NullTime); !ok {
-				return fmt.Errorf("unexpected type %T for field updated", values[i])
+		case agent.FieldAncestry:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field ancestry", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.Ancestry); err != nil {
+					return fmt.Errorf("unmarshal field ancestry: %w", err)
+				}
+			}
+		case agent.FieldStateVersion:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field state_version", values[i])
 			} else if value.Valid {
-				_m.Updated = value.Time
+				_m.StateVersion = value.Int64
 			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
@@ -293,8 +503,90 @@ func (_m *Agent) String() string {
 	builder.WriteString("grove_id=")
 	builder.WriteString(fmt.Sprintf("%v", _m.GroveID))
 	builder.WriteString(", ")
-	builder.WriteString("status=")
-	builder.WriteString(fmt.Sprintf("%v", _m.Status))
+	builder.WriteString("labels=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Labels))
+	builder.WriteString(", ")
+	builder.WriteString("annotations=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Annotations))
+	builder.WriteString(", ")
+	builder.WriteString("phase=")
+	builder.WriteString(_m.Phase)
+	builder.WriteString(", ")
+	builder.WriteString("activity=")
+	builder.WriteString(_m.Activity)
+	builder.WriteString(", ")
+	builder.WriteString("tool_name=")
+	builder.WriteString(_m.ToolName)
+	builder.WriteString(", ")
+	builder.WriteString("connection_state=")
+	builder.WriteString(_m.ConnectionState)
+	builder.WriteString(", ")
+	builder.WriteString("container_status=")
+	builder.WriteString(_m.ContainerStatus)
+	builder.WriteString(", ")
+	builder.WriteString("runtime_state=")
+	builder.WriteString(_m.RuntimeState)
+	builder.WriteString(", ")
+	builder.WriteString("stalled_from_activity=")
+	builder.WriteString(_m.StalledFromActivity)
+	builder.WriteString(", ")
+	builder.WriteString("current_turns=")
+	builder.WriteString(fmt.Sprintf("%v", _m.CurrentTurns))
+	builder.WriteString(", ")
+	builder.WriteString("current_model_calls=")
+	builder.WriteString(fmt.Sprintf("%v", _m.CurrentModelCalls))
+	builder.WriteString(", ")
+	if v := _m.StartedAt; v != nil {
+		builder.WriteString("started_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("image=")
+	builder.WriteString(_m.Image)
+	builder.WriteString(", ")
+	builder.WriteString("detached=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Detached))
+	builder.WriteString(", ")
+	builder.WriteString("runtime=")
+	builder.WriteString(_m.Runtime)
+	builder.WriteString(", ")
+	if v := _m.RuntimeBrokerID; v != nil {
+		builder.WriteString("runtime_broker_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("web_pty_enabled=")
+	builder.WriteString(fmt.Sprintf("%v", _m.WebPtyEnabled))
+	builder.WriteString(", ")
+	builder.WriteString("task_summary=")
+	builder.WriteString(_m.TaskSummary)
+	builder.WriteString(", ")
+	builder.WriteString("message=")
+	builder.WriteString(_m.Message)
+	builder.WriteString(", ")
+	builder.WriteString("applied_config=")
+	builder.WriteString(fmt.Sprintf("%v", _m.AppliedConfig))
+	builder.WriteString(", ")
+	builder.WriteString("created_at=")
+	builder.WriteString(_m.CreatedAt.Format(time.ANSIC))
+	builder.WriteString(", ")
+	builder.WriteString("updated_at=")
+	builder.WriteString(_m.UpdatedAt.Format(time.ANSIC))
+	builder.WriteString(", ")
+	if v := _m.LastSeen; v != nil {
+		builder.WriteString("last_seen=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.LastActivityEvent; v != nil {
+		builder.WriteString("last_activity_event=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.DeletedAt; v != nil {
+		builder.WriteString("deleted_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
 	builder.WriteString(", ")
 	if v := _m.CreatedBy; v != nil {
 		builder.WriteString("created_by=")
@@ -306,17 +598,17 @@ func (_m *Agent) String() string {
 		builder.WriteString(fmt.Sprintf("%v", *v))
 	}
 	builder.WriteString(", ")
-	builder.WriteString("delegation_enabled=")
-	builder.WriteString(fmt.Sprintf("%v", _m.DelegationEnabled))
-	builder.WriteString(", ")
 	builder.WriteString("visibility=")
 	builder.WriteString(_m.Visibility)
 	builder.WriteString(", ")
-	builder.WriteString("created=")
-	builder.WriteString(_m.Created.Format(time.ANSIC))
+	builder.WriteString("delegation_enabled=")
+	builder.WriteString(fmt.Sprintf("%v", _m.DelegationEnabled))
 	builder.WriteString(", ")
-	builder.WriteString("updated=")
-	builder.WriteString(_m.Updated.Format(time.ANSIC))
+	builder.WriteString("ancestry=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Ancestry))
+	builder.WriteString(", ")
+	builder.WriteString("state_version=")
+	builder.WriteString(fmt.Sprintf("%v", _m.StateVersion))
 	builder.WriteByte(')')
 	return builder.String()
 }

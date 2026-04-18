@@ -3,6 +3,7 @@
 package migrate
 
 import (
+	"entgo.io/ent/dialect/entsql"
 	"entgo.io/ent/dialect/sql/schema"
 	"entgo.io/ent/schema/field"
 )
@@ -36,14 +37,38 @@ var (
 	// AgentsColumns holds the columns for the "agents" table.
 	AgentsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
-		{Name: "slug", Type: field.TypeString},
+		{Name: "agent_id", Type: field.TypeString},
 		{Name: "name", Type: field.TypeString},
 		{Name: "template", Type: field.TypeString, Nullable: true},
-		{Name: "status", Type: field.TypeEnum, Enums: []string{"created", "provisioning", "cloning", "starting", "running", "stopping", "stopped", "error"}, Default: "created"},
-		{Name: "delegation_enabled", Type: field.TypeBool, Default: false},
+		{Name: "labels", Type: field.TypeJSON, Nullable: true},
+		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
+		{Name: "phase", Type: field.TypeString, Default: "created"},
+		{Name: "activity", Type: field.TypeString, Default: ""},
+		{Name: "tool_name", Type: field.TypeString, Default: ""},
+		{Name: "connection_state", Type: field.TypeString, Default: "unknown"},
+		{Name: "container_status", Type: field.TypeString, Nullable: true},
+		{Name: "runtime_state", Type: field.TypeString, Nullable: true},
+		{Name: "stalled_from_activity", Type: field.TypeString, Default: ""},
+		{Name: "current_turns", Type: field.TypeInt, Default: 0},
+		{Name: "current_model_calls", Type: field.TypeInt, Default: 0},
+		{Name: "started_at", Type: field.TypeTime, Nullable: true},
+		{Name: "image", Type: field.TypeString, Nullable: true},
+		{Name: "detached", Type: field.TypeBool, Default: true},
+		{Name: "runtime", Type: field.TypeString, Nullable: true},
+		{Name: "runtime_broker_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "web_pty_enabled", Type: field.TypeBool, Default: false},
+		{Name: "task_summary", Type: field.TypeString, Nullable: true},
+		{Name: "message", Type: field.TypeString, Nullable: true},
+		{Name: "applied_config", Type: field.TypeJSON, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+		{Name: "last_seen", Type: field.TypeTime, Nullable: true},
+		{Name: "last_activity_event", Type: field.TypeTime, Nullable: true},
+		{Name: "deleted_at", Type: field.TypeTime, Nullable: true},
 		{Name: "visibility", Type: field.TypeString, Default: "private"},
-		{Name: "created", Type: field.TypeTime},
-		{Name: "updated", Type: field.TypeTime},
+		{Name: "delegation_enabled", Type: field.TypeBool, Default: false},
+		{Name: "ancestry", Type: field.TypeJSON, Nullable: true},
+		{Name: "state_version", Type: field.TypeInt64, Default: 1},
 		{Name: "grove_id", Type: field.TypeUUID},
 		{Name: "created_by", Type: field.TypeUUID, Nullable: true},
 		{Name: "owner_id", Type: field.TypeUUID, Nullable: true},
@@ -56,28 +81,51 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_groves_agents",
-				Columns:    []*schema.Column{AgentsColumns[9]},
+				Columns:    []*schema.Column{AgentsColumns[33]},
 				RefColumns: []*schema.Column{GrovesColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
 			{
 				Symbol:     "agents_users_created_agents",
-				Columns:    []*schema.Column{AgentsColumns[10]},
+				Columns:    []*schema.Column{AgentsColumns[34]},
 				RefColumns: []*schema.Column{UsersColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
 			{
 				Symbol:     "agents_users_owned_agents",
-				Columns:    []*schema.Column{AgentsColumns[11]},
+				Columns:    []*schema.Column{AgentsColumns[35]},
 				RefColumns: []*schema.Column{UsersColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
 		},
 		Indexes: []*schema.Index{
 			{
-				Name:    "agent_slug_grove_id",
+				Name:    "idx_agents_grove_slug",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[9]},
+				Columns: []*schema.Column{AgentsColumns[33], AgentsColumns[1]},
+			},
+			{
+				Name:    "idx_agents_grove",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[33]},
+			},
+			{
+				Name:    "idx_agents_runtime_broker",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[19]},
+			},
+			{
+				Name:    "idx_agents_phase",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[6]},
+			},
+			{
+				Name:    "idx_agents_deleted",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[28]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "deleted_at IS NOT NULL",
+				},
 			},
 		},
 	}
@@ -166,17 +214,45 @@ var (
 		{Name: "git_remote", Type: field.TypeString, Nullable: true},
 		{Name: "labels", Type: field.TypeJSON, Nullable: true},
 		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
-		{Name: "created", Type: field.TypeTime},
-		{Name: "updated", Type: field.TypeTime},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
 		{Name: "owner_id", Type: field.TypeString, Nullable: true},
 		{Name: "visibility", Type: field.TypeString, Default: "private"},
+		{Name: "default_runtime_broker_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "shared_dirs", Type: field.TypeJSON, Nullable: true},
+		{Name: "github_installation_id", Type: field.TypeInt64, Nullable: true},
+		{Name: "github_permissions", Type: field.TypeJSON, Nullable: true},
+		{Name: "github_app_status", Type: field.TypeJSON, Nullable: true},
+		{Name: "git_identity", Type: field.TypeJSON, Nullable: true},
 	}
 	// GrovesTable holds the schema information for the "groves" table.
 	GrovesTable = &schema.Table{
 		Name:       "groves",
 		Columns:    GrovesColumns,
 		PrimaryKey: []*schema.Column{GrovesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_groves_slug",
+				Unique:  false,
+				Columns: []*schema.Column{GrovesColumns[2]},
+			},
+			{
+				Name:    "idx_groves_git_remote",
+				Unique:  false,
+				Columns: []*schema.Column{GrovesColumns[3]},
+			},
+			{
+				Name:    "idx_groves_owner",
+				Unique:  false,
+				Columns: []*schema.Column{GrovesColumns[9]},
+			},
+			{
+				Name:    "idx_groves_default_runtime_broker",
+				Unique:  false,
+				Columns: []*schema.Column{GrovesColumns[11]},
+			},
+		},
 	}
 	// PolicyBindingsColumns holds the columns for the "policy_bindings" table.
 	PolicyBindingsColumns = []*schema.Column{
@@ -221,6 +297,47 @@ var (
 			},
 		},
 	}
+	// RuntimeBrokersColumns holds the columns for the "runtime_brokers" table.
+	RuntimeBrokersColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "name", Type: field.TypeString},
+		{Name: "slug", Type: field.TypeString},
+		{Name: "type", Type: field.TypeString},
+		{Name: "mode", Type: field.TypeString, Default: "connected"},
+		{Name: "version", Type: field.TypeString, Nullable: true},
+		{Name: "status", Type: field.TypeString, Default: "offline"},
+		{Name: "connection_state", Type: field.TypeString, Default: "disconnected"},
+		{Name: "last_heartbeat", Type: field.TypeTime, Nullable: true},
+		{Name: "capabilities", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "supported_harnesses", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "resources", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "runtimes", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "labels", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "annotations", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "endpoint", Type: field.TypeString, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "auto_provide", Type: field.TypeBool, Default: false},
+	}
+	// RuntimeBrokersTable holds the schema information for the "runtime_brokers" table.
+	RuntimeBrokersTable = &schema.Table{
+		Name:       "runtime_brokers",
+		Columns:    RuntimeBrokersColumns,
+		PrimaryKey: []*schema.Column{RuntimeBrokersColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_runtime_brokers_slug",
+				Unique:  false,
+				Columns: []*schema.Column{RuntimeBrokersColumns[2]},
+			},
+			{
+				Name:    "idx_runtime_brokers_status",
+				Unique:  false,
+				Columns: []*schema.Column{RuntimeBrokersColumns[6]},
+			},
+		},
+	}
 	// UsersColumns holds the columns for the "users" table.
 	UsersColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -230,14 +347,22 @@ var (
 		{Name: "role", Type: field.TypeEnum, Enums: []string{"admin", "member", "viewer"}, Default: "member"},
 		{Name: "status", Type: field.TypeEnum, Enums: []string{"active", "suspended"}, Default: "active"},
 		{Name: "preferences", Type: field.TypeJSON, Nullable: true},
-		{Name: "created", Type: field.TypeTime},
+		{Name: "created_at", Type: field.TypeTime},
 		{Name: "last_login", Type: field.TypeTime, Nullable: true},
+		{Name: "last_seen", Type: field.TypeTime, Nullable: true},
 	}
 	// UsersTable holds the schema information for the "users" table.
 	UsersTable = &schema.Table{
 		Name:       "users",
 		Columns:    UsersColumns,
 		PrimaryKey: []*schema.Column{UsersColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_users_email",
+				Unique:  false,
+				Columns: []*schema.Column{UsersColumns[1]},
+			},
+		},
 	}
 	// GroupChildGroupsColumns holds the columns for the "group_child_groups" table.
 	GroupChildGroupsColumns = []*schema.Column{
@@ -272,6 +397,7 @@ var (
 		GroupMembershipsTable,
 		GrovesTable,
 		PolicyBindingsTable,
+		RuntimeBrokersTable,
 		UsersTable,
 		GroupChildGroupsTable,
 	}
@@ -281,14 +407,26 @@ func init() {
 	AgentsTable.ForeignKeys[0].RefTable = GrovesTable
 	AgentsTable.ForeignKeys[1].RefTable = UsersTable
 	AgentsTable.ForeignKeys[2].RefTable = UsersTable
+	AgentsTable.Annotation = &entsql.Annotation{
+		Table: "agents",
+	}
 	GroupsTable.ForeignKeys[0].RefTable = UsersTable
 	GroupMembershipsTable.ForeignKeys[0].RefTable = GroupsTable
 	GroupMembershipsTable.ForeignKeys[1].RefTable = UsersTable
 	GroupMembershipsTable.ForeignKeys[2].RefTable = AgentsTable
+	GrovesTable.Annotation = &entsql.Annotation{
+		Table: "groves",
+	}
 	PolicyBindingsTable.ForeignKeys[0].RefTable = AccessPoliciesTable
 	PolicyBindingsTable.ForeignKeys[1].RefTable = UsersTable
 	PolicyBindingsTable.ForeignKeys[2].RefTable = GroupsTable
 	PolicyBindingsTable.ForeignKeys[3].RefTable = AgentsTable
+	RuntimeBrokersTable.Annotation = &entsql.Annotation{
+		Table: "runtime_brokers",
+	}
+	UsersTable.Annotation = &entsql.Annotation{
+		Table: "users",
+	}
 	GroupChildGroupsTable.ForeignKeys[0].RefTable = GroupsTable
 	GroupChildGroupsTable.ForeignKeys[1].RefTable = GroupsTable
 }

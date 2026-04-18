@@ -10,10 +10,12 @@ import (
 
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
+	"entgo.io/ent/dialect/sql/sqljson"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/grove"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/google/uuid"
 )
 
@@ -102,9 +104,9 @@ func (_u *GroveUpdate) ClearAnnotations() *GroveUpdate {
 	return _u
 }
 
-// SetUpdated sets the "updated" field.
-func (_u *GroveUpdate) SetUpdated(v time.Time) *GroveUpdate {
-	_u.mutation.SetUpdated(v)
+// SetUpdatedAt sets the "updated_at" field.
+func (_u *GroveUpdate) SetUpdatedAt(v time.Time) *GroveUpdate {
+	_u.mutation.SetUpdatedAt(v)
 	return _u
 }
 
@@ -159,6 +161,107 @@ func (_u *GroveUpdate) SetNillableVisibility(v *string) *GroveUpdate {
 	if v != nil {
 		_u.SetVisibility(*v)
 	}
+	return _u
+}
+
+// SetDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field.
+func (_u *GroveUpdate) SetDefaultRuntimeBrokerID(v uuid.UUID) *GroveUpdate {
+	_u.mutation.SetDefaultRuntimeBrokerID(v)
+	return _u
+}
+
+// SetNillableDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field if the given value is not nil.
+func (_u *GroveUpdate) SetNillableDefaultRuntimeBrokerID(v *uuid.UUID) *GroveUpdate {
+	if v != nil {
+		_u.SetDefaultRuntimeBrokerID(*v)
+	}
+	return _u
+}
+
+// ClearDefaultRuntimeBrokerID clears the value of the "default_runtime_broker_id" field.
+func (_u *GroveUpdate) ClearDefaultRuntimeBrokerID() *GroveUpdate {
+	_u.mutation.ClearDefaultRuntimeBrokerID()
+	return _u
+}
+
+// SetSharedDirs sets the "shared_dirs" field.
+func (_u *GroveUpdate) SetSharedDirs(v []schema.SharedDir) *GroveUpdate {
+	_u.mutation.SetSharedDirs(v)
+	return _u
+}
+
+// AppendSharedDirs appends value to the "shared_dirs" field.
+func (_u *GroveUpdate) AppendSharedDirs(v []schema.SharedDir) *GroveUpdate {
+	_u.mutation.AppendSharedDirs(v)
+	return _u
+}
+
+// ClearSharedDirs clears the value of the "shared_dirs" field.
+func (_u *GroveUpdate) ClearSharedDirs() *GroveUpdate {
+	_u.mutation.ClearSharedDirs()
+	return _u
+}
+
+// SetGithubInstallationID sets the "github_installation_id" field.
+func (_u *GroveUpdate) SetGithubInstallationID(v int64) *GroveUpdate {
+	_u.mutation.ResetGithubInstallationID()
+	_u.mutation.SetGithubInstallationID(v)
+	return _u
+}
+
+// SetNillableGithubInstallationID sets the "github_installation_id" field if the given value is not nil.
+func (_u *GroveUpdate) SetNillableGithubInstallationID(v *int64) *GroveUpdate {
+	if v != nil {
+		_u.SetGithubInstallationID(*v)
+	}
+	return _u
+}
+
+// AddGithubInstallationID adds value to the "github_installation_id" field.
+func (_u *GroveUpdate) AddGithubInstallationID(v int64) *GroveUpdate {
+	_u.mutation.AddGithubInstallationID(v)
+	return _u
+}
+
+// ClearGithubInstallationID clears the value of the "github_installation_id" field.
+func (_u *GroveUpdate) ClearGithubInstallationID() *GroveUpdate {
+	_u.mutation.ClearGithubInstallationID()
+	return _u
+}
+
+// SetGithubPermissions sets the "github_permissions" field.
+func (_u *GroveUpdate) SetGithubPermissions(v *schema.GitHubTokenPermissions) *GroveUpdate {
+	_u.mutation.SetGithubPermissions(v)
+	return _u
+}
+
+// ClearGithubPermissions clears the value of the "github_permissions" field.
+func (_u *GroveUpdate) ClearGithubPermissions() *GroveUpdate {
+	_u.mutation.ClearGithubPermissions()
+	return _u
+}
+
+// SetGithubAppStatus sets the "github_app_status" field.
+func (_u *GroveUpdate) SetGithubAppStatus(v *schema.GitHubAppGroveStatus) *GroveUpdate {
+	_u.mutation.SetGithubAppStatus(v)
+	return _u
+}
+
+// ClearGithubAppStatus clears the value of the "github_app_status" field.
+func (_u *GroveUpdate) ClearGithubAppStatus() *GroveUpdate {
+	_u.mutation.ClearGithubAppStatus()
+	return _u
+}
+
+// SetGitIdentity sets the "git_identity" field.
+func (_u *GroveUpdate) SetGitIdentity(v *schema.GitIdentityConfig) *GroveUpdate {
+	_u.mutation.SetGitIdentity(v)
+	return _u
+}
+
+// ClearGitIdentity clears the value of the "git_identity" field.
+func (_u *GroveUpdate) ClearGitIdentity() *GroveUpdate {
+	_u.mutation.ClearGitIdentity()
 	return _u
 }
 
@@ -233,9 +336,9 @@ func (_u *GroveUpdate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_u *GroveUpdate) defaults() {
-	if _, ok := _u.mutation.Updated(); !ok {
-		v := grove.UpdateDefaultUpdated()
-		_u.mutation.SetUpdated(v)
+	if _, ok := _u.mutation.UpdatedAt(); !ok {
+		v := grove.UpdateDefaultUpdatedAt()
+		_u.mutation.SetUpdatedAt(v)
 	}
 }
 
@@ -290,8 +393,8 @@ func (_u *GroveUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.AnnotationsCleared() {
 		_spec.ClearField(grove.FieldAnnotations, field.TypeJSON)
 	}
-	if value, ok := _u.mutation.Updated(); ok {
-		_spec.SetField(grove.FieldUpdated, field.TypeTime, value)
+	if value, ok := _u.mutation.UpdatedAt(); ok {
+		_spec.SetField(grove.FieldUpdatedAt, field.TypeTime, value)
 	}
 	if value, ok := _u.mutation.CreatedBy(); ok {
 		_spec.SetField(grove.FieldCreatedBy, field.TypeString, value)
@@ -307,6 +410,50 @@ func (_u *GroveUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.Visibility(); ok {
 		_spec.SetField(grove.FieldVisibility, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.DefaultRuntimeBrokerID(); ok {
+		_spec.SetField(grove.FieldDefaultRuntimeBrokerID, field.TypeUUID, value)
+	}
+	if _u.mutation.DefaultRuntimeBrokerIDCleared() {
+		_spec.ClearField(grove.FieldDefaultRuntimeBrokerID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.SharedDirs(); ok {
+		_spec.SetField(grove.FieldSharedDirs, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedSharedDirs(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, grove.FieldSharedDirs, value)
+		})
+	}
+	if _u.mutation.SharedDirsCleared() {
+		_spec.ClearField(grove.FieldSharedDirs, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.GithubInstallationID(); ok {
+		_spec.SetField(grove.FieldGithubInstallationID, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedGithubInstallationID(); ok {
+		_spec.AddField(grove.FieldGithubInstallationID, field.TypeInt64, value)
+	}
+	if _u.mutation.GithubInstallationIDCleared() {
+		_spec.ClearField(grove.FieldGithubInstallationID, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.GithubPermissions(); ok {
+		_spec.SetField(grove.FieldGithubPermissions, field.TypeJSON, value)
+	}
+	if _u.mutation.GithubPermissionsCleared() {
+		_spec.ClearField(grove.FieldGithubPermissions, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.GithubAppStatus(); ok {
+		_spec.SetField(grove.FieldGithubAppStatus, field.TypeJSON, value)
+	}
+	if _u.mutation.GithubAppStatusCleared() {
+		_spec.ClearField(grove.FieldGithubAppStatus, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.GitIdentity(); ok {
+		_spec.SetField(grove.FieldGitIdentity, field.TypeJSON, value)
+	}
+	if _u.mutation.GitIdentityCleared() {
+		_spec.ClearField(grove.FieldGitIdentity, field.TypeJSON)
 	}
 	if _u.mutation.AgentsCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -445,9 +592,9 @@ func (_u *GroveUpdateOne) ClearAnnotations() *GroveUpdateOne {
 	return _u
 }
 
-// SetUpdated sets the "updated" field.
-func (_u *GroveUpdateOne) SetUpdated(v time.Time) *GroveUpdateOne {
-	_u.mutation.SetUpdated(v)
+// SetUpdatedAt sets the "updated_at" field.
+func (_u *GroveUpdateOne) SetUpdatedAt(v time.Time) *GroveUpdateOne {
+	_u.mutation.SetUpdatedAt(v)
 	return _u
 }
 
@@ -502,6 +649,107 @@ func (_u *GroveUpdateOne) SetNillableVisibility(v *string) *GroveUpdateOne {
 	if v != nil {
 		_u.SetVisibility(*v)
 	}
+	return _u
+}
+
+// SetDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field.
+func (_u *GroveUpdateOne) SetDefaultRuntimeBrokerID(v uuid.UUID) *GroveUpdateOne {
+	_u.mutation.SetDefaultRuntimeBrokerID(v)
+	return _u
+}
+
+// SetNillableDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field if the given value is not nil.
+func (_u *GroveUpdateOne) SetNillableDefaultRuntimeBrokerID(v *uuid.UUID) *GroveUpdateOne {
+	if v != nil {
+		_u.SetDefaultRuntimeBrokerID(*v)
+	}
+	return _u
+}
+
+// ClearDefaultRuntimeBrokerID clears the value of the "default_runtime_broker_id" field.
+func (_u *GroveUpdateOne) ClearDefaultRuntimeBrokerID() *GroveUpdateOne {
+	_u.mutation.ClearDefaultRuntimeBrokerID()
+	return _u
+}
+
+// SetSharedDirs sets the "shared_dirs" field.
+func (_u *GroveUpdateOne) SetSharedDirs(v []schema.SharedDir) *GroveUpdateOne {
+	_u.mutation.SetSharedDirs(v)
+	return _u
+}
+
+// AppendSharedDirs appends value to the "shared_dirs" field.
+func (_u *GroveUpdateOne) AppendSharedDirs(v []schema.SharedDir) *GroveUpdateOne {
+	_u.mutation.AppendSharedDirs(v)
+	return _u
+}
+
+// ClearSharedDirs clears the value of the "shared_dirs" field.
+func (_u *GroveUpdateOne) ClearSharedDirs() *GroveUpdateOne {
+	_u.mutation.ClearSharedDirs()
+	return _u
+}
+
+// SetGithubInstallationID sets the "github_installation_id" field.
+func (_u *GroveUpdateOne) SetGithubInstallationID(v int64) *GroveUpdateOne {
+	_u.mutation.ResetGithubInstallationID()
+	_u.mutation.SetGithubInstallationID(v)
+	return _u
+}
+
+// SetNillableGithubInstallationID sets the "github_installation_id" field if the given value is not nil.
+func (_u *GroveUpdateOne) SetNillableGithubInstallationID(v *int64) *GroveUpdateOne {
+	if v != nil {
+		_u.SetGithubInstallationID(*v)
+	}
+	return _u
+}
+
+// AddGithubInstallationID adds value to the "github_installation_id" field.
+func (_u *GroveUpdateOne) AddGithubInstallationID(v int64) *GroveUpdateOne {
+	_u.mutation.AddGithubInstallationID(v)
+	return _u
+}
+
+// ClearGithubInstallationID clears the value of the "github_installation_id" field.
+func (_u *GroveUpdateOne) ClearGithubInstallationID() *GroveUpdateOne {
+	_u.mutation.ClearGithubInstallationID()
+	return _u
+}
+
+// SetGithubPermissions sets the "github_permissions" field.
+func (_u *GroveUpdateOne) SetGithubPermissions(v *schema.GitHubTokenPermissions) *GroveUpdateOne {
+	_u.mutation.SetGithubPermissions(v)
+	return _u
+}
+
+// ClearGithubPermissions clears the value of the "github_permissions" field.
+func (_u *GroveUpdateOne) ClearGithubPermissions() *GroveUpdateOne {
+	_u.mutation.ClearGithubPermissions()
+	return _u
+}
+
+// SetGithubAppStatus sets the "github_app_status" field.
+func (_u *GroveUpdateOne) SetGithubAppStatus(v *schema.GitHubAppGroveStatus) *GroveUpdateOne {
+	_u.mutation.SetGithubAppStatus(v)
+	return _u
+}
+
+// ClearGithubAppStatus clears the value of the "github_app_status" field.
+func (_u *GroveUpdateOne) ClearGithubAppStatus() *GroveUpdateOne {
+	_u.mutation.ClearGithubAppStatus()
+	return _u
+}
+
+// SetGitIdentity sets the "git_identity" field.
+func (_u *GroveUpdateOne) SetGitIdentity(v *schema.GitIdentityConfig) *GroveUpdateOne {
+	_u.mutation.SetGitIdentity(v)
+	return _u
+}
+
+// ClearGitIdentity clears the value of the "git_identity" field.
+func (_u *GroveUpdateOne) ClearGitIdentity() *GroveUpdateOne {
+	_u.mutation.ClearGitIdentity()
 	return _u
 }
 
@@ -589,9 +837,9 @@ func (_u *GroveUpdateOne) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_u *GroveUpdateOne) defaults() {
-	if _, ok := _u.mutation.Updated(); !ok {
-		v := grove.UpdateDefaultUpdated()
-		_u.mutation.SetUpdated(v)
+	if _, ok := _u.mutation.UpdatedAt(); !ok {
+		v := grove.UpdateDefaultUpdatedAt()
+		_u.mutation.SetUpdatedAt(v)
 	}
 }
 
@@ -663,8 +911,8 @@ func (_u *GroveUpdateOne) sqlSave(ctx context.Context) (_node *Grove, err error)
 	if _u.mutation.AnnotationsCleared() {
 		_spec.ClearField(grove.FieldAnnotations, field.TypeJSON)
 	}
-	if value, ok := _u.mutation.Updated(); ok {
-		_spec.SetField(grove.FieldUpdated, field.TypeTime, value)
+	if value, ok := _u.mutation.UpdatedAt(); ok {
+		_spec.SetField(grove.FieldUpdatedAt, field.TypeTime, value)
 	}
 	if value, ok := _u.mutation.CreatedBy(); ok {
 		_spec.SetField(grove.FieldCreatedBy, field.TypeString, value)
@@ -680,6 +928,50 @@ func (_u *GroveUpdateOne) sqlSave(ctx context.Context) (_node *Grove, err error)
 	}
 	if value, ok := _u.mutation.Visibility(); ok {
 		_spec.SetField(grove.FieldVisibility, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.DefaultRuntimeBrokerID(); ok {
+		_spec.SetField(grove.FieldDefaultRuntimeBrokerID, field.TypeUUID, value)
+	}
+	if _u.mutation.DefaultRuntimeBrokerIDCleared() {
+		_spec.ClearField(grove.FieldDefaultRuntimeBrokerID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.SharedDirs(); ok {
+		_spec.SetField(grove.FieldSharedDirs, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedSharedDirs(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, grove.FieldSharedDirs, value)
+		})
+	}
+	if _u.mutation.SharedDirsCleared() {
+		_spec.ClearField(grove.FieldSharedDirs, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.GithubInstallationID(); ok {
+		_spec.SetField(grove.FieldGithubInstallationID, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedGithubInstallationID(); ok {
+		_spec.AddField(grove.FieldGithubInstallationID, field.TypeInt64, value)
+	}
+	if _u.mutation.GithubInstallationIDCleared() {
+		_spec.ClearField(grove.FieldGithubInstallationID, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.GithubPermissions(); ok {
+		_spec.SetField(grove.FieldGithubPermissions, field.TypeJSON, value)
+	}
+	if _u.mutation.GithubPermissionsCleared() {
+		_spec.ClearField(grove.FieldGithubPermissions, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.GithubAppStatus(); ok {
+		_spec.SetField(grove.FieldGithubAppStatus, field.TypeJSON, value)
+	}
+	if _u.mutation.GithubAppStatusCleared() {
+		_spec.ClearField(grove.FieldGithubAppStatus, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.GitIdentity(); ok {
+		_spec.SetField(grove.FieldGitIdentity, field.TypeJSON, value)
+	}
+	if _u.mutation.GitIdentityCleared() {
+		_spec.ClearField(grove.FieldGitIdentity, field.TypeJSON)
 	}
 	if _u.mutation.AgentsCleared() {
 		edge := &sqlgraph.EdgeSpec{

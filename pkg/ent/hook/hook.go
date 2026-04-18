@@ -81,6 +81,18 @@ func (f PolicyBindingFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Valu
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.PolicyBindingMutation", m)
 }
 
+// The RuntimeBrokerFunc type is an adapter to allow the use of ordinary
+// function as RuntimeBroker mutator.
+type RuntimeBrokerFunc func(context.Context, *ent.RuntimeBrokerMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f RuntimeBrokerFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.RuntimeBrokerMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.RuntimeBrokerMutation", m)
+}
+
 // The UserFunc type is an adapter to allow the use of ordinary
 // function as User mutator.
 type UserFunc func(context.Context, *ent.UserMutation) (ent.Value, error)

@@ -12,6 +12,7 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/grove"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/google/uuid"
 )
 
@@ -60,30 +61,30 @@ func (_c *GroveCreate) SetAnnotations(v map[string]string) *GroveCreate {
 	return _c
 }
 
-// SetCreated sets the "created" field.
-func (_c *GroveCreate) SetCreated(v time.Time) *GroveCreate {
-	_c.mutation.SetCreated(v)
+// SetCreatedAt sets the "created_at" field.
+func (_c *GroveCreate) SetCreatedAt(v time.Time) *GroveCreate {
+	_c.mutation.SetCreatedAt(v)
 	return _c
 }
 
-// SetNillableCreated sets the "created" field if the given value is not nil.
-func (_c *GroveCreate) SetNillableCreated(v *time.Time) *GroveCreate {
+// SetNillableCreatedAt sets the "created_at" field if the given value is not nil.
+func (_c *GroveCreate) SetNillableCreatedAt(v *time.Time) *GroveCreate {
 	if v != nil {
-		_c.SetCreated(*v)
+		_c.SetCreatedAt(*v)
 	}
 	return _c
 }
 
-// SetUpdated sets the "updated" field.
-func (_c *GroveCreate) SetUpdated(v time.Time) *GroveCreate {
-	_c.mutation.SetUpdated(v)
+// SetUpdatedAt sets the "updated_at" field.
+func (_c *GroveCreate) SetUpdatedAt(v time.Time) *GroveCreate {
+	_c.mutation.SetUpdatedAt(v)
 	return _c
 }
 
-// SetNillableUpdated sets the "updated" field if the given value is not nil.
-func (_c *GroveCreate) SetNillableUpdated(v *time.Time) *GroveCreate {
+// SetNillableUpdatedAt sets the "updated_at" field if the given value is not nil.
+func (_c *GroveCreate) SetNillableUpdatedAt(v *time.Time) *GroveCreate {
 	if v != nil {
-		_c.SetUpdated(*v)
+		_c.SetUpdatedAt(*v)
 	}
 	return _c
 }
@@ -127,6 +128,58 @@ func (_c *GroveCreate) SetNillableVisibility(v *string) *GroveCreate {
 	if v != nil {
 		_c.SetVisibility(*v)
 	}
+	return _c
+}
+
+// SetDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field.
+func (_c *GroveCreate) SetDefaultRuntimeBrokerID(v uuid.UUID) *GroveCreate {
+	_c.mutation.SetDefaultRuntimeBrokerID(v)
+	return _c
+}
+
+// SetNillableDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field if the given value is not nil.
+func (_c *GroveCreate) SetNillableDefaultRuntimeBrokerID(v *uuid.UUID) *GroveCreate {
+	if v != nil {
+		_c.SetDefaultRuntimeBrokerID(*v)
+	}
+	return _c
+}
+
+// SetSharedDirs sets the "shared_dirs" field.
+func (_c *GroveCreate) SetSharedDirs(v []schema.SharedDir) *GroveCreate {
+	_c.mutation.SetSharedDirs(v)
+	return _c
+}
+
+// SetGithubInstallationID sets the "github_installation_id" field.
+func (_c *GroveCreate) SetGithubInstallationID(v int64) *GroveCreate {
+	_c.mutation.SetGithubInstallationID(v)
+	return _c
+}
+
+// SetNillableGithubInstallationID sets the "github_installation_id" field if the given value is not nil.
+func (_c *GroveCreate) SetNillableGithubInstallationID(v *int64) *GroveCreate {
+	if v != nil {
+		_c.SetGithubInstallationID(*v)
+	}
+	return _c
+}
+
+// SetGithubPermissions sets the "github_permissions" field.
+func (_c *GroveCreate) SetGithubPermissions(v *schema.GitHubTokenPermissions) *GroveCreate {
+	_c.mutation.SetGithubPermissions(v)
+	return _c
+}
+
+// SetGithubAppStatus sets the "github_app_status" field.
+func (_c *GroveCreate) SetGithubAppStatus(v *schema.GitHubAppGroveStatus) *GroveCreate {
+	_c.mutation.SetGithubAppStatus(v)
+	return _c
+}
+
+// SetGitIdentity sets the "git_identity" field.
+func (_c *GroveCreate) SetGitIdentity(v *schema.GitIdentityConfig) *GroveCreate {
+	_c.mutation.SetGitIdentity(v)
 	return _c
 }
 
@@ -194,13 +247,13 @@ func (_c *GroveCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *GroveCreate) defaults() {
-	if _, ok := _c.mutation.Created(); !ok {
-		v := grove.DefaultCreated()
-		_c.mutation.SetCreated(v)
+	if _, ok := _c.mutation.CreatedAt(); !ok {
+		v := grove.DefaultCreatedAt()
+		_c.mutation.SetCreatedAt(v)
 	}
-	if _, ok := _c.mutation.Updated(); !ok {
-		v := grove.DefaultUpdated()
-		_c.mutation.SetUpdated(v)
+	if _, ok := _c.mutation.UpdatedAt(); !ok {
+		v := grove.DefaultUpdatedAt()
+		_c.mutation.SetUpdatedAt(v)
 	}
 	if _, ok := _c.mutation.Visibility(); !ok {
 		v := grove.DefaultVisibility
@@ -230,11 +283,11 @@ func (_c *GroveCreate) check() error {
 			return &ValidationError{Name: "slug", err: fmt.Errorf(`ent: validator failed for field "Grove.slug": %w`, err)}
 		}
 	}
-	if _, ok := _c.mutation.Created(); !ok {
-		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "Grove.created"`)}
+	if _, ok := _c.mutation.CreatedAt(); !ok {
+		return &ValidationError{Name: "created_at", err: errors.New(`ent: missing required field "Grove.created_at"`)}
 	}
-	if _, ok := _c.mutation.Updated(); !ok {
-		return &ValidationError{Name: "updated", err: errors.New(`ent: missing required field "Grove.updated"`)}
+	if _, ok := _c.mutation.UpdatedAt(); !ok {
+		return &ValidationError{Name: "updated_at", err: errors.New(`ent: missing required field "Grove.updated_at"`)}
 	}
 	if _, ok := _c.mutation.Visibility(); !ok {
 		return &ValidationError{Name: "visibility", err: errors.New(`ent: missing required field "Grove.visibility"`)}
@@ -294,13 +347,13 @@ func (_c *GroveCreate) createSpec() (*Grove, *sqlgraph.CreateSpec) {
 		_spec.SetField(grove.FieldAnnotations, field.TypeJSON, value)
 		_node.Annotations = value
 	}
-	if value, ok := _c.mutation.Created(); ok {
-		_spec.SetField(grove.FieldCreated, field.TypeTime, value)
-		_node.Created = value
+	if value, ok := _c.mutation.CreatedAt(); ok {
+		_spec.SetField(grove.FieldCreatedAt, field.TypeTime, value)
+		_node.CreatedAt = value
 	}
-	if value, ok := _c.mutation.Updated(); ok {
-		_spec.SetField(grove.FieldUpdated, field.TypeTime, value)
-		_node.Updated = value
+	if value, ok := _c.mutation.UpdatedAt(); ok {
+		_spec.SetField(grove.FieldUpdatedAt, field.TypeTime, value)
+		_node.UpdatedAt = value
 	}
 	if value, ok := _c.mutation.CreatedBy(); ok {
 		_spec.SetField(grove.FieldCreatedBy, field.TypeString, value)
@@ -313,6 +366,30 @@ func (_c *GroveCreate) createSpec() (*Grove, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.Visibility(); ok {
 		_spec.SetField(grove.FieldVisibility, field.TypeString, value)
 		_node.Visibility = value
+	}
+	if value, ok := _c.mutation.DefaultRuntimeBrokerID(); ok {
+		_spec.SetField(grove.FieldDefaultRuntimeBrokerID, field.TypeUUID, value)
+		_node.DefaultRuntimeBrokerID = &value
+	}
+	if value, ok := _c.mutation.SharedDirs(); ok {
+		_spec.SetField(grove.FieldSharedDirs, field.TypeJSON, value)
+		_node.SharedDirs = value
+	}
+	if value, ok := _c.mutation.GithubInstallationID(); ok {
+		_spec.SetField(grove.FieldGithubInstallationID, field.TypeInt64, value)
+		_node.GithubInstallationID = &value
+	}
+	if value, ok := _c.mutation.GithubPermissions(); ok {
+		_spec.SetField(grove.FieldGithubPermissions, field.TypeJSON, value)
+		_node.GithubPermissions = value
+	}
+	if value, ok := _c.mutation.GithubAppStatus(); ok {
+		_spec.SetField(grove.FieldGithubAppStatus, field.TypeJSON, value)
+		_node.GithubAppStatus = value
+	}
+	if value, ok := _c.mutation.GitIdentity(); ok {
+		_spec.SetField(grove.FieldGitIdentity, field.TypeJSON, value)
+		_node.GitIdentity = value
 	}
 	if nodes := _c.mutation.AgentsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{

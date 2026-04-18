@@ -24,5 +24,8 @@ type Grove func(*sql.Selector)
 // PolicyBinding is the predicate function for policybinding builders.
 type PolicyBinding func(*sql.Selector)
 
+// RuntimeBroker is the predicate function for runtimebroker builders.
+type RuntimeBroker func(*sql.Selector)
+
 // User is the predicate function for user builders.
 type User func(*sql.Selector)

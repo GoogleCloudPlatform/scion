@@ -28,10 +28,12 @@ const (
 	FieldStatus = "status"
 	// FieldPreferences holds the string denoting the preferences field in the database.
 	FieldPreferences = "preferences"
-	// FieldCreated holds the string denoting the created field in the database.
-	FieldCreated = "created"
+	// FieldCreatedAt holds the string denoting the created_at field in the database.
+	FieldCreatedAt = "created_at"
 	// FieldLastLogin holds the string denoting the last_login field in the database.
 	FieldLastLogin = "last_login"
+	// FieldLastSeen holds the string denoting the last_seen field in the database.
+	FieldLastSeen = "last_seen"
 	// EdgeCreatedAgents holds the string denoting the created_agents edge name in mutations.
 	EdgeCreatedAgents = "created_agents"
 	// EdgeOwnedAgents holds the string denoting the owned_agents edge name in mutations.
@@ -90,8 +92,9 @@ var Columns = []string{
 	FieldRole,
 	FieldStatus,
 	FieldPreferences,
-	FieldCreated,
+	FieldCreatedAt,
 	FieldLastLogin,
+	FieldLastSeen,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -109,8 +112,8 @@ var (
 	EmailValidator func(string) error
 	// DisplayNameValidator is a validator for the "display_name" field. It is called by the builders before save.
 	DisplayNameValidator func(string) error
-	// DefaultCreated holds the default value on creation for the "created" field.
-	DefaultCreated func() time.Time
+	// DefaultCreatedAt holds the default value on creation for the "created_at" field.
+	DefaultCreatedAt func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
@@ -201,14 +204,19 @@ func ByStatus(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStatus, opts...).ToFunc()
 }
 
-// ByCreated orders the results by the created field.
-func ByCreated(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldCreated, opts...).ToFunc()
+// ByCreatedAt orders the results by the created_at field.
+func ByCreatedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCreatedAt, opts...).ToFunc()
 }
 
 // ByLastLogin orders the results by the last_login field.
 func ByLastLogin(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLastLogin, opts...).ToFunc()
+}
+
+// ByLastSeen orders the results by the last_seen field.
+func ByLastSeen(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLastSeen, opts...).ToFunc()
 }
 
 // ByCreatedAgentsCount orders the results by created_agents count.

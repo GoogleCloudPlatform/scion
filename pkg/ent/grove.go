@@ -11,6 +11,7 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/grove"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/google/uuid"
 )
 
@@ -29,16 +30,28 @@ type Grove struct {
 	Labels map[string]string `json:"labels,omitempty"`
 	// Annotations holds the value of the "annotations" field.
 	Annotations map[string]string `json:"annotations,omitempty"`
-	// Created holds the value of the "created" field.
-	Created time.Time `json:"created,omitempty"`
-	// Updated holds the value of the "updated" field.
-	Updated time.Time `json:"updated,omitempty"`
+	// CreatedAt holds the value of the "created_at" field.
+	CreatedAt time.Time `json:"created_at,omitempty"`
+	// UpdatedAt holds the value of the "updated_at" field.
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 	// CreatedBy holds the value of the "created_by" field.
 	CreatedBy string `json:"created_by,omitempty"`
 	// OwnerID holds the value of the "owner_id" field.
 	OwnerID string `json:"owner_id,omitempty"`
 	// Visibility holds the value of the "visibility" field.
 	Visibility string `json:"visibility,omitempty"`
+	// DefaultRuntimeBrokerID holds the value of the "default_runtime_broker_id" field.
+	DefaultRuntimeBrokerID *uuid.UUID `json:"default_runtime_broker_id,omitempty"`
+	// SharedDirs holds the value of the "shared_dirs" field.
+	SharedDirs []schema.SharedDir `json:"shared_dirs,omitempty"`
+	// GithubInstallationID holds the value of the "github_installation_id" field.
+	GithubInstallationID *int64 `json:"github_installation_id,omitempty"`
+	// GithubPermissions holds the value of the "github_permissions" field.
+	GithubPermissions *schema.GitHubTokenPermissions `json:"github_permissions,omitempty"`
+	// GithubAppStatus holds the value of the "github_app_status" field.
+	GithubAppStatus *schema.GitHubAppGroveStatus `json:"github_app_status,omitempty"`
+	// GitIdentity holds the value of the "git_identity" field.
+	GitIdentity *schema.GitIdentityConfig `json:"git_identity,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the GroveQuery when eager-loading is set.
 	Edges        GroveEdges `json:"edges"`
@@ -68,11 +81,15 @@ func (*Grove) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case grove.FieldLabels, grove.FieldAnnotations:
+		case grove.FieldDefaultRuntimeBrokerID:
+			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
+		case grove.FieldLabels, grove.FieldAnnotations, grove.FieldSharedDirs, grove.FieldGithubPermissions, grove.FieldGithubAppStatus, grove.FieldGitIdentity:
 			values[i] = new([]byte)
+		case grove.FieldGithubInstallationID:
+			values[i] = new(sql.NullInt64)
 		case grove.FieldName, grove.FieldSlug, grove.FieldGitRemote, grove.FieldCreatedBy, grove.FieldOwnerID, grove.FieldVisibility:
 			values[i] = new(sql.NullString)
-		case grove.FieldCreated, grove.FieldUpdated:
+		case grove.FieldCreatedAt, grove.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
 		case grove.FieldID:
 			values[i] = new(uuid.UUID)
@@ -132,17 +149,17 @@ func (_m *Grove) assignValues(columns []string, values []any) error {
 					return fmt.Errorf("unmarshal field annotations: %w", err)
 				}
 			}
-		case grove.FieldCreated:
+		case grove.FieldCreatedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
-				return fmt.Errorf("unexpected type %T for field created", values[i])
+				return fmt.Errorf("unexpected type %T for field created_at", values[i])
 			} else if value.Valid {
-				_m.Created = value.Time
+				_m.CreatedAt = value.Time
 			}
-		case grove.FieldUpdated:
+		case grove.FieldUpdatedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
-				return fmt.Errorf("unexpected type %T for field updated", values[i])
+				return fmt.Errorf("unexpected type %T for field updated_at", values[i])
 			} else if value.Valid {
-				_m.Updated = value.Time
+				_m.UpdatedAt = value.Time
 			}
 		case grove.FieldCreatedBy:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -161,6 +178,52 @@ func (_m *Grove) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field visibility", values[i])
 			} else if value.Valid {
 				_m.Visibility = value.String
+			}
+		case grove.FieldDefaultRuntimeBrokerID:
+			if value, ok := values[i].(*sql.NullScanner); !ok {
+				return fmt.Errorf("unexpected type %T for field default_runtime_broker_id", values[i])
+			} else if value.Valid {
+				_m.DefaultRuntimeBrokerID = new(uuid.UUID)
+				*_m.DefaultRuntimeBrokerID = *value.S.(*uuid.UUID)
+			}
+		case grove.FieldSharedDirs:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field shared_dirs", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.SharedDirs); err != nil {
+					return fmt.Errorf("unmarshal field shared_dirs: %w", err)
+				}
+			}
+		case grove.FieldGithubInstallationID:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field github_installation_id", values[i])
+			} else if value.Valid {
+				_m.GithubInstallationID = new(int64)
+				*_m.GithubInstallationID = value.Int64
+			}
+		case grove.FieldGithubPermissions:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field github_permissions", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.GithubPermissions); err != nil {
+					return fmt.Errorf("unmarshal field github_permissions: %w", err)
+				}
+			}
+		case grove.FieldGithubAppStatus:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field github_app_status", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.GithubAppStatus); err != nil {
+					return fmt.Errorf("unmarshal field github_app_status: %w", err)
+				}
+			}
+		case grove.FieldGitIdentity:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field git_identity", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.GitIdentity); err != nil {
+					return fmt.Errorf("unmarshal field git_identity: %w", err)
+				}
 			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
@@ -220,11 +283,11 @@ func (_m *Grove) String() string {
 	builder.WriteString("annotations=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Annotations))
 	builder.WriteString(", ")
-	builder.WriteString("created=")
-	builder.WriteString(_m.Created.Format(time.ANSIC))
+	builder.WriteString("created_at=")
+	builder.WriteString(_m.CreatedAt.Format(time.ANSIC))
 	builder.WriteString(", ")
-	builder.WriteString("updated=")
-	builder.WriteString(_m.Updated.Format(time.ANSIC))
+	builder.WriteString("updated_at=")
+	builder.WriteString(_m.UpdatedAt.Format(time.ANSIC))
 	builder.WriteString(", ")
 	builder.WriteString("created_by=")
 	builder.WriteString(_m.CreatedBy)
@@ -234,6 +297,28 @@ func (_m *Grove) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("visibility=")
 	builder.WriteString(_m.Visibility)
+	builder.WriteString(", ")
+	if v := _m.DefaultRuntimeBrokerID; v != nil {
+		builder.WriteString("default_runtime_broker_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("shared_dirs=")
+	builder.WriteString(fmt.Sprintf("%v", _m.SharedDirs))
+	builder.WriteString(", ")
+	if v := _m.GithubInstallationID; v != nil {
+		builder.WriteString("github_installation_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("github_permissions=")
+	builder.WriteString(fmt.Sprintf("%v", _m.GithubPermissions))
+	builder.WriteString(", ")
+	builder.WriteString("github_app_status=")
+	builder.WriteString(fmt.Sprintf("%v", _m.GithubAppStatus))
+	builder.WriteString(", ")
+	builder.WriteString("git_identity=")
+	builder.WriteString(fmt.Sprintf("%v", _m.GitIdentity))
 	builder.WriteByte(')')
 	return builder.String()
 }

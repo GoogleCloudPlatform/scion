@@ -18,16 +18,24 @@ import (
 	"time"
 
 	"entgo.io/ent"
+	"entgo.io/ent/dialect/entsql"
+	"entgo.io/ent/schema"
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
+	"entgo.io/ent/schema/index"
 	"github.com/google/uuid"
 )
 
 // Grove holds the schema definition for the Grove entity.
-// This is a minimal schema for edge compilation; operational fields
-// will be added when the grove entity is fully migrated to Ent.
 type Grove struct {
 	ent.Schema
+}
+
+// Annotations set the table name.
+func (Grove) Annotations() []schema.Annotation {
+	return []schema.Annotation{
+		entsql.Annotation{Table: "groves"},
+	}
 }
 
 // Fields of the Grove.
@@ -48,10 +56,10 @@ func (Grove) Fields() []ent.Field {
 			Optional(),
 		field.JSON("annotations", map[string]string{}).
 			Optional(),
-		field.Time("created").
+		field.Time("created_at").
 			Default(time.Now).
 			Immutable(),
-		field.Time("updated").
+		field.Time("updated_at").
 			Default(time.Now).
 			UpdateDefault(time.Now),
 		field.String("created_by").
@@ -60,6 +68,28 @@ func (Grove) Fields() []ent.Field {
 			Optional(),
 		field.String("visibility").
 			Default("private"),
+
+		// V2: default runtime broker (FK, ON DELETE SET NULL).
+		field.UUID("default_runtime_broker_id", uuid.UUID{}).
+			Optional().
+			Nillable(),
+
+		// V28: grove-level shared directory config (JSON array).
+		field.JSON("shared_dirs", []SharedDir{}).
+			Optional(),
+
+		// V35: GitHub App integration (int64 FK to github_installations.installation_id).
+		field.Int64("github_installation_id").
+			Optional().
+			Nillable(),
+		field.JSON("github_permissions", &GitHubTokenPermissions{}).
+			Optional(),
+		field.JSON("github_app_status", &GitHubAppGroveStatus{}).
+			Optional(),
+
+		// V36: commit attribution config.
+		field.JSON("git_identity", &GitIdentityConfig{}).
+			Optional(),
 	}
 }
 
@@ -67,5 +97,19 @@ func (Grove) Fields() []ent.Field {
 func (Grove) Edges() []ent.Edge {
 	return []ent.Edge{
 		edge.To("agents", Agent.Type),
+	}
+}
+
+// Indexes of the Grove, named to match raw SQL DDL.
+func (Grove) Indexes() []ent.Index {
+	return []ent.Index{
+		index.Fields("slug").
+			StorageKey("idx_groves_slug"),
+		index.Fields("git_remote").
+			StorageKey("idx_groves_git_remote"),
+		index.Fields("owner_id").
+			StorageKey("idx_groves_owner"),
+		index.Fields("default_runtime_broker_id").
+			StorageKey("idx_groves_default_runtime_broker"),
 	}
 }

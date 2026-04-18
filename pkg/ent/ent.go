@@ -18,6 +18,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/grove"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 )
 
@@ -85,6 +86,7 @@ func checkColumn(t, c string) error {
 			groupmembership.Table: groupmembership.ValidColumn,
 			grove.Table:           grove.ValidColumn,
 			policybinding.Table:   policybinding.ValidColumn,
+			runtimebroker.Table:   runtimebroker.ValidColumn,
 			user.Table:            user.ValidColumn,
 		})
 	})
