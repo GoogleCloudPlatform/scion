@@ -808,12 +808,28 @@ func writeSecretMap(homeDir string, containerHome string, secrets []api.Resolved
 // "Up 5 minutes", "Exited (0) 3 hours ago", or "Created". This function
 // maps those to lifecycle phases so heartbeats report accurate state
 // regardless of whether agent-info.json has been updated.
+//
+// Exit-code distinction: "Exited (0)" maps to "stopped" (success), while
+// "Exited (N)" for N != 0 maps to "error" so that the workflow executor can
+// detect container failures and propagate a non-zero exit code to the Hub.
 func phaseFromContainerStatus(status string) string {
 	lower := strings.ToLower(status)
 	switch {
 	case strings.HasPrefix(lower, "up") || lower == "running":
 		return "running"
-	case strings.HasPrefix(lower, "exited") || lower == "stopped":
+	case strings.HasPrefix(lower, "exited"):
+		// Parse the exit code from "Exited (N) ..." to distinguish success from failure.
+		// A missing or zero exit code maps to "stopped"; non-zero maps to "error".
+		if strings.HasPrefix(lower, "exited (0)") || lower == "exited (0)" {
+			return "stopped"
+		}
+		// Any non-zero exit code (e.g. "Exited (1)") is treated as "error"
+		// so the workflow executor can propagate the failure correctly.
+		if strings.Contains(lower, "exited (") {
+			return "error"
+		}
+		return "stopped"
+	case lower == "stopped":
 		return "stopped"
 	default:
 		return "created"

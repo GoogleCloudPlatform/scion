@@ -14,7 +14,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build install test test-fast vet lint golangci-lint web web-typecheck fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries test-workflow-integration
+.PHONY: all build install test test-fast vet lint golangci-lint web web-typecheck fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries test-workflow-integration test-workflow-integration-full
 
 ## all: Build the web frontend, then compile the Go binary with embedded assets
 all: web install
@@ -133,6 +133,25 @@ test-workflow-integration:
 	@bash scripts/workflow-hub-integration-test.sh
 	@echo ""
 	@echo "All workflow integration tests passed."
+
+## test-workflow-integration-full: Run all T1+T2 workflow integration tests (local + hub + scenarios + schedule + agent)
+test-workflow-integration-full:
+	@echo "Running workflow local integration tests (T1)..."
+	@bash scripts/workflow-local-integration-test.sh
+	@echo ""
+	@echo "Running workflow hub integration tests (T1)..."
+	@bash scripts/workflow-hub-integration-test.sh
+	@echo ""
+	@echo "Running workflow hub scenarios tests (T2)..."
+	@bash scripts/workflow-hub-scenarios-test.sh
+	@echo ""
+	@echo "Running workflow schedule integration tests (T2)..."
+	@bash scripts/workflow-schedule-integration-test.sh
+	@echo ""
+	@echo "Running workflow agent integration tests (T2)..."
+	@bash scripts/workflow-agent-integration-test.sh
+	@echo ""
+	@echo "All workflow integration tests (T1+T2) passed."
 
 ## clean: Remove build artifacts
 clean:

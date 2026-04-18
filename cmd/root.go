@@ -152,7 +152,7 @@ return an error instead of blocking.`,
 		if commandInSubtree(cmd, "config") {
 			requiresRegistry = false
 		}
-		if commandInSubtree(cmd, "hub") || commandInSubtree(cmd, "server") || commandInSubtree(cmd, "workflow") {
+		if commandInSubtree(cmd, "hub") || commandInSubtree(cmd, "server") || commandInSubtree(cmd, "workflow") || commandInSubtree(cmd, "schedule") {
 			requiresRegistry = false
 		}
 		if requiresRegistry && config.IsHubContext() {

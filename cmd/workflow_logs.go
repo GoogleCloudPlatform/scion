@@ -92,7 +92,34 @@ func runWorkflowLogs(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		// Skip non-log control events (e.g. "logs_not_yet_wired").
+		// "log" events carry actual workflow output lines — print them.
+		// Other non-empty event types (e.g. "status", "logs_not_yet_wired") are
+		// control events that are only emitted in JSON mode.
+		if evt.Event == "log" {
+			if jsonOut {
+				b, _ := json.Marshal(evt)
+				fmt.Println(string(b))
+				continue
+			}
+			if evt.Line != "" {
+				ts := evt.TS
+				if ts == "" {
+					ts = "-"
+				}
+				stream := evt.Stream
+				if stream == "" {
+					stream = "stdout"
+				}
+				if stream == "stderr" {
+					fmt.Fprintf(os.Stderr, "[%s] [%s] %s\n", ts, stream, evt.Line)
+				} else {
+					fmt.Printf("[%s] [%s] %s\n", ts, stream, evt.Line)
+				}
+			}
+			continue
+		}
+
+		// Skip other non-terminal control events (e.g. "status", "logs_not_yet_wired").
 		if evt.Event != "" {
 			if jsonOut {
 				b, _ := json.Marshal(evt)
@@ -101,6 +128,7 @@ func runWorkflowLogs(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		// Fallback: events without an Event field (old wire format or direct line).
 		if jsonOut {
 			b, _ := json.Marshal(evt)
 			fmt.Println(string(b))
