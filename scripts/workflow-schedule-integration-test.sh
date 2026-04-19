@@ -62,7 +62,10 @@ GROVE_ID=""
 
 SCION_TOKEN_FILE="$HOME/.scion/scion-token"
 SCION_TOKEN_BACKUP="/tmp/scion-scion-token-backup-schedule-$$"
+SCION_DEV_TOKEN_FILE="$HOME/.scion/dev-token"
+SCION_DEV_TOKEN_BACKUP="/tmp/scion-dev-token-backup-schedule-$$"
 TOKEN_BACKED_UP=false
+DEV_TOKEN_BACKED_UP=false
 
 TESTS_RUN=0
 TESTS_PASSED=0
@@ -99,8 +102,22 @@ cleanup() {
         wait "$HUB_PID" 2>/dev/null || true
     fi
 
+    # Kill + remove any lingering workflow containers (no broker-side reaper yet).
+    docker ps -q --filter "label=scion.scion/kind=workflow-run" 2>/dev/null | while read -r cid; do
+        docker kill "$cid" 2>/dev/null || true
+    done
+    docker ps -aq --filter "label=scion.scion/kind=workflow-run" 2>/dev/null | while read -r cid; do
+        docker rm -f "$cid" 2>/dev/null || true
+    done
+
+    # Clear any token files written during the test so restored originals are authoritative.
+    rm -f "$SCION_TOKEN_FILE" "$SCION_DEV_TOKEN_FILE" 2>/dev/null || true
+
     if [[ "$TOKEN_BACKED_UP" == "true" ]]; then
         mv "$SCION_TOKEN_BACKUP" "$SCION_TOKEN_FILE" 2>/dev/null || true
+    fi
+    if [[ "$DEV_TOKEN_BACKED_UP" == "true" ]]; then
+        mv "$SCION_DEV_TOKEN_BACKUP" "$SCION_DEV_TOKEN_FILE" 2>/dev/null || true
     fi
 
     if [[ "$SKIP_CLEANUP" == "false" ]]; then
@@ -162,6 +179,10 @@ backup_scion_token() {
     if [[ -f "$SCION_TOKEN_FILE" ]]; then
         mv "$SCION_TOKEN_FILE" "$SCION_TOKEN_BACKUP"
         TOKEN_BACKED_UP=true
+    fi
+    if [[ -f "$SCION_DEV_TOKEN_FILE" ]]; then
+        mv "$SCION_DEV_TOKEN_FILE" "$SCION_DEV_TOKEN_BACKUP"
+        DEV_TOKEN_BACKED_UP=true
     fi
 }
 

@@ -71,7 +71,10 @@ GROVE2_ID=""  # second grove without the label
 
 SCION_TOKEN_FILE="$HOME/.scion/scion-token"
 SCION_TOKEN_BACKUP="/tmp/scion-scion-token-backup-agent-$$"
+SCION_DEV_TOKEN_FILE="$HOME/.scion/dev-token"
+SCION_DEV_TOKEN_BACKUP="/tmp/scion-dev-token-backup-agent-$$"
 TOKEN_BACKED_UP=false
+DEV_TOKEN_BACKED_UP=false
 
 TESTS_RUN=0
 TESTS_PASSED=0
@@ -108,13 +111,23 @@ cleanup() {
         wait "$HUB_PID" 2>/dev/null || true
     fi
 
-    # Clean up any workflow containers from this test
+    # Clean up any workflow containers from this test (both running and exited,
+    # since Phase 3c has no reaper and exited containers would accumulate).
     docker ps -q --filter "label=scion.scion/kind=workflow-run" 2>/dev/null | while read -r cid; do
         docker kill "$cid" 2>/dev/null || true
     done
+    docker ps -aq --filter "label=scion.scion/kind=workflow-run" 2>/dev/null | while read -r cid; do
+        docker rm -f "$cid" 2>/dev/null || true
+    done
+
+    # Clear any token files written during the test so restored originals are authoritative.
+    rm -f "$SCION_TOKEN_FILE" "$SCION_DEV_TOKEN_FILE" 2>/dev/null || true
 
     if [[ "$TOKEN_BACKED_UP" == "true" ]]; then
         mv "$SCION_TOKEN_BACKUP" "$SCION_TOKEN_FILE" 2>/dev/null || true
+    fi
+    if [[ "$DEV_TOKEN_BACKED_UP" == "true" ]]; then
+        mv "$SCION_DEV_TOKEN_BACKUP" "$SCION_DEV_TOKEN_FILE" 2>/dev/null || true
     fi
 
     if [[ "$SKIP_CLEANUP" == "false" ]]; then
@@ -176,6 +189,10 @@ backup_scion_token() {
     if [[ -f "$SCION_TOKEN_FILE" ]]; then
         mv "$SCION_TOKEN_FILE" "$SCION_TOKEN_BACKUP"
         TOKEN_BACKED_UP=true
+    fi
+    if [[ -f "$SCION_DEV_TOKEN_FILE" ]]; then
+        mv "$SCION_DEV_TOKEN_FILE" "$SCION_DEV_TOKEN_BACKUP"
+        DEV_TOKEN_BACKED_UP=true
     fi
 }
 
@@ -564,6 +581,48 @@ test_created_by_fields() {
 }
 
 # ============================================================================
+# Test 5: Agent-token header negative path
+#         Exercises the agent auth branch of CreateWorkflowRun without requiring
+#         a real agent image. Without a valid JWT signed by the hub's ephemeral
+#         key, the handler must return 401 (malformed token) or 403 (empty/invalid).
+# ============================================================================
+
+test_agent_token_negative() {
+    log_section "Test 5: Agent-token header rejection"
+
+    # 5a: garbage JWT in X-Scion-Agent-Token is rejected (401/403, not 201).
+    TESTS_RUN=$((TESTS_RUN + 1))
+    local http_code_5a
+    http_code_5a=$(curl -s -o /dev/null -w "%{http_code}" \
+        -X POST "$HUB_ENDPOINT/api/v1/groves/$GROVE_ID/workflows/runs" \
+        -H "X-Scion-Agent-Token: not-a-real-jwt" \
+        -H "Content-Type: application/json" \
+        -d "{\"sourceYaml\":\"flow:\\n  - type: exec\\n    run: echo x\",\"groveId\":\"$GROVE_ID\"}" 2>/dev/null)
+    if [[ "$http_code_5a" == "401" || "$http_code_5a" == "403" ]]; then
+        log_success "5a garbage X-Scion-Agent-Token rejected (HTTP $http_code_5a)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        log_error "5a expected 401/403 for garbage agent token, got HTTP $http_code_5a"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+
+    # 5b: totally unauthenticated request is rejected (no headers at all).
+    TESTS_RUN=$((TESTS_RUN + 1))
+    local http_code_5b
+    http_code_5b=$(curl -s -o /dev/null -w "%{http_code}" \
+        -X POST "$HUB_ENDPOINT/api/v1/groves/$GROVE_ID/workflows/runs" \
+        -H "Content-Type: application/json" \
+        -d "{\"sourceYaml\":\"flow:\\n  - type: exec\\n    run: echo x\",\"groveId\":\"$GROVE_ID\"}" 2>/dev/null)
+    if [[ "$http_code_5b" == "401" || "$http_code_5b" == "403" ]]; then
+        log_success "5b unauthenticated workflow-run request rejected (HTTP $http_code_5b)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        log_error "5b expected 401/403 for unauthenticated request, got HTTP $http_code_5b"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -585,6 +644,7 @@ run_all_tests() {
     test_agent_creates_run_positive
     test_grove_label_gate
     test_created_by_fields
+    test_agent_token_negative
 
     log_section "Test Summary"
     echo -e "  Total run:   $TESTS_RUN"

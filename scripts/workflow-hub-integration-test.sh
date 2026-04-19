@@ -65,11 +65,16 @@ HUB_PID=""
 DEV_TOKEN=""
 GROVE_ID=""
 
-# scion-token backup path — we back up the file if it exists so SCION_DEV_TOKEN
-# takes priority (the CLI checks the file before the env var).
+# scion-token / dev-token backup paths — we back up both files if they exist so
+# SCION_DEV_TOKEN env var takes priority (the CLI checks these files first).
+# Both files can be written by the CLI/server during the test (token refresh, dev-auth
+# startup), so we also clear any residual content post-backup to avoid stale-token leaks.
 SCION_TOKEN_FILE="$HOME/.scion/scion-token"
 SCION_TOKEN_BACKUP="/tmp/scion-scion-token-backup-$$"
+SCION_DEV_TOKEN_FILE="$HOME/.scion/dev-token"
+SCION_DEV_TOKEN_BACKUP="/tmp/scion-dev-token-backup-$$"
 TOKEN_BACKED_UP=false
+DEV_TOKEN_BACKED_UP=false
 
 # Test counters
 TESTS_RUN=0
@@ -141,10 +146,27 @@ cleanup() {
         wait "$HUB_PID" 2>/dev/null || true
     fi
 
-    # Restore scion-token file if we backed it up
+    # Kill + remove any lingering workflow containers (Phase 3c has no reaper,
+    # exited ephemeral containers would otherwise accumulate on the host).
+    docker ps -q --filter "label=scion.scion/kind=workflow-run" 2>/dev/null | while read -r cid; do
+        docker kill "$cid" 2>/dev/null || true
+    done
+    docker ps -aq --filter "label=scion.scion/kind=workflow-run" 2>/dev/null | while read -r cid; do
+        docker rm -f "$cid" 2>/dev/null || true
+    done
+
+    # Remove any token files the test/server wrote during the run so the restored
+    # originals (or lack thereof) are authoritative.
+    rm -f "$SCION_TOKEN_FILE" "$SCION_DEV_TOKEN_FILE" 2>/dev/null || true
+
+    # Restore scion-token / dev-token files if we backed them up
     if [[ "$TOKEN_BACKED_UP" == "true" ]]; then
         mv "$SCION_TOKEN_BACKUP" "$SCION_TOKEN_FILE" 2>/dev/null || true
         log_info "Restored $SCION_TOKEN_FILE"
+    fi
+    if [[ "$DEV_TOKEN_BACKED_UP" == "true" ]]; then
+        mv "$SCION_DEV_TOKEN_BACKUP" "$SCION_DEV_TOKEN_FILE" 2>/dev/null || true
+        log_info "Restored $SCION_DEV_TOKEN_FILE"
     fi
 
     if [[ "$SKIP_CLEANUP" == "false" ]]; then
@@ -224,6 +246,11 @@ backup_scion_token() {
         mv "$SCION_TOKEN_FILE" "$SCION_TOKEN_BACKUP"
         TOKEN_BACKED_UP=true
         log_info "Backed up $SCION_TOKEN_FILE (will restore on exit)"
+    fi
+    if [[ -f "$SCION_DEV_TOKEN_FILE" ]]; then
+        mv "$SCION_DEV_TOKEN_FILE" "$SCION_DEV_TOKEN_BACKUP"
+        DEV_TOKEN_BACKED_UP=true
+        log_info "Backed up $SCION_DEV_TOKEN_FILE (will restore on exit)"
     fi
 }
 
