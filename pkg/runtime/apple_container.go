@@ -67,8 +67,13 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 		config.Env = append(config.Env, telemetryGCPCredentialsEnvVar+"="+credPath)
 	}
 
-	// Apple container runtime does not support Linux capabilities (--cap-add).
-	// Metadata interception relies on GCE_METADATA_HOST env var instead of iptables.
+	// Apple container runtime does not support Linux capabilities (--cap-add NET_ADMIN),
+	// so iptables-based metadata traffic interception is not available. Disable it here
+	// to avoid a fatal unsupported-flag error at container startup. Apps that honour the
+	// GCE_METADATA_HOST / GCE_METADATA_ROOT environment variables (already injected by
+	// the broker for assign/block modes) will still reach the scion metadata server;
+	// only apps that bypass those variables and hardcode metadata.google.internal will
+	// not be intercepted.
 	config.MetadataInterception = false
 
 	args, err := buildCommonRunArgs(config)
