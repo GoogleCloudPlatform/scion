@@ -68,7 +68,7 @@ func StartComponent(component, executable string, args []string, globalDir strin
 	logPath := filepath.Join(globalDir, LogFileName(component))
 
 	logDir := filepath.Dir(logPath)
-	if err := os.MkdirAll(logDir, 0755); err != nil {
+if err := os.MkdirAll(logDir, 0700); err != nil {
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 	
