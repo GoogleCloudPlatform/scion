@@ -57,6 +57,8 @@ var (
 	DefaultFileCount int
 	// DefaultTotalBytes holds the default value on creation for the "total_bytes" field.
 	DefaultTotalBytes int64
+	// DefaultID holds the default value on creation for the "id" field.
+	DefaultID func() string
 )
 
 // OrderOption defines the ordering options for the GroveSyncState queries.

@@ -140,10 +140,8 @@ func (Agent) Fields() []ent.Field {
 			Nillable(),
 		field.String("visibility").
 			Default("private"),
-		// DelegationEnabled is an Ent-only field (no raw SQL column). Used by
-		// the policy engine to mark agents whose creator relationship is
-		// policy-addressable. A follow-up raw-SQL migration will add this
-		// column so the schema-diff gate can pass.
+		// delegation_enabled marks agents whose creator relationship is
+		// addressable by policy (see migration V46).
 		field.Bool("delegation_enabled").
 			Default(false),
 

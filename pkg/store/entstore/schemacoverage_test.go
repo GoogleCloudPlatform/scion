@@ -98,6 +98,9 @@ func TestSchemaCoverage_Columns(t *testing.T) {
 
 	rawTables := listTables(t, ctx, rawDB)
 	entTables := toSet(listTables(t, ctx, entDB))
+	if len(entTables) == 0 {
+		t.Fatal("Ent DB has no tables — inspection handle is not seeing AutoMigrate output")
+	}
 
 	for _, table := range rawTables {
 		if excludedTables[table] {
@@ -135,6 +138,9 @@ func TestSchemaCoverage_ColumnAttributes(t *testing.T) {
 
 	rawTables := listTables(t, ctx, rawDB)
 	entTables := toSet(listTables(t, ctx, entDB))
+	if len(entTables) == 0 {
+		t.Fatal("Ent DB has no tables — inspection handle is not seeing AutoMigrate output")
+	}
 
 	for _, table := range rawTables {
 		if excludedTables[table] {
@@ -163,6 +169,97 @@ func TestSchemaCoverage_ColumnAttributes(t *testing.T) {
 			checkAttr(t, table, name, "pk", fmt.Sprintf("%d", boolToInt(raw.pk > 0)), fmt.Sprintf("%d", boolToInt(ent.pk > 0)))
 		}
 	}
+}
+
+// TestSchemaCoverage_Indexes compares user-declared indexes between raw SQL
+// and Ent. Auto-generated internal indexes (SQLite's sqlite_autoindex_*,
+// implicit PK / UNIQUE-column indexes) are filtered out by the
+// sql IS NOT NULL predicate — only CREATE INDEX statements show up.
+//
+// Index drift is typically a perf regression, not a correctness issue, but a
+// missing index on a hot path (e.g. idx_agents_grove) will bite in Phase 3
+// when Ent starts routing reads through it. Known-intentional drift goes in
+// knownIndexDrift with a reason.
+func TestSchemaCoverage_Indexes(t *testing.T) {
+	ctx := context.Background()
+
+	rawDB := openRawSQL(t, ctx)
+	defer rawDB.Close()
+	entDB := openEnt(t, ctx)
+	defer entDB.Close()
+
+	rawIdx := listIndexes(t, ctx, rawDB)
+	entIdx := listIndexes(t, ctx, entDB)
+	if len(entIdx) == 0 {
+		t.Fatal("Ent DB has no user-declared indexes — inspection handle is broken")
+	}
+
+	// Missing: raw has it, Ent doesn't.
+	for key, raw := range rawIdx {
+		if excludedTables[raw.table] {
+			continue
+		}
+		if _, ok := entIdx[key]; !ok {
+			if reason, ok := knownIndexDrift[key+".missing"]; ok {
+				t.Logf("drift ok @ %s.missing: raw has %s, Ent does not (%s)", key, raw.name, reason)
+				continue
+			}
+			t.Errorf("Ent is missing index %q on %q (raw SQL cols=%v unique=%v where=%q)",
+				raw.name, raw.table, raw.cols, raw.unique, raw.where)
+		}
+	}
+
+	// Extra: Ent has it, raw doesn't. Informational — Ent adds its own
+	// indexes for edges, which is fine.
+	for key, ent := range entIdx {
+		if excludedTables[ent.table] {
+			continue
+		}
+		if _, ok := rawIdx[key]; !ok {
+			t.Logf("Ent has extra index not in raw SQL (informational): %s on %s cols=%v unique=%v",
+				ent.name, ent.table, ent.cols, ent.unique)
+		}
+	}
+
+	// Attribute comparison for shared indexes.
+	for key, raw := range rawIdx {
+		if excludedTables[raw.table] {
+			continue
+		}
+		ent, ok := entIdx[key]
+		if !ok {
+			continue
+		}
+		checkIndexAttr(t, key, "unique", fmt.Sprintf("%v", raw.unique), fmt.Sprintf("%v", ent.unique))
+		checkIndexAttr(t, key, "cols", strings.Join(raw.cols, ","), strings.Join(ent.cols, ","))
+		checkIndexAttr(t, key, "where", canonWhere(raw.where), canonWhere(ent.where))
+	}
+}
+
+func checkIndexAttr(t *testing.T, indexKey, aspect, raw, ent string) {
+	t.Helper()
+	if raw == ent {
+		return
+	}
+	key := indexKey + "." + aspect
+	if reason, ok := knownIndexDrift[key]; ok {
+		t.Logf("drift ok @ %s: raw=%q ent=%q (%s)", key, raw, ent, reason)
+		return
+	}
+	t.Errorf("index attribute mismatch @ %s: raw=%q ent=%q — add to knownIndexDrift with a reason, or fix the schema",
+		key, raw, ent)
+}
+
+// knownIndexDrift lists (table.index_name.aspect) tuples where raw SQL and
+// Ent intentionally disagree. Aspect is one of "unique", "cols", "where", or
+// "missing" (the latter when raw has an index Ent doesn't emit).
+var knownIndexDrift = map[string]string{
+	// Expression index on COALESCE(agent_id, '') — Ent's Index API can't
+	// express functional/expression indexes. Phase 3j is responsible for
+	// enforcing the (scope, agent_id, subscriber_type, subscriber_id,
+	// grove_id) uniqueness at the application layer (or via a follow-up
+	// raw-SQL annotation). Tracked separately from the main migration.
+	"notification_subscriptions.idx_notification_subs_unique.missing": "expression index (COALESCE) — Ent cannot express",
 }
 
 func checkAttr(t *testing.T, table, col, aspect, raw, ent string) {
@@ -322,6 +419,14 @@ type columnInfo struct {
 	pk      int
 }
 
+type indexInfo struct {
+	table  string
+	name   string
+	cols   []string
+	unique bool
+	where  string
+}
+
 func openRawSQL(t *testing.T, ctx context.Context) *sql.DB {
 	t.Helper()
 	s, err := sqlite.New("file:rawsql?mode=memory&cache=shared&_pragma=foreign_keys(1)")
@@ -336,23 +441,13 @@ func openRawSQL(t *testing.T, ctx context.Context) *sql.DB {
 
 func openEnt(t *testing.T, ctx context.Context) *sql.DB {
 	t.Helper()
-	client, err := entc.OpenSQLite("file:entmig?mode=memory&cache=shared")
+	client, db, err := entc.OpenSQLite("file:entmig?mode=memory&cache=shared")
 	if err != nil {
 		t.Fatalf("opening ent client: %v", err)
 	}
 	if err := entc.AutoMigrate(ctx, client); err != nil {
 		t.Fatalf("running Ent auto-migration: %v", err)
 	}
-	// Reach into the client's underlying driver to run PRAGMA queries.
-	// Ent doesn't expose DB() directly; pragmatic workaround: open a
-	// second driver pointing at the same shared-cache in-memory DB.
-	db, err := sql.Open("sqlite", "file:entmig?mode=memory&cache=shared")
-	if err != nil {
-		t.Fatalf("opening ent inspection handle: %v", err)
-	}
-	// Keep the ent client alive for the duration of the test by closing it
-	// when this handle closes. Use a finalizer via t.Cleanup instead of
-	// altering the return type.
 	t.Cleanup(func() { _ = client.Close() })
 	return db
 }
@@ -428,4 +523,91 @@ func toSet(xs []string) map[string]bool {
 		out[x] = true
 	}
 	return out
+}
+
+// listIndexes returns a map keyed by "table.index_name" of all user-declared
+// indexes on non-excluded tables. Auto-generated indexes (sqlite_autoindex_*,
+// implicit UNIQUE-column indexes) are filtered via the sql IS NOT NULL
+// predicate — only CREATE INDEX statements have non-null sql.
+func listIndexes(t *testing.T, ctx context.Context, db *sql.DB) map[string]indexInfo {
+	t.Helper()
+	rows, err := db.QueryContext(ctx,
+		`SELECT tbl_name, name, sql FROM sqlite_master
+		 WHERE type='index' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%'
+		 ORDER BY tbl_name, name`)
+	if err != nil {
+		t.Fatalf("listing indexes: %v", err)
+	}
+	defer rows.Close()
+	out := make(map[string]indexInfo)
+	for rows.Next() {
+		var table, name, ddl string
+		if err := rows.Scan(&table, &name, &ddl); err != nil {
+			t.Fatalf("scanning index row: %v", err)
+		}
+		out[table+"."+name] = parseCreateIndex(table, name, ddl)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating indexes: %v", err)
+	}
+	return out
+}
+
+// parseCreateIndex extracts UNIQUE flag, column list, and WHERE clause from a
+// CREATE INDEX statement. Deliberately shallow — it only needs to work on
+// DDL produced by SQLite's round-trip of our raw SQL migrations and Ent's
+// AutoMigrate, both of which emit a canonical form.
+func parseCreateIndex(table, name, ddl string) indexInfo {
+	info := indexInfo{table: table, name: name}
+	lower := strings.ToLower(ddl)
+	info.unique = strings.Contains(lower, "create unique index")
+
+	// Column list: first parenthesized group after the table name.
+	open := strings.Index(ddl, "(")
+	close := strings.LastIndex(ddl, ")")
+	if open > 0 && close > open {
+		// The WHERE clause may contain its own parens. Find the matching
+		// close for the column list by scanning from open.
+		depth := 0
+		for i := open; i < len(ddl); i++ {
+			switch ddl[i] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 {
+					close = i
+					goto done
+				}
+			}
+		}
+	done:
+		cols := ddl[open+1 : close]
+		for _, c := range strings.Split(cols, ",") {
+			c = strings.TrimSpace(c)
+			// Drop collation / sort direction tails: "col COLLATE NOCASE", "col DESC".
+			if sp := strings.IndexAny(c, " \t"); sp > 0 {
+				c = c[:sp]
+			}
+			c = strings.Trim(c, "\"`[]")
+			info.cols = append(info.cols, c)
+		}
+		// WHERE tail (partial index predicate).
+		tail := ddl[close+1:]
+		if idx := strings.Index(strings.ToLower(tail), "where"); idx >= 0 {
+			info.where = strings.TrimSpace(tail[idx+len("where"):])
+		}
+	}
+	return info
+}
+
+// canonWhere normalizes partial-index predicates so raw SQL and Ent match
+// despite cosmetic differences (quoting, whitespace, case).
+func canonWhere(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.ReplaceAll(s, "\"", "")
+	s = strings.ReplaceAll(s, "`", "")
+	// Collapse whitespace.
+	s = strings.Join(strings.Fields(s), " ")
+	return s
 }

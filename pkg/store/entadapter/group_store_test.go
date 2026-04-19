@@ -29,7 +29,7 @@ import (
 
 func newTestGroupStore(t *testing.T) *GroupStore {
 	t.Helper()
-	client, err := entc.OpenSQLite("file:" + t.Name() + "?mode=memory&cache=shared")
+	client, _, err := entc.OpenSQLite("file:" + t.Name() + "?mode=memory&cache=shared")
 	require.NoError(t, err)
 	t.Cleanup(func() { client.Close() })
 	require.NoError(t, entc.AutoMigrate(context.Background(), client))
@@ -816,7 +816,7 @@ func TestGetEffectiveGroupsNoMemberships(t *testing.T) {
 
 func TestCompositeStoreDelegation(t *testing.T) {
 	// Verify the CompositeStore properly delegates group operations
-	client, err := entc.OpenSQLite("file:" + t.Name() + "?mode=memory&cache=shared")
+	client, _, err := entc.OpenSQLite("file:" + t.Name() + "?mode=memory&cache=shared")
 	require.NoError(t, err)
 	t.Cleanup(func() { client.Close() })
 	require.NoError(t, entc.AutoMigrate(context.Background(), client))

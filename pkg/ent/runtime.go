@@ -366,6 +366,10 @@ func init() {
 	grovecontributorDescCreatedAt := grovecontributorFields[11].Descriptor()
 	// grovecontributor.DefaultCreatedAt holds the default value on creation for the created_at field.
 	grovecontributor.DefaultCreatedAt = grovecontributorDescCreatedAt.Default.(func() time.Time)
+	// grovecontributorDescID is the schema descriptor for id field.
+	grovecontributorDescID := grovecontributorFields[0].Descriptor()
+	// grovecontributor.DefaultID holds the default value on creation for the id field.
+	grovecontributor.DefaultID = grovecontributorDescID.Default.(func() string)
 	grovesyncstateFields := schema.GroveSyncState{}.Fields()
 	_ = grovesyncstateFields
 	// grovesyncstateDescGroveID is the schema descriptor for grove_id field.
@@ -384,6 +388,10 @@ func init() {
 	grovesyncstateDescTotalBytes := grovesyncstateFields[6].Descriptor()
 	// grovesyncstate.DefaultTotalBytes holds the default value on creation for the total_bytes field.
 	grovesyncstate.DefaultTotalBytes = grovesyncstateDescTotalBytes.Default.(int64)
+	// grovesyncstateDescID is the schema descriptor for id field.
+	grovesyncstateDescID := grovesyncstateFields[0].Descriptor()
+	// grovesyncstate.DefaultID holds the default value on creation for the id field.
+	grovesyncstate.DefaultID = grovesyncstateDescID.Default.(func() string)
 	harnessconfigFields := schema.HarnessConfig{}.Fields()
 	_ = harnessconfigFields
 	// harnessconfigDescName is the schema descriptor for name field.

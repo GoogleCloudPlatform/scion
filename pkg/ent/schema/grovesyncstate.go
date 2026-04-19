@@ -20,6 +20,7 @@ import (
 	"entgo.io/ent/schema"
 	"entgo.io/ent/schema/field"
 	"entgo.io/ent/schema/index"
+	"github.com/google/uuid"
 )
 
 // GroveSyncState mirrors grove_sync_state (V42). Same composite-PK note as
@@ -34,7 +35,7 @@ func (GroveSyncState) Annotations() []schema.Annotation {
 
 func (GroveSyncState) Fields() []ent.Field {
 	return []ent.Field{
-		field.String("id"),
+		field.String("id").DefaultFunc(uuid.NewString),
 		field.String("grove_id").NotEmpty(),
 		field.String("broker_id").Default(""),
 		field.Time("last_sync_time").Optional().Nillable(),

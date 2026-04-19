@@ -102,6 +102,14 @@ func (_c *GroveSyncStateCreate) SetID(v string) *GroveSyncStateCreate {
 	return _c
 }
 
+// SetNillableID sets the "id" field if the given value is not nil.
+func (_c *GroveSyncStateCreate) SetNillableID(v *string) *GroveSyncStateCreate {
+	if v != nil {
+		_c.SetID(*v)
+	}
+	return _c
+}
+
 // Mutation returns the GroveSyncStateMutation object of the builder.
 func (_c *GroveSyncStateCreate) Mutation() *GroveSyncStateMutation {
 	return _c.mutation
@@ -148,6 +156,10 @@ func (_c *GroveSyncStateCreate) defaults() {
 	if _, ok := _c.mutation.TotalBytes(); !ok {
 		v := grovesyncstate.DefaultTotalBytes
 		_c.mutation.SetTotalBytes(v)
+	}
+	if _, ok := _c.mutation.ID(); !ok {
+		v := grovesyncstate.DefaultID()
+		_c.mutation.SetID(v)
 	}
 }
 

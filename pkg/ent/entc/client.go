@@ -31,34 +31,39 @@ import (
 // The dsn should be a SQLite connection string (e.g. "file:ent?mode=memory&cache=shared").
 // Foreign keys and WAL journal mode are enabled automatically.
 // This uses the modernc.org/sqlite pure-Go driver which registers as "sqlite".
-func OpenSQLite(dsn string, opts ...ent.Option) (*ent.Client, error) {
+// The returned *sql.DB is the same handle wrapped by the Ent client; callers
+// that don't need it can discard with _. Closing the client closes the DB.
+func OpenSQLite(dsn string, opts ...ent.Option) (*ent.Client, *sql.DB, error) {
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("opening sqlite connection: %w", err)
+		return nil, nil, fmt.Errorf("opening sqlite connection: %w", err)
 	}
 	// Enable foreign keys and WAL mode, matching existing store pattern.
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("enabling foreign keys: %w", err)
+		return nil, nil, fmt.Errorf("enabling foreign keys: %w", err)
 	}
 	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("enabling WAL mode: %w", err)
+		return nil, nil, fmt.Errorf("enabling WAL mode: %w", err)
 	}
 	drv := entsql.OpenDB(dialect.SQLite, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
-	return client, nil
+	return client, db, nil
 }
 
 // OpenPostgres creates an Ent client backed by PostgreSQL.
 // The dsn should be a PostgreSQL connection string
 // (e.g. "host=localhost port=5432 user=scion dbname=scion sslmode=disable").
-func OpenPostgres(dsn string, opts ...ent.Option) (*ent.Client, error) {
-	client, err := ent.Open(dialect.Postgres, dsn, opts...)
+// Returns the underlying *sql.DB so callers can apply pool configuration.
+func OpenPostgres(dsn string, opts ...ent.Option) (*ent.Client, *sql.DB, error) {
+	db, err := sql.Open("postgres", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("opening postgres connection: %w", err)
+		return nil, nil, fmt.Errorf("opening postgres connection: %w", err)
 	}
-	return client, nil
+	drv := entsql.OpenDB(dialect.Postgres, db)
+	client := ent.NewClient(append(opts, ent.Driver(drv))...)
+	return client, db, nil
 }
 
 // AutoMigrate runs automatic schema migration on the given client.

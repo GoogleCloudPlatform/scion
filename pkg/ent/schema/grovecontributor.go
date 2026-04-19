@@ -22,6 +22,7 @@ import (
 	"entgo.io/ent/schema"
 	"entgo.io/ent/schema/field"
 	"entgo.io/ent/schema/index"
+	"github.com/google/uuid"
 )
 
 // GroveContributor mirrors grove_contributors (V1 + V3 + V10). Raw SQL uses a
@@ -38,7 +39,7 @@ func (GroveContributor) Annotations() []schema.Annotation {
 
 func (GroveContributor) Fields() []ent.Field {
 	return []ent.Field{
-		field.String("id"),
+		field.String("id").DefaultFunc(uuid.NewString),
 		field.String("grove_id").NotEmpty(),
 		field.String("broker_id").NotEmpty(),
 		field.String("broker_name").NotEmpty(),
