@@ -69,6 +69,7 @@ type workflowRuntime interface {
 	Stop(ctx context.Context, id string) error
 	Delete(ctx context.Context, id string) error
 	GetLogs(ctx context.Context, id string) (string, error)
+	GetLogsSince(ctx context.Context, id string, since time.Time) (string, error)
 	List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error)
 }
 
@@ -418,7 +419,10 @@ func (e *WorkflowExecutor) pollContainerUntilDone(
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	var prevLogs string
+	// logSince is set before the container starts; only logs from this point
+	// forward are fetched, reducing data transfer for long-running workflows.
+	logSince := time.Now()
+	prevWindowLen := 0 // bytes already sent from the current --since window
 	exitCode := 0
 	goneCount := 0
 
@@ -431,22 +435,28 @@ func (e *WorkflowExecutor) pollContainerUntilDone(
 		case <-ticker.C:
 		}
 
-		// Fetch all logs seen so far.
-		currentLogs, err := e.rt.GetLogs(runCtx, containerID)
+		// Fetch logs since the current window start (O(1) amortized vs O(N²)).
+		windowLogs, err := e.rt.GetLogsSince(runCtx, containerID, logSince)
 		if err != nil {
 			if runCtx.Err() != nil || cancelCtx.Err() != nil {
 				return 0, nil
 			}
-			log.Debug("WorkflowExecutor: GetLogs transient error", "error", err)
+			log.Debug("WorkflowExecutor: GetLogsSince transient error", "error", err)
 			// Continue polling; container may be briefly unavailable.
 			continue
 		}
 
-		// Forward newly appended bytes as a single log event.
-		if len(currentLogs) > len(prevLogs) {
-			newLine := currentLogs[len(prevLogs):]
-			e.sendLogEvent(connName, runID, "stdout", newLine)
-			prevLogs = currentLogs
+		// Forward only bytes we haven't sent yet (handles --since boundary overlap).
+		if len(windowLogs) > prevWindowLen {
+			e.sendLogEvent(connName, runID, "stdout", windowLogs[prevWindowLen:])
+			prevWindowLen = len(windowLogs)
+		}
+
+		// Advance the since window periodically to reduce data transfer.
+		// 1-second overlap prevents missing logs at the second boundary.
+		if prevWindowLen > 0 {
+			logSince = time.Now().Add(-time.Second)
+			prevWindowLen = 0
 		}
 
 		// Check container phase via List with label filter.
@@ -474,10 +484,10 @@ func (e *WorkflowExecutor) pollContainerUntilDone(
 
 		phase := agents[0].Phase
 		if phase == "stopped" || phase == "error" || phase == scionrt.LegacyAgentPhaseEnded {
-			// Drain remaining logs.
-			finalLogs, _ := e.rt.GetLogs(runCtx, containerID)
-			if len(finalLogs) > len(prevLogs) {
-				e.sendLogEvent(connName, runID, "stdout", finalLogs[len(prevLogs):])
+			// Drain remaining logs using the advancing window.
+			finalLogs, _ := e.rt.GetLogsSince(runCtx, containerID, logSince)
+			if len(finalLogs) > prevWindowLen {
+				e.sendLogEvent(connName, runID, "stdout", finalLogs[prevWindowLen:])
 			}
 			// Map phase to exit code: "error" phase means the container exited
 			// non-zero. The runtime does not expose the raw exit code via AgentInfo,
@@ -547,7 +557,8 @@ func (e *WorkflowExecutor) sendOutputEvent(connName, runID string, exitCode int,
 // Files larger than 1 MB are skipped (they should be uploaded to blob storage).
 // Returns "" if the directory is empty or all files are too large.
 func readTraceFiles(traceDir string, log *slog.Logger) string {
-	const maxFileSize = 1 << 20 // 1 MB
+	const maxFileSize = 256 << 10  // 256 KB per file
+	const maxTotalSize = 256 << 10 // 256 KB aggregate cap
 
 	entries, err := os.ReadDir(traceDir)
 	if err != nil {
@@ -555,6 +566,7 @@ func readTraceFiles(traceDir string, log *slog.Logger) string {
 	}
 
 	var traceItems []json.RawMessage
+	var totalSize int64
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -563,6 +575,10 @@ func readTraceFiles(traceDir string, log *slog.Logger) string {
 		if err != nil || info.Size() > maxFileSize {
 			continue
 		}
+		if totalSize+info.Size() > maxTotalSize {
+			log.Debug("WorkflowExecutor: trace aggregate cap reached, skipping remaining files")
+			break
+		}
 		data, err := os.ReadFile(filepath.Join(traceDir, entry.Name()))
 		if err != nil {
 			log.Debug("WorkflowExecutor: failed to read trace file", "name", entry.Name(), "error", err)
@@ -570,6 +586,7 @@ func readTraceFiles(traceDir string, log *slog.Logger) string {
 		}
 		if json.Valid(data) {
 			traceItems = append(traceItems, json.RawMessage(data))
+			totalSize += info.Size()
 		}
 	}
 

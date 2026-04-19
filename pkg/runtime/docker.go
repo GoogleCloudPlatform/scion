@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
@@ -205,6 +206,13 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 
 func (r *DockerRuntime) GetLogs(ctx context.Context, id string) (string, error) {
 	return runSimpleCommand(ctx, r.Command, "logs", id)
+}
+
+func (r *DockerRuntime) GetLogsSince(ctx context.Context, id string, since time.Time) (string, error) {
+	if since.IsZero() {
+		return runSimpleCommand(ctx, r.Command, "logs", id)
+	}
+	return runSimpleCommand(ctx, r.Command, "logs", "--since", since.UTC().Format(time.RFC3339), id)
 }
 
 func (r *DockerRuntime) Attach(ctx context.Context, id string) error {

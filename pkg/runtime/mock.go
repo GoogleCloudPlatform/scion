@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
@@ -27,6 +28,7 @@ type MockRuntime struct {
 	DeleteFunc           func(ctx context.Context, id string) error
 	ListFunc             func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error)
 	GetLogsFunc          func(ctx context.Context, id string) (string, error)
+	GetLogsSinceFunc     func(ctx context.Context, id string, since time.Time) (string, error)
 	AttachFunc           func(ctx context.Context, id string) error
 	ImageExistsFunc      func(ctx context.Context, image string) (bool, error)
 	SyncFunc             func(ctx context.Context, id string, direction SyncDirection) error
@@ -78,6 +80,13 @@ func (m *MockRuntime) GetLogs(ctx context.Context, id string) (string, error) {
 		return m.GetLogsFunc(ctx, id)
 	}
 	return "mock logs", nil
+}
+
+func (m *MockRuntime) GetLogsSince(ctx context.Context, id string, since time.Time) (string, error) {
+	if m.GetLogsSinceFunc != nil {
+		return m.GetLogsSinceFunc(ctx, id, since)
+	}
+	return m.GetLogs(ctx, id)
 }
 
 func (m *MockRuntime) Attach(ctx context.Context, id string) error {

@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
@@ -58,6 +59,9 @@ type Runtime interface {
 	Delete(ctx context.Context, id string) error
 	List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error)
 	GetLogs(ctx context.Context, id string) (string, error)
+	// GetLogsSince returns logs appended since the given timestamp.
+	// If since is zero, returns all logs (equivalent to GetLogs).
+	GetLogsSince(ctx context.Context, id string, since time.Time) (string, error)
 	Attach(ctx context.Context, id string) error
 	ImageExists(ctx context.Context, image string) (bool, error)
 	PullImage(ctx context.Context, image string) error

@@ -224,6 +224,13 @@ func (r *AppleContainerRuntime) GetLogs(ctx context.Context, id string) (string,
 	return runSimpleCommand(ctx, r.Command, "logs", id)
 }
 
+func (r *AppleContainerRuntime) GetLogsSince(ctx context.Context, id string, since time.Time) (string, error) {
+	if since.IsZero() {
+		return runSimpleCommand(ctx, r.Command, "logs", id)
+	}
+	return runSimpleCommand(ctx, r.Command, "logs", "--since", since.UTC().Format(time.RFC3339), id)
+}
+
 func (r *AppleContainerRuntime) Attach(ctx context.Context, id string) error {
 	// 1. Find container to check for tmux label
 	agents, err := r.List(ctx, nil)

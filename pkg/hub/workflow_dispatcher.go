@@ -313,7 +313,7 @@ func (d *WorkflowRunDispatcher) HandleWorkflowOutputEvent(ctx context.Context, b
 	// Clean up buffered logs and subscribers after a short delay so any
 	// in-flight WSS readers can drain their queues.
 	go func() {
-		time.Sleep(30 * time.Second)
+		time.Sleep(5 * time.Minute)
 		d.cleanupRun(payload.RunID)
 	}()
 }
@@ -343,7 +343,7 @@ func (d *WorkflowRunDispatcher) HandleWorkflowLogEvent(brokerID string, payload 
 // Subscribe registers a subscriber channel for events on a workflow run.
 // Returns a list of buffered log entries for replay, and an unsubscribe function.
 func (d *WorkflowRunDispatcher) Subscribe(runID string) ([]WorkflowLogEntry, WorkflowRunSubscriber, func()) {
-	ch := make(WorkflowRunSubscriber, 128)
+	ch := make(WorkflowRunSubscriber, 512)
 
 	// Capture buffered logs before subscribing.
 	d.logsMu.RLock()

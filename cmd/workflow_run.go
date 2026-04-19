@@ -168,7 +168,7 @@ func runWorkflowRunViaHub(cmd *cobra.Command, file string) error {
 		Inputs:     inputsJSON,
 	}
 
-	ctx := context.Background()
+	ctx := cmd.Context()
 
 	PrintUsingHub(GetHubEndpoint(settings))
 	statusf("Dispatching workflow run to Hub...\n")

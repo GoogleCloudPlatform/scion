@@ -24,6 +24,7 @@ import (
 	goruntime "runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
@@ -313,6 +314,13 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 
 func (r *PodmanRuntime) GetLogs(ctx context.Context, id string) (string, error) {
 	return runSimpleCommand(ctx, r.Command, "logs", id)
+}
+
+func (r *PodmanRuntime) GetLogsSince(ctx context.Context, id string, since time.Time) (string, error) {
+	if since.IsZero() {
+		return runSimpleCommand(ctx, r.Command, "logs", id)
+	}
+	return runSimpleCommand(ctx, r.Command, "logs", "--since", since.UTC().Format(time.RFC3339), id)
 }
 
 func (r *PodmanRuntime) Attach(ctx context.Context, id string) error {

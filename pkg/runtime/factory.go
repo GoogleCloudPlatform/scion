@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -165,6 +166,10 @@ func (e *ErrorRuntime) List(ctx context.Context, labelFilter map[string]string) 
 }
 
 func (e *ErrorRuntime) GetLogs(ctx context.Context, id string) (string, error) {
+	return "", e.Err
+}
+
+func (e *ErrorRuntime) GetLogsSince(ctx context.Context, id string, since time.Time) (string, error) {
 	return "", e.Err
 }
 

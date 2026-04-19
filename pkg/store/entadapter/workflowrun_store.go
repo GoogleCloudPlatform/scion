@@ -144,7 +144,7 @@ func (s *WorkflowRunStore) ListWorkflowRuns(ctx context.Context, opts store.Work
 	}
 
 	q := s.client.WorkflowRun.Query().
-		Order(workflowrun.ByCreated()).
+		Order(ent.Desc(workflowrun.FieldCreated)).
 		Limit(limit + 1) // fetch one extra to detect next page
 
 	if opts.Filter.GroveID != "" {

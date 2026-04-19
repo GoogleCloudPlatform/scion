@@ -1712,6 +1712,34 @@ func (r *KubernetesRuntime) GetLogs(ctx context.Context, id string) (string, err
 	return string(data), nil
 }
 
+func (r *KubernetesRuntime) GetLogsSince(ctx context.Context, id string, since time.Time) (string, error) {
+	namespace := r.DefaultNamespace
+	podName := id
+	if strings.Contains(id, "/") {
+		parts := strings.SplitN(id, "/", 2)
+		namespace = parts[0]
+		podName = parts[1]
+	} else {
+		namespace = r.resolveNamespace(ctx, podName)
+	}
+	opts := &corev1.PodLogOptions{}
+	if !since.IsZero() {
+		t := metav1.NewTime(since)
+		opts.SinceTime = &t
+	}
+	req := r.Client.Clientset.CoreV1().Pods(namespace).GetLogs(podName, opts)
+	podLogs, err := req.Stream(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer podLogs.Close()
+	data, err := io.ReadAll(podLogs)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
 func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 	podName := id
 	namespace := r.DefaultNamespace

@@ -15,7 +15,6 @@
 package cmd
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -66,7 +65,7 @@ func runWorkflowLogs(cmd *cobra.Command, args []string) error {
 
 	statusf("Connecting to log stream for run %s...\n", runID)
 
-	ctx := context.Background()
+	ctx := cmd.Context()
 	ch, err := client.StreamWorkflowRunLogs(ctx, runID)
 	if err != nil {
 		return fmt.Errorf("opening log stream: %w", err)

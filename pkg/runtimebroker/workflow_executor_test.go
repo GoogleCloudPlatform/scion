@@ -171,6 +171,10 @@ func (f *fakeRuntime) GetLogs(ctx context.Context, id string) (string, error) {
 	return logs, err
 }
 
+func (f *fakeRuntime) GetLogsSince(ctx context.Context, id string, since time.Time) (string, error) {
+	return f.GetLogs(ctx, id)
+}
+
 func (f *fakeRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
 	f.mu.Lock()
 	phase := f.Phase
