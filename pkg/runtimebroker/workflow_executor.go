@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -393,7 +394,7 @@ func (e *WorkflowExecutor) executeRun(ctx context.Context, connName string, req 
 
 	var errStr *string
 	if exitCode != 0 {
-		errStr = ptrStr("quack exited with code " + itoa(exitCode))
+		errStr = ptrStr("quack exited with code " + strconv.Itoa(exitCode))
 	}
 
 	log.Info("WorkflowExecutor: run completed", "exitCode", exitCode)
@@ -552,13 +553,19 @@ func (e *WorkflowExecutor) sendOutputEvent(connName, runID string, exitCode int,
 	e.sendEvent(connName, wsprotocol.EventWorkflowOutput, payload)
 }
 
+// Inlined-trace size limits. Files above traceFileMaxBytes are skipped
+// (they belong in blob storage); aggregate bytes above traceAggregateMaxBytes
+// stop consumption of further trace files for this run.
+const (
+	traceFileMaxBytes      = 256 << 10 // 256 KB per file
+	traceAggregateMaxBytes = 256 << 10 // 256 KB aggregate cap across all files
+)
+
 // readTraceFiles reads all JSON files from the trace directory and returns
 // them as a JSON string of the form {"traces":[...]}.
-// Files larger than 1 MB are skipped (they should be uploaded to blob storage).
-// Returns "" if the directory is empty or all files are too large.
+// Files larger than traceFileMaxBytes are skipped (they should be uploaded to
+// blob storage). Returns "" if the directory is empty or all files are too large.
 func readTraceFiles(traceDir string, log *slog.Logger) string {
-	const maxFileSize = 256 << 10  // 256 KB per file
-	const maxTotalSize = 256 << 10 // 256 KB aggregate cap
 
 	entries, err := os.ReadDir(traceDir)
 	if err != nil {
@@ -572,10 +579,10 @@ func readTraceFiles(traceDir string, log *slog.Logger) string {
 			continue
 		}
 		info, err := entry.Info()
-		if err != nil || info.Size() > maxFileSize {
+		if err != nil || info.Size() > traceFileMaxBytes {
 			continue
 		}
-		if totalSize+info.Size() > maxTotalSize {
+		if totalSize+info.Size() > traceAggregateMaxBytes {
 			log.Debug("WorkflowExecutor: trace aggregate cap reached, skipping remaining files")
 			break
 		}
@@ -610,22 +617,3 @@ func ptrStr(s string) *string {
 	return &s
 }
 
-// itoa converts an int to its decimal string representation.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	buf := make([]byte, 0, 10)
-	for n > 0 {
-		buf = append([]byte{byte('0' + n%10)}, buf...)
-		n /= 10
-	}
-	if neg {
-		buf = append([]byte{'-'}, buf...)
-	}
-	return string(buf)
-}

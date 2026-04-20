@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -946,22 +945,3 @@ func TestExecutor_CommandArgs(t *testing.T) {
 	assert.Contains(t, joinedArgs, "--trace-dir")
 }
 
-// ---------------------------------------------------------------------------
-// itoa helper
-// ---------------------------------------------------------------------------
-
-func TestItoa(t *testing.T) {
-	cases := []struct {
-		in   int
-		want string
-	}{
-		{0, "0"},
-		{1, "1"},
-		{42, "42"},
-		{-5, "-5"},
-		{1000, "1000"},
-	}
-	for _, c := range cases {
-		assert.Equal(t, c.want, itoa(c.in), fmt.Sprintf("itoa(%d)", c.in))
-	}
-}
