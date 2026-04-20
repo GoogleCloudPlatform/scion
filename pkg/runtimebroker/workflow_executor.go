@@ -406,8 +406,14 @@ func (e *WorkflowExecutor) executeRun(ctx context.Context, connName string, req 
 		// runs will need blob-storage uploading (follow-up).
 		finalStdout, ferr := e.rt.GetLogs(context.Background(), containerID)
 		if ferr == nil && finalStdout != "" {
+			// Cap inlined stdout at 256 KB; trim to a rune boundary so we
+			// never write invalid UTF-8 into result_json. Runs larger than
+			// the cap should use blob-storage upload (tracked as follow-up
+			// #6 in duckflux-scion-followups.md). Note: quack emits JSON,
+			// so a truncated payload is not guaranteed to round-trip as a
+			// single JSON value — the cap preserves the prefix for debuggability.
 			if len(finalStdout) > resultJSONMaxBytes {
-				finalStdout = finalStdout[:resultJSONMaxBytes]
+				finalStdout = trimIncompleteUTF8Tail(finalStdout[:resultJSONMaxBytes])
 			}
 			resultJSON = &finalStdout
 		}
