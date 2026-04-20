@@ -916,6 +916,28 @@ func TestExecutor_VolumeMount(t *testing.T) {
 	assert.True(t, found, "expected /workflow volume mount")
 }
 
+// TestTrimIncompleteUTF8Tail verifies that trimIncompleteUTF8Tail correctly
+// drops partial multi-byte UTF-8 sequences at the tail of a string.
+func TestTrimIncompleteUTF8Tail(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"hello", "hello"},
+		{"olá", "olá"},                        // complete
+		{"ol\xc3", "ol"},                      // truncated 2-byte start
+		{"ol\xe2\x98", "ol"},                  // truncated 3-byte start
+		{"ol\xe2\x98\x83", "ol\xe2\x98\x83"}, // complete 3-byte rune (☃)
+		{"\xe2", ""},                          // single truncated start
+	}
+	for _, c := range cases {
+		got := trimIncompleteUTF8Tail(c.in)
+		if got != c.want {
+			t.Errorf("trim(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 // TestExecutor_CommandArgs verifies that the quack command arguments are
 // passed correctly in RunConfig.
 func TestExecutor_CommandArgs(t *testing.T) {
@@ -953,8 +975,9 @@ func TestExecutor_CommandArgs(t *testing.T) {
 	}
 	assert.True(t, hasWorkflowFile, "quack command must reference workflow.yaml")
 
-	// Must pass --trace-dir.
+	// Must pass --trace-dir and explicit --trace-format json.
 	joinedArgs := strings.Join(cfg.CommandArgs, " ")
 	assert.Contains(t, joinedArgs, "--trace-dir")
+	assert.Contains(t, joinedArgs, "--trace-format json")
 }
 

@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -25,11 +26,17 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
+
+// errContainerVanished is returned by pollContainerUntilDone when the
+// workflow container disappears mid-run (deleted externally, OOM-killed by
+// the node, etc.). The caller must treat this as a failure, not success.
+var errContainerVanished = errors.New("workflow container vanished unexpectedly")
 
 // workflowRunRequest is the JSON body sent by the hub when dispatching a run.
 type workflowRunRequest struct {
@@ -326,6 +333,7 @@ func (e *WorkflowExecutor) executeRun(ctx context.Context, connName string, req 
 			"/workflow/workflow.yaml",
 			"--input-file", "/workflow/inputs.json",
 			"--trace-dir", "/workflow/trace/",
+			"--trace-format", "json",
 		},
 		BrokerMode: true,
 	}
@@ -377,19 +385,31 @@ func (e *WorkflowExecutor) executeRun(ctx context.Context, connName string, req 
 		e.sendOutputEvent(connName, req.RunID, 2, nil, ptrStr("canceled"), "")
 		return
 	}
+	if errors.Is(pollErr, errContainerVanished) {
+		log.Warn("WorkflowExecutor: container vanished mid-run", "runID", req.RunID)
+		e.sendOutputEvent(connName, req.RunID, 2, nil, ptrStr("container vanished unexpectedly"), "")
+		return
+	}
 	if pollErr != nil {
 		log.Error("WorkflowExecutor: polling error", "error", pollErr)
 		e.sendOutputEvent(connName, req.RunID, 2, nil, ptrStr("polling error: "+pollErr.Error()), "")
 		return
 	}
 
-	// Capture trace files from the host-side trace directory and inline them.
-	// TODO(blob-upload): upload traceDir to blob storage and set traceKey
-	// instead of inlining (see workflows.md §4.3 "trace capture" follow-up).
+	// Populate resultJSON with quack's verbatim stdout per design §5.
+	// Trace files in traceDir will be uploaded to blob storage and referenced
+	// via trace_url in a follow-up PR (see followups.md #6).
 	var resultJSON *string
 	if exitCode == 0 {
-		if traceData := readTraceFiles(traceDir, log); traceData != "" {
-			resultJSON = &traceData
+		// Fetch the final stdout buffer (the quack stdout is what § 5 of the
+		// design doc calls "verbatim workflow output"). Cap at 256 KB; larger
+		// runs will need blob-storage uploading (follow-up).
+		finalStdout, ferr := e.rt.GetLogs(context.Background(), containerID)
+		if ferr == nil && finalStdout != "" {
+			if len(finalStdout) > resultJSONMaxBytes {
+				finalStdout = finalStdout[:resultJSONMaxBytes]
+			}
+			resultJSON = &finalStdout
 		}
 	}
 
@@ -444,8 +464,11 @@ func (e *WorkflowExecutor) pollContainerUntilDone(
 		}
 
 		if len(allLogs) > totalBytesSent {
-			e.sendLogEvent(connName, runID, "stdout", allLogs[totalBytesSent:])
-			totalBytesSent = len(allLogs)
+			safe := trimIncompleteUTF8Tail(allLogs[totalBytesSent:])
+			if safe != "" {
+				e.sendLogEvent(connName, runID, "stdout", safe)
+				totalBytesSent += len(safe)
+			}
 		}
 
 		// Check container phase via List with label filter.
@@ -465,7 +488,7 @@ func (e *WorkflowExecutor) pollContainerUntilDone(
 			// Wait two consecutive misses before treating as done.
 			goneCount++
 			if goneCount >= 2 {
-				break
+				return 0, errContainerVanished
 			}
 			continue
 		}
@@ -476,7 +499,11 @@ func (e *WorkflowExecutor) pollContainerUntilDone(
 			// Drain remaining logs using the same offset.
 			finalLogs, _ := e.rt.GetLogs(runCtx, containerID)
 			if len(finalLogs) > totalBytesSent {
-				e.sendLogEvent(connName, runID, "stdout", finalLogs[totalBytesSent:])
+				safe := trimIncompleteUTF8Tail(finalLogs[totalBytesSent:])
+				if safe != "" {
+					e.sendLogEvent(connName, runID, "stdout", safe)
+					totalBytesSent += len(safe)
+				}
 			}
 			// Use structured inspection to preserve raw exit code
 			// (quack 0=success / 1=CLI error / 2=workflow failure semantics).
@@ -542,6 +569,11 @@ func (e *WorkflowExecutor) sendOutputEvent(connName, runID string, exitCode int,
 	e.sendEvent(connName, wsprotocol.EventWorkflowOutput, payload)
 }
 
+// resultJSONMaxBytes caps how much of quack's stdout is inlined into the
+// workflow_output event. Larger runs will upload stdout to blob storage
+// instead (tracked as follow-up #6).
+const resultJSONMaxBytes = 256 << 10 // 256 KB cap on inlined stdout
+
 // Inlined-trace size limits. Files above traceFileMaxBytes are skipped
 // (they belong in blob storage); aggregate bytes above traceAggregateMaxBytes
 // stop consumption of further trace files for this run.
@@ -599,6 +631,42 @@ func readTraceFiles(traceDir string, log *slog.Logger) string {
 		return ""
 	}
 	return string(out)
+}
+
+// trimIncompleteUTF8Tail returns the prefix of s that ends at a complete
+// UTF-8 rune boundary. A trailing byte that begins a multi-byte sequence
+// without its full continuation is dropped so the Hub never receives
+// invalid UTF-8. The trimmed tail is available on the next poll.
+// Trims at most 3 bytes (UTF-8 max continuation length).
+func trimIncompleteUTF8Tail(s string) string {
+	if len(s) == 0 {
+		return s
+	}
+	// Walk back from the end up to 3 bytes to find the start of the last rune.
+	// i is the candidate rune-start position (0-indexed).
+	for i := len(s) - 1; i >= 0 && i >= len(s)-4; i-- {
+		b := s[i]
+		if !utf8.RuneStart(b) {
+			// Continuation byte; keep walking back.
+			continue
+		}
+		// b is a rune start byte. Check whether the rune starting at i is
+		// fully encoded within s.
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 && b >= 0x80 {
+			// b is a non-ASCII start byte but the sequence is malformed or
+			// incomplete: trim at i.
+			return s[:i]
+		}
+		if i+size == len(s) {
+			// The rune is complete and ends exactly at the string boundary.
+			return s
+		}
+		// The rune extends past the end of s (truncated): trim at i.
+		return s[:i]
+	}
+	// All bytes walked were continuation bytes with no start found: drop them all.
+	return ""
 }
 
 // ptrStr returns a pointer to a string.
