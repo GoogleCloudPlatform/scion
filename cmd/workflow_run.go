@@ -198,24 +198,14 @@ func runWorkflowRunViaHub(cmd *cobra.Command, file string) error {
 		return fmt.Errorf("opening log stream: %w", err)
 	}
 
-	finalStatus := run.Status
-	for evt := range ch {
-		if evt.Event == "terminal" {
-			finalStatus = evt.Status
-			break
-		}
-		// Suppress empty lines and control events.
-		if evt.Line != "" {
-			ts := evt.TS
-			if ts == "" {
-				ts = "-"
-			}
-			stream := evt.Stream
-			if stream == "" {
-				stream = "stdout"
-			}
-			fmt.Printf("[%s] [%s] %s\n", ts, stream, evt.Line)
-		}
+	jsonOut := isJSONOutput()
+	terminalStatus, err := streamWorkflowLogs(ctx, ch, run.ID, false, jsonOut)
+	if err != nil {
+		return fmt.Errorf("streaming logs: %w", err)
+	}
+	finalStatus := terminalStatus
+	if finalStatus == "" {
+		finalStatus = run.Status
 	}
 
 	// Map final status to exit code.
