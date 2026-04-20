@@ -174,6 +174,19 @@ func (f *fakeRuntime) GetLogsSince(ctx context.Context, id string, since time.Ti
 	return f.GetLogs(ctx, id)
 }
 
+func (f *fakeRuntime) Inspect(ctx context.Context, id string) (scionrt.ContainerState, error) {
+	f.mu.Lock()
+	phase := f.Phase
+	f.mu.Unlock()
+	// Return a ContainerState consistent with the current phase.
+	// For "error" phase, return exit code 1 to satisfy non-zero exit assertions.
+	exitCode := 0
+	if phase == "error" {
+		exitCode = 1
+	}
+	return scionrt.ContainerState{Phase: phase, ExitCode: exitCode}, nil
+}
+
 func (f *fakeRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
 	f.mu.Lock()
 	phase := f.Phase

@@ -1740,6 +1740,30 @@ func (r *KubernetesRuntime) GetLogsSince(ctx context.Context, id string, since t
 	return string(data), nil
 }
 
+func (r *KubernetesRuntime) Inspect(ctx context.Context, id string) (ContainerState, error) {
+	namespace := r.DefaultNamespace
+	podName := id
+	if strings.Contains(id, "/") {
+		parts := strings.SplitN(id, "/", 2)
+		namespace = parts[0]
+		podName = parts[1]
+	} else {
+		namespace = r.resolveNamespace(ctx, podName)
+	}
+	pod, err := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return ContainerState{}, err
+	}
+	st := ContainerState{Phase: phaseFromContainerStatus(string(pod.Status.Phase))}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.State.Terminated != nil {
+			st.ExitCode = int(cs.State.Terminated.ExitCode)
+			break
+		}
+	}
+	return st, nil
+}
+
 func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 	podName := id
 	namespace := r.DefaultNamespace

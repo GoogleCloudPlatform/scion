@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -834,4 +835,21 @@ func phaseFromContainerStatus(status string) string {
 	default:
 		return "created"
 	}
+}
+
+// parseInspectOutput parses the output of a runtime inspect command formatted
+// as "<status> <exitCode>" (e.g. "exited 2") into a ContainerState.
+// Used by Docker, Podman, and Apple Container Inspect implementations.
+func parseInspectOutput(raw string) ContainerState {
+	fields := strings.Fields(strings.TrimSpace(raw))
+	st := ContainerState{}
+	if len(fields) >= 1 {
+		st.Phase = phaseFromContainerStatus(fields[0])
+	}
+	if len(fields) >= 2 {
+		if n, err := strconv.Atoi(fields[1]); err == nil {
+			st.ExitCode = n
+		}
+	}
+	return st
 }

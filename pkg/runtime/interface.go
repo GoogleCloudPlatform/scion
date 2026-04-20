@@ -52,6 +52,14 @@ type RunConfig struct {
 	NetworkMode          string   // Container network mode (e.g. "host" for --network=host)
 }
 
+// ContainerState captures terminal state of a container from structured
+// runtime metadata (docker inspect, k8s PodStatus, etc.) rather than from
+// parsing human-readable status strings.
+type ContainerState struct {
+	Phase    string // mapped phase: running, stopped, error, ...
+	ExitCode int    // raw exit code; 0 if non-terminal or unknown
+}
+
 type Runtime interface {
 	Name() string
 	Run(ctx context.Context, config RunConfig) (string, error)
@@ -62,6 +70,9 @@ type Runtime interface {
 	// GetLogsSince returns logs appended since the given timestamp.
 	// If since is zero, returns all logs (equivalent to GetLogs).
 	GetLogsSince(ctx context.Context, id string, since time.Time) (string, error)
+	// Inspect returns structured state for a container using runtime-native
+	// metadata. Prefer this to parsing List output when you need the raw exit code.
+	Inspect(ctx context.Context, id string) (ContainerState, error)
 	Attach(ctx context.Context, id string) error
 	ImageExists(ctx context.Context, image string) (bool, error)
 	PullImage(ctx context.Context, image string) error

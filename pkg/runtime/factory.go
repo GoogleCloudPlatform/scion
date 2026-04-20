@@ -173,6 +173,10 @@ func (e *ErrorRuntime) GetLogsSince(ctx context.Context, id string, since time.T
 	return "", e.Err
 }
 
+func (e *ErrorRuntime) Inspect(ctx context.Context, id string) (ContainerState, error) {
+	return ContainerState{}, e.Err
+}
+
 func (e *ErrorRuntime) Attach(ctx context.Context, id string) error {
 	return e.Err
 }

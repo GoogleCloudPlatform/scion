@@ -71,6 +71,7 @@ type workflowRuntime interface {
 	Delete(ctx context.Context, id string) error
 	GetLogs(ctx context.Context, id string) (string, error)
 	GetLogsSince(ctx context.Context, id string, since time.Time) (string, error)
+	Inspect(ctx context.Context, id string) (scionrt.ContainerState, error)
 	List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error)
 }
 
@@ -405,12 +406,12 @@ func (e *WorkflowExecutor) executeRun(ctx context.Context, connName string, req 
 // log bytes to the Hub as workflow_log events. It exits when the container
 // reaches a terminal phase (stopped/error) or either context is done.
 //
-// Log streaming choice: option (a) — polling GetLogs snapshot, diffing
-// against previous length. This avoids needing a streaming helper not exposed
-// by the Runtime interface and works uniformly across Docker, Apple, and K8s.
+// Log streaming choice: GetLogs + totalBytesSent offset. This approach captures
+// all logs from container start (no startup log loss) and never re-sends bytes
+// (no duplication). Works uniformly across Docker, Apple, and K8s.
 //
-// Returns the inferred exit code (0 = success, 1 = flow failure) and any
-// non-context error encountered during polling.
+// Returns the raw exit code (preserving quack semantics: 0=success,
+// 1=CLI error, 2=workflow failure) and any non-context error during polling.
 func (e *WorkflowExecutor) pollContainerUntilDone(
 	runCtx context.Context,
 	cancelCtx context.Context,
@@ -420,10 +421,7 @@ func (e *WorkflowExecutor) pollContainerUntilDone(
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	// logSince is set before the container starts; only logs from this point
-	// forward are fetched, reducing data transfer for long-running workflows.
-	logSince := time.Now()
-	prevWindowLen := 0 // bytes already sent from the current --since window
+	totalBytesSent := 0
 	exitCode := 0
 	goneCount := 0
 
@@ -436,28 +434,18 @@ func (e *WorkflowExecutor) pollContainerUntilDone(
 		case <-ticker.C:
 		}
 
-		// Fetch logs since the current window start (O(1) amortized vs O(N²)).
-		windowLogs, err := e.rt.GetLogsSince(runCtx, containerID, logSince)
+		allLogs, err := e.rt.GetLogs(runCtx, containerID)
 		if err != nil {
 			if runCtx.Err() != nil || cancelCtx.Err() != nil {
 				return 0, nil
 			}
-			log.Debug("WorkflowExecutor: GetLogsSince transient error", "error", err)
-			// Continue polling; container may be briefly unavailable.
+			log.Debug("WorkflowExecutor: GetLogs transient error", "error", err)
 			continue
 		}
 
-		// Forward only bytes we haven't sent yet (handles --since boundary overlap).
-		if len(windowLogs) > prevWindowLen {
-			e.sendLogEvent(connName, runID, "stdout", windowLogs[prevWindowLen:])
-			prevWindowLen = len(windowLogs)
-		}
-
-		// Advance the since window periodically to reduce data transfer.
-		// 1-second overlap prevents missing logs at the second boundary.
-		if prevWindowLen > 0 {
-			logSince = time.Now().Add(-time.Second)
-			prevWindowLen = 0
+		if len(allLogs) > totalBytesSent {
+			e.sendLogEvent(connName, runID, "stdout", allLogs[totalBytesSent:])
+			totalBytesSent = len(allLogs)
 		}
 
 		// Check container phase via List with label filter.
@@ -485,15 +473,16 @@ func (e *WorkflowExecutor) pollContainerUntilDone(
 
 		phase := agents[0].Phase
 		if phase == "stopped" || phase == "error" || phase == scionrt.LegacyAgentPhaseEnded {
-			// Drain remaining logs using the advancing window.
-			finalLogs, _ := e.rt.GetLogsSince(runCtx, containerID, logSince)
-			if len(finalLogs) > prevWindowLen {
-				e.sendLogEvent(connName, runID, "stdout", finalLogs[prevWindowLen:])
+			// Drain remaining logs using the same offset.
+			finalLogs, _ := e.rt.GetLogs(runCtx, containerID)
+			if len(finalLogs) > totalBytesSent {
+				e.sendLogEvent(connName, runID, "stdout", finalLogs[totalBytesSent:])
 			}
-			// Map phase to exit code: "error" phase means the container exited
-			// non-zero. The runtime does not expose the raw exit code via AgentInfo,
-			// so we use 1 as a conservative non-zero indicator.
-			if phase == "error" {
+			// Use structured inspection to preserve raw exit code
+			// (quack 0=success / 1=CLI error / 2=workflow failure semantics).
+			if st, ierr := e.rt.Inspect(runCtx, containerID); ierr == nil {
+				exitCode = st.ExitCode
+			} else if phase == "error" {
 				exitCode = 1
 			}
 			break

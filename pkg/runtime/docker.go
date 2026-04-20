@@ -215,6 +215,14 @@ func (r *DockerRuntime) GetLogsSince(ctx context.Context, id string, since time.
 	return runSimpleCommand(ctx, r.Command, "logs", "--since", since.UTC().Format(time.RFC3339), id)
 }
 
+func (r *DockerRuntime) Inspect(ctx context.Context, id string) (ContainerState, error) {
+	out, err := runSimpleCommand(ctx, r.Command, "inspect", "--format", "{{.State.Status}} {{.State.ExitCode}}", id)
+	if err != nil {
+		return ContainerState{}, err
+	}
+	return parseInspectOutput(out), nil
+}
+
 func (r *DockerRuntime) Attach(ctx context.Context, id string) error {
 	// We need to find the container first to handle names properly
 	agents, err := r.List(ctx, nil)

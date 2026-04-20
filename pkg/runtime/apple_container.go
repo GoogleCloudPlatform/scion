@@ -231,6 +231,24 @@ func (r *AppleContainerRuntime) GetLogsSince(ctx context.Context, id string, sin
 	return runSimpleCommand(ctx, r.Command, "logs", "--since", since.UTC().Format(time.RFC3339), id)
 }
 
+// Inspect returns structured state for the container. The Apple Container CLI
+// does not support Go template formatting for inspect, so we fall back to
+// List() to find the matching container and return a ContainerState with the
+// mapped phase. The ExitCode is always 0 because the Apple runtime does not
+// expose raw exit codes via its list output.
+func (r *AppleContainerRuntime) Inspect(ctx context.Context, id string) (ContainerState, error) {
+	agents, err := r.List(ctx, nil)
+	if err != nil {
+		return ContainerState{}, err
+	}
+	for _, a := range agents {
+		if a.ContainerID == id || a.Name == id || strings.TrimPrefix(a.Name, "/") == id {
+			return ContainerState{Phase: a.Phase, ExitCode: 0}, nil
+		}
+	}
+	return ContainerState{}, fmt.Errorf("container %s not found", id)
+}
+
 func (r *AppleContainerRuntime) Attach(ctx context.Context, id string) error {
 	// 1. Find container to check for tmux label
 	agents, err := r.List(ctx, nil)
