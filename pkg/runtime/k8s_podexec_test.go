@@ -75,7 +75,7 @@ func TestPodExec_TargetsAgentContainer(t *testing.T) {
 			name: "Exec",
 			opts: &corev1.PodExecOptions{
 				Container: agentContainerName,
-				Command:   []string{"su", "-", "scion", "-c", "echo hi"},
+				Command:   ExecAsUserCmd("scion", "echo hi"),
 				Stdout:    true,
 				Stderr:    true,
 			},
