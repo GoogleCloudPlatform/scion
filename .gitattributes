@@ -1,0 +1,6 @@
+# Mark Ent-generated code so GitHub collapses it in diffs and excludes
+# it from language stats. The schema files (pkg/ent/schema/**) are
+# hand-written and intentionally left out of this rule. Regenerate with:
+#   go generate ./pkg/ent/...
+pkg/ent/*.go     linguist-generated=true
+pkg/ent/*/*.go   linguist-generated=true
