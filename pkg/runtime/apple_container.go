@@ -18,9 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -48,11 +46,14 @@ func (r *AppleContainerRuntime) ExecUser() string {
 
 func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (string, error) {
 	// Stage file, variable, and secret-map secrets before building args
+	var secretMountSpecs []string
 	if config.HomeDir != "" && len(config.ResolvedSecrets) > 0 {
 		containerHome := util.GetHomeDir(config.UnixUsername)
-		if _, err := writeFileSecrets(config.HomeDir, containerHome, config.ResolvedSecrets); err != nil {
+		mounts, err := writeFileSecrets(config.HomeDir, containerHome, config.ResolvedSecrets)
+		if err != nil {
 			return "", fmt.Errorf("failed to stage file secrets: %w", err)
 		}
+		secretMountSpecs = mounts
 		if err := writeVariableSecrets(config.HomeDir, config.ResolvedSecrets); err != nil {
 			return "", fmt.Errorf("failed to write variable secrets: %w", err)
 		}
@@ -65,6 +66,15 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 	if credPath := findGCPTelemetryCredentialPath(config.ResolvedSecrets, util.GetHomeDir(config.UnixUsername)); credPath != "" {
 		config.Env = append(config.Env, telemetryGCPCredentialsEnvVar+"="+credPath)
 	}
+
+	// Apple container runtime does not support Linux capabilities (--cap-add NET_ADMIN),
+	// so iptables-based metadata traffic interception is not available. Disable it here
+	// to avoid a fatal unsupported-flag error at container startup. Apps that honour the
+	// GCE_METADATA_HOST / GCE_METADATA_ROOT environment variables (already injected by
+	// the broker for assign/block modes) will still reach the scion metadata server;
+	// only apps that bypass those variables and hardcode metadata.google.internal will
+	// not be intercepted.
+	config.MetadataInterception = false
 
 	args, err := buildCommonRunArgs(config)
 	if err != nil {
@@ -109,13 +119,10 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 	// Skip the original 'run', '-d', and '-i' from buildCommonRunArgs (indices 0, 1, 2)
 	newArgs = append(newArgs, args[3:]...)
 
-	// Insert secrets staging directory volume before the image so it is treated
-	// as a container flag rather than an argument to the container command.
-	if config.HomeDir != "" && len(config.ResolvedSecrets) > 0 {
-		secretsDir := filepath.Join(filepath.Dir(config.HomeDir), "secrets")
-		if _, err := os.Stat(secretsDir); err == nil {
-			newArgs = insertVolumeFlags(newArgs, config.Image, []string{secretsDir + ":/run/scion-secrets:ro"})
-		}
+	// Insert file secret bind-mounts before the image so they are treated as
+	// container flags rather than arguments to the container command.
+	if len(secretMountSpecs) > 0 {
+		newArgs = insertVolumeFlags(newArgs, config.Image, secretMountSpecs)
 	}
 
 	WriteRuntimeDebugFile(config, r.Command, newArgs)
