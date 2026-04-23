@@ -549,11 +549,13 @@ func TestDetectHarnessFromConfig_NameBased(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Use an empty temp dir so config loading returns empty config
 			dir := t.TempDir()
 			got := detectHarnessFromConfig(dir, tt.name)
-			if got != tt.expected {
-				t.Errorf("detectHarnessFromConfig(%q, %q) = %q, want %q", dir, tt.name, got, tt.expected)
+			if got.Harness != tt.expected {
+				t.Errorf("detectHarnessFromConfig(%q, %q).Harness = %q, want %q", dir, tt.name, got.Harness, tt.expected)
+			}
+			if got.DefaultHarnessConfig != "" {
+				t.Errorf("expected empty DefaultHarnessConfig for name-based, got %q", got.DefaultHarnessConfig)
 			}
 		})
 	}
@@ -562,7 +564,6 @@ func TestDetectHarnessFromConfig_NameBased(t *testing.T) {
 func TestDetectHarnessFromConfig_FromConfigFile(t *testing.T) {
 	dir := t.TempDir()
 
-	// Write a scion-agent.yaml with a harness_config field
 	configContent := `harness_config: claude
 `
 	if err := os.WriteFile(filepath.Join(dir, "scion-agent.yaml"), []byte(configContent), 0644); err != nil {
@@ -570,23 +571,29 @@ func TestDetectHarnessFromConfig_FromConfigFile(t *testing.T) {
 	}
 
 	got := detectHarnessFromConfig(dir, "my-template")
-	if got != "claude" {
-		t.Errorf("expected 'claude' from config, got %q", got)
+	if got.Harness != "claude" {
+		t.Errorf("expected Harness 'claude' from config, got %q", got.Harness)
+	}
+	if got.DefaultHarnessConfig != "claude" {
+		t.Errorf("expected DefaultHarnessConfig 'claude', got %q", got.DefaultHarnessConfig)
 	}
 }
 
 func TestDetectHarnessFromConfig_DefaultHarnessConfig(t *testing.T) {
 	dir := t.TempDir()
 
-	configContent := `default_harness_config: gemini
+	configContent := `default_harness_config: gemini-web
 `
 	if err := os.WriteFile(filepath.Join(dir, "scion-agent.yaml"), []byte(configContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	got := detectHarnessFromConfig(dir, "my-template")
-	if got != "gemini" {
-		t.Errorf("expected 'gemini' from config, got %q", got)
+	if got.Harness != "gemini" {
+		t.Errorf("expected Harness 'gemini', got %q", got.Harness)
+	}
+	if got.DefaultHarnessConfig != "gemini-web" {
+		t.Errorf("expected DefaultHarnessConfig 'gemini-web', got %q", got.DefaultHarnessConfig)
 	}
 }
 
@@ -600,8 +607,29 @@ func TestDetectHarnessFromConfig_HarnessField(t *testing.T) {
 	}
 
 	got := detectHarnessFromConfig(dir, "my-template")
-	if got != "codex" {
-		t.Errorf("expected 'codex' from config, got %q", got)
+	if got.Harness != "codex" {
+		t.Errorf("expected Harness 'codex' from config, got %q", got.Harness)
+	}
+	if got.DefaultHarnessConfig != "" {
+		t.Errorf("expected empty DefaultHarnessConfig for explicit harness field, got %q", got.DefaultHarnessConfig)
+	}
+}
+
+func TestDetectHarnessFromConfig_CustomDefaultHarnessConfig(t *testing.T) {
+	dir := t.TempDir()
+
+	configContent := `default_harness_config: adk
+`
+	if err := os.WriteFile(filepath.Join(dir, "scion-agent.yaml"), []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := detectHarnessFromConfig(dir, "my-template")
+	if got.Harness != "" {
+		t.Errorf("expected empty Harness for unknown config name 'adk', got %q", got.Harness)
+	}
+	if got.DefaultHarnessConfig != "adk" {
+		t.Errorf("expected DefaultHarnessConfig 'adk', got %q", got.DefaultHarnessConfig)
 	}
 }
 
@@ -795,5 +823,94 @@ func TestImportTemplatesFromWorkspace_MultipleTemplates(t *testing.T) {
 	}
 	if result.TotalCount != 2 {
 		t.Fatalf("expected 2 templates, got %d", result.TotalCount)
+	}
+}
+
+func TestBootstrapTemplatesFromDir_ImportsDefaultHarnessConfig(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	templatesDir := makeTemplateDir(t, "web-dev", map[string]string{
+		"scion-agent.yaml":                       "default_harness_config: claude-web\n",
+		"harness-configs/claude-web/config.yaml": "harness: claude\n",
+		"harness-configs/gemini-web/config.yaml": "harness: gemini\n",
+	})
+
+	if err := srv.BootstrapTemplatesFromDir(ctx, templatesDir); err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+
+	result, err := s.ListTemplates(ctx, store.TemplateFilter{}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TotalCount != 1 {
+		t.Fatalf("expected 1 template, got %d", result.TotalCount)
+	}
+
+	tmpl := result.Items[0]
+	if tmpl.DefaultHarnessConfig != "claude-web" {
+		t.Errorf("expected DefaultHarnessConfig 'claude-web', got %q", tmpl.DefaultHarnessConfig)
+	}
+	if tmpl.Harness != "claude" {
+		t.Errorf("expected Harness 'claude', got %q", tmpl.Harness)
+	}
+
+	// Verify bundled harness-configs were imported
+	hcResult, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hcResult.TotalCount != 2 {
+		t.Fatalf("expected 2 harness configs imported from template, got %d", hcResult.TotalCount)
+	}
+
+	names := map[string]bool{}
+	for _, hc := range hcResult.Items {
+		names[hc.Name] = true
+	}
+	if !names["claude-web"] {
+		t.Error("expected harness config 'claude-web' to be imported")
+	}
+	if !names["gemini-web"] {
+		t.Error("expected harness config 'gemini-web' to be imported")
+	}
+}
+
+func TestBootstrapTemplatesFromDir_BackfillsDefaultHarnessConfig(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	templatesDir := makeTemplateDir(t, "backfill-tmpl", map[string]string{
+		"scion-agent.yaml":                       "default_harness_config: claude-web\n",
+		"harness-configs/claude-web/config.yaml": "harness: claude\n",
+	})
+
+	// First bootstrap populates DefaultHarnessConfig
+	if err := srv.BootstrapTemplatesFromDir(ctx, templatesDir); err != nil {
+		t.Fatalf("first bootstrap failed: %v", err)
+	}
+
+	// Simulate a pre-migration template by clearing the field in the DB
+	tmpl, err := s.GetTemplateBySlug(ctx, "backfill-tmpl", store.TemplateScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl.DefaultHarnessConfig = ""
+	if err := s.UpdateTemplate(ctx, tmpl); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second bootstrap should backfill despite content hash matching
+	if err := srv.BootstrapTemplatesFromDir(ctx, templatesDir); err != nil {
+		t.Fatalf("second bootstrap failed: %v", err)
+	}
+
+	tmpl, err = s.GetTemplateBySlug(ctx, "backfill-tmpl", store.TemplateScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tmpl.DefaultHarnessConfig != "claude-web" {
+		t.Errorf("expected DefaultHarnessConfig 'claude-web' after backfill, got %q", tmpl.DefaultHarnessConfig)
 	}
 }

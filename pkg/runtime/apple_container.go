@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -107,7 +108,8 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 	}
 
 	// Skip the original 'run', '-d', and '-i' from buildCommonRunArgs (indices 0, 1, 2)
-	newArgs = append(newArgs, args[3:]...)
+	// then strip flags that the Apple container CLI does not support.
+	newArgs = append(newArgs, stripUnsupportedAppleFlags(args[3:])...)
 
 	// Insert secrets staging directory volume before the image so it is treated
 	// as a container flag rather than an argument to the container command.
@@ -284,6 +286,30 @@ func (r *AppleContainerRuntime) Exec(ctx context.Context, id string, cmd []strin
 	}
 	args := append([]string{"exec", "--user", "scion", id}, cmd...)
 	return runSimpleCommand(ctx, r.Command, args...)
+}
+
+// stripUnsupportedAppleFlags removes flag-value pairs that the Apple
+// `container` CLI does not recognise (e.g. --cap-add, --device, --mount,
+// --add-host, --network). These are Docker/Podman-specific and cause the
+// Apple runtime to exit with "Unknown option".
+func stripUnsupportedAppleFlags(args []string) []string {
+	unsupported := map[string]bool{
+		"--cap-add":  true,
+		"--device":   true,
+		"--mount":    true,
+		"--add-host": true,
+		"--network":  true,
+	}
+	var out []string
+	for i := 0; i < len(args); i++ {
+		if unsupported[args[i]] {
+			slog.Warn("stripping unsupported flag for Apple container runtime", "flag", args[i], "value", args[i+1])
+			i++ // skip the value
+			continue
+		}
+		out = append(out, args[i])
+	}
+	return out
 }
 
 // GetWorkspacePath returns the host path to the container's /workspace mount.

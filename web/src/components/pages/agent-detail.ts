@@ -1379,7 +1379,7 @@ export class ScionPageAgentDetail extends LitElement {
           ${harness
             ? html`
                 <div class="info-item">
-                  <span class="info-label">Harness</span>
+                  <span class="info-label">Harness Config</span>
                   <span class="info-value">${harness}</span>
                 </div>
               `

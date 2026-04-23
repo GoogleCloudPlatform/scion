@@ -125,6 +125,18 @@
   --scion-status-danger: var(--scion-danger-500);
   --scion-status-info: var(--scion-primary-500);
 
+  /* Status badge colors (light mode) */
+  --scion-badge-success-bg: var(--scion-success-100);
+  --scion-badge-success-text: var(--scion-success-800);
+  --scion-badge-warning-bg: var(--scion-warning-100);
+  --scion-badge-warning-text: var(--scion-warning-800);
+  --scion-badge-danger-bg: var(--scion-danger-100);
+  --scion-badge-danger-text: var(--scion-danger-800);
+  --scion-badge-primary-bg: var(--scion-primary-100);
+  --scion-badge-primary-text: var(--scion-primary-800);
+  --scion-badge-neutral-bg: var(--scion-neutral-200);
+  --scion-badge-neutral-text: var(--scion-neutral-800);
+
   /* Shadows */
   --scion-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
   --scion-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
@@ -309,6 +321,18 @@
   --scion-status-danger: var(--scion-danger-400);
   --scion-status-info: var(--scion-primary-400);
 
+  /* Status badge colors (dark mode) */
+  --scion-badge-success-bg: rgba(34, 197, 94, 0.2);
+  --scion-badge-success-text: #86efac;
+  --scion-badge-warning-bg: rgba(245, 158, 11, 0.2);
+  --scion-badge-warning-text: #fcd34d;
+  --scion-badge-danger-bg: rgba(239, 68, 68, 0.2);
+  --scion-badge-danger-text: #fca5a5;
+  --scion-badge-primary-bg: rgba(59, 130, 246, 0.2);
+  --scion-badge-primary-text: #93c5fd;
+  --scion-badge-neutral-bg: rgba(100, 116, 139, 0.2);
+  --scion-badge-neutral-text: #cbd5e1;
+
   /* Shadows - stronger opacity for dark mode */
   --scion-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
   --scion-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.4), 0 1px 2px -1px rgb(0 0 0 / 0.4);
@@ -394,5 +418,17 @@
     /* Shoelace extreme-end neutrals */
     --sl-color-neutral-0: var(--scion-neutral-800);
     --sl-color-neutral-1000: var(--scion-neutral-50);
+
+    /* Status badge colors */
+    --scion-badge-success-bg: rgba(34, 197, 94, 0.2);
+    --scion-badge-success-text: #86efac;
+    --scion-badge-warning-bg: rgba(245, 158, 11, 0.2);
+    --scion-badge-warning-text: #fcd34d;
+    --scion-badge-danger-bg: rgba(239, 68, 68, 0.2);
+    --scion-badge-danger-text: #fca5a5;
+    --scion-badge-primary-bg: rgba(59, 130, 246, 0.2);
+    --scion-badge-primary-text: #93c5fd;
+    --scion-badge-neutral-bg: rgba(100, 116, 139, 0.2);
+    --scion-badge-neutral-text: #cbd5e1;
   }
 }

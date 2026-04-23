@@ -100,6 +100,7 @@ func testTemplateFileServer(t *testing.T) (*Server, store.Store, *contentMockSto
 	}
 
 	cfg := DefaultServerConfig()
+	cfg.DevAuthToken = testDevToken
 	srv, err := New(cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
@@ -164,6 +165,7 @@ func TestHandleTemplateFileList(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/templates/"+tmpl.ID+"/files", nil)
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -198,6 +200,7 @@ func TestHandleTemplateFileRead(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/templates/"+tmpl.ID+"/files/CLAUDE.md", nil)
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -229,6 +232,7 @@ func TestHandleTemplateFileRead_NotFound(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/templates/"+tmpl.ID+"/files/nonexistent.md", nil)
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -249,6 +253,7 @@ func TestHandleTemplateFileWrite(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/"+tmpl.ID+"/files/CLAUDE.md",
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -296,6 +301,7 @@ func TestHandleTemplateFileWrite_NewFile(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/"+tmpl.ID+"/files/home/.bashrc",
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -331,6 +337,7 @@ func TestHandleTemplateFileWrite_LockedTemplate(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/"+tmpl.ID+"/files/CLAUDE.md",
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -350,6 +357,7 @@ func TestHandleTemplateFileWrite_ConflictHash(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/tmpl-test-1/files/CLAUDE.md",
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -368,6 +376,7 @@ func TestHandleTemplateFileDelete(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/templates/"+tmpl.ID+"/files/home/.bashrc", nil)
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -407,6 +416,7 @@ func TestHandleTemplateFileDelete_LockedTemplate(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/templates/"+tmpl.ID+"/files/CLAUDE.md", nil)
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -423,6 +433,7 @@ func TestHandleTemplateFileDelete_NotFound(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/templates/tmpl-test-1/files/nonexistent.md", nil)
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -452,6 +463,7 @@ func templateMultipartRequest(t *testing.T, templateID string, files map[string]
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates/"+templateID+"/files", &buf)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
 	return req
 }
 
@@ -580,6 +592,7 @@ func TestHandleTemplateFileUpload_NoFiles(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/files", &buf)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -626,5 +639,181 @@ func TestHandleTemplateFileUpload_OverwriteExisting(t *testing.T) {
 	stored := stor.content[tmpl.StoragePath+"/CLAUDE.md"]
 	if string(stored) != "# New Content" {
 		t.Errorf("unexpected stored content: %s", string(stored))
+	}
+}
+
+func TestDetectHarnessFromContent(t *testing.T) {
+	tests := []struct {
+		name         string
+		content      string
+		templateName string
+		wantHarness  string
+		wantConfig   string
+	}{
+		{
+			name:         "harness_config field",
+			content:      "harness_config: claude-web\n",
+			templateName: "my-template",
+			wantHarness:  "claude",
+			wantConfig:   "claude-web",
+		},
+		{
+			name:         "default_harness_config field",
+			content:      "default_harness_config: gemini-web\n",
+			templateName: "my-template",
+			wantHarness:  "gemini",
+			wantConfig:   "gemini-web",
+		},
+		{
+			name:         "hyphenated keys normalized",
+			content:      "default-harness-config: gemini-pro\n",
+			templateName: "my-template",
+			wantHarness:  "gemini",
+			wantConfig:   "gemini-pro",
+		},
+		{
+			name:         "legacy harness field",
+			content:      "harness: codex\n",
+			templateName: "my-template",
+			wantHarness:  "codex",
+			wantConfig:   "",
+		},
+		{
+			name:         "falls back to template name",
+			content:      "env:\n  FOO: bar\n",
+			templateName: "claude-default",
+			wantHarness:  "claude",
+			wantConfig:   "",
+		},
+		{
+			name:         "no match returns empty",
+			content:      "env:\n  FOO: bar\n",
+			templateName: "custom",
+			wantHarness:  "",
+			wantConfig:   "",
+		},
+		{
+			name:         "harness_config takes priority over default_harness_config",
+			content:      "harness_config: claude-web\ndefault_harness_config: gemini-web\n",
+			templateName: "my-template",
+			wantHarness:  "claude",
+			wantConfig:   "claude-web",
+		},
+		{
+			name:         "invalid yaml falls back to template name",
+			content:      ": invalid: yaml: [",
+			templateName: "gemini-template",
+			wantHarness:  "gemini",
+			wantConfig:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := detectHarnessFromContent([]byte(tt.content), tt.templateName)
+			if got.Harness != tt.wantHarness {
+				t.Errorf("detectHarnessFromContent().Harness = %q, want %q", got.Harness, tt.wantHarness)
+			}
+			if got.DefaultHarnessConfig != tt.wantConfig {
+				t.Errorf("detectHarnessFromContent().DefaultHarnessConfig = %q, want %q", got.DefaultHarnessConfig, tt.wantConfig)
+			}
+		})
+	}
+}
+
+func TestHandleTemplateFileWrite_UpdatesHarness(t *testing.T) {
+	srv, s, stor := testTemplateFileServer(t)
+	ctx := context.Background()
+
+	tmpl := createTestTemplate(t, s, stor, map[string]string{
+		"scion-agent.yaml": "harness_config: claude\n",
+	})
+
+	// Write a new scion-agent.yaml that changes the harness
+	body := `{"content": "default_harness_config: gemini-web\n"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/"+tmpl.ID+"/files/scion-agent.yaml",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	updated, err := s.GetTemplate(ctx, tmpl.ID)
+	if err != nil {
+		t.Fatalf("failed to get updated template: %v", err)
+	}
+	if updated.Harness != "gemini" {
+		t.Errorf("expected harness 'gemini', got %q", updated.Harness)
+	}
+	if updated.DefaultHarnessConfig != "gemini-web" {
+		t.Errorf("expected defaultHarnessConfig 'gemini-web', got %q", updated.DefaultHarnessConfig)
+	}
+}
+
+func TestHandleTemplateFileWrite_NonConfigFileDoesNotChangeHarness(t *testing.T) {
+	srv, s, stor := testTemplateFileServer(t)
+	ctx := context.Background()
+
+	tmpl := createTestTemplate(t, s, stor, map[string]string{
+		"CLAUDE.md": "# Agent",
+	})
+
+	body := `{"content": "default_harness_config: gemini\n"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/"+tmpl.ID+"/files/CLAUDE.md",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	updated, err := s.GetTemplate(ctx, tmpl.ID)
+	if err != nil {
+		t.Fatalf("failed to get updated template: %v", err)
+	}
+	if updated.Harness != "claude" {
+		t.Errorf("expected harness to remain 'claude', got %q", updated.Harness)
+	}
+}
+
+func TestHandleTemplateFileDelete_ResetsHarness(t *testing.T) {
+	srv, s, stor := testTemplateFileServer(t)
+	ctx := context.Background()
+
+	tmpl := createTestTemplate(t, s, stor, map[string]string{
+		"scion-agent.yaml": "default_harness_config: gemini-web\n",
+		"CLAUDE.md":        "# Agent",
+	})
+
+	// Update harness to match config file
+	tmpl.Harness = "gemini"
+	if err := s.UpdateTemplate(ctx, tmpl); err != nil {
+		t.Fatalf("failed to update template: %v", err)
+	}
+
+	// Delete the config file
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/templates/"+tmpl.ID+"/files/scion-agent.yaml", nil)
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", w.Code, w.Body.String())
+	}
+
+	updated, err := s.GetTemplate(ctx, tmpl.ID)
+	if err != nil {
+		t.Fatalf("failed to get updated template: %v", err)
+	}
+	// Template name is "test-template" which doesn't match any known harness
+	if updated.Harness != "" {
+		t.Errorf("expected empty harness after config deletion, got %q", updated.Harness)
 	}
 }

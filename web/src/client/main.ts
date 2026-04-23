@@ -20,10 +20,19 @@
  * Handles client-side routing and real-time state management via SSE.
  */
 
+import themeCSS from '../styles/theme.css?inline';
 import type { PageData, User } from '../shared/types.js';
 import { stateManager } from './state.js';
 import { debugLog } from './debug-log.js';
 import { setDocumentTitle } from './page-title.js';
+
+// Inject theme CSS so it loads regardless of whether the page is served by
+// the Vite dev server (index.html) or the Go SPA shell template (web.go).
+{
+  const style = document.createElement('style');
+  style.textContent = themeCSS;
+  document.head.appendChild(style);
+}
 
 // Import Shoelace base path config (needed for icons).
 // Icons are copied to public/shoelace/ by scripts/copy-shoelace-icons.mjs

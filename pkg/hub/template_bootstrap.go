@@ -130,7 +130,23 @@ func (s *Server) syncExistingTemplate(ctx context.Context, existing *store.Templ
 				Mode: fi.Mode,
 			})
 		}
-		if computeContentHash(preview) == existing.ContentHash {
+		hashMatch := computeContentHash(preview) == existing.ContentHash
+
+		// Even when content hasn't changed, backfill DefaultHarnessConfig
+		// for templates imported before that field existed.
+		if hashMatch && existing.DefaultHarnessConfig == "" {
+			cfgInfo := detectHarnessFromConfig(templatePath, existing.Name)
+			if cfgInfo.DefaultHarnessConfig != "" {
+				existing.DefaultHarnessConfig = cfgInfo.DefaultHarnessConfig
+				existing.Harness = cfgInfo.Harness
+				_ = s.store.UpdateTemplate(ctx, existing)
+				s.importTemplateHarnessConfigs(ctx, templatePath, existing.Scope, existing.ScopeID)
+				s.templateLog.Info("template bootstrap: backfilled defaultHarnessConfig",
+					"template", existing.Name, "defaultHarnessConfig", cfgInfo.DefaultHarnessConfig)
+			}
+		}
+
+		if hashMatch {
 			return false, nil
 		}
 	}
@@ -197,11 +213,16 @@ func (s *Server) syncExistingTemplate(ctx context.Context, existing *store.Templ
 	// Update the database record with new files and hash
 	existing.Files = uploadedFiles
 	existing.ContentHash = newHash
-	existing.Harness = detectHarnessFromConfig(templatePath, existing.Name)
+	cfgInfo := detectHarnessFromConfig(templatePath, existing.Name)
+	existing.Harness = cfgInfo.Harness
+	existing.DefaultHarnessConfig = cfgInfo.DefaultHarnessConfig
 
 	if err := s.store.UpdateTemplate(ctx, existing); err != nil {
 		return false, err
 	}
+
+	// Re-import any harness-configs bundled inside the template
+	s.importTemplateHarnessConfigs(ctx, templatePath, existing.Scope, existing.ScopeID)
 
 	return changed, nil
 }
@@ -218,26 +239,27 @@ func (s *Server) bootstrapSingleTemplate(ctx context.Context, name, templatePath
 		return err
 	}
 
-	// Detect harness type from the template config
-	harness := detectHarnessFromConfig(templatePath, name)
+	// Detect harness type and default harness config from the template config
+	cfgInfo := detectHarnessFromConfig(templatePath, name)
 
 	slug := api.Slugify(name)
 
 	// Create a pending template record
 	storagePath := storage.TemplateStoragePath(scope, groveID, slug)
 	tmpl := &store.Template{
-		ID:            api.NewUUID(),
-		Name:          name,
-		Slug:          slug,
-		Harness:       harness,
-		Scope:         scope,
-		ScopeID:       groveID,
-		GroveID:       groveID, // deprecated alias kept for compatibility
-		Status:        store.TemplateStatusPending,
-		StoragePath:   storagePath,
-		StorageBucket: stor.Bucket(),
-		StorageURI:    storage.TemplateStorageURI(stor.Bucket(), scope, groveID, slug),
-		Visibility:    store.VisibilityPrivate,
+		ID:                   api.NewUUID(),
+		Name:                 name,
+		Slug:                 slug,
+		Harness:              cfgInfo.Harness,
+		DefaultHarnessConfig: cfgInfo.DefaultHarnessConfig,
+		Scope:                scope,
+		ScopeID:              groveID,
+		GroveID:              groveID, // deprecated alias kept for compatibility
+		Status:               store.TemplateStatusPending,
+		StoragePath:          storagePath,
+		StorageBucket:        stor.Bucket(),
+		StorageURI:           storage.TemplateStorageURI(stor.Bucket(), scope, groveID, slug),
+		Visibility:           store.VisibilityPrivate,
 	}
 
 	if err := s.store.CreateTemplate(ctx, tmpl); err != nil {
@@ -283,31 +305,48 @@ func (s *Server) bootstrapSingleTemplate(ctx context.Context, name, templatePath
 	}
 
 	s.templateLog.Info("template bootstrap: imported template",
-		"name", name, "files", len(templateFiles), "harness", harness)
+		"name", name, "files", len(templateFiles), "harness", cfgInfo.Harness,
+		"defaultHarnessConfig", cfgInfo.DefaultHarnessConfig)
+
+	// Import any harness-configs bundled inside the template
+	s.importTemplateHarnessConfigs(ctx, templatePath, scope, groveID)
+
 	return nil
 }
 
-// detectHarnessFromConfig reads a template's config and returns the harness type.
-// It checks the ScionConfig fields (HarnessConfig, DefaultHarnessConfig, Harness)
-// and falls back to name-based inference.
-func detectHarnessFromConfig(templatePath, templateName string) string {
+// templateConfigInfo holds the harness type and default harness config name
+// extracted from a template's scion-agent.yaml.
+type templateConfigInfo struct {
+	Harness              string // inferred harness type (claude, gemini, etc.)
+	DefaultHarnessConfig string // actual harness-config name from config (e.g. "claude-web", "adk")
+}
+
+// detectHarnessFromConfig reads a template's config and returns the harness type
+// and the default harness config name. The harness type is inferred from the
+// config name or explicit harness field. The default harness config name preserves
+// the original value from scion-agent.yaml so it can be used for hub resolution.
+func detectHarnessFromConfig(templatePath, templateName string) templateConfigInfo {
 	t := &config.Template{Name: templateName, Path: templatePath}
 	cfg, err := t.LoadConfig()
 	if err == nil && cfg != nil {
-		// Check config fields in priority order
 		if cfg.HarnessConfig != "" {
-			return inferHarnessFromName(cfg.HarnessConfig)
+			return templateConfigInfo{
+				Harness:              inferHarnessFromName(cfg.HarnessConfig),
+				DefaultHarnessConfig: cfg.HarnessConfig,
+			}
 		}
 		if cfg.DefaultHarnessConfig != "" {
-			return inferHarnessFromName(cfg.DefaultHarnessConfig)
+			return templateConfigInfo{
+				Harness:              inferHarnessFromName(cfg.DefaultHarnessConfig),
+				DefaultHarnessConfig: cfg.DefaultHarnessConfig,
+			}
 		}
 		if cfg.Harness != "" {
-			return cfg.Harness
+			return templateConfigInfo{Harness: cfg.Harness}
 		}
 	}
 
-	// Fall back to name-based inference
-	return inferHarnessFromName(templateName)
+	return templateConfigInfo{Harness: inferHarnessFromName(templateName)}
 }
 
 // inferHarnessFromName guesses the harness type from a name string.
@@ -324,6 +363,68 @@ func inferHarnessFromName(name string) string {
 		return "codex"
 	default:
 		return ""
+	}
+}
+
+// importTemplateHarnessConfigs imports harness-configs bundled inside a
+// template's harness-configs/ subdirectory into the Hub's harness-config store.
+// Configs are scoped to match the template's scope (global or grove).
+func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath, scope, scopeID string) {
+	hcDir := filepath.Join(templatePath, "harness-configs")
+	info, err := os.Stat(hcDir)
+	if err != nil || !info.IsDir() {
+		return
+	}
+
+	stor := s.GetStorage()
+	if stor == nil {
+		return
+	}
+
+	entries, err := os.ReadDir(hcDir)
+	if err != nil {
+		return
+	}
+
+	hcScope := store.HarnessConfigScopeGlobal
+	if scope == string(store.TemplateScopeGrove) {
+		hcScope = store.HarnessConfigScopeGrove
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		dirPath := filepath.Join(hcDir, name)
+		slug := api.Slugify(name)
+
+		hcDirCfg, err := config.LoadHarnessConfigDir(dirPath)
+		if err != nil {
+			s.templateLog.Debug("template harness-config import: failed to load config, skipping",
+				"config", name, "error", err)
+			continue
+		}
+
+		existing, err := s.store.GetHarnessConfigBySlug(ctx, slug, hcScope, scopeID)
+		if err != nil && err != store.ErrNotFound {
+			continue
+		}
+
+		if existing == nil {
+			if err := s.bootstrapSingleHarnessConfigScoped(ctx, name, dirPath, hcDirCfg, stor, hcScope, scopeID); err != nil {
+				s.templateLog.Warn("template harness-config import: failed to import, skipping",
+					"config", name, "error", err)
+				continue
+			}
+			s.templateLog.Info("template harness-config import: imported config",
+				"config", name, "harness", hcDirCfg.Config.Harness, "scope", hcScope)
+		} else {
+			if _, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDirCfg, stor); err != nil {
+				s.templateLog.Warn("template harness-config import: failed to sync, skipping",
+					"config", name, "error", err)
+			}
+		}
 	}
 }
 

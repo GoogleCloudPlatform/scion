@@ -719,9 +719,9 @@ export class ScionPageAgentCreate extends LitElement {
   }
 
   /**
-   * Select the default template and harness for the current grove using grove settings.
+   * Select the default template and harness config for the current grove using grove settings.
    * Falls back to a template named "default", then the first available template.
-   * The harness is determined by: template harness > grove defaultHarnessConfig > 'gemini'.
+   * The harness config is determined by: template defaultHarnessConfig > template harness > grove default > 'gemini'.
    */
   private async selectDefaultTemplate(): Promise<void> {
     const visible = this.filteredTemplates;
@@ -730,6 +730,9 @@ export class ScionPageAgentCreate extends LitElement {
     const settings = this.groveId ? await this.fetchGroveSettings(this.groveId) : null;
     const harnessDefault = settings?.defaultHarnessConfig || 'gemini';
 
+    const harnessFor = (t: { defaultHarnessConfig?: string; harness?: string }) =>
+      t.defaultHarnessConfig || t.harness || harnessDefault;
+
     // Try grove settings default template first
     if (settings?.defaultTemplate) {
       const match = visible.find(
@@ -737,7 +740,7 @@ export class ScionPageAgentCreate extends LitElement {
       );
       if (match) {
         this.templateId = match.id;
-        this.setHarnessFromValue(match.harness || harnessDefault);
+        this.setHarnessFromValue(harnessFor(match));
         return;
       }
     }
@@ -746,10 +749,10 @@ export class ScionPageAgentCreate extends LitElement {
     const fallback = visible.find((t) => t.slug === 'default' || t.name === 'default');
     if (fallback) {
       this.templateId = fallback.id;
-      this.setHarnessFromValue(fallback.harness || harnessDefault);
+      this.setHarnessFromValue(harnessFor(fallback));
     } else if (visible.length > 0) {
       this.templateId = visible[0].id;
-      this.setHarnessFromValue(visible[0].harness || harnessDefault);
+      this.setHarnessFromValue(harnessFor(visible[0]));
     } else {
       this.templateId = '';
       this.setHarnessFromValue(harnessDefault);
@@ -928,10 +931,10 @@ export class ScionPageAgentCreate extends LitElement {
     const select = e.target as HTMLElement & { value: string };
     this.templateId = select.value;
 
-    // Update harness to match template's harness
     const template = this.templates.find((t) => t.id === this.templateId);
-    if (template?.harness) {
-      this.setHarnessFromValue(template.harness);
+    const configName = template?.defaultHarnessConfig || template?.harness;
+    if (configName) {
+      this.setHarnessFromValue(configName);
     }
   }
 
@@ -958,15 +961,16 @@ export class ScionPageAgentCreate extends LitElement {
     return this.harness === '__other__' ? this.customHarness : this.harness;
   }
 
-  /** Hint text showing when the selected harness matches the template's harness. */
+  /** Hint text showing when the selected harness config matches the template's default. */
   private get templateHarnessHint(): string {
     const template = this.templates.find((t) => t.id === this.templateId);
-    if (!template?.harness) return '';
+    const configName = template?.defaultHarnessConfig || template?.harness;
+    if (!configName) return '';
 
-    if (template.harness === this.resolvedHarness) {
+    if (configName === this.resolvedHarness) {
       return 'Matches selected template.';
     }
-    return `Template suggests: ${template.harness}`;
+    return `Template suggests: ${configName}`;
   }
 
   override render() {

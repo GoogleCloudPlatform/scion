@@ -200,28 +200,28 @@ export class ScionStatusBadge extends LitElement {
 
     /* Variant colors */
     .badge.success {
-      background: var(--scion-success-100, #dcfce7);
-      color: var(--scion-success-700, #15803d);
+      background: var(--scion-badge-success-bg, #dcfce7);
+      color: var(--scion-badge-success-text, #166534);
     }
 
     .badge.warning {
-      background: var(--scion-warning-100, #fef3c7);
-      color: var(--scion-warning-700, #b45309);
+      background: var(--scion-badge-warning-bg, #fef3c7);
+      color: var(--scion-badge-warning-text, #92400e);
     }
 
     .badge.danger {
-      background: var(--scion-danger-100, #fee2e2);
-      color: var(--scion-danger-700, #b91c1c);
+      background: var(--scion-badge-danger-bg, #fee2e2);
+      color: var(--scion-badge-danger-text, #991b1b);
     }
 
     .badge.primary {
-      background: var(--scion-primary-100, #dbeafe);
-      color: var(--scion-primary-700, #1d4ed8);
+      background: var(--scion-badge-primary-bg, #dbeafe);
+      color: var(--scion-badge-primary-text, #1e40af);
     }
 
     .badge.neutral {
-      background: var(--scion-neutral-200, #e2e8f0);
-      color: var(--scion-neutral-700, #334155);
+      background: var(--scion-badge-neutral-bg, #e2e8f0);
+      color: var(--scion-badge-neutral-text, #1e293b);
     }
 
     /* Pulse indicator */
@@ -269,34 +269,6 @@ export class ScionStatusBadge extends LitElement {
         box-shadow:
           0 0 0 0 rgba(34, 197, 94, 0),
           0 0 0 0 rgba(34, 197, 94, 0);
-      }
-    }
-
-    /* Dark mode adjustments */
-    @media (prefers-color-scheme: dark) {
-      .badge.success {
-        background: rgba(34, 197, 94, 0.2);
-        color: #86efac;
-      }
-
-      .badge.warning {
-        background: rgba(245, 158, 11, 0.2);
-        color: #fcd34d;
-      }
-
-      .badge.danger {
-        background: rgba(239, 68, 68, 0.2);
-        color: #fca5a5;
-      }
-
-      .badge.primary {
-        background: rgba(59, 130, 246, 0.2);
-        color: #93c5fd;
-      }
-
-      .badge.neutral {
-        background: rgba(100, 116, 139, 0.2);
-        color: #cbd5e1;
       }
     }
   `;

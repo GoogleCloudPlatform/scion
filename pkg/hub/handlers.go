@@ -584,9 +584,12 @@ func (s *Server) createAgentInGrove(
 		}
 	}
 
-	// Resolve harness config: prefer template metadata harness field, then explicit request field.
+	// Resolve harness config: prefer the user's explicit choice, then template default.
 	// Do NOT use req.Template as fallback since it may contain a UUID.
-	harnessConfig := s.getHarnessConfigFromTemplate(resolvedTemplate, req.HarnessConfig)
+	harnessConfig := req.HarnessConfig
+	if harnessConfig == "" {
+		harnessConfig = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
+	}
 
 	agent := &store.Agent{
 		ID:              api.NewUUID(),
@@ -8020,9 +8023,13 @@ func (s *Server) resolveTemplate(ctx context.Context, templateRef, groveID strin
 }
 
 // getHarnessConfigFromTemplate returns the harness config name from a resolved template,
-// or the fallback value if no template was resolved.
+// or the fallback value if no template was resolved. Prefers the template's
+// DefaultHarnessConfig (e.g. "claude-web") over the generic Harness type (e.g. "claude").
 func (s *Server) getHarnessConfigFromTemplate(template *store.Template, fallback string) string {
 	if template != nil {
+		if template.DefaultHarnessConfig != "" {
+			return template.DefaultHarnessConfig
+		}
 		if template.Harness != "" {
 			return template.Harness
 		}

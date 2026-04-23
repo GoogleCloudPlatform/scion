@@ -121,6 +121,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV43,
 		migrationV44,
 		migrationV45,
+		migrationV46,
 	}
 
 	// Create migrations table if not exists
@@ -1088,6 +1089,10 @@ ALTER TABLE gcp_service_accounts ADD COLUMN managed_by TEXT NOT NULL DEFAULT '';
 // Migration V45: Add allow_progeny column to secrets table
 const migrationV45 = `
 ALTER TABLE secrets ADD COLUMN allow_progeny INTEGER NOT NULL DEFAULT 0;
+`
+
+const migrationV46 = `
+ALTER TABLE templates ADD COLUMN default_harness_config TEXT;
 `
 
 // Helper functions for JSON marshaling/unmarshaling
@@ -2504,16 +2509,16 @@ func (s *SQLiteStore) CreateTemplate(ctx context.Context, template *store.Templa
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO templates (
-			id, name, slug, display_name, description, harness, image, config,
+			id, name, slug, display_name, description, harness, default_harness_config, image, config,
 			content_hash, scope, scope_id, grove_id,
 			storage_uri, storage_bucket, storage_path, files,
 			base_template, locked, status,
 			owner_id, created_by, updated_by, visibility,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		template.ID, template.Name, template.Slug, nullableString(template.DisplayName), nullableString(template.Description),
-		template.Harness, template.Image, marshalJSON(template.Config),
+		template.Harness, nullableString(template.DefaultHarnessConfig), template.Image, marshalJSON(template.Config),
 		nullableString(template.ContentHash), template.Scope, nullableString(template.ScopeID), nullableString(template.GroveID),
 		nullableString(template.StorageURI), nullableString(template.StorageBucket), nullableString(template.StoragePath), marshalJSON(template.Files),
 		nullableString(template.BaseTemplate), template.Locked, template.Status,
@@ -2535,9 +2540,10 @@ func (s *SQLiteStore) GetTemplate(ctx context.Context, id string) (*store.Templa
 	var displayName, description, contentHash, scopeID, groveID sql.NullString
 	var storageURI, storageBucket, storagePath, baseTemplate sql.NullString
 	var createdBy, updatedBy, ownerID, visibility sql.NullString
+	var defaultHarnessConfig sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, name, slug, display_name, description, harness, image, config,
+		SELECT id, name, slug, display_name, description, harness, default_harness_config, image, config,
 			content_hash, scope, scope_id, grove_id,
 			storage_uri, storage_bucket, storage_path, files,
 			base_template, locked, status,
@@ -2546,7 +2552,7 @@ func (s *SQLiteStore) GetTemplate(ctx context.Context, id string) (*store.Templa
 		FROM templates WHERE id = ?
 	`, id).Scan(
 		&template.ID, &template.Name, &template.Slug, &displayName, &description,
-		&template.Harness, &template.Image, &config,
+		&template.Harness, &defaultHarnessConfig, &template.Image, &config,
 		&contentHash, &template.Scope, &scopeID, &groveID,
 		&storageURI, &storageBucket, &storagePath, &files,
 		&baseTemplate, &template.Locked, &template.Status,
@@ -2565,6 +2571,9 @@ func (s *SQLiteStore) GetTemplate(ctx context.Context, id string) (*store.Templa
 	}
 	if description.Valid {
 		template.Description = description.String
+	}
+	if defaultHarnessConfig.Valid {
+		template.DefaultHarnessConfig = defaultHarnessConfig.String
 	}
 	if contentHash.Valid {
 		template.ContentHash = contentHash.String
@@ -2633,7 +2642,7 @@ func (s *SQLiteStore) UpdateTemplate(ctx context.Context, template *store.Templa
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE templates SET
 			name = ?, slug = ?, display_name = ?, description = ?,
-			harness = ?, image = ?, config = ?,
+			harness = ?, default_harness_config = ?, image = ?, config = ?,
 			content_hash = ?, scope = ?, scope_id = ?, grove_id = ?,
 			storage_uri = ?, storage_bucket = ?, storage_path = ?, files = ?,
 			base_template = ?, locked = ?, status = ?,
@@ -2642,7 +2651,7 @@ func (s *SQLiteStore) UpdateTemplate(ctx context.Context, template *store.Templa
 		WHERE id = ?
 	`,
 		template.Name, template.Slug, nullableString(template.DisplayName), nullableString(template.Description),
-		template.Harness, template.Image, marshalJSON(template.Config),
+		template.Harness, nullableString(template.DefaultHarnessConfig), template.Image, marshalJSON(template.Config),
 		nullableString(template.ContentHash), template.Scope, nullableString(template.ScopeID), nullableString(template.GroveID),
 		nullableString(template.StorageURI), nullableString(template.StorageBucket), nullableString(template.StoragePath), marshalJSON(template.Files),
 		nullableString(template.BaseTemplate), template.Locked, template.Status,
@@ -2751,7 +2760,7 @@ func (s *SQLiteStore) ListTemplates(ctx context.Context, filter store.TemplateFi
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, name, slug, display_name, description, harness, image, config,
+		SELECT id, name, slug, display_name, description, harness, default_harness_config, image, config,
 			content_hash, scope, scope_id, grove_id,
 			storage_uri, storage_bucket, storage_path, files,
 			base_template, locked, status,
@@ -2774,10 +2783,11 @@ func (s *SQLiteStore) ListTemplates(ctx context.Context, filter store.TemplateFi
 		var displayName, description, contentHash, scopeID, groveID sql.NullString
 		var storageURI, storageBucket, storagePath, baseTemplate sql.NullString
 		var createdBy, updatedBy, ownerID, visibility sql.NullString
+		var defaultHarnessConfig sql.NullString
 
 		if err := rows.Scan(
 			&template.ID, &template.Name, &template.Slug, &displayName, &description,
-			&template.Harness, &template.Image, &config,
+			&template.Harness, &defaultHarnessConfig, &template.Image, &config,
 			&contentHash, &template.Scope, &scopeID, &groveID,
 			&storageURI, &storageBucket, &storagePath, &files,
 			&baseTemplate, &template.Locked, &template.Status,
@@ -2792,6 +2802,9 @@ func (s *SQLiteStore) ListTemplates(ctx context.Context, filter store.TemplateFi
 		}
 		if description.Valid {
 			template.Description = description.String
+		}
+		if defaultHarnessConfig.Valid {
+			template.DefaultHarnessConfig = defaultHarnessConfig.String
 		}
 		if contentHash.Valid {
 			template.ContentHash = contentHash.String
