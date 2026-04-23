@@ -236,3 +236,25 @@ func TestExecAsUserCmd_CallSiteShapes(t *testing.T) {
 		})
 	}
 }
+
+func TestValidExecUserName(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "scion accepted", in: "scion", want: true},
+		{name: "alphanumeric with hyphen and underscore accepted", in: "agent-1_x", want: true},
+		{name: "empty rejected", in: "", want: false},
+		{name: "shell metachar rejected", in: "scion;rm -rf /", want: false},
+		{name: "command substitution rejected", in: "$(whoami)", want: false},
+		{name: "embedded space rejected", in: "two words", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ValidExecUserName.MatchString(tc.in); got != tc.want {
+				t.Errorf("ValidExecUserName.MatchString(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}

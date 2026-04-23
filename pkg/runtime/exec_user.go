@@ -14,6 +14,15 @@
 
 package runtime
 
+import "regexp"
+
+// ValidExecUserName matches usernames that are safe to interpolate
+// into shell command lines built by ExecAsUserCmd. Compiled once at
+// package init so callers (e.g. KubernetesRuntime.Attach) avoid a
+// per-invocation regexp.MustCompile, and so the broker's
+// sanitizeExecUser shares one source of truth for the rule.
+var ValidExecUserName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
 // ExecAsUserCmd returns a /bin/sh command vector that runs cmd as user.
 //
 // If the container already runs as user (no su needed — common on GKE

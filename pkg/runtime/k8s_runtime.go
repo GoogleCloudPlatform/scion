@@ -26,7 +26,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -1767,7 +1766,7 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 	}
 
 	// Validate username to prevent shell injection via pod annotations.
-	if !regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString(username) {
+	if !ValidExecUserName.MatchString(username) {
 		return fmt.Errorf("invalid username in pod annotation: %q", username)
 	}
 
@@ -2042,7 +2041,7 @@ func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (
 	for i, arg := range cmd {
 		quoted[i] = fmt.Sprintf("'%s'", strings.ReplaceAll(arg, "'", "'\"'\"'"))
 	}
-	suCmd := ExecAsUserCmd("scion", strings.Join(quoted, " "))
+	suCmd := ExecAsUserCmd(r.ExecUser(), strings.Join(quoted, " "))
 
 	option := &corev1.PodExecOptions{
 		Container: agentContainerName,

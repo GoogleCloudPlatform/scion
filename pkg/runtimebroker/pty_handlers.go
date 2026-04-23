@@ -24,7 +24,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -56,23 +55,18 @@ const (
 	ptyMaxDataSize = 32 * 1024 // 32KB max per message
 )
 
-// execUserPattern matches the set of usernames the broker is willing
-// to interpolate into shell command lines (via runtime.ExecAsUserCmd
-// and the runtime --user flag). The character set mirrors the
-// validation in pkg/runtime/k8s_runtime.go:Attach so the broker and
-// runtime apply the same defense-in-depth check against shell
-// injection from agent metadata that crosses a trust boundary.
-var execUserPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
-
-// sanitizeExecUser returns user if it matches execUserPattern,
+// sanitizeExecUser returns user if it matches runtime.ValidExecUserName,
 // otherwise returns "scion" and logs a warning. Callers default to
 // "scion" already when the value is empty, so passing an empty
-// string is harmless.
+// string is harmless. The shared regex enforces the same
+// defense-in-depth check against shell injection from agent metadata
+// that KubernetesRuntime.Attach applies, so values flowing into
+// runtime.ExecAsUserCmd are validated by exactly one rule.
 func sanitizeExecUser(user string) string {
 	if user == "" {
 		return "scion"
 	}
-	if !execUserPattern.MatchString(user) {
+	if !runtime.ValidExecUserName.MatchString(user) {
 		slog.Warn("Invalid exec user, falling back to 'scion'", "user", user)
 		return "scion"
 	}
@@ -417,11 +411,12 @@ func (s *LocalPTYSession) runK8sExec() error {
 		Namespace(namespace).
 		SubResource("exec")
 
-	// Run as scion user: the tmux session is owned by the scion user
-	// (sciontool init drops privileges), so root can't see the session.
+	// Run as the configured exec user (default "scion"): the tmux
+	// session is owned by that user (sciontool init drops privileges),
+	// so root can't see the session.
 	req.VersionedParams(&corev1.PodExecOptions{
 		Container: "agent",
-		Command:   runtime.ExecAsUserCmd("scion", tmuxAttachCmd),
+		Command:   runtime.ExecAsUserCmd(s.execUser, tmuxAttachCmd),
 		Stdin:     true,
 		Stdout:    true,
 		Stderr:    true,
@@ -768,11 +763,12 @@ func (h *StreamPTYHandler) runK8sExec() error {
 		Namespace(namespace).
 		SubResource("exec")
 
-	// Run as scion user: the tmux session is owned by the scion user
-	// (sciontool init drops privileges), so root can't see the session.
+	// Run as the configured exec user (default "scion"): the tmux
+	// session is owned by that user (sciontool init drops privileges),
+	// so root can't see the session.
 	req.VersionedParams(&corev1.PodExecOptions{
 		Container: "agent",
-		Command:   runtime.ExecAsUserCmd("scion", tmuxAttachCmd),
+		Command:   runtime.ExecAsUserCmd(h.execUser, tmuxAttachCmd),
 		Stdin:     true,
 		Stdout:    true,
 		Stderr:    true,
