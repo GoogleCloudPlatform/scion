@@ -21,14 +21,14 @@ on:
         description: 'Container registry (e.g., ghcr.io/myorg)'
         required: true
       target:
-        description: 'Build target'
+        description: 'Build target (use "all" for first-time builds)'
         type: choice
         options:
-          - common
           - all
+          - common
           - core-base
           - harnesses
-        default: 'common'
+        default: 'all'
       tag:
         description: 'Image tag'
         default: 'latest'
@@ -48,9 +48,9 @@ on:
         required: true
         type: string
       target:
-        description: 'Build target (common, all, core-base, harnesses)'
+        description: 'Build target (all, common, core-base, harnesses)'
         type: string
-        default: 'common'
+        default: 'all'
       tag:
         description: 'Image tag'
         type: string
