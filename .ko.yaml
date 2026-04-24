@@ -1,0 +1,15 @@
+builds:
+  - id: scion
+    main: ./cmd/scion
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X
+        github.com/GoogleCloudPlatform/scion/pkg/version.Version={{.Env.VERSION}}
+      - -X
+        github.com/GoogleCloudPlatform/scion/pkg/version.Commit={{.Env.COMMIT}}
+      - -X
+        github.com/GoogleCloudPlatform/scion/pkg/version.BuildTime={{.Env.BUILD_TIME}}
+    env:
+      - CGO_ENABLED=0
