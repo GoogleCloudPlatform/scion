@@ -1,0 +1,50 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scion-runtime-manager
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - create
+      - get
+      - list
+      - patch
+      - update
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - pods/exec
+    verbs:
+      - create
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - pods/log
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - create
+      - get
+      - list
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scion-runtime-manager
+subjects:
+  - kind: ServiceAccount
+    name: scion
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: scion-runtime-manager
