@@ -78,6 +78,12 @@ type OTelConfig struct {
 	Protocol string
 	// Insecure skips TLS verification.
 	Insecure bool
+	// CAFile is the path to a PEM-encoded CA bundle for OTLP TLS.
+	CAFile string
+	// CertFile is the path to a PEM-encoded client certificate for OTLP mTLS.
+	CertFile string
+	// KeyFile is the path to a PEM-encoded client private key for OTLP mTLS.
+	KeyFile string
 	// ProjectID is the GCP project ID.
 	ProjectID string
 }

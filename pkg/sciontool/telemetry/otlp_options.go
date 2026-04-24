@@ -7,7 +7,10 @@ package telemetry
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
+	"os"
 
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
@@ -17,6 +20,40 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+var errOTLPCACertsNotFound = errors.New("parsing OTLP CA file: no certificates found")
+var errOTLPMissingClientKeyPair = errors.New("OTLP client certificate and key must be provided together")
+
+func LoadOTLPTLSConfig(caFile, certFile, keyFile string) (*tls.Config, error) {
+	tlsConfig := &tls.Config{}
+
+	if caFile != "" {
+		pemBytes, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("reading OTLP CA file: %w", err)
+		}
+
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(pemBytes) {
+			return nil, errOTLPCACertsNotFound
+		}
+		tlsConfig.RootCAs = roots
+	}
+
+	if certFile == "" && keyFile == "" {
+		return tlsConfig, nil
+	}
+	if certFile == "" || keyFile == "" {
+		return nil, errOTLPMissingClientKeyPair
+	}
+
+	clientCert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("loading OTLP client certificate: %w", err)
+	}
+	tlsConfig.Certificates = []tls.Certificate{clientCert}
+	return tlsConfig, nil
+}
 
 func loadSecureGCPDialOptions(ctx context.Context, config *Config) ([]grpc.DialOption, error) {
 	if config.GCPCredentialsFile == "" || config.Insecure {
@@ -32,7 +69,7 @@ func loadSecureGCPDialOptions(ctx context.Context, config *Config) ([]grpc.DialO
 }
 
 func loadSecureOTLPTLSConfig(config *Config) (*tls.Config, error) {
-	tlsConfig, err := loadOTLPTLSConfig(config.CAFile)
+	tlsConfig, err := LoadOTLPTLSConfig(config.CAFile, config.CertFile, config.KeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load OTLP TLS config: %w", err)
 	}

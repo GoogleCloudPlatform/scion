@@ -28,6 +28,10 @@ const (
 	EnvInsecure = "SCION_OTEL_INSECURE"
 	// EnvCAFile is the path to a PEM-encoded CA bundle for OTLP TLS.
 	EnvCAFile = "SCION_OTEL_CA_FILE"
+	// EnvCertFile is the path to a PEM-encoded client certificate for OTLP mTLS.
+	EnvCertFile = "SCION_OTEL_CERT_FILE"
+	// EnvKeyFile is the path to a PEM-encoded client private key for OTLP mTLS.
+	EnvKeyFile = "SCION_OTEL_KEY_FILE"
 	// EnvGRPCPort is the local gRPC receiver port.
 	EnvGRPCPort = "SCION_OTEL_GRPC_PORT"
 	// EnvHTTPPort is the local HTTP receiver port.
@@ -81,6 +85,10 @@ type Config struct {
 	Insecure bool
 	// CAFile is the path to a PEM-encoded CA bundle for OTLP TLS.
 	CAFile string
+	// CertFile is the path to a PEM-encoded client certificate for OTLP mTLS.
+	CertFile string
+	// KeyFile is the path to a PEM-encoded client private key for OTLP mTLS.
+	KeyFile string
 	// GRPCPort is the local gRPC receiver port.
 	GRPCPort int
 	// HTTPPort is the local HTTP receiver port.
@@ -122,6 +130,8 @@ func LoadConfig() *Config {
 		Protocol:     getEnvOrDefault(EnvProtocol, DefaultProtocol),
 		Insecure:     parseBoolEnv(EnvInsecure, false),
 		CAFile:       os.Getenv(EnvCAFile),
+		CertFile:     os.Getenv(EnvCertFile),
+		KeyFile:      os.Getenv(EnvKeyFile),
 		GRPCPort:     parseIntEnv(EnvGRPCPort, DefaultGRPCPort),
 		HTTPPort:     parseIntEnv(EnvHTTPPort, DefaultHTTPPort),
 		ProjectID:    os.Getenv(EnvProjectID),

@@ -1185,6 +1185,8 @@ func TestMergeScionConfigTelemetry(t *testing.T) {
 						Enabled:            boolP(true),
 						InsecureSkipVerify: boolP(false),
 						CAFile:             "/etc/ssl/certs/base-root.pem",
+						CertFile:           "/etc/ssl/certs/base-client.pem",
+						KeyFile:            "/etc/ssl/private/base-client-key.pem",
 					},
 					Batch: &api.TelemetryBatch{
 						MaxSize: 512,
@@ -1220,6 +1222,8 @@ func TestMergeScionConfigTelemetry(t *testing.T) {
 					TLS: &api.TelemetryTLS{
 						InsecureSkipVerify: boolP(true),
 						CAFile:             "/etc/ssl/certs/override-root.pem",
+						CertFile:           "/etc/ssl/certs/override-client.pem",
+						KeyFile:            "/etc/ssl/private/override-client-key.pem",
 					},
 					Batch: &api.TelemetryBatch{
 						MaxSize: 256,
