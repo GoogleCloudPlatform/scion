@@ -1,0 +1,17 @@
+apiVersion: v2
+name: scion
+description: Scion AI agent orchestration platform - hub and runtime broker
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/GoogleCloudPlatform/scion
+sources:
+  - https://github.com/GoogleCloudPlatform/scion
+maintainers:
+  - name: GoogleCloudPlatform
+    url: https://github.com/GoogleCloudPlatform
+keywords:
+  - scion
+  - ai
+  - agents
+  - kubernetes

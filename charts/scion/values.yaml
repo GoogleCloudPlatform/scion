@@ -1,0 +1,271 @@
+# Scion Helm Chart Values
+# See: https://github.com/GoogleCloudPlatform/scion
+
+# -- Deployment mode: "hub" (hub+broker co-located) or "broker" (broker-only)
+mode: hub
+
+# -- Number of replicas. MUST be 1 when using SQLite (default).
+replicaCount: 1
+
+image:
+  # -- Container image repository
+  repository: ghcr.io/googlecloudplatform/scion
+  # -- Image tag (defaults to Chart appVersion)
+  tag: ""
+  # -- Image pull policy
+  pullPolicy: IfNotPresent
+
+# -- Image pull secrets
+imagePullSecrets: []
+
+# -- Override the chart name
+nameOverride: ""
+# -- Override the full release name
+fullnameOverride: ""
+
+# -- Additional labels to add to all resources
+commonLabels: {}
+
+# -- Additional annotations to add to all resources
+commonAnnotations: {}
+
+# =============================================================================
+# Scion Server Configuration
+# =============================================================================
+
+server:
+  # -- Hub API + Web UI port (combined mode)
+  port: 8080
+  # -- Public URL for the hub (used for OAuth callbacks, broker connections)
+  # Example: https://hub.example.com
+  publicUrl: ""
+  # -- Admin email addresses (auto-promoted to admin role)
+  adminEmails: []
+  # -- Log level: debug, info, warn, error
+  logLevel: "info"
+
+  # -- Additional CLI arguments passed to `scion server start`
+  extraArgs: []
+
+  # -- Additional environment variables (list of {name, value} or {name, valueFrom})
+  extraEnv: []
+
+# =============================================================================
+# Runtime Broker Configuration
+# =============================================================================
+
+broker:
+  # -- Enable runtime broker (always true in hub mode, configurable in broker mode)
+  enabled: true
+  # -- Broker port
+  port: 9800
+  # -- How the broker connects to the hub (internal URL, auto-configured in hub mode)
+  hubEndpoint: ""
+  # -- URL that agents inside containers use to reach the hub
+  containerHubEndpoint: ""
+  # -- Auto-provide groves
+  autoProvide: true
+  # -- Broker name
+  name: ""
+  # -- Broker nickname
+  nickname: ""
+
+  # -- For broker-only mode: K8s Secret containing broker-credentials.json
+  credentialsSecret: ""
+
+# =============================================================================
+# Database Configuration
+# =============================================================================
+
+database:
+  # -- Database driver (only "sqlite" is currently supported)
+  driver: "sqlite"
+  # -- Database path inside the container (on the PVC)
+  path: "/data/hub.db"
+
+# =============================================================================
+# Storage Configuration
+# =============================================================================
+
+storage:
+  # -- Storage provider: "local" or "gcs"
+  provider: "gcs"
+  # -- GCS bucket name (required when provider is "gcs")
+  bucket: ""
+  # -- Local storage path (only when provider is "local")
+  localPath: "/data/storage"
+
+# =============================================================================
+# Secrets Backend
+# =============================================================================
+
+secrets:
+  # -- Secrets backend: "local" or "gcpsm"
+  backend: "local"
+  # -- GCP project ID (required when backend is "gcpsm")
+  gcpProjectId: ""
+
+# =============================================================================
+# Authentication
+# =============================================================================
+
+auth:
+  # -- Authorized email domains for login
+  authorizedDomains: []
+  # -- Session secret (required). Reference to an existing K8s Secret.
+  existingSecret: ""
+  # -- Key in the existing secret that contains the session secret
+  existingSecretKey: "session-secret"
+
+# -- Reference to a K8s Secret containing OAuth credentials.
+# Expected keys: see values documentation for full list.
+oauthSecret: ""
+
+# -- Reference to a K8s Secret containing GitHub App credentials.
+githubAppSecret: ""
+
+# =============================================================================
+# Telemetry
+# =============================================================================
+
+telemetry:
+  # -- Enable Cloud Logging
+  cloudLogging:
+    enabled: false
+    gcpProjectId: ""
+    logId: ""
+  # -- Enable OTEL log bridge
+  otelLogBridge:
+    enabled: false
+
+# =============================================================================
+# Image Registry (for agent container images)
+# =============================================================================
+
+# -- Container image registry for agent images (e.g., ghcr.io/myorg)
+imageRegistry: ""
+
+# =============================================================================
+# Kubernetes Resources
+# =============================================================================
+
+# -- Resource requests and limits for the hub pod
+resources:
+  requests:
+    cpu: "500m"
+    memory: "512Mi"
+  limits:
+    cpu: "2"
+    memory: "2Gi"
+
+# =============================================================================
+# Persistence (SQLite)
+# =============================================================================
+
+persistence:
+  # -- Enable persistent storage for SQLite database
+  enabled: true
+  # -- Storage class name (empty = default)
+  storageClass: ""
+  # -- PVC size
+  size: "10Gi"
+  # -- Access mode
+  accessMode: ReadWriteOnce
+  # -- Use an existing PVC instead of creating one
+  existingClaim: ""
+
+# =============================================================================
+# Service
+# =============================================================================
+
+service:
+  # -- Service type
+  type: ClusterIP
+  # -- Service port
+  port: 8080
+  # -- Additional annotations (e.g., for cloud load balancers)
+  annotations: {}
+
+# =============================================================================
+# Ingress
+# =============================================================================
+
+ingress:
+  # -- Enable Ingress resource
+  enabled: false
+  # -- Ingress class name
+  className: ""
+  # -- Ingress annotations
+  annotations: {}
+  # -- Ingress hosts
+  hosts:
+    - host: hub.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  # -- Ingress TLS configuration
+  tls: []
+  #  - secretName: hub-tls
+  #    hosts:
+  #      - hub.example.com
+
+# =============================================================================
+# Service Account
+# =============================================================================
+
+serviceAccount:
+  # -- Create a ServiceAccount
+  create: true
+  # -- ServiceAccount name (auto-generated if empty)
+  name: ""
+  # -- Annotations (e.g., for GKE Workload Identity)
+  annotations: {}
+  #  iam.gke.io/gcp-service-account: scion-hub@my-project.iam.gserviceaccount.com
+
+# =============================================================================
+# RBAC
+# =============================================================================
+
+rbac:
+  # -- Create RBAC resources for managing agent pods
+  create: true
+  # -- Use ClusterRole (true) or namespace-scoped Role (false)
+  clusterWide: false
+  # -- Namespace for agent pods (only used when clusterWide is false).
+  # Defaults to the release namespace.
+  agentNamespace: ""
+  # -- Enable SecretProviderClass CRD permissions (GKE Secret Store CSI)
+  secretProviderClass: false
+
+# =============================================================================
+# Pod Configuration
+# =============================================================================
+
+# -- Node selector
+nodeSelector: {}
+
+# -- Tolerations
+tolerations: []
+
+# -- Affinity rules
+affinity: {}
+
+# -- Pod annotations
+podAnnotations: {}
+
+# -- Pod labels
+podLabels: {}
+
+# -- Pod security context
+podSecurityContext:
+  fsGroup: 65532
+
+# -- Container security context
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
