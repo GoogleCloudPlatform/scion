@@ -322,7 +322,45 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	util.Debugf("image resolution: final image=%s", resolvedImage)
 
-	h := harness.New(harnessName)
+	// Resolve the harness implementation. When we have a harness-config name,
+	// route through harness.Resolve so container-script provisioners (and
+	// future declarative-only harnesses) are honored. Otherwise fall back to
+	// the legacy New() shim using the bare harness type.
+	var h api.Harness
+	var harnessConfigRevision string
+	if harnessConfigName != "" {
+		var resolveTemplatePaths []string
+		if opts.Template != "" {
+			tplName := opts.Template
+			if !filepath.IsAbs(tplName) && finalScionCfg != nil && finalScionCfg.Info != nil && finalScionCfg.Info.Template != "" {
+				tplName = finalScionCfg.Info.Template
+			}
+			if chain, err := config.GetTemplateChainInGrove(tplName, opts.GrovePath); err == nil {
+				for _, tpl := range chain {
+					resolveTemplatePaths = append(resolveTemplatePaths, tpl.Path)
+				}
+			}
+		}
+		resolved, err := harness.Resolve(ctx, harness.ResolveOptions{
+			Name:          harnessConfigName,
+			GrovePath:     projectDir,
+			TemplatePaths: resolveTemplatePaths,
+			ProfileName:   profileName,
+			Settings:      settings,
+		})
+		if err != nil {
+			util.Debugf("harness.Resolve fell back to New(%q): %v", harnessName, err)
+			h = harness.New(harnessName)
+		} else {
+			h = resolved.Harness
+			if resolved.ConfigDir != nil {
+				harnessConfigRevision = config.ComputeHarnessConfigRevision(resolved.ConfigDir.Path)
+			}
+			util.Debugf("harness resolution: implementation=%s harness=%q", resolved.Implementation, resolved.Config.Harness)
+		}
+	} else {
+		h = harness.New(harnessName)
+	}
 
 	// 3. Resolve credentials via new auth pipeline
 
@@ -873,6 +911,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				a.Warnings = warnings
 				a.Phase = status
 				a.HarnessConfig = harnessConfigName
+				a.HarnessConfigRevision = harnessConfigRevision
 				a.HarnessAuth = opts.HarnessAuth
 				a.Profile = profileName
 				return &a, nil
@@ -882,7 +921,17 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	// Container ID returned but not found in listing — it may have exited and been removed
 	warnings = append(warnings, "Container started but could not be verified as running")
-	return &api.AgentInfo{ID: id, Name: opts.Name, Phase: status, Detached: detached, Warnings: warnings, HarnessConfig: harnessConfigName, HarnessAuth: opts.HarnessAuth, Profile: profileName}, nil
+	return &api.AgentInfo{
+		ID:                    id,
+		Name:                  opts.Name,
+		Phase:                 status,
+		Detached:              detached,
+		Warnings:              warnings,
+		HarnessConfig:         harnessConfigName,
+		HarnessConfigRevision: harnessConfigRevision,
+		HarnessAuth:           opts.HarnessAuth,
+		Profile:               profileName,
+	}, nil
 }
 
 // extractWorkspaceFromVolumes finds a volume mounted to /workspace and returns its source path.

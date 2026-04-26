@@ -15,3 +15,67 @@
 harness: claude
 image: scion-claude:latest
 user: scion
+provisioner:
+  type: builtin
+  interface_version: 1
+config_dir: .claude
+skills_dir: .claude/skills
+interrupt_key: Escape
+instructions_file: .claude/CLAUDE.md
+system_prompt_file: .claude/system-prompt.md
+system_prompt_mode: native
+command:
+  base: ["claude", "--no-chrome", "--dangerously-skip-permissions"]
+  resume_flag: "--continue"
+  task_position: after_base_args
+  system_prompt_flag: "--system-prompt"
+capabilities:
+  limits:
+    max_turns: { support: "yes" }
+    max_model_calls: { support: "no", reason: "This harness does not emit model-end hook events" }
+    max_duration: { support: "yes" }
+  telemetry:
+    enabled: { support: "yes" }
+    native_emitter: { support: "yes" }
+  prompts:
+    system_prompt: { support: "yes" }
+    agent_instructions: { support: "yes" }
+  auth:
+    api_key: { support: "yes" }
+    auth_file: { support: "yes" }
+    oauth_token: { support: "yes" }
+    vertex_ai: { support: "yes" }
+auth:
+  default_type: api-key
+  types:
+    api-key:
+      required_env:
+        - any_of: ["ANTHROPIC_API_KEY"]
+    oauth-token:
+      required_env:
+        - any_of: ["CLAUDE_CODE_OAUTH_TOKEN"]
+    auth-file:
+      required_files:
+        - name: CLAUDE_AUTH
+          type: file
+          target_suffix: "/.claude/.credentials.json"
+    vertex-ai:
+      required_env:
+        - any_of: ["GOOGLE_CLOUD_PROJECT"]
+        - any_of: ["GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"]
+      required_files:
+        - name: gcloud-adc
+          type: file
+          description: "Google Cloud Application Default Credentials (ADC) file for vertex-ai authentication"
+          alternative_env_keys: ["GOOGLE_APPLICATION_CREDENTIALS"]
+          skipped_when_gcp_service_account_assigned: true
+          required: true
+  autodetect:
+    env:
+      CLAUDE_CODE_OAUTH_TOKEN: oauth-token
+      GOOGLE_APPLICATION_CREDENTIALS: vertex-ai
+      GOOGLE_CLOUD_PROJECT: vertex-ai
+      ANTHROPIC_API_KEY: api-key
+    files:
+      CLAUDE_AUTH: auth-file
+      gcloud-adc: vertex-ai

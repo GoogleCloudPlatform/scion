@@ -62,8 +62,8 @@ WORKDIR /opt
 RUN wget https://www.kernel.org/pub/software/scm/git/git-2.54.0.tar.gz
 RUN tar -xvf git-2.54.0.tar.gz
 WORKDIR /opt/git-2.54.0/
-RUN make prefix=/usr/local all
-RUN make prefix=/usr/local install
+RUN make -j"$(nproc 2>/dev/null || echo 1)" prefix=/usr/local all && \
+    make -j"$(nproc 2>/dev/null || echo 1)" prefix=/usr/local install
 
 # Final Stage
 FROM node:20-slim

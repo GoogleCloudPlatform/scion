@@ -25,42 +25,42 @@ const (
 
 // CapabilityField describes support status and optional context.
 type CapabilityField struct {
-	Support SupportLevel `json:"support"`
-	Reason  string       `json:"reason,omitempty"`
+	Support SupportLevel `json:"support" yaml:"support"`
+	Reason  string       `json:"reason,omitempty" yaml:"reason,omitempty"`
 }
 
 // HarnessLimitCapabilities describes support for run limits.
 type HarnessLimitCapabilities struct {
-	MaxTurns      CapabilityField `json:"max_turns"`
-	MaxModelCalls CapabilityField `json:"max_model_calls"`
-	MaxDuration   CapabilityField `json:"max_duration"`
+	MaxTurns      CapabilityField `json:"max_turns" yaml:"max_turns"`
+	MaxModelCalls CapabilityField `json:"max_model_calls" yaml:"max_model_calls"`
+	MaxDuration   CapabilityField `json:"max_duration" yaml:"max_duration"`
 }
 
 // HarnessTelemetryCapabilities describes support for telemetry controls.
 type HarnessTelemetryCapabilities struct {
-	EnabledConfig CapabilityField `json:"enabled"`
-	NativeEmitter CapabilityField `json:"native_emitter"`
+	EnabledConfig CapabilityField `json:"enabled" yaml:"enabled"`
+	NativeEmitter CapabilityField `json:"native_emitter" yaml:"native_emitter"`
 }
 
 // HarnessPromptCapabilities describes support for prompt-related fields.
 type HarnessPromptCapabilities struct {
-	SystemPrompt      CapabilityField `json:"system_prompt"`
-	AgentInstructions CapabilityField `json:"agent_instructions"`
+	SystemPrompt      CapabilityField `json:"system_prompt" yaml:"system_prompt"`
+	AgentInstructions CapabilityField `json:"agent_instructions" yaml:"agent_instructions"`
 }
 
 // HarnessAuthCapabilities describes support for auth mode selections.
 type HarnessAuthCapabilities struct {
-	APIKey     CapabilityField `json:"api_key"`
-	AuthFile   CapabilityField `json:"auth_file"`
-	OAuthToken CapabilityField `json:"oauth_token"`
-	VertexAI   CapabilityField `json:"vertex_ai"`
+	APIKey     CapabilityField `json:"api_key" yaml:"api_key"`
+	AuthFile   CapabilityField `json:"auth_file" yaml:"auth_file"`
+	OAuthToken CapabilityField `json:"oauth_token" yaml:"oauth_token"`
+	VertexAI   CapabilityField `json:"vertex_ai" yaml:"vertex_ai"`
 }
 
 // HarnessAdvancedCapabilities describes advanced field support for a harness.
 type HarnessAdvancedCapabilities struct {
-	Harness   string                       `json:"harness"`
-	Limits    HarnessLimitCapabilities     `json:"limits"`
-	Telemetry HarnessTelemetryCapabilities `json:"telemetry"`
-	Prompts   HarnessPromptCapabilities    `json:"prompts"`
-	Auth      HarnessAuthCapabilities      `json:"auth"`
+	Harness   string                       `json:"harness" yaml:"harness,omitempty"`
+	Limits    HarnessLimitCapabilities     `json:"limits" yaml:"limits"`
+	Telemetry HarnessTelemetryCapabilities `json:"telemetry" yaml:"telemetry"`
+	Prompts   HarnessPromptCapabilities    `json:"prompts" yaml:"prompts"`
+	Auth      HarnessAuthCapabilities      `json:"auth" yaml:"auth"`
 }

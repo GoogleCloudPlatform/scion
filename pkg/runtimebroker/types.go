@@ -104,29 +104,33 @@ type HubConnectionInfo struct {
 
 // AgentResponse represents an agent in API responses.
 type AgentResponse struct {
-	ID              string            `json:"id,omitempty"`          // Hub UUID
-	Slug            string            `json:"slug"`                  // URL-safe identifier
-	ContainerID     string            `json:"containerId,omitempty"` // Runtime container ID
-	Name            string            `json:"name"`
-	Template        string            `json:"template,omitempty"`      // Template name used
-	HarnessConfig   string            `json:"harnessConfig,omitempty"` // Resolved harness-config name
-	HarnessAuth     string            `json:"harnessAuth,omitempty"`   // Resolved harness auth method
-	Image           string            `json:"image,omitempty"`         // Resolved container image
-	RuntimeType     string            `json:"runtime,omitempty"`       // Runtime type (docker, kubernetes, apple)
-	Profile         string            `json:"profile,omitempty"`       // Settings profile used
-	GroveID         string            `json:"groveId,omitempty"`
-	UserID          string            `json:"userId,omitempty"`
-	Status          string            `json:"status"`
-	Phase           string            `json:"phase,omitempty"`
-	Activity        string            `json:"activity,omitempty"`
-	StatusReason    string            `json:"statusReason,omitempty"`
-	Ready           bool              `json:"ready,omitempty"`
-	ContainerStatus string            `json:"containerStatus,omitempty"`
-	Config          *AgentConfig      `json:"config,omitempty"`
-	Runtime         *AgentRuntime     `json:"runtimeInfo,omitempty"` // Renamed JSON tag to avoid conflict
-	Labels          map[string]string `json:"labels,omitempty"`
-	CreatedAt       time.Time         `json:"createdAt,omitempty"`
-	UpdatedAt       time.Time         `json:"updatedAt,omitempty"`
+	ID            string `json:"id,omitempty"`          // Hub UUID
+	Slug          string `json:"slug"`                  // URL-safe identifier
+	ContainerID   string `json:"containerId,omitempty"` // Runtime container ID
+	Name          string `json:"name"`
+	Template      string `json:"template,omitempty"`      // Template name used
+	HarnessConfig string `json:"harnessConfig,omitempty"` // Resolved harness-config name
+	// HarnessConfigRevision records the harness-config bundle revision (e.g.
+	// the Hub artifact ContentHash) used to provision this agent. Empty for
+	// built-in or local-only configs without a tracked revision.
+	HarnessConfigRevision string            `json:"harnessConfigRevision,omitempty"`
+	HarnessAuth           string            `json:"harnessAuth,omitempty"` // Resolved harness auth method
+	Image                 string            `json:"image,omitempty"`       // Resolved container image
+	RuntimeType           string            `json:"runtime,omitempty"`     // Runtime type (docker, kubernetes, apple)
+	Profile               string            `json:"profile,omitempty"`     // Settings profile used
+	GroveID               string            `json:"groveId,omitempty"`
+	UserID                string            `json:"userId,omitempty"`
+	Status                string            `json:"status"`
+	Phase                 string            `json:"phase,omitempty"`
+	Activity              string            `json:"activity,omitempty"`
+	StatusReason          string            `json:"statusReason,omitempty"`
+	Ready                 bool              `json:"ready,omitempty"`
+	ContainerStatus       string            `json:"containerStatus,omitempty"`
+	Config                *AgentConfig      `json:"config,omitempty"`
+	Runtime               *AgentRuntime     `json:"runtimeInfo,omitempty"` // Renamed JSON tag to avoid conflict
+	Labels                map[string]string `json:"labels,omitempty"`
+	CreatedAt             time.Time         `json:"createdAt,omitempty"`
+	UpdatedAt             time.Time         `json:"updatedAt,omitempty"`
 }
 
 // AgentConfig contains agent configuration details.
@@ -382,24 +386,25 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 	}
 
 	resp := AgentResponse{
-		ID:              info.ID,
-		Slug:            info.Slug,
-		ContainerID:     info.ContainerID,
-		Name:            info.Name,
-		Template:        info.Template,
-		HarnessConfig:   info.HarnessConfig,
-		HarnessAuth:     info.HarnessAuth,
-		Image:           info.Image,
-		RuntimeType:     info.Runtime,
-		Profile:         info.Profile,
-		GroveID:         info.GroveID,
-		Status:          status,
-		Phase:           phase,
-		Activity:        activity,
-		ContainerStatus: info.ContainerStatus,
-		Labels:          info.Labels,
-		CreatedAt:       info.Created,
-		Ready:           phase == string(state.PhaseRunning),
+		ID:                    info.ID,
+		Slug:                  info.Slug,
+		ContainerID:           info.ContainerID,
+		Name:                  info.Name,
+		Template:              info.Template,
+		HarnessConfig:         info.HarnessConfig,
+		HarnessConfigRevision: info.HarnessConfigRevision,
+		HarnessAuth:           info.HarnessAuth,
+		Image:                 info.Image,
+		RuntimeType:           info.Runtime,
+		Profile:               info.Profile,
+		GroveID:               info.GroveID,
+		Status:                status,
+		Phase:                 phase,
+		Activity:              activity,
+		ContainerStatus:       info.ContainerStatus,
+		Labels:                info.Labels,
+		CreatedAt:             info.Created,
+		Ready:                 phase == string(state.PhaseRunning),
 	}
 
 	if info.Template != "" || info.Image != "" {

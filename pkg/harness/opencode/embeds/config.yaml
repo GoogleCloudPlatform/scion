@@ -15,3 +15,62 @@
 harness: opencode
 image: scion-opencode:latest
 user: scion
+# provisioner.type defaults to "builtin" so the compiled OpenCode harness keeps
+# running unchanged. Run `scion harness-config upgrade opencode --activate-script`
+# to flip this to container-script after reviewing the staged provision.py.
+provisioner:
+  type: builtin
+  interface_version: 1
+  command: ["python3", "/home/scion/.scion/harness/provision.py"]
+  timeout: 30s
+  lifecycle_events:
+    - pre-start
+  required_image_tools:
+    - python3
+config_dir: .config/opencode
+skills_dir: .config/opencode/skills
+interrupt_key: C-c
+instructions_file: AGENTS.md
+system_prompt_file: AGENTS.md
+system_prompt_mode: prepend_to_instructions
+command:
+  # task_position is before_base_args because the compiled OpenCode harness
+  # emits `opencode --prompt <task> <base_args...>` — flipping this to
+  # after_base_args breaks parity for any caller that passes harness args.
+  base: ["opencode"]
+  resume_flag: "--continue"
+  task_flag: "--prompt"
+  task_position: before_base_args
+capabilities:
+  limits:
+    max_turns: { support: "no", reason: "This harness has no hook dialect for turn events" }
+    max_model_calls: { support: "no", reason: "This harness has no hook dialect for model events" }
+    max_duration: { support: "yes" }
+  telemetry:
+    enabled: { support: "yes" }
+    native_emitter: { support: "no", reason: "Native telemetry forwarding is not wired for this harness" }
+  prompts:
+    system_prompt: { support: "partial", reason: "System prompt is downgraded into AGENTS.md" }
+    agent_instructions: { support: "yes" }
+  auth:
+    api_key: { support: "yes" }
+    auth_file: { support: "yes" }
+    oauth_token: { support: "no" }
+    vertex_ai: { support: "no", reason: "Vertex AI auth is not supported for this harness" }
+auth:
+  default_type: api-key
+  types:
+    api-key:
+      required_env:
+        - any_of: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+    auth-file:
+      required_files:
+        - name: OPENCODE_AUTH
+          type: file
+          target_suffix: "/.local/share/opencode/auth.json"
+  autodetect:
+    env:
+      ANTHROPIC_API_KEY: api-key
+      OPENAI_API_KEY: api-key
+    files:
+      OPENCODE_AUTH: auth-file

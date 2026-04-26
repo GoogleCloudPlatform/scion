@@ -19,9 +19,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -374,4 +376,194 @@ func RequiredAuthEnvKeys(harnessName, authSelectedType string) [][]string {
 	}
 
 	return nil
+}
+
+// Config-driven auth preflight.
+//
+// The functions below replace the compiled per-harness tables above with
+// logic that reads the declarative `auth:` block from a harness-config.yaml
+// (parsed into config.HarnessAuthMetadata in Phase 1). When a harness-config
+// supplies metadata, the runtime broker should prefer the *FromConfig
+// variants; the compiled fallbacks remain so legacy on-disk configs without
+// an `auth:` section keep working during migration.
+//
+// Detection precedence
+// --------------------
+// When several env vars or file secrets are present at once, the original
+// compiled detectors had a fixed priority (e.g. Claude prefers oauth-token
+// over vertex-ai). To express that priority deterministically from a YAML
+// map (which has no inherent order), the *FromConfig functions use this
+// rule:
+//
+//   1. Build the candidate set: every auth type that any present key maps
+//      to via authMeta.Autodetect.{Env|Files}.
+//   2. If the harness's default_type appears in the candidate set, return
+//      "" — the caller is already on the default and no override is needed.
+//   3. Otherwise return the alphabetically-smallest candidate. For the
+//      built-in harness set this matches the legacy behavior: "auth-file"
+//      < "oauth-token" < "vertex-ai", which is also the operational
+//      preference order. Future harnesses with non-monotonic preferences
+//      should pick auth type names that sort in their preferred order.
+
+// AuthMetadataAvailable reports whether a HarnessConfigEntry carries the
+// declarative auth block needed by the *FromConfig functions. Callers use
+// this to decide between config-driven and legacy compiled preflight.
+func AuthMetadataAvailable(entry *config.HarnessConfigEntry) bool {
+	if entry == nil || entry.Auth == nil {
+		return false
+	}
+	if len(entry.Auth.Types) == 0 && len(entry.Auth.Autodetect.Env) == 0 && len(entry.Auth.Autodetect.Files) == 0 {
+		return false
+	}
+	return true
+}
+
+// RequiredAuthEnvKeysFromConfig is the config-driven counterpart of
+// RequiredAuthEnvKeys. It returns the env-var alternative groups for the
+// (auth-type) pair declared in authMeta.Types.
+func RequiredAuthEnvKeysFromConfig(authMeta *config.HarnessAuthMetadata, authSelectedType string) [][]string {
+	if authMeta == nil {
+		return nil
+	}
+	effective := authSelectedType
+	if effective == "" {
+		effective = authMeta.DefaultType
+		if effective == "" {
+			effective = "api-key"
+		}
+	}
+	t, ok := authMeta.Types[effective]
+	if !ok {
+		return nil
+	}
+	if len(t.RequiredEnv) == 0 {
+		return nil
+	}
+	groups := make([][]string, 0, len(t.RequiredEnv))
+	for _, req := range t.RequiredEnv {
+		if len(req.AnyOf) == 0 {
+			continue
+		}
+		group := append([]string(nil), req.AnyOf...)
+		groups = append(groups, group)
+	}
+	if len(groups) == 0 {
+		return nil
+	}
+	return groups
+}
+
+// RequiredAuthSecretsFromConfig is the config-driven counterpart of
+// RequiredAuthSecrets. It returns only file requirements explicitly marked
+// `required: true` — documentary files (e.g. CLAUDE_AUTH for Claude's
+// auth-file type, which the user mounts from a locally-resolved file) are
+// not preflight-enforced. File requirements with
+// SkippedWhenGCPServiceAccountAssigned are dropped when gcpSAAssigned is
+// true, mirroring the compiled behavior for vertex-ai with workload identity.
+func RequiredAuthSecretsFromConfig(authMeta *config.HarnessAuthMetadata, authSelectedType string, gcpSAAssigned bool) []api.RequiredSecret {
+	if authMeta == nil {
+		return nil
+	}
+	effective := authSelectedType
+	if effective == "" {
+		effective = authMeta.DefaultType
+		if effective == "" {
+			effective = "api-key"
+		}
+	}
+	t, ok := authMeta.Types[effective]
+	if !ok {
+		return nil
+	}
+	if len(t.RequiredFiles) == 0 {
+		return nil
+	}
+	out := make([]api.RequiredSecret, 0, len(t.RequiredFiles))
+	for _, f := range t.RequiredFiles {
+		if !f.Required {
+			continue
+		}
+		if f.SkippedWhenGCPServiceAccountAssigned && gcpSAAssigned {
+			continue
+		}
+		fileType := f.Type
+		if fileType == "" {
+			fileType = "file"
+		}
+		out = append(out, api.RequiredSecret{
+			Key:                f.Name,
+			Type:               fileType,
+			Description:        f.Description,
+			AlternativeEnvKeys: append([]string(nil), f.AlternativeEnvKeys...),
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// DetectAuthTypeFromFileSecretsFromConfig is the config-driven counterpart
+// of DetectAuthTypeFromFileSecrets. It uses authMeta.Autodetect.Files to map
+// each present file-secret name to a candidate auth type.
+func DetectAuthTypeFromFileSecretsFromConfig(authMeta *config.HarnessAuthMetadata, fileSecretNames map[string]struct{}) string {
+	if authMeta == nil {
+		return ""
+	}
+	return pickAutodetectCandidate(authMeta.DefaultType, authMeta.Autodetect.Files, fileSecretNames)
+}
+
+// DetectAuthTypeFromEnvVarsFromConfig is the config-driven counterpart of
+// DetectAuthTypeFromEnvVars.
+func DetectAuthTypeFromEnvVarsFromConfig(authMeta *config.HarnessAuthMetadata, envKeys map[string]struct{}) string {
+	if authMeta == nil {
+		return ""
+	}
+	return pickAutodetectCandidate(authMeta.DefaultType, authMeta.Autodetect.Env, envKeys)
+}
+
+// DetectAuthTypeFromGCPIdentityFromConfig is the config-driven counterpart
+// of DetectAuthTypeFromGCPIdentity. It returns "vertex-ai" only when the
+// harness declares a vertex-ai auth type (so the metadata server actually
+// has a use) and gcpSAAssigned is true.
+func DetectAuthTypeFromGCPIdentityFromConfig(authMeta *config.HarnessAuthMetadata, gcpSAAssigned bool) string {
+	if !gcpSAAssigned || authMeta == nil {
+		return ""
+	}
+	if _, ok := authMeta.Types["vertex-ai"]; ok {
+		return "vertex-ai"
+	}
+	return ""
+}
+
+// pickAutodetectCandidate implements the deterministic precedence rule
+// documented above: prefer the default_type, otherwise return the
+// alphabetically-smallest candidate.
+func pickAutodetectCandidate(defaultType string, autodetect map[string]string, presentKeys map[string]struct{}) string {
+	if len(autodetect) == 0 || len(presentKeys) == 0 {
+		return ""
+	}
+	candidates := make(map[string]struct{})
+	for key, authType := range autodetect {
+		if authType == "" {
+			continue
+		}
+		if _, ok := presentKeys[key]; ok {
+			candidates[authType] = struct{}{}
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	if defaultType != "" {
+		if _, ok := candidates[defaultType]; ok {
+			return ""
+		}
+	}
+	sorted := make([]string, 0, len(candidates))
+	for c := range candidates {
+		sorted = append(sorted, c)
+	}
+	sort.Strings(sorted)
+	return sorted[0]
 }

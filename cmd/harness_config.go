@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -162,7 +163,10 @@ This overwrites config.yaml and home directory files with the built-in versions.
 			return fmt.Errorf("harness-config %q not found at %s: %w", name, targetDir, err)
 		}
 
-		// Find the matching harness implementation
+		// Reset always seeds from the built-in defaults of the underlying
+		// harness type, so use the legacy New() shim here rather than
+		// Resolve(); the latter would dispatch container-script when
+		// activated, but reset must restore the embedded built-in fileset.
 		h := harness.New(hcDir.Config.Harness)
 
 		// Reset by re-seeding with force=true
@@ -183,6 +187,84 @@ This overwrites config.yaml and home directory files with the built-in versions.
 		}
 
 		fmt.Printf("Harness-config %q reset to defaults.\n", name)
+		return nil
+	},
+}
+
+var harnessConfigUpgradeCmd = &cobra.Command{
+	Use:   "upgrade [name]",
+	Short: "Additively upgrade local harness-config directories",
+	Long: `Adds missing embedded support files and merges missing declarative metadata into
+local harness-config config.yaml files without clobbering existing user values.
+
+By default this does not activate container-script provisioning. Use
+--activate-script with a named harness-config after reviewing the staged files.`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		activateScript, _ := cmd.Flags().GetBool("activate-script")
+		force, _ := cmd.Flags().GetBool("force")
+		if activateScript && len(args) == 0 {
+			return fmt.Errorf("--activate-script requires a harness-config name")
+		}
+
+		globalDir, err := config.GetGlobalDir()
+		if err != nil {
+			return fmt.Errorf("failed to resolve global directory: %w", err)
+		}
+		parentDir := filepath.Join(globalDir, "harness-configs")
+
+		var names []string
+		if len(args) == 1 {
+			names = []string{args[0]}
+		} else {
+			entries, err := os.ReadDir(parentDir)
+			if err != nil {
+				return fmt.Errorf("failed to read harness-configs directory: %w", err)
+			}
+			for _, entry := range entries {
+				if entry.IsDir() {
+					names = append(names, entry.Name())
+				}
+			}
+			sort.Strings(names)
+		}
+
+		plans := make([]*config.HarnessConfigUpgradePlan, 0, len(names))
+		for _, name := range names {
+			targetDir := filepath.Join(parentDir, name)
+			hcDir, err := config.LoadHarnessConfigDir(targetDir)
+			if err != nil {
+				return fmt.Errorf("failed to load harness-config %q: %w", name, err)
+			}
+			h := harness.New(hcDir.Config.Harness)
+			plan, err := config.UpgradeHarnessConfig(targetDir, h, config.HarnessConfigUpgradeOptions{
+				DryRun:         dryRun,
+				ActivateScript: activateScript,
+				Force:          force,
+			})
+			if err != nil {
+				return err
+			}
+			plans = append(plans, plan)
+		}
+
+		if isJSONOutput() {
+			return outputJSON(plans)
+		}
+
+		if len(plans) == 0 {
+			fmt.Println("No harness configurations found.")
+			return nil
+		}
+		for _, plan := range plans {
+			fmt.Println(config.SummarizeHarnessConfigUpgradePlan(plan))
+			if len(plan.Backups) > 0 {
+				for _, backup := range plan.Backups {
+					fmt.Printf("  backup: %s\n", backup)
+				}
+			}
+		}
 		return nil
 	},
 }
@@ -641,6 +723,14 @@ func isHarnessConfigMissingFileError(err error) bool {
 }
 
 // pullHarnessConfigFromHub downloads a harness config from the Hub to local disk.
+//
+// Phase 3: each downloaded file is hashed and compared against the
+// fileInfo.Hash announced by the Hub. A mismatch aborts the pull before any
+// file is written, so a tampered or corrupted artifact never reaches an
+// agent's harness-config dir. Files without a Hub-side hash are accepted
+// (legacy artifacts pre-date file-level hashes); operators can detect those
+// by inspecting the manifest's overall ContentHash, which is still printed
+// after a successful sync.
 func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, toPath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -672,24 +762,36 @@ func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, t
 		return fmt.Errorf("failed to get download URLs: %w", err)
 	}
 
+	// Two-phase download: fetch + verify before writing anything to disk so
+	// a hash mismatch never leaves a partially-installed harness-config.
 	fmt.Printf("Downloading %d files to %s...\n", len(downloadResp.Files), destPath)
 	useHubFileRead := hasLocalDownloadURLs(downloadResp.Files)
+	type pendingFile struct {
+		path    string
+		content []byte
+		relPath string
+	}
+	pending := make([]pendingFile, 0, len(downloadResp.Files))
 	for _, fileInfo := range downloadResp.Files {
 		filePath := filepath.Join(destPath, filepath.FromSlash(fileInfo.Path))
-
-		if err := ensureParentDir(filePath); err != nil {
-			return err
-		}
 
 		content, err := downloadHarnessConfigContent(ctx, hubCtx.Client.HarnessConfigs(), hc.ID, fileInfo, useHubFileRead)
 		if err != nil {
 			return err
 		}
-
-		if err := writeHarnessConfigFile(filePath, content); err != nil {
+		if err := verifyHarnessConfigArtifactHash(fileInfo, content); err != nil {
+			return fmt.Errorf("harness-config %q: %w", name, err)
+		}
+		pending = append(pending, pendingFile{path: filePath, content: content, relPath: fileInfo.Path})
+	}
+	for _, f := range pending {
+		if err := ensureParentDir(f.path); err != nil {
 			return err
 		}
-		fmt.Printf("  Downloaded: %s\n", fileInfo.Path)
+		if err := writeHarnessConfigFile(f.path, f.content); err != nil {
+			return err
+		}
+		fmt.Printf("  Downloaded: %s\n", f.relPath)
 	}
 
 	if isJSONOutput() {
@@ -715,6 +817,7 @@ func init() {
 	rootCmd.AddCommand(harnessConfigCmd)
 	harnessConfigCmd.AddCommand(harnessConfigListCmd)
 	harnessConfigCmd.AddCommand(harnessConfigResetCmd)
+	harnessConfigCmd.AddCommand(harnessConfigUpgradeCmd)
 	harnessConfigCmd.AddCommand(harnessConfigSyncCmd)
 	harnessConfigCmd.AddCommand(harnessConfigPushCmd)
 	harnessConfigCmd.AddCommand(harnessConfigPullCmd)
@@ -723,6 +826,11 @@ func init() {
 
 	// Flags for list command
 	harnessConfigListCmd.Flags().Bool("hub", false, "Include Hub results")
+
+	// Flags for upgrade command
+	harnessConfigUpgradeCmd.Flags().Bool("dry-run", false, "Show planned changes without writing files")
+	harnessConfigUpgradeCmd.Flags().Bool("activate-script", false, "Activate container-script provisioning for the named harness-config")
+	harnessConfigUpgradeCmd.Flags().Bool("force", false, "Reset harness-configs to embedded defaults before future additive migration steps")
 
 	// Flags for sync command
 	harnessConfigSyncCmd.Flags().String("name", "", "Name for the harness-config on the Hub")

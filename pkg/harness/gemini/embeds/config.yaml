@@ -15,3 +15,67 @@
 harness: gemini
 image: scion-gemini:latest
 user: scion
+provisioner:
+  type: builtin
+  interface_version: 1
+config_dir: .gemini
+skills_dir: .gemini/skills
+interrupt_key: Escape
+instructions_file: .gemini/GEMINI.md
+system_prompt_file: .gemini/system_prompt.md
+system_prompt_mode: native
+command:
+  base: ["gemini", "--yolo"]
+  resume_flag: "--resume"
+  task_flag: "--prompt-interactive"
+  task_position: after_base_args
+env_template:
+  GEMINI_CLI_NO_RELAUNCH: "true"
+capabilities:
+  limits:
+    max_turns: { support: "yes" }
+    max_model_calls: { support: "yes" }
+    max_duration: { support: "yes" }
+  telemetry:
+    enabled: { support: "yes" }
+    native_emitter: { support: "yes" }
+  prompts:
+    system_prompt: { support: "yes" }
+    agent_instructions: { support: "yes" }
+  auth:
+    api_key: { support: "yes" }
+    auth_file: { support: "yes" }
+    oauth_token: { support: "no" }
+    vertex_ai: { support: "yes" }
+auth:
+  default_type: api-key
+  types:
+    api-key:
+      required_env:
+        - any_of: ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+    auth-file:
+      required_files:
+        - name: GEMINI_OAUTH_CREDS
+          type: file
+          description: "Gemini personal OAuth credentials file"
+          target_suffix: "/.gemini/oauth_creds.json"
+    vertex-ai:
+      required_env:
+        - any_of: ["GOOGLE_CLOUD_PROJECT"]
+        - any_of: ["GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"]
+      required_files:
+        - name: gcloud-adc
+          type: file
+          description: "Google Cloud Application Default Credentials (ADC) file for vertex-ai authentication"
+          alternative_env_keys: ["GOOGLE_APPLICATION_CREDENTIALS"]
+          skipped_when_gcp_service_account_assigned: true
+          required: true
+  autodetect:
+    env:
+      GEMINI_API_KEY: api-key
+      GOOGLE_API_KEY: api-key
+      GOOGLE_APPLICATION_CREDENTIALS: vertex-ai
+      GOOGLE_CLOUD_PROJECT: vertex-ai
+    files:
+      GEMINI_OAUTH_CREDS: auth-file
+      gcloud-adc: vertex-ai

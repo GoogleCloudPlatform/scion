@@ -182,17 +182,19 @@ runtimes:
 	assert.NotEmpty(t, errors, "invalid runtime type should produce validation error")
 }
 
-func TestValidateSettings_InvalidHarnessType(t *testing.T) {
+func TestValidateSettings_InvalidHarnessConfigProvisionerType(t *testing.T) {
 	data := []byte(`
 schema_version: "1"
 harness_configs:
   test:
-    harness: nonexistent
+    harness: custom
     image: test:latest
+    provisioner:
+      type: unknown
 `)
 	errors, err := ValidateSettings(data, "1")
 	require.NoError(t, err)
-	assert.NotEmpty(t, errors, "invalid harness type should produce validation error")
+	assert.NotEmpty(t, errors, "invalid provisioner type should produce validation error")
 }
 
 func TestValidateSettings_MissingRequiredHarnessField(t *testing.T) {
@@ -314,6 +316,64 @@ harness_configs:
         target: /container/path
         read_only: true
     auth_selected_type: "vertex-ai"
+    provisioner:
+      type: builtin
+      interface_version: 1
+      command: ["python3", "/home/scion/.scion/harness/provision.py"]
+      timeout: 30s
+      lifecycle_events: ["pre-start"]
+      required_image_tools: ["python3"]
+    config_dir: .gemini
+    skills_dir: .gemini/skills
+    interrupt_key: Escape
+    instructions_file: .gemini/GEMINI.md
+    system_prompt_file: .gemini/system_prompt.md
+    system_prompt_mode: native
+    command:
+      base: ["gemini", "--yolo"]
+      resume_flag: "--resume"
+      task_flag: "--prompt-interactive"
+      task_position: after_base_args
+    env_template:
+      GEMINI_CLI_NO_RELAUNCH: "true"
+    capabilities:
+      limits:
+        max_turns: { support: "yes" }
+        max_model_calls: { support: "yes" }
+        max_duration: { support: "yes" }
+      telemetry:
+        enabled: { support: "yes" }
+        native_emitter: { support: "yes" }
+      prompts:
+        system_prompt: { support: "yes" }
+        agent_instructions: { support: "yes" }
+      auth:
+        api_key: { support: "yes" }
+        auth_file: { support: "yes" }
+        oauth_token: { support: "no" }
+        vertex_ai: { support: "yes" }
+    auth:
+      default_type: api-key
+      types:
+        api-key:
+          required_env:
+            - any_of: ["GEMINI_API_KEY"]
+        vertex-ai:
+          required_env:
+            - any_of: ["GOOGLE_CLOUD_PROJECT"]
+          required_files:
+            - name: gcloud-adc
+              type: file
+              description: "ADC file"
+              alternative_env_keys: ["GOOGLE_APPLICATION_CREDENTIALS"]
+              skipped_when_gcp_service_account_assigned: true
+      autodetect:
+        env:
+          GEMINI_API_KEY: api-key
+        files:
+          gcloud-adc: vertex-ai
+    dialect:
+      event_name_field: event_type
 `)
 	errors, err := ValidateSettings(data, "1")
 	require.NoError(t, err)

@@ -364,6 +364,10 @@ type V1BrokerConfig struct {
 	BrokerToken          string        `json:"broker_token,omitempty" yaml:"broker_token,omitempty" koanf:"broker_token"`
 	AutoProvide          *bool         `json:"auto_provide,omitempty" yaml:"auto_provide,omitempty" koanf:"auto_provide"`
 	CORS                 *V1CORSConfig `json:"cors,omitempty" yaml:"cors,omitempty" koanf:"cors"`
+	// AllowContainerScriptHarnesses controls whether this broker will
+	// dispatch agents whose harness-config declares container-script
+	// provisioning. Defaults to false; operators must explicitly opt in.
+	AllowContainerScriptHarnesses bool `json:"allow_container_script_harnesses,omitempty" yaml:"allow_container_script_harnesses,omitempty" koanf:"allow_container_script_harnesses"`
 }
 
 // V1DatabaseConfig holds database settings.
@@ -539,6 +543,87 @@ type HarnessConfigEntry struct {
 	Volumes          []api.VolumeMount    `json:"volumes,omitempty" yaml:"volumes,omitempty" koanf:"volumes"`
 	AuthSelectedType string               `json:"auth_selected_type,omitempty" yaml:"auth_selected_type,omitempty" koanf:"auth_selected_type"`
 	Secrets          []api.RequiredSecret `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
+
+	Provisioner      *HarnessProvisionerConfig        `json:"provisioner,omitempty" yaml:"provisioner,omitempty" koanf:"provisioner"`
+	ConfigDir        string                           `json:"config_dir,omitempty" yaml:"config_dir,omitempty" koanf:"config_dir"`
+	SkillsDir        string                           `json:"skills_dir,omitempty" yaml:"skills_dir,omitempty" koanf:"skills_dir"`
+	InterruptKey     string                           `json:"interrupt_key,omitempty" yaml:"interrupt_key,omitempty" koanf:"interrupt_key"`
+	InstructionsFile string                           `json:"instructions_file,omitempty" yaml:"instructions_file,omitempty" koanf:"instructions_file"`
+	SystemPromptFile string                           `json:"system_prompt_file,omitempty" yaml:"system_prompt_file,omitempty" koanf:"system_prompt_file"`
+	SystemPromptMode string                           `json:"system_prompt_mode,omitempty" yaml:"system_prompt_mode,omitempty" koanf:"system_prompt_mode"`
+	Command          *HarnessCommandConfig            `json:"command,omitempty" yaml:"command,omitempty" koanf:"command"`
+	EnvTemplate      map[string]string                `json:"env_template,omitempty" yaml:"env_template,omitempty" koanf:"env_template"`
+	Capabilities     *api.HarnessAdvancedCapabilities `json:"capabilities,omitempty" yaml:"capabilities,omitempty" koanf:"capabilities"`
+	Auth             *HarnessAuthMetadata             `json:"auth,omitempty" yaml:"auth,omitempty" koanf:"auth"`
+	Dialect          map[string]interface{}           `json:"dialect,omitempty" yaml:"dialect,omitempty" koanf:"dialect"`
+}
+
+// HarnessProvisionerConfig declares how a harness-config is provisioned.
+// "builtin" keeps the current compiled Go harness behavior; "container-script"
+// is the explicit opt-in for the decoupled container-side script path.
+type HarnessProvisionerConfig struct {
+	Type               string   `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`
+	InterfaceVersion   int      `json:"interface_version,omitempty" yaml:"interface_version,omitempty" koanf:"interface_version"`
+	Command            []string `json:"command,omitempty" yaml:"command,omitempty" koanf:"command"`
+	Timeout            string   `json:"timeout,omitempty" yaml:"timeout,omitempty" koanf:"timeout"`
+	LifecycleEvents    []string `json:"lifecycle_events,omitempty" yaml:"lifecycle_events,omitempty" koanf:"lifecycle_events"`
+	RequiredImageTools []string `json:"required_image_tools,omitempty" yaml:"required_image_tools,omitempty" koanf:"required_image_tools"`
+}
+
+// HarnessCommandConfig describes harness CLI command construction.
+type HarnessCommandConfig struct {
+	Base             []string `json:"base,omitempty" yaml:"base,omitempty" koanf:"base"`
+	ResumeFlag       string   `json:"resume_flag,omitempty" yaml:"resume_flag,omitempty" koanf:"resume_flag"`
+	TaskFlag         string   `json:"task_flag,omitempty" yaml:"task_flag,omitempty" koanf:"task_flag"`
+	TaskPosition     string   `json:"task_position,omitempty" yaml:"task_position,omitempty" koanf:"task_position"`
+	SystemPromptFlag string   `json:"system_prompt_flag,omitempty" yaml:"system_prompt_flag,omitempty" koanf:"system_prompt_flag"`
+}
+
+// HarnessAuthMetadata contains declarative auth preflight metadata.
+type HarnessAuthMetadata struct {
+	DefaultType string                             `json:"default_type,omitempty" yaml:"default_type,omitempty" koanf:"default_type"`
+	Types       map[string]HarnessAuthTypeMetadata `json:"types,omitempty" yaml:"types,omitempty" koanf:"types"`
+	Autodetect  HarnessAuthAutodetect              `json:"autodetect,omitempty" yaml:"autodetect,omitempty" koanf:"autodetect"`
+}
+
+type HarnessAuthTypeMetadata struct {
+	RequiredEnv   []HarnessAuthEnvRequirement  `json:"required_env,omitempty" yaml:"required_env,omitempty" koanf:"required_env"`
+	RequiredFiles []HarnessAuthFileRequirement `json:"required_files,omitempty" yaml:"required_files,omitempty" koanf:"required_files"`
+}
+
+type HarnessAuthEnvRequirement struct {
+	AnyOf []string `json:"any_of,omitempty" yaml:"any_of,omitempty" koanf:"any_of"`
+}
+
+type HarnessAuthFileRequirement struct {
+	Name        string `json:"name,omitempty" yaml:"name,omitempty" koanf:"name"`
+	Type        string `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`
+	Description string `json:"description,omitempty" yaml:"description,omitempty" koanf:"description"`
+	// TargetSuffix is the in-container projection target suffix. Used
+	// together with the broker's home dir resolution, e.g. "/.claude/.credentials.json".
+	TargetSuffix string `json:"target_suffix,omitempty" yaml:"target_suffix,omitempty" koanf:"target_suffix"`
+	// AlternativeEnvKeys lists env vars that satisfy this file requirement
+	// in lieu of the file itself (e.g. GOOGLE_APPLICATION_CREDENTIALS for
+	// gcloud-adc).
+	AlternativeEnvKeys []string `json:"alternative_env_keys,omitempty" yaml:"alternative_env_keys,omitempty" koanf:"alternative_env_keys"`
+	// SkippedWhenGCPServiceAccountAssigned drops this requirement when a
+	// GCP workload identity is attached, because the metadata server stands
+	// in for the credential file.
+	SkippedWhenGCPServiceAccountAssigned bool `json:"skipped_when_gcp_service_account_assigned,omitempty" yaml:"skipped_when_gcp_service_account_assigned,omitempty" koanf:"skipped_when_gcp_service_account_assigned"`
+	// Required marks the file as a broker-side required secret: the broker
+	// must locate it (via Hub secrets, CLI gather, or alternatives) before
+	// dispatching the agent. When false the file is documentary — the auth
+	// type uses it, but the broker is not responsible for sourcing it (the
+	// user mounts a locally-resolved file). This preserves legacy parity:
+	// vertex-ai's gcloud-adc was the only "must-supply" secret in the
+	// compiled tables; auth-file types described their files but did not
+	// enforce them at preflight.
+	Required bool `json:"required,omitempty" yaml:"required,omitempty" koanf:"required"`
+}
+
+type HarnessAuthAutodetect struct {
+	Env   map[string]string `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
+	Files map[string]string `json:"files,omitempty" yaml:"files,omitempty" koanf:"files"`
 }
 
 // V1HarnessOverride defines a harness override entry in versioned settings.
@@ -994,6 +1079,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				gc.RuntimeBroker.CORSMaxAge = v1.Broker.CORS.MaxAge
 			}
 		}
+		gc.RuntimeBroker.AllowContainerScriptHarnesses = v1.Broker.AllowContainerScriptHarnesses
 	}
 
 	// Database config
@@ -1131,15 +1217,16 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 
 	// Broker config
 	v1.Broker = &V1BrokerConfig{
-		Enabled:              gc.RuntimeBroker.Enabled,
-		Port:                 gc.RuntimeBroker.Port,
-		Host:                 gc.RuntimeBroker.Host,
-		ReadTimeout:          gc.RuntimeBroker.ReadTimeout.String(),
-		WriteTimeout:         gc.RuntimeBroker.WriteTimeout.String(),
-		HubEndpoint:          gc.RuntimeBroker.HubEndpoint,
-		ContainerHubEndpoint: gc.RuntimeBroker.ContainerHubEndpoint,
-		BrokerID:             gc.RuntimeBroker.BrokerID,
-		BrokerName:           gc.RuntimeBroker.BrokerName,
+		Enabled:                       gc.RuntimeBroker.Enabled,
+		Port:                          gc.RuntimeBroker.Port,
+		Host:                          gc.RuntimeBroker.Host,
+		ReadTimeout:                   gc.RuntimeBroker.ReadTimeout.String(),
+		WriteTimeout:                  gc.RuntimeBroker.WriteTimeout.String(),
+		HubEndpoint:                   gc.RuntimeBroker.HubEndpoint,
+		ContainerHubEndpoint:          gc.RuntimeBroker.ContainerHubEndpoint,
+		BrokerID:                      gc.RuntimeBroker.BrokerID,
+		BrokerName:                    gc.RuntimeBroker.BrokerName,
+		AllowContainerScriptHarnesses: gc.RuntimeBroker.AllowContainerScriptHarnesses,
 		CORS: &V1CORSConfig{
 			Enabled:        gc.RuntimeBroker.CORSEnabled,
 			AllowedOrigins: gc.RuntimeBroker.CORSAllowedOrigins,
