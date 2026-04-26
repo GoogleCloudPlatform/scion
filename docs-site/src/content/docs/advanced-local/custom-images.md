@@ -41,7 +41,7 @@ For security and compatibility across runtimes (especially Kubernetes), Scion ag
 Build all images locally and push to your registry. Once `core-base` has been built, rebuilds can often use the default `common` build target.
 
 ```bash
-# Build scion-base + all harness images, then push
+# Build all layers (core-base, scion-base, and harnesses), then push
 image-build/scripts/build-images.sh --registry ghcr.io/myorg --push --target all
 
 # Configure Scion to use them
