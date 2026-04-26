@@ -84,7 +84,7 @@ No publicly hosted images are currently available for Scion, but quick and easy 
 
 The easiest way to get these images is to fork this repo, and then go to the "Actions" tab and select the "Build Scion Images" workflow.
 
-You will then use your `ghcr.io/myorg` registry for the scion setting. These images are required during initialization.
+You will then use your `ghcr.io/myorg` registry for the `image_registry` setting. These images must be available in the registry before running the initialization command.
 
 See [Building Containers](/scion/advanced-local/custom-images/) for more details
 
