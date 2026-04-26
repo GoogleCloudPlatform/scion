@@ -24,7 +24,7 @@ core-base          System dependencies (Go, Node, Python, Git)
         └── scion-codex      Codex harness
 ```
 
-The `core-base` layer changes infrequently. Most rebuilds only need `scion-base` and the harness layers (the `common` build target).
+The `core-base` layer changes infrequently, but needs to be built at least once for initialization. Most rebuilds only need `scion-base` and the harness layers (the `common` build target).
 
 ### Non-Root Requirement
 
@@ -38,11 +38,11 @@ For security and compatibility across runtimes (especially Kubernetes), Scion ag
 
 ### Option 1: Local Docker Build
 
-Build images locally and push to your registry:
+Build all images locally and push to your registry. Once the `core-base` has been built, rebuilds can often use the default `common` build target.
 
 ```bash
 # Build scion-base + all harness images, then push
-image-build/scripts/build-images.sh --registry ghcr.io/myorg --push
+image-build/scripts/build-images.sh --registry ghcr.io/myorg --push --target all
 
 # Configure Scion to use them
 scion config set image_registry ghcr.io/myorg
