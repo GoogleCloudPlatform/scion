@@ -24,7 +24,7 @@ core-base          System dependencies (Go, Node, Python, Git)
         └── scion-codex      Codex harness
 ```
 
-The `core-base` layer changes infrequently, but needs to be built at least once for initialization. Most rebuilds only need `scion-base` and the harness layers (the `common` build target).
+The `core-base` layer changes infrequently, but needs to be built at least once as it is a prerequisite for all other layers. Most rebuilds only need `scion-base` and the harness layers (the `common` build target).
 
 ### Non-Root Requirement
 
