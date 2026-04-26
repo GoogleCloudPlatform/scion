@@ -38,7 +38,7 @@ For security and compatibility across runtimes (especially Kubernetes), Scion ag
 
 ### Option 1: Local Docker Build
 
-Build all images locally and push to your registry. Once the `core-base` has been built, rebuilds can often use the default `common` build target.
+Build all images locally and push to your registry. Once `core-base` has been built, rebuilds can often use the default `common` build target.
 
 ```bash
 # Build scion-base + all harness images, then push
