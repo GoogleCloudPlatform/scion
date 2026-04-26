@@ -84,7 +84,7 @@ No publicly hosted images are currently available for Scion, but quick and easy 
 
 The easiest way to get these images is to fork this repo, and then go to the "Actions" tab and select the "Build Scion Images" workflow.
 
-You will then use your `ghcr.io/myorg` registry for the scion setting.
+You will then use your `ghcr.io/myorg` registry for the scion setting. These images are required during initialization.
 
 See [Building Containers](/scion/advanced-local/custom-images/) for more details
 
@@ -99,7 +99,7 @@ scion init --machine
 
 This creates a directory at `~/.scion`
 
-You will be prompted for the image registry where you built and deployed images.
+You will be prompted for the image registry where you have built and deployed the images in the previous step.
 
 ### 2. Initialize a Grove
 Navigate to the root of a project where you want to use Scion and run:
