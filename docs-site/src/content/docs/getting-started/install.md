@@ -15,7 +15,7 @@ Scion is written in Go. You need Go 1.22 or later installed.
 While a binary may be available from the github releases page, this is an active project and it is currently best to regularly build from source.
 
 ### 2. Container Runtime
-Scion requires a container runtime to manage agents. You can use either Docker, Podman or the Apple Virtualization Framework (experimental).
+Scion requires a container runtime to manage agents. You can use Docker, Podman, or the Apple Virtualization Framework (experimental).
 
 #### Docker (Linux/Windows)
 - Install [Docker Desktop](https://www.docker.com/products/docker-desktop) or [Docker Engine](https://docs.docker.com/engine/install/).
