@@ -578,7 +578,7 @@ func initStore(cfg *config.GlobalConfig) (store.Store, error) {
 		}
 
 		entDSN := cfg.Database.URL + "_ent"
-		entClient, err := entc.OpenSQLite("file:" + entDSN + "?cache=shared")
+		entClient, _, err := entc.OpenSQLite("file:" + entDSN + "?cache=shared")
 		if err != nil {
 			sqliteStore.Close()
 			return nil, fmt.Errorf("failed to open ent database: %w", err)

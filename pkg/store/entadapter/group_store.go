@@ -530,7 +530,7 @@ func (s *GroupStore) GetGroupMembers(ctx context.Context, groupID string) ([]sto
 				MemberType: store.GroupMemberTypeAgent,
 				MemberID:   a.ID.String(),
 				Role:       store.GroupMemberRoleMember,
-				AddedAt:    a.Created,
+				AddedAt:    a.CreatedAt,
 				AddedBy:    "system",
 			})
 		}

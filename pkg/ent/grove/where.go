@@ -71,14 +71,14 @@ func GitRemote(v string) predicate.Grove {
 	return predicate.Grove(sql.FieldEQ(FieldGitRemote, v))
 }
 
-// Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
-func Created(v time.Time) predicate.Grove {
-	return predicate.Grove(sql.FieldEQ(FieldCreated, v))
+// CreatedAt applies equality check predicate on the "created_at" field. It's identical to CreatedAtEQ.
+func CreatedAt(v time.Time) predicate.Grove {
+	return predicate.Grove(sql.FieldEQ(FieldCreatedAt, v))
 }
 
-// Updated applies equality check predicate on the "updated" field. It's identical to UpdatedEQ.
-func Updated(v time.Time) predicate.Grove {
-	return predicate.Grove(sql.FieldEQ(FieldUpdated, v))
+// UpdatedAt applies equality check predicate on the "updated_at" field. It's identical to UpdatedAtEQ.
+func UpdatedAt(v time.Time) predicate.Grove {
+	return predicate.Grove(sql.FieldEQ(FieldUpdatedAt, v))
 }
 
 // CreatedBy applies equality check predicate on the "created_by" field. It's identical to CreatedByEQ.
@@ -94,6 +94,16 @@ func OwnerID(v string) predicate.Grove {
 // Visibility applies equality check predicate on the "visibility" field. It's identical to VisibilityEQ.
 func Visibility(v string) predicate.Grove {
 	return predicate.Grove(sql.FieldEQ(FieldVisibility, v))
+}
+
+// DefaultRuntimeBrokerID applies equality check predicate on the "default_runtime_broker_id" field. It's identical to DefaultRuntimeBrokerIDEQ.
+func DefaultRuntimeBrokerID(v uuid.UUID) predicate.Grove {
+	return predicate.Grove(sql.FieldEQ(FieldDefaultRuntimeBrokerID, v))
+}
+
+// GithubInstallationID applies equality check predicate on the "github_installation_id" field. It's identical to GithubInstallationIDEQ.
+func GithubInstallationID(v int64) predicate.Grove {
+	return predicate.Grove(sql.FieldEQ(FieldGithubInstallationID, v))
 }
 
 // NameEQ applies the EQ predicate on the "name" field.
@@ -321,84 +331,84 @@ func AnnotationsNotNil() predicate.Grove {
 	return predicate.Grove(sql.FieldNotNull(FieldAnnotations))
 }
 
-// CreatedEQ applies the EQ predicate on the "created" field.
-func CreatedEQ(v time.Time) predicate.Grove {
-	return predicate.Grove(sql.FieldEQ(FieldCreated, v))
+// CreatedAtEQ applies the EQ predicate on the "created_at" field.
+func CreatedAtEQ(v time.Time) predicate.Grove {
+	return predicate.Grove(sql.FieldEQ(FieldCreatedAt, v))
 }
 
-// CreatedNEQ applies the NEQ predicate on the "created" field.
-func CreatedNEQ(v time.Time) predicate.Grove {
-	return predicate.Grove(sql.FieldNEQ(FieldCreated, v))
+// CreatedAtNEQ applies the NEQ predicate on the "created_at" field.
+func CreatedAtNEQ(v time.Time) predicate.Grove {
+	return predicate.Grove(sql.FieldNEQ(FieldCreatedAt, v))
 }
 
-// CreatedIn applies the In predicate on the "created" field.
-func CreatedIn(vs ...time.Time) predicate.Grove {
-	return predicate.Grove(sql.FieldIn(FieldCreated, vs...))
+// CreatedAtIn applies the In predicate on the "created_at" field.
+func CreatedAtIn(vs ...time.Time) predicate.Grove {
+	return predicate.Grove(sql.FieldIn(FieldCreatedAt, vs...))
 }
 
-// CreatedNotIn applies the NotIn predicate on the "created" field.
-func CreatedNotIn(vs ...time.Time) predicate.Grove {
-	return predicate.Grove(sql.FieldNotIn(FieldCreated, vs...))
+// CreatedAtNotIn applies the NotIn predicate on the "created_at" field.
+func CreatedAtNotIn(vs ...time.Time) predicate.Grove {
+	return predicate.Grove(sql.FieldNotIn(FieldCreatedAt, vs...))
 }
 
-// CreatedGT applies the GT predicate on the "created" field.
-func CreatedGT(v time.Time) predicate.Grove {
-	return predicate.Grove(sql.FieldGT(FieldCreated, v))
+// CreatedAtGT applies the GT predicate on the "created_at" field.
+func CreatedAtGT(v time.Time) predicate.Grove {
+	return predicate.Grove(sql.FieldGT(FieldCreatedAt, v))
 }
 
-// CreatedGTE applies the GTE predicate on the "created" field.
-func CreatedGTE(v time.Time) predicate.Grove {
-	return predicate.Grove(sql.FieldGTE(FieldCreated, v))
+// CreatedAtGTE applies the GTE predicate on the "created_at" field.
+func CreatedAtGTE(v time.Time) predicate.Grove {
+	return predicate.Grove(sql.FieldGTE(FieldCreatedAt, v))
 }
 
-// CreatedLT applies the LT predicate on the "created" field.
-func CreatedLT(v time.Time) predicate.Grove {
-	return predicate.Grove(sql.FieldLT(FieldCreated, v))
+// CreatedAtLT applies the LT predicate on the "created_at" field.
+func CreatedAtLT(v time.Time) predicate.Grove {
+	return predicate.Grove(sql.FieldLT(FieldCreatedAt, v))
 }
 
-// CreatedLTE applies the LTE predicate on the "created" field.
-func CreatedLTE(v time.Time) predicate.Grove {
-	return predicate.Grove(sql.FieldLTE(FieldCreated, v))
+// CreatedAtLTE applies the LTE predicate on the "created_at" field.
+func CreatedAtLTE(v time.Time) predicate.Grove {
+	return predicate.Grove(sql.FieldLTE(FieldCreatedAt, v))
 }
 
-// UpdatedEQ applies the EQ predicate on the "updated" field.
-func UpdatedEQ(v time.Time) predicate.Grove {
-	return predicate.Grove(sql.FieldEQ(FieldUpdated, v))
+// UpdatedAtEQ applies the EQ predicate on the "updated_at" field.
+func UpdatedAtEQ(v time.Time) predicate.Grove {
+	return predicate.Grove(sql.FieldEQ(FieldUpdatedAt, v))
 }
 
-// UpdatedNEQ applies the NEQ predicate on the "updated" field.
-func UpdatedNEQ(v time.Time) predicate.Grove {
-	return predicate.Grove(sql.FieldNEQ(FieldUpdated, v))
+// UpdatedAtNEQ applies the NEQ predicate on the "updated_at" field.
+func UpdatedAtNEQ(v time.Time) predicate.Grove {
+	return predicate.Grove(sql.FieldNEQ(FieldUpdatedAt, v))
 }
 
-// UpdatedIn applies the In predicate on the "updated" field.
-func UpdatedIn(vs ...time.Time) predicate.Grove {
-	return predicate.Grove(sql.FieldIn(FieldUpdated, vs...))
+// UpdatedAtIn applies the In predicate on the "updated_at" field.
+func UpdatedAtIn(vs ...time.Time) predicate.Grove {
+	return predicate.Grove(sql.FieldIn(FieldUpdatedAt, vs...))
 }
 
-// UpdatedNotIn applies the NotIn predicate on the "updated" field.
-func UpdatedNotIn(vs ...time.Time) predicate.Grove {
-	return predicate.Grove(sql.FieldNotIn(FieldUpdated, vs...))
+// UpdatedAtNotIn applies the NotIn predicate on the "updated_at" field.
+func UpdatedAtNotIn(vs ...time.Time) predicate.Grove {
+	return predicate.Grove(sql.FieldNotIn(FieldUpdatedAt, vs...))
 }
 
-// UpdatedGT applies the GT predicate on the "updated" field.
-func UpdatedGT(v time.Time) predicate.Grove {
-	return predicate.Grove(sql.FieldGT(FieldUpdated, v))
+// UpdatedAtGT applies the GT predicate on the "updated_at" field.
+func UpdatedAtGT(v time.Time) predicate.Grove {
+	return predicate.Grove(sql.FieldGT(FieldUpdatedAt, v))
 }
 
-// UpdatedGTE applies the GTE predicate on the "updated" field.
-func UpdatedGTE(v time.Time) predicate.Grove {
-	return predicate.Grove(sql.FieldGTE(FieldUpdated, v))
+// UpdatedAtGTE applies the GTE predicate on the "updated_at" field.
+func UpdatedAtGTE(v time.Time) predicate.Grove {
+	return predicate.Grove(sql.FieldGTE(FieldUpdatedAt, v))
 }
 
-// UpdatedLT applies the LT predicate on the "updated" field.
-func UpdatedLT(v time.Time) predicate.Grove {
-	return predicate.Grove(sql.FieldLT(FieldUpdated, v))
+// UpdatedAtLT applies the LT predicate on the "updated_at" field.
+func UpdatedAtLT(v time.Time) predicate.Grove {
+	return predicate.Grove(sql.FieldLT(FieldUpdatedAt, v))
 }
 
-// UpdatedLTE applies the LTE predicate on the "updated" field.
-func UpdatedLTE(v time.Time) predicate.Grove {
-	return predicate.Grove(sql.FieldLTE(FieldUpdated, v))
+// UpdatedAtLTE applies the LTE predicate on the "updated_at" field.
+func UpdatedAtLTE(v time.Time) predicate.Grove {
+	return predicate.Grove(sql.FieldLTE(FieldUpdatedAt, v))
 }
 
 // CreatedByEQ applies the EQ predicate on the "created_by" field.
@@ -614,6 +624,146 @@ func VisibilityEqualFold(v string) predicate.Grove {
 // VisibilityContainsFold applies the ContainsFold predicate on the "visibility" field.
 func VisibilityContainsFold(v string) predicate.Grove {
 	return predicate.Grove(sql.FieldContainsFold(FieldVisibility, v))
+}
+
+// DefaultRuntimeBrokerIDEQ applies the EQ predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDEQ(v uuid.UUID) predicate.Grove {
+	return predicate.Grove(sql.FieldEQ(FieldDefaultRuntimeBrokerID, v))
+}
+
+// DefaultRuntimeBrokerIDNEQ applies the NEQ predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDNEQ(v uuid.UUID) predicate.Grove {
+	return predicate.Grove(sql.FieldNEQ(FieldDefaultRuntimeBrokerID, v))
+}
+
+// DefaultRuntimeBrokerIDIn applies the In predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDIn(vs ...uuid.UUID) predicate.Grove {
+	return predicate.Grove(sql.FieldIn(FieldDefaultRuntimeBrokerID, vs...))
+}
+
+// DefaultRuntimeBrokerIDNotIn applies the NotIn predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDNotIn(vs ...uuid.UUID) predicate.Grove {
+	return predicate.Grove(sql.FieldNotIn(FieldDefaultRuntimeBrokerID, vs...))
+}
+
+// DefaultRuntimeBrokerIDGT applies the GT predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDGT(v uuid.UUID) predicate.Grove {
+	return predicate.Grove(sql.FieldGT(FieldDefaultRuntimeBrokerID, v))
+}
+
+// DefaultRuntimeBrokerIDGTE applies the GTE predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDGTE(v uuid.UUID) predicate.Grove {
+	return predicate.Grove(sql.FieldGTE(FieldDefaultRuntimeBrokerID, v))
+}
+
+// DefaultRuntimeBrokerIDLT applies the LT predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDLT(v uuid.UUID) predicate.Grove {
+	return predicate.Grove(sql.FieldLT(FieldDefaultRuntimeBrokerID, v))
+}
+
+// DefaultRuntimeBrokerIDLTE applies the LTE predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDLTE(v uuid.UUID) predicate.Grove {
+	return predicate.Grove(sql.FieldLTE(FieldDefaultRuntimeBrokerID, v))
+}
+
+// DefaultRuntimeBrokerIDIsNil applies the IsNil predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDIsNil() predicate.Grove {
+	return predicate.Grove(sql.FieldIsNull(FieldDefaultRuntimeBrokerID))
+}
+
+// DefaultRuntimeBrokerIDNotNil applies the NotNil predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDNotNil() predicate.Grove {
+	return predicate.Grove(sql.FieldNotNull(FieldDefaultRuntimeBrokerID))
+}
+
+// SharedDirsIsNil applies the IsNil predicate on the "shared_dirs" field.
+func SharedDirsIsNil() predicate.Grove {
+	return predicate.Grove(sql.FieldIsNull(FieldSharedDirs))
+}
+
+// SharedDirsNotNil applies the NotNil predicate on the "shared_dirs" field.
+func SharedDirsNotNil() predicate.Grove {
+	return predicate.Grove(sql.FieldNotNull(FieldSharedDirs))
+}
+
+// GithubInstallationIDEQ applies the EQ predicate on the "github_installation_id" field.
+func GithubInstallationIDEQ(v int64) predicate.Grove {
+	return predicate.Grove(sql.FieldEQ(FieldGithubInstallationID, v))
+}
+
+// GithubInstallationIDNEQ applies the NEQ predicate on the "github_installation_id" field.
+func GithubInstallationIDNEQ(v int64) predicate.Grove {
+	return predicate.Grove(sql.FieldNEQ(FieldGithubInstallationID, v))
+}
+
+// GithubInstallationIDIn applies the In predicate on the "github_installation_id" field.
+func GithubInstallationIDIn(vs ...int64) predicate.Grove {
+	return predicate.Grove(sql.FieldIn(FieldGithubInstallationID, vs...))
+}
+
+// GithubInstallationIDNotIn applies the NotIn predicate on the "github_installation_id" field.
+func GithubInstallationIDNotIn(vs ...int64) predicate.Grove {
+	return predicate.Grove(sql.FieldNotIn(FieldGithubInstallationID, vs...))
+}
+
+// GithubInstallationIDGT applies the GT predicate on the "github_installation_id" field.
+func GithubInstallationIDGT(v int64) predicate.Grove {
+	return predicate.Grove(sql.FieldGT(FieldGithubInstallationID, v))
+}
+
+// GithubInstallationIDGTE applies the GTE predicate on the "github_installation_id" field.
+func GithubInstallationIDGTE(v int64) predicate.Grove {
+	return predicate.Grove(sql.FieldGTE(FieldGithubInstallationID, v))
+}
+
+// GithubInstallationIDLT applies the LT predicate on the "github_installation_id" field.
+func GithubInstallationIDLT(v int64) predicate.Grove {
+	return predicate.Grove(sql.FieldLT(FieldGithubInstallationID, v))
+}
+
+// GithubInstallationIDLTE applies the LTE predicate on the "github_installation_id" field.
+func GithubInstallationIDLTE(v int64) predicate.Grove {
+	return predicate.Grove(sql.FieldLTE(FieldGithubInstallationID, v))
+}
+
+// GithubInstallationIDIsNil applies the IsNil predicate on the "github_installation_id" field.
+func GithubInstallationIDIsNil() predicate.Grove {
+	return predicate.Grove(sql.FieldIsNull(FieldGithubInstallationID))
+}
+
+// GithubInstallationIDNotNil applies the NotNil predicate on the "github_installation_id" field.
+func GithubInstallationIDNotNil() predicate.Grove {
+	return predicate.Grove(sql.FieldNotNull(FieldGithubInstallationID))
+}
+
+// GithubPermissionsIsNil applies the IsNil predicate on the "github_permissions" field.
+func GithubPermissionsIsNil() predicate.Grove {
+	return predicate.Grove(sql.FieldIsNull(FieldGithubPermissions))
+}
+
+// GithubPermissionsNotNil applies the NotNil predicate on the "github_permissions" field.
+func GithubPermissionsNotNil() predicate.Grove {
+	return predicate.Grove(sql.FieldNotNull(FieldGithubPermissions))
+}
+
+// GithubAppStatusIsNil applies the IsNil predicate on the "github_app_status" field.
+func GithubAppStatusIsNil() predicate.Grove {
+	return predicate.Grove(sql.FieldIsNull(FieldGithubAppStatus))
+}
+
+// GithubAppStatusNotNil applies the NotNil predicate on the "github_app_status" field.
+func GithubAppStatusNotNil() predicate.Grove {
+	return predicate.Grove(sql.FieldNotNull(FieldGithubAppStatus))
+}
+
+// GitIdentityIsNil applies the IsNil predicate on the "git_identity" field.
+func GitIdentityIsNil() predicate.Grove {
+	return predicate.Grove(sql.FieldIsNull(FieldGitIdentity))
+}
+
+// GitIdentityNotNil applies the NotNil predicate on the "git_identity" field.
+func GitIdentityNotNil() predicate.Grove {
+	return predicate.Grove(sql.FieldNotNull(FieldGitIdentity))
 }
 
 // HasAgents applies the HasEdge predicate on the "agents" edge.

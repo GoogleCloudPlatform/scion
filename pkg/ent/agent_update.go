@@ -4,12 +4,14 @@ package ent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
+	"entgo.io/ent/dialect/sql/sqljson"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
@@ -95,17 +97,411 @@ func (_u *AgentUpdate) SetNillableGroveID(v *uuid.UUID) *AgentUpdate {
 	return _u
 }
 
-// SetStatus sets the "status" field.
-func (_u *AgentUpdate) SetStatus(v agent.Status) *AgentUpdate {
-	_u.mutation.SetStatus(v)
+// SetLabels sets the "labels" field.
+func (_u *AgentUpdate) SetLabels(v map[string]string) *AgentUpdate {
+	_u.mutation.SetLabels(v)
 	return _u
 }
 
-// SetNillableStatus sets the "status" field if the given value is not nil.
-func (_u *AgentUpdate) SetNillableStatus(v *agent.Status) *AgentUpdate {
+// ClearLabels clears the value of the "labels" field.
+func (_u *AgentUpdate) ClearLabels() *AgentUpdate {
+	_u.mutation.ClearLabels()
+	return _u
+}
+
+// SetAnnotations sets the "annotations" field.
+func (_u *AgentUpdate) SetAnnotations(v map[string]string) *AgentUpdate {
+	_u.mutation.SetAnnotations(v)
+	return _u
+}
+
+// ClearAnnotations clears the value of the "annotations" field.
+func (_u *AgentUpdate) ClearAnnotations() *AgentUpdate {
+	_u.mutation.ClearAnnotations()
+	return _u
+}
+
+// SetPhase sets the "phase" field.
+func (_u *AgentUpdate) SetPhase(v string) *AgentUpdate {
+	_u.mutation.SetPhase(v)
+	return _u
+}
+
+// SetNillablePhase sets the "phase" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillablePhase(v *string) *AgentUpdate {
 	if v != nil {
-		_u.SetStatus(*v)
+		_u.SetPhase(*v)
 	}
+	return _u
+}
+
+// SetActivity sets the "activity" field.
+func (_u *AgentUpdate) SetActivity(v string) *AgentUpdate {
+	_u.mutation.SetActivity(v)
+	return _u
+}
+
+// SetNillableActivity sets the "activity" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableActivity(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetActivity(*v)
+	}
+	return _u
+}
+
+// SetToolName sets the "tool_name" field.
+func (_u *AgentUpdate) SetToolName(v string) *AgentUpdate {
+	_u.mutation.SetToolName(v)
+	return _u
+}
+
+// SetNillableToolName sets the "tool_name" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableToolName(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetToolName(*v)
+	}
+	return _u
+}
+
+// SetConnectionState sets the "connection_state" field.
+func (_u *AgentUpdate) SetConnectionState(v string) *AgentUpdate {
+	_u.mutation.SetConnectionState(v)
+	return _u
+}
+
+// SetNillableConnectionState sets the "connection_state" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableConnectionState(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetConnectionState(*v)
+	}
+	return _u
+}
+
+// SetContainerStatus sets the "container_status" field.
+func (_u *AgentUpdate) SetContainerStatus(v string) *AgentUpdate {
+	_u.mutation.SetContainerStatus(v)
+	return _u
+}
+
+// SetNillableContainerStatus sets the "container_status" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableContainerStatus(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetContainerStatus(*v)
+	}
+	return _u
+}
+
+// ClearContainerStatus clears the value of the "container_status" field.
+func (_u *AgentUpdate) ClearContainerStatus() *AgentUpdate {
+	_u.mutation.ClearContainerStatus()
+	return _u
+}
+
+// SetRuntimeState sets the "runtime_state" field.
+func (_u *AgentUpdate) SetRuntimeState(v string) *AgentUpdate {
+	_u.mutation.SetRuntimeState(v)
+	return _u
+}
+
+// SetNillableRuntimeState sets the "runtime_state" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableRuntimeState(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetRuntimeState(*v)
+	}
+	return _u
+}
+
+// ClearRuntimeState clears the value of the "runtime_state" field.
+func (_u *AgentUpdate) ClearRuntimeState() *AgentUpdate {
+	_u.mutation.ClearRuntimeState()
+	return _u
+}
+
+// SetStalledFromActivity sets the "stalled_from_activity" field.
+func (_u *AgentUpdate) SetStalledFromActivity(v string) *AgentUpdate {
+	_u.mutation.SetStalledFromActivity(v)
+	return _u
+}
+
+// SetNillableStalledFromActivity sets the "stalled_from_activity" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableStalledFromActivity(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetStalledFromActivity(*v)
+	}
+	return _u
+}
+
+// SetCurrentTurns sets the "current_turns" field.
+func (_u *AgentUpdate) SetCurrentTurns(v int) *AgentUpdate {
+	_u.mutation.ResetCurrentTurns()
+	_u.mutation.SetCurrentTurns(v)
+	return _u
+}
+
+// SetNillableCurrentTurns sets the "current_turns" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableCurrentTurns(v *int) *AgentUpdate {
+	if v != nil {
+		_u.SetCurrentTurns(*v)
+	}
+	return _u
+}
+
+// AddCurrentTurns adds value to the "current_turns" field.
+func (_u *AgentUpdate) AddCurrentTurns(v int) *AgentUpdate {
+	_u.mutation.AddCurrentTurns(v)
+	return _u
+}
+
+// SetCurrentModelCalls sets the "current_model_calls" field.
+func (_u *AgentUpdate) SetCurrentModelCalls(v int) *AgentUpdate {
+	_u.mutation.ResetCurrentModelCalls()
+	_u.mutation.SetCurrentModelCalls(v)
+	return _u
+}
+
+// SetNillableCurrentModelCalls sets the "current_model_calls" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableCurrentModelCalls(v *int) *AgentUpdate {
+	if v != nil {
+		_u.SetCurrentModelCalls(*v)
+	}
+	return _u
+}
+
+// AddCurrentModelCalls adds value to the "current_model_calls" field.
+func (_u *AgentUpdate) AddCurrentModelCalls(v int) *AgentUpdate {
+	_u.mutation.AddCurrentModelCalls(v)
+	return _u
+}
+
+// SetStartedAt sets the "started_at" field.
+func (_u *AgentUpdate) SetStartedAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetStartedAt(v)
+	return _u
+}
+
+// SetNillableStartedAt sets the "started_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableStartedAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetStartedAt(*v)
+	}
+	return _u
+}
+
+// ClearStartedAt clears the value of the "started_at" field.
+func (_u *AgentUpdate) ClearStartedAt() *AgentUpdate {
+	_u.mutation.ClearStartedAt()
+	return _u
+}
+
+// SetImage sets the "image" field.
+func (_u *AgentUpdate) SetImage(v string) *AgentUpdate {
+	_u.mutation.SetImage(v)
+	return _u
+}
+
+// SetNillableImage sets the "image" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableImage(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetImage(*v)
+	}
+	return _u
+}
+
+// ClearImage clears the value of the "image" field.
+func (_u *AgentUpdate) ClearImage() *AgentUpdate {
+	_u.mutation.ClearImage()
+	return _u
+}
+
+// SetDetached sets the "detached" field.
+func (_u *AgentUpdate) SetDetached(v bool) *AgentUpdate {
+	_u.mutation.SetDetached(v)
+	return _u
+}
+
+// SetNillableDetached sets the "detached" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableDetached(v *bool) *AgentUpdate {
+	if v != nil {
+		_u.SetDetached(*v)
+	}
+	return _u
+}
+
+// SetRuntime sets the "runtime" field.
+func (_u *AgentUpdate) SetRuntime(v string) *AgentUpdate {
+	_u.mutation.SetRuntime(v)
+	return _u
+}
+
+// SetNillableRuntime sets the "runtime" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableRuntime(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetRuntime(*v)
+	}
+	return _u
+}
+
+// ClearRuntime clears the value of the "runtime" field.
+func (_u *AgentUpdate) ClearRuntime() *AgentUpdate {
+	_u.mutation.ClearRuntime()
+	return _u
+}
+
+// SetRuntimeBrokerID sets the "runtime_broker_id" field.
+func (_u *AgentUpdate) SetRuntimeBrokerID(v uuid.UUID) *AgentUpdate {
+	_u.mutation.SetRuntimeBrokerID(v)
+	return _u
+}
+
+// SetNillableRuntimeBrokerID sets the "runtime_broker_id" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableRuntimeBrokerID(v *uuid.UUID) *AgentUpdate {
+	if v != nil {
+		_u.SetRuntimeBrokerID(*v)
+	}
+	return _u
+}
+
+// ClearRuntimeBrokerID clears the value of the "runtime_broker_id" field.
+func (_u *AgentUpdate) ClearRuntimeBrokerID() *AgentUpdate {
+	_u.mutation.ClearRuntimeBrokerID()
+	return _u
+}
+
+// SetWebPtyEnabled sets the "web_pty_enabled" field.
+func (_u *AgentUpdate) SetWebPtyEnabled(v bool) *AgentUpdate {
+	_u.mutation.SetWebPtyEnabled(v)
+	return _u
+}
+
+// SetNillableWebPtyEnabled sets the "web_pty_enabled" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableWebPtyEnabled(v *bool) *AgentUpdate {
+	if v != nil {
+		_u.SetWebPtyEnabled(*v)
+	}
+	return _u
+}
+
+// SetTaskSummary sets the "task_summary" field.
+func (_u *AgentUpdate) SetTaskSummary(v string) *AgentUpdate {
+	_u.mutation.SetTaskSummary(v)
+	return _u
+}
+
+// SetNillableTaskSummary sets the "task_summary" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableTaskSummary(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetTaskSummary(*v)
+	}
+	return _u
+}
+
+// ClearTaskSummary clears the value of the "task_summary" field.
+func (_u *AgentUpdate) ClearTaskSummary() *AgentUpdate {
+	_u.mutation.ClearTaskSummary()
+	return _u
+}
+
+// SetMessage sets the "message" field.
+func (_u *AgentUpdate) SetMessage(v string) *AgentUpdate {
+	_u.mutation.SetMessage(v)
+	return _u
+}
+
+// SetNillableMessage sets the "message" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableMessage(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetMessage(*v)
+	}
+	return _u
+}
+
+// ClearMessage clears the value of the "message" field.
+func (_u *AgentUpdate) ClearMessage() *AgentUpdate {
+	_u.mutation.ClearMessage()
+	return _u
+}
+
+// SetAppliedConfig sets the "applied_config" field.
+func (_u *AgentUpdate) SetAppliedConfig(v json.RawMessage) *AgentUpdate {
+	_u.mutation.SetAppliedConfig(v)
+	return _u
+}
+
+// AppendAppliedConfig appends value to the "applied_config" field.
+func (_u *AgentUpdate) AppendAppliedConfig(v json.RawMessage) *AgentUpdate {
+	_u.mutation.AppendAppliedConfig(v)
+	return _u
+}
+
+// ClearAppliedConfig clears the value of the "applied_config" field.
+func (_u *AgentUpdate) ClearAppliedConfig() *AgentUpdate {
+	_u.mutation.ClearAppliedConfig()
+	return _u
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (_u *AgentUpdate) SetUpdatedAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetUpdatedAt(v)
+	return _u
+}
+
+// SetLastSeen sets the "last_seen" field.
+func (_u *AgentUpdate) SetLastSeen(v time.Time) *AgentUpdate {
+	_u.mutation.SetLastSeen(v)
+	return _u
+}
+
+// SetNillableLastSeen sets the "last_seen" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableLastSeen(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetLastSeen(*v)
+	}
+	return _u
+}
+
+// ClearLastSeen clears the value of the "last_seen" field.
+func (_u *AgentUpdate) ClearLastSeen() *AgentUpdate {
+	_u.mutation.ClearLastSeen()
+	return _u
+}
+
+// SetLastActivityEvent sets the "last_activity_event" field.
+func (_u *AgentUpdate) SetLastActivityEvent(v time.Time) *AgentUpdate {
+	_u.mutation.SetLastActivityEvent(v)
+	return _u
+}
+
+// SetNillableLastActivityEvent sets the "last_activity_event" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableLastActivityEvent(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetLastActivityEvent(*v)
+	}
+	return _u
+}
+
+// ClearLastActivityEvent clears the value of the "last_activity_event" field.
+func (_u *AgentUpdate) ClearLastActivityEvent() *AgentUpdate {
+	_u.mutation.ClearLastActivityEvent()
+	return _u
+}
+
+// SetDeletedAt sets the "deleted_at" field.
+func (_u *AgentUpdate) SetDeletedAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetDeletedAt(v)
+	return _u
+}
+
+// SetNillableDeletedAt sets the "deleted_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableDeletedAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetDeletedAt(*v)
+	}
+	return _u
+}
+
+// ClearDeletedAt clears the value of the "deleted_at" field.
+func (_u *AgentUpdate) ClearDeletedAt() *AgentUpdate {
+	_u.mutation.ClearDeletedAt()
 	return _u
 }
 
@@ -149,20 +545,6 @@ func (_u *AgentUpdate) ClearOwnerID() *AgentUpdate {
 	return _u
 }
 
-// SetDelegationEnabled sets the "delegation_enabled" field.
-func (_u *AgentUpdate) SetDelegationEnabled(v bool) *AgentUpdate {
-	_u.mutation.SetDelegationEnabled(v)
-	return _u
-}
-
-// SetNillableDelegationEnabled sets the "delegation_enabled" field if the given value is not nil.
-func (_u *AgentUpdate) SetNillableDelegationEnabled(v *bool) *AgentUpdate {
-	if v != nil {
-		_u.SetDelegationEnabled(*v)
-	}
-	return _u
-}
-
 // SetVisibility sets the "visibility" field.
 func (_u *AgentUpdate) SetVisibility(v string) *AgentUpdate {
 	_u.mutation.SetVisibility(v)
@@ -177,9 +559,56 @@ func (_u *AgentUpdate) SetNillableVisibility(v *string) *AgentUpdate {
 	return _u
 }
 
-// SetUpdated sets the "updated" field.
-func (_u *AgentUpdate) SetUpdated(v time.Time) *AgentUpdate {
-	_u.mutation.SetUpdated(v)
+// SetDelegationEnabled sets the "delegation_enabled" field.
+func (_u *AgentUpdate) SetDelegationEnabled(v bool) *AgentUpdate {
+	_u.mutation.SetDelegationEnabled(v)
+	return _u
+}
+
+// SetNillableDelegationEnabled sets the "delegation_enabled" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableDelegationEnabled(v *bool) *AgentUpdate {
+	if v != nil {
+		_u.SetDelegationEnabled(*v)
+	}
+	return _u
+}
+
+// SetAncestry sets the "ancestry" field.
+func (_u *AgentUpdate) SetAncestry(v []string) *AgentUpdate {
+	_u.mutation.SetAncestry(v)
+	return _u
+}
+
+// AppendAncestry appends value to the "ancestry" field.
+func (_u *AgentUpdate) AppendAncestry(v []string) *AgentUpdate {
+	_u.mutation.AppendAncestry(v)
+	return _u
+}
+
+// ClearAncestry clears the value of the "ancestry" field.
+func (_u *AgentUpdate) ClearAncestry() *AgentUpdate {
+	_u.mutation.ClearAncestry()
+	return _u
+}
+
+// SetStateVersion sets the "state_version" field.
+func (_u *AgentUpdate) SetStateVersion(v int64) *AgentUpdate {
+	_u.mutation.ResetStateVersion()
+	_u.mutation.SetStateVersion(v)
+	return _u
+}
+
+// SetNillableStateVersion sets the "state_version" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableStateVersion(v *int64) *AgentUpdate {
+	if v != nil {
+		_u.SetStateVersion(*v)
+	}
+	return _u
+}
+
+// AddStateVersion adds value to the "state_version" field.
+func (_u *AgentUpdate) AddStateVersion(v int64) *AgentUpdate {
+	_u.mutation.AddStateVersion(v)
 	return _u
 }
 
@@ -337,9 +766,9 @@ func (_u *AgentUpdate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_u *AgentUpdate) defaults() {
-	if _, ok := _u.mutation.Updated(); !ok {
-		v := agent.UpdateDefaultUpdated()
-		_u.mutation.SetUpdated(v)
+	if _, ok := _u.mutation.UpdatedAt(); !ok {
+		v := agent.UpdateDefaultUpdatedAt()
+		_u.mutation.SetUpdatedAt(v)
 	}
 }
 
@@ -353,11 +782,6 @@ func (_u *AgentUpdate) check() error {
 	if v, ok := _u.mutation.Name(); ok {
 		if err := agent.NameValidator(v); err != nil {
 			return &ValidationError{Name: "name", err: fmt.Errorf(`ent: validator failed for field "Agent.name": %w`, err)}
-		}
-	}
-	if v, ok := _u.mutation.Status(); ok {
-		if err := agent.StatusValidator(v); err != nil {
-			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "Agent.status": %w`, err)}
 		}
 	}
 	if _u.mutation.GroveCleared() && len(_u.mutation.GroveIDs()) > 0 {
@@ -390,17 +814,153 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.TemplateCleared() {
 		_spec.ClearField(agent.FieldTemplate, field.TypeString)
 	}
-	if value, ok := _u.mutation.Status(); ok {
-		_spec.SetField(agent.FieldStatus, field.TypeEnum, value)
+	if value, ok := _u.mutation.Labels(); ok {
+		_spec.SetField(agent.FieldLabels, field.TypeJSON, value)
 	}
-	if value, ok := _u.mutation.DelegationEnabled(); ok {
-		_spec.SetField(agent.FieldDelegationEnabled, field.TypeBool, value)
+	if _u.mutation.LabelsCleared() {
+		_spec.ClearField(agent.FieldLabels, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.Annotations(); ok {
+		_spec.SetField(agent.FieldAnnotations, field.TypeJSON, value)
+	}
+	if _u.mutation.AnnotationsCleared() {
+		_spec.ClearField(agent.FieldAnnotations, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.Phase(); ok {
+		_spec.SetField(agent.FieldPhase, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.Activity(); ok {
+		_spec.SetField(agent.FieldActivity, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.ToolName(); ok {
+		_spec.SetField(agent.FieldToolName, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.ConnectionState(); ok {
+		_spec.SetField(agent.FieldConnectionState, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.ContainerStatus(); ok {
+		_spec.SetField(agent.FieldContainerStatus, field.TypeString, value)
+	}
+	if _u.mutation.ContainerStatusCleared() {
+		_spec.ClearField(agent.FieldContainerStatus, field.TypeString)
+	}
+	if value, ok := _u.mutation.RuntimeState(); ok {
+		_spec.SetField(agent.FieldRuntimeState, field.TypeString, value)
+	}
+	if _u.mutation.RuntimeStateCleared() {
+		_spec.ClearField(agent.FieldRuntimeState, field.TypeString)
+	}
+	if value, ok := _u.mutation.StalledFromActivity(); ok {
+		_spec.SetField(agent.FieldStalledFromActivity, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.CurrentTurns(); ok {
+		_spec.SetField(agent.FieldCurrentTurns, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedCurrentTurns(); ok {
+		_spec.AddField(agent.FieldCurrentTurns, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.CurrentModelCalls(); ok {
+		_spec.SetField(agent.FieldCurrentModelCalls, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedCurrentModelCalls(); ok {
+		_spec.AddField(agent.FieldCurrentModelCalls, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.StartedAt(); ok {
+		_spec.SetField(agent.FieldStartedAt, field.TypeTime, value)
+	}
+	if _u.mutation.StartedAtCleared() {
+		_spec.ClearField(agent.FieldStartedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.Image(); ok {
+		_spec.SetField(agent.FieldImage, field.TypeString, value)
+	}
+	if _u.mutation.ImageCleared() {
+		_spec.ClearField(agent.FieldImage, field.TypeString)
+	}
+	if value, ok := _u.mutation.Detached(); ok {
+		_spec.SetField(agent.FieldDetached, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.Runtime(); ok {
+		_spec.SetField(agent.FieldRuntime, field.TypeString, value)
+	}
+	if _u.mutation.RuntimeCleared() {
+		_spec.ClearField(agent.FieldRuntime, field.TypeString)
+	}
+	if value, ok := _u.mutation.RuntimeBrokerID(); ok {
+		_spec.SetField(agent.FieldRuntimeBrokerID, field.TypeUUID, value)
+	}
+	if _u.mutation.RuntimeBrokerIDCleared() {
+		_spec.ClearField(agent.FieldRuntimeBrokerID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.WebPtyEnabled(); ok {
+		_spec.SetField(agent.FieldWebPtyEnabled, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.TaskSummary(); ok {
+		_spec.SetField(agent.FieldTaskSummary, field.TypeString, value)
+	}
+	if _u.mutation.TaskSummaryCleared() {
+		_spec.ClearField(agent.FieldTaskSummary, field.TypeString)
+	}
+	if value, ok := _u.mutation.Message(); ok {
+		_spec.SetField(agent.FieldMessage, field.TypeString, value)
+	}
+	if _u.mutation.MessageCleared() {
+		_spec.ClearField(agent.FieldMessage, field.TypeString)
+	}
+	if value, ok := _u.mutation.AppliedConfig(); ok {
+		_spec.SetField(agent.FieldAppliedConfig, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedAppliedConfig(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, agent.FieldAppliedConfig, value)
+		})
+	}
+	if _u.mutation.AppliedConfigCleared() {
+		_spec.ClearField(agent.FieldAppliedConfig, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.UpdatedAt(); ok {
+		_spec.SetField(agent.FieldUpdatedAt, field.TypeTime, value)
+	}
+	if value, ok := _u.mutation.LastSeen(); ok {
+		_spec.SetField(agent.FieldLastSeen, field.TypeTime, value)
+	}
+	if _u.mutation.LastSeenCleared() {
+		_spec.ClearField(agent.FieldLastSeen, field.TypeTime)
+	}
+	if value, ok := _u.mutation.LastActivityEvent(); ok {
+		_spec.SetField(agent.FieldLastActivityEvent, field.TypeTime, value)
+	}
+	if _u.mutation.LastActivityEventCleared() {
+		_spec.ClearField(agent.FieldLastActivityEvent, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DeletedAt(); ok {
+		_spec.SetField(agent.FieldDeletedAt, field.TypeTime, value)
+	}
+	if _u.mutation.DeletedAtCleared() {
+		_spec.ClearField(agent.FieldDeletedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.Visibility(); ok {
 		_spec.SetField(agent.FieldVisibility, field.TypeString, value)
 	}
-	if value, ok := _u.mutation.Updated(); ok {
-		_spec.SetField(agent.FieldUpdated, field.TypeTime, value)
+	if value, ok := _u.mutation.DelegationEnabled(); ok {
+		_spec.SetField(agent.FieldDelegationEnabled, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.Ancestry(); ok {
+		_spec.SetField(agent.FieldAncestry, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedAncestry(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, agent.FieldAncestry, value)
+		})
+	}
+	if _u.mutation.AncestryCleared() {
+		_spec.ClearField(agent.FieldAncestry, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.StateVersion(); ok {
+		_spec.SetField(agent.FieldStateVersion, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedStateVersion(); ok {
+		_spec.AddField(agent.FieldStateVersion, field.TypeInt64, value)
 	}
 	if _u.mutation.GroveCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -661,17 +1221,411 @@ func (_u *AgentUpdateOne) SetNillableGroveID(v *uuid.UUID) *AgentUpdateOne {
 	return _u
 }
 
-// SetStatus sets the "status" field.
-func (_u *AgentUpdateOne) SetStatus(v agent.Status) *AgentUpdateOne {
-	_u.mutation.SetStatus(v)
+// SetLabels sets the "labels" field.
+func (_u *AgentUpdateOne) SetLabels(v map[string]string) *AgentUpdateOne {
+	_u.mutation.SetLabels(v)
 	return _u
 }
 
-// SetNillableStatus sets the "status" field if the given value is not nil.
-func (_u *AgentUpdateOne) SetNillableStatus(v *agent.Status) *AgentUpdateOne {
+// ClearLabels clears the value of the "labels" field.
+func (_u *AgentUpdateOne) ClearLabels() *AgentUpdateOne {
+	_u.mutation.ClearLabels()
+	return _u
+}
+
+// SetAnnotations sets the "annotations" field.
+func (_u *AgentUpdateOne) SetAnnotations(v map[string]string) *AgentUpdateOne {
+	_u.mutation.SetAnnotations(v)
+	return _u
+}
+
+// ClearAnnotations clears the value of the "annotations" field.
+func (_u *AgentUpdateOne) ClearAnnotations() *AgentUpdateOne {
+	_u.mutation.ClearAnnotations()
+	return _u
+}
+
+// SetPhase sets the "phase" field.
+func (_u *AgentUpdateOne) SetPhase(v string) *AgentUpdateOne {
+	_u.mutation.SetPhase(v)
+	return _u
+}
+
+// SetNillablePhase sets the "phase" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillablePhase(v *string) *AgentUpdateOne {
 	if v != nil {
-		_u.SetStatus(*v)
+		_u.SetPhase(*v)
 	}
+	return _u
+}
+
+// SetActivity sets the "activity" field.
+func (_u *AgentUpdateOne) SetActivity(v string) *AgentUpdateOne {
+	_u.mutation.SetActivity(v)
+	return _u
+}
+
+// SetNillableActivity sets the "activity" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableActivity(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetActivity(*v)
+	}
+	return _u
+}
+
+// SetToolName sets the "tool_name" field.
+func (_u *AgentUpdateOne) SetToolName(v string) *AgentUpdateOne {
+	_u.mutation.SetToolName(v)
+	return _u
+}
+
+// SetNillableToolName sets the "tool_name" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableToolName(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetToolName(*v)
+	}
+	return _u
+}
+
+// SetConnectionState sets the "connection_state" field.
+func (_u *AgentUpdateOne) SetConnectionState(v string) *AgentUpdateOne {
+	_u.mutation.SetConnectionState(v)
+	return _u
+}
+
+// SetNillableConnectionState sets the "connection_state" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableConnectionState(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetConnectionState(*v)
+	}
+	return _u
+}
+
+// SetContainerStatus sets the "container_status" field.
+func (_u *AgentUpdateOne) SetContainerStatus(v string) *AgentUpdateOne {
+	_u.mutation.SetContainerStatus(v)
+	return _u
+}
+
+// SetNillableContainerStatus sets the "container_status" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableContainerStatus(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetContainerStatus(*v)
+	}
+	return _u
+}
+
+// ClearContainerStatus clears the value of the "container_status" field.
+func (_u *AgentUpdateOne) ClearContainerStatus() *AgentUpdateOne {
+	_u.mutation.ClearContainerStatus()
+	return _u
+}
+
+// SetRuntimeState sets the "runtime_state" field.
+func (_u *AgentUpdateOne) SetRuntimeState(v string) *AgentUpdateOne {
+	_u.mutation.SetRuntimeState(v)
+	return _u
+}
+
+// SetNillableRuntimeState sets the "runtime_state" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableRuntimeState(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetRuntimeState(*v)
+	}
+	return _u
+}
+
+// ClearRuntimeState clears the value of the "runtime_state" field.
+func (_u *AgentUpdateOne) ClearRuntimeState() *AgentUpdateOne {
+	_u.mutation.ClearRuntimeState()
+	return _u
+}
+
+// SetStalledFromActivity sets the "stalled_from_activity" field.
+func (_u *AgentUpdateOne) SetStalledFromActivity(v string) *AgentUpdateOne {
+	_u.mutation.SetStalledFromActivity(v)
+	return _u
+}
+
+// SetNillableStalledFromActivity sets the "stalled_from_activity" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableStalledFromActivity(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetStalledFromActivity(*v)
+	}
+	return _u
+}
+
+// SetCurrentTurns sets the "current_turns" field.
+func (_u *AgentUpdateOne) SetCurrentTurns(v int) *AgentUpdateOne {
+	_u.mutation.ResetCurrentTurns()
+	_u.mutation.SetCurrentTurns(v)
+	return _u
+}
+
+// SetNillableCurrentTurns sets the "current_turns" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableCurrentTurns(v *int) *AgentUpdateOne {
+	if v != nil {
+		_u.SetCurrentTurns(*v)
+	}
+	return _u
+}
+
+// AddCurrentTurns adds value to the "current_turns" field.
+func (_u *AgentUpdateOne) AddCurrentTurns(v int) *AgentUpdateOne {
+	_u.mutation.AddCurrentTurns(v)
+	return _u
+}
+
+// SetCurrentModelCalls sets the "current_model_calls" field.
+func (_u *AgentUpdateOne) SetCurrentModelCalls(v int) *AgentUpdateOne {
+	_u.mutation.ResetCurrentModelCalls()
+	_u.mutation.SetCurrentModelCalls(v)
+	return _u
+}
+
+// SetNillableCurrentModelCalls sets the "current_model_calls" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableCurrentModelCalls(v *int) *AgentUpdateOne {
+	if v != nil {
+		_u.SetCurrentModelCalls(*v)
+	}
+	return _u
+}
+
+// AddCurrentModelCalls adds value to the "current_model_calls" field.
+func (_u *AgentUpdateOne) AddCurrentModelCalls(v int) *AgentUpdateOne {
+	_u.mutation.AddCurrentModelCalls(v)
+	return _u
+}
+
+// SetStartedAt sets the "started_at" field.
+func (_u *AgentUpdateOne) SetStartedAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetStartedAt(v)
+	return _u
+}
+
+// SetNillableStartedAt sets the "started_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableStartedAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetStartedAt(*v)
+	}
+	return _u
+}
+
+// ClearStartedAt clears the value of the "started_at" field.
+func (_u *AgentUpdateOne) ClearStartedAt() *AgentUpdateOne {
+	_u.mutation.ClearStartedAt()
+	return _u
+}
+
+// SetImage sets the "image" field.
+func (_u *AgentUpdateOne) SetImage(v string) *AgentUpdateOne {
+	_u.mutation.SetImage(v)
+	return _u
+}
+
+// SetNillableImage sets the "image" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableImage(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetImage(*v)
+	}
+	return _u
+}
+
+// ClearImage clears the value of the "image" field.
+func (_u *AgentUpdateOne) ClearImage() *AgentUpdateOne {
+	_u.mutation.ClearImage()
+	return _u
+}
+
+// SetDetached sets the "detached" field.
+func (_u *AgentUpdateOne) SetDetached(v bool) *AgentUpdateOne {
+	_u.mutation.SetDetached(v)
+	return _u
+}
+
+// SetNillableDetached sets the "detached" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableDetached(v *bool) *AgentUpdateOne {
+	if v != nil {
+		_u.SetDetached(*v)
+	}
+	return _u
+}
+
+// SetRuntime sets the "runtime" field.
+func (_u *AgentUpdateOne) SetRuntime(v string) *AgentUpdateOne {
+	_u.mutation.SetRuntime(v)
+	return _u
+}
+
+// SetNillableRuntime sets the "runtime" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableRuntime(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetRuntime(*v)
+	}
+	return _u
+}
+
+// ClearRuntime clears the value of the "runtime" field.
+func (_u *AgentUpdateOne) ClearRuntime() *AgentUpdateOne {
+	_u.mutation.ClearRuntime()
+	return _u
+}
+
+// SetRuntimeBrokerID sets the "runtime_broker_id" field.
+func (_u *AgentUpdateOne) SetRuntimeBrokerID(v uuid.UUID) *AgentUpdateOne {
+	_u.mutation.SetRuntimeBrokerID(v)
+	return _u
+}
+
+// SetNillableRuntimeBrokerID sets the "runtime_broker_id" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableRuntimeBrokerID(v *uuid.UUID) *AgentUpdateOne {
+	if v != nil {
+		_u.SetRuntimeBrokerID(*v)
+	}
+	return _u
+}
+
+// ClearRuntimeBrokerID clears the value of the "runtime_broker_id" field.
+func (_u *AgentUpdateOne) ClearRuntimeBrokerID() *AgentUpdateOne {
+	_u.mutation.ClearRuntimeBrokerID()
+	return _u
+}
+
+// SetWebPtyEnabled sets the "web_pty_enabled" field.
+func (_u *AgentUpdateOne) SetWebPtyEnabled(v bool) *AgentUpdateOne {
+	_u.mutation.SetWebPtyEnabled(v)
+	return _u
+}
+
+// SetNillableWebPtyEnabled sets the "web_pty_enabled" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableWebPtyEnabled(v *bool) *AgentUpdateOne {
+	if v != nil {
+		_u.SetWebPtyEnabled(*v)
+	}
+	return _u
+}
+
+// SetTaskSummary sets the "task_summary" field.
+func (_u *AgentUpdateOne) SetTaskSummary(v string) *AgentUpdateOne {
+	_u.mutation.SetTaskSummary(v)
+	return _u
+}
+
+// SetNillableTaskSummary sets the "task_summary" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableTaskSummary(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetTaskSummary(*v)
+	}
+	return _u
+}
+
+// ClearTaskSummary clears the value of the "task_summary" field.
+func (_u *AgentUpdateOne) ClearTaskSummary() *AgentUpdateOne {
+	_u.mutation.ClearTaskSummary()
+	return _u
+}
+
+// SetMessage sets the "message" field.
+func (_u *AgentUpdateOne) SetMessage(v string) *AgentUpdateOne {
+	_u.mutation.SetMessage(v)
+	return _u
+}
+
+// SetNillableMessage sets the "message" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableMessage(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetMessage(*v)
+	}
+	return _u
+}
+
+// ClearMessage clears the value of the "message" field.
+func (_u *AgentUpdateOne) ClearMessage() *AgentUpdateOne {
+	_u.mutation.ClearMessage()
+	return _u
+}
+
+// SetAppliedConfig sets the "applied_config" field.
+func (_u *AgentUpdateOne) SetAppliedConfig(v json.RawMessage) *AgentUpdateOne {
+	_u.mutation.SetAppliedConfig(v)
+	return _u
+}
+
+// AppendAppliedConfig appends value to the "applied_config" field.
+func (_u *AgentUpdateOne) AppendAppliedConfig(v json.RawMessage) *AgentUpdateOne {
+	_u.mutation.AppendAppliedConfig(v)
+	return _u
+}
+
+// ClearAppliedConfig clears the value of the "applied_config" field.
+func (_u *AgentUpdateOne) ClearAppliedConfig() *AgentUpdateOne {
+	_u.mutation.ClearAppliedConfig()
+	return _u
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (_u *AgentUpdateOne) SetUpdatedAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetUpdatedAt(v)
+	return _u
+}
+
+// SetLastSeen sets the "last_seen" field.
+func (_u *AgentUpdateOne) SetLastSeen(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetLastSeen(v)
+	return _u
+}
+
+// SetNillableLastSeen sets the "last_seen" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableLastSeen(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetLastSeen(*v)
+	}
+	return _u
+}
+
+// ClearLastSeen clears the value of the "last_seen" field.
+func (_u *AgentUpdateOne) ClearLastSeen() *AgentUpdateOne {
+	_u.mutation.ClearLastSeen()
+	return _u
+}
+
+// SetLastActivityEvent sets the "last_activity_event" field.
+func (_u *AgentUpdateOne) SetLastActivityEvent(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetLastActivityEvent(v)
+	return _u
+}
+
+// SetNillableLastActivityEvent sets the "last_activity_event" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableLastActivityEvent(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetLastActivityEvent(*v)
+	}
+	return _u
+}
+
+// ClearLastActivityEvent clears the value of the "last_activity_event" field.
+func (_u *AgentUpdateOne) ClearLastActivityEvent() *AgentUpdateOne {
+	_u.mutation.ClearLastActivityEvent()
+	return _u
+}
+
+// SetDeletedAt sets the "deleted_at" field.
+func (_u *AgentUpdateOne) SetDeletedAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetDeletedAt(v)
+	return _u
+}
+
+// SetNillableDeletedAt sets the "deleted_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableDeletedAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetDeletedAt(*v)
+	}
+	return _u
+}
+
+// ClearDeletedAt clears the value of the "deleted_at" field.
+func (_u *AgentUpdateOne) ClearDeletedAt() *AgentUpdateOne {
+	_u.mutation.ClearDeletedAt()
 	return _u
 }
 
@@ -715,20 +1669,6 @@ func (_u *AgentUpdateOne) ClearOwnerID() *AgentUpdateOne {
 	return _u
 }
 
-// SetDelegationEnabled sets the "delegation_enabled" field.
-func (_u *AgentUpdateOne) SetDelegationEnabled(v bool) *AgentUpdateOne {
-	_u.mutation.SetDelegationEnabled(v)
-	return _u
-}
-
-// SetNillableDelegationEnabled sets the "delegation_enabled" field if the given value is not nil.
-func (_u *AgentUpdateOne) SetNillableDelegationEnabled(v *bool) *AgentUpdateOne {
-	if v != nil {
-		_u.SetDelegationEnabled(*v)
-	}
-	return _u
-}
-
 // SetVisibility sets the "visibility" field.
 func (_u *AgentUpdateOne) SetVisibility(v string) *AgentUpdateOne {
 	_u.mutation.SetVisibility(v)
@@ -743,9 +1683,56 @@ func (_u *AgentUpdateOne) SetNillableVisibility(v *string) *AgentUpdateOne {
 	return _u
 }
 
-// SetUpdated sets the "updated" field.
-func (_u *AgentUpdateOne) SetUpdated(v time.Time) *AgentUpdateOne {
-	_u.mutation.SetUpdated(v)
+// SetDelegationEnabled sets the "delegation_enabled" field.
+func (_u *AgentUpdateOne) SetDelegationEnabled(v bool) *AgentUpdateOne {
+	_u.mutation.SetDelegationEnabled(v)
+	return _u
+}
+
+// SetNillableDelegationEnabled sets the "delegation_enabled" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableDelegationEnabled(v *bool) *AgentUpdateOne {
+	if v != nil {
+		_u.SetDelegationEnabled(*v)
+	}
+	return _u
+}
+
+// SetAncestry sets the "ancestry" field.
+func (_u *AgentUpdateOne) SetAncestry(v []string) *AgentUpdateOne {
+	_u.mutation.SetAncestry(v)
+	return _u
+}
+
+// AppendAncestry appends value to the "ancestry" field.
+func (_u *AgentUpdateOne) AppendAncestry(v []string) *AgentUpdateOne {
+	_u.mutation.AppendAncestry(v)
+	return _u
+}
+
+// ClearAncestry clears the value of the "ancestry" field.
+func (_u *AgentUpdateOne) ClearAncestry() *AgentUpdateOne {
+	_u.mutation.ClearAncestry()
+	return _u
+}
+
+// SetStateVersion sets the "state_version" field.
+func (_u *AgentUpdateOne) SetStateVersion(v int64) *AgentUpdateOne {
+	_u.mutation.ResetStateVersion()
+	_u.mutation.SetStateVersion(v)
+	return _u
+}
+
+// SetNillableStateVersion sets the "state_version" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableStateVersion(v *int64) *AgentUpdateOne {
+	if v != nil {
+		_u.SetStateVersion(*v)
+	}
+	return _u
+}
+
+// AddStateVersion adds value to the "state_version" field.
+func (_u *AgentUpdateOne) AddStateVersion(v int64) *AgentUpdateOne {
+	_u.mutation.AddStateVersion(v)
 	return _u
 }
 
@@ -916,9 +1903,9 @@ func (_u *AgentUpdateOne) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_u *AgentUpdateOne) defaults() {
-	if _, ok := _u.mutation.Updated(); !ok {
-		v := agent.UpdateDefaultUpdated()
-		_u.mutation.SetUpdated(v)
+	if _, ok := _u.mutation.UpdatedAt(); !ok {
+		v := agent.UpdateDefaultUpdatedAt()
+		_u.mutation.SetUpdatedAt(v)
 	}
 }
 
@@ -932,11 +1919,6 @@ func (_u *AgentUpdateOne) check() error {
 	if v, ok := _u.mutation.Name(); ok {
 		if err := agent.NameValidator(v); err != nil {
 			return &ValidationError{Name: "name", err: fmt.Errorf(`ent: validator failed for field "Agent.name": %w`, err)}
-		}
-	}
-	if v, ok := _u.mutation.Status(); ok {
-		if err := agent.StatusValidator(v); err != nil {
-			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "Agent.status": %w`, err)}
 		}
 	}
 	if _u.mutation.GroveCleared() && len(_u.mutation.GroveIDs()) > 0 {
@@ -986,17 +1968,153 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	if _u.mutation.TemplateCleared() {
 		_spec.ClearField(agent.FieldTemplate, field.TypeString)
 	}
-	if value, ok := _u.mutation.Status(); ok {
-		_spec.SetField(agent.FieldStatus, field.TypeEnum, value)
+	if value, ok := _u.mutation.Labels(); ok {
+		_spec.SetField(agent.FieldLabels, field.TypeJSON, value)
 	}
-	if value, ok := _u.mutation.DelegationEnabled(); ok {
-		_spec.SetField(agent.FieldDelegationEnabled, field.TypeBool, value)
+	if _u.mutation.LabelsCleared() {
+		_spec.ClearField(agent.FieldLabels, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.Annotations(); ok {
+		_spec.SetField(agent.FieldAnnotations, field.TypeJSON, value)
+	}
+	if _u.mutation.AnnotationsCleared() {
+		_spec.ClearField(agent.FieldAnnotations, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.Phase(); ok {
+		_spec.SetField(agent.FieldPhase, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.Activity(); ok {
+		_spec.SetField(agent.FieldActivity, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.ToolName(); ok {
+		_spec.SetField(agent.FieldToolName, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.ConnectionState(); ok {
+		_spec.SetField(agent.FieldConnectionState, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.ContainerStatus(); ok {
+		_spec.SetField(agent.FieldContainerStatus, field.TypeString, value)
+	}
+	if _u.mutation.ContainerStatusCleared() {
+		_spec.ClearField(agent.FieldContainerStatus, field.TypeString)
+	}
+	if value, ok := _u.mutation.RuntimeState(); ok {
+		_spec.SetField(agent.FieldRuntimeState, field.TypeString, value)
+	}
+	if _u.mutation.RuntimeStateCleared() {
+		_spec.ClearField(agent.FieldRuntimeState, field.TypeString)
+	}
+	if value, ok := _u.mutation.StalledFromActivity(); ok {
+		_spec.SetField(agent.FieldStalledFromActivity, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.CurrentTurns(); ok {
+		_spec.SetField(agent.FieldCurrentTurns, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedCurrentTurns(); ok {
+		_spec.AddField(agent.FieldCurrentTurns, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.CurrentModelCalls(); ok {
+		_spec.SetField(agent.FieldCurrentModelCalls, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedCurrentModelCalls(); ok {
+		_spec.AddField(agent.FieldCurrentModelCalls, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.StartedAt(); ok {
+		_spec.SetField(agent.FieldStartedAt, field.TypeTime, value)
+	}
+	if _u.mutation.StartedAtCleared() {
+		_spec.ClearField(agent.FieldStartedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.Image(); ok {
+		_spec.SetField(agent.FieldImage, field.TypeString, value)
+	}
+	if _u.mutation.ImageCleared() {
+		_spec.ClearField(agent.FieldImage, field.TypeString)
+	}
+	if value, ok := _u.mutation.Detached(); ok {
+		_spec.SetField(agent.FieldDetached, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.Runtime(); ok {
+		_spec.SetField(agent.FieldRuntime, field.TypeString, value)
+	}
+	if _u.mutation.RuntimeCleared() {
+		_spec.ClearField(agent.FieldRuntime, field.TypeString)
+	}
+	if value, ok := _u.mutation.RuntimeBrokerID(); ok {
+		_spec.SetField(agent.FieldRuntimeBrokerID, field.TypeUUID, value)
+	}
+	if _u.mutation.RuntimeBrokerIDCleared() {
+		_spec.ClearField(agent.FieldRuntimeBrokerID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.WebPtyEnabled(); ok {
+		_spec.SetField(agent.FieldWebPtyEnabled, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.TaskSummary(); ok {
+		_spec.SetField(agent.FieldTaskSummary, field.TypeString, value)
+	}
+	if _u.mutation.TaskSummaryCleared() {
+		_spec.ClearField(agent.FieldTaskSummary, field.TypeString)
+	}
+	if value, ok := _u.mutation.Message(); ok {
+		_spec.SetField(agent.FieldMessage, field.TypeString, value)
+	}
+	if _u.mutation.MessageCleared() {
+		_spec.ClearField(agent.FieldMessage, field.TypeString)
+	}
+	if value, ok := _u.mutation.AppliedConfig(); ok {
+		_spec.SetField(agent.FieldAppliedConfig, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedAppliedConfig(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, agent.FieldAppliedConfig, value)
+		})
+	}
+	if _u.mutation.AppliedConfigCleared() {
+		_spec.ClearField(agent.FieldAppliedConfig, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.UpdatedAt(); ok {
+		_spec.SetField(agent.FieldUpdatedAt, field.TypeTime, value)
+	}
+	if value, ok := _u.mutation.LastSeen(); ok {
+		_spec.SetField(agent.FieldLastSeen, field.TypeTime, value)
+	}
+	if _u.mutation.LastSeenCleared() {
+		_spec.ClearField(agent.FieldLastSeen, field.TypeTime)
+	}
+	if value, ok := _u.mutation.LastActivityEvent(); ok {
+		_spec.SetField(agent.FieldLastActivityEvent, field.TypeTime, value)
+	}
+	if _u.mutation.LastActivityEventCleared() {
+		_spec.ClearField(agent.FieldLastActivityEvent, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DeletedAt(); ok {
+		_spec.SetField(agent.FieldDeletedAt, field.TypeTime, value)
+	}
+	if _u.mutation.DeletedAtCleared() {
+		_spec.ClearField(agent.FieldDeletedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.Visibility(); ok {
 		_spec.SetField(agent.FieldVisibility, field.TypeString, value)
 	}
-	if value, ok := _u.mutation.Updated(); ok {
-		_spec.SetField(agent.FieldUpdated, field.TypeTime, value)
+	if value, ok := _u.mutation.DelegationEnabled(); ok {
+		_spec.SetField(agent.FieldDelegationEnabled, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.Ancestry(); ok {
+		_spec.SetField(agent.FieldAncestry, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedAncestry(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, agent.FieldAncestry, value)
+		})
+	}
+	if _u.mutation.AncestryCleared() {
+		_spec.ClearField(agent.FieldAncestry, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.StateVersion(); ok {
+		_spec.SetField(agent.FieldStateVersion, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedStateVersion(); ok {
+		_spec.AddField(agent.FieldStateVersion, field.TypeInt64, value)
 	}
 	if _u.mutation.GroveCleared() {
 		edge := &sqlgraph.EdgeSpec{

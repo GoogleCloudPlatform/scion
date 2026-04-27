@@ -16,16 +16,56 @@ type Tx struct {
 	AccessPolicy *AccessPolicyClient
 	// Agent is the client for interacting with the Agent builders.
 	Agent *AgentClient
+	// BrokerJoinToken is the client for interacting with the BrokerJoinToken builders.
+	BrokerJoinToken *BrokerJoinTokenClient
+	// BrokerSecret is the client for interacting with the BrokerSecret builders.
+	BrokerSecret *BrokerSecretClient
+	// EnvVar is the client for interacting with the EnvVar builders.
+	EnvVar *EnvVarClient
+	// GCPServiceAccount is the client for interacting with the GCPServiceAccount builders.
+	GCPServiceAccount *GCPServiceAccountClient
+	// GitHubInstallation is the client for interacting with the GitHubInstallation builders.
+	GitHubInstallation *GitHubInstallationClient
 	// Group is the client for interacting with the Group builders.
 	Group *GroupClient
 	// GroupMembership is the client for interacting with the GroupMembership builders.
 	GroupMembership *GroupMembershipClient
 	// Grove is the client for interacting with the Grove builders.
 	Grove *GroveClient
+	// GroveContributor is the client for interacting with the GroveContributor builders.
+	GroveContributor *GroveContributorClient
+	// GroveSyncState is the client for interacting with the GroveSyncState builders.
+	GroveSyncState *GroveSyncStateClient
+	// HarnessConfig is the client for interacting with the HarnessConfig builders.
+	HarnessConfig *HarnessConfigClient
+	// MaintenanceOperation is the client for interacting with the MaintenanceOperation builders.
+	MaintenanceOperation *MaintenanceOperationClient
+	// MaintenanceOperationRun is the client for interacting with the MaintenanceOperationRun builders.
+	MaintenanceOperationRun *MaintenanceOperationRunClient
+	// MessageRecord is the client for interacting with the MessageRecord builders.
+	MessageRecord *MessageRecordClient
+	// Notification is the client for interacting with the Notification builders.
+	Notification *NotificationClient
+	// NotificationSubscription is the client for interacting with the NotificationSubscription builders.
+	NotificationSubscription *NotificationSubscriptionClient
 	// PolicyBinding is the client for interacting with the PolicyBinding builders.
 	PolicyBinding *PolicyBindingClient
+	// RuntimeBroker is the client for interacting with the RuntimeBroker builders.
+	RuntimeBroker *RuntimeBrokerClient
+	// Schedule is the client for interacting with the Schedule builders.
+	Schedule *ScheduleClient
+	// ScheduledEvent is the client for interacting with the ScheduledEvent builders.
+	ScheduledEvent *ScheduledEventClient
+	// Secret is the client for interacting with the Secret builders.
+	Secret *SecretClient
+	// SubscriptionTemplate is the client for interacting with the SubscriptionTemplate builders.
+	SubscriptionTemplate *SubscriptionTemplateClient
+	// Template is the client for interacting with the Template builders.
+	Template *TemplateClient
 	// User is the client for interacting with the User builders.
 	User *UserClient
+	// UserAccessToken is the client for interacting with the UserAccessToken builders.
+	UserAccessToken *UserAccessTokenClient
 
 	// lazily loaded.
 	client     *Client
@@ -159,11 +199,31 @@ func (tx *Tx) Client() *Client {
 func (tx *Tx) init() {
 	tx.AccessPolicy = NewAccessPolicyClient(tx.config)
 	tx.Agent = NewAgentClient(tx.config)
+	tx.BrokerJoinToken = NewBrokerJoinTokenClient(tx.config)
+	tx.BrokerSecret = NewBrokerSecretClient(tx.config)
+	tx.EnvVar = NewEnvVarClient(tx.config)
+	tx.GCPServiceAccount = NewGCPServiceAccountClient(tx.config)
+	tx.GitHubInstallation = NewGitHubInstallationClient(tx.config)
 	tx.Group = NewGroupClient(tx.config)
 	tx.GroupMembership = NewGroupMembershipClient(tx.config)
 	tx.Grove = NewGroveClient(tx.config)
+	tx.GroveContributor = NewGroveContributorClient(tx.config)
+	tx.GroveSyncState = NewGroveSyncStateClient(tx.config)
+	tx.HarnessConfig = NewHarnessConfigClient(tx.config)
+	tx.MaintenanceOperation = NewMaintenanceOperationClient(tx.config)
+	tx.MaintenanceOperationRun = NewMaintenanceOperationRunClient(tx.config)
+	tx.MessageRecord = NewMessageRecordClient(tx.config)
+	tx.Notification = NewNotificationClient(tx.config)
+	tx.NotificationSubscription = NewNotificationSubscriptionClient(tx.config)
 	tx.PolicyBinding = NewPolicyBindingClient(tx.config)
+	tx.RuntimeBroker = NewRuntimeBrokerClient(tx.config)
+	tx.Schedule = NewScheduleClient(tx.config)
+	tx.ScheduledEvent = NewScheduledEventClient(tx.config)
+	tx.Secret = NewSecretClient(tx.config)
+	tx.SubscriptionTemplate = NewSubscriptionTemplateClient(tx.config)
+	tx.Template = NewTemplateClient(tx.config)
 	tx.User = NewUserClient(tx.config)
+	tx.UserAccessToken = NewUserAccessTokenClient(tx.config)
 }
 
 // txDriver wraps the given dialect.Tx with a nop dialect.Driver implementation.

@@ -3,7 +3,6 @@
 package agent
 
 import (
-	"fmt"
 	"time"
 
 	"entgo.io/ent/dialect/sql"
@@ -17,27 +16,75 @@ const (
 	// FieldID holds the string denoting the id field in the database.
 	FieldID = "id"
 	// FieldSlug holds the string denoting the slug field in the database.
-	FieldSlug = "slug"
+	FieldSlug = "agent_id"
 	// FieldName holds the string denoting the name field in the database.
 	FieldName = "name"
 	// FieldTemplate holds the string denoting the template field in the database.
 	FieldTemplate = "template"
 	// FieldGroveID holds the string denoting the grove_id field in the database.
 	FieldGroveID = "grove_id"
-	// FieldStatus holds the string denoting the status field in the database.
-	FieldStatus = "status"
+	// FieldLabels holds the string denoting the labels field in the database.
+	FieldLabels = "labels"
+	// FieldAnnotations holds the string denoting the annotations field in the database.
+	FieldAnnotations = "annotations"
+	// FieldPhase holds the string denoting the phase field in the database.
+	FieldPhase = "phase"
+	// FieldActivity holds the string denoting the activity field in the database.
+	FieldActivity = "activity"
+	// FieldToolName holds the string denoting the tool_name field in the database.
+	FieldToolName = "tool_name"
+	// FieldConnectionState holds the string denoting the connection_state field in the database.
+	FieldConnectionState = "connection_state"
+	// FieldContainerStatus holds the string denoting the container_status field in the database.
+	FieldContainerStatus = "container_status"
+	// FieldRuntimeState holds the string denoting the runtime_state field in the database.
+	FieldRuntimeState = "runtime_state"
+	// FieldStalledFromActivity holds the string denoting the stalled_from_activity field in the database.
+	FieldStalledFromActivity = "stalled_from_activity"
+	// FieldCurrentTurns holds the string denoting the current_turns field in the database.
+	FieldCurrentTurns = "current_turns"
+	// FieldCurrentModelCalls holds the string denoting the current_model_calls field in the database.
+	FieldCurrentModelCalls = "current_model_calls"
+	// FieldStartedAt holds the string denoting the started_at field in the database.
+	FieldStartedAt = "started_at"
+	// FieldImage holds the string denoting the image field in the database.
+	FieldImage = "image"
+	// FieldDetached holds the string denoting the detached field in the database.
+	FieldDetached = "detached"
+	// FieldRuntime holds the string denoting the runtime field in the database.
+	FieldRuntime = "runtime"
+	// FieldRuntimeBrokerID holds the string denoting the runtime_broker_id field in the database.
+	FieldRuntimeBrokerID = "runtime_broker_id"
+	// FieldWebPtyEnabled holds the string denoting the web_pty_enabled field in the database.
+	FieldWebPtyEnabled = "web_pty_enabled"
+	// FieldTaskSummary holds the string denoting the task_summary field in the database.
+	FieldTaskSummary = "task_summary"
+	// FieldMessage holds the string denoting the message field in the database.
+	FieldMessage = "message"
+	// FieldAppliedConfig holds the string denoting the applied_config field in the database.
+	FieldAppliedConfig = "applied_config"
+	// FieldCreatedAt holds the string denoting the created_at field in the database.
+	FieldCreatedAt = "created_at"
+	// FieldUpdatedAt holds the string denoting the updated_at field in the database.
+	FieldUpdatedAt = "updated_at"
+	// FieldLastSeen holds the string denoting the last_seen field in the database.
+	FieldLastSeen = "last_seen"
+	// FieldLastActivityEvent holds the string denoting the last_activity_event field in the database.
+	FieldLastActivityEvent = "last_activity_event"
+	// FieldDeletedAt holds the string denoting the deleted_at field in the database.
+	FieldDeletedAt = "deleted_at"
 	// FieldCreatedBy holds the string denoting the created_by field in the database.
 	FieldCreatedBy = "created_by"
 	// FieldOwnerID holds the string denoting the owner_id field in the database.
 	FieldOwnerID = "owner_id"
-	// FieldDelegationEnabled holds the string denoting the delegation_enabled field in the database.
-	FieldDelegationEnabled = "delegation_enabled"
 	// FieldVisibility holds the string denoting the visibility field in the database.
 	FieldVisibility = "visibility"
-	// FieldCreated holds the string denoting the created field in the database.
-	FieldCreated = "created"
-	// FieldUpdated holds the string denoting the updated field in the database.
-	FieldUpdated = "updated"
+	// FieldDelegationEnabled holds the string denoting the delegation_enabled field in the database.
+	FieldDelegationEnabled = "delegation_enabled"
+	// FieldAncestry holds the string denoting the ancestry field in the database.
+	FieldAncestry = "ancestry"
+	// FieldStateVersion holds the string denoting the state_version field in the database.
+	FieldStateVersion = "state_version"
 	// EdgeGrove holds the string denoting the grove edge name in mutations.
 	EdgeGrove = "grove"
 	// EdgeCreator holds the string denoting the creator edge name in mutations.
@@ -94,13 +141,37 @@ var Columns = []string{
 	FieldName,
 	FieldTemplate,
 	FieldGroveID,
-	FieldStatus,
+	FieldLabels,
+	FieldAnnotations,
+	FieldPhase,
+	FieldActivity,
+	FieldToolName,
+	FieldConnectionState,
+	FieldContainerStatus,
+	FieldRuntimeState,
+	FieldStalledFromActivity,
+	FieldCurrentTurns,
+	FieldCurrentModelCalls,
+	FieldStartedAt,
+	FieldImage,
+	FieldDetached,
+	FieldRuntime,
+	FieldRuntimeBrokerID,
+	FieldWebPtyEnabled,
+	FieldTaskSummary,
+	FieldMessage,
+	FieldAppliedConfig,
+	FieldCreatedAt,
+	FieldUpdatedAt,
+	FieldLastSeen,
+	FieldLastActivityEvent,
+	FieldDeletedAt,
 	FieldCreatedBy,
 	FieldOwnerID,
-	FieldDelegationEnabled,
 	FieldVisibility,
-	FieldCreated,
-	FieldUpdated,
+	FieldDelegationEnabled,
+	FieldAncestry,
+	FieldStateVersion,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -118,51 +189,39 @@ var (
 	SlugValidator func(string) error
 	// NameValidator is a validator for the "name" field. It is called by the builders before save.
 	NameValidator func(string) error
-	// DefaultDelegationEnabled holds the default value on creation for the "delegation_enabled" field.
-	DefaultDelegationEnabled bool
+	// DefaultPhase holds the default value on creation for the "phase" field.
+	DefaultPhase string
+	// DefaultActivity holds the default value on creation for the "activity" field.
+	DefaultActivity string
+	// DefaultToolName holds the default value on creation for the "tool_name" field.
+	DefaultToolName string
+	// DefaultConnectionState holds the default value on creation for the "connection_state" field.
+	DefaultConnectionState string
+	// DefaultStalledFromActivity holds the default value on creation for the "stalled_from_activity" field.
+	DefaultStalledFromActivity string
+	// DefaultCurrentTurns holds the default value on creation for the "current_turns" field.
+	DefaultCurrentTurns int
+	// DefaultCurrentModelCalls holds the default value on creation for the "current_model_calls" field.
+	DefaultCurrentModelCalls int
+	// DefaultDetached holds the default value on creation for the "detached" field.
+	DefaultDetached bool
+	// DefaultWebPtyEnabled holds the default value on creation for the "web_pty_enabled" field.
+	DefaultWebPtyEnabled bool
+	// DefaultCreatedAt holds the default value on creation for the "created_at" field.
+	DefaultCreatedAt func() time.Time
+	// DefaultUpdatedAt holds the default value on creation for the "updated_at" field.
+	DefaultUpdatedAt func() time.Time
+	// UpdateDefaultUpdatedAt holds the default value on update for the "updated_at" field.
+	UpdateDefaultUpdatedAt func() time.Time
 	// DefaultVisibility holds the default value on creation for the "visibility" field.
 	DefaultVisibility string
-	// DefaultCreated holds the default value on creation for the "created" field.
-	DefaultCreated func() time.Time
-	// DefaultUpdated holds the default value on creation for the "updated" field.
-	DefaultUpdated func() time.Time
-	// UpdateDefaultUpdated holds the default value on update for the "updated" field.
-	UpdateDefaultUpdated func() time.Time
+	// DefaultDelegationEnabled holds the default value on creation for the "delegation_enabled" field.
+	DefaultDelegationEnabled bool
+	// DefaultStateVersion holds the default value on creation for the "state_version" field.
+	DefaultStateVersion int64
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
-
-// Status defines the type for the "status" enum field.
-type Status string
-
-// StatusCreated is the default value of the Status enum.
-const DefaultStatus = StatusCreated
-
-// Status values.
-const (
-	StatusCreated      Status = "created"
-	StatusProvisioning Status = "provisioning"
-	StatusCloning      Status = "cloning"
-	StatusStarting     Status = "starting"
-	StatusRunning      Status = "running"
-	StatusStopping     Status = "stopping"
-	StatusStopped      Status = "stopped"
-	StatusError        Status = "error"
-)
-
-func (s Status) String() string {
-	return string(s)
-}
-
-// StatusValidator is a validator for the "status" field enum values. It is called by the builders before save.
-func StatusValidator(s Status) error {
-	switch s {
-	case StatusCreated, StatusProvisioning, StatusCloning, StatusStarting, StatusRunning, StatusStopping, StatusStopped, StatusError:
-		return nil
-	default:
-		return fmt.Errorf("agent: invalid enum value for status field: %q", s)
-	}
-}
 
 // OrderOption defines the ordering options for the Agent queries.
 type OrderOption func(*sql.Selector)
@@ -192,9 +251,114 @@ func ByGroveID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldGroveID, opts...).ToFunc()
 }
 
-// ByStatus orders the results by the status field.
-func ByStatus(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldStatus, opts...).ToFunc()
+// ByPhase orders the results by the phase field.
+func ByPhase(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPhase, opts...).ToFunc()
+}
+
+// ByActivity orders the results by the activity field.
+func ByActivity(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldActivity, opts...).ToFunc()
+}
+
+// ByToolName orders the results by the tool_name field.
+func ByToolName(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldToolName, opts...).ToFunc()
+}
+
+// ByConnectionState orders the results by the connection_state field.
+func ByConnectionState(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldConnectionState, opts...).ToFunc()
+}
+
+// ByContainerStatus orders the results by the container_status field.
+func ByContainerStatus(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldContainerStatus, opts...).ToFunc()
+}
+
+// ByRuntimeState orders the results by the runtime_state field.
+func ByRuntimeState(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRuntimeState, opts...).ToFunc()
+}
+
+// ByStalledFromActivity orders the results by the stalled_from_activity field.
+func ByStalledFromActivity(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStalledFromActivity, opts...).ToFunc()
+}
+
+// ByCurrentTurns orders the results by the current_turns field.
+func ByCurrentTurns(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCurrentTurns, opts...).ToFunc()
+}
+
+// ByCurrentModelCalls orders the results by the current_model_calls field.
+func ByCurrentModelCalls(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCurrentModelCalls, opts...).ToFunc()
+}
+
+// ByStartedAt orders the results by the started_at field.
+func ByStartedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartedAt, opts...).ToFunc()
+}
+
+// ByImage orders the results by the image field.
+func ByImage(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldImage, opts...).ToFunc()
+}
+
+// ByDetached orders the results by the detached field.
+func ByDetached(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDetached, opts...).ToFunc()
+}
+
+// ByRuntime orders the results by the runtime field.
+func ByRuntime(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRuntime, opts...).ToFunc()
+}
+
+// ByRuntimeBrokerID orders the results by the runtime_broker_id field.
+func ByRuntimeBrokerID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRuntimeBrokerID, opts...).ToFunc()
+}
+
+// ByWebPtyEnabled orders the results by the web_pty_enabled field.
+func ByWebPtyEnabled(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldWebPtyEnabled, opts...).ToFunc()
+}
+
+// ByTaskSummary orders the results by the task_summary field.
+func ByTaskSummary(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldTaskSummary, opts...).ToFunc()
+}
+
+// ByMessage orders the results by the message field.
+func ByMessage(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldMessage, opts...).ToFunc()
+}
+
+// ByCreatedAt orders the results by the created_at field.
+func ByCreatedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCreatedAt, opts...).ToFunc()
+}
+
+// ByUpdatedAt orders the results by the updated_at field.
+func ByUpdatedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldUpdatedAt, opts...).ToFunc()
+}
+
+// ByLastSeen orders the results by the last_seen field.
+func ByLastSeen(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLastSeen, opts...).ToFunc()
+}
+
+// ByLastActivityEvent orders the results by the last_activity_event field.
+func ByLastActivityEvent(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLastActivityEvent, opts...).ToFunc()
+}
+
+// ByDeletedAt orders the results by the deleted_at field.
+func ByDeletedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletedAt, opts...).ToFunc()
 }
 
 // ByCreatedBy orders the results by the created_by field.
@@ -207,24 +371,19 @@ func ByOwnerID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldOwnerID, opts...).ToFunc()
 }
 
-// ByDelegationEnabled orders the results by the delegation_enabled field.
-func ByDelegationEnabled(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldDelegationEnabled, opts...).ToFunc()
-}
-
 // ByVisibility orders the results by the visibility field.
 func ByVisibility(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldVisibility, opts...).ToFunc()
 }
 
-// ByCreated orders the results by the created field.
-func ByCreated(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldCreated, opts...).ToFunc()
+// ByDelegationEnabled orders the results by the delegation_enabled field.
+func ByDelegationEnabled(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDelegationEnabled, opts...).ToFunc()
 }
 
-// ByUpdated orders the results by the updated field.
-func ByUpdated(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldUpdated, opts...).ToFunc()
+// ByStateVersion orders the results by the state_version field.
+func ByStateVersion(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStateVersion, opts...).ToFunc()
 }
 
 // ByGroveField orders the results by grove field.

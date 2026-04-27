@@ -12,6 +12,21 @@ type AccessPolicy func(*sql.Selector)
 // Agent is the predicate function for agent builders.
 type Agent func(*sql.Selector)
 
+// BrokerJoinToken is the predicate function for brokerjointoken builders.
+type BrokerJoinToken func(*sql.Selector)
+
+// BrokerSecret is the predicate function for brokersecret builders.
+type BrokerSecret func(*sql.Selector)
+
+// EnvVar is the predicate function for envvar builders.
+type EnvVar func(*sql.Selector)
+
+// GCPServiceAccount is the predicate function for gcpserviceaccount builders.
+type GCPServiceAccount func(*sql.Selector)
+
+// GitHubInstallation is the predicate function for githubinstallation builders.
+type GitHubInstallation func(*sql.Selector)
+
 // Group is the predicate function for group builders.
 type Group func(*sql.Selector)
 
@@ -21,8 +36,53 @@ type GroupMembership func(*sql.Selector)
 // Grove is the predicate function for grove builders.
 type Grove func(*sql.Selector)
 
+// GroveContributor is the predicate function for grovecontributor builders.
+type GroveContributor func(*sql.Selector)
+
+// GroveSyncState is the predicate function for grovesyncstate builders.
+type GroveSyncState func(*sql.Selector)
+
+// HarnessConfig is the predicate function for harnessconfig builders.
+type HarnessConfig func(*sql.Selector)
+
+// MaintenanceOperation is the predicate function for maintenanceoperation builders.
+type MaintenanceOperation func(*sql.Selector)
+
+// MaintenanceOperationRun is the predicate function for maintenanceoperationrun builders.
+type MaintenanceOperationRun func(*sql.Selector)
+
+// MessageRecord is the predicate function for messagerecord builders.
+type MessageRecord func(*sql.Selector)
+
+// Notification is the predicate function for notification builders.
+type Notification func(*sql.Selector)
+
+// NotificationSubscription is the predicate function for notificationsubscription builders.
+type NotificationSubscription func(*sql.Selector)
+
 // PolicyBinding is the predicate function for policybinding builders.
 type PolicyBinding func(*sql.Selector)
 
+// RuntimeBroker is the predicate function for runtimebroker builders.
+type RuntimeBroker func(*sql.Selector)
+
+// Schedule is the predicate function for schedule builders.
+type Schedule func(*sql.Selector)
+
+// ScheduledEvent is the predicate function for scheduledevent builders.
+type ScheduledEvent func(*sql.Selector)
+
+// Secret is the predicate function for secret builders.
+type Secret func(*sql.Selector)
+
+// SubscriptionTemplate is the predicate function for subscriptiontemplate builders.
+type SubscriptionTemplate func(*sql.Selector)
+
+// Template is the predicate function for template builders.
+type Template func(*sql.Selector)
+
 // User is the predicate function for user builders.
 type User func(*sql.Selector)
+
+// UserAccessToken is the predicate function for useraccesstoken builders.
+type UserAccessToken func(*sql.Selector)

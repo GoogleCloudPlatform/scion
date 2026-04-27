@@ -41,7 +41,7 @@ func newTestCompositeStore(t *testing.T) *CompositeStore {
 	require.NoError(t, base.Migrate(context.Background()))
 
 	// Create a separate Ent-managed database (permissions database)
-	entClient, err := entc.OpenSQLite("file:" + t.Name() + "?mode=memory&cache=shared")
+	entClient, _, err := entc.OpenSQLite("file:" + t.Name() + "?mode=memory&cache=shared")
 	require.NoError(t, err)
 	require.NoError(t, entc.AutoMigrate(context.Background(), entClient))
 

@@ -3,6 +3,7 @@
 package migrate
 
 import (
+	"entgo.io/ent/dialect/entsql"
 	"entgo.io/ent/dialect/sql/schema"
 	"entgo.io/ent/schema/field"
 )
@@ -36,14 +37,38 @@ var (
 	// AgentsColumns holds the columns for the "agents" table.
 	AgentsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
-		{Name: "slug", Type: field.TypeString},
+		{Name: "agent_id", Type: field.TypeString},
 		{Name: "name", Type: field.TypeString},
 		{Name: "template", Type: field.TypeString, Nullable: true},
-		{Name: "status", Type: field.TypeEnum, Enums: []string{"created", "provisioning", "cloning", "starting", "running", "stopping", "stopped", "error"}, Default: "created"},
-		{Name: "delegation_enabled", Type: field.TypeBool, Default: false},
+		{Name: "labels", Type: field.TypeJSON, Nullable: true},
+		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
+		{Name: "phase", Type: field.TypeString, Default: "created"},
+		{Name: "activity", Type: field.TypeString, Default: ""},
+		{Name: "tool_name", Type: field.TypeString, Default: ""},
+		{Name: "connection_state", Type: field.TypeString, Default: "unknown"},
+		{Name: "container_status", Type: field.TypeString, Nullable: true},
+		{Name: "runtime_state", Type: field.TypeString, Nullable: true},
+		{Name: "stalled_from_activity", Type: field.TypeString, Default: ""},
+		{Name: "current_turns", Type: field.TypeInt, Default: 0},
+		{Name: "current_model_calls", Type: field.TypeInt, Default: 0},
+		{Name: "started_at", Type: field.TypeTime, Nullable: true},
+		{Name: "image", Type: field.TypeString, Nullable: true},
+		{Name: "detached", Type: field.TypeBool, Default: true},
+		{Name: "runtime", Type: field.TypeString, Nullable: true},
+		{Name: "runtime_broker_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "web_pty_enabled", Type: field.TypeBool, Default: false},
+		{Name: "task_summary", Type: field.TypeString, Nullable: true},
+		{Name: "message", Type: field.TypeString, Nullable: true},
+		{Name: "applied_config", Type: field.TypeJSON, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+		{Name: "last_seen", Type: field.TypeTime, Nullable: true},
+		{Name: "last_activity_event", Type: field.TypeTime, Nullable: true},
+		{Name: "deleted_at", Type: field.TypeTime, Nullable: true},
 		{Name: "visibility", Type: field.TypeString, Default: "private"},
-		{Name: "created", Type: field.TypeTime},
-		{Name: "updated", Type: field.TypeTime},
+		{Name: "delegation_enabled", Type: field.TypeBool, Default: false},
+		{Name: "ancestry", Type: field.TypeJSON, Nullable: true},
+		{Name: "state_version", Type: field.TypeInt64, Default: 1},
 		{Name: "grove_id", Type: field.TypeUUID},
 		{Name: "created_by", Type: field.TypeUUID, Nullable: true},
 		{Name: "owner_id", Type: field.TypeUUID, Nullable: true},
@@ -56,28 +81,189 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_groves_agents",
-				Columns:    []*schema.Column{AgentsColumns[9]},
+				Columns:    []*schema.Column{AgentsColumns[33]},
 				RefColumns: []*schema.Column{GrovesColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
 			{
 				Symbol:     "agents_users_created_agents",
-				Columns:    []*schema.Column{AgentsColumns[10]},
+				Columns:    []*schema.Column{AgentsColumns[34]},
 				RefColumns: []*schema.Column{UsersColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
 			{
 				Symbol:     "agents_users_owned_agents",
-				Columns:    []*schema.Column{AgentsColumns[11]},
+				Columns:    []*schema.Column{AgentsColumns[35]},
 				RefColumns: []*schema.Column{UsersColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
 		},
 		Indexes: []*schema.Index{
 			{
-				Name:    "agent_slug_grove_id",
+				Name:    "idx_agents_grove_slug",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[9]},
+				Columns: []*schema.Column{AgentsColumns[33], AgentsColumns[1]},
+			},
+			{
+				Name:    "idx_agents_grove",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[33]},
+			},
+			{
+				Name:    "idx_agents_runtime_broker",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[19]},
+			},
+			{
+				Name:    "idx_agents_phase",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[6]},
+			},
+			{
+				Name:    "idx_agents_deleted",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[28]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "deleted_at IS NOT NULL",
+				},
+			},
+		},
+	}
+	// BrokerJoinTokensColumns holds the columns for the "broker_join_tokens" table.
+	BrokerJoinTokensColumns = []*schema.Column{
+		{Name: "broker_id", Type: field.TypeString},
+		{Name: "token_hash", Type: field.TypeString, Unique: true},
+		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "created_by", Type: field.TypeString},
+	}
+	// BrokerJoinTokensTable holds the schema information for the "broker_join_tokens" table.
+	BrokerJoinTokensTable = &schema.Table{
+		Name:       "broker_join_tokens",
+		Columns:    BrokerJoinTokensColumns,
+		PrimaryKey: []*schema.Column{BrokerJoinTokensColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_broker_join_tokens_hash",
+				Unique:  false,
+				Columns: []*schema.Column{BrokerJoinTokensColumns[1]},
+			},
+			{
+				Name:    "idx_broker_join_tokens_expires",
+				Unique:  false,
+				Columns: []*schema.Column{BrokerJoinTokensColumns[2]},
+			},
+		},
+	}
+	// BrokerSecretsColumns holds the columns for the "broker_secrets" table.
+	BrokerSecretsColumns = []*schema.Column{
+		{Name: "broker_id", Type: field.TypeString},
+		{Name: "secret_key", Type: field.TypeBytes},
+		{Name: "algorithm", Type: field.TypeString, Default: "hmac-sha256"},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "rotated_at", Type: field.TypeTime, Nullable: true},
+		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "status", Type: field.TypeString, Default: "active"},
+	}
+	// BrokerSecretsTable holds the schema information for the "broker_secrets" table.
+	BrokerSecretsTable = &schema.Table{
+		Name:       "broker_secrets",
+		Columns:    BrokerSecretsColumns,
+		PrimaryKey: []*schema.Column{BrokerSecretsColumns[0]},
+	}
+	// EnvVarsColumns holds the columns for the "env_vars" table.
+	EnvVarsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "key", Type: field.TypeString},
+		{Name: "value", Type: field.TypeString},
+		{Name: "scope", Type: field.TypeString},
+		{Name: "scope_id", Type: field.TypeString},
+		{Name: "description", Type: field.TypeString, Nullable: true},
+		{Name: "sensitive", Type: field.TypeBool, Default: false},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "injection_mode", Type: field.TypeString, Default: "as_needed"},
+		{Name: "secret", Type: field.TypeBool, Default: false},
+	}
+	// EnvVarsTable holds the schema information for the "env_vars" table.
+	EnvVarsTable = &schema.Table{
+		Name:       "env_vars",
+		Columns:    EnvVarsColumns,
+		PrimaryKey: []*schema.Column{EnvVarsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_env_vars_key_scope",
+				Unique:  true,
+				Columns: []*schema.Column{EnvVarsColumns[1], EnvVarsColumns[3], EnvVarsColumns[4]},
+			},
+			{
+				Name:    "idx_env_vars_scope",
+				Unique:  false,
+				Columns: []*schema.Column{EnvVarsColumns[3], EnvVarsColumns[4]},
+			},
+		},
+	}
+	// GcpServiceAccountsColumns holds the columns for the "gcp_service_accounts" table.
+	GcpServiceAccountsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "scope", Type: field.TypeString},
+		{Name: "scope_id", Type: field.TypeString},
+		{Name: "email", Type: field.TypeString},
+		{Name: "project_id", Type: field.TypeString},
+		{Name: "display_name", Type: field.TypeString, Default: ""},
+		{Name: "default_scopes", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "verified", Type: field.TypeBool, Default: false},
+		{Name: "verified_at", Type: field.TypeTime, Nullable: true},
+		{Name: "created_by", Type: field.TypeString, Default: ""},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "managed", Type: field.TypeBool, Default: false},
+		{Name: "managed_by", Type: field.TypeString, Default: ""},
+	}
+	// GcpServiceAccountsTable holds the schema information for the "gcp_service_accounts" table.
+	GcpServiceAccountsTable = &schema.Table{
+		Name:       "gcp_service_accounts",
+		Columns:    GcpServiceAccountsColumns,
+		PrimaryKey: []*schema.Column{GcpServiceAccountsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "gcpserviceaccount_email_scope_scope_id",
+				Unique:  true,
+				Columns: []*schema.Column{GcpServiceAccountsColumns[3], GcpServiceAccountsColumns[1], GcpServiceAccountsColumns[2]},
+			},
+			{
+				Name:    "idx_gcp_sa_scope",
+				Unique:  false,
+				Columns: []*schema.Column{GcpServiceAccountsColumns[1], GcpServiceAccountsColumns[2]},
+			},
+		},
+	}
+	// GithubInstallationsColumns holds the columns for the "github_installations" table.
+	GithubInstallationsColumns = []*schema.Column{
+		{Name: "installation_id", Type: field.TypeInt64, Increment: true},
+		{Name: "account_login", Type: field.TypeString},
+		{Name: "account_type", Type: field.TypeString, Default: "Organization"},
+		{Name: "app_id", Type: field.TypeInt64},
+		{Name: "repositories", Type: field.TypeString, Size: 2147483647, Default: "[]"},
+		{Name: "status", Type: field.TypeString, Default: "active"},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// GithubInstallationsTable holds the schema information for the "github_installations" table.
+	GithubInstallationsTable = &schema.Table{
+		Name:       "github_installations",
+		Columns:    GithubInstallationsColumns,
+		PrimaryKey: []*schema.Column{GithubInstallationsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_github_installations_account",
+				Unique:  false,
+				Columns: []*schema.Column{GithubInstallationsColumns[1]},
+			},
+			{
+				Name:    "idx_github_installations_status",
+				Unique:  false,
+				Columns: []*schema.Column{GithubInstallationsColumns[5]},
 			},
 		},
 	}
@@ -166,17 +352,343 @@ var (
 		{Name: "git_remote", Type: field.TypeString, Nullable: true},
 		{Name: "labels", Type: field.TypeJSON, Nullable: true},
 		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
-		{Name: "created", Type: field.TypeTime},
-		{Name: "updated", Type: field.TypeTime},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
 		{Name: "owner_id", Type: field.TypeString, Nullable: true},
 		{Name: "visibility", Type: field.TypeString, Default: "private"},
+		{Name: "default_runtime_broker_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "shared_dirs", Type: field.TypeJSON, Nullable: true},
+		{Name: "github_installation_id", Type: field.TypeInt64, Nullable: true},
+		{Name: "github_permissions", Type: field.TypeJSON, Nullable: true},
+		{Name: "github_app_status", Type: field.TypeJSON, Nullable: true},
+		{Name: "git_identity", Type: field.TypeJSON, Nullable: true},
 	}
 	// GrovesTable holds the schema information for the "groves" table.
 	GrovesTable = &schema.Table{
 		Name:       "groves",
 		Columns:    GrovesColumns,
 		PrimaryKey: []*schema.Column{GrovesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_groves_slug",
+				Unique:  false,
+				Columns: []*schema.Column{GrovesColumns[2]},
+			},
+			{
+				Name:    "idx_groves_git_remote",
+				Unique:  false,
+				Columns: []*schema.Column{GrovesColumns[3]},
+			},
+			{
+				Name:    "idx_groves_owner",
+				Unique:  false,
+				Columns: []*schema.Column{GrovesColumns[9]},
+			},
+			{
+				Name:    "idx_groves_default_runtime_broker",
+				Unique:  false,
+				Columns: []*schema.Column{GrovesColumns[11]},
+			},
+		},
+	}
+	// GroveContributorsColumns holds the columns for the "grove_contributors" table.
+	GroveContributorsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "grove_id", Type: field.TypeString},
+		{Name: "broker_id", Type: field.TypeString},
+		{Name: "broker_name", Type: field.TypeString},
+		{Name: "mode", Type: field.TypeString, Default: "connected"},
+		{Name: "status", Type: field.TypeString, Default: "offline"},
+		{Name: "profiles", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "last_seen", Type: field.TypeTime, Nullable: true},
+		{Name: "local_path", Type: field.TypeString, Nullable: true},
+		{Name: "linked_by", Type: field.TypeString, Nullable: true},
+		{Name: "linked_at", Type: field.TypeTime, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+	}
+	// GroveContributorsTable holds the schema information for the "grove_contributors" table.
+	GroveContributorsTable = &schema.Table{
+		Name:       "grove_contributors",
+		Columns:    GroveContributorsColumns,
+		PrimaryKey: []*schema.Column{GroveContributorsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "grovecontributor_grove_id_broker_id",
+				Unique:  true,
+				Columns: []*schema.Column{GroveContributorsColumns[1], GroveContributorsColumns[2]},
+			},
+		},
+	}
+	// GroveSyncStateColumns holds the columns for the "grove_sync_state" table.
+	GroveSyncStateColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "grove_id", Type: field.TypeString},
+		{Name: "broker_id", Type: field.TypeString, Default: ""},
+		{Name: "last_sync_time", Type: field.TypeTime, Nullable: true},
+		{Name: "last_commit_sha", Type: field.TypeString, Nullable: true},
+		{Name: "file_count", Type: field.TypeInt, Default: 0},
+		{Name: "total_bytes", Type: field.TypeInt64, Default: 0},
+	}
+	// GroveSyncStateTable holds the schema information for the "grove_sync_state" table.
+	GroveSyncStateTable = &schema.Table{
+		Name:       "grove_sync_state",
+		Columns:    GroveSyncStateColumns,
+		PrimaryKey: []*schema.Column{GroveSyncStateColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "grovesyncstate_grove_id_broker_id",
+				Unique:  true,
+				Columns: []*schema.Column{GroveSyncStateColumns[1], GroveSyncStateColumns[2]},
+			},
+			{
+				Name:    "idx_grove_sync_state_grove",
+				Unique:  false,
+				Columns: []*schema.Column{GroveSyncStateColumns[1]},
+			},
+		},
+	}
+	// HarnessConfigsColumns holds the columns for the "harness_configs" table.
+	HarnessConfigsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "name", Type: field.TypeString},
+		{Name: "slug", Type: field.TypeString},
+		{Name: "display_name", Type: field.TypeString, Nullable: true},
+		{Name: "description", Type: field.TypeString, Nullable: true},
+		{Name: "harness", Type: field.TypeString},
+		{Name: "config", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "content_hash", Type: field.TypeString, Nullable: true},
+		{Name: "scope", Type: field.TypeString, Default: "global"},
+		{Name: "scope_id", Type: field.TypeString, Nullable: true},
+		{Name: "storage_uri", Type: field.TypeString, Nullable: true},
+		{Name: "storage_bucket", Type: field.TypeString, Nullable: true},
+		{Name: "storage_path", Type: field.TypeString, Nullable: true},
+		{Name: "files", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "locked", Type: field.TypeBool, Default: false},
+		{Name: "status", Type: field.TypeString, Default: "active"},
+		{Name: "owner_id", Type: field.TypeString, Nullable: true},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "updated_by", Type: field.TypeString, Nullable: true},
+		{Name: "visibility", Type: field.TypeString, Default: "private"},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// HarnessConfigsTable holds the schema information for the "harness_configs" table.
+	HarnessConfigsTable = &schema.Table{
+		Name:       "harness_configs",
+		Columns:    HarnessConfigsColumns,
+		PrimaryKey: []*schema.Column{HarnessConfigsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_harness_configs_slug_scope",
+				Unique:  false,
+				Columns: []*schema.Column{HarnessConfigsColumns[2], HarnessConfigsColumns[8]},
+			},
+			{
+				Name:    "idx_harness_configs_harness",
+				Unique:  false,
+				Columns: []*schema.Column{HarnessConfigsColumns[5]},
+			},
+			{
+				Name:    "idx_harness_configs_status",
+				Unique:  false,
+				Columns: []*schema.Column{HarnessConfigsColumns[15]},
+			},
+			{
+				Name:    "idx_harness_configs_content_hash",
+				Unique:  false,
+				Columns: []*schema.Column{HarnessConfigsColumns[7]},
+			},
+			{
+				Name:    "idx_harness_configs_scope_id",
+				Unique:  false,
+				Columns: []*schema.Column{HarnessConfigsColumns[8], HarnessConfigsColumns[9]},
+			},
+		},
+	}
+	// MaintenanceOperationsColumns holds the columns for the "maintenance_operations" table.
+	MaintenanceOperationsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "key", Type: field.TypeString, Unique: true},
+		{Name: "title", Type: field.TypeString},
+		{Name: "description", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "category", Type: field.TypeString},
+		{Name: "status", Type: field.TypeString, Default: "pending"},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "started_at", Type: field.TypeTime, Nullable: true},
+		{Name: "completed_at", Type: field.TypeTime, Nullable: true},
+		{Name: "started_by", Type: field.TypeString, Nullable: true},
+		{Name: "result", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "metadata", Type: field.TypeString, Size: 2147483647, Default: "{}"},
+	}
+	// MaintenanceOperationsTable holds the schema information for the "maintenance_operations" table.
+	MaintenanceOperationsTable = &schema.Table{
+		Name:       "maintenance_operations",
+		Columns:    MaintenanceOperationsColumns,
+		PrimaryKey: []*schema.Column{MaintenanceOperationsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_maintenance_ops_category",
+				Unique:  false,
+				Columns: []*schema.Column{MaintenanceOperationsColumns[4]},
+			},
+			{
+				Name:    "idx_maintenance_ops_status",
+				Unique:  false,
+				Columns: []*schema.Column{MaintenanceOperationsColumns[5]},
+			},
+		},
+	}
+	// MaintenanceOperationRunsColumns holds the columns for the "maintenance_operation_runs" table.
+	MaintenanceOperationRunsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "operation_key", Type: field.TypeString},
+		{Name: "status", Type: field.TypeString, Default: "running"},
+		{Name: "started_at", Type: field.TypeTime},
+		{Name: "completed_at", Type: field.TypeTime, Nullable: true},
+		{Name: "started_by", Type: field.TypeString, Nullable: true},
+		{Name: "result", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "log", Type: field.TypeString, Size: 2147483647, Default: ""},
+	}
+	// MaintenanceOperationRunsTable holds the schema information for the "maintenance_operation_runs" table.
+	MaintenanceOperationRunsTable = &schema.Table{
+		Name:       "maintenance_operation_runs",
+		Columns:    MaintenanceOperationRunsColumns,
+		PrimaryKey: []*schema.Column{MaintenanceOperationRunsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_maintenance_runs_key",
+				Unique:  false,
+				Columns: []*schema.Column{MaintenanceOperationRunsColumns[1]},
+			},
+			{
+				Name:    "idx_maintenance_runs_started",
+				Unique:  false,
+				Columns: []*schema.Column{MaintenanceOperationRunsColumns[3]},
+				Annotation: &entsql.IndexAnnotation{
+					Desc: true,
+				},
+			},
+		},
+	}
+	// MessagesColumns holds the columns for the "messages" table.
+	MessagesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "grove_id", Type: field.TypeString},
+		{Name: "sender", Type: field.TypeString},
+		{Name: "sender_id", Type: field.TypeString, Default: ""},
+		{Name: "recipient", Type: field.TypeString},
+		{Name: "recipient_id", Type: field.TypeString, Default: ""},
+		{Name: "msg", Type: field.TypeString, Size: 2147483647},
+		{Name: "type", Type: field.TypeString, Default: "instruction"},
+		{Name: "urgent", Type: field.TypeBool, Default: false},
+		{Name: "broadcasted", Type: field.TypeBool, Default: false},
+		{Name: "read", Type: field.TypeBool, Default: false},
+		{Name: "agent_id", Type: field.TypeString, Default: ""},
+		{Name: "created_at", Type: field.TypeTime},
+	}
+	// MessagesTable holds the schema information for the "messages" table.
+	MessagesTable = &schema.Table{
+		Name:       "messages",
+		Columns:    MessagesColumns,
+		PrimaryKey: []*schema.Column{MessagesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_messages_grove",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[1]},
+			},
+			{
+				Name:    "idx_messages_recipient",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[5], MessagesColumns[10]},
+			},
+			{
+				Name:    "idx_messages_agent",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[11]},
+			},
+			{
+				Name:    "idx_messages_sender",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[3]},
+			},
+			{
+				Name:    "idx_messages_created",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[12]},
+				Annotation: &entsql.IndexAnnotation{
+					Desc: true,
+				},
+			},
+		},
+	}
+	// NotificationsColumns holds the columns for the "notifications" table.
+	NotificationsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "subscription_id", Type: field.TypeString},
+		{Name: "agent_id", Type: field.TypeString},
+		{Name: "grove_id", Type: field.TypeString},
+		{Name: "subscriber_type", Type: field.TypeString},
+		{Name: "subscriber_id", Type: field.TypeString},
+		{Name: "status", Type: field.TypeString},
+		{Name: "message", Type: field.TypeString, Size: 2147483647},
+		{Name: "dispatched", Type: field.TypeBool, Default: false},
+		{Name: "acknowledged", Type: field.TypeBool, Default: false},
+		{Name: "created_at", Type: field.TypeTime},
+	}
+	// NotificationsTable holds the schema information for the "notifications" table.
+	NotificationsTable = &schema.Table{
+		Name:       "notifications",
+		Columns:    NotificationsColumns,
+		PrimaryKey: []*schema.Column{NotificationsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_notifications_subscriber",
+				Unique:  false,
+				Columns: []*schema.Column{NotificationsColumns[4], NotificationsColumns[5]},
+			},
+			{
+				Name:    "idx_notifications_grove",
+				Unique:  false,
+				Columns: []*schema.Column{NotificationsColumns[3]},
+			},
+		},
+	}
+	// NotificationSubscriptionsColumns holds the columns for the "notification_subscriptions" table.
+	NotificationSubscriptionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "scope", Type: field.TypeString, Default: "agent"},
+		{Name: "agent_id", Type: field.TypeString, Nullable: true},
+		{Name: "subscriber_type", Type: field.TypeString, Default: "agent"},
+		{Name: "subscriber_id", Type: field.TypeString},
+		{Name: "grove_id", Type: field.TypeString},
+		{Name: "trigger_activities", Type: field.TypeString, Size: 2147483647},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "created_by", Type: field.TypeString},
+	}
+	// NotificationSubscriptionsTable holds the schema information for the "notification_subscriptions" table.
+	NotificationSubscriptionsTable = &schema.Table{
+		Name:       "notification_subscriptions",
+		Columns:    NotificationSubscriptionsColumns,
+		PrimaryKey: []*schema.Column{NotificationSubscriptionsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_notification_subs_agent",
+				Unique:  false,
+				Columns: []*schema.Column{NotificationSubscriptionsColumns[2]},
+			},
+			{
+				Name:    "idx_notification_subs_grove",
+				Unique:  false,
+				Columns: []*schema.Column{NotificationSubscriptionsColumns[5]},
+			},
+			{
+				Name:    "idx_notification_subs_subscriber",
+				Unique:  false,
+				Columns: []*schema.Column{NotificationSubscriptionsColumns[3], NotificationSubscriptionsColumns[4]},
+			},
+		},
 	}
 	// PolicyBindingsColumns holds the columns for the "policy_bindings" table.
 	PolicyBindingsColumns = []*schema.Column{
@@ -221,6 +733,253 @@ var (
 			},
 		},
 	}
+	// RuntimeBrokersColumns holds the columns for the "runtime_brokers" table.
+	RuntimeBrokersColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "name", Type: field.TypeString},
+		{Name: "slug", Type: field.TypeString},
+		{Name: "type", Type: field.TypeString},
+		{Name: "mode", Type: field.TypeString, Default: "connected"},
+		{Name: "version", Type: field.TypeString, Nullable: true},
+		{Name: "status", Type: field.TypeString, Default: "offline"},
+		{Name: "connection_state", Type: field.TypeString, Default: "disconnected"},
+		{Name: "last_heartbeat", Type: field.TypeTime, Nullable: true},
+		{Name: "capabilities", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "supported_harnesses", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "resources", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "runtimes", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "labels", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "annotations", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "endpoint", Type: field.TypeString, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "auto_provide", Type: field.TypeBool, Default: false},
+	}
+	// RuntimeBrokersTable holds the schema information for the "runtime_brokers" table.
+	RuntimeBrokersTable = &schema.Table{
+		Name:       "runtime_brokers",
+		Columns:    RuntimeBrokersColumns,
+		PrimaryKey: []*schema.Column{RuntimeBrokersColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_runtime_brokers_slug",
+				Unique:  false,
+				Columns: []*schema.Column{RuntimeBrokersColumns[2]},
+			},
+			{
+				Name:    "idx_runtime_brokers_status",
+				Unique:  false,
+				Columns: []*schema.Column{RuntimeBrokersColumns[6]},
+			},
+		},
+	}
+	// SchedulesColumns holds the columns for the "schedules" table.
+	SchedulesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "grove_id", Type: field.TypeString},
+		{Name: "name", Type: field.TypeString},
+		{Name: "cron_expr", Type: field.TypeString},
+		{Name: "event_type", Type: field.TypeString},
+		{Name: "payload", Type: field.TypeString, Size: 2147483647, Default: "{}"},
+		{Name: "status", Type: field.TypeString, Default: "active"},
+		{Name: "next_run_at", Type: field.TypeTime, Nullable: true},
+		{Name: "last_run_at", Type: field.TypeTime, Nullable: true},
+		{Name: "last_run_status", Type: field.TypeString, Nullable: true},
+		{Name: "last_run_error", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "run_count", Type: field.TypeInt, Default: 0},
+		{Name: "error_count", Type: field.TypeInt, Default: 0},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// SchedulesTable holds the schema information for the "schedules" table.
+	SchedulesTable = &schema.Table{
+		Name:       "schedules",
+		Columns:    SchedulesColumns,
+		PrimaryKey: []*schema.Column{SchedulesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "schedule_grove_id_name",
+				Unique:  true,
+				Columns: []*schema.Column{SchedulesColumns[1], SchedulesColumns[2]},
+			},
+			{
+				Name:    "idx_schedules_grove",
+				Unique:  false,
+				Columns: []*schema.Column{SchedulesColumns[1]},
+			},
+			{
+				Name:    "idx_schedules_next_run",
+				Unique:  false,
+				Columns: []*schema.Column{SchedulesColumns[7]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "status = 'active'",
+				},
+			},
+		},
+	}
+	// ScheduledEventsColumns holds the columns for the "scheduled_events" table.
+	ScheduledEventsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "grove_id", Type: field.TypeString},
+		{Name: "event_type", Type: field.TypeString},
+		{Name: "fire_at", Type: field.TypeTime},
+		{Name: "payload", Type: field.TypeString, Size: 2147483647},
+		{Name: "status", Type: field.TypeString, Default: "pending"},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "fired_at", Type: field.TypeTime, Nullable: true},
+		{Name: "error", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "schedule_id", Type: field.TypeString, Default: ""},
+	}
+	// ScheduledEventsTable holds the schema information for the "scheduled_events" table.
+	ScheduledEventsTable = &schema.Table{
+		Name:       "scheduled_events",
+		Columns:    ScheduledEventsColumns,
+		PrimaryKey: []*schema.Column{ScheduledEventsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_scheduled_events_status",
+				Unique:  false,
+				Columns: []*schema.Column{ScheduledEventsColumns[5]},
+			},
+			{
+				Name:    "idx_scheduled_events_fire_at",
+				Unique:  false,
+				Columns: []*schema.Column{ScheduledEventsColumns[3]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "status = 'pending'",
+				},
+			},
+			{
+				Name:    "idx_scheduled_events_grove",
+				Unique:  false,
+				Columns: []*schema.Column{ScheduledEventsColumns[1]},
+			},
+		},
+	}
+	// SecretsColumns holds the columns for the "secrets" table.
+	SecretsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "key", Type: field.TypeString},
+		{Name: "encrypted_value", Type: field.TypeString, Size: 2147483647},
+		{Name: "scope", Type: field.TypeString},
+		{Name: "scope_id", Type: field.TypeString},
+		{Name: "description", Type: field.TypeString, Nullable: true},
+		{Name: "version", Type: field.TypeInt, Default: 1},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "updated_by", Type: field.TypeString, Nullable: true},
+		{Name: "secret_type", Type: field.TypeString, Default: "environment"},
+		{Name: "target", Type: field.TypeString, Nullable: true},
+		{Name: "secret_ref", Type: field.TypeString, Nullable: true},
+		{Name: "injection_mode", Type: field.TypeString, Default: "as_needed"},
+		{Name: "allow_progeny", Type: field.TypeBool, Default: false},
+	}
+	// SecretsTable holds the schema information for the "secrets" table.
+	SecretsTable = &schema.Table{
+		Name:       "secrets",
+		Columns:    SecretsColumns,
+		PrimaryKey: []*schema.Column{SecretsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_secrets_key_scope",
+				Unique:  true,
+				Columns: []*schema.Column{SecretsColumns[1], SecretsColumns[3], SecretsColumns[4]},
+			},
+			{
+				Name:    "idx_secrets_scope",
+				Unique:  false,
+				Columns: []*schema.Column{SecretsColumns[3], SecretsColumns[4]},
+			},
+		},
+	}
+	// SubscriptionTemplatesColumns holds the columns for the "subscription_templates" table.
+	SubscriptionTemplatesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "name", Type: field.TypeString},
+		{Name: "scope", Type: field.TypeString, Default: "grove"},
+		{Name: "trigger_activities", Type: field.TypeString, Size: 2147483647},
+		{Name: "grove_id", Type: field.TypeString, Default: ""},
+		{Name: "created_by", Type: field.TypeString},
+	}
+	// SubscriptionTemplatesTable holds the schema information for the "subscription_templates" table.
+	SubscriptionTemplatesTable = &schema.Table{
+		Name:       "subscription_templates",
+		Columns:    SubscriptionTemplatesColumns,
+		PrimaryKey: []*schema.Column{SubscriptionTemplatesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_sub_templates_grove",
+				Unique:  false,
+				Columns: []*schema.Column{SubscriptionTemplatesColumns[4]},
+			},
+		},
+	}
+	// TemplatesColumns holds the columns for the "templates" table.
+	TemplatesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "name", Type: field.TypeString},
+		{Name: "slug", Type: field.TypeString},
+		{Name: "harness", Type: field.TypeString},
+		{Name: "image", Type: field.TypeString, Nullable: true},
+		{Name: "config", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "scope", Type: field.TypeString, Default: "global"},
+		{Name: "grove_id", Type: field.TypeString, Nullable: true},
+		{Name: "storage_uri", Type: field.TypeString, Nullable: true},
+		{Name: "owner_id", Type: field.TypeString, Nullable: true},
+		{Name: "visibility", Type: field.TypeString, Default: "private"},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+		{Name: "display_name", Type: field.TypeString, Nullable: true},
+		{Name: "description", Type: field.TypeString, Nullable: true},
+		{Name: "content_hash", Type: field.TypeString, Nullable: true},
+		{Name: "scope_id", Type: field.TypeString, Nullable: true},
+		{Name: "storage_bucket", Type: field.TypeString, Nullable: true},
+		{Name: "storage_path", Type: field.TypeString, Nullable: true},
+		{Name: "files", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "base_template", Type: field.TypeString, Nullable: true},
+		{Name: "locked", Type: field.TypeBool, Default: false},
+		{Name: "status", Type: field.TypeString, Default: "active"},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "updated_by", Type: field.TypeString, Nullable: true},
+		{Name: "default_harness_config", Type: field.TypeString, Nullable: true},
+	}
+	// TemplatesTable holds the schema information for the "templates" table.
+	TemplatesTable = &schema.Table{
+		Name:       "templates",
+		Columns:    TemplatesColumns,
+		PrimaryKey: []*schema.Column{TemplatesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_templates_slug_scope",
+				Unique:  false,
+				Columns: []*schema.Column{TemplatesColumns[2], TemplatesColumns[6]},
+			},
+			{
+				Name:    "idx_templates_harness",
+				Unique:  false,
+				Columns: []*schema.Column{TemplatesColumns[3]},
+			},
+			{
+				Name:    "idx_templates_status",
+				Unique:  false,
+				Columns: []*schema.Column{TemplatesColumns[22]},
+			},
+			{
+				Name:    "idx_templates_content_hash",
+				Unique:  false,
+				Columns: []*schema.Column{TemplatesColumns[15]},
+			},
+			{
+				Name:    "idx_templates_scope_id",
+				Unique:  false,
+				Columns: []*schema.Column{TemplatesColumns[6], TemplatesColumns[16]},
+			},
+		},
+	}
 	// UsersColumns holds the columns for the "users" table.
 	UsersColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -230,14 +989,54 @@ var (
 		{Name: "role", Type: field.TypeEnum, Enums: []string{"admin", "member", "viewer"}, Default: "member"},
 		{Name: "status", Type: field.TypeEnum, Enums: []string{"active", "suspended"}, Default: "active"},
 		{Name: "preferences", Type: field.TypeJSON, Nullable: true},
-		{Name: "created", Type: field.TypeTime},
+		{Name: "created_at", Type: field.TypeTime},
 		{Name: "last_login", Type: field.TypeTime, Nullable: true},
+		{Name: "last_seen", Type: field.TypeTime, Nullable: true},
 	}
 	// UsersTable holds the schema information for the "users" table.
 	UsersTable = &schema.Table{
 		Name:       "users",
 		Columns:    UsersColumns,
 		PrimaryKey: []*schema.Column{UsersColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_users_email",
+				Unique:  false,
+				Columns: []*schema.Column{UsersColumns[1]},
+			},
+		},
+	}
+	// UserAccessTokensColumns holds the columns for the "user_access_tokens" table.
+	UserAccessTokensColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "user_id", Type: field.TypeString},
+		{Name: "name", Type: field.TypeString},
+		{Name: "prefix", Type: field.TypeString},
+		{Name: "key_hash", Type: field.TypeString, Unique: true},
+		{Name: "grove_id", Type: field.TypeString},
+		{Name: "scopes", Type: field.TypeString},
+		{Name: "revoked", Type: field.TypeBool, Default: false},
+		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "last_used", Type: field.TypeTime, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+	}
+	// UserAccessTokensTable holds the schema information for the "user_access_tokens" table.
+	UserAccessTokensTable = &schema.Table{
+		Name:       "user_access_tokens",
+		Columns:    UserAccessTokensColumns,
+		PrimaryKey: []*schema.Column{UserAccessTokensColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "idx_uat_user_id",
+				Unique:  false,
+				Columns: []*schema.Column{UserAccessTokensColumns[1]},
+			},
+			{
+				Name:    "idx_uat_key_hash",
+				Unique:  false,
+				Columns: []*schema.Column{UserAccessTokensColumns[4]},
+			},
+		},
 	}
 	// GroupChildGroupsColumns holds the columns for the "group_child_groups" table.
 	GroupChildGroupsColumns = []*schema.Column{
@@ -268,11 +1067,31 @@ var (
 	Tables = []*schema.Table{
 		AccessPoliciesTable,
 		AgentsTable,
+		BrokerJoinTokensTable,
+		BrokerSecretsTable,
+		EnvVarsTable,
+		GcpServiceAccountsTable,
+		GithubInstallationsTable,
 		GroupsTable,
 		GroupMembershipsTable,
 		GrovesTable,
+		GroveContributorsTable,
+		GroveSyncStateTable,
+		HarnessConfigsTable,
+		MaintenanceOperationsTable,
+		MaintenanceOperationRunsTable,
+		MessagesTable,
+		NotificationsTable,
+		NotificationSubscriptionsTable,
 		PolicyBindingsTable,
+		RuntimeBrokersTable,
+		SchedulesTable,
+		ScheduledEventsTable,
+		SecretsTable,
+		SubscriptionTemplatesTable,
+		TemplatesTable,
 		UsersTable,
+		UserAccessTokensTable,
 		GroupChildGroupsTable,
 	}
 )
@@ -281,14 +1100,83 @@ func init() {
 	AgentsTable.ForeignKeys[0].RefTable = GrovesTable
 	AgentsTable.ForeignKeys[1].RefTable = UsersTable
 	AgentsTable.ForeignKeys[2].RefTable = UsersTable
+	AgentsTable.Annotation = &entsql.Annotation{
+		Table: "agents",
+	}
+	BrokerJoinTokensTable.Annotation = &entsql.Annotation{
+		Table: "broker_join_tokens",
+	}
+	BrokerSecretsTable.Annotation = &entsql.Annotation{
+		Table: "broker_secrets",
+	}
+	EnvVarsTable.Annotation = &entsql.Annotation{
+		Table: "env_vars",
+	}
+	GcpServiceAccountsTable.Annotation = &entsql.Annotation{
+		Table: "gcp_service_accounts",
+	}
+	GithubInstallationsTable.Annotation = &entsql.Annotation{
+		Table: "github_installations",
+	}
 	GroupsTable.ForeignKeys[0].RefTable = UsersTable
 	GroupMembershipsTable.ForeignKeys[0].RefTable = GroupsTable
 	GroupMembershipsTable.ForeignKeys[1].RefTable = UsersTable
 	GroupMembershipsTable.ForeignKeys[2].RefTable = AgentsTable
+	GrovesTable.Annotation = &entsql.Annotation{
+		Table: "groves",
+	}
+	GroveContributorsTable.Annotation = &entsql.Annotation{
+		Table: "grove_contributors",
+	}
+	GroveSyncStateTable.Annotation = &entsql.Annotation{
+		Table: "grove_sync_state",
+	}
+	HarnessConfigsTable.Annotation = &entsql.Annotation{
+		Table: "harness_configs",
+	}
+	MaintenanceOperationsTable.Annotation = &entsql.Annotation{
+		Table: "maintenance_operations",
+	}
+	MaintenanceOperationRunsTable.Annotation = &entsql.Annotation{
+		Table: "maintenance_operation_runs",
+	}
+	MessagesTable.Annotation = &entsql.Annotation{
+		Table: "messages",
+	}
+	NotificationsTable.Annotation = &entsql.Annotation{
+		Table: "notifications",
+	}
+	NotificationSubscriptionsTable.Annotation = &entsql.Annotation{
+		Table: "notification_subscriptions",
+	}
 	PolicyBindingsTable.ForeignKeys[0].RefTable = AccessPoliciesTable
 	PolicyBindingsTable.ForeignKeys[1].RefTable = UsersTable
 	PolicyBindingsTable.ForeignKeys[2].RefTable = GroupsTable
 	PolicyBindingsTable.ForeignKeys[3].RefTable = AgentsTable
+	RuntimeBrokersTable.Annotation = &entsql.Annotation{
+		Table: "runtime_brokers",
+	}
+	SchedulesTable.Annotation = &entsql.Annotation{
+		Table: "schedules",
+	}
+	ScheduledEventsTable.Annotation = &entsql.Annotation{
+		Table: "scheduled_events",
+	}
+	SecretsTable.Annotation = &entsql.Annotation{
+		Table: "secrets",
+	}
+	SubscriptionTemplatesTable.Annotation = &entsql.Annotation{
+		Table: "subscription_templates",
+	}
+	TemplatesTable.Annotation = &entsql.Annotation{
+		Table: "templates",
+	}
+	UsersTable.Annotation = &entsql.Annotation{
+		Table: "users",
+	}
+	UserAccessTokensTable.Annotation = &entsql.Annotation{
+		Table: "user_access_tokens",
+	}
 	GroupChildGroupsTable.ForeignKeys[0].RefTable = GroupsTable
 	GroupChildGroupsTable.ForeignKeys[1].RefTable = GroupsTable
 }
