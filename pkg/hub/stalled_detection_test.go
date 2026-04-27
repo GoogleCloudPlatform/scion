@@ -345,6 +345,76 @@ func TestAgentStalledDetectionHandler_BlockedAgentNotStalled(t *testing.T) {
 	}
 }
 
+func TestAgentStalledDetectionHandler_IdleAgentMarkedStalled(t *testing.T) {
+	srv, s, ep := setupStalledTestServer(t)
+	ctx := context.Background()
+
+	grove := &store.Grove{
+		ID:         api.NewUUID(),
+		Name:       "Idle Stalled Grove",
+		Slug:       "idle-stalled-grove",
+		Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateGrove(ctx, grove); err != nil {
+		t.Fatalf("failed to create grove: %v", err)
+	}
+
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Slug:       "idle-agent",
+		Name:       "Idle Agent",
+		Template:   "claude",
+		GroveID:    grove.ID,
+		Phase:      string(state.PhaseCreated),
+		Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+
+	// Set to running with idle activity
+	if err := s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityIdle),
+	}); err != nil {
+		t.Fatalf("failed to update agent status: %v", err)
+	}
+
+	// Make activity stale but keep heartbeat recent (process alive but stuck at idle)
+	staleActivity := time.Now().Add(-10 * time.Minute)
+	recentHB := time.Now().Add(-30 * time.Second)
+	db := s.(*sqlite.SQLiteStore).DB()
+	if _, err := db.ExecContext(ctx,
+		"UPDATE agents SET last_activity_event = ?, last_seen = ? WHERE id = ?",
+		staleActivity, recentHB, agent.ID); err != nil {
+		t.Fatalf("failed to set stale activity: %v", err)
+	}
+
+	// Run stalled detection — should mark this idle agent as stalled
+	handler := srv.agentStalledDetectionHandler()
+	handler(ctx)
+
+	published := ep.publishedAgents()
+	if len(published) != 1 {
+		t.Fatalf("expected 1 published event (idle agent should be stalled), got %d", len(published))
+	}
+	if published[0].Activity != string(state.ActivityStalled) {
+		t.Errorf("published agent activity = %q, want %q", published[0].Activity, string(state.ActivityStalled))
+	}
+
+	// Verify via store
+	a, err := s.GetAgent(ctx, agent.ID)
+	if err != nil {
+		t.Fatalf("failed to get agent: %v", err)
+	}
+	if a.Activity != string(state.ActivityStalled) {
+		t.Errorf("agent activity = %q, want %q", a.Activity, string(state.ActivityStalled))
+	}
+	if a.StalledFromActivity != string(state.ActivityIdle) {
+		t.Errorf("stalled_from_activity = %q, want %q", a.StalledFromActivity, string(state.ActivityIdle))
+	}
+}
+
 func TestNew_DefaultsStalledThresholdWhenZero(t *testing.T) {
 	s, err := sqlite.New(":memory:")
 	if err != nil {

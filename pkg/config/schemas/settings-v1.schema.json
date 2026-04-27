@@ -229,7 +229,7 @@
       "properties": {
         "harness": {
           "type": "string",
-          "enum": ["gemini", "claude", "opencode", "codex", "generic"],
+          "minLength": 1,
           "description": "The harness type this config applies to."
         },
         "image": {
@@ -270,6 +270,233 @@
           "type": "array",
           "items": { "$ref": "#/$defs/requiredSecret" },
           "description": "Required secrets for this harness configuration."
+        },
+        "provisioner": {
+          "$ref": "#/$defs/harnessProvisioner",
+          "description": "Provisioning implementation metadata. Presence of a script file alone does not activate container-script behavior."
+        },
+        "config_dir": {
+          "type": "string",
+          "description": "Default harness-native config directory relative to the agent home."
+        },
+        "skills_dir": {
+          "type": "string",
+          "description": "Harness-native skills directory relative to the agent home."
+        },
+        "interrupt_key": {
+          "type": "string",
+          "description": "Key sequence used to interrupt the harness process."
+        },
+        "instructions_file": {
+          "type": "string",
+          "description": "Harness-native file that receives agent instructions."
+        },
+        "system_prompt_file": {
+          "type": "string",
+          "description": "Harness-native file that receives system prompt content when supported."
+        },
+        "system_prompt_mode": {
+          "type": "string",
+          "enum": ["native", "prepend_to_instructions", "none"],
+          "description": "How the harness consumes a system prompt."
+        },
+        "command": {
+          "$ref": "#/$defs/harnessCommand",
+          "description": "Declarative command construction metadata."
+        },
+        "env_template": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Declarative environment defaults with template expressions."
+        },
+        "capabilities": {
+          "$ref": "#/$defs/harnessCapabilities",
+          "description": "Advanced capability advertisement for this harness config."
+        },
+        "auth": {
+          "$ref": "#/$defs/harnessAuthMetadata",
+          "description": "Declarative auth preflight metadata for broker and hosted dispatch."
+        },
+        "dialect": {
+          "type": "object",
+          "description": "Optional hook dialect metadata.",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "harnessProvisioner": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["builtin", "container-script", "plugin", "generic"]
+        },
+        "interface_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "command": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "timeout": {
+          "type": "string"
+        },
+        "lifecycle_events": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "required_image_tools": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "harnessCommand": {
+      "type": "object",
+      "properties": {
+        "base": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "resume_flag": { "type": "string" },
+        "task_flag": { "type": ["string", "null"] },
+        "task_position": {
+          "type": "string",
+          "enum": ["after_base_args", "before_base_args", "positional"]
+        },
+        "system_prompt_flag": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "capabilityField": {
+      "type": "object",
+      "required": ["support"],
+      "properties": {
+        "support": {
+          "type": "string",
+          "enum": ["yes", "no", "partial"]
+        },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "harnessCapabilities": {
+      "type": "object",
+      "properties": {
+        "harness": { "type": "string" },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "max_turns": { "$ref": "#/$defs/capabilityField" },
+            "max_model_calls": { "$ref": "#/$defs/capabilityField" },
+            "max_duration": { "$ref": "#/$defs/capabilityField" }
+          },
+          "additionalProperties": false
+        },
+        "telemetry": {
+          "type": "object",
+          "properties": {
+            "enabled": { "$ref": "#/$defs/capabilityField" },
+            "native_emitter": { "$ref": "#/$defs/capabilityField" }
+          },
+          "additionalProperties": false
+        },
+        "prompts": {
+          "type": "object",
+          "properties": {
+            "system_prompt": { "$ref": "#/$defs/capabilityField" },
+            "agent_instructions": { "$ref": "#/$defs/capabilityField" }
+          },
+          "additionalProperties": false
+        },
+        "auth": {
+          "type": "object",
+          "properties": {
+            "api_key": { "$ref": "#/$defs/capabilityField" },
+            "auth_file": { "$ref": "#/$defs/capabilityField" },
+            "oauth_token": { "$ref": "#/$defs/capabilityField" },
+            "vertex_ai": { "$ref": "#/$defs/capabilityField" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "harnessAuthMetadata": {
+      "type": "object",
+      "properties": {
+        "default_type": {
+          "type": "string",
+          "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai"]
+        },
+        "types": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/harnessAuthTypeMetadata" }
+        },
+        "autodetect": { "$ref": "#/$defs/harnessAuthAutodetect" }
+      },
+      "additionalProperties": false
+    },
+    "harnessAuthTypeMetadata": {
+      "type": "object",
+      "properties": {
+        "required_env": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/harnessAuthEnvRequirement" }
+        },
+        "required_files": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/harnessAuthFileRequirement" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "harnessAuthEnvRequirement": {
+      "type": "object",
+      "properties": {
+        "any_of": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "harnessAuthFileRequirement": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "type": { "type": "string" },
+        "description": { "type": "string" },
+        "target_suffix": { "type": "string" },
+        "alternative_env_keys": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "skipped_when_gcp_service_account_assigned": { "type": "boolean" },
+        "required": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "harnessAuthAutodetect": {
+      "type": "object",
+      "properties": {
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai"]
+          }
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai"]
+          }
         }
       },
       "additionalProperties": false
@@ -457,6 +684,12 @@
           "description": "Token received when registering this broker with the Hub.",
           "x-sensitive": true,
           "x-env-var": "SCION_SERVER_BROKER_BROKERTOKEN"
+        },
+        "allow_container_script_harnesses": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow agents whose harness-config declares provisioner.type: container-script. Container-script provisioners execute scripts inside the agent container with access to projected secrets, so brokers must opt in explicitly.",
+          "x-env-var": "SCION_SERVER_BROKER_ALLOWCONTAINERSCRIPTHARNESSES"
         },
         "cors": { "$ref": "#/$defs/corsConfig" }
       }

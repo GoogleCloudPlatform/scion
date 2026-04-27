@@ -285,9 +285,10 @@ type Template struct {
 	Description string `json:"description,omitempty"` // Optional description
 
 	// Configuration
-	Harness string          `json:"harness"` // claude, gemini, opencode, codex, generic
-	Image   string          `json:"image"`   // Default container image
-	Config  *TemplateConfig `json:"config,omitempty"`
+	Harness              string          `json:"harness"`                        // claude, gemini, opencode, codex, generic
+	DefaultHarnessConfig string          `json:"defaultHarnessConfig,omitempty"` // default_harness_config name from template config (e.g. "claude-web")
+	Image                string          `json:"image"`                          // Default container image
+	Config               *TemplateConfig `json:"config,omitempty"`
 
 	// Content tracking
 	ContentHash string `json:"contentHash,omitempty"` // SHA-256 hash of template contents

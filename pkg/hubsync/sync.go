@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1326,6 +1327,8 @@ func readAgentTokenFile() string {
 // createHubClient creates a new Hub client with proper authentication.
 // Note: hub.token and hub.apiKey are deprecated and no longer used for auth.
 // Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > auto dev auth.
+// Exception: for localhost endpoints, dev auth takes priority over non-dev agent tokens
+// to avoid stale scion-token files from previous remote hub connections.
 func createHubClient(settings *config.Settings, endpoint string) (hubclient.Client, error) {
 	var opts []hubclient.Option
 
@@ -1341,8 +1344,16 @@ func createHubClient(settings *config.Settings, endpoint string) (hubclient.Clie
 	// 2. Check for agent token from canonical token file, then bootstrap env var
 	if !authConfigured {
 		if token := readAgentTokenFile(); token != "" {
-			opts = append(opts, hubclient.WithAgentToken(token))
-			authConfigured = true
+			if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) {
+				if devToken := apiclient.ResolveDevToken(); devToken != "" {
+					opts = append(opts, hubclient.WithBearerToken(devToken))
+					authConfigured = true
+				}
+			}
+			if !authConfigured {
+				opts = append(opts, hubclient.WithAgentToken(token))
+				authConfigured = true
+			}
 		} else if token := os.Getenv("SCION_AUTH_TOKEN"); token != "" {
 			opts = append(opts, hubclient.WithAgentToken(token))
 			authConfigured = true
@@ -1357,6 +1368,15 @@ func createHubClient(settings *config.Settings, endpoint string) (hubclient.Clie
 	opts = append(opts, hubclient.WithTimeout(30*time.Second))
 
 	return hubclient.New(endpoint, opts...)
+}
+
+func isLocalhostEndpoint(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 // wrapHubError wraps a Hub error with guidance to disable Hub integration.

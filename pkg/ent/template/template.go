@@ -61,6 +61,8 @@ const (
 	FieldCreatedBy = "created_by"
 	// FieldUpdatedBy holds the string denoting the updated_by field in the database.
 	FieldUpdatedBy = "updated_by"
+	// FieldDefaultHarnessConfig holds the string denoting the default_harness_config field in the database.
+	FieldDefaultHarnessConfig = "default_harness_config"
 	// Table holds the table name of the template in the database.
 	Table = "templates"
 )
@@ -92,6 +94,7 @@ var Columns = []string{
 	FieldStatus,
 	FieldCreatedBy,
 	FieldUpdatedBy,
+	FieldDefaultHarnessConfig,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -253,4 +256,9 @@ func ByCreatedBy(opts ...sql.OrderTermOption) OrderOption {
 // ByUpdatedBy orders the results by the updated_by field.
 func ByUpdatedBy(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldUpdatedBy, opts...).ToFunc()
+}
+
+// ByDefaultHarnessConfig orders the results by the default_harness_config field.
+func ByDefaultHarnessConfig(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDefaultHarnessConfig, opts...).ToFunc()
 }

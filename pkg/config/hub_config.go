@@ -123,6 +123,14 @@ type RuntimeBrokerConfig struct {
 	CORSAllowedMethods []string `json:"corsAllowedMethods" yaml:"corsAllowedMethods" koanf:"corsAllowedMethods"`
 	CORSAllowedHeaders []string `json:"corsAllowedHeaders" yaml:"corsAllowedHeaders" koanf:"corsAllowedHeaders"`
 	CORSMaxAge         int      `json:"corsMaxAge" yaml:"corsMaxAge" koanf:"corsMaxAge"`
+
+	// AllowContainerScriptHarnesses controls whether the broker accepts
+	// dispatches whose harness-config declares
+	// `provisioner.type: container-script`. Defaults to false; the broker
+	// rejects container-script dispatches with 403 until enabled. See
+	// .design/decoupled-harness-implementation.md (Phase 3) for the policy
+	// rationale.
+	AllowContainerScriptHarnesses bool `json:"allowContainerScriptHarnesses" yaml:"allowContainerScriptHarnesses" koanf:"allowContainerScriptHarnesses"`
 }
 
 // DatabaseConfig holds database connection settings.

@@ -122,6 +122,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV44,
 		migrationV45,
 		migrationV46,
+		migrationV47,
 	}
 
 	// Create migrations table if not exists
@@ -1091,11 +1092,15 @@ const migrationV45 = `
 ALTER TABLE secrets ADD COLUMN allow_progeny INTEGER NOT NULL DEFAULT 0;
 `
 
-// Migration V46: Add delegation_enabled column to agents table.
+const migrationV46 = `
+ALTER TABLE templates ADD COLUMN default_harness_config TEXT;
+`
+
+// Migration V47: Add delegation_enabled column to agents table.
 // Backfills the Ent-side field used by the policy engine to mark agents
 // whose creator relationship is policy-addressable. Required before
 // Phase 2 of the Ent migration points Ent at hub.db.
-const migrationV46 = `
+const migrationV47 = `
 ALTER TABLE agents ADD COLUMN delegation_enabled INTEGER NOT NULL DEFAULT 0;
 `
 
@@ -1414,9 +1419,20 @@ func (s *SQLiteStore) ListAgents(ctx context.Context, filter store.AgentFilter, 
 			args = append(args, filter.OwnerID)
 		}
 		conditions = append(conditions, "("+strings.Join(orParts, " OR ")+")")
+	} else if len(filter.MemberGroveIDs) > 0 {
+		placeholders := make([]string, len(filter.MemberGroveIDs))
+		for i, id := range filter.MemberGroveIDs {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		conditions = append(conditions, "grove_id IN ("+strings.Join(placeholders, ",")+")")
 	} else if filter.OwnerID != "" {
 		conditions = append(conditions, "owner_id = ?")
 		args = append(args, filter.OwnerID)
+	}
+	if filter.ExcludeOwnerID != "" {
+		conditions = append(conditions, "owner_id != ?")
+		args = append(args, filter.ExcludeOwnerID)
 	}
 	if filter.GroveID != "" {
 		conditions = append(conditions, "grove_id = ?")
@@ -1762,7 +1778,7 @@ func (s *SQLiteStore) MarkStalledAgents(ctx context.Context, activityThreshold, 
 		  AND last_seen >= ?
 		  AND last_seen IS NOT NULL
 		  AND phase = 'running'
-		  AND activity NOT IN ('completed', 'limits_exceeded', 'blocked', 'stalled', 'offline', 'idle', 'waiting_for_input')
+		  AND activity NOT IN ('completed', 'limits_exceeded', 'blocked', 'stalled', 'offline', 'waiting_for_input')
 	`, now, activityThreshold, heartbeatRecency)
 	if err != nil {
 		return nil, err
@@ -2513,16 +2529,16 @@ func (s *SQLiteStore) CreateTemplate(ctx context.Context, template *store.Templa
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO templates (
-			id, name, slug, display_name, description, harness, image, config,
+			id, name, slug, display_name, description, harness, default_harness_config, image, config,
 			content_hash, scope, scope_id, grove_id,
 			storage_uri, storage_bucket, storage_path, files,
 			base_template, locked, status,
 			owner_id, created_by, updated_by, visibility,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		template.ID, template.Name, template.Slug, nullableString(template.DisplayName), nullableString(template.Description),
-		template.Harness, template.Image, marshalJSON(template.Config),
+		template.Harness, nullableString(template.DefaultHarnessConfig), template.Image, marshalJSON(template.Config),
 		nullableString(template.ContentHash), template.Scope, nullableString(template.ScopeID), nullableString(template.GroveID),
 		nullableString(template.StorageURI), nullableString(template.StorageBucket), nullableString(template.StoragePath), marshalJSON(template.Files),
 		nullableString(template.BaseTemplate), template.Locked, template.Status,
@@ -2544,9 +2560,10 @@ func (s *SQLiteStore) GetTemplate(ctx context.Context, id string) (*store.Templa
 	var displayName, description, contentHash, scopeID, groveID sql.NullString
 	var storageURI, storageBucket, storagePath, baseTemplate sql.NullString
 	var createdBy, updatedBy, ownerID, visibility sql.NullString
+	var defaultHarnessConfig sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, name, slug, display_name, description, harness, image, config,
+		SELECT id, name, slug, display_name, description, harness, default_harness_config, image, config,
 			content_hash, scope, scope_id, grove_id,
 			storage_uri, storage_bucket, storage_path, files,
 			base_template, locked, status,
@@ -2555,7 +2572,7 @@ func (s *SQLiteStore) GetTemplate(ctx context.Context, id string) (*store.Templa
 		FROM templates WHERE id = ?
 	`, id).Scan(
 		&template.ID, &template.Name, &template.Slug, &displayName, &description,
-		&template.Harness, &template.Image, &config,
+		&template.Harness, &defaultHarnessConfig, &template.Image, &config,
 		&contentHash, &template.Scope, &scopeID, &groveID,
 		&storageURI, &storageBucket, &storagePath, &files,
 		&baseTemplate, &template.Locked, &template.Status,
@@ -2574,6 +2591,9 @@ func (s *SQLiteStore) GetTemplate(ctx context.Context, id string) (*store.Templa
 	}
 	if description.Valid {
 		template.Description = description.String
+	}
+	if defaultHarnessConfig.Valid {
+		template.DefaultHarnessConfig = defaultHarnessConfig.String
 	}
 	if contentHash.Valid {
 		template.ContentHash = contentHash.String
@@ -2642,7 +2662,7 @@ func (s *SQLiteStore) UpdateTemplate(ctx context.Context, template *store.Templa
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE templates SET
 			name = ?, slug = ?, display_name = ?, description = ?,
-			harness = ?, image = ?, config = ?,
+			harness = ?, default_harness_config = ?, image = ?, config = ?,
 			content_hash = ?, scope = ?, scope_id = ?, grove_id = ?,
 			storage_uri = ?, storage_bucket = ?, storage_path = ?, files = ?,
 			base_template = ?, locked = ?, status = ?,
@@ -2651,7 +2671,7 @@ func (s *SQLiteStore) UpdateTemplate(ctx context.Context, template *store.Templa
 		WHERE id = ?
 	`,
 		template.Name, template.Slug, nullableString(template.DisplayName), nullableString(template.Description),
-		template.Harness, template.Image, marshalJSON(template.Config),
+		template.Harness, nullableString(template.DefaultHarnessConfig), template.Image, marshalJSON(template.Config),
 		nullableString(template.ContentHash), template.Scope, nullableString(template.ScopeID), nullableString(template.GroveID),
 		nullableString(template.StorageURI), nullableString(template.StorageBucket), nullableString(template.StoragePath), marshalJSON(template.Files),
 		nullableString(template.BaseTemplate), template.Locked, template.Status,
@@ -2760,7 +2780,7 @@ func (s *SQLiteStore) ListTemplates(ctx context.Context, filter store.TemplateFi
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, name, slug, display_name, description, harness, image, config,
+		SELECT id, name, slug, display_name, description, harness, default_harness_config, image, config,
 			content_hash, scope, scope_id, grove_id,
 			storage_uri, storage_bucket, storage_path, files,
 			base_template, locked, status,
@@ -2783,10 +2803,11 @@ func (s *SQLiteStore) ListTemplates(ctx context.Context, filter store.TemplateFi
 		var displayName, description, contentHash, scopeID, groveID sql.NullString
 		var storageURI, storageBucket, storagePath, baseTemplate sql.NullString
 		var createdBy, updatedBy, ownerID, visibility sql.NullString
+		var defaultHarnessConfig sql.NullString
 
 		if err := rows.Scan(
 			&template.ID, &template.Name, &template.Slug, &displayName, &description,
-			&template.Harness, &template.Image, &config,
+			&template.Harness, &defaultHarnessConfig, &template.Image, &config,
 			&contentHash, &template.Scope, &scopeID, &groveID,
 			&storageURI, &storageBucket, &storagePath, &files,
 			&baseTemplate, &template.Locked, &template.Status,
@@ -2801,6 +2822,9 @@ func (s *SQLiteStore) ListTemplates(ctx context.Context, filter store.TemplateFi
 		}
 		if description.Valid {
 			template.Description = description.String
+		}
+		if defaultHarnessConfig.Valid {
+			template.DefaultHarnessConfig = defaultHarnessConfig.String
 		}
 		if contentHash.Valid {
 			template.ContentHash = contentHash.String

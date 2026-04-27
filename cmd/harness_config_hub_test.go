@@ -24,8 +24,14 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/require"
 )
+
+// configYAMLHashCodex is the SHA-256 hash of the canonical "harness: codex\n"
+// payload used by the local-storage hub mocks. Phase 3 verifies this hash
+// during pull, so the mock server must announce a matching value.
+var configYAMLHashCodex = transfer.HashBytes([]byte("harness: codex\n"))
 
 func newMockHubServerForLocalStorageHarnessConfig(t *testing.T, uploadedPaths *[]string) *httptest.Server {
 	t.Helper()
@@ -94,11 +100,14 @@ func newMockHubServerForLocalStorageHarnessConfig(t *testing.T, uploadedPaths *[
 			})
 
 		case r.URL.Path == "/api/v1/harness-configs/local-storage-hc-id/download" && r.Method == http.MethodGet:
+			// Use the real SHA-256 of "harness: codex\n" so Phase 3 hash
+			// validation passes. Hard-coded value computed via:
+			//   echo -n "harness: codex\n" | sha256sum
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"files": []map[string]interface{}{
 					{
 						"path": "config.yaml",
-						"hash": "sha256:download-hash",
+						"hash": configYAMLHashCodex,
 						"url":  "file:///home/scion/.scion/storage/harness-configs/global/codex/config.yaml",
 					},
 				},
@@ -111,7 +120,7 @@ func newMockHubServerForLocalStorageHarnessConfig(t *testing.T, uploadedPaths *[
 				"size":     16,
 				"modTime":  "2026-04-10T00:00:00Z",
 				"encoding": "utf-8",
-				"hash":     "sha256:download-hash",
+				"hash":     configYAMLHashCodex,
 			})
 
 		default:

@@ -21,7 +21,27 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
+
+// verifyHarnessConfigArtifactHash checks the SHA-256 hash of downloaded
+// content against the hash announced by the Hub for this file. The Hub may
+// omit the hash for legacy artifacts; in that case verification is skipped
+// so historical bundles continue to install (operators can detect missing
+// per-file hashes by inspecting the manifest's overall ContentHash).
+func verifyHarnessConfigArtifactHash(file hubclient.DownloadURLInfo, content []byte) error {
+	if file.Hash == "" {
+		return nil
+	}
+	got := transfer.HashBytes(content)
+	if got != file.Hash {
+		return fmt.Errorf(
+			"hash mismatch for %s: hub announced %s but downloaded content is %s",
+			file.Path, file.Hash, got,
+		)
+	}
+	return nil
+}
 
 func downloadHarnessConfigContent(
 	ctx context.Context,

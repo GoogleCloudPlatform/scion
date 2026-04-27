@@ -18,8 +18,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 )
 
 func TestLoadHarnessConfigDir(t *testing.T) {
@@ -55,6 +53,67 @@ user: scion
 	}
 	if hc.Config.User != "scion" {
 		t.Errorf("expected user 'scion', got %q", hc.Config.User)
+	}
+}
+
+func TestLoadHarnessConfigDir_ExtendedFields(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "claude")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	configYAML := `harness: claude
+image: scion-claude:latest
+user: scion
+provisioner:
+  type: builtin
+  interface_version: 1
+config_dir: .claude
+skills_dir: .claude/skills
+interrupt_key: Escape
+command:
+  base: ["claude"]
+  resume_flag: "--continue"
+capabilities:
+  limits:
+    max_turns: { support: "yes" }
+auth:
+  default_type: api-key
+  types:
+    api-key:
+      required_env:
+        - any_of: ["ANTHROPIC_API_KEY"]
+`
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(configYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	hc, err := LoadHarnessConfigDir(configDir)
+	if err != nil {
+		t.Fatalf("LoadHarnessConfigDir failed: %v", err)
+	}
+	if hc.Config.Provisioner == nil || hc.Config.Provisioner.Type != "builtin" {
+		t.Fatalf("expected provisioner builtin, got %#v", hc.Config.Provisioner)
+	}
+	if hc.Config.Command == nil || len(hc.Config.Command.Base) != 1 || hc.Config.Command.Base[0] != "claude" {
+		t.Fatalf("expected command metadata to load, got %#v", hc.Config.Command)
+	}
+	if hc.Config.Auth == nil || hc.Config.Auth.DefaultType != "api-key" {
+		t.Fatalf("expected auth metadata to load, got %#v", hc.Config.Auth)
+	}
+}
+
+func TestLoadHarnessConfigDir_InvalidUnknownField(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "claude")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("harness: claude\nunknown: true\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadHarnessConfigDir(configDir); err == nil {
+		t.Fatal("expected invalid harness config to fail validation")
 	}
 }
 
@@ -326,17 +385,21 @@ func TestSeedHarnessConfigFromFS(t *testing.T) {
 	}
 }
 
-func TestSeedHarnessConfig_CodexNotifyScript(t *testing.T) {
-	tmpDir := t.TempDir()
-	targetDir := filepath.Join(tmpDir, "codex")
-
-	err := SeedHarnessConfig(targetDir, &harness.Codex{}, false)
-	if err != nil {
-		t.Fatalf("SeedHarnessConfig failed: %v", err)
+func TestMapEmbedFileToHarnessConfigPath_RootSupportFiles(t *testing.T) {
+	targetDir := "/tmp/hc"
+	homeDir := filepath.Join(targetDir, "home")
+	tests := map[string]string{
+		"provision.py":                 filepath.Join(targetDir, "provision.py"),
+		"dialect.yaml":                 filepath.Join(targetDir, "dialect.yaml"),
+		"schema/manifest.json":         filepath.Join(targetDir, "schema", "manifest.json"),
+		"examples/basic.json":          filepath.Join(targetDir, "examples", "basic.json"),
+		"tests/fixtures/manifest.json": filepath.Join(targetDir, "tests", "fixtures", "manifest.json"),
+		"home/.tool/settings.json":     filepath.Join(homeDir, ".tool", "settings.json"),
+		"settings.json":                filepath.Join(homeDir, ".tool", "settings.json"),
 	}
-
-	scriptPath := filepath.Join(targetDir, "home", ".codex", "scion_notify.sh")
-	if _, err := os.Stat(scriptPath); err != nil {
-		t.Fatalf("expected notify script to be seeded at %s: %v", scriptPath, err)
+	for input, want := range tests {
+		if got := mapEmbedFileToHarnessConfigPath(targetDir, homeDir, ".tool", input); got != want {
+			t.Errorf("mapEmbedFileToHarnessConfigPath(%q) = %q, want %q", input, got, want)
+		}
 	}
 }

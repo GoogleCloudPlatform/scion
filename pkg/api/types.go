@@ -412,7 +412,14 @@ type AgentInfo struct {
 	Name          string `json:"name"`                  // Human-friendly display name
 	Template      string `json:"template"`
 	HarnessConfig string `json:"harnessConfig,omitempty"` // Resolved harness-config name
-	HarnessAuth   string `json:"harnessAuth,omitempty"`   // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
+	// HarnessConfigRevision records the harness-config bundle revision (e.g.
+	// the Hub artifact's ContentHash) that this agent was provisioned from.
+	// Empty when the harness-config came from a built-in or local source
+	// without a tracked revision. Used by Phase 3 broker dispatch tests and
+	// audit flows so operators can correlate an agent with the exact bundle
+	// it ran.
+	HarnessConfigRevision string `json:"harnessConfigRevision,omitempty"`
+	HarnessAuth           string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
 
 	// Grove association
 	Grove     string `json:"grove"`               // Grove name (legacy, simple string)

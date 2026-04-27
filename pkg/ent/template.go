@@ -64,8 +64,10 @@ type Template struct {
 	// CreatedBy holds the value of the "created_by" field.
 	CreatedBy string `json:"created_by,omitempty"`
 	// UpdatedBy holds the value of the "updated_by" field.
-	UpdatedBy    string `json:"updated_by,omitempty"`
-	selectValues sql.SelectValues
+	UpdatedBy string `json:"updated_by,omitempty"`
+	// DefaultHarnessConfig holds the value of the "default_harness_config" field.
+	DefaultHarnessConfig string `json:"default_harness_config,omitempty"`
+	selectValues         sql.SelectValues
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -75,7 +77,7 @@ func (*Template) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case template.FieldLocked:
 			values[i] = new(sql.NullBool)
-		case template.FieldID, template.FieldName, template.FieldSlug, template.FieldHarness, template.FieldImage, template.FieldConfig, template.FieldScope, template.FieldGroveID, template.FieldStorageURI, template.FieldOwnerID, template.FieldVisibility, template.FieldDisplayName, template.FieldDescription, template.FieldContentHash, template.FieldScopeID, template.FieldStorageBucket, template.FieldStoragePath, template.FieldFiles, template.FieldBaseTemplate, template.FieldStatus, template.FieldCreatedBy, template.FieldUpdatedBy:
+		case template.FieldID, template.FieldName, template.FieldSlug, template.FieldHarness, template.FieldImage, template.FieldConfig, template.FieldScope, template.FieldGroveID, template.FieldStorageURI, template.FieldOwnerID, template.FieldVisibility, template.FieldDisplayName, template.FieldDescription, template.FieldContentHash, template.FieldScopeID, template.FieldStorageBucket, template.FieldStoragePath, template.FieldFiles, template.FieldBaseTemplate, template.FieldStatus, template.FieldCreatedBy, template.FieldUpdatedBy, template.FieldDefaultHarnessConfig:
 			values[i] = new(sql.NullString)
 		case template.FieldCreatedAt, template.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
@@ -244,6 +246,12 @@ func (_m *Template) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.UpdatedBy = value.String
 			}
+		case template.FieldDefaultHarnessConfig:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field default_harness_config", values[i])
+			} else if value.Valid {
+				_m.DefaultHarnessConfig = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -351,6 +359,9 @@ func (_m *Template) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("updated_by=")
 	builder.WriteString(_m.UpdatedBy)
+	builder.WriteString(", ")
+	builder.WriteString("default_harness_config=")
+	builder.WriteString(_m.DefaultHarnessConfig)
 	builder.WriteByte(')')
 	return builder.String()
 }

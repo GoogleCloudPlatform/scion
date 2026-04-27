@@ -190,7 +190,7 @@ var spaShellTemplate = `<!DOCTYPE html>
 
     <!-- Shoelace Component Library -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@{{.ShoelaceVersion}}/cdn/themes/light.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@{{.ShoelaceVersion}}/cdn/themes/dark.css" media="(prefers-color-scheme: dark)">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@{{.ShoelaceVersion}}/cdn/themes/dark.css">
     <script type="module" src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@{{.ShoelaceVersion}}/cdn/shoelace-autoloader.js"></script>
 
     <!-- Initial state for hydration -->

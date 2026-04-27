@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
@@ -41,12 +42,36 @@ import (
 const (
 	tmuxSessionWaitTimeout  = 30 * time.Second
 	tmuxSessionPollInterval = 500 * time.Millisecond
+
+	// tmuxAttachCmd is the shell cmd that attaches to the agent's
+	// tmux session for an interactive PTY stream. The TERM env
+	// prefix is required so tmux negotiates the right terminfo for
+	// xterm-style sequences from the web terminal client.
+	tmuxAttachCmd = "TERM=xterm-256color tmux attach-session -t scion"
 )
 
 // PTY endpoint configuration
 const (
 	ptyMaxDataSize = 32 * 1024 // 32KB max per message
 )
+
+// sanitizeExecUser returns user if it matches runtime.ValidExecUserName,
+// otherwise returns "scion" and logs a warning. Callers default to
+// "scion" already when the value is empty, so passing an empty
+// string is harmless. The shared regex enforces the same
+// defense-in-depth check against shell injection from agent metadata
+// that KubernetesRuntime.Attach applies, so values flowing into
+// runtime.ExecAsUserCmd are validated by exactly one rule.
+func sanitizeExecUser(user string) string {
+	if user == "" {
+		return "scion"
+	}
+	if !runtime.ValidExecUserName.MatchString(user) {
+		slog.Warn("Invalid exec user, falling back to 'scion'", "user", user)
+		return "scion"
+	}
+	return user
+}
 
 // activeWindowOSC builds an OSC 7337 escape sequence encoding the active tmux
 // window name. The web terminal client parses this to sync its toolbar selector.
@@ -87,7 +112,7 @@ func queryTmuxActiveWindowK8s(ctx context.Context, config *rest.Config, clientse
 
 	req.VersionedParams(&corev1.PodExecOptions{
 		Container: "agent",
-		Command:   []string{"su", "-", execUser, "-c", "tmux display-message -t scion -p '#{window_name}'"},
+		Command:   runtime.ExecAsUserCmd(execUser, "tmux display-message -t scion -p '#{window_name}'"),
 		Stdin:     false,
 		Stdout:    true,
 		Stderr:    false,
@@ -122,9 +147,7 @@ func waitForTmuxSession(ctx context.Context, runtimeCmd, containerID, namespace,
 	ticker := time.NewTicker(tmuxSessionPollInterval)
 	defer ticker.Stop()
 
-	if execUser == "" {
-		execUser = "scion"
-	}
+	execUser = sanitizeExecUser(execUser)
 
 	isK8s := runtimeCmd == "kubernetes" || runtimeCmd == "k8s"
 
@@ -137,7 +160,7 @@ func waitForTmuxSession(ctx context.Context, runtimeCmd, containerID, namespace,
 			if isK8s && k8sConfig != nil && k8sClientset != nil {
 				// The tmux session runs as the scion user (via sciontool init privilege drop),
 				// so we must check as that user — root can't see scion's tmux socket.
-				checkErr = k8sExecCheck(ctx, k8sConfig, k8sClientset, namespace, containerID, []string{"su", "-", execUser, "-c", "tmux has-session -t scion"})
+				checkErr = k8sExecCheck(ctx, k8sConfig, k8sClientset, namespace, containerID, runtime.ExecAsUserCmd(execUser, "tmux has-session -t scion"))
 			} else {
 				cmd := exec.CommandContext(ctx, runtimeCmd, "exec", "--user", execUser, containerID, "tmux", "has-session", "-t", "scion")
 				checkErr = cmd.Run()
@@ -297,9 +320,7 @@ func newLocalPTYSession(ctx context.Context, agentID, containerID, runtimeCmd, e
 	if runtimeCmd == "" {
 		runtimeCmd = "docker"
 	}
-	if execUser == "" {
-		execUser = "scion"
-	}
+	execUser = sanitizeExecUser(execUser)
 	ctx, cancel := context.WithCancel(ctx)
 	return &LocalPTYSession{
 		ctx:          ctx,
@@ -390,11 +411,12 @@ func (s *LocalPTYSession) runK8sExec() error {
 		Namespace(namespace).
 		SubResource("exec")
 
-	// Run as scion user: the tmux session is owned by the scion user
-	// (sciontool init drops privileges), so root can't see the session.
+	// Run as the configured exec user (default "scion"): the tmux
+	// session is owned by that user (sciontool init drops privileges),
+	// so root can't see the session.
 	req.VersionedParams(&corev1.PodExecOptions{
 		Container: "agent",
-		Command:   []string{"su", "-", "scion", "-c", "TERM=xterm-256color tmux attach-session -t scion"},
+		Command:   runtime.ExecAsUserCmd(s.execUser, tmuxAttachCmd),
 		Stdin:     true,
 		Stdout:    true,
 		Stderr:    true,
@@ -638,9 +660,7 @@ type StreamPTYHandler struct {
 // NewStreamPTYHandler creates a handler for a PTY stream from the control channel.
 func NewStreamPTYHandler(client *ControlChannelClient, handler *StreamHandler, containerID, runtimeCmd, execUser, namespace string, cols, rows int, k8sConfig *rest.Config, k8sClientset kubernetes.Interface) *StreamPTYHandler {
 	ctx, cancel := context.WithCancel(context.Background())
-	if execUser == "" {
-		execUser = "scion"
-	}
+	execUser = sanitizeExecUser(execUser)
 	return &StreamPTYHandler{
 		client:       client,
 		handler:      handler,
@@ -743,11 +763,12 @@ func (h *StreamPTYHandler) runK8sExec() error {
 		Namespace(namespace).
 		SubResource("exec")
 
-	// Run as scion user: the tmux session is owned by the scion user
-	// (sciontool init drops privileges), so root can't see the session.
+	// Run as the configured exec user (default "scion"): the tmux
+	// session is owned by that user (sciontool init drops privileges),
+	// so root can't see the session.
 	req.VersionedParams(&corev1.PodExecOptions{
 		Container: "agent",
-		Command:   []string{"su", "-", "scion", "-c", "TERM=xterm-256color tmux attach-session -t scion"},
+		Command:   runtime.ExecAsUserCmd(h.execUser, tmuxAttachCmd),
 		Stdin:     true,
 		Stdout:    true,
 		Stderr:    true,

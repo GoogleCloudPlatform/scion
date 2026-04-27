@@ -104,24 +104,29 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 // bootstrapSingleHarnessConfig imports one local harness config directory into
 // the Hub's database and storage backend.
 func (s *Server) bootstrapSingleHarnessConfig(ctx context.Context, name, dirPath string, hcDir *config.HarnessConfigDir, stor storage.Storage) error {
+	return s.bootstrapSingleHarnessConfigScoped(ctx, name, dirPath, hcDir, stor, store.HarnessConfigScopeGlobal, "")
+}
+
+func (s *Server) bootstrapSingleHarnessConfigScoped(ctx context.Context, name, dirPath string, hcDir *config.HarnessConfigDir, stor storage.Storage, scope, scopeID string) error {
 	files, err := transfer.CollectFiles(dirPath, nil)
 	if err != nil {
 		return err
 	}
 
 	slug := api.Slugify(name)
-	storagePath := storage.HarnessConfigStoragePath(store.HarnessConfigScopeGlobal, "", slug)
+	storagePath := storage.HarnessConfigStoragePath(scope, scopeID, slug)
 
 	hc := &store.HarnessConfig{
 		ID:            api.NewUUID(),
 		Name:          name,
 		Slug:          slug,
 		Harness:       hcDir.Config.Harness,
-		Scope:         store.HarnessConfigScopeGlobal,
+		Scope:         scope,
+		ScopeID:       scopeID,
 		Status:        store.HarnessConfigStatusPending,
 		StoragePath:   storagePath,
 		StorageBucket: stor.Bucket(),
-		StorageURI:    storage.HarnessConfigStorageURI(stor.Bucket(), store.HarnessConfigScopeGlobal, "", slug),
+		StorageURI:    storage.HarnessConfigStorageURI(stor.Bucket(), scope, scopeID, slug),
 		Visibility:    store.VisibilityPublic,
 	}
 

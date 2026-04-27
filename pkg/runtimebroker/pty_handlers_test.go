@@ -180,3 +180,28 @@ func TestK8sSizeQueue_ReturnsNilOnClose(t *testing.T) {
 		t.Errorf("expected nil on close, got %+v", size)
 	}
 }
+
+func TestSanitizeExecUser(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "empty falls back", in: "", want: "scion"},
+		{name: "valid scion", in: "scion", want: "scion"},
+		{name: "valid root", in: "root", want: "root"},
+		{name: "valid alphanumeric with hyphen", in: "agent-user_1", want: "agent-user_1"},
+		{name: "shell metachar rejected", in: "scion;rm -rf /", want: "scion"},
+		{name: "command substitution rejected", in: "$(whoami)", want: "scion"},
+		{name: "quote rejected", in: `bad"name`, want: "scion"},
+		{name: "space rejected", in: "two words", want: "scion"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeExecUser(tc.in)
+			if got != tc.want {
+				t.Errorf("sanitizeExecUser(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

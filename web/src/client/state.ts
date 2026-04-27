@@ -406,6 +406,14 @@ export class StateManager extends EventTarget {
   }
 
   /**
+   * Seed scope-level capabilities so other pages sharing the same scope
+   * can use them without re-fetching.
+   */
+  seedScopeCapabilities(caps: import('../shared/types.js').Capabilities): void {
+    this.state.scopeCapabilities = caps;
+  }
+
+  /**
    * Seed the brokers map with full objects from a REST API response.
    * Does not trigger notifications.
    */

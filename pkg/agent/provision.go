@@ -573,7 +573,18 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 
 	// Step 3: Copy skills directories into harness-specific location
-	h := harness.New(finalScionCfg.Harness)
+	resolved, err := harness.Resolve(ctx, harness.ResolveOptions{
+		Name:          harnessConfigName,
+		GrovePath:     grovePath,
+		TemplatePaths: templatePaths,
+		ProfileName:   profileName,
+		Settings:      settings,
+	})
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to resolve harness for %q: %w", harnessConfigName, err)
+	}
+	h := resolved.Harness
+	util.Debugf("ProvisionAgent: harness implementation=%s for harness=%q", resolved.Implementation, finalScionCfg.Harness)
 	skillsDir := h.SkillsDir()
 	if skillsDir != "" {
 		skillsDest := filepath.Join(agentHome, skillsDir)
@@ -794,11 +805,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		displayTemplateName = chain[len(chain)-1].Name
 	}
 	info := &api.AgentInfo{
-		Grove:         groveName,
-		Name:          agentName,
-		Template:      displayTemplateName,
-		HarnessConfig: harnessConfigName,
-		Profile:       profileName,
+		Grove:                 groveName,
+		Name:                  agentName,
+		Template:              displayTemplateName,
+		HarnessConfig:         harnessConfigName,
+		HarnessConfigRevision: config.ComputeHarnessConfigRevision(hcDir.Path),
+		Profile:               profileName,
 	}
 	if optionalStatus != "" {
 		info.Phase = optionalStatus

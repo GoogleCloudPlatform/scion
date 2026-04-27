@@ -26,7 +26,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -1767,17 +1766,15 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 	}
 
 	// Validate username to prevent shell injection via pod annotations.
-	if !regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString(username) {
+	if !ValidExecUserName.MatchString(username) {
 		return fmt.Errorf("invalid username in pod annotation: %q", username)
 	}
 
-	// Build the exec command. If the container already runs as the target
-	// user (common on GKE Autopilot where allowPrivilegeEscalation=false),
-	// skip the su wrapper — it would prompt for a password.
-	// Use a shell wrapper that checks the current user at runtime.
-	execCmd := []string{"sh", "-c", fmt.Sprintf(
-		`target=%q; if [ "$(whoami)" = "$target" ]; then exec tmux attach -t scion; else exec su - "$target" -c "tmux attach -t scion"; fi`,
-		username)}
+	// Wrap the exec command with the whoami-skip-su helper so it works
+	// on both root-entrypoint images (where su is needed) and non-root
+	// entrypoint images (where su would prompt for a password). See
+	// ExecAsUserCmd godoc for the underlying PAM rationale.
+	execCmd := ExecAsUserCmd(username, "tmux attach -t scion")
 
 	option := &corev1.PodExecOptions{
 		Container: agentContainerName,
@@ -2035,13 +2032,16 @@ func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (
 		Namespace(namespace).
 		SubResource("exec")
 
-	// Wrap command with su to run as the scion user (K8s exec has no --user flag).
-	// Shell-quote each argument to handle spaces and special characters.
+	// Wrap command to run as the scion user (K8s exec has no --user flag).
+	// Shell-quote each argument to handle spaces and special characters,
+	// then wrap with the whoami-skip-su helper so it works on images that
+	// run as root (su needed) and images that run as scion (su would
+	// prompt for a password — see ExecAsUserCmd godoc).
 	quoted := make([]string, len(cmd))
 	for i, arg := range cmd {
 		quoted[i] = fmt.Sprintf("'%s'", strings.ReplaceAll(arg, "'", "'\"'\"'"))
 	}
-	suCmd := []string{"su", "-", "scion", "-c", strings.Join(quoted, " ")}
+	suCmd := ExecAsUserCmd(r.ExecUser(), strings.Join(quoted, " "))
 
 	option := &corev1.PodExecOptions{
 		Container: agentContainerName,

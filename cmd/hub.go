@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -374,6 +375,15 @@ func printTokenExpiry(expiry time.Time) {
 	}
 }
 
+func isLocalhostEndpoint(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
 // readAgentTokenFile reads the canonical agent token from ~/.scion/scion-token.
 // Returns empty string if the file doesn't exist (e.g. not running in a container).
 func readAgentTokenFile() string {
@@ -409,18 +419,32 @@ func getAuthInfo(settings *config.Settings, endpoint string) authInfo {
 		}
 	}
 
-	// Check for agent auth token from canonical token file or bootstrap env var
+	// Check for agent auth token from canonical token file or bootstrap env var.
+	// When the endpoint is localhost and dev auth is available, prefer dev auth
+	// over a non-dev agent token — the scion-token may be stale from a previous
+	// remote hub connection while the dev-token was written by the running local server.
 	if token := readAgentTokenFile(); token != "" {
 		if apiclient.IsDevToken(token) {
 			info.Method = "Agent token (dev)"
 			info.MethodType = "agent_token"
 			info.Source = "scion-token file"
 			info.IsDevAuth = true
-		} else {
-			info.Method = "Agent token"
-			info.MethodType = "agent_token"
-			info.Source = "scion-token file"
+			info.TokenExpiry = parseJWTExpiry(token)
+			return info
 		}
+		if isLocalhostEndpoint(endpoint) {
+			if devToken, devSource := apiclient.ResolveDevTokenWithSource(); devToken != "" {
+				util.Debugf("Skipping non-dev agent token from scion-token file; using dev auth (%s) for localhost endpoint", devSource)
+				info.Method = "Dev auth"
+				info.MethodType = "devauth"
+				info.Source = devSource
+				info.IsDevAuth = true
+				return info
+			}
+		}
+		info.Method = "Agent token"
+		info.MethodType = "agent_token"
+		info.Source = "scion-token file"
 		info.TokenExpiry = parseJWTExpiry(token)
 		return info
 	}
@@ -474,6 +498,8 @@ func getHubClient(settings *config.Settings) (hubclient.Client, error) {
 	// Add authentication - check in priority order.
 	// Note: hub.token and hub.apiKey are deprecated and no longer used for auth.
 	// Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > SCION_HUB_TOKEN env > auto dev auth.
+	// Exception: for localhost endpoints, dev auth takes priority over non-dev agent tokens
+	// to avoid stale scion-token files from previous remote hub connections.
 	authConfigured := false
 
 	// Check for OAuth credentials from scion hub auth login
@@ -485,8 +511,16 @@ func getHubClient(settings *config.Settings) (hubclient.Client, error) {
 	// Check for agent auth token from canonical token file, then bootstrap env var
 	if !authConfigured {
 		if token := readAgentTokenFile(); token != "" {
-			opts = append(opts, hubclient.WithAgentToken(token))
-			authConfigured = true
+			if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) {
+				if devToken := apiclient.ResolveDevToken(); devToken != "" {
+					opts = append(opts, hubclient.WithBearerToken(devToken))
+					authConfigured = true
+				}
+			}
+			if !authConfigured {
+				opts = append(opts, hubclient.WithAgentToken(token))
+				authConfigured = true
+			}
 		} else if token := os.Getenv("SCION_AUTH_TOKEN"); token != "" {
 			opts = append(opts, hubclient.WithAgentToken(token))
 			authConfigured = true

@@ -332,6 +332,20 @@ func (_c *TemplateCreate) SetNillableUpdatedBy(v *string) *TemplateCreate {
 	return _c
 }
 
+// SetDefaultHarnessConfig sets the "default_harness_config" field.
+func (_c *TemplateCreate) SetDefaultHarnessConfig(v string) *TemplateCreate {
+	_c.mutation.SetDefaultHarnessConfig(v)
+	return _c
+}
+
+// SetNillableDefaultHarnessConfig sets the "default_harness_config" field if the given value is not nil.
+func (_c *TemplateCreate) SetNillableDefaultHarnessConfig(v *string) *TemplateCreate {
+	if v != nil {
+		_c.SetDefaultHarnessConfig(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *TemplateCreate) SetID(v string) *TemplateCreate {
 	_c.mutation.SetID(v)
@@ -573,6 +587,10 @@ func (_c *TemplateCreate) createSpec() (*Template, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.UpdatedBy(); ok {
 		_spec.SetField(template.FieldUpdatedBy, field.TypeString, value)
 		_node.UpdatedBy = value
+	}
+	if value, ok := _c.mutation.DefaultHarnessConfig(); ok {
+		_spec.SetField(template.FieldDefaultHarnessConfig, field.TypeString, value)
+		_node.DefaultHarnessConfig = value
 	}
 	return _node, _spec
 }

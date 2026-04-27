@@ -25640,37 +25640,38 @@ func (m *SubscriptionTemplateMutation) ResetEdge(name string) error {
 // TemplateMutation represents an operation that mutates the Template nodes in the graph.
 type TemplateMutation struct {
 	config
-	op             Op
-	typ            string
-	id             *string
-	name           *string
-	slug           *string
-	harness        *string
-	image          *string
-	_config        *string
-	scope          *string
-	grove_id       *string
-	storage_uri    *string
-	owner_id       *string
-	visibility     *string
-	created_at     *time.Time
-	updated_at     *time.Time
-	display_name   *string
-	description    *string
-	content_hash   *string
-	scope_id       *string
-	storage_bucket *string
-	storage_path   *string
-	files          *string
-	base_template  *string
-	locked         *bool
-	status         *string
-	created_by     *string
-	updated_by     *string
-	clearedFields  map[string]struct{}
-	done           bool
-	oldValue       func(context.Context) (*Template, error)
-	predicates     []predicate.Template
+	op                     Op
+	typ                    string
+	id                     *string
+	name                   *string
+	slug                   *string
+	harness                *string
+	image                  *string
+	_config                *string
+	scope                  *string
+	grove_id               *string
+	storage_uri            *string
+	owner_id               *string
+	visibility             *string
+	created_at             *time.Time
+	updated_at             *time.Time
+	display_name           *string
+	description            *string
+	content_hash           *string
+	scope_id               *string
+	storage_bucket         *string
+	storage_path           *string
+	files                  *string
+	base_template          *string
+	locked                 *bool
+	status                 *string
+	created_by             *string
+	updated_by             *string
+	default_harness_config *string
+	clearedFields          map[string]struct{}
+	done                   bool
+	oldValue               func(context.Context) (*Template, error)
+	predicates             []predicate.Template
 }
 
 var _ ent.Mutation = (*TemplateMutation)(nil)
@@ -26836,6 +26837,55 @@ func (m *TemplateMutation) ResetUpdatedBy() {
 	delete(m.clearedFields, template.FieldUpdatedBy)
 }
 
+// SetDefaultHarnessConfig sets the "default_harness_config" field.
+func (m *TemplateMutation) SetDefaultHarnessConfig(s string) {
+	m.default_harness_config = &s
+}
+
+// DefaultHarnessConfig returns the value of the "default_harness_config" field in the mutation.
+func (m *TemplateMutation) DefaultHarnessConfig() (r string, exists bool) {
+	v := m.default_harness_config
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDefaultHarnessConfig returns the old "default_harness_config" field's value of the Template entity.
+// If the Template object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TemplateMutation) OldDefaultHarnessConfig(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDefaultHarnessConfig is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDefaultHarnessConfig requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDefaultHarnessConfig: %w", err)
+	}
+	return oldValue.DefaultHarnessConfig, nil
+}
+
+// ClearDefaultHarnessConfig clears the value of the "default_harness_config" field.
+func (m *TemplateMutation) ClearDefaultHarnessConfig() {
+	m.default_harness_config = nil
+	m.clearedFields[template.FieldDefaultHarnessConfig] = struct{}{}
+}
+
+// DefaultHarnessConfigCleared returns if the "default_harness_config" field was cleared in this mutation.
+func (m *TemplateMutation) DefaultHarnessConfigCleared() bool {
+	_, ok := m.clearedFields[template.FieldDefaultHarnessConfig]
+	return ok
+}
+
+// ResetDefaultHarnessConfig resets all changes to the "default_harness_config" field.
+func (m *TemplateMutation) ResetDefaultHarnessConfig() {
+	m.default_harness_config = nil
+	delete(m.clearedFields, template.FieldDefaultHarnessConfig)
+}
+
 // Where appends a list predicates to the TemplateMutation builder.
 func (m *TemplateMutation) Where(ps ...predicate.Template) {
 	m.predicates = append(m.predicates, ps...)
@@ -26870,7 +26920,7 @@ func (m *TemplateMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TemplateMutation) Fields() []string {
-	fields := make([]string, 0, 24)
+	fields := make([]string, 0, 25)
 	if m.name != nil {
 		fields = append(fields, template.FieldName)
 	}
@@ -26943,6 +26993,9 @@ func (m *TemplateMutation) Fields() []string {
 	if m.updated_by != nil {
 		fields = append(fields, template.FieldUpdatedBy)
 	}
+	if m.default_harness_config != nil {
+		fields = append(fields, template.FieldDefaultHarnessConfig)
+	}
 	return fields
 }
 
@@ -26999,6 +27052,8 @@ func (m *TemplateMutation) Field(name string) (ent.Value, bool) {
 		return m.CreatedBy()
 	case template.FieldUpdatedBy:
 		return m.UpdatedBy()
+	case template.FieldDefaultHarnessConfig:
+		return m.DefaultHarnessConfig()
 	}
 	return nil, false
 }
@@ -27056,6 +27111,8 @@ func (m *TemplateMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldCreatedBy(ctx)
 	case template.FieldUpdatedBy:
 		return m.OldUpdatedBy(ctx)
+	case template.FieldDefaultHarnessConfig:
+		return m.OldDefaultHarnessConfig(ctx)
 	}
 	return nil, fmt.Errorf("unknown Template field %s", name)
 }
@@ -27233,6 +27290,13 @@ func (m *TemplateMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetUpdatedBy(v)
 		return nil
+	case template.FieldDefaultHarnessConfig:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDefaultHarnessConfig(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Template field %s", name)
 }
@@ -27308,6 +27372,9 @@ func (m *TemplateMutation) ClearedFields() []string {
 	if m.FieldCleared(template.FieldUpdatedBy) {
 		fields = append(fields, template.FieldUpdatedBy)
 	}
+	if m.FieldCleared(template.FieldDefaultHarnessConfig) {
+		fields = append(fields, template.FieldDefaultHarnessConfig)
+	}
 	return fields
 }
 
@@ -27366,6 +27433,9 @@ func (m *TemplateMutation) ClearField(name string) error {
 		return nil
 	case template.FieldUpdatedBy:
 		m.ClearUpdatedBy()
+		return nil
+	case template.FieldDefaultHarnessConfig:
+		m.ClearDefaultHarnessConfig()
 		return nil
 	}
 	return fmt.Errorf("unknown Template nullable field %s", name)
@@ -27446,6 +27516,9 @@ func (m *TemplateMutation) ResetField(name string) error {
 		return nil
 	case template.FieldUpdatedBy:
 		m.ResetUpdatedBy()
+		return nil
+	case template.FieldDefaultHarnessConfig:
+		m.ResetDefaultHarnessConfig()
 		return nil
 	}
 	return fmt.Errorf("unknown Template field %s", name)

@@ -178,10 +178,13 @@ export class ScionPageGroves extends LitElement {
     // Only trust it when scope was previously null (initial SSR page load);
     // on client-side navigations the maps were just cleared by setScope above.
     // Skip hydrated data when a scope filter is active — SSR data is unfiltered.
+    // Also require scope capabilities — without them the "New Grove" button
+    // won't render, so we must fetch from the API to get them.
     const hydratedGroves = stateManager.getGroves();
-    if (hydratedGroves.length > 0 && this.groveScope === 'all') {
+    const hydratedCaps = stateManager.getScopeCapabilities();
+    if (hydratedGroves.length > 0 && hydratedCaps && this.groveScope === 'all') {
       this.groves = hydratedGroves;
-      this.scopeCapabilities = stateManager.getScopeCapabilities();
+      this.scopeCapabilities = hydratedCaps;
       this.loading = false;
       stateManager.seedGroves(this.groves);
     } else {
@@ -252,7 +255,11 @@ export class ScionPageGroves extends LitElement {
       }
 
       // Seed stateManager so SSE delta merging has full baseline data
+      // and so other pages sharing the same scope can reuse capabilities.
       stateManager.seedGroves(this.groves);
+      if (this.scopeCapabilities) {
+        stateManager.seedScopeCapabilities(this.scopeCapabilities);
+      }
     } catch (err) {
       console.error('Failed to load groves:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load groves';

@@ -84,10 +84,10 @@ export class ScionPageAgents extends LitElement {
   private viewMode: ViewMode = 'grid';
 
   /**
-   * Whether to show only agents in the user's groves or created by the user
+   * Filter scope: 'all' (no filter), 'mine' (created by me), 'shared' (in shared groves)
    */
   @state()
-  private showMineOnly = false;
+  private agentScope: 'all' | 'mine' | 'shared' = 'all';
 
   static override styles = [
     listPageStyles,
@@ -176,8 +176,44 @@ export class ScionPageAgents extends LitElement {
         justify-content: flex-end;
       }
 
-      .filter-toggle {
+      .scope-toggle {
         display: inline-flex;
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        overflow: hidden;
+      }
+
+      .scope-toggle button {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        height: 2rem;
+        border: none;
+        background: var(--scion-surface, #ffffff);
+        color: var(--scion-text-muted, #64748b);
+        cursor: pointer;
+        padding: 0 0.625rem;
+        font-size: 0.8125rem;
+        font-family: inherit;
+        transition: all 150ms ease;
+        white-space: nowrap;
+      }
+
+      .scope-toggle button:not(:last-child) {
+        border-right: 1px solid var(--scion-border, #e2e8f0);
+      }
+
+      .scope-toggle button:hover:not(.active) {
+        background: var(--scion-bg-subtle, #f1f5f9);
+      }
+
+      .scope-toggle button.active {
+        background: var(--scion-primary, #3b82f6);
+        color: white;
+      }
+
+      .scope-toggle button sl-icon {
+        font-size: 0.875rem;
       }
 
       .grove-link {
@@ -187,10 +223,6 @@ export class ScionPageAgents extends LitElement {
 
       .grove-link:hover {
         text-decoration: underline;
-      }
-
-      .filter-toggle sl-button::part(base) {
-        font-size: 0.8125rem;
       }
     `,
   ];
@@ -206,9 +238,12 @@ export class ScionPageAgents extends LitElement {
       this.viewMode = stored;
     }
 
-    // Read persisted mine-only filter
-    if (this.pageData?.user && localStorage.getItem('scion-filter-mine-agents') === 'true') {
-      this.showMineOnly = true;
+    // Read persisted scope filter
+    if (this.pageData?.user) {
+      const scope = localStorage.getItem('scion-scope-agents');
+      if (scope === 'mine' || scope === 'shared') {
+        this.agentScope = scope;
+      }
     }
 
     // Set SSE scope to dashboard (all grove summaries).
@@ -219,11 +254,14 @@ export class ScionPageAgents extends LitElement {
     // Use hydrated data from SSR if available, avoiding the initial fetch.
     // Only trust it when scope was previously null (initial SSR page load);
     // on client-side navigations the maps were just cleared by setScope above.
-    // Skip hydrated data when mine-only filter is active — SSR data is unfiltered.
+    // Skip hydrated data when a scope filter is active — SSR data is unfiltered.
+    // Also require scope capabilities — without them the "New Agent" button
+    // won't render, so we must fetch from the API to get them.
     const hydratedAgents = stateManager.getAgents();
-    if (hydratedAgents.length > 0 && !this.showMineOnly) {
+    const hydratedCaps = stateManager.getScopeCapabilities();
+    if (hydratedAgents.length > 0 && hydratedCaps && this.agentScope === 'all') {
       this.agents = hydratedAgents;
-      this.scopeCapabilities = stateManager.getScopeCapabilities();
+      this.scopeCapabilities = hydratedCaps;
       this.loading = false;
       stateManager.seedAgents(this.agents);
     } else {
@@ -245,10 +283,10 @@ export class ScionPageAgents extends LitElement {
     const agentMap = new Map(this.agents.map((a) => [a.id, a]));
     for (const agent of updatedAgents) {
       const existing = agentMap.get(agent.id);
-      // When "My Agents" filter is active, only update agents already in the
+      // When a scope filter is active, only update agents already in the
       // filtered list — don't add new agents that weren't in the REST response.
-      // The server-side filter is the source of truth for ownership.
-      if (!existing && this.showMineOnly) {
+      // The server-side filter is the source of truth for ownership/membership.
+      if (!existing && this.agentScope !== 'all') {
         continue;
       }
       const merged = { ...existing, ...agent } as Agent;
@@ -292,7 +330,9 @@ export class ScionPageAgents extends LitElement {
   }
 
   private async fetchAndMergeAgents(): Promise<void> {
-    const url = this.showMineOnly ? '/api/v1/agents?mine=true' : '/api/v1/agents';
+    const url = this.agentScope !== 'all'
+      ? `/api/v1/agents?scope=${this.agentScope}`
+      : '/api/v1/agents';
     const response = await apiFetch(url);
 
     if (!response.ok) {
@@ -308,6 +348,9 @@ export class ScionPageAgents extends LitElement {
       this.scopeCapabilities = data._capabilities;
     }
     stateManager.seedAgents(this.agents);
+    if (this.scopeCapabilities) {
+      stateManager.seedScopeCapabilities(this.scopeCapabilities);
+    }
   }
 
   private async handleAgentAction(
@@ -415,9 +458,14 @@ export class ScionPageAgents extends LitElement {
     this.viewMode = e.detail.view;
   }
 
-  private toggleMineOnly(): void {
-    this.showMineOnly = !this.showMineOnly;
-    localStorage.setItem('scion-filter-mine-agents', String(this.showMineOnly));
+  private setScope(scope: 'all' | 'mine' | 'shared'): void {
+    if (this.agentScope === scope) return;
+    this.agentScope = scope;
+    if (scope === 'all') {
+      localStorage.removeItem('scion-scope-agents');
+    } else {
+      localStorage.setItem('scion-scope-agents', scope);
+    }
     void this.loadAgents();
   }
 
@@ -427,15 +475,28 @@ export class ScionPageAgents extends LitElement {
         <h1>Agents</h1>
         <div class="header-actions">
           ${this.pageData?.user ? html`
-            <div class="filter-toggle">
-              <sl-button
-                size="small"
-                variant=${this.showMineOnly ? 'primary' : 'default'}
-                @click=${this.toggleMineOnly}
+            <div class="scope-toggle">
+              <button
+                class=${this.agentScope === 'all' ? 'active' : ''}
+                title="All agents"
+                @click=${() => this.setScope('all')}
+              >All</button>
+              <button
+                class=${this.agentScope === 'mine' ? 'active' : ''}
+                title="Agents I created"
+                @click=${() => this.setScope('mine')}
               >
-                <sl-icon slot="prefix" name="person"></sl-icon>
-                My Agents
-              </sl-button>
+                <sl-icon name="person"></sl-icon>
+                Mine
+              </button>
+              <button
+                class=${this.agentScope === 'shared' ? 'active' : ''}
+                title="Agents in shared groves"
+                @click=${() => this.setScope('shared')}
+              >
+                <sl-icon name="people"></sl-icon>
+                Shared
+              </button>
             </div>
           ` : nothing}
           <scion-view-toggle
@@ -497,12 +558,21 @@ export class ScionPageAgents extends LitElement {
 
   private renderAgents() {
     if (this.agents.length === 0) {
-      if (this.showMineOnly) {
+      if (this.agentScope === 'mine') {
         return html`
           <div class="empty-state">
             <sl-icon name="person"></sl-icon>
             <h2>No Agents Found</h2>
-            <p>You don't have any agents in your groves yet.</p>
+            <p>You haven't created any agents yet.</p>
+          </div>
+        `;
+      }
+      if (this.agentScope === 'shared') {
+        return html`
+          <div class="empty-state">
+            <sl-icon name="people"></sl-icon>
+            <h2>No Shared Agents</h2>
+            <p>No agents have been shared with you yet.</p>
           </div>
         `;
       }

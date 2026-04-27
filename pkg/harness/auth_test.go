@@ -545,16 +545,27 @@ func TestDetectAuthTypeFromEnvVars(t *testing.T) {
 		wantType string
 	}{
 		{"claude with GAC", "claude", map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}}, "vertex-ai"},
+		{"claude with GOOGLE_CLOUD_PROJECT", "claude", map[string]struct{}{"GOOGLE_CLOUD_PROJECT": {}}, "vertex-ai"},
 		{"claude with CLAUDE_CODE_OAUTH_TOKEN", "claude", map[string]struct{}{"CLAUDE_CODE_OAUTH_TOKEN": {}}, "oauth-token"},
 		{"claude prefers OAuth token over GAC", "claude", map[string]struct{}{"CLAUDE_CODE_OAUTH_TOKEN": {}, "GOOGLE_APPLICATION_CREDENTIALS": {}}, "oauth-token"},
+		{"claude prefers OAuth token over GCP", "claude", map[string]struct{}{"CLAUDE_CODE_OAUTH_TOKEN": {}, "GOOGLE_CLOUD_PROJECT": {}}, "oauth-token"},
 		{"gemini with GAC", "gemini", map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}}, "vertex-ai"},
+		{"gemini with GOOGLE_CLOUD_PROJECT", "gemini", map[string]struct{}{"GOOGLE_CLOUD_PROJECT": {}}, "vertex-ai"},
 		{"gemini with CLAUDE_CODE_OAUTH_TOKEN", "gemini", map[string]struct{}{"CLAUDE_CODE_OAUTH_TOKEN": {}}, ""},
 		{"claude without GAC", "claude", map[string]struct{}{}, ""},
 		{"gemini without GAC", "gemini", map[string]struct{}{}, ""},
 		{"opencode with GAC", "opencode", map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}}, ""},
+		{"opencode with GOOGLE_CLOUD_PROJECT", "opencode", map[string]struct{}{"GOOGLE_CLOUD_PROJECT": {}}, ""},
 		{"codex with GAC", "codex", map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}}, ""},
 		{"generic with GAC", "generic", map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}}, ""},
 		{"claude with unrelated env", "claude", map[string]struct{}{"SOME_OTHER_VAR": {}}, ""},
+		{"claude API key wins over GAC", "claude", map[string]struct{}{"ANTHROPIC_API_KEY": {}, "GOOGLE_APPLICATION_CREDENTIALS": {}}, ""},
+		{"claude API key wins over GCP project", "claude", map[string]struct{}{"ANTHROPIC_API_KEY": {}, "GOOGLE_CLOUD_PROJECT": {}}, ""},
+		{"claude API key alone", "claude", map[string]struct{}{"ANTHROPIC_API_KEY": {}}, ""},
+		{"gemini API key wins over GAC", "gemini", map[string]struct{}{"GEMINI_API_KEY": {}, "GOOGLE_APPLICATION_CREDENTIALS": {}}, ""},
+		{"gemini API key wins over GCP project", "gemini", map[string]struct{}{"GEMINI_API_KEY": {}, "GOOGLE_CLOUD_PROJECT": {}}, ""},
+		{"gemini GOOGLE_API_KEY wins over GAC", "gemini", map[string]struct{}{"GOOGLE_API_KEY": {}, "GOOGLE_APPLICATION_CREDENTIALS": {}}, ""},
+		{"gemini API key alone", "gemini", map[string]struct{}{"GEMINI_API_KEY": {}}, ""},
 	}
 
 	for _, tt := range tests {

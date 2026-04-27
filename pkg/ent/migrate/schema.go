@@ -945,6 +945,7 @@ var (
 		{Name: "status", Type: field.TypeString, Default: "active"},
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
 		{Name: "updated_by", Type: field.TypeString, Nullable: true},
+		{Name: "default_harness_config", Type: field.TypeString, Nullable: true},
 	}
 	// TemplatesTable holds the schema information for the "templates" table.
 	TemplatesTable = &schema.Table{

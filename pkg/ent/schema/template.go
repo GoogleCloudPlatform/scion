@@ -61,6 +61,8 @@ func (Template) Fields() []ent.Field {
 		field.String("status").Default("active"),
 		field.String("created_by").Optional(),
 		field.String("updated_by").Optional(),
+		// V46 addition.
+		field.String("default_harness_config").Optional(),
 	}
 }
 

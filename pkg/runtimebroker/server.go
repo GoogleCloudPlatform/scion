@@ -134,6 +134,15 @@ type ServerConfig struct {
 	// StateDir is the directory for broker runtime state (pending env-gather,
 	// dispatch attempts). Defaults to ~/.scion/runtime-broker-state/<broker-id>.
 	StateDir string
+
+	// AllowContainerScriptHarnesses controls whether the broker will dispatch
+	// agents whose resolved harness-config declares
+	// `provisioner.type: container-script`. Container-script provisioners
+	// execute Python (or any declared interpreter) inside the agent container
+	// with access to projected secrets, so brokers should opt in explicitly.
+	// Defaults to false; the broker rejects container-script dispatches with
+	// 403 until an operator enables this flag.
+	AllowContainerScriptHarnesses bool
 }
 
 // DefaultServerConfig returns the default server configuration.

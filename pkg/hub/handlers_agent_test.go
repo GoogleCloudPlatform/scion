@@ -3129,6 +3129,62 @@ func TestBrokerHeartbeat_StalledAgentRecoveredByNewActivity(t *testing.T) {
 	assert.Empty(t, updated.StalledFromActivity, "stalled_from_activity should be cleared on recovery")
 }
 
+func TestBrokerHeartbeat_StalledIdleAgentNotOverwrittenBySameActivity(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	grove := &store.Grove{ID: "grove-stall-idle", Name: "Stall Idle Grove", Slug: "stall-idle-grove"}
+	require.NoError(t, s.CreateGrove(ctx, grove))
+
+	broker := &store.RuntimeBroker{
+		ID: "broker-stall-idle", Name: "Stall Idle Broker", Slug: "stall-idle-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID: "agent-stall-idle", Slug: "stall-idle-slug", Name: "Stall Idle Agent",
+		GroveID: grove.ID, RuntimeBrokerID: broker.ID,
+		Phase: string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Set agent to running+idle
+	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityIdle),
+	}))
+
+	// Simulate stalled detection: mark agent stalled with stalled_from_activity = idle
+	db := s.(*sqlite.SQLiteStore).DB()
+	staleActivity := time.Now().Add(-10 * time.Minute)
+	_, err := db.ExecContext(ctx,
+		"UPDATE agents SET activity = 'stalled', stalled_from_activity = 'idle', last_activity_event = ?, last_seen = ? WHERE id = ?",
+		staleActivity, time.Now().Add(-10*time.Second), agent.ID)
+	require.NoError(t, err)
+
+	// Send heartbeat still reporting "idle" — should NOT clear the stall
+	hb := brokerHeartbeatRequest{
+		Status: "online",
+		Groves: []brokerGroveHeartbeat{{
+			GroveID:    grove.ID,
+			AgentCount: 1,
+			Agents: []brokerAgentHeartbeat{{
+				Slug:     agent.Slug,
+				Phase:    string(state.PhaseRunning),
+				Activity: "idle",
+			}},
+		}},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", hb)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "stalled", updated.Activity, "agent should remain stalled when heartbeat reports same pre-stall idle activity")
+	assert.Equal(t, "idle", updated.StalledFromActivity, "stalled_from_activity should be preserved")
+}
+
 func TestBrokerHeartbeat_DoesNotRevertStoppedAgent(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()

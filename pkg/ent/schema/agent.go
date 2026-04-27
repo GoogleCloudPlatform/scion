@@ -141,7 +141,7 @@ func (Agent) Fields() []ent.Field {
 		field.String("visibility").
 			Default("private"),
 		// delegation_enabled marks agents whose creator relationship is
-		// addressable by policy (see migration V46).
+		// addressable by policy (see migration V47).
 		field.Bool("delegation_enabled").
 			Default(false),
 

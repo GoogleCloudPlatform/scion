@@ -169,6 +169,10 @@ func runInit(args []string) int {
 
 	// Initialize lifecycle hooks manager
 	lifecycleManager := hooks.NewLifecycleManager()
+	// Register the per-agent hooks directory so container-script harnesses
+	// (whose pre-start wrapper is staged at $HOME/.scion/hooks/pre-start.d/)
+	// participate in the standard hook discovery alongside system hooks.
+	lifecycleManager.AddHooksDir(filepath.Join(agentHome, ".scion", "hooks"))
 
 	// Register status and logging handlers for lifecycle events
 	// These handlers update agent-info.json and agent.log on container lifecycle events
@@ -225,11 +229,52 @@ func runInit(args []string) int {
 		}()
 	}
 
+	// Detect whether a container-script harness has staged a manifest that
+	// requires pre-start provisioning. When required, pre-start hook failures
+	// must abort startup rather than silently launching a misconfigured child.
+	harnessReq, harnessReqErr := hooks.LoadHarnessManifestRequirement(agentHome)
+	if harnessReqErr != nil {
+		log.Error("Failed to load harness manifest: %v", harnessReqErr)
+		// Treat parse errors on a present manifest as fatal — the harness
+		// staged something we cannot interpret.
+		return 1
+	}
+
 	// Run pre-start hooks (after setup, before child process)
 	log.Info("Running pre-start hooks...")
 	if err := lifecycleManager.RunPreStart(); err != nil {
 		log.Error("Pre-start hooks failed: %v", err)
+		if harnessReq.Required {
+			log.Error("Container-script harness pre-start provisioning is required; aborting startup")
+			statusHandler.UpdatePhase(state.PhaseError, "", "")
+			statusHandler.SetMessage(fmt.Sprintf("pre-start provisioning failed: %v", err))
+			return 1
+		}
 		// Continue anyway - hooks failing shouldn't prevent startup
+	}
+
+	// Load the env overlay produced by the pre-start provisioner. Resolve
+	// any from_file references to in-memory values so secrets are not
+	// written back to logs or persistent JSON. Fail startup when the
+	// overlay is malformed or references missing files for a required
+	// container-script harness — the child would otherwise launch without
+	// its credentials.
+	var harnessEnvOverlay map[string]string
+	if harnessReq.EnvOverlayPath != "" {
+		overlayPath := hooks.ResolveContainerPath(harnessReq.EnvOverlayPath, agentHome)
+		allowedRoots := []string{harnessReq.BundleDir, agentHome}
+		overlay, err := hooks.LoadEnvOverlay(overlayPath, allowedRoots)
+		if err != nil {
+			log.Error("Failed to load harness env overlay %s: %v", overlayPath, err)
+			if harnessReq.Required {
+				statusHandler.UpdatePhase(state.PhaseError, "", "")
+				statusHandler.SetMessage(fmt.Sprintf("invalid harness env overlay: %v", err))
+				return 1
+			}
+		} else if len(overlay) > 0 {
+			harnessEnvOverlay = overlay
+			log.Info("Loaded %d env overlay entries from %s", len(overlay), overlayPath)
+		}
 	}
 
 	// Clone git workspace if configured (hub-first git groves)
@@ -351,6 +396,7 @@ func runInit(args []string) int {
 		GID:         targetGID,
 		Username:    "scion",
 		Rootless:    rootless,
+		EnvOverlay:  harnessEnvOverlay,
 	}
 	sup := supervisor.New(config)
 

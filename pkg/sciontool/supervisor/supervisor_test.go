@@ -354,3 +354,41 @@ func TestApplyExtraPath(t *testing.T) {
 		}
 	})
 }
+
+func TestMergeEnvOverlay_Helper(t *testing.T) {
+	t.Run("runtime env wins over overlay", func(t *testing.T) {
+		env := []string{"FOO=runtime", "PATH=/usr/bin"}
+		overlay := map[string]string{"FOO": "from-overlay", "BAR": "added"}
+		got := mergeEnvOverlay(env, overlay)
+		if v := getEnvVar(got, "FOO"); v != "runtime" {
+			t.Errorf("expected runtime FOO to win, got %q", v)
+		}
+		if v := getEnvVar(got, "BAR"); v != "added" {
+			t.Errorf("expected BAR appended, got %q", v)
+		}
+	})
+
+	t.Run("nil overlay is passthrough", func(t *testing.T) {
+		env := []string{"X=1"}
+		got := mergeEnvOverlay(env, nil)
+		if len(got) != 1 || got[0] != "X=1" {
+			t.Fatalf("expected passthrough, got %v", got)
+		}
+	})
+
+	t.Run("deterministic order", func(t *testing.T) {
+		env := []string{}
+		overlay := map[string]string{"B": "2", "A": "1", "C": "3"}
+		got := mergeEnvOverlay(env, overlay)
+		// Sorted alphabetically for reproducibility.
+		want := []string{"A=1", "B=2", "C=3"}
+		if len(got) != len(want) {
+			t.Fatalf("len mismatch: %v", got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("got[%d]=%q, want %q", i, got[i], want[i])
+			}
+		}
+	})
+}

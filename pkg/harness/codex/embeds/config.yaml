@@ -18,3 +18,63 @@ user: scion
 env:
   # TODO: notify hook is disabled pending full hook support in Codex; this var has no effect until then
   SCION_CODEX_NOTIFY_AUTO_COMPLETE: "true"
+# provisioner.type defaults to "builtin" so the compiled Codex harness keeps
+# running unchanged. Run `scion harness-config upgrade codex --activate-script`
+# to flip this to container-script after reviewing the staged provision.py.
+provisioner:
+  type: builtin
+  interface_version: 1
+  command: ["python3", "/home/scion/.scion/harness/provision.py"]
+  timeout: 30s
+  lifecycle_events:
+    - pre-start
+  required_image_tools:
+    - python3
+config_dir: .codex
+skills_dir: .codex/skills
+interrupt_key: C-c
+instructions_file: .codex/AGENTS.md
+system_prompt_mode: none
+command:
+  base: ["codex", "--sandbox", "danger-full-access", "--dangerously-bypass-approvals-and-sandbox"]
+  # resume_flag is split on whitespace, so "resume --last" emits two argv tokens
+  # and matches the compiled harness's `args = append(args, "resume", "--last")`.
+  resume_flag: "resume --last"
+  # task_position is before_base_args because the compiled Codex harness emits
+  # `codex <base...> <task> <baseArgs...>` — flipping this to after_base_args
+  # would break parity for any caller that passes harness args (same gotcha as
+  # OpenCode in Phase 4).
+  task_position: before_base_args
+capabilities:
+  limits:
+    max_turns: { support: "no", reason: "This harness has no hook dialect for turn events" }
+    max_model_calls: { support: "no", reason: "This harness has no hook dialect for model events" }
+    max_duration: { support: "yes" }
+  telemetry:
+    enabled: { support: "yes" }
+    native_emitter: { support: "yes" }
+  prompts:
+    system_prompt: { support: "no", reason: "System prompt injection is not implemented for this harness" }
+    agent_instructions: { support: "yes" }
+  auth:
+    api_key: { support: "yes" }
+    auth_file: { support: "yes" }
+    oauth_token: { support: "no" }
+    vertex_ai: { support: "no", reason: "Vertex AI auth is not supported for this harness" }
+auth:
+  default_type: api-key
+  types:
+    api-key:
+      required_env:
+        - any_of: ["CODEX_API_KEY", "OPENAI_API_KEY"]
+    auth-file:
+      required_files:
+        - name: CODEX_AUTH
+          type: file
+          target_suffix: "/.codex/auth.json"
+  autodetect:
+    env:
+      CODEX_API_KEY: api-key
+      OPENAI_API_KEY: api-key
+    files:
+      CODEX_AUTH: auth-file

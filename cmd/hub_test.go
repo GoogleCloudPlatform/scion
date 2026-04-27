@@ -105,6 +105,101 @@ func TestGetAuthInfo_NilHub(t *testing.T) {
 	assert.Equal(t, "none", info.MethodType)
 }
 
+func TestGetAuthInfo_DevAuthPreferredOverStaleAgentTokenOnLocalhost(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("SCION_AUTH_TOKEN", "")
+	t.Setenv("SCION_DEV_TOKEN", "")
+	t.Setenv("SCION_DEV_TOKEN_FILE", "")
+	t.Setenv("SCION_HUB_TOKEN", "")
+
+	scionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a non-dev agent token (stale JWT from a previous remote hub)
+	if err := os.WriteFile(filepath.Join(scionDir, "scion-token"), []byte("eyJhbGciOiJIUzI1NiJ9.stale-jwt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a dev token (from the currently running local server)
+	if err := os.WriteFile(filepath.Join(scionDir, "dev-token"), []byte("scion_dev_abc123"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	settings := &config.Settings{}
+	info := getAuthInfo(settings, "http://localhost:8080")
+	assert.Equal(t, "devauth", info.MethodType)
+	assert.Equal(t, "Dev auth", info.Method)
+	assert.True(t, info.IsDevAuth)
+}
+
+func TestGetAuthInfo_AgentTokenUsedOnRemoteEndpoint(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("SCION_AUTH_TOKEN", "")
+	t.Setenv("SCION_DEV_TOKEN", "")
+	t.Setenv("SCION_DEV_TOKEN_FILE", "")
+	t.Setenv("SCION_HUB_TOKEN", "")
+
+	scionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a non-dev agent token
+	if err := os.WriteFile(filepath.Join(scionDir, "scion-token"), []byte("eyJhbGciOiJIUzI1NiJ9.valid-jwt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a dev token (leftover from a previous local server)
+	if err := os.WriteFile(filepath.Join(scionDir, "dev-token"), []byte("scion_dev_abc123"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	settings := &config.Settings{}
+	info := getAuthInfo(settings, "https://hub.example.com")
+	assert.Equal(t, "agent_token", info.MethodType)
+	assert.Equal(t, "Agent token", info.Method)
+	assert.Equal(t, "scion-token file", info.Source)
+}
+
+func TestGetAuthInfo_DevAgentTokenUsedDirectly(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("SCION_AUTH_TOKEN", "")
+	t.Setenv("SCION_DEV_TOKEN", "")
+	t.Setenv("SCION_DEV_TOKEN_FILE", "")
+	t.Setenv("SCION_HUB_TOKEN", "")
+
+	scionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a dev token in the scion-token file (agent launched by dev server)
+	if err := os.WriteFile(filepath.Join(scionDir, "scion-token"), []byte("scion_dev_abc123"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	settings := &config.Settings{}
+	info := getAuthInfo(settings, "http://localhost:8080")
+	assert.Equal(t, "agent_token", info.MethodType)
+	assert.Equal(t, "Agent token (dev)", info.Method)
+	assert.True(t, info.IsDevAuth)
+}
+
+func TestIsLocalhostEndpoint(t *testing.T) {
+	assert.True(t, isLocalhostEndpoint("http://localhost:8080"))
+	assert.True(t, isLocalhostEndpoint("https://localhost:443"))
+	assert.True(t, isLocalhostEndpoint("http://127.0.0.1:8080"))
+	assert.True(t, isLocalhostEndpoint("http://[::1]:8080"))
+	assert.False(t, isLocalhostEndpoint("https://hub.example.com"))
+	assert.False(t, isLocalhostEndpoint("http://192.168.1.100:8080"))
+	assert.False(t, isLocalhostEndpoint(""))
+}
+
 func TestGetHubEnabledScope_GlobalScope(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("SCION_HUB_ENDPOINT", "")

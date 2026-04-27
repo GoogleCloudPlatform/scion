@@ -12,13 +12,16 @@
   },
   "dependencies": {
     "@astrojs/check": "^0.9.6",
-    "@astrojs/starlight": "^0.37.4",
-    "astro": "^5.18.1",
+    "@astrojs/starlight": "^0.38.3",
+    "astro": "^6.1.8",
     "sharp": "^0.34.2",
     "starlight-links-validator": "^0.19.2",
     "typescript": "^5.9.3"
   },
   "devDependencies": {
     "astro-d2": "^0.8.1"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

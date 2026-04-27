@@ -433,6 +433,7 @@ export interface Template {
   displayName?: string;
   description?: string;
   harness: string;
+  defaultHarnessConfig?: string;
   status: string;
   scope: string;
   scopeId?: string;

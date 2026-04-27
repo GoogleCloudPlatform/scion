@@ -39,6 +39,11 @@ type Config struct {
 	// still sets HOME/USER/LOGNAME to the Username so harnesses find their
 	// config in the right place.
 	Rootless bool
+	// EnvOverlay are additional environment variables produced by the harness
+	// pre-start provisioner (e.g. resolved API keys read from secret files).
+	// Existing entries in the runtime environment win on conflict; overlay
+	// values only fill keys that are not already set.
+	EnvOverlay map[string]string
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -146,6 +151,14 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 		s.cmd.Env = setEnvVar(s.cmd.Env, "PATH", newPath)
 		s.cmd.Env = removeEnvVar(s.cmd.Env, "SCION_EXTRA_PATH")
 		log.Debug("Applied SCION_EXTRA_PATH: PATH=%s", newPath)
+	}
+
+	// Merge harness-generated env overlay. Runtime env wins on conflict so a
+	// container-script harness cannot mask a value set by the broker/CLI.
+	if len(s.config.EnvOverlay) > 0 {
+		before := len(s.cmd.Env)
+		s.cmd.Env = mergeEnvOverlay(s.cmd.Env, s.config.EnvOverlay)
+		log.Debug("Applied harness env overlay: %d entries (added %d)", len(s.config.EnvOverlay), len(s.cmd.Env)-before)
 	}
 
 	if err := s.cmd.Start(); err != nil {
@@ -312,6 +325,48 @@ func removeEnvVar(env []string, key string) []string {
 		result = append(result, e)
 	}
 	return result
+}
+
+// mergeEnvOverlay folds overlay key/value pairs into env. Existing entries
+// in env take precedence so runtime/CLI-provided env vars are never masked
+// by harness output.
+func mergeEnvOverlay(env []string, overlay map[string]string) []string {
+	if len(overlay) == 0 {
+		return env
+	}
+	taken := make(map[string]struct{}, len(env))
+	for _, e := range env {
+		if i := indexByte(e, '='); i > 0 {
+			taken[e[:i]] = struct{}{}
+		}
+	}
+	// Deterministic order for reproducibility.
+	keys := make([]string, 0, len(overlay))
+	for k := range overlay {
+		keys = append(keys, k)
+	}
+	for i := 1; i < len(keys); i++ {
+		for j := i; j > 0 && keys[j-1] > keys[j]; j-- {
+			keys[j-1], keys[j] = keys[j], keys[j-1]
+		}
+	}
+	for _, k := range keys {
+		if _, ok := taken[k]; ok {
+			continue
+		}
+		env = append(env, k+"="+overlay[k])
+	}
+	return env
+}
+
+// indexByte avoids the strings import for a tight inner loop.
+func indexByte(s string, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
 }
 
 // chownRecursive changes ownership of a directory and all its contents.

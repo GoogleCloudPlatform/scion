@@ -15,7 +15,7 @@ Scion is written in Go. You need Go 1.22 or later installed.
 While a binary may be available from the github releases page, this is an active project and it is currently best to regularly build from source.
 
 ### 2. Container Runtime
-Scion requires a container runtime to manage agents. You can use either Docker or the Apple Virtualization Framework (experimental).
+Scion requires a container runtime to manage agents. You can use Docker, Podman, or the Apple Virtualization Framework (experimental).
 
 #### Docker (Linux/Windows)
 - Install [Docker Desktop](https://www.docker.com/products/docker-desktop) or [Docker Engine](https://docs.docker.com/engine/install/).
@@ -84,7 +84,7 @@ No publicly hosted images are currently available for Scion, but quick and easy 
 
 The easiest way to get these images is to fork this repo, and then go to the "Actions" tab and select the "Build Scion Images" workflow.
 
-You will then use your `ghcr.io/myorg` registry for the scion setting.
+You will then use your `ghcr.io/myorg` registry for the `image_registry` setting. These images must be available in the registry before running the initialization command.
 
 See [Building Containers](/scion/advanced-local/custom-images/) for more details
 
@@ -99,7 +99,7 @@ scion init --machine
 
 This creates a directory at `~/.scion`
 
-You will be prompted for the image registry where you built and deployed images.
+You will be prompted for the image registry where you have built and deployed the images in the previous step.
 
 ### 2. Initialize a Grove
 Navigate to the root of a project where you want to use Scion and run:

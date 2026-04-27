@@ -113,6 +113,36 @@ func ValidateAgentConfig(data []byte, schemaVersion string) ([]ValidationError, 
 	return validateAgainstSchema(data, schemaVersion, agentSchemaFiles)
 }
 
+// ValidateHarnessConfig validates a standalone harness-config config.yaml by
+// wrapping it in the versioned settings schema's harness_configs map.
+func ValidateHarnessConfig(data []byte) ([]ValidationError, error) {
+	var doc interface{}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("failed to parse harness config: %w", err)
+	}
+
+	wrapped := map[string]interface{}{
+		"schema_version": "1",
+		"harness_configs": map[string]interface{}{
+			"_": doc,
+		},
+	}
+	wrappedData, err := yaml.Marshal(wrapped)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare harness config for validation: %w", err)
+	}
+
+	errors, err := ValidateSettings(wrappedData, "1")
+	if err != nil {
+		return nil, err
+	}
+	for i := range errors {
+		errors[i].Path = strings.TrimPrefix(errors[i].Path, "harness_configs/_/")
+		errors[i].Path = strings.TrimPrefix(errors[i].Path, "harness_configs/_")
+	}
+	return errors, nil
+}
+
 // validateAgainstSchema performs JSON Schema validation using the specified
 // schema file map.
 func validateAgainstSchema(data []byte, schemaVersion string, schemaFiles map[string]string) ([]ValidationError, error) {

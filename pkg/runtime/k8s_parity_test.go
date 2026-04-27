@@ -374,26 +374,46 @@ func TestCreateAuthFileSecret(t *testing.T) {
 // --- K8s exec user context parity (matches Docker/Podman --user scion) ---
 
 func TestK8sExec_WrapsCommandWithSu(t *testing.T) {
-	// Verify that Exec wraps commands with su to run as the scion user,
+	// Verify that Exec wraps commands so they run as the scion user,
 	// matching the --user scion flag used by Docker/Podman runtimes.
+	// The wrapper uses ExecAsUserCmd (sh -c with whoami fallback)
+	// instead of a bare `su -` invocation, so it works on container
+	// images whose /etc/pam.d/su lacks pam_rootok.so. ExecAsUserCmd
+	// passes user/cmd as positional shell arguments, so the joined
+	// shell-quoted cmd appears verbatim as the trailing argv entry.
 	cmd := []string{"tmux", "send-keys", "-t", "scion:0", "hello world", "Enter"}
 
-	// Simulate the wrapping logic from Exec
+	// Simulate the wrapping logic from Exec.
 	quoted := make([]string, len(cmd))
 	for i, arg := range cmd {
 		quoted[i] = fmt.Sprintf("'%s'", strings.ReplaceAll(arg, "'", "'\"'\"'"))
 	}
-	suCmd := []string{"su", "-", "scion", "-c", strings.Join(quoted, " ")}
+	joined := strings.Join(quoted, " ")
+	wrapped := ExecAsUserCmd("scion", joined)
 
-	if suCmd[0] != "su" || suCmd[1] != "-" || suCmd[2] != "scion" || suCmd[3] != "-c" {
-		t.Fatalf("expected su - scion -c prefix, got: %v", suCmd[:4])
+	if len(wrapped) != 6 || wrapped[0] != "sh" || wrapped[1] != "-c" {
+		t.Fatalf("expected [sh -c <script> <name> <user> <cmd>] wrapper, got: %v", wrapped)
 	}
 
-	// The -c argument should contain all original args, properly quoted
-	shellCmd := suCmd[4]
+	// The script must retain a su fallback so legacy
+	// root-entrypoint images keep working.
+	script := wrapped[2]
+	if !strings.Contains(script, `su - "$1" -c "$2"`) {
+		t.Errorf("expected script to retain su fallback, got: %s", script)
+	}
+
+	// User and cmd are passed as positional argv ($1, $2 — $0 is
+	// the script-name label) — both must round-trip through the
+	// helper untouched.
+	if wrapped[4] != "scion" {
+		t.Errorf("expected user at wrapped[4] to be \"scion\", got %q", wrapped[4])
+	}
+	if wrapped[5] != joined {
+		t.Errorf("expected joined cmd at wrapped[5] verbatim, got %q want %q", wrapped[5], joined)
+	}
 	for _, arg := range cmd {
-		if !strings.Contains(shellCmd, arg) {
-			t.Errorf("shell command %q should contain argument %q", shellCmd, arg)
+		if !strings.Contains(wrapped[5], arg) {
+			t.Errorf("joined cmd %q should contain argument %q", wrapped[5], arg)
 		}
 	}
 }

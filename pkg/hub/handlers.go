@@ -278,13 +278,30 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		IncludeDeleted:  query.Get("includeDeleted") == "true",
 	}
 
-	// mine=true: restrict to agents in groves the user owns/is a member of,
-	// plus agents the user personally created
-	if query.Get("mine") == "true" {
+	// scope=mine: agents the current user created
+	// scope=shared: agents in groves the user is a member of, but not created by them
+	// mine=true (legacy): agents the user created or in groves they own/are a member of
+	switch query.Get("scope") {
+	case "mine":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 			filter.OwnerID = userIdent.ID()
+		}
+	case "shared":
+		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 			if groveIDs := s.resolveUserGroveIDs(ctx, userIdent.ID()); len(groveIDs) > 0 {
-				filter.MemberOrOwnerGroveIDs = groveIDs
+				filter.MemberGroveIDs = groveIDs
+				filter.ExcludeOwnerID = userIdent.ID()
+			} else {
+				filter.MemberGroveIDs = []string{"__none__"}
+			}
+		}
+	default:
+		if query.Get("mine") == "true" {
+			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+				filter.OwnerID = userIdent.ID()
+				if groveIDs := s.resolveUserGroveIDs(ctx, userIdent.ID()); len(groveIDs) > 0 {
+					filter.MemberOrOwnerGroveIDs = groveIDs
+				}
 			}
 		}
 	}
@@ -584,9 +601,12 @@ func (s *Server) createAgentInGrove(
 		}
 	}
 
-	// Resolve harness config: prefer template metadata harness field, then explicit request field.
+	// Resolve harness config: prefer the user's explicit choice, then template default.
 	// Do NOT use req.Template as fallback since it may contain a UUID.
-	harnessConfig := s.getHarnessConfigFromTemplate(resolvedTemplate, req.HarnessConfig)
+	harnessConfig := req.HarnessConfig
+	if harnessConfig == "" {
+		harnessConfig = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
+	}
 
 	agent := &store.Agent{
 		ID:              api.NewUUID(),
@@ -8020,9 +8040,13 @@ func (s *Server) resolveTemplate(ctx context.Context, templateRef, groveID strin
 }
 
 // getHarnessConfigFromTemplate returns the harness config name from a resolved template,
-// or the fallback value if no template was resolved.
+// or the fallback value if no template was resolved. Prefers the template's
+// DefaultHarnessConfig (e.g. "claude-web") over the generic Harness type (e.g. "claude").
 func (s *Server) getHarnessConfigFromTemplate(template *store.Template, fallback string) string {
 	if template != nil {
+		if template.DefaultHarnessConfig != "" {
+			return template.DefaultHarnessConfig
+		}
 		if template.Harness != "" {
 			return template.Harness
 		}

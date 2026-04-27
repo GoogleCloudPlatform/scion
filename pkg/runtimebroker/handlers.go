@@ -533,6 +533,18 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Phase 3 broker policy: refuse container-script harness dispatches
+	// unless the broker has opted in. We check before buildStartContext so
+	// the failure happens before the broker mounts grove state, downloads
+	// workspaces, or projects secrets.
+	if name, entry, ok := s.lookupHarnessConfigForPolicy(req); ok {
+		if d := s.evaluateHarnessConfigPolicy(name, entry); !d.OK {
+			markAttemptFailed(d.HTTPStatus, d.Message)
+			writeError(w, d.HTTPStatus, d.Code, d.Message, nil)
+			return
+		}
+	}
+
 	// Build unified start context (grove path, env, template, git-clone, secrets, manager)
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:            req.Name,
@@ -1516,6 +1528,11 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 	}
 	if harnessConfigName != "" {
 		var harnessType, authType string
+		// authMeta is the declarative auth block from the resolved harness-
+		// config (Phase 1). When non-nil, the Phase-3 config-driven preflight
+		// path is used; otherwise the broker falls back to the legacy compiled
+		// per-harness tables in pkg/harness/auth.go.
+		var authMeta *config.HarnessAuthMetadata
 
 		// Try on-disk harness-config directory first (check grovePath,
 		// then fall back to global dir for hub-dispatched agents without a local grove)
@@ -1527,6 +1544,9 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 			if hcDir, err := config.FindHarnessConfigDir(harnessConfigName, harnessConfigSearchPath); err == nil {
 				harnessType = hcDir.Config.Harness
 				authType = hcDir.Config.AuthSelectedType
+				if hcDir.Config.Auth != nil {
+					authMeta = hcDir.Config.Auth
+				}
 			}
 		}
 
@@ -1538,6 +1558,9 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 				}
 				if authType == "" {
 					authType = hcfg.AuthSelectedType
+				}
+				if authMeta == nil && hcfg.Auth != nil {
+					authMeta = hcfg.Auth
 				}
 			}
 		}
@@ -1575,6 +1598,11 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 		// or a GCP service account can satisfy an alternative auth method before
 		// defaulting to api-key. This mirrors the auto-detect priority in each
 		// harness's ResolveAuth.
+		//
+		// Phase 3: when the harness-config carries declarative auth metadata
+		// (authMeta != nil), the *FromConfig variants drive detection. Older
+		// configs without the `auth:` block still hit the compiled fallbacks.
+		useConfigDriven := harness.AuthMetadataAvailable(&config.HarnessConfigEntry{Auth: authMeta})
 		if authType == "" {
 			fileSecretNames := make(map[string]struct{})
 			for _, sec := range req.ResolvedSecrets {
@@ -1582,7 +1610,13 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 					fileSecretNames[sec.Name] = struct{}{}
 				}
 			}
-			if detected := harness.DetectAuthTypeFromFileSecrets(harnessType, fileSecretNames); detected != "" {
+			var detected string
+			if useConfigDriven {
+				detected = harness.DetectAuthTypeFromFileSecretsFromConfig(authMeta, fileSecretNames)
+			} else {
+				detected = harness.DetectAuthTypeFromFileSecrets(harnessType, fileSecretNames)
+			}
+			if detected != "" {
 				authType = detected
 			}
 		}
@@ -1593,18 +1627,47 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 					resolvedEnvKeys[k] = struct{}{}
 				}
 			}
-			if detected := harness.DetectAuthTypeFromEnvVars(harnessType, resolvedEnvKeys); detected != "" {
+			for _, sec := range req.ResolvedSecrets {
+				if sec.Type == "environment" || sec.Type == "" {
+					target := sec.Target
+					if target == "" {
+						target = sec.Name
+					}
+					if target != "" {
+						resolvedEnvKeys[target] = struct{}{}
+					}
+				}
+			}
+			var detected string
+			if useConfigDriven {
+				detected = harness.DetectAuthTypeFromEnvVarsFromConfig(authMeta, resolvedEnvKeys)
+			} else {
+				detected = harness.DetectAuthTypeFromEnvVars(harnessType, resolvedEnvKeys)
+			}
+			if detected != "" {
 				authType = detected
 			}
 		}
 		if authType == "" {
-			if detected := harness.DetectAuthTypeFromGCPIdentity(harnessType, gcpSAAssigned); detected != "" {
+			var detected string
+			if useConfigDriven {
+				detected = harness.DetectAuthTypeFromGCPIdentityFromConfig(authMeta, gcpSAAssigned)
+			} else {
+				detected = harness.DetectAuthTypeFromGCPIdentity(harnessType, gcpSAAssigned)
+			}
+			if detected != "" {
 				authType = detected
 			}
 		}
 
 		// Resolve auth key groups and check satisfaction
-		if keyGroups := harness.RequiredAuthEnvKeys(harnessType, authType); len(keyGroups) > 0 {
+		var keyGroups [][]string
+		if useConfigDriven {
+			keyGroups = harness.RequiredAuthEnvKeysFromConfig(authMeta, authType)
+		} else {
+			keyGroups = harness.RequiredAuthEnvKeys(harnessType, authType)
+		}
+		if len(keyGroups) > 0 {
 			// Build lookup of already-satisfied keys
 			envKeys := make(map[string]struct{})
 			for k, v := range req.ResolvedEnv {
@@ -1644,7 +1707,13 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 		// Phase 1b: Auth-required file secrets (e.g. ADC for vertex-ai).
 		// When a GCP service account is assigned, the metadata server provides
 		// credentials, so the ADC file is not required.
-		if authSecrets := harness.RequiredAuthSecrets(harnessType, authType, gcpSAAssigned); len(authSecrets) > 0 {
+		var authSecrets []api.RequiredSecret
+		if useConfigDriven {
+			authSecrets = harness.RequiredAuthSecretsFromConfig(authMeta, authType, gcpSAAssigned)
+		} else {
+			authSecrets = harness.RequiredAuthSecrets(harnessType, authType, gcpSAAssigned)
+		}
+		if len(authSecrets) > 0 {
 			// Build lookup of file-type resolved secrets by Name and Target suffix
 			fileSecrets := make(map[string]struct{})
 			for _, sec := range req.ResolvedSecrets {

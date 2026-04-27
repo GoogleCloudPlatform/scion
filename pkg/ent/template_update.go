@@ -432,6 +432,26 @@ func (_u *TemplateUpdate) ClearUpdatedBy() *TemplateUpdate {
 	return _u
 }
 
+// SetDefaultHarnessConfig sets the "default_harness_config" field.
+func (_u *TemplateUpdate) SetDefaultHarnessConfig(v string) *TemplateUpdate {
+	_u.mutation.SetDefaultHarnessConfig(v)
+	return _u
+}
+
+// SetNillableDefaultHarnessConfig sets the "default_harness_config" field if the given value is not nil.
+func (_u *TemplateUpdate) SetNillableDefaultHarnessConfig(v *string) *TemplateUpdate {
+	if v != nil {
+		_u.SetDefaultHarnessConfig(*v)
+	}
+	return _u
+}
+
+// ClearDefaultHarnessConfig clears the value of the "default_harness_config" field.
+func (_u *TemplateUpdate) ClearDefaultHarnessConfig() *TemplateUpdate {
+	_u.mutation.ClearDefaultHarnessConfig()
+	return _u
+}
+
 // Mutation returns the TemplateMutation object of the builder.
 func (_u *TemplateUpdate) Mutation() *TemplateMutation {
 	return _u.mutation
@@ -618,6 +638,12 @@ func (_u *TemplateUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.UpdatedByCleared() {
 		_spec.ClearField(template.FieldUpdatedBy, field.TypeString)
+	}
+	if value, ok := _u.mutation.DefaultHarnessConfig(); ok {
+		_spec.SetField(template.FieldDefaultHarnessConfig, field.TypeString, value)
+	}
+	if _u.mutation.DefaultHarnessConfigCleared() {
+		_spec.ClearField(template.FieldDefaultHarnessConfig, field.TypeString)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -1043,6 +1069,26 @@ func (_u *TemplateUpdateOne) ClearUpdatedBy() *TemplateUpdateOne {
 	return _u
 }
 
+// SetDefaultHarnessConfig sets the "default_harness_config" field.
+func (_u *TemplateUpdateOne) SetDefaultHarnessConfig(v string) *TemplateUpdateOne {
+	_u.mutation.SetDefaultHarnessConfig(v)
+	return _u
+}
+
+// SetNillableDefaultHarnessConfig sets the "default_harness_config" field if the given value is not nil.
+func (_u *TemplateUpdateOne) SetNillableDefaultHarnessConfig(v *string) *TemplateUpdateOne {
+	if v != nil {
+		_u.SetDefaultHarnessConfig(*v)
+	}
+	return _u
+}
+
+// ClearDefaultHarnessConfig clears the value of the "default_harness_config" field.
+func (_u *TemplateUpdateOne) ClearDefaultHarnessConfig() *TemplateUpdateOne {
+	_u.mutation.ClearDefaultHarnessConfig()
+	return _u
+}
+
 // Mutation returns the TemplateMutation object of the builder.
 func (_u *TemplateUpdateOne) Mutation() *TemplateMutation {
 	return _u.mutation
@@ -1259,6 +1305,12 @@ func (_u *TemplateUpdateOne) sqlSave(ctx context.Context) (_node *Template, err 
 	}
 	if _u.mutation.UpdatedByCleared() {
 		_spec.ClearField(template.FieldUpdatedBy, field.TypeString)
+	}
+	if value, ok := _u.mutation.DefaultHarnessConfig(); ok {
+		_spec.SetField(template.FieldDefaultHarnessConfig, field.TypeString, value)
+	}
+	if _u.mutation.DefaultHarnessConfigCleared() {
+		_spec.ClearField(template.FieldDefaultHarnessConfig, field.TypeString)
 	}
 	_node = &Template{config: _u.config}
 	_spec.Assign = _node.assignValues

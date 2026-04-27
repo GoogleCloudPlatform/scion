@@ -15,12 +15,16 @@
 package config
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"gopkg.in/yaml.v3"
@@ -55,6 +59,12 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config.yaml: %w", err)
+	}
+
+	if validationErrors, err := ValidateHarnessConfig(data); err != nil {
+		return nil, err
+	} else if len(validationErrors) > 0 {
+		return nil, fmt.Errorf("invalid config.yaml: %s", validationErrors[0].Error())
 	}
 
 	var entry HarnessConfigEntry
@@ -213,8 +223,7 @@ func SeedHarnessConfig(targetDir string, h api.Harness, force bool) error {
 			return nil
 		}
 
-		// Map embed filenames to home directory paths
-		targetPath := mapEmbedFileToHomePath(homeDir, configDir, relPath)
+		targetPath := mapEmbedFileToHarnessConfigPath(targetDir, homeDir, configDir, relPath)
 		if targetPath == "" {
 			return nil
 		}
@@ -231,6 +240,38 @@ func SeedHarnessConfig(targetDir string, h api.Harness, force bool) error {
 	}
 
 	return nil
+}
+
+func mapEmbedFileToHarnessConfigPath(targetDir, homeDir, configDir, fileName string) string {
+	cleanName := filepath.ToSlash(filepath.Clean(fileName))
+	if cleanName == "." || cleanName == ".." || cleanName == "" || cleanName == "config.yaml" || cleanName == "scion-agent.yaml" {
+		return ""
+	}
+	if strings.HasPrefix(cleanName, "../") || filepath.IsAbs(cleanName) {
+		return ""
+	}
+
+	if strings.HasPrefix(cleanName, "home/") {
+		return filepath.Join(homeDir, filepath.FromSlash(strings.TrimPrefix(cleanName, "home/")))
+	}
+
+	if isHarnessConfigRootSupportFile(cleanName) {
+		return filepath.Join(targetDir, filepath.FromSlash(cleanName))
+	}
+
+	return mapEmbedFileToHomePath(homeDir, configDir, cleanName)
+}
+
+func isHarnessConfigRootSupportFile(relPath string) bool {
+	if relPath == "provision.py" || relPath == "dialect.yaml" {
+		return true
+	}
+	for _, prefix := range []string{"schema/", "schemas/", "examples/", "tests/fixtures/"} {
+		if strings.HasPrefix(relPath, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // mapEmbedFileToHomePath maps an embed filename to its target path under homeDir.
@@ -267,6 +308,73 @@ func mapEmbedFileToHomePath(homeDir, configDir, fileName string) string {
 		}
 		return filepath.Join(homeDir, fileName)
 	}
+}
+
+// ComputeHarnessConfigRevision returns a content hash uniquely identifying
+// the on-disk state of a harness-config directory. The hash combines the
+// SHA-256 of every file under dirPath (sorted by relative path) so two dirs
+// with identical content produce the same revision string.
+//
+// Used by Phase 3 to stamp api.AgentInfo.HarnessConfigRevision when an
+// agent is provisioned. For Hub-distributed harness-configs the value will
+// match the manifest ContentHash recorded by the Hub's sync machinery; for
+// local-only or built-in seeded configs it provides a stable local
+// revision useful for audit.
+//
+// Returns "" when dirPath is empty or unreadable. Errors hashing individual
+// files are skipped so a transient FS error does not block agent creation;
+// the result still reflects the readable subset of files.
+func ComputeHarnessConfigRevision(dirPath string) string {
+	if dirPath == "" {
+		return ""
+	}
+	files, err := os.ReadDir(dirPath)
+	if err != nil || len(files) == 0 {
+		return ""
+	}
+	type fileHash struct {
+		Path string
+		Hash string
+	}
+	var hashes []fileHash
+	walk := func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil || d.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(dirPath, path)
+		if relErr != nil {
+			return nil
+		}
+		f, openErr := os.Open(path)
+		if openErr != nil {
+			return nil
+		}
+		defer f.Close()
+		h := sha256.New()
+		if _, copyErr := io.Copy(h, f); copyErr != nil {
+			return nil
+		}
+		hashes = append(hashes, fileHash{
+			Path: filepath.ToSlash(rel),
+			Hash: hex.EncodeToString(h.Sum(nil)),
+		})
+		return nil
+	}
+	if err := filepath.WalkDir(dirPath, walk); err != nil {
+		return ""
+	}
+	if len(hashes) == 0 {
+		return ""
+	}
+	sort.Slice(hashes, func(i, j int) bool { return hashes[i].Path < hashes[j].Path })
+	combined := sha256.New()
+	for _, fh := range hashes {
+		combined.Write([]byte(fh.Path))
+		combined.Write([]byte{0})
+		combined.Write([]byte(fh.Hash))
+		combined.Write([]byte{0})
+	}
+	return "sha256:" + hex.EncodeToString(combined.Sum(nil))
 }
 
 // SeedHarnessConfigFromFS is a lower-level function that seeds from a provided embed.FS.
@@ -311,7 +419,7 @@ func SeedHarnessConfigFromFS(targetDir string, embedsFS embed.FS, basePath, conf
 			return nil
 		}
 
-		targetPath := mapEmbedFileToHomePath(homeDir, configDir, relPath)
+		targetPath := mapEmbedFileToHarnessConfigPath(targetDir, homeDir, configDir, relPath)
 		if targetPath == "" {
 			return nil
 		}

@@ -184,6 +184,11 @@ func UpdatedBy(v string) predicate.Template {
 	return predicate.Template(sql.FieldEQ(FieldUpdatedBy, v))
 }
 
+// DefaultHarnessConfig applies equality check predicate on the "default_harness_config" field. It's identical to DefaultHarnessConfigEQ.
+func DefaultHarnessConfig(v string) predicate.Template {
+	return predicate.Template(sql.FieldEQ(FieldDefaultHarnessConfig, v))
+}
+
 // NameEQ applies the EQ predicate on the "name" field.
 func NameEQ(v string) predicate.Template {
 	return predicate.Template(sql.FieldEQ(FieldName, v))
@@ -1787,6 +1792,81 @@ func UpdatedByEqualFold(v string) predicate.Template {
 // UpdatedByContainsFold applies the ContainsFold predicate on the "updated_by" field.
 func UpdatedByContainsFold(v string) predicate.Template {
 	return predicate.Template(sql.FieldContainsFold(FieldUpdatedBy, v))
+}
+
+// DefaultHarnessConfigEQ applies the EQ predicate on the "default_harness_config" field.
+func DefaultHarnessConfigEQ(v string) predicate.Template {
+	return predicate.Template(sql.FieldEQ(FieldDefaultHarnessConfig, v))
+}
+
+// DefaultHarnessConfigNEQ applies the NEQ predicate on the "default_harness_config" field.
+func DefaultHarnessConfigNEQ(v string) predicate.Template {
+	return predicate.Template(sql.FieldNEQ(FieldDefaultHarnessConfig, v))
+}
+
+// DefaultHarnessConfigIn applies the In predicate on the "default_harness_config" field.
+func DefaultHarnessConfigIn(vs ...string) predicate.Template {
+	return predicate.Template(sql.FieldIn(FieldDefaultHarnessConfig, vs...))
+}
+
+// DefaultHarnessConfigNotIn applies the NotIn predicate on the "default_harness_config" field.
+func DefaultHarnessConfigNotIn(vs ...string) predicate.Template {
+	return predicate.Template(sql.FieldNotIn(FieldDefaultHarnessConfig, vs...))
+}
+
+// DefaultHarnessConfigGT applies the GT predicate on the "default_harness_config" field.
+func DefaultHarnessConfigGT(v string) predicate.Template {
+	return predicate.Template(sql.FieldGT(FieldDefaultHarnessConfig, v))
+}
+
+// DefaultHarnessConfigGTE applies the GTE predicate on the "default_harness_config" field.
+func DefaultHarnessConfigGTE(v string) predicate.Template {
+	return predicate.Template(sql.FieldGTE(FieldDefaultHarnessConfig, v))
+}
+
+// DefaultHarnessConfigLT applies the LT predicate on the "default_harness_config" field.
+func DefaultHarnessConfigLT(v string) predicate.Template {
+	return predicate.Template(sql.FieldLT(FieldDefaultHarnessConfig, v))
+}
+
+// DefaultHarnessConfigLTE applies the LTE predicate on the "default_harness_config" field.
+func DefaultHarnessConfigLTE(v string) predicate.Template {
+	return predicate.Template(sql.FieldLTE(FieldDefaultHarnessConfig, v))
+}
+
+// DefaultHarnessConfigContains applies the Contains predicate on the "default_harness_config" field.
+func DefaultHarnessConfigContains(v string) predicate.Template {
+	return predicate.Template(sql.FieldContains(FieldDefaultHarnessConfig, v))
+}
+
+// DefaultHarnessConfigHasPrefix applies the HasPrefix predicate on the "default_harness_config" field.
+func DefaultHarnessConfigHasPrefix(v string) predicate.Template {
+	return predicate.Template(sql.FieldHasPrefix(FieldDefaultHarnessConfig, v))
+}
+
+// DefaultHarnessConfigHasSuffix applies the HasSuffix predicate on the "default_harness_config" field.
+func DefaultHarnessConfigHasSuffix(v string) predicate.Template {
+	return predicate.Template(sql.FieldHasSuffix(FieldDefaultHarnessConfig, v))
+}
+
+// DefaultHarnessConfigIsNil applies the IsNil predicate on the "default_harness_config" field.
+func DefaultHarnessConfigIsNil() predicate.Template {
+	return predicate.Template(sql.FieldIsNull(FieldDefaultHarnessConfig))
+}
+
+// DefaultHarnessConfigNotNil applies the NotNil predicate on the "default_harness_config" field.
+func DefaultHarnessConfigNotNil() predicate.Template {
+	return predicate.Template(sql.FieldNotNull(FieldDefaultHarnessConfig))
+}
+
+// DefaultHarnessConfigEqualFold applies the EqualFold predicate on the "default_harness_config" field.
+func DefaultHarnessConfigEqualFold(v string) predicate.Template {
+	return predicate.Template(sql.FieldEqualFold(FieldDefaultHarnessConfig, v))
+}
+
+// DefaultHarnessConfigContainsFold applies the ContainsFold predicate on the "default_harness_config" field.
+func DefaultHarnessConfigContainsFold(v string) predicate.Template {
+	return predicate.Template(sql.FieldContainsFold(FieldDefaultHarnessConfig, v))
 }
 
 // And groups predicates with the AND operator between them.

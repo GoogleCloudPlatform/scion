@@ -166,6 +166,16 @@ type AgentFilter struct {
 	// OwnerID and this field are combined with OR (not AND) when both are set.
 	MemberOrOwnerGroveIDs []string
 
+	// MemberGroveIDs, when non-empty, restricts results to agents whose
+	// grove_id is in this set. Unlike MemberOrOwnerGroveIDs, this is NOT
+	// combined with OwnerID — it filters strictly by grove ID membership.
+	MemberGroveIDs []string
+
+	// ExcludeOwnerID, when non-empty, excludes agents whose owner_id matches
+	// this value. Used with MemberGroveIDs to return "shared" agents (in a
+	// member grove but not personally created).
+	ExcludeOwnerID string
+
 	// AncestorID, when non-empty, restricts results to agents whose ancestry
 	// chain contains the given principal ID (transitive access via creation lineage).
 	AncestorID string
