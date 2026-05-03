@@ -17,6 +17,7 @@ package state
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -34,12 +35,13 @@ type UserMapping struct {
 
 // SpaceLink associates a platform space/channel with a grove.
 type SpaceLink struct {
-	SpaceID   string
-	Platform  string
-	GroveID   string
-	GroveSlug string
-	LinkedBy  string
-	LinkedAt  time.Time
+	SpaceID      string
+	Platform     string
+	GroveID      string
+	GroveSlug    string
+	LinkedBy     string
+	LinkedAt     time.Time
+	DefaultAgent string
 }
 
 // AgentSubscription tracks a user's subscription to agent activity notifications.
@@ -120,6 +122,16 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Additive column migrations (idempotent — ignore "duplicate column" errors).
+	addColumns := []string{
+		`ALTER TABLE space_links ADD COLUMN default_agent TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, m := range addColumns {
+		if _, err := s.db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("exec column migration: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -190,10 +202,10 @@ func (s *Store) GetUserMappingByHubID(hubUserID string) (*UserMapping, error) {
 func (s *Store) GetSpaceLink(spaceID, platform string) (*SpaceLink, error) {
 	l := &SpaceLink{}
 	err := s.db.QueryRow(
-		`SELECT space_id, platform, grove_id, grove_slug, linked_by, linked_at
+		`SELECT space_id, platform, grove_id, grove_slug, linked_by, linked_at, default_agent
 		 FROM space_links WHERE space_id = ? AND platform = ?`,
 		spaceID, platform,
-	).Scan(&l.SpaceID, &l.Platform, &l.GroveID, &l.GroveSlug, &l.LinkedBy, &l.LinkedAt)
+	).Scan(&l.SpaceID, &l.Platform, &l.GroveID, &l.GroveSlug, &l.LinkedBy, &l.LinkedAt, &l.DefaultAgent)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -206,9 +218,9 @@ func (s *Store) GetSpaceLink(spaceID, platform string) (*SpaceLink, error) {
 // SetSpaceLink inserts or replaces a space link.
 func (s *Store) SetSpaceLink(l *SpaceLink) error {
 	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO space_links (space_id, platform, grove_id, grove_slug, linked_by, linked_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		l.SpaceID, l.Platform, l.GroveID, l.GroveSlug, l.LinkedBy, l.LinkedAt,
+		`INSERT OR REPLACE INTO space_links (space_id, platform, grove_id, grove_slug, linked_by, linked_at, default_agent)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		l.SpaceID, l.Platform, l.GroveID, l.GroveSlug, l.LinkedBy, l.LinkedAt, l.DefaultAgent,
 	)
 	if err != nil {
 		return fmt.Errorf("set space link: %w", err)
@@ -231,7 +243,7 @@ func (s *Store) DeleteSpaceLink(spaceID, platform string) error {
 // ListSpaceLinks returns all space links.
 func (s *Store) ListSpaceLinks() ([]SpaceLink, error) {
 	rows, err := s.db.Query(
-		`SELECT space_id, platform, grove_id, grove_slug, linked_by, linked_at FROM space_links`,
+		`SELECT space_id, platform, grove_id, grove_slug, linked_by, linked_at, default_agent FROM space_links`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list space links: %w", err)
@@ -241,12 +253,29 @@ func (s *Store) ListSpaceLinks() ([]SpaceLink, error) {
 	var links []SpaceLink
 	for rows.Next() {
 		var l SpaceLink
-		if err := rows.Scan(&l.SpaceID, &l.Platform, &l.GroveID, &l.GroveSlug, &l.LinkedBy, &l.LinkedAt); err != nil {
+		if err := rows.Scan(&l.SpaceID, &l.Platform, &l.GroveID, &l.GroveSlug, &l.LinkedBy, &l.LinkedAt, &l.DefaultAgent); err != nil {
 			return nil, fmt.Errorf("scan space link: %w", err)
 		}
 		links = append(links, l)
 	}
 	return links, rows.Err()
+}
+
+// SetDefaultAgent sets the default agent for a space link.
+func (s *Store) SetDefaultAgent(spaceID, platform, agentSlug string) error {
+	_, err := s.db.Exec(
+		`UPDATE space_links SET default_agent = ? WHERE space_id = ? AND platform = ?`,
+		agentSlug, spaceID, platform,
+	)
+	if err != nil {
+		return fmt.Errorf("set default agent: %w", err)
+	}
+	return nil
+}
+
+// ClearDefaultAgent removes the default agent for a space link.
+func (s *Store) ClearDefaultAgent(spaceID, platform string) error {
+	return s.SetDefaultAgent(spaceID, platform, "")
 }
 
 // --- Agent Subscriptions ---

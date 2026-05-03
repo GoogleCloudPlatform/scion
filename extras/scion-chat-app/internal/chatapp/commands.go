@@ -176,6 +176,8 @@ func (r *CommandRouter) handleCommand(ctx context.Context, event *ChatEvent) (*E
 		resp, err = r.cmdUnsubscribe(ctx, event, args)
 	case "message", "msg":
 		resp, err = r.cmdMessage(ctx, event, args)
+	case "set-default":
+		resp, err = r.cmdSetDefault(ctx, event, args)
 	case "help":
 		resp, err = r.cmdHelp(ctx, event)
 	default:
@@ -371,23 +373,42 @@ func (r *CommandRouter) cmdList(ctx context.Context, event *ChatEvent, args []st
 		return textResponse(event, "Authentication required. Use `/scion register` first."), nil
 	}
 
+	// Fetch current grove info from hub to ensure we display the latest slug.
+	grove, err := client.Groves().Get(ctx, link.GroveID)
+	if err != nil {
+		return textResponse(event, fmt.Sprintf("Failed to get grove info: %v", err)), nil
+	}
+	if grove.Slug != link.GroveSlug {
+		link.GroveSlug = grove.Slug
+		if storeErr := r.store.SetSpaceLink(link); storeErr != nil {
+			r.log.Warn("failed to update cached grove slug", "error", storeErr)
+		}
+	}
+
 	agents, err := client.GroveAgents(link.GroveID).List(ctx, nil)
 	if err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to list agents: %v", err)), nil
 	}
 
 	if len(agents.Agents) == 0 {
-		return textResponse(event, fmt.Sprintf("No agents in grove `%s`.", link.GroveSlug)), nil
+		return textResponse(event, fmt.Sprintf("No agents in grove `%s`.", grove.Slug)), nil
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("*Agents in %s:*\n", link.GroveSlug))
+	sb.WriteString(fmt.Sprintf("*Agents in %s:*\n", grove.Slug))
 	for _, a := range agents.Agents {
 		status := a.Activity
 		if status == "" {
 			status = a.Phase
 		}
-		sb.WriteString(fmt.Sprintf("• `%s` — %s\n", a.Slug, status))
+		marker := ""
+		if link.DefaultAgent != "" && a.Slug == link.DefaultAgent {
+			marker = " *"
+		}
+		sb.WriteString(fmt.Sprintf("• `%s` — %s%s\n", a.Slug, status, marker))
+	}
+	if link.DefaultAgent != "" {
+		sb.WriteString("\n_* default agent_")
 	}
 	return textResponse(event, sb.String()), nil
 }
@@ -442,12 +463,17 @@ func (r *CommandRouter) cmdStart(ctx context.Context, event *ChatEvent, args []s
 		return textResponse(event, "Usage: `/scion start <agent-slug>`"), nil
 	}
 
+	link, linkResp := r.requireSpaceLink(ctx, event)
+	if linkResp != nil {
+		return linkResp, nil
+	}
+
 	client, err := r.clientForUser(ctx, event)
 	if err != nil {
 		return textResponse(event, "Authentication required. Use `/scion register` first."), nil
 	}
 
-	if err := client.Agents().Start(ctx, args[0]); err != nil {
+	if err := client.GroveAgents(link.GroveID).Start(ctx, args[0]); err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to start agent: %v", err)), nil
 	}
 	return textResponse(event, fmt.Sprintf("Agent `%s` started.", args[0])), nil
@@ -458,12 +484,17 @@ func (r *CommandRouter) cmdStop(ctx context.Context, event *ChatEvent, args []st
 		return textResponse(event, "Usage: `/scion stop <agent-slug>`"), nil
 	}
 
+	link, linkResp := r.requireSpaceLink(ctx, event)
+	if linkResp != nil {
+		return linkResp, nil
+	}
+
 	client, err := r.clientForUser(ctx, event)
 	if err != nil {
 		return textResponse(event, "Authentication required. Use `/scion register` first."), nil
 	}
 
-	if err := client.Agents().Stop(ctx, args[0]); err != nil {
+	if err := client.GroveAgents(link.GroveID).Stop(ctx, args[0]); err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to stop agent: %v", err)), nil
 	}
 	return textResponse(event, fmt.Sprintf("Agent `%s` stopped.", args[0])), nil
@@ -905,7 +936,7 @@ func (r *CommandRouter) cmdUnsubscribe(ctx context.Context, event *ChatEvent, ar
 }
 
 func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args []string) (*EventResponse, error) {
-	if len(args) < 2 {
+	if len(args) < 1 {
 		return textResponse(event, "Usage: `/scion message [--thread <thread-id>] <agent-slug> <text>`"), nil
 	}
 
@@ -934,12 +965,30 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 		}
 	}
 
-	if len(remaining) < 2 {
+	if len(remaining) < 1 {
 		return textResponse(event, "Usage: `/scion message [--thread <thread-id>] <agent-slug> <text>`"), nil
 	}
 
 	agentSlug := remaining[0]
 	messageText := strings.Join(remaining[1:], " ")
+
+	// Try to resolve the first arg as an agent. If it doesn't match and a
+	// default agent is configured, treat the entire input as the message text.
+	agent, err := client.GroveAgents(link.GroveID).Get(ctx, agentSlug)
+	if err != nil {
+		if link.DefaultAgent == "" {
+			return textResponse(event, fmt.Sprintf("Agent `%s` not found: %v", agentSlug, err)), nil
+		}
+		agentSlug = link.DefaultAgent
+		messageText = strings.Join(remaining, " ")
+		agent, err = client.GroveAgents(link.GroveID).Get(ctx, agentSlug)
+		if err != nil {
+			return textResponse(event, fmt.Sprintf("Default agent `%s` not found: %v", agentSlug, err)), nil
+		}
+	}
+	if agent.Phase == "stopped" {
+		return textResponse(event, fmt.Sprintf("Agent `%s` is stopped. Start it with `/scion start %s` before sending messages.", agentSlug, agentSlug)), nil
+	}
 
 	// Use the hub user email with "user:" prefix so agents can address replies
 	msg := messages.NewInstruction("user:"+mapping.HubUserEmail, agentSlug, messageText)
@@ -952,25 +1001,49 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 		return textResponse(event, fmt.Sprintf("Failed to send message to `%s`: %v", agentSlug, err)), nil
 	}
 
-	// Send a visible message so other space members can see what was sent.
 	displayName := event.UserDisplayName
 	if displayName == "" {
 		displayName = event.UserEmail
 	}
-	visibleText := fmt.Sprintf("Message from *%s* sent to *%s*:\n%s", displayName, agentSlug, messageText)
-	if _, err := r.messenger.SendMessage(ctx, SendMessageRequest{
-		SpaceID:  event.SpaceID,
-		ThreadID: event.ThreadID,
-		Text:     visibleText,
-	}); err != nil {
-		r.log.Error("failed to send visible message confirmation", "error", err)
+	replyText := fmt.Sprintf("Message from *%s* sent to *%s*:\n%s", displayName, agentSlug, messageText)
+	return textResponse(event, replyText), nil
+}
+
+func (r *CommandRouter) cmdSetDefault(ctx context.Context, event *ChatEvent, args []string) (*EventResponse, error) {
+	link, linkResp := r.requireSpaceLink(ctx, event)
+	if linkResp != nil {
+		return linkResp, nil
 	}
 
-	replyText := fmt.Sprintf("Message sent to agent `%s`.", agentSlug)
-	if threadID != "" {
-		replyText += fmt.Sprintf(" (thread: `%s`)", threadID)
+	if len(args) == 0 {
+		if link.DefaultAgent == "" {
+			return textResponse(event, "No default agent is set. Usage: `/scion set-default <agent-slug>`"), nil
+		}
+		return textResponse(event, fmt.Sprintf("Default agent is `%s`. Use `/scion set-default clear` to remove.", link.DefaultAgent)), nil
 	}
-	return textResponse(event, replyText), nil
+
+	arg := strings.ToLower(args[0])
+	if arg == "clear" || arg == "none" {
+		if err := r.store.ClearDefaultAgent(event.SpaceID, event.Platform); err != nil {
+			return textResponse(event, fmt.Sprintf("Failed to clear default agent: %v", err)), nil
+		}
+		return textResponse(event, "Default agent cleared."), nil
+	}
+
+	client, err := r.clientForUser(ctx, event)
+	if err != nil {
+		return textResponse(event, "Authentication required. Use `/scion register` first."), nil
+	}
+
+	agent, err := client.GroveAgents(link.GroveID).Get(ctx, args[0])
+	if err != nil {
+		return textResponse(event, fmt.Sprintf("Agent `%s` not found: %v", args[0], err)), nil
+	}
+
+	if err := r.store.SetDefaultAgent(event.SpaceID, event.Platform, agent.Slug); err != nil {
+		return textResponse(event, fmt.Sprintf("Failed to set default agent: %v", err)), nil
+	}
+	return textResponse(event, fmt.Sprintf("Default agent set to `%s`. Messages that don't match an agent name will be sent here.", agent.Slug)), nil
 }
 
 func (r *CommandRouter) cmdInfo(ctx context.Context, event *ChatEvent, args []string) (*EventResponse, error) {
@@ -1021,6 +1094,9 @@ func (r *CommandRouter) cmdInfo(ctx context.Context, event *ChatEvent, args []st
 			}
 		}
 	}
+	if link != nil && link.DefaultAgent != "" {
+		widgets = append(widgets, Widget{Type: WidgetKeyValue, Label: "Default Agent", Content: link.DefaultAgent})
+	}
 
 	card := Card{
 		Header: CardHeader{
@@ -1054,6 +1130,7 @@ func (r *CommandRouter) cmdHelp(ctx context.Context, event *ChatEvent) (*EventRe
 • ` + "`/scion delete <agent>`" + ` — Delete an agent (with confirmation)
 • ` + "`/scion logs <agent>`" + ` — View recent agent logs
 • ` + "`/scion message [--thread <id>] <agent> <text>`" + ` — Send a message to an agent
+• ` + "`/scion set-default <agent>`" + ` — Set default agent for messages (clear with ` + "`clear`" + `)
 
 *Space & Identity:*
 • ` + "`/scion info`" + ` — Show registration, grove link, and agent info
