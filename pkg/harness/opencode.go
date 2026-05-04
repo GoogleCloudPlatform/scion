@@ -108,7 +108,7 @@ func (o *OpenCode) GetTelemetryEnv() map[string]string {
 }
 
 func (o *OpenCode) InjectAgentInstructions(agentHome string, content []byte) error {
-	target := filepath.Join(agentHome, "AGENTS.md")
+	target := filepath.Join(agentHome, ".config/opencode", "AGENTS.md")
 	return os.WriteFile(target, content, 0644)
 }
 
@@ -184,7 +184,7 @@ func (o *OpenCode) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error) {
 
 func (o *OpenCode) InjectSystemPrompt(agentHome string, content []byte) error {
 	// OpenCode has no native system prompt support — downgrade by prepending to AGENTS.md
-	agentsPath := filepath.Join(agentHome, "AGENTS.md")
+	agentsPath := filepath.Join(agentHome, ".config/opencode", "AGENTS.md")
 	header := fmt.Sprintf("# System Prompt\n\n%s\n\n---\n\n", string(content))
 
 	existing, err := os.ReadFile(agentsPath)
