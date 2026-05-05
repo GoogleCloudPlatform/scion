@@ -50,7 +50,7 @@ func (o *OpenCode) AdvancedCapabilities() api.HarnessAdvancedCapabilities {
 		Auth: api.HarnessAuthCapabilities{
 			APIKey:   api.CapabilityField{Support: api.SupportYes},
 			AuthFile: api.CapabilityField{Support: api.SupportYes},
-			VertexAI: api.CapabilityField{Support: api.SupportNo, Reason: "Vertex AI auth is not supported for this harness"},
+			VertexAI: api.CapabilityField{Support: api.SupportYes},
 		},
 		Resume: api.CapabilityField{Support: api.SupportYes},
 	}
@@ -64,11 +64,8 @@ func (o *OpenCode) GetCommand(task string, resume bool, baseArgs []string) []str
 	args := []string{"opencode"}
 	if resume {
 		args = append(args, "--continue")
-	} else {
-		args = append(args, "--prompt")
-		if task != "" {
-			args = append(args, task)
-		}
+	} else if task != "" {
+		args = append(args, "--prompt", task)
 	}
 
 	args = append(args, baseArgs...)
@@ -142,12 +139,22 @@ func (o *OpenCode) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error) {
 					{SourcePath: auth.OpenCodeAuthFile, ContainerPath: "~/.local/share/opencode/auth.json"},
 				},
 			}, nil
+		case "vertex-ai":
+			if auth.GoogleCloudProject == "" || auth.GoogleCloudRegion == "" {
+				return nil, fmt.Errorf("opencode: auth type %q selected but GOOGLE_CLOUD_PROJECT and/or GOOGLE_CLOUD_REGION not set", auth.SelectedType)
+			}
+			return o.resolveVertexAI(auth), nil
+
 		default:
-			return nil, fmt.Errorf("opencode: unknown auth type %q; valid types are: api-key, auth-file", auth.SelectedType)
+			return nil, fmt.Errorf("opencode: unknown auth type %q; valid types are: api-key, auth-file, vertex-ai", auth.SelectedType)
 		}
 	}
 
-	// Auto-detect preference order: AnthropicAPIKey → OpenAIAPIKey → OpenCodeAuthFile → error
+	// Auto-detect preference order: VertexAi → AnthropicAPIKey → OpenAIAPIKey → OpenCodeAuthFile → error
+
+	if auth.GoogleCloudProject != "" && auth.GoogleCloudRegion != "" {
+		return o.resolveVertexAI(auth), nil
+	}
 
 	if auth.AnthropicAPIKey != "" {
 		return &api.ResolvedAuth{
@@ -179,9 +186,27 @@ func (o *OpenCode) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error) {
 		}, nil
 	}
 
-	return nil, fmt.Errorf("opencode: no valid auth method found; set ANTHROPIC_API_KEY or OPENAI_API_KEY, or provide auth credentials at ~/.local/share/opencode/auth.json")
+	return nil, fmt.Errorf("opencode: no valid auth method found; set VertexAi ENVs or ANTHROPIC_API_KEY or OPENAI_API_KEY, or provide auth credentials at ~/.local/share/opencode/auth.json")
 }
 
+func (o *OpenCode) resolveVertexAI(auth api.AuthConfig) *api.ResolvedAuth {
+	adcContainerPath := "~/.config/gcloud/application_default_credentials.json"
+	result := &api.ResolvedAuth{
+		Method: "vertex-ai",
+		EnvVars: map[string]string{
+			"VERTEX_LOCATION":      auth.GoogleCloudRegion,
+			"GOOGLE_CLOUD_REGION":  auth.GoogleCloudRegion,
+			"GOOGLE_CLOUD_PROJECT": auth.GoogleCloudProject,
+		},
+	}
+	if auth.GoogleAppCredentials != "" {
+		result.Files = append(result.Files, api.FileMapping{
+			SourcePath:    auth.GoogleAppCredentials,
+			ContainerPath: adcContainerPath,
+		})
+	}
+	return result
+}
 func (o *OpenCode) InjectSystemPrompt(agentHome string, content []byte) error {
 	// OpenCode has no native system prompt support — downgrade by prepending to AGENTS.md
 	agentsPath := filepath.Join(agentHome, "AGENTS.md")
