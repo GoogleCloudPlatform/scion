@@ -115,6 +115,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     aggregate \
     nano \
     vim \
+    openssh-client \
     python3-venv \
     lsb-release \
     chromium \
