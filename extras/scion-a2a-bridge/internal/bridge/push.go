@@ -35,12 +35,14 @@ import (
 
 // PushDispatcher delivers webhook notifications for task state changes.
 type PushDispatcher struct {
-	store     *state.Store
-	config    *Config
-	log       *slog.Logger
-	client    *http.Client
-	resolveIP func(host string) ([]net.IP, error)
-	sem       chan struct{}
+	store       *state.Store
+	config      *Config
+	log         *slog.Logger
+	client      *http.Client
+	resolveIP   func(host string) ([]net.IP, error)
+	sem         chan struct{}
+	shutdownCtx context.Context
+	wg          sync.WaitGroup
 }
 
 var errRedirectBlocked = errors.New("push notification redirects are not allowed")
@@ -93,6 +95,11 @@ func isPrivateIP(ip net.IP) bool {
 	if ipv6SiteLocal != nil {
 		reservedRanges = append(reservedRanges, *ipv6SiteLocal)
 	}
+	// IPv6 multicast (ff00::/8).
+	_, ipv6Mcast, _ := net.ParseCIDR("ff00::/8")
+	if ipv6Mcast != nil {
+		reservedRanges = append(reservedRanges, *ipv6Mcast)
+	}
 
 	for _, cidr := range reservedRanges {
 		if cidr.Contains(ip) {
@@ -142,19 +149,26 @@ func NewSSRFSafeClient() *http.Client {
 }
 
 // NewPushDispatcher creates a new push notification dispatcher.
-func NewPushDispatcher(store *state.Store, cfg *Config, log *slog.Logger) *PushDispatcher {
+func NewPushDispatcher(store *state.Store, cfg *Config, log *slog.Logger, shutdownCtx context.Context) *PushDispatcher {
 	return &PushDispatcher{
-		store:     store,
-		config:    cfg,
-		log:       log,
-		client:    NewSSRFSafeClient(),
-		resolveIP: net.LookupIP,
-		sem:       make(chan struct{}, maxPushConcurrency),
+		store:       store,
+		config:      cfg,
+		log:         log,
+		client:      NewSSRFSafeClient(),
+		resolveIP:   net.LookupIP,
+		sem:         make(chan struct{}, maxPushConcurrency),
+		shutdownCtx: shutdownCtx,
 	}
 }
 
 // Dispatch sends a stream event to all registered push notification webhooks for a task.
 func (pd *PushDispatcher) Dispatch(ctx context.Context, taskID string, event StreamEvent) {
+	select {
+	case <-pd.shutdownCtx.Done():
+		return
+	default:
+	}
+
 	configs, err := pd.store.GetPushConfigsByTask(taskID)
 	if err != nil {
 		pd.log.Error("failed to get push configs", "task_id", taskID, "error", err)
@@ -166,17 +180,30 @@ func (pd *PushDispatcher) Dispatch(ctx context.Context, taskID string, event Str
 
 	pd.log.Debug("dispatching push notifications", "task_id", taskID, "config_count", len(configs))
 
-	var wg sync.WaitGroup
+	pd.wg.Add(1)
+	defer pd.wg.Done()
+
+	var localWg sync.WaitGroup
 	for _, cfg := range configs {
-		wg.Add(1)
+		// Acquire semaphore before spawning to bound goroutine count.
+		select {
+		case pd.sem <- struct{}{}:
+		case <-pd.shutdownCtx.Done():
+			return
+		}
+		localWg.Add(1)
 		go func(c state.PushNotificationConfig) {
-			defer wg.Done()
-			pd.sem <- struct{}{}
+			defer localWg.Done()
 			defer func() { <-pd.sem }()
 			pd.sendWithRetry(c, event)
 		}(cfg)
 	}
-	wg.Wait()
+	localWg.Wait()
+}
+
+// Wait blocks until all in-flight dispatches complete.
+func (pd *PushDispatcher) Wait() {
+	pd.wg.Wait()
 }
 
 func (pd *PushDispatcher) sendWithRetry(cfg state.PushNotificationConfig, event StreamEvent) {
@@ -186,7 +213,11 @@ func (pd *PushDispatcher) sendWithRetry(cfg state.PushNotificationConfig, event 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			backoff := time.Duration(1<<uint(attempt-1)) * 2 * time.Second
-			time.Sleep(backoff)
+			select {
+			case <-time.After(backoff):
+			case <-pd.shutdownCtx.Done():
+				return
+			}
 		}
 
 		statusCode, err := pd.send(cfg, event)
@@ -248,7 +279,11 @@ func (pd *PushDispatcher) send(cfg state.PushNotificationConfig, event StreamEve
 }
 
 // SetPushNotificationConfig registers a webhook for task updates.
-func (b *Bridge) SetPushNotificationConfig(ctx context.Context, taskID, url, token, authScheme, authCredentials string) (*state.PushNotificationConfig, error) {
+func (b *Bridge) SetPushNotificationConfig(ctx context.Context, taskID, pushURL, token, authScheme, authCredentials string) (*state.PushNotificationConfig, error) {
+	if err := ValidatePushURL(pushURL); err != nil {
+		return nil, fmt.Errorf("invalid push URL: %w", err)
+	}
+
 	task, err := b.store.GetTask(taskID)
 	if err != nil {
 		return nil, fmt.Errorf("get task: %w", err)
@@ -260,7 +295,7 @@ func (b *Bridge) SetPushNotificationConfig(ctx context.Context, taskID, url, tok
 	cfg := &state.PushNotificationConfig{
 		ID:              uuid.New().String(),
 		TaskID:          taskID,
-		URL:             url,
+		URL:             pushURL,
 		Token:           token,
 		AuthScheme:      authScheme,
 		AuthCredentials: authCredentials,
@@ -271,7 +306,7 @@ func (b *Bridge) SetPushNotificationConfig(ctx context.Context, taskID, url, tok
 		return nil, fmt.Errorf("set push config: %w", err)
 	}
 
-	b.log.Info("push notification config set", "id", cfg.ID, "task_id", taskID, "url", url)
+	b.log.Info("push notification config set", "id", cfg.ID, "task_id", taskID, "url", pushURL)
 	return cfg, nil
 }
 

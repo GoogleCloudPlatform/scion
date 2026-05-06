@@ -30,6 +30,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
+// waiter tracks a blocking response channel with agent routing info.
+type waiter struct {
+	ch        chan *messages.StructuredMessage
+	agentSlug string
+	groveID   string
+}
+
 // Bridge is the core bridge logic that ties together state management,
 // hub client operations, and message translation.
 type Bridge struct {
@@ -44,9 +51,9 @@ type Bridge struct {
 
 	// waiters tracks channels waiting for agent responses, keyed by taskID.
 	mu      sync.RWMutex
-	waiters map[string]chan *messages.StructuredMessage
+	waiters map[string]*waiter
 
-	// activeTasks maps taskID to the agent slug for routing broker messages.
+	// activeTasks maps taskID to the agentKey (groveID:agentSlug) for routing broker messages.
 	tasksMu     sync.RWMutex
 	activeTasks map[string]string
 
@@ -72,8 +79,8 @@ func New(store *state.Store, hubClient hubclient.Client, minter *identity.TokenM
 		config:         cfg,
 		log:            log,
 		streams:        NewStreamManager(),
-		push:           NewPushDispatcher(store, cfg, log),
-		waiters:        make(map[string]chan *messages.StructuredMessage),
+		push:           NewPushDispatcher(store, cfg, log, ctx),
+		waiters:        make(map[string]*waiter),
 		activeTasks:    make(map[string]string),
 		agentTasks:     make(map[string][]string),
 		shutdownCtx:    ctx,
@@ -85,6 +92,7 @@ func New(store *state.Store, hubClient hubclient.Client, minter *identity.TokenM
 func (b *Bridge) Shutdown() {
 	b.shutdownCancel()
 	b.wg.Wait()
+	b.push.Wait()
 }
 
 // SetBroker wires the broker server for subscription management.
@@ -165,7 +173,11 @@ func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextI
 
 	// Blocking mode: set up per-task waiter.
 	responseCh := make(chan *messages.StructuredMessage, 1)
-	b.addWaiter(taskID, responseCh)
+	b.addWaiter(taskID, &waiter{
+		ch:        responseCh,
+		agentSlug: agentCtx.AgentSlug,
+		groveID:   agentCtx.GroveID,
+	})
 	defer b.removeWaiter(taskID)
 
 	if err := b.hubClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false); err != nil {
@@ -332,11 +344,14 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 		return nil
 	}
 
-	// Fallback: dispatch to all blocking waiters for this agent (best-effort without correlation).
+	// Fallback: dispatch to blocking waiters that match this agent (best-effort without correlation).
+	groveID := extractGroveIDFromTopic(topic)
 	b.mu.RLock()
 	var matchedTaskIDs []string
-	for taskID := range b.waiters {
-		matchedTaskIDs = append(matchedTaskIDs, taskID)
+	for taskID, w := range b.waiters {
+		if w.agentSlug == agentSlug && (groveID == "" || w.groveID == groveID) {
+			matchedTaskIDs = append(matchedTaskIDs, taskID)
+		}
 	}
 	b.mu.RUnlock()
 
@@ -344,19 +359,12 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 		b.dispatchToWaiter(taskID, msg)
 	}
 
-	// Dispatch to all active (non-blocking/streaming) tasks for this agent.
+	// Dispatch to all active (non-blocking/streaming) tasks for this agent
+	// using the indexed reverse map for O(1) lookup.
+	aKey := agentKey(groveID, agentSlug)
 	b.tasksMu.RLock()
-	var activeTaskIDs []string
-	for _, aKey := range []string{} {
-		_ = aKey
-	}
-	// Find all tasks that belong to this agent slug.
-	for taskID, aSlug := range b.activeTasks {
-		// Match on agent slug suffix (agentKey is "groveID:agentSlug").
-		if strings.HasSuffix(aSlug, ":"+agentSlug) || aSlug == agentSlug {
-			activeTaskIDs = append(activeTaskIDs, taskID)
-		}
-	}
+	activeTaskIDs := make([]string, len(b.agentTasks[aKey]))
+	copy(activeTaskIDs, b.agentTasks[aKey])
 	b.tasksMu.RUnlock()
 
 	for _, taskID := range activeTaskIDs {
@@ -367,15 +375,19 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 }
 
 // dispatchToWaiter sends a message to a blocking waiter for the given taskID.
+// State-change messages are skipped so the actual reply lands in the buffer.
 func (b *Bridge) dispatchToWaiter(taskID string, msg *messages.StructuredMessage) {
+	if msg.Type == messages.TypeStateChange {
+		return
+	}
 	b.mu.RLock()
-	ch, ok := b.waiters[taskID]
+	w, ok := b.waiters[taskID]
 	b.mu.RUnlock()
 	if !ok {
 		return
 	}
 	select {
-	case ch <- msg:
+	case w.ch <- msg:
 	default:
 	}
 }
@@ -408,6 +420,9 @@ func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug str
 			b.unregisterActiveTask(taskID, aKey)
 		}
 	} else {
+		// MVP: treat any non-state-change message as a terminal response.
+		// A multi-turn agent may send interim content that shouldn't complete the task.
+		b.log.Debug("treating content message as task completion", "task_id", taskID)
 		if err := b.store.UpdateTaskState(taskID, TaskStateCompleted); err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 		}
@@ -639,10 +654,10 @@ func (b *Bridge) unregisterActiveTask(taskID, aKey string) {
 	}
 }
 
-func (b *Bridge) addWaiter(taskID string, ch chan *messages.StructuredMessage) {
+func (b *Bridge) addWaiter(taskID string, w *waiter) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.waiters[taskID] = ch
+	b.waiters[taskID] = w
 }
 
 func (b *Bridge) removeWaiter(taskID string) {
@@ -661,6 +676,38 @@ func extractAgentIDFromTopic(topic string) string {
 		return parts[4]
 	}
 	return ""
+}
+
+// extractGroveIDFromTopic parses grove identity from broker topic strings.
+func extractGroveIDFromTopic(topic string) string {
+	parts := strings.Split(topic, ".")
+	if len(parts) >= 3 && parts[0] == "scion" && parts[1] == "grove" {
+		return parts[2]
+	}
+	return ""
+}
+
+// AuthorizeTask verifies a task belongs to the given grove and agent.
+// Returns nil (not an error) if the task doesn't exist or doesn't match,
+// so callers can return "not found" without leaking existence.
+func (b *Bridge) AuthorizeTask(taskID, groveSlug, agentSlug string) (*state.Task, error) {
+	task, err := b.store.GetTask(taskID)
+	if err != nil {
+		return nil, fmt.Errorf("get task: %w", err)
+	}
+	if task == nil || task.GroveID != groveSlug || task.AgentSlug != agentSlug {
+		return nil, nil
+	}
+	return task, nil
+}
+
+// AuthorizeContext verifies a context belongs to the given grove and agent.
+func (b *Bridge) AuthorizeContext(contextID, groveSlug, agentSlug string) bool {
+	ctx, err := b.store.GetContext(contextID)
+	if err != nil || ctx == nil {
+		return false
+	}
+	return ctx.GroveID == groveSlug && ctx.AgentSlug == agentSlug
 }
 
 // extractAgentIDFromSender extracts agent identity from sender field.

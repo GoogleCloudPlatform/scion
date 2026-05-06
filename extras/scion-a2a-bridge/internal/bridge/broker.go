@@ -194,7 +194,24 @@ func (b *BrokerServer) CancelSubscription(pattern string) error {
 }
 
 // Serve starts the go-plugin RPC server on the given address.
-func (b *BrokerServer) Serve(listenAddr string) (*PluginServer, error) {
+// If allowRemote is false, the address must bind to a loopback interface.
+func (b *BrokerServer) Serve(listenAddr string, allowRemote bool) (*PluginServer, error) {
+	if !allowRemote {
+		host, _, err := net.SplitHostPort(listenAddr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid plugin listen address %q: %w", listenAddr, err)
+		}
+		if host == "" || host == "0.0.0.0" || host == "::" {
+			return nil, fmt.Errorf("plugin.listen_address %q binds to all interfaces; use localhost or set plugin.allow_remote: true", listenAddr)
+		}
+		if host != "localhost" {
+			ip := net.ParseIP(host)
+			if ip == nil || !ip.IsLoopback() {
+				return nil, fmt.Errorf("plugin.listen_address %q is not loopback; set plugin.allow_remote: true to override", listenAddr)
+			}
+		}
+	}
+
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("listening on %s: %w", listenAddr, err)

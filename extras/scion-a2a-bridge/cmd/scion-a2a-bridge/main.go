@@ -96,10 +96,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if cfg.Hub.User == "" {
-		log.Error("hub user is required")
-		os.Exit(1)
-	}
 	adminAuth := identity.NewMintingAuth(minter, cfg.Hub.User, cfg.Hub.User, "admin", 15*time.Minute)
 
 	adminClient, err := hubclient.New(cfg.Hub.Endpoint, hubclient.WithAuthenticator(adminAuth))
@@ -120,7 +116,7 @@ func main() {
 	if pluginAddr == "" {
 		pluginAddr = "localhost:9090"
 	}
-	pluginServer, err := broker.Serve(pluginAddr)
+	pluginServer, err := broker.Serve(pluginAddr, cfg.Plugin.AllowRemote)
 	if err != nil {
 		log.Error("failed to start broker plugin server", "error", err)
 		os.Exit(1)
@@ -140,12 +136,11 @@ func main() {
 	metrics := bridge.NewMetrics(prometheus.DefaultRegisterer)
 	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"))
 
-	// WriteTimeout is 0 to support long-lived SSE streams.
 	httpServer := &http.Server{
 		Addr:           listenAddr,
 		Handler:        srv.Handler(),
 		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   0,
+		WriteTimeout:   30 * time.Second,
 		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
@@ -223,6 +218,8 @@ func loadConfig(path string) (*bridge.Config, error) {
 	return &cfg, nil
 }
 
+var b64Cleaner = strings.NewReplacer(" ", "", "\t", "", "\n", "", "\r", "")
+
 func loadSigningKey(cfg bridge.HubConfig) (string, error) {
 	switch {
 	case cfg.SigningKey != "":
@@ -230,9 +227,7 @@ func loadSigningKey(cfg bridge.HubConfig) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("reading signing key file: %w", err)
 		}
-		// Strip all whitespace (including embedded newlines from wrapped base64).
-		cleaned := strings.NewReplacer(" ", "", "\t", "", "\n", "", "\r", "").Replace(string(data))
-		return cleaned, nil
+		return b64Cleaner.Replace(string(data)), nil
 	case cfg.SigningKeySecret != "":
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -255,7 +250,7 @@ func accessSecret(ctx context.Context, resourceName string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("accessing secret version: %w", err)
 	}
-	return strings.TrimSpace(string(resp.Payload.Data)), nil
+	return b64Cleaner.Replace(string(resp.Payload.Data)), nil
 }
 
 func initLogger(cfg bridge.LoggingConfig) *slog.Logger {

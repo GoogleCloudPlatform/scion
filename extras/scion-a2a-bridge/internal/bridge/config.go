@@ -46,7 +46,6 @@ type ProviderConfig struct {
 type HubConfig struct {
 	Endpoint         string `yaml:"endpoint"`
 	User             string `yaml:"user"`
-	Project          string `yaml:"project"`
 	SigningKey       string `yaml:"signing_key"`
 	SigningKeySecret string `yaml:"signing_key_secret"`
 }
@@ -54,6 +53,7 @@ type HubConfig struct {
 // PluginConfig holds broker plugin RPC server settings.
 type PluginConfig struct {
 	ListenAddress string `yaml:"listen_address"`
+	AllowRemote   bool   `yaml:"allow_remote"`
 }
 
 // AuthConfig holds external authentication settings for A2A clients.

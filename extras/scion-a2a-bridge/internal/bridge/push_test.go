@@ -15,6 +15,7 @@
 package bridge
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -90,7 +91,7 @@ func TestPushDispatcherSendsWebhook(t *testing.T) {
 
 	cfg := &Config{Timeouts: TimeoutConfig{PushRetryMax: 3}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	pd := NewPushDispatcher(store, cfg, log)
+	pd := NewPushDispatcher(store, cfg, log, context.Background())
 	pd.resolveIP = noopResolveIP
 	pd.client = testPushClient()
 
@@ -136,7 +137,7 @@ func TestPushDispatcherAuthScheme(t *testing.T) {
 
 	cfg := &Config{}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	pd := NewPushDispatcher(store, cfg, log)
+	pd := NewPushDispatcher(store, cfg, log, context.Background())
 	pd.resolveIP = noopResolveIP
 	pd.client = testPushClient()
 
@@ -182,7 +183,7 @@ func TestPushDispatcherRetriesOnFailure(t *testing.T) {
 	// PushRetryMax=1 means: 1 initial attempt + 1 retry = 2 total, with 2s backoff.
 	cfg := &Config{Timeouts: TimeoutConfig{PushRetryMax: 1}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	pd := NewPushDispatcher(store, cfg, log)
+	pd := NewPushDispatcher(store, cfg, log, context.Background())
 	pd.resolveIP = noopResolveIP
 	pd.client = testPushClient()
 
@@ -231,7 +232,7 @@ func TestPushDispatcherDeletesOnPermanentError(t *testing.T) {
 
 	cfg := &Config{Timeouts: TimeoutConfig{PushRetryMax: 3}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	pd := NewPushDispatcher(store, cfg, log)
+	pd := NewPushDispatcher(store, cfg, log, context.Background())
 	pd.resolveIP = noopResolveIP
 	pd.client = testPushClient()
 
@@ -276,7 +277,7 @@ func TestPushDispatcherKeepsConfigOnServerError(t *testing.T) {
 
 	cfg := &Config{Timeouts: TimeoutConfig{PushRetryMax: 0}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	pd := NewPushDispatcher(store, cfg, log)
+	pd := NewPushDispatcher(store, cfg, log, context.Background())
 	pd.resolveIP = noopResolveIP
 	pd.client = testPushClient()
 
@@ -313,7 +314,7 @@ func TestPushDispatcherWebhookPayload(t *testing.T) {
 
 	cfg := &Config{Timeouts: TimeoutConfig{PushRetryMax: 0}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	pd := NewPushDispatcher(store, cfg, log)
+	pd := NewPushDispatcher(store, cfg, log, context.Background())
 	pd.resolveIP = noopResolveIP
 	pd.client = testPushClient()
 

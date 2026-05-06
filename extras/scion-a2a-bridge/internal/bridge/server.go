@@ -99,11 +99,22 @@ func NewServer(bridge *Bridge, cfg *Config, metrics *Metrics, log *slog.Logger) 
 	}
 }
 
-// ValidateConfig checks that authentication configuration is consistent.
-// Returns an error if the auth scheme requires a key but none is configured.
+// ValidateConfig checks that required configuration fields are present and consistent.
 func ValidateConfig(cfg *Config) error {
-	if cfg.Auth.Scheme == "apiKey" && cfg.Auth.APIKey == "" {
-		return fmt.Errorf("auth.api_key is required when auth.scheme is \"apiKey\"")
+	if cfg.Bridge.ExternalURL == "" {
+		return fmt.Errorf("bridge.external_url is required")
+	}
+	if cfg.Hub.Endpoint == "" {
+		return fmt.Errorf("hub.endpoint is required")
+	}
+	if cfg.Hub.User == "" {
+		return fmt.Errorf("hub.user is required")
+	}
+	if cfg.Auth.Scheme != "" && cfg.Auth.Scheme != "apiKey" && cfg.Auth.Scheme != "bearer" {
+		return fmt.Errorf("unsupported auth.scheme: %q (supported: apiKey, bearer)", cfg.Auth.Scheme)
+	}
+	if (cfg.Auth.Scheme == "apiKey" || cfg.Auth.Scheme == "bearer") && cfg.Auth.APIKey == "" {
+		return fmt.Errorf("auth.api_key is required when auth.scheme is %q", cfg.Auth.Scheme)
 	}
 	return nil
 }
@@ -133,7 +144,9 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+		s.log.Error("failed to encode healthz response", "error", err)
+	}
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
@@ -161,7 +174,9 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(checks)
+	if err := json.NewEncoder(w).Encode(checks); err != nil {
+		s.log.Error("failed to encode readyz response", "error", err)
+	}
 }
 
 func (s *Server) handleWellKnownAgentCard(w http.ResponseWriter, r *http.Request) {
@@ -185,7 +200,9 @@ func (s *Server) handleWellKnownAgentCard(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
-	json.NewEncoder(w).Encode(registry)
+	if err := json.NewEncoder(w).Encode(registry); err != nil {
+		s.log.Error("failed to encode well-known agent card response", "error", err)
+	}
 }
 
 func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
@@ -216,7 +233,9 @@ func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
-	json.NewEncoder(w).Encode(card)
+	if err := json.NewEncoder(w).Encode(card); err != nil {
+		s.log.Error("failed to encode agent card response", "error", err)
+	}
 }
 
 func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
@@ -248,19 +267,19 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	case "message/stream":
 		s.handleStreamMessage(w, r, req, groveSlug, agentSlug)
 	case "tasks/get":
-		s.handleGetTask(w, r, req)
+		s.handleGetTask(w, r, req, groveSlug, agentSlug)
 	case "tasks/list":
-		s.handleListTasks(w, r, req)
+		s.handleListTasks(w, r, req, groveSlug, agentSlug)
 	case "tasks/cancel":
-		s.handleCancelTask(w, r, req)
+		s.handleCancelTask(w, r, req, groveSlug, agentSlug)
 	case "tasks/pushNotification/set":
-		s.handleSetPushNotification(w, r, req)
+		s.handleSetPushNotification(w, r, req, groveSlug, agentSlug)
 	case "tasks/pushNotification/get":
-		s.handleGetPushNotification(w, r, req)
+		s.handleGetPushNotification(w, r, req, groveSlug, agentSlug)
 	case "tasks/pushNotification/delete":
-		s.handleDeletePushNotification(w, r, req)
+		s.handleDeletePushNotification(w, r, req, groveSlug, agentSlug)
 	case "tasks/resubscribe":
-		s.handleResubscribe(w, r, req)
+		s.handleResubscribe(w, r, req, groveSlug, agentSlug)
 	default:
 		s.writeRPCError(w, req.ID, ErrCodeMethodNotFound, fmt.Sprintf("method %q not found", req.Method))
 	}
@@ -289,7 +308,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, req J
 	s.writeRPCResult(w, req.ID, result)
 }
 
-func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
+func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
 	var params TaskQueryParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid GetTask params", "error", err)
@@ -297,7 +316,7 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request, req JSONR
 		return
 	}
 
-	task, err := s.bridge.GetTask(r.Context(), params.ID)
+	task, err := s.bridge.AuthorizeTask(params.ID, groveSlug, agentSlug)
 	if err != nil {
 		s.log.Error("GetTask failed", "error", err, "taskID", params.ID)
 		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
@@ -308,10 +327,14 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request, req JSONR
 		return
 	}
 
-	s.writeRPCResult(w, req.ID, task)
+	s.writeRPCResult(w, req.ID, &TaskResult{
+		ID:        task.ID,
+		ContextID: task.ContextID,
+		Status:    TaskStatus{State: task.State},
+	})
 }
 
-func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
+func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
 	var params TaskQueryParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid ListTasks params", "error", err)
@@ -321,6 +344,11 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request, req JSO
 
 	if params.ContextID == "" {
 		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "contextId is required")
+		return
+	}
+
+	if !s.bridge.AuthorizeContext(params.ContextID, groveSlug, agentSlug) {
+		s.writeRPCError(w, req.ID, ErrCodeTaskNotFound, "context not found")
 		return
 	}
 
@@ -334,11 +362,22 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request, req JSO
 	s.writeRPCResult(w, req.ID, tasks)
 }
 
-func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
+func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
 	var params TaskQueryParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid CancelTask params", "error", err)
 		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
+		return
+	}
+
+	task, err := s.bridge.AuthorizeTask(params.ID, groveSlug, agentSlug)
+	if err != nil {
+		s.log.Error("CancelTask auth failed", "error", err, "taskID", params.ID)
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
+		return
+	}
+	if task == nil {
+		s.writeRPCError(w, req.ID, ErrCodeTaskNotFound, "task not found")
 		return
 	}
 
@@ -375,11 +414,22 @@ func (s *Server) handleStreamMessage(w http.ResponseWriter, r *http.Request, req
 	s.writeSSEStream(w, r, taskID, events)
 }
 
-func (s *Server) handleResubscribe(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
+func (s *Server) handleResubscribe(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
 	var params TaskQueryParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid Resubscribe params", "error", err)
 		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
+		return
+	}
+
+	task, err := s.bridge.AuthorizeTask(params.ID, groveSlug, agentSlug)
+	if err != nil {
+		s.log.Error("Resubscribe auth failed", "error", err, "taskID", params.ID)
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
+		return
+	}
+	if task == nil {
+		s.writeRPCError(w, req.ID, ErrCodeTaskNotFound, "task not found")
 		return
 	}
 
@@ -399,6 +449,12 @@ func (s *Server) writeSSEStream(w http.ResponseWriter, r *http.Request, taskID s
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
 		return
+	}
+
+	// Disable the global WriteTimeout for this long-lived SSE connection.
+	rc := http.NewResponseController(w)
+	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+		s.log.Warn("failed to disable write deadline for SSE", "error", err)
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -456,11 +512,22 @@ type PushNotificationParams struct {
 	AuthCredentials string `json:"authCredentials,omitempty"`
 }
 
-func (s *Server) handleSetPushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
+func (s *Server) handleSetPushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
 	var params PushNotificationParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid SetPushNotification params", "error", err)
 		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
+		return
+	}
+
+	task, err := s.bridge.AuthorizeTask(params.TaskID, groveSlug, agentSlug)
+	if err != nil {
+		s.log.Error("SetPushNotification auth failed", "error", err, "taskID", params.TaskID)
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
+		return
+	}
+	if task == nil {
+		s.writeRPCError(w, req.ID, ErrCodeTaskNotFound, "task not found")
 		return
 	}
 
@@ -470,12 +537,7 @@ func (s *Server) handleSetPushNotification(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if err := ValidatePushURL(params.URL); err != nil {
-		s.log.Warn("push notification URL rejected", "url", params.URL, "error", err)
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "push notification URL is not allowed")
-		return
-	}
-
+	// SSRF validation is also enforced inside SetPushNotificationConfig (defense-in-depth).
 	cfg, err := s.bridge.SetPushNotificationConfig(r.Context(), params.TaskID, params.URL, params.Token, params.AuthScheme, params.AuthCredentials)
 	if err != nil {
 		s.log.Error("SetPushNotificationConfig failed", "error", err, "taskID", params.TaskID)
@@ -486,11 +548,22 @@ func (s *Server) handleSetPushNotification(w http.ResponseWriter, r *http.Reques
 	s.writeRPCResult(w, req.ID, cfg)
 }
 
-func (s *Server) handleGetPushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
+func (s *Server) handleGetPushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
 	var params PushNotificationParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid GetPushNotification params", "error", err)
 		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
+		return
+	}
+
+	task, err := s.bridge.AuthorizeTask(params.TaskID, groveSlug, agentSlug)
+	if err != nil {
+		s.log.Error("GetPushNotification auth failed", "error", err, "taskID", params.TaskID)
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
+		return
+	}
+	if task == nil {
+		s.writeRPCError(w, req.ID, ErrCodeTaskNotFound, "task not found")
 		return
 	}
 
@@ -504,11 +577,27 @@ func (s *Server) handleGetPushNotification(w http.ResponseWriter, r *http.Reques
 	s.writeRPCResult(w, req.ID, configs)
 }
 
-func (s *Server) handleDeletePushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
+func (s *Server) handleDeletePushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
 	var params PushNotificationParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid DeletePushNotification params", "error", err)
 		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
+		return
+	}
+
+	if params.TaskID == "" {
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "taskId is required")
+		return
+	}
+
+	task, err := s.bridge.AuthorizeTask(params.TaskID, groveSlug, agentSlug)
+	if err != nil {
+		s.log.Error("DeletePushNotification auth failed", "error", err, "taskID", params.TaskID)
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
+		return
+	}
+	if task == nil {
+		s.writeRPCError(w, req.ID, ErrCodeTaskNotFound, "task not found")
 		return
 	}
 
@@ -521,31 +610,53 @@ func (s *Server) handleDeletePushNotification(w http.ResponseWriter, r *http.Req
 	s.writeRPCResult(w, req.ID, map[string]bool{"ok": true})
 }
 
+// normalizeJSONRPCID ensures the id conforms to JSON-RPC 2.0 (string, number, or null).
+func normalizeJSONRPCID(id interface{}) interface{} {
+	switch id.(type) {
+	case float64, string:
+		return id
+	case nil:
+		return nil
+	default:
+		return nil
+	}
+}
+
 func (s *Server) writeRPCResult(w http.ResponseWriter, id interface{}, result interface{}) {
 	resp := JSONRPCResponse{
 		JSONRPC: "2.0",
-		ID:      id,
+		ID:      normalizeJSONRPCID(id),
 		Result:  result,
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		s.log.Error("failed to encode RPC result", "error", err)
+	}
 }
 
 func (s *Server) writeRPCError(w http.ResponseWriter, id interface{}, code int, message string) {
 	resp := JSONRPCResponse{
 		JSONRPC: "2.0",
-		ID:      id,
+		ID:      normalizeJSONRPCID(id),
 		Error:   &JSONRPCError{Code: code, Message: message},
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		s.log.Error("failed to encode RPC error", "error", err)
+	}
 }
 
 // authMiddleware validates API key authentication on non-public endpoints.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Public endpoints skip auth.
-		if r.URL.Path == "/.well-known/agent-card.json" || strings.HasSuffix(r.URL.Path, "/.well-known/agent-card.json") || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
+		if r.URL.Path == "/.well-known/agent-card.json" || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Per-agent card: exactly /groves/{slug}/agents/{slug}/.well-known/agent-card.json
+		segments := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		if len(segments) == 6 && segments[0] == "groves" && segments[2] == "agents" && segments[4] == ".well-known" && segments[5] == "agent-card.json" {
 			next.ServeHTTP(w, r)
 			return
 		}

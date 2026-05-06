@@ -62,7 +62,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 				Name: "a2a_bridge_tasks_created_total",
 				Help: "Total tasks created.",
 			},
-			[]string{"grove", "agent"},
+			[]string{"grove"},
 		),
 		TasksCompleted: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -106,7 +106,9 @@ func normalizeRoute(path string) string {
 		return "/readyz"
 	case path == "/metrics":
 		return "/metrics"
-	case path == "/.well-known/agent-card.json" || strings.HasSuffix(path, "/.well-known/agent-card.json"):
+	case path == "/.well-known/agent-card.json":
+		return "/agent-card"
+	case strings.HasSuffix(path, "/.well-known/agent-card.json"):
 		return "/agent-card"
 	case strings.HasSuffix(path, "/jsonrpc"):
 		return "/jsonrpc"

@@ -71,7 +71,7 @@ type Store struct {
 
 // New opens (or creates) the SQLite database at dbPath and runs schema migrations.
 func New(dbPath string) (*Store, error) {
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

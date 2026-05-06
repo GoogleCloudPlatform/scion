@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Build stage
-FROM golang:1.25@sha256:8a7adc288b77e9b787cd2695029eb54d10ae80571b21d44fed68d067ad0a9c96 AS builder
+FROM golang:1.25.4@sha256:8a7adc288b77e9b787cd2695029eb54d10ae80571b21d44fed68d067ad0a9c96 AS builder
 
 WORKDIR /src
 

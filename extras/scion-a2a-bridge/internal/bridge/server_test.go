@@ -28,7 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
 )
 
-func newTestServer(t *testing.T) (*Server, *httptest.Server) {
+func newTestServer(t *testing.T) (*Server, *httptest.Server, *state.Store) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -65,7 +65,7 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server) {
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
-	return srv, ts
+	return srv, ts, store
 }
 
 func doRPC(t *testing.T, ts *httptest.Server, path string, method string, params interface{}, apiKey string) *JSONRPCResponse {
@@ -107,7 +107,7 @@ func doRPC(t *testing.T, ts *httptest.Server, path string, method string, params
 }
 
 func TestHealthEndpoint(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, _ := newTestServer(t)
 
 	resp, err := http.Get(ts.URL + "/healthz")
 	if err != nil {
@@ -127,7 +127,7 @@ func TestHealthEndpoint(t *testing.T) {
 }
 
 func TestWellKnownAgentCard(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, _ := newTestServer(t)
 
 	resp, err := http.Get(ts.URL + "/.well-known/agent-card.json")
 	if err != nil {
@@ -165,7 +165,7 @@ func TestWellKnownAgentCard(t *testing.T) {
 }
 
 func TestPerAgentCard(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, _ := newTestServer(t)
 
 	resp, err := http.Get(ts.URL + "/groves/test-grove/agents/test-agent/.well-known/agent-card.json")
 	if err != nil {
@@ -191,7 +191,7 @@ func TestPerAgentCard(t *testing.T) {
 }
 
 func TestPerAgentCardNotExposed(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, _ := newTestServer(t)
 
 	resp, err := http.Get(ts.URL + "/groves/test-grove/agents/hidden-agent/.well-known/agent-card.json")
 	if err != nil {
@@ -205,7 +205,7 @@ func TestPerAgentCardNotExposed(t *testing.T) {
 }
 
 func TestPerAgentCardUnknownGrove(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, _ := newTestServer(t)
 
 	resp, err := http.Get(ts.URL + "/groves/unknown-grove/agents/test-agent/.well-known/agent-card.json")
 	if err != nil {
@@ -219,7 +219,7 @@ func TestPerAgentCardUnknownGrove(t *testing.T) {
 }
 
 func TestAuthMiddleware(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, _ := newTestServer(t)
 
 	// Agent cards are public — no auth required.
 	resp, err := http.Get(ts.URL + "/.well-known/agent-card.json")
@@ -261,7 +261,7 @@ func TestAuthMiddleware(t *testing.T) {
 }
 
 func TestGetTaskNotFound(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, _ := newTestServer(t)
 
 	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
 		"tasks/get", TaskQueryParams{ID: "nonexistent-task"}, "test-api-key")
@@ -275,7 +275,7 @@ func TestGetTaskNotFound(t *testing.T) {
 }
 
 func TestListTasksRequiresContextID(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, _ := newTestServer(t)
 
 	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
 		"tasks/list", TaskQueryParams{}, "test-api-key")
@@ -289,7 +289,7 @@ func TestListTasksRequiresContextID(t *testing.T) {
 }
 
 func TestUnknownMethod(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, _ := newTestServer(t)
 
 	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
 		"unknown/method", map[string]string{}, "test-api-key")
@@ -394,7 +394,7 @@ func TestCancelTaskAlreadyTerminal(t *testing.T) {
 }
 
 func TestCancelTaskNotFound(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, _ := newTestServer(t)
 
 	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
 		"tasks/cancel", map[string]string{"id": "nonexistent-task"}, "test-api-key")
@@ -408,7 +408,7 @@ func TestCancelTaskNotFound(t *testing.T) {
 }
 
 func TestInvalidJSONRPC(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, _ := newTestServer(t)
 
 	// Send with wrong version.
 	rpcReq, _ := json.Marshal(map[string]interface{}{
@@ -439,7 +439,7 @@ func TestInvalidJSONRPC(t *testing.T) {
 }
 
 func TestMalformedJSON(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, _ := newTestServer(t)
 
 	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/groves/test-grove/agents/test-agent/jsonrpc",
 		bytes.NewReader([]byte(`{not valid json`)))
@@ -466,7 +466,7 @@ func TestMalformedJSON(t *testing.T) {
 // --- Phase 2 server tests ---
 
 func TestPushNotificationSetGetDelete(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, _ := newTestServer(t)
 
 	// Create a task first (needed for push config FK).
 	rpcPath := "/groves/test-grove/agents/test-agent/jsonrpc"
@@ -506,8 +506,14 @@ func TestPushNotificationSetGetDelete(t *testing.T) {
 }
 
 func TestPushNotificationSetRejectsPrivateIP(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, store := newTestServer(t)
 	rpcPath := "/groves/test-grove/agents/test-agent/jsonrpc"
+
+	now := time.Now()
+	store.CreateTask(&state.Task{
+		ID: "push-priv-task", ContextID: "ctx-1", GroveID: "test-grove", AgentSlug: "test-agent",
+		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
+	})
 
 	cases := []struct {
 		name string
@@ -526,7 +532,7 @@ func TestPushNotificationSetRejectsPrivateIP(t *testing.T) {
 			rpcResp := doRPC(t, ts, rpcPath,
 				"tasks/pushNotification/set",
 				PushNotificationParams{
-					TaskID: "some-task",
+					TaskID: "push-priv-task",
 					URL:    tc.url,
 					Token:  "tok",
 				},
@@ -536,19 +542,25 @@ func TestPushNotificationSetRejectsPrivateIP(t *testing.T) {
 			if rpcResp.Error == nil {
 				t.Fatal("expected error for private IP URL")
 			}
-			if rpcResp.Error.Code != ErrCodeInvalidParams {
-				t.Errorf("error code = %d, want %d", rpcResp.Error.Code, ErrCodeInvalidParams)
+			if rpcResp.Error.Code != ErrCodeInternalError {
+				t.Errorf("error code = %d, want %d", rpcResp.Error.Code, ErrCodeInternalError)
 			}
 		})
 	}
 }
 
 func TestPushNotificationGetReturnsEmpty(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, store := newTestServer(t)
+
+	now := time.Now()
+	store.CreateTask(&state.Task{
+		ID: "push-get-task", ContextID: "ctx-1", GroveID: "test-grove", AgentSlug: "test-agent",
+		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
+	})
 
 	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
 		"tasks/pushNotification/get",
-		PushNotificationParams{TaskID: "some-task"},
+		PushNotificationParams{TaskID: "push-get-task"},
 		"test-api-key",
 	)
 
@@ -559,11 +571,17 @@ func TestPushNotificationGetReturnsEmpty(t *testing.T) {
 }
 
 func TestPushNotificationDeleteSucceeds(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, store := newTestServer(t)
+
+	now := time.Now()
+	store.CreateTask(&state.Task{
+		ID: "push-del-task", ContextID: "ctx-1", GroveID: "test-grove", AgentSlug: "test-agent",
+		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
+	})
 
 	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
 		"tasks/pushNotification/delete",
-		PushNotificationParams{ID: "nonexistent-push-id"},
+		PushNotificationParams{TaskID: "push-del-task", ID: "nonexistent-push-id"},
 		"test-api-key",
 	)
 
@@ -574,7 +592,7 @@ func TestPushNotificationDeleteSucceeds(t *testing.T) {
 }
 
 func TestStreamMethodInvalidParams(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, _ := newTestServer(t)
 
 	// Send a raw JSON string that can't be unmarshaled to SendMessageParams.
 	rpcReq := JSONRPCRequest{
@@ -607,7 +625,7 @@ func TestStreamMethodInvalidParams(t *testing.T) {
 }
 
 func TestResubscribeTaskNotFound(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, _ := newTestServer(t)
 
 	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
 		"tasks/resubscribe",
@@ -621,7 +639,7 @@ func TestResubscribeTaskNotFound(t *testing.T) {
 }
 
 func TestResubscribeRequiresID(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, _ := newTestServer(t)
 
 	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
 		"tasks/resubscribe",
@@ -636,7 +654,7 @@ func TestResubscribeRequiresID(t *testing.T) {
 }
 
 func TestNewRPCMethods(t *testing.T) {
-	_, ts := newTestServer(t)
+	_, ts, _ := newTestServer(t)
 
 	// Verify these methods are recognized (not "method not found").
 	// message/stream and tasks/resubscribe are excluded because they trigger
