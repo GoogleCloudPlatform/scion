@@ -31,16 +31,18 @@ const MaxAttachments = 10
 
 // Message type constants (closed enum).
 const (
-	TypeInstruction = "instruction"
-	TypeInputNeeded = "input-needed"
-	TypeStateChange = "state-change"
+	TypeInstruction    = "instruction"
+	TypeInputNeeded    = "input-needed"
+	TypeStateChange    = "state-change"
+	TypeAssistantReply = "assistant-reply"
 )
 
 // validTypes is the set of valid message types.
 var validTypes = map[string]bool{
-	TypeInstruction: true,
-	TypeInputNeeded: true,
-	TypeStateChange: true,
+	TypeInstruction:    true,
+	TypeInputNeeded:    true,
+	TypeStateChange:    true,
+	TypeAssistantReply: true,
 }
 
 // StructuredMessage represents a formatted Scion message.
@@ -57,6 +59,7 @@ type StructuredMessage struct {
 	Raw         bool     `json:"raw,omitempty"`
 	Urgent      bool     `json:"urgent,omitempty"`
 	Broadcasted bool     `json:"broadcasted,omitempty"`
+	Status      string   `json:"status,omitempty"`
 	Attachments []string `json:"attachments,omitempty"`
 }
 

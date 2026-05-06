@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
@@ -243,5 +244,168 @@ func TestHandleUserMessage_RoutesNonInstructionToNotification(t *testing.T) {
 				t.Error("expected notification card to have a subtitle with activity status")
 			}
 		})
+	}
+}
+
+func TestExtractActivity_UsesStatusField(t *testing.T) {
+	tests := []struct {
+		name    string
+		msg     *messages.StructuredMessage
+		wantAct string
+	}{
+		{
+			name:    "status field takes precedence over content",
+			msg:     &messages.StructuredMessage{Msg: "agent COMPLETED something", Status: "ERROR"},
+			wantAct: "ERROR",
+		},
+		{
+			name:    "status field normalized to uppercase",
+			msg:     &messages.StructuredMessage{Msg: "some message", Status: "stalled"},
+			wantAct: "STALLED",
+		},
+		{
+			name:    "falls back to content matching when status empty",
+			msg:     &messages.StructuredMessage{Msg: "agent has COMPLETED"},
+			wantAct: "COMPLETED",
+		},
+		{
+			name:    "falls back to type when no content match",
+			msg:     &messages.StructuredMessage{Msg: "some generic message", Type: messages.TypeInputNeeded},
+			wantAct: "WAITING_FOR_INPUT",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractActivity(tc.msg)
+			if got != tc.wantAct {
+				t.Errorf("extractActivity() = %q, want %q", got, tc.wantAct)
+			}
+		})
+	}
+}
+
+func TestHandleUserMessage_AssistantReplyTruncated(t *testing.T) {
+	store := newTestStore(t)
+
+	if err := store.SetUserMapping(&state.UserMapping{
+		PlatformUserID: "users/12345",
+		Platform:       "googlechat",
+		HubUserID:      "hub-user-1",
+		HubUserEmail:   "test@example.com",
+		RegisteredBy:   "auto",
+	}); err != nil {
+		t.Fatalf("setting user mapping: %v", err)
+	}
+
+	if err := store.SetSpaceLink(&state.SpaceLink{
+		SpaceID:   "spaces/AAQAx",
+		Platform:  "googlechat",
+		GroveID:   "grove-abc",
+		GroveSlug: "my-grove",
+		LinkedBy:  "test",
+	}); err != nil {
+		t.Fatalf("setting space link: %v", err)
+	}
+
+	fm := &fakeMessenger{}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	relay := NewNotificationRelay(store, fm, log)
+
+	longText := strings.Repeat("x", 2000)
+	msg := &messages.StructuredMessage{
+		Sender:      "agent:claude-agent",
+		RecipientID: "hub-user-1",
+		Msg:         longText,
+		Type:        messages.TypeAssistantReply,
+	}
+
+	err := relay.HandleBrokerMessage(context.Background(),
+		"scion.grove.grove-abc.user.hub-user-1.messages", msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(fm.messages) == 0 {
+		t.Fatal("expected a message to be sent")
+	}
+
+	got := fm.messages[0]
+	if got.Card == nil {
+		t.Fatal("expected a card in the message")
+	}
+
+	wantTitle := "\U0001F916 claude-agent"
+	if got.Card.Header.Title != wantTitle {
+		t.Errorf("card title = %q, want %q", got.Card.Header.Title, wantTitle)
+	}
+	if got.Card.Header.Subtitle != "" {
+		t.Errorf("assistant-reply should use direct message card (no subtitle), got subtitle = %q", got.Card.Header.Subtitle)
+	}
+
+	if len(got.Card.Sections) == 0 {
+		t.Fatal("expected at least one card section")
+	}
+	cardContent := got.Card.Sections[0].Widgets[0].Content
+	if len(cardContent) > 600 {
+		t.Errorf("card content should be truncated, got %d chars", len(cardContent))
+	}
+	if !strings.Contains(cardContent, "chars truncated") {
+		t.Error("truncated card should contain truncation notice")
+	}
+}
+
+func TestHandleUserMessage_ShortAssistantReplyNotTruncated(t *testing.T) {
+	store := newTestStore(t)
+
+	if err := store.SetUserMapping(&state.UserMapping{
+		PlatformUserID: "users/12345",
+		Platform:       "googlechat",
+		HubUserID:      "hub-user-1",
+		HubUserEmail:   "test@example.com",
+		RegisteredBy:   "auto",
+	}); err != nil {
+		t.Fatalf("setting user mapping: %v", err)
+	}
+
+	if err := store.SetSpaceLink(&state.SpaceLink{
+		SpaceID:   "spaces/AAQAx",
+		Platform:  "googlechat",
+		GroveID:   "grove-abc",
+		GroveSlug: "my-grove",
+		LinkedBy:  "test",
+	}); err != nil {
+		t.Fatalf("setting space link: %v", err)
+	}
+
+	fm := &fakeMessenger{}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	relay := NewNotificationRelay(store, fm, log)
+
+	shortText := "Task completed successfully."
+	msg := &messages.StructuredMessage{
+		Sender:      "agent:claude-agent",
+		RecipientID: "hub-user-1",
+		Msg:         shortText,
+		Type:        messages.TypeAssistantReply,
+	}
+
+	err := relay.HandleBrokerMessage(context.Background(),
+		"scion.grove.grove-abc.user.hub-user-1.messages", msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(fm.messages) == 0 {
+		t.Fatal("expected a message to be sent")
+	}
+
+	got := fm.messages[0]
+	if got.Card == nil {
+		t.Fatal("expected a card")
+	}
+	cardContent := got.Card.Sections[0].Widgets[0].Content
+	if cardContent != shortText {
+		t.Errorf("short message should not be truncated, got %q, want %q", cardContent, shortText)
 	}
 }
