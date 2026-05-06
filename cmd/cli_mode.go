@@ -42,6 +42,7 @@ var agentAllowed = map[string]bool{
 	"resume":                      true,
 	"start":                       true,
 	"stop":                        true,
+	"suspend":                     true,
 	"version":                     true,
 	"whoami":                      true,
 	"notifications":               true,

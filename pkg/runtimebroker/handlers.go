@@ -922,6 +922,8 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, g
 		s.startAgent(w, r, id, groveID)
 	case api.AgentActionStop:
 		s.stopAgent(w, r, id, groveID)
+	case api.AgentActionSuspend:
+		s.stopAgent(w, r, id, groveID)
 	case api.AgentActionRestart:
 		s.restartAgent(w, r, id, groveID)
 	case api.AgentActionMessage:
@@ -1017,6 +1019,14 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 	// Resolve saved profile for runtime selection
 	if opts.GrovePath != "" {
 		opts.Profile = agent.GetSavedProfile(id, opts.GrovePath)
+	}
+
+	// If the agent was suspended, resume with harness session preservation.
+	if opts.GrovePath != "" {
+		savedPhase := agent.GetSavedPhase(id, opts.GrovePath)
+		if savedPhase == string(state.PhaseSuspended) {
+			opts.Resume = true
+		}
 	}
 
 	// Re-resolve manager after profile update

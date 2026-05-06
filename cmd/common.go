@@ -415,6 +415,17 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		}
 	}
 
+	// When resuming, check the saved phase to determine harness resume behavior.
+	// Suspended agents get harness resume (--continue/--resume); stopped agents
+	// get a fresh session.
+	effectiveResume := resume
+	if resume {
+		savedPhase := agent.GetSavedPhase(agentName, grovePath)
+		if savedPhase == string(state.PhaseStopped) {
+			effectiveResume = false
+		}
+	}
+
 	opts := api.StartOptions{
 		Name:          agentName,
 		Task:          effectiveTask,
@@ -424,7 +435,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		HarnessAuth:   effectiveHarnessAuth,
 		Image:         resolvedImage,
 		GrovePath:     grovePath,
-		Resume:        resume,
+		Resume:        effectiveResume,
 		Detached:      detached,
 		NoAuth:        noAuth,
 		Branch:        effectiveBranch,

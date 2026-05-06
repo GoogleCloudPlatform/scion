@@ -53,6 +53,9 @@ type AgentService interface {
 	// Stop stops a running agent.
 	Stop(ctx context.Context, agentID string) error
 
+	// Suspend pauses a running agent, preserving state for later resume.
+	Suspend(ctx context.Context, agentID string) error
+
 	// Restart restarts an agent.
 	Restart(ctx context.Context, agentID string) error
 
@@ -378,6 +381,15 @@ func (s *agentService) Start(ctx context.Context, agentID string) error {
 // Stop stops a running agent.
 func (s *agentService) Stop(ctx context.Context, agentID string) error {
 	resp, err := s.c.transport.Post(ctx, s.agentPath(agentID)+"/stop", nil, nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+// Suspend pauses a running agent, preserving state for later resume.
+func (s *agentService) Suspend(ctx context.Context, agentID string) error {
+	resp, err := s.c.transport.Post(ctx, s.agentPath(agentID)+"/suspend", nil, nil)
 	if err != nil {
 		return err
 	}

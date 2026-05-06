@@ -1782,7 +1782,7 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 	switch action {
 	case api.AgentActionStatus:
 		s.updateAgentStatus(w, r, id)
-	case api.AgentActionStart, api.AgentActionStop, api.AgentActionRestart:
+	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend, api.AgentActionRestart:
 		s.handleAgentLifecycle(w, r, id, action)
 	case api.AgentActionMessage:
 		s.handleAgentMessage(w, r, id)
@@ -2575,6 +2575,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			s.syncWorkspaceOnStop(ctx, agent)
 			dispatchErr = dispatcher.DispatchAgentStop(ctx, agent)
 		}
+	case api.AgentActionSuspend:
+		newPhase = string(state.PhaseSuspended)
+		if dispatcher != nil && agent.RuntimeBrokerID != "" {
+			s.syncWorkspaceOnStop(ctx, agent)
+			dispatchErr = dispatcher.DispatchAgentStop(ctx, agent)
+		}
 	case api.AgentActionRestart:
 		newPhase = string(state.PhaseRunning)
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
@@ -2606,9 +2612,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	statusUpdate := store.AgentStatusUpdate{
 		Phase: newPhase,
 	}
-	// When stopping, also update container status so the hub immediately
+	// When stopping or suspending, also update container status so the hub immediately
 	// reflects the stopped state without waiting for the next heartbeat.
-	if action == api.AgentActionStop {
+	if action == api.AgentActionStop || action == api.AgentActionSuspend {
 		statusUpdate.ContainerStatus = "stopped"
 		statusUpdate.Activity = ""
 	}
@@ -4535,7 +4541,7 @@ func (s *Server) handleGroveAgentAction(w http.ResponseWriter, r *http.Request, 
 
 	// For interactive actions, enforce policy-based authorization (owner or admin only)
 	switch action {
-	case api.AgentActionStart, api.AgentActionStop, api.AgentActionRestart, api.AgentActionMessage, api.AgentActionExec:
+	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend, api.AgentActionRestart, api.AgentActionMessage, api.AgentActionExec:
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 			decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionAttach)
 			if !decision.Allowed {
@@ -4549,7 +4555,7 @@ func (s *Server) handleGroveAgentAction(w http.ResponseWriter, r *http.Request, 
 	switch action {
 	case api.AgentActionStatus:
 		s.updateAgentStatus(w, r, agent.ID)
-	case api.AgentActionStart, api.AgentActionStop, api.AgentActionRestart:
+	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend, api.AgentActionRestart:
 		s.handleAgentLifecycle(w, r, agent.ID, action)
 	case api.AgentActionMessage:
 		s.handleAgentMessage(w, r, agent.ID)
@@ -8284,6 +8290,47 @@ func (s *Server) handleExistingAgent(
 	cleanupMode := req.CleanupMode
 	if cleanupMode == "" {
 		cleanupMode = "strict"
+	}
+
+	// Suspended agents are restarted in-place (not deleted), preserving harness state.
+	if !req.ProvisionOnly && existingAgent.Phase == string(state.PhaseSuspended) {
+		if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
+			existingAgent.RuntimeBrokerID = runtimeBrokerID
+		}
+
+		dispatcher := s.GetDispatcher()
+		if dispatcher == nil || existingAgent.RuntimeBrokerID == "" {
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				"cannot resume agent: no runtime broker available", nil)
+			return existingAgentErrored
+		}
+
+		if req.Task != "" && existingAgent.AppliedConfig != nil {
+			existingAgent.AppliedConfig.Task = req.Task
+			existingAgent.AppliedConfig.Attach = req.Attach
+		}
+
+		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task); err != nil {
+			RuntimeError(w, "Failed to resume suspended agent: "+err.Error())
+			return existingAgentErrored
+		}
+
+		if existingAgent.Phase == string(state.PhaseSuspended) {
+			existingAgent.Phase = string(state.PhaseRunning)
+		}
+		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
+			s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
+		}
+
+		if req.Notify {
+			s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.GroveID, notifySubscriberType, notifySubscriberID, createdBy)
+		}
+
+		s.enrichAgent(ctx, existingAgent, grove, nil)
+		writeJSON(w, http.StatusOK, CreateAgentResponse{
+			Agent: existingAgent,
+		})
+		return existingAgentStarted
 	}
 
 	// Phase 1: Stale cleanup — agent is running/stopped/error and caller wants a real start.

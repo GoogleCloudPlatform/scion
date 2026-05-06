@@ -394,7 +394,7 @@ func TestAssistantDeniedList(t *testing.T) {
 
 func TestAgentAllowedList(t *testing.T) {
 	expectedAllowed := []string{
-		"create", "delete", "list", "start", "stop", "look", "logs",
+		"create", "delete", "list", "start", "stop", "suspend", "look", "logs",
 		"message",
 		"resume", "version",
 		"notifications",

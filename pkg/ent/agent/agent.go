@@ -145,6 +145,7 @@ const (
 	StatusCloning      Status = "cloning"
 	StatusStarting     Status = "starting"
 	StatusRunning      Status = "running"
+	StatusSuspended    Status = "suspended"
 	StatusStopping     Status = "stopping"
 	StatusStopped      Status = "stopped"
 	StatusError        Status = "error"
@@ -157,7 +158,7 @@ func (s Status) String() string {
 // StatusValidator is a validator for the "status" field enum values. It is called by the builders before save.
 func StatusValidator(s Status) error {
 	switch s {
-	case StatusCreated, StatusProvisioning, StatusCloning, StatusStarting, StatusRunning, StatusStopping, StatusStopped, StatusError:
+	case StatusCreated, StatusProvisioning, StatusCloning, StatusStarting, StatusRunning, StatusSuspended, StatusStopping, StatusStopped, StatusError:
 		return nil
 	default:
 		return fmt.Errorf("agent: invalid enum value for status field: %q", s)
