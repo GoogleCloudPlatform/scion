@@ -23,7 +23,10 @@ import (
 func TestStreamManagerSubscribeAndBroadcast(t *testing.T) {
 	sm := NewStreamManager()
 
-	ch, cleanup := sm.Subscribe("task-1")
+	ch, cleanup, err := sm.Subscribe("task-1")
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
 	defer cleanup()
 
 	if !sm.HasSubscribers("task-1") {
@@ -60,9 +63,15 @@ func TestStreamManagerSubscribeAndBroadcast(t *testing.T) {
 func TestStreamManagerMultipleSubscribers(t *testing.T) {
 	sm := NewStreamManager()
 
-	ch1, cleanup1 := sm.Subscribe("task-1")
+	ch1, cleanup1, err := sm.Subscribe("task-1")
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
 	defer cleanup1()
-	ch2, cleanup2 := sm.Subscribe("task-1")
+	ch2, cleanup2, err := sm.Subscribe("task-1")
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
 	defer cleanup2()
 
 	event := StreamEvent{
@@ -89,7 +98,10 @@ func TestStreamManagerMultipleSubscribers(t *testing.T) {
 func TestStreamManagerCleanup(t *testing.T) {
 	sm := NewStreamManager()
 
-	_, cleanup := sm.Subscribe("task-1")
+	_, cleanup, err := sm.Subscribe("task-1")
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
 	if !sm.HasSubscribers("task-1") {
 		t.Fatal("expected subscribers after subscribe")
 	}
@@ -103,8 +115,14 @@ func TestStreamManagerCleanup(t *testing.T) {
 func TestStreamManagerCloseAll(t *testing.T) {
 	sm := NewStreamManager()
 
-	ch1, _ := sm.Subscribe("task-1")
-	ch2, _ := sm.Subscribe("task-1")
+	ch1, _, err := sm.Subscribe("task-1")
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	ch2, _, err := sm.Subscribe("task-1")
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
 
 	sm.CloseAll("task-1")
 
@@ -141,7 +159,10 @@ func TestStreamManagerConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ch, cleanup := sm.Subscribe("task-1")
+			ch, cleanup, err := sm.Subscribe("task-1")
+			if err != nil {
+				return
+			}
 			defer cleanup()
 
 			sm.Broadcast("task-1", StreamEvent{

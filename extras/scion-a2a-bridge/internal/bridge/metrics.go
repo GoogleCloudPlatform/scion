@@ -17,6 +17,7 @@ package bridge
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -97,6 +98,23 @@ func (sr *statusRecorder) Flush() {
 	}
 }
 
+func normalizeRoute(path string) string {
+	switch {
+	case path == "/healthz":
+		return "/healthz"
+	case path == "/readyz":
+		return "/readyz"
+	case path == "/metrics":
+		return "/metrics"
+	case path == "/.well-known/agent-card.json" || strings.HasSuffix(path, "/.well-known/agent-card.json"):
+		return "/agent-card"
+	case strings.HasSuffix(path, "/jsonrpc"):
+		return "/jsonrpc"
+	default:
+		return "/other"
+	}
+}
+
 // InstrumentHandler wraps an http.Handler to record request metrics.
 func InstrumentHandler(next http.Handler, metrics *Metrics) http.Handler {
 	if metrics == nil {
@@ -109,8 +127,8 @@ func InstrumentHandler(next http.Handler, metrics *Metrics) http.Handler {
 		next.ServeHTTP(rec, r)
 
 		duration := time.Since(start).Seconds()
-		method := r.Method + " " + r.URL.Path
-		metrics.RequestsTotal.WithLabelValues(method, strconv.Itoa(rec.status)).Inc()
-		metrics.RequestDuration.WithLabelValues(method).Observe(duration)
+		route := r.Method + " " + normalizeRoute(r.URL.Path)
+		metrics.RequestsTotal.WithLabelValues(route, strconv.Itoa(rec.status)).Inc()
+		metrics.RequestDuration.WithLabelValues(route).Observe(duration)
 	})
 }

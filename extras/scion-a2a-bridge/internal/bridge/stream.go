@@ -16,6 +16,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -24,6 +25,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
 )
+
+// ErrTooManySubscribers is returned when the SSE connection limit is reached.
+var ErrTooManySubscribers = errors.New("too many active SSE subscribers")
 
 // StreamEvent represents an SSE event sent to streaming clients.
 type StreamEvent struct {
@@ -47,22 +51,32 @@ type TaskArtifactUpdate struct {
 
 // StreamManager tracks active SSE streams per task and fans out events.
 type StreamManager struct {
-	mu      sync.RWMutex
-	streams map[string][]chan StreamEvent
+	mu             sync.RWMutex
+	streams        map[string][]chan StreamEvent
+	maxSubscribers int
 }
 
 // NewStreamManager creates a new stream manager.
 func NewStreamManager() *StreamManager {
 	return &StreamManager{
-		streams: make(map[string][]chan StreamEvent),
+		streams:        make(map[string][]chan StreamEvent),
+		maxSubscribers: 100,
 	}
 }
 
 // Subscribe registers a new SSE stream for a task. Returns a receive channel
 // and a cleanup function that must be called when the stream is no longer needed.
-func (sm *StreamManager) Subscribe(taskID string) (<-chan StreamEvent, func()) {
+func (sm *StreamManager) Subscribe(taskID string) (<-chan StreamEvent, func(), error) {
 	ch := make(chan StreamEvent, 16)
 	sm.mu.Lock()
+	total := 0
+	for _, subs := range sm.streams {
+		total += len(subs)
+	}
+	if total >= sm.maxSubscribers {
+		sm.mu.Unlock()
+		return nil, nil, ErrTooManySubscribers
+	}
 	sm.streams[taskID] = append(sm.streams[taskID], ch)
 	sm.mu.Unlock()
 
@@ -81,7 +95,7 @@ func (sm *StreamManager) Subscribe(taskID string) (<-chan StreamEvent, func()) {
 		}
 	}
 
-	return ch, cleanup
+	return ch, cleanup, nil
 }
 
 // Broadcast sends an event to all active streams for a task.
@@ -144,7 +158,10 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, groveSlug, agentSlug,
 
 	b.registerActiveTask(taskID, agentCtx.AgentSlug)
 
-	events, cleanup := b.streams.Subscribe(taskID)
+	events, cleanup, err := b.streams.Subscribe(taskID)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("subscribe: %w", err)
+	}
 
 	// Send initial task-submitted event.
 	b.streams.Broadcast(taskID, StreamEvent{
@@ -210,7 +227,10 @@ func (b *Bridge) SubscribeToTask(ctx context.Context, taskID string) (<-chan Str
 		return nil, nil, fmt.Errorf("task %s is in terminal state: %s", taskID, task.State)
 	}
 
-	events, cleanup := b.streams.Subscribe(taskID)
+	events, cleanup, err := b.streams.Subscribe(taskID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("subscribe: %w", err)
+	}
 
 	// Send current task state as the first event.
 	b.streams.Broadcast(taskID, StreamEvent{

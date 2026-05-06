@@ -15,10 +15,12 @@
 package bridge
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -210,6 +212,8 @@ func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	groveSlug := r.PathValue("groveSlug")
 	agentSlug := r.PathValue("agentSlug")
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
 	var req JSONRPCRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -433,6 +437,12 @@ func (s *Server) handleSetPushNotification(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	parsed, err := url.Parse(params.URL)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "url must be an absolute http or https URL")
+		return
+	}
+
 	cfg, err := s.bridge.SetPushNotificationConfig(r.Context(), params.TaskID, params.URL, params.Token, params.AuthScheme, params.AuthCredentials)
 	if err != nil {
 		s.writeRPCError(w, req.ID, ErrCodeInternalError, err.Error())
@@ -497,7 +507,7 @@ func (s *Server) writeRPCError(w http.ResponseWriter, id interface{}, code int, 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Public endpoints skip auth.
-		if strings.HasSuffix(r.URL.Path, "agent-card.json") || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
+		if r.URL.Path == "/.well-known/agent-card.json" || strings.HasSuffix(r.URL.Path, "/.well-known/agent-card.json") || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -515,7 +525,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		if apiKey != s.config.Auth.APIKey {
+		if subtle.ConstantTimeCompare([]byte(apiKey), []byte(s.config.Auth.APIKey)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

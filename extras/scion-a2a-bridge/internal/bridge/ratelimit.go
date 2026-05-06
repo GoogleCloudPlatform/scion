@@ -58,18 +58,22 @@ func (tb *tokenBucket) allow() bool {
 
 // RateLimiter provides per-key token bucket rate limiting.
 type RateLimiter struct {
-	mu      sync.Mutex
-	buckets map[string]*tokenBucket
-	rate    float64
-	burst   int
+	mu             sync.Mutex
+	buckets        map[string]*tokenBucket
+	rate           float64
+	burst          int
+	maxBuckets     int
+	overflowBucket *tokenBucket
 }
 
 // NewRateLimiter creates a rate limiter with the given per-key rate and burst.
 func NewRateLimiter(rate float64, burst int) *RateLimiter {
 	return &RateLimiter{
-		buckets: make(map[string]*tokenBucket),
-		rate:    rate,
-		burst:   burst,
+		buckets:        make(map[string]*tokenBucket),
+		rate:           rate,
+		burst:          burst,
+		maxBuckets:     10000,
+		overflowBucket: newTokenBucket(0, 0),
 	}
 }
 
@@ -78,6 +82,9 @@ func (rl *RateLimiter) getBucket(key string) *tokenBucket {
 	defer rl.mu.Unlock()
 	b, ok := rl.buckets[key]
 	if !ok {
+		if len(rl.buckets) >= rl.maxBuckets {
+			return rl.overflowBucket
+		}
 		b = newTokenBucket(rl.rate, rl.burst)
 		rl.buckets[key] = b
 	}

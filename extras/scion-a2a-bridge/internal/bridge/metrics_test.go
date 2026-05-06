@@ -91,6 +91,26 @@ func TestInstrumentHandlerRecordsMetrics(t *testing.T) {
 	}
 }
 
+func TestNormalizeRoute(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"/healthz", "/healthz"},
+		{"/readyz", "/readyz"},
+		{"/metrics", "/metrics"},
+		{"/.well-known/agent-card.json", "/agent-card"},
+		{"/groves/foo/agents/bar/.well-known/agent-card.json", "/agent-card"},
+		{"/groves/foo/agents/bar/jsonrpc", "/jsonrpc"},
+		{"/some/random/path", "/other"},
+	}
+	for _, tt := range tests {
+		if got := normalizeRoute(tt.path); got != tt.want {
+			t.Errorf("normalizeRoute(%q) = %q, want %q", tt.path, got, tt.want)
+		}
+	}
+}
+
 func TestInstrumentHandlerRecordsDuration(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg)
@@ -147,7 +167,7 @@ func TestInstrumentHandlerCapturesNonOKStatus(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	var metric dto.Metric
-	counter, err := m.RequestsTotal.GetMetricWithLabelValues("GET /missing", "404")
+	counter, err := m.RequestsTotal.GetMetricWithLabelValues("GET /other", "404")
 	if err != nil {
 		t.Fatalf("get metric: %v", err)
 	}

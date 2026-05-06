@@ -134,8 +134,11 @@ func main() {
 	metrics := bridge.NewMetrics(prometheus.DefaultRegisterer)
 	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"))
 	httpServer := &http.Server{
-		Addr:    listenAddr,
-		Handler: srv.Handler(),
+		Addr:           listenAddr,
+		Handler:        srv.Handler(),
+		ReadTimeout:    30 * time.Second,
+		WriteTimeout:   120 * time.Second,
+		MaxHeaderBytes: 1 << 20,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

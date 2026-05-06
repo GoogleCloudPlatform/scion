@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -27,6 +28,10 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
 )
+
+func noopResolveIP(host string) ([]net.IP, error) {
+	return []net.IP{net.IPv4(203, 0, 113, 1)}, nil
+}
 
 func newTestBridge(t *testing.T) *Bridge {
 	t.Helper()
@@ -81,6 +86,7 @@ func TestPushDispatcherSendsWebhook(t *testing.T) {
 	cfg := &Config{Timeouts: TimeoutConfig{PushRetryMax: 3}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pd := NewPushDispatcher(store, cfg, log)
+	pd.resolveIP = noopResolveIP
 
 	event := StreamEvent{
 		StatusUpdate: &TaskStatusUpdate{
@@ -125,6 +131,7 @@ func TestPushDispatcherAuthScheme(t *testing.T) {
 	cfg := &Config{}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pd := NewPushDispatcher(store, cfg, log)
+	pd.resolveIP = noopResolveIP
 
 	// Use send directly (not sendWithRetry) for auth header verification.
 	if err := pd.send(state.PushNotificationConfig{
@@ -169,6 +176,7 @@ func TestPushDispatcherRetriesOnFailure(t *testing.T) {
 	cfg := &Config{Timeouts: TimeoutConfig{PushRetryMax: 1}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pd := NewPushDispatcher(store, cfg, log)
+	pd.resolveIP = noopResolveIP
 
 	pd.sendWithRetry(state.PushNotificationConfig{
 		ID:  "push-1",
@@ -216,6 +224,7 @@ func TestPushDispatcherDeletesAfterExhaustedRetries(t *testing.T) {
 	cfg := &Config{Timeouts: TimeoutConfig{PushRetryMax: 0}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pd := NewPushDispatcher(store, cfg, log)
+	pd.resolveIP = noopResolveIP
 
 	pd.sendWithRetry(state.PushNotificationConfig{
 		ID:  "push-del",
@@ -251,6 +260,7 @@ func TestPushDispatcherWebhookPayload(t *testing.T) {
 	cfg := &Config{Timeouts: TimeoutConfig{PushRetryMax: 0}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pd := NewPushDispatcher(store, cfg, log)
+	pd.resolveIP = noopResolveIP
 
 	event := StreamEvent{
 		ArtifactUpdate: &TaskArtifactUpdate{

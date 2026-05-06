@@ -18,9 +18,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/google/uuid"
@@ -30,10 +33,33 @@ import (
 
 // PushDispatcher delivers webhook notifications for task state changes.
 type PushDispatcher struct {
-	store  *state.Store
-	config *Config
-	log    *slog.Logger
-	client *http.Client
+	store     *state.Store
+	config    *Config
+	log       *slog.Logger
+	client    *http.Client
+	resolveIP func(host string) ([]net.IP, error)
+}
+
+var errRedirectBlocked = errors.New("push notification redirects are not allowed")
+
+func isPrivateIP(ip net.IP) bool {
+	privateRanges := []net.IPNet{
+		{IP: net.IPv4(10, 0, 0, 0), Mask: net.CIDRMask(8, 32)},
+		{IP: net.IPv4(172, 16, 0, 0), Mask: net.CIDRMask(12, 32)},
+		{IP: net.IPv4(192, 168, 0, 0), Mask: net.CIDRMask(16, 32)},
+		{IP: net.IPv4(127, 0, 0, 0), Mask: net.CIDRMask(8, 32)},
+		{IP: net.IPv4(169, 254, 0, 0), Mask: net.CIDRMask(16, 32)},
+		{IP: net.IPv4(169, 254, 169, 254), Mask: net.CIDRMask(32, 32)},
+	}
+	for _, cidr := range privateRanges {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	return false
 }
 
 // NewPushDispatcher creates a new push notification dispatcher.
@@ -42,7 +68,13 @@ func NewPushDispatcher(store *state.Store, cfg *Config, log *slog.Logger) *PushD
 		store:  store,
 		config: cfg,
 		log:    log,
-		client: &http.Client{Timeout: 10 * time.Second},
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return errRedirectBlocked
+			},
+		},
+		resolveIP: net.LookupIP,
 	}
 }
 
@@ -91,6 +123,21 @@ func (pd *PushDispatcher) sendWithRetry(cfg state.PushNotificationConfig, event 
 }
 
 func (pd *PushDispatcher) send(cfg state.PushNotificationConfig, event StreamEvent) error {
+	parsed, err := url.Parse(cfg.URL)
+	if err != nil {
+		return fmt.Errorf("parse push URL: %w", err)
+	}
+	host := parsed.Hostname()
+	ips, err := pd.resolveIP(host)
+	if err != nil {
+		return fmt.Errorf("resolve push host %q: %w", host, err)
+	}
+	for _, ip := range ips {
+		if isPrivateIP(ip) {
+			return fmt.Errorf("push URL host %q resolves to private IP %s", host, ip)
+		}
+	}
+
 	body, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
