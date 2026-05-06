@@ -505,6 +505,44 @@ func TestPushNotificationSetGetDelete(t *testing.T) {
 	}
 }
 
+func TestPushNotificationSetRejectsPrivateIP(t *testing.T) {
+	_, ts := newTestServer(t)
+	rpcPath := "/groves/test-grove/agents/test-agent/jsonrpc"
+
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"loopback", "https://127.0.0.1/webhook"},
+		{"metadata", "https://169.254.169.254/latest/meta-data/"},
+		{"rfc1918-10", "https://10.0.0.1/hook"},
+		{"rfc1918-172", "https://172.16.0.1/hook"},
+		{"rfc1918-192", "https://192.168.1.1/hook"},
+		{"unspecified", "https://0.0.0.0/hook"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rpcResp := doRPC(t, ts, rpcPath,
+				"tasks/pushNotification/set",
+				PushNotificationParams{
+					TaskID: "some-task",
+					URL:    tc.url,
+					Token:  "tok",
+				},
+				"test-api-key",
+			)
+
+			if rpcResp.Error == nil {
+				t.Fatal("expected error for private IP URL")
+			}
+			if rpcResp.Error.Code != ErrCodeInvalidParams {
+				t.Errorf("error code = %d, want %d", rpcResp.Error.Code, ErrCodeInvalidParams)
+			}
+		})
+	}
+}
+
 func TestPushNotificationGetReturnsEmpty(t *testing.T) {
 	_, ts := newTestServer(t)
 

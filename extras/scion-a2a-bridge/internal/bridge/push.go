@@ -42,6 +42,28 @@ type PushDispatcher struct {
 
 var errRedirectBlocked = errors.New("push notification redirects are not allowed")
 
+// ErrSSRFBlocked is returned when a push notification URL resolves to a private or reserved IP.
+var ErrSSRFBlocked = errors.New("push notification URL rejected")
+
+// ValidatePushURL checks that the given URL does not resolve to a private or reserved IP address.
+func ValidatePushURL(pushURL string) error {
+	parsed, err := url.Parse(pushURL)
+	if err != nil {
+		return fmt.Errorf("parse push URL: %w", err)
+	}
+	host := parsed.Hostname()
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("%w: cannot resolve host", ErrSSRFBlocked)
+	}
+	for _, ip := range ips {
+		if isPrivateIP(ip) {
+			return fmt.Errorf("%w", ErrSSRFBlocked)
+		}
+	}
+	return nil
+}
+
 func isPrivateIP(ip net.IP) bool {
 	privateRanges := []net.IPNet{
 		{IP: net.IPv4(10, 0, 0, 0), Mask: net.CIDRMask(8, 32)},

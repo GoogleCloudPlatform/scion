@@ -342,3 +342,27 @@ func TestBridgeSetPushConfigTaskNotFound(t *testing.T) {
 		t.Fatal("expected error for nonexistent task")
 	}
 }
+
+func TestValidatePushURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{"loopback-v4", "https://127.0.0.1/hook", true},
+		{"loopback-localhost", "https://localhost/hook", true},
+		{"metadata", "https://169.254.169.254/latest/meta-data/", true},
+		{"rfc1918-10", "https://10.0.0.1/hook", true},
+		{"rfc1918-172", "https://172.16.0.1/hook", true},
+		{"rfc1918-192", "https://192.168.1.1/hook", true},
+		{"unspecified", "https://0.0.0.0/hook", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidatePushURL(tt.url)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidatePushURL(%q) error = %v, wantErr %v", tt.url, err, tt.wantErr)
+			}
+		})
+	}
+}

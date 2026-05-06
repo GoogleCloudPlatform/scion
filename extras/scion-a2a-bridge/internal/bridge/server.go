@@ -455,6 +455,12 @@ func (s *Server) handleSetPushNotification(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if err := ValidatePushURL(params.URL); err != nil {
+		s.log.Warn("push notification URL rejected", "url", params.URL, "error", err)
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "push notification URL is not allowed")
+		return
+	}
+
 	cfg, err := s.bridge.SetPushNotificationConfig(r.Context(), params.TaskID, params.URL, params.Token, params.AuthScheme, params.AuthCredentials)
 	if err != nil {
 		s.log.Error("SetPushNotificationConfig failed", "error", err, "taskID", params.TaskID)
