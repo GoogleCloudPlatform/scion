@@ -81,3 +81,184 @@ docker run -p 8443:8443 -p 9090:9090 \
 |------|---------|
 | 8443 | A2A HTTP server (JSON-RPC, agent cards, health/metrics) |
 | 9090 | Broker plugin RPC (Hub connects here to push agent messages) |
+
+## Setup and onboarding (agent instructions)
+
+Step-by-step instructions for installing, configuring, and running the A2A bridge from scratch. Every command is copy-paste ready.
+
+### 1. Prerequisites
+
+1. Install Go 1.25 or later. Confirm with `go version`.
+2. Have network access to a running Scion Hub instance. Note its HTTP API URL (e.g., `https://hub.example.com`).
+3. Obtain the Hub's HS256 signing key, base64-encoded. This is either:
+   - A file on disk containing the raw base64 string, or
+   - A GCP Secret Manager resource name (e.g., `projects/my-project/secrets/hub-signing-key`).
+4. Have a Hub admin user email that the bridge will authenticate as (e.g., `a2a-bridge@example.com`).
+5. Know the grove slug(s) you want to expose over A2A.
+
+### 2. Build the binary
+
+From the repository root:
+
+```sh
+cd extras/scion-a2a-bridge
+go build -o scion-a2a-bridge ./cmd/scion-a2a-bridge/
+```
+
+Verify the binary exists:
+
+```sh
+ls -l scion-a2a-bridge
+```
+
+### 3. Create and edit the config file
+
+Copy the sample config:
+
+```sh
+cp scion-a2a-bridge.yaml.sample scion-a2a-bridge.yaml
+```
+
+Edit `scion-a2a-bridge.yaml`. The required fields are:
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `hub.endpoint` | Hub HTTP API URL | `https://hub.example.com` |
+| `hub.user` | Admin identity the bridge uses for Hub API calls | `a2a-bridge@example.com` |
+| `hub.signing_key` | Path to a file containing the Hub's base64-encoded HS256 signing key. Mutually exclusive with `hub.signing_key_secret`. | `/path/to/signing-key.b64` |
+| `hub.signing_key_secret` | GCP Secret Manager resource name for the signing key. Mutually exclusive with `hub.signing_key`. | `projects/my-project/secrets/hub-signing-key` |
+| `bridge.listen_address` | Address for the A2A HTTP server | `:8443` |
+| `bridge.external_url` | Public URL where A2A clients reach the bridge | `https://a2a.example.com` |
+| `auth.api_key` | Static API key clients pass in the `X-API-Key` header. Supports env var expansion. | `${A2A_API_KEY}` |
+| `groves[].slug` | Grove slug to expose. Add one entry per grove. | `my-grove` |
+| `plugin.listen_address` | Broker plugin RPC listen address | `localhost:9090` |
+
+Minimal config example:
+
+```yaml
+bridge:
+  listen_address: ":8443"
+  external_url: "https://a2a.example.com"
+  provider:
+    organization: "My Org"
+    url: "https://example.com"
+
+hub:
+  endpoint: "https://hub.example.com"
+  user: "a2a-bridge@example.com"
+  signing_key: "/path/to/signing-key.b64"
+
+plugin:
+  listen_address: "localhost:9090"
+
+auth:
+  scheme: "apiKey"
+  api_key: "${A2A_API_KEY}"
+
+groves:
+  - slug: "my-grove"
+    auto_provision: false
+
+state:
+  database: "/var/lib/scion-a2a-bridge/state.db"
+
+logging:
+  level: "info"
+  format: "json"
+```
+
+### 4. Configure the Hub
+
+Edit the Hub's `settings.yaml` to enable the message broker and register the bridge as a plugin.
+
+Add or update these sections:
+
+```yaml
+message_broker:
+  enabled: true
+
+plugins:
+  a2a-bridge:
+    type: self_managed
+    address: "localhost:9090"
+```
+
+The `address` must match `plugin.listen_address` in the bridge config. Restart the Hub after making these changes.
+
+### 5. Start the bridge
+
+Set the API key environment variable (if using `${A2A_API_KEY}` in config):
+
+```sh
+export A2A_API_KEY="your-api-key-here"
+```
+
+Start the bridge:
+
+```sh
+./scion-a2a-bridge --config scion-a2a-bridge.yaml
+```
+
+### 6. Verify it is running
+
+Run these checks against the bridge (adjust host/port if `bridge.listen_address` differs):
+
+```sh
+# Liveness check — expect HTTP 200
+curl -s -o /dev/null -w '%{http_code}' http://localhost:8443/healthz
+
+# Readiness check — expect HTTP 200 (database and broker connected)
+curl -s -o /dev/null -w '%{http_code}' http://localhost:8443/readyz
+
+# Bridge registry agent card — expect JSON with A2A agent card
+curl -s http://localhost:8443/.well-known/agent-card.json | head -20
+
+# Per-agent card (replace GROVE and AGENT with actual values)
+curl -s http://localhost:8443/groves/GROVE/agents/AGENT/.well-known/agent-card.json
+```
+
+### 7. Test with a sample JSON-RPC request
+
+Send a `message/send` request to an agent's JSON-RPC endpoint:
+
+```sh
+curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: ${A2A_API_KEY}" \
+  http://localhost:8443/groves/GROVE/agents/AGENT/jsonrpc \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "test-1",
+    "method": "message/send",
+    "params": {
+      "message": {
+        "role": "user",
+        "parts": [
+          {"kind": "text", "text": "Hello, agent."}
+        ]
+      }
+    }
+  }'
+```
+
+Replace `GROVE` and `AGENT` with the target grove slug and agent name. A successful response contains a `result` object with `id`, `status`, and `artifacts` fields.
+
+### 8. Docker deployment
+
+Build the image from the repository root (the Dockerfile expects the full repo context):
+
+```sh
+docker build -t scion-a2a-bridge -f extras/scion-a2a-bridge/Dockerfile .
+```
+
+Run the container, mounting your config file:
+
+```sh
+docker run -p 8443:8443 -p 9090:9090 \
+  -e A2A_API_KEY="your-api-key-here" \
+  -v /path/to/scion-a2a-bridge.yaml:/etc/scion-a2a-bridge/config.yaml \
+  -v /path/to/signing-key.b64:/etc/scion-a2a-bridge/signing-key.b64 \
+  scion-a2a-bridge
+```
+
+The container runs as non-root user `bridge` (UID 1000). The state database directory `/var/lib/scion-a2a-bridge/` is writable by this user inside the container. To persist state across restarts, mount a volume at that path.
