@@ -59,8 +59,10 @@ type JSONRPCError struct {
 
 // SendMessageParams holds parameters for the SendMessage RPC method.
 type SendMessageParams struct {
-	Message       Message                `json:"message"`
-	Configuration *SendMessageConfig     `json:"configuration,omitempty"`
+	Message       Message            `json:"message"`
+	Configuration *SendMessageConfig `json:"configuration,omitempty"`
+	ContextID     string             `json:"contextId,omitempty"`
+	TaskID        string             `json:"taskId,omitempty"`
 }
 
 // SendMessageConfig holds SendMessage configuration options.
@@ -212,11 +214,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, req J
 		return
 	}
 
-	// Extract contextId from message metadata if present.
-	var contextID string
-	// For MVP, contextID comes from request params.
-
-	result, err := s.bridge.SendMessage(r.Context(), groveSlug, agentSlug, contextID, params.Message.Parts)
+	result, err := s.bridge.SendMessage(r.Context(), groveSlug, agentSlug, params.ContextID, params.Message.Parts)
 	if err != nil {
 		s.log.Error("SendMessage failed", "error", err, "grove", groveSlug, "agent", agentSlug)
 		s.writeRPCError(w, req.ID, ErrCodeInternalError, err.Error())
