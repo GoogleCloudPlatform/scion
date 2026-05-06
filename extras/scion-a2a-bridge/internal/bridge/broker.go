@@ -206,11 +206,6 @@ func (b *BrokerServer) Serve(listenAddr string) (*PluginServer, error) {
 		},
 	}
 
-	server := &PluginServer{
-		listener: listener,
-		log:      b.log,
-	}
-
 	stdoutR, _ := io.Pipe()
 	stderrR, _ := io.Pipe()
 
@@ -224,17 +219,24 @@ func (b *BrokerServer) Serve(listenAddr string) (*PluginServer, error) {
 
 	go rpcServer.Serve(listener)
 
+	server := &PluginServer{
+		listener:  listener,
+		rpcDoneCh: doneCh,
+		log:       b.log,
+		addr:      listener.Addr().String(),
+	}
+
 	b.log.Info("broker plugin RPC server started", "address", listenAddr)
-	server.addr = listener.Addr().String()
 
 	return server, nil
 }
 
 // PluginServer wraps the running plugin RPC server.
 type PluginServer struct {
-	listener net.Listener
-	addr     string
-	log      *slog.Logger
+	listener  net.Listener
+	rpcDoneCh chan struct{}
+	addr      string
+	log       *slog.Logger
 }
 
 // Addr returns the address the server is listening on.
@@ -242,10 +244,15 @@ func (s *PluginServer) Addr() string {
 	return s.addr
 }
 
-// Close shuts down the plugin server.
+// Close shuts down the plugin server, stopping the listener and waiting for
+// in-flight RPCs to drain.
 func (s *PluginServer) Close() error {
+	var err error
 	if s.listener != nil {
-		return s.listener.Close()
+		err = s.listener.Close()
 	}
-	return nil
+	if s.rpcDoneCh != nil {
+		close(s.rpcDoneCh)
+	}
+	return err
 }

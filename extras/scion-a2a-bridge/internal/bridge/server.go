@@ -15,6 +15,7 @@
 package bridge
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -27,14 +28,14 @@ import (
 
 // A2A JSON-RPC error codes.
 const (
-	ErrCodeParseError       = -32700
-	ErrCodeInvalidRequest   = -32600
-	ErrCodeMethodNotFound   = -32601
-	ErrCodeInvalidParams    = -32602
-	ErrCodeInternalError    = -32603
-	ErrCodeTaskNotFound     = -32001
+	ErrCodeParseError        = -32700
+	ErrCodeInvalidRequest    = -32600
+	ErrCodeMethodNotFound    = -32601
+	ErrCodeInvalidParams     = -32602
+	ErrCodeInternalError     = -32603
+	ErrCodeTaskNotFound      = -32001
 	ErrCodeTaskNotCancelable = -32002
-	ErrCodeUnsupportedOp    = -32004
+	ErrCodeUnsupportedOp     = -32004
 )
 
 // JSONRPCRequest represents an incoming JSON-RPC 2.0 request.
@@ -98,6 +99,15 @@ func NewServer(bridge *Bridge, cfg *Config, metrics *Metrics, log *slog.Logger) 
 	}
 }
 
+// ValidateConfig checks that authentication configuration is consistent.
+// Returns an error if the auth scheme requires a key but none is configured.
+func ValidateConfig(cfg *Config) error {
+	if cfg.Auth.Scheme == "apiKey" && cfg.Auth.APIKey == "" {
+		return fmt.Errorf("auth.api_key is required when auth.scheme is \"apiKey\"")
+	}
+	return nil
+}
+
 // Handler returns an http.Handler for the A2A server routes.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -114,7 +124,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.Handle("GET /metrics", MetricsHandler())
 
-	// Wrap with middleware chain: metrics → rate limit → auth.
+	// Wrap with middleware chain: metrics -> rate limit -> auth.
 	handler := s.authMiddleware(mux)
 	handler = RateLimitMiddleware(handler, s.config.RateLimit)
 	handler = InstrumentHandler(handler, s.metrics)
@@ -155,7 +165,6 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWellKnownAgentCard(w http.ResponseWriter, r *http.Request) {
-	// Return a registry card listing all configured groves/agents.
 	registry := map[string]interface{}{
 		"name":        "scion-a2a-bridge",
 		"description": "Scion A2A Protocol Bridge — exposes Scion agents as A2A endpoints",
@@ -416,7 +425,13 @@ func (s *Server) writeSSEStream(w http.ResponseWriter, r *http.Request, taskID s
 				s.log.Error("marshal SSE event", "error", err)
 				continue
 			}
-			fmt.Fprintf(w, "data: %s\n\n", data)
+			// SSE spec: each line of a multi-line payload must be prefixed with "data: ".
+			dataStr := string(data)
+			lines := strings.Split(dataStr, "\n")
+			for _, line := range lines {
+				fmt.Fprintf(w, "data: %s\n", line)
+			}
+			fmt.Fprintf(w, "\n")
 			flusher.Flush()
 
 			if event.StatusUpdate != nil && event.StatusUpdate.Final {
@@ -548,7 +563,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		if subtle.ConstantTimeCompare([]byte(apiKey), []byte(s.config.Auth.APIKey)) != 1 {
+		// Compare SHA-256 hashes to avoid leaking key length via timing.
+		expectedHash := sha256.Sum256([]byte(s.config.Auth.APIKey))
+		providedHash := sha256.Sum256([]byte(apiKey))
+		if subtle.ConstantTimeCompare(expectedHash[:], providedHash[:]) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

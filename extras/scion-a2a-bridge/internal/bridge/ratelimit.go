@@ -56,39 +56,63 @@ func (tb *tokenBucket) allow() bool {
 	return true
 }
 
-// RateLimiter provides per-key token bucket rate limiting.
+// bucketEntry wraps a token bucket with LRU tracking.
+type bucketEntry struct {
+	bucket   *tokenBucket
+	lastUsed time.Time
+}
+
+// RateLimiter provides per-key token bucket rate limiting with LRU eviction.
 type RateLimiter struct {
-	mu             sync.Mutex
-	buckets        map[string]*tokenBucket
-	rate           float64
-	burst          int
-	maxBuckets     int
-	overflowBucket *tokenBucket
+	mu         sync.Mutex
+	buckets    map[string]*bucketEntry
+	rate       float64
+	burst      int
+	maxBuckets int
 }
 
 // NewRateLimiter creates a rate limiter with the given per-key rate and burst.
 func NewRateLimiter(rate float64, burst int) *RateLimiter {
 	return &RateLimiter{
-		buckets:        make(map[string]*tokenBucket),
-		rate:           rate,
-		burst:          burst,
-		maxBuckets:     10000,
-		overflowBucket: newTokenBucket(0, 0),
+		buckets:    make(map[string]*bucketEntry),
+		rate:       rate,
+		burst:      burst,
+		maxBuckets: 10000,
 	}
 }
 
 func (rl *RateLimiter) getBucket(key string) *tokenBucket {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	b, ok := rl.buckets[key]
-	if !ok {
-		if len(rl.buckets) >= rl.maxBuckets {
-			return rl.overflowBucket
-		}
-		b = newTokenBucket(rl.rate, rl.burst)
-		rl.buckets[key] = b
+	now := time.Now()
+	entry, ok := rl.buckets[key]
+	if ok {
+		entry.lastUsed = now
+		return entry.bucket
 	}
+	if len(rl.buckets) >= rl.maxBuckets {
+		rl.evictOldest()
+	}
+	b := newTokenBucket(rl.rate, rl.burst)
+	rl.buckets[key] = &bucketEntry{bucket: b, lastUsed: now}
 	return b
+}
+
+// evictOldest removes the least recently used bucket. Must be called with rl.mu held.
+func (rl *RateLimiter) evictOldest() {
+	var oldestKey string
+	var oldestTime time.Time
+	first := true
+	for k, entry := range rl.buckets {
+		if first || entry.lastUsed.Before(oldestTime) {
+			oldestKey = k
+			oldestTime = entry.lastUsed
+			first = false
+		}
+	}
+	if oldestKey != "" {
+		delete(rl.buckets, oldestKey)
+	}
 }
 
 // Allow checks if a request from the given key is allowed.

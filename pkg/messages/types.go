@@ -59,8 +59,9 @@ type StructuredMessage struct {
 	Raw         bool     `json:"raw,omitempty"`
 	Urgent      bool     `json:"urgent,omitempty"`
 	Broadcasted bool     `json:"broadcasted,omitempty"`
-	Status      string   `json:"status,omitempty"`
-	Attachments []string `json:"attachments,omitempty"`
+	Status      string              `json:"status,omitempty"`
+	Attachments []string            `json:"attachments,omitempty"`
+	Metadata    map[string]string   `json:"metadata,omitempty"`
 }
 
 // ValidateType returns an error if the message type is not in the closed enum.

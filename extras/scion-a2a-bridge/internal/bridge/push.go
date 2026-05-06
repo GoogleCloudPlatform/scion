@@ -24,6 +24,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,6 +40,7 @@ type PushDispatcher struct {
 	log       *slog.Logger
 	client    *http.Client
 	resolveIP func(host string) ([]net.IP, error)
+	sem       chan struct{}
 }
 
 var errRedirectBlocked = errors.New("push notification redirects are not allowed")
@@ -65,38 +68,88 @@ func ValidatePushURL(pushURL string) error {
 }
 
 func isPrivateIP(ip net.IP) bool {
-	privateRanges := []net.IPNet{
-		{IP: net.IPv4(10, 0, 0, 0), Mask: net.CIDRMask(8, 32)},
-		{IP: net.IPv4(172, 16, 0, 0), Mask: net.CIDRMask(12, 32)},
-		{IP: net.IPv4(192, 168, 0, 0), Mask: net.CIDRMask(16, 32)},
-		{IP: net.IPv4(127, 0, 0, 0), Mask: net.CIDRMask(8, 32)},
-		{IP: net.IPv4(169, 254, 0, 0), Mask: net.CIDRMask(16, 32)},
-		{IP: net.IPv4(169, 254, 169, 254), Mask: net.CIDRMask(32, 32)},
-	}
-	for _, cidr := range privateRanges {
-		if cidr.Contains(ip) {
-			return true
-		}
+	// Use Go's built-in IsPrivate (covers RFC1918 IPv4 + IPv6 ULA fc00::/7).
+	if ip.IsPrivate() {
+		return true
 	}
 	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
 		return true
 	}
+
+	// Additional reserved ranges not covered by IsPrivate.
+	reservedRanges := []net.IPNet{
+		// IPv4 link-local / cloud metadata.
+		{IP: net.IPv4(169, 254, 0, 0), Mask: net.CIDRMask(16, 32)},
+		// IPv4 CGNAT (Carrier-Grade NAT).
+		{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)},
+		// IPv4 multicast.
+		{IP: net.IPv4(224, 0, 0, 0), Mask: net.CIDRMask(4, 32)},
+		// IPv4 broadcast.
+		{IP: net.IPv4(255, 255, 255, 255), Mask: net.CIDRMask(32, 32)},
+	}
+
+	// IPv6 site-local (deprecated but still seen).
+	_, ipv6SiteLocal, _ := net.ParseCIDR("fec0::/10")
+	if ipv6SiteLocal != nil {
+		reservedRanges = append(reservedRanges, *ipv6SiteLocal)
+	}
+
+	for _, cidr := range reservedRanges {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
 	return false
+}
+
+// ssrfSafeDialer returns a DialContext that checks resolved IPs at connection time,
+// preventing DNS rebinding attacks where DNS returns a public IP at validation
+// but a private IP at connection time.
+func ssrfSafeDialer() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{
+		Timeout: 10 * time.Second,
+		Control: func(network, address string, c syscall.RawConn) error {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return fmt.Errorf("%w: invalid address", ErrSSRFBlocked)
+			}
+			ip := net.ParseIP(host)
+			if ip == nil {
+				return fmt.Errorf("%w: cannot parse IP", ErrSSRFBlocked)
+			}
+			if isPrivateIP(ip) {
+				return fmt.Errorf("%w: resolved to private/reserved IP %s", ErrSSRFBlocked, ip)
+			}
+			return nil
+		},
+	}
+	return dialer.DialContext
+}
+
+const maxPushConcurrency = 50
+
+// NewSSRFSafeClient creates an HTTP client that checks resolved IPs at connection time.
+func NewSSRFSafeClient() *http.Client {
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			DialContext: ssrfSafeDialer(),
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return errRedirectBlocked
+		},
+	}
 }
 
 // NewPushDispatcher creates a new push notification dispatcher.
 func NewPushDispatcher(store *state.Store, cfg *Config, log *slog.Logger) *PushDispatcher {
 	return &PushDispatcher{
-		store:  store,
-		config: cfg,
-		log:    log,
-		client: &http.Client{
-			Timeout: 10 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return errRedirectBlocked
-			},
-		},
+		store:     store,
+		config:    cfg,
+		log:       log,
+		client:    NewSSRFSafeClient(),
 		resolveIP: net.LookupIP,
+		sem:       make(chan struct{}, maxPushConcurrency),
 	}
 }
 
@@ -113,13 +166,22 @@ func (pd *PushDispatcher) Dispatch(ctx context.Context, taskID string, event Str
 
 	pd.log.Debug("dispatching push notifications", "task_id", taskID, "config_count", len(configs))
 
+	var wg sync.WaitGroup
 	for _, cfg := range configs {
-		go pd.sendWithRetry(cfg, event)
+		wg.Add(1)
+		go func(c state.PushNotificationConfig) {
+			defer wg.Done()
+			pd.sem <- struct{}{}
+			defer func() { <-pd.sem }()
+			pd.sendWithRetry(c, event)
+		}(cfg)
 	}
+	wg.Wait()
 }
 
 func (pd *PushDispatcher) sendWithRetry(cfg state.PushNotificationConfig, event StreamEvent) {
 	maxRetries := pd.config.Timeouts.PushRetryMax
+	var lastStatusCode int
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
@@ -127,47 +189,41 @@ func (pd *PushDispatcher) sendWithRetry(cfg state.PushNotificationConfig, event 
 			time.Sleep(backoff)
 		}
 
-		if err := pd.send(cfg, event); err != nil {
+		statusCode, err := pd.send(cfg, event)
+		if err != nil {
+			lastStatusCode = statusCode
 			pd.log.Warn("push notification failed",
 				"url", cfg.URL,
 				"config_id", cfg.ID,
 				"attempt", attempt+1,
+				"status_code", statusCode,
 				"error", err,
 			)
+			// Permanent client errors: remove config immediately.
+			if statusCode == 410 || (statusCode >= 400 && statusCode < 500 && statusCode != 408 && statusCode != 429) {
+				pd.log.Error("push notification returned permanent client error, removing config",
+					"id", cfg.ID, "url", cfg.URL, "status_code", statusCode)
+				pd.store.DeletePushConfig(cfg.ID)
+				return
+			}
 			continue
 		}
 		return
 	}
 
-	pd.log.Error("push notification exhausted retries, removing config",
-		"id", cfg.ID, "url", cfg.URL)
-	pd.store.DeletePushConfig(cfg.ID)
+	pd.log.Error("push notification exhausted retries",
+		"id", cfg.ID, "url", cfg.URL, "last_status_code", lastStatusCode)
 }
 
-func (pd *PushDispatcher) send(cfg state.PushNotificationConfig, event StreamEvent) error {
-	parsed, err := url.Parse(cfg.URL)
-	if err != nil {
-		return fmt.Errorf("parse push URL: %w", err)
-	}
-	host := parsed.Hostname()
-	ips, err := pd.resolveIP(host)
-	if err != nil {
-		return fmt.Errorf("resolve push host %q: %w", host, err)
-	}
-	for _, ip := range ips {
-		if isPrivateIP(ip) {
-			return fmt.Errorf("push URL host %q resolves to private IP %s", host, ip)
-		}
-	}
-
+func (pd *PushDispatcher) send(cfg state.PushNotificationConfig, event StreamEvent) (int, error) {
 	body, err := json.Marshal(event)
 	if err != nil {
-		return fmt.Errorf("marshal event: %w", err)
+		return 0, fmt.Errorf("marshal event: %w", err)
 	}
 
 	req, err := http.NewRequest(http.MethodPost, cfg.URL, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+		return 0, fmt.Errorf("create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/a2a+json")
@@ -180,15 +236,15 @@ func (pd *PushDispatcher) send(cfg state.PushNotificationConfig, event StreamEve
 
 	resp, err := pd.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("send request: %w", err)
+		return 0, fmt.Errorf("send request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("webhook returned status %d", resp.StatusCode)
+		return resp.StatusCode, fmt.Errorf("webhook returned status %d", resp.StatusCode)
 	}
 
-	return nil
+	return resp.StatusCode, nil
 }
 
 // SetPushNotificationConfig registers a webhook for task updates.

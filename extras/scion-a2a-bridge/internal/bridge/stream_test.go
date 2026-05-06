@@ -238,40 +238,43 @@ func TestActiveTaskTracking(t *testing.T) {
 	_ = sm // StreamManager tested above; this tests Bridge active task methods.
 
 	b := &Bridge{
-		activeTasks: make(map[string][]string),
+		activeTasks: make(map[string]string),
+		agentTasks:  make(map[string][]string),
 	}
 
-	b.registerActiveTask("task-1", "agent-a")
-	b.registerActiveTask("task-2", "agent-a")
-	b.registerActiveTask("task-3", "agent-b")
+	b.registerActiveTask("task-1", "grove1:agent-a")
+	b.registerActiveTask("task-2", "grove1:agent-a")
+	b.registerActiveTask("task-3", "grove1:agent-b")
 
-	tasksA := b.getActiveTaskIDs("agent-a")
-	if len(tasksA) != 2 {
-		t.Errorf("agent-a tasks = %d, want 2", len(tasksA))
-	}
-
-	tasksB := b.getActiveTaskIDs("agent-b")
-	if len(tasksB) != 1 {
-		t.Errorf("agent-b tasks = %d, want 1", len(tasksB))
-	}
-
-	b.unregisterActiveTask("task-1", "agent-a")
-	tasksA = b.getActiveTaskIDs("agent-a")
-	if len(tasksA) != 1 {
-		t.Errorf("agent-a tasks after unregister = %d, want 1", len(tasksA))
-	}
-
-	b.unregisterActiveTask("task-2", "agent-a")
-	tasksA = b.getActiveTaskIDs("agent-a")
-	if len(tasksA) != 0 {
-		t.Errorf("agent-a tasks after full unregister = %d, want 0", len(tasksA))
-	}
-
-	// Verify the map entry is cleaned up.
+	// Check activeTasks maps taskID to agentKey.
 	b.tasksMu.RLock()
-	_, exists := b.activeTasks["agent-a"]
+	if b.activeTasks["task-1"] != "grove1:agent-a" {
+		t.Errorf("task-1 agent key = %q, want %q", b.activeTasks["task-1"], "grove1:agent-a")
+	}
+	agentATaskCount := len(b.agentTasks["grove1:agent-a"])
+	agentBTaskCount := len(b.agentTasks["grove1:agent-b"])
+	b.tasksMu.RUnlock()
+
+	if agentATaskCount != 2 {
+		t.Errorf("agent-a tasks = %d, want 2", agentATaskCount)
+	}
+	if agentBTaskCount != 1 {
+		t.Errorf("agent-b tasks = %d, want 1", agentBTaskCount)
+	}
+
+	b.unregisterActiveTask("task-1", "grove1:agent-a")
+	b.tasksMu.RLock()
+	agentATaskCount = len(b.agentTasks["grove1:agent-a"])
+	b.tasksMu.RUnlock()
+	if agentATaskCount != 1 {
+		t.Errorf("agent-a tasks after unregister = %d, want 1", agentATaskCount)
+	}
+
+	b.unregisterActiveTask("task-2", "grove1:agent-a")
+	b.tasksMu.RLock()
+	_, exists := b.agentTasks["grove1:agent-a"]
 	b.tasksMu.RUnlock()
 	if exists {
-		t.Error("expected agent-a entry to be removed from map")
+		t.Error("expected agent-a entry to be removed from agentTasks map")
 	}
 }

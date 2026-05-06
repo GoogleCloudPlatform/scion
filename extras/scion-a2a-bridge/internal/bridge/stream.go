@@ -18,7 +18,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,9 +33,9 @@ var ErrTooManySubscribers = errors.New("too many active SSE subscribers")
 
 // StreamEvent represents an SSE event sent to streaming clients.
 type StreamEvent struct {
-	Task           *TaskResult          `json:"task,omitempty"`
-	StatusUpdate   *TaskStatusUpdate    `json:"statusUpdate,omitempty"`
-	ArtifactUpdate *TaskArtifactUpdate  `json:"artifactUpdate,omitempty"`
+	Task           *TaskResult         `json:"task,omitempty"`
+	StatusUpdate   *TaskStatusUpdate   `json:"statusUpdate,omitempty"`
+	ArtifactUpdate *TaskArtifactUpdate `json:"artifactUpdate,omitempty"`
 }
 
 // TaskStatusUpdate represents a task state change event.
@@ -54,6 +56,7 @@ type StreamManager struct {
 	mu             sync.RWMutex
 	streams        map[string][]chan StreamEvent
 	maxSubscribers int
+	droppedEvents  atomic.Int64
 }
 
 // NewStreamManager creates a new stream manager.
@@ -108,6 +111,11 @@ func (sm *StreamManager) Broadcast(taskID string, event StreamEvent) {
 		select {
 		case ch <- event:
 		default:
+			dropped := sm.droppedEvents.Add(1)
+			slog.Warn("SSE event dropped: subscriber channel full",
+				"task_id", taskID,
+				"total_dropped", dropped,
+			)
 		}
 	}
 }
@@ -156,14 +164,14 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, groveSlug, agentSlug,
 		return "", nil, nil, fmt.Errorf("create task: %w", err)
 	}
 
-	b.registerActiveTask(taskID, agentCtx.AgentSlug)
+	aKey := agentKey(agentCtx.GroveID, agentCtx.AgentSlug)
+	b.registerActiveTask(taskID, aKey)
 
 	events, cleanup, err := b.streams.Subscribe(taskID)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("subscribe: %w", err)
 	}
 
-	// Send initial task-submitted event.
 	b.streams.Broadcast(taskID, StreamEvent{
 		Task: &TaskResult{
 			ID:        taskID,
@@ -175,22 +183,26 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, groveSlug, agentSlug,
 	scionMsg := TranslateA2AToScion(parts)
 	scionMsg.Sender = fmt.Sprintf("user:%s", b.config.Hub.User)
 	scionMsg.Recipient = fmt.Sprintf("agent:%s", agentCtx.AgentSlug)
+	scionMsg.Metadata = map[string]string{"a2aTaskId": taskID}
 
 	if b.broker != nil {
-		pattern := fmt.Sprintf("scion.grove.%s.user.>", agentCtx.GroveID)
+		pattern := fmt.Sprintf("scion.grove.%s.user.%s.messages", agentCtx.GroveID, b.config.Hub.User)
 		if err := b.broker.RequestSubscription(pattern); err != nil {
 			b.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
 		}
 	}
 
-	// Send message to agent asynchronously so the SSE connection can be set up.
+	b.wg.Add(1)
 	go func() {
-		sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer b.wg.Done()
+		sendCtx, cancel := context.WithTimeout(b.shutdownCtx, 30*time.Second)
 		defer cancel()
 
 		if err := b.hubClient.Agents().SendStructuredMessage(sendCtx, agentCtx.AgentID, scionMsg, false, false); err != nil {
 			b.log.Error("streaming send failed", "error", err, "task_id", taskID)
-			b.store.UpdateTaskState(taskID, TaskStateFailed)
+			if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
+				b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+			}
 			b.streams.Broadcast(taskID, StreamEvent{
 				StatusUpdate: &TaskStatusUpdate{
 					TaskID: taskID,
@@ -198,11 +210,13 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, groveSlug, agentSlug,
 					Final:  true,
 				},
 			})
-			b.unregisterActiveTask(taskID, agentCtx.AgentSlug)
+			b.unregisterActiveTask(taskID, aKey)
 			return
 		}
 
-		b.store.UpdateTaskState(taskID, TaskStateWorking)
+		if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
+			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+		}
 		b.streams.Broadcast(taskID, StreamEvent{
 			StatusUpdate: &TaskStatusUpdate{
 				TaskID: taskID,
@@ -232,7 +246,6 @@ func (b *Bridge) SubscribeToTask(ctx context.Context, taskID string) (<-chan Str
 		return nil, nil, fmt.Errorf("subscribe: %w", err)
 	}
 
-	// Send current task state as the first event.
 	b.streams.Broadcast(taskID, StreamEvent{
 		StatusUpdate: &TaskStatusUpdate{
 			TaskID: taskID,

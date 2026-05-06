@@ -50,6 +50,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Validate auth configuration at startup (fail closed).
+	if err := bridge.ValidateConfig(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "invalid configuration: %v\n", err)
+		os.Exit(1)
+	}
+
 	log := initLogger(cfg.Logging)
 	log.Info("scion-a2a-bridge starting")
 
@@ -133,11 +139,14 @@ func main() {
 
 	metrics := bridge.NewMetrics(prometheus.DefaultRegisterer)
 	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"))
+
+	// WriteTimeout is 0 to support long-lived SSE streams.
 	httpServer := &http.Server{
 		Addr:           listenAddr,
 		Handler:        srv.Handler(),
 		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   120 * time.Second,
+		WriteTimeout:   0,
+		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
 
@@ -172,6 +181,9 @@ func main() {
 		log.Error("failed to stop A2A server", "error", err)
 	}
 
+	// Drain background goroutines before closing the store.
+	b.Shutdown()
+
 	log.Info("scion-a2a-bridge stopped")
 }
 
@@ -181,7 +193,17 @@ func loadConfig(path string) (*bridge.Config, error) {
 		return nil, fmt.Errorf("reading config file: %w", err)
 	}
 
-	expanded := os.ExpandEnv(string(data))
+	var missing []string
+	expanded := os.Expand(string(data), func(name string) string {
+		v, ok := os.LookupEnv(name)
+		if !ok {
+			missing = append(missing, name)
+		}
+		return v
+	})
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("config references unset environment variables: %v", missing)
+	}
 
 	var cfg bridge.Config
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
@@ -208,7 +230,9 @@ func loadSigningKey(cfg bridge.HubConfig) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("reading signing key file: %w", err)
 		}
-		return strings.TrimSpace(string(data)), nil
+		// Strip all whitespace (including embedded newlines from wrapped base64).
+		cleaned := strings.NewReplacer(" ", "", "\t", "", "\n", "", "\r", "").Replace(string(data))
+		return cleaned, nil
 	case cfg.SigningKeySecret != "":
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

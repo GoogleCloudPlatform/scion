@@ -33,6 +33,11 @@ func noopResolveIP(host string) ([]net.IP, error) {
 	return []net.IP{net.IPv4(203, 0, 113, 1)}, nil
 }
 
+// testPushClient returns a plain HTTP client suitable for tests against httptest servers.
+func testPushClient() *http.Client {
+	return &http.Client{Timeout: 10 * time.Second}
+}
+
 func newTestBridge(t *testing.T) *Bridge {
 	t.Helper()
 	dir := t.TempDir()
@@ -87,6 +92,7 @@ func TestPushDispatcherSendsWebhook(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pd := NewPushDispatcher(store, cfg, log)
 	pd.resolveIP = noopResolveIP
+	pd.client = testPushClient()
 
 	event := StreamEvent{
 		StatusUpdate: &TaskStatusUpdate{
@@ -132,9 +138,10 @@ func TestPushDispatcherAuthScheme(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pd := NewPushDispatcher(store, cfg, log)
 	pd.resolveIP = noopResolveIP
+	pd.client = testPushClient()
 
 	// Use send directly (not sendWithRetry) for auth header verification.
-	if err := pd.send(state.PushNotificationConfig{
+	if _, err := pd.send(state.PushNotificationConfig{
 		ID:              "push-1",
 		URL:             ts.URL,
 		AuthScheme:      "ApiKey",
@@ -177,6 +184,7 @@ func TestPushDispatcherRetriesOnFailure(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pd := NewPushDispatcher(store, cfg, log)
 	pd.resolveIP = noopResolveIP
+	pd.client = testPushClient()
 
 	pd.sendWithRetry(state.PushNotificationConfig{
 		ID:  "push-1",
@@ -193,9 +201,10 @@ func TestPushDispatcherRetriesOnFailure(t *testing.T) {
 	}
 }
 
-func TestPushDispatcherDeletesAfterExhaustedRetries(t *testing.T) {
+func TestPushDispatcherDeletesOnPermanentError(t *testing.T) {
+	// 410 Gone is a permanent client error — config should be deleted immediately.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusGone)
 	}))
 	defer ts.Close()
 
@@ -220,11 +229,11 @@ func TestPushDispatcherDeletesAfterExhaustedRetries(t *testing.T) {
 		t.Fatalf("expected 1 config before, got %d", len(configs))
 	}
 
-	// Use PushRetryMax=0 so it only makes one attempt (no retries), then deletes.
-	cfg := &Config{Timeouts: TimeoutConfig{PushRetryMax: 0}}
+	cfg := &Config{Timeouts: TimeoutConfig{PushRetryMax: 3}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pd := NewPushDispatcher(store, cfg, log)
 	pd.resolveIP = noopResolveIP
+	pd.client = testPushClient()
 
 	pd.sendWithRetry(state.PushNotificationConfig{
 		ID:  "push-del",
@@ -238,7 +247,52 @@ func TestPushDispatcherDeletesAfterExhaustedRetries(t *testing.T) {
 
 	configs, _ = store.GetPushConfigsByTask("task-1")
 	if len(configs) != 0 {
-		t.Errorf("expected 0 configs after exhausted retries, got %d", len(configs))
+		t.Errorf("expected 0 configs after permanent 410 error, got %d", len(configs))
+	}
+}
+
+func TestPushDispatcherKeepsConfigOnServerError(t *testing.T) {
+	// 500 is a transient server error — config should NOT be deleted.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	dir := t.TempDir()
+	store, err := state.New(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Now()
+	store.CreateTask(&state.Task{
+		ID: "task-2", ContextID: "ctx-2", GroveID: "g1", AgentSlug: "a1",
+		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
+	})
+	store.SetPushConfig(&state.PushNotificationConfig{
+		ID: "push-keep", TaskID: "task-2", URL: ts.URL, CreatedAt: now,
+	})
+
+	cfg := &Config{Timeouts: TimeoutConfig{PushRetryMax: 0}}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	pd := NewPushDispatcher(store, cfg, log)
+	pd.resolveIP = noopResolveIP
+	pd.client = testPushClient()
+
+	pd.sendWithRetry(state.PushNotificationConfig{
+		ID:  "push-keep",
+		URL: ts.URL,
+	}, StreamEvent{
+		StatusUpdate: &TaskStatusUpdate{
+			TaskID: "task-2",
+			Status: TaskStatus{State: TaskStateWorking},
+		},
+	})
+
+	configs, _ := store.GetPushConfigsByTask("task-2")
+	if len(configs) != 1 {
+		t.Errorf("expected 1 config to be preserved after transient 500 errors, got %d", len(configs))
 	}
 }
 
@@ -261,6 +315,7 @@ func TestPushDispatcherWebhookPayload(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pd := NewPushDispatcher(store, cfg, log)
 	pd.resolveIP = noopResolveIP
+	pd.client = testPushClient()
 
 	event := StreamEvent{
 		ArtifactUpdate: &TaskArtifactUpdate{

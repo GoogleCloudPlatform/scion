@@ -42,29 +42,49 @@ type Bridge struct {
 	push      *PushDispatcher
 	log       *slog.Logger
 
-	// waiters tracks channels waiting for agent responses, keyed by agent slug.
+	// waiters tracks channels waiting for agent responses, keyed by taskID.
 	mu      sync.RWMutex
-	waiters map[string][]chan *messages.StructuredMessage
+	waiters map[string]chan *messages.StructuredMessage
 
-	// activeTasks maps agent slugs to their active (non-terminal) task IDs,
-	// used to route broker messages to streaming and push subscribers.
+	// activeTasks maps taskID to the agent slug for routing broker messages.
 	tasksMu     sync.RWMutex
-	activeTasks map[string][]string
+	activeTasks map[string]string
+
+	// agentTasks maps agentKey (groveID:agentSlug) to active task IDs,
+	// used for reverse lookup when broker messages arrive.
+	agentTasks map[string][]string
+
+	// wg tracks background goroutines to drain on shutdown.
+	wg sync.WaitGroup
+
+	// shutdownCtx is cancelled during graceful shutdown.
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 }
 
 // New creates a new Bridge instance.
 func New(store *state.Store, hubClient hubclient.Client, minter *identity.TokenMinter, cfg *Config, log *slog.Logger) *Bridge {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Bridge{
-		store:       store,
-		hubClient:   hubClient,
-		minter:      minter,
-		config:      cfg,
-		log:         log,
-		streams:     NewStreamManager(),
-		push:        NewPushDispatcher(store, cfg, log),
-		waiters:     make(map[string][]chan *messages.StructuredMessage),
-		activeTasks: make(map[string][]string),
+		store:          store,
+		hubClient:      hubClient,
+		minter:         minter,
+		config:         cfg,
+		log:            log,
+		streams:        NewStreamManager(),
+		push:           NewPushDispatcher(store, cfg, log),
+		waiters:        make(map[string]chan *messages.StructuredMessage),
+		activeTasks:    make(map[string]string),
+		agentTasks:     make(map[string][]string),
+		shutdownCtx:    ctx,
+		shutdownCancel: cancel,
 	}
+}
+
+// Shutdown signals background goroutines to stop and waits for them to drain.
+func (b *Bridge) Shutdown() {
+	b.shutdownCancel()
+	b.wg.Wait()
 }
 
 // SetBroker wires the broker server for subscription management.
@@ -72,17 +92,20 @@ func (b *Bridge) SetBroker(broker *BrokerServer) {
 	b.broker = broker
 }
 
+// agentKey returns a composite key for grove-scoped agent isolation.
+func agentKey(groveID, agentSlug string) string {
+	return groveID + ":" + agentSlug
+}
+
 // SendMessage handles an A2A SendMessage. When blocking is true (the default),
 // it waits for the agent response. When blocking is false, it returns immediately
 // after submitting the message and the client can poll via GetTask or subscribe.
 func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextID string, parts []Part, blocking bool) (*TaskResult, error) {
-	// Resolve context to agent.
 	agentCtx, err := b.resolveContext(ctx, groveSlug, agentSlug, contextID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve context: %w", err)
 	}
 
-	// Create task record.
 	taskID := uuid.New().String()
 	now := time.Now()
 	task := &state.Task{
@@ -100,32 +123,37 @@ func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextI
 		return nil, fmt.Errorf("create task: %w", err)
 	}
 
-	// Translate A2A parts to Scion message.
 	scionMsg := TranslateA2AToScion(parts)
 	scionMsg.Sender = fmt.Sprintf("user:%s", b.config.Hub.User)
 	scionMsg.Recipient = fmt.Sprintf("agent:%s", agentCtx.AgentSlug)
+	scionMsg.Metadata = map[string]string{"a2aTaskId": taskID}
 
-	// Ensure subscription exists for this agent.
 	if b.broker != nil {
-		pattern := fmt.Sprintf("scion.grove.%s.user.>", agentCtx.GroveID)
+		pattern := fmt.Sprintf("scion.grove.%s.user.%s.messages", agentCtx.GroveID, b.config.Hub.User)
 		if err := b.broker.RequestSubscription(pattern); err != nil {
 			b.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
 		}
 	}
 
-	// Non-blocking mode: submit and return immediately.
 	if !blocking {
-		b.registerActiveTask(taskID, agentCtx.AgentSlug)
+		aKey := agentKey(agentCtx.GroveID, agentCtx.AgentSlug)
+		b.registerActiveTask(taskID, aKey)
+		b.wg.Add(1)
 		go func() {
-			sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer b.wg.Done()
+			sendCtx, cancel := context.WithTimeout(b.shutdownCtx, 30*time.Second)
 			defer cancel()
 			if err := b.hubClient.Agents().SendStructuredMessage(sendCtx, agentCtx.AgentID, scionMsg, false, false); err != nil {
 				b.log.Error("non-blocking send failed", "error", err, "task_id", taskID)
-				b.store.UpdateTaskState(taskID, TaskStateFailed)
-				b.unregisterActiveTask(taskID, agentCtx.AgentSlug)
+				if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
+					b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+				}
+				b.unregisterActiveTask(taskID, aKey)
 				return
 			}
-			b.store.UpdateTaskState(taskID, TaskStateWorking)
+			if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
+				b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+			}
 		}()
 
 		return &TaskResult{
@@ -135,20 +163,22 @@ func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextI
 		}, nil
 	}
 
-	// Blocking mode: set up waiter and wait for response.
+	// Blocking mode: set up per-task waiter.
 	responseCh := make(chan *messages.StructuredMessage, 1)
-	b.addWaiter(agentCtx.AgentSlug, responseCh)
-	defer b.removeWaiter(agentCtx.AgentSlug, responseCh)
+	b.addWaiter(taskID, responseCh)
+	defer b.removeWaiter(taskID)
 
-	// Send message to agent via Hub API.
 	if err := b.hubClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false); err != nil {
-		b.store.UpdateTaskState(taskID, TaskStateFailed)
+		if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
+			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+		}
 		return nil, fmt.Errorf("send message to agent: %w", err)
 	}
 
-	b.store.UpdateTaskState(taskID, TaskStateWorking)
+	if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
+		b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+	}
 
-	// Wait for response with timeout.
 	timeout := b.config.Timeouts.SendMessage
 	if timeout == 0 {
 		timeout = 120 * time.Second
@@ -157,7 +187,9 @@ func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextI
 	select {
 	case response := <-responseCh:
 		msg, artifacts := TranslateScionToA2A(response)
-		b.store.UpdateTaskState(taskID, TaskStateCompleted)
+		if err := b.store.UpdateTaskState(taskID, TaskStateCompleted); err != nil {
+			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+		}
 
 		return &TaskResult{
 			ID:        taskID,
@@ -170,11 +202,15 @@ func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextI
 		}, nil
 
 	case <-time.After(timeout):
-		b.store.UpdateTaskState(taskID, TaskStateFailed)
+		if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
+			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+		}
 		return nil, fmt.Errorf("timeout waiting for agent response after %v", timeout)
 
 	case <-ctx.Done():
-		b.store.UpdateTaskState(taskID, TaskStateFailed)
+		if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
+			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+		}
 		return nil, ctx.Err()
 	}
 }
@@ -216,7 +252,8 @@ func (b *Bridge) ListTasks(ctx context.Context, contextID string) ([]TaskResult,
 	return results, nil
 }
 
-// CancelTask cancels an in-progress task, notifying stream and push subscribers.
+// CancelTask cancels an in-progress task, notifying stream and push subscribers,
+// and sending an interrupt to the Hub to stop the agent.
 func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, error) {
 	task, err := b.store.GetTask(taskID)
 	if err != nil {
@@ -229,7 +266,25 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 		return nil, fmt.Errorf("task %s is already in terminal state: %s", taskID, task.State)
 	}
 
-	b.store.UpdateTaskState(taskID, TaskStateCanceled)
+	// Send interrupt to the agent via Hub.
+	if b.hubClient != nil && task.AgentID != "" {
+		interruptMsg := &messages.StructuredMessage{
+			Version:   1,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Sender:    fmt.Sprintf("user:%s", b.config.Hub.User),
+			Recipient: fmt.Sprintf("agent:%s", task.AgentSlug),
+			Msg:       "Task cancelled by A2A client.",
+			Type:      messages.TypeInstruction,
+			Metadata:  map[string]string{"a2aTaskId": taskID},
+		}
+		if err := b.hubClient.Agents().SendStructuredMessage(ctx, task.AgentID, interruptMsg, true, false); err != nil {
+			b.log.Error("failed to send cancel interrupt to agent", "error", err, "task_id", taskID, "agent_id", task.AgentID)
+		}
+	}
+
+	if err := b.store.UpdateTaskState(taskID, TaskStateCanceled); err != nil {
+		b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+	}
 
 	cancelEvent := StreamEvent{
 		StatusUpdate: &TaskStatusUpdate{
@@ -240,7 +295,9 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 	}
 	b.streams.Broadcast(taskID, cancelEvent)
 	b.push.Dispatch(ctx, taskID, cancelEvent)
-	b.unregisterActiveTask(taskID, task.AgentSlug)
+
+	aKey := agentKey(task.GroveID, task.AgentSlug)
+	b.unregisterActiveTask(taskID, aKey)
 	b.streams.CloseAll(taskID)
 
 	return &TaskResult{
@@ -259,9 +316,6 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 		"msg_preview", truncate(msg.Msg, 100),
 	)
 
-	// Extract agent slug from sender field (format: "agent:<slug>").
-	// This is more reliable than parsing the topic, which may be a user-targeted
-	// topic (scion.grove.<groveId>.user.<userId>.messages) without agent info.
 	agentSlug := extractAgentIDFromSender(msg.Sender)
 	if agentSlug == "" {
 		agentSlug = extractAgentIDFromTopic(topic)
@@ -271,79 +325,122 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 		return nil
 	}
 
-	// Dispatch to blocking waiters (SendMessage).
-	b.mu.RLock()
-	waiters := b.waiters[agentSlug]
-	waiterCount := len(waiters)
-	b.mu.RUnlock()
-
-	b.log.Info("dispatching broker message", "agent_slug", agentSlug, "waiter_count", waiterCount)
-
-	for _, ch := range waiters {
-		select {
-		case ch <- msg:
-		default:
-		}
-	}
-
-	// Dispatch to streaming and push subscribers for active tasks.
-	taskIDs := b.getActiveTaskIDs(agentSlug)
-	if len(taskIDs) == 0 {
+	// If the message carries a task correlation ID, dispatch only to that task.
+	if taskID := msg.Metadata["a2aTaskId"]; taskID != "" {
+		b.dispatchToWaiter(taskID, msg)
+		b.dispatchToActiveTask(ctx, taskID, agentSlug, msg)
 		return nil
 	}
 
-	a2aMsg, artifacts := TranslateScionToA2A(msg)
+	// Fallback: dispatch to all blocking waiters for this agent (best-effort without correlation).
+	b.mu.RLock()
+	var matchedTaskIDs []string
+	for taskID := range b.waiters {
+		matchedTaskIDs = append(matchedTaskIDs, taskID)
+	}
+	b.mu.RUnlock()
 
-	for _, taskID := range taskIDs {
-		if msg.Type == messages.TypeStateChange {
-			taskState := MapActivityToTaskState(msg.Msg)
-			b.store.UpdateTaskState(taskID, taskState)
+	for _, taskID := range matchedTaskIDs {
+		b.dispatchToWaiter(taskID, msg)
+	}
 
-			event := StreamEvent{
-				StatusUpdate: &TaskStatusUpdate{
-					TaskID: taskID,
-					Status: TaskStatus{State: taskState},
-					Final:  IsTerminalState(taskState),
-				},
-			}
-			b.streams.Broadcast(taskID, event)
-			b.push.Dispatch(ctx, taskID, event)
-
-			if IsTerminalState(taskState) {
-				b.unregisterActiveTask(taskID, agentSlug)
-			}
-		} else {
-			b.store.UpdateTaskState(taskID, TaskStateCompleted)
-
-			for _, art := range artifacts {
-				artEvent := StreamEvent{
-					ArtifactUpdate: &TaskArtifactUpdate{
-						TaskID:   taskID,
-						Artifact: art,
-					},
-				}
-				b.streams.Broadcast(taskID, artEvent)
-				b.push.Dispatch(ctx, taskID, artEvent)
-			}
-
-			statusEvent := StreamEvent{
-				StatusUpdate: &TaskStatusUpdate{
-					TaskID: taskID,
-					Status: TaskStatus{
-						State:   TaskStateCompleted,
-						Message: &a2aMsg,
-					},
-					Final: true,
-				},
-			}
-			b.streams.Broadcast(taskID, statusEvent)
-			b.push.Dispatch(ctx, taskID, statusEvent)
-
-			b.unregisterActiveTask(taskID, agentSlug)
+	// Dispatch to all active (non-blocking/streaming) tasks for this agent.
+	b.tasksMu.RLock()
+	var activeTaskIDs []string
+	for _, aKey := range []string{} {
+		_ = aKey
+	}
+	// Find all tasks that belong to this agent slug.
+	for taskID, aSlug := range b.activeTasks {
+		// Match on agent slug suffix (agentKey is "groveID:agentSlug").
+		if strings.HasSuffix(aSlug, ":"+agentSlug) || aSlug == agentSlug {
+			activeTaskIDs = append(activeTaskIDs, taskID)
 		}
+	}
+	b.tasksMu.RUnlock()
+
+	for _, taskID := range activeTaskIDs {
+		b.dispatchToActiveTask(ctx, taskID, agentSlug, msg)
 	}
 
 	return nil
+}
+
+// dispatchToWaiter sends a message to a blocking waiter for the given taskID.
+func (b *Bridge) dispatchToWaiter(taskID string, msg *messages.StructuredMessage) {
+	b.mu.RLock()
+	ch, ok := b.waiters[taskID]
+	b.mu.RUnlock()
+	if !ok {
+		return
+	}
+	select {
+	case ch <- msg:
+	default:
+	}
+}
+
+// dispatchToActiveTask routes a broker message to streaming/push subscribers for a task.
+func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug string, msg *messages.StructuredMessage) {
+	a2aMsg, artifacts := TranslateScionToA2A(msg)
+
+	if msg.Type == messages.TypeStateChange {
+		taskState := MapActivityToTaskState(msg.Msg)
+		if err := b.store.UpdateTaskState(taskID, taskState); err != nil {
+			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+		}
+
+		event := StreamEvent{
+			StatusUpdate: &TaskStatusUpdate{
+				TaskID: taskID,
+				Status: TaskStatus{State: taskState},
+				Final:  IsTerminalState(taskState),
+			},
+		}
+		b.streams.Broadcast(taskID, event)
+		b.push.Dispatch(ctx, taskID, event)
+
+		if IsTerminalState(taskState) {
+			// Find the agent key for this task.
+			b.tasksMu.RLock()
+			aKey := b.activeTasks[taskID]
+			b.tasksMu.RUnlock()
+			b.unregisterActiveTask(taskID, aKey)
+		}
+	} else {
+		if err := b.store.UpdateTaskState(taskID, TaskStateCompleted); err != nil {
+			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+		}
+
+		for _, art := range artifacts {
+			artEvent := StreamEvent{
+				ArtifactUpdate: &TaskArtifactUpdate{
+					TaskID:   taskID,
+					Artifact: art,
+				},
+			}
+			b.streams.Broadcast(taskID, artEvent)
+			b.push.Dispatch(ctx, taskID, artEvent)
+		}
+
+		statusEvent := StreamEvent{
+			StatusUpdate: &TaskStatusUpdate{
+				TaskID: taskID,
+				Status: TaskStatus{
+					State:   TaskStateCompleted,
+					Message: &a2aMsg,
+				},
+				Final: true,
+			},
+		}
+		b.streams.Broadcast(taskID, statusEvent)
+		b.push.Dispatch(ctx, taskID, statusEvent)
+
+		b.tasksMu.RLock()
+		aKey := b.activeTasks[taskID]
+		b.tasksMu.RUnlock()
+		b.unregisterActiveTask(taskID, aKey)
+	}
 }
 
 func truncate(s string, n int) string {
@@ -363,8 +460,7 @@ func (b *Bridge) GenerateAgentCard(ctx context.Context, groveSlug, agentSlug str
 	description := fmt.Sprintf("Scion agent %s in grove %s", agentSlug, groveSlug)
 	var skills []map[string]interface{}
 
-	// Fetch agent metadata from Hub for richer card content.
-	if agent := b.lookupAgent(ctx, agentSlug); agent != nil {
+	if agent := b.lookupAgent(ctx, groveSlug, agentSlug); agent != nil {
 		if agent.Name != "" {
 			name = agent.Name
 		}
@@ -421,7 +517,8 @@ func (b *Bridge) GenerateAgentCard(ctx context.Context, groveSlug, agentSlug str
 }
 
 // lookupAgent fetches agent metadata from the Hub API, returning nil on failure.
-func (b *Bridge) lookupAgent(ctx context.Context, agentSlug string) *hubclient.Agent {
+// Uses GroveID filter to avoid listing all agents.
+func (b *Bridge) lookupAgent(ctx context.Context, groveSlug, agentSlug string) *hubclient.Agent {
 	if b.hubClient == nil {
 		return nil
 	}
@@ -429,7 +526,7 @@ func (b *Bridge) lookupAgent(ctx context.Context, agentSlug string) *hubclient.A
 	if agentSvc == nil {
 		return nil
 	}
-	agents, err := agentSvc.List(ctx, nil)
+	agents, err := agentSvc.List(ctx, &hubclient.ListAgentsOptions{GroveID: groveSlug})
 	if err != nil {
 		b.log.Debug("failed to list agents for card enrichment", "error", err)
 		return nil
@@ -454,7 +551,6 @@ func (b *Bridge) GetGroveConfig(groveSlug string) *GroveConfig {
 
 // resolveContext maps an A2A context to a Scion agent, creating a new context if needed.
 func (b *Bridge) resolveContext(ctx context.Context, groveSlug, agentSlug, contextID string) (*state.Context, error) {
-	// If contextID provided, look up existing context.
 	if contextID != "" {
 		existing, err := b.store.GetContext(contextID)
 		if err != nil {
@@ -467,9 +563,7 @@ func (b *Bridge) resolveContext(ctx context.Context, groveSlug, agentSlug, conte
 		return nil, fmt.Errorf("unknown context ID: %s", contextID)
 	}
 
-	// No contextID — create a new context.
-	// Look up the agent via Hub API.
-	agents, err := b.hubClient.Agents().List(ctx, nil)
+	agents, err := b.hubClient.Agents().List(ctx, &hubclient.ListAgentsOptions{GroveID: groveSlug})
 	if err != nil {
 		return nil, fmt.Errorf("list agents: %w", err)
 	}
@@ -483,7 +577,6 @@ func (b *Bridge) resolveContext(ctx context.Context, groveSlug, agentSlug, conte
 		}
 	}
 	if agentID == "" {
-		// Agent not found — try auto-provisioning if grove config allows it.
 		groveCfg := b.GetGroveConfig(groveSlug)
 		if groveCfg == nil || !groveCfg.AutoProvision || groveCfg.DefaultTemplate == "" {
 			return nil, fmt.Errorf("agent %q not found", agentSlug)
@@ -523,57 +616,42 @@ func (b *Bridge) resolveContext(ctx context.Context, groveSlug, agentSlug, conte
 	return agentCtx, nil
 }
 
-func (b *Bridge) registerActiveTask(taskID, agentSlug string) {
+func (b *Bridge) registerActiveTask(taskID, aKey string) {
 	b.tasksMu.Lock()
 	defer b.tasksMu.Unlock()
-	b.activeTasks[agentSlug] = append(b.activeTasks[agentSlug], taskID)
+	b.activeTasks[taskID] = aKey
+	b.agentTasks[aKey] = append(b.agentTasks[aKey], taskID)
 }
 
-func (b *Bridge) unregisterActiveTask(taskID, agentSlug string) {
+func (b *Bridge) unregisterActiveTask(taskID, aKey string) {
 	b.tasksMu.Lock()
 	defer b.tasksMu.Unlock()
-	tasks := b.activeTasks[agentSlug]
+	delete(b.activeTasks, taskID)
+	tasks := b.agentTasks[aKey]
 	for i, t := range tasks {
 		if t == taskID {
-			b.activeTasks[agentSlug] = append(tasks[:i], tasks[i+1:]...)
+			b.agentTasks[aKey] = append(tasks[:i], tasks[i+1:]...)
 			break
 		}
 	}
-	if len(b.activeTasks[agentSlug]) == 0 {
-		delete(b.activeTasks, agentSlug)
+	if len(b.agentTasks[aKey]) == 0 {
+		delete(b.agentTasks, aKey)
 	}
 }
 
-func (b *Bridge) getActiveTaskIDs(agentSlug string) []string {
-	b.tasksMu.RLock()
-	defer b.tasksMu.RUnlock()
-	return append([]string(nil), b.activeTasks[agentSlug]...)
-}
-
-func (b *Bridge) addWaiter(agentID string, ch chan *messages.StructuredMessage) {
+func (b *Bridge) addWaiter(taskID string, ch chan *messages.StructuredMessage) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.waiters[agentID] = append(b.waiters[agentID], ch)
+	b.waiters[taskID] = ch
 }
 
-func (b *Bridge) removeWaiter(agentID string, ch chan *messages.StructuredMessage) {
+func (b *Bridge) removeWaiter(taskID string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	waiters := b.waiters[agentID]
-	for i, w := range waiters {
-		if w == ch {
-			b.waiters[agentID] = append(waiters[:i], waiters[i+1:]...)
-			break
-		}
-	}
-	if len(b.waiters[agentID]) == 0 {
-		delete(b.waiters, agentID)
-	}
+	delete(b.waiters, taskID)
 }
 
 // extractAgentIDFromTopic parses agent identity from broker topic strings.
-// Topic format: scion.grove.<groveId>.agent.<agentSlug>.messages
-// Or: scion.grove.<groveId>.user.<userId>.messages
 func extractAgentIDFromTopic(topic string) string {
 	parts := strings.Split(topic, ".")
 	if len(parts) < 5 {
@@ -586,7 +664,6 @@ func extractAgentIDFromTopic(topic string) string {
 }
 
 // extractAgentIDFromSender extracts agent identity from sender field.
-// Sender format: "agent:<slug>" or "agent:<id>"
 func extractAgentIDFromSender(sender string) string {
 	if strings.HasPrefix(sender, "agent:") {
 		return strings.TrimPrefix(sender, "agent:")
