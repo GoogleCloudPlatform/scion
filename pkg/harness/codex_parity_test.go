@@ -62,18 +62,19 @@ func TestCodexEmbedsSeedRootSupportFiles(t *testing.T) {
 	if hc.Config.Provisioner == nil {
 		t.Fatal("expected provisioner block in seeded config.yaml")
 	}
-	if hc.Config.Provisioner.Type != "builtin" {
-		t.Errorf("provisioner.type=%q want builtin (script must opt in)", hc.Config.Provisioner.Type)
+	if hc.Config.Provisioner.Type != "container-script" {
+		t.Errorf("provisioner.type=%q want container-script", hc.Config.Provisioner.Type)
 	}
 	if len(hc.Config.Provisioner.Command) == 0 {
-		t.Error("expected provisioner.command to be staged for future activation")
+		t.Error("expected provisioner.command to be set")
 	}
 }
 
-// TestCodexActivateScriptFlipsProvisionerType is the operator-facing
-// activation step: --activate-script flips type to container-script and
-// produces a backup of the previous config.yaml.
-func TestCodexActivateScriptFlipsProvisionerType(t *testing.T) {
+// TestCodexActivateScriptIsNoOpWhenAlreadyActive verifies that
+// --activate-script is idempotent: since the default config.yaml already
+// sets provisioner.type to container-script, the upgrade produces no
+// config change and no backup.
+func TestCodexActivateScriptIsNoOpWhenAlreadyActive(t *testing.T) {
 	dir := seedCodexDir(t)
 
 	plan, err := config.UpgradeHarnessConfig(dir, &Codex{}, config.HarnessConfigUpgradeOptions{
@@ -83,8 +84,8 @@ func TestCodexActivateScriptFlipsProvisionerType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpgradeHarnessConfig --activate-script: %v", err)
 	}
-	if !plan.Changed {
-		t.Fatal("expected activation to change config")
+	if plan.Changed {
+		t.Fatal("expected no config change since type is already container-script")
 	}
 
 	hc, err := config.LoadHarnessConfigDir(dir)
@@ -94,8 +95,8 @@ func TestCodexActivateScriptFlipsProvisionerType(t *testing.T) {
 	if hc.Config.Provisioner == nil || hc.Config.Provisioner.Type != "container-script" {
 		t.Fatalf("provisioner.type after activate=%q want container-script", hc.Config.Provisioner.Type)
 	}
-	if len(plan.Backups) != 1 {
-		t.Fatalf("expected one backup, got %v", plan.Backups)
+	if len(plan.Backups) != 0 {
+		t.Fatalf("expected no backups, got %v", plan.Backups)
 	}
 }
 
@@ -105,11 +106,6 @@ func TestCodexActivateScriptFlipsProvisionerType(t *testing.T) {
 // — single-token assertions wouldn't catch the split-on-whitespace gap.
 func TestCodexContainerScriptHarnessParity(t *testing.T) {
 	dir := seedCodexDir(t)
-	if _, err := config.UpgradeHarnessConfig(dir, &Codex{}, config.HarnessConfigUpgradeOptions{
-		ActivateScript: true,
-	}); err != nil {
-		t.Fatalf("activate script: %v", err)
-	}
 	hc, err := config.LoadHarnessConfigDir(dir)
 	if err != nil {
 		t.Fatalf("LoadHarnessConfigDir: %v", err)
@@ -161,11 +157,6 @@ func TestCodexContainerScriptHarnessParity(t *testing.T) {
 // container-script GetCommand would silently produce a single bogus arg.
 func TestCodexContainerScriptGetCommandParity(t *testing.T) {
 	dir := seedCodexDir(t)
-	if _, err := config.UpgradeHarnessConfig(dir, &Codex{}, config.HarnessConfigUpgradeOptions{
-		ActivateScript: true,
-	}); err != nil {
-		t.Fatalf("activate: %v", err)
-	}
 	hc, err := config.LoadHarnessConfigDir(dir)
 	if err != nil {
 		t.Fatalf("LoadHarnessConfigDir: %v", err)
@@ -202,11 +193,6 @@ func TestCodexContainerScriptGetCommandParity(t *testing.T) {
 // provision.py byte-identically and emits the trusted hook wrapper.
 func TestCodexContainerScriptHarnessStagesScript(t *testing.T) {
 	dir := seedCodexDir(t)
-	if _, err := config.UpgradeHarnessConfig(dir, &Codex{}, config.HarnessConfigUpgradeOptions{
-		ActivateScript: true,
-	}); err != nil {
-		t.Fatalf("activate: %v", err)
-	}
 	hc, err := config.LoadHarnessConfigDir(dir)
 	if err != nil {
 		t.Fatalf("LoadHarnessConfigDir: %v", err)
@@ -252,11 +238,6 @@ func TestCodexContainerScriptHarnessStagesScript(t *testing.T) {
 // records the path in auth-candidates.json's env_secret_files map.
 func TestCodexContainerScriptApplyAuthSettingsStagesSecretFiles(t *testing.T) {
 	dir := seedCodexDir(t)
-	if _, err := config.UpgradeHarnessConfig(dir, &Codex{}, config.HarnessConfigUpgradeOptions{
-		ActivateScript: true,
-	}); err != nil {
-		t.Fatalf("activate: %v", err)
-	}
 	hc, err := config.LoadHarnessConfigDir(dir)
 	if err != nil {
 		t.Fatal(err)

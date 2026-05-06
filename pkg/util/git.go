@@ -439,7 +439,8 @@ func NormalizeGitRemote(remote string) string {
 		}
 	}
 
-	// Remove .git suffix
+	// Remove trailing slashes and .git suffix
+	remote = strings.TrimRight(remote, "/")
 	remote = strings.TrimSuffix(remote, ".git")
 
 	return remote
@@ -522,6 +523,9 @@ func ToHTTPSCloneURL(gitURL string) string {
 		}
 	}
 
+	// Strip trailing slashes before adding .git suffix
+	result = strings.TrimRight(result, "/")
+
 	// Ensure .git suffix
 	if !strings.HasSuffix(result, ".git") {
 		result += ".git"
@@ -554,16 +558,15 @@ func ExtractOrgRepo(gitURL string) (org, repo string) {
 // CloneSharedWorkspace clones a git repository into the specified workspace path
 // for use as a shared workspace grove. It configures git identity and optionally
 // uses a token for authentication.
+//
+// If the requested branch does not exist on the remote, the clone falls back to
+// the remote's default branch and creates the requested branch locally.
 func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
-	// Build the authenticated URL if a token is provided
 	authURL := cloneURL
 	if token != "" {
-		// Insert oauth2:token credentials into the HTTPS URL
-		// cloneURL is expected to be https://host/org/repo.git
 		authURL = strings.Replace(cloneURL, "https://", "https://oauth2:"+token+"@", 1)
 	}
 
-	// Build clone command
 	args := []string{"clone"}
 	if branch != "" {
 		args = append(args, "--branch", branch)
@@ -571,11 +574,33 @@ func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
 	args = append(args, authURL, workspacePath)
 
 	cmd := exec.Command("git", args...)
-	// Prevent git from prompting for credentials
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// Sanitize output to avoid leaking tokens in error messages
+
+	if err != nil && branch != "" && isRemoteBranchNotFound(string(output)) {
+		// The branch doesn't exist on the remote yet. Clone the default branch
+		// instead and create the requested branch locally.
+		os.RemoveAll(workspacePath)
+
+		fallbackArgs := []string{"clone", authURL, workspacePath}
+		fallbackCmd := exec.Command("git", fallbackArgs...)
+		fallbackCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		output, err = fallbackCmd.CombinedOutput()
+		if err != nil {
+			sanitized := strings.TrimSpace(sanitizeGitOutput(string(output), token))
+			gitErr := ClassifyGitError(sanitized)
+			if guidance := gitErr.UserGuidance(); guidance != "" {
+				return &GitError{Kind: gitErr.Kind, Message: fmt.Sprintf("git clone failed: %s (%s)", sanitized, guidance)}
+			}
+			return &GitError{Kind: gitErr.Kind, Message: fmt.Sprintf("git clone failed: %s", sanitized)}
+		}
+
+		// Create the requested branch locally
+		checkoutCmd := exec.Command("git", "-C", workspacePath, "checkout", "-b", branch)
+		if checkoutOut, checkoutErr := checkoutCmd.CombinedOutput(); checkoutErr != nil {
+			return fmt.Errorf("failed to create local branch %q: %s", branch, strings.TrimSpace(string(checkoutOut)))
+		}
+	} else if err != nil {
 		sanitized := strings.TrimSpace(sanitizeGitOutput(string(output), token))
 		gitErr := ClassifyGitError(sanitized)
 		if guidance := gitErr.UserGuidance(); guidance != "" {
@@ -584,7 +609,6 @@ func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
 		return &GitError{Kind: gitErr.Kind, Message: fmt.Sprintf("git clone failed: %s", sanitized)}
 	}
 
-	// Configure git identity in the cloned workspace
 	if err := gitConfig(workspacePath, "user.name", "Scion"); err != nil {
 		return fmt.Errorf("failed to configure git user.name: %w", err)
 	}
@@ -592,9 +616,6 @@ func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
 		return fmt.Errorf("failed to configure git user.email: %w", err)
 	}
 
-	// Remove stored credentials from the clone's remote URL.
-	// The cloned repo stores the authenticated URL in .git/config — replace it
-	// with the bare (unauthenticated) URL so credentials aren't persisted on disk.
 	if token != "" {
 		if err := gitConfig(workspacePath, "remote.origin.url", cloneURL); err != nil {
 			Debugf("CloneSharedWorkspace: failed to sanitize remote URL: %v", err)
@@ -602,6 +623,14 @@ func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
 	}
 
 	return nil
+}
+
+// isRemoteBranchNotFound checks whether git clone stderr indicates that the
+// requested branch does not exist on the remote (as opposed to the repo itself
+// not being found or an auth error).
+func isRemoteBranchNotFound(stderr string) bool {
+	lower := strings.ToLower(stderr)
+	return strings.Contains(lower, "remote branch") && strings.Contains(lower, "not found")
 }
 
 // PullCommitInfo describes a single commit that was pulled.

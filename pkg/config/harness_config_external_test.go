@@ -82,8 +82,8 @@ env:
 	if hc.Config.Image != "custom-codex:latest" || hc.Config.User != "developer" {
 		t.Fatalf("user-owned fields were not preserved: %#v", hc.Config)
 	}
-	if hc.Config.Provisioner == nil || hc.Config.Provisioner.Type != "builtin" {
-		t.Fatalf("expected additive metadata to include builtin provisioner, got %#v", hc.Config.Provisioner)
+	if hc.Config.Provisioner == nil || hc.Config.Provisioner.Type != "container-script" {
+		t.Fatalf("expected additive metadata to include container-script provisioner, got %#v", hc.Config.Provisioner)
 	}
 	if hc.Config.Env["CUSTOM"] != "1" || hc.Config.Env["SCION_CODEX_NOTIFY_AUTO_COMPLETE"] != "true" {
 		t.Fatalf("expected env map to preserve custom values and add defaults, got %#v", hc.Config.Env)

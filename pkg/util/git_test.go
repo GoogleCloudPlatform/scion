@@ -487,6 +487,8 @@ func TestNormalizeGitRemote(t *testing.T) {
 		{"https oauth", "https://user:x-oauth-basic@github.com/org/repo.git", "github.com/org/repo"},
 		{"https user only", "https://user@github.com/org/repo.git", "github.com/org/repo"},
 		{"uppercase host", "https://GitHub.COM/org/repo.git", "github.com/org/repo"},
+		{"https trailing slash", "https://github.com/org/repo/", "github.com/org/repo"},
+		{"https trailing slash with .git", "https://github.com/org/repo.git/", "github.com/org/repo"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -507,6 +509,8 @@ func TestNormalizeGitRemote_CrossProtocolConsistency(t *testing.T) {
 		"ssh://git@github.com/ptone/gamegame.git",
 		"https://x-access-token:TOKEN@github.com/ptone/gamegame.git",
 		"git://github.com/ptone/gamegame.git",
+		"https://github.com/ptone/gamegame/",
+		"https://github.com/ptone/gamegame",
 	}
 
 	want := "github.com/ptone/gamegame"
@@ -633,6 +637,43 @@ func TestCloneSharedWorkspace(t *testing.T) {
 		}
 		if got := strings.TrimSpace(string(output)); got != "feature" {
 			t.Errorf("expected branch 'feature', got %q", got)
+		}
+	})
+
+	t.Run("CloneWithNonExistentBranch_FallsBack", func(t *testing.T) {
+		destDir := filepath.Join(t.TempDir(), "workspace")
+		err := CloneSharedWorkspace(destDir, sourceDir, "branch-does-not-exist", "")
+		if err != nil {
+			t.Fatalf("CloneSharedWorkspace should fall back to default branch: %v", err)
+		}
+
+		// Verify we're on the requested branch (created locally)
+		cmd := exec.Command("git", "-C", destDir, "branch", "--show-current")
+		output, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.TrimSpace(string(output)); got != "branch-does-not-exist" {
+			t.Errorf("expected branch 'branch-does-not-exist', got %q", got)
+		}
+
+		// Verify file content was cloned from the default branch
+		content, err := os.ReadFile(filepath.Join(destDir, "hello.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(content) != "hello world" {
+			t.Errorf("unexpected content: %q", content)
+		}
+
+		// Verify git identity was still configured
+		cmd = exec.Command("git", "-C", destDir, "config", "user.name")
+		output, err = cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.TrimSpace(string(output)); got != "Scion" {
+			t.Errorf("expected user.name 'Scion', got %q", got)
 		}
 	})
 
@@ -801,6 +842,27 @@ func TestClassifyGitError(t *testing.T) {
 			}
 			if gitErr.Message != tt.stderr {
 				t.Errorf("ClassifyGitError(%q).Message = %q, want %q", tt.stderr, gitErr.Message, tt.stderr)
+			}
+		})
+	}
+}
+
+func TestIsRemoteBranchNotFound(t *testing.T) {
+	tests := []struct {
+		name   string
+		stderr string
+		want   bool
+	}{
+		{"exact git message", "fatal: Remote branch a2a-bridge not found in upstream origin", true},
+		{"lowercase variant", "fatal: remote branch my-branch not found in upstream origin", true},
+		{"repo not found", "fatal: repository 'https://github.com/org/repo.git/' not found", false},
+		{"auth failure", "fatal: Authentication failed for 'https://github.com/org/repo.git/'", false},
+		{"empty", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRemoteBranchNotFound(tt.stderr); got != tt.want {
+				t.Errorf("isRemoteBranchNotFound(%q) = %v, want %v", tt.stderr, got, tt.want)
 			}
 		})
 	}

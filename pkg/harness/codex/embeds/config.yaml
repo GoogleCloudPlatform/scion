@@ -18,11 +18,12 @@ user: scion
 env:
   # TODO: notify hook is disabled pending full hook support in Codex; this var has no effect until then
   SCION_CODEX_NOTIFY_AUTO_COMPLETE: "true"
-# provisioner.type defaults to "builtin" so the compiled Codex harness keeps
-# running unchanged. Run `scion harness-config upgrade codex --activate-script`
-# to flip this to container-script after reviewing the staged provision.py.
+# provisioner.type is container-script so the container-side provision.py
+# handles auth resolution, MCP server translation, and other harness-native
+# config writes. Existing installations that still have type: builtin can
+# run `scion harness-config upgrade codex --activate-script` to migrate.
 provisioner:
-  type: builtin
+  type: container-script
   interface_version: 1
   command: ["python3", "/home/scion/.scion/harness/provision.py"]
   timeout: 30s
