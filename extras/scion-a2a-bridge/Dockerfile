@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Build stage
-FROM golang:1.25 AS builder
+FROM golang:1.25@sha256:8a7adc288b77e9b787cd2695029eb54d10ae80571b21d44fed68d067ad0a9c96 AS builder
 
 WORKDIR /src
 
@@ -32,18 +32,22 @@ RUN go mod download
 RUN CGO_ENABLED=1 go build -o /scion-a2a-bridge ./cmd/scion-a2a-bridge/
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /scion-a2a-bridge /usr/local/bin/scion-a2a-bridge
+RUN groupadd -r -g 1000 bridge && useradd -r -u 1000 -g bridge -s /sbin/nologin bridge
 
-# Create data directory for SQLite
-RUN mkdir -p /var/lib/scion-a2a-bridge
+COPY --from=builder /scion-a2a-bridge /usr/local/bin/scion-a2a-bridge
+RUN chmod 0755 /usr/local/bin/scion-a2a-bridge
+
+RUN mkdir -p /var/lib/scion-a2a-bridge && chown bridge:bridge /var/lib/scion-a2a-bridge
 
 EXPOSE 8443 9090
+
+USER bridge
 
 ENTRYPOINT ["scion-a2a-bridge"]
 CMD ["--config", "/etc/scion-a2a-bridge/config.yaml"]

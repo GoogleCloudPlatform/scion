@@ -131,7 +131,8 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	ready := true
 
 	if err := s.bridge.store.Ping(); err != nil {
-		checks["database"] = "error: " + err.Error()
+		s.log.Error("readiness check: database ping failed", "error", err)
+		checks["database"] = "error"
 		ready = false
 	} else {
 		checks["database"] = "ok"
@@ -259,7 +260,8 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
 	var params SendMessageParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid params: "+err.Error())
+		s.log.Warn("invalid SendMessage params", "error", err)
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
 		return
 	}
 
@@ -271,7 +273,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, req J
 	result, err := s.bridge.SendMessage(r.Context(), groveSlug, agentSlug, params.ContextID, params.Message.Parts, blocking)
 	if err != nil {
 		s.log.Error("SendMessage failed", "error", err, "grove", groveSlug, "agent", agentSlug)
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, err.Error())
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
 		return
 	}
 
@@ -281,13 +283,15 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, req J
 func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
 	var params TaskQueryParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid params: "+err.Error())
+		s.log.Warn("invalid GetTask params", "error", err)
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
 		return
 	}
 
 	task, err := s.bridge.GetTask(r.Context(), params.ID)
 	if err != nil {
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, err.Error())
+		s.log.Error("GetTask failed", "error", err, "taskID", params.ID)
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
 		return
 	}
 	if task == nil {
@@ -301,7 +305,8 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request, req JSONR
 func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
 	var params TaskQueryParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid params: "+err.Error())
+		s.log.Warn("invalid ListTasks params", "error", err)
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
 		return
 	}
 
@@ -312,7 +317,8 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request, req JSO
 
 	tasks, err := s.bridge.ListTasks(r.Context(), params.ContextID)
 	if err != nil {
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, err.Error())
+		s.log.Error("ListTasks failed", "error", err, "contextID", params.ContextID)
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
 		return
 	}
 
@@ -322,13 +328,15 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request, req JSO
 func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
 	var params TaskQueryParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid params: "+err.Error())
+		s.log.Warn("invalid CancelTask params", "error", err)
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
 		return
 	}
 
 	result, err := s.bridge.CancelTask(r.Context(), params.ID)
 	if err != nil {
-		s.writeRPCError(w, req.ID, ErrCodeTaskNotCancelable, err.Error())
+		s.log.Error("CancelTask failed", "error", err, "taskID", params.ID)
+		s.writeRPCError(w, req.ID, ErrCodeTaskNotCancelable, "task cannot be canceled")
 		return
 	}
 	if result == nil {
@@ -342,14 +350,15 @@ func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request, req JS
 func (s *Server) handleStreamMessage(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
 	var params SendMessageParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid params: "+err.Error())
+		s.log.Warn("invalid StreamMessage params", "error", err)
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
 		return
 	}
 
 	taskID, events, cleanup, err := s.bridge.SendStreamingMessage(r.Context(), groveSlug, agentSlug, params.ContextID, params.Message.Parts)
 	if err != nil {
-		s.log.Error("SendStreamingMessage failed", "error", err)
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, err.Error())
+		s.log.Error("SendStreamingMessage failed", "error", err, "grove", groveSlug, "agent", agentSlug)
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
 		return
 	}
 	defer cleanup()
@@ -360,13 +369,15 @@ func (s *Server) handleStreamMessage(w http.ResponseWriter, r *http.Request, req
 func (s *Server) handleResubscribe(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
 	var params TaskQueryParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid params: "+err.Error())
+		s.log.Warn("invalid Resubscribe params", "error", err)
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
 		return
 	}
 
 	events, cleanup, err := s.bridge.SubscribeToTask(r.Context(), params.ID)
 	if err != nil {
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, err.Error())
+		s.log.Error("SubscribeToTask failed", "error", err, "taskID", params.ID)
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
 		return
 	}
 	defer cleanup()
@@ -433,7 +444,8 @@ type PushNotificationParams struct {
 func (s *Server) handleSetPushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
 	var params PushNotificationParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid params: "+err.Error())
+		s.log.Warn("invalid SetPushNotification params", "error", err)
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
 		return
 	}
 
@@ -445,7 +457,8 @@ func (s *Server) handleSetPushNotification(w http.ResponseWriter, r *http.Reques
 
 	cfg, err := s.bridge.SetPushNotificationConfig(r.Context(), params.TaskID, params.URL, params.Token, params.AuthScheme, params.AuthCredentials)
 	if err != nil {
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, err.Error())
+		s.log.Error("SetPushNotificationConfig failed", "error", err, "taskID", params.TaskID)
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
 		return
 	}
 
@@ -455,13 +468,15 @@ func (s *Server) handleSetPushNotification(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleGetPushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
 	var params PushNotificationParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid params: "+err.Error())
+		s.log.Warn("invalid GetPushNotification params", "error", err)
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
 		return
 	}
 
 	configs, err := s.bridge.GetPushNotificationConfig(r.Context(), params.TaskID)
 	if err != nil {
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, err.Error())
+		s.log.Error("GetPushNotificationConfig failed", "error", err, "taskID", params.TaskID)
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
 		return
 	}
 
@@ -471,12 +486,14 @@ func (s *Server) handleGetPushNotification(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleDeletePushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
 	var params PushNotificationParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid params: "+err.Error())
+		s.log.Warn("invalid DeletePushNotification params", "error", err)
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
 		return
 	}
 
 	if err := s.bridge.DeletePushNotificationConfig(r.Context(), params.ID); err != nil {
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, err.Error())
+		s.log.Error("DeletePushNotificationConfig failed", "error", err, "pushID", params.ID)
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
 		return
 	}
 
