@@ -38,22 +38,32 @@ type Bridge struct {
 	minter    *identity.TokenMinter
 	config    *Config
 	broker    *BrokerServer
+	streams   *StreamManager
+	push      *PushDispatcher
 	log       *slog.Logger
 
 	// waiters tracks channels waiting for agent responses, keyed by agent slug.
 	mu      sync.RWMutex
 	waiters map[string][]chan *messages.StructuredMessage
+
+	// activeTasks maps agent slugs to their active (non-terminal) task IDs,
+	// used to route broker messages to streaming and push subscribers.
+	tasksMu     sync.RWMutex
+	activeTasks map[string][]string
 }
 
 // New creates a new Bridge instance.
 func New(store *state.Store, hubClient hubclient.Client, minter *identity.TokenMinter, cfg *Config, log *slog.Logger) *Bridge {
 	return &Bridge{
-		store:     store,
-		hubClient: hubClient,
-		minter:    minter,
-		config:    cfg,
-		log:       log,
-		waiters:   make(map[string][]chan *messages.StructuredMessage),
+		store:       store,
+		hubClient:   hubClient,
+		minter:      minter,
+		config:      cfg,
+		log:         log,
+		streams:     NewStreamManager(),
+		push:        NewPushDispatcher(store, cfg, log),
+		waiters:     make(map[string][]chan *messages.StructuredMessage),
+		activeTasks: make(map[string][]string),
 	}
 }
 
@@ -62,9 +72,10 @@ func (b *Bridge) SetBroker(broker *BrokerServer) {
 	b.broker = broker
 }
 
-// SendMessage handles a blocking A2A SendMessage: sends a message to the agent,
-// waits for a response via the broker, and returns the completed task.
-func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextID string, parts []Part) (*TaskResult, error) {
+// SendMessage handles an A2A SendMessage. When blocking is true (the default),
+// it waits for the agent response. When blocking is false, it returns immediately
+// after submitting the message and the client can poll via GetTask or subscribe.
+func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextID string, parts []Part, blocking bool) (*TaskResult, error) {
 	// Resolve context to agent.
 	agentCtx, err := b.resolveContext(ctx, groveSlug, agentSlug, contextID)
 	if err != nil {
@@ -94,11 +105,6 @@ func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextI
 	scionMsg.Sender = fmt.Sprintf("user:%s", b.config.Hub.User)
 	scionMsg.Recipient = fmt.Sprintf("agent:%s", agentCtx.AgentSlug)
 
-	// Set up waiter for response, keyed by agent slug to match sender field.
-	responseCh := make(chan *messages.StructuredMessage, 1)
-	b.addWaiter(agentCtx.AgentSlug, responseCh)
-	defer b.removeWaiter(agentCtx.AgentSlug, responseCh)
-
 	// Ensure subscription exists for this agent.
 	if b.broker != nil {
 		pattern := fmt.Sprintf("scion.grove.%s.user.>", agentCtx.GroveID)
@@ -106,6 +112,33 @@ func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextI
 			b.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
 		}
 	}
+
+	// Non-blocking mode: submit and return immediately.
+	if !blocking {
+		b.registerActiveTask(taskID, agentCtx.AgentSlug)
+		go func() {
+			sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := b.hubClient.Agents().SendStructuredMessage(sendCtx, agentCtx.AgentID, scionMsg, false, false); err != nil {
+				b.log.Error("non-blocking send failed", "error", err, "task_id", taskID)
+				b.store.UpdateTaskState(taskID, TaskStateFailed)
+				b.unregisterActiveTask(taskID, agentCtx.AgentSlug)
+				return
+			}
+			b.store.UpdateTaskState(taskID, TaskStateWorking)
+		}()
+
+		return &TaskResult{
+			ID:        taskID,
+			ContextID: agentCtx.ContextID,
+			Status:    TaskStatus{State: TaskStateSubmitted},
+		}, nil
+	}
+
+	// Blocking mode: set up waiter and wait for response.
+	responseCh := make(chan *messages.StructuredMessage, 1)
+	b.addWaiter(agentCtx.AgentSlug, responseCh)
+	defer b.removeWaiter(agentCtx.AgentSlug, responseCh)
 
 	// Send message to agent via Hub API.
 	if err := b.hubClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false); err != nil {
@@ -204,17 +237,58 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 		return nil
 	}
 
+	// Dispatch to blocking waiters (SendMessage).
 	b.mu.RLock()
 	waiters := b.waiters[agentSlug]
 	waiterCount := len(waiters)
 	b.mu.RUnlock()
 
-	b.log.Info("dispatching to waiters", "agent_slug", agentSlug, "waiter_count", waiterCount)
+	b.log.Info("dispatching broker message", "agent_slug", agentSlug, "waiter_count", waiterCount)
 
 	for _, ch := range waiters {
 		select {
 		case ch <- msg:
 		default:
+		}
+	}
+
+	// Dispatch to streaming and push subscribers for active tasks.
+	taskIDs := b.getActiveTaskIDs(agentSlug)
+	if len(taskIDs) > 0 {
+		a2aMsg, artifacts := TranslateScionToA2A(msg)
+		for _, taskID := range taskIDs {
+			taskState := MapActivityToTaskState(msg.Type)
+			isFinal := IsTerminalState(taskState)
+
+			event := StreamEvent{
+				StatusUpdate: &TaskStatusUpdate{
+					TaskID: taskID,
+					Status: TaskStatus{
+						State:   taskState,
+						Message: &a2aMsg,
+					},
+					Final: isFinal,
+				},
+			}
+			b.streams.Broadcast(taskID, event)
+			b.push.Dispatch(ctx, taskID, event)
+
+			for _, art := range artifacts {
+				artEvent := StreamEvent{
+					ArtifactUpdate: &TaskArtifactUpdate{
+						TaskID:   taskID,
+						Artifact: art,
+					},
+				}
+				b.streams.Broadcast(taskID, artEvent)
+				b.push.Dispatch(ctx, taskID, artEvent)
+			}
+
+			if isFinal {
+				b.store.UpdateTaskState(taskID, taskState)
+				b.unregisterActiveTask(taskID, agentSlug)
+				b.streams.CloseAll(taskID)
+			}
 		}
 	}
 
@@ -325,6 +399,33 @@ func (b *Bridge) resolveContext(ctx context.Context, groveSlug, agentSlug, conte
 	}
 
 	return agentCtx, nil
+}
+
+func (b *Bridge) registerActiveTask(taskID, agentSlug string) {
+	b.tasksMu.Lock()
+	defer b.tasksMu.Unlock()
+	b.activeTasks[agentSlug] = append(b.activeTasks[agentSlug], taskID)
+}
+
+func (b *Bridge) unregisterActiveTask(taskID, agentSlug string) {
+	b.tasksMu.Lock()
+	defer b.tasksMu.Unlock()
+	tasks := b.activeTasks[agentSlug]
+	for i, t := range tasks {
+		if t == taskID {
+			b.activeTasks[agentSlug] = append(tasks[:i], tasks[i+1:]...)
+			break
+		}
+	}
+	if len(b.activeTasks[agentSlug]) == 0 {
+		delete(b.activeTasks, agentSlug)
+	}
+}
+
+func (b *Bridge) getActiveTaskIDs(agentSlug string) []string {
+	b.tasksMu.RLock()
+	defer b.tasksMu.RUnlock()
+	return append([]string(nil), b.activeTasks[agentSlug]...)
 }
 
 func (b *Bridge) addWaiter(agentID string, ch chan *messages.StructuredMessage) {

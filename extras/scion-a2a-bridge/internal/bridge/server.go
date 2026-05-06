@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // A2A JSON-RPC error codes.
@@ -196,12 +197,22 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	switch req.Method {
 	case "message/send":
 		s.handleSendMessage(w, r, req, groveSlug, agentSlug)
+	case "message/stream":
+		s.handleStreamMessage(w, r, req, groveSlug, agentSlug)
 	case "tasks/get":
 		s.handleGetTask(w, r, req)
 	case "tasks/list":
 		s.handleListTasks(w, r, req)
 	case "tasks/cancel":
 		s.writeRPCError(w, req.ID, ErrCodeUnsupportedOp, "cancel not yet supported")
+	case "tasks/pushNotification/set":
+		s.handleSetPushNotification(w, r, req)
+	case "tasks/pushNotification/get":
+		s.handleGetPushNotification(w, r, req)
+	case "tasks/pushNotification/delete":
+		s.handleDeletePushNotification(w, r, req)
+	case "tasks/resubscribe":
+		s.handleResubscribe(w, r, req)
 	default:
 		s.writeRPCError(w, req.ID, ErrCodeMethodNotFound, fmt.Sprintf("method %q not found", req.Method))
 	}
@@ -214,7 +225,12 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, req J
 		return
 	}
 
-	result, err := s.bridge.SendMessage(r.Context(), groveSlug, agentSlug, params.ContextID, params.Message.Parts)
+	blocking := true
+	if params.Configuration != nil && params.Configuration.Blocking != nil {
+		blocking = *params.Configuration.Blocking
+	}
+
+	result, err := s.bridge.SendMessage(r.Context(), groveSlug, agentSlug, params.ContextID, params.Message.Parts, blocking)
 	if err != nil {
 		s.log.Error("SendMessage failed", "error", err, "grove", groveSlug, "agent", agentSlug)
 		s.writeRPCError(w, req.ID, ErrCodeInternalError, err.Error())
@@ -263,6 +279,144 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request, req JSO
 	}
 
 	s.writeRPCResult(w, req.ID, tasks)
+}
+
+func (s *Server) handleStreamMessage(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
+	var params SendMessageParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid params: "+err.Error())
+		return
+	}
+
+	taskID, events, cleanup, err := s.bridge.SendStreamingMessage(r.Context(), groveSlug, agentSlug, params.ContextID, params.Message.Parts)
+	if err != nil {
+		s.log.Error("SendStreamingMessage failed", "error", err)
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, err.Error())
+		return
+	}
+	defer cleanup()
+
+	s.writeSSEStream(w, r, taskID, events)
+}
+
+func (s *Server) handleResubscribe(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
+	var params TaskQueryParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid params: "+err.Error())
+		return
+	}
+
+	events, cleanup, err := s.bridge.SubscribeToTask(r.Context(), params.ID)
+	if err != nil {
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, err.Error())
+		return
+	}
+	defer cleanup()
+
+	s.writeSSEStream(w, r, params.ID, events)
+}
+
+func (s *Server) writeSSEStream(w http.ResponseWriter, r *http.Request, taskID string, events <-chan StreamEvent) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	keepalive := s.config.Timeouts.SSEKeepalive
+	if keepalive == 0 {
+		keepalive = 30 * time.Second
+	}
+	ticker := time.NewTicker(keepalive)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+			data, err := json.Marshal(event)
+			if err != nil {
+				s.log.Error("marshal SSE event", "error", err)
+				continue
+			}
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+
+			if event.StatusUpdate != nil && event.StatusUpdate.Final {
+				return
+			}
+		case <-ticker.C:
+			fmt.Fprintf(w, ": keepalive\n\n")
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+// PushNotificationParams holds parameters for push notification operations.
+type PushNotificationParams struct {
+	TaskID          string `json:"taskId"`
+	ID              string `json:"id,omitempty"`
+	URL             string `json:"url,omitempty"`
+	Token           string `json:"token,omitempty"`
+	AuthScheme      string `json:"authScheme,omitempty"`
+	AuthCredentials string `json:"authCredentials,omitempty"`
+}
+
+func (s *Server) handleSetPushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
+	var params PushNotificationParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid params: "+err.Error())
+		return
+	}
+
+	cfg, err := s.bridge.SetPushNotificationConfig(r.Context(), params.TaskID, params.URL, params.Token, params.AuthScheme, params.AuthCredentials)
+	if err != nil {
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, err.Error())
+		return
+	}
+
+	s.writeRPCResult(w, req.ID, cfg)
+}
+
+func (s *Server) handleGetPushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
+	var params PushNotificationParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid params: "+err.Error())
+		return
+	}
+
+	configs, err := s.bridge.GetPushNotificationConfig(r.Context(), params.TaskID)
+	if err != nil {
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, err.Error())
+		return
+	}
+
+	s.writeRPCResult(w, req.ID, configs)
+}
+
+func (s *Server) handleDeletePushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
+	var params PushNotificationParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid params: "+err.Error())
+		return
+	}
+
+	if err := s.bridge.DeletePushNotificationConfig(r.Context(), params.ID); err != nil {
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, err.Error())
+		return
+	}
+
+	s.writeRPCResult(w, req.ID, map[string]bool{"ok": true})
 }
 
 func (s *Server) writeRPCResult(w http.ResponseWriter, id interface{}, result interface{}) {
