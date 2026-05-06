@@ -158,7 +158,8 @@ func TranslateScionToA2A(msg *messages.StructuredMessage) (Message, []Artifact) 
 	}
 
 	var artifacts []Artifact
-	if msg.Type == "" || msg.Type == messages.TypeInstruction {
+	switch msg.Type {
+	case "", messages.TypeInstruction, "assistant-reply":
 		artifacts = append(artifacts, Artifact{
 			ArtifactID: uuid.New().String(),
 			Parts:      parts,
