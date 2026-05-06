@@ -952,6 +952,24 @@ func GetSavedRuntime(agentName string, grovePath string) string {
 	return ""
 }
 
+func GetSavedHarnessConfig(agentName string, grovePath string) string {
+	projectDir, err := config.GetResolvedProjectDir(grovePath)
+	if err != nil {
+		return ""
+	}
+	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
+	if _, err := os.Stat(agentInfoPath); err == nil {
+		data, err := os.ReadFile(agentInfoPath)
+		if err == nil {
+			var info api.AgentInfo
+			if err := json.Unmarshal(data, &info); err == nil {
+				return info.HarnessConfig
+			}
+		}
+	}
+	return ""
+}
+
 func GetSavedPhase(agentName string, grovePath string) string {
 	projectDir, err := config.GetResolvedProjectDir(grovePath)
 	if err != nil {

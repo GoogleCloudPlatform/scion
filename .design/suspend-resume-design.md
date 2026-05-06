@@ -83,19 +83,25 @@ Add `PhaseSuspended` to the agent state machine. This is a new lifecycle phase b
 | Container | Stopped | Stopped |
 | Harness session preserved | Yes (intent) | No (fresh start expected) |
 | `resume` behavior | Restart with `--resume`/`--continue` | Restart fresh (no resume flag) |
-| `start` behavior | Error: "agent is suspended, use resume" | Delete + recreate |
+| `start` behavior | Implicit resume (prints "Resuming...") | Delete + recreate |
 | Notification trigger | No | No |
 | Shows in `list` as | suspended | stopped |
 | `stop --all` includes | Yes (transitions to stopped) | N/A |
 
-### Key Design Decision: Resume Semantics Change
+### Key Design Decision: Implicit Resume from Start
 
-When `resume` is called, it checks the agent's current phase:
+Both `start` and `resume` check the agent's current phase:
 
-- **`suspended`** → Restart with harness resume flag (`--continue` for Claude, `--resume` for Gemini). This preserves the LLM session.
+- **`suspended`** → Restart with harness resume flag (`--continue` for Claude, `--resume` for Gemini). This preserves the LLM session. **`start` automatically detects this and prints "Resuming agent '...'..."**
 - **`stopped`** → Restart without the resume flag. The harness starts a fresh session. Working files (worktree, home directory) are still present, but the LLM conversation starts clean.
 
-This is the most impactful change: `resume` on a `stopped` agent now means "restart fresh" rather than "try to restore the session."
+The `start` command is now the primary way to resume a suspended agent — no need for users to remember a separate `resume` command. The `resume` command remains as an explicit alias.
+
+### Key Design Decision: Suspend Requires Resume Support
+
+The `suspend` command validates that the agent's harness supports session resume before proceeding. Harnesses that do not support resume (e.g., `generic`) will return an error directing the user to use `stop` instead. This prevents agents from entering a `suspended` state that cannot be meaningfully resumed.
+
+The `Resume` capability is declared in `HarnessAdvancedCapabilities` alongside other capability fields. Built-in harnesses (`claude`, `gemini`, `opencode`, `codex`) all declare `SupportYes`. The `generic` harness declares `SupportNo`. Declarative and container-script harnesses can set the `Resume` field in their `config.yaml` capabilities block.
 
 ## Implementation
 
@@ -168,11 +174,22 @@ The dispatcher calls the same `StopAgent` on the broker — the container operat
 
 ### 6. Resume Update (`cmd/common.go` RunAgent)
 
-Update `startAgentViaHub()` to check the agent's current phase before setting the resume flag. When the hub dispatches a start for a stopped agent, it omits the resume flag.
+`RunAgent` always checks the saved phase to determine resume behavior, regardless of
+whether it was called from `start` (resume=false) or `resume` (resume=true):
 
-For local mode, the `RunAgent` function checks the local agent config status:
-- If `suspended` → pass `resume=true` to the harness
-- If `stopped` → pass `resume=false` (fresh start)
+```go
+savedPhase := agent.GetSavedPhase(agentName, grovePath)
+if savedPhase == "suspended" {
+    effectiveResume = true   // implicit resume from start
+} else if resume && savedPhase == "stopped" {
+    effectiveResume = false  // explicit resume of stopped agent → fresh session
+}
+```
+
+For hub mode, `startAgentViaHub()` queries the agent's phase before creating. If the
+agent is suspended, it sets `Resume: true` in the create request and prints "Resuming...".
+The hub already resumes suspended agents in-place regardless of the Resume flag
+(`handleExistingAgent` checks `existingAgent.Phase == "suspended"`).
 
 ### 7. Hubclient (`pkg/hubclient/agents.go`)
 

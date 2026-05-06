@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -2576,6 +2577,24 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			dispatchErr = dispatcher.DispatchAgentStop(ctx, agent)
 		}
 	case api.AgentActionSuspend:
+		// Validate that the agent's harness supports session resume.
+		harnessName := ""
+		if agent.AppliedConfig != nil {
+			harnessName = agent.AppliedConfig.HarnessConfig
+		}
+		if harnessName != "" {
+			h := harness.New(harnessName)
+			caps := h.AdvancedCapabilities()
+			if caps.Resume.Support == api.SupportNo {
+				reason := caps.Resume.Reason
+				if reason == "" {
+					reason = "harness does not support session resume"
+				}
+				writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+					fmt.Sprintf("Cannot suspend agent: %s. Use 'stop' instead.", reason), nil)
+				return
+			}
+		}
 		newPhase = string(state.PhaseSuspended)
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
 			s.syncWorkspaceOnStop(ctx, agent)

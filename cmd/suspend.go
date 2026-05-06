@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/spf13/cobra"
@@ -39,9 +40,12 @@ var suspendCmd = &cobra.Command{
 	Long: `Suspend a running agent, preserving its state for later resume.
 
 Unlike 'stop', which signals termination, 'suspend' signals that the agent
-will be resumed later with its harness session intact. When you 'resume' a
-suspended agent, the harness picks up where it left off. When you 'resume'
-a stopped agent, it starts a fresh session.`,
+will be resumed later with its harness session intact. When you 'start' a
+suspended agent, the harness picks up where it left off (implicit resume).
+When you 'start' a stopped agent, it starts a fresh session.
+
+Suspend requires the agent's harness to support session resume. Harnesses
+that do not (e.g. generic) will return an error — use 'stop' instead.`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if suspendAll {
 			if len(args) > 0 {
@@ -83,7 +87,11 @@ a stopped agent, it starts a fresh session.`,
 			return suspendAgentViaHub(hubCtx, agentName)
 		}
 
-		// Local mode
+		// Local mode — verify the harness supports resume before suspending.
+		if err := checkHarnessResumeSupport(agentName, grovePath); err != nil {
+			return err
+		}
+
 		rt := runtime.GetRuntime(grovePath, profile)
 		mgr := agent.NewManager(rt)
 
@@ -105,6 +113,25 @@ a stopped agent, it starts a fresh session.`,
 		statusf("Agent '%s' suspended.\n", agentName)
 		return nil
 	},
+}
+
+// checkHarnessResumeSupport resolves the agent's harness and returns an error
+// if the harness does not support session resume.
+func checkHarnessResumeSupport(agentName, grovePath string) error {
+	harnessConfigName := agent.GetSavedHarnessConfig(agentName, grovePath)
+	if harnessConfigName == "" {
+		return nil
+	}
+	h := harness.New(harnessConfigName)
+	caps := h.AdvancedCapabilities()
+	if caps.Resume.Support == api.SupportNo {
+		reason := caps.Resume.Reason
+		if reason == "" {
+			reason = "harness does not support session resume"
+		}
+		return fmt.Errorf("cannot suspend agent '%s': %s. Use 'stop' instead", agentName, reason)
+	}
+	return nil
 }
 
 func suspendAllAgents() error {
@@ -177,6 +204,15 @@ func suspendAllAgents() error {
 
 			res := agentResult{Name: name, Status: "success"}
 
+			if err := checkHarnessResumeSupport(name, grovePath); err != nil {
+				res.Status = "skipped"
+				res.Error = err.Error()
+				mu.Lock()
+				results = append(results, res)
+				mu.Unlock()
+				return
+			}
+
 			agentRt := runtime.GetRuntime(grovePath, profile)
 			agentMgr := agent.NewManager(agentRt)
 
@@ -226,10 +262,13 @@ func suspendAllAgents() error {
 
 	var errs []string
 	for _, r := range results {
-		if r.Error != "" {
+		switch r.Status {
+		case "skipped":
+			statusf("Agent '%s': skipped: %s\n", r.Name, r.Error)
+		case "error":
 			statusf("Agent '%s': error: %s\n", r.Name, r.Error)
 			errs = append(errs, fmt.Sprintf("%s: %s", r.Name, r.Error))
-		} else {
+		default:
 			statusf("Agent '%s' suspended.\n", r.Name)
 		}
 	}

@@ -53,6 +53,7 @@ func (c *Codex) AdvancedCapabilities() api.HarnessAdvancedCapabilities {
 			AuthFile: api.CapabilityField{Support: api.SupportYes},
 			VertexAI: api.CapabilityField{Support: api.SupportNo, Reason: "Vertex AI auth is not supported for this harness"},
 		},
+		Resume: api.CapabilityField{Support: api.SupportYes},
 	}
 }
 

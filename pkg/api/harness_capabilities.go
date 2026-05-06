@@ -76,4 +76,5 @@ type HarnessAdvancedCapabilities struct {
 	Prompts   HarnessPromptCapabilities    `json:"prompts" yaml:"prompts"`
 	Auth      HarnessAuthCapabilities      `json:"auth" yaml:"auth"`
 	MCP       HarnessMCPCapabilities       `json:"mcp" yaml:"mcp"`
+	Resume    CapabilityField              `json:"resume" yaml:"resume"`
 }
