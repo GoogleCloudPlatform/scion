@@ -756,7 +756,7 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private async handleAction(
-    action: 'start' | 'stop' | 'delete',
+    action: 'start' | 'stop' | 'suspend' | 'resume' | 'delete',
     event?: MouseEvent
   ): Promise<void> {
     if (!this.agent) return;
@@ -786,18 +786,26 @@ export class ScionPageAgentDetail extends LitElement {
       return;
     }
 
-    // Start/stop: apply optimistic phase update
+    const optimisticPhase: Record<string, string> = {
+      start: 'starting',
+      stop: 'stopping',
+      suspend: 'stopping',
+      resume: 'starting',
+    };
     this.agent = {
       ...this.agent,
-      phase: action === 'start' ? 'starting' : 'stopping',
+      phase: optimisticPhase[action] as Agent['phase'],
+    };
+
+    const actionUrls: Record<string, string> = {
+      start: `/api/v1/agents/${this.agentId}/start`,
+      stop: `/api/v1/agents/${this.agentId}/stop`,
+      suspend: `/api/v1/agents/${this.agentId}/suspend`,
+      resume: `/api/v1/agents/${this.agentId}/start`,
     };
 
     try {
-      const url =
-        action === 'start'
-          ? `/api/v1/agents/${this.agentId}/start`
-          : `/api/v1/agents/${this.agentId}/stop`;
-      const response = await apiFetch(url, { method: 'POST' });
+      const response = await apiFetch(actionUrls[action], { method: 'POST' });
 
       if (!response.ok) {
         throw new Error(await extractApiError(response, `Failed to ${action} agent`));
@@ -807,7 +815,6 @@ export class ScionPageAgentDetail extends LitElement {
     } catch (err) {
       console.error(`Failed to ${action} agent:`, err);
       alert(err instanceof Error ? err.message : `Failed to ${action} agent`);
-      // Roll back optimistic update
       this.backgroundRefresh();
     }
   }
@@ -1002,35 +1009,63 @@ export class ScionPageAgentDetail extends LitElement {
               `
             : nothing}
           ${isAgentRunning(agent)
-            ? can(agent._capabilities, 'stop')
-              ? html`
-                  <sl-button
-                    variant="danger"
-                    size="small"
-                    outline
-                    ?loading=${this.actionLoading['stop']}
-                    ?disabled=${this.actionLoading['stop']}
-                    @click=${() => this.handleAction('stop')}
-                  >
-                    <sl-icon slot="prefix" name="stop-circle"></sl-icon>
-                    Stop
-                  </sl-button>
-                `
-              : nothing
-            : can(agent._capabilities, 'start')
-              ? html`
-                  <sl-button
-                    variant="success"
-                    size="small"
-                    ?loading=${this.actionLoading['start']}
-                    ?disabled=${this.actionLoading['start']}
-                    @click=${() => this.handleAction('start')}
-                  >
-                    <sl-icon slot="prefix" name="play-circle"></sl-icon>
-                    Start
-                  </sl-button>
-                `
-              : nothing}
+            ? html`
+                ${can(agent._capabilities, 'stop')
+                  ? html`
+                      <sl-button
+                        variant="warning"
+                        size="small"
+                        outline
+                        ?loading=${this.actionLoading['suspend']}
+                        ?disabled=${this.actionLoading['suspend']}
+                        @click=${() => this.handleAction('suspend')}
+                      >
+                        <sl-icon slot="prefix" name="pause-circle"></sl-icon>
+                        Suspend
+                      </sl-button>
+                      <sl-button
+                        variant="danger"
+                        size="small"
+                        outline
+                        ?loading=${this.actionLoading['stop']}
+                        ?disabled=${this.actionLoading['stop']}
+                        @click=${() => this.handleAction('stop')}
+                      >
+                        <sl-icon slot="prefix" name="stop-circle"></sl-icon>
+                        Stop
+                      </sl-button>
+                    `
+                  : nothing}
+              `
+            : agent.phase === 'suspended'
+              ? can(agent._capabilities, 'start')
+                ? html`
+                    <sl-button
+                      variant="success"
+                      size="small"
+                      ?loading=${this.actionLoading['resume']}
+                      ?disabled=${this.actionLoading['resume']}
+                      @click=${() => this.handleAction('resume')}
+                    >
+                      <sl-icon slot="prefix" name="play-circle"></sl-icon>
+                      Resume
+                    </sl-button>
+                  `
+                : nothing
+              : can(agent._capabilities, 'start')
+                ? html`
+                    <sl-button
+                      variant="success"
+                      size="small"
+                      ?loading=${this.actionLoading['start']}
+                      ?disabled=${this.actionLoading['start']}
+                      @click=${() => this.handleAction('start')}
+                    >
+                      <sl-icon slot="prefix" name="play-circle"></sl-icon>
+                      Start
+                    </sl-button>
+                  `
+                : nothing}
           ${agent.phase === 'created'
             ? html`
                 <a href="/agents/${this.agentId}/configure" style="text-decoration: none;">

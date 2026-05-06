@@ -58,6 +58,7 @@ export const PHASE_DISPLAY: Record<AgentPhase, StateDisplay> = {
   running: { emoji: '▶️', icon: 'play-circle', variant: 'success', pulse: false },
   stopping: { emoji: '⏹️', icon: 'arrow-repeat', variant: 'warning', pulse: true },
   stopped: { emoji: '⏹️', icon: 'stop-circle', variant: 'neutral', pulse: false },
+  suspended: { emoji: '⏸️', icon: 'pause-circle', variant: 'warning', pulse: false },
   error: { emoji: '❌', icon: 'exclamation-triangle', variant: 'danger', pulse: false },
 };
 

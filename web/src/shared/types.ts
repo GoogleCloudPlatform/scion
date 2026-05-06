@@ -184,6 +184,7 @@ export type AgentPhase =
   | 'running'
   | 'stopping'
   | 'stopped'
+  | 'suspended'
   | 'error';
 
 /**
