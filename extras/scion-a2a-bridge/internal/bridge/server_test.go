@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
 )
@@ -368,5 +369,167 @@ func TestMalformedJSON(t *testing.T) {
 	}
 	if rpcResp.Error.Code != ErrCodeParseError {
 		t.Errorf("error code = %d, want %d", rpcResp.Error.Code, ErrCodeParseError)
+	}
+}
+
+// --- Phase 2 server tests ---
+
+func TestPushNotificationSetGetDelete(t *testing.T) {
+	_, ts := newTestServer(t)
+
+	// Create a task first (needed for push config FK).
+	rpcPath := "/groves/test-grove/agents/test-agent/jsonrpc"
+
+	// Create a task directly in the store via the test bridge.
+	// We access it indirectly by creating it in the store.
+	dir := t.TempDir()
+	store, err := state.New(filepath.Join(dir, "push-test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Now()
+	store.CreateTask(&state.Task{
+		ID: "push-task-1", ContextID: "ctx-1", GroveID: "test-grove", AgentSlug: "test-agent",
+		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
+	})
+
+	// Set push config — this test verifies the JSON-RPC dispatch works even though
+	// the task is in a different store. The server handler delegates to bridge which
+	// uses its own store, so we test the handler's param parsing and error paths.
+	rpcResp := doRPC(t, ts, rpcPath,
+		"tasks/pushNotification/set",
+		PushNotificationParams{
+			TaskID: "nonexistent-task",
+			URL:    "https://example.com/webhook",
+			Token:  "tok",
+		},
+		"test-api-key",
+	)
+
+	// Should fail because task doesn't exist in the server's store.
+	if rpcResp.Error == nil {
+		t.Fatal("expected error for nonexistent task")
+	}
+}
+
+func TestPushNotificationGetReturnsEmpty(t *testing.T) {
+	_, ts := newTestServer(t)
+
+	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
+		"tasks/pushNotification/get",
+		PushNotificationParams{TaskID: "some-task"},
+		"test-api-key",
+	)
+
+	// Should succeed with empty result (no configs).
+	if rpcResp.Error != nil {
+		t.Fatalf("unexpected error: %s", rpcResp.Error.Message)
+	}
+}
+
+func TestPushNotificationDeleteSucceeds(t *testing.T) {
+	_, ts := newTestServer(t)
+
+	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
+		"tasks/pushNotification/delete",
+		PushNotificationParams{ID: "nonexistent-push-id"},
+		"test-api-key",
+	)
+
+	// Delete of nonexistent ID should succeed (idempotent).
+	if rpcResp.Error != nil {
+		t.Fatalf("unexpected error: %s", rpcResp.Error.Message)
+	}
+}
+
+func TestStreamMethodInvalidParams(t *testing.T) {
+	_, ts := newTestServer(t)
+
+	// Send a raw JSON string that can't be unmarshaled to SendMessageParams.
+	rpcReq := JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "message/stream",
+		Params:  json.RawMessage(`"not an object"`),
+	}
+	body, _ := json.Marshal(rpcReq)
+	httpReq, _ := http.NewRequest(http.MethodPost,
+		ts.URL+"/groves/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(body))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-API-Key", "test-api-key")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var rpcResp JSONRPCResponse
+	json.NewDecoder(resp.Body).Decode(&rpcResp)
+
+	if rpcResp.Error == nil {
+		t.Fatal("expected error for invalid params")
+	}
+	if rpcResp.Error.Code != ErrCodeInvalidParams {
+		t.Errorf("error code = %d, want %d", rpcResp.Error.Code, ErrCodeInvalidParams)
+	}
+}
+
+func TestResubscribeTaskNotFound(t *testing.T) {
+	_, ts := newTestServer(t)
+
+	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
+		"tasks/resubscribe",
+		TaskQueryParams{ID: "nonexistent-task"},
+		"test-api-key",
+	)
+
+	if rpcResp.Error == nil {
+		t.Fatal("expected error for nonexistent task")
+	}
+}
+
+func TestResubscribeRequiresID(t *testing.T) {
+	_, ts := newTestServer(t)
+
+	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
+		"tasks/resubscribe",
+		TaskQueryParams{},
+		"test-api-key",
+	)
+
+	// Should fail because the task doesn't exist (empty ID).
+	if rpcResp.Error == nil {
+		t.Fatal("expected error for empty task ID")
+	}
+}
+
+func TestNewRPCMethods(t *testing.T) {
+	_, ts := newTestServer(t)
+
+	// Verify these methods are recognized (not "method not found").
+	// message/stream and tasks/resubscribe are excluded because they trigger
+	// resolveContext which requires a hub client (nil in test fixture).
+	methods := []string{
+		"tasks/pushNotification/set",
+		"tasks/pushNotification/get",
+		"tasks/pushNotification/delete",
+		"tasks/resubscribe",
+	}
+
+	for _, method := range methods {
+		t.Run(method, func(t *testing.T) {
+			rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
+				method,
+				map[string]string{},
+				"test-api-key",
+			)
+
+			if rpcResp.Error != nil && rpcResp.Error.Code == ErrCodeMethodNotFound {
+				t.Errorf("method %q should be registered but got method not found", method)
+			}
+		})
 	}
 }

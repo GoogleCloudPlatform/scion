@@ -254,24 +254,32 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 
 	// Dispatch to streaming and push subscribers for active tasks.
 	taskIDs := b.getActiveTaskIDs(agentSlug)
-	if len(taskIDs) > 0 {
-		a2aMsg, artifacts := TranslateScionToA2A(msg)
-		for _, taskID := range taskIDs {
-			taskState := MapActivityToTaskState(msg.Type)
-			isFinal := IsTerminalState(taskState)
+	if len(taskIDs) == 0 {
+		return nil
+	}
+
+	a2aMsg, artifacts := TranslateScionToA2A(msg)
+
+	for _, taskID := range taskIDs {
+		if msg.Type == messages.TypeStateChange {
+			taskState := MapActivityToTaskState(msg.Msg)
+			b.store.UpdateTaskState(taskID, taskState)
 
 			event := StreamEvent{
 				StatusUpdate: &TaskStatusUpdate{
 					TaskID: taskID,
-					Status: TaskStatus{
-						State:   taskState,
-						Message: &a2aMsg,
-					},
-					Final: isFinal,
+					Status: TaskStatus{State: taskState},
+					Final:  IsTerminalState(taskState),
 				},
 			}
 			b.streams.Broadcast(taskID, event)
 			b.push.Dispatch(ctx, taskID, event)
+
+			if IsTerminalState(taskState) {
+				b.unregisterActiveTask(taskID, agentSlug)
+			}
+		} else {
+			b.store.UpdateTaskState(taskID, TaskStateCompleted)
 
 			for _, art := range artifacts {
 				artEvent := StreamEvent{
@@ -284,11 +292,20 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 				b.push.Dispatch(ctx, taskID, artEvent)
 			}
 
-			if isFinal {
-				b.store.UpdateTaskState(taskID, taskState)
-				b.unregisterActiveTask(taskID, agentSlug)
-				b.streams.CloseAll(taskID)
+			statusEvent := StreamEvent{
+				StatusUpdate: &TaskStatusUpdate{
+					TaskID: taskID,
+					Status: TaskStatus{
+						State:   TaskStateCompleted,
+						Message: &a2aMsg,
+					},
+					Final: true,
+				},
 			}
+			b.streams.Broadcast(taskID, statusEvent)
+			b.push.Dispatch(ctx, taskID, statusEvent)
+
+			b.unregisterActiveTask(taskID, agentSlug)
 		}
 	}
 

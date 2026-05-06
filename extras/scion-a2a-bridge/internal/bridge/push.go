@@ -66,9 +66,6 @@ func (pd *PushDispatcher) Dispatch(ctx context.Context, taskID string, event Str
 
 func (pd *PushDispatcher) sendWithRetry(cfg state.PushNotificationConfig, event StreamEvent) {
 	maxRetries := pd.config.Timeouts.PushRetryMax
-	if maxRetries == 0 {
-		maxRetries = 3
-	}
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {

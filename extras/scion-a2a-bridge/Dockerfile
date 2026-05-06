@@ -22,7 +22,6 @@ COPY go.mod go.sum ./
 COPY pkg/ pkg/
 COPY cmd/ cmd/
 COPY web/ web/
-COPY internal/ internal/
 
 # Copy the extras module
 COPY extras/scion-a2a-bridge/ extras/scion-a2a-bridge/
