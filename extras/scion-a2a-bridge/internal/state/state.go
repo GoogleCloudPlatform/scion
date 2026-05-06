@@ -95,6 +95,11 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// Ping checks database connectivity.
+func (s *Store) Ping() error {
+	return s.db.Ping()
+}
+
 func (s *Store) migrate() error {
 	migrations := []string{
 		`CREATE TABLE IF NOT EXISTS tasks (

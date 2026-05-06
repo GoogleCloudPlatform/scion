@@ -302,17 +302,17 @@ func TestUnknownMethod(t *testing.T) {
 	}
 }
 
-func TestCancelNotSupported(t *testing.T) {
+func TestCancelTaskNotFound(t *testing.T) {
 	_, ts := newTestServer(t)
 
 	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
-		"tasks/cancel", map[string]string{"id": "task-1"}, "test-api-key")
+		"tasks/cancel", map[string]string{"id": "nonexistent-task"}, "test-api-key")
 
 	if rpcResp.Error == nil {
-		t.Fatal("expected error for cancel")
+		t.Fatal("expected error for cancel of nonexistent task")
 	}
-	if rpcResp.Error.Code != ErrCodeUnsupportedOp {
-		t.Errorf("error code = %d, want %d", rpcResp.Error.Code, ErrCodeUnsupportedOp)
+	if rpcResp.Error.Code != ErrCodeTaskNotFound {
+		t.Errorf("error code = %d, want %d", rpcResp.Error.Code, ErrCodeTaskNotFound)
 	}
 }
 

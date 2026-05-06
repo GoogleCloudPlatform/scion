@@ -105,8 +105,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /groves/{groveSlug}/agents/{agentSlug}/.well-known/agent-card.json", s.handleAgentCard)
 	mux.HandleFunc("POST /groves/{groveSlug}/agents/{agentSlug}/jsonrpc", s.handleJSONRPC)
 
-	// Health check.
+	// Health and readiness checks.
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
 
 	// Wrap with auth middleware.
 	return s.authMiddleware(mux)
@@ -115,6 +116,33 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	checks := map[string]string{}
+	ready := true
+
+	if err := s.bridge.store.Ping(); err != nil {
+		checks["database"] = "error: " + err.Error()
+		ready = false
+	} else {
+		checks["database"] = "ok"
+	}
+
+	if s.bridge.broker != nil {
+		checks["broker"] = "connected"
+	} else {
+		checks["broker"] = "not configured"
+	}
+
+	checks["status"] = "ready"
+	if !ready {
+		checks["status"] = "not ready"
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(checks)
 }
 
 func (s *Server) handleWellKnownAgentCard(w http.ResponseWriter, r *http.Request) {
@@ -166,7 +194,7 @@ func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	card := s.bridge.GenerateAgentCard(groveSlug, agentSlug)
+	card := s.bridge.GenerateAgentCard(r.Context(), groveSlug, agentSlug)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
@@ -204,7 +232,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	case "tasks/list":
 		s.handleListTasks(w, r, req)
 	case "tasks/cancel":
-		s.writeRPCError(w, req.ID, ErrCodeUnsupportedOp, "cancel not yet supported")
+		s.handleCancelTask(w, r, req)
 	case "tasks/pushNotification/set":
 		s.handleSetPushNotification(w, r, req)
 	case "tasks/pushNotification/get":
@@ -279,6 +307,26 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request, req JSO
 	}
 
 	s.writeRPCResult(w, req.ID, tasks)
+}
+
+func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request, req JSONRPCRequest) {
+	var params TaskQueryParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid params: "+err.Error())
+		return
+	}
+
+	result, err := s.bridge.CancelTask(r.Context(), params.ID)
+	if err != nil {
+		s.writeRPCError(w, req.ID, ErrCodeTaskNotCancelable, err.Error())
+		return
+	}
+	if result == nil {
+		s.writeRPCError(w, req.ID, ErrCodeTaskNotFound, "task not found")
+		return
+	}
+
+	s.writeRPCResult(w, req.ID, result)
 }
 
 func (s *Server) handleStreamMessage(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
@@ -443,7 +491,7 @@ func (s *Server) writeRPCError(w http.ResponseWriter, id interface{}, code int, 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Public endpoints skip auth.
-		if strings.HasSuffix(r.URL.Path, "agent-card.json") || r.URL.Path == "/healthz" {
+		if strings.HasSuffix(r.URL.Path, "agent-card.json") || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 			next.ServeHTTP(w, r)
 			return
 		}

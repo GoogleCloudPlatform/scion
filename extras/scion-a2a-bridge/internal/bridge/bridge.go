@@ -216,6 +216,40 @@ func (b *Bridge) ListTasks(ctx context.Context, contextID string) ([]TaskResult,
 	return results, nil
 }
 
+// CancelTask cancels an in-progress task, notifying stream and push subscribers.
+func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, error) {
+	task, err := b.store.GetTask(taskID)
+	if err != nil {
+		return nil, fmt.Errorf("get task: %w", err)
+	}
+	if task == nil {
+		return nil, nil
+	}
+	if IsTerminalState(task.State) {
+		return nil, fmt.Errorf("task %s is already in terminal state: %s", taskID, task.State)
+	}
+
+	b.store.UpdateTaskState(taskID, TaskStateCanceled)
+
+	cancelEvent := StreamEvent{
+		StatusUpdate: &TaskStatusUpdate{
+			TaskID: taskID,
+			Status: TaskStatus{State: TaskStateCanceled},
+			Final:  true,
+		},
+	}
+	b.streams.Broadcast(taskID, cancelEvent)
+	b.push.Dispatch(ctx, taskID, cancelEvent)
+	b.unregisterActiveTask(taskID, task.AgentSlug)
+	b.streams.CloseAll(taskID)
+
+	return &TaskResult{
+		ID:        task.ID,
+		ContextID: task.ContextID,
+		Status:    TaskStatus{State: TaskStateCanceled},
+	}, nil
+}
+
 // HandleBrokerMessage processes an inbound message from the broker plugin.
 func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	b.log.Info("handling broker message",
@@ -319,14 +353,52 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// GenerateAgentCard builds an agent card for the given grove and agent.
-func (b *Bridge) GenerateAgentCard(groveSlug, agentSlug string) map[string]interface{} {
+// GenerateAgentCard builds an agent card for the given grove and agent,
+// enriching it with metadata from the Hub API when available.
+func (b *Bridge) GenerateAgentCard(ctx context.Context, groveSlug, agentSlug string) map[string]interface{} {
 	baseURL := strings.TrimRight(b.config.Bridge.ExternalURL, "/")
 	agentURL := fmt.Sprintf("%s/groves/%s/agents/%s", baseURL, groveSlug, agentSlug)
 
+	name := agentSlug
+	description := fmt.Sprintf("Scion agent %s in grove %s", agentSlug, groveSlug)
+	var skills []map[string]interface{}
+
+	// Fetch agent metadata from Hub for richer card content.
+	if agent := b.lookupAgent(ctx, agentSlug); agent != nil {
+		if agent.Name != "" {
+			name = agent.Name
+		}
+		if desc, ok := agent.Annotations["description"]; ok && desc != "" {
+			description = desc
+		} else if agent.TaskSummary != "" {
+			description = agent.TaskSummary
+		}
+		if agent.Labels != nil {
+			for k, v := range agent.Labels {
+				if strings.HasPrefix(k, "skill/") {
+					skills = append(skills, map[string]interface{}{
+						"id":          strings.TrimPrefix(k, "skill/"),
+						"name":        strings.TrimPrefix(k, "skill/"),
+						"description": v,
+					})
+				}
+			}
+		}
+	}
+
+	if len(skills) == 0 {
+		skills = []map[string]interface{}{
+			{
+				"id":          agentSlug,
+				"name":        name,
+				"description": fmt.Sprintf("Interact with agent %s", name),
+			},
+		}
+	}
+
 	card := map[string]interface{}{
-		"name":        agentSlug,
-		"description": fmt.Sprintf("Scion agent %s in grove %s", agentSlug, groveSlug),
+		"name":        name,
+		"description": description,
 		"url":         agentURL,
 		"version":     "1.0.0",
 		"capabilities": map[string]bool{
@@ -335,13 +407,7 @@ func (b *Bridge) GenerateAgentCard(groveSlug, agentSlug string) map[string]inter
 		},
 		"defaultInputModes":  []string{"text/plain", "application/json"},
 		"defaultOutputModes": []string{"text/plain", "application/json"},
-		"skills": []map[string]interface{}{
-			{
-				"id":          agentSlug,
-				"name":        agentSlug,
-				"description": fmt.Sprintf("Interact with agent %s", agentSlug),
-			},
-		},
+		"skills":             skills,
 	}
 
 	if b.config.Bridge.Provider.Organization != "" {
@@ -352,6 +418,28 @@ func (b *Bridge) GenerateAgentCard(groveSlug, agentSlug string) map[string]inter
 	}
 
 	return card
+}
+
+// lookupAgent fetches agent metadata from the Hub API, returning nil on failure.
+func (b *Bridge) lookupAgent(ctx context.Context, agentSlug string) *hubclient.Agent {
+	if b.hubClient == nil {
+		return nil
+	}
+	agentSvc := b.hubClient.Agents()
+	if agentSvc == nil {
+		return nil
+	}
+	agents, err := agentSvc.List(ctx, nil)
+	if err != nil {
+		b.log.Debug("failed to list agents for card enrichment", "error", err)
+		return nil
+	}
+	for _, a := range agents.Agents {
+		if a.Name == agentSlug || a.Slug == agentSlug {
+			return &a
+		}
+	}
+	return nil
 }
 
 // GetGroveConfig returns the configuration for a grove slug, or nil if not configured.
