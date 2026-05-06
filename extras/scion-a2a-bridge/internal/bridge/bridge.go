@@ -1,0 +1,359 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package bridge
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/identity"
+	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+)
+
+// Bridge is the core bridge logic that ties together state management,
+// hub client operations, and message translation.
+type Bridge struct {
+	store     *state.Store
+	hubClient hubclient.Client
+	minter    *identity.TokenMinter
+	config    *Config
+	broker    *BrokerServer
+	log       *slog.Logger
+
+	// waiters tracks channels waiting for agent responses, keyed by agent ID.
+	mu      sync.RWMutex
+	waiters map[string][]chan *messages.StructuredMessage
+}
+
+// New creates a new Bridge instance.
+func New(store *state.Store, hubClient hubclient.Client, minter *identity.TokenMinter, cfg *Config, log *slog.Logger) *Bridge {
+	return &Bridge{
+		store:     store,
+		hubClient: hubClient,
+		minter:    minter,
+		config:    cfg,
+		log:       log,
+		waiters:   make(map[string][]chan *messages.StructuredMessage),
+	}
+}
+
+// SetBroker wires the broker server for subscription management.
+func (b *Bridge) SetBroker(broker *BrokerServer) {
+	b.broker = broker
+}
+
+// SendMessage handles a blocking A2A SendMessage: sends a message to the agent,
+// waits for a response via the broker, and returns the completed task.
+func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextID string, parts []Part) (*TaskResult, error) {
+	// Resolve context to agent.
+	agentCtx, err := b.resolveContext(ctx, groveSlug, agentSlug, contextID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve context: %w", err)
+	}
+
+	// Create task record.
+	taskID := uuid.New().String()
+	now := time.Now()
+	task := &state.Task{
+		ID:        taskID,
+		ContextID: agentCtx.ContextID,
+		GroveID:   agentCtx.GroveID,
+		AgentSlug: agentCtx.AgentSlug,
+		AgentID:   agentCtx.AgentID,
+		State:     TaskStateSubmitted,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Metadata:  "{}",
+	}
+	if err := b.store.CreateTask(task); err != nil {
+		return nil, fmt.Errorf("create task: %w", err)
+	}
+
+	// Translate A2A parts to Scion message.
+	scionMsg := TranslateA2AToScion(parts)
+	scionMsg.Sender = fmt.Sprintf("user:%s", b.config.Hub.User)
+	scionMsg.Recipient = fmt.Sprintf("agent:%s", agentCtx.AgentSlug)
+
+	// Set up waiter for response.
+	responseCh := make(chan *messages.StructuredMessage, 1)
+	b.addWaiter(agentCtx.AgentID, responseCh)
+	defer b.removeWaiter(agentCtx.AgentID, responseCh)
+
+	// Ensure subscription exists for this agent.
+	if b.broker != nil {
+		pattern := fmt.Sprintf("scion.grove.%s.user.>", agentCtx.GroveID)
+		if err := b.broker.RequestSubscription(pattern); err != nil {
+			b.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
+		}
+	}
+
+	// Send message to agent via Hub API.
+	if err := b.hubClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false); err != nil {
+		b.store.UpdateTaskState(taskID, TaskStateFailed)
+		return nil, fmt.Errorf("send message to agent: %w", err)
+	}
+
+	b.store.UpdateTaskState(taskID, TaskStateWorking)
+
+	// Wait for response with timeout.
+	timeout := b.config.Timeouts.SendMessage
+	if timeout == 0 {
+		timeout = 120 * time.Second
+	}
+
+	select {
+	case response := <-responseCh:
+		msg, artifacts := TranslateScionToA2A(response)
+		b.store.UpdateTaskState(taskID, TaskStateCompleted)
+
+		return &TaskResult{
+			ID:        taskID,
+			ContextID: agentCtx.ContextID,
+			Status: TaskStatus{
+				State:   TaskStateCompleted,
+				Message: &msg,
+			},
+			Artifacts: artifacts,
+		}, nil
+
+	case <-time.After(timeout):
+		b.store.UpdateTaskState(taskID, TaskStateFailed)
+		return nil, fmt.Errorf("timeout waiting for agent response after %v", timeout)
+
+	case <-ctx.Done():
+		b.store.UpdateTaskState(taskID, TaskStateFailed)
+		return nil, ctx.Err()
+	}
+}
+
+// GetTask retrieves a task by ID.
+func (b *Bridge) GetTask(ctx context.Context, taskID string) (*TaskResult, error) {
+	task, err := b.store.GetTask(taskID)
+	if err != nil {
+		return nil, fmt.Errorf("get task: %w", err)
+	}
+	if task == nil {
+		return nil, nil
+	}
+
+	return &TaskResult{
+		ID:        task.ID,
+		ContextID: task.ContextID,
+		Status: TaskStatus{
+			State: task.State,
+		},
+	}, nil
+}
+
+// ListTasks returns tasks for a given context.
+func (b *Bridge) ListTasks(ctx context.Context, contextID string) ([]TaskResult, error) {
+	tasks, err := b.store.ListTasksByContext(contextID)
+	if err != nil {
+		return nil, fmt.Errorf("list tasks: %w", err)
+	}
+
+	results := make([]TaskResult, len(tasks))
+	for i, t := range tasks {
+		results[i] = TaskResult{
+			ID:        t.ID,
+			ContextID: t.ContextID,
+			Status:    TaskStatus{State: t.State},
+		}
+	}
+	return results, nil
+}
+
+// HandleBrokerMessage processes an inbound message from the broker plugin.
+func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
+	b.log.Debug("handling broker message",
+		"topic", topic,
+		"sender", msg.Sender,
+		"type", msg.Type,
+	)
+
+	agentID := extractAgentIDFromTopic(topic)
+	if agentID == "" {
+		// Try extracting from sender field.
+		agentID = extractAgentIDFromSender(msg.Sender)
+	}
+	if agentID == "" {
+		b.log.Debug("ignoring message: could not determine agent ID", "topic", topic)
+		return nil
+	}
+
+	// Notify waiters for this agent.
+	b.mu.RLock()
+	waiters := b.waiters[agentID]
+	b.mu.RUnlock()
+
+	for _, ch := range waiters {
+		select {
+		case ch <- msg:
+		default:
+		}
+	}
+
+	return nil
+}
+
+// GenerateAgentCard builds an agent card for the given grove and agent.
+func (b *Bridge) GenerateAgentCard(groveSlug, agentSlug string) map[string]interface{} {
+	baseURL := strings.TrimRight(b.config.Bridge.ExternalURL, "/")
+	agentURL := fmt.Sprintf("%s/groves/%s/agents/%s", baseURL, groveSlug, agentSlug)
+
+	card := map[string]interface{}{
+		"name":        agentSlug,
+		"description": fmt.Sprintf("Scion agent %s in grove %s", agentSlug, groveSlug),
+		"url":         agentURL,
+		"version":     "1.0.0",
+		"capabilities": map[string]bool{
+			"streaming":         true,
+			"pushNotifications": true,
+		},
+		"defaultInputModes":  []string{"text/plain", "application/json"},
+		"defaultOutputModes": []string{"text/plain", "application/json"},
+		"skills": []map[string]interface{}{
+			{
+				"id":          agentSlug,
+				"name":        agentSlug,
+				"description": fmt.Sprintf("Interact with agent %s", agentSlug),
+			},
+		},
+	}
+
+	if b.config.Bridge.Provider.Organization != "" {
+		card["provider"] = map[string]string{
+			"organization": b.config.Bridge.Provider.Organization,
+			"url":          b.config.Bridge.Provider.URL,
+		}
+	}
+
+	return card
+}
+
+// GetGroveConfig returns the configuration for a grove slug, or nil if not configured.
+func (b *Bridge) GetGroveConfig(groveSlug string) *GroveConfig {
+	for i := range b.config.Groves {
+		if b.config.Groves[i].Slug == groveSlug {
+			return &b.config.Groves[i]
+		}
+	}
+	return nil
+}
+
+// resolveContext maps an A2A context to a Scion agent, creating a new context if needed.
+func (b *Bridge) resolveContext(ctx context.Context, groveSlug, agentSlug, contextID string) (*state.Context, error) {
+	// If contextID provided, look up existing context.
+	if contextID != "" {
+		existing, err := b.store.GetContext(contextID)
+		if err != nil {
+			return nil, fmt.Errorf("get context: %w", err)
+		}
+		if existing != nil {
+			b.store.TouchContext(contextID)
+			return existing, nil
+		}
+		return nil, fmt.Errorf("unknown context ID: %s", contextID)
+	}
+
+	// No contextID — create a new context.
+	// Look up the agent via Hub API.
+	agents, err := b.hubClient.Agents().List(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("list agents: %w", err)
+	}
+
+	var agentID string
+	for _, a := range agents.Agents {
+		if a.Name == agentSlug || a.Slug == agentSlug {
+			agentID = a.ID
+			break
+		}
+	}
+	if agentID == "" {
+		return nil, fmt.Errorf("agent %q not found", agentSlug)
+	}
+
+	// Determine grove ID from the agent list or config.
+	groveID := groveSlug // Use slug as ID for now.
+
+	newContextID := uuid.New().String()
+	now := time.Now()
+	agentCtx := &state.Context{
+		ContextID:  newContextID,
+		GroveID:    groveID,
+		AgentSlug:  agentSlug,
+		AgentID:    agentID,
+		CreatedAt:  now,
+		LastActive: now,
+	}
+	if err := b.store.CreateContext(agentCtx); err != nil {
+		return nil, fmt.Errorf("create context: %w", err)
+	}
+
+	return agentCtx, nil
+}
+
+func (b *Bridge) addWaiter(agentID string, ch chan *messages.StructuredMessage) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.waiters[agentID] = append(b.waiters[agentID], ch)
+}
+
+func (b *Bridge) removeWaiter(agentID string, ch chan *messages.StructuredMessage) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	waiters := b.waiters[agentID]
+	for i, w := range waiters {
+		if w == ch {
+			b.waiters[agentID] = append(waiters[:i], waiters[i+1:]...)
+			break
+		}
+	}
+	if len(b.waiters[agentID]) == 0 {
+		delete(b.waiters, agentID)
+	}
+}
+
+// extractAgentIDFromTopic parses agent identity from broker topic strings.
+// Topic format: scion.grove.<groveId>.agent.<agentSlug>.messages
+// Or: scion.grove.<groveId>.user.<userId>.messages
+func extractAgentIDFromTopic(topic string) string {
+	parts := strings.Split(topic, ".")
+	if len(parts) < 5 {
+		return ""
+	}
+	if parts[0] == "scion" && parts[1] == "grove" && parts[3] == "agent" {
+		return parts[4]
+	}
+	return ""
+}
+
+// extractAgentIDFromSender extracts agent identity from sender field.
+// Sender format: "agent:<slug>" or "agent:<id>"
+func extractAgentIDFromSender(sender string) string {
+	if strings.HasPrefix(sender, "agent:") {
+		return strings.TrimPrefix(sender, "agent:")
+	}
+	return ""
+}
