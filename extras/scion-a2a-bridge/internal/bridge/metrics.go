@@ -91,6 +91,12 @@ func (sr *statusRecorder) WriteHeader(code int) {
 	sr.ResponseWriter.WriteHeader(code)
 }
 
+func (sr *statusRecorder) Flush() {
+	if f, ok := sr.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // InstrumentHandler wraps an http.Handler to record request metrics.
 func InstrumentHandler(next http.Handler, metrics *Metrics) http.Handler {
 	if metrics == nil {

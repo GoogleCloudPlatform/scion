@@ -157,6 +157,67 @@ func TestInstrumentHandlerCapturesNonOKStatus(t *testing.T) {
 	}
 }
 
+func TestStatusRecorderForwardsFlusher(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected http.Flusher to be available through statusRecorder")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+		w.Write([]byte("data: hello\n\n"))
+		flusher.Flush()
+	})
+
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg)
+
+	handler := InstrumentHandler(inner, m)
+
+	req := httptest.NewRequest(http.MethodPost, "/jsonrpc", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != "data: hello\n\n" {
+		t.Errorf("body = %q, want SSE data", got)
+	}
+}
+
+func TestFlusherThroughFullMiddlewareChain(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("http.Flusher lost through middleware chain")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+		w.Write([]byte("data: streamed\n\n"))
+		flusher.Flush()
+	})
+
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg)
+
+	handler := RateLimitMiddleware(inner, RateLimitConfig{Enabled: true, RequestsPerSec: 100, Burst: 100})
+	handler = InstrumentHandler(handler, m)
+
+	req := httptest.NewRequest(http.MethodPost, "/jsonrpc", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != "data: streamed\n\n" {
+		t.Errorf("body = %q, want SSE data through full chain", got)
+	}
+}
+
 func TestMetricsHandler(t *testing.T) {
 	handler := MetricsHandler()
 	if handler == nil {
