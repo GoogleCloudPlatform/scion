@@ -483,7 +483,24 @@ func (b *Bridge) resolveContext(ctx context.Context, groveSlug, agentSlug, conte
 		}
 	}
 	if agentID == "" {
-		return nil, fmt.Errorf("agent %q not found", agentSlug)
+		// Agent not found — try auto-provisioning if grove config allows it.
+		groveCfg := b.GetGroveConfig(groveSlug)
+		if groveCfg == nil || !groveCfg.AutoProvision || groveCfg.DefaultTemplate == "" {
+			return nil, fmt.Errorf("agent %q not found", agentSlug)
+		}
+
+		b.log.Info("auto-provisioning agent", "slug", agentSlug, "grove", groveSlug, "template", groveCfg.DefaultTemplate)
+		created, err := b.hubClient.Agents().Create(ctx, &hubclient.CreateAgentRequest{
+			Name:     agentSlug,
+			GroveID:  groveSlug,
+			Template: groveCfg.DefaultTemplate,
+			Labels:   map[string]string{"a2a-bridge/auto-provisioned": "true"},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("auto-provision agent %q: %w", agentSlug, err)
+		}
+		agentID = created.Agent.ID
+		groveID = created.Agent.GroveID
 	}
 	if groveID == "" {
 		groveID = groveSlug

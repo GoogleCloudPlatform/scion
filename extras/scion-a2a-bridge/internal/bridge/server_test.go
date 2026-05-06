@@ -60,7 +60,7 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server) {
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	bridge := New(store, nil, nil, cfg, log)
-	srv := NewServer(bridge, cfg, log)
+	srv := NewServer(bridge, cfg, nil, log)
 
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

@@ -32,6 +32,7 @@ import (
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
+	"github.com/prometheus/client_golang/prometheus"
 	"gopkg.in/yaml.v3"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/bridge"
@@ -131,7 +132,8 @@ func main() {
 		listenAddr = ":8443"
 	}
 
-	srv := bridge.NewServer(b, cfg, log.With("component", "a2a-server"))
+	metrics := bridge.NewMetrics(prometheus.DefaultRegisterer)
+	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"))
 	httpServer := &http.Server{
 		Addr:    listenAddr,
 		Handler: srv.Handler(),

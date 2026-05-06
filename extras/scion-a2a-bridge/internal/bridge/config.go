@@ -18,14 +18,15 @@ import "time"
 
 // Config holds the complete bridge configuration.
 type Config struct {
-	Bridge   BridgeConfig   `yaml:"bridge"`
-	Hub      HubConfig      `yaml:"hub"`
-	Plugin   PluginConfig   `yaml:"plugin"`
-	Auth     AuthConfig     `yaml:"auth"`
-	Groves   []GroveConfig  `yaml:"groves"`
-	State    StateConfig    `yaml:"state"`
-	Timeouts TimeoutConfig  `yaml:"timeouts"`
-	Logging  LoggingConfig  `yaml:"logging"`
+	Bridge    BridgeConfig    `yaml:"bridge"`
+	Hub       HubConfig       `yaml:"hub"`
+	Plugin    PluginConfig    `yaml:"plugin"`
+	Auth      AuthConfig      `yaml:"auth"`
+	Groves    []GroveConfig   `yaml:"groves"`
+	State     StateConfig     `yaml:"state"`
+	Timeouts  TimeoutConfig   `yaml:"timeouts"`
+	Logging   LoggingConfig   `yaml:"logging"`
+	RateLimit RateLimitConfig `yaml:"rate_limit"`
 }
 
 // BridgeConfig holds the A2A protocol server settings.
@@ -85,4 +86,11 @@ type TimeoutConfig struct {
 type LoggingConfig struct {
 	Level  string `yaml:"level"`
 	Format string `yaml:"format"`
+}
+
+// RateLimitConfig controls request rate limiting.
+type RateLimitConfig struct {
+	Enabled        bool          `yaml:"enabled"`
+	RequestsPerSec float64       `yaml:"requests_per_sec"`
+	Burst          int           `yaml:"burst"`
 }

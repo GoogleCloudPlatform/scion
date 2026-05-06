@@ -80,17 +80,19 @@ type TaskQueryParams struct {
 
 // Server is the A2A HTTP server that handles JSON-RPC requests.
 type Server struct {
-	bridge *Bridge
-	config *Config
-	log    *slog.Logger
+	bridge  *Bridge
+	config  *Config
+	metrics *Metrics
+	log     *slog.Logger
 }
 
 // NewServer creates a new A2A protocol server.
-func NewServer(bridge *Bridge, cfg *Config, log *slog.Logger) *Server {
+func NewServer(bridge *Bridge, cfg *Config, metrics *Metrics, log *slog.Logger) *Server {
 	return &Server{
-		bridge: bridge,
-		config: cfg,
-		log:    log,
+		bridge:  bridge,
+		config:  cfg,
+		metrics: metrics,
+		log:     log,
 	}
 }
 
@@ -105,12 +107,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /groves/{groveSlug}/agents/{agentSlug}/.well-known/agent-card.json", s.handleAgentCard)
 	mux.HandleFunc("POST /groves/{groveSlug}/agents/{agentSlug}/jsonrpc", s.handleJSONRPC)
 
-	// Health and readiness checks.
+	// Health, readiness, and metrics.
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	mux.Handle("GET /metrics", MetricsHandler())
 
-	// Wrap with auth middleware.
-	return s.authMiddleware(mux)
+	// Wrap with middleware chain: metrics → rate limit → auth.
+	handler := s.authMiddleware(mux)
+	handler = RateLimitMiddleware(handler, s.config.RateLimit)
+	handler = InstrumentHandler(handler, s.metrics)
+	return handler
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -491,7 +497,7 @@ func (s *Server) writeRPCError(w http.ResponseWriter, id interface{}, code int, 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Public endpoints skip auth.
-		if strings.HasSuffix(r.URL.Path, "agent-card.json") || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+		if strings.HasSuffix(r.URL.Path, "agent-card.json") || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
 			next.ServeHTTP(w, r)
 			return
 		}
