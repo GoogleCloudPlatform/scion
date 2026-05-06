@@ -302,6 +302,97 @@ func TestUnknownMethod(t *testing.T) {
 	}
 }
 
+func TestCancelTaskSuccess(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.New(filepath.Join(dir, "cancel-test.db"))
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+	defer store.Close()
+
+	cfg := &Config{
+		Bridge: BridgeConfig{
+			ExternalURL: "https://a2a.test.example.com",
+			Provider:    ProviderConfig{Organization: "Test Org", URL: "https://test.example.com"},
+		},
+		Auth: AuthConfig{Scheme: "apiKey", APIKey: "test-api-key"},
+		Groves: []GroveConfig{
+			{Slug: "test-grove", ExposedAgents: []string{"test-agent"}},
+		},
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	bridge := New(store, nil, nil, cfg, log)
+	srv := NewServer(bridge, cfg, nil, log)
+	ts2 := httptest.NewServer(srv.Handler())
+	defer ts2.Close()
+
+	now := time.Now()
+	store.CreateTask(&state.Task{
+		ID: "cancel-me", ContextID: "ctx-1", GroveID: "test-grove", AgentSlug: "test-agent",
+		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
+	})
+
+	rpcResp := doRPC(t, ts2, "/groves/test-grove/agents/test-agent/jsonrpc",
+		"tasks/cancel", map[string]string{"id": "cancel-me"}, "test-api-key")
+
+	if rpcResp.Error != nil {
+		t.Fatalf("unexpected error: code=%d msg=%s", rpcResp.Error.Code, rpcResp.Error.Message)
+	}
+
+	resultBytes, _ := json.Marshal(rpcResp.Result)
+	var result TaskResult
+	if err := json.Unmarshal(resultBytes, &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if result.Status.State != TaskStateCanceled {
+		t.Errorf("status.state = %q, want %q", result.Status.State, TaskStateCanceled)
+	}
+
+	// Verify the store was updated.
+	task, _ := store.GetTask("cancel-me")
+	if task.State != TaskStateCanceled {
+		t.Errorf("store state = %q, want %q", task.State, TaskStateCanceled)
+	}
+}
+
+func TestCancelTaskAlreadyTerminal(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.New(filepath.Join(dir, "cancel-terminal.db"))
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+	defer store.Close()
+
+	cfg := &Config{
+		Bridge: BridgeConfig{ExternalURL: "https://a2a.test.example.com"},
+		Auth:   AuthConfig{Scheme: "apiKey", APIKey: "test-api-key"},
+		Groves: []GroveConfig{{Slug: "test-grove", ExposedAgents: []string{"test-agent"}}},
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	bridge := New(store, nil, nil, cfg, log)
+	srv := NewServer(bridge, cfg, nil, log)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	now := time.Now()
+	store.CreateTask(&state.Task{
+		ID: "done-task", ContextID: "ctx-1", GroveID: "test-grove", AgentSlug: "test-agent",
+		State: TaskStateCompleted, CreatedAt: now, UpdatedAt: now, Metadata: "{}",
+	})
+
+	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
+		"tasks/cancel", map[string]string{"id": "done-task"}, "test-api-key")
+
+	if rpcResp.Error == nil {
+		t.Fatal("expected error when canceling a completed task")
+	}
+	if rpcResp.Error.Code != ErrCodeTaskNotCancelable {
+		t.Errorf("error code = %d, want %d", rpcResp.Error.Code, ErrCodeTaskNotCancelable)
+	}
+}
+
 func TestCancelTaskNotFound(t *testing.T) {
 	_, ts := newTestServer(t)
 
