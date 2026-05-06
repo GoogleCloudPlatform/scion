@@ -56,6 +56,8 @@ func NewBrokerServer(handler MessageHandler, log *slog.Logger) *BrokerServer {
 
 // SetHandler replaces the message handler after construction.
 func (b *BrokerServer) SetHandler(handler MessageHandler) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.handler = handler
 }
 
@@ -75,8 +77,11 @@ func (b *BrokerServer) Publish(ctx context.Context, topic string, msg *messages.
 		"sender", msg.Sender,
 		"type", msg.Type,
 	)
-	if b.handler != nil {
-		return b.handler(ctx, topic, msg)
+	b.mu.RLock()
+	h := b.handler
+	b.mu.RUnlock()
+	if h != nil {
+		return h(ctx, topic, msg)
 	}
 	return nil
 }
@@ -223,8 +228,10 @@ func (b *BrokerServer) Serve(listenAddr string, allowRemote bool) (*PluginServer
 		},
 	}
 
-	stdoutR, _ := io.Pipe()
-	stderrR, _ := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+	stderrR, stderrW := io.Pipe()
+	stdoutW.Close()
+	stderrW.Close()
 
 	doneCh := make(chan struct{})
 	rpcServer := &goplugin.RPCServer{
@@ -261,8 +268,8 @@ func (s *PluginServer) Addr() string {
 	return s.addr
 }
 
-// Close shuts down the plugin server, stopping the listener and waiting for
-// in-flight RPCs to drain.
+// Close shuts down the plugin server. Does not wait for in-flight RPCs spawned
+// by go-plugin to drain; the parent Bridge.Shutdown handles goroutine drainage.
 func (s *PluginServer) Close() error {
 	var err error
 	if s.listener != nil {

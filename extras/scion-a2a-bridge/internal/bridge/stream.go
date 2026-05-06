@@ -107,16 +107,35 @@ func (sm *StreamManager) Broadcast(taskID string, event StreamEvent) {
 	streams := sm.streams[taskID]
 	sm.mu.RUnlock()
 
+	var slowChans []chan StreamEvent
 	for _, ch := range streams {
 		select {
 		case ch <- event:
 		default:
 			dropped := sm.droppedEvents.Add(1)
-			slog.Warn("SSE event dropped: subscriber channel full",
+			slog.Warn("SSE subscriber too slow, closing channel to force reconnect",
 				"task_id", taskID,
 				"total_dropped", dropped,
 			)
+			slowChans = append(slowChans, ch)
 		}
+	}
+	if len(slowChans) > 0 {
+		sm.mu.Lock()
+		for _, slow := range slowChans {
+			subs := sm.streams[taskID]
+			for i, s := range subs {
+				if s == slow {
+					sm.streams[taskID] = append(subs[:i], subs[i+1:]...)
+					break
+				}
+			}
+			close(slow)
+		}
+		if len(sm.streams[taskID]) == 0 {
+			delete(sm.streams, taskID)
+		}
+		sm.mu.Unlock()
 	}
 }
 
@@ -169,6 +188,7 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, groveSlug, agentSlug,
 
 	events, cleanup, err := b.streams.Subscribe(taskID)
 	if err != nil {
+		b.unregisterActiveTask(taskID, aKey)
 		return "", nil, nil, fmt.Errorf("subscribe: %w", err)
 	}
 
@@ -225,7 +245,11 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, groveSlug, agentSlug,
 		})
 	}()
 
-	return taskID, events, cleanup, nil
+	returnedCleanup := func() {
+		cleanup()
+		b.unregisterActiveTask(taskID, aKey)
+	}
+	return taskID, events, returnedCleanup, nil
 }
 
 // SubscribeToTask opens an SSE stream for an existing in-progress task.

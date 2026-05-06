@@ -15,7 +15,9 @@
 package bridge
 
 import (
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -140,7 +142,20 @@ func RateLimitMiddleware(next http.Handler, cfg RateLimitConfig) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get("X-API-Key")
 		if key == "" {
-			key = r.RemoteAddr
+			host, _, err := net.SplitHostPort(r.RemoteAddr)
+			if err != nil {
+				host = r.RemoteAddr
+			}
+			if cfg.TrustProxy {
+				if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+					if i := strings.Index(xff, ","); i >= 0 {
+						host = strings.TrimSpace(xff[:i])
+					} else {
+						host = strings.TrimSpace(xff)
+					}
+				}
+			}
+			key = host
 		}
 
 		if !limiter.Allow(key) {

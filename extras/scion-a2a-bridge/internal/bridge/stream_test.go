@@ -15,9 +15,16 @@
 package bridge
 
 import (
+	"context"
+	"io"
+	"log/slog"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
 func TestStreamManagerSubscribeAndBroadcast(t *testing.T) {
@@ -276,5 +283,72 @@ func TestActiveTaskTracking(t *testing.T) {
 	b.tasksMu.RUnlock()
 	if exists {
 		t.Error("expected agent-a entry to be removed from agentTasks map")
+	}
+}
+
+// TestBlockingTaskIgnoresActiveDispatch is a regression test for C3: ensures
+// HandleBrokerMessage does not dispatch to dispatchToActiveTask for blocking
+// tasks (which are tracked as waiters, not activeTasks).
+func TestBlockingTaskIgnoresActiveDispatch(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.New(filepath.Join(dir, "c3-test.db"))
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+	defer store.Close()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := &Config{
+		Hub: HubConfig{User: "test-user"},
+	}
+	b := New(store, nil, nil, cfg, log)
+
+	now := time.Now()
+	taskID := "blocking-task-1"
+	store.CreateTask(&state.Task{
+		ID: taskID, ContextID: "ctx-1", GroveID: "grove1", AgentSlug: "agent-a",
+		State: TaskStateWorking, CreatedAt: now, UpdatedAt: now, Metadata: "{}",
+	})
+
+	// Register a blocking waiter (as SendMessage would in blocking mode).
+	responseCh := make(chan *messages.StructuredMessage, 1)
+	b.addWaiter(taskID, &waiter{
+		ch:        responseCh,
+		agentSlug: "agent-a",
+		groveID:   "grove1",
+	})
+	defer b.removeWaiter(taskID)
+
+	// Simulate a state-change arriving for the blocking task.
+	stateChangeMsg := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Sender:    "agent:agent-a",
+		Recipient: "user:test-user",
+		Msg:       "IDLE",
+		Type:      messages.TypeStateChange,
+		Metadata:  map[string]string{"a2aTaskId": taskID},
+	}
+
+	err = b.HandleBrokerMessage(context.Background(), "scion.grove.grove1.agent.agent-a.messages", stateChangeMsg)
+	if err != nil {
+		t.Fatalf("HandleBrokerMessage: %v", err)
+	}
+
+	// The waiter should NOT receive a state-change (dispatchToWaiter skips TypeStateChange).
+	select {
+	case <-responseCh:
+		t.Fatal("blocking waiter should not receive state-change messages")
+	default:
+	}
+
+	// The task should NOT have been updated in the DB by dispatchToActiveTask
+	// because the task is not registered in activeTasks.
+	task, err := store.GetTask(taskID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if task.State != TaskStateWorking {
+		t.Errorf("task state = %q, want %q (state-change should not have been dispatched to active task path)", task.State, TaskStateWorking)
 	}
 }

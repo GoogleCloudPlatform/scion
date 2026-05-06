@@ -116,6 +116,11 @@ func ValidateConfig(cfg *Config) error {
 	if (cfg.Auth.Scheme == "apiKey" || cfg.Auth.Scheme == "bearer") && cfg.Auth.APIKey == "" {
 		return fmt.Errorf("auth.api_key is required when auth.scheme is %q", cfg.Auth.Scheme)
 	}
+	if cfg.Bridge.Provider.URL != "" {
+		if _, err := url.Parse(cfg.Bridge.Provider.URL); err != nil {
+			return fmt.Errorf("bridge.provider.url is invalid: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -293,6 +298,15 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, req J
 		return
 	}
 
+	if len(params.Message.Parts) == 0 {
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "message.parts must be non-empty")
+		return
+	}
+	if params.Message.Role != "" && params.Message.Role != RoleUser {
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "message.role must be 'user'")
+		return
+	}
+
 	blocking := true
 	if params.Configuration != nil && params.Configuration.Blocking != nil {
 		blocking = *params.Configuration.Blocking
@@ -301,7 +315,15 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, req J
 	result, err := s.bridge.SendMessage(r.Context(), groveSlug, agentSlug, params.ContextID, params.Message.Parts, blocking)
 	if err != nil {
 		s.log.Error("SendMessage failed", "error", err, "grove", groveSlug, "agent", agentSlug)
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
+		errMsg := err.Error()
+		switch {
+		case strings.Contains(errMsg, "not found"):
+			s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "agent or context not found")
+		case strings.Contains(errMsg, "unknown context ID"):
+			s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "unknown context ID")
+		default:
+			s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
+		}
 		return
 	}
 
@@ -400,6 +422,15 @@ func (s *Server) handleStreamMessage(w http.ResponseWriter, r *http.Request, req
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid StreamMessage params", "error", err)
 		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
+		return
+	}
+
+	if len(params.Message.Parts) == 0 {
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "message.parts must be non-empty")
+		return
+	}
+	if params.Message.Role != "" && params.Message.Role != RoleUser {
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "message.role must be 'user'")
 		return
 	}
 

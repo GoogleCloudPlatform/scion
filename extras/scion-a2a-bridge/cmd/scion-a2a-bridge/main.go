@@ -188,6 +188,8 @@ func loadConfig(path string) (*bridge.Config, error) {
 		return nil, fmt.Errorf("reading config file: %w", err)
 	}
 
+	// NOTE: os.Expand has no escape mechanism — a literal "$" in config values
+	// will be interpreted as the start of an environment variable reference.
 	var missing []string
 	expanded := os.Expand(string(data), func(name string) string {
 		v, ok := os.LookupEnv(name)

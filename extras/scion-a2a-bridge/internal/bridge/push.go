@@ -246,6 +246,8 @@ func (pd *PushDispatcher) sendWithRetry(cfg state.PushNotificationConfig, event 
 		"id", cfg.ID, "url", cfg.URL, "last_status_code", lastStatusCode)
 }
 
+// TODO(v2): Add X-A2A-Signature HMAC over request body for webhook authentication.
+// Currently the bearer token is the only authentication; a leaked token is a full takeover.
 func (pd *PushDispatcher) send(cfg state.PushNotificationConfig, event StreamEvent) (int, error) {
 	body, err := json.Marshal(event)
 	if err != nil {

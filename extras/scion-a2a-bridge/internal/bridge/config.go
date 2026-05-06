@@ -90,7 +90,8 @@ type LoggingConfig struct {
 
 // RateLimitConfig controls request rate limiting.
 type RateLimitConfig struct {
-	Enabled        bool          `yaml:"enabled"`
-	RequestsPerSec float64       `yaml:"requests_per_sec"`
-	Burst          int           `yaml:"burst"`
+	Enabled        bool    `yaml:"enabled"`
+	RequestsPerSec float64 `yaml:"requests_per_sec"`
+	Burst          int     `yaml:"burst"`
+	TrustProxy     bool    `yaml:"trust_proxy"`
 }

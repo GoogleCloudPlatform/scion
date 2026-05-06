@@ -278,8 +278,12 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 		return nil, fmt.Errorf("task %s is already in terminal state: %s", taskID, task.State)
 	}
 
-	// Send interrupt to the agent via Hub.
+	// Send interrupt to the agent via Hub, re-resolving if the stored AgentID is stale.
 	if b.hubClient != nil && task.AgentID != "" {
+		targetAgentID := task.AgentID
+		if agent := b.lookupAgent(ctx, task.GroveID, task.AgentSlug); agent != nil {
+			targetAgentID = agent.ID
+		}
 		interruptMsg := &messages.StructuredMessage{
 			Version:   1,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -289,8 +293,8 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 			Type:      messages.TypeInstruction,
 			Metadata:  map[string]string{"a2aTaskId": taskID},
 		}
-		if err := b.hubClient.Agents().SendStructuredMessage(ctx, task.AgentID, interruptMsg, true, false); err != nil {
-			b.log.Error("failed to send cancel interrupt to agent", "error", err, "task_id", taskID, "agent_id", task.AgentID)
+		if err := b.hubClient.Agents().SendStructuredMessage(ctx, targetAgentID, interruptMsg, true, false); err != nil {
+			b.log.Error("failed to send cancel interrupt to agent", "error", err, "task_id", taskID, "agent_id", targetAgentID)
 		}
 	}
 
@@ -340,16 +344,25 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 	// If the message carries a task correlation ID, dispatch only to that task.
 	if taskID := msg.Metadata["a2aTaskId"]; taskID != "" {
 		b.dispatchToWaiter(taskID, msg)
-		b.dispatchToActiveTask(ctx, taskID, agentSlug, msg)
+		b.tasksMu.RLock()
+		_, isActive := b.activeTasks[taskID]
+		b.tasksMu.RUnlock()
+		if isActive {
+			b.dispatchToActiveTask(ctx, taskID, agentSlug, msg)
+		}
 		return nil
 	}
 
 	// Fallback: dispatch to blocking waiters that match this agent (best-effort without correlation).
 	groveID := extractGroveIDFromTopic(topic)
+	if groveID == "" {
+		b.log.Warn("dropping message with unparseable grove ID", "topic", topic)
+		return nil
+	}
 	b.mu.RLock()
 	var matchedTaskIDs []string
 	for taskID, w := range b.waiters {
-		if w.agentSlug == agentSlug && (groveID == "" || w.groveID == groveID) {
+		if w.agentSlug == agentSlug && w.groveID == groveID {
 			matchedTaskIDs = append(matchedTaskIDs, taskID)
 		}
 	}
@@ -420,9 +433,11 @@ func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug str
 			b.unregisterActiveTask(taskID, aKey)
 		}
 	} else {
-		// MVP: treat any non-state-change message as a terminal response.
-		// A multi-turn agent may send interim content that shouldn't complete the task.
-		b.log.Debug("treating content message as task completion", "task_id", taskID)
+		// MVP LIMITATION: treats any non-state-change message as a terminal response.
+		// Multi-turn agents that emit interim content (e.g. "thinking out loud")
+		// will have their task closed prematurely on the first content message.
+		// This needs to be revisited when streaming multi-turn support is added.
+		b.log.Debug("treating content message as task completion (MVP)", "task_id", taskID)
 		if err := b.store.UpdateTaskState(taskID, TaskStateCompleted); err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 		}
@@ -605,10 +620,27 @@ func (b *Bridge) resolveContext(ctx context.Context, groveSlug, agentSlug, conte
 			Labels:   map[string]string{"a2a-bridge/auto-provisioned": "true"},
 		})
 		if err != nil {
-			return nil, fmt.Errorf("auto-provision agent %q: %w", agentSlug, err)
+			// Concurrent create may have succeeded; re-list to find the agent.
+			retryAgents, retryErr := b.hubClient.Agents().List(ctx, &hubclient.ListAgentsOptions{GroveID: groveSlug})
+			if retryErr != nil {
+				return nil, fmt.Errorf("auto-provision agent %q: %w", agentSlug, err)
+			}
+			found := false
+			for _, a := range retryAgents.Agents {
+				if a.Name == agentSlug || a.Slug == agentSlug {
+					agentID = a.ID
+					groveID = a.GroveID
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, fmt.Errorf("auto-provision agent %q: %w", agentSlug, err)
+			}
+		} else {
+			agentID = created.Agent.ID
+			groveID = created.Agent.GroveID
 		}
-		agentID = created.Agent.ID
-		groveID = created.Agent.GroveID
 	}
 	if groveID == "" {
 		groveID = groveSlug

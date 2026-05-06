@@ -134,10 +134,19 @@ func TranslateA2AToScion(parts []Part) *messages.StructuredMessage {
 		}
 	}
 
+	msg := textContent.String()
+	if msg == "" {
+		if len(attachments) > 0 {
+			msg = "[A2A request with attachments only]"
+		} else {
+			msg = "[empty A2A request]"
+		}
+	}
+
 	return &messages.StructuredMessage{
 		Version:     1,
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
-		Msg:         textContent.String(),
+		Msg:         msg,
 		Type:        messages.TypeInstruction,
 		Attachments: attachments,
 	}

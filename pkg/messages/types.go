@@ -29,6 +29,12 @@ const MaxMsgSize = 64 * 1024 // 64KB
 // Maximum number of attachments.
 const MaxAttachments = 10
 
+// Maximum number of metadata entries.
+const MaxMetadataEntries = 32
+
+// Maximum size of a single metadata value in bytes.
+const MaxMetadataValueSize = 4 * 1024 // 4KB
+
 // Message type constants (closed enum).
 const (
 	TypeInstruction    = "instruction"
@@ -94,6 +100,14 @@ func (m *StructuredMessage) Validate() error {
 	}
 	if len(m.Attachments) > MaxAttachments {
 		return fmt.Errorf("too many attachments: %d (max %d)", len(m.Attachments), MaxAttachments)
+	}
+	if len(m.Metadata) > MaxMetadataEntries {
+		return fmt.Errorf("too many metadata entries: %d (max %d)", len(m.Metadata), MaxMetadataEntries)
+	}
+	for k, v := range m.Metadata {
+		if len(v) > MaxMetadataValueSize {
+			return fmt.Errorf("metadata value for key %q exceeds maximum size of %d bytes", k, MaxMetadataValueSize)
+		}
 	}
 	return nil
 }
