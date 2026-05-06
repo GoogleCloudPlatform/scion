@@ -50,9 +50,11 @@ echo "Registrar Nameservers:"
 gcloud dns managed-zones describe "${ZONE_NAME}" --format="value(nameServers)" | tr ';' '\n'
 echo "--------------------------------------------------"
 
-# 3. Add or Update A Record for the Hub
-echo "Checking A record for ${HUB_SUBDOMAIN}..."
+# 3. Add A Record for the Hub
+echo "Checking A record for ${HUB_SUBDOMAIN}...on ${INSTANCE_NAME} in ${GCE_ZONE}"
+
 EXTERNAL_IP=$(gcloud compute instances describe "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --format="get(networkInterfaces[0].accessConfigs[0].natIP)")
+echo "Zone Name ${ZONE_NAME} Hub Subdomain ${HUB_SUBDOMAIN} "
 
 # Try to get the current IP of the record
 CURRENT_RECORD_IP=$(gcloud dns record-sets list --zone="${ZONE_NAME}" --name="${HUB_SUBDOMAIN}." --type="A" --format="value(rrdatas[0])" 2>/dev/null || true)
@@ -83,6 +85,7 @@ echo "Checking certificate status on ${INSTANCE_NAME}..."
 if gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="sudo test -f /etc/letsencrypt/live/${DOMAIN}/fullchain.pem" &>/dev/null; then
     echo "Certificate for ${DOMAIN} already exists. Skipping acquisition."
 else
+    echo "Instance Name ${INSTANCE_NAME} in zone ${GCE_ZONE}"
     echo "Requesting wildcard certificate for ${DOMAIN}..."
     gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="sudo certbot certonly \
         --dns-google \

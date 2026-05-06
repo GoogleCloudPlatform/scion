@@ -26,9 +26,9 @@ set -euo pipefail
 # Usage:
 #   setup-cloud-build.sh [--project <project>] [--location <location>] [--repo <repo-name>]
 
-PROJECT=""
+PROJECT="genai-437003"
 LOCATION="us-central1"
-REPO_NAME="scion"
+REPO_NAME="scion-images"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -105,6 +105,16 @@ gcloud artifacts repositories add-iam-policy-binding "${REPO_NAME}" \
   --quiet
 
 echo "    Granted artifactregistry.writer to ${CB_SA}."
+
+gcloud artifacts repositories add-iam-policy-binding "${REPO_NAME}" \
+  --location="${LOCATION}" \
+  --project="${PROJECT}" \
+  --member="serviceAccount:${CB_SA}" \
+  --role="roles/artifactregistry.reader" \
+  --quiet
+
+echo "    Granted artifactregistry.reader to ${CB_SA}."
+
 
 echo ""
 echo "Setup complete! Registry path:"

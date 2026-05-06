@@ -25,5 +25,17 @@ RUN mkdir -p /home/scion/.gemini /home/scion/.gemini/skills && \
 RUN npm install -g @google/gemini-cli@${GEMINI_CLI_VERSION} \
   && npm cache clean --force
 
+# Install Conductor
+RUN gemini extensions install --consent https://github.com/gemini-cli-extensions/conductor
+
+# Install Security
+RUN gemini extensions install --consent https://github.com/gemini-cli-extensions/security
+
+# Install Code Review
+RUN gemini extensions install --consent https://github.com/gemini-cli-extensions/code-review
+
+# Install Skills
+COPY --chown=scion:scion ./skills/ /home/scion/.gemini/skills/
+
 # default entrypoint when none specified
 CMD ["gemini"]

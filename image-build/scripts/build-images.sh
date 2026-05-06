@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -euo pipefail
+set -eo pipefail
 
 # Scion image build orchestrator.
 #
@@ -276,7 +276,7 @@ else
       --dockerfile "${dockerfile}" \
       --tags "${tags}" \
       --platforms "${PLATFORMS}" \
-      "${build_arg_flags[@]}" \
+      ${build_arg_flags+"${build_arg_flags[@]}"} \
       --push "${PUSH}" \
       --load "${LOAD}"
   done
