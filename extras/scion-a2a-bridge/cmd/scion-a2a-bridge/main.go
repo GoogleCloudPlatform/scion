@@ -21,7 +21,6 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -230,30 +229,6 @@ func accessSecret(ctx context.Context, resourceName string) (string, error) {
 		return "", fmt.Errorf("accessing secret version: %w", err)
 	}
 	return strings.TrimSpace(string(resp.Payload.Data)), nil
-}
-
-// gceProjectID returns the GCP project ID from the GCE metadata server.
-func gceProjectID() string {
-	client := &http.Client{Timeout: 2 * time.Second}
-	req, err := http.NewRequest(http.MethodGet,
-		"http://metadata.google.internal/computeMetadata/v1/project/project-id", nil)
-	if err != nil {
-		return ""
-	}
-	req.Header.Set("Metadata-Flavor", "Google")
-	resp, err := client.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return ""
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(body))
 }
 
 func initLogger(cfg bridge.LoggingConfig) *slog.Logger {
