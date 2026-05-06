@@ -73,7 +73,8 @@ The dialect parser maps harness-specific event names to a normalized vocabulary 
 | `prompt-submit` | UserPromptSubmit | — |
 | `tool-start` | PreToolUse | BeforeTool |
 | `tool-end` | PostToolUse | AfterTool |
-| `agent-end` | Stop, SubagentStop | AfterAgent |
+| `agent-end` | Stop | AfterAgent |
+| `subagent-end` | SubagentStop | — |
 | `model-start` | BeforeModel | BeforeModel |
 | `model-end` | AfterModel | AfterModel |
 | `notification` | Notification | Notification |
@@ -107,7 +108,7 @@ type EventData struct {
 
 **This is the critical mechanism for the thinking/reasoning content leak.**
 
-On `agent-end` events (Stop/SubagentStop), the Claude dialect extracts the assistant's final response text from two sources (`pkg/sciontool/hooks/dialects/claude.go:110-118`):
+On `agent-end` events (Stop only — SubagentStop now normalizes to `subagent-end` and is excluded), the Claude dialect extracts the assistant's final response text from two sources (`pkg/sciontool/hooks/dialects/claude.go:110-118`):
 
 #### Source 1: `last_assistant_message` field (preferred)
 
@@ -141,7 +142,7 @@ This would correctly skip `type: "thinking"` blocks if they exist as separate ty
 
 The `last_assistant_message` path (the preferred, non-racy path) receives a **flat string** from Claude Code. Claude Code's Stop hook payload includes the full assistant message including extended thinking content. Since the dialect treats this as an opaque string:
 
-1. Claude Code fires Stop hook with `last_assistant_message` containing thinking + response
+1. Claude Code fires main-agent Stop hook with `last_assistant_message` containing thinking + response
 2. ClaudeDialect takes the string verbatim → `event.Data.AssistantText`
 3. HubHandler forwards it to the Hub as an outbound `assistant-reply` message (64KB truncation only)
 4. Hub persists it in the message store
@@ -160,7 +161,8 @@ The HubHandler (`pkg/sciontool/hooks/handlers/hub.go`) is the bridge between hoo
 | `prompt-submit` | `UpdateStatus(thinking)` | Always clears sticky (new work) |
 | `model-start` | `UpdateStatus(thinking)` | Respects sticky states |
 | `tool-start` | `UpdateStatus(executing)` | Reports tool name; detects `AskUserQuestion`/`ExitPlanMode` as `waiting_for_input` |
-| `agent-end` | **`SendOutboundMessage(AssistantText)`** + `UpdateStatus(idle)` | **This forwards thinking content** |
+| `agent-end` | **`SendOutboundMessage(AssistantText)`** + `UpdateStatus(idle)` | **Main agent only — this forwards thinking content** |
+| `subagent-end` | *(no action)* | Excluded — subagent turns do not affect scion agent state |
 | `session-end` | `ReportState(stopped)` | Terminal state |
 | `notification` | `UpdateStatus(waiting_for_input)` | Tool permission requests |
 
@@ -604,3 +606,19 @@ This gives the mobile client full control over what to display, enabling feature
 3. **The ACP provides the right foundation for a full-fidelity remote interface**, but it currently operates at the HTTP-tunneling level, not at the agent-output-streaming level. Adding a structured conversation stream type would enable mobile/speech interfaces without going through the lossy notification pipeline.
 
 4. **The fix requires changes at two levels**: (a) immediate content filtering in the Claude dialect to strip thinking from AssistantText, and (b) architectural content classification in the messaging pipeline to support normal/verbose/full fidelity modes for different consumers.
+
+---
+
+## CHANGE LOG
+
+### 2026-05-06 — Separate SubagentStop from main agent state
+
+**Problem**: `SubagentStop` events were normalized to the same `agent-end` event as main-agent `Stop`, causing subagent turn completions to drive scion agent state changes (idle status updates, outbound assistant-reply messages, turn count increments in limits tracking). Only the main agent loop should drive the scion agent's externally-visible state.
+
+**Changes**:
+- Added `EventSubagentEnd = "subagent-end"` normalized event constant (`pkg/sciontool/hooks/types.go`)
+- Split `normalizeEventName()` in the Claude dialect: `Stop` → `agent-end`, `SubagentStop` → `subagent-end` (`pkg/sciontool/hooks/dialects/claude.go`)
+- AssistantText extraction (from `last_assistant_message` or `transcript_path`) now only runs for `agent-end`, skipping `subagent-end`
+- No handler changes required — all handlers (StatusHandler, HubHandler, LimitsHandler, TelemetryHandler, LoggingHandler) match on explicit `EventAgentEnd`; the new `EventSubagentEnd` falls to their `default` case (no-op)
+
+**Effect**: SubagentStop events still flow through the hook pipeline and are visible in logs (via the default logging path), but they no longer trigger status updates to the Hub, local agent-info.json changes, outbound assistant-reply messages, or turn count increments.
