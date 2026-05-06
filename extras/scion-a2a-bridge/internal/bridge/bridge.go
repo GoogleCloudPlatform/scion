@@ -40,7 +40,7 @@ type Bridge struct {
 	broker    *BrokerServer
 	log       *slog.Logger
 
-	// waiters tracks channels waiting for agent responses, keyed by agent ID.
+	// waiters tracks channels waiting for agent responses, keyed by agent slug.
 	mu      sync.RWMutex
 	waiters map[string][]chan *messages.StructuredMessage
 }
@@ -94,10 +94,10 @@ func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextI
 	scionMsg.Sender = fmt.Sprintf("user:%s", b.config.Hub.User)
 	scionMsg.Recipient = fmt.Sprintf("agent:%s", agentCtx.AgentSlug)
 
-	// Set up waiter for response.
+	// Set up waiter for response, keyed by agent slug to match sender field.
 	responseCh := make(chan *messages.StructuredMessage, 1)
-	b.addWaiter(agentCtx.AgentID, responseCh)
-	defer b.removeWaiter(agentCtx.AgentID, responseCh)
+	b.addWaiter(agentCtx.AgentSlug, responseCh)
+	defer b.removeWaiter(agentCtx.AgentSlug, responseCh)
 
 	// Ensure subscription exists for this agent.
 	if b.broker != nil {
@@ -185,26 +185,31 @@ func (b *Bridge) ListTasks(ctx context.Context, contextID string) ([]TaskResult,
 
 // HandleBrokerMessage processes an inbound message from the broker plugin.
 func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
-	b.log.Debug("handling broker message",
+	b.log.Info("handling broker message",
 		"topic", topic,
 		"sender", msg.Sender,
 		"type", msg.Type,
+		"msg_preview", truncate(msg.Msg, 100),
 	)
 
-	agentID := extractAgentIDFromTopic(topic)
-	if agentID == "" {
-		// Try extracting from sender field.
-		agentID = extractAgentIDFromSender(msg.Sender)
+	// Extract agent slug from sender field (format: "agent:<slug>").
+	// This is more reliable than parsing the topic, which may be a user-targeted
+	// topic (scion.grove.<groveId>.user.<userId>.messages) without agent info.
+	agentSlug := extractAgentIDFromSender(msg.Sender)
+	if agentSlug == "" {
+		agentSlug = extractAgentIDFromTopic(topic)
 	}
-	if agentID == "" {
-		b.log.Debug("ignoring message: could not determine agent ID", "topic", topic)
+	if agentSlug == "" {
+		b.log.Debug("ignoring message: could not determine agent slug", "topic", topic, "sender", msg.Sender)
 		return nil
 	}
 
-	// Notify waiters for this agent.
 	b.mu.RLock()
-	waiters := b.waiters[agentID]
+	waiters := b.waiters[agentSlug]
+	waiterCount := len(waiters)
 	b.mu.RUnlock()
+
+	b.log.Info("dispatching to waiters", "agent_slug", agentSlug, "waiter_count", waiterCount)
 
 	for _, ch := range waiters {
 		select {
@@ -214,6 +219,13 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 	}
 
 	return nil
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 // GenerateAgentCard builds an agent card for the given grove and agent.
@@ -283,19 +295,20 @@ func (b *Bridge) resolveContext(ctx context.Context, groveSlug, agentSlug, conte
 		return nil, fmt.Errorf("list agents: %w", err)
 	}
 
-	var agentID string
+	var agentID, groveID string
 	for _, a := range agents.Agents {
 		if a.Name == agentSlug || a.Slug == agentSlug {
 			agentID = a.ID
+			groveID = a.GroveID
 			break
 		}
 	}
 	if agentID == "" {
 		return nil, fmt.Errorf("agent %q not found", agentSlug)
 	}
-
-	// Determine grove ID from the agent list or config.
-	groveID := groveSlug // Use slug as ID for now.
+	if groveID == "" {
+		groveID = groveSlug
+	}
 
 	newContextID := uuid.New().String()
 	now := time.Now()
