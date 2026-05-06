@@ -195,7 +195,7 @@ func (e *PullImagesExecutor) Run(ctx context.Context, logger io.Writer, params m
 	for _, h := range harnesses {
 		image := fmt.Sprintf("%s/scion-%s:%s", registry, h, tag)
 		fmt.Fprintf(logger, "Pulling %s ...\n", image)
-		log.Debug("Pulling image %s", "image", image)
+		log.Debug("Pulling image", "image", image)
 
 		log.Debug("Executing Command runtimeBin", "runtimeBin", runtimeBin, "image", image)
 
