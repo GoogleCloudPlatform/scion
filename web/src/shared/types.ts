@@ -356,6 +356,7 @@ export interface HarnessAdvancedCapabilities {
     oauth_token: CapabilityField;
     vertex_ai: CapabilityField;
   };
+  resume?: CapabilityField;
 }
 
 /**

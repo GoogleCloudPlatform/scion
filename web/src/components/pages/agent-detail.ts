@@ -1012,17 +1012,21 @@ export class ScionPageAgentDetail extends LitElement {
             ? html`
                 ${can(agent._capabilities, 'stop')
                   ? html`
-                      <sl-button
-                        variant="warning"
-                        size="small"
-                        outline
-                        ?loading=${this.actionLoading['suspend']}
-                        ?disabled=${this.actionLoading['suspend']}
-                        @click=${() => this.handleAction('suspend')}
-                      >
-                        <sl-icon slot="prefix" name="pause-circle"></sl-icon>
-                        Suspend
-                      </sl-button>
+                      ${agent.harnessCapabilities?.resume?.support !== 'no'
+                        ? html`
+                            <sl-button
+                              variant="warning"
+                              size="small"
+                              outline
+                              ?loading=${this.actionLoading['suspend']}
+                              ?disabled=${this.actionLoading['suspend']}
+                              @click=${() => this.handleAction('suspend')}
+                            >
+                              <sl-icon slot="prefix" name="pause-circle"></sl-icon>
+                              Suspend
+                            </sl-button>
+                          `
+                        : nothing}
                       <sl-button
                         variant="danger"
                         size="small"
