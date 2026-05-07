@@ -263,8 +263,11 @@ func accessSecret(ctx context.Context, resourceName string) (string, error) {
 	}
 	defer client.Close()
 
+	if !strings.Contains(resourceName, "/versions/") {
+		resourceName += "/versions/latest"
+	}
 	resp, err := client.AccessSecretVersion(ctx, &smpb.AccessSecretVersionRequest{
-		Name: resourceName + "/versions/latest",
+		Name: resourceName,
 	})
 	if err != nil {
 		return "", fmt.Errorf("accessing secret version: %w", err)

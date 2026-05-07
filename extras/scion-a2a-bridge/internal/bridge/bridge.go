@@ -211,14 +211,14 @@ func (b *Bridge) reapStaleTasks(maxAge time.Duration) {
 }
 
 // Shutdown gracefully drains background work.
-// Order: (1) close broker channel so brokerWorker drains buffered messages
-// with shutdownCtx still live (push.Dispatch works during drain),
-// (2) cancel shutdownCtx to stop the janitor and other background work,
-// (3) wait for push goroutines spawned during drain to finish.
+// Order: (1) close broker channel so brokerWorker drains buffered messages,
+// (2) cancel shutdownCtx to stop the janitor,
+// (3) wait for both goroutines to exit,
+// (4) wait for push goroutines spawned during drain to finish.
 func (b *Bridge) Shutdown() {
 	close(b.brokerMsgs)
-	b.wg.Wait()
 	b.shutdownCancel()
+	b.wg.Wait()
 	b.push.Wait()
 }
 
@@ -744,11 +744,9 @@ func (b *Bridge) lookupAgent(ctx context.Context, groveSlug, agentSlug string) *
 		}
 	}
 
-	if result != nil {
-		b.agentCacheMu.Lock()
-		b.agentCache[cacheKey] = &agentCacheEntry{agent: result, cachedAt: time.Now()}
-		b.agentCacheMu.Unlock()
-	}
+	b.agentCacheMu.Lock()
+	b.agentCache[cacheKey] = &agentCacheEntry{agent: result, cachedAt: time.Now()}
+	b.agentCacheMu.Unlock()
 
 	return result
 }

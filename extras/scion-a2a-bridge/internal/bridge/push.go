@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -287,7 +288,10 @@ func (pd *PushDispatcher) send(cfg state.PushNotificationConfig, event StreamEve
 	if err != nil {
 		return 0, fmt.Errorf("send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode >= 400 {
 		return resp.StatusCode, fmt.Errorf("webhook returned status %d", resp.StatusCode)
