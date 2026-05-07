@@ -57,14 +57,6 @@ type PushNotificationConfig struct {
 	CreatedAt       time.Time
 }
 
-// IdentityMapping maps an external A2A client identity to a Scion Hub user.
-type IdentityMapping struct {
-	ExternalID   string
-	HubUserID    string
-	HubUserEmail string
-	MappedAt     time.Time
-}
-
 // Store provides SQLite-backed state management for the A2A bridge.
 type Store struct {
 	db *sql.DB
@@ -127,6 +119,10 @@ func (s *Store) migrate() error {
 			last_active DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 
+		// SECURITY: token and auth_credentials are stored in cleartext. The SQLite file
+		// must be on an encrypted volume with strict file permissions (0600). Deployers
+		// should use short-lived tokens where possible. Envelope encryption (AES-GCM with
+		// a config-supplied KEK) is planned for a future release.
 		`CREATE TABLE IF NOT EXISTS push_notification_configs (
 			id TEXT PRIMARY KEY,
 			task_id TEXT NOT NULL,
@@ -138,13 +134,6 @@ func (s *Store) migrate() error {
 			FOREIGN KEY (task_id) REFERENCES tasks(id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_push_task ON push_notification_configs(task_id)`,
-
-		`CREATE TABLE IF NOT EXISTS identity_mappings (
-			external_id TEXT PRIMARY KEY,
-			hub_user_id TEXT NOT NULL,
-			hub_user_email TEXT NOT NULL,
-			mapped_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-		)`,
 	}
 
 	for _, m := range migrations {
@@ -350,42 +339,3 @@ func (s *Store) DeletePushConfigForTask(taskID, id string) error {
 	return nil
 }
 
-// --- Identity Mappings ---
-
-// SetIdentityMapping inserts or replaces an identity mapping.
-func (s *Store) SetIdentityMapping(m *IdentityMapping) error {
-	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO identity_mappings (external_id, hub_user_id, hub_user_email, mapped_at)
-		 VALUES (?, ?, ?, ?)`,
-		m.ExternalID, m.HubUserID, m.HubUserEmail, m.MappedAt,
-	)
-	if err != nil {
-		return fmt.Errorf("set identity mapping: %w", err)
-	}
-	return nil
-}
-
-// GetIdentityMapping returns the mapping for the given external ID, or nil if not found.
-func (s *Store) GetIdentityMapping(externalID string) (*IdentityMapping, error) {
-	m := &IdentityMapping{}
-	err := s.db.QueryRow(
-		`SELECT external_id, hub_user_id, hub_user_email, mapped_at
-		 FROM identity_mappings WHERE external_id = ?`, externalID,
-	).Scan(&m.ExternalID, &m.HubUserID, &m.HubUserEmail, &m.MappedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get identity mapping: %w", err)
-	}
-	return m, nil
-}
-
-// DeleteIdentityMapping removes an identity mapping.
-func (s *Store) DeleteIdentityMapping(externalID string) error {
-	_, err := s.db.Exec(`DELETE FROM identity_mappings WHERE external_id = ?`, externalID)
-	if err != nil {
-		return fmt.Errorf("delete identity mapping: %w", err)
-	}
-	return nil
-}

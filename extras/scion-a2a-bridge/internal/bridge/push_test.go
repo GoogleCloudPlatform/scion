@@ -52,7 +52,7 @@ func newTestBridge(t *testing.T) *Bridge {
 		Timeouts: TimeoutConfig{PushRetryMax: 3},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(store, nil, nil, cfg, log)
+	return New(store, nil, nil, cfg, nil, log)
 }
 
 func TestPushDispatcherSendsWebhook(t *testing.T) {

@@ -59,7 +59,7 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server, *state.Store) {
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	bridge := New(store, nil, nil, cfg, log)
+	bridge := New(store, nil, nil, cfg, nil, log)
 	srv := NewServer(bridge, cfg, nil, log)
 
 	ts := httptest.NewServer(srv.Handler())
@@ -322,7 +322,7 @@ func TestCancelTaskSuccess(t *testing.T) {
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	bridge := New(store, nil, nil, cfg, log)
+	bridge := New(store, nil, nil, cfg, nil, log)
 	srv := NewServer(bridge, cfg, nil, log)
 	ts2 := httptest.NewServer(srv.Handler())
 	defer ts2.Close()
@@ -371,7 +371,7 @@ func TestCancelTaskAlreadyTerminal(t *testing.T) {
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	bridge := New(store, nil, nil, cfg, log)
+	bridge := New(store, nil, nil, cfg, nil, log)
 	srv := NewServer(bridge, cfg, nil, log)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -671,7 +671,7 @@ func TestAuthorizeTaskReturnsNilNil(t *testing.T) {
 		Bridge: BridgeConfig{ExternalURL: "https://a2a.test.example.com"},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	b := New(s, nil, nil, cfg, log)
+	b := New(s, nil, nil, cfg, nil, log)
 
 	now := time.Now()
 	_ = store // use the outer store for unrelated setup

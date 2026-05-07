@@ -193,6 +193,9 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, groveSlug, agentSlug,
 	if err := b.store.CreateTask(task); err != nil {
 		return "", nil, nil, fmt.Errorf("create task: %w", err)
 	}
+	if b.metrics != nil {
+		b.metrics.TasksCreated.WithLabelValues(agentCtx.GroveID).Inc()
+	}
 
 	aKey := agentKey(agentCtx.GroveID, agentCtx.AgentSlug)
 	b.registerActiveTask(taskID, aKey)

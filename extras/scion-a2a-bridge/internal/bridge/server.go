@@ -23,9 +23,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
+
+var slugRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 // A2A JSON-RPC error codes.
 const (
@@ -121,11 +124,17 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.Hub.User == "" {
 		return fmt.Errorf("hub.user is required")
 	}
-	if cfg.Auth.Scheme != "" && cfg.Auth.Scheme != "apiKey" && cfg.Auth.Scheme != "bearer" {
-		return fmt.Errorf("unsupported auth.scheme: %q (supported: apiKey, bearer)", cfg.Auth.Scheme)
+	if strings.ContainsAny(cfg.Hub.User, ".:") {
+		return fmt.Errorf("hub.user %q must not contain '.' or ':' (used in broker topic patterns)", cfg.Hub.User)
+	}
+	if cfg.Auth.Scheme != "" && cfg.Auth.Scheme != "apiKey" && cfg.Auth.Scheme != "bearer" && cfg.Auth.Scheme != "none" {
+		return fmt.Errorf("unsupported auth.scheme: %q (supported: apiKey, bearer, none)", cfg.Auth.Scheme)
 	}
 	if (cfg.Auth.Scheme == "apiKey" || cfg.Auth.Scheme == "bearer") && cfg.Auth.APIKey == "" {
 		return fmt.Errorf("auth.api_key is required when auth.scheme is %q", cfg.Auth.Scheme)
+	}
+	if cfg.Auth.APIKey == "" && cfg.Auth.Scheme != "none" {
+		return fmt.Errorf("auth.api_key is required (set auth.scheme: \"none\" to explicitly disable authentication)")
 	}
 	if cfg.Bridge.Provider.URL != "" {
 		if _, err := url.Parse(cfg.Bridge.Provider.URL); err != nil {
@@ -137,10 +146,13 @@ func ValidateConfig(cfg *Config) error {
 
 // WarnOnOpenAuth logs a warning if the auth configuration leaves the bridge open.
 func (s *Server) WarnOnOpenAuth() {
-	if s.config.Auth.APIKey == "" {
-		s.log.Warn("bridge auth is DISABLED: no auth.api_key configured — all requests will be accepted without authentication")
+	if s.config.Auth.Scheme == "none" {
+		s.log.Warn("bridge auth is explicitly DISABLED (auth.scheme: none) — all requests will be accepted without authentication")
 	} else if s.config.Auth.Scheme == "" {
 		s.log.Warn("auth.scheme is empty: bridge will accept credentials from both X-API-Key and Authorization headers")
+	}
+	if s.config.RateLimit.TrustProxy {
+		s.log.Warn("rate_limit.trust_proxy is enabled — X-Forwarded-For is trusted unconditionally, which allows clients to spoof their IP and bypass per-IP rate limits; consider adding network-level proxy restrictions")
 	}
 }
 
@@ -211,8 +223,8 @@ func (s *Server) handleWellKnownAgentCard(w http.ResponseWriter, r *http.Request
 		"url":         s.config.Bridge.ExternalURL,
 		"version":     "1.0.0",
 		"capabilities": map[string]bool{
-			"streaming":         true,
-			"pushNotifications": true,
+			"streaming":         false,
+			"pushNotifications": false,
 		},
 	}
 
@@ -233,6 +245,11 @@ func (s *Server) handleWellKnownAgentCard(w http.ResponseWriter, r *http.Request
 func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 	groveSlug := r.PathValue("groveSlug")
 	agentSlug := r.PathValue("agentSlug")
+
+	if !slugRE.MatchString(groveSlug) || !slugRE.MatchString(agentSlug) {
+		http.Error(w, "invalid slug", http.StatusBadRequest)
+		return
+	}
 
 	groveCfg := s.bridge.GetGroveConfig(groveSlug)
 	if groveCfg == nil {
@@ -266,6 +283,11 @@ func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	groveSlug := r.PathValue("groveSlug")
 	agentSlug := r.PathValue("agentSlug")
+
+	if !slugRE.MatchString(groveSlug) || !slugRE.MatchString(agentSlug) {
+		s.writeRPCError(w, nil, ErrCodeInvalidParams, "invalid slug format")
+		return
+	}
 
 	if err := s.bridge.AuthorizeExposed(groveSlug, agentSlug); err != nil {
 		s.writeRPCError(w, nil, ErrCodeInvalidParams, "agent not found")
@@ -404,7 +426,13 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request, req JSO
 		return
 	}
 
-	if !s.bridge.AuthorizeContext(params.ContextID, groveSlug, agentSlug) {
+	authorized, authErr := s.bridge.AuthorizeContext(params.ContextID, groveSlug, agentSlug)
+	if authErr != nil {
+		s.log.Error("AuthorizeContext failed", "error", authErr, "contextID", params.ContextID)
+		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
+		return
+	}
+	if !authorized {
 		s.writeRPCError(w, req.ID, ErrCodeTaskNotFound, "context not found")
 		return
 	}
@@ -458,6 +486,9 @@ func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request, req JS
 }
 
 func (s *Server) handleStreamMessage(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
+	s.log.Warn("message/stream request received — MVP limitation: streaming treats the first content message as terminal; multi-turn agents will break",
+		"grove", groveSlug, "agent", agentSlug)
+
 	var params SendMessageParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid StreamMessage params", "error", err)
@@ -531,6 +562,11 @@ func (s *Server) writeSSEStream(w http.ResponseWriter, r *http.Request, taskID s
 	rc := http.NewResponseController(w)
 	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
 		s.log.Warn("failed to disable write deadline for SSE", "error", err)
+	}
+
+	if s.metrics != nil {
+		s.metrics.ActiveSSE.Inc()
+		defer s.metrics.ActiveSSE.Dec()
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -687,6 +723,9 @@ func (s *Server) handleDeletePushNotification(w http.ResponseWriter, r *http.Req
 }
 
 // normalizeJSONRPCID ensures the id conforms to JSON-RPC 2.0 (string, number, or null).
+// Per §4, fractional numbers and structured values (object/array) are forbidden as IDs.
+// We coerce invalid types to null rather than echoing them, accepting that this makes
+// client-side correlation impossible for malformed requests.
 func normalizeJSONRPCID(id interface{}) interface{} {
 	switch id.(type) {
 	case float64, string:
@@ -737,7 +776,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if s.config.Auth.APIKey == "" {
+		if s.config.Auth.Scheme == "none" {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -301,7 +301,7 @@ func TestBlockingTaskIgnoresActiveDispatch(t *testing.T) {
 	cfg := &Config{
 		Hub: HubConfig{User: "test-user"},
 	}
-	b := New(store, nil, nil, cfg, log)
+	b := New(store, nil, nil, cfg, nil, log)
 
 	now := time.Now()
 	taskID := "blocking-task-1"

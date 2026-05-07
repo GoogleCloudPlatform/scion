@@ -221,45 +221,6 @@ func TestPushNotificationConfig(t *testing.T) {
 	}
 }
 
-func TestIdentityMapping(t *testing.T) {
-	s := newTestStore(t)
-	now := time.Now().Truncate(time.Second)
-
-	m := &IdentityMapping{
-		ExternalID:   "ext-user-1",
-		HubUserID:    "hub-user-1",
-		HubUserEmail: "user@example.com",
-		MappedAt:     now,
-	}
-
-	if err := s.SetIdentityMapping(m); err != nil {
-		t.Fatalf("SetIdentityMapping: %v", err)
-	}
-
-	got, err := s.GetIdentityMapping("ext-user-1")
-	if err != nil {
-		t.Fatalf("GetIdentityMapping: %v", err)
-	}
-	if got == nil {
-		t.Fatal("GetIdentityMapping returned nil")
-	}
-	if got.HubUserEmail != "user@example.com" {
-		t.Errorf("HubUserEmail = %q, want %q", got.HubUserEmail, "user@example.com")
-	}
-
-	if err := s.DeleteIdentityMapping("ext-user-1"); err != nil {
-		t.Fatalf("DeleteIdentityMapping: %v", err)
-	}
-
-	got, err = s.GetIdentityMapping("ext-user-1")
-	if err != nil {
-		t.Fatalf("GetIdentityMapping after delete: %v", err)
-	}
-	if got != nil {
-		t.Errorf("expected nil after delete, got %+v", got)
-	}
-}
-
 func TestMigrateIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")

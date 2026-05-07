@@ -112,8 +112,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	metrics := bridge.NewMetrics(prometheus.DefaultRegisterer)
+
 	// Create core bridge.
-	b := bridge.New(store, adminClient, minter, cfg, log.With("component", "bridge"))
+	b := bridge.New(store, adminClient, minter, cfg, metrics, log.With("component", "bridge"))
 
 	// Create broker server and wire the bridge as handler.
 	broker := bridge.NewBrokerServer(b.HandleBrokerMessage, log.With("component", "broker"), ctx)
@@ -140,7 +142,6 @@ func main() {
 		listenAddr = ":8443"
 	}
 
-	metrics := bridge.NewMetrics(prometheus.DefaultRegisterer)
 	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"))
 	srv.WarnOnOpenAuth()
 

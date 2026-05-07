@@ -82,8 +82,13 @@ func init() {
 		{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)},
 		{IP: net.IPv4(224, 0, 0, 0), Mask: net.CIDRMask(4, 32)},
 		{IP: net.IPv4(255, 255, 255, 255), Mask: net.CIDRMask(32, 32)},
+		{IP: net.IPv4(192, 0, 0, 0), Mask: net.CIDRMask(24, 32)},   // IETF Protocol Assignments
+		{IP: net.IPv4(192, 0, 2, 0), Mask: net.CIDRMask(24, 32)},   // TEST-NET-1
+		{IP: net.IPv4(198, 51, 100, 0), Mask: net.CIDRMask(24, 32)}, // TEST-NET-2
+		{IP: net.IPv4(203, 0, 113, 0), Mask: net.CIDRMask(24, 32)},  // TEST-NET-3
+		{IP: net.IPv4(198, 18, 0, 0), Mask: net.CIDRMask(15, 32)},   // Benchmarking
 	}
-	for _, cidrStr := range []string{"fec0::/10", "ff00::/8"} {
+	for _, cidrStr := range []string{"fec0::/10", "ff00::/8", "2001:db8::/32"} {
 		_, cidr, _ := net.ParseCIDR(cidrStr)
 		if cidr != nil {
 			static = append(static, *cidr)
@@ -238,7 +243,9 @@ func (pd *PushDispatcher) sendWithRetry(cfg state.PushNotificationConfig, event 
 			if statusCode == 410 || (statusCode >= 400 && statusCode < 500 && statusCode != 408 && statusCode != 429) {
 				pd.log.Error("push notification returned permanent client error, removing config",
 					"id", cfg.ID, "url", cfg.URL, "status_code", statusCode)
-				pd.store.DeletePushConfig(cfg.ID)
+				if err := pd.store.DeletePushConfig(cfg.ID); err != nil {
+					pd.log.Error("failed to delete push config after permanent error", "id", cfg.ID, "error", err)
+				}
 				return
 			}
 			continue
@@ -260,7 +267,7 @@ func (pd *PushDispatcher) send(cfg state.PushNotificationConfig, event StreamEve
 		return 0, fmt.Errorf("marshal event: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, cfg.URL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(pd.shutdownCtx, http.MethodPost, cfg.URL, bytes.NewReader(body))
 	if err != nil {
 		return 0, fmt.Errorf("create request: %w", err)
 	}

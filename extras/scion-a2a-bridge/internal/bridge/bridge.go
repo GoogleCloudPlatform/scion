@@ -53,6 +53,7 @@ type Bridge struct {
 	broker    *BrokerServer
 	streams   *StreamManager
 	push      *PushDispatcher
+	metrics   *Metrics
 	log       *slog.Logger
 
 	// waiters tracks channels waiting for agent responses, keyed by taskID.
@@ -96,13 +97,14 @@ type brokerMessage struct {
 }
 
 // New creates a new Bridge instance.
-func New(store *state.Store, hubClient hubclient.Client, minter *identity.TokenMinter, cfg *Config, log *slog.Logger) *Bridge {
+func New(store *state.Store, hubClient hubclient.Client, minter *identity.TokenMinter, cfg *Config, metrics *Metrics, log *slog.Logger) *Bridge {
 	ctx, cancel := context.WithCancel(context.Background())
 	b := &Bridge{
 		store:          store,
 		hubClient:      hubClient,
 		minter:         minter,
 		config:         cfg,
+		metrics:        metrics,
 		log:            log,
 		streams:        NewStreamManager(cfg.Bridge.MaxSubscribers),
 		push:           NewPushDispatcher(store, cfg, log, ctx),
@@ -169,6 +171,18 @@ func (b *Bridge) reapStaleTasks(maxAge time.Duration) {
 			if err := b.store.UpdateTaskState(entry.taskID, TaskStateFailed); err != nil {
 				b.log.Error("janitor: failed to update task state", "task_id", entry.taskID, "error", err)
 			}
+			if b.metrics != nil {
+				b.metrics.TasksCompleted.WithLabelValues(TaskStateFailed).Inc()
+			}
+			failEvent := StreamEvent{
+				StatusUpdate: &TaskStatusUpdate{
+					TaskID: entry.taskID,
+					Status: TaskStatus{State: TaskStateFailed},
+					Final:  true,
+				},
+			}
+			b.streams.Broadcast(entry.taskID, failEvent)
+			b.push.Dispatch(b.shutdownCtx, entry.taskID, failEvent)
 			b.unregisterActiveTask(entry.taskID, entry.aKey)
 			b.streams.CloseAll(entry.taskID)
 		}
@@ -219,6 +233,9 @@ func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextI
 	}
 	if err := b.store.CreateTask(task); err != nil {
 		return nil, fmt.Errorf("create task: %w", err)
+	}
+	if b.metrics != nil {
+		b.metrics.TasksCreated.WithLabelValues(agentCtx.GroveID).Inc()
 	}
 
 	scionMsg := TranslateA2AToScion(parts)
@@ -399,6 +416,9 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 	if err := b.store.UpdateTaskState(taskID, TaskStateCanceled); err != nil {
 		b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 	}
+	if b.metrics != nil {
+		b.metrics.TasksCompleted.WithLabelValues(TaskStateCanceled).Inc()
+	}
 
 	cancelEvent := StreamEvent{
 		StatusUpdate: &TaskStatusUpdate{
@@ -550,7 +570,9 @@ func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug str
 		b.push.Dispatch(ctx, taskID, event)
 
 		if IsTerminalState(taskState) {
-			// Find the agent key for this task.
+			if b.metrics != nil {
+				b.metrics.TasksCompleted.WithLabelValues(taskState).Inc()
+			}
 			b.tasksMu.RLock()
 			aKey := b.activeTasks[taskID]
 			b.tasksMu.RUnlock()
@@ -592,6 +614,9 @@ func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug str
 		b.streams.Broadcast(taskID, statusEvent)
 		b.push.Dispatch(ctx, taskID, statusEvent)
 
+		if b.metrics != nil {
+			b.metrics.TasksCompleted.WithLabelValues(TaskStateCompleted).Inc()
+		}
 		b.tasksMu.RLock()
 		aKey := b.activeTasks[taskID]
 		b.tasksMu.RUnlock()
@@ -654,8 +679,8 @@ func (b *Bridge) GenerateAgentCard(ctx context.Context, groveSlug, agentSlug str
 		"url":         agentURL,
 		"version":     "1.0.0",
 		"capabilities": map[string]bool{
-			"streaming":         true,
-			"pushNotifications": true,
+			"streaming":         false,
+			"pushNotifications": false,
 		},
 		"defaultInputModes":  []string{"text/plain", "application/json"},
 		"defaultOutputModes": []string{"text/plain", "application/json"},
@@ -706,9 +731,11 @@ func (b *Bridge) lookupAgent(ctx context.Context, groveSlug, agentSlug string) *
 		}
 	}
 
-	b.agentCacheMu.Lock()
-	b.agentCache[cacheKey] = &agentCacheEntry{agent: result, cachedAt: time.Now()}
-	b.agentCacheMu.Unlock()
+	if result != nil {
+		b.agentCacheMu.Lock()
+		b.agentCache[cacheKey] = &agentCacheEntry{agent: result, cachedAt: time.Now()}
+		b.agentCacheMu.Unlock()
+	}
 
 	return result
 }
@@ -904,12 +931,17 @@ func (b *Bridge) AuthorizeTask(taskID, groveSlug, agentSlug string) (*state.Task
 }
 
 // AuthorizeContext verifies a context belongs to the given grove and agent.
-func (b *Bridge) AuthorizeContext(contextID, groveSlug, agentSlug string) bool {
+// Returns (true, nil) on success, (false, nil) when the context doesn't exist
+// or doesn't match, and (false, err) on database errors.
+func (b *Bridge) AuthorizeContext(contextID, groveSlug, agentSlug string) (bool, error) {
 	ctx, err := b.store.GetContext(contextID)
-	if err != nil || ctx == nil {
-		return false
+	if err != nil {
+		return false, fmt.Errorf("get context: %w", err)
 	}
-	return ctx.GroveID == groveSlug && ctx.AgentSlug == agentSlug
+	if ctx == nil {
+		return false, nil
+	}
+	return ctx.GroveID == groveSlug && ctx.AgentSlug == agentSlug, nil
 }
 
 // extractAgentIDFromSender extracts agent identity from sender field.
