@@ -443,7 +443,8 @@ func (b *Bridge) brokerWorker() {
 			}
 			b.dispatchBrokerMessage(bm.topic, bm.msg)
 		case <-b.shutdownCtx.Done():
-			// Drain remaining messages before exiting.
+			// Intentionally drain remaining messages so in-flight push
+			// notifications are dispatched; bounded by push.Wait() in Shutdown.
 			for {
 				select {
 				case bm := <-b.brokerMsgs:
@@ -502,31 +503,11 @@ func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMes
 		return
 	}
 
-	// Fallback: dispatch to blocking waiters that match this agent (best-effort without correlation).
-	b.mu.RLock()
-	var matchedTaskIDs []string
-	for taskID, w := range b.waiters {
-		if w.agentSlug == agentSlug && w.groveID == groveID {
-			matchedTaskIDs = append(matchedTaskIDs, taskID)
-		}
-	}
-	b.mu.RUnlock()
-
-	for _, taskID := range matchedTaskIDs {
-		b.dispatchToWaiter(taskID, msg)
-	}
-
-	// Dispatch to all active (non-blocking/streaming) tasks for this agent
-	// using the indexed reverse map for O(1) lookup.
-	aKey := agentKey(groveID, agentSlug)
-	b.tasksMu.RLock()
-	activeTaskIDs := make([]string, len(b.agentTasks[aKey]))
-	copy(activeTaskIDs, b.agentTasks[aKey])
-	b.tasksMu.RUnlock()
-
-	for _, taskID := range activeTaskIDs {
-		b.dispatchToActiveTask(ctx, taskID, agentSlug, msg)
-	}
+	// No a2aTaskId correlation — log and discard. The bridge always sets
+	// a2aTaskId on outbound messages, so uncorrelated inbound messages
+	// cannot be reliably routed to a specific task.
+	b.log.Warn("dropping broker message without a2aTaskId correlation",
+		"topic", topic, "sender", msg.Sender, "grove", groveID, "agent", agentSlug)
 }
 
 // dispatchToWaiter sends a message to a blocking waiter for the given taskID.
@@ -887,6 +868,25 @@ func parseTopic(topic string) (groveID, agentSlug string, err error) {
 func extractGroveIDFromTopic(topic string) string {
 	groveID, _, _ := parseTopic(topic)
 	return groveID
+}
+
+// AuthorizeExposed returns nil if the grove is configured and the agent
+// is exposed (or no allowlist is set). Returns ErrAgentNotFound to avoid
+// leaking grove existence.
+func (b *Bridge) AuthorizeExposed(groveSlug, agentSlug string) error {
+	g := b.GetGroveConfig(groveSlug)
+	if g == nil {
+		return ErrAgentNotFound
+	}
+	if len(g.ExposedAgents) == 0 {
+		return nil
+	}
+	for _, a := range g.ExposedAgents {
+		if a == agentSlug {
+			return nil
+		}
+	}
+	return ErrAgentNotFound
 }
 
 // AuthorizeTask verifies a task belongs to the given grove and agent.

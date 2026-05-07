@@ -649,9 +649,11 @@ func TestResubscribeRequiresID(t *testing.T) {
 		"test-api-key",
 	)
 
-	// Should fail because the task doesn't exist (empty ID).
 	if rpcResp.Error == nil {
 		t.Fatal("expected error for empty task ID")
+	}
+	if rpcResp.Error.Code != ErrCodeInvalidParams {
+		t.Errorf("error code = %d, want %d", rpcResp.Error.Code, ErrCodeInvalidParams)
 	}
 }
 
@@ -704,6 +706,50 @@ func TestAuthorizeTaskReturnsNilNil(t *testing.T) {
 	}
 	if task == nil || task.ID != "owned-task" {
 		t.Errorf("AuthorizeTask(correct owner) = %v, want task with ID %q", task, "owned-task")
+	}
+}
+
+func TestJSONRPCDeniesNonExposedAgent(t *testing.T) {
+	_, ts, _ := newTestServer(t)
+
+	methods := []string{
+		"message/send",
+		"tasks/get",
+		"tasks/list",
+		"tasks/cancel",
+		"tasks/resubscribe",
+		"tasks/pushNotification/set",
+		"tasks/pushNotification/get",
+		"tasks/pushNotification/delete",
+	}
+
+	for _, method := range methods {
+		t.Run("hidden-agent/"+method, func(t *testing.T) {
+			rpcResp := doRPC(t, ts, "/groves/test-grove/agents/hidden-agent/jsonrpc",
+				method, map[string]string{"id": "x"}, "test-api-key")
+
+			if rpcResp.Error == nil {
+				t.Fatalf("expected error for non-exposed agent on %s", method)
+			}
+			if rpcResp.Error.Code != ErrCodeInvalidParams {
+				t.Errorf("error code = %d, want %d", rpcResp.Error.Code, ErrCodeInvalidParams)
+			}
+			if rpcResp.Error.Message != "agent not found" {
+				t.Errorf("error message = %q, want %q", rpcResp.Error.Message, "agent not found")
+			}
+		})
+
+		t.Run("unknown-grove/"+method, func(t *testing.T) {
+			rpcResp := doRPC(t, ts, "/groves/unknown-grove/agents/test-agent/jsonrpc",
+				method, map[string]string{"id": "x"}, "test-api-key")
+
+			if rpcResp.Error == nil {
+				t.Fatalf("expected error for unknown grove on %s", method)
+			}
+			if rpcResp.Error.Code != ErrCodeInvalidParams {
+				t.Errorf("error code = %d, want %d", rpcResp.Error.Code, ErrCodeInvalidParams)
+			}
+		})
 	}
 }
 

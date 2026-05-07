@@ -129,6 +129,8 @@ func (sm *StreamManager) Broadcast(taskID string, event StreamEvent) {
 	}
 	sm.mu.RUnlock()
 
+	// Safe: Subscribe's cleanup removes by channel identity, so if Broadcast already
+	// removed and closed a slow channel, the cleanup is a no-op — no double-close.
 	if len(slowChans) > 0 {
 		sm.mu.Lock()
 		for _, slow := range slowChans {

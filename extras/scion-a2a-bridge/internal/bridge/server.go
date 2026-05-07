@@ -267,6 +267,11 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	groveSlug := r.PathValue("groveSlug")
 	agentSlug := r.PathValue("agentSlug")
 
+	if err := s.bridge.AuthorizeExposed(groveSlug, agentSlug); err != nil {
+		s.writeRPCError(w, nil, ErrCodeInvalidParams, "agent not found")
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
 	var req JSONRPCRequest
@@ -485,6 +490,11 @@ func (s *Server) handleResubscribe(w http.ResponseWriter, r *http.Request, req J
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid Resubscribe params", "error", err)
 		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
+		return
+	}
+
+	if params.ID == "" {
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "id is required")
 		return
 	}
 

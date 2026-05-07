@@ -269,6 +269,11 @@ docker run -p 8443:8443 -p 9090:9090 \
 
 The container runs as non-root user `bridge` (UID 1000). The state database directory `/var/lib/scion-a2a-bridge/` is writable by this user inside the container (mode `0700`). To persist state across restarts, mount a volume at that path.
 
+## Limitations (MVP)
+
+- **First content message is terminal.** The bridge treats the first non-state-change message from an agent as the final response and closes the task. Multi-turn agents that emit interim content (clarifying questions, progress updates) will have their task closed prematurely. Agents using `input-required` → `completed` flows are not supported yet.
+- **Blocking-mode `input-required` flows never resolve.** State-change messages are intentionally skipped for blocking waiters so the actual content reply is delivered. This means a blocking `message/send` call against an agent that transitions to `input-required` will time out (default 120s) because the state change is suppressed and no content reply follows.
+
 ## Security considerations
 
 ### SQLite state database
@@ -278,6 +283,14 @@ The SQLite database stores webhook bearer credentials (`token`, `auth_credential
 - **File permissions**: the database file must be readable only by the bridge process (`chmod 0600`). The Dockerfile enforces `0700` on the data directory.
 - **Encrypted storage**: deploy the database on an encrypted volume (e.g., LUKS, dm-crypt, cloud-provider encrypted disks) so that a disk image or backup leak does not expose webhook tokens.
 - **Future**: HMAC body-signing (`X-A2A-Signature`) will replace static bearer tokens for webhook authentication, eliminating the need to store shared secrets. See `push.go` for the tracking TODO.
+
+### Signing key
+
+The bridge mints HS256 admin JWTs using the Hub's signing key. Anyone who reads this key (from the config file, state database, or process memory) can forge admin tokens for `hub.user`. Use a dedicated, minimally-privileged Hub user for the bridge — not a full admin account. Store the signing key via GCP Secret Manager (`hub.signing_key_secret`) rather than a plaintext file where possible.
+
+### Broker plugin RPC (`plugin.allow_remote`)
+
+By default the broker plugin RPC binds to loopback only. Setting `plugin.allow_remote: true` (e.g. to run the Hub and bridge in separate containers) opens the socket to the network with **no transport authentication** — anything that can dial the port can publish arbitrary messages as if they came from real agents. When using `allow_remote: true`, deploy the bridge behind a network-level mTLS boundary or firewall that restricts access to the Hub's IP only.
 
 ### Push notifications (webhooks)
 

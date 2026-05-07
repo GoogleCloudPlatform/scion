@@ -32,7 +32,6 @@ const (
 	TaskStateCanceled      = "canceled"
 	TaskStateInputRequired = "input-required"
 	TaskStateRejected      = "rejected"
-	TaskStateAuthRequired  = "auth-required"
 )
 
 // A2A message roles.
@@ -43,7 +42,7 @@ const (
 
 // Part represents a typed content part in an A2A message.
 type Part struct {
-	Type      string      `json:"type,omitempty"`
+	Kind      string      `json:"kind,omitempty"`
 	Text      string      `json:"text,omitempty"`
 	MediaType string      `json:"mediaType,omitempty"`
 	URL       string      `json:"url,omitempty"`
