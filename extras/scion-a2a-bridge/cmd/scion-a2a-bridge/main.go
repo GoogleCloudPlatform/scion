@@ -96,7 +96,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	adminAuth := identity.NewMintingAuth(minter, cfg.Hub.User, cfg.Hub.User, "admin", 15*time.Minute)
+	hubUserID := cfg.Hub.UserID
+	if hubUserID == "" {
+		hubUserID = cfg.Hub.User
+	}
+	adminAuth := identity.NewMintingAuth(minter, hubUserID, cfg.Hub.User, "admin", 15*time.Minute)
 
 	adminClient, err := hubclient.New(cfg.Hub.Endpoint, hubclient.WithAuthenticator(adminAuth))
 	if err != nil {
@@ -138,6 +142,7 @@ func main() {
 
 	metrics := bridge.NewMetrics(prometheus.DefaultRegisterer)
 	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"))
+	srv.WarnOnOpenAuth()
 
 	httpServer := &http.Server{
 		Addr:           listenAddr,

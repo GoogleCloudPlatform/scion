@@ -105,6 +105,16 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.Bridge.ExternalURL == "" {
 		return fmt.Errorf("bridge.external_url is required")
 	}
+	for _, g := range cfg.Groves {
+		if strings.Contains(g.Slug, ":") {
+			return fmt.Errorf("grove slug %q must not contain ':'", g.Slug)
+		}
+		for _, a := range g.ExposedAgents {
+			if strings.Contains(a, ":") {
+				return fmt.Errorf("agent slug %q must not contain ':'", a)
+			}
+		}
+	}
 	if cfg.Hub.Endpoint == "" {
 		return fmt.Errorf("hub.endpoint is required")
 	}
@@ -123,6 +133,15 @@ func ValidateConfig(cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+// WarnOnOpenAuth logs a warning if the auth configuration leaves the bridge open.
+func (s *Server) WarnOnOpenAuth() {
+	if s.config.Auth.APIKey == "" {
+		s.log.Warn("bridge auth is DISABLED: no auth.api_key configured — all requests will be accepted without authentication")
+	} else if s.config.Auth.Scheme == "" {
+		s.log.Warn("auth.scheme is empty: bridge will accept credentials from both X-API-Key and Authorization headers")
+	}
 }
 
 // Handler returns an http.Handler for the A2A server routes.
@@ -258,6 +277,12 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 
 	if req.JSONRPC != "2.0" {
 		s.writeRPCError(w, req.ID, ErrCodeInvalidRequest, "invalid JSON-RPC version")
+		return
+	}
+
+	// JSON-RPC 2.0 §4.1: notifications (id absent/null) must not receive responses.
+	if req.ID == nil {
+		s.log.Debug("ignoring JSON-RPC notification", "method", req.Method)
 		return
 	}
 
@@ -697,11 +722,22 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		apiKey := r.Header.Get("X-API-Key")
-		if apiKey == "" {
-			apiKey = r.Header.Get("Authorization")
-			if strings.HasPrefix(apiKey, "Bearer ") {
-				apiKey = strings.TrimPrefix(apiKey, "Bearer ")
+		var apiKey string
+		switch s.config.Auth.Scheme {
+		case "apiKey":
+			apiKey = r.Header.Get("X-API-Key")
+		case "bearer":
+			auth := r.Header.Get("Authorization")
+			if strings.HasPrefix(auth, "Bearer ") {
+				apiKey = strings.TrimPrefix(auth, "Bearer ")
+			}
+		default:
+			apiKey = r.Header.Get("X-API-Key")
+			if apiKey == "" {
+				auth := r.Header.Get("Authorization")
+				if strings.HasPrefix(auth, "Bearer ") {
+					apiKey = strings.TrimPrefix(auth, "Bearer ")
+				}
 			}
 		}
 

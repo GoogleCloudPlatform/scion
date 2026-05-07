@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -235,6 +236,33 @@ func TestFlusherThroughFullMiddlewareChain(t *testing.T) {
 	}
 	if got := rec.Body.String(); got != "data: streamed\n\n" {
 		t.Errorf("body = %q, want SSE data through full chain", got)
+	}
+}
+
+func TestStatusRecorderUnwrapEnablesSetWriteDeadline(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rc := http.NewResponseController(w)
+		if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+			t.Fatalf("SetWriteDeadline through statusRecorder should succeed, got: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg)
+
+	handler := InstrumentHandler(inner, m)
+
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/test")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 }
 

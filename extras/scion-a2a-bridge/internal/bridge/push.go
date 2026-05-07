@@ -50,7 +50,9 @@ var errRedirectBlocked = errors.New("push notification redirects are not allowed
 // ErrSSRFBlocked is returned when a push notification URL resolves to a private or reserved IP.
 var ErrSSRFBlocked = errors.New("push notification URL rejected")
 
-// ValidatePushURL checks that the given URL does not resolve to a private or reserved IP address.
+// ValidatePushURL is a best-effort pre-check that the given URL does not resolve
+// to a private or reserved IP address. The real enforcement happens at connect
+// time via ssrfSafeDialer's Control function, which catches DNS rebinding.
 func ValidatePushURL(pushURL string) error {
 	parsed, err := url.Parse(pushURL)
 	if err != nil {
@@ -62,6 +64,9 @@ func ValidatePushURL(pushURL string) error {
 		return fmt.Errorf("%w: cannot resolve host", ErrSSRFBlocked)
 	}
 	for _, ip := range ips {
+		if v4 := ip.To4(); v4 != nil {
+			ip = v4
+		}
 		if isPrivateIP(ip) {
 			return fmt.Errorf("%w", ErrSSRFBlocked)
 		}
@@ -69,38 +74,31 @@ func ValidatePushURL(pushURL string) error {
 	return nil
 }
 
+var reservedRanges []net.IPNet
+
+func init() {
+	static := []net.IPNet{
+		{IP: net.IPv4(169, 254, 0, 0), Mask: net.CIDRMask(16, 32)},
+		{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)},
+		{IP: net.IPv4(224, 0, 0, 0), Mask: net.CIDRMask(4, 32)},
+		{IP: net.IPv4(255, 255, 255, 255), Mask: net.CIDRMask(32, 32)},
+	}
+	for _, cidrStr := range []string{"fec0::/10", "ff00::/8"} {
+		_, cidr, _ := net.ParseCIDR(cidrStr)
+		if cidr != nil {
+			static = append(static, *cidr)
+		}
+	}
+	reservedRanges = static
+}
+
 func isPrivateIP(ip net.IP) bool {
-	// Use Go's built-in IsPrivate (covers RFC1918 IPv4 + IPv6 ULA fc00::/7).
 	if ip.IsPrivate() {
 		return true
 	}
 	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
 		return true
 	}
-
-	// Additional reserved ranges not covered by IsPrivate.
-	reservedRanges := []net.IPNet{
-		// IPv4 link-local / cloud metadata.
-		{IP: net.IPv4(169, 254, 0, 0), Mask: net.CIDRMask(16, 32)},
-		// IPv4 CGNAT (Carrier-Grade NAT).
-		{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)},
-		// IPv4 multicast.
-		{IP: net.IPv4(224, 0, 0, 0), Mask: net.CIDRMask(4, 32)},
-		// IPv4 broadcast.
-		{IP: net.IPv4(255, 255, 255, 255), Mask: net.CIDRMask(32, 32)},
-	}
-
-	// IPv6 site-local (deprecated but still seen).
-	_, ipv6SiteLocal, _ := net.ParseCIDR("fec0::/10")
-	if ipv6SiteLocal != nil {
-		reservedRanges = append(reservedRanges, *ipv6SiteLocal)
-	}
-	// IPv6 multicast (ff00::/8).
-	_, ipv6Mcast, _ := net.ParseCIDR("ff00::/8")
-	if ipv6Mcast != nil {
-		reservedRanges = append(reservedRanges, *ipv6Mcast)
-	}
-
 	for _, cidr := range reservedRanges {
 		if cidr.Contains(ip) {
 			return true
@@ -123,6 +121,9 @@ func ssrfSafeDialer() func(ctx context.Context, network, addr string) (net.Conn,
 			ip := net.ParseIP(host)
 			if ip == nil {
 				return fmt.Errorf("%w: cannot parse IP", ErrSSRFBlocked)
+			}
+			if v4 := ip.To4(); v4 != nil {
+				ip = v4
 			}
 			if isPrivateIP(ip) {
 				return fmt.Errorf("%w: resolved to private/reserved IP %s", ErrSSRFBlocked, ip)
@@ -245,8 +246,10 @@ func (pd *PushDispatcher) sendWithRetry(cfg state.PushNotificationConfig, event 
 		"id", cfg.ID, "url", cfg.URL, "last_status_code", lastStatusCode)
 }
 
-// TODO(v2): Add X-A2A-Signature HMAC over request body for webhook authentication.
-// Currently the bearer token is the only authentication; a leaked token is a full takeover.
+// SECURITY TODO(v2): Add X-A2A-Signature HMAC over request body for webhook authentication.
+// IMPORTANT: must land before public deployment. Currently the bearer token is the only
+// authentication; webhook receivers have no way to verify the bridge's identity, and a
+// leaked token is a full takeover.
 func (pd *PushDispatcher) send(cfg state.PushNotificationConfig, event StreamEvent) (int, error) {
 	body, err := json.Marshal(event)
 	if err != nil {

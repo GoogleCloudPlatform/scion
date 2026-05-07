@@ -70,27 +70,108 @@ type Bridge struct {
 	// wg tracks background goroutines to drain on shutdown.
 	wg sync.WaitGroup
 
+	// brokerMsgs decouples HandleBrokerMessage (called synchronously by the
+	// broker RPC) from dispatch work. Publish enqueues; a worker drains.
+	brokerMsgs chan brokerMessage
+
+	// agentCache caches lookupAgent results to avoid listing all agents per call.
+	agentCacheMu sync.RWMutex
+	agentCache   map[string]*agentCacheEntry
+
 	// shutdownCtx is cancelled during graceful shutdown.
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
 }
 
+type agentCacheEntry struct {
+	agent    *hubclient.Agent
+	cachedAt time.Time
+}
+
+const agentCacheTTL = 3 * time.Minute
+
+type brokerMessage struct {
+	topic string
+	msg   *messages.StructuredMessage
+}
+
 // New creates a new Bridge instance.
 func New(store *state.Store, hubClient hubclient.Client, minter *identity.TokenMinter, cfg *Config, log *slog.Logger) *Bridge {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Bridge{
+	b := &Bridge{
 		store:          store,
 		hubClient:      hubClient,
 		minter:         minter,
 		config:         cfg,
 		log:            log,
-		streams:        NewStreamManager(),
+		streams:        NewStreamManager(cfg.Bridge.MaxSubscribers),
 		push:           NewPushDispatcher(store, cfg, log, ctx),
 		waiters:        make(map[string]*waiter),
 		activeTasks:    make(map[string]string),
 		agentTasks:     make(map[string][]string),
+		brokerMsgs:     make(chan brokerMessage, 256),
+		agentCache:     make(map[string]*agentCacheEntry),
 		shutdownCtx:    ctx,
 		shutdownCancel: cancel,
+	}
+	b.wg.Add(2)
+	go b.janitor()
+	go b.brokerWorker()
+	return b
+}
+
+// janitor periodically reaps active tasks that have exceeded the maximum age,
+// preventing unbounded growth of activeTasks/agentTasks/waiters maps when
+// agents crash or broker connections are lost.
+func (b *Bridge) janitor() {
+	defer b.wg.Done()
+
+	maxAge := 2 * b.config.Timeouts.SendMessage
+	if maxAge == 0 {
+		maxAge = 4 * time.Minute
+	}
+	interval := maxAge / 2
+	if interval < 30*time.Second {
+		interval = 30 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-b.shutdownCtx.Done():
+			return
+		case <-ticker.C:
+			b.reapStaleTasks(maxAge)
+		}
+	}
+}
+
+func (b *Bridge) reapStaleTasks(maxAge time.Duration) {
+	cutoff := time.Now().Add(-maxAge)
+
+	b.tasksMu.RLock()
+	var staleEntries []struct{ taskID, aKey string }
+	for taskID, aKey := range b.activeTasks {
+		staleEntries = append(staleEntries, struct{ taskID, aKey string }{taskID, aKey})
+	}
+	b.tasksMu.RUnlock()
+
+	for _, entry := range staleEntries {
+		task, err := b.store.GetTask(entry.taskID)
+		if err != nil {
+			b.log.Error("janitor: failed to get task", "task_id", entry.taskID, "error", err)
+			continue
+		}
+		if task == nil || task.UpdatedAt.Before(cutoff) {
+			b.log.Warn("janitor: reaping stale task", "task_id", entry.taskID, "age_cutoff", maxAge)
+			if err := b.store.UpdateTaskState(entry.taskID, TaskStateFailed); err != nil {
+				b.log.Error("janitor: failed to update task state", "task_id", entry.taskID, "error", err)
+			}
+			b.unregisterActiveTask(entry.taskID, entry.aKey)
+			b.streams.CloseAll(entry.taskID)
+		}
 	}
 }
 
@@ -290,6 +371,11 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 		return nil, fmt.Errorf("task %s is already in terminal state: %s", taskID, task.State)
 	}
 
+	// Unregister before updating state so concurrent broker messages cannot
+	// overwrite the canceled state via dispatchToActiveTask.
+	aKey := agentKey(task.GroveID, task.AgentSlug)
+	b.unregisterActiveTask(taskID, aKey)
+
 	// Send interrupt to the agent via Hub, re-resolving if the stored AgentID is stale.
 	if b.hubClient != nil && task.AgentID != "" {
 		targetAgentID := task.AgentID
@@ -324,8 +410,6 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 	b.streams.Broadcast(taskID, cancelEvent)
 	b.push.Dispatch(ctx, taskID, cancelEvent)
 
-	aKey := agentKey(task.GroveID, task.AgentSlug)
-	b.unregisterActiveTask(taskID, aKey)
 	b.streams.CloseAll(taskID)
 
 	return &TaskResult{
@@ -335,11 +419,44 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 	}, nil
 }
 
-// HandleBrokerMessage processes an inbound message from the broker plugin.
-// NOTE: This runs synchronously in the broker's Publish RPC. State-store writes
-// and channel sends here can backpressure the Hub broker. A bounded internal
-// queue + worker pool would decouple dispatch latency from broker throughput.
+// HandleBrokerMessage enqueues a broker message for async dispatch, keeping
+// the broker's Publish RPC non-blocking. Returns an error only if the queue
+// is full, signalling backpressure to the Hub.
 func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
+	select {
+	case b.brokerMsgs <- brokerMessage{topic: topic, msg: msg}:
+		return nil
+	default:
+		b.log.Error("broker message queue full, dropping message", "topic", topic)
+		return fmt.Errorf("broker message queue full")
+	}
+}
+
+// brokerWorker drains the brokerMsgs channel, dispatching each message.
+func (b *Bridge) brokerWorker() {
+	defer b.wg.Done()
+	for {
+		select {
+		case bm, ok := <-b.brokerMsgs:
+			if !ok {
+				return
+			}
+			b.dispatchBrokerMessage(bm.topic, bm.msg)
+		case <-b.shutdownCtx.Done():
+			// Drain remaining messages before exiting.
+			for {
+				select {
+				case bm := <-b.brokerMsgs:
+					b.dispatchBrokerMessage(bm.topic, bm.msg)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMessage) {
 	b.log.Info("handling broker message",
 		"topic", topic,
 		"sender", msg.Sender,
@@ -349,12 +466,17 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 
 	agentSlug := extractAgentIDFromSender(msg.Sender)
 	if agentSlug == "" {
-		agentSlug = extractAgentIDFromTopic(topic)
+		b.log.Warn("ignoring message: sender does not use agent:<slug> format, dropping", "topic", topic, "sender", msg.Sender)
+		return
 	}
-	if agentSlug == "" {
-		b.log.Warn("ignoring message: could not determine agent slug", "topic", topic, "sender", msg.Sender)
-		return nil
+
+	groveID := extractGroveIDFromTopic(topic)
+	if groveID == "" {
+		b.log.Warn("dropping message with unparseable grove ID", "topic", topic)
+		return
 	}
+
+	ctx := b.shutdownCtx
 
 	// If the message carries a task correlation ID, dispatch only to that task.
 	if taskID := msg.Metadata["a2aTaskId"]; taskID != "" {
@@ -365,15 +487,10 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 		if isActive {
 			b.dispatchToActiveTask(ctx, taskID, agentSlug, msg)
 		}
-		return nil
+		return
 	}
 
 	// Fallback: dispatch to blocking waiters that match this agent (best-effort without correlation).
-	groveID := extractGroveIDFromTopic(topic)
-	if groveID == "" {
-		b.log.Warn("dropping message with unparseable grove ID", "topic", topic)
-		return nil
-	}
 	b.mu.RLock()
 	var matchedTaskIDs []string
 	for taskID, w := range b.waiters {
@@ -398,8 +515,6 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 	for _, taskID := range activeTaskIDs {
 		b.dispatchToActiveTask(ctx, taskID, agentSlug, msg)
 	}
-
-	return nil
 }
 
 // dispatchToWaiter sends a message to a blocking waiter for the given taskID.
@@ -417,6 +532,7 @@ func (b *Bridge) dispatchToWaiter(taskID string, msg *messages.StructuredMessage
 	select {
 	case w.ch <- msg:
 	default:
+		b.log.Debug("dropping duplicate response for blocking waiter", "task_id", taskID)
 	}
 }
 
@@ -448,10 +564,12 @@ func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug str
 			b.unregisterActiveTask(taskID, aKey)
 		}
 	} else {
-		// MVP LIMITATION: treats any non-state-change message as a terminal response.
-		// Multi-turn agents that emit interim content (e.g. "thinking out loud")
-		// will have their task closed prematurely on the first content message.
-		// This needs to be revisited when streaming multi-turn support is added.
+		// TODO(multi-turn): MVP limitation — treats any non-state-change message as
+		// a terminal response. Multi-turn agents that emit interim content (e.g.
+		// clarifying questions, progress updates) will have their task closed
+		// prematurely on the first content message. This breaks agents that use
+		// input-required → completed flows. Must be fixed before exposing
+		// non-trivial agent types.
 		b.log.Debug("treating content message as task completion (MVP)", "task_id", taskID)
 		if err := b.store.UpdateTaskState(taskID, TaskStateCompleted); err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
@@ -562,8 +680,17 @@ func (b *Bridge) GenerateAgentCard(ctx context.Context, groveSlug, agentSlug str
 }
 
 // lookupAgent fetches agent metadata from the Hub API, returning nil on failure.
-// Uses GroveID filter to avoid listing all agents.
+// Results are cached for agentCacheTTL to avoid listing all agents on every call.
 func (b *Bridge) lookupAgent(ctx context.Context, groveSlug, agentSlug string) *hubclient.Agent {
+	cacheKey := groveSlug + ":" + agentSlug
+
+	b.agentCacheMu.RLock()
+	if entry, ok := b.agentCache[cacheKey]; ok && time.Since(entry.cachedAt) < agentCacheTTL {
+		b.agentCacheMu.RUnlock()
+		return entry.agent
+	}
+	b.agentCacheMu.RUnlock()
+
 	if b.hubClient == nil {
 		return nil
 	}
@@ -576,12 +703,21 @@ func (b *Bridge) lookupAgent(ctx context.Context, groveSlug, agentSlug string) *
 		b.log.Debug("failed to list agents for card enrichment", "error", err)
 		return nil
 	}
+
+	var result *hubclient.Agent
 	for _, a := range agents.Agents {
 		if a.Name == agentSlug || a.Slug == agentSlug {
-			return &a
+			agentCopy := a
+			result = &agentCopy
+			break
 		}
 	}
-	return nil
+
+	b.agentCacheMu.Lock()
+	b.agentCache[cacheKey] = &agentCacheEntry{agent: result, cachedAt: time.Now()}
+	b.agentCacheMu.Unlock()
+
+	return result
 }
 
 // GetGroveConfig returns the configuration for a grove slug, or nil if not configured.
@@ -605,7 +741,9 @@ func (b *Bridge) resolveContext(ctx context.Context, groveSlug, agentSlug, conte
 			if existing.GroveID != groveSlug || existing.AgentSlug != agentSlug {
 				return nil, fmt.Errorf("%w: context does not belong to %s/%s", ErrContextUnknown, groveSlug, agentSlug)
 			}
-			b.store.TouchContext(contextID)
+			if err := b.store.TouchContext(contextID); err != nil {
+				b.log.Error("failed to touch context", "context_id", contextID, "error", err)
+			}
 			return existing, nil
 		}
 		return nil, fmt.Errorf("%w: %s", ErrContextUnknown, contextID)
@@ -716,25 +854,23 @@ func (b *Bridge) removeWaiter(taskID string) {
 	delete(b.waiters, taskID)
 }
 
-// extractAgentIDFromTopic parses agent identity from broker topic strings.
-func extractAgentIDFromTopic(topic string) string {
+// parseTopic extracts grove and agent identifiers from a broker topic string.
+// Expected format: scion.grove.<groveID>.agent.<agentSlug>...
+func parseTopic(topic string) (groveID, agentSlug string, err error) {
 	parts := strings.Split(topic, ".")
-	if len(parts) < 5 {
-		return ""
+	if len(parts) < 3 || parts[0] != "scion" || parts[1] != "grove" {
+		return "", "", fmt.Errorf("malformed topic: %s", topic)
 	}
-	if parts[0] == "scion" && parts[1] == "grove" && parts[3] == "agent" {
-		return parts[4]
+	groveID = parts[2]
+	if len(parts) >= 5 && parts[3] == "agent" {
+		agentSlug = parts[4]
 	}
-	return ""
+	return groveID, agentSlug, nil
 }
 
-// extractGroveIDFromTopic parses grove identity from broker topic strings.
 func extractGroveIDFromTopic(topic string) string {
-	parts := strings.Split(topic, ".")
-	if len(parts) >= 3 && parts[0] == "scion" && parts[1] == "grove" {
-		return parts[2]
-	}
-	return ""
+	groveID, _, _ := parseTopic(topic)
+	return groveID
 }
 
 // AuthorizeTask verifies a task belongs to the given grove and agent.

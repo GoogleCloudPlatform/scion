@@ -25,7 +25,7 @@ Key sections:
 | `bridge` | A2A HTTP server address, external URL, provider metadata |
 | `hub` | Scion Hub endpoint, admin user, signing key (file path or GCP Secret Manager) |
 | `plugin` | Broker plugin RPC listen address (default `localhost:9090`) |
-| `auth` | Client authentication — API key, bearer token, or OAuth2 |
+| `auth` | Client authentication — API key or bearer token |
 | `groves` | Which groves and agents to expose, with optional auto-provisioning |
 | `state` | SQLite database path |
 | `timeouts` | Send message timeout, SSE keepalive interval, push retry limit |
@@ -244,6 +244,8 @@ curl -s -X POST \
 Replace `GROVE` and `AGENT` with the target grove slug and agent name. A successful response contains a `result` object with `id`, `status`, and `artifacts` fields.
 
 ### 8. Docker deployment
+
+The Docker build requires `CGO_ENABLED=1` (for `go-sqlite3`). The default runtime image is `debian:bookworm-slim` (glibc). Alpine users must use a musl-compatible SQLite driver or switch to a glibc-based image.
 
 Build the image from the repository root (the Dockerfile expects the full repo context):
 

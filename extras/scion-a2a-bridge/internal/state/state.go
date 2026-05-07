@@ -187,9 +187,11 @@ func (s *Store) GetTask(id string) (*Task, error) {
 }
 
 // UpdateTaskState updates a task's state and updated_at timestamp.
+// Terminal states (completed, failed, canceled, rejected) are protected:
+// once a task reaches a terminal state, further updates are silently ignored.
 func (s *Store) UpdateTaskState(id, state string) error {
 	_, err := s.db.Exec(
-		`UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?`,
+		`UPDATE tasks SET state = ?, updated_at = ? WHERE id = ? AND state NOT IN ('completed', 'failed', 'canceled', 'rejected')`,
 		state, time.Now(), id,
 	)
 	if err != nil {

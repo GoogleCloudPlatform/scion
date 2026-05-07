@@ -98,6 +98,8 @@ func (sr *statusRecorder) Flush() {
 	}
 }
 
+func (sr *statusRecorder) Unwrap() http.ResponseWriter { return sr.ResponseWriter }
+
 func normalizeRoute(path string) string {
 	switch {
 	case path == "/healthz":

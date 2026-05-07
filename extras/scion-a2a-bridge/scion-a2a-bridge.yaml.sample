@@ -44,7 +44,7 @@ plugin:
 
 # External authentication for A2A clients calling the bridge.
 auth:
-  # Supported schemes: "apiKey" (default for MVP), "bearer", "oauth2".
+  # Supported schemes: "apiKey" (default for MVP), "bearer".
   scheme: "apiKey"
 
   # Static API key. Clients pass this in the X-API-Key header.

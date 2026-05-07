@@ -59,11 +59,14 @@ type StreamManager struct {
 	droppedEvents  atomic.Int64
 }
 
-// NewStreamManager creates a new stream manager.
-func NewStreamManager() *StreamManager {
+// NewStreamManager creates a new stream manager with the given subscriber limit.
+func NewStreamManager(maxSubscribers int) *StreamManager {
+	if maxSubscribers <= 0 {
+		maxSubscribers = 100
+	}
 	return &StreamManager{
 		streams:        make(map[string][]chan StreamEvent),
-		maxSubscribers: 100,
+		maxSubscribers: maxSubscribers,
 	}
 }
 

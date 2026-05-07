@@ -28,7 +28,7 @@ import (
 )
 
 func TestStreamManagerSubscribeAndBroadcast(t *testing.T) {
-	sm := NewStreamManager()
+	sm := NewStreamManager(0)
 
 	ch, cleanup, err := sm.Subscribe("task-1")
 	if err != nil {
@@ -68,7 +68,7 @@ func TestStreamManagerSubscribeAndBroadcast(t *testing.T) {
 }
 
 func TestStreamManagerMultipleSubscribers(t *testing.T) {
-	sm := NewStreamManager()
+	sm := NewStreamManager(0)
 
 	ch1, cleanup1, err := sm.Subscribe("task-1")
 	if err != nil {
@@ -103,7 +103,7 @@ func TestStreamManagerMultipleSubscribers(t *testing.T) {
 }
 
 func TestStreamManagerCleanup(t *testing.T) {
-	sm := NewStreamManager()
+	sm := NewStreamManager(0)
 
 	_, cleanup, err := sm.Subscribe("task-1")
 	if err != nil {
@@ -120,7 +120,7 @@ func TestStreamManagerCleanup(t *testing.T) {
 }
 
 func TestStreamManagerCloseAll(t *testing.T) {
-	sm := NewStreamManager()
+	sm := NewStreamManager(0)
 
 	ch1, _, err := sm.Subscribe("task-1")
 	if err != nil {
@@ -147,7 +147,7 @@ func TestStreamManagerCloseAll(t *testing.T) {
 }
 
 func TestStreamManagerBroadcastNoSubscribers(t *testing.T) {
-	sm := NewStreamManager()
+	sm := NewStreamManager(0)
 
 	// Should not panic.
 	sm.Broadcast("nonexistent-task", StreamEvent{
@@ -159,7 +159,7 @@ func TestStreamManagerBroadcastNoSubscribers(t *testing.T) {
 }
 
 func TestStreamManagerConcurrentAccess(t *testing.T) {
-	sm := NewStreamManager()
+	sm := NewStreamManager(0)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
@@ -241,7 +241,7 @@ func TestStreamEventTypes(t *testing.T) {
 }
 
 func TestActiveTaskTracking(t *testing.T) {
-	sm := NewStreamManager()
+	sm := NewStreamManager(0)
 	_ = sm // StreamManager tested above; this tests Bridge active task methods.
 
 	b := &Bridge{
