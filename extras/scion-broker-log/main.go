@@ -53,6 +53,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	goplugin "github.com/hashicorp/go-plugin"
+	"github.com/hashicorp/go-plugin/runner"
 )
 
 // CLI flags
@@ -62,6 +63,7 @@ var (
 	flagJSON    = flag.Bool("json", false, "Output JSON Lines instead of human-readable format")
 	flagFullMsg = flag.Bool("full-msg", false, "Show full message body (default truncates to 120 chars)")
 	flagFields  = flag.String("fields", "", "Comma-separated fields to include (e.g. topic,sender,type,msg). Empty = all")
+	flagForward = flag.String("forward", "", "Forward messages to another broker plugin at this address (e.g. localhost:9090 for scion-chat-app)")
 )
 
 func main() {
@@ -78,6 +80,16 @@ func main() {
 		fullMsg:       *flagFullMsg,
 		fields:        fieldSet,
 		subscriptions: make(map[string]bool),
+	}
+
+	if *flagForward != "" {
+		downstream, err := connectDownstream(*flagForward, log)
+		if err != nil {
+			log.Error("failed to connect to downstream broker", "addr", *flagForward, "error", err)
+			os.Exit(1)
+		}
+		bl.downstream = downstream
+		log.Info("forwarding enabled", "downstream", *flagForward)
 	}
 
 	listener, err := net.Listen("tcp", *flagAddr)
@@ -118,6 +130,7 @@ func main() {
 
 // brokerLog implements plugin.MessageBrokerPluginInterface and plugin.HostCallbacksAware.
 // On each Publish() call it formats the message and writes it to stdout.
+// When downstream is set, it also forwards all calls to another broker plugin.
 type brokerLog struct {
 	log           *slog.Logger
 	topicPattern  string
@@ -125,6 +138,7 @@ type brokerLog struct {
 	fullMsg       bool
 	fields        map[string]bool // nil = all fields
 	hostCallbacks plugin.HostCallbacks
+	downstream    *plugin.BrokerRPCClient // optional forwarding target
 	mu            sync.RWMutex
 	subscriptions map[string]bool
 	configured    bool
@@ -146,15 +160,26 @@ func (b *brokerLog) Configure(config map[string]string) error {
 		}
 	}
 	b.log.Info("configured", "config_keys", keys)
+
+	if b.downstream != nil {
+		if err := b.downstream.Configure(config); err != nil {
+			b.log.Warn("downstream configure failed", "error", err)
+		}
+	}
 	return nil
 }
 
-func (b *brokerLog) Publish(_ context.Context, topic string, msg *messages.StructuredMessage) error {
+func (b *brokerLog) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	b.msgCount.Add(1)
 	if b.jsonOutput {
 		writeJSONLine(topic, msg, b.fullMsg, b.fields)
 	} else {
 		writeHumanLine(topic, msg, b.fullMsg, b.fields)
+	}
+	if b.downstream != nil {
+		if err := b.downstream.Publish(ctx, topic, msg); err != nil {
+			b.log.Warn("downstream publish failed", "topic", topic, "error", err)
+		}
 	}
 	return nil
 }
@@ -164,6 +189,11 @@ func (b *brokerLog) Subscribe(pattern string) error {
 	defer b.mu.Unlock()
 	b.subscriptions[pattern] = true
 	b.log.Info("hub subscribed us to pattern", "pattern", pattern)
+	if b.downstream != nil {
+		if err := b.downstream.Subscribe(pattern); err != nil {
+			b.log.Warn("downstream subscribe failed", "pattern", pattern, "error", err)
+		}
+	}
 	return nil
 }
 
@@ -172,11 +202,21 @@ func (b *brokerLog) Unsubscribe(pattern string) error {
 	defer b.mu.Unlock()
 	delete(b.subscriptions, pattern)
 	b.log.Info("hub unsubscribed us from pattern", "pattern", pattern)
+	if b.downstream != nil {
+		if err := b.downstream.Unsubscribe(pattern); err != nil {
+			b.log.Warn("downstream unsubscribe failed", "pattern", pattern, "error", err)
+		}
+	}
 	return nil
 }
 
 func (b *brokerLog) Close() error {
 	b.log.Info("close requested", "messages_logged", b.msgCount.Load())
+	if b.downstream != nil {
+		if err := b.downstream.Close(); err != nil {
+			b.log.Warn("downstream close failed", "error", err)
+		}
+	}
 	return nil
 }
 
@@ -234,6 +274,75 @@ func (b *brokerLog) SetHostCallbacks(hc plugin.HostCallbacks) {
 		}
 		b.log.Error("gave up requesting subscription after 10 attempts", "pattern", b.topicPattern)
 	}()
+}
+
+// --- Downstream forwarding ---
+
+// connectDownstream establishes a go-plugin RPC client connection to another
+// broker plugin (e.g. scion-chat-app) running at the given address.
+func connectDownstream(addr string, log *slog.Logger) (*plugin.BrokerRPCClient, error) {
+	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("resolve address %s: %w", addr, err)
+	}
+
+	client := goplugin.NewClient(&goplugin.ClientConfig{
+		HandshakeConfig: goplugin.HandshakeConfig{
+			ProtocolVersion:  plugin.BrokerPluginProtocolVersion,
+			MagicCookieKey:   plugin.MagicCookieKey,
+			MagicCookieValue: plugin.MagicCookieValue,
+		},
+		Plugins: map[string]goplugin.Plugin{
+			plugin.BrokerPluginName: &plugin.BrokerPlugin{},
+		},
+		Reattach: &goplugin.ReattachConfig{
+			Protocol:        goplugin.ProtocolNetRPC,
+			ProtocolVersion: plugin.BrokerPluginProtocolVersion,
+			Addr:            tcpAddr,
+			Test:            true,
+			ReattachFunc: func() (runner.AttachedRunner, error) {
+				return &noopRunner{}, nil
+			},
+		},
+	})
+
+	rpcClient, err := client.Client()
+	if err != nil {
+		return nil, fmt.Errorf("connect to downstream: %w", err)
+	}
+
+	raw, err := rpcClient.Dispense(plugin.BrokerPluginName)
+	if err != nil {
+		return nil, fmt.Errorf("dispense broker plugin: %w", err)
+	}
+
+	brokerClient, ok := raw.(*plugin.BrokerRPCClient)
+	if !ok {
+		return nil, fmt.Errorf("dispensed plugin is %T, not *plugin.BrokerRPCClient", raw)
+	}
+
+	info, err := brokerClient.GetInfo()
+	if err != nil {
+		log.Warn("downstream GetInfo failed", "error", err)
+	} else {
+		log.Info("connected to downstream", "name", info.Name, "version", info.Version)
+	}
+
+	return brokerClient, nil
+}
+
+type noopRunner struct{}
+
+func (r *noopRunner) Wait(_ context.Context) error { return nil }
+func (r *noopRunner) Kill(_ context.Context) error { return nil }
+func (r *noopRunner) ID() string                   { return "broker-log-downstream" }
+
+func (r *noopRunner) PluginToHost(pluginNet, pluginAddr string) (string, string, error) {
+	return pluginNet, pluginAddr, nil
+}
+
+func (r *noopRunner) HostToPlugin(hostNet, hostAddr string) (string, string, error) {
+	return hostNet, hostAddr, nil
 }
 
 // --- Output formatting ---

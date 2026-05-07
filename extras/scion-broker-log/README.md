@@ -40,6 +40,7 @@ go build -o scion-broker-log .
 | `--json` | `false` | Output JSON Lines instead of human-readable format |
 | `--full-msg` | `false` | Show full message body (default truncates to 120 chars) |
 | `--fields` | *(all)* | Comma-separated fields to include: `topic`, `sender`, `recipient`, `type`, `status`, `msg`, `attachments` |
+| `--forward` | *(none)* | Forward messages to another broker plugin at this address (e.g. `localhost:9090`) |
 
 ## Hub Configuration
 
@@ -97,6 +98,30 @@ This is a self-managed [go-plugin](https://github.com/hashicorp/go-plugin) broke
 
 It implements `MessageBrokerPluginInterface` and `HostCallbacksAware` from `pkg/plugin`. See `main.go` for the complete implementation — it's a single file designed to be read as a reference.
 
-## Note
+## Forwarding Mode (tee/proxy)
 
-This plugin **replaces** the active broker when configured. The hub supports one broker plugin at a time, so while `broker-log` is active, other broker plugins (e.g., `scion-chat-app`) won't receive messages. Swap back to your production broker when done debugging.
+The hub supports one broker plugin at a time. To use `broker-log` alongside another plugin (e.g. `scion-chat-app`), use `--forward` to tee messages to the downstream plugin:
+
+```bash
+# Start the chat app on its normal port
+./scion-chat-app ...
+
+# Start broker-log as a proxy — logs everything AND forwards to the chat app
+./scion-broker-log --forward localhost:9090
+```
+
+Then configure the hub to point at `broker-log` instead of the chat app:
+
+```yaml
+server:
+  message_broker:
+    enabled: true
+    type: "broker-log"
+  plugins:
+    broker:
+      broker-log:
+        self_managed: true
+        address: "localhost:9091"
+```
+
+In this mode, broker-log connects to the downstream plugin via go-plugin RPC and forwards all `Publish`, `Configure`, `Subscribe`, and `Unsubscribe` calls after logging. The downstream plugin continues to function normally — it just receives traffic through broker-log instead of directly from the hub.
