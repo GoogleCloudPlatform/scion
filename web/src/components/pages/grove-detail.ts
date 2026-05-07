@@ -1431,16 +1431,18 @@ export class ScionPageGroveDetail extends LitElement {
             ` : nothing}
             ${isAgentRunning(agent)
               ? can(agent._capabilities, 'stop') ? html`
-                  <sl-button
-                    variant="warning"
-                    size="small"
-                    outline
-                    ?loading=${isLoading}
-                    ?disabled=${isLoading}
-                    @click=${() => this.handleAgentAction(agent.id, 'suspend')}
-                  >
-                    <sl-icon slot="prefix" name="pause-circle"></sl-icon>
-                  </sl-button>
+                  ${agent.harnessCapabilities?.resume?.support !== 'no' ? html`
+                    <sl-button
+                      variant="warning"
+                      size="small"
+                      outline
+                      ?loading=${isLoading}
+                      ?disabled=${isLoading}
+                      @click=${() => this.handleAgentAction(agent.id, 'suspend')}
+                    >
+                      <sl-icon slot="prefix" name="pause-circle"></sl-icon>
+                    </sl-button>
+                  ` : nothing}
                   <sl-button
                     variant="danger"
                     size="small"
@@ -1546,17 +1548,21 @@ export class ScionPageGroveDetail extends LitElement {
           ${isAgentRunning(agent)
             ? can(agent._capabilities, 'stop')
               ? html`
-                  <sl-button
-                    variant="warning"
-                    size="small"
-                    outline
-                    ?loading=${isLoading}
-                    ?disabled=${isLoading}
-                    @click=${() => this.handleAgentAction(agent.id, 'suspend')}
-                  >
-                    <sl-icon slot="prefix" name="pause-circle"></sl-icon>
-                    Suspend
-                  </sl-button>
+                  ${agent.harnessCapabilities?.resume?.support !== 'no'
+                    ? html`
+                        <sl-button
+                          variant="warning"
+                          size="small"
+                          outline
+                          ?loading=${isLoading}
+                          ?disabled=${isLoading}
+                          @click=${() => this.handleAgentAction(agent.id, 'suspend')}
+                        >
+                          <sl-icon slot="prefix" name="pause-circle"></sl-icon>
+                          Suspend
+                        </sl-button>
+                      `
+                    : nothing}
                   <sl-button
                     variant="danger"
                     size="small"
