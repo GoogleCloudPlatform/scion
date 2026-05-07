@@ -2720,6 +2720,57 @@ func TestUpdateAgentStatus_SetsLastActivityEvent(t *testing.T) {
 		"activity update should update last_activity_event")
 }
 
+func TestUpdateAgentStatus_ProtectsTerminalActivity(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	grove := &store.Grove{
+		ID:         api.NewUUID(),
+		Name:       "Terminal Guard Grove",
+		Slug:       "terminal-guard-grove",
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateGrove(ctx, grove))
+
+	agent := &store.Agent{
+		ID: api.NewUUID(), Slug: "terminal-guard", Name: "Terminal Guard",
+		Template: "claude", GroveID: grove.ID, Phase: string(state.PhaseStopped),
+		Activity:   string(state.ActivityCrashed),
+		Visibility: store.VisibilityPrivate,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Non-terminal activity should not overwrite crashed
+	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Activity: string(state.ActivityIdle),
+	}))
+
+	a, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.ActivityCrashed), a.Activity,
+		"non-terminal activity should not overwrite crashed")
+
+	// Another terminal activity should overwrite
+	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Activity: string(state.ActivityLimitsExceeded),
+	}))
+
+	a, err = s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.ActivityLimitsExceeded), a.Activity,
+		"terminal activity should be able to overwrite another terminal activity")
+
+	// Empty activity should keep current (standard behavior)
+	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Heartbeat: true,
+	}))
+
+	a, err = s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.ActivityLimitsExceeded), a.Activity,
+		"empty activity should keep current terminal activity")
+}
+
 // ============================================================================
 // DSN Construction Tests
 // ============================================================================

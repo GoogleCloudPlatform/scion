@@ -3251,6 +3251,99 @@ func TestBrokerHeartbeat_DoesNotRevertStoppedAgent_LegacyPath(t *testing.T) {
 	assert.Equal(t, string(state.PhaseStopped), updated.Phase, "legacy heartbeat should not revert stopped phase")
 }
 
+func TestBrokerHeartbeat_PropagatesTerminalActivityOnStoppedAgent(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	grove := &store.Grove{ID: "grove-crash-hb", Name: "Crash HB Grove", Slug: "crash-hb-grove"}
+	require.NoError(t, s.CreateGrove(ctx, grove))
+
+	broker := &store.RuntimeBroker{
+		ID: "broker-crash-hb", Name: "Crash HB Broker", Slug: "crash-hb-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID: "agent-crash-hb", Slug: "crash-hb-slug", Name: "Crash HB Agent",
+		GroveID: grove.ID, RuntimeBrokerID: broker.ID,
+		Phase: string(state.PhaseStopped),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Send heartbeat confirming stopped phase with crashed activity.
+	// This simulates the broker relaying crash state that the direct Hub
+	// report missed (race condition fix).
+	hb := brokerHeartbeatRequest{
+		Status: "online",
+		Groves: []brokerGroveHeartbeat{{
+			GroveID:    grove.ID,
+			AgentCount: 1,
+			Agents: []brokerAgentHeartbeat{{
+				Slug:     agent.Slug,
+				Phase:    string(state.PhaseStopped),
+				Activity: string(state.ActivityCrashed),
+				Message:  "crashed with exit code 1",
+			}},
+		}},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", hb)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Agent should now have crashed activity
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStopped), updated.Phase)
+	assert.Equal(t, string(state.ActivityCrashed), updated.Activity,
+		"heartbeat should propagate terminal activity on stopped agent")
+	assert.Equal(t, "crashed with exit code 1", updated.Message,
+		"heartbeat should propagate crash message")
+}
+
+func TestBrokerHeartbeat_DoesNotOverwriteTerminalActivityWithNonTerminal(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	grove := &store.Grove{ID: "grove-term-guard", Name: "Term Guard Grove", Slug: "term-guard-grove"}
+	require.NoError(t, s.CreateGrove(ctx, grove))
+
+	broker := &store.RuntimeBroker{
+		ID: "broker-term-guard", Name: "Term Guard Broker", Slug: "term-guard-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID: "agent-term-guard", Slug: "term-guard-slug", Name: "Term Guard Agent",
+		GroveID: grove.ID, RuntimeBrokerID: broker.ID,
+		Phase:    string(state.PhaseStopped),
+		Activity: string(state.ActivityCrashed),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Send heartbeat with non-terminal activity — should be blocked
+	hb := brokerHeartbeatRequest{
+		Status: "online",
+		Groves: []brokerGroveHeartbeat{{
+			GroveID:    grove.ID,
+			AgentCount: 1,
+			Agents: []brokerAgentHeartbeat{{
+				Slug:     agent.Slug,
+				Phase:    string(state.PhaseStopped),
+				Activity: string(state.ActivityIdle),
+			}},
+		}},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", hb)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Agent should retain crashed activity
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.ActivityCrashed), updated.Activity,
+		"heartbeat should not overwrite terminal activity with non-terminal")
+}
+
 func TestCreateAgent_RestartCreatesNotificationSubscription(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, grove := setupCreateAgentServer(t, disp)

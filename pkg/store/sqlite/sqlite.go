@@ -1631,7 +1631,12 @@ func (s *SQLiteStore) UpdateAgentStatus(ctx context.Context, id string, su store
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE agents SET
 			phase = COALESCE(NULLIF(?, ''), phase),
-			activity = CASE WHEN ? != '' THEN ? ELSE activity END,
+			activity = CASE WHEN ? != '' THEN
+				CASE WHEN phase = 'stopped'
+					AND activity IN ('crashed', 'limits_exceeded')
+					AND ? NOT IN ('crashed', 'limits_exceeded')
+					THEN activity ELSE ? END
+				ELSE activity END,
 			tool_name = CASE WHEN ? THEN ? ELSE tool_name END,
 			message = COALESCE(NULLIF(?, ''), message),
 			connection_state = COALESCE(NULLIF(?, ''), connection_state),
@@ -1648,7 +1653,7 @@ func (s *SQLiteStore) UpdateAgentStatus(ctx context.Context, id string, su store
 		WHERE id = ?
 	`,
 		su.Phase,
-		su.Activity, su.Activity,
+		su.Activity, su.Activity, su.Activity,
 		activityProvided, su.ToolName,
 		su.Message, su.ConnectionState, su.ContainerStatus,
 		su.RuntimeState, su.TaskSummary,

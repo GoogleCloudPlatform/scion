@@ -5602,8 +5602,15 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					if agentHB.Phase == agent.Phase {
 						statusUpdate.Phase = agentHB.Phase
 					}
-					// Do not propagate activity — the hub already cleared
-					// it when the stop was issued.
+					// Allow terminal activities (crashed, limits_exceeded)
+					// to propagate — they carry information about HOW the
+					// agent stopped and may arrive via heartbeat if the
+					// direct Hub report was slow or failed.
+					hbActivity := state.Activity(agentHB.Activity)
+					if hbActivity.IsTerminal() && agentHB.Activity != agent.Activity {
+						statusUpdate.Activity = agentHB.Activity
+						statusUpdate.Message = agentHB.Message
+					}
 				} else {
 					// Structured path: broker sent Phase/Activity directly
 					statusUpdate.Phase = agentHB.Phase

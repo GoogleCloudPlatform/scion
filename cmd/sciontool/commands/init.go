@@ -780,20 +780,46 @@ func runInit(args []string) int {
 	}
 
 	// Determine the final exit code and whether this was a crash.
+	// Also recognize ExitCodeLimitsExceeded from the child process itself
+	// (e.g., the harness detected limits before the supervisor signal).
+	if !limitsExceeded && result.code == handlers.ExitCodeLimitsExceeded {
+		limitsExceeded = true
+	}
 	finalCode := result.code
 	if limitsExceeded {
 		finalCode = handlers.ExitCodeLimitsExceeded
-	} else if result.err != nil {
+	} else if result.err != nil && result.code == 0 {
 		finalCode = 1
 	}
 	isCrash := !limitsExceeded && finalCode != 0
+
+	// Build crash message: distinguish real child exit codes from
+	// synthetic ones produced by supervisor errors.
+	var crashMsg string
+	if isCrash {
+		if result.err != nil && result.code == 0 {
+			crashMsg = fmt.Sprintf("Agent crashed (supervisor error: %v)", result.err)
+		} else {
+			crashMsg = fmt.Sprintf("Agent crashed with exit code %d", finalCode)
+		}
+	}
+
+	// Update local agent-info.json BEFORE the Hub report so the broker
+	// heartbeat can relay crash/limits state even if the Hub call is slow
+	// or fails entirely.
+	if isCrash {
+		statusHandler.UpdatePhase(state.PhaseStopped, state.ActivityCrashed, "")
+		statusHandler.SetMessage(crashMsg)
+	} else if limitsExceeded {
+		statusHandler.UpdatePhase(state.PhaseStopped, state.ActivityLimitsExceeded, "")
+		statusHandler.SetMessage("limits exceeded")
+	}
 
 	// Report final status to Hub, distinguishing clean stop from crash.
 	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
 		hubCtx, hubCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		var hubErr error
 		if isCrash {
-			crashMsg := fmt.Sprintf("Agent crashed with exit code %d", finalCode)
 			s := state.AgentState{Phase: state.PhaseStopped, Activity: state.ActivityCrashed}
 			hubErr = hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
 				Phase:    state.PhaseStopped,
@@ -820,13 +846,6 @@ func runInit(args []string) int {
 			log.Info("Reported final status to Hub (exitCode=%d, crash=%v)", finalCode, isCrash)
 		}
 		hubCancel()
-	}
-
-	// Update local agent-info.json with crash state so the broker heartbeat
-	// can relay it even after the Hub report.
-	if isCrash {
-		statusHandler.UpdatePhase(state.PhaseStopped, state.ActivityCrashed, "")
-		statusHandler.SetMessage(fmt.Sprintf("crashed with exit code %d", finalCode))
 	}
 
 	if limitsExceeded {
