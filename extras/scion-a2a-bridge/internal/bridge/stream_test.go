@@ -245,7 +245,7 @@ func TestActiveTaskTracking(t *testing.T) {
 	_ = sm // StreamManager tested above; this tests Bridge active task methods.
 
 	b := &Bridge{
-		activeTasks: make(map[string]string),
+		activeTasks: make(map[string]activeTaskEntry),
 		agentTasks:  make(map[string][]string),
 	}
 
@@ -255,8 +255,8 @@ func TestActiveTaskTracking(t *testing.T) {
 
 	// Check activeTasks maps taskID to agentKey.
 	b.tasksMu.RLock()
-	if b.activeTasks["task-1"] != "grove1:agent-a" {
-		t.Errorf("task-1 agent key = %q, want %q", b.activeTasks["task-1"], "grove1:agent-a")
+	if b.activeTasks["task-1"].aKey != "grove1:agent-a" {
+		t.Errorf("task-1 agent key = %q, want %q", b.activeTasks["task-1"].aKey, "grove1:agent-a")
 	}
 	agentATaskCount := len(b.agentTasks["grove1:agent-a"])
 	agentBTaskCount := len(b.agentTasks["grove1:agent-b"])

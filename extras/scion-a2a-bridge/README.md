@@ -295,7 +295,7 @@ By default the broker plugin RPC binds to loopback only. Setting `plugin.allow_r
 
 ### `/metrics` endpoint
 
-The `/metrics` endpoint is exposed without authentication or rate limiting (standard Prometheus convention). It should be restricted to internal networks via firewall rules, network ACLs, or a separate listen address. In a misconfigured deployment, an exposed `/metrics` endpoint leaks request counts, latencies, and URL patterns.
+The `/metrics` endpoint requires the same API key authentication as other non-public endpoints. Prometheus scrapers must include the API key in their scrape configuration (e.g., via `authorization` or `headers` in the Prometheus job config). If this is undesirable, consider running a dedicated metrics listener on a separate port restricted to internal networks.
 
 ### Rate limiting and `trust_proxy`
 

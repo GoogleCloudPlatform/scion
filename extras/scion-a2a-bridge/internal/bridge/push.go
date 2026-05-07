@@ -296,6 +296,8 @@ func (pd *PushDispatcher) send(cfg state.PushNotificationConfig, event StreamEve
 	return resp.StatusCode, nil
 }
 
+const maxPushConfigsPerTask = 10
+
 // SetPushNotificationConfig registers a webhook for task updates.
 func (b *Bridge) SetPushNotificationConfig(ctx context.Context, taskID, pushURL, token, authScheme, authCredentials string) (*state.PushNotificationConfig, error) {
 	if err := ValidatePushURL(pushURL); err != nil {
@@ -308,6 +310,14 @@ func (b *Bridge) SetPushNotificationConfig(ctx context.Context, taskID, pushURL,
 	}
 	if task == nil {
 		return nil, fmt.Errorf("task not found: %s", taskID)
+	}
+
+	existing, err := b.store.GetPushConfigsByTask(taskID)
+	if err != nil {
+		return nil, fmt.Errorf("check existing configs: %w", err)
+	}
+	if len(existing) >= maxPushConfigsPerTask {
+		return nil, fmt.Errorf("maximum push notification configs (%d) reached for task", maxPushConfigsPerTask)
 	}
 
 	cfg := &state.PushNotificationConfig{

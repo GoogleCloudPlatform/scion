@@ -60,9 +60,9 @@ type Bridge struct {
 	mu      sync.RWMutex
 	waiters map[string]*waiter
 
-	// activeTasks maps taskID to the agentKey (groveID:agentSlug) for routing broker messages.
+	// activeTasks maps taskID to routing/lifecycle metadata for broker messages.
 	tasksMu     sync.RWMutex
-	activeTasks map[string]string
+	activeTasks map[string]activeTaskEntry
 
 	// agentTasks maps agentKey (groveID:agentSlug) to active task IDs,
 	// used for reverse lookup when broker messages arrive.
@@ -91,6 +91,11 @@ type agentCacheEntry struct {
 
 const agentCacheTTL = 3 * time.Minute
 
+type activeTaskEntry struct {
+	aKey      string
+	createdAt time.Time
+}
+
 type brokerMessage struct {
 	topic string
 	msg   *messages.StructuredMessage
@@ -109,7 +114,7 @@ func New(store *state.Store, hubClient hubclient.Client, minter *identity.TokenM
 		streams:        NewStreamManager(cfg.Bridge.MaxSubscribers),
 		push:           NewPushDispatcher(store, cfg, log, ctx),
 		waiters:        make(map[string]*waiter),
-		activeTasks:    make(map[string]string),
+		activeTasks:    make(map[string]activeTaskEntry),
 		agentTasks:     make(map[string][]string),
 		brokerMsgs:     make(chan brokerMessage, 256),
 		agentCache:     make(map[string]*agentCacheEntry),
@@ -155,55 +160,65 @@ func (b *Bridge) reapStaleTasks(maxAge time.Duration) {
 	cutoff := time.Now().Add(-maxAge)
 
 	b.tasksMu.RLock()
-	var staleEntries []struct{ taskID, aKey string }
-	for taskID, aKey := range b.activeTasks {
-		staleEntries = append(staleEntries, struct{ taskID, aKey string }{taskID, aKey})
+	var candidates []struct {
+		taskID string
+		entry  activeTaskEntry
+	}
+	for taskID, entry := range b.activeTasks {
+		// Skip tasks that were created recently — they can't be stale yet.
+		if entry.createdAt.After(cutoff) {
+			continue
+		}
+		candidates = append(candidates, struct {
+			taskID string
+			entry  activeTaskEntry
+		}{taskID, entry})
 	}
 	b.tasksMu.RUnlock()
 
-	for _, entry := range staleEntries {
-		task, err := b.store.GetTask(entry.taskID)
+	for _, c := range candidates {
+		task, err := b.store.GetTask(c.taskID)
 		if err != nil {
-			b.log.Error("janitor: failed to get task", "task_id", entry.taskID, "error", err)
+			b.log.Error("janitor: failed to get task", "task_id", c.taskID, "error", err)
 			continue
 		}
-		// If the task already reached a terminal state (e.g. completed by a
-		// concurrent broker message), just clean up the in-memory tracking.
 		if task != nil && IsTerminalState(task.State) {
-			b.unregisterActiveTask(entry.taskID, entry.aKey)
-			b.streams.CloseAll(entry.taskID)
+			b.unregisterActiveTask(c.taskID, c.entry.aKey)
+			b.streams.CloseAll(c.taskID)
 			continue
 		}
 		if task == nil || task.UpdatedAt.Before(cutoff) {
-			b.log.Warn("janitor: reaping stale task", "task_id", entry.taskID, "age_cutoff", maxAge)
-			if err := b.store.UpdateTaskState(entry.taskID, TaskStateFailed); err != nil {
-				b.log.Error("janitor: failed to update task state", "task_id", entry.taskID, "error", err)
+			b.log.Warn("janitor: reaping stale task", "task_id", c.taskID, "age_cutoff", maxAge)
+			if err := b.store.UpdateTaskState(c.taskID, TaskStateFailed); err != nil {
+				b.log.Error("janitor: failed to update task state", "task_id", c.taskID, "error", err)
 			}
 			if b.metrics != nil {
 				b.metrics.TasksCompleted.WithLabelValues(TaskStateFailed).Inc()
 			}
 			failEvent := StreamEvent{
 				StatusUpdate: &TaskStatusUpdate{
-					TaskID: entry.taskID,
+					TaskID: c.taskID,
 					Status: TaskStatus{State: TaskStateFailed},
 					Final:  true,
 				},
 			}
-			b.streams.Broadcast(entry.taskID, failEvent)
-			b.push.Dispatch(b.shutdownCtx, entry.taskID, failEvent)
-			b.unregisterActiveTask(entry.taskID, entry.aKey)
-			b.streams.CloseAll(entry.taskID)
+			b.streams.Broadcast(c.taskID, failEvent)
+			b.push.Dispatch(b.shutdownCtx, c.taskID, failEvent)
+			b.unregisterActiveTask(c.taskID, c.entry.aKey)
+			b.streams.CloseAll(c.taskID)
 		}
 	}
 }
 
-// Shutdown signals background goroutines to stop and waits for them to drain.
-// Order: b.wg first (bridge goroutines that call push.Dispatch), then push.Wait
-// (per-webhook goroutines). This is safe because Dispatch calls pd.wg.Add(1)
-// synchronously before spawning, so all push work is tracked by the time b.wg.Wait returns.
+// Shutdown gracefully drains background work.
+// Order: (1) close broker channel so brokerWorker drains buffered messages
+// with shutdownCtx still live (push.Dispatch works during drain),
+// (2) cancel shutdownCtx to stop the janitor and other background work,
+// (3) wait for push goroutines spawned during drain to finish.
 func (b *Bridge) Shutdown() {
-	b.shutdownCancel()
+	close(b.brokerMsgs)
 	b.wg.Wait()
+	b.shutdownCancel()
 	b.push.Wait()
 }
 
@@ -449,8 +464,13 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 
 // HandleBrokerMessage enqueues a broker message for async dispatch, keeping
 // the broker's Publish RPC non-blocking. Returns an error only if the queue
-// is full, signalling backpressure to the Hub.
-func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
+// is full or shutdown has begun, signalling backpressure to the Hub.
+func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *messages.StructuredMessage) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("broker shutting down")
+		}
+	}()
 	select {
 	case b.brokerMsgs <- brokerMessage{topic: topic, msg: msg}:
 		return nil
@@ -461,27 +481,12 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 }
 
 // brokerWorker drains the brokerMsgs channel, dispatching each message.
+// Shutdown closes the channel; the range loop drains buffered messages
+// with shutdownCtx still live so push.Dispatch works during drain.
 func (b *Bridge) brokerWorker() {
 	defer b.wg.Done()
-	for {
-		select {
-		case bm, ok := <-b.brokerMsgs:
-			if !ok {
-				return
-			}
-			b.dispatchBrokerMessage(bm.topic, bm.msg)
-		case <-b.shutdownCtx.Done():
-			// Intentionally drain remaining messages so in-flight push
-			// notifications are dispatched; bounded by push.Wait() in Shutdown.
-			for {
-				select {
-				case bm := <-b.brokerMsgs:
-					b.dispatchBrokerMessage(bm.topic, bm.msg)
-				default:
-					return
-				}
-			}
-		}
+	for bm := range b.brokerMsgs {
+		b.dispatchBrokerMessage(bm.topic, bm.msg)
 	}
 }
 
@@ -582,7 +587,7 @@ func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug str
 				b.metrics.TasksCompleted.WithLabelValues(taskState).Inc()
 			}
 			b.tasksMu.RLock()
-			aKey := b.activeTasks[taskID]
+			aKey := b.activeTasks[taskID].aKey
 			b.tasksMu.RUnlock()
 			b.unregisterActiveTask(taskID, aKey)
 		}
@@ -626,7 +631,7 @@ func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug str
 			b.metrics.TasksCompleted.WithLabelValues(TaskStateCompleted).Inc()
 		}
 		b.tasksMu.RLock()
-		aKey := b.activeTasks[taskID]
+		aKey := b.activeTasks[taskID].aKey
 		b.tasksMu.RUnlock()
 		b.unregisterActiveTask(taskID, aKey)
 	}
@@ -863,7 +868,7 @@ func (b *Bridge) resolveContext(ctx context.Context, groveSlug, agentSlug, conte
 func (b *Bridge) registerActiveTask(taskID, aKey string) {
 	b.tasksMu.Lock()
 	defer b.tasksMu.Unlock()
-	b.activeTasks[taskID] = aKey
+	b.activeTasks[taskID] = activeTaskEntry{aKey: aKey, createdAt: time.Now()}
 	b.agentTasks[aKey] = append(b.agentTasks[aKey], taskID)
 }
 
