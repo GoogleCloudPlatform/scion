@@ -146,6 +146,7 @@ func (b *Bridge) janitor() {
 			return
 		case <-ticker.C:
 			b.reapStaleTasks(maxAge)
+			b.evictStaleAgentCache()
 		}
 	}
 }
@@ -164,6 +165,13 @@ func (b *Bridge) reapStaleTasks(maxAge time.Duration) {
 		task, err := b.store.GetTask(entry.taskID)
 		if err != nil {
 			b.log.Error("janitor: failed to get task", "task_id", entry.taskID, "error", err)
+			continue
+		}
+		// If the task already reached a terminal state (e.g. completed by a
+		// concurrent broker message), just clean up the in-memory tracking.
+		if task != nil && IsTerminalState(task.State) {
+			b.unregisterActiveTask(entry.taskID, entry.aKey)
+			b.streams.CloseAll(entry.taskID)
 			continue
 		}
 		if task == nil || task.UpdatedAt.Before(cutoff) {
@@ -478,7 +486,7 @@ func (b *Bridge) brokerWorker() {
 }
 
 func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMessage) {
-	b.log.Info("handling broker message",
+	b.log.Debug("handling broker message",
 		"topic", topic,
 		"sender", msg.Sender,
 		"type", msg.Type,
@@ -738,6 +746,17 @@ func (b *Bridge) lookupAgent(ctx context.Context, groveSlug, agentSlug string) *
 	}
 
 	return result
+}
+
+func (b *Bridge) evictStaleAgentCache() {
+	cutoff := 2 * agentCacheTTL
+	b.agentCacheMu.Lock()
+	for key, entry := range b.agentCache {
+		if time.Since(entry.cachedAt) >= cutoff {
+			delete(b.agentCache, key)
+		}
+	}
+	b.agentCacheMu.Unlock()
 }
 
 // GetGroveConfig returns the configuration for a grove slug, or nil if not configured.

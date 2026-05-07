@@ -278,6 +278,7 @@ type PluginServer struct {
 	rpcDoneCh chan struct{}
 	addr      string
 	log       *slog.Logger
+	closeOnce sync.Once
 }
 
 // Addr returns the address the server is listening on.
@@ -289,11 +290,13 @@ func (s *PluginServer) Addr() string {
 // by go-plugin to drain; the parent Bridge.Shutdown handles goroutine drainage.
 func (s *PluginServer) Close() error {
 	var err error
-	if s.listener != nil {
-		err = s.listener.Close()
-	}
-	if s.rpcDoneCh != nil {
-		close(s.rpcDoneCh)
-	}
+	s.closeOnce.Do(func() {
+		if s.listener != nil {
+			err = s.listener.Close()
+		}
+		if s.rpcDoneCh != nil {
+			close(s.rpcDoneCh)
+		}
+	})
 	return err
 }

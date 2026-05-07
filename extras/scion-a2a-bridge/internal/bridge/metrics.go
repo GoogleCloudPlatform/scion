@@ -120,6 +120,9 @@ func normalizeRoute(path string) string {
 }
 
 // InstrumentHandler wraps an http.Handler to record request metrics.
+// NOTE: SSE connections inflate the duration histogram since ServeHTTP blocks
+// for the connection lifetime. Acceptable for MVP; a separate SSE-duration
+// metric can be added if P99 alerts become unreliable.
 func InstrumentHandler(next http.Handler, metrics *Metrics) http.Handler {
 	if metrics == nil {
 		return next

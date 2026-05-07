@@ -15,6 +15,8 @@
 package bridge
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"net/http"
 	"strings"
@@ -156,7 +158,7 @@ func RateLimitMiddleware(next http.Handler, cfg RateLimitConfig) http.Handler {
 			return
 		}
 
-		key := r.Header.Get("X-API-Key")
+		key := hashKey(r.Header.Get("X-API-Key"))
 		if key == "" {
 			host, _, err := net.SplitHostPort(r.RemoteAddr)
 			if err != nil {
@@ -188,4 +190,12 @@ func RateLimitMiddleware(next http.Handler, cfg RateLimitConfig) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+func hashKey(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(h[:])
 }

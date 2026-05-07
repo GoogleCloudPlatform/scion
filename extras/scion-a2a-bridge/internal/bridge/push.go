@@ -211,6 +211,9 @@ func (pd *PushDispatcher) Wait() {
 
 func (pd *PushDispatcher) sendWithRetry(cfg state.PushNotificationConfig, event StreamEvent) {
 	maxRetries := pd.config.Timeouts.PushRetryMax
+	if maxRetries == 0 {
+		maxRetries = 3
+	}
 	var lastStatusCode int
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {

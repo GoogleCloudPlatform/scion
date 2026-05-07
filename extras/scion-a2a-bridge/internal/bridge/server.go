@@ -765,7 +765,7 @@ func (s *Server) writeRPCError(w http.ResponseWriter, id interface{}, code int, 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Public endpoints skip auth.
-		if r.URL.Path == "/.well-known/agent-card.json" || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
+		if r.URL.Path == "/.well-known/agent-card.json" || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -791,6 +791,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				apiKey = strings.TrimPrefix(auth, "Bearer ")
 			}
 		default:
+			// When auth.scheme is unset (empty), accept credentials from either
+			// X-API-Key or Authorization: Bearer headers for convenience.
 			apiKey = r.Header.Get("X-API-Key")
 			if apiKey == "" {
 				auth := r.Header.Get("Authorization")
