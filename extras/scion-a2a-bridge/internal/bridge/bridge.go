@@ -341,7 +341,7 @@ func (b *Bridge) GetTask(ctx context.Context, taskID string) (*TaskResult, error
 
 // ListTasks returns tasks for a given context.
 func (b *Bridge) ListTasks(ctx context.Context, contextID string) ([]TaskResult, error) {
-	tasks, err := b.store.ListTasksByContext(contextID)
+	tasks, err := b.store.ListTasksByContext(ctx, contextID)
 	if err != nil {
 		return nil, fmt.Errorf("list tasks: %w", err)
 	}
@@ -478,8 +478,20 @@ func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMes
 
 	ctx := b.shutdownCtx
 
-	// If the message carries a task correlation ID, dispatch only to that task.
+	// If the message carries a task correlation ID, dispatch only to that task
+	// after verifying the message's agent matches the task's owner.
 	if taskID := msg.Metadata["a2aTaskId"]; taskID != "" {
+		task, err := b.store.GetTask(taskID)
+		if err != nil || task == nil {
+			b.log.Debug("ignoring message for unknown task", "task_id", taskID)
+			return
+		}
+		if task.AgentSlug != agentSlug {
+			b.log.Warn("dropping cross-agent a2aTaskId injection",
+				"task_agent", task.AgentSlug, "msg_agent", agentSlug, "task_id", taskID)
+			return
+		}
+
 		b.dispatchToWaiter(taskID, msg)
 		b.tasksMu.RLock()
 		_, isActive := b.activeTasks[taskID]
@@ -721,10 +733,12 @@ func (b *Bridge) lookupAgent(ctx context.Context, groveSlug, agentSlug string) *
 }
 
 // GetGroveConfig returns the configuration for a grove slug, or nil if not configured.
+// Returns a pointer to a copy to avoid aliasing the live config slice.
 func (b *Bridge) GetGroveConfig(groveSlug string) *GroveConfig {
 	for i := range b.config.Groves {
 		if b.config.Groves[i].Slug == groveSlug {
-			return &b.config.Groves[i]
+			cfg := b.config.Groves[i]
+			return &cfg
 		}
 	}
 	return nil
@@ -855,7 +869,9 @@ func (b *Bridge) removeWaiter(taskID string) {
 }
 
 // parseTopic extracts grove and agent identifiers from a broker topic string.
-// Expected format: scion.grove.<groveID>.agent.<agentSlug>...
+// Expected format: scion.grove.<groveID>.user.<user>.messages (6 segments).
+// The 5-segment agent form (scion.grove.<g>.agent.<a>) is parsed but currently
+// unused — the bridge only subscribes to user-scoped topics.
 func parseTopic(topic string) (groveID, agentSlug string, err error) {
 	parts := strings.Split(topic, ".")
 	if len(parts) < 3 || parts[0] != "scion" || parts[1] != "grove" {

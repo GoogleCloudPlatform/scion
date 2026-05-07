@@ -106,6 +106,9 @@ func NewMintingAuth(minter *TokenMinter, userID, email, role string, duration ti
 }
 
 // ApplyAuth sets the Authorization header with a fresh or cached token.
+// Holds a.mu across the JWT signing call on refresh, which serializes Hub
+// requests during that window. Acceptable: this is an admin-only client
+// with a 1-minute pre-expiry refresh window, so contention is rare.
 func (a *MintingAuth) ApplyAuth(req *http.Request) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()

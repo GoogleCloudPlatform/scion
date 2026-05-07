@@ -15,6 +15,7 @@
 package state
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -201,8 +202,8 @@ func (s *Store) UpdateTaskState(id, state string) error {
 }
 
 // ListTasksByContext returns all tasks for the given context.
-func (s *Store) ListTasksByContext(contextID string) ([]Task, error) {
-	rows, err := s.db.Query(
+func (s *Store) ListTasksByContext(ctx context.Context, contextID string) ([]Task, error) {
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, context_id, grove_id, agent_slug, agent_id, state, created_at, updated_at, metadata
 		 FROM tasks WHERE context_id = ? ORDER BY created_at DESC`, contextID,
 	)

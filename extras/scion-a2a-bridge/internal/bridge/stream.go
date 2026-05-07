@@ -72,6 +72,9 @@ func NewStreamManager(maxSubscribers int) *StreamManager {
 
 // Subscribe registers a new SSE stream for a task. Returns a receive channel
 // and a cleanup function that must be called when the stream is no longer needed.
+// The global cap is enforced with an O(N_tasks) scan on every Subscribe. At the
+// default maxSubscribers=100 this is trivial; if the cap becomes config-driven
+// and raised significantly, switch to an atomic counter.
 func (sm *StreamManager) Subscribe(taskID string) (<-chan StreamEvent, func(), error) {
 	ch := make(chan StreamEvent, 16)
 	sm.mu.Lock()

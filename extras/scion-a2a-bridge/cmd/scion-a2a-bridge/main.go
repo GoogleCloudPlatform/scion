@@ -155,6 +155,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
+		log.Warn("A2A server starting WITHOUT TLS — ensure TLS is terminated at a reverse proxy (e.g. Caddy, nginx, cloud LB)", "address", listenAddr)
 		log.Info("A2A protocol server starting", "address", listenAddr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- fmt.Errorf("a2a server: %w", err)

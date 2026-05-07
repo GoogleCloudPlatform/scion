@@ -15,6 +15,7 @@
 package state
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -103,7 +104,7 @@ func TestListTasksByContext(t *testing.T) {
 		State: "submitted", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
-	tasks, err := s.ListTasksByContext("ctx-a")
+	tasks, err := s.ListTasksByContext(context.Background(), "ctx-a")
 	if err != nil {
 		t.Fatalf("ListTasksByContext: %v", err)
 	}

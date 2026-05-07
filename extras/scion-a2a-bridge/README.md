@@ -32,7 +32,7 @@ Key sections:
 | `rate_limit` | Per-key token-bucket rate limiting |
 | `logging` | Log level and format (text or JSON) |
 
-Environment variables can be referenced as `${VAR_NAME}` in the YAML file.
+Environment variables can be referenced as `${VAR_NAME}` in the YAML file. **Note:** `os.Expand` has no escape mechanism — a literal `$` in config values (e.g. in an API key like `Pa$$w0rd`) will be interpreted as the start of an environment variable reference. Avoid literal `$` in non-variable config values, or set such values via environment variables instead.
 
 ## Running
 
@@ -74,6 +74,10 @@ docker run -p 8443:8443 -p 9090:9090 \
 - `tasks/pushNotification/set` — register a webhook for task updates
 - `tasks/pushNotification/get` — list webhooks for a task
 - `tasks/pushNotification/delete` — remove a webhook
+
+## TLS
+
+The A2A server listens on plain HTTP. **TLS must be terminated at a reverse proxy** (e.g. Caddy, nginx, or a cloud load balancer) in front of the bridge. The bridge logs a `WARN` at startup as a reminder. Do not expose the bridge port directly to the internet without a TLS-terminating proxy.
 
 ## Ports
 
@@ -263,4 +267,24 @@ docker run -p 8443:8443 -p 9090:9090 \
   scion-a2a-bridge
 ```
 
-The container runs as non-root user `bridge` (UID 1000). The state database directory `/var/lib/scion-a2a-bridge/` is writable by this user inside the container. To persist state across restarts, mount a volume at that path.
+The container runs as non-root user `bridge` (UID 1000). The state database directory `/var/lib/scion-a2a-bridge/` is writable by this user inside the container (mode `0700`). To persist state across restarts, mount a volume at that path.
+
+## Security considerations
+
+### SQLite state database
+
+The SQLite database stores webhook bearer credentials (`token`, `auth_credentials`) in cleartext. To protect these secrets at rest:
+
+- **File permissions**: the database file must be readable only by the bridge process (`chmod 0600`). The Dockerfile enforces `0700` on the data directory.
+- **Encrypted storage**: deploy the database on an encrypted volume (e.g., LUKS, dm-crypt, cloud-provider encrypted disks) so that a disk image or backup leak does not expose webhook tokens.
+- **Future**: HMAC body-signing (`X-A2A-Signature`) will replace static bearer tokens for webhook authentication, eliminating the need to store shared secrets. See `push.go` for the tracking TODO.
+
+### Push notifications (webhooks)
+
+Push notification URLs are validated against SSRF before use. The bridge:
+
+- Rejects URLs that resolve to private, loopback, link-local, CGNAT, or reserved IP ranges (see `ValidatePushURL`).
+- Applies a connect-time `Dialer.Control` callback (`ssrfSafeDialer`) that re-checks resolved IPs, defeating DNS rebinding attacks.
+- Blocks HTTP redirects to prevent leaking `Authorization` headers to redirect targets.
+
+Operators should additionally restrict outbound network access at the infrastructure level (e.g., firewall egress rules) as defense-in-depth.

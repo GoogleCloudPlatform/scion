@@ -210,7 +210,11 @@ func (pd *PushDispatcher) sendWithRetry(cfg state.PushNotificationConfig, event 
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			backoff := time.Duration(1<<uint(attempt-1)) * 2 * time.Second
+			shift := uint(attempt - 1)
+			if shift > 8 {
+				shift = 8 // cap at ~512s to prevent overflow at high push_retry_max
+			}
+			backoff := time.Duration(1<<shift) * 2 * time.Second
 			select {
 			case <-time.After(backoff):
 			case <-pd.shutdownCtx.Done():

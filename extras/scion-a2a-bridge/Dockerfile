@@ -43,7 +43,9 @@ RUN groupadd -r -g 1000 bridge && useradd -r -u 1000 -g bridge -s /sbin/nologin 
 COPY --from=builder /scion-a2a-bridge /usr/local/bin/scion-a2a-bridge
 RUN chmod 0755 /usr/local/bin/scion-a2a-bridge
 
-RUN mkdir -p /var/lib/scion-a2a-bridge && chown bridge:bridge /var/lib/scion-a2a-bridge
+RUN mkdir -p /var/lib/scion-a2a-bridge && chown bridge:bridge /var/lib/scion-a2a-bridge && chmod 0700 /var/lib/scion-a2a-bridge
+
+ENV SCION_A2A_STATE_DB=/var/lib/scion-a2a-bridge/state.db
 
 EXPOSE 8443 9090
 

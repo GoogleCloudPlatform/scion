@@ -363,6 +363,11 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request, req JSONR
 		return
 	}
 
+	if params.ID == "" {
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "id is required")
+		return
+	}
+
 	task, err := s.bridge.AuthorizeTask(params.ID, groveSlug, agentSlug)
 	if err != nil {
 		s.log.Error("GetTask failed", "error", err, "taskID", params.ID)
@@ -414,6 +419,11 @@ func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request, req JS
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid CancelTask params", "error", err)
 		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
+		return
+	}
+
+	if params.ID == "" {
+		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "id is required")
 		return
 	}
 

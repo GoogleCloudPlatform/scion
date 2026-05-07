@@ -101,7 +101,10 @@ func (rl *RateLimiter) getBucket(key string) *tokenBucket {
 }
 
 // evictRandomSample samples up to 5 random entries (Go map iteration is randomized)
-// and evicts the oldest of the sample. This avoids O(N) full scans at cap. Must be called with rl.mu held.
+// and evicts the oldest of the sample. This avoids O(N) full scans at cap.
+// MVP limitation: an attacker churning unique IPs can evict legitimate clients'
+// state. A hardened mode should reject new keys with 503 when over cap.
+// Must be called with rl.mu held.
 func (rl *RateLimiter) evictRandomSample() {
 	const sampleSize = 5
 	var oldestKey string
@@ -145,12 +148,25 @@ func RateLimitMiddleware(next http.Handler, cfg RateLimitConfig) http.Handler {
 	limiter := NewRateLimiter(rate, burst)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Short-circuit rate limiting for operational endpoints so that
+		// Prometheus scrapers, k8s probes, and uptime monitors don't
+		// consume rate-limit budget.
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		key := r.Header.Get("X-API-Key")
 		if key == "" {
 			host, _, err := net.SplitHostPort(r.RemoteAddr)
 			if err != nil {
 				host = r.RemoteAddr
 			}
+			// Trust boundary: TrustProxy takes the first XFF token unconditionally.
+			// Any client can spoof X-Forwarded-For to bypass per-IP rate limits.
+			// Production hardening: use the rightmost untrusted address, or
+			// require a TrustedProxies CIDR allowlist and only honor XFF when
+			// r.RemoteAddr is in that set.
 			if cfg.TrustProxy {
 				if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 					if i := strings.Index(xff, ","); i >= 0 {
@@ -164,7 +180,9 @@ func RateLimitMiddleware(next http.Handler, cfg RateLimitConfig) http.Handler {
 		}
 
 		if !limiter.Allow(key) {
-			http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":"rate limit exceeded"}`))
 			return
 		}
 

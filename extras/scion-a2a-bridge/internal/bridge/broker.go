@@ -242,6 +242,9 @@ func (b *BrokerServer) Serve(listenAddr string, allowRemote bool) (*PluginServer
 
 	// Reader ends are never explicitly closed — they leak for the process lifetime.
 	// Acceptable: one BrokerServer per process, and go-plugin holds references internally.
+	// Closing the writer side immediately yields EOF on the reader, which is correct:
+	// go-plugin's RPCServer in server mode uses the listener for RPC transport, not
+	// these stdio pipes. The pipes satisfy the interface but carry no application data.
 	stdoutR, stdoutW := io.Pipe()
 	stderrR, stderrW := io.Pipe()
 	stdoutW.Close()
