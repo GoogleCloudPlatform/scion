@@ -384,8 +384,6 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		addArg("--label", fmt.Sprintf("scion.template=%s", config.Template))
 	}
 
-	args = append(args, config.Image)
-
 	// Get command from harness
 	var harnessArgs []string
 	if config.Harness != nil {
@@ -411,11 +409,18 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	)
 
 	if len(fuseMounts) > 0 {
-		mountCmds := strings.Join(fuseMounts, " && ")
 		// Pass tmuxCmd via env var to avoid double-shell quoting issues.
 		// The env var value is set by Docker/Podman without shell
 		// interpretation, then safely expanded by sh via "$SCION_START_CMD".
+		// Must be added before the image name — Docker/Podman require all
+		// flags before the image argument.
 		addArg("-e", fmt.Sprintf("SCION_START_CMD=%s", tmuxCmd))
+	}
+
+	args = append(args, config.Image)
+
+	if len(fuseMounts) > 0 {
+		mountCmds := strings.Join(fuseMounts, " && ")
 		wrapped := fmt.Sprintf(`%s && exec sh -c "$SCION_START_CMD"`, mountCmds)
 		args = append(args, "sh", "-c", wrapped)
 	} else {
