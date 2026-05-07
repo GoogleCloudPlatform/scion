@@ -268,7 +268,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 			},
 			wantIn: []string{
 				"-e FOO=BAR",
-				"tmux new-session -d -s scion -n agent gemini --yolo --resume --prompt-interactive hello",
+				"tmux new-session -d -s scion -n agent 'gemini' '--yolo' '--resume' '--prompt-interactive' 'hello'",
 			},
 		},
 		{
@@ -281,7 +281,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 				Resume:  true,
 			},
 			wantIn: []string{
-				"tmux new-session -d -s scion -n agent gemini --yolo --resume --prompt-interactive hello",
+				"tmux new-session -d -s scion -n agent 'gemini' '--yolo' '--resume' '--prompt-interactive' 'hello'",
 			},
 		},
 		{
@@ -1312,5 +1312,72 @@ func TestSharedWorkspace_NoAgentStateInMounts(t *testing.T) {
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, fmt.Sprintf("%s:/workspace", groveDir)) {
 		t.Errorf("expected grove %s to be mounted at /workspace, args: %s", groveDir, joined)
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"simple", "hello", "'hello'"},
+		{"empty", "", "''"},
+		{"spaces", "hello world", "'hello world'"},
+		{"backticks", "use `command` here", "'use `command` here'"},
+		{"dollar sign", "value is $HOME", "'value is $HOME'"},
+		{"command substitution", "$(rm -rf /)", "'$(rm -rf /)'"},
+		{"double quotes", `say "hello"`, `'say "hello"'`},
+		{"single quotes", "it's", "'it'\\''s'"},
+		{"mixed metacharacters", "run `cmd` with $VAR and 'quotes'", "'run `cmd` with $VAR and '\\''quotes'\\'''"},
+		{"newlines", "line1\nline2", "'line1\nline2'"},
+		{"backslashes", `path\to\file`, `'path\to\file'`},
+		{"semicolons", "cmd1; cmd2", "'cmd1; cmd2'"},
+		{"pipes", "cmd1 | cmd2", "'cmd1 | cmd2'"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shellQuote(tt.input)
+			if got != tt.want {
+				t.Errorf("shellQuote(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildCommonRunArgs_ShellMetacharsInPrompt(t *testing.T) {
+	prompts := []struct {
+		name string
+		task string
+	}{
+		{"backticks", "Fix the bug in `main.go` using ```go\nfmt.Println()\n```"},
+		{"dollar signs", "Set $HOME and $(whoami) correctly"},
+		{"single quotes", "Don't use 'unsafe' code"},
+		{"mixed", "Run `cmd` with $VAR and 'quotes' in $(subshell)"},
+	}
+
+	for _, tt := range prompts {
+		t.Run(tt.name, func(t *testing.T) {
+			config := RunConfig{
+				Harness:      &harness.ClaudeCode{},
+				Name:         "test-agent",
+				UnixUsername: "scion",
+				Image:        "scion-agent:latest",
+				Task:         tt.task,
+			}
+			args, err := buildCommonRunArgs(config)
+			if err != nil {
+				t.Fatalf("buildCommonRunArgs failed: %v", err)
+			}
+
+			// The last arg is the tmux command passed to "sh -c".
+			// Verify the prompt is single-quoted (not double-quoted).
+			shCmd := args[len(args)-1]
+			quoted := shellQuote(tt.task)
+			if !strings.Contains(shCmd, quoted) {
+				t.Errorf("expected single-quoted prompt %q in sh -c arg, got: %s", quoted, shCmd)
+			}
+		})
 	}
 }

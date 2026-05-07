@@ -68,6 +68,13 @@ func ResolveContainerWorkspace(repoRoot, workspace string, gitClone *api.GitClon
 	return "/workspace"
 }
 
+// shellQuote returns s quoted for safe embedding in a POSIX shell command.
+// It uses single quotes, which prevent all shell interpretation (variable
+// expansion, command substitution via backticks or $(), globbing, etc.).
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
 // buildCommonRunArgs constructs the common arguments for 'run' command across different runtimes.
 func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	args := []string{"run", "-d", "-i"}
@@ -387,14 +394,12 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		return nil, fmt.Errorf("no harness provided")
 	}
 
-	// Build tmux-wrapped command
+	// Build tmux-wrapped command — use POSIX single-quote escaping so that
+	// shell metacharacters (backticks, $, etc.) in the task prompt are not
+	// interpreted by sh -c.
 	var quotedArgs []string
 	for _, a := range harnessArgs {
-		if strings.ContainsAny(a, " \t\n\"'$") {
-			quotedArgs = append(quotedArgs, fmt.Sprintf("%q", a))
-		} else {
-			quotedArgs = append(quotedArgs, a)
-		}
+		quotedArgs = append(quotedArgs, shellQuote(a))
 	}
 	cmdLine := strings.Join(quotedArgs, " ")
 
@@ -407,7 +412,11 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 
 	if len(fuseMounts) > 0 {
 		mountCmds := strings.Join(fuseMounts, " && ")
-		wrapped := fmt.Sprintf("%s && exec sh -c %q", mountCmds, tmuxCmd)
+		// Pass tmuxCmd via env var to avoid double-shell quoting issues.
+		// The env var value is set by Docker/Podman without shell
+		// interpretation, then safely expanded by sh via "$SCION_START_CMD".
+		addArg("-e", fmt.Sprintf("SCION_START_CMD=%s", tmuxCmd))
+		wrapped := fmt.Sprintf(`%s && exec sh -c "$SCION_START_CMD"`, mountCmds)
 		args = append(args, "sh", "-c", wrapped)
 	} else {
 		args = append(args, "sh", "-c", tmuxCmd)

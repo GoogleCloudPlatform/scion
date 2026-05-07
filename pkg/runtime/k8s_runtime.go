@@ -767,11 +767,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 
 	var quotedArgs []string
 	for _, a := range harnessArgs {
-		if strings.ContainsAny(a, " \t\n\"'$") {
-			quotedArgs = append(quotedArgs, fmt.Sprintf("%q", a))
-		} else {
-			quotedArgs = append(quotedArgs, a)
-		}
+		quotedArgs = append(quotedArgs, shellQuote(a))
 	}
 	cmdLine := strings.Join(quotedArgs, " ")
 	// Create session with "agent" window running the harness, plus a "shell" window.
