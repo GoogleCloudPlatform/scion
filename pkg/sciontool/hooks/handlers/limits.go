@@ -35,10 +35,11 @@ type LimitsState struct {
 // When a limit is exceeded, it updates the agent status, logs the event, reports
 // to the Hub, and sends SIGUSR1 to PID 1 (sciontool init) to initiate shutdown.
 type LimitsHandler struct {
-	maxTurns      int
-	maxModelCalls int
-	limitsPath    string
-	statusHandler *StatusHandler
+	maxTurns        int
+	maxModelCalls   int
+	limitsPath      string
+	triggerFilePath string
+	statusHandler   *StatusHandler
 }
 
 // NewLimitsHandler creates a new limits handler.
@@ -58,10 +59,11 @@ func NewLimitsHandler() *LimitsHandler {
 	}
 
 	return &LimitsHandler{
-		maxTurns:      maxTurns,
-		maxModelCalls: maxModelCalls,
-		limitsPath:    filepath.Join(home, "agent-limits.json"),
-		statusHandler: NewStatusHandler(),
+		maxTurns:        maxTurns,
+		maxModelCalls:   maxModelCalls,
+		limitsPath:      filepath.Join(home, "agent-limits.json"),
+		triggerFilePath: LimitsTriggerFile,
+		statusHandler:   NewStatusHandler(),
 	}
 }
 
@@ -71,10 +73,11 @@ func NewLimitsHandlerWithPath(maxTurns, maxModelCalls int, limitsPath string) *L
 		return nil
 	}
 	return &LimitsHandler{
-		maxTurns:      maxTurns,
-		maxModelCalls: maxModelCalls,
-		limitsPath:    limitsPath,
-		statusHandler: NewStatusHandler(),
+		maxTurns:        maxTurns,
+		maxModelCalls:   maxModelCalls,
+		limitsPath:      limitsPath,
+		triggerFilePath: LimitsTriggerFile,
+		statusHandler:   NewStatusHandler(),
 	}
 }
 
@@ -180,7 +183,7 @@ func (h *LimitsHandler) triggerLimitsExceeded(message string) {
 	}
 
 	// 4. Signal init process to initiate shutdown (trigger file + SIGUSR1 fallback)
-	if err := signalLimitsExceeded(); err != nil {
+	if err := h.signalLimitsExceeded(); err != nil {
 		log.Error("Failed to signal limits exceeded: %v", err)
 	}
 }
@@ -234,11 +237,15 @@ const LimitsTriggerFile = "/tmp/scion-limits-exceeded"
 
 // signalLimitsExceeded notifies PID 1 that a limit has been exceeded.
 // It writes a trigger file and also attempts SIGUSR1 as a fallback.
-func signalLimitsExceeded() error {
+func (h *LimitsHandler) signalLimitsExceeded() error {
+	triggerPath := h.triggerFilePath
+	if triggerPath == "" {
+		triggerPath = LimitsTriggerFile
+	}
 	// Primary mechanism: create a trigger file that init watches for.
 	// This works regardless of UID differences between the hook process
 	// and PID 1 (init runs as root, hooks run as the scion user).
-	if err := os.WriteFile(LimitsTriggerFile, []byte("exceeded"), 0666); err != nil {
+	if err := os.WriteFile(triggerPath, []byte("exceeded"), 0666); err != nil {
 		log.Error("Failed to write limits trigger file: %v", err)
 	}
 
