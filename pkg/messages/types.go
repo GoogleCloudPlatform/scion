@@ -32,6 +32,9 @@ const MaxAttachments = 10
 // Maximum number of metadata entries.
 const MaxMetadataEntries = 32
 
+// Maximum size of a single metadata key in bytes.
+const MaxMetadataKeySize = 256
+
 // Maximum size of a single metadata value in bytes.
 const MaxMetadataValueSize = 4 * 1024 // 4KB
 
@@ -105,6 +108,9 @@ func (m *StructuredMessage) Validate() error {
 		return fmt.Errorf("too many metadata entries: %d (max %d)", len(m.Metadata), MaxMetadataEntries)
 	}
 	for k, v := range m.Metadata {
+		if len(k) > MaxMetadataKeySize {
+			return fmt.Errorf("metadata key %q... exceeds maximum size of %d bytes", k[:32], MaxMetadataKeySize)
+		}
 		if len(v) > MaxMetadataValueSize {
 			return fmt.Errorf("metadata value for key %q exceeds maximum size of %d bytes", k, MaxMetadataValueSize)
 		}

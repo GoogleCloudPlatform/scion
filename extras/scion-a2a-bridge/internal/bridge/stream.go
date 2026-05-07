@@ -102,10 +102,11 @@ func (sm *StreamManager) Subscribe(taskID string) (<-chan StreamEvent, func(), e
 }
 
 // Broadcast sends an event to all active streams for a task.
+// Holds RLock for the entire send loop to prevent concurrent CloseAll
+// from closing channels mid-send (which would panic on send-to-closed-channel).
 func (sm *StreamManager) Broadcast(taskID string, event StreamEvent) {
 	sm.mu.RLock()
 	streams := sm.streams[taskID]
-	sm.mu.RUnlock()
 
 	var slowChans []chan StreamEvent
 	for _, ch := range streams {
@@ -113,13 +114,15 @@ func (sm *StreamManager) Broadcast(taskID string, event StreamEvent) {
 		case ch <- event:
 		default:
 			dropped := sm.droppedEvents.Add(1)
-			slog.Warn("SSE subscriber too slow, closing channel to force reconnect",
+			slog.Warn("SSE subscriber too slow, will remove",
 				"task_id", taskID,
 				"total_dropped", dropped,
 			)
 			slowChans = append(slowChans, ch)
 		}
 	}
+	sm.mu.RUnlock()
+
 	if len(slowChans) > 0 {
 		sm.mu.Lock()
 		for _, slow := range slowChans {
@@ -127,10 +130,10 @@ func (sm *StreamManager) Broadcast(taskID string, event StreamEvent) {
 			for i, s := range subs {
 				if s == slow {
 					sm.streams[taskID] = append(subs[:i], subs[i+1:]...)
+					close(slow)
 					break
 				}
 			}
-			close(slow)
 		}
 		if len(sm.streams[taskID]) == 0 {
 			delete(sm.streams, taskID)

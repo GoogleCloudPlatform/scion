@@ -1,0 +1,10 @@
+# Exclude files not needed by the scion-a2a-bridge build.
+# The Dockerfile COPYs from the repo root, so paths are relative to that.
+.git
+.github
+.claude
+docs/
+web/
+**/*_test.go
+**/.DS_Store
+*.md

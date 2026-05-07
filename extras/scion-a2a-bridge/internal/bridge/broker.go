@@ -36,6 +36,7 @@ type BrokerServer struct {
 	handler       MessageHandler
 	hostCallbacks plugin.HostCallbacks
 	log           *slog.Logger
+	shutdownCtx   context.Context
 
 	mu            sync.RWMutex
 	subscriptions map[string]bool
@@ -46,10 +47,11 @@ var _ plugin.MessageBrokerPluginInterface = (*BrokerServer)(nil)
 var _ plugin.HostCallbacksAware = (*BrokerServer)(nil)
 
 // NewBrokerServer creates a new broker plugin server.
-func NewBrokerServer(handler MessageHandler, log *slog.Logger) *BrokerServer {
+func NewBrokerServer(handler MessageHandler, log *slog.Logger, shutdownCtx context.Context) *BrokerServer {
 	return &BrokerServer{
 		handler:       handler,
 		log:           log,
+		shutdownCtx:   shutdownCtx,
 		subscriptions: make(map[string]bool),
 	}
 }
@@ -159,7 +161,11 @@ func (b *BrokerServer) SetHostCallbacks(hc plugin.HostCallbacks) {
 				}
 				if err.Error() == "host callbacks not yet available" {
 					b.log.Debug("host callbacks not ready yet, retrying...", "pattern", pattern, "attempt", i+1)
-					time.Sleep(time.Second)
+					select {
+					case <-time.After(time.Second):
+					case <-b.shutdownCtx.Done():
+						return
+					}
 				} else {
 					b.log.Error("failed to request deferred subscription", "pattern", pattern, "error", err)
 					break
@@ -177,10 +183,16 @@ func (b *BrokerServer) HostCallbacks() plugin.HostCallbacks {
 }
 
 // RequestSubscription asks the Hub to subscribe this plugin to a topic pattern.
+// Skips the remote RPC if the pattern is already subscribed locally.
 func (b *BrokerServer) RequestSubscription(pattern string) error {
 	b.mu.Lock()
+	already := b.subscriptions[pattern]
 	b.subscriptions[pattern] = true
 	b.mu.Unlock()
+
+	if already {
+		return nil
+	}
 
 	hc := b.HostCallbacks()
 	if hc == nil {
@@ -228,6 +240,8 @@ func (b *BrokerServer) Serve(listenAddr string, allowRemote bool) (*PluginServer
 		},
 	}
 
+	// Reader ends are never explicitly closed — they leak for the process lifetime.
+	// Acceptable: one BrokerServer per process, and go-plugin holds references internally.
 	stdoutR, stdoutW := io.Pipe()
 	stderrR, stderrW := io.Pipe()
 	stdoutW.Close()

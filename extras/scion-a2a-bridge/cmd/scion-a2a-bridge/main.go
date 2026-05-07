@@ -105,11 +105,14 @@ func main() {
 	}
 	log.Info("hub client initialized", "endpoint", cfg.Hub.Endpoint, "admin_user", cfg.Hub.User)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// Create core bridge.
 	b := bridge.New(store, adminClient, minter, cfg, log.With("component", "bridge"))
 
 	// Create broker server and wire the bridge as handler.
-	broker := bridge.NewBrokerServer(b.HandleBrokerMessage, log.With("component", "broker"))
+	broker := bridge.NewBrokerServer(b.HandleBrokerMessage, log.With("component", "broker"), ctx)
 
 	// Start broker plugin RPC server.
 	pluginAddr := cfg.Plugin.ListenAddress
@@ -144,9 +147,6 @@ func main() {
 		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -220,7 +220,17 @@ func loadConfig(path string) (*bridge.Config, error) {
 	return &cfg, nil
 }
 
-var b64Cleaner = strings.NewReplacer(" ", "", "\t", "", "\n", "", "\r", "")
+var b64Cleaner = strings.NewReplacer(" ", "", "\t", "", "\n", "", "\r", "", "\xef\xbb\xbf", "")
+
+func cleanBase64(raw string) (string, error) {
+	cleaned := b64Cleaner.Replace(raw)
+	for i := 0; i < len(cleaned); i++ {
+		if cleaned[i] > 127 {
+			return "", fmt.Errorf("signing key contains non-ASCII byte at position %d (possible UTF-16 or BOM encoding)", i)
+		}
+	}
+	return cleaned, nil
+}
 
 func loadSigningKey(cfg bridge.HubConfig) (string, error) {
 	switch {
@@ -229,7 +239,7 @@ func loadSigningKey(cfg bridge.HubConfig) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("reading signing key file: %w", err)
 		}
-		return b64Cleaner.Replace(string(data)), nil
+		return cleanBase64(string(data))
 	case cfg.SigningKeySecret != "":
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -252,7 +262,7 @@ func accessSecret(ctx context.Context, resourceName string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("accessing secret version: %w", err)
 	}
-	return b64Cleaner.Replace(string(resp.Payload.Data)), nil
+	return cleanBase64(string(resp.Payload.Data))
 }
 
 func initLogger(cfg bridge.LoggingConfig) *slog.Logger {

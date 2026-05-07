@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -315,11 +316,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, req J
 	result, err := s.bridge.SendMessage(r.Context(), groveSlug, agentSlug, params.ContextID, params.Message.Parts, blocking)
 	if err != nil {
 		s.log.Error("SendMessage failed", "error", err, "grove", groveSlug, "agent", agentSlug)
-		errMsg := err.Error()
 		switch {
-		case strings.Contains(errMsg, "not found"):
-			s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "agent or context not found")
-		case strings.Contains(errMsg, "unknown context ID"):
+		case errors.Is(err, ErrAgentNotFound):
+			s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "agent not found")
+		case errors.Is(err, ErrContextUnknown):
 			s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "unknown context ID")
 		default:
 			s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
@@ -632,7 +632,7 @@ func (s *Server) handleDeletePushNotification(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if err := s.bridge.DeletePushNotificationConfig(r.Context(), params.ID); err != nil {
+	if err := s.bridge.DeletePushNotificationConfig(r.Context(), params.TaskID, params.ID); err != nil {
 		s.log.Error("DeletePushNotificationConfig failed", "error", err, "pushID", params.ID)
 		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
 		return

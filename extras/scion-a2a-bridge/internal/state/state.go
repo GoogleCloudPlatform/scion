@@ -331,6 +331,22 @@ func (s *Store) DeletePushConfig(id string) error {
 	return nil
 }
 
+// DeletePushConfigForTask removes a push config only if it belongs to the given task.
+func (s *Store) DeletePushConfigForTask(taskID, id string) error {
+	result, err := s.db.Exec(`DELETE FROM push_notification_configs WHERE id = ? AND task_id = ?`, id, taskID)
+	if err != nil {
+		return fmt.Errorf("delete push config: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete push config: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("push config not found for task")
+	}
+	return nil
+}
+
 // --- Identity Mappings ---
 
 // SetIdentityMapping inserts or replaces an identity mapping.

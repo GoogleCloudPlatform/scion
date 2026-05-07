@@ -16,6 +16,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -28,6 +29,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+)
+
+var (
+	ErrAgentNotFound  = errors.New("agent not found")
+	ErrContextUnknown = errors.New("unknown context ID")
 )
 
 // waiter tracks a blocking response channel with agent routing info.
@@ -89,6 +95,9 @@ func New(store *state.Store, hubClient hubclient.Client, minter *identity.TokenM
 }
 
 // Shutdown signals background goroutines to stop and waits for them to drain.
+// Order: b.wg first (bridge goroutines that call push.Dispatch), then push.Wait
+// (per-webhook goroutines). This is safe because Dispatch calls pd.wg.Add(1)
+// synchronously before spawning, so all push work is tracked by the time b.wg.Wait returns.
 func (b *Bridge) Shutdown() {
 	b.shutdownCancel()
 	b.wg.Wait()
@@ -196,6 +205,9 @@ func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextI
 		timeout = 120 * time.Second
 	}
 
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
 	select {
 	case response := <-responseCh:
 		msg, artifacts := TranslateScionToA2A(response)
@@ -213,7 +225,7 @@ func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextI
 			Artifacts: artifacts,
 		}, nil
 
-	case <-time.After(timeout):
+	case <-timer.C:
 		if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 		}
@@ -324,6 +336,9 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 }
 
 // HandleBrokerMessage processes an inbound message from the broker plugin.
+// NOTE: This runs synchronously in the broker's Publish RPC. State-store writes
+// and channel sends here can backpressure the Hub broker. A bounded internal
+// queue + worker pool would decouple dispatch latency from broker throughput.
 func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	b.log.Info("handling broker message",
 		"topic", topic,
@@ -337,7 +352,7 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 		agentSlug = extractAgentIDFromTopic(topic)
 	}
 	if agentSlug == "" {
-		b.log.Debug("ignoring message: could not determine agent slug", "topic", topic, "sender", msg.Sender)
+		b.log.Warn("ignoring message: could not determine agent slug", "topic", topic, "sender", msg.Sender)
 		return nil
 	}
 
@@ -587,10 +602,13 @@ func (b *Bridge) resolveContext(ctx context.Context, groveSlug, agentSlug, conte
 			return nil, fmt.Errorf("get context: %w", err)
 		}
 		if existing != nil {
+			if existing.GroveID != groveSlug || existing.AgentSlug != agentSlug {
+				return nil, fmt.Errorf("%w: context does not belong to %s/%s", ErrContextUnknown, groveSlug, agentSlug)
+			}
 			b.store.TouchContext(contextID)
 			return existing, nil
 		}
-		return nil, fmt.Errorf("unknown context ID: %s", contextID)
+		return nil, fmt.Errorf("%w: %s", ErrContextUnknown, contextID)
 	}
 
 	agents, err := b.hubClient.Agents().List(ctx, &hubclient.ListAgentsOptions{GroveID: groveSlug})
@@ -609,7 +627,7 @@ func (b *Bridge) resolveContext(ctx context.Context, groveSlug, agentSlug, conte
 	if agentID == "" {
 		groveCfg := b.GetGroveConfig(groveSlug)
 		if groveCfg == nil || !groveCfg.AutoProvision || groveCfg.DefaultTemplate == "" {
-			return nil, fmt.Errorf("agent %q not found", agentSlug)
+			return nil, fmt.Errorf("%w: %q", ErrAgentNotFound, agentSlug)
 		}
 
 		b.log.Info("auto-provisioning agent", "slug", agentSlug, "grove", groveSlug, "template", groveCfg.DefaultTemplate)

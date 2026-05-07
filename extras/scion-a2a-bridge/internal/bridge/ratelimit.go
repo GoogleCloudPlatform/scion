@@ -100,17 +100,22 @@ func (rl *RateLimiter) getBucket(key string) *tokenBucket {
 	return b
 }
 
-// evictOldest removes the least recently used bucket. Must be called with rl.mu held.
+// evictOldest samples up to 5 random entries (Go map iteration is randomized)
+// and evicts the oldest. This avoids O(N) full scans at cap. Must be called with rl.mu held.
 func (rl *RateLimiter) evictOldest() {
+	const sampleSize = 5
 	var oldestKey string
 	var oldestTime time.Time
-	first := true
+	i := 0
 	for k, entry := range rl.buckets {
-		if first || entry.lastUsed.Before(oldestTime) {
+		if i >= sampleSize {
+			break
+		}
+		if i == 0 || entry.lastUsed.Before(oldestTime) {
 			oldestKey = k
 			oldestTime = entry.lastUsed
-			first = false
 		}
+		i++
 	}
 	if oldestKey != "" {
 		delete(rl.buckets, oldestKey)

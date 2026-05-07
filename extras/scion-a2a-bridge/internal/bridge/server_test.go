@@ -570,7 +570,7 @@ func TestPushNotificationGetReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestPushNotificationDeleteSucceeds(t *testing.T) {
+func TestPushNotificationDeleteNonexistent(t *testing.T) {
 	_, ts, store := newTestServer(t)
 
 	now := time.Now()
@@ -585,9 +585,11 @@ func TestPushNotificationDeleteSucceeds(t *testing.T) {
 		"test-api-key",
 	)
 
-	// Delete of nonexistent ID should succeed (idempotent).
-	if rpcResp.Error != nil {
-		t.Fatalf("unexpected error: %s", rpcResp.Error.Message)
+	if rpcResp.Error == nil {
+		t.Fatal("expected error when deleting nonexistent push config")
+	}
+	if rpcResp.Error.Code != ErrCodeInternalError {
+		t.Errorf("error code = %d, want %d", rpcResp.Error.Code, ErrCodeInternalError)
 	}
 }
 
@@ -650,6 +652,58 @@ func TestResubscribeRequiresID(t *testing.T) {
 	// Should fail because the task doesn't exist (empty ID).
 	if rpcResp.Error == nil {
 		t.Fatal("expected error for empty task ID")
+	}
+}
+
+func TestAuthorizeTaskReturnsNilNil(t *testing.T) {
+	_, _, store := newTestServer(t)
+
+	dir := t.TempDir()
+	s, err := state.New(filepath.Join(dir, "auth-test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	cfg := &Config{
+		Bridge: BridgeConfig{ExternalURL: "https://a2a.test.example.com"},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	b := New(s, nil, nil, cfg, log)
+
+	now := time.Now()
+	_ = store // use the outer store for unrelated setup
+
+	s.CreateTask(&state.Task{
+		ID: "owned-task", ContextID: "ctx-1", GroveID: "grove-a", AgentSlug: "agent-x",
+		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
+	})
+
+	// Task not found returns (nil, nil).
+	task, err := b.AuthorizeTask("nonexistent", "grove-a", "agent-x")
+	if task != nil || err != nil {
+		t.Errorf("AuthorizeTask(nonexistent) = (%v, %v), want (nil, nil)", task, err)
+	}
+
+	// Task exists but wrong grove returns (nil, nil) — no existence leak.
+	task, err = b.AuthorizeTask("owned-task", "grove-b", "agent-x")
+	if task != nil || err != nil {
+		t.Errorf("AuthorizeTask(wrong grove) = (%v, %v), want (nil, nil)", task, err)
+	}
+
+	// Task exists but wrong agent returns (nil, nil).
+	task, err = b.AuthorizeTask("owned-task", "grove-a", "agent-y")
+	if task != nil || err != nil {
+		t.Errorf("AuthorizeTask(wrong agent) = (%v, %v), want (nil, nil)", task, err)
+	}
+
+	// Correct grove and agent returns the task.
+	task, err = b.AuthorizeTask("owned-task", "grove-a", "agent-x")
+	if err != nil {
+		t.Fatalf("AuthorizeTask(correct owner) error: %v", err)
+	}
+	if task == nil || task.ID != "owned-task" {
+		t.Errorf("AuthorizeTask(correct owner) = %v, want task with ID %q", task, "owned-task")
 	}
 }
 

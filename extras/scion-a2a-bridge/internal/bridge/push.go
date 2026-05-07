@@ -142,6 +142,8 @@ func NewSSRFSafeClient() *http.Client {
 		Transport: &http.Transport{
 			DialContext: ssrfSafeDialer(),
 		},
+		// Redirects must stay blocked: the Authorization header (token/credentials)
+		// would be forwarded to the redirect target, leaking secrets.
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return errRedirectBlocked
 		},
@@ -162,6 +164,7 @@ func NewPushDispatcher(store *state.Store, cfg *Config, log *slog.Logger, shutdo
 }
 
 // Dispatch sends a stream event to all registered push notification webhooks for a task.
+// Returns immediately after spawning per-config goroutines; use pd.Wait() for shutdown drainage.
 func (pd *PushDispatcher) Dispatch(ctx context.Context, taskID string, event StreamEvent) {
 	select {
 	case <-pd.shutdownCtx.Done():
@@ -180,25 +183,19 @@ func (pd *PushDispatcher) Dispatch(ctx context.Context, taskID string, event Str
 
 	pd.log.Debug("dispatching push notifications", "task_id", taskID, "config_count", len(configs))
 
-	pd.wg.Add(1)
-	defer pd.wg.Done()
-
-	var localWg sync.WaitGroup
 	for _, cfg := range configs {
-		// Acquire semaphore before spawning to bound goroutine count.
 		select {
 		case pd.sem <- struct{}{}:
 		case <-pd.shutdownCtx.Done():
 			return
 		}
-		localWg.Add(1)
+		pd.wg.Add(1)
 		go func(c state.PushNotificationConfig) {
-			defer localWg.Done()
+			defer pd.wg.Done()
 			defer func() { <-pd.sem }()
 			pd.sendWithRetry(c, event)
 		}(cfg)
 	}
-	localWg.Wait()
 }
 
 // Wait blocks until all in-flight dispatches complete.
@@ -231,6 +228,8 @@ func (pd *PushDispatcher) sendWithRetry(cfg state.PushNotificationConfig, event 
 				"error", err,
 			)
 			// Permanent client errors: remove config immediately.
+			// 5xx is retried (not treated as permanent). Since Dispatch is async,
+			// retries don't block the broker — they only consume a semaphore slot.
 			if statusCode == 410 || (statusCode >= 400 && statusCode < 500 && statusCode != 408 && statusCode != 429) {
 				pd.log.Error("push notification returned permanent client error, removing config",
 					"id", cfg.ID, "url", cfg.URL, "status_code", statusCode)
@@ -317,7 +316,8 @@ func (b *Bridge) GetPushNotificationConfig(ctx context.Context, taskID string) (
 	return b.store.GetPushConfigsByTask(taskID)
 }
 
-// DeletePushNotificationConfig removes a push notification configuration.
-func (b *Bridge) DeletePushNotificationConfig(ctx context.Context, id string) error {
-	return b.store.DeletePushConfig(id)
+// DeletePushNotificationConfig removes a push notification configuration,
+// verifying it belongs to the specified task.
+func (b *Bridge) DeletePushNotificationConfig(ctx context.Context, taskID, id string) error {
+	return b.store.DeletePushConfigForTask(taskID, id)
 }

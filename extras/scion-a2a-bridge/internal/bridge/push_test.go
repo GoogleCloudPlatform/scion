@@ -377,7 +377,7 @@ func TestBridgePushConfigCRUD(t *testing.T) {
 	}
 
 	// Delete config.
-	if err := b.DeletePushNotificationConfig(nil, cfg.ID); err != nil {
+	if err := b.DeletePushNotificationConfig(nil, "task-1", cfg.ID); err != nil {
 		t.Fatalf("DeletePushNotificationConfig: %v", err)
 	}
 
