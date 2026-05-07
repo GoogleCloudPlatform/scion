@@ -198,6 +198,9 @@ type AgentStatusUpdate struct {
 	CurrentTurns      *int   `json:"currentTurns,omitempty"`
 	CurrentModelCalls *int   `json:"currentModelCalls,omitempty"`
 	StartedAt         string `json:"startedAt,omitempty"`
+
+	// Exit tracking
+	ExitCode *int `json:"exitCode,omitempty"`
 }
 
 // GroveStore defines grove-related persistence operations.

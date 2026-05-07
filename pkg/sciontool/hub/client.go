@@ -135,6 +135,9 @@ type StatusUpdate struct {
 	CurrentTurns      *int   `json:"currentTurns,omitempty"`
 	CurrentModelCalls *int   `json:"currentModelCalls,omitempty"`
 	StartedAt         string `json:"startedAt,omitempty"`
+
+	// Exit tracking
+	ExitCode *int `json:"exitCode,omitempty"`
 }
 
 // Client is a Hub API client for sciontool.

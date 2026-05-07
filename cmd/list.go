@@ -316,6 +316,9 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 		if phase == "" {
 			phase = "unknown"
 		}
+		if phase == string(state.PhaseStopped) && state.Activity(a.Activity).IsTerminal() {
+			phase = a.Activity
+		}
 		containerStatus := a.ContainerStatus
 		if containerStatus == "created" && a.ID == "" {
 			containerStatus = "none"
@@ -517,8 +520,12 @@ func hubAgentPhaseActivity(phase, activity, status string) (string, string) {
 // The Hub API may return a single Status field that represents either a phase
 // or an activity (e.g. "running", "stopped", "waiting_for_input").
 func hubStatusToPhaseActivity(status string) (string, string) {
-	// Check if the status is a known activity (only valid during running phase)
+	// Terminal activities (crashed, limits_exceeded) belong to the stopped phase.
 	a := state.Activity(status)
+	if a.IsTerminal() {
+		return string(state.PhaseStopped), status
+	}
+	// Check if the status is a known activity (only valid during running phase)
 	if a.IsValid() && a != "" {
 		return string(state.PhaseRunning), status
 	}

@@ -779,15 +779,54 @@ func runInit(args []string) int {
 		log.Error("Session-end hooks failed: %v", err)
 	}
 
-	// Report final stopped status to Hub
+	// Determine the final exit code and whether this was a crash.
+	finalCode := result.code
+	if limitsExceeded {
+		finalCode = handlers.ExitCodeLimitsExceeded
+	} else if result.err != nil {
+		finalCode = 1
+	}
+	isCrash := !limitsExceeded && finalCode != 0
+
+	// Report final status to Hub, distinguishing clean stop from crash.
 	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
 		hubCtx, hubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := hubClient.ReportState(hubCtx, state.PhaseStopped, "", "Agent stopped"); err != nil {
-			log.Error("Failed to report stopped status to Hub: %v", err)
+		var hubErr error
+		if isCrash {
+			crashMsg := fmt.Sprintf("Agent crashed with exit code %d", finalCode)
+			s := state.AgentState{Phase: state.PhaseStopped, Activity: state.ActivityCrashed}
+			hubErr = hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
+				Phase:    state.PhaseStopped,
+				Activity: state.ActivityCrashed,
+				Status:   s.DisplayStatus(),
+				Message:  crashMsg,
+				ExitCode: &finalCode,
+			})
+		} else if limitsExceeded {
+			s := state.AgentState{Phase: state.PhaseStopped, Activity: state.ActivityLimitsExceeded}
+			hubErr = hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
+				Phase:    state.PhaseStopped,
+				Activity: state.ActivityLimitsExceeded,
+				Status:   s.DisplayStatus(),
+				Message:  "Agent stopped: limits exceeded",
+				ExitCode: &finalCode,
+			})
 		} else {
-			log.Info("Reported stopped status to Hub")
+			hubErr = hubClient.ReportState(hubCtx, state.PhaseStopped, "", "Agent stopped")
+		}
+		if hubErr != nil {
+			log.Error("Failed to report final status to Hub: %v", hubErr)
+		} else {
+			log.Info("Reported final status to Hub (exitCode=%d, crash=%v)", finalCode, isCrash)
 		}
 		hubCancel()
+	}
+
+	// Update local agent-info.json with crash state so the broker heartbeat
+	// can relay it even after the Hub report.
+	if isCrash {
+		statusHandler.UpdatePhase(state.PhaseStopped, state.ActivityCrashed, "")
+		statusHandler.SetMessage(fmt.Sprintf("crashed with exit code %d", finalCode))
 	}
 
 	if limitsExceeded {
