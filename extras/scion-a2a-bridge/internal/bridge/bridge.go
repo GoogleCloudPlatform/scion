@@ -536,11 +536,32 @@ func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMes
 		return
 	}
 
-	// No a2aTaskId correlation — log and discard. The bridge always sets
-	// a2aTaskId on outbound messages, so uncorrelated inbound messages
-	// cannot be reliably routed to a specific task.
-	b.log.Warn("dropping broker message without a2aTaskId correlation",
-		"topic", topic, "sender", msg.Sender, "grove", groveID, "agent", agentSlug)
+	// No a2aTaskId — the outbound message path (sciontool stop hook →
+	// SendOutboundMessage) does not carry metadata from the original inbound
+	// message, so a2aTaskId is lost in the round-trip. Fall back to agent-slug
+	// correlation using the agentTasks reverse map.
+	aKey := agentKey(groveID, agentSlug)
+	b.tasksMu.RLock()
+	taskIDs := append([]string(nil), b.agentTasks[aKey]...)
+	b.tasksMu.RUnlock()
+
+	if len(taskIDs) == 0 {
+		b.log.Warn("dropping broker message: no a2aTaskId and no active tasks for agent",
+			"topic", topic, "sender", msg.Sender, "grove", groveID, "agent", agentSlug)
+		return
+	}
+
+	b.log.Debug("correlating broker message by agent slug (no a2aTaskId)",
+		"agent", agentSlug, "grove", groveID, "active_tasks", len(taskIDs))
+	for _, taskID := range taskIDs {
+		b.dispatchToWaiter(taskID, msg)
+		b.tasksMu.RLock()
+		_, isActive := b.activeTasks[taskID]
+		b.tasksMu.RUnlock()
+		if isActive {
+			b.dispatchToActiveTask(ctx, taskID, agentSlug, msg)
+		}
+	}
 }
 
 // dispatchToWaiter sends a message to a blocking waiter for the given taskID.
