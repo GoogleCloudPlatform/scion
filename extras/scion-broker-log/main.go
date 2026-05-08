@@ -83,7 +83,7 @@ func main() {
 	}
 
 	if *flagForward != "" {
-		downstream, err := connectDownstream(*flagForward, log)
+		downstream, err := connectDownstream(*flagForward, log, bl)
 		if err != nil {
 			log.Error("failed to connect to downstream broker", "addr", *flagForward, "error", err)
 			os.Exit(1)
@@ -147,6 +147,7 @@ type brokerLog struct {
 
 var _ plugin.MessageBrokerPluginInterface = (*brokerLog)(nil)
 var _ plugin.HostCallbacksAware = (*brokerLog)(nil)
+var _ plugin.HostCallbacks = (*brokerLog)(nil)
 
 func (b *brokerLog) Configure(config map[string]string) error {
 	b.mu.Lock()
@@ -276,11 +277,31 @@ func (b *brokerLog) SetHostCallbacks(hc plugin.HostCallbacks) {
 	}()
 }
 
+func (b *brokerLog) RequestSubscription(pattern string) error {
+	b.mu.RLock()
+	hc := b.hostCallbacks
+	b.mu.RUnlock()
+	if hc == nil {
+		return fmt.Errorf("host callbacks not available")
+	}
+	return hc.RequestSubscription(pattern)
+}
+
+func (b *brokerLog) CancelSubscription(pattern string) error {
+	b.mu.RLock()
+	hc := b.hostCallbacks
+	b.mu.RUnlock()
+	if hc == nil {
+		return fmt.Errorf("host callbacks not available")
+	}
+	return hc.CancelSubscription(pattern)
+}
+
 // --- Downstream forwarding ---
 
 // connectDownstream establishes a go-plugin RPC client connection to another
 // broker plugin (e.g. scion-chat-app) running at the given address.
-func connectDownstream(addr string, log *slog.Logger) (*plugin.BrokerRPCClient, error) {
+func connectDownstream(addr string, log *slog.Logger, hostCallbacks plugin.HostCallbacks) (*plugin.BrokerRPCClient, error) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("resolve address %s: %w", addr, err)
@@ -293,7 +314,9 @@ func connectDownstream(addr string, log *slog.Logger) (*plugin.BrokerRPCClient, 
 			MagicCookieValue: plugin.MagicCookieValue,
 		},
 		Plugins: map[string]goplugin.Plugin{
-			plugin.BrokerPluginName: &plugin.BrokerPlugin{},
+			plugin.BrokerPluginName: &plugin.BrokerPlugin{
+				HostCallbacks: hostCallbacks,
+			},
 		},
 		Reattach: &goplugin.ReattachConfig{
 			Protocol:        goplugin.ProtocolNetRPC,
