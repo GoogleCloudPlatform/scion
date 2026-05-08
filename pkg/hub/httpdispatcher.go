@@ -1011,6 +1011,15 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		}
 	}
 
+	// In dev-auth mode, inject the dev token so the in-container scion CLI can
+	// authenticate to the Hub. buildCreateRequest does the same for the
+	// create+start path; without it here, agents started via the start-existing
+	// path (e.g. `scion start <created-agent>`, broker re-dispatch on resume)
+	// reach the Hub with no usable credential and every hub call returns 401.
+	if d.devAuthToken != "" {
+		resolvedEnv["SCION_DEV_TOKEN"] = d.devAuthToken
+	}
+
 	if d.debug {
 		configEnvCount := 0
 		if agent.AppliedConfig != nil {

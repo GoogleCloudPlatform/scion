@@ -1659,6 +1659,101 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_DevTokenMergesWithExistingEnv(t
 	}
 }
 
+// TestHTTPAgentDispatcher_DispatchAgentStart_InjectsDevToken verifies that
+// DispatchAgentStart injects SCION_DEV_TOKEN into resolvedEnv when dev-auth
+// mode is configured, so agents started via the start-existing path (e.g.
+// `scion start <created-agent>`) auth to the Hub the same way as agents
+// started through the create+start path (which already injects the token via
+// buildCreateRequest).
+func TestHTTPAgentDispatcher_DispatchAgentStart_InjectsDevToken(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       "broker-1",
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetDevAuthToken("my-dev-token")
+
+	agent := &store.Agent{
+		ID:              "agent-1",
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		GroveID:         "grove-1",
+		RuntimeBrokerID: "broker-1",
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+			Env: map[string]string{
+				"EXISTING_VAR": "existing-value",
+			},
+		},
+	}
+
+	if err := dispatcher.DispatchAgentStart(ctx, agent, ""); err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+
+	if !mockClient.startCalled {
+		t.Fatal("expected StartAgent to be called")
+	}
+	if mockClient.lastResolvedEnv["SCION_DEV_TOKEN"] != "my-dev-token" {
+		t.Errorf("expected SCION_DEV_TOKEN='my-dev-token', got %q",
+			mockClient.lastResolvedEnv["SCION_DEV_TOKEN"])
+	}
+	// Existing env should still be present alongside the dev token.
+	if mockClient.lastResolvedEnv["EXISTING_VAR"] != "existing-value" {
+		t.Errorf("expected EXISTING_VAR='existing-value', got %q",
+			mockClient.lastResolvedEnv["EXISTING_VAR"])
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentStart_NoDevToken verifies that
+// SCION_DEV_TOKEN is not injected when dev-auth mode is not configured.
+func TestHTTPAgentDispatcher_DispatchAgentStart_NoDevToken(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       "broker-1",
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	// Do NOT set dev auth token.
+
+	agent := &store.Agent{
+		ID:              "agent-1",
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		GroveID:         "grove-1",
+		RuntimeBrokerID: "broker-1",
+	}
+
+	if err := dispatcher.DispatchAgentStart(ctx, agent, ""); err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+
+	if _, exists := mockClient.lastResolvedEnv["SCION_DEV_TOKEN"]; exists {
+		t.Error("expected SCION_DEV_TOKEN NOT to be present when devAuthToken is empty")
+	}
+}
+
 func TestHTTPAgentDispatcher_DispatchAgentStart_AppliesBrokerResponse(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
