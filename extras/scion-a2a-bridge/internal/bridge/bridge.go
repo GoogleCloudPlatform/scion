@@ -531,7 +531,9 @@ func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMes
 			return
 		}
 
-		b.dispatchToWaiter(taskID, msg)
+		if b.dispatchToWaiter(taskID, msg) {
+			return
+		}
 		b.tasksMu.RLock()
 		_, isActive := b.activeTasks[taskID]
 		b.tasksMu.RUnlock()
@@ -559,7 +561,9 @@ func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMes
 	b.log.Debug("correlating broker message by agent slug (no a2aTaskId)",
 		"agent", agentSlug, "grove", groveID, "active_tasks", len(taskIDs))
 	for _, taskID := range taskIDs {
-		b.dispatchToWaiter(taskID, msg)
+		if b.dispatchToWaiter(taskID, msg) {
+			continue
+		}
 		b.tasksMu.RLock()
 		_, isActive := b.activeTasks[taskID]
 		b.tasksMu.RUnlock()
@@ -570,22 +574,25 @@ func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMes
 }
 
 // dispatchToWaiter sends a message to a blocking waiter for the given taskID.
-// State-change messages are skipped so the actual reply lands in the buffer.
-func (b *Bridge) dispatchToWaiter(taskID string, msg *messages.StructuredMessage) {
-	if msg.Type == messages.TypeStateChange {
-		return
-	}
+// Returns true if a waiter exists and handled the message (callers should skip
+// further dispatch). State-change messages are skipped so the actual reply
+// lands in the buffer.
+func (b *Bridge) dispatchToWaiter(taskID string, msg *messages.StructuredMessage) bool {
 	b.mu.RLock()
 	w, ok := b.waiters[taskID]
 	b.mu.RUnlock()
 	if !ok {
-		return
+		return false
+	}
+	if msg.Type == messages.TypeStateChange {
+		return true
 	}
 	select {
 	case w.ch <- msg:
 	default:
 		b.log.Debug("dropping duplicate response for blocking waiter", "task_id", taskID)
 	}
+	return true
 }
 
 // dispatchToActiveTask routes a broker message to streaming/push subscribers for a task.
