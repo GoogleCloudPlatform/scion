@@ -302,6 +302,10 @@ func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextI
 	}
 
 	// Blocking mode: set up per-task waiter.
+	// Also register in agentTasks so the slug-based fallback correlation works
+	// when broker messages arrive without a2aTaskId metadata.
+	aKey := agentKey(agentCtx.GroveID, agentCtx.AgentSlug)
+	b.registerActiveTask(taskID, aKey)
 	responseCh := make(chan *messages.StructuredMessage, 1)
 	b.addWaiter(taskID, &waiter{
 		ch:        responseCh,
@@ -309,6 +313,7 @@ func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextI
 		groveID:   agentCtx.GroveID,
 	})
 	defer b.removeWaiter(taskID)
+	defer b.unregisterActiveTask(taskID, aKey)
 
 	if err := b.hubClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false); err != nil {
 		if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
