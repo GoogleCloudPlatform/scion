@@ -257,11 +257,7 @@ export class ScionGCPServiceAccountList extends LitElement {
       return;
     }
 
-    const projectId = this.dialogProjectId.trim();
-    if (!projectId) {
-      this.dialogError = 'GCP project ID is required';
-      return;
-    }
+    const projectId = this.dialogProjectId.trim() || this.extractProjectFromEmail(email);
 
     this.dialogLoading = true;
     this.dialogError = null;
@@ -683,6 +679,10 @@ export class ScionGCPServiceAccountList extends LitElement {
             value=${this.dialogEmail}
             @sl-input=${(e: Event) => {
               this.dialogEmail = (e.target as HTMLInputElement).value;
+              const inferred = this.extractProjectFromEmail(this.dialogEmail);
+              if (inferred) {
+                this.dialogProjectId = inferred;
+              }
             }}
             required
           ></sl-input>
@@ -691,10 +691,10 @@ export class ScionGCPServiceAccountList extends LitElement {
             label="GCP Project ID"
             placeholder="e.g. my-project-123"
             value=${this.dialogProjectId}
+            help-text=${this.extractProjectFromEmail(this.dialogEmail) ? 'Auto-detected from service account email' : ''}
             @sl-input=${(e: Event) => {
               this.dialogProjectId = (e.target as HTMLInputElement).value;
             }}
-            required
           ></sl-input>
 
           <sl-input

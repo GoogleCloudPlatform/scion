@@ -78,7 +78,7 @@ func TestCreateGCPServiceAccount_MissingEmail(t *testing.T) {
 	assert.Contains(t, errResp.Error.Message, "email")
 }
 
-func TestCreateGCPServiceAccount_MissingProjectID(t *testing.T) {
+func TestCreateGCPServiceAccount_InferProjectIDFromEmail(t *testing.T) {
 	srv, s := testServer(t)
 	groveID := createTestGroveForSA(t, srv, s)
 
@@ -88,26 +88,28 @@ func TestCreateGCPServiceAccount_MissingProjectID(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost,
 		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", groveID), body)
-	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var errResp ErrorResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
-	assert.Equal(t, ErrCodeInvalidRequest, errResp.Error.Code)
-	assert.Contains(t, errResp.Error.Message, "projectId")
+	var sa store.GCPServiceAccount
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sa))
+	assert.Equal(t, "my-project", sa.ProjectID)
 }
 
-func TestCreateGCPServiceAccount_MissingBothFields(t *testing.T) {
+func TestCreateGCPServiceAccount_CannotInferProjectID(t *testing.T) {
 	srv, s := testServer(t)
 	groveID := createTestGroveForSA(t, srv, s)
 
+	body := map[string]string{
+		"email": "agent@example.com",
+	}
+
 	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", groveID), map[string]string{})
+		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", groveID), body)
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 
 	var errResp ErrorResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
 	assert.Equal(t, ErrCodeInvalidRequest, errResp.Error.Code)
-	assert.Contains(t, errResp.Error.Message, "email")
 	assert.Contains(t, errResp.Error.Message, "projectId")
 }
 
@@ -778,4 +780,20 @@ func TestGCPSA_GroveOwnerCanAddMembers(t *testing.T) {
 		fmt.Sprintf("/api/v1/groups/%s/members", membersGroup.ID), body)
 	require.Equal(t, http.StatusCreated, rec.Code,
 		"grove owner should be able to add members to grove group; got: %s", rec.Body.String())
+}
+
+func TestProjectIDFromServiceAccountEmail(t *testing.T) {
+	tests := []struct {
+		email string
+		want  string
+	}{
+		{"agent@my-project.iam.gserviceaccount.com", "my-project"},
+		{"fold-run-infra@foldrun-ptone-argolis.iam.gserviceaccount.com", "foldrun-ptone-argolis"},
+		{"sa@example.com", ""},
+		{"no-at-sign", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, projectIDFromServiceAccountEmail(tt.email), "email=%q", tt.email)
+	}
 }

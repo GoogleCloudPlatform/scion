@@ -113,21 +113,17 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	if req.Email == "" || req.ProjectID == "" {
-		slog.Debug("GCP SA create: missing required fields",
-			"grove_id", groveID,
-			"has_email", req.Email != "",
-			"has_project_id", req.ProjectID != "",
-		)
-		missing := []string{}
-		if req.Email == "" {
-			missing = append(missing, "email")
-		}
-		if req.ProjectID == "" {
-			missing = append(missing, "projectId")
-		}
+	if req.Email == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "missing required field(s): email", nil)
+		return
+	}
+
+	if req.ProjectID == "" {
+		req.ProjectID = projectIDFromServiceAccountEmail(req.Email)
+	}
+	if req.ProjectID == "" {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-			fmt.Sprintf("missing required field(s): %s", strings.Join(missing, ", ")), nil)
+			"could not infer projectId from email; please provide it explicitly", nil)
 		return
 	}
 
@@ -459,6 +455,21 @@ func slugifyAccountID(s string) string {
 	// Trim leading/trailing hyphens
 	result = strings.Trim(result, "-")
 	return result
+}
+
+// projectIDFromServiceAccountEmail extracts the GCP project ID from a
+// service account email of the form <name>@<project>.iam.gserviceaccount.com.
+func projectIDFromServiceAccountEmail(email string) string {
+	at := strings.IndexByte(email, '@')
+	if at < 0 {
+		return ""
+	}
+	domain := email[at+1:]
+	suffix := ".iam.gserviceaccount.com"
+	if !strings.HasSuffix(domain, suffix) {
+		return ""
+	}
+	return domain[:len(domain)-len(suffix)]
 }
 
 // generateRandomAccountID generates a random SA account ID: scion-{8-hex-chars}.
