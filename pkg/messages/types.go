@@ -29,6 +29,15 @@ const MaxMsgSize = 64 * 1024 // 64KB
 // Maximum number of attachments.
 const MaxAttachments = 10
 
+// Maximum number of metadata entries.
+const MaxMetadataEntries = 32
+
+// Maximum size of a single metadata key in bytes.
+const MaxMetadataKeySize = 256
+
+// Maximum size of a single metadata value in bytes.
+const MaxMetadataValueSize = 4 * 1024 // 4KB
+
 // Message type constants (closed enum).
 const (
 	TypeInstruction    = "instruction"
@@ -47,26 +56,27 @@ var validTypes = map[string]bool{
 
 // StructuredMessage represents a formatted Scion message.
 type StructuredMessage struct {
-	Version     int      `json:"version"`
-	Timestamp   string   `json:"timestamp"`
-	Sender      string   `json:"sender"`
-	SenderID    string   `json:"sender_id,omitempty"`
-	Recipient   string   `json:"recipient"`
-	RecipientID string   `json:"recipient_id,omitempty"`
-	Msg         string   `json:"msg"`
-	Type        string   `json:"type"`
-	Plain       bool     `json:"plain,omitempty"`
-	Raw         bool     `json:"raw,omitempty"`
-	Urgent      bool     `json:"urgent,omitempty"`
-	Broadcasted bool     `json:"broadcasted,omitempty"`
-	Status      string   `json:"status,omitempty"`
-	Attachments []string `json:"attachments,omitempty"`
+	Version     int               `json:"version"`
+	Timestamp   string            `json:"timestamp"`
+	Sender      string            `json:"sender"`
+	SenderID    string            `json:"sender_id,omitempty"`
+	Recipient   string            `json:"recipient"`
+	RecipientID string            `json:"recipient_id,omitempty"`
+	Msg         string            `json:"msg"`
+	Type        string            `json:"type"`
+	Plain       bool              `json:"plain,omitempty"`
+	Raw         bool              `json:"raw,omitempty"`
+	Urgent      bool              `json:"urgent,omitempty"`
+	Broadcasted bool              `json:"broadcasted,omitempty"`
+	Status      string            `json:"status,omitempty"`
+	Attachments []string          `json:"attachments,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
 // ValidateType returns an error if the message type is not in the closed enum.
 func ValidateType(t string) error {
 	if !validTypes[t] {
-		return fmt.Errorf("invalid message type %q: must be one of: instruction, input-needed, state-change", t)
+		return fmt.Errorf("invalid message type %q: must be one of: instruction, input-needed, state-change, assistant-reply", t)
 	}
 	return nil
 }
@@ -93,6 +103,17 @@ func (m *StructuredMessage) Validate() error {
 	}
 	if len(m.Attachments) > MaxAttachments {
 		return fmt.Errorf("too many attachments: %d (max %d)", len(m.Attachments), MaxAttachments)
+	}
+	if len(m.Metadata) > MaxMetadataEntries {
+		return fmt.Errorf("too many metadata entries: %d (max %d)", len(m.Metadata), MaxMetadataEntries)
+	}
+	for k, v := range m.Metadata {
+		if len(k) > MaxMetadataKeySize {
+			return fmt.Errorf("metadata key %q... exceeds maximum size of %d bytes", k[:32], MaxMetadataKeySize)
+		}
+		if len(v) > MaxMetadataValueSize {
+			return fmt.Errorf("metadata value for key %q exceeds maximum size of %d bytes", k, MaxMetadataValueSize)
+		}
 	}
 	return nil
 }
