@@ -2857,6 +2857,7 @@ type CreateGroveRequest struct {
 	WorkspaceMode string            `json:"workspaceMode,omitempty"` // "shared" or "per-agent" (default); only meaningful when gitRemote is set
 	Visibility    string            `json:"visibility,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
+	GitHubToken   string            `json:"githubToken,omitempty"`
 }
 
 type RegisterGroveRequest struct {
@@ -3115,6 +3116,28 @@ func (s *Server) createGrove(w http.ResponseWriter, r *http.Request) {
 		s.autoAssociateGitHubInstallation(ctx, grove)
 	}
 
+	// Save the GitHub token as a grove secret if provided.
+	// This must happen before cloneSharedWorkspaceGrove so that
+	// resolveCloneToken can find it during the initial clone.
+	if req.GitHubToken != "" && s.secretBackend != nil {
+		tokenInput := &secret.SetSecretInput{
+			Name:          "GITHUB_TOKEN",
+			Value:         req.GitHubToken,
+			SecretType:    secret.TypeEnvironment,
+			Target:        "GITHUB_TOKEN",
+			Scope:         secret.ScopeGrove,
+			ScopeID:       grove.ID,
+			Description:   "GitHub token for repository access",
+			InjectionMode: "as_needed",
+			CreatedBy:     grove.CreatedBy,
+			UpdatedBy:     grove.CreatedBy,
+		}
+		if _, _, err := s.secretBackend.Set(ctx, tokenInput); err != nil {
+			slog.Warn("failed to save GitHub token as grove secret",
+				"grove_id", grove.ID, "error", err)
+		}
+	}
+
 	// Initialize filesystem workspace for hub-native groves and shared-workspace git groves.
 	if grove.IsSharedWorkspace() {
 		// Shared-workspace git grove: clone the repository into the workspace.
@@ -3122,6 +3145,12 @@ func (s *Server) createGrove(w http.ResponseWriter, r *http.Request) {
 		if err := s.cloneSharedWorkspaceGrove(ctx, grove); err != nil {
 			slog.Error("shared workspace clone failed, rolling back grove creation",
 				"grove_id", grove.ID, "slug", grove.Slug, "error", err)
+			if req.GitHubToken != "" && s.secretBackend != nil {
+				if delErr := s.secretBackend.Delete(ctx, "GITHUB_TOKEN", secret.ScopeGrove, grove.ID); delErr != nil {
+					slog.Warn("failed to clean up grove secret after clone failure",
+						"grove_id", grove.ID, "error", delErr)
+				}
+			}
 			if delErr := s.store.DeleteGrove(ctx, grove.ID); delErr != nil {
 				slog.Warn("failed to clean up grove record after clone failure",
 					"grove_id", grove.ID, "error", delErr)

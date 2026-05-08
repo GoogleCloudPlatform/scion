@@ -70,6 +70,9 @@ export class ScionPageGroveCreate extends LitElement {
   private gitWorkspaceMode: GitWorkspaceMode = 'per-agent';
 
   @state()
+  private githubToken = '';
+
+  @state()
   private githubAppUrl: string | null = null;
 
   override connectedCallback(): void {
@@ -394,6 +397,9 @@ export class ScionPageGroveCreate extends LitElement {
           body.workspaceMode = 'shared';
         }
         body.labels = labels;
+        if (this.githubToken.trim()) {
+          body.githubToken = this.githubToken.trim();
+        }
       }
 
       const response = await fetch('/api/v1/groves', {
@@ -499,6 +505,23 @@ export class ScionPageGroveCreate extends LitElement {
                       </div>
                     `
                   : nothing}
+
+                <div class="form-field">
+                  <label for="githubToken">GitHub Token</label>
+                  <sl-input
+                    id="githubToken"
+                    type="password"
+                    placeholder="ghp_..."
+                    .value=${this.githubToken}
+                    @sl-input=${(e: Event) => {
+                      this.githubToken = (e.target as HTMLElement & { value: string }).value;
+                    }}
+                    password-toggle
+                  ></sl-input>
+                  <div class="hint">
+                    Optional. A personal access token for cloning private repositories. Saved as a grove secret.
+                  </div>
+                </div>
 
                 ${this.existingGrovesForRemote.length > 0
                   ? html`
