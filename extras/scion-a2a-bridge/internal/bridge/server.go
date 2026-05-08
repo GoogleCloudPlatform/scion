@@ -124,9 +124,6 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.Hub.User == "" {
 		return fmt.Errorf("hub.user is required")
 	}
-	if strings.ContainsAny(cfg.Hub.User, ".:") {
-		return fmt.Errorf("hub.user %q must not contain '.' or ':' (used in broker topic patterns)", cfg.Hub.User)
-	}
 	if cfg.Auth.Scheme != "" && cfg.Auth.Scheme != "apiKey" && cfg.Auth.Scheme != "bearer" && cfg.Auth.Scheme != "none" {
 		return fmt.Errorf("unsupported auth.scheme: %q (supported: apiKey, bearer, none)", cfg.Auth.Scheme)
 	}
