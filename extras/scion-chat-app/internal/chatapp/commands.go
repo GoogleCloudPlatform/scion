@@ -1036,6 +1036,12 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 		if link.DefaultAgent == "" {
 			return textResponse(event, fmt.Sprintf("Agent `%s` not found: %v", agentSlug, err)), nil
 		}
+		r.log.Warn("agent slug lookup failed, falling back to default agent",
+			"original_slug", agentSlug,
+			"default_agent", link.DefaultAgent,
+			"grove_id", link.GroveID,
+			"error", err,
+		)
 		agentSlug = link.DefaultAgent
 		messageText = strings.Join(remaining, " ")
 		agent, err = client.GroveAgents(link.GroveID).Get(ctx, agentSlug)

@@ -4564,6 +4564,17 @@ func (s *Server) handleGroveAgentAction(w http.ResponseWriter, r *http.Request, 
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 			decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionAttach)
 			if !decision.Allowed {
+				slog.Warn("agent authz check failed",
+					"agent_id", agent.ID,
+					"agent_slug", agent.Slug,
+					"agent_owner_id", agent.OwnerID,
+					"agent_created_by", agent.CreatedBy,
+					"user_id", userIdent.ID(),
+					"user_email", userIdent.Email(),
+					"user_role", userIdent.Role(),
+					"action", action,
+					"decision_reason", decision.Reason,
+				)
 				writeError(w, http.StatusForbidden, ErrCodeForbidden,
 					"Only the agent's creator can interact with it", nil)
 				return
@@ -8306,6 +8317,13 @@ func (s *Server) handleExistingAgent(
 	if existingAgent == nil {
 		return existingAgentNone
 	}
+	s.agentLifecycleLog.Info("handleExistingAgent: found existing agent",
+		"slug", existingAgent.Slug,
+		"existing_agent_id", existingAgent.ID,
+		"existing_owner_id", existingAgent.OwnerID,
+		"existing_phase", existingAgent.Phase,
+		"caller_id", createdBy,
+	)
 	cleanupMode := req.CleanupMode
 	if cleanupMode == "" {
 		cleanupMode = "strict"
