@@ -31,7 +31,7 @@ var (
 	policyTestUserUID  = uuid.MustParse("10000000-0000-0000-0000-000000000010")
 	policyTestUser2UID = uuid.MustParse("10000000-0000-0000-0000-000000000020")
 	policyTestAgentUID = uuid.MustParse("20000000-0000-0000-0000-000000000010")
-	policyTestGroveUID = uuid.MustParse("30000000-0000-0000-0000-000000000010")
+	policyTestProjectUID = uuid.MustParse("30000000-0000-0000-0000-000000000010")
 	policyTestGroupUID = uuid.MustParse("40000000-0000-0000-0000-000000000010")
 )
 
@@ -60,11 +60,11 @@ func newTestPolicyStore(t *testing.T) *PolicyStore {
 		Save(ctx)
 	require.NoError(t, err)
 
-	// Create test grove
-	grove, err := client.Grove.Create().
-		SetID(policyTestGroveUID).
-		SetName("test-grove").
-		SetSlug("test-grove").
+	// Create test project
+	project, err := client.Project.Create().
+		SetID(policyTestProjectUID).
+		SetName("test-project").
+		SetSlug("test-project").
 		Save(ctx)
 	require.NoError(t, err)
 
@@ -73,7 +73,7 @@ func newTestPolicyStore(t *testing.T) *PolicyStore {
 		SetID(policyTestAgentUID).
 		SetName("test-agent").
 		SetSlug("test-agent").
-		SetGrove(grove).
+		SetProject(project).
 		Save(ctx)
 	require.NoError(t, err)
 
@@ -119,7 +119,7 @@ func TestGetPolicy(t *testing.T) {
 		ID:           id,
 		Name:         "Test Policy",
 		ScopeType:    "grove",
-		ScopeID:      policyTestGroveUID.String(),
+		ScopeID:      policyTestProjectUID.String(),
 		ResourceType: "agent",
 		Actions:      []string{"read", "update"},
 		Effect:       "allow",
@@ -131,7 +131,7 @@ func TestGetPolicy(t *testing.T) {
 	assert.Equal(t, id, got.ID)
 	assert.Equal(t, "Test Policy", got.Name)
 	assert.Equal(t, "grove", got.ScopeType)
-	assert.Equal(t, policyTestGroveUID.String(), got.ScopeID)
+	assert.Equal(t, policyTestProjectUID.String(), got.ScopeID)
 	assert.Equal(t, []string{"read", "update"}, got.Actions)
 }
 
@@ -224,8 +224,8 @@ func TestListPolicies_Filter(t *testing.T) {
 		ResourceType: "*", Actions: []string{"*"}, Effect: "deny",
 	}))
 	require.NoError(t, ps.CreatePolicy(ctx, &store.Policy{
-		ID: uuid.New().String(), Name: "Grove Allow", ScopeType: "grove",
-		ScopeID: policyTestGroveUID.String(), ResourceType: "agent",
+		ID: uuid.New().String(), Name: "Project Allow", ScopeType: "grove",
+		ScopeID: policyTestProjectUID.String(), ResourceType: "agent",
 		Actions: []string{"read"}, Effect: "allow",
 	}))
 
@@ -391,7 +391,7 @@ func TestGetPoliciesForPrincipals_BulkQuery(t *testing.T) {
 	}
 	p2 := &store.Policy{
 		ID: uuid.New().String(), Name: "Group Policy", ScopeType: "grove",
-		ScopeID: policyTestGroveUID.String(), ResourceType: "agent",
+		ScopeID: policyTestProjectUID.String(), ResourceType: "agent",
 		Actions: []string{"update"}, Effect: "allow", Priority: 10,
 	}
 	p3 := &store.Policy{
@@ -422,7 +422,7 @@ func TestGetPoliciesForPrincipals_BulkQuery(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, policies, 2)
 
-	// Results are ordered by scope_type alphabetically (grove < hub) then priority
+	// Results are ordered by scope_type alphabetically (project < hub) then priority
 	// The evaluatePolicies function handles semantic ordering internally
 	scopeTypes := map[string]bool{}
 	for _, p := range policies {

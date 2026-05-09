@@ -12,32 +12,32 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/grove"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/google/uuid"
 )
 
-// GroveUpdate is the builder for updating Grove entities.
-type GroveUpdate struct {
+// ProjectUpdate is the builder for updating Project entities.
+type ProjectUpdate struct {
 	config
 	hooks    []Hook
-	mutation *GroveMutation
+	mutation *ProjectMutation
 }
 
-// Where appends a list predicates to the GroveUpdate builder.
-func (_u *GroveUpdate) Where(ps ...predicate.Grove) *GroveUpdate {
+// Where appends a list predicates to the ProjectUpdate builder.
+func (_u *ProjectUpdate) Where(ps ...predicate.Project) *ProjectUpdate {
 	_u.mutation.Where(ps...)
 	return _u
 }
 
 // SetName sets the "name" field.
-func (_u *GroveUpdate) SetName(v string) *GroveUpdate {
+func (_u *ProjectUpdate) SetName(v string) *ProjectUpdate {
 	_u.mutation.SetName(v)
 	return _u
 }
 
 // SetNillableName sets the "name" field if the given value is not nil.
-func (_u *GroveUpdate) SetNillableName(v *string) *GroveUpdate {
+func (_u *ProjectUpdate) SetNillableName(v *string) *ProjectUpdate {
 	if v != nil {
 		_u.SetName(*v)
 	}
@@ -45,13 +45,13 @@ func (_u *GroveUpdate) SetNillableName(v *string) *GroveUpdate {
 }
 
 // SetSlug sets the "slug" field.
-func (_u *GroveUpdate) SetSlug(v string) *GroveUpdate {
+func (_u *ProjectUpdate) SetSlug(v string) *ProjectUpdate {
 	_u.mutation.SetSlug(v)
 	return _u
 }
 
 // SetNillableSlug sets the "slug" field if the given value is not nil.
-func (_u *GroveUpdate) SetNillableSlug(v *string) *GroveUpdate {
+func (_u *ProjectUpdate) SetNillableSlug(v *string) *ProjectUpdate {
 	if v != nil {
 		_u.SetSlug(*v)
 	}
@@ -59,13 +59,13 @@ func (_u *GroveUpdate) SetNillableSlug(v *string) *GroveUpdate {
 }
 
 // SetGitRemote sets the "git_remote" field.
-func (_u *GroveUpdate) SetGitRemote(v string) *GroveUpdate {
+func (_u *ProjectUpdate) SetGitRemote(v string) *ProjectUpdate {
 	_u.mutation.SetGitRemote(v)
 	return _u
 }
 
 // SetNillableGitRemote sets the "git_remote" field if the given value is not nil.
-func (_u *GroveUpdate) SetNillableGitRemote(v *string) *GroveUpdate {
+func (_u *ProjectUpdate) SetNillableGitRemote(v *string) *ProjectUpdate {
 	if v != nil {
 		_u.SetGitRemote(*v)
 	}
@@ -73,49 +73,49 @@ func (_u *GroveUpdate) SetNillableGitRemote(v *string) *GroveUpdate {
 }
 
 // ClearGitRemote clears the value of the "git_remote" field.
-func (_u *GroveUpdate) ClearGitRemote() *GroveUpdate {
+func (_u *ProjectUpdate) ClearGitRemote() *ProjectUpdate {
 	_u.mutation.ClearGitRemote()
 	return _u
 }
 
 // SetLabels sets the "labels" field.
-func (_u *GroveUpdate) SetLabels(v map[string]string) *GroveUpdate {
+func (_u *ProjectUpdate) SetLabels(v map[string]string) *ProjectUpdate {
 	_u.mutation.SetLabels(v)
 	return _u
 }
 
 // ClearLabels clears the value of the "labels" field.
-func (_u *GroveUpdate) ClearLabels() *GroveUpdate {
+func (_u *ProjectUpdate) ClearLabels() *ProjectUpdate {
 	_u.mutation.ClearLabels()
 	return _u
 }
 
 // SetAnnotations sets the "annotations" field.
-func (_u *GroveUpdate) SetAnnotations(v map[string]string) *GroveUpdate {
+func (_u *ProjectUpdate) SetAnnotations(v map[string]string) *ProjectUpdate {
 	_u.mutation.SetAnnotations(v)
 	return _u
 }
 
 // ClearAnnotations clears the value of the "annotations" field.
-func (_u *GroveUpdate) ClearAnnotations() *GroveUpdate {
+func (_u *ProjectUpdate) ClearAnnotations() *ProjectUpdate {
 	_u.mutation.ClearAnnotations()
 	return _u
 }
 
 // SetUpdated sets the "updated" field.
-func (_u *GroveUpdate) SetUpdated(v time.Time) *GroveUpdate {
+func (_u *ProjectUpdate) SetUpdated(v time.Time) *ProjectUpdate {
 	_u.mutation.SetUpdated(v)
 	return _u
 }
 
 // SetCreatedBy sets the "created_by" field.
-func (_u *GroveUpdate) SetCreatedBy(v string) *GroveUpdate {
+func (_u *ProjectUpdate) SetCreatedBy(v string) *ProjectUpdate {
 	_u.mutation.SetCreatedBy(v)
 	return _u
 }
 
 // SetNillableCreatedBy sets the "created_by" field if the given value is not nil.
-func (_u *GroveUpdate) SetNillableCreatedBy(v *string) *GroveUpdate {
+func (_u *ProjectUpdate) SetNillableCreatedBy(v *string) *ProjectUpdate {
 	if v != nil {
 		_u.SetCreatedBy(*v)
 	}
@@ -123,19 +123,19 @@ func (_u *GroveUpdate) SetNillableCreatedBy(v *string) *GroveUpdate {
 }
 
 // ClearCreatedBy clears the value of the "created_by" field.
-func (_u *GroveUpdate) ClearCreatedBy() *GroveUpdate {
+func (_u *ProjectUpdate) ClearCreatedBy() *ProjectUpdate {
 	_u.mutation.ClearCreatedBy()
 	return _u
 }
 
 // SetOwnerID sets the "owner_id" field.
-func (_u *GroveUpdate) SetOwnerID(v string) *GroveUpdate {
+func (_u *ProjectUpdate) SetOwnerID(v string) *ProjectUpdate {
 	_u.mutation.SetOwnerID(v)
 	return _u
 }
 
 // SetNillableOwnerID sets the "owner_id" field if the given value is not nil.
-func (_u *GroveUpdate) SetNillableOwnerID(v *string) *GroveUpdate {
+func (_u *ProjectUpdate) SetNillableOwnerID(v *string) *ProjectUpdate {
 	if v != nil {
 		_u.SetOwnerID(*v)
 	}
@@ -143,19 +143,19 @@ func (_u *GroveUpdate) SetNillableOwnerID(v *string) *GroveUpdate {
 }
 
 // ClearOwnerID clears the value of the "owner_id" field.
-func (_u *GroveUpdate) ClearOwnerID() *GroveUpdate {
+func (_u *ProjectUpdate) ClearOwnerID() *ProjectUpdate {
 	_u.mutation.ClearOwnerID()
 	return _u
 }
 
 // SetVisibility sets the "visibility" field.
-func (_u *GroveUpdate) SetVisibility(v string) *GroveUpdate {
+func (_u *ProjectUpdate) SetVisibility(v string) *ProjectUpdate {
 	_u.mutation.SetVisibility(v)
 	return _u
 }
 
 // SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *GroveUpdate) SetNillableVisibility(v *string) *GroveUpdate {
+func (_u *ProjectUpdate) SetNillableVisibility(v *string) *ProjectUpdate {
 	if v != nil {
 		_u.SetVisibility(*v)
 	}
@@ -163,13 +163,13 @@ func (_u *GroveUpdate) SetNillableVisibility(v *string) *GroveUpdate {
 }
 
 // AddAgentIDs adds the "agents" edge to the Agent entity by IDs.
-func (_u *GroveUpdate) AddAgentIDs(ids ...uuid.UUID) *GroveUpdate {
+func (_u *ProjectUpdate) AddAgentIDs(ids ...uuid.UUID) *ProjectUpdate {
 	_u.mutation.AddAgentIDs(ids...)
 	return _u
 }
 
 // AddAgents adds the "agents" edges to the Agent entity.
-func (_u *GroveUpdate) AddAgents(v ...*Agent) *GroveUpdate {
+func (_u *ProjectUpdate) AddAgents(v ...*Agent) *ProjectUpdate {
 	ids := make([]uuid.UUID, len(v))
 	for i := range v {
 		ids[i] = v[i].ID
@@ -177,25 +177,25 @@ func (_u *GroveUpdate) AddAgents(v ...*Agent) *GroveUpdate {
 	return _u.AddAgentIDs(ids...)
 }
 
-// Mutation returns the GroveMutation object of the builder.
-func (_u *GroveUpdate) Mutation() *GroveMutation {
+// Mutation returns the ProjectMutation object of the builder.
+func (_u *ProjectUpdate) Mutation() *ProjectMutation {
 	return _u.mutation
 }
 
 // ClearAgents clears all "agents" edges to the Agent entity.
-func (_u *GroveUpdate) ClearAgents() *GroveUpdate {
+func (_u *ProjectUpdate) ClearAgents() *ProjectUpdate {
 	_u.mutation.ClearAgents()
 	return _u
 }
 
 // RemoveAgentIDs removes the "agents" edge to Agent entities by IDs.
-func (_u *GroveUpdate) RemoveAgentIDs(ids ...uuid.UUID) *GroveUpdate {
+func (_u *ProjectUpdate) RemoveAgentIDs(ids ...uuid.UUID) *ProjectUpdate {
 	_u.mutation.RemoveAgentIDs(ids...)
 	return _u
 }
 
 // RemoveAgents removes "agents" edges to Agent entities.
-func (_u *GroveUpdate) RemoveAgents(v ...*Agent) *GroveUpdate {
+func (_u *ProjectUpdate) RemoveAgents(v ...*Agent) *ProjectUpdate {
 	ids := make([]uuid.UUID, len(v))
 	for i := range v {
 		ids[i] = v[i].ID
@@ -204,13 +204,13 @@ func (_u *GroveUpdate) RemoveAgents(v ...*Agent) *GroveUpdate {
 }
 
 // Save executes the query and returns the number of nodes affected by the update operation.
-func (_u *GroveUpdate) Save(ctx context.Context) (int, error) {
+func (_u *ProjectUpdate) Save(ctx context.Context) (int, error) {
 	_u.defaults()
 	return withHooks(ctx, _u.sqlSave, _u.mutation, _u.hooks)
 }
 
 // SaveX is like Save, but panics if an error occurs.
-func (_u *GroveUpdate) SaveX(ctx context.Context) int {
+func (_u *ProjectUpdate) SaveX(ctx context.Context) int {
 	affected, err := _u.Save(ctx)
 	if err != nil {
 		panic(err)
@@ -219,46 +219,46 @@ func (_u *GroveUpdate) SaveX(ctx context.Context) int {
 }
 
 // Exec executes the query.
-func (_u *GroveUpdate) Exec(ctx context.Context) error {
+func (_u *ProjectUpdate) Exec(ctx context.Context) error {
 	_, err := _u.Save(ctx)
 	return err
 }
 
 // ExecX is like Exec, but panics if an error occurs.
-func (_u *GroveUpdate) ExecX(ctx context.Context) {
+func (_u *ProjectUpdate) ExecX(ctx context.Context) {
 	if err := _u.Exec(ctx); err != nil {
 		panic(err)
 	}
 }
 
 // defaults sets the default values of the builder before save.
-func (_u *GroveUpdate) defaults() {
+func (_u *ProjectUpdate) defaults() {
 	if _, ok := _u.mutation.Updated(); !ok {
-		v := grove.UpdateDefaultUpdated()
+		v := project.UpdateDefaultUpdated()
 		_u.mutation.SetUpdated(v)
 	}
 }
 
 // check runs all checks and user-defined validators on the builder.
-func (_u *GroveUpdate) check() error {
+func (_u *ProjectUpdate) check() error {
 	if v, ok := _u.mutation.Name(); ok {
-		if err := grove.NameValidator(v); err != nil {
-			return &ValidationError{Name: "name", err: fmt.Errorf(`ent: validator failed for field "Grove.name": %w`, err)}
+		if err := project.NameValidator(v); err != nil {
+			return &ValidationError{Name: "name", err: fmt.Errorf(`ent: validator failed for field "Project.name": %w`, err)}
 		}
 	}
 	if v, ok := _u.mutation.Slug(); ok {
-		if err := grove.SlugValidator(v); err != nil {
-			return &ValidationError{Name: "slug", err: fmt.Errorf(`ent: validator failed for field "Grove.slug": %w`, err)}
+		if err := project.SlugValidator(v); err != nil {
+			return &ValidationError{Name: "slug", err: fmt.Errorf(`ent: validator failed for field "Project.slug": %w`, err)}
 		}
 	}
 	return nil
 }
 
-func (_u *GroveUpdate) sqlSave(ctx context.Context) (_node int, err error) {
+func (_u *ProjectUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if err := _u.check(); err != nil {
 		return _node, err
 	}
-	_spec := sqlgraph.NewUpdateSpec(grove.Table, grove.Columns, sqlgraph.NewFieldSpec(grove.FieldID, field.TypeUUID))
+	_spec := sqlgraph.NewUpdateSpec(project.Table, project.Columns, sqlgraph.NewFieldSpec(project.FieldID, field.TypeUUID))
 	if ps := _u.mutation.predicates; len(ps) > 0 {
 		_spec.Predicate = func(selector *sql.Selector) {
 			for i := range ps {
@@ -267,53 +267,53 @@ func (_u *GroveUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 		}
 	}
 	if value, ok := _u.mutation.Name(); ok {
-		_spec.SetField(grove.FieldName, field.TypeString, value)
+		_spec.SetField(project.FieldName, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Slug(); ok {
-		_spec.SetField(grove.FieldSlug, field.TypeString, value)
+		_spec.SetField(project.FieldSlug, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.GitRemote(); ok {
-		_spec.SetField(grove.FieldGitRemote, field.TypeString, value)
+		_spec.SetField(project.FieldGitRemote, field.TypeString, value)
 	}
 	if _u.mutation.GitRemoteCleared() {
-		_spec.ClearField(grove.FieldGitRemote, field.TypeString)
+		_spec.ClearField(project.FieldGitRemote, field.TypeString)
 	}
 	if value, ok := _u.mutation.Labels(); ok {
-		_spec.SetField(grove.FieldLabels, field.TypeJSON, value)
+		_spec.SetField(project.FieldLabels, field.TypeJSON, value)
 	}
 	if _u.mutation.LabelsCleared() {
-		_spec.ClearField(grove.FieldLabels, field.TypeJSON)
+		_spec.ClearField(project.FieldLabels, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.Annotations(); ok {
-		_spec.SetField(grove.FieldAnnotations, field.TypeJSON, value)
+		_spec.SetField(project.FieldAnnotations, field.TypeJSON, value)
 	}
 	if _u.mutation.AnnotationsCleared() {
-		_spec.ClearField(grove.FieldAnnotations, field.TypeJSON)
+		_spec.ClearField(project.FieldAnnotations, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
-		_spec.SetField(grove.FieldUpdated, field.TypeTime, value)
+		_spec.SetField(project.FieldUpdated, field.TypeTime, value)
 	}
 	if value, ok := _u.mutation.CreatedBy(); ok {
-		_spec.SetField(grove.FieldCreatedBy, field.TypeString, value)
+		_spec.SetField(project.FieldCreatedBy, field.TypeString, value)
 	}
 	if _u.mutation.CreatedByCleared() {
-		_spec.ClearField(grove.FieldCreatedBy, field.TypeString)
+		_spec.ClearField(project.FieldCreatedBy, field.TypeString)
 	}
 	if value, ok := _u.mutation.OwnerID(); ok {
-		_spec.SetField(grove.FieldOwnerID, field.TypeString, value)
+		_spec.SetField(project.FieldOwnerID, field.TypeString, value)
 	}
 	if _u.mutation.OwnerIDCleared() {
-		_spec.ClearField(grove.FieldOwnerID, field.TypeString)
+		_spec.ClearField(project.FieldOwnerID, field.TypeString)
 	}
 	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(grove.FieldVisibility, field.TypeString, value)
+		_spec.SetField(project.FieldVisibility, field.TypeString, value)
 	}
 	if _u.mutation.AgentsCleared() {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2M,
 			Inverse: false,
-			Table:   grove.AgentsTable,
-			Columns: []string{grove.AgentsColumn},
+			Table:   project.AgentsTable,
+			Columns: []string{project.AgentsColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(agent.FieldID, field.TypeUUID),
@@ -325,8 +325,8 @@ func (_u *GroveUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2M,
 			Inverse: false,
-			Table:   grove.AgentsTable,
-			Columns: []string{grove.AgentsColumn},
+			Table:   project.AgentsTable,
+			Columns: []string{project.AgentsColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(agent.FieldID, field.TypeUUID),
@@ -341,8 +341,8 @@ func (_u *GroveUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2M,
 			Inverse: false,
-			Table:   grove.AgentsTable,
-			Columns: []string{grove.AgentsColumn},
+			Table:   project.AgentsTable,
+			Columns: []string{project.AgentsColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(agent.FieldID, field.TypeUUID),
@@ -355,7 +355,7 @@ func (_u *GroveUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
-			err = &NotFoundError{grove.Label}
+			err = &NotFoundError{project.Label}
 		} else if sqlgraph.IsConstraintError(err) {
 			err = &ConstraintError{msg: err.Error(), wrap: err}
 		}
@@ -365,22 +365,22 @@ func (_u *GroveUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	return _node, nil
 }
 
-// GroveUpdateOne is the builder for updating a single Grove entity.
-type GroveUpdateOne struct {
+// ProjectUpdateOne is the builder for updating a single Project entity.
+type ProjectUpdateOne struct {
 	config
 	fields   []string
 	hooks    []Hook
-	mutation *GroveMutation
+	mutation *ProjectMutation
 }
 
 // SetName sets the "name" field.
-func (_u *GroveUpdateOne) SetName(v string) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) SetName(v string) *ProjectUpdateOne {
 	_u.mutation.SetName(v)
 	return _u
 }
 
 // SetNillableName sets the "name" field if the given value is not nil.
-func (_u *GroveUpdateOne) SetNillableName(v *string) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) SetNillableName(v *string) *ProjectUpdateOne {
 	if v != nil {
 		_u.SetName(*v)
 	}
@@ -388,13 +388,13 @@ func (_u *GroveUpdateOne) SetNillableName(v *string) *GroveUpdateOne {
 }
 
 // SetSlug sets the "slug" field.
-func (_u *GroveUpdateOne) SetSlug(v string) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) SetSlug(v string) *ProjectUpdateOne {
 	_u.mutation.SetSlug(v)
 	return _u
 }
 
 // SetNillableSlug sets the "slug" field if the given value is not nil.
-func (_u *GroveUpdateOne) SetNillableSlug(v *string) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) SetNillableSlug(v *string) *ProjectUpdateOne {
 	if v != nil {
 		_u.SetSlug(*v)
 	}
@@ -402,13 +402,13 @@ func (_u *GroveUpdateOne) SetNillableSlug(v *string) *GroveUpdateOne {
 }
 
 // SetGitRemote sets the "git_remote" field.
-func (_u *GroveUpdateOne) SetGitRemote(v string) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) SetGitRemote(v string) *ProjectUpdateOne {
 	_u.mutation.SetGitRemote(v)
 	return _u
 }
 
 // SetNillableGitRemote sets the "git_remote" field if the given value is not nil.
-func (_u *GroveUpdateOne) SetNillableGitRemote(v *string) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) SetNillableGitRemote(v *string) *ProjectUpdateOne {
 	if v != nil {
 		_u.SetGitRemote(*v)
 	}
@@ -416,49 +416,49 @@ func (_u *GroveUpdateOne) SetNillableGitRemote(v *string) *GroveUpdateOne {
 }
 
 // ClearGitRemote clears the value of the "git_remote" field.
-func (_u *GroveUpdateOne) ClearGitRemote() *GroveUpdateOne {
+func (_u *ProjectUpdateOne) ClearGitRemote() *ProjectUpdateOne {
 	_u.mutation.ClearGitRemote()
 	return _u
 }
 
 // SetLabels sets the "labels" field.
-func (_u *GroveUpdateOne) SetLabels(v map[string]string) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) SetLabels(v map[string]string) *ProjectUpdateOne {
 	_u.mutation.SetLabels(v)
 	return _u
 }
 
 // ClearLabels clears the value of the "labels" field.
-func (_u *GroveUpdateOne) ClearLabels() *GroveUpdateOne {
+func (_u *ProjectUpdateOne) ClearLabels() *ProjectUpdateOne {
 	_u.mutation.ClearLabels()
 	return _u
 }
 
 // SetAnnotations sets the "annotations" field.
-func (_u *GroveUpdateOne) SetAnnotations(v map[string]string) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) SetAnnotations(v map[string]string) *ProjectUpdateOne {
 	_u.mutation.SetAnnotations(v)
 	return _u
 }
 
 // ClearAnnotations clears the value of the "annotations" field.
-func (_u *GroveUpdateOne) ClearAnnotations() *GroveUpdateOne {
+func (_u *ProjectUpdateOne) ClearAnnotations() *ProjectUpdateOne {
 	_u.mutation.ClearAnnotations()
 	return _u
 }
 
 // SetUpdated sets the "updated" field.
-func (_u *GroveUpdateOne) SetUpdated(v time.Time) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) SetUpdated(v time.Time) *ProjectUpdateOne {
 	_u.mutation.SetUpdated(v)
 	return _u
 }
 
 // SetCreatedBy sets the "created_by" field.
-func (_u *GroveUpdateOne) SetCreatedBy(v string) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) SetCreatedBy(v string) *ProjectUpdateOne {
 	_u.mutation.SetCreatedBy(v)
 	return _u
 }
 
 // SetNillableCreatedBy sets the "created_by" field if the given value is not nil.
-func (_u *GroveUpdateOne) SetNillableCreatedBy(v *string) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) SetNillableCreatedBy(v *string) *ProjectUpdateOne {
 	if v != nil {
 		_u.SetCreatedBy(*v)
 	}
@@ -466,19 +466,19 @@ func (_u *GroveUpdateOne) SetNillableCreatedBy(v *string) *GroveUpdateOne {
 }
 
 // ClearCreatedBy clears the value of the "created_by" field.
-func (_u *GroveUpdateOne) ClearCreatedBy() *GroveUpdateOne {
+func (_u *ProjectUpdateOne) ClearCreatedBy() *ProjectUpdateOne {
 	_u.mutation.ClearCreatedBy()
 	return _u
 }
 
 // SetOwnerID sets the "owner_id" field.
-func (_u *GroveUpdateOne) SetOwnerID(v string) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) SetOwnerID(v string) *ProjectUpdateOne {
 	_u.mutation.SetOwnerID(v)
 	return _u
 }
 
 // SetNillableOwnerID sets the "owner_id" field if the given value is not nil.
-func (_u *GroveUpdateOne) SetNillableOwnerID(v *string) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) SetNillableOwnerID(v *string) *ProjectUpdateOne {
 	if v != nil {
 		_u.SetOwnerID(*v)
 	}
@@ -486,19 +486,19 @@ func (_u *GroveUpdateOne) SetNillableOwnerID(v *string) *GroveUpdateOne {
 }
 
 // ClearOwnerID clears the value of the "owner_id" field.
-func (_u *GroveUpdateOne) ClearOwnerID() *GroveUpdateOne {
+func (_u *ProjectUpdateOne) ClearOwnerID() *ProjectUpdateOne {
 	_u.mutation.ClearOwnerID()
 	return _u
 }
 
 // SetVisibility sets the "visibility" field.
-func (_u *GroveUpdateOne) SetVisibility(v string) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) SetVisibility(v string) *ProjectUpdateOne {
 	_u.mutation.SetVisibility(v)
 	return _u
 }
 
 // SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *GroveUpdateOne) SetNillableVisibility(v *string) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) SetNillableVisibility(v *string) *ProjectUpdateOne {
 	if v != nil {
 		_u.SetVisibility(*v)
 	}
@@ -506,13 +506,13 @@ func (_u *GroveUpdateOne) SetNillableVisibility(v *string) *GroveUpdateOne {
 }
 
 // AddAgentIDs adds the "agents" edge to the Agent entity by IDs.
-func (_u *GroveUpdateOne) AddAgentIDs(ids ...uuid.UUID) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) AddAgentIDs(ids ...uuid.UUID) *ProjectUpdateOne {
 	_u.mutation.AddAgentIDs(ids...)
 	return _u
 }
 
 // AddAgents adds the "agents" edges to the Agent entity.
-func (_u *GroveUpdateOne) AddAgents(v ...*Agent) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) AddAgents(v ...*Agent) *ProjectUpdateOne {
 	ids := make([]uuid.UUID, len(v))
 	for i := range v {
 		ids[i] = v[i].ID
@@ -520,25 +520,25 @@ func (_u *GroveUpdateOne) AddAgents(v ...*Agent) *GroveUpdateOne {
 	return _u.AddAgentIDs(ids...)
 }
 
-// Mutation returns the GroveMutation object of the builder.
-func (_u *GroveUpdateOne) Mutation() *GroveMutation {
+// Mutation returns the ProjectMutation object of the builder.
+func (_u *ProjectUpdateOne) Mutation() *ProjectMutation {
 	return _u.mutation
 }
 
 // ClearAgents clears all "agents" edges to the Agent entity.
-func (_u *GroveUpdateOne) ClearAgents() *GroveUpdateOne {
+func (_u *ProjectUpdateOne) ClearAgents() *ProjectUpdateOne {
 	_u.mutation.ClearAgents()
 	return _u
 }
 
 // RemoveAgentIDs removes the "agents" edge to Agent entities by IDs.
-func (_u *GroveUpdateOne) RemoveAgentIDs(ids ...uuid.UUID) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) RemoveAgentIDs(ids ...uuid.UUID) *ProjectUpdateOne {
 	_u.mutation.RemoveAgentIDs(ids...)
 	return _u
 }
 
 // RemoveAgents removes "agents" edges to Agent entities.
-func (_u *GroveUpdateOne) RemoveAgents(v ...*Agent) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) RemoveAgents(v ...*Agent) *ProjectUpdateOne {
 	ids := make([]uuid.UUID, len(v))
 	for i := range v {
 		ids[i] = v[i].ID
@@ -546,27 +546,27 @@ func (_u *GroveUpdateOne) RemoveAgents(v ...*Agent) *GroveUpdateOne {
 	return _u.RemoveAgentIDs(ids...)
 }
 
-// Where appends a list predicates to the GroveUpdate builder.
-func (_u *GroveUpdateOne) Where(ps ...predicate.Grove) *GroveUpdateOne {
+// Where appends a list predicates to the ProjectUpdate builder.
+func (_u *ProjectUpdateOne) Where(ps ...predicate.Project) *ProjectUpdateOne {
 	_u.mutation.Where(ps...)
 	return _u
 }
 
 // Select allows selecting one or more fields (columns) of the returned entity.
 // The default is selecting all fields defined in the entity schema.
-func (_u *GroveUpdateOne) Select(field string, fields ...string) *GroveUpdateOne {
+func (_u *ProjectUpdateOne) Select(field string, fields ...string) *ProjectUpdateOne {
 	_u.fields = append([]string{field}, fields...)
 	return _u
 }
 
-// Save executes the query and returns the updated Grove entity.
-func (_u *GroveUpdateOne) Save(ctx context.Context) (*Grove, error) {
+// Save executes the query and returns the updated Project entity.
+func (_u *ProjectUpdateOne) Save(ctx context.Context) (*Project, error) {
 	_u.defaults()
 	return withHooks(ctx, _u.sqlSave, _u.mutation, _u.hooks)
 }
 
 // SaveX is like Save, but panics if an error occurs.
-func (_u *GroveUpdateOne) SaveX(ctx context.Context) *Grove {
+func (_u *ProjectUpdateOne) SaveX(ctx context.Context) *Project {
 	node, err := _u.Save(ctx)
 	if err != nil {
 		panic(err)
@@ -575,59 +575,59 @@ func (_u *GroveUpdateOne) SaveX(ctx context.Context) *Grove {
 }
 
 // Exec executes the query on the entity.
-func (_u *GroveUpdateOne) Exec(ctx context.Context) error {
+func (_u *ProjectUpdateOne) Exec(ctx context.Context) error {
 	_, err := _u.Save(ctx)
 	return err
 }
 
 // ExecX is like Exec, but panics if an error occurs.
-func (_u *GroveUpdateOne) ExecX(ctx context.Context) {
+func (_u *ProjectUpdateOne) ExecX(ctx context.Context) {
 	if err := _u.Exec(ctx); err != nil {
 		panic(err)
 	}
 }
 
 // defaults sets the default values of the builder before save.
-func (_u *GroveUpdateOne) defaults() {
+func (_u *ProjectUpdateOne) defaults() {
 	if _, ok := _u.mutation.Updated(); !ok {
-		v := grove.UpdateDefaultUpdated()
+		v := project.UpdateDefaultUpdated()
 		_u.mutation.SetUpdated(v)
 	}
 }
 
 // check runs all checks and user-defined validators on the builder.
-func (_u *GroveUpdateOne) check() error {
+func (_u *ProjectUpdateOne) check() error {
 	if v, ok := _u.mutation.Name(); ok {
-		if err := grove.NameValidator(v); err != nil {
-			return &ValidationError{Name: "name", err: fmt.Errorf(`ent: validator failed for field "Grove.name": %w`, err)}
+		if err := project.NameValidator(v); err != nil {
+			return &ValidationError{Name: "name", err: fmt.Errorf(`ent: validator failed for field "Project.name": %w`, err)}
 		}
 	}
 	if v, ok := _u.mutation.Slug(); ok {
-		if err := grove.SlugValidator(v); err != nil {
-			return &ValidationError{Name: "slug", err: fmt.Errorf(`ent: validator failed for field "Grove.slug": %w`, err)}
+		if err := project.SlugValidator(v); err != nil {
+			return &ValidationError{Name: "slug", err: fmt.Errorf(`ent: validator failed for field "Project.slug": %w`, err)}
 		}
 	}
 	return nil
 }
 
-func (_u *GroveUpdateOne) sqlSave(ctx context.Context) (_node *Grove, err error) {
+func (_u *ProjectUpdateOne) sqlSave(ctx context.Context) (_node *Project, err error) {
 	if err := _u.check(); err != nil {
 		return _node, err
 	}
-	_spec := sqlgraph.NewUpdateSpec(grove.Table, grove.Columns, sqlgraph.NewFieldSpec(grove.FieldID, field.TypeUUID))
+	_spec := sqlgraph.NewUpdateSpec(project.Table, project.Columns, sqlgraph.NewFieldSpec(project.FieldID, field.TypeUUID))
 	id, ok := _u.mutation.ID()
 	if !ok {
-		return nil, &ValidationError{Name: "id", err: errors.New(`ent: missing "Grove.id" for update`)}
+		return nil, &ValidationError{Name: "id", err: errors.New(`ent: missing "Project.id" for update`)}
 	}
 	_spec.Node.ID.Value = id
 	if fields := _u.fields; len(fields) > 0 {
 		_spec.Node.Columns = make([]string, 0, len(fields))
-		_spec.Node.Columns = append(_spec.Node.Columns, grove.FieldID)
+		_spec.Node.Columns = append(_spec.Node.Columns, project.FieldID)
 		for _, f := range fields {
-			if !grove.ValidColumn(f) {
+			if !project.ValidColumn(f) {
 				return nil, &ValidationError{Name: f, err: fmt.Errorf("ent: invalid field %q for query", f)}
 			}
-			if f != grove.FieldID {
+			if f != project.FieldID {
 				_spec.Node.Columns = append(_spec.Node.Columns, f)
 			}
 		}
@@ -640,53 +640,53 @@ func (_u *GroveUpdateOne) sqlSave(ctx context.Context) (_node *Grove, err error)
 		}
 	}
 	if value, ok := _u.mutation.Name(); ok {
-		_spec.SetField(grove.FieldName, field.TypeString, value)
+		_spec.SetField(project.FieldName, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Slug(); ok {
-		_spec.SetField(grove.FieldSlug, field.TypeString, value)
+		_spec.SetField(project.FieldSlug, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.GitRemote(); ok {
-		_spec.SetField(grove.FieldGitRemote, field.TypeString, value)
+		_spec.SetField(project.FieldGitRemote, field.TypeString, value)
 	}
 	if _u.mutation.GitRemoteCleared() {
-		_spec.ClearField(grove.FieldGitRemote, field.TypeString)
+		_spec.ClearField(project.FieldGitRemote, field.TypeString)
 	}
 	if value, ok := _u.mutation.Labels(); ok {
-		_spec.SetField(grove.FieldLabels, field.TypeJSON, value)
+		_spec.SetField(project.FieldLabels, field.TypeJSON, value)
 	}
 	if _u.mutation.LabelsCleared() {
-		_spec.ClearField(grove.FieldLabels, field.TypeJSON)
+		_spec.ClearField(project.FieldLabels, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.Annotations(); ok {
-		_spec.SetField(grove.FieldAnnotations, field.TypeJSON, value)
+		_spec.SetField(project.FieldAnnotations, field.TypeJSON, value)
 	}
 	if _u.mutation.AnnotationsCleared() {
-		_spec.ClearField(grove.FieldAnnotations, field.TypeJSON)
+		_spec.ClearField(project.FieldAnnotations, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
-		_spec.SetField(grove.FieldUpdated, field.TypeTime, value)
+		_spec.SetField(project.FieldUpdated, field.TypeTime, value)
 	}
 	if value, ok := _u.mutation.CreatedBy(); ok {
-		_spec.SetField(grove.FieldCreatedBy, field.TypeString, value)
+		_spec.SetField(project.FieldCreatedBy, field.TypeString, value)
 	}
 	if _u.mutation.CreatedByCleared() {
-		_spec.ClearField(grove.FieldCreatedBy, field.TypeString)
+		_spec.ClearField(project.FieldCreatedBy, field.TypeString)
 	}
 	if value, ok := _u.mutation.OwnerID(); ok {
-		_spec.SetField(grove.FieldOwnerID, field.TypeString, value)
+		_spec.SetField(project.FieldOwnerID, field.TypeString, value)
 	}
 	if _u.mutation.OwnerIDCleared() {
-		_spec.ClearField(grove.FieldOwnerID, field.TypeString)
+		_spec.ClearField(project.FieldOwnerID, field.TypeString)
 	}
 	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(grove.FieldVisibility, field.TypeString, value)
+		_spec.SetField(project.FieldVisibility, field.TypeString, value)
 	}
 	if _u.mutation.AgentsCleared() {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2M,
 			Inverse: false,
-			Table:   grove.AgentsTable,
-			Columns: []string{grove.AgentsColumn},
+			Table:   project.AgentsTable,
+			Columns: []string{project.AgentsColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(agent.FieldID, field.TypeUUID),
@@ -698,8 +698,8 @@ func (_u *GroveUpdateOne) sqlSave(ctx context.Context) (_node *Grove, err error)
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2M,
 			Inverse: false,
-			Table:   grove.AgentsTable,
-			Columns: []string{grove.AgentsColumn},
+			Table:   project.AgentsTable,
+			Columns: []string{project.AgentsColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(agent.FieldID, field.TypeUUID),
@@ -714,8 +714,8 @@ func (_u *GroveUpdateOne) sqlSave(ctx context.Context) (_node *Grove, err error)
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2M,
 			Inverse: false,
-			Table:   grove.AgentsTable,
-			Columns: []string{grove.AgentsColumn},
+			Table:   project.AgentsTable,
+			Columns: []string{project.AgentsColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(agent.FieldID, field.TypeUUID),
@@ -726,12 +726,12 @@ func (_u *GroveUpdateOne) sqlSave(ctx context.Context) (_node *Grove, err error)
 		}
 		_spec.Edges.Add = append(_spec.Edges.Add, edge)
 	}
-	_node = &Grove{config: _u.config}
+	_node = &Project{config: _u.config}
 	_spec.Assign = _node.assignValues
 	_spec.ScanValues = _node.scanValues
 	if err = sqlgraph.UpdateNode(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
-			err = &NotFoundError{grove.Label}
+			err = &NotFoundError{project.Label}
 		} else if sqlgraph.IsConstraintError(err) {
 			err = &ConstraintError{msg: err.Error(), wrap: err}
 		}

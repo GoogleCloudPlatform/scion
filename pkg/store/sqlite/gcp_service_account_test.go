@@ -32,7 +32,7 @@ func TestGCPServiceAccount_CRUD(t *testing.T) {
 
 	sa := &store.GCPServiceAccount{
 		ID:            "sa-1",
-		Scope:         store.ScopeGrove,
+		Scope:         store.ScopeProject,
 		ScopeID:       "grove-1",
 		Email:         "agent@project.iam.gserviceaccount.com",
 		ProjectID:     "my-project",
@@ -69,7 +69,7 @@ func TestGCPServiceAccount_CRUD(t *testing.T) {
 
 	// List
 	list, err := s.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
-		Scope:   store.ScopeGrove,
+		Scope:   store.ScopeProject,
 		ScopeID: "grove-1",
 	})
 	require.NoError(t, err)
@@ -86,7 +86,7 @@ func TestGCPServiceAccount_CRUD(t *testing.T) {
 	// List with wrong filter
 	list, err = s.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
 		ScopeID: "grove-999",
-		Scope:   store.ScopeGrove,
+		Scope:   store.ScopeProject,
 	})
 	require.NoError(t, err)
 	assert.Len(t, list, 0)
@@ -105,7 +105,7 @@ func TestGCPServiceAccount_DuplicateEmail(t *testing.T) {
 
 	sa1 := &store.GCPServiceAccount{
 		ID:        "sa-1",
-		Scope:     store.ScopeGrove,
+		Scope:     store.ScopeProject,
 		ScopeID:   "grove-1",
 		Email:     "agent@project.iam.gserviceaccount.com",
 		ProjectID: "my-project",
@@ -117,7 +117,7 @@ func TestGCPServiceAccount_DuplicateEmail(t *testing.T) {
 	// Same email, same scope = should fail
 	sa2 := &store.GCPServiceAccount{
 		ID:        "sa-2",
-		Scope:     store.ScopeGrove,
+		Scope:     store.ScopeProject,
 		ScopeID:   "grove-1",
 		Email:     "agent@project.iam.gserviceaccount.com",
 		ProjectID: "my-project",
@@ -129,7 +129,7 @@ func TestGCPServiceAccount_DuplicateEmail(t *testing.T) {
 	// Same email, different scope = should succeed
 	sa3 := &store.GCPServiceAccount{
 		ID:        "sa-3",
-		Scope:     store.ScopeGrove,
+		Scope:     store.ScopeProject,
 		ScopeID:   "grove-2",
 		Email:     "agent@project.iam.gserviceaccount.com",
 		ProjectID: "my-project",
@@ -145,7 +145,7 @@ func TestGCPServiceAccount_ManagedFields(t *testing.T) {
 
 	sa := &store.GCPServiceAccount{
 		ID:        "sa-managed-1",
-		Scope:     store.ScopeGrove,
+		Scope:     store.ScopeProject,
 		ScopeID:   "grove-1",
 		Email:     "scion-abc123@hub-project.iam.gserviceaccount.com",
 		ProjectID: "hub-project",
@@ -165,7 +165,7 @@ func TestGCPServiceAccount_ManagedFields(t *testing.T) {
 	// List with managed filter
 	managed := true
 	list, err := s.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
-		Scope:   store.ScopeGrove,
+		Scope:   store.ScopeProject,
 		ScopeID: "grove-1",
 		Managed: &managed,
 	})
@@ -176,7 +176,7 @@ func TestGCPServiceAccount_ManagedFields(t *testing.T) {
 	// Create a non-managed SA
 	sa2 := &store.GCPServiceAccount{
 		ID:        "sa-byosa-1",
-		Scope:     store.ScopeGrove,
+		Scope:     store.ScopeProject,
 		ScopeID:   "grove-1",
 		Email:     "user-sa@other-project.iam.gserviceaccount.com",
 		ProjectID: "other-project",
@@ -187,7 +187,7 @@ func TestGCPServiceAccount_ManagedFields(t *testing.T) {
 
 	// Filter managed=true should return only the managed one
 	list, err = s.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
-		Scope:   store.ScopeGrove,
+		Scope:   store.ScopeProject,
 		ScopeID: "grove-1",
 		Managed: &managed,
 	})
@@ -198,7 +198,7 @@ func TestGCPServiceAccount_ManagedFields(t *testing.T) {
 	// Filter managed=false should return only the BYOSA one
 	notManaged := false
 	list, err = s.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
-		Scope:   store.ScopeGrove,
+		Scope:   store.ScopeProject,
 		ScopeID: "grove-1",
 		Managed: &notManaged,
 	})
@@ -208,7 +208,7 @@ func TestGCPServiceAccount_ManagedFields(t *testing.T) {
 
 	// No managed filter should return both
 	list, err = s.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
-		Scope:   store.ScopeGrove,
+		Scope:   store.ScopeProject,
 		ScopeID: "grove-1",
 	})
 	require.NoError(t, err)

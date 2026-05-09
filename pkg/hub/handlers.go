@@ -3220,7 +3220,7 @@ func (s *Server) createGroveGroup(ctx context.Context, grove *store.Grove) {
 		ID:        api.NewUUID(),
 		Name:      grove.Name + " Agents",
 		Slug:      agentsSlug,
-		GroupType: store.GroupTypeGroveAgents,
+		GroupType: store.GroupTypeProjectAgents,
 		GroveID:   grove.ID,
 		CreatedBy: grove.CreatedBy,
 	}

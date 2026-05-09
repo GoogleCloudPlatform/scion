@@ -31,7 +31,7 @@ import (
 
 // CreateScheduledEvent creates a new scheduled event.
 func (s *SQLiteStore) CreateScheduledEvent(ctx context.Context, event *store.ScheduledEvent) error {
-	if event.ID == "" || event.GroveID == "" || event.EventType == "" {
+	if event.ID == "" || event.ProjectID == "" || event.EventType == "" {
 		return store.ErrInvalidInput
 	}
 
@@ -49,7 +49,7 @@ func (s *SQLiteStore) CreateScheduledEvent(ctx context.Context, event *store.Sch
 			created_at, created_by, fired_at, error, schedule_id
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		event.ID, event.GroveID, event.EventType, event.FireAt, event.Payload, event.Status,
+		event.ID, event.ProjectID, event.EventType, event.FireAt, event.Payload, event.Status,
 		event.CreatedAt, nullableString(event.CreatedBy), nullableTime(timeFromPtr(event.FiredAt)), nullableString(event.Error),
 		nullableString(event.ScheduleID),
 	)
@@ -58,7 +58,7 @@ func (s *SQLiteStore) CreateScheduledEvent(ctx context.Context, event *store.Sch
 			return store.ErrAlreadyExists
 		}
 		if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
-			return fmt.Errorf("grove %s does not exist: %w", event.GroveID, store.ErrInvalidInput)
+			return fmt.Errorf("grove %s does not exist: %w", event.ProjectID, store.ErrInvalidInput)
 		}
 		return err
 	}
@@ -78,7 +78,7 @@ func (s *SQLiteStore) GetScheduledEvent(ctx context.Context, id string) (*store.
 			created_at, created_by, fired_at, error, schedule_id
 		FROM scheduled_events WHERE id = ?
 	`, id).Scan(
-		&event.ID, &event.GroveID, &event.EventType, &event.FireAt, &event.Payload, &event.Status,
+		&event.ID, &event.ProjectID, &event.EventType, &event.FireAt, &event.Payload, &event.Status,
 		&event.CreatedAt, &createdBy, &firedAt, &errMsg, &scheduleID,
 	)
 	if err != nil {
@@ -157,9 +157,9 @@ func (s *SQLiteStore) ListScheduledEvents(ctx context.Context, filter store.Sche
 	var conditions []string
 	var args []interface{}
 
-	if filter.GroveID != "" {
+	if filter.ProjectID != "" {
 		conditions = append(conditions, "grove_id = ?")
-		args = append(args, filter.GroveID)
+		args = append(args, filter.ProjectID)
 	}
 	if filter.EventType != "" {
 		conditions = append(conditions, "event_type = ?")
@@ -289,7 +289,7 @@ func scanScheduledEvents(rows *sql.Rows) ([]store.ScheduledEvent, error) {
 		var scheduleID sql.NullString
 
 		if err := rows.Scan(
-			&event.ID, &event.GroveID, &event.EventType, &event.FireAt, &event.Payload, &event.Status,
+			&event.ID, &event.ProjectID, &event.EventType, &event.FireAt, &event.Payload, &event.Status,
 			&event.CreatedAt, &createdBy, &firedAt, &errMsg, &scheduleID,
 		); err != nil {
 			return nil, err

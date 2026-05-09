@@ -44,7 +44,8 @@ func (Group) Fields() []ent.Field {
 		field.Enum("group_type").
 			Values("explicit", "grove_agents").
 			Default("explicit"),
-		field.UUID("grove_id", uuid.UUID{}).
+		field.UUID("project_id", uuid.UUID{}).
+			StorageKey("grove_id").
 			Optional().
 			Nillable(),
 		field.JSON("labels", map[string]string{}).

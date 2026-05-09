@@ -18,11 +18,11 @@ type Group func(*sql.Selector)
 // GroupMembership is the predicate function for groupmembership builders.
 type GroupMembership func(*sql.Selector)
 
-// Grove is the predicate function for grove builders.
-type Grove func(*sql.Selector)
-
 // PolicyBinding is the predicate function for policybinding builders.
 type PolicyBinding func(*sql.Selector)
+
+// Project is the predicate function for project builders.
+type Project func(*sql.Selector)
 
 // User is the predicate function for user builders.
 type User func(*sql.Selector)

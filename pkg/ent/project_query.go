@@ -13,57 +13,57 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/grove"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/google/uuid"
 )
 
-// GroveQuery is the builder for querying Grove entities.
-type GroveQuery struct {
+// ProjectQuery is the builder for querying Project entities.
+type ProjectQuery struct {
 	config
 	ctx        *QueryContext
-	order      []grove.OrderOption
+	order      []project.OrderOption
 	inters     []Interceptor
-	predicates []predicate.Grove
+	predicates []predicate.Project
 	withAgents *AgentQuery
 	// intermediate query (i.e. traversal path).
 	sql  *sql.Selector
 	path func(context.Context) (*sql.Selector, error)
 }
 
-// Where adds a new predicate for the GroveQuery builder.
-func (_q *GroveQuery) Where(ps ...predicate.Grove) *GroveQuery {
+// Where adds a new predicate for the ProjectQuery builder.
+func (_q *ProjectQuery) Where(ps ...predicate.Project) *ProjectQuery {
 	_q.predicates = append(_q.predicates, ps...)
 	return _q
 }
 
 // Limit the number of records to be returned by this query.
-func (_q *GroveQuery) Limit(limit int) *GroveQuery {
+func (_q *ProjectQuery) Limit(limit int) *ProjectQuery {
 	_q.ctx.Limit = &limit
 	return _q
 }
 
 // Offset to start from.
-func (_q *GroveQuery) Offset(offset int) *GroveQuery {
+func (_q *ProjectQuery) Offset(offset int) *ProjectQuery {
 	_q.ctx.Offset = &offset
 	return _q
 }
 
 // Unique configures the query builder to filter duplicate records on query.
 // By default, unique is set to true, and can be disabled using this method.
-func (_q *GroveQuery) Unique(unique bool) *GroveQuery {
+func (_q *ProjectQuery) Unique(unique bool) *ProjectQuery {
 	_q.ctx.Unique = &unique
 	return _q
 }
 
 // Order specifies how the records should be ordered.
-func (_q *GroveQuery) Order(o ...grove.OrderOption) *GroveQuery {
+func (_q *ProjectQuery) Order(o ...project.OrderOption) *ProjectQuery {
 	_q.order = append(_q.order, o...)
 	return _q
 }
 
 // QueryAgents chains the current query on the "agents" edge.
-func (_q *GroveQuery) QueryAgents() *AgentQuery {
+func (_q *ProjectQuery) QueryAgents() *AgentQuery {
 	query := (&AgentClient{config: _q.config}).Query()
 	query.path = func(ctx context.Context) (fromU *sql.Selector, err error) {
 		if err := _q.prepareQuery(ctx); err != nil {
@@ -74,9 +74,9 @@ func (_q *GroveQuery) QueryAgents() *AgentQuery {
 			return nil, err
 		}
 		step := sqlgraph.NewStep(
-			sqlgraph.From(grove.Table, grove.FieldID, selector),
+			sqlgraph.From(project.Table, project.FieldID, selector),
 			sqlgraph.To(agent.Table, agent.FieldID),
-			sqlgraph.Edge(sqlgraph.O2M, false, grove.AgentsTable, grove.AgentsColumn),
+			sqlgraph.Edge(sqlgraph.O2M, false, project.AgentsTable, project.AgentsColumn),
 		)
 		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
 		return fromU, nil
@@ -84,21 +84,21 @@ func (_q *GroveQuery) QueryAgents() *AgentQuery {
 	return query
 }
 
-// First returns the first Grove entity from the query.
-// Returns a *NotFoundError when no Grove was found.
-func (_q *GroveQuery) First(ctx context.Context) (*Grove, error) {
+// First returns the first Project entity from the query.
+// Returns a *NotFoundError when no Project was found.
+func (_q *ProjectQuery) First(ctx context.Context) (*Project, error) {
 	nodes, err := _q.Limit(1).All(setContextOp(ctx, _q.ctx, ent.OpQueryFirst))
 	if err != nil {
 		return nil, err
 	}
 	if len(nodes) == 0 {
-		return nil, &NotFoundError{grove.Label}
+		return nil, &NotFoundError{project.Label}
 	}
 	return nodes[0], nil
 }
 
 // FirstX is like First, but panics if an error occurs.
-func (_q *GroveQuery) FirstX(ctx context.Context) *Grove {
+func (_q *ProjectQuery) FirstX(ctx context.Context) *Project {
 	node, err := _q.First(ctx)
 	if err != nil && !IsNotFound(err) {
 		panic(err)
@@ -106,22 +106,22 @@ func (_q *GroveQuery) FirstX(ctx context.Context) *Grove {
 	return node
 }
 
-// FirstID returns the first Grove ID from the query.
-// Returns a *NotFoundError when no Grove ID was found.
-func (_q *GroveQuery) FirstID(ctx context.Context) (id uuid.UUID, err error) {
+// FirstID returns the first Project ID from the query.
+// Returns a *NotFoundError when no Project ID was found.
+func (_q *ProjectQuery) FirstID(ctx context.Context) (id uuid.UUID, err error) {
 	var ids []uuid.UUID
 	if ids, err = _q.Limit(1).IDs(setContextOp(ctx, _q.ctx, ent.OpQueryFirstID)); err != nil {
 		return
 	}
 	if len(ids) == 0 {
-		err = &NotFoundError{grove.Label}
+		err = &NotFoundError{project.Label}
 		return
 	}
 	return ids[0], nil
 }
 
 // FirstIDX is like FirstID, but panics if an error occurs.
-func (_q *GroveQuery) FirstIDX(ctx context.Context) uuid.UUID {
+func (_q *ProjectQuery) FirstIDX(ctx context.Context) uuid.UUID {
 	id, err := _q.FirstID(ctx)
 	if err != nil && !IsNotFound(err) {
 		panic(err)
@@ -129,10 +129,10 @@ func (_q *GroveQuery) FirstIDX(ctx context.Context) uuid.UUID {
 	return id
 }
 
-// Only returns a single Grove entity found by the query, ensuring it only returns one.
-// Returns a *NotSingularError when more than one Grove entity is found.
-// Returns a *NotFoundError when no Grove entities are found.
-func (_q *GroveQuery) Only(ctx context.Context) (*Grove, error) {
+// Only returns a single Project entity found by the query, ensuring it only returns one.
+// Returns a *NotSingularError when more than one Project entity is found.
+// Returns a *NotFoundError when no Project entities are found.
+func (_q *ProjectQuery) Only(ctx context.Context) (*Project, error) {
 	nodes, err := _q.Limit(2).All(setContextOp(ctx, _q.ctx, ent.OpQueryOnly))
 	if err != nil {
 		return nil, err
@@ -141,14 +141,14 @@ func (_q *GroveQuery) Only(ctx context.Context) (*Grove, error) {
 	case 1:
 		return nodes[0], nil
 	case 0:
-		return nil, &NotFoundError{grove.Label}
+		return nil, &NotFoundError{project.Label}
 	default:
-		return nil, &NotSingularError{grove.Label}
+		return nil, &NotSingularError{project.Label}
 	}
 }
 
 // OnlyX is like Only, but panics if an error occurs.
-func (_q *GroveQuery) OnlyX(ctx context.Context) *Grove {
+func (_q *ProjectQuery) OnlyX(ctx context.Context) *Project {
 	node, err := _q.Only(ctx)
 	if err != nil {
 		panic(err)
@@ -156,10 +156,10 @@ func (_q *GroveQuery) OnlyX(ctx context.Context) *Grove {
 	return node
 }
 
-// OnlyID is like Only, but returns the only Grove ID in the query.
-// Returns a *NotSingularError when more than one Grove ID is found.
+// OnlyID is like Only, but returns the only Project ID in the query.
+// Returns a *NotSingularError when more than one Project ID is found.
 // Returns a *NotFoundError when no entities are found.
-func (_q *GroveQuery) OnlyID(ctx context.Context) (id uuid.UUID, err error) {
+func (_q *ProjectQuery) OnlyID(ctx context.Context) (id uuid.UUID, err error) {
 	var ids []uuid.UUID
 	if ids, err = _q.Limit(2).IDs(setContextOp(ctx, _q.ctx, ent.OpQueryOnlyID)); err != nil {
 		return
@@ -168,15 +168,15 @@ func (_q *GroveQuery) OnlyID(ctx context.Context) (id uuid.UUID, err error) {
 	case 1:
 		id = ids[0]
 	case 0:
-		err = &NotFoundError{grove.Label}
+		err = &NotFoundError{project.Label}
 	default:
-		err = &NotSingularError{grove.Label}
+		err = &NotSingularError{project.Label}
 	}
 	return
 }
 
 // OnlyIDX is like OnlyID, but panics if an error occurs.
-func (_q *GroveQuery) OnlyIDX(ctx context.Context) uuid.UUID {
+func (_q *ProjectQuery) OnlyIDX(ctx context.Context) uuid.UUID {
 	id, err := _q.OnlyID(ctx)
 	if err != nil {
 		panic(err)
@@ -184,18 +184,18 @@ func (_q *GroveQuery) OnlyIDX(ctx context.Context) uuid.UUID {
 	return id
 }
 
-// All executes the query and returns a list of Groves.
-func (_q *GroveQuery) All(ctx context.Context) ([]*Grove, error) {
+// All executes the query and returns a list of Projects.
+func (_q *ProjectQuery) All(ctx context.Context) ([]*Project, error) {
 	ctx = setContextOp(ctx, _q.ctx, ent.OpQueryAll)
 	if err := _q.prepareQuery(ctx); err != nil {
 		return nil, err
 	}
-	qr := querierAll[[]*Grove, *GroveQuery]()
-	return withInterceptors[[]*Grove](ctx, _q, qr, _q.inters)
+	qr := querierAll[[]*Project, *ProjectQuery]()
+	return withInterceptors[[]*Project](ctx, _q, qr, _q.inters)
 }
 
 // AllX is like All, but panics if an error occurs.
-func (_q *GroveQuery) AllX(ctx context.Context) []*Grove {
+func (_q *ProjectQuery) AllX(ctx context.Context) []*Project {
 	nodes, err := _q.All(ctx)
 	if err != nil {
 		panic(err)
@@ -203,20 +203,20 @@ func (_q *GroveQuery) AllX(ctx context.Context) []*Grove {
 	return nodes
 }
 
-// IDs executes the query and returns a list of Grove IDs.
-func (_q *GroveQuery) IDs(ctx context.Context) (ids []uuid.UUID, err error) {
+// IDs executes the query and returns a list of Project IDs.
+func (_q *ProjectQuery) IDs(ctx context.Context) (ids []uuid.UUID, err error) {
 	if _q.ctx.Unique == nil && _q.path != nil {
 		_q.Unique(true)
 	}
 	ctx = setContextOp(ctx, _q.ctx, ent.OpQueryIDs)
-	if err = _q.Select(grove.FieldID).Scan(ctx, &ids); err != nil {
+	if err = _q.Select(project.FieldID).Scan(ctx, &ids); err != nil {
 		return nil, err
 	}
 	return ids, nil
 }
 
 // IDsX is like IDs, but panics if an error occurs.
-func (_q *GroveQuery) IDsX(ctx context.Context) []uuid.UUID {
+func (_q *ProjectQuery) IDsX(ctx context.Context) []uuid.UUID {
 	ids, err := _q.IDs(ctx)
 	if err != nil {
 		panic(err)
@@ -225,16 +225,16 @@ func (_q *GroveQuery) IDsX(ctx context.Context) []uuid.UUID {
 }
 
 // Count returns the count of the given query.
-func (_q *GroveQuery) Count(ctx context.Context) (int, error) {
+func (_q *ProjectQuery) Count(ctx context.Context) (int, error) {
 	ctx = setContextOp(ctx, _q.ctx, ent.OpQueryCount)
 	if err := _q.prepareQuery(ctx); err != nil {
 		return 0, err
 	}
-	return withInterceptors[int](ctx, _q, querierCount[*GroveQuery](), _q.inters)
+	return withInterceptors[int](ctx, _q, querierCount[*ProjectQuery](), _q.inters)
 }
 
 // CountX is like Count, but panics if an error occurs.
-func (_q *GroveQuery) CountX(ctx context.Context) int {
+func (_q *ProjectQuery) CountX(ctx context.Context) int {
 	count, err := _q.Count(ctx)
 	if err != nil {
 		panic(err)
@@ -243,7 +243,7 @@ func (_q *GroveQuery) CountX(ctx context.Context) int {
 }
 
 // Exist returns true if the query has elements in the graph.
-func (_q *GroveQuery) Exist(ctx context.Context) (bool, error) {
+func (_q *ProjectQuery) Exist(ctx context.Context) (bool, error) {
 	ctx = setContextOp(ctx, _q.ctx, ent.OpQueryExist)
 	switch _, err := _q.FirstID(ctx); {
 	case IsNotFound(err):
@@ -256,7 +256,7 @@ func (_q *GroveQuery) Exist(ctx context.Context) (bool, error) {
 }
 
 // ExistX is like Exist, but panics if an error occurs.
-func (_q *GroveQuery) ExistX(ctx context.Context) bool {
+func (_q *ProjectQuery) ExistX(ctx context.Context) bool {
 	exist, err := _q.Exist(ctx)
 	if err != nil {
 		panic(err)
@@ -264,18 +264,18 @@ func (_q *GroveQuery) ExistX(ctx context.Context) bool {
 	return exist
 }
 
-// Clone returns a duplicate of the GroveQuery builder, including all associated steps. It can be
+// Clone returns a duplicate of the ProjectQuery builder, including all associated steps. It can be
 // used to prepare common query builders and use them differently after the clone is made.
-func (_q *GroveQuery) Clone() *GroveQuery {
+func (_q *ProjectQuery) Clone() *ProjectQuery {
 	if _q == nil {
 		return nil
 	}
-	return &GroveQuery{
+	return &ProjectQuery{
 		config:     _q.config,
 		ctx:        _q.ctx.Clone(),
-		order:      append([]grove.OrderOption{}, _q.order...),
+		order:      append([]project.OrderOption{}, _q.order...),
 		inters:     append([]Interceptor{}, _q.inters...),
-		predicates: append([]predicate.Grove{}, _q.predicates...),
+		predicates: append([]predicate.Project{}, _q.predicates...),
 		withAgents: _q.withAgents.Clone(),
 		// clone intermediate query.
 		sql:  _q.sql.Clone(),
@@ -285,7 +285,7 @@ func (_q *GroveQuery) Clone() *GroveQuery {
 
 // WithAgents tells the query-builder to eager-load the nodes that are connected to
 // the "agents" edge. The optional arguments are used to configure the query builder of the edge.
-func (_q *GroveQuery) WithAgents(opts ...func(*AgentQuery)) *GroveQuery {
+func (_q *ProjectQuery) WithAgents(opts ...func(*AgentQuery)) *ProjectQuery {
 	query := (&AgentClient{config: _q.config}).Query()
 	for _, opt := range opts {
 		opt(query)
@@ -304,15 +304,15 @@ func (_q *GroveQuery) WithAgents(opts ...func(*AgentQuery)) *GroveQuery {
 //		Count int `json:"count,omitempty"`
 //	}
 //
-//	client.Grove.Query().
-//		GroupBy(grove.FieldName).
+//	client.Project.Query().
+//		GroupBy(project.FieldName).
 //		Aggregate(ent.Count()).
 //		Scan(ctx, &v)
-func (_q *GroveQuery) GroupBy(field string, fields ...string) *GroveGroupBy {
+func (_q *ProjectQuery) GroupBy(field string, fields ...string) *ProjectGroupBy {
 	_q.ctx.Fields = append([]string{field}, fields...)
-	grbuild := &GroveGroupBy{build: _q}
+	grbuild := &ProjectGroupBy{build: _q}
 	grbuild.flds = &_q.ctx.Fields
-	grbuild.label = grove.Label
+	grbuild.label = project.Label
 	grbuild.scan = grbuild.Scan
 	return grbuild
 }
@@ -326,23 +326,23 @@ func (_q *GroveQuery) GroupBy(field string, fields ...string) *GroveGroupBy {
 //		Name string `json:"name,omitempty"`
 //	}
 //
-//	client.Grove.Query().
-//		Select(grove.FieldName).
+//	client.Project.Query().
+//		Select(project.FieldName).
 //		Scan(ctx, &v)
-func (_q *GroveQuery) Select(fields ...string) *GroveSelect {
+func (_q *ProjectQuery) Select(fields ...string) *ProjectSelect {
 	_q.ctx.Fields = append(_q.ctx.Fields, fields...)
-	sbuild := &GroveSelect{GroveQuery: _q}
-	sbuild.label = grove.Label
+	sbuild := &ProjectSelect{ProjectQuery: _q}
+	sbuild.label = project.Label
 	sbuild.flds, sbuild.scan = &_q.ctx.Fields, sbuild.Scan
 	return sbuild
 }
 
-// Aggregate returns a GroveSelect configured with the given aggregations.
-func (_q *GroveQuery) Aggregate(fns ...AggregateFunc) *GroveSelect {
+// Aggregate returns a ProjectSelect configured with the given aggregations.
+func (_q *ProjectQuery) Aggregate(fns ...AggregateFunc) *ProjectSelect {
 	return _q.Select().Aggregate(fns...)
 }
 
-func (_q *GroveQuery) prepareQuery(ctx context.Context) error {
+func (_q *ProjectQuery) prepareQuery(ctx context.Context) error {
 	for _, inter := range _q.inters {
 		if inter == nil {
 			return fmt.Errorf("ent: uninitialized interceptor (forgotten import ent/runtime?)")
@@ -354,7 +354,7 @@ func (_q *GroveQuery) prepareQuery(ctx context.Context) error {
 		}
 	}
 	for _, f := range _q.ctx.Fields {
-		if !grove.ValidColumn(f) {
+		if !project.ValidColumn(f) {
 			return &ValidationError{Name: f, err: fmt.Errorf("ent: invalid field %q for query", f)}
 		}
 	}
@@ -368,19 +368,19 @@ func (_q *GroveQuery) prepareQuery(ctx context.Context) error {
 	return nil
 }
 
-func (_q *GroveQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*Grove, error) {
+func (_q *ProjectQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*Project, error) {
 	var (
-		nodes       = []*Grove{}
+		nodes       = []*Project{}
 		_spec       = _q.querySpec()
 		loadedTypes = [1]bool{
 			_q.withAgents != nil,
 		}
 	)
 	_spec.ScanValues = func(columns []string) ([]any, error) {
-		return (*Grove).scanValues(nil, columns)
+		return (*Project).scanValues(nil, columns)
 	}
 	_spec.Assign = func(columns []string, values []any) error {
-		node := &Grove{config: _q.config}
+		node := &Project{config: _q.config}
 		nodes = append(nodes, node)
 		node.Edges.loadedTypes = loadedTypes
 		return node.assignValues(columns, values)
@@ -396,17 +396,17 @@ func (_q *GroveQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*Grove,
 	}
 	if query := _q.withAgents; query != nil {
 		if err := _q.loadAgents(ctx, query, nodes,
-			func(n *Grove) { n.Edges.Agents = []*Agent{} },
-			func(n *Grove, e *Agent) { n.Edges.Agents = append(n.Edges.Agents, e) }); err != nil {
+			func(n *Project) { n.Edges.Agents = []*Agent{} },
+			func(n *Project, e *Agent) { n.Edges.Agents = append(n.Edges.Agents, e) }); err != nil {
 			return nil, err
 		}
 	}
 	return nodes, nil
 }
 
-func (_q *GroveQuery) loadAgents(ctx context.Context, query *AgentQuery, nodes []*Grove, init func(*Grove), assign func(*Grove, *Agent)) error {
+func (_q *ProjectQuery) loadAgents(ctx context.Context, query *AgentQuery, nodes []*Project, init func(*Project), assign func(*Project, *Agent)) error {
 	fks := make([]driver.Value, 0, len(nodes))
-	nodeids := make(map[uuid.UUID]*Grove)
+	nodeids := make(map[uuid.UUID]*Project)
 	for i := range nodes {
 		fks = append(fks, nodes[i].ID)
 		nodeids[nodes[i].ID] = nodes[i]
@@ -415,27 +415,27 @@ func (_q *GroveQuery) loadAgents(ctx context.Context, query *AgentQuery, nodes [
 		}
 	}
 	if len(query.ctx.Fields) > 0 {
-		query.ctx.AppendFieldOnce(agent.FieldGroveID)
+		query.ctx.AppendFieldOnce(agent.FieldProjectID)
 	}
 	query.Where(predicate.Agent(func(s *sql.Selector) {
-		s.Where(sql.InValues(s.C(grove.AgentsColumn), fks...))
+		s.Where(sql.InValues(s.C(project.AgentsColumn), fks...))
 	}))
 	neighbors, err := query.All(ctx)
 	if err != nil {
 		return err
 	}
 	for _, n := range neighbors {
-		fk := n.GroveID
+		fk := n.ProjectID
 		node, ok := nodeids[fk]
 		if !ok {
-			return fmt.Errorf(`unexpected referenced foreign-key "grove_id" returned %v for node %v`, fk, n.ID)
+			return fmt.Errorf(`unexpected referenced foreign-key "project_id" returned %v for node %v`, fk, n.ID)
 		}
 		assign(node, n)
 	}
 	return nil
 }
 
-func (_q *GroveQuery) sqlCount(ctx context.Context) (int, error) {
+func (_q *ProjectQuery) sqlCount(ctx context.Context) (int, error) {
 	_spec := _q.querySpec()
 	_spec.Node.Columns = _q.ctx.Fields
 	if len(_q.ctx.Fields) > 0 {
@@ -444,8 +444,8 @@ func (_q *GroveQuery) sqlCount(ctx context.Context) (int, error) {
 	return sqlgraph.CountNodes(ctx, _q.driver, _spec)
 }
 
-func (_q *GroveQuery) querySpec() *sqlgraph.QuerySpec {
-	_spec := sqlgraph.NewQuerySpec(grove.Table, grove.Columns, sqlgraph.NewFieldSpec(grove.FieldID, field.TypeUUID))
+func (_q *ProjectQuery) querySpec() *sqlgraph.QuerySpec {
+	_spec := sqlgraph.NewQuerySpec(project.Table, project.Columns, sqlgraph.NewFieldSpec(project.FieldID, field.TypeUUID))
 	_spec.From = _q.sql
 	if unique := _q.ctx.Unique; unique != nil {
 		_spec.Unique = *unique
@@ -454,9 +454,9 @@ func (_q *GroveQuery) querySpec() *sqlgraph.QuerySpec {
 	}
 	if fields := _q.ctx.Fields; len(fields) > 0 {
 		_spec.Node.Columns = make([]string, 0, len(fields))
-		_spec.Node.Columns = append(_spec.Node.Columns, grove.FieldID)
+		_spec.Node.Columns = append(_spec.Node.Columns, project.FieldID)
 		for i := range fields {
-			if fields[i] != grove.FieldID {
+			if fields[i] != project.FieldID {
 				_spec.Node.Columns = append(_spec.Node.Columns, fields[i])
 			}
 		}
@@ -484,12 +484,12 @@ func (_q *GroveQuery) querySpec() *sqlgraph.QuerySpec {
 	return _spec
 }
 
-func (_q *GroveQuery) sqlQuery(ctx context.Context) *sql.Selector {
+func (_q *ProjectQuery) sqlQuery(ctx context.Context) *sql.Selector {
 	builder := sql.Dialect(_q.driver.Dialect())
-	t1 := builder.Table(grove.Table)
+	t1 := builder.Table(project.Table)
 	columns := _q.ctx.Fields
 	if len(columns) == 0 {
-		columns = grove.Columns
+		columns = project.Columns
 	}
 	selector := builder.Select(t1.Columns(columns...)...).From(t1)
 	if _q.sql != nil {
@@ -516,28 +516,28 @@ func (_q *GroveQuery) sqlQuery(ctx context.Context) *sql.Selector {
 	return selector
 }
 
-// GroveGroupBy is the group-by builder for Grove entities.
-type GroveGroupBy struct {
+// ProjectGroupBy is the group-by builder for Project entities.
+type ProjectGroupBy struct {
 	selector
-	build *GroveQuery
+	build *ProjectQuery
 }
 
 // Aggregate adds the given aggregation functions to the group-by query.
-func (_g *GroveGroupBy) Aggregate(fns ...AggregateFunc) *GroveGroupBy {
+func (_g *ProjectGroupBy) Aggregate(fns ...AggregateFunc) *ProjectGroupBy {
 	_g.fns = append(_g.fns, fns...)
 	return _g
 }
 
 // Scan applies the selector query and scans the result into the given value.
-func (_g *GroveGroupBy) Scan(ctx context.Context, v any) error {
+func (_g *ProjectGroupBy) Scan(ctx context.Context, v any) error {
 	ctx = setContextOp(ctx, _g.build.ctx, ent.OpQueryGroupBy)
 	if err := _g.build.prepareQuery(ctx); err != nil {
 		return err
 	}
-	return scanWithInterceptors[*GroveQuery, *GroveGroupBy](ctx, _g.build, _g, _g.build.inters, v)
+	return scanWithInterceptors[*ProjectQuery, *ProjectGroupBy](ctx, _g.build, _g, _g.build.inters, v)
 }
 
-func (_g *GroveGroupBy) sqlScan(ctx context.Context, root *GroveQuery, v any) error {
+func (_g *ProjectGroupBy) sqlScan(ctx context.Context, root *ProjectQuery, v any) error {
 	selector := root.sqlQuery(ctx).Select()
 	aggregation := make([]string, 0, len(_g.fns))
 	for _, fn := range _g.fns {
@@ -564,28 +564,28 @@ func (_g *GroveGroupBy) sqlScan(ctx context.Context, root *GroveQuery, v any) er
 	return sql.ScanSlice(rows, v)
 }
 
-// GroveSelect is the builder for selecting fields of Grove entities.
-type GroveSelect struct {
-	*GroveQuery
+// ProjectSelect is the builder for selecting fields of Project entities.
+type ProjectSelect struct {
+	*ProjectQuery
 	selector
 }
 
 // Aggregate adds the given aggregation functions to the selector query.
-func (_s *GroveSelect) Aggregate(fns ...AggregateFunc) *GroveSelect {
+func (_s *ProjectSelect) Aggregate(fns ...AggregateFunc) *ProjectSelect {
 	_s.fns = append(_s.fns, fns...)
 	return _s
 }
 
 // Scan applies the selector query and scans the result into the given value.
-func (_s *GroveSelect) Scan(ctx context.Context, v any) error {
+func (_s *ProjectSelect) Scan(ctx context.Context, v any) error {
 	ctx = setContextOp(ctx, _s.ctx, ent.OpQuerySelect)
 	if err := _s.prepareQuery(ctx); err != nil {
 		return err
 	}
-	return scanWithInterceptors[*GroveQuery, *GroveSelect](ctx, _s.GroveQuery, _s, _s.inters, v)
+	return scanWithInterceptors[*ProjectQuery, *ProjectSelect](ctx, _s.ProjectQuery, _s, _s.inters, v)
 }
 
-func (_s *GroveSelect) sqlScan(ctx context.Context, root *GroveQuery, v any) error {
+func (_s *ProjectSelect) sqlScan(ctx context.Context, root *ProjectQuery, v any) error {
 	selector := root.sqlQuery(ctx)
 	aggregation := make([]string, 0, len(_s.fns))
 	for _, fn := range _s.fns {

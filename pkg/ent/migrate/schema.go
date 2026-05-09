@@ -3,6 +3,7 @@
 package migrate
 
 import (
+	"entgo.io/ent/dialect/entsql"
 	"entgo.io/ent/dialect/sql/schema"
 	"entgo.io/ent/schema/field"
 )
@@ -158,26 +159,6 @@ var (
 			},
 		},
 	}
-	// GrovesColumns holds the columns for the "groves" table.
-	GrovesColumns = []*schema.Column{
-		{Name: "id", Type: field.TypeUUID},
-		{Name: "name", Type: field.TypeString},
-		{Name: "slug", Type: field.TypeString, Unique: true},
-		{Name: "git_remote", Type: field.TypeString, Nullable: true},
-		{Name: "labels", Type: field.TypeJSON, Nullable: true},
-		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
-		{Name: "created", Type: field.TypeTime},
-		{Name: "updated", Type: field.TypeTime},
-		{Name: "created_by", Type: field.TypeString, Nullable: true},
-		{Name: "owner_id", Type: field.TypeString, Nullable: true},
-		{Name: "visibility", Type: field.TypeString, Default: "private"},
-	}
-	// GrovesTable holds the schema information for the "groves" table.
-	GrovesTable = &schema.Table{
-		Name:       "groves",
-		Columns:    GrovesColumns,
-		PrimaryKey: []*schema.Column{GrovesColumns[0]},
-	}
 	// PolicyBindingsColumns holds the columns for the "policy_bindings" table.
 	PolicyBindingsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -220,6 +201,26 @@ var (
 				OnDelete:   schema.SetNull,
 			},
 		},
+	}
+	// GrovesColumns holds the columns for the "groves" table.
+	GrovesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "name", Type: field.TypeString},
+		{Name: "slug", Type: field.TypeString, Unique: true},
+		{Name: "git_remote", Type: field.TypeString, Nullable: true},
+		{Name: "labels", Type: field.TypeJSON, Nullable: true},
+		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
+		{Name: "created", Type: field.TypeTime},
+		{Name: "updated", Type: field.TypeTime},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "owner_id", Type: field.TypeString, Nullable: true},
+		{Name: "visibility", Type: field.TypeString, Default: "private"},
+	}
+	// GrovesTable holds the schema information for the "groves" table.
+	GrovesTable = &schema.Table{
+		Name:       "groves",
+		Columns:    GrovesColumns,
+		PrimaryKey: []*schema.Column{GrovesColumns[0]},
 	}
 	// UsersColumns holds the columns for the "users" table.
 	UsersColumns = []*schema.Column{
@@ -270,8 +271,8 @@ var (
 		AgentsTable,
 		GroupsTable,
 		GroupMembershipsTable,
-		GrovesTable,
 		PolicyBindingsTable,
+		GrovesTable,
 		UsersTable,
 		GroupChildGroupsTable,
 	}
@@ -289,6 +290,9 @@ func init() {
 	PolicyBindingsTable.ForeignKeys[1].RefTable = UsersTable
 	PolicyBindingsTable.ForeignKeys[2].RefTable = GroupsTable
 	PolicyBindingsTable.ForeignKeys[3].RefTable = AgentsTable
+	GrovesTable.Annotation = &entsql.Annotation{
+		Table: "groves",
+	}
 	GroupChildGroupsTable.ForeignKeys[0].RefTable = GroupsTable
 	GroupChildGroupsTable.ForeignKeys[1].RefTable = GroupsTable
 }

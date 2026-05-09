@@ -11,37 +11,37 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/grove"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/google/uuid"
 )
 
-// GroveCreate is the builder for creating a Grove entity.
-type GroveCreate struct {
+// ProjectCreate is the builder for creating a Project entity.
+type ProjectCreate struct {
 	config
-	mutation *GroveMutation
+	mutation *ProjectMutation
 	hooks    []Hook
 }
 
 // SetName sets the "name" field.
-func (_c *GroveCreate) SetName(v string) *GroveCreate {
+func (_c *ProjectCreate) SetName(v string) *ProjectCreate {
 	_c.mutation.SetName(v)
 	return _c
 }
 
 // SetSlug sets the "slug" field.
-func (_c *GroveCreate) SetSlug(v string) *GroveCreate {
+func (_c *ProjectCreate) SetSlug(v string) *ProjectCreate {
 	_c.mutation.SetSlug(v)
 	return _c
 }
 
 // SetGitRemote sets the "git_remote" field.
-func (_c *GroveCreate) SetGitRemote(v string) *GroveCreate {
+func (_c *ProjectCreate) SetGitRemote(v string) *ProjectCreate {
 	_c.mutation.SetGitRemote(v)
 	return _c
 }
 
 // SetNillableGitRemote sets the "git_remote" field if the given value is not nil.
-func (_c *GroveCreate) SetNillableGitRemote(v *string) *GroveCreate {
+func (_c *ProjectCreate) SetNillableGitRemote(v *string) *ProjectCreate {
 	if v != nil {
 		_c.SetGitRemote(*v)
 	}
@@ -49,25 +49,25 @@ func (_c *GroveCreate) SetNillableGitRemote(v *string) *GroveCreate {
 }
 
 // SetLabels sets the "labels" field.
-func (_c *GroveCreate) SetLabels(v map[string]string) *GroveCreate {
+func (_c *ProjectCreate) SetLabels(v map[string]string) *ProjectCreate {
 	_c.mutation.SetLabels(v)
 	return _c
 }
 
 // SetAnnotations sets the "annotations" field.
-func (_c *GroveCreate) SetAnnotations(v map[string]string) *GroveCreate {
+func (_c *ProjectCreate) SetAnnotations(v map[string]string) *ProjectCreate {
 	_c.mutation.SetAnnotations(v)
 	return _c
 }
 
 // SetCreated sets the "created" field.
-func (_c *GroveCreate) SetCreated(v time.Time) *GroveCreate {
+func (_c *ProjectCreate) SetCreated(v time.Time) *ProjectCreate {
 	_c.mutation.SetCreated(v)
 	return _c
 }
 
 // SetNillableCreated sets the "created" field if the given value is not nil.
-func (_c *GroveCreate) SetNillableCreated(v *time.Time) *GroveCreate {
+func (_c *ProjectCreate) SetNillableCreated(v *time.Time) *ProjectCreate {
 	if v != nil {
 		_c.SetCreated(*v)
 	}
@@ -75,13 +75,13 @@ func (_c *GroveCreate) SetNillableCreated(v *time.Time) *GroveCreate {
 }
 
 // SetUpdated sets the "updated" field.
-func (_c *GroveCreate) SetUpdated(v time.Time) *GroveCreate {
+func (_c *ProjectCreate) SetUpdated(v time.Time) *ProjectCreate {
 	_c.mutation.SetUpdated(v)
 	return _c
 }
 
 // SetNillableUpdated sets the "updated" field if the given value is not nil.
-func (_c *GroveCreate) SetNillableUpdated(v *time.Time) *GroveCreate {
+func (_c *ProjectCreate) SetNillableUpdated(v *time.Time) *ProjectCreate {
 	if v != nil {
 		_c.SetUpdated(*v)
 	}
@@ -89,13 +89,13 @@ func (_c *GroveCreate) SetNillableUpdated(v *time.Time) *GroveCreate {
 }
 
 // SetCreatedBy sets the "created_by" field.
-func (_c *GroveCreate) SetCreatedBy(v string) *GroveCreate {
+func (_c *ProjectCreate) SetCreatedBy(v string) *ProjectCreate {
 	_c.mutation.SetCreatedBy(v)
 	return _c
 }
 
 // SetNillableCreatedBy sets the "created_by" field if the given value is not nil.
-func (_c *GroveCreate) SetNillableCreatedBy(v *string) *GroveCreate {
+func (_c *ProjectCreate) SetNillableCreatedBy(v *string) *ProjectCreate {
 	if v != nil {
 		_c.SetCreatedBy(*v)
 	}
@@ -103,13 +103,13 @@ func (_c *GroveCreate) SetNillableCreatedBy(v *string) *GroveCreate {
 }
 
 // SetOwnerID sets the "owner_id" field.
-func (_c *GroveCreate) SetOwnerID(v string) *GroveCreate {
+func (_c *ProjectCreate) SetOwnerID(v string) *ProjectCreate {
 	_c.mutation.SetOwnerID(v)
 	return _c
 }
 
 // SetNillableOwnerID sets the "owner_id" field if the given value is not nil.
-func (_c *GroveCreate) SetNillableOwnerID(v *string) *GroveCreate {
+func (_c *ProjectCreate) SetNillableOwnerID(v *string) *ProjectCreate {
 	if v != nil {
 		_c.SetOwnerID(*v)
 	}
@@ -117,13 +117,13 @@ func (_c *GroveCreate) SetNillableOwnerID(v *string) *GroveCreate {
 }
 
 // SetVisibility sets the "visibility" field.
-func (_c *GroveCreate) SetVisibility(v string) *GroveCreate {
+func (_c *ProjectCreate) SetVisibility(v string) *ProjectCreate {
 	_c.mutation.SetVisibility(v)
 	return _c
 }
 
 // SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_c *GroveCreate) SetNillableVisibility(v *string) *GroveCreate {
+func (_c *ProjectCreate) SetNillableVisibility(v *string) *ProjectCreate {
 	if v != nil {
 		_c.SetVisibility(*v)
 	}
@@ -131,13 +131,13 @@ func (_c *GroveCreate) SetNillableVisibility(v *string) *GroveCreate {
 }
 
 // SetID sets the "id" field.
-func (_c *GroveCreate) SetID(v uuid.UUID) *GroveCreate {
+func (_c *ProjectCreate) SetID(v uuid.UUID) *ProjectCreate {
 	_c.mutation.SetID(v)
 	return _c
 }
 
 // SetNillableID sets the "id" field if the given value is not nil.
-func (_c *GroveCreate) SetNillableID(v *uuid.UUID) *GroveCreate {
+func (_c *ProjectCreate) SetNillableID(v *uuid.UUID) *ProjectCreate {
 	if v != nil {
 		_c.SetID(*v)
 	}
@@ -145,13 +145,13 @@ func (_c *GroveCreate) SetNillableID(v *uuid.UUID) *GroveCreate {
 }
 
 // AddAgentIDs adds the "agents" edge to the Agent entity by IDs.
-func (_c *GroveCreate) AddAgentIDs(ids ...uuid.UUID) *GroveCreate {
+func (_c *ProjectCreate) AddAgentIDs(ids ...uuid.UUID) *ProjectCreate {
 	_c.mutation.AddAgentIDs(ids...)
 	return _c
 }
 
 // AddAgents adds the "agents" edges to the Agent entity.
-func (_c *GroveCreate) AddAgents(v ...*Agent) *GroveCreate {
+func (_c *ProjectCreate) AddAgents(v ...*Agent) *ProjectCreate {
 	ids := make([]uuid.UUID, len(v))
 	for i := range v {
 		ids[i] = v[i].ID
@@ -159,19 +159,19 @@ func (_c *GroveCreate) AddAgents(v ...*Agent) *GroveCreate {
 	return _c.AddAgentIDs(ids...)
 }
 
-// Mutation returns the GroveMutation object of the builder.
-func (_c *GroveCreate) Mutation() *GroveMutation {
+// Mutation returns the ProjectMutation object of the builder.
+func (_c *ProjectCreate) Mutation() *ProjectMutation {
 	return _c.mutation
 }
 
-// Save creates the Grove in the database.
-func (_c *GroveCreate) Save(ctx context.Context) (*Grove, error) {
+// Save creates the Project in the database.
+func (_c *ProjectCreate) Save(ctx context.Context) (*Project, error) {
 	_c.defaults()
 	return withHooks(ctx, _c.sqlSave, _c.mutation, _c.hooks)
 }
 
 // SaveX calls Save and panics if Save returns an error.
-func (_c *GroveCreate) SaveX(ctx context.Context) *Grove {
+func (_c *ProjectCreate) SaveX(ctx context.Context) *Project {
 	v, err := _c.Save(ctx)
 	if err != nil {
 		panic(err)
@@ -180,69 +180,69 @@ func (_c *GroveCreate) SaveX(ctx context.Context) *Grove {
 }
 
 // Exec executes the query.
-func (_c *GroveCreate) Exec(ctx context.Context) error {
+func (_c *ProjectCreate) Exec(ctx context.Context) error {
 	_, err := _c.Save(ctx)
 	return err
 }
 
 // ExecX is like Exec, but panics if an error occurs.
-func (_c *GroveCreate) ExecX(ctx context.Context) {
+func (_c *ProjectCreate) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
 		panic(err)
 	}
 }
 
 // defaults sets the default values of the builder before save.
-func (_c *GroveCreate) defaults() {
+func (_c *ProjectCreate) defaults() {
 	if _, ok := _c.mutation.Created(); !ok {
-		v := grove.DefaultCreated()
+		v := project.DefaultCreated()
 		_c.mutation.SetCreated(v)
 	}
 	if _, ok := _c.mutation.Updated(); !ok {
-		v := grove.DefaultUpdated()
+		v := project.DefaultUpdated()
 		_c.mutation.SetUpdated(v)
 	}
 	if _, ok := _c.mutation.Visibility(); !ok {
-		v := grove.DefaultVisibility
+		v := project.DefaultVisibility
 		_c.mutation.SetVisibility(v)
 	}
 	if _, ok := _c.mutation.ID(); !ok {
-		v := grove.DefaultID()
+		v := project.DefaultID()
 		_c.mutation.SetID(v)
 	}
 }
 
 // check runs all checks and user-defined validators on the builder.
-func (_c *GroveCreate) check() error {
+func (_c *ProjectCreate) check() error {
 	if _, ok := _c.mutation.Name(); !ok {
-		return &ValidationError{Name: "name", err: errors.New(`ent: missing required field "Grove.name"`)}
+		return &ValidationError{Name: "name", err: errors.New(`ent: missing required field "Project.name"`)}
 	}
 	if v, ok := _c.mutation.Name(); ok {
-		if err := grove.NameValidator(v); err != nil {
-			return &ValidationError{Name: "name", err: fmt.Errorf(`ent: validator failed for field "Grove.name": %w`, err)}
+		if err := project.NameValidator(v); err != nil {
+			return &ValidationError{Name: "name", err: fmt.Errorf(`ent: validator failed for field "Project.name": %w`, err)}
 		}
 	}
 	if _, ok := _c.mutation.Slug(); !ok {
-		return &ValidationError{Name: "slug", err: errors.New(`ent: missing required field "Grove.slug"`)}
+		return &ValidationError{Name: "slug", err: errors.New(`ent: missing required field "Project.slug"`)}
 	}
 	if v, ok := _c.mutation.Slug(); ok {
-		if err := grove.SlugValidator(v); err != nil {
-			return &ValidationError{Name: "slug", err: fmt.Errorf(`ent: validator failed for field "Grove.slug": %w`, err)}
+		if err := project.SlugValidator(v); err != nil {
+			return &ValidationError{Name: "slug", err: fmt.Errorf(`ent: validator failed for field "Project.slug": %w`, err)}
 		}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
-		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "Grove.created"`)}
+		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "Project.created"`)}
 	}
 	if _, ok := _c.mutation.Updated(); !ok {
-		return &ValidationError{Name: "updated", err: errors.New(`ent: missing required field "Grove.updated"`)}
+		return &ValidationError{Name: "updated", err: errors.New(`ent: missing required field "Project.updated"`)}
 	}
 	if _, ok := _c.mutation.Visibility(); !ok {
-		return &ValidationError{Name: "visibility", err: errors.New(`ent: missing required field "Grove.visibility"`)}
+		return &ValidationError{Name: "visibility", err: errors.New(`ent: missing required field "Project.visibility"`)}
 	}
 	return nil
 }
 
-func (_c *GroveCreate) sqlSave(ctx context.Context) (*Grove, error) {
+func (_c *ProjectCreate) sqlSave(ctx context.Context) (*Project, error) {
 	if err := _c.check(); err != nil {
 		return nil, err
 	}
@@ -265,61 +265,61 @@ func (_c *GroveCreate) sqlSave(ctx context.Context) (*Grove, error) {
 	return _node, nil
 }
 
-func (_c *GroveCreate) createSpec() (*Grove, *sqlgraph.CreateSpec) {
+func (_c *ProjectCreate) createSpec() (*Project, *sqlgraph.CreateSpec) {
 	var (
-		_node = &Grove{config: _c.config}
-		_spec = sqlgraph.NewCreateSpec(grove.Table, sqlgraph.NewFieldSpec(grove.FieldID, field.TypeUUID))
+		_node = &Project{config: _c.config}
+		_spec = sqlgraph.NewCreateSpec(project.Table, sqlgraph.NewFieldSpec(project.FieldID, field.TypeUUID))
 	)
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
 	}
 	if value, ok := _c.mutation.Name(); ok {
-		_spec.SetField(grove.FieldName, field.TypeString, value)
+		_spec.SetField(project.FieldName, field.TypeString, value)
 		_node.Name = value
 	}
 	if value, ok := _c.mutation.Slug(); ok {
-		_spec.SetField(grove.FieldSlug, field.TypeString, value)
+		_spec.SetField(project.FieldSlug, field.TypeString, value)
 		_node.Slug = value
 	}
 	if value, ok := _c.mutation.GitRemote(); ok {
-		_spec.SetField(grove.FieldGitRemote, field.TypeString, value)
+		_spec.SetField(project.FieldGitRemote, field.TypeString, value)
 		_node.GitRemote = &value
 	}
 	if value, ok := _c.mutation.Labels(); ok {
-		_spec.SetField(grove.FieldLabels, field.TypeJSON, value)
+		_spec.SetField(project.FieldLabels, field.TypeJSON, value)
 		_node.Labels = value
 	}
 	if value, ok := _c.mutation.Annotations(); ok {
-		_spec.SetField(grove.FieldAnnotations, field.TypeJSON, value)
+		_spec.SetField(project.FieldAnnotations, field.TypeJSON, value)
 		_node.Annotations = value
 	}
 	if value, ok := _c.mutation.Created(); ok {
-		_spec.SetField(grove.FieldCreated, field.TypeTime, value)
+		_spec.SetField(project.FieldCreated, field.TypeTime, value)
 		_node.Created = value
 	}
 	if value, ok := _c.mutation.Updated(); ok {
-		_spec.SetField(grove.FieldUpdated, field.TypeTime, value)
+		_spec.SetField(project.FieldUpdated, field.TypeTime, value)
 		_node.Updated = value
 	}
 	if value, ok := _c.mutation.CreatedBy(); ok {
-		_spec.SetField(grove.FieldCreatedBy, field.TypeString, value)
+		_spec.SetField(project.FieldCreatedBy, field.TypeString, value)
 		_node.CreatedBy = value
 	}
 	if value, ok := _c.mutation.OwnerID(); ok {
-		_spec.SetField(grove.FieldOwnerID, field.TypeString, value)
+		_spec.SetField(project.FieldOwnerID, field.TypeString, value)
 		_node.OwnerID = value
 	}
 	if value, ok := _c.mutation.Visibility(); ok {
-		_spec.SetField(grove.FieldVisibility, field.TypeString, value)
+		_spec.SetField(project.FieldVisibility, field.TypeString, value)
 		_node.Visibility = value
 	}
 	if nodes := _c.mutation.AgentsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2M,
 			Inverse: false,
-			Table:   grove.AgentsTable,
-			Columns: []string{grove.AgentsColumn},
+			Table:   project.AgentsTable,
+			Columns: []string{project.AgentsColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(agent.FieldID, field.TypeUUID),
@@ -333,27 +333,27 @@ func (_c *GroveCreate) createSpec() (*Grove, *sqlgraph.CreateSpec) {
 	return _node, _spec
 }
 
-// GroveCreateBulk is the builder for creating many Grove entities in bulk.
-type GroveCreateBulk struct {
+// ProjectCreateBulk is the builder for creating many Project entities in bulk.
+type ProjectCreateBulk struct {
 	config
 	err      error
-	builders []*GroveCreate
+	builders []*ProjectCreate
 }
 
-// Save creates the Grove entities in the database.
-func (_c *GroveCreateBulk) Save(ctx context.Context) ([]*Grove, error) {
+// Save creates the Project entities in the database.
+func (_c *ProjectCreateBulk) Save(ctx context.Context) ([]*Project, error) {
 	if _c.err != nil {
 		return nil, _c.err
 	}
 	specs := make([]*sqlgraph.CreateSpec, len(_c.builders))
-	nodes := make([]*Grove, len(_c.builders))
+	nodes := make([]*Project, len(_c.builders))
 	mutators := make([]Mutator, len(_c.builders))
 	for i := range _c.builders {
 		func(i int, root context.Context) {
 			builder := _c.builders[i]
 			builder.defaults()
 			var mut Mutator = MutateFunc(func(ctx context.Context, m Mutation) (Value, error) {
-				mutation, ok := m.(*GroveMutation)
+				mutation, ok := m.(*ProjectMutation)
 				if !ok {
 					return nil, fmt.Errorf("unexpected mutation type %T", m)
 				}
@@ -396,7 +396,7 @@ func (_c *GroveCreateBulk) Save(ctx context.Context) ([]*Grove, error) {
 }
 
 // SaveX is like Save, but panics if an error occurs.
-func (_c *GroveCreateBulk) SaveX(ctx context.Context) []*Grove {
+func (_c *ProjectCreateBulk) SaveX(ctx context.Context) []*Project {
 	v, err := _c.Save(ctx)
 	if err != nil {
 		panic(err)
@@ -405,13 +405,13 @@ func (_c *GroveCreateBulk) SaveX(ctx context.Context) []*Grove {
 }
 
 // Exec executes the query.
-func (_c *GroveCreateBulk) Exec(ctx context.Context) error {
+func (_c *ProjectCreateBulk) Exec(ctx context.Context) error {
 	_, err := _c.Save(ctx)
 	return err
 }
 
 // ExecX is like Exec, but panics if an error occurs.
-func (_c *GroveCreateBulk) ExecX(ctx context.Context) {
+func (_c *ProjectCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
 		panic(err)
 	}

@@ -10,12 +10,12 @@ import (
 
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/grove"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/google/uuid"
 )
 
-// Grove is the model entity for the Grove schema.
-type Grove struct {
+// Project is the model entity for the Project schema.
+type Project struct {
 	config `json:"-"`
 	// ID of the ent.
 	ID uuid.UUID `json:"id,omitempty"`
@@ -40,13 +40,13 @@ type Grove struct {
 	// Visibility holds the value of the "visibility" field.
 	Visibility string `json:"visibility,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
-	// The values are being populated by the GroveQuery when eager-loading is set.
-	Edges        GroveEdges `json:"edges"`
+	// The values are being populated by the ProjectQuery when eager-loading is set.
+	Edges        ProjectEdges `json:"edges"`
 	selectValues sql.SelectValues
 }
 
-// GroveEdges holds the relations/edges for other nodes in the graph.
-type GroveEdges struct {
+// ProjectEdges holds the relations/edges for other nodes in the graph.
+type ProjectEdges struct {
 	// Agents holds the value of the agents edge.
 	Agents []*Agent `json:"agents,omitempty"`
 	// loadedTypes holds the information for reporting if a
@@ -56,7 +56,7 @@ type GroveEdges struct {
 
 // AgentsOrErr returns the Agents value or an error if the edge
 // was not loaded in eager-loading.
-func (e GroveEdges) AgentsOrErr() ([]*Agent, error) {
+func (e ProjectEdges) AgentsOrErr() ([]*Agent, error) {
 	if e.loadedTypes[0] {
 		return e.Agents, nil
 	}
@@ -64,17 +64,17 @@ func (e GroveEdges) AgentsOrErr() ([]*Agent, error) {
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
-func (*Grove) scanValues(columns []string) ([]any, error) {
+func (*Project) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case grove.FieldLabels, grove.FieldAnnotations:
+		case project.FieldLabels, project.FieldAnnotations:
 			values[i] = new([]byte)
-		case grove.FieldName, grove.FieldSlug, grove.FieldGitRemote, grove.FieldCreatedBy, grove.FieldOwnerID, grove.FieldVisibility:
+		case project.FieldName, project.FieldSlug, project.FieldGitRemote, project.FieldCreatedBy, project.FieldOwnerID, project.FieldVisibility:
 			values[i] = new(sql.NullString)
-		case grove.FieldCreated, grove.FieldUpdated:
+		case project.FieldCreated, project.FieldUpdated:
 			values[i] = new(sql.NullTime)
-		case grove.FieldID:
+		case project.FieldID:
 			values[i] = new(uuid.UUID)
 		default:
 			values[i] = new(sql.UnknownType)
@@ -84,39 +84,39 @@ func (*Grove) scanValues(columns []string) ([]any, error) {
 }
 
 // assignValues assigns the values that were returned from sql.Rows (after scanning)
-// to the Grove fields.
-func (_m *Grove) assignValues(columns []string, values []any) error {
+// to the Project fields.
+func (_m *Project) assignValues(columns []string, values []any) error {
 	if m, n := len(values), len(columns); m < n {
 		return fmt.Errorf("mismatch number of scan values: %d != %d", m, n)
 	}
 	for i := range columns {
 		switch columns[i] {
-		case grove.FieldID:
+		case project.FieldID:
 			if value, ok := values[i].(*uuid.UUID); !ok {
 				return fmt.Errorf("unexpected type %T for field id", values[i])
 			} else if value != nil {
 				_m.ID = *value
 			}
-		case grove.FieldName:
+		case project.FieldName:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field name", values[i])
 			} else if value.Valid {
 				_m.Name = value.String
 			}
-		case grove.FieldSlug:
+		case project.FieldSlug:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field slug", values[i])
 			} else if value.Valid {
 				_m.Slug = value.String
 			}
-		case grove.FieldGitRemote:
+		case project.FieldGitRemote:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field git_remote", values[i])
 			} else if value.Valid {
 				_m.GitRemote = new(string)
 				*_m.GitRemote = value.String
 			}
-		case grove.FieldLabels:
+		case project.FieldLabels:
 			if value, ok := values[i].(*[]byte); !ok {
 				return fmt.Errorf("unexpected type %T for field labels", values[i])
 			} else if value != nil && len(*value) > 0 {
@@ -124,7 +124,7 @@ func (_m *Grove) assignValues(columns []string, values []any) error {
 					return fmt.Errorf("unmarshal field labels: %w", err)
 				}
 			}
-		case grove.FieldAnnotations:
+		case project.FieldAnnotations:
 			if value, ok := values[i].(*[]byte); !ok {
 				return fmt.Errorf("unexpected type %T for field annotations", values[i])
 			} else if value != nil && len(*value) > 0 {
@@ -132,31 +132,31 @@ func (_m *Grove) assignValues(columns []string, values []any) error {
 					return fmt.Errorf("unmarshal field annotations: %w", err)
 				}
 			}
-		case grove.FieldCreated:
+		case project.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created", values[i])
 			} else if value.Valid {
 				_m.Created = value.Time
 			}
-		case grove.FieldUpdated:
+		case project.FieldUpdated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field updated", values[i])
 			} else if value.Valid {
 				_m.Updated = value.Time
 			}
-		case grove.FieldCreatedBy:
+		case project.FieldCreatedBy:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field created_by", values[i])
 			} else if value.Valid {
 				_m.CreatedBy = value.String
 			}
-		case grove.FieldOwnerID:
+		case project.FieldOwnerID:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field owner_id", values[i])
 			} else if value.Valid {
 				_m.OwnerID = value.String
 			}
-		case grove.FieldVisibility:
+		case project.FieldVisibility:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field visibility", values[i])
 			} else if value.Valid {
@@ -169,39 +169,39 @@ func (_m *Grove) assignValues(columns []string, values []any) error {
 	return nil
 }
 
-// Value returns the ent.Value that was dynamically selected and assigned to the Grove.
+// Value returns the ent.Value that was dynamically selected and assigned to the Project.
 // This includes values selected through modifiers, order, etc.
-func (_m *Grove) Value(name string) (ent.Value, error) {
+func (_m *Project) Value(name string) (ent.Value, error) {
 	return _m.selectValues.Get(name)
 }
 
-// QueryAgents queries the "agents" edge of the Grove entity.
-func (_m *Grove) QueryAgents() *AgentQuery {
-	return NewGroveClient(_m.config).QueryAgents(_m)
+// QueryAgents queries the "agents" edge of the Project entity.
+func (_m *Project) QueryAgents() *AgentQuery {
+	return NewProjectClient(_m.config).QueryAgents(_m)
 }
 
-// Update returns a builder for updating this Grove.
-// Note that you need to call Grove.Unwrap() before calling this method if this Grove
+// Update returns a builder for updating this Project.
+// Note that you need to call Project.Unwrap() before calling this method if this Project
 // was returned from a transaction, and the transaction was committed or rolled back.
-func (_m *Grove) Update() *GroveUpdateOne {
-	return NewGroveClient(_m.config).UpdateOne(_m)
+func (_m *Project) Update() *ProjectUpdateOne {
+	return NewProjectClient(_m.config).UpdateOne(_m)
 }
 
-// Unwrap unwraps the Grove entity that was returned from a transaction after it was closed,
+// Unwrap unwraps the Project entity that was returned from a transaction after it was closed,
 // so that all future queries will be executed through the driver which created the transaction.
-func (_m *Grove) Unwrap() *Grove {
+func (_m *Project) Unwrap() *Project {
 	_tx, ok := _m.config.driver.(*txDriver)
 	if !ok {
-		panic("ent: Grove is not a transactional entity")
+		panic("ent: Project is not a transactional entity")
 	}
 	_m.config.driver = _tx.drv
 	return _m
 }
 
 // String implements the fmt.Stringer.
-func (_m *Grove) String() string {
+func (_m *Project) String() string {
 	var builder strings.Builder
-	builder.WriteString("Grove(")
+	builder.WriteString("Project(")
 	builder.WriteString(fmt.Sprintf("id=%v, ", _m.ID))
 	builder.WriteString("name=")
 	builder.WriteString(_m.Name)
@@ -238,5 +238,5 @@ func (_m *Grove) String() string {
 	return builder.String()
 }
 
-// Groves is a parsable slice of Grove.
-type Groves []*Grove
+// Projects is a parsable slice of Project.
+type Projects []*Project

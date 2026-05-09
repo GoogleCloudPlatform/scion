@@ -71,9 +71,9 @@ func Template(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldTemplate, v))
 }
 
-// GroveID applies equality check predicate on the "grove_id" field. It's identical to GroveIDEQ.
-func GroveID(v uuid.UUID) predicate.Agent {
-	return predicate.Agent(sql.FieldEQ(FieldGroveID, v))
+// ProjectID applies equality check predicate on the "project_id" field. It's identical to ProjectIDEQ.
+func ProjectID(v uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldProjectID, v))
 }
 
 // CreatedBy applies equality check predicate on the "created_by" field. It's identical to CreatedByEQ.
@@ -311,24 +311,24 @@ func TemplateContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldTemplate, v))
 }
 
-// GroveIDEQ applies the EQ predicate on the "grove_id" field.
-func GroveIDEQ(v uuid.UUID) predicate.Agent {
-	return predicate.Agent(sql.FieldEQ(FieldGroveID, v))
+// ProjectIDEQ applies the EQ predicate on the "project_id" field.
+func ProjectIDEQ(v uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldProjectID, v))
 }
 
-// GroveIDNEQ applies the NEQ predicate on the "grove_id" field.
-func GroveIDNEQ(v uuid.UUID) predicate.Agent {
-	return predicate.Agent(sql.FieldNEQ(FieldGroveID, v))
+// ProjectIDNEQ applies the NEQ predicate on the "project_id" field.
+func ProjectIDNEQ(v uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldProjectID, v))
 }
 
-// GroveIDIn applies the In predicate on the "grove_id" field.
-func GroveIDIn(vs ...uuid.UUID) predicate.Agent {
-	return predicate.Agent(sql.FieldIn(FieldGroveID, vs...))
+// ProjectIDIn applies the In predicate on the "project_id" field.
+func ProjectIDIn(vs ...uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldProjectID, vs...))
 }
 
-// GroveIDNotIn applies the NotIn predicate on the "grove_id" field.
-func GroveIDNotIn(vs ...uuid.UUID) predicate.Agent {
-	return predicate.Agent(sql.FieldNotIn(FieldGroveID, vs...))
+// ProjectIDNotIn applies the NotIn predicate on the "project_id" field.
+func ProjectIDNotIn(vs ...uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldProjectID, vs...))
 }
 
 // StatusEQ applies the EQ predicate on the "status" field.
@@ -566,21 +566,21 @@ func UpdatedLTE(v time.Time) predicate.Agent {
 	return predicate.Agent(sql.FieldLTE(FieldUpdated, v))
 }
 
-// HasGrove applies the HasEdge predicate on the "grove" edge.
-func HasGrove() predicate.Agent {
+// HasProject applies the HasEdge predicate on the "project" edge.
+func HasProject() predicate.Agent {
 	return predicate.Agent(func(s *sql.Selector) {
 		step := sqlgraph.NewStep(
 			sqlgraph.From(Table, FieldID),
-			sqlgraph.Edge(sqlgraph.M2O, true, GroveTable, GroveColumn),
+			sqlgraph.Edge(sqlgraph.M2O, true, ProjectTable, ProjectColumn),
 		)
 		sqlgraph.HasNeighbors(s, step)
 	})
 }
 
-// HasGroveWith applies the HasEdge predicate on the "grove" edge with a given conditions (other predicates).
-func HasGroveWith(preds ...predicate.Grove) predicate.Agent {
+// HasProjectWith applies the HasEdge predicate on the "project" edge with a given conditions (other predicates).
+func HasProjectWith(preds ...predicate.Project) predicate.Agent {
 	return predicate.Agent(func(s *sql.Selector) {
-		step := newGroveStep()
+		step := newProjectStep()
 		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
 			for _, p := range preds {
 				p(s)

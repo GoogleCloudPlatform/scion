@@ -22,12 +22,12 @@ import (
 )
 
 // ============================================================================
-// Grove Sync State Operations
+// Project Sync State Operations
 // ============================================================================
 
-// UpsertGroveSyncState creates or updates sync state for a grove.
-func (s *SQLiteStore) UpsertGroveSyncState(ctx context.Context, state *store.GroveSyncState) error {
-	if state.GroveID == "" {
+// UpsertProjectSyncState creates or updates sync state for a project.
+func (s *SQLiteStore) UpsertProjectSyncState(ctx context.Context, state *store.ProjectSyncState) error {
+	if state.ProjectID == "" {
 		return store.ErrInvalidInput
 	}
 
@@ -39,7 +39,7 @@ func (s *SQLiteStore) UpsertGroveSyncState(ctx context.Context, state *store.Gro
 			last_commit_sha = excluded.last_commit_sha,
 			file_count = excluded.file_count,
 			total_bytes = excluded.total_bytes
-	`, state.GroveID, state.BrokerID,
+	`, state.ProjectID, state.BrokerID,
 		nullableTimePtr(state.LastSyncTime),
 		nullableString(state.LastCommitSHA),
 		state.FileCount, state.TotalBytes,
@@ -47,9 +47,9 @@ func (s *SQLiteStore) UpsertGroveSyncState(ctx context.Context, state *store.Gro
 	return err
 }
 
-// GetGroveSyncState retrieves sync state for a grove and optional broker.
-func (s *SQLiteStore) GetGroveSyncState(ctx context.Context, groveID, brokerID string) (*store.GroveSyncState, error) {
-	state := &store.GroveSyncState{}
+// GetProjectSyncState retrieves sync state for a project and optional broker.
+func (s *SQLiteStore) GetProjectSyncState(ctx context.Context, projectID, brokerID string) (*store.ProjectSyncState, error) {
+	state := &store.ProjectSyncState{}
 	var lastSyncTime sql.NullTime
 	var lastCommitSHA sql.NullString
 
@@ -57,8 +57,8 @@ func (s *SQLiteStore) GetGroveSyncState(ctx context.Context, groveID, brokerID s
 		SELECT grove_id, broker_id, last_sync_time, last_commit_sha, file_count, total_bytes
 		FROM grove_sync_state
 		WHERE grove_id = ? AND broker_id = ?
-	`, groveID, brokerID).Scan(
-		&state.GroveID, &state.BrokerID,
+	`, projectID, brokerID).Scan(
+		&state.ProjectID, &state.BrokerID,
 		&lastSyncTime, &lastCommitSHA,
 		&state.FileCount, &state.TotalBytes,
 	)
@@ -79,27 +79,27 @@ func (s *SQLiteStore) GetGroveSyncState(ctx context.Context, groveID, brokerID s
 	return state, nil
 }
 
-// ListGroveSyncStates returns all sync states for a grove.
-func (s *SQLiteStore) ListGroveSyncStates(ctx context.Context, groveID string) ([]store.GroveSyncState, error) {
+// ListProjectSyncStates returns all sync states for a project.
+func (s *SQLiteStore) ListProjectSyncStates(ctx context.Context, projectID string) ([]store.ProjectSyncState, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT grove_id, broker_id, last_sync_time, last_commit_sha, file_count, total_bytes
 		FROM grove_sync_state
 		WHERE grove_id = ?
 		ORDER BY broker_id
-	`, groveID)
+	`, projectID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var states []store.GroveSyncState
+	var states []store.ProjectSyncState
 	for rows.Next() {
-		var state store.GroveSyncState
+		var state store.ProjectSyncState
 		var lastSyncTime sql.NullTime
 		var lastCommitSHA sql.NullString
 
 		if err := rows.Scan(
-			&state.GroveID, &state.BrokerID,
+			&state.ProjectID, &state.BrokerID,
 			&lastSyncTime, &lastCommitSHA,
 			&state.FileCount, &state.TotalBytes,
 		); err != nil {
@@ -117,16 +117,16 @@ func (s *SQLiteStore) ListGroveSyncStates(ctx context.Context, groveID string) (
 	}
 
 	if states == nil {
-		states = []store.GroveSyncState{}
+		states = []store.ProjectSyncState{}
 	}
 	return states, rows.Err()
 }
 
-// DeleteGroveSyncState removes sync state for a grove and optional broker.
-func (s *SQLiteStore) DeleteGroveSyncState(ctx context.Context, groveID, brokerID string) error {
+// DeleteProjectSyncState removes sync state for a project and optional broker.
+func (s *SQLiteStore) DeleteProjectSyncState(ctx context.Context, projectID, brokerID string) error {
 	result, err := s.db.ExecContext(ctx, `
 		DELETE FROM grove_sync_state WHERE grove_id = ? AND broker_id = ?
-	`, groveID, brokerID)
+	`, projectID, brokerID)
 	if err != nil {
 		return err
 	}

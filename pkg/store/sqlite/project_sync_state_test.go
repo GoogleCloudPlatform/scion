@@ -26,29 +26,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGroveSyncStateCRUD(t *testing.T) {
+func TestProjectSyncStateCRUD(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID := createTestGrove(t, s)
+	projectID := createTestProject(t, s)
 
 	now := time.Now().UTC().Truncate(time.Second)
 
 	// Upsert (create)
-	state := &store.GroveSyncState{
-		GroveID:       groveID,
+	state := &store.ProjectSyncState{
+		ProjectID:     projectID,
 		BrokerID:      "",
 		LastSyncTime:  &now,
 		LastCommitSHA: "abc123",
 		FileCount:     42,
 		TotalBytes:    123456,
 	}
-	err := s.UpsertGroveSyncState(ctx, state)
+	err := s.UpsertProjectSyncState(ctx, state)
 	require.NoError(t, err)
 
 	// Get
-	got, err := s.GetGroveSyncState(ctx, groveID, "")
+	got, err := s.GetProjectSyncState(ctx, projectID, "")
 	require.NoError(t, err)
-	assert.Equal(t, groveID, got.GroveID)
+	assert.Equal(t, projectID, got.ProjectID)
 	assert.Equal(t, "", got.BrokerID)
 	assert.NotNil(t, got.LastSyncTime)
 	assert.Equal(t, now, *got.LastSyncTime)
@@ -61,78 +61,78 @@ func TestGroveSyncStateCRUD(t *testing.T) {
 	state.LastSyncTime = &later
 	state.FileCount = 50
 	state.TotalBytes = 200000
-	err = s.UpsertGroveSyncState(ctx, state)
+	err = s.UpsertProjectSyncState(ctx, state)
 	require.NoError(t, err)
 
-	got, err = s.GetGroveSyncState(ctx, groveID, "")
+	got, err = s.GetProjectSyncState(ctx, projectID, "")
 	require.NoError(t, err)
 	assert.Equal(t, later, *got.LastSyncTime)
 	assert.Equal(t, 50, got.FileCount)
 	assert.Equal(t, int64(200000), got.TotalBytes)
 
 	// Add a broker-scoped state
-	brokerState := &store.GroveSyncState{
-		GroveID:    groveID,
+	brokerState := &store.ProjectSyncState{
+		ProjectID:    projectID,
 		BrokerID:   "broker-1",
 		FileCount:  10,
 		TotalBytes: 5000,
 	}
-	err = s.UpsertGroveSyncState(ctx, brokerState)
+	err = s.UpsertProjectSyncState(ctx, brokerState)
 	require.NoError(t, err)
 
 	// List
-	states, err := s.ListGroveSyncStates(ctx, groveID)
+	states, err := s.ListProjectSyncStates(ctx, projectID)
 	require.NoError(t, err)
 	assert.Len(t, states, 2)
 
 	// Delete hub-native state
-	err = s.DeleteGroveSyncState(ctx, groveID, "")
+	err = s.DeleteProjectSyncState(ctx, projectID, "")
 	require.NoError(t, err)
 
 	// Verify only broker state remains
-	states, err = s.ListGroveSyncStates(ctx, groveID)
+	states, err = s.ListProjectSyncStates(ctx, projectID)
 	require.NoError(t, err)
 	assert.Len(t, states, 1)
 	assert.Equal(t, "broker-1", states[0].BrokerID)
 
 	// Get not found
-	_, err = s.GetGroveSyncState(ctx, groveID, "")
+	_, err = s.GetProjectSyncState(ctx, projectID, "")
 	assert.ErrorIs(t, err, store.ErrNotFound)
 
 	// Delete not found
-	err = s.DeleteGroveSyncState(ctx, groveID, "nonexistent")
+	err = s.DeleteProjectSyncState(ctx, projectID, "nonexistent")
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
-func TestGroveSyncStateValidation(t *testing.T) {
+func TestProjectSyncStateValidation(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// Empty grove ID
-	err := s.UpsertGroveSyncState(ctx, &store.GroveSyncState{})
+	// Empty project ID
+	err := s.UpsertProjectSyncState(ctx, &store.ProjectSyncState{})
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 }
 
-func TestGroveSyncStateCascadeDelete(t *testing.T) {
+func TestProjectSyncStateCascadeDelete(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID := createTestGrove(t, s)
+	projectID := createTestProject(t, s)
 
 	now := time.Now().UTC().Truncate(time.Second)
-	state := &store.GroveSyncState{
-		GroveID:      groveID,
+	state := &store.ProjectSyncState{
+		ProjectID:      projectID,
 		LastSyncTime: &now,
 		FileCount:    5,
 		TotalBytes:   1000,
 	}
-	err := s.UpsertGroveSyncState(ctx, state)
+	err := s.UpsertProjectSyncState(ctx, state)
 	require.NoError(t, err)
 
-	// Delete the grove - sync state should cascade
-	err = s.DeleteGrove(ctx, groveID)
+	// Delete the project (grove) - sync state should cascade
+	err = s.DeleteProject(ctx, projectID)
 	require.NoError(t, err)
 
-	states, err := s.ListGroveSyncStates(ctx, groveID)
+	states, err := s.ListProjectSyncStates(ctx, projectID)
 	require.NoError(t, err)
 	assert.Empty(t, states)
 }

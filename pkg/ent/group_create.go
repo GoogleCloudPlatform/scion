@@ -64,16 +64,16 @@ func (_c *GroupCreate) SetNillableGroupType(v *group.GroupType) *GroupCreate {
 	return _c
 }
 
-// SetGroveID sets the "grove_id" field.
-func (_c *GroupCreate) SetGroveID(v uuid.UUID) *GroupCreate {
-	_c.mutation.SetGroveID(v)
+// SetProjectID sets the "project_id" field.
+func (_c *GroupCreate) SetProjectID(v uuid.UUID) *GroupCreate {
+	_c.mutation.SetProjectID(v)
 	return _c
 }
 
-// SetNillableGroveID sets the "grove_id" field if the given value is not nil.
-func (_c *GroupCreate) SetNillableGroveID(v *uuid.UUID) *GroupCreate {
+// SetNillableProjectID sets the "project_id" field if the given value is not nil.
+func (_c *GroupCreate) SetNillableProjectID(v *uuid.UUID) *GroupCreate {
 	if v != nil {
-		_c.SetGroveID(*v)
+		_c.SetProjectID(*v)
 	}
 	return _c
 }
@@ -361,9 +361,9 @@ func (_c *GroupCreate) createSpec() (*Group, *sqlgraph.CreateSpec) {
 		_spec.SetField(group.FieldGroupType, field.TypeEnum, value)
 		_node.GroupType = value
 	}
-	if value, ok := _c.mutation.GroveID(); ok {
-		_spec.SetField(group.FieldGroveID, field.TypeUUID, value)
-		_node.GroveID = &value
+	if value, ok := _c.mutation.ProjectID(); ok {
+		_spec.SetField(group.FieldProjectID, field.TypeUUID, value)
+		_node.ProjectID = &value
 	}
 	if value, ok := _c.mutation.Labels(); ok {
 		_spec.SetField(group.FieldLabels, field.TypeJSON, value)

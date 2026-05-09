@@ -13,9 +13,9 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/grove"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/google/uuid"
 )
@@ -81,16 +81,16 @@ func (_u *AgentUpdate) ClearTemplate() *AgentUpdate {
 	return _u
 }
 
-// SetGroveID sets the "grove_id" field.
-func (_u *AgentUpdate) SetGroveID(v uuid.UUID) *AgentUpdate {
-	_u.mutation.SetGroveID(v)
+// SetProjectID sets the "project_id" field.
+func (_u *AgentUpdate) SetProjectID(v uuid.UUID) *AgentUpdate {
+	_u.mutation.SetProjectID(v)
 	return _u
 }
 
-// SetNillableGroveID sets the "grove_id" field if the given value is not nil.
-func (_u *AgentUpdate) SetNillableGroveID(v *uuid.UUID) *AgentUpdate {
+// SetNillableProjectID sets the "project_id" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableProjectID(v *uuid.UUID) *AgentUpdate {
 	if v != nil {
-		_u.SetGroveID(*v)
+		_u.SetProjectID(*v)
 	}
 	return _u
 }
@@ -183,9 +183,9 @@ func (_u *AgentUpdate) SetUpdated(v time.Time) *AgentUpdate {
 	return _u
 }
 
-// SetGrove sets the "grove" edge to the Grove entity.
-func (_u *AgentUpdate) SetGrove(v *Grove) *AgentUpdate {
-	return _u.SetGroveID(v.ID)
+// SetProject sets the "project" edge to the Project entity.
+func (_u *AgentUpdate) SetProject(v *Project) *AgentUpdate {
+	return _u.SetProjectID(v.ID)
 }
 
 // SetCreatorID sets the "creator" edge to the User entity by ID.
@@ -247,9 +247,9 @@ func (_u *AgentUpdate) Mutation() *AgentMutation {
 	return _u.mutation
 }
 
-// ClearGrove clears the "grove" edge to the Grove entity.
-func (_u *AgentUpdate) ClearGrove() *AgentUpdate {
-	_u.mutation.ClearGrove()
+// ClearProject clears the "project" edge to the Project entity.
+func (_u *AgentUpdate) ClearProject() *AgentUpdate {
+	_u.mutation.ClearProject()
 	return _u
 }
 
@@ -360,8 +360,8 @@ func (_u *AgentUpdate) check() error {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "Agent.status": %w`, err)}
 		}
 	}
-	if _u.mutation.GroveCleared() && len(_u.mutation.GroveIDs()) > 0 {
-		return errors.New(`ent: clearing a required unique edge "Agent.grove"`)
+	if _u.mutation.ProjectCleared() && len(_u.mutation.ProjectIDs()) > 0 {
+		return errors.New(`ent: clearing a required unique edge "Agent.project"`)
 	}
 	return nil
 }
@@ -402,28 +402,28 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(agent.FieldUpdated, field.TypeTime, value)
 	}
-	if _u.mutation.GroveCleared() {
+	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.M2O,
 			Inverse: true,
-			Table:   agent.GroveTable,
-			Columns: []string{agent.GroveColumn},
+			Table:   agent.ProjectTable,
+			Columns: []string{agent.ProjectColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(grove.FieldID, field.TypeUUID),
+				IDSpec: sqlgraph.NewFieldSpec(project.FieldID, field.TypeUUID),
 			},
 		}
 		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
 	}
-	if nodes := _u.mutation.GroveIDs(); len(nodes) > 0 {
+	if nodes := _u.mutation.ProjectIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.M2O,
 			Inverse: true,
-			Table:   agent.GroveTable,
-			Columns: []string{agent.GroveColumn},
+			Table:   agent.ProjectTable,
+			Columns: []string{agent.ProjectColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(grove.FieldID, field.TypeUUID),
+				IDSpec: sqlgraph.NewFieldSpec(project.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {
@@ -647,16 +647,16 @@ func (_u *AgentUpdateOne) ClearTemplate() *AgentUpdateOne {
 	return _u
 }
 
-// SetGroveID sets the "grove_id" field.
-func (_u *AgentUpdateOne) SetGroveID(v uuid.UUID) *AgentUpdateOne {
-	_u.mutation.SetGroveID(v)
+// SetProjectID sets the "project_id" field.
+func (_u *AgentUpdateOne) SetProjectID(v uuid.UUID) *AgentUpdateOne {
+	_u.mutation.SetProjectID(v)
 	return _u
 }
 
-// SetNillableGroveID sets the "grove_id" field if the given value is not nil.
-func (_u *AgentUpdateOne) SetNillableGroveID(v *uuid.UUID) *AgentUpdateOne {
+// SetNillableProjectID sets the "project_id" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableProjectID(v *uuid.UUID) *AgentUpdateOne {
 	if v != nil {
-		_u.SetGroveID(*v)
+		_u.SetProjectID(*v)
 	}
 	return _u
 }
@@ -749,9 +749,9 @@ func (_u *AgentUpdateOne) SetUpdated(v time.Time) *AgentUpdateOne {
 	return _u
 }
 
-// SetGrove sets the "grove" edge to the Grove entity.
-func (_u *AgentUpdateOne) SetGrove(v *Grove) *AgentUpdateOne {
-	return _u.SetGroveID(v.ID)
+// SetProject sets the "project" edge to the Project entity.
+func (_u *AgentUpdateOne) SetProject(v *Project) *AgentUpdateOne {
+	return _u.SetProjectID(v.ID)
 }
 
 // SetCreatorID sets the "creator" edge to the User entity by ID.
@@ -813,9 +813,9 @@ func (_u *AgentUpdateOne) Mutation() *AgentMutation {
 	return _u.mutation
 }
 
-// ClearGrove clears the "grove" edge to the Grove entity.
-func (_u *AgentUpdateOne) ClearGrove() *AgentUpdateOne {
-	_u.mutation.ClearGrove()
+// ClearProject clears the "project" edge to the Project entity.
+func (_u *AgentUpdateOne) ClearProject() *AgentUpdateOne {
+	_u.mutation.ClearProject()
 	return _u
 }
 
@@ -939,8 +939,8 @@ func (_u *AgentUpdateOne) check() error {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "Agent.status": %w`, err)}
 		}
 	}
-	if _u.mutation.GroveCleared() && len(_u.mutation.GroveIDs()) > 0 {
-		return errors.New(`ent: clearing a required unique edge "Agent.grove"`)
+	if _u.mutation.ProjectCleared() && len(_u.mutation.ProjectIDs()) > 0 {
+		return errors.New(`ent: clearing a required unique edge "Agent.project"`)
 	}
 	return nil
 }
@@ -998,28 +998,28 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(agent.FieldUpdated, field.TypeTime, value)
 	}
-	if _u.mutation.GroveCleared() {
+	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.M2O,
 			Inverse: true,
-			Table:   agent.GroveTable,
-			Columns: []string{agent.GroveColumn},
+			Table:   agent.ProjectTable,
+			Columns: []string{agent.ProjectColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(grove.FieldID, field.TypeUUID),
+				IDSpec: sqlgraph.NewFieldSpec(project.FieldID, field.TypeUUID),
 			},
 		}
 		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
 	}
-	if nodes := _u.mutation.GroveIDs(); len(nodes) > 0 {
+	if nodes := _u.mutation.ProjectIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.M2O,
 			Inverse: true,
-			Table:   agent.GroveTable,
-			Columns: []string{agent.GroveColumn},
+			Table:   agent.ProjectTable,
+			Columns: []string{agent.ProjectColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(grove.FieldID, field.TypeUUID),
+				IDSpec: sqlgraph.NewFieldSpec(project.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {

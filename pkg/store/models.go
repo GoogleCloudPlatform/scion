@@ -31,8 +31,8 @@ type Agent struct {
 	Name     string `json:"name"`     // Human-friendly display name
 	Template string `json:"template"` // Template used to create this agent
 
-	// Grove association
-	GroveID string `json:"groveId"` // FK to Grove.ID
+	// Project association
+	ProjectID string `json:"groveId"` // FK to Grove.ID
 
 	// Metadata (stored as JSON)
 	Labels      map[string]string `json:"labels,omitempty"`
@@ -64,7 +64,7 @@ type Agent struct {
 	Message         string `json:"message,omitempty"`
 
 	// Enriched fields (populated by Hub when returning data, not persisted)
-	Grove             string `json:"grove,omitempty"`             // Grove name (resolved from GroveID)
+	Grove             string `json:"grove,omitempty"`             // Project name (resolved from ProjectID)
 	RuntimeBrokerName string `json:"runtimeBrokerName,omitempty"` // Broker name (resolved from RuntimeBrokerID)
 	HarnessConfig     string `json:"harnessConfig,omitempty"`     // Harness config name (resolved from AppliedConfig.HarnessConfig)
 	HarnessAuth       string `json:"harnessAuth,omitempty"`       // Harness auth method (resolved from AppliedConfig.HarnessAuth)
@@ -104,7 +104,7 @@ type AgentAppliedConfig struct {
 	Task          string              `json:"task,omitempty"`      // Initial task/prompt for the agent
 	Attach        bool                `json:"attach,omitempty"`    // If true, signals interactive attach mode to the broker/harness
 	Branch        string              `json:"branch,omitempty"`    // Git branch name (defaults to agent slug if empty)
-	Workspace     string              `json:"workspace,omitempty"` // Host path to mount as /workspace (overrides default grove root)
+	Workspace     string              `json:"workspace,omitempty"` // Host path to mount as /workspace (overrides default project root)
 	GitClone      *api.GitCloneConfig `json:"gitClone,omitempty"`
 
 	// Template info for Runtime Broker hydration
@@ -132,19 +132,19 @@ type AgentAppliedConfig struct {
 	GCPIdentity *GCPIdentityConfig `json:"gcpIdentity,omitempty"`
 }
 
-// Grove type constants.
-// Type reflects how the grove was established on the Hub:
-//   - "linked": A pre-existing local grove linked to the Hub
+// Project type constants.
+// Type reflects how the project was established on the Hub:
+//   - "linked": A pre-existing local project linked to the Hub
 //   - "hub-native": Created via the Hub (web UI or API)
 //
-// Whether a grove is git-backed is orthogonal and indicated by the GitRemote field.
+// Whether a project is git-backed is orthogonal and indicated by the GitRemote field.
 const (
-	GroveTypeLinked    = "linked"     // Broker-linked grove (local project linked to hub)
-	GroveTypeHubNative = "hub-native" // Hub-native workspace
+	ProjectTypeLinked    = "linked"     // Broker-linked project (local project linked to hub)
+	ProjectTypeHubNative = "hub-native" // Hub-native workspace
 )
 
 // Workspace mode constants for git groves.
-// When a git grove has the workspace mode label set to "shared", it uses a
+// When a git project has the workspace mode label set to "shared", it uses a
 // single shared clone mounted by all agents instead of per-agent clones.
 const (
 	LabelWorkspaceMode    = "scion.dev/workspace-mode"
@@ -152,8 +152,8 @@ const (
 	WorkspaceModePerAgent = "per-agent"
 )
 
-// Grove represents a project/agent group in the Hub database.
-type Grove struct {
+// Project represents a project/agent group in the Hub database.
+type Project struct {
 	// Identity
 	ID   string `json:"id"`   // UUID primary key
 	Name string `json:"name"` // Human-friendly display name
@@ -186,7 +186,7 @@ type Grove struct {
 	// GitHub App integration
 	GitHubInstallationID *int64                  `json:"githubInstallationId,omitempty"`
 	GitHubPermissions    *GitHubTokenPermissions `json:"githubPermissions,omitempty"`
-	GitHubAppStatus      *GitHubAppGroveStatus   `json:"githubAppStatus,omitempty"`
+	GitHubAppStatus      *GitHubAppProjectStatus `json:"githubAppStatus,omitempty"`
 
 	// Git commit attribution (used when GitHub App generates commits)
 	GitIdentity *GitIdentityConfig `json:"gitIdentity,omitempty"`
@@ -194,13 +194,13 @@ type Grove struct {
 	// Computed fields (not stored, populated on read)
 	AgentCount        int    `json:"agentCount,omitempty"`
 	ActiveBrokerCount int    `json:"activeBrokerCount,omitempty"`
-	GroveType         string `json:"groveType,omitempty"` // "git", "linked", or "hub-native"
+	ProjectType         string `json:"groveType,omitempty"` // "git", "linked", or "hub-native"
 	OwnerName         string `json:"ownerName,omitempty"` // Enriched: resolved from OwnerID
 }
 
-// IsSharedWorkspace returns true if this is a git grove configured to use a
+// IsSharedWorkspace returns true if this is a git project configured to use a
 // single shared workspace clone instead of per-agent clones.
-func (g *Grove) IsSharedWorkspace() bool {
+func (g *Project) IsSharedWorkspace() bool {
 	return g.GitRemote != "" && g.Labels[LabelWorkspaceMode] == WorkspaceModeShared
 }
 
@@ -261,12 +261,12 @@ type BrokerProfile struct {
 	Namespace string `json:"namespace,omitempty"` // K8s namespace
 }
 
-// GroveProvider links a runtime broker to a grove.
-type GroveProvider struct {
-	GroveID    string    `json:"groveId"`
+// ProjectProvider links a runtime broker to a grove.
+type ProjectProvider struct {
+	ProjectID    string    `json:"groveId"`
 	BrokerID   string    `json:"brokerId"`
 	BrokerName string    `json:"brokerName"`
-	LocalPath  string    `json:"localPath,omitempty"` // Filesystem path to the grove on this broker (e.g., ~/.scion or /path/to/project/.scion)
+	LocalPath  string    `json:"localPath,omitempty"` // Filesystem path to the project on this broker (e.g., ~/.scion or /path/to/project/.scion)
 	Status     string    `json:"status"`              // online, offline
 	LastSeen   time.Time `json:"lastSeen,omitempty"`
 
@@ -296,7 +296,7 @@ type Template struct {
 	// Scope
 	Scope   string `json:"scope"`             // global, grove, user
 	ScopeID string `json:"scopeId,omitempty"` // groveId or userId (null for global)
-	GroveID string `json:"groveId,omitempty"` // Grove association (if scope=grove) - deprecated, use ScopeID
+	ProjectID string `json:"groveId,omitempty"` // Project association (if scope=grove) - deprecated, use ScopeID
 
 	// Storage
 	StorageURI    string `json:"storageUri,omitempty"`    // Full bucket URI (e.g., "gs://bucket/templates/path/")
@@ -342,7 +342,7 @@ const (
 // TemplateScope constants
 const (
 	TemplateScopeGlobal = "global"
-	TemplateScopeGrove  = "grove"
+	TemplateScopeProject = "grove"
 	TemplateScopeUser   = "user"
 )
 
@@ -411,7 +411,7 @@ const (
 // HarnessConfigScope constants
 const (
 	HarnessConfigScopeGlobal = "global"
-	HarnessConfigScopeGrove  = "grove"
+	HarnessConfigScopeProject = "grove"
 	HarnessConfigScopeUser   = "user"
 )
 
@@ -609,7 +609,7 @@ const (
 // SubscriptionScope constants define what a subscription targets.
 const (
 	SubscriptionScopeAgent = "agent" // Watch a specific agent
-	SubscriptionScopeGrove = "grove" // Watch all agents in a grove
+	SubscriptionScopeProject = "grove" // Watch all agents in a project
 )
 
 // NotificationSubscription represents a subscription to agent activity changes.
@@ -620,7 +620,7 @@ type NotificationSubscription struct {
 	AgentSlug         string    `json:"agentSlug,omitempty"` // Display-only: resolved agent slug (not persisted)
 	SubscriberType    string    `json:"subscriberType"`      // "agent" or "user"
 	SubscriberID      string    `json:"subscriberId"`        // Slug or ID of the subscriber
-	GroveID           string    `json:"groveId"`             // Always required (grove context)
+	ProjectID           string    `json:"groveId"`             // Always required (grove context)
 	TriggerActivities []string  `json:"triggerActivities"`   // e.g. ["COMPLETED", "WAITING_FOR_INPUT"]
 	CreatedAt         time.Time `json:"createdAt"`
 	CreatedBy         string    `json:"createdBy"`
@@ -645,7 +645,7 @@ type SubscriptionTemplate struct {
 	Name              string   `json:"name"`              // Display name (e.g., "All Events", "Critical Only")
 	Scope             string   `json:"scope"`             // Default scope: "agent" or "grove"
 	TriggerActivities []string `json:"triggerActivities"` // Pre-configured trigger set
-	GroveID           string   `json:"groveId"`           // Grove scope (empty = global)
+	ProjectID           string   `json:"groveId"`           // Project scope (empty = global)
 	CreatedBy         string   `json:"createdBy"`
 }
 
@@ -654,7 +654,7 @@ type Notification struct {
 	ID             string    `json:"id"`             // UUID primary key
 	SubscriptionID string    `json:"subscriptionId"` // FK to NotificationSubscription
 	AgentID        string    `json:"agentId"`        // Agent that triggered the notification
-	GroveID        string    `json:"groveId"`
+	ProjectID        string    `json:"groveId"`
 	SubscriberType string    `json:"subscriberType"` // "agent" or "user"
 	SubscriberID   string    `json:"subscriberId"`
 	Status         string    `json:"status"` // Trigger status (UPPER CASE)
@@ -756,7 +756,7 @@ const (
 const (
 	ScopeHub           = "hub"
 	ScopeUser          = "user"
-	ScopeGrove         = "grove"
+	ScopeProject       = "grove"
 	ScopeRuntimeBroker = "runtime_broker"
 )
 
@@ -784,7 +784,7 @@ type Group struct {
 	Slug        string `json:"slug"` // URL-safe identifier
 	Description string `json:"description,omitempty"`
 	GroupType   string `json:"groupType,omitempty"` // "explicit" or "grove_agents"
-	GroveID     string `json:"groveId,omitempty"`   // FK to Grove.ID (for grove_agents groups)
+	ProjectID     string `json:"groveId,omitempty"`   // FK to Grove.ID (for grove_agents groups)
 
 	// Hierarchy
 	ParentID string `json:"parentId,omitempty"` // Optional parent group for hierarchy
@@ -822,8 +822,8 @@ const (
 
 // GroupType constants
 const (
-	GroupTypeExplicit    = "explicit"
-	GroupTypeGroveAgents = "grove_agents"
+	GroupTypeExplicit      = "explicit"
+	GroupTypeProjectAgents = "grove_agents" // Watch all agents in a project
 )
 
 // PolicyPrincipalType agent constant
@@ -902,7 +902,7 @@ const (
 // PolicyScopeType constants
 const (
 	PolicyScopeHub      = "hub"
-	PolicyScopeGrove    = "grove"
+	PolicyScopeProject  = "grove"
 	PolicyScopeResource = "resource"
 )
 
@@ -933,7 +933,7 @@ type UserAccessToken struct {
 	KeyHash string `json:"-"`      // SHA-256 hash (never exposed)
 
 	// Scoping
-	GroveID string   `json:"groveId"` // Required: grove this token is scoped to
+	ProjectID string   `json:"groveId"` // Required: project this token is scoped to
 	Scopes  []string `json:"scopes"`  // Action scopes (resource:action pairs)
 
 	// Lifecycle
@@ -1064,7 +1064,7 @@ const (
 // Message represents a persisted structured message between agents and humans.
 type Message struct {
 	ID          string    `json:"id"`
-	GroveID     string    `json:"groveId"`
+	ProjectID     string    `json:"groveId"`
 	Sender      string    `json:"sender"`    // "user:alice", "agent:code-reviewer"
 	SenderID    string    `json:"senderId"`  // UUID or identity key
 	Recipient   string    `json:"recipient"` // "user:alice", "agent:code-reviewer"
@@ -1080,7 +1080,7 @@ type Message struct {
 
 // MessageFilter defines query parameters for listing messages.
 type MessageFilter struct {
-	GroveID     string // Filter by grove
+	ProjectID   string // Filter by project
 	AgentID     string // Filter by involved agent
 	RecipientID string // Filter by recipient
 	SenderID    string // Filter by sender
@@ -1103,7 +1103,7 @@ type MessageFilter struct {
 // ScheduledEvent represents a one-shot timer persisted in the database.
 type ScheduledEvent struct {
 	ID         string     `json:"id"`
-	GroveID    string     `json:"groveId"`
+	ProjectID    string     `json:"groveId"`
 	EventType  string     `json:"eventType"` // "message", "status_update"
 	FireAt     time.Time  `json:"fireAt"`    // When to fire (UTC)
 	Payload    string     `json:"payload"`   // JSON blob (handler-specific)
@@ -1125,7 +1125,7 @@ const (
 
 // ScheduledEventFilter for listing events.
 type ScheduledEventFilter struct {
-	GroveID    string
+	ProjectID    string
 	EventType  string
 	Status     string
 	ScheduleID string // Filter events generated by a specific recurring schedule
@@ -1138,7 +1138,7 @@ type ScheduledEventFilter struct {
 // Schedule represents a user-defined recurring schedule backed by a cron expression.
 type Schedule struct {
 	ID            string     `json:"id"`
-	GroveID       string     `json:"groveId"`
+	ProjectID       string     `json:"groveId"`
 	Name          string     `json:"name"`
 	CronExpr      string     `json:"cronExpr"`  // Standard 5-field cron expression (UTC)
 	EventType     string     `json:"eventType"` // "message" (future: "dispatch_agent")
@@ -1170,7 +1170,7 @@ const (
 
 // ScheduleFilter for listing schedules.
 type ScheduleFilter struct {
-	GroveID string
+	ProjectID string
 	Status  string
 	Name    string
 }
@@ -1184,8 +1184,8 @@ func (a *Agent) ToAPI() *api.AgentInfo {
 		Name:     a.Name,
 		Template: a.Template,
 
-		// Grove association - use the hosted format (uuid__slug)
-		GroveID: a.GroveID,
+		// Project association - use the hosted format (uuid__slug)
+		ProjectID: a.ProjectID,
 
 		// Metadata
 		Labels:      a.Labels,
@@ -1246,9 +1246,9 @@ func (a *Agent) ToAPI() *api.AgentInfo {
 	return info
 }
 
-// ToAPI converts a store.Grove to an api.GroveInfo for external consumption.
-func (g *Grove) ToAPI() *api.GroveInfo {
-	return &api.GroveInfo{
+// ToAPI converts a store.Project to an api.ProjectInfo for external consumption.
+func (g *Project) ToAPI() *api.ProjectInfo {
+	return &api.ProjectInfo{
 		ID:   g.ID,
 		Name: g.Name,
 		Slug: g.Slug,
@@ -1294,8 +1294,8 @@ const (
 	GitHubInstallationStatusDeleted   = "deleted"
 )
 
-// GitHubAppGroveStatus represents the health of the GitHub App integration for a grove.
-type GitHubAppGroveStatus struct {
+// GitHubAppProjectStatus represents the health of the GitHub App integration for a project.
+type GitHubAppProjectStatus struct {
 	State         string     `json:"state"`
 	ErrorCode     string     `json:"error_code,omitempty"`
 	ErrorMessage  string     `json:"error_message,omitempty"`
@@ -1380,12 +1380,12 @@ const (
 )
 
 // =============================================================================
-// Grove Sync State (Workspace Sync Metadata)
+// Project Sync State (Workspace Sync Metadata)
 // =============================================================================
 
-// GroveSyncState tracks sync metadata per grove (and optionally per broker).
-type GroveSyncState struct {
-	GroveID       string     `json:"groveId"`
+// ProjectSyncState tracks sync metadata per project (and optionally per broker).
+type ProjectSyncState struct {
+	ProjectID     string     `json:"groveId"`
 	BrokerID      string     `json:"brokerId,omitempty"`
 	LastSyncTime  *time.Time `json:"lastSyncTime,omitempty"`
 	LastCommitSHA string     `json:"lastCommitSha,omitempty"`

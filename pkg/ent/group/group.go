@@ -24,8 +24,8 @@ const (
 	FieldDescription = "description"
 	// FieldGroupType holds the string denoting the group_type field in the database.
 	FieldGroupType = "group_type"
-	// FieldGroveID holds the string denoting the grove_id field in the database.
-	FieldGroveID = "grove_id"
+	// FieldProjectID holds the string denoting the project_id field in the database.
+	FieldProjectID = "grove_id"
 	// FieldLabels holds the string denoting the labels field in the database.
 	FieldLabels = "labels"
 	// FieldAnnotations holds the string denoting the annotations field in the database.
@@ -84,7 +84,7 @@ var Columns = []string{
 	FieldSlug,
 	FieldDescription,
 	FieldGroupType,
-	FieldGroveID,
+	FieldProjectID,
 	FieldLabels,
 	FieldAnnotations,
 	FieldCreated,
@@ -181,9 +181,9 @@ func ByGroupType(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldGroupType, opts...).ToFunc()
 }
 
-// ByGroveID orders the results by the grove_id field.
-func ByGroveID(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldGroveID, opts...).ToFunc()
+// ByProjectID orders the results by the project_id field.
+func ByProjectID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldProjectID, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

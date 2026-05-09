@@ -165,11 +165,11 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 	if groupType == "" {
 		groupType = store.GroupTypeExplicit
 	}
-	if groupType != store.GroupTypeExplicit && groupType != store.GroupTypeGroveAgents {
+	if groupType != store.GroupTypeExplicit && groupType != store.GroupTypeProjectAgents {
 		ValidationError(w, "groupType must be 'explicit' or 'grove_agents'", nil)
 		return
 	}
-	if groupType == store.GroupTypeGroveAgents {
+	if groupType == store.GroupTypeProjectAgents {
 		ValidationError(w, "grove_agents groups are system-managed and cannot be created via API", nil)
 		return
 	}
@@ -383,7 +383,7 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request, id string) 
 		}
 	}
 
-	if group.GroupType == store.GroupTypeGroveAgents {
+	if group.GroupType == store.GroupTypeProjectAgents {
 		BadRequest(w, "grove_agents groups are system-managed and cannot be deleted via API")
 		return
 	}

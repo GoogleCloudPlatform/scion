@@ -31,7 +31,7 @@ import (
 
 // CreateSchedule creates a new recurring schedule.
 func (s *SQLiteStore) CreateSchedule(ctx context.Context, schedule *store.Schedule) error {
-	if schedule.ID == "" || schedule.GroveID == "" || schedule.Name == "" || schedule.CronExpr == "" {
+	if schedule.ID == "" || schedule.ProjectID == "" || schedule.Name == "" || schedule.CronExpr == "" {
 		return store.ErrInvalidInput
 	}
 
@@ -53,7 +53,7 @@ func (s *SQLiteStore) CreateSchedule(ctx context.Context, schedule *store.Schedu
 			run_count, error_count, created_at, created_by, updated_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		schedule.ID, schedule.GroveID, schedule.Name, schedule.CronExpr,
+		schedule.ID, schedule.ProjectID, schedule.Name, schedule.CronExpr,
 		schedule.EventType, schedule.Payload, schedule.Status,
 		nullableTime(timeFromNullablePtr(schedule.NextRunAt)),
 		nullableTime(timeFromNullablePtr(schedule.LastRunAt)),
@@ -66,7 +66,7 @@ func (s *SQLiteStore) CreateSchedule(ctx context.Context, schedule *store.Schedu
 			return store.ErrAlreadyExists
 		}
 		if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
-			return fmt.Errorf("grove %s does not exist: %w", schedule.GroveID, store.ErrInvalidInput)
+			return fmt.Errorf("grove %s does not exist: %w", schedule.ProjectID, store.ErrInvalidInput)
 		}
 		return err
 	}
@@ -85,7 +85,7 @@ func (s *SQLiteStore) GetSchedule(ctx context.Context, id string) (*store.Schedu
 			run_count, error_count, created_at, created_by, updated_at
 		FROM schedules WHERE id = ?
 	`, id).Scan(
-		&schedule.ID, &schedule.GroveID, &schedule.Name, &schedule.CronExpr,
+		&schedule.ID, &schedule.ProjectID, &schedule.Name, &schedule.CronExpr,
 		&schedule.EventType, &schedule.Payload, &schedule.Status,
 		&nextRunAt, &lastRunAt, &lastRunStatus, &lastRunError,
 		&schedule.RunCount, &schedule.ErrorCount,
@@ -122,9 +122,9 @@ func (s *SQLiteStore) ListSchedules(ctx context.Context, filter store.ScheduleFi
 	var conditions []string
 	var args []interface{}
 
-	if filter.GroveID != "" {
+	if filter.ProjectID != "" {
 		conditions = append(conditions, "grove_id = ?")
-		args = append(args, filter.GroveID)
+		args = append(args, filter.ProjectID)
 	}
 	if filter.Status != "" {
 		conditions = append(conditions, "status = ?")
@@ -332,7 +332,7 @@ func scanSchedules(rows *sql.Rows) ([]store.Schedule, error) {
 		var lastRunStatus, lastRunError, createdBy sql.NullString
 
 		if err := rows.Scan(
-			&schedule.ID, &schedule.GroveID, &schedule.Name, &schedule.CronExpr,
+			&schedule.ID, &schedule.ProjectID, &schedule.Name, &schedule.CronExpr,
 			&schedule.EventType, &schedule.Payload, &schedule.Status,
 			&nextRunAt, &lastRunAt, &lastRunStatus, &lastRunError,
 			&schedule.RunCount, &schedule.ErrorCount,

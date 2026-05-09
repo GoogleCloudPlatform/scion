@@ -248,7 +248,7 @@ func (s *SQLiteStore) applyMigrationWithFKOff(ctx context.Context, version int, 
 
 // Migration V1: Initial schema
 const migrationV1 = `
--- Groves table
+-- Projects table
 CREATE TABLE IF NOT EXISTS groves (
 	id TEXT PRIMARY KEY,
 	name TEXT NOT NULL,
@@ -290,7 +290,7 @@ CREATE TABLE IF NOT EXISTS runtime_brokers (
 CREATE INDEX IF NOT EXISTS idx_runtime_brokers_slug ON runtime_brokers(slug);
 CREATE INDEX IF NOT EXISTS idx_runtime_brokers_status ON runtime_brokers(status);
 
--- Grove contributors (many-to-many relationship)
+-- Project contributors (many-to-many relationship)
 CREATE TABLE IF NOT EXISTS grove_contributors (
 	grove_id TEXT NOT NULL,
 	broker_id TEXT NOT NULL,
@@ -1258,7 +1258,7 @@ func (s *SQLiteStore) CreateAgent(ctx context.Context, agent *store.Agent) error
 			created_by, owner_id, visibility, state_version, ancestry
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		agent.ID, agent.Slug, agent.Name, agent.Template, agent.GroveID,
+		agent.ID, agent.Slug, agent.Name, agent.Template, agent.ProjectID,
 		marshalJSON(agent.Labels), marshalJSON(agent.Annotations),
 		agent.Phase, agent.Activity, agent.ToolName,
 		agent.ConnectionState, agent.ContainerStatus, agent.RuntimeState,
@@ -1296,7 +1296,7 @@ func (s *SQLiteStore) GetAgent(ctx context.Context, id string) (*store.Agent, er
 			created_by, owner_id, visibility, state_version, ancestry
 		FROM agents WHERE id = ?
 	`, id).Scan(
-		&agent.ID, &agent.Slug, &agent.Name, &agent.Template, &agent.GroveID,
+		&agent.ID, &agent.Slug, &agent.Name, &agent.Template, &agent.ProjectID,
 		&labels, &annotations,
 		&agent.Phase, &agent.Activity, &toolName,
 		&agent.ConnectionState, &agent.ContainerStatus, &agent.RuntimeState,
@@ -1343,7 +1343,7 @@ func (s *SQLiteStore) GetAgent(ctx context.Context, id string) (*store.Agent, er
 	return agent, nil
 }
 
-func (s *SQLiteStore) GetAgentBySlug(ctx context.Context, groveID, slug string) (*store.Agent, error) {
+func (s *SQLiteStore) GetAgentBySlug(ctx context.Context, projectID, slug string) (*store.Agent, error) {
 	agent := &store.Agent{}
 	var labels, annotations, appliedConfig string
 	var lastSeen, lastActivityEvent, deletedAt, startedAt sql.NullTime
@@ -1361,8 +1361,8 @@ func (s *SQLiteStore) GetAgentBySlug(ctx context.Context, groveID, slug string) 
 			created_at, updated_at, last_seen, last_activity_event, deleted_at, started_at,
 			created_by, owner_id, visibility, state_version, ancestry
 		FROM agents WHERE grove_id = ? AND agent_id = ?
-	`, groveID, slug).Scan(
-		&agent.ID, &agent.Slug, &agent.Name, &agent.Template, &agent.GroveID,
+	`, projectID, slug).Scan(
+		&agent.ID, &agent.Slug, &agent.Name, &agent.Template, &agent.ProjectID,
 		&labels, &annotations,
 		&agent.Phase, &agent.Activity, &toolName,
 		&agent.ConnectionState, &agent.ContainerStatus, &agent.RuntimeState,
@@ -1478,10 +1478,10 @@ func (s *SQLiteStore) ListAgents(ctx context.Context, filter store.AgentFilter, 
 	var conditions []string
 	var args []interface{}
 
-	if len(filter.MemberOrOwnerGroveIDs) > 0 {
-		// Combine grove_id membership with owner_id match using OR
-		placeholders := make([]string, len(filter.MemberOrOwnerGroveIDs))
-		for i, id := range filter.MemberOrOwnerGroveIDs {
+	if len(filter.MemberOrOwnerProjectIDs) > 0 {
+		// Combine project_id membership with owner_id match using OR
+		placeholders := make([]string, len(filter.MemberOrOwnerProjectIDs))
+		for i, id := range filter.MemberOrOwnerProjectIDs {
 			placeholders[i] = "?"
 			args = append(args, id)
 		}
@@ -1491,9 +1491,9 @@ func (s *SQLiteStore) ListAgents(ctx context.Context, filter store.AgentFilter, 
 			args = append(args, filter.OwnerID)
 		}
 		conditions = append(conditions, "("+strings.Join(orParts, " OR ")+")")
-	} else if len(filter.MemberGroveIDs) > 0 {
-		placeholders := make([]string, len(filter.MemberGroveIDs))
-		for i, id := range filter.MemberGroveIDs {
+	} else if len(filter.MemberProjectIDs) > 0 {
+		placeholders := make([]string, len(filter.MemberProjectIDs))
+		for i, id := range filter.MemberProjectIDs {
 			placeholders[i] = "?"
 			args = append(args, id)
 		}
@@ -1506,9 +1506,9 @@ func (s *SQLiteStore) ListAgents(ctx context.Context, filter store.AgentFilter, 
 		conditions = append(conditions, "owner_id != ?")
 		args = append(args, filter.ExcludeOwnerID)
 	}
-	if filter.GroveID != "" {
+	if filter.ProjectID != "" {
 		conditions = append(conditions, "grove_id = ?")
-		args = append(args, filter.GroveID)
+		args = append(args, filter.ProjectID)
 	}
 	if filter.RuntimeBrokerID != "" {
 		conditions = append(conditions, "runtime_broker_id = ?")
@@ -1578,7 +1578,7 @@ func (s *SQLiteStore) ListAgents(ctx context.Context, filter store.AgentFilter, 
 		var runtimeBrokerID, message, toolName, ancestry sql.NullString
 
 		if err := rows.Scan(
-			&agent.ID, &agent.Slug, &agent.Name, &agent.Template, &agent.GroveID,
+			&agent.ID, &agent.Slug, &agent.Name, &agent.Template, &agent.ProjectID,
 			&labels, &annotations,
 			&agent.Phase, &agent.Activity, &toolName,
 			&agent.ConnectionState, &agent.ContainerStatus, &agent.RuntimeState,
@@ -1780,7 +1780,7 @@ func (s *SQLiteStore) MarkStaleAgentsOffline(ctx context.Context, threshold time
 		var runtimeBrokerID, message, toolName, ancestry sql.NullString
 
 		if err := rows.Scan(
-			&agent.ID, &agent.Slug, &agent.Name, &agent.Template, &agent.GroveID,
+			&agent.ID, &agent.Slug, &agent.Name, &agent.Template, &agent.ProjectID,
 			&labels, &annotations,
 			&agent.Phase, &agent.Activity, &toolName,
 			&agent.ConnectionState, &agent.ContainerStatus, &agent.RuntimeState,
@@ -1894,7 +1894,7 @@ func (s *SQLiteStore) MarkStalledAgents(ctx context.Context, activityThreshold, 
 		var runtimeBrokerID, message, toolName, ancestry sql.NullString
 
 		if err := rows.Scan(
-			&agent.ID, &agent.Slug, &agent.Name, &agent.Template, &agent.GroveID,
+			&agent.ID, &agent.Slug, &agent.Name, &agent.Template, &agent.ProjectID,
 			&labels, &annotations,
 			&agent.Phase, &agent.Activity, &toolName,
 			&agent.ConnectionState, &agent.ContainerStatus, &agent.RuntimeState,
@@ -1945,23 +1945,23 @@ func (s *SQLiteStore) MarkStalledAgents(ctx context.Context, activityThreshold, 
 }
 
 // ============================================================================
-// Grove Operations
+// Project Operations
 // ============================================================================
 
-func (s *SQLiteStore) CreateGrove(ctx context.Context, grove *store.Grove) error {
+func (s *SQLiteStore) CreateProject(ctx context.Context, project *store.Project) error {
 	now := time.Now()
-	grove.Created = now
-	grove.Updated = now
+	project.Created = now
+	project.Updated = now
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO groves (id, name, slug, git_remote, default_runtime_broker_id, labels, annotations, shared_dirs, created_at, updated_at, created_by, owner_id, visibility, github_installation_id, github_permissions, github_app_status, git_identity)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		grove.ID, grove.Name, grove.Slug, nullableString(grove.GitRemote), nullableString(grove.DefaultRuntimeBrokerID),
-		marshalJSON(grove.Labels), marshalJSON(grove.Annotations), marshalJSON(grove.SharedDirs),
-		grove.Created, grove.Updated, grove.CreatedBy, grove.OwnerID, grove.Visibility,
-		nullableInt64(grove.GitHubInstallationID), marshalJSONPtr(grove.GitHubPermissions), marshalJSONPtr(grove.GitHubAppStatus),
-		marshalJSONPtr(grove.GitIdentity),
+		project.ID, project.Name, project.Slug, nullableString(project.GitRemote), nullableString(project.DefaultRuntimeBrokerID),
+		marshalJSON(project.Labels), marshalJSON(project.Annotations), marshalJSON(project.SharedDirs),
+		project.Created, project.Updated, project.CreatedBy, project.OwnerID, project.Visibility,
+		nullableInt64(project.GitHubInstallationID), marshalJSONPtr(project.GitHubPermissions), marshalJSONPtr(project.GitHubAppStatus),
+		marshalJSONPtr(project.GitIdentity),
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -1972,8 +1972,8 @@ func (s *SQLiteStore) CreateGrove(ctx context.Context, grove *store.Grove) error
 	return nil
 }
 
-func (s *SQLiteStore) GetGrove(ctx context.Context, id string) (*store.Grove, error) {
-	grove := &store.Grove{}
+func (s *SQLiteStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	project := &store.Project{}
 	var labels, annotations, sharedDirs string
 	var gitRemote, defaultRuntimeBrokerID sql.NullString
 	var githubInstallationID sql.NullInt64
@@ -1983,9 +1983,9 @@ func (s *SQLiteStore) GetGrove(ctx context.Context, id string) (*store.Grove, er
 		SELECT id, name, slug, git_remote, default_runtime_broker_id, labels, annotations, shared_dirs, created_at, updated_at, created_by, owner_id, visibility, github_installation_id, COALESCE(github_permissions, ''), COALESCE(github_app_status, ''), COALESCE(git_identity, '')
 		FROM groves WHERE id = ?
 	`, id).Scan(
-		&grove.ID, &grove.Name, &grove.Slug, &gitRemote, &defaultRuntimeBrokerID,
+		&project.ID, &project.Name, &project.Slug, &gitRemote, &defaultRuntimeBrokerID,
 		&labels, &annotations, &sharedDirs,
-		&grove.Created, &grove.Updated, &grove.CreatedBy, &grove.OwnerID, &grove.Visibility,
+		&project.Created, &project.Updated, &project.CreatedBy, &project.OwnerID, &project.Visibility,
 		&githubInstallationID, &githubPermissions, &githubAppStatus, &gitIdentity,
 	)
 	if err != nil {
@@ -1996,60 +1996,61 @@ func (s *SQLiteStore) GetGrove(ctx context.Context, id string) (*store.Grove, er
 	}
 
 	if gitRemote.Valid {
-		grove.GitRemote = gitRemote.String
+		project.GitRemote = gitRemote.String
 	}
 	if defaultRuntimeBrokerID.Valid {
-		grove.DefaultRuntimeBrokerID = defaultRuntimeBrokerID.String
+		project.DefaultRuntimeBrokerID = defaultRuntimeBrokerID.String
 	}
 	if githubInstallationID.Valid {
 		id := githubInstallationID.Int64
-		grove.GitHubInstallationID = &id
+		project.GitHubInstallationID = &id
 	}
-	unmarshalJSON(labels, &grove.Labels)
-	unmarshalJSON(annotations, &grove.Annotations)
-	unmarshalJSON(sharedDirs, &grove.SharedDirs)
+	unmarshalJSON(labels, &project.Labels)
+	unmarshalJSON(annotations, &project.Annotations)
+	unmarshalJSON(sharedDirs, &project.SharedDirs)
 	if githubPermissions != "" {
-		grove.GitHubPermissions = &store.GitHubTokenPermissions{}
-		unmarshalJSON(githubPermissions, grove.GitHubPermissions)
+		project.GitHubPermissions = &store.GitHubTokenPermissions{}
+		unmarshalJSON(githubPermissions, project.GitHubPermissions)
 	}
 	if githubAppStatus != "" {
-		grove.GitHubAppStatus = &store.GitHubAppGroveStatus{}
-		unmarshalJSON(githubAppStatus, grove.GitHubAppStatus)
+		project.GitHubAppStatus = &store.GitHubAppProjectStatus{}
+		unmarshalJSON(githubAppStatus, project.GitHubAppStatus)
 	}
 	if gitIdentity != "" {
-		grove.GitIdentity = &store.GitIdentityConfig{}
-		unmarshalJSON(gitIdentity, grove.GitIdentity)
+		project.GitIdentity = &store.GitIdentityConfig{}
+		unmarshalJSON(gitIdentity, project.GitIdentity)
 	}
 
 	// Populate computed fields
-	s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM agents WHERE grove_id = ?", id).Scan(&grove.AgentCount)
+	s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM agents WHERE grove_id = ?", id).Scan(&project.AgentCount)
 	s.db.QueryRowContext(ctx, `
 		SELECT (SELECT COUNT(*) FROM grove_contributors WHERE grove_id = ? AND status = 'online')
 		     + (SELECT COUNT(*) FROM runtime_brokers WHERE auto_provide = 1 AND status = 'online'
 		            AND id NOT IN (SELECT broker_id FROM grove_contributors WHERE grove_id = ?))
-	`, id, id).Scan(&grove.ActiveBrokerCount)
-	s.populateGroveType(ctx, grove)
+	`, id, id).Scan(&project.ActiveBrokerCount)
+	s.populateProjectType(ctx, project)
 
-	return grove, nil
+	return project, nil
 }
 
-// populateGroveType sets the computed GroveType field based on how the grove was established.
+
+// populateProjectType sets the computed ProjectType field based on how the grove was established.
 // Type is "linked" (pre-existing local grove linked to Hub) or "hub-native" (created via Hub).
 // Whether a grove is git-backed is orthogonal — indicated by the GitRemote field.
-func (s *SQLiteStore) populateGroveType(ctx context.Context, grove *store.Grove) {
+func (s *SQLiteStore) populateProjectType(ctx context.Context, project *store.Project) {
 	// Check if any provider has a local_path not under ~/.scion/groves/ (i.e. broker-linked)
 	var linkedCount int
 	s.db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM grove_contributors WHERE grove_id = ? AND local_path != '' AND local_path NOT LIKE '%/.scion/groves/%'",
-		grove.ID).Scan(&linkedCount)
+		project.ID).Scan(&linkedCount)
 	if linkedCount > 0 {
-		grove.GroveType = store.GroveTypeLinked
+		project.ProjectType = store.ProjectTypeLinked
 		return
 	}
-	grove.GroveType = store.GroveTypeHubNative
+	project.ProjectType = store.ProjectTypeHubNative
 }
 
-func (s *SQLiteStore) GetGroveBySlug(ctx context.Context, slug string) (*store.Grove, error) {
+func (s *SQLiteStore) GetProjectBySlug(ctx context.Context, slug string) (*store.Project, error) {
 	var id string
 	err := s.db.QueryRowContext(ctx, "SELECT id FROM groves WHERE slug = ?", slug).Scan(&id)
 	if err != nil {
@@ -2058,10 +2059,10 @@ func (s *SQLiteStore) GetGroveBySlug(ctx context.Context, slug string) (*store.G
 		}
 		return nil, err
 	}
-	return s.GetGrove(ctx, id)
+	return s.GetProject(ctx, id)
 }
 
-func (s *SQLiteStore) GetGroveBySlugCaseInsensitive(ctx context.Context, slug string) (*store.Grove, error) {
+func (s *SQLiteStore) GetProjectBySlugCaseInsensitive(ctx context.Context, slug string) (*store.Project, error) {
 	var id string
 	err := s.db.QueryRowContext(ctx, "SELECT id FROM groves WHERE LOWER(slug) = LOWER(?)", slug).Scan(&id)
 	if err != nil {
@@ -2070,16 +2071,16 @@ func (s *SQLiteStore) GetGroveBySlugCaseInsensitive(ctx context.Context, slug st
 		}
 		return nil, err
 	}
-	return s.GetGrove(ctx, id)
+	return s.GetProject(ctx, id)
 }
 
-func (s *SQLiteStore) GetGrovesByGitRemote(ctx context.Context, gitRemote string) ([]*store.Grove, error) {
+func (s *SQLiteStore) GetProjectsByGitRemote(ctx context.Context, gitRemote string) ([]*store.Project, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT id FROM groves WHERE git_remote = ? ORDER BY created_at ASC", gitRemote)
 	if err != nil {
 		return nil, err
 	}
 
-	// Collect all IDs first, then close the cursor before calling GetGrove
+	// Collect all IDs first, then close the cursor before calling GetProject
 	// (SQLite single-connection can't serve a new query while rows are open).
 	var ids []string
 	for rows.Next() {
@@ -2096,9 +2097,9 @@ func (s *SQLiteStore) GetGrovesByGitRemote(ctx context.Context, gitRemote string
 	}
 	rows.Close()
 
-	groves := make([]*store.Grove, 0, len(ids))
+	groves := make([]*store.Project, 0, len(ids))
 	for _, id := range ids {
-		grove, err := s.GetGrove(ctx, id)
+		grove, err := s.GetProject(ctx, id)
 		if err != nil {
 			return nil, err
 		}
@@ -2129,8 +2130,8 @@ func (s *SQLiteStore) NextAvailableSlug(ctx context.Context, baseSlug string) (s
 	}
 }
 
-func (s *SQLiteStore) UpdateGrove(ctx context.Context, grove *store.Grove) error {
-	grove.Updated = time.Now()
+func (s *SQLiteStore) UpdateProject(ctx context.Context, project *store.Project) error {
+	project.Updated = time.Now()
 
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE groves SET
@@ -2141,12 +2142,12 @@ func (s *SQLiteStore) UpdateGrove(ctx context.Context, grove *store.Grove) error
 			git_identity = ?
 		WHERE id = ?
 	`,
-		grove.Name, grove.Slug, nullableString(grove.GitRemote), nullableString(grove.DefaultRuntimeBrokerID),
-		marshalJSON(grove.Labels), marshalJSON(grove.Annotations), marshalJSON(grove.SharedDirs),
-		grove.Updated, grove.OwnerID, grove.Visibility,
-		nullableInt64(grove.GitHubInstallationID), marshalJSONPtr(grove.GitHubPermissions), marshalJSONPtr(grove.GitHubAppStatus),
-		marshalJSONPtr(grove.GitIdentity),
-		grove.ID,
+		project.Name, project.Slug, nullableString(project.GitRemote), nullableString(project.DefaultRuntimeBrokerID),
+		marshalJSON(project.Labels), marshalJSON(project.Annotations), marshalJSON(project.SharedDirs),
+		project.Updated, project.OwnerID, project.Visibility,
+		nullableInt64(project.GitHubInstallationID), marshalJSONPtr(project.GitHubPermissions), marshalJSONPtr(project.GitHubAppStatus),
+		marshalJSONPtr(project.GitIdentity),
+		project.ID,
 	)
 	if err != nil {
 		return err
@@ -2162,7 +2163,7 @@ func (s *SQLiteStore) UpdateGrove(ctx context.Context, grove *store.Grove) error
 	return nil
 }
 
-func (s *SQLiteStore) DeleteGrove(ctx context.Context, id string) error {
+func (s *SQLiteStore) DeleteProject(ctx context.Context, id string) error {
 	result, err := s.db.ExecContext(ctx, "DELETE FROM groves WHERE id = ?", id)
 	if err != nil {
 		return err
@@ -2177,7 +2178,7 @@ func (s *SQLiteStore) DeleteGrove(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *SQLiteStore) ListGroves(ctx context.Context, filter store.GroveFilter, opts store.ListOptions) (*store.ListResult[store.Grove], error) {
+func (s *SQLiteStore) ListProjects(ctx context.Context, filter store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
 	var conditions []string
 	var args []interface{}
 
@@ -2194,10 +2195,10 @@ func (s *SQLiteStore) ListGroves(ctx context.Context, filter store.GroveFilter, 
 			args = append(args, filter.OwnerID)
 		}
 		conditions = append(conditions, "("+strings.Join(orParts, " OR ")+")")
-	} else if len(filter.MemberGroveIDs) > 0 {
+	} else if len(filter.MemberProjectIDs) > 0 {
 		// Strict grove ID membership (no owner OR)
-		placeholders := make([]string, len(filter.MemberGroveIDs))
-		for i, id := range filter.MemberGroveIDs {
+		placeholders := make([]string, len(filter.MemberProjectIDs))
+		for i, id := range filter.MemberProjectIDs {
 			placeholders[i] = "?"
 			args = append(args, id)
 		}
@@ -2263,9 +2264,9 @@ func (s *SQLiteStore) ListGroves(ctx context.Context, filter store.GroveFilter, 
 	}
 	defer rows.Close()
 
-	var groves []store.Grove
+	var groves []store.Project
 	type groveRow struct {
-		grove                store.Grove
+		grove                store.Project
 		labels               string
 		annotations          string
 		sharedDirs           string
@@ -2312,7 +2313,7 @@ func (s *SQLiteStore) ListGroves(ctx context.Context, filter store.GroveFilter, 
 			unmarshalJSON(r.githubPermissions, grove.GitHubPermissions)
 		}
 		if r.githubAppStatus != "" {
-			grove.GitHubAppStatus = &store.GitHubAppGroveStatus{}
+			grove.GitHubAppStatus = &store.GitHubAppProjectStatus{}
 			unmarshalJSON(r.githubAppStatus, grove.GitHubAppStatus)
 		}
 		if r.gitIdentity != "" {
@@ -2327,12 +2328,12 @@ func (s *SQLiteStore) ListGroves(ctx context.Context, filter store.GroveFilter, 
 			     + (SELECT COUNT(*) FROM runtime_brokers WHERE auto_provide = 1 AND status = 'online'
 			            AND id NOT IN (SELECT broker_id FROM grove_contributors WHERE grove_id = ?))
 		`, grove.ID, grove.ID).Scan(&grove.ActiveBrokerCount)
-		s.populateGroveType(ctx, &grove)
+		s.populateProjectType(ctx, &grove)
 
 		groves = append(groves, grove)
 	}
 
-	return &store.ListResult[store.Grove]{
+	return &store.ListResult[store.Project]{
 		Items:      groves,
 		TotalCount: totalCount,
 	}, nil
@@ -2483,9 +2484,9 @@ func (s *SQLiteStore) ListRuntimeBrokers(ctx context.Context, filter store.Runti
 		conditions = append(conditions, "status = ?")
 		args = append(args, filter.Status)
 	}
-	if filter.GroveID != "" {
+	if filter.ProjectID != "" {
 		conditions = append(conditions, "(id IN (SELECT broker_id FROM grove_contributors WHERE grove_id = ?) OR auto_provide = 1)")
-		args = append(args, filter.GroveID)
+		args = append(args, filter.ProjectID)
 	}
 	if filter.Name != "" {
 		conditions = append(conditions, "LOWER(name) = LOWER(?)")
@@ -2616,7 +2617,7 @@ func (s *SQLiteStore) CreateTemplate(ctx context.Context, template *store.Templa
 	`,
 		template.ID, template.Name, template.Slug, nullableString(template.DisplayName), nullableString(template.Description),
 		template.Harness, nullableString(template.DefaultHarnessConfig), template.Image, marshalJSON(template.Config),
-		nullableString(template.ContentHash), template.Scope, nullableString(template.ScopeID), nullableString(template.GroveID),
+		nullableString(template.ContentHash), template.Scope, nullableString(template.ScopeID), nullableString(template.ProjectID),
 		nullableString(template.StorageURI), nullableString(template.StorageBucket), nullableString(template.StoragePath), marshalJSON(template.Files),
 		nullableString(template.BaseTemplate), template.Locked, template.Status,
 		nullableString(template.OwnerID), nullableString(template.CreatedBy), nullableString(template.UpdatedBy), template.Visibility,
@@ -2634,7 +2635,7 @@ func (s *SQLiteStore) CreateTemplate(ctx context.Context, template *store.Templa
 func (s *SQLiteStore) GetTemplate(ctx context.Context, id string) (*store.Template, error) {
 	template := &store.Template{}
 	var config, files string
-	var displayName, description, contentHash, scopeID, groveID sql.NullString
+	var displayName, description, contentHash, scopeID, projectID sql.NullString
 	var storageURI, storageBucket, storagePath, baseTemplate sql.NullString
 	var createdBy, updatedBy, ownerID, visibility sql.NullString
 	var defaultHarnessConfig sql.NullString
@@ -2650,7 +2651,7 @@ func (s *SQLiteStore) GetTemplate(ctx context.Context, id string) (*store.Templa
 	`, id).Scan(
 		&template.ID, &template.Name, &template.Slug, &displayName, &description,
 		&template.Harness, &defaultHarnessConfig, &template.Image, &config,
-		&contentHash, &template.Scope, &scopeID, &groveID,
+		&contentHash, &template.Scope, &scopeID, &projectID,
 		&storageURI, &storageBucket, &storagePath, &files,
 		&baseTemplate, &template.Locked, &template.Status,
 		&ownerID, &createdBy, &updatedBy, &visibility,
@@ -2678,8 +2679,8 @@ func (s *SQLiteStore) GetTemplate(ctx context.Context, id string) (*store.Templa
 	if scopeID.Valid {
 		template.ScopeID = scopeID.String
 	}
-	if groveID.Valid {
-		template.GroveID = groveID.String
+	if projectID.Valid {
+		template.ProjectID = projectID.String
 	}
 	if storageURI.Valid {
 		template.StorageURI = storageURI.String
@@ -2749,7 +2750,7 @@ func (s *SQLiteStore) UpdateTemplate(ctx context.Context, template *store.Templa
 	`,
 		template.Name, template.Slug, nullableString(template.DisplayName), nullableString(template.Description),
 		template.Harness, nullableString(template.DefaultHarnessConfig), template.Image, marshalJSON(template.Config),
-		nullableString(template.ContentHash), template.Scope, nullableString(template.ScopeID), nullableString(template.GroveID),
+		nullableString(template.ContentHash), template.Scope, nullableString(template.ScopeID), nullableString(template.ProjectID),
 		nullableString(template.StorageURI), nullableString(template.StorageBucket), nullableString(template.StoragePath), marshalJSON(template.Files),
 		nullableString(template.BaseTemplate), template.Locked, template.Status,
 		nullableString(template.OwnerID), nullableString(template.UpdatedBy), template.Visibility,
@@ -2813,14 +2814,14 @@ func (s *SQLiteStore) ListTemplates(ctx context.Context, filter store.TemplateFi
 	if filter.ScopeID != "" {
 		conditions = append(conditions, "(scope_id = ? OR grove_id = ?)")
 		args = append(args, filter.ScopeID, filter.ScopeID)
-	} else if filter.GroveID != "" && filter.Scope == "" {
+	} else if filter.ProjectID != "" && filter.Scope == "" {
 		// When groveId is set without scope, return global + grove-scoped templates for this grove
 		conditions = append(conditions, "(scope = 'global' OR (scope = 'grove' AND (scope_id = ? OR grove_id = ?)))")
-		args = append(args, filter.GroveID, filter.GroveID)
-	} else if filter.GroveID != "" {
+		args = append(args, filter.ProjectID, filter.ProjectID)
+	} else if filter.ProjectID != "" {
 		// Backwards compatibility: groveId with explicit scope
 		conditions = append(conditions, "(scope_id = ? OR grove_id = ?)")
-		args = append(args, filter.GroveID, filter.GroveID)
+		args = append(args, filter.ProjectID, filter.ProjectID)
 	}
 	if filter.Harness != "" {
 		conditions = append(conditions, "harness = ?")
@@ -2877,7 +2878,7 @@ func (s *SQLiteStore) ListTemplates(ctx context.Context, filter store.TemplateFi
 	for rows.Next() {
 		var template store.Template
 		var config, files string
-		var displayName, description, contentHash, scopeID, groveID sql.NullString
+		var displayName, description, contentHash, scopeID, projectID sql.NullString
 		var storageURI, storageBucket, storagePath, baseTemplate sql.NullString
 		var createdBy, updatedBy, ownerID, visibility sql.NullString
 		var defaultHarnessConfig sql.NullString
@@ -2885,7 +2886,7 @@ func (s *SQLiteStore) ListTemplates(ctx context.Context, filter store.TemplateFi
 		if err := rows.Scan(
 			&template.ID, &template.Name, &template.Slug, &displayName, &description,
 			&template.Harness, &defaultHarnessConfig, &template.Image, &config,
-			&contentHash, &template.Scope, &scopeID, &groveID,
+			&contentHash, &template.Scope, &scopeID, &projectID,
 			&storageURI, &storageBucket, &storagePath, &files,
 			&baseTemplate, &template.Locked, &template.Status,
 			&ownerID, &createdBy, &updatedBy, &visibility,
@@ -2909,8 +2910,8 @@ func (s *SQLiteStore) ListTemplates(ctx context.Context, filter store.TemplateFi
 		if scopeID.Valid {
 			template.ScopeID = scopeID.String
 		}
-		if groveID.Valid {
-			template.GroveID = groveID.String
+		if projectID.Valid {
+			template.ProjectID = projectID.String
 		}
 		if storageURI.Valid {
 			template.StorageURI = storageURI.String
@@ -3156,10 +3157,10 @@ func (s *SQLiteStore) ListHarnessConfigs(ctx context.Context, filter store.Harne
 	if filter.ScopeID != "" {
 		conditions = append(conditions, "scope_id = ?")
 		args = append(args, filter.ScopeID)
-	} else if filter.GroveID != "" && filter.Scope == "" {
+	} else if filter.ProjectID != "" && filter.Scope == "" {
 		// When groveId is set without scope, return global + grove-scoped configs for this grove
 		conditions = append(conditions, "(scope = 'global' OR (scope = 'grove' AND scope_id = ?))")
-		args = append(args, filter.GroveID)
+		args = append(args, filter.ProjectID)
 	}
 	if filter.Harness != "" {
 		conditions = append(conditions, "harness = ?")
@@ -3271,10 +3272,10 @@ func (s *SQLiteStore) ListHarnessConfigs(ctx context.Context, filter store.Harne
 		harnessConfigs = append(harnessConfigs, hc)
 	}
 
-	// When querying by GroveID without explicit Scope, the query returns both
+	// When querying by ProjectID without explicit Scope, the query returns both
 	// global and grove-scoped configs. Deduplicate by slug, preferring the more
 	// specific scope (grove > global).
-	if filter.GroveID != "" && filter.Scope == "" {
+	if filter.ProjectID != "" && filter.Scope == "" {
 		seen := make(map[string]int, len(harnessConfigs))
 		deduped := make([]store.HarnessConfig, 0, len(harnessConfigs))
 		for _, hc := range harnessConfigs {
@@ -3954,10 +3955,11 @@ func (s *SQLiteStore) GetInviteStats(ctx context.Context) (*store.InviteStats, e
 }
 
 // ============================================================================
-// GroveProvider Operations
+// ProjectProvider Operations
+
 // ============================================================================
 
-func (s *SQLiteStore) AddGroveProvider(ctx context.Context, provider *store.GroveProvider) error {
+func (s *SQLiteStore) AddProjectProvider(ctx context.Context, provider *store.ProjectProvider) error {
 	// Set LinkedAt to now if not already set
 	if provider.LinkedAt.IsZero() && provider.LinkedBy != "" {
 		provider.LinkedAt = time.Now()
@@ -3967,15 +3969,15 @@ func (s *SQLiteStore) AddGroveProvider(ctx context.Context, provider *store.Grov
 		INSERT OR REPLACE INTO grove_contributors (grove_id, broker_id, broker_name, local_path, mode, status, profiles, last_seen, linked_by, linked_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		provider.GroveID, provider.BrokerID, provider.BrokerName, provider.LocalPath, "", provider.Status,
+		provider.ProjectID, provider.BrokerID, provider.BrokerName, provider.LocalPath, "", provider.Status,
 		"[]", provider.LastSeen, // profiles column kept for schema compat but no longer used
 		nullableString(provider.LinkedBy), nullableTime(provider.LinkedAt),
 	)
 	return err
 }
 
-func (s *SQLiteStore) RemoveGroveProvider(ctx context.Context, groveID, brokerID string) error {
-	result, err := s.db.ExecContext(ctx, "DELETE FROM grove_contributors WHERE grove_id = ? AND broker_id = ?", groveID, brokerID)
+func (s *SQLiteStore) RemoveProjectProvider(ctx context.Context, projectID, brokerID string) error {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM grove_contributors WHERE grove_id = ? AND broker_id = ?", projectID, brokerID)
 	if err != nil {
 		return err
 	}
@@ -3989,8 +3991,8 @@ func (s *SQLiteStore) RemoveGroveProvider(ctx context.Context, groveID, brokerID
 	return nil
 }
 
-func (s *SQLiteStore) GetGroveProvider(ctx context.Context, groveID, brokerID string) (*store.GroveProvider, error) {
-	var provider store.GroveProvider
+func (s *SQLiteStore) GetProjectProvider(ctx context.Context, projectID, brokerID string) (*store.ProjectProvider, error) {
+	var provider store.ProjectProvider
 	var localPath, linkedBy sql.NullString
 	var providerMode, profiles string // unused columns kept for schema compat
 	var lastSeen, linkedAt sql.NullTime
@@ -3998,8 +4000,8 @@ func (s *SQLiteStore) GetGroveProvider(ctx context.Context, groveID, brokerID st
 	err := s.db.QueryRowContext(ctx, `
 		SELECT grove_id, broker_id, broker_name, local_path, mode, status, profiles, last_seen, linked_by, linked_at
 		FROM grove_contributors WHERE grove_id = ? AND broker_id = ?
-	`, groveID, brokerID).Scan(
-		&provider.GroveID, &provider.BrokerID, &provider.BrokerName, &localPath, &providerMode, &provider.Status,
+	`, projectID, brokerID).Scan(
+		&provider.ProjectID, &provider.BrokerID, &provider.BrokerName, &localPath, &providerMode, &provider.Status,
 		&profiles, &lastSeen, &linkedBy, &linkedAt,
 	)
 	if err != nil {
@@ -4026,25 +4028,25 @@ func (s *SQLiteStore) GetGroveProvider(ctx context.Context, groveID, brokerID st
 	return &provider, nil
 }
 
-func (s *SQLiteStore) GetGroveProviders(ctx context.Context, groveID string) ([]store.GroveProvider, error) {
+func (s *SQLiteStore) GetProjectProviders(ctx context.Context, projectID string) ([]store.ProjectProvider, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT grove_id, broker_id, broker_name, local_path, mode, status, profiles, last_seen, linked_by, linked_at
 		FROM grove_contributors WHERE grove_id = ?
-	`, groveID)
+	`, projectID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var providers []store.GroveProvider
+	var providers []store.ProjectProvider
 	for rows.Next() {
-		var provider store.GroveProvider
+		var provider store.ProjectProvider
 		var localPath, linkedBy sql.NullString
 		var providerMode, profiles string // unused columns kept for schema compat
 		var lastSeen, linkedAt sql.NullTime
 
 		if err := rows.Scan(
-			&provider.GroveID, &provider.BrokerID, &provider.BrokerName, &localPath, &providerMode, &provider.Status,
+			&provider.ProjectID, &provider.BrokerID, &provider.BrokerName, &localPath, &providerMode, &provider.Status,
 			&profiles, &lastSeen, &linkedBy, &linkedAt,
 		); err != nil {
 			return nil, err
@@ -4070,7 +4072,7 @@ func (s *SQLiteStore) GetGroveProviders(ctx context.Context, groveID string) ([]
 	return providers, nil
 }
 
-func (s *SQLiteStore) GetBrokerGroves(ctx context.Context, brokerID string) ([]store.GroveProvider, error) {
+func (s *SQLiteStore) GetBrokerProjects(ctx context.Context, brokerID string) ([]store.ProjectProvider, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT grove_id, broker_id, broker_name, local_path, mode, status, profiles, last_seen, linked_by, linked_at
 		FROM grove_contributors WHERE broker_id = ?
@@ -4080,15 +4082,15 @@ func (s *SQLiteStore) GetBrokerGroves(ctx context.Context, brokerID string) ([]s
 	}
 	defer rows.Close()
 
-	var providers []store.GroveProvider
+	var providers []store.ProjectProvider
 	for rows.Next() {
-		var provider store.GroveProvider
+		var provider store.ProjectProvider
 		var localPath, linkedBy sql.NullString
 		var providerMode, profiles string // unused columns kept for schema compat
 		var lastSeen, linkedAt sql.NullTime
 
 		if err := rows.Scan(
-			&provider.GroveID, &provider.BrokerID, &provider.BrokerName, &localPath, &providerMode, &provider.Status,
+			&provider.ProjectID, &provider.BrokerID, &provider.BrokerName, &localPath, &providerMode, &provider.Status,
 			&profiles, &lastSeen, &linkedBy, &linkedAt,
 		); err != nil {
 			return nil, err
@@ -4114,12 +4116,12 @@ func (s *SQLiteStore) GetBrokerGroves(ctx context.Context, brokerID string) ([]s
 	return providers, nil
 }
 
-func (s *SQLiteStore) UpdateProviderStatus(ctx context.Context, groveID, brokerID, status string) error {
+func (s *SQLiteStore) UpdateProviderStatus(ctx context.Context, projectID, brokerID, status string) error {
 	now := time.Now()
 
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE grove_contributors SET status = ?, last_seen = ? WHERE grove_id = ? AND broker_id = ?
-	`, status, now, groveID, brokerID)
+	`, status, now, projectID, brokerID)
 	if err != nil {
 		return err
 	}
@@ -4630,7 +4632,7 @@ func (s *SQLiteStore) CreateGroup(ctx context.Context, group *store.Group) error
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		group.ID, group.Name, group.Slug, group.Description,
-		group.GroupType, nullableString(group.GroveID),
+		group.GroupType, nullableString(group.ProjectID),
 		nullableString(group.ParentID),
 		marshalJSON(group.Labels), marshalJSON(group.Annotations),
 		group.Created, group.Updated, group.CreatedBy, group.OwnerID,
@@ -4647,14 +4649,14 @@ func (s *SQLiteStore) CreateGroup(ctx context.Context, group *store.Group) error
 func (s *SQLiteStore) GetGroup(ctx context.Context, id string) (*store.Group, error) {
 	group := &store.Group{}
 	var labels, annotations string
-	var parentID, groveID sql.NullString
+	var parentID, projectID sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, name, slug, description, group_type, grove_id, parent_id, labels, annotations, created_at, updated_at, created_by, owner_id
 		FROM groups WHERE id = ?
 	`, id).Scan(
 		&group.ID, &group.Name, &group.Slug, &group.Description,
-		&group.GroupType, &groveID,
+		&group.GroupType, &projectID,
 		&parentID,
 		&labels, &annotations,
 		&group.Created, &group.Updated, &group.CreatedBy, &group.OwnerID,
@@ -4669,8 +4671,8 @@ func (s *SQLiteStore) GetGroup(ctx context.Context, id string) (*store.Group, er
 	if parentID.Valid {
 		group.ParentID = parentID.String
 	}
-	if groveID.Valid {
-		group.GroveID = groveID.String
+	if projectID.Valid {
+		group.ProjectID = projectID.String
 	}
 	unmarshalJSON(labels, &group.Labels)
 	unmarshalJSON(annotations, &group.Annotations)
@@ -4704,7 +4706,7 @@ func (s *SQLiteStore) UpdateGroup(ctx context.Context, group *store.Group) error
 		WHERE id = ?
 	`,
 		group.Name, group.Slug, group.Description,
-		group.GroupType, nullableString(group.GroveID),
+		group.GroupType, nullableString(group.ProjectID),
 		nullableString(group.ParentID),
 		marshalJSON(group.Labels), marshalJSON(group.Annotations),
 		group.Updated, group.OwnerID,
@@ -4755,9 +4757,9 @@ func (s *SQLiteStore) ListGroups(ctx context.Context, filter store.GroupFilter, 
 		conditions = append(conditions, "group_type = ?")
 		args = append(args, filter.GroupType)
 	}
-	if filter.GroveID != "" {
+	if filter.ProjectID != "" {
 		conditions = append(conditions, "grove_id = ?")
-		args = append(args, filter.GroveID)
+		args = append(args, filter.ProjectID)
 	}
 
 	whereClause := ""
@@ -4792,11 +4794,11 @@ func (s *SQLiteStore) ListGroups(ctx context.Context, filter store.GroupFilter, 
 	for rows.Next() {
 		var group store.Group
 		var labels, annotations string
-		var parentID, groveID sql.NullString
+		var parentID, projectID sql.NullString
 
 		if err := rows.Scan(
 			&group.ID, &group.Name, &group.Slug, &group.Description,
-			&group.GroupType, &groveID,
+			&group.GroupType, &projectID,
 			&parentID,
 			&labels, &annotations,
 			&group.Created, &group.Updated, &group.CreatedBy, &group.OwnerID,
@@ -4807,8 +4809,8 @@ func (s *SQLiteStore) ListGroups(ctx context.Context, filter store.GroupFilter, 
 		if parentID.Valid {
 			group.ParentID = parentID.String
 		}
-		if groveID.Valid {
-			group.GroveID = groveID.String
+		if projectID.Valid {
+			group.ProjectID = projectID.String
 		}
 		unmarshalJSON(labels, &group.Labels)
 		unmarshalJSON(annotations, &group.Annotations)
@@ -5056,11 +5058,11 @@ func (s *SQLiteStore) addTransitiveGroups(ctx context.Context, groupID string, v
 	return nil
 }
 
-// GetGroupByGroveID retrieves the grove_agents group associated with a grove.
-func (s *SQLiteStore) GetGroupByGroveID(ctx context.Context, groveID string) (*store.Group, error) {
+// GetGroupByProjectID retrieves the grove_agents group associated with a grove.
+func (s *SQLiteStore) GetGroupByProjectID(ctx context.Context, projectID string) (*store.Group, error) {
 	var id string
 	err := s.db.QueryRowContext(ctx, "SELECT id FROM groups WHERE grove_id = ? AND group_type = ? LIMIT 1",
-		groveID, store.GroupTypeGroveAgents).Scan(&id)
+		projectID, store.GroupTypeProjectAgents).Scan(&id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, store.ErrNotFound
@@ -5107,10 +5109,10 @@ func (s *SQLiteStore) GetGroupsByIDs(ctx context.Context, ids []string) ([]store
 	for rows.Next() {
 		var g store.Group
 		var labels, annotations string
-		var parentID, groveID sql.NullString
+		var parentID, projectID sql.NullString
 		if err := rows.Scan(
 			&g.ID, &g.Name, &g.Slug, &g.Description,
-			&g.GroupType, &groveID,
+			&g.GroupType, &projectID,
 			&parentID,
 			&labels, &annotations,
 			&g.Created, &g.Updated, &g.CreatedBy, &g.OwnerID,
@@ -5120,8 +5122,8 @@ func (s *SQLiteStore) GetGroupsByIDs(ctx context.Context, ids []string) ([]store
 		if parentID.Valid {
 			g.ParentID = parentID.String
 		}
-		if groveID.Valid {
-			g.GroveID = groveID.String
+		if projectID.Valid {
+			g.ProjectID = projectID.String
 		}
 		unmarshalJSON(labels, &g.Labels)
 		unmarshalJSON(annotations, &g.Annotations)
@@ -5495,7 +5497,7 @@ func (s *SQLiteStore) CreateUserAccessToken(ctx context.Context, token *store.Us
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		token.ID, token.UserID, token.Name, token.Prefix, token.KeyHash,
-		token.GroveID, marshalJSON(token.Scopes),
+		token.ProjectID, marshalJSON(token.Scopes),
 		token.Revoked, nullableTimePtr(token.ExpiresAt), nullableTimePtr(token.LastUsed), token.Created,
 	)
 	if err != nil {
@@ -5521,7 +5523,7 @@ func (s *SQLiteStore) GetUserAccessToken(ctx context.Context, id string) (*store
 		FROM user_access_tokens WHERE id = ?
 	`, id).Scan(
 		&token.ID, &token.UserID, &token.Name, &token.Prefix, &token.KeyHash,
-		&token.GroveID, &scopes,
+		&token.ProjectID, &scopes,
 		&token.Revoked, &expiresAt, &lastUsed, &token.Created,
 	)
 	if err != nil {
@@ -5552,7 +5554,7 @@ func (s *SQLiteStore) GetUserAccessTokenByHash(ctx context.Context, hash string)
 		FROM user_access_tokens WHERE key_hash = ?
 	`, hash).Scan(
 		&token.ID, &token.UserID, &token.Name, &token.Prefix, &token.KeyHash,
-		&token.GroveID, &scopes,
+		&token.ProjectID, &scopes,
 		&token.Revoked, &expiresAt, &lastUsed, &token.Created,
 	)
 	if err != nil {
@@ -5632,7 +5634,7 @@ func (s *SQLiteStore) ListUserAccessTokens(ctx context.Context, userID string) (
 
 		if err := rows.Scan(
 			&token.ID, &token.UserID, &token.Name, &token.Prefix,
-			&token.GroveID, &scopes,
+			&token.ProjectID, &scopes,
 			&token.Revoked, &expiresAt, &lastUsed, &token.Created,
 		); err != nil {
 			return nil, err

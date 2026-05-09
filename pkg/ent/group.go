@@ -28,8 +28,8 @@ type Group struct {
 	Description string `json:"description,omitempty"`
 	// GroupType holds the value of the "group_type" field.
 	GroupType group.GroupType `json:"group_type,omitempty"`
-	// GroveID holds the value of the "grove_id" field.
-	GroveID *uuid.UUID `json:"grove_id,omitempty"`
+	// ProjectID holds the value of the "project_id" field.
+	ProjectID *uuid.UUID `json:"project_id,omitempty"`
 	// Labels holds the value of the "labels" field.
 	Labels map[string]string `json:"labels,omitempty"`
 	// Annotations holds the value of the "annotations" field.
@@ -117,7 +117,7 @@ func (*Group) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case group.FieldGroveID, group.FieldOwnerID:
+		case group.FieldProjectID, group.FieldOwnerID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case group.FieldLabels, group.FieldAnnotations:
 			values[i] = new([]byte)
@@ -172,12 +172,12 @@ func (_m *Group) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.GroupType = group.GroupType(value.String)
 			}
-		case group.FieldGroveID:
+		case group.FieldProjectID:
 			if value, ok := values[i].(*sql.NullScanner); !ok {
-				return fmt.Errorf("unexpected type %T for field grove_id", values[i])
+				return fmt.Errorf("unexpected type %T for field project_id", values[i])
 			} else if value.Valid {
-				_m.GroveID = new(uuid.UUID)
-				*_m.GroveID = *value.S.(*uuid.UUID)
+				_m.ProjectID = new(uuid.UUID)
+				*_m.ProjectID = *value.S.(*uuid.UUID)
 			}
 		case group.FieldLabels:
 			if value, ok := values[i].(*[]byte); !ok {
@@ -293,8 +293,8 @@ func (_m *Group) String() string {
 	builder.WriteString("group_type=")
 	builder.WriteString(fmt.Sprintf("%v", _m.GroupType))
 	builder.WriteString(", ")
-	if v := _m.GroveID; v != nil {
-		builder.WriteString("grove_id=")
+	if v := _m.ProjectID; v != nil {
+		builder.WriteString("project_id=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
 	}
 	builder.WriteString(", ")

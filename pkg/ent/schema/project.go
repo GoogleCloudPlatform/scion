@@ -18,20 +18,22 @@ import (
 	"time"
 
 	"entgo.io/ent"
+	"entgo.io/ent/dialect/entsql"
+	"entgo.io/ent/schema"
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
 	"github.com/google/uuid"
 )
 
-// Grove holds the schema definition for the Grove entity.
+// Project holds the schema definition for the Project entity.
 // This is a minimal schema for edge compilation; operational fields
-// will be added when the grove entity is fully migrated to Ent.
-type Grove struct {
+// will be added when the project entity is fully migrated to Ent.
+type Project struct {
 	ent.Schema
 }
 
-// Fields of the Grove.
-func (Grove) Fields() []ent.Field {
+// Fields of the Project.
+func (Project) Fields() []ent.Field {
 	return []ent.Field{
 		field.UUID("id", uuid.UUID{}).
 			Default(uuid.New).
@@ -63,9 +65,16 @@ func (Grove) Fields() []ent.Field {
 	}
 }
 
-// Edges of the Grove.
-func (Grove) Edges() []ent.Edge {
+// Edges of the Project.
+func (Project) Edges() []ent.Edge {
 	return []ent.Edge{
 		edge.To("agents", Agent.Type),
+	}
+}
+
+// Annotations of the Project.
+func (Project) Annotations() []schema.Annotation {
+	return []schema.Annotation{
+		entsql.Annotation{Table: "groves"},
 	}
 }
