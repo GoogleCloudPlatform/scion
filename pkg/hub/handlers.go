@@ -474,7 +474,7 @@ func (s *Server) createAgentInProject(
 	grove, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
-			NotFound(w, "Grove")
+			NotFound(w, "Project")
 			return
 		}
 		writeErrorFromErr(w, err, "")
@@ -3992,13 +3992,19 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleProjectRoutes routes requests under /api/v1/groves/{groveId}/...
+// handleProjectRoutes routes requests under /api/v1/groves/{groveId}/... or /api/v1/projects/{projectId}/...
 // It supports both the grove resource endpoints and nested agent endpoints.
 func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 	// Extract grove ID and remaining path
-	path := strings.TrimPrefix(r.URL.Path, "/api/v1/groves/")
+	var path string
+	if strings.HasPrefix(r.URL.Path, "/api/v1/projects/") {
+		path = strings.TrimPrefix(r.URL.Path, "/api/v1/projects/")
+	} else {
+		path = strings.TrimPrefix(r.URL.Path, "/api/v1/groves/")
+	}
+
 	if path == "" {
-		NotFound(w, "Grove")
+		NotFound(w, "Project")
 		return
 	}
 
@@ -4013,7 +4019,7 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 
 	// Skip the register endpoint - it's handled separately
 	if projectIDRaw == "register" {
-		NotFound(w, "Grove")
+		NotFound(w, "Project")
 		return
 	}
 
@@ -4248,7 +4254,7 @@ func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request, pro
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
-			NotFound(w, "Grove")
+			NotFound(w, "Project")
 			return
 		}
 		writeErrorFromErr(w, err, "")
@@ -4663,11 +4669,16 @@ func resolveProjectID(projectIDRaw string) string {
 
 // handleProjectByID is deprecated - use handleProjectRoutes instead
 func (s *Server) handleProjectByID(w http.ResponseWriter, r *http.Request) {
-	id := extractID(r, "/api/v1/groves")
+	var id string
+	if strings.HasPrefix(r.URL.Path, "/api/v1/projects") {
+		id = extractID(r, "/api/v1/projects")
+	} else {
+		id = extractID(r, "/api/v1/groves")
+	}
 
 	if id == "" || id == "register" {
 		// Handled by handleProjectRegister
-		NotFound(w, "Grove")
+		NotFound(w, "Project")
 		return
 	}
 
@@ -6247,7 +6258,7 @@ func (s *Server) resolveEnvSecretAccess(w http.ResponseWriter, r *http.Request, 
 		grove, err := s.store.GetProject(ctx, clientScopeID)
 		if err != nil {
 			if err == store.ErrNotFound {
-				NotFound(w, "Grove")
+				NotFound(w, "Project")
 			} else {
 				writeErrorFromErr(w, err, "")
 			}
@@ -7027,7 +7038,7 @@ func (s *Server) handleProjectEnvVars(w http.ResponseWriter, r *http.Request, pr
 	grove, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
-			NotFound(w, "Grove")
+			NotFound(w, "Project")
 			return
 		}
 		writeErrorFromErr(w, err, "")
@@ -7121,7 +7132,7 @@ func (s *Server) handleProjectEnvVarByKey(w http.ResponseWriter, r *http.Request
 	grove, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
-			NotFound(w, "Grove")
+			NotFound(w, "Project")
 			return
 		}
 		writeErrorFromErr(w, err, "")
@@ -7295,7 +7306,7 @@ func (s *Server) handleProjectSecrets(w http.ResponseWriter, r *http.Request, pr
 	grove, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
-			NotFound(w, "Grove")
+			NotFound(w, "Project")
 			return
 		}
 		writeErrorFromErr(w, err, "")
@@ -7360,7 +7371,7 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 	grove, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
-			NotFound(w, "Grove")
+			NotFound(w, "Project")
 			return
 		}
 		writeErrorFromErr(w, err, "")
@@ -7529,7 +7540,7 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 	_, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
-			NotFound(w, "Grove")
+			NotFound(w, "Project")
 			return
 		}
 		writeErrorFromErr(w, err, "")
@@ -8838,7 +8849,7 @@ func (s *Server) handleProjectImportTemplates(w http.ResponseWriter, r *http.Req
 	grove, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
-			NotFound(w, "Grove")
+			NotFound(w, "Project")
 			return
 		}
 		writeErrorFromErr(w, err, "")

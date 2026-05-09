@@ -2013,6 +2013,11 @@ func (s *Server) registerRoutes() {
 	// This handler must come before the generic grove-by-id handler
 	s.mux.HandleFunc("/api/v1/groves/", s.handleProjectRoutes)
 
+	// Aliases for /api/v1/groves -> /api/v1/projects (Phase 3)
+	s.mux.HandleFunc("/api/v1/projects", s.handleProjects)
+	s.mux.HandleFunc("/api/v1/projects/register", s.handleProjectRegister)
+	s.mux.HandleFunc("/api/v1/projects/", s.handleProjectRoutes)
+
 	s.mux.HandleFunc("/api/v1/runtime-brokers", s.handleRuntimeBrokers)
 	s.mux.HandleFunc("/api/v1/runtime-brokers/", s.handleRuntimeBrokerRoutes)
 

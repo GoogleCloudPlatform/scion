@@ -73,11 +73,8 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, gro
 	}
 
 	// Build the prefix that the WebDAV handler should strip.
-	// The full URL path is /api/v1/groves/{groveId}/dav/...
+	// The full URL path is /api/v1/{groves|projects}/{id}/dav/...
 	// We need to strip everything up to and including /dav
-	prefix := "/api/v1/groves/" + r.URL.Path[len("/api/v1/groves/"):len("/api/v1/groves/")+strings.Index(r.URL.Path[len("/api/v1/groves/"):], "/dav/")+len("/dav/")]
-
-	// Simpler approach: reconstruct the prefix from the grove ID raw portion
 	prefixEnd := strings.Index(r.URL.Path, "/dav/")
 	if prefixEnd == -1 {
 		prefixEnd = strings.Index(r.URL.Path, "/dav")
@@ -86,7 +83,7 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, gro
 		NotFound(w, "WebDAV endpoint")
 		return
 	}
-	prefix = r.URL.Path[:prefixEnd+len("/dav")]
+	prefix := r.URL.Path[:prefixEnd+len("/dav")]
 
 	handler := &webdav.Handler{
 		Prefix:     prefix,

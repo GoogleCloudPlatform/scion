@@ -238,6 +238,7 @@ type PathPattern struct {
 // HubPathPatterns returns the URL patterns for the Hub API.
 func HubPathPatterns() []PathPattern {
 	return []PathPattern{
+		{Prefix: "/api/v1/projects/", GroveIdx: 0, AgentIdx: -1},
 		{Prefix: "/api/v1/groves/", GroveIdx: 0, AgentIdx: -1},
 		{Prefix: "/api/v1/agents/", GroveIdx: -1, AgentIdx: 0},
 	}
@@ -246,6 +247,7 @@ func HubPathPatterns() []PathPattern {
 // BrokerPathPatterns returns the URL patterns for the Broker API.
 func BrokerPathPatterns() []PathPattern {
 	return []PathPattern{
+		{Prefix: "/api/v1/projects/", GroveIdx: 0, AgentIdx: -1},
 		{Prefix: "/api/v1/groves/", GroveIdx: 0, AgentIdx: -1},
 		{Prefix: "/api/v1/agents/", GroveIdx: -1, AgentIdx: 0},
 	}
