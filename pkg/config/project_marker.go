@@ -26,7 +26,7 @@ import (
 
 // ProjectMarker represents the content of a .scion marker file.
 // When .scion is a file (not a directory), it points to an external
-// grove-config directory under ~/.scion/grove-configs/.
+// grove-config directory under ~/.scion/project-configs/.
 type ProjectMarker struct {
 	ProjectID   string `yaml:"grove-id"`
 	ProjectName string `yaml:"grove-name"`
@@ -42,19 +42,19 @@ func (m ProjectMarker) ShortUUID() string {
 	return id
 }
 
-// DirName returns the directory name used under ~/.scion/grove-configs/.
+// DirName returns the directory name used under ~/.scion/project-configs/.
 func (m ProjectMarker) DirName() string {
 	return fmt.Sprintf("%s__%s", m.ProjectSlug, m.ShortUUID())
 }
 
 // ExternalProjectPath returns the absolute path to the external grove config
-// directory: ~/.scion/grove-configs/<grove-slug>__<short-uuid>/.scion/
+// directory: ~/.scion/project-configs/<grove-slug>__<short-uuid>/.scion/
 func (m ProjectMarker) ExternalProjectPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, GlobalDir, "grove-configs", m.DirName(), DotScion), nil
+	return filepath.Join(home, GlobalDir, "project-configs", m.DirName(), DotScion), nil
 }
 
 // ReadProjectMarker reads and parses a .scion marker file.
@@ -186,7 +186,7 @@ func WriteProjectID(projectDir string, groveID string) error {
 }
 
 // GetGitProjectExternalConfigDir returns the external config directory for a git grove.
-// Git groves store settings and templates externally at ~/.scion/grove-configs/<slug>__<uuid>/.scion/
+// Git groves store settings and templates externally at ~/.scion/project-configs/<slug>__<uuid>/.scion/
 // while keeping worktrees in-repo.
 // Returns ("", nil) if the grove-id file does not exist (not yet initialized for split storage).
 func GetGitProjectExternalConfigDir(projectDir string) (string, error) {
@@ -210,11 +210,11 @@ func GetGitProjectExternalConfigDir(projectDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, GlobalDir, "grove-configs", marker.DirName(), DotScion), nil
+	return filepath.Join(home, GlobalDir, "project-configs", marker.DirName(), DotScion), nil
 }
 
 // GetGitProjectExternalAgentsDir returns the external agents directory for a git grove.
-// Git groves store agent homes externally at ~/.scion/grove-configs/<slug>__<uuid>/.scion/agents/
+// Git groves store agent homes externally at ~/.scion/project-configs/<slug>__<uuid>/.scion/agents/
 // while keeping worktrees in-repo.
 // Returns ("", nil) if the grove-id file does not exist (not yet initialized for split storage).
 func GetGitProjectExternalAgentsDir(projectDir string) (string, error) {
@@ -238,12 +238,12 @@ func GetGitProjectExternalAgentsDir(projectDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, GlobalDir, "grove-configs", marker.DirName(), DotScion, "agents"), nil
+	return filepath.Join(home, GlobalDir, "project-configs", marker.DirName(), DotScion, "agents"), nil
 }
 
 // GetAgentHomePath returns the correct home directory path for an agent.
 // For git groves with split storage (grove-id file exists), this returns
-// the external path under ~/.scion/grove-configs/.
+// the external path under ~/.scion/project-configs/.
 // For non-git groves (projectDir already resolved to external via marker),
 // or git groves without split storage, returns the in-repo path.
 func GetAgentHomePath(projectDir, agentName string) string {
@@ -259,7 +259,7 @@ func GetAgentHomePath(projectDir, agentName string) string {
 //
 // For shared-workspace git groves (sharedWorkspace == true and a grove-id
 // marker exists), this returns the external path under
-// ~/.scion/grove-configs/<slug>__<uuid>/.scion/agents/<name>/ so that sibling
+// ~/.scion/project-configs/<slug>__<uuid>/.scion/agents/<name>/ so that sibling
 // agents do not see each other's state via the shared /workspace mount. See
 // .design/hub-shared-workspace-isolation.md for the threat model.
 //

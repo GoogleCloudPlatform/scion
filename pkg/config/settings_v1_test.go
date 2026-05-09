@@ -798,7 +798,7 @@ func TestResolveEffectiveProjectPath_GitProject(t *testing.T) {
 
 	result := resolveEffectiveProjectPath(projectDir)
 
-	want := filepath.Join(tmpHome, ".scion", "grove-configs", "my-repo__550e8400", ".scion")
+	want := filepath.Join(tmpHome, ".scion", "project-configs", "my-repo__550e8400", ".scion")
 	assert.Equal(t, want, result)
 }
 
@@ -3057,6 +3057,16 @@ telemetry:
 }
 
 func TestLoadVersionedSettings_TelemetryHierarchyMerge(t *testing.T) {
+	// Unset all SCION_ environment variables to avoid pollution
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "SCION_") {
+			key := strings.SplitN(e, "=", 2)[0]
+			val := os.Getenv(key)
+			os.Unsetenv(key)
+			defer os.Setenv(key, val)
+		}
+	}
+
 	// Test that telemetry settings merge across global → grove (last write wins).
 	tmpDir := t.TempDir()
 
@@ -3164,6 +3174,16 @@ func TestVersionedEnvKeyMapper_Telemetry(t *testing.T) {
 }
 
 func TestLoadVersionedSettings_TelemetryEnvOverride(t *testing.T) {
+	// Unset all SCION_ environment variables to avoid pollution
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "SCION_") {
+			key := strings.SplitN(e, "=", 2)[0]
+			val := os.Getenv(key)
+			os.Unsetenv(key)
+			defer os.Setenv(key, val)
+		}
+	}
+
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")

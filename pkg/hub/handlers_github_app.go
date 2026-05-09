@@ -936,7 +936,7 @@ func (s *Server) githubAppHealthCheckHandler() func(ctx context.Context) {
 							slog.Error("GitHub App health check: failed to mark installation as deleted",
 								"installation_id", inst.InstallationID, "error", updateErr)
 						}
-						s.updateGrovesForInstallation(ctx, inst.InstallationID, store.GitHubAppStateError,
+						s.updateProjectsForInstallation(ctx, inst.InstallationID, store.GitHubAppStateError,
 							githubapp.ErrCodeInstallationRevoked,
 							"Installation was revoked on GitHub. Reinstall the GitHub App for this org/account.")
 						deleted++
@@ -951,7 +951,7 @@ func (s *Server) githubAppHealthCheckHandler() func(ctx context.Context) {
 							slog.Error("GitHub App health check: failed to mark installation as suspended",
 								"installation_id", inst.InstallationID, "error", updateErr)
 						}
-						s.updateGrovesForInstallation(ctx, inst.InstallationID, store.GitHubAppStateError,
+						s.updateProjectsForInstallation(ctx, inst.InstallationID, store.GitHubAppStateError,
 							githubapp.ErrCodeInstallationSuspended,
 							"Installation is suspended. Contact org admin to unsuspend.")
 						suspended++
@@ -982,7 +982,7 @@ func (s *Server) githubAppHealthCheckHandler() func(ctx context.Context) {
 					slog.Error("GitHub App health check: failed to update suspended installation",
 						"installation_id", inst.InstallationID, "error", updateErr)
 				}
-				s.updateGrovesForInstallation(ctx, inst.InstallationID, store.GitHubAppStateError,
+				s.updateProjectsForInstallation(ctx, inst.InstallationID, store.GitHubAppStateError,
 					githubapp.ErrCodeInstallationSuspended,
 					"Installation is suspended. Contact org admin to unsuspend.")
 				suspended++

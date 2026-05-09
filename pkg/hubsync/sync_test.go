@@ -31,6 +31,13 @@ import (
 )
 
 func TestEnsureHubReady_GlobalFallbackWithHubEnabled(t *testing.T) {
+	// Unset Hub context to avoid synthetic project root detection
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID"} {
+		if val, ok := os.LookupEnv(e); ok {
+			os.Unsetenv(e)
+			defer os.Setenv(e, val)
+		}
+	}
 	// When projectPath="" and the resolution falls back to global, EnsureHubReady
 	// should still attempt hub integration if hub is enabled in global settings.
 	// This was previously broken: the function returned (nil, nil) immediately
@@ -179,6 +186,13 @@ hub:
 }
 
 func TestEnsureHubReady_GlobalFallbackWithHubDisabled(t *testing.T) {
+	// Unset Hub context to avoid synthetic project root detection
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID"} {
+		if val, ok := os.LookupEnv(e); ok {
+			os.Unsetenv(e)
+			defer os.Setenv(e, val)
+		}
+	}
 	// When projectPath="" and the resolution falls back to global with hub NOT
 	// enabled, EnsureHubReady should return (nil, nil) - same behavior as before.
 
@@ -380,7 +394,7 @@ func TestEnsureHubReady_HubContextProjectIDEnvPriority(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	// Create a project directory with .scion that has a grove_id in settings
-	projectDir := filepath.Join(tmpHome, "project")
+	projectDir := filepath.Join(tmpHome, "grove")
 	scionDir := filepath.Join(projectDir, ".scion")
 	if err := os.MkdirAll(scionDir, 0755); err != nil {
 		t.Fatalf("Failed to create scion dir: %v", err)
@@ -973,8 +987,8 @@ func TestSyncResult_ExcludeAgents(t *testing.T) {
 	}
 }
 
-func TestGroveMatch_Fields(t *testing.T) {
-	match := GroveMatch{
+func TestProjectMatch_Fields(t *testing.T) {
+	match := ProjectMatch{
 		ID:        "test-id",
 		Name:      "test-grove",
 		GitRemote: "github.com/test/repo",

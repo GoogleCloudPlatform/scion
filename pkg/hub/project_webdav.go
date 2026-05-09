@@ -103,12 +103,12 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, gro
 
 	// Update sync state after successful write operations
 	if r.Method == "PUT" || r.Method == "DELETE" || r.Method == "MKCOL" || r.Method == "MOVE" {
-		go s.updateGroveSyncState(grove.ID, workspacePath)
+		go s.updateProjectSyncState(grove.ID, workspacePath)
 	}
 }
 
-// updateGroveSyncState recalculates and persists file count and total bytes for a grove.
-func (s *Server) updateGroveSyncState(groveID, workspacePath string) {
+// updateProjectSyncState recalculates and persists file count and total bytes for a grove.
+func (s *Server) updateProjectSyncState(groveID, workspacePath string) {
 	var fileCount int
 	var totalBytes int64
 

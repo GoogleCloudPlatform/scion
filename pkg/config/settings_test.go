@@ -870,7 +870,7 @@ func TestDeleteHubConnection(t *testing.T) {
 
 func TestUpdateSetting_SplitStorageWritesToExternalDir(t *testing.T) {
 	// When a grove has split storage (grove-id file), UpdateSetting should
-	// write to the external config dir (~/.scion/grove-configs/…), not the
+	// write to the external config dir (~/.scion/project-configs/…), not the
 	// local .scion/ directory, so that LoadSettingsKoanf reads the same values.
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
@@ -892,7 +892,7 @@ func TestUpdateSetting_SplitStorageWritesToExternalDir(t *testing.T) {
 	// Compute expected external config dir
 	projectSlug := api.Slugify("my-project")
 	shortUUID := strings.ReplaceAll(projectID, "-", "")[:8]
-	externalDir := filepath.Join(tmpHome, ".scion", "grove-configs",
+	externalDir := filepath.Join(tmpHome, ".scion", "project-configs",
 		projectSlug+"__"+shortUUID, ".scion")
 	if err := os.MkdirAll(externalDir, 0755); err != nil {
 		t.Fatal(err)

@@ -387,7 +387,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			RuntimeError(w, "Failed to get global dir: "+err.Error())
 			return
 		}
-		req.ProjectPath = filepath.Join(globalDir, "groves", req.ProjectSlug)
+		req.ProjectPath = filepath.Join(globalDir, "projects", req.ProjectSlug)
 	}
 
 	// Env-gather: if GatherEnv is true, evaluate env completeness before building full context.
@@ -582,7 +582,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// If WorkspaceStoragePath is set, download workspace from GCS (non-git bootstrap)
 	if req.WorkspaceStoragePath != "" {
 		// For hub-native groves (ProjectSlug set), use the conventional path
-		// ~/.scion/groves/<slug>/ instead of the worktree-based path.
+		// ~/.scion.groves/<slug>/ instead of the worktree-based path.
 		var workspaceDir string
 		if req.ProjectSlug != "" {
 			globalDir, err := config.GetGlobalDir()
@@ -591,7 +591,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				RuntimeError(w, "Failed to get global dir: "+err.Error())
 				return
 			}
-			workspaceDir = filepath.Join(globalDir, "groves", req.ProjectSlug)
+			workspaceDir = filepath.Join(globalDir, "projects", req.ProjectSlug)
 		} else {
 			workspaceDir = filepath.Join(s.config.WorktreeBase, req.Name, "workspace")
 		}
@@ -628,7 +628,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// agent directory. The explicit workspace takes precedence over the
 		// worktree logic in ProvisionAgent, so no worktree will be created.
 
-		// Write a .scion grove marker into the workspace so in-container CLI
+		// Write a .scion.grove marker into the workspace so in-container CLI
 		// can discover the grove context and use the Hub API.
 		if req.ProjectID != "" && req.ProjectSlug != "" {
 			if writeErr := config.WriteWorkspaceMarker(workspaceDir, req.ProjectID, req.ProjectSlug, req.ProjectSlug); writeErr != nil {
@@ -857,7 +857,7 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, groveID
 
 	// If no grove path was found (container missing or no annotation), check
 	// hub-native grove directories for the agent's files. Without this,
-	// agents in hub-native groves (~/.scion/groves/<slug>/) are silently
+	// agents in hub-native groves (~/.scion.groves/<slug>/) are silently
 	// skipped during file cleanup because the default filesystem scan only
 	// checks the CWD-resolved project dir and global ~/.scion.
 	if grovePath == "" && deleteFiles {
@@ -1060,7 +1060,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 // set in the web configure form) are applied before the agent starts.
 //
 // sharedWorkspace branches the path: shared-workspace agents store
-// scion-agent.json externally (~/.scion/grove-configs/<slug>__<uuid>/.scion/
+// scion-agent.json externally (~/.scion.grove-configs/<slug>__<uuid>/.scion/
 // agents/<name>/) so siblings cannot read it via /workspace.
 func (s *Server) applyInlineConfigUpdate(agentName, grovePath string, inlineConfig *api.ScionConfig, sharedWorkspace bool) {
 	projectDir, err := config.GetResolvedProjectDir(grovePath)
@@ -2242,9 +2242,9 @@ func agentInfoPtr(a AgentResponse) *AgentResponse {
 // Project Endpoints
 // ============================================================================
 
-// handleProjectBySlug routes requests to /api/v1/groves/{slug}.
+// handleProjectBySlug routes requests to /api/v1/projects/{slug}.
 func (s *Server) handleProjectBySlug(w http.ResponseWriter, r *http.Request) {
-	slug := extractID(r, "/api/v1/groves")
+	slug := extractID(r, "/api/v1/projects")
 	if slug == "" {
 		NotFound(w, "grove")
 		return
@@ -2267,10 +2267,10 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		return
 	}
 
-	grovePath := filepath.Join(globalDir, "groves", slug)
+	grovePath := filepath.Join(globalDir, "projects", slug)
 
 	// Path traversal protection: ensure the resolved path stays inside the groves directory.
-	grovesBase := filepath.Join(globalDir, "groves")
+	grovesBase := filepath.Join(globalDir, "projects")
 	absProject, err := filepath.Abs(grovePath)
 	if err != nil {
 		RuntimeError(w, "Failed to resolve grove path: "+err.Error())
@@ -2304,20 +2304,20 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 }
 
 // findAgentInHubNativeProjects scans hub-native grove directories
-// (~/.scion/groves/<slug>/.scion/) for an agent directory matching the given
-// name. Returns the .scion project dir path if found, or empty string.
+// (~/.scion.groves/<slug>/.scion/) for an agent directory matching the given
+// name. Returns the .scion.grove dir path if found, or empty string.
 // This is used as a fallback when the container is missing and the agent's
 // grove path can't be determined from container labels.
 //
 // Probes both the in-grove location (worktree-mode agents) and the external
-// per-agent state dir under ~/.scion/grove-configs/ (shared-workspace agents,
+// per-agent state dir under ~/.scion.grove-configs/ (shared-workspace agents,
 // whose state lives external to the shared checkout).
 func findAgentInHubNativeProjects(agentName string) string {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		return ""
 	}
-	grovesDir := filepath.Join(globalDir, "groves")
+	grovesDir := filepath.Join(globalDir, "projects")
 	entries, err := os.ReadDir(grovesDir)
 	if err != nil {
 		return ""

@@ -27,8 +27,8 @@ import (
 func TestEnsureSharedDirs(t *testing.T) {
 	tmpDir := t.TempDir()
 	// Simulate a non-git grove external config path:
-	// ~/.scion/grove-configs/test__abc12345/.scion/
-	projectDir := filepath.Join(tmpDir, "grove-configs", "test__abc12345", ".scion")
+	// ~/.scion/project-configs/test__abc12345/.scion/
+	projectDir := filepath.Join(tmpDir, "project-configs", "test__abc12345", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	dirs := []api.SharedDir{
@@ -41,7 +41,7 @@ func TestEnsureSharedDirs(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify directories were created
-	basePath := filepath.Join(tmpDir, "grove-configs", "test__abc12345", SharedDirsSubdir)
+	basePath := filepath.Join(tmpDir, "project-configs", "test__abc12345", SharedDirsSubdir)
 	for _, d := range dirs {
 		dirPath := filepath.Join(basePath, d.Name)
 		info, err := os.Stat(dirPath)
@@ -57,7 +57,7 @@ func TestEnsureSharedDirs_Empty(t *testing.T) {
 
 func TestSharedDirsToVolumeMounts(t *testing.T) {
 	tmpDir := t.TempDir()
-	projectDir := filepath.Join(tmpDir, "grove-configs", "test__abc12345", ".scion")
+	projectDir := filepath.Join(tmpDir, "project-configs", "test__abc12345", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	dirs := []api.SharedDir{
@@ -88,7 +88,7 @@ func TestSharedDirsToVolumeMounts(t *testing.T) {
 
 func TestSharedDirsToVolumeMounts_GitWorktreeWorkspace(t *testing.T) {
 	tmpDir := t.TempDir()
-	projectDir := filepath.Join(tmpDir, "grove-configs", "test__abc12345", ".scion")
+	projectDir := filepath.Join(tmpDir, "project-configs", "test__abc12345", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	dirs := []api.SharedDir{
@@ -116,7 +116,7 @@ func TestSharedDirsToVolumeMounts_Empty(t *testing.T) {
 
 func TestGetSharedDirInfos(t *testing.T) {
 	tmpDir := t.TempDir()
-	projectDir := filepath.Join(tmpDir, "grove-configs", "test__abc12345", ".scion")
+	projectDir := filepath.Join(tmpDir, "project-configs", "test__abc12345", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	dirs := []api.SharedDir{
@@ -125,7 +125,7 @@ func TestGetSharedDirInfos(t *testing.T) {
 	}
 
 	// Create only the first one
-	basePath := filepath.Join(tmpDir, "grove-configs", "test__abc12345", SharedDirsSubdir)
+	basePath := filepath.Join(tmpDir, "project-configs", "test__abc12345", SharedDirsSubdir)
 	require.NoError(t, os.MkdirAll(filepath.Join(basePath, "existing"), 0755))
 
 	infos, err := GetSharedDirInfos(projectDir, dirs)
@@ -141,7 +141,7 @@ func TestGetSharedDirInfos(t *testing.T) {
 
 func TestRemoveSharedDir(t *testing.T) {
 	tmpDir := t.TempDir()
-	projectDir := filepath.Join(tmpDir, "grove-configs", "test__abc12345", ".scion")
+	projectDir := filepath.Join(tmpDir, "project-configs", "test__abc12345", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	dirs := []api.SharedDir{{Name: "to-remove"}}
@@ -168,7 +168,7 @@ func TestGetSharedDirsBasePath_GitProject(t *testing.T) {
 	os.Setenv("HOME", tmpDir)
 
 	// Create the external agents dir structure
-	groveConfigDir := filepath.Join(tmpDir, ".scion", "grove-configs", "myproject__abc12345")
+	groveConfigDir := filepath.Join(tmpDir, ".scion", "project-configs", "myproject__abc12345")
 	agentsDir := filepath.Join(groveConfigDir, "agents")
 	require.NoError(t, os.MkdirAll(agentsDir, 0755))
 
@@ -183,5 +183,5 @@ func TestGetSharedDirsBasePath_GitProject(t *testing.T) {
 	basePath, err := GetSharedDirsBasePath(projectDir)
 	require.NoError(t, err)
 	assert.Contains(t, basePath, SharedDirsSubdir)
-	assert.Contains(t, basePath, "grove-configs")
+	assert.Contains(t, basePath, "project-configs")
 }

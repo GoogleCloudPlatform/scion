@@ -64,7 +64,7 @@ func TestDiscoverProjects_GlobalOnly(t *testing.T) {
 
 func TestDiscoverProjects_ExternalProject(t *testing.T) {
 	// Unset Hub environment variables to avoid pollution
-	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID"} {
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_OTEL_ENDPOINT", "SCION_OTEL_PROTOCOL"} {
 		if val, ok := os.LookupEnv(e); ok {
 			os.Unsetenv(e)
 			defer os.Setenv(e, val)
@@ -129,7 +129,7 @@ func TestDiscoverProjects_ExternalProject(t *testing.T) {
 
 func TestDiscoverProjects_OrphanedExternal(t *testing.T) {
 	// Unset Hub environment variables to avoid pollution
-	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID"} {
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_OTEL_ENDPOINT", "SCION_OTEL_PROTOCOL"} {
 		if val, ok := os.LookupEnv(e); ok {
 			os.Unsetenv(e)
 			defer os.Setenv(e, val)
@@ -350,7 +350,7 @@ func TestProjectInfo_AgentsDir(t *testing.T) {
 
 func TestDiscoverProjects_StaleExternalAfterMarkerRecreate(t *testing.T) {
 	// Unset Hub environment variables to avoid pollution
-	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID"} {
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_OTEL_ENDPOINT", "SCION_OTEL_PROTOCOL"} {
 		if val, ok := os.LookupEnv(e); ok {
 			os.Unsetenv(e)
 			defer os.Setenv(e, val)

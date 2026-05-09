@@ -103,17 +103,17 @@ func (p *MessageBrokerProxy) Start() {
 	// Subscribe to global broadcasts
 	p.subscribeGlobalBroadcast()
 
-	// Bootstrap subscriptions for groves that already have running agents.
+	// Bootstrap subscriptions for projects that already have running agents.
 	// Without this, messages published before the next agent.created lifecycle
 	// event would be silently dropped by the broker.
-	p.bootstrapExistingGroves()
+	p.bootstrapExistingProjects()
 
 	p.log.Info("Message broker proxy started")
 }
 
-// bootstrapExistingGroves sets up broker subscriptions for all groves that
+// bootstrapExistingProjects sets up broker subscriptions for all projects that
 // already have running agents at startup time.
-func (p *MessageBrokerProxy) bootstrapExistingGroves() {
+func (p *MessageBrokerProxy) bootstrapExistingProjects() {
 	ctx := context.Background()
 	result, err := p.store.ListAgents(ctx, store.AgentFilter{
 		Phase: "running",
@@ -123,19 +123,19 @@ func (p *MessageBrokerProxy) bootstrapExistingGroves() {
 		return
 	}
 
-	groves := make(map[string]bool)
+	projects := make(map[string]bool)
 	for _, agent := range result.Items {
-		if !groves[agent.ProjectID] {
-			groves[agent.ProjectID] = true
-			if err := p.EnsureGroveSubscriptions(ctx, agent.ProjectID); err != nil {
-				p.log.Error("Failed to bootstrap grove subscriptions",
-					"grove_id", agent.ProjectID, "error", err)
+		if !projects[agent.ProjectID] {
+			projects[agent.ProjectID] = true
+			if err := p.EnsureProjectSubscriptions(ctx, agent.ProjectID); err != nil {
+				p.log.Error("Failed to bootstrap project subscriptions",
+					"project_id", agent.ProjectID, "error", err)
 			}
 		}
 	}
 
-	if len(groves) > 0 {
-		p.log.Info("Bootstrapped broker subscriptions for existing groves", "count", len(groves))
+	if len(projects) > 0 {
+		p.log.Info("Bootstrapped broker subscriptions for existing projects", "count", len(projects))
 	}
 }
 
@@ -244,9 +244,9 @@ func (p *MessageBrokerProxy) PublishUserMessage(ctx context.Context, groveID, us
 	return p.broker.Publish(ctx, topic, msg)
 }
 
-// EnsureGroveSubscriptions sets up broker subscriptions for all running agents
-// in the specified grove. Called when a grove becomes active or a broker reconnects.
-func (p *MessageBrokerProxy) EnsureGroveSubscriptions(ctx context.Context, groveID string) error {
+// EnsureProjectSubscriptions sets up broker subscriptions for all running agents
+// in the specified project. Called when a project becomes active or a broker reconnects.
+func (p *MessageBrokerProxy) EnsureProjectSubscriptions(ctx context.Context, groveID string) error {
 	result, err := p.store.ListAgents(ctx, store.AgentFilter{
 		ProjectID: groveID,
 		Phase:   "running",
@@ -259,9 +259,9 @@ func (p *MessageBrokerProxy) EnsureGroveSubscriptions(ctx context.Context, grove
 		p.subscribeAgent(groveID, agent.Slug)
 	}
 
-	// Also subscribe to grove broadcast and user messages
-	p.subscribeGroveBroadcast(groveID)
-	p.subscribeGroveUserMessages(groveID)
+	// Also subscribe to project broadcast and user messages
+	p.subscribeProjectBroadcast(groveID)
+	p.subscribeProjectUserMessages(groveID)
 
 	return nil
 }
@@ -276,8 +276,8 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 			return
 		}
 		p.subscribeAgent(created.ProjectID, created.Slug)
-		p.subscribeGroveBroadcast(created.ProjectID)
-		p.subscribeGroveUserMessages(created.ProjectID)
+		p.subscribeProjectBroadcast(created.ProjectID)
+		p.subscribeProjectUserMessages(created.ProjectID)
 
 	case containsSuffix(evt.Subject, ".agent.status"):
 		var status AgentStatusEvent
@@ -295,11 +295,11 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 			p.log.Error("Failed to unmarshal agent deleted event", "error", err)
 			return
 		}
-		// Agent subscriptions are cleaned up when the grove's subscriptions
+		// Agent subscriptions are cleaned up when the project's subscriptions
 		// are rebuilt. Individual cleanup is handled by the broker's
 		// Unsubscribe mechanism if needed.
-		p.log.Debug("Agent deleted, broker subscriptions will be cleaned on next grove rebuild",
-			"agent_id", deleted.AgentID, "grove_id", deleted.ProjectID)
+		p.log.Debug("Agent deleted, broker subscriptions will be cleaned on next project rebuild",
+			"agent_id", deleted.AgentID, "project_id", deleted.ProjectID)
 	}
 }
 
@@ -331,9 +331,9 @@ func (p *MessageBrokerProxy) subscribeAgent(groveID, agentSlug string) {
 	p.log.Debug("Subscribed to agent messages", "topic", topic, "agentSlug", agentSlug)
 }
 
-// subscribeGroveBroadcast creates a broker subscription for grove-wide broadcasts
-// that fans out to all running agents in the grove.
-func (p *MessageBrokerProxy) subscribeGroveBroadcast(groveID string) {
+// subscribeProjectBroadcast creates a broker subscription for project-wide broadcasts
+// that fans out to all running agents in the project.
+func (p *MessageBrokerProxy) subscribeProjectBroadcast(groveID string) {
 	topic := broker.TopicProjectBroadcast(groveID)
 
 	p.mu.Lock()
@@ -345,10 +345,10 @@ func (p *MessageBrokerProxy) subscribeGroveBroadcast(groveID string) {
 	p.mu.Unlock()
 
 	sub, err := p.broker.Subscribe(topic, func(ctx context.Context, t string, msg *messages.StructuredMessage) {
-		p.fanOutToGrove(ctx, groveID, msg)
+		p.fanOutToProject(ctx, groveID, msg)
 	})
 	if err != nil {
-		p.log.Error("Failed to subscribe for grove broadcast",
+		p.log.Error("Failed to subscribe for project broadcast",
 			"groveID", groveID, "error", err)
 		return
 	}
@@ -357,14 +357,14 @@ func (p *MessageBrokerProxy) subscribeGroveBroadcast(groveID string) {
 	p.subscriptions[groveID] = append(p.subscriptions[groveID], sub)
 	p.mu.Unlock()
 
-	p.log.Debug("Subscribed to grove broadcast", "topic", topic)
+	p.log.Debug("Subscribed to project broadcast", "topic", topic)
 }
 
-// subscribeGroveUserMessages creates a broker subscription for all user-targeted
-// messages in a grove. When a message arrives, it is persisted to the message
+// subscribeProjectUserMessages creates a broker subscription for all user-targeted
+// messages in a project. When a message arrives, it is persisted to the message
 // store and published as a user.message SSE event for connected browser clients.
-// The subscription uses a wildcard to cover all users in the grove.
-func (p *MessageBrokerProxy) subscribeGroveUserMessages(groveID string) {
+// The subscription uses a wildcard to cover all users in the project.
+func (p *MessageBrokerProxy) subscribeProjectUserMessages(groveID string) {
 	topic := broker.TopicAllUserMessages(groveID)
 
 	p.mu.Lock()
@@ -379,7 +379,7 @@ func (p *MessageBrokerProxy) subscribeGroveUserMessages(groveID string) {
 		p.deliverToUser(ctx, groveID, t, msg)
 	})
 	if err != nil {
-		p.log.Error("Failed to subscribe for grove user messages",
+		p.log.Error("Failed to subscribe for project user messages",
 			"groveID", groveID, "error", err)
 		return
 	}
@@ -388,7 +388,7 @@ func (p *MessageBrokerProxy) subscribeGroveUserMessages(groveID string) {
 	p.subscriptions[groveID] = append(p.subscriptions[groveID], sub)
 	p.mu.Unlock()
 
-	p.log.Debug("Subscribed to grove user messages", "topic", topic)
+	p.log.Debug("Subscribed to project user messages", "topic", topic)
 }
 
 // deliverToUser handles a broker message addressed to a human user by persisting
@@ -507,22 +507,22 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, groveID, agentS
 	}
 }
 
-// fanOutToGrove dispatches a broadcast message to all running agents in a grove.
-func (p *MessageBrokerProxy) fanOutToGrove(ctx context.Context, groveID string, msg *messages.StructuredMessage) {
+// fanOutToProject dispatches a broadcast message to all running agents in a project.
+func (p *MessageBrokerProxy) fanOutToProject(ctx context.Context, groveID string, msg *messages.StructuredMessage) {
 	result, err := p.store.ListAgents(ctx, store.AgentFilter{
 		ProjectID: groveID,
 		Phase:   "running",
 	}, store.ListOptions{})
 	if err != nil {
-		p.log.Error("Failed to list agents for grove broadcast fan-out",
+		p.log.Error("Failed to list agents for project broadcast fan-out",
 			"groveID", groveID, "error", err)
 		return
 	}
 
-	p.log.Debug("Broadcasting to grove agents", "grove_id", groveID, "count", len(result.Items))
+	p.log.Debug("Broadcasting to project agents", "project_id", groveID, "count", len(result.Items))
 
 	for _, agent := range result.Items {
-		// Skip the sender if it's an agent in this grove
+		// Skip the sender if it's an agent in this project
 		if msg.Sender == "agent:"+agent.Slug {
 			continue
 		}

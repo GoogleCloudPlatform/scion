@@ -1174,7 +1174,10 @@ func gitCloneWorkspace(uid, gid int, agentHome string) error {
 		return nil
 	}
 
-	workspacePath := "/workspace"
+	workspacePath := os.Getenv("SCION_WORKSPACE_PATH")
+	if workspacePath == "" {
+		workspacePath = "/workspace"
+	}
 
 	// Check if workspace already has content (stop/start scenario).
 	// Ignore marker-only directories (e.g. .scion/) that may have been

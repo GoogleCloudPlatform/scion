@@ -202,7 +202,7 @@ type CreateAgentRequest struct {
 	WorkspaceStoragePath string `json:"workspaceStoragePath,omitempty"`
 
 	// ProjectSlug is the grove slug for hub-native groves.
-	// When set, the broker creates the workspace at ~/.scion/groves/<slug>/
+	// When set, the broker creates the workspace at ~/.scion.groves/<slug>/
 	// instead of the default worktree-based path.
 	ProjectSlug string `json:"groveSlug,omitempty"`
 

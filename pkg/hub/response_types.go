@@ -30,7 +30,7 @@ type AgentWithCapabilities struct {
 
 // ProjectWithCapabilities wraps a store.Project with capability annotations.
 type ProjectWithCapabilities struct {
-	Project      store.Project `json:"project"`
+	store.Project
 	Cap          *Capabilities `json:"_capabilities,omitempty"`
 	CloudLogging bool          `json:"cloudLogging,omitempty"`
 }

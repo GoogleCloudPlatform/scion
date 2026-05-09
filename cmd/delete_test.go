@@ -393,6 +393,14 @@ func TestDeleteAgentsViaHub_LocalCleanupFailureCreatesStaleLocalNotToRegister(t 
 }
 
 func TestDeleteStopped_RequiresGroveContext(t *testing.T) {
+	// Unset Hub context to avoid synthetic project root detection
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID"} {
+		if val, ok := os.LookupEnv(e); ok {
+			os.Unsetenv(e)
+			defer os.Setenv(e, val)
+		}
+	}
+
 	orig := saveDeleteTestState()
 	defer orig.restore()
 

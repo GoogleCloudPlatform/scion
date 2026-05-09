@@ -864,10 +864,10 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 	// Collect grove paths to scan
 	var grovePaths []string
 
-	// Hub-native groves: ~/.scion/groves/<slug>/.scion/
+	// Hub-native groves: ~/.scion.groves/<slug>/.scion/
 	globalDir, err := config.GetGlobalDir()
 	if err == nil {
-		grovesDir := filepath.Join(globalDir, "groves")
+		grovesDir := filepath.Join(globalDir, "projects")
 		entries, err := os.ReadDir(grovesDir)
 		if err == nil {
 			for _, e := range entries {
@@ -1441,7 +1441,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/agents/", s.handleAgentByID)
 
 	// Project routes
-	s.mux.HandleFunc("/api/v1/groves/", s.handleProjectBySlug)
+	s.mux.HandleFunc("/api/v1/projects/", s.handleProjectBySlug)
 
 	// Workspace sync routes (for Hub-initiated sync via control channel)
 	s.mux.HandleFunc("/api/v1/workspace/upload", s.handleWorkspaceUpload)

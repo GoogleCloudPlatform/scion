@@ -276,5 +276,5 @@ func TestResolveGroveOnHub_MultipleByName(t *testing.T) {
 
 	_, err = resolveProjectOnHub(context.Background(), client, "dupe")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "multiple groves found")
+	assert.Contains(t, err.Error(), "multiple projects found")
 }

@@ -60,7 +60,7 @@ func FindProjectRoot() (string, bool) {
 				}
 			}
 			// Marker file exists but external path can't be resolved
-			// (e.g., inside a container where ~/.scion/grove-configs/ doesn't exist).
+			// (e.g., inside a container where ~/.scion/project-configs/ doesn't exist).
 			// In hub context, return a synthetic path — the CLI will use the
 			// Hub API and env vars rather than filesystem-based grove data.
 			if IsHubContext() {
@@ -157,7 +157,7 @@ func GetGlobalDir() (string, error) {
 
 // GetProjectConfigDir returns the directory where grove config files (settings.yaml,
 // templates/) live. For git groves with split storage (grove-id file exists), this
-// is the external path under ~/.scion/grove-configs/. For all other groves
+// is the external path under ~/.scion/project-configs/. For all other groves
 // (non-git, global), projectDir is returned as-is since it is already the config dir.
 func GetProjectConfigDir(projectDir string) string {
 	if extDir, err := GetGitProjectExternalConfigDir(projectDir); err == nil && extDir != "" {

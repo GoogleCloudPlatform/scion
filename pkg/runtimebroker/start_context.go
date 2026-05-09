@@ -78,7 +78,7 @@ type startContextInputs struct {
 
 // buildStartContext unifies the common startup logic shared by createAgent,
 // startAgent, restartAgent, and finalizeEnv:
-//   - Hub-native grove path resolution (ProjectSlug → ~/.scion/groves/<slug>/)
+//   - Hub-native grove path resolution (ProjectSlug → ~/.scion.groves/<slug>/)
 //   - Merged env assembly (resolved env + config env + auth + hub endpoint + broker identity)
 //   - Template hydration
 //   - Git-clone env injection
@@ -95,7 +95,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		if err != nil {
 			return nil, &startContextError{Status: http.StatusInternalServerError, Message: "Failed to get global dir: " + err.Error()}
 		}
-		in.ProjectPath = filepath.Join(globalDir, "groves", in.ProjectSlug)
+		in.ProjectPath = filepath.Join(globalDir, "projects", in.ProjectSlug)
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("Resolved hub-native grove path from slug",
 				"agent_id", in.AgentID, "slug", in.ProjectSlug, "path", in.ProjectPath)
@@ -105,10 +105,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// Ensure hub-native groves have a .scion marker with grove-id for
 	// external split storage. When the hub dispatches to a broker without a
 	// LocalPath (e.g. auto-provided embedded broker for a linked grove), the
-	// broker creates the workspace at ~/.scion/groves/<slug>/. Without a
+	// broker creates the workspace at ~/.scion.groves/<slug>/. Without a
 	// grove-id, agents are provisioned inside that workspace directory.
 	// Writing the hub's grove ID enables split storage so agent homes go to
-	// ~/.scion/grove-configs/<slug>__<uuid>/.scion/agents/ instead.
+	// ~/.scion.grove-configs/<slug>__<uuid>/.scion/agents/ instead.
 	//
 	// The .scion path may be a marker file (hub-native/workspace marker) or
 	// a directory (git grove). This block handles both forms.
@@ -414,7 +414,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 		opts.Workspace = ""
 		// Keep opts.ProjectPath so that ProvisionAgent can resolve the correct
-		// agent directory (e.g. ~/.scion/groves/<slug>/) instead of falling
+		// agent directory (e.g. ~/.scion.groves/<slug>/) instead of falling
 		// back to the global grove. The git-clone check in ProvisionAgent
 		// runs before the worktree logic, so no worktree will be created.
 		opts.GitClone = gc

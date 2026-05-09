@@ -62,7 +62,7 @@ func TestCreateProject_HubNative_NoGitRemote(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove))
 
 	assert.Equal(t, "Hub Native Project", grove.Name)
-	assert.Equal(t, "hub-native-grove", grove.Slug)
+	assert.Equal(t, "hub-native-project", grove.Slug)
 	assert.Empty(t, grove.GitRemote, "hub-native grove should have no git remote")
 
 	// Verify the filesystem was initialized

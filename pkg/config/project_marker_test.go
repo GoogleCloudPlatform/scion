@@ -65,7 +65,7 @@ func TestProjectMarker_ExternalProjectPath(t *testing.T) {
 		t.Fatalf("ExternalProjectPath() error: %v", err)
 	}
 
-	want := filepath.Join(tmpHome, ".scion", "grove-configs", "my-project__550e8400", ".scion")
+	want := filepath.Join(tmpHome, ".scion", "project-configs", "my-project__550e8400", ".scion")
 	if got != want {
 		t.Errorf("ExternalProjectPath() = %q, want %q", got, want)
 	}
@@ -143,7 +143,7 @@ func TestResolveProjectMarker(t *testing.T) {
 		t.Fatalf("ResolveProjectMarker failed: %v", err)
 	}
 
-	want := filepath.Join(tmpHome, ".scion", "grove-configs", "my-app__abcdef12", ".scion")
+	want := filepath.Join(tmpHome, ".scion", "project-configs", "my-app__abcdef12", ".scion")
 	if resolved != want {
 		t.Errorf("ResolveProjectMarker() = %q, want %q", resolved, want)
 	}
@@ -304,7 +304,7 @@ func TestGetGitProjectExternalConfigDir(t *testing.T) {
 		t.Fatalf("GetGitProjectExternalConfigDir failed: %v", err)
 	}
 
-	want := filepath.Join(tmpHome, ".scion", "grove-configs", "my-repo__550e8400", ".scion")
+	want := filepath.Join(tmpHome, ".scion", "project-configs", "my-repo__550e8400", ".scion")
 	if got != want {
 		t.Errorf("GetGitProjectExternalConfigDir() = %q, want %q", got, want)
 	}
@@ -340,7 +340,7 @@ func TestGetGitProjectExternalAgentsDir(t *testing.T) {
 		t.Fatalf("GetGitProjectExternalAgentsDir failed: %v", err)
 	}
 
-	want := filepath.Join(tmpHome, ".scion", "grove-configs", "my-repo__550e8400", ".scion", "agents")
+	want := filepath.Join(tmpHome, ".scion", "project-configs", "my-repo__550e8400", ".scion", "agents")
 	if got != want {
 		t.Errorf("GetGitProjectExternalAgentsDir() = %q, want %q", got, want)
 	}
@@ -373,7 +373,7 @@ func TestGetAgentHomePath_GitGroveSplitStorage(t *testing.T) {
 	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
 	got := GetAgentHomePath(projectDir, "test-agent")
-	want := filepath.Join(tmpHome, ".scion", "grove-configs", "my-repo__550e8400", ".scion", "agents", "test-agent", "home")
+	want := filepath.Join(tmpHome, ".scion", "project-configs", "my-repo__550e8400", ".scion", "agents", "test-agent", "home")
 	if got != want {
 		t.Errorf("GetAgentHomePath() = %q, want %q", got, want)
 	}
@@ -404,7 +404,7 @@ func TestGetAgentDir_SharedWorkspaceUsesExternal(t *testing.T) {
 	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
 	got := GetAgentDir(projectDir, "test-agent", true)
-	want := filepath.Join(tmpHome, ".scion", "grove-configs", "my-repo__550e8400", ".scion", "agents", "test-agent")
+	want := filepath.Join(tmpHome, ".scion", "project-configs", "my-repo__550e8400", ".scion", "agents", "test-agent")
 	if got != want {
 		t.Errorf("GetAgentDir(sharedWorkspace=true) = %q, want %q", got, want)
 	}
@@ -450,7 +450,7 @@ func TestResolveAgentDir_PrefersExternalWhenScionAgentJSONExists(t *testing.T) {
 	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
 	// Populate the external dir with a scion-agent.json (shared-workspace layout)
-	extAgentDir := filepath.Join(tmpHome, ".scion", "grove-configs", "my-repo__550e8400", ".scion", "agents", "test-agent")
+	extAgentDir := filepath.Join(tmpHome, ".scion", "project-configs", "my-repo__550e8400", ".scion", "agents", "test-agent")
 	if err := os.MkdirAll(extAgentDir, 0755); err != nil {
 		t.Fatalf("mkdir external agent dir: %v", err)
 	}
@@ -562,8 +562,8 @@ func TestGetProjectName_ExternalDir(t *testing.T) {
 		dir  string
 		want string
 	}{
-		{"/home/user/.scion/grove-configs/my-project__abc12345/.scion", "my-project"},
-		{"/home/user/.scion/grove-configs/cool-app__12345678/.scion", "cool-app"},
+		{"/home/user/.scion/project-configs/my-project__abc12345/.scion", "my-project"},
+		{"/home/user/.scion/project-configs/cool-app__12345678/.scion", "cool-app"},
 		{"/home/user/projects/simple/.scion", "simple"},
 	}
 	for _, tt := range tests {

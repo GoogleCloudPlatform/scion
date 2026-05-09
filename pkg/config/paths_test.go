@@ -285,14 +285,14 @@ func TestFindProjectRoot_HubContextNoScion_Disabled(t *testing.T) {
 }
 
 func TestFindProjectRoot_MarkerWithHubFallback(t *testing.T) {
-	// When a .scion marker file exists but the external grove-configs path
+	// When a .scion marker file exists but the external project-configs path
 	// doesn't, and hub context is available, FindProjectRoot should succeed.
 	tmpDir := t.TempDir()
 
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 
-	// Set HOME to a dir where grove-configs won't exist
+	// Set HOME to a dir where project-configs won't exist
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", "http://hub.example.com")

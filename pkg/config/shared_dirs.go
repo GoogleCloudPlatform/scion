@@ -22,30 +22,30 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
-// SharedDirsSubdir is the subdirectory name under grove-configs for shared directories.
+// SharedDirsSubdir is the subdirectory name under project-configs for shared directories.
 const SharedDirsSubdir = "shared-dirs"
 
 // GetSharedDirsBasePath returns the host-side base directory for shared dirs
 // for the given grove. For non-git groves (where projectDir is already the
 // external grove-config path), this is <projectDir>/../shared-dirs/.
 // For git groves with split storage, this is
-// ~/.scion/grove-configs/<slug>__<uuid>/shared-dirs/.
+// ~/.scion/project-configs/<slug>__<uuid>/shared-dirs/.
 func GetSharedDirsBasePath(projectDir string) (string, error) {
 	// Check if this is a git grove with split storage (has grove-id file)
 	if externalAgentsDir, err := GetGitProjectExternalAgentsDir(projectDir); err == nil && externalAgentsDir != "" {
-		// externalAgentsDir is ~/.scion/grove-configs/<slug>__<uuid>/.scion/agents
-		// We want ~/.scion/grove-configs/<slug>__<uuid>/shared-dirs
+		// externalAgentsDir is ~/.scion/project-configs/<slug>__<uuid>/.scion/agents
+		// We want ~/.scion/project-configs/<slug>__<uuid>/shared-dirs
 		// Go up past "agents" and ".scion" to reach the grove-config root
 		groveConfigRoot := filepath.Dir(filepath.Dir(externalAgentsDir))
 		return filepath.Join(groveConfigRoot, SharedDirsSubdir), nil
 	}
 
 	// For non-git groves, projectDir is already resolved to
-	// ~/.scion/grove-configs/<slug>__<uuid>/.scion/
+	// ~/.scion/project-configs/<slug>__<uuid>/.scion/
 	// Go up one level to get the grove-config root, then into shared-dirs
 	parent := filepath.Dir(projectDir)
-	// Verify we're in a grove-configs directory structure
-	if filepath.Base(filepath.Dir(parent)) == "grove-configs" || filepath.Base(parent) != ".scion" {
+	// Verify we're in a project-configs directory structure
+	if filepath.Base(filepath.Dir(parent)) == "project-configs" || filepath.Base(parent) != ".scion" {
 		return filepath.Join(parent, SharedDirsSubdir), nil
 	}
 

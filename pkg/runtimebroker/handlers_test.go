@@ -1345,7 +1345,7 @@ func TestCreateAgentHubEndpointFromProjectSettings(t *testing.T) {
 		body := `{
 			"name": "grove-endpoint-agent",
 			"hubEndpoint": "http://localhost:9810",
-			"projectPath": "` + groveDir + `",
+			"grovePath": "` + groveDir + `",
 			"config": {"template": "claude"}
 		}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1388,7 +1388,7 @@ func TestCreateAgentHubEndpointFromProjectSettings(t *testing.T) {
 
 		body := `{
 			"name": "grove-fallback-agent",
-			"projectPath": "` + groveDir + `",
+			"grovePath": "` + groveDir + `",
 			"config": {"template": "claude"}
 		}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1451,7 +1451,7 @@ func TestCreateAgentProjectHubEndpointSuppressedWhenDisabled(t *testing.T) {
 
 		body := `{
 			"name": "grove-disabled-agent",
-			"projectPath": "` + groveDir + `",
+			"grovePath": "` + groveDir + `",
 			"config": {"template": "claude"}
 		}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1497,7 +1497,7 @@ func TestCreateAgentProjectHubEndpointSuppressedWhenDisabled(t *testing.T) {
 		body := `{
 			"name": "dispatcher-endpoint-agent",
 			"hubEndpoint": "https://hub.authoritative.com",
-			"projectPath": "` + groveDir + `",
+			"grovePath": "` + groveDir + `",
 			"config": {"template": "claude"}
 		}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1537,12 +1537,12 @@ func TestCreateAgentHubNativeProjectSettingsEndpoint(t *testing.T) {
 	srv := New(cfg, mgr, rt)
 
 	// Set up a hub-native grove directory at the expected path.
-	// The slug "my-hub-grove" will resolve to ~/.scion/groves/my-hub-grove.
+	// The slug "my-hub-grove" will resolve to ~/.scion.groves/my-hub-grove.
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		t.Fatalf("failed to get global dir: %v", err)
 	}
-	projectPath := filepath.Join(globalDir, "groves", "settings-test-grove")
+	projectPath := filepath.Join(globalDir, "projects", "settings-test-grove")
 	scionDir := filepath.Join(projectPath, ".scion")
 	if err := os.MkdirAll(scionDir, 0755); err != nil {
 		t.Fatalf("failed to create .scion dir: %v", err)
@@ -1558,7 +1558,7 @@ func TestCreateAgentHubNativeProjectSettingsEndpoint(t *testing.T) {
 	// Send createAgent request with projectSlug but no projectPath
 	body := `{
 		"name": "hub-native-agent",
-		"projectSlug": "settings-test-grove",
+		"groveSlug": "settings-test-grove",
 		"hubEndpoint": "http://localhost:9810",
 		"config": {"template": "claude"}
 	}`
@@ -1606,7 +1606,7 @@ func TestResolveProjectSettingsDir(t *testing.T) {
 	})
 
 	t.Run("hub-native grove - settings in .scion subdirectory", func(t *testing.T) {
-		// Hub-native grove: projectPath = ~/.scion/groves/<slug>, settings in .scion/
+		// Hub-native grove: projectPath = ~/.scion.groves/<slug>, settings in .scion/
 		groveDir := t.TempDir()
 		scionDir := filepath.Join(groveDir, ".scion")
 		if err := os.MkdirAll(scionDir, 0755); err != nil {
@@ -1702,7 +1702,7 @@ hub:
 		body := fmt.Sprintf(`{
 			"name": "test-agent",
 			"hubEndpoint": "http://localhost:8080",
-			"projectPath": %q
+			"grovePath": %q
 		}`, groveDir)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -1805,7 +1805,7 @@ runtimes:
 		body := fmt.Sprintf(`{
 			"name": "test-agent",
 			"hubEndpoint": "http://localhost:8080",
-			"projectPath": %q
+			"grovePath": %q
 		}`, groveDir)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -2273,18 +2273,18 @@ func TestCreateAgentWithoutProfile(t *testing.T) {
 
 func TestProjectSlugWorkspacePath(t *testing.T) {
 	// Verify the workspace directory path for hub-native groves uses
-	// ~/.scion/groves/<slug>/ instead of the worktree-based path.
+	// ~/.scion.groves/<slug>/ instead of the worktree-based path.
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		t.Fatalf("failed to get global dir: %v", err)
 	}
 
-	expected := filepath.Join(globalDir, "groves", "my-test-grove")
+	expected := filepath.Join(globalDir, "projects", "my-test-grove")
 
 	// Simulate the logic from the handler: when ProjectSlug is set,
 	// use the conventional path.
 	projectSlug := "my-test-grove"
-	workspaceDir := filepath.Join(globalDir, "groves", projectSlug)
+	workspaceDir := filepath.Join(globalDir, "projects", projectSlug)
 
 	if workspaceDir != expected {
 		t.Errorf("expected workspace dir %q, got %q", expected, workspaceDir)
@@ -2304,7 +2304,7 @@ func TestCreateAgentRequest_ProjectSlugField(t *testing.T) {
 	// Verify ProjectSlug is properly serialized/deserialized in CreateAgentRequest.
 	reqJSON := `{
 		"name": "grove-agent",
-		"projectSlug": "my-hub-grove",
+		"groveSlug": "my-hub-grove",
 		"workspaceStoragePath": "workspaces/grove-123/grove-workspace"
 	}`
 
@@ -2324,7 +2324,7 @@ func TestCreateAgentRequest_ProjectSlugField(t *testing.T) {
 func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
 	// When ProjectSlug is set and ProjectPath is empty (hub-native grove with no
 	// local provider path), the handler should resolve ProjectPath to the
-	// conventional ~/.scion/groves/<slug>/ path so the agent is created in the
+	// conventional ~/.scion.groves/<slug>/ path so the agent is created in the
 	// correct grove instead of the broker's local grove.
 	srv, mgr := newTestServerWithProvisionCapture()
 
@@ -2333,7 +2333,7 @@ func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
 		"id": "agent-uuid-123",
 		"slug": "hub-native-agent",
 		"groveId": "grove-abc",
-		"projectSlug": "my-hub-grove",
+		"groveSlug": "my-hub-grove",
 		"provisionOnly": true,
 		"config": {"template": "claude"}
 	}`
@@ -2356,7 +2356,7 @@ func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
 		t.Fatalf("failed to get global dir: %v", err)
 	}
 
-	expectedPath := filepath.Join(globalDir, "groves", "my-hub-grove")
+	expectedPath := filepath.Join(globalDir, "projects", "my-hub-grove")
 	if mgr.lastOpts.ProjectPath != expectedPath {
 		t.Errorf("expected ProjectPath %q, got %q", expectedPath, mgr.lastOpts.ProjectPath)
 	}
@@ -2372,8 +2372,8 @@ func TestCreateAgentProjectSlugNotUsedWhenProjectPathSet(t *testing.T) {
 		"id": "agent-uuid-456",
 		"slug": "local-grove-agent",
 		"groveId": "grove-def",
-		"projectSlug": "my-hub-grove",
-		"projectPath": "/projects/my-local-grove/.scion",
+		"groveSlug": "my-hub-grove",
+		"grovePath": "/projects/my-local-grove/.scion",
 		"provisionOnly": true,
 		"config": {"template": "claude"}
 	}`
@@ -2423,7 +2423,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 			t.Fatalf("failed to write settings.yaml: %v", err)
 		}
 
-		body := fmt.Sprintf(`{"projectPath": %q}`, groveDir)
+		body := fmt.Sprintf(`{"grovePath": %q}`, groveDir)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
@@ -2459,7 +2459,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 		srv := New(cfg, mgr, rt)
 
-		// Hub-native grove: projectPath is the workspace parent (~/.scion/groves/<slug>),
+		// Hub-native grove: projectPath is the workspace parent (~/.scion.groves/<slug>),
 		// settings.yaml lives in the .scion subdirectory
 		groveDir := t.TempDir()
 		scionDir := filepath.Join(groveDir, ".scion")
@@ -2471,7 +2471,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 			t.Fatalf("failed to write settings.yaml: %v", err)
 		}
 
-		body := fmt.Sprintf(`{"projectPath": %q}`, groveDir)
+		body := fmt.Sprintf(`{"grovePath": %q}`, groveDir)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
@@ -2517,7 +2517,7 @@ func TestStartAgentBrokerConfigUsedWhenNoProjectSettings(t *testing.T) {
 		t.Fatalf("failed to write settings.yaml: %v", err)
 	}
 
-	body := fmt.Sprintf(`{"projectPath": %q}`, groveDir)
+	body := fmt.Sprintf(`{"grovePath": %q}`, groveDir)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -2723,7 +2723,7 @@ func TestStartAgentProjectSlugResolvesProjectPath(t *testing.T) {
 	srv, mgr := newTestServerWithProvisionCapture()
 
 	// Start uses the agent name from the URL path
-	body := `{"projectSlug": "my-hub-grove"}`
+	body := `{"groveSlug": "my-hub-grove"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/hub-native-agent/start", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -2743,7 +2743,7 @@ func TestStartAgentProjectSlugResolvesProjectPath(t *testing.T) {
 		t.Fatalf("failed to get global dir: %v", err)
 	}
 
-	expectedPath := filepath.Join(globalDir, "groves", "my-hub-grove")
+	expectedPath := filepath.Join(globalDir, "projects", "my-hub-grove")
 	if mgr.lastOpts.ProjectPath != expectedPath {
 		t.Errorf("expected ProjectPath %q, got %q", expectedPath, mgr.lastOpts.ProjectPath)
 	}
@@ -2754,7 +2754,7 @@ func TestStartAgentProjectSlugNotUsedWhenProjectPathSet(t *testing.T) {
 	// projectPath takes precedence.
 	srv, mgr := newTestServerWithProvisionCapture()
 
-	body := `{"projectPath": "/projects/my-local-grove/.scion", "projectSlug": "my-hub-grove"}`
+	body := `{"grovePath": "/projects/my-local-grove/.scion", "groveSlug": "my-hub-grove"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/local-grove-agent/start", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -2894,7 +2894,7 @@ func TestDeleteProject_RemovesDirectory(t *testing.T) {
 
 	// Create a temporary groves directory structure
 	tmpHome := t.TempDir()
-	grovesDir := filepath.Join(tmpHome, ".scion", "groves")
+	grovesDir := filepath.Join(tmpHome, ".scion", "projects")
 	groveDir := filepath.Join(grovesDir, "test-grove")
 	scionDir := filepath.Join(groveDir, ".scion")
 
@@ -2911,7 +2911,7 @@ func TestDeleteProject_RemovesDirectory(t *testing.T) {
 	// Override HOME so config.GetGlobalDir resolves to our temp dir
 	t.Setenv("HOME", tmpHome)
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/groves/test-grove", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/test-grove", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -2930,14 +2930,14 @@ func TestDeleteProject_NonExistent_Returns204(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	// Create the groves parent but NOT the specific grove directory
-	grovesDir := filepath.Join(tmpHome, ".scion", "groves")
+	grovesDir := filepath.Join(tmpHome, ".scion", "projects")
 	if err := os.MkdirAll(grovesDir, 0o755); err != nil {
 		t.Fatalf("failed to create groves dir: %v", err)
 	}
 
 	t.Setenv("HOME", tmpHome)
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/groves/nonexistent-grove", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/nonexistent-grove", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -2953,7 +2953,7 @@ func TestDeleteProject_PathTraversal_Blocked(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 
 	// Attempt path traversal
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/groves/..%2F..%2Fetc", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/..%2F..%2Fetc", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -2968,7 +2968,7 @@ func TestFindAgentInHubNativeProjects(t *testing.T) {
 
 	// Create hub-native grove structure with an agent directory
 	projectSlug := "my-project"
-	scionDir := filepath.Join(tmpHome, ".scion", "groves", projectSlug, ".scion")
+	scionDir := filepath.Join(tmpHome, ".scion", "projects", projectSlug, ".scion")
 	agentDir := filepath.Join(scionDir, "agents", "test-agent")
 	if err := os.MkdirAll(agentDir, 0o755); err != nil {
 		t.Fatalf("failed to create agent dir: %v", err)
@@ -3013,7 +3013,7 @@ func TestDeleteAgent_HubNativeProject_NoContainer(t *testing.T) {
 
 	// Create hub-native grove with an agent directory and config file
 	projectSlug := "hub-grove"
-	scionDir := filepath.Join(tmpHome, ".scion", "groves", projectSlug, ".scion")
+	scionDir := filepath.Join(tmpHome, ".scion", "projects", projectSlug, ".scion")
 	agentName := "orphaned-agent"
 	agentDir := filepath.Join(scionDir, "agents", agentName)
 	if err := os.MkdirAll(agentDir, 0o755); err != nil {
@@ -3101,7 +3101,7 @@ func TestCreateAgentStartFailure_CleansUpFiles(t *testing.T) {
 
 	body := fmt.Sprintf(`{
 		"name": "fail-agent",
-		"projectPath": %q,
+		"grovePath": %q,
 		"config": {"task": "do something"}
 	}`, projectPath)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))

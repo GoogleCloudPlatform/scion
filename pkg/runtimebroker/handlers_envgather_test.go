@@ -107,7 +107,7 @@ profiles:
 		"name": "test-agent",
 		"id": "agent-uuid-123",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"resolvedEnv": {"API_KEY": "sk-test-key", "ANTHROPIC_API_KEY": "sk-ant-key"},
 		"config": {"template": "claude", "profile": "default"}
 	}`
@@ -151,7 +151,7 @@ profiles:
 		"name": "test-agent-gather",
 		"id": "agent-uuid-456",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"resolvedEnv": {"API_KEY": "sk-from-hub"},
 		"config": {"template": "claude", "profile": "default"}
 	}`
@@ -224,7 +224,7 @@ profiles:
 		"name": "test-agent-broker-env",
 		"id": "agent-uuid-789",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -282,7 +282,7 @@ profiles:
 		"name": "test-agent-finalize",
 		"id": "agent-uuid-fin",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(createBody))
@@ -341,7 +341,7 @@ profiles:
 		"name": "test-agent-retry",
 		"id": "agent-uuid-retry",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(createBody))
@@ -419,7 +419,7 @@ profiles:
 		"name": "test-agent-restart",
 		"id": "agent-uuid-restart",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(createBody))
@@ -495,7 +495,7 @@ runtimes:
 		"requestId": "req-idempotent-1",
 		"name": "test-agent-idem",
 		"id": "agent-uuid-idem",
-		"projectPath": %q,
+		"grovePath": %q,
 		"config": {"template": "claude"}
 	}`, groveDir)
 	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -586,7 +586,7 @@ profiles:
 		"name": "test-agent-settings-env",
 		"id": "agent-uuid-se",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -640,7 +640,7 @@ profiles:
 		"name": "test-agent-gemini-vertex",
 		"id": "agent-uuid-gv",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"config": {"template": "gemini", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -690,7 +690,7 @@ profiles:
 		"name": "test-agent-override",
 		"id": "agent-uuid-ov",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"config": {"template": "gemini", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -726,7 +726,7 @@ profiles:
 		"name": "test-agent-oauth",
 		"id": "agent-uuid-oauth",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"resolvedSecrets": [
 			{"name": "GEMINI_OAUTH_CREDS", "type": "file", "target": "/home/gemini/.gemini/oauth_creds.json", "value": "{}", "source": "user"}
 		],
@@ -768,7 +768,7 @@ profiles:
 		"name": "test-agent-no-gather",
 		"id": "agent-uuid-no-gather",
 		"gatherEnv": false,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -810,7 +810,7 @@ profiles:
 		"name": "test-agent-secret-upgrade",
 		"id": "agent-uuid-secret",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"resolvedSecrets": [
 			{"name": "API_KEY", "type": "environment", "target": "API_KEY", "value": "secret-api-key", "source": "user"},
 			{"name": "ANTHROPIC_API_KEY", "type": "environment", "target": "ANTHROPIC_API_KEY", "value": "secret-ant-key", "source": "user"}
@@ -852,7 +852,7 @@ profiles:
 		"name": "test-agent-partial-secret",
 		"id": "agent-uuid-partial",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"resolvedSecrets": [
 			{"name": "API_KEY", "type": "environment", "target": "API_KEY", "value": "secret-api-key", "source": "user"}
 		],
@@ -927,7 +927,7 @@ profiles:
 		"name": "test-agent-harness-secrets",
 		"id": "agent-uuid-hs",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"resolvedEnv": {"ANTHROPIC_API_KEY": "sk-ant-key"},
 		"config": {"template": "claude", "profile": "default"}
 	}`
@@ -998,7 +998,7 @@ profiles:
 		"name": "test-agent-profile-secrets",
 		"id": "agent-uuid-ps",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1050,7 +1050,7 @@ profiles:
 		"name": "test-agent-req-secrets",
 		"id": "agent-uuid-rs",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"requiredSecrets": [
 			{"key": "HUB_TEMPLATE_KEY", "description": "Key from Hub template"}
 		],
@@ -1123,7 +1123,7 @@ profiles:
 		"name": "test-agent-si-needed",
 		"id": "agent-uuid-sin",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"resolvedEnv": {"ANTHROPIC_API_KEY": "sk-ant-key"},
 		"resolvedSecrets": [
 			{"name": "SATISFIED_KEY", "type": "environment", "target": "SATISFIED_KEY", "value": "satisfied-val", "source": "user"}
@@ -1189,7 +1189,7 @@ profiles:
 		"name": "test-agent-type-prop",
 		"id": "agent-uuid-tp",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1264,7 +1264,7 @@ profiles:
 		"name": "test-agent-type-tmpl",
 		"id": "agent-uuid-tt",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"requiredSecrets": [
 			{"key": "TMPL_FILE_SECRET", "description": "Template file secret", "type": "file"},
 			{"key": "TMPL_ENV_SECRET", "description": "Template env secret", "type": "environment"}
@@ -1335,7 +1335,7 @@ profiles:
 		"name": "test-agent-merge",
 		"id": "agent-uuid-merge",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1425,7 +1425,7 @@ profiles:
 		"name": "test-agent-empty-tpl",
 		"id": "agent-uuid-empty-tpl",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"config": {"profile": "default"}
 	}`
 	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(createBody))
@@ -1480,7 +1480,7 @@ profiles:
 		"name": "test-agent-harness-config",
 		"id": "agent-uuid-hc",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"config": {"template": "default", "harnessConfig": "gemini", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1534,7 +1534,7 @@ profiles:
 		"name": "test-agent-hc-preserve",
 		"id": "agent-uuid-hcp",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"config": {"template": "claude", "harnessConfig": "claude", "profile": "default"}
 	}`
 	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(createBody))
@@ -1587,7 +1587,7 @@ profiles:
 		"name": "test-agent-vertex-adc",
 		"id": "agent-uuid-vadc",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"resolvedEnv": {
 			"GOOGLE_CLOUD_PROJECT": "my-project",
 			"GOOGLE_CLOUD_REGION": "us-central1"
@@ -1661,7 +1661,7 @@ profiles:
 		"name": "test-agent-vertex-adc-sat",
 		"id": "agent-uuid-vadcs",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"resolvedEnv": {
 			"GOOGLE_CLOUD_PROJECT": "my-project",
 			"GOOGLE_CLOUD_REGION": "us-central1"
@@ -1712,7 +1712,7 @@ profiles:
 		"name": "test-agent-autodetect-gac",
 		"id": "agent-uuid-adgac",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"resolvedEnv": {
 			"GOOGLE_APPLICATION_CREDENTIALS": "/path/to/service-account.json"
 		},
@@ -1773,7 +1773,7 @@ profiles:
 		"name": "test-agent-vertex-gac",
 		"id": "agent-uuid-vgac",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"resolvedEnv": {
 			"GOOGLE_CLOUD_PROJECT": "my-project",
 			"GOOGLE_CLOUD_REGION": "us-central1",
@@ -1823,7 +1823,7 @@ profiles:
 		"name": "test-agent-autodetect-gcp",
 		"id": "agent-uuid-adgcp",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"resolvedEnv": {
 			"GOOGLE_CLOUD_PROJECT": "my-hub-project"
 		},
@@ -1883,7 +1883,7 @@ profiles:
 		"name": "test-agent-apikey-gcp",
 		"id": "agent-uuid-apikey-gcp",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"resolvedEnv": {
 			"GOOGLE_CLOUD_PROJECT": "my-project",
 			"GOOGLE_CLOUD_REGION": "us-central1",
@@ -1927,7 +1927,7 @@ profiles:
 		"name": "test-agent-claude-apikey-gcp",
 		"id": "agent-uuid-claude-apikey-gcp",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"resolvedEnv": {
 			"GOOGLE_CLOUD_PROJECT": "my-project",
 			"GOOGLE_CLOUD_REGION": "us-central1"
@@ -1971,7 +1971,7 @@ profiles:
 		"name": "test-agent-harness-auth",
 		"id": "agent-uuid-ha",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"resolvedSecrets": [
 			{"name": "GEMINI_OAUTH_CREDS", "type": "file", "target": "/home/gemini/.gemini/oauth_creds.json", "value": "{}", "source": "user"}
 		],
@@ -2116,7 +2116,7 @@ profiles:
 		"name": "test-agent-target-fallback",
 		"id": "agent-uuid-target-fb",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"config": {"template": "gemini", "profile": "default"},
 		"resolvedSecrets": [
 			{"name": "GEMINI_API_KEY", "type": "environment", "value": "sk-test", "target": ""},
@@ -2150,7 +2150,7 @@ profiles:
 		"name": "test-agent-harness-auth-vertex",
 		"id": "agent-uuid-hav",
 		"gatherEnv": true,
-		"projectPath": "` + groveDir + `",
+		"grovePath": "` + groveDir + `",
 		"config": {"template": "gemini", "profile": "default", "harnessAuth": "vertex-ai"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))

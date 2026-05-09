@@ -162,6 +162,9 @@ func TestGitCloneWorkspace_NoCloneURL(t *testing.T) {
 		}
 	}()
 
+
+	tmpWorkspace := t.TempDir()
+	t.Setenv("SCION_WORKSPACE_PATH", tmpWorkspace)
 	err := gitCloneWorkspace(0, 0, "/tmp")
 	if err != nil {
 		t.Errorf("expected nil error when SCION_GIT_CLONE_URL is not set, got: %v", err)
@@ -705,6 +708,9 @@ func TestGitCloneWorkspace_DefaultEnvValues(t *testing.T) {
 	// the function doesn't panic and returns a meaningful error.
 	// uid=0 exercises the scion-user fallback path (the lookup will fail
 	// gracefully outside a container where no scion user exists).
+
+	tmpWorkspace := t.TempDir()
+	t.Setenv("SCION_WORKSPACE_PATH", tmpWorkspace)
 	err := gitCloneWorkspace(0, 0, "/tmp")
 	if err == nil {
 		t.Fatal("expected error from git clone to nonexistent host")
@@ -740,6 +746,8 @@ func TestGitCloneWorkspace_NonZeroUIDChownsWorkspace(t *testing.T) {
 	gid := os.Getgid()
 	_ = tmpDir // workspace path is hardcoded; this confirms the logic flow
 
+	tmpWorkspace := t.TempDir()
+	t.Setenv("SCION_WORKSPACE_PATH", tmpWorkspace)
 	err := gitCloneWorkspace(uid, gid, "/tmp")
 	if err == nil {
 		t.Fatal("expected error from git clone to nonexistent host")

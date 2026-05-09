@@ -411,7 +411,7 @@ func TestMatchProjectsToInstallation(t *testing.T) {
 		t.Fatalf("failed to create installation: %v", err)
 	}
 
-	matched := srv.matchGrovesToInstallation(ctx, installation)
+	matched := srv.matchProjectsToInstallation(ctx, installation)
 
 	if len(matched) != 2 {
 		t.Fatalf("expected 2 matched groves, got %d: %v", len(matched), matched)
@@ -440,7 +440,7 @@ func TestMatchProjectsToInstallation(t *testing.T) {
 	}
 }
 
-func TestMatchGrovesToInstallation_SkipsAlreadyAssociated(t *testing.T) {
+func TestMatchProjectsToInstallation_SkipsAlreadyAssociated(t *testing.T) {
 	srv, s := webhookTestServer(t)
 	ctx := context.Background()
 
@@ -473,7 +473,7 @@ func TestMatchGrovesToInstallation_SkipsAlreadyAssociated(t *testing.T) {
 		Repositories:   []string{"acme/widgets"},
 	}
 
-	matched := srv.matchGrovesToInstallation(ctx, installation)
+	matched := srv.matchProjectsToInstallation(ctx, installation)
 	if len(matched) != 0 {
 		t.Errorf("expected 0 matched groves (already associated), got %d", len(matched))
 	}

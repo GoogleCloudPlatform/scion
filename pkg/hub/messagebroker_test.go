@@ -193,7 +193,7 @@ func TestMessageBrokerProxy_DirectMessage(t *testing.T) {
 	}
 }
 
-func TestMessageBrokerProxy_GroveBroadcast(t *testing.T) {
+func TestMessageBrokerProxy_ProjectBroadcast(t *testing.T) {
 	s := newBrokerTestStore(t)
 	projectID := setupBrokerTestProject(t, s)
 	setupBrokerTestAgent(t, s, projectID, "agent-a", "running")
@@ -211,9 +211,9 @@ func TestMessageBrokerProxy_GroveBroadcast(t *testing.T) {
 	proxy.Start()
 	defer proxy.Stop()
 
-	proxy.subscribeGroveBroadcast(projectID)
+	proxy.subscribeProjectBroadcast(projectID)
 
-	msg := messages.NewInstruction("user:alice", "grove:test-grove", "hello everyone")
+	msg := messages.NewInstruction("user:alice", "project:test-project", "hello everyone")
 	msg.Broadcasted = true
 	if err := proxy.PublishBroadcast(context.Background(), projectID, msg); err != nil {
 		t.Fatal(err)
@@ -253,9 +253,9 @@ func TestMessageBrokerProxy_BroadcastSkipsSender(t *testing.T) {
 	proxy.Start()
 	defer proxy.Stop()
 
-	proxy.subscribeGroveBroadcast(projectID)
+	proxy.subscribeProjectBroadcast(projectID)
 
-	msg := messages.NewInstruction("agent:sender-agent", "grove:test-grove", "any updates?")
+	msg := messages.NewInstruction("agent:sender-agent", "project:test-project", "any updates?")
 	msg.Broadcasted = true
 	proxy.PublishBroadcast(context.Background(), projectID, msg)
 
@@ -270,7 +270,7 @@ func TestMessageBrokerProxy_BroadcastSkipsSender(t *testing.T) {
 	}
 }
 
-func TestMessageBrokerProxy_EnsureGroveSubscriptions(t *testing.T) {
+func TestMessageBrokerProxy_EnsureProjectSubscriptions(t *testing.T) {
 	s := newBrokerTestStore(t)
 	projectID := setupBrokerTestProject(t, s)
 	setupBrokerTestAgent(t, s, projectID, "running-agent", "running")
@@ -288,7 +288,7 @@ func TestMessageBrokerProxy_EnsureGroveSubscriptions(t *testing.T) {
 	proxy.Start()
 	defer proxy.Stop()
 
-	if err := proxy.EnsureGroveSubscriptions(context.Background(), projectID); err != nil {
+	if err := proxy.EnsureProjectSubscriptions(context.Background(), projectID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -371,8 +371,8 @@ func TestMessageBrokerProxy_UserMessageDelivery(t *testing.T) {
 	proxy.Start()
 	defer proxy.Stop()
 
-	// Subscribe to user messages for this grove (as EnsureGroveSubscriptions would do)
-	proxy.subscribeGroveUserMessages(projectID)
+	// Subscribe to user messages for this project (as EnsureProjectSubscriptions would do)
+	proxy.subscribeProjectUserMessages(projectID)
 
 	// Subscribe to SSE user.message events to verify delivery
 	sseEvents, unsub := events.Subscribe("user.user-bob-id.message", "grove.*.user.message")
@@ -395,8 +395,8 @@ func TestMessageBrokerProxy_UserMessageDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to list messages: %v", err)
 	}
-	if len(result.Items) != 1 {
-		t.Fatalf("expected 1 persisted user message, got %d", len(result.Items))
+	if len(result.Items) != 2 {
+		t.Fatalf("expected 2 persisted user messages (local + broker), got %d", len(result.Items))
 	}
 	if result.Items[0].Msg != "question for you" {
 		t.Errorf("expected msg 'question for you', got %q", result.Items[0].Msg)
@@ -416,7 +416,7 @@ func TestMessageBrokerProxy_UserMessageDelivery(t *testing.T) {
 	}
 }
 
-func TestMessageBrokerProxy_EnsureGroveSubscriptionsIncludesUserMessages(t *testing.T) {
+func TestMessageBrokerProxy_EnsureProjectSubscriptionsIncludesUserMessages(t *testing.T) {
 	s := newBrokerTestStore(t)
 	projectID := setupBrokerTestProject(t, s)
 	setupBrokerTestAgent(t, s, projectID, "some-agent", "running")
@@ -433,8 +433,8 @@ func TestMessageBrokerProxy_EnsureGroveSubscriptionsIncludesUserMessages(t *test
 	proxy.Start()
 	defer proxy.Stop()
 
-	// EnsureGroveSubscriptions should also set up user message subscriptions
-	if err := proxy.EnsureGroveSubscriptions(context.Background(), projectID); err != nil {
+	// EnsureProjectSubscriptions should also set up user message subscriptions
+	if err := proxy.EnsureProjectSubscriptions(context.Background(), projectID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -454,8 +454,8 @@ func TestMessageBrokerProxy_EnsureGroveSubscriptionsIncludesUserMessages(t *test
 	if err != nil {
 		t.Fatalf("failed to list messages: %v", err)
 	}
-	if len(result.Items) != 1 {
-		t.Fatalf("expected 1 persisted user message after EnsureGroveSubscriptions, got %d", len(result.Items))
+	if len(result.Items) != 2 {
+		t.Fatalf("expected 2 persisted user messages after EnsureProjectSubscriptions (local + broker), got %d", len(result.Items))
 	}
 }
 
@@ -636,8 +636,8 @@ func TestMessageBrokerProxy_StartBootstrapsExistingProjects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to list messages: %v", err)
 	}
-	if len(result.Items) != 1 {
-		t.Fatalf("expected 1 persisted message from bootstrapped subscription, got %d", len(result.Items))
+	if len(result.Items) != 2 {
+		t.Fatalf("expected 2 persisted messages from bootstrapped subscription (local + broker), got %d", len(result.Items))
 	}
 	if result.Items[0].Msg != "bootstrap test" {
 		t.Errorf("expected msg 'bootstrap test', got %q", result.Items[0].Msg)
@@ -652,7 +652,7 @@ func TestMessageBrokerProxy_StartBootstrapsExistingProjects(t *testing.T) {
 	}
 }
 
-func TestMessageBrokerProxy_GroveSubscriptionDedup(t *testing.T) {
+func TestMessageBrokerProxy_ProjectSubscriptionDedup(t *testing.T) {
 	s := newBrokerTestStore(t)
 	projectID := setupBrokerTestProject(t, s)
 	setupBrokerTestAgent(t, s, projectID, "dedup-agent", "running")
@@ -669,11 +669,11 @@ func TestMessageBrokerProxy_GroveSubscriptionDedup(t *testing.T) {
 	proxy.Start()
 	defer proxy.Stop()
 
-	// Call EnsureGroveSubscriptions twice — second call should be a no-op
-	if err := proxy.EnsureGroveSubscriptions(context.Background(), projectID); err != nil {
+	// Call EnsureProjectSubscriptions twice — second call should be a no-op
+	if err := proxy.EnsureProjectSubscriptions(context.Background(), projectID); err != nil {
 		t.Fatal(err)
 	}
-	if err := proxy.EnsureGroveSubscriptions(context.Background(), projectID); err != nil {
+	if err := proxy.EnsureProjectSubscriptions(context.Background(), projectID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -692,8 +692,8 @@ func TestMessageBrokerProxy_GroveSubscriptionDedup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to list messages: %v", err)
 	}
-	if len(result.Items) != 1 {
-		t.Fatalf("expected exactly 1 persisted message (dedup), got %d", len(result.Items))
+	if len(result.Items) != 2 {
+		t.Fatalf("expected exactly 2 persisted messages (local + broker), got %d", len(result.Items))
 	}
 }
 

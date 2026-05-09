@@ -545,7 +545,7 @@ func UpdateSetting(grovePath string, key string, value string, global bool) erro
 			return fmt.Errorf("grove path required for local settings")
 		}
 		// Resolve through GetProjectConfigDir so that git groves with split
-		// storage write to the external config dir (~/.scion/grove-configs/…)
+		// storage write to the external config dir (~/.scion/project-configs/…)
 		// — the same location LoadSettingsKoanf reads from.
 		dir = GetProjectConfigDir(grovePath)
 	}
@@ -1004,7 +1004,7 @@ func DeleteHubConnection(grovePath string, name string, global bool) error {
 			return fmt.Errorf("grove path required for local settings")
 		}
 		// Resolve through GetProjectConfigDir so that git groves with split
-		// storage write to the external config dir (~/.scion/grove-configs/…)
+		// storage write to the external config dir (~/.scion/project-configs/…)
 		// — the same location LoadSettingsKoanf reads from.
 		dir = GetProjectConfigDir(grovePath)
 	}

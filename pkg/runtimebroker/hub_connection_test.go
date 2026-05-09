@@ -535,7 +535,7 @@ func TestGlobalProjectRejection_WithProjectID_MultiHub(t *testing.T) {
 	body := `{
 		"name": "scoped-agent",
 		"groveId": "my-project",
-		"projectPath": "/some/path/.scion",
+		"grovePath": "/some/path/.scion",
 		"config": {"template": "claude"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
