@@ -3119,10 +3119,16 @@ func (s *Server) createGrove(w http.ResponseWriter, r *http.Request) {
 	// Save the GitHub token as a grove secret if provided.
 	// This must happen before cloneSharedWorkspaceGrove so that
 	// resolveCloneToken can find it during the initial clone.
-	if req.GitHubToken != "" && s.secretBackend != nil {
+	// Only applies to git-backed groves (GitRemote != "").
+	if req.GitHubToken != "" && s.secretBackend != nil && grove.GitRemote != "" {
+		token := strings.TrimSpace(req.GitHubToken)
+		if len(token) > 500 {
+			ValidationError(w, "GitHub token exceeds maximum length", nil)
+			return
+		}
 		tokenInput := &secret.SetSecretInput{
 			Name:          "GITHUB_TOKEN",
-			Value:         req.GitHubToken,
+			Value:         token,
 			SecretType:    secret.TypeEnvironment,
 			Target:        "GITHUB_TOKEN",
 			Scope:         secret.ScopeGrove,
@@ -3133,8 +3139,15 @@ func (s *Server) createGrove(w http.ResponseWriter, r *http.Request) {
 			UpdatedBy:     grove.CreatedBy,
 		}
 		if _, _, err := s.secretBackend.Set(ctx, tokenInput); err != nil {
-			slog.Warn("failed to save GitHub token as grove secret",
+			slog.Error("failed to save GitHub token as grove secret",
 				"grove_id", grove.ID, "error", err)
+			if delErr := s.store.DeleteGrove(ctx, grove.ID); delErr != nil {
+				slog.Warn("failed to clean up grove record after secret save failure",
+					"grove_id", grove.ID, "error", delErr)
+			}
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to save GitHub token: "+err.Error(), nil)
+			return
 		}
 	}
 
@@ -3145,7 +3158,7 @@ func (s *Server) createGrove(w http.ResponseWriter, r *http.Request) {
 		if err := s.cloneSharedWorkspaceGrove(ctx, grove); err != nil {
 			slog.Error("shared workspace clone failed, rolling back grove creation",
 				"grove_id", grove.ID, "slug", grove.Slug, "error", err)
-			if req.GitHubToken != "" && s.secretBackend != nil {
+			if req.GitHubToken != "" && s.secretBackend != nil && grove.GitRemote != "" {
 				if delErr := s.secretBackend.Delete(ctx, "GITHUB_TOKEN", secret.ScopeGrove, grove.ID); delErr != nil {
 					slog.Warn("failed to clean up grove secret after clone failure",
 						"grove_id", grove.ID, "error", delErr)

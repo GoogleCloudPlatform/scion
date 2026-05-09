@@ -511,7 +511,7 @@ export class ScionPageGroveCreate extends LitElement {
                   <sl-input
                     id="githubToken"
                     type="password"
-                    placeholder="ghp_..."
+                    placeholder="Paste token here"
                     .value=${this.githubToken}
                     @sl-input=${(e: Event) => {
                       this.githubToken = (e.target as HTMLElement & { value: string }).value;
