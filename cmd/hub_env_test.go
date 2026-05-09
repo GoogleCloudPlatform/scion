@@ -32,7 +32,7 @@ import (
 type envTestState struct {
 	home           string
 	projectPath      string
-	envGroveScope  string
+	envProjectScope  string
 	envBrokerScope string
 	envScope       string
 	envOutputJSON  bool
@@ -42,7 +42,7 @@ func saveEnvTestState() envTestState {
 	return envTestState{
 		home:           os.Getenv("HOME"),
 		projectPath:      projectPath,
-		envGroveScope:  envGroveScope,
+		envProjectScope:  envProjectScope,
 		envBrokerScope: envBrokerScope,
 		envScope:       envScope,
 		envOutputJSON:  envOutputJSON,
@@ -52,7 +52,7 @@ func saveEnvTestState() envTestState {
 func (s envTestState) restore() {
 	os.Setenv("HOME", s.home)
 	projectPath = s.projectPath
-	envGroveScope = s.envGroveScope
+	envProjectScope = s.envProjectScope
 	envBrokerScope = s.envBrokerScope
 	envScope = s.envScope
 	envOutputJSON = s.envOutputJSON
@@ -151,7 +151,7 @@ func TestRunEnvList_WithResults(t *testing.T) {
 	projectPath = groveDir
 
 	envOutputJSON = false
-	envGroveScope = ""
+	envProjectScope = ""
 	envBrokerScope = ""
 
 	err := runEnvList(hubEnvListCmd, nil)
@@ -173,7 +173,7 @@ func TestRunEnvList_Empty(t *testing.T) {
 	projectPath = groveDir
 
 	envOutputJSON = false
-	envGroveScope = ""
+	envProjectScope = ""
 	envBrokerScope = ""
 
 	err := runEnvList(hubEnvListCmd, nil)
@@ -199,7 +199,7 @@ func TestRunEnvList_JSON(t *testing.T) {
 	projectPath = groveDir
 
 	envOutputJSON = true
-	envGroveScope = ""
+	envProjectScope = ""
 	envBrokerScope = ""
 
 	err := runEnvList(hubEnvListCmd, nil)
@@ -313,7 +313,7 @@ func TestRunEnvList_BareGroveFlag(t *testing.T) {
 	envOutputJSON = false
 	envBrokerScope = ""
 	// Simulate bare --grove: set sentinel value and mark flag as changed
-	envGroveScope = scopeInferSentinel
+	envProjectScope = scopeInferSentinel
 	hubEnvListCmd.Flags().Set("grove", scopeInferSentinel)
 	defer hubEnvListCmd.Flags().Set("grove", "")
 
@@ -344,7 +344,7 @@ func TestRunEnvList_GroveByName(t *testing.T) {
 	envOutputJSON = false
 	envBrokerScope = ""
 	// Simulate --grove=hub-local
-	envGroveScope = "hub-local"
+	envProjectScope = "hub-local"
 	hubEnvListCmd.Flags().Set("grove", "hub-local")
 	defer hubEnvListCmd.Flags().Set("grove", "")
 
@@ -361,7 +361,7 @@ func TestResolveEnvScope_SentinelInfersFromSettings(t *testing.T) {
 
 	// Create a temporary command to isolate flag state
 	testCmd := &cobra.Command{Use: "test"}
-	testCmd.Flags().StringVar(&envGroveScope, "grove", "", "")
+	testCmd.Flags().StringVar(&envProjectScope, "grove", "", "")
 	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&envBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
@@ -389,7 +389,7 @@ func TestResolveEnvScope_ExplicitGroveValue(t *testing.T) {
 	defer orig.restore()
 
 	testCmd := &cobra.Command{Use: "test"}
-	testCmd.Flags().StringVar(&envGroveScope, "grove", "", "")
+	testCmd.Flags().StringVar(&envProjectScope, "grove", "", "")
 	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&envBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
@@ -417,7 +417,7 @@ func TestResolveEnvScope_ScopeHub(t *testing.T) {
 
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&envScope, "scope", "", "")
-	testCmd.Flags().StringVar(&envGroveScope, "grove", "", "")
+	testCmd.Flags().StringVar(&envProjectScope, "grove", "", "")
 	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&envBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
@@ -445,7 +445,7 @@ func TestResolveEnvScope_ScopeConflictsWithProject(t *testing.T) {
 
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&envScope, "scope", "", "")
-	testCmd.Flags().StringVar(&envGroveScope, "grove", "", "")
+	testCmd.Flags().StringVar(&envProjectScope, "grove", "", "")
 	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&envBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
@@ -473,7 +473,7 @@ func TestResolveEnvScope_ScopeConflictsWithBroker(t *testing.T) {
 
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&envScope, "scope", "", "")
-	testCmd.Flags().StringVar(&envGroveScope, "grove", "", "")
+	testCmd.Flags().StringVar(&envProjectScope, "grove", "", "")
 	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&envBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel

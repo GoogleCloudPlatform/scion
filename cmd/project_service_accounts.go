@@ -28,35 +28,35 @@ import (
 
 var saOutputJSON bool
 
-var groveServiceAccountsCmd = &cobra.Command{
+var projectServiceAccountsCmd = &cobra.Command{
 	Use:     "service-accounts",
 	Aliases: []string{"sa"},
-	Short:   "Manage GCP service accounts for a grove",
-	Long: `Manage GCP service accounts registered for use by agents in a grove.
+	Short:   "Manage GCP service accounts for a project",
+	Long: `Manage GCP service accounts registered for use by agents in a project.
 
 Service accounts are registered with the Hub and used to provide agents
 with transparent GCP identity via metadata server emulation. No key
 material is stored — the Hub impersonates the SA at token-generation time.
 
 Examples:
-  scion grove service-accounts list
-  scion grove service-accounts add agent-worker@project.iam.gserviceaccount.com --project my-project
-  scion grove service-accounts verify <id>
-  scion grove service-accounts remove <id>`,
+  scion project service-accounts list
+  scion project service-accounts add agent-worker@project.iam.gserviceaccount.com --project my-project
+  scion project service-accounts verify <id>
+  scion project service-accounts remove <id>`,
 }
 
 var saAddCmd = &cobra.Command{
 	Use:   "add EMAIL",
 	Short: "Register a GCP service account",
-	Long: `Register a GCP service account for use by agents in this grove.
+	Long: `Register a GCP service account for use by agents in this project.
 
 The Hub will verify it can impersonate this service account via the
 IAM Credentials API. The Hub's own service account must have
 roles/iam.serviceAccountTokenCreator on the target SA.
 
 Examples:
-  scion grove service-accounts add agent-worker@my-project.iam.gserviceaccount.com --project my-project
-  scion grove service-accounts add agent-worker@my-project.iam.gserviceaccount.com --project my-project --name "Worker SA"`,
+  scion project service-accounts add agent-worker@my-project.iam.gserviceaccount.com --project my-project
+  scion project service-accounts add agent-worker@my-project.iam.gserviceaccount.com --project my-project --name "Worker SA"`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSAAdd,
 }
@@ -65,11 +65,11 @@ var saListCmd = &cobra.Command{
 	Use:     "list",
 	Aliases: []string{"ls"},
 	Short:   "List registered GCP service accounts",
-	Long: `List all GCP service accounts registered for this grove.
+	Long: `List all GCP service accounts registered for this project.
 
 Examples:
-  scion grove service-accounts list
-  scion grove service-accounts list --json`,
+  scion project service-accounts list
+  scion project service-accounts list --json`,
 	Args: cobra.NoArgs,
 	RunE: runSAList,
 }
@@ -78,13 +78,13 @@ var saRemoveCmd = &cobra.Command{
 	Use:     "remove ID",
 	Aliases: []string{"rm", "delete"},
 	Short:   "Remove a GCP service account registration",
-	Long: `Remove a registered GCP service account from this grove.
+	Long: `Remove a registered GCP service account from this project.
 
 This does not delete the service account in GCP — it only removes the
 registration from the Hub.
 
 Examples:
-  scion grove service-accounts remove <id>`,
+  scion project service-accounts remove <id>`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSARemove,
 }
@@ -98,7 +98,7 @@ This calls the IAM Credentials API to confirm the Hub's identity has
 roles/iam.serviceAccountTokenCreator on the target SA.
 
 Examples:
-  scion grove service-accounts verify <id>`,
+  scion project service-accounts verify <id>`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSAVerify,
 }
@@ -113,9 +113,9 @@ The Hub automatically configures itself to impersonate the SA for token
 generation. You can later grant IAM permissions on your own GCP projects.
 
 Examples:
-  scion grove service-accounts mint
-  scion grove service-accounts mint --account-id my-pipeline
-  scion grove service-accounts mint --account-id my-pipeline --name "My Pipeline SA"`,
+  scion project service-accounts mint
+  scion project service-accounts mint --account-id my-pipeline
+  scion project service-accounts mint --account-id my-pipeline --name "My Pipeline SA"`,
 	Args: cobra.NoArgs,
 	RunE: runSAMint,
 }
@@ -127,12 +127,12 @@ var (
 )
 
 func init() {
-	groveCmd.AddCommand(groveServiceAccountsCmd)
-	groveServiceAccountsCmd.AddCommand(saAddCmd)
-	groveServiceAccountsCmd.AddCommand(saListCmd)
-	groveServiceAccountsCmd.AddCommand(saRemoveCmd)
-	groveServiceAccountsCmd.AddCommand(saVerifyCmd)
-	groveServiceAccountsCmd.AddCommand(saMintCmd)
+	projectCmd.AddCommand(projectServiceAccountsCmd)
+	projectServiceAccountsCmd.AddCommand(saAddCmd)
+	projectServiceAccountsCmd.AddCommand(saListCmd)
+	projectServiceAccountsCmd.AddCommand(saRemoveCmd)
+	projectServiceAccountsCmd.AddCommand(saVerifyCmd)
+	projectServiceAccountsCmd.AddCommand(saMintCmd)
 
 	saAddCmd.Flags().StringVar(&saProjectID, "project", "", "GCP project ID (required)")
 	saAddCmd.Flags().StringVar(&saDisplayName, "name", "", "Display name for the service account")
@@ -144,11 +144,11 @@ func init() {
 	saListCmd.Flags().BoolVar(&saOutputJSON, "json", false, "Output in JSON format")
 }
 
-// resolveGroveForSA resolves the grove ID and creates a hub client for SA operations.
+// resolveProjectForSA resolves the project ID and creates a hub client for SA operations.
 func resolveProjectForSA() (hubclient.Client, string, error) {
 	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to resolve grove path: %w", err)
+		return nil, "", fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -166,7 +166,7 @@ func resolveProjectForSA() (hubclient.Client, string, error) {
 		projectID = settings.Hub.ProjectID
 	}
 	if projectID == "" {
-		return nil, "", fmt.Errorf("grove not linked to Hub. Use 'scion hub link' first")
+		return nil, "", fmt.Errorf("project not linked to Hub. Use 'scion hub link' first")
 	}
 
 	return client, projectID, nil
@@ -232,8 +232,8 @@ func runSAList(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(sas) == 0 {
-		fmt.Println("No GCP service accounts registered for this grove.")
-		fmt.Println("Use 'scion grove service-accounts add' to register one.")
+		fmt.Println("No GCP service accounts registered for this project.")
+		fmt.Println("Use 'scion project service-accounts add' to register one.")
 		return nil
 	}
 

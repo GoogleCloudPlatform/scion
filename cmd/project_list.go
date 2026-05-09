@@ -23,20 +23,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var groveListCmd = &cobra.Command{
+var projectListCmd = &cobra.Command{
 	Use:     "list",
 	Aliases: []string{"ls"},
-	Short:   "List all known groves on this machine",
-	Long: `List all groves known to scion, including the global grove and
-all project groves (both git-based and external). Shows workspace path,
-type, agent count, and status for each grove.
+	Short:   "List all known projects on this machine",
+	Long:    `List all projects known to scion, including the global project and all project workspaces. Shows workspace path, type, agent count, and status for each project.
 
-Orphaned groves (where the workspace no longer exists) are flagged.
-Use 'scion grove prune' to clean them up.`,
+Orphaned projects (where the workspace no longer exists) are flagged.
+Use 'scion project prune' to clean them up.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projects, err := config.DiscoverProjects()
 		if err != nil {
-			return fmt.Errorf("failed to discover groves: %w", err)
+			return fmt.Errorf("failed to discover projects: %w", err)
 		}
 
 		if isJSONOutput() {
@@ -47,7 +45,7 @@ Use 'scion grove prune' to clean them up.`,
 		}
 
 		if len(projects) == 0 {
-			fmt.Println("No groves found. Run 'scion init' to create one.")
+			fmt.Println("No projects found. Run 'scion init' to create one.")
 			return nil
 		}
 
@@ -68,5 +66,5 @@ Use 'scion grove prune' to clean them up.`,
 }
 
 func init() {
-	groveCmd.AddCommand(groveListCmd)
+	projectCmd.AddCommand(projectListCmd)
 }

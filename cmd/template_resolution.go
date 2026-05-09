@@ -63,13 +63,13 @@ func ResolveTemplateForHub(ctx context.Context, hubCtx *HubContext, templateName
 		return nil, fmt.Errorf("template name is required")
 	}
 
-	// Parse scope prefix if present (e.g., "global:claude", "grove:custom")
+	// Parse scope prefix if present (e.g., "global:claude", "project:custom")
 	scope, name := parseTemplateScope(templateName)
 
-	// Get grove ID for grove-scoped lookups
+	// Get project ID for project-scoped lookups
 	projectID, err := GetProjectID(hubCtx)
-	if err != nil && scope == "grove" {
-		return nil, fmt.Errorf("failed to determine grove ID for template resolution: %w", err)
+	if err != nil && (scope == "grove" || scope == "project") {
+		return nil, fmt.Errorf("failed to determine project ID for template resolution: %w", err)
 	}
 
 	// Step 1: Check if template exists on Hub
@@ -110,7 +110,10 @@ func parseTemplateScope(templateName string) (scope, name string) {
 		prefix := templateName[:idx]
 		// Check if it's a known scope prefix
 		switch prefix {
-		case "global", "grove", "user":
+		case "global", "grove", "project", "user":
+			if prefix == "project" {
+				return "grove", templateName[idx+1:]
+			}
 			return prefix, templateName[idx+1:]
 		}
 	}
@@ -119,7 +122,7 @@ func parseTemplateScope(templateName string) (scope, name string) {
 
 // findTemplateOnHub searches for a template on the Hub.
 // It implements the resolution order from Section 3.2 of the design doc:
-// 1. Grove scope (if applicable)
+// 1. Project scope (if applicable)
 // 2. User scope
 // 3. Global scope
 func findTemplateOnHub(ctx context.Context, hubCtx *HubContext, name, scope, projectID string) (*hubclient.Template, error) {
@@ -128,12 +131,17 @@ func findTemplateOnHub(ctx context.Context, hubCtx *HubContext, name, scope, pro
 
 	// If explicit scope is provided, search only that scope
 	if scope != "" {
+		effectiveScope := scope
+		if effectiveScope == "project" {
+			effectiveScope = "grove"
+		}
+
 		opts := &hubclient.ListTemplatesOptions{
 			Name:   name,
-			Scope:  scope,
+			Scope:  effectiveScope,
 			Status: "active",
 		}
-		if scope == "grove" && projectID != "" {
+		if effectiveScope == "grove" && projectID != "" {
 			opts.ProjectID = projectID
 		}
 
@@ -152,8 +160,8 @@ func findTemplateOnHub(ctx context.Context, hubCtx *HubContext, name, scope, pro
 		return nil, nil
 	}
 
-	// No explicit scope - follow resolution order: grove -> user -> global
-	// First, check grove scope if we have a grove ID
+	// No explicit scope - follow resolution order: project -> user -> global
+	// First, check project scope if we have a project ID
 	if projectID != "" {
 		opts := &hubclient.ListTemplatesOptions{
 			Name:    name,
@@ -239,7 +247,7 @@ func handleHubAndLocalTemplate(ctx context.Context, hubCtx *HubContext, hubTempl
 
 // handleLocalOnlyTemplate handles the case where template exists only locally.
 func handleLocalOnlyTemplate(ctx context.Context, hubCtx *HubContext, localTemplate *config.Template, scope, projectID string) (*TemplateResolutionResult, error) {
-	// Check if the target broker has local filesystem access to the grove.
+	// Check if the target broker has local filesystem access to the project.
 	// If so, the broker can resolve the template locally — no upload needed.
 	if brokerHasLocalAccess(ctx, hubCtx, projectID) {
 		return &TemplateResolutionResult{
@@ -274,7 +282,7 @@ func handleLocalOnlyTemplate(ctx context.Context, hubCtx *HubContext, localTempl
 }
 
 // brokerHasLocalAccess checks whether the target broker has local filesystem
-// access to the grove. If so, the broker can resolve templates locally without
+// access to the project. If so, the broker can resolve templates locally without
 // requiring them to be uploaded to the Hub.
 func brokerHasLocalAccess(ctx context.Context, hubCtx *HubContext, projectID string) bool {
 	if hubCtx.BrokerID == "" || projectID == "" {
@@ -360,6 +368,9 @@ func uploadLocalTemplate(ctx context.Context, hubCtx *HubContext, localTemplate 
 		effectiveScope = templateScope
 	}
 	if effectiveScope == "" {
+		effectiveScope = "grove"
+	}
+	if effectiveScope == "project" {
 		effectiveScope = "grove"
 	}
 
@@ -565,9 +576,9 @@ func promptChoice(prompt, defaultChoice string, validChoices []string) (string, 
 func formatTemplateNotFoundError(name, projectPath string) error {
 	var locations []string
 
-	// Check grove-specific locations
+	// Check project-specific locations
 	if projectPath != "" {
-		locations = append(locations, "  - Hub (grove scope) - not found")
+		locations = append(locations, "  - Hub (project scope) - not found")
 	}
 	locations = append(locations, "  - Hub (global) - not found")
 

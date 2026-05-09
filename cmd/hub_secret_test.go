@@ -32,7 +32,7 @@ import (
 type secretTestState struct {
 	home              string
 	projectPath         string
-	secretGroveScope  string
+	secretProjectScope  string
 	secretBrokerScope string
 	secretScope       string
 	secretOutputJSON  bool
@@ -42,7 +42,7 @@ func saveSecretTestState() secretTestState {
 	return secretTestState{
 		home:              os.Getenv("HOME"),
 		projectPath:         projectPath,
-		secretGroveScope:  secretGroveScope,
+		secretProjectScope:  secretProjectScope,
 		secretBrokerScope: secretBrokerScope,
 		secretScope:       secretScope,
 		secretOutputJSON:  secretOutputJSON,
@@ -52,7 +52,7 @@ func saveSecretTestState() secretTestState {
 func (s secretTestState) restore() {
 	os.Setenv("HOME", s.home)
 	projectPath = s.projectPath
-	secretGroveScope = s.secretGroveScope
+	secretProjectScope = s.secretProjectScope
 	secretBrokerScope = s.secretBrokerScope
 	secretScope = s.secretScope
 	secretOutputJSON = s.secretOutputJSON
@@ -151,7 +151,7 @@ func TestRunSecretList_WithResults(t *testing.T) {
 	projectPath = groveDir
 
 	secretOutputJSON = false
-	secretGroveScope = ""
+	secretProjectScope = ""
 	secretBrokerScope = ""
 
 	err := runSecretList(hubSecretListCmd, nil)
@@ -173,7 +173,7 @@ func TestRunSecretList_Empty(t *testing.T) {
 	projectPath = groveDir
 
 	secretOutputJSON = false
-	secretGroveScope = ""
+	secretProjectScope = ""
 	secretBrokerScope = ""
 
 	err := runSecretList(hubSecretListCmd, nil)
@@ -199,7 +199,7 @@ func TestRunSecretList_JSON(t *testing.T) {
 	projectPath = groveDir
 
 	secretOutputJSON = true
-	secretGroveScope = ""
+	secretProjectScope = ""
 	secretBrokerScope = ""
 
 	err := runSecretList(hubSecretListCmd, nil)
@@ -212,7 +212,7 @@ func TestResolveSecretScope_ScopeHub(t *testing.T) {
 
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&secretScope, "scope", "", "")
-	testCmd.Flags().StringVar(&secretGroveScope, "grove", "", "")
+	testCmd.Flags().StringVar(&secretProjectScope, "grove", "", "")
 	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&secretBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
@@ -242,7 +242,7 @@ func TestResolveSecretScope_GroveFallbackToProjectID(t *testing.T) {
 
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&secretScope, "scope", "", "")
-	testCmd.Flags().StringVar(&secretGroveScope, "grove", "", "")
+	testCmd.Flags().StringVar(&secretProjectScope, "grove", "", "")
 	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&secretBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
@@ -274,7 +274,7 @@ func TestResolveSecretScope_ScopeConflictsWithProject(t *testing.T) {
 
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&secretScope, "scope", "", "")
-	testCmd.Flags().StringVar(&secretGroveScope, "grove", "", "")
+	testCmd.Flags().StringVar(&secretProjectScope, "grove", "", "")
 	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&secretBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
@@ -302,7 +302,7 @@ func TestResolveSecretScope_ScopeConflictsWithBroker(t *testing.T) {
 
 	testCmd := &cobra.Command{Use: "test"}
 	testCmd.Flags().StringVar(&secretScope, "scope", "", "")
-	testCmd.Flags().StringVar(&secretGroveScope, "grove", "", "")
+	testCmd.Flags().StringVar(&secretProjectScope, "grove", "", "")
 	testCmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
 	testCmd.Flags().StringVar(&secretBrokerScope, "broker", "", "")
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel

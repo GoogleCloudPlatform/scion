@@ -28,33 +28,33 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var grovePruneCmd = &cobra.Command{
+var projectPruneCmd = &cobra.Command{
 	Use:   "prune",
-	Short: "Remove orphaned grove configs",
-	Long: `Detect and remove grove configs in ~/.scion/project-configs/ whose
+	Short: "Remove orphaned project configs",
+	Long: `Detect and remove project configs in ~/.scion/project-configs/ whose
 workspaces no longer exist. This cleans up leftover configuration from
 deleted or moved projects.
 
-Any running agent containers belonging to orphaned groves will be stopped
-and removed before the grove config is deleted.
+Any running agent containers belonging to orphaned projects will be stopped
+and removed before the project config is deleted.
 
-Use 'scion grove list' to see all groves and their status first.
-Use 'scion grove reconnect' to fix a grove whose workspace moved.`,
+Use 'scion project list' to see all projects and their status first.
+Use 'scion project reconnect' to fix a project whose workspace moved.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		orphaned, err := config.FindOrphanedProjectConfigs()
 		if err != nil {
-			return fmt.Errorf("failed to scan for orphaned groves: %w", err)
+			return fmt.Errorf("failed to scan for orphaned projects: %w", err)
 		}
 
 		if len(orphaned) == 0 {
 			if isJSONOutput() {
 				return outputJSON(ActionResult{
 					Status:  "success",
-					Command: "grove prune",
-					Message: "No orphaned grove configs found.",
+					Command: "project prune",
+					Message: "No orphaned project configs found.",
 				})
 			}
-			fmt.Println("No orphaned grove configs found.")
+			fmt.Println("No orphaned project configs found.")
 			return nil
 		}
 
@@ -72,8 +72,8 @@ Use 'scion grove reconnect' to fix a grove whose workspace moved.`,
 			if !autoConfirm {
 				return outputJSON(ActionResult{
 					Status:  "pending",
-					Command: "grove prune",
-					Message: fmt.Sprintf("Found %d orphaned grove config(s). Use --yes to confirm removal.", len(orphaned)),
+					Command: "project prune",
+					Message: fmt.Sprintf("Found %d orphaned project config(s). Use --yes to confirm removal.", len(orphaned)),
 					Details: map[string]interface{}{"orphaned": results},
 				})
 			}
@@ -89,14 +89,14 @@ Use 'scion grove reconnect' to fix a grove whose workspace moved.`,
 
 			return outputJSON(ActionResult{
 				Status:  "success",
-				Command: "grove prune",
-				Message: fmt.Sprintf("Removed %d orphaned grove config(s).", len(removed)),
+				Command: "project prune",
+				Message: fmt.Sprintf("Removed %d orphaned project config(s).", len(removed)),
 				Details: map[string]interface{}{"removed": removed},
 			})
 		}
 
 		// Interactive mode
-		fmt.Printf("Found %d orphaned grove config(s):\n\n", len(orphaned))
+		fmt.Printf("Found %d orphaned project config(s):\n\n", len(orphaned))
 		for _, g := range orphaned {
 			workspace := g.WorkspacePath
 			if workspace == "" {
@@ -113,10 +113,10 @@ Use 'scion grove reconnect' to fix a grove whose workspace moved.`,
 
 		if !autoConfirm {
 			if nonInteractive {
-				return fmt.Errorf("orphaned grove configs found; use --yes to confirm removal")
+				return fmt.Errorf("orphaned project configs found; use --yes to confirm removal")
 			}
 			if !util.IsTerminal() {
-				return fmt.Errorf("orphaned grove configs found; use --yes to confirm removal in non-terminal mode")
+				return fmt.Errorf("orphaned project configs found; use --yes to confirm removal in non-terminal mode")
 			}
 			fmt.Print("Remove these orphaned configs? [y/N] ")
 			reader := bufio.NewReader(os.Stdin)
@@ -143,8 +143,8 @@ Use 'scion grove reconnect' to fix a grove whose workspace moved.`,
 	},
 }
 
-// cleanupOrphanedGrove stops any running containers for the orphaned grove's
-// agents before the grove config is removed. Errors are best-effort and logged
+// cleanupOrphanedProject stops any running containers for the orphaned project's
+// agents before the project config is removed. Errors are best-effort and logged
 // as warnings.
 func cleanupOrphanedProject(g config.ProjectInfo) {
 	if g.AgentCount == 0 {
@@ -167,5 +167,5 @@ func cleanupOrphanedProject(g config.ProjectInfo) {
 }
 
 func init() {
-	groveCmd.AddCommand(grovePruneCmd)
+	projectCmd.AddCommand(projectPruneCmd)
 }

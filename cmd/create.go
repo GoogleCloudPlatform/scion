@@ -152,7 +152,7 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
-	// Get the grove ID for this project
+	// Get the project ID for this project
 	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
@@ -287,7 +287,8 @@ func init() {
 	// Template resolution flags for Hub mode (Section 9.4)
 	createCmd.Flags().BoolVar(&uploadTemplate, "upload-template", false, "Automatically upload local template to Hub if not found")
 	createCmd.Flags().BoolVar(&noUpload, "no-upload", false, "Fail if template requires upload (never prompt)")
-	createCmd.Flags().StringVar(&templateScope, "template-scope", "grove", "Scope for uploaded template (global, grove, user)")
+	createCmd.Flags().StringVar(&templateScope, "template-scope", "project", "Scope for uploaded template (global, project, user)")
+
 
 	// Inline config flag
 	createCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")

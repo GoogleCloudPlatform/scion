@@ -36,19 +36,19 @@ import (
 var globalInit bool
 var initImageRegistry string
 
-// groveCmd represents the grove command
-var groveCmd = &cobra.Command{
-	Use:     "grove",
-	Aliases: []string{"group"},
-	Short:   "Manage scion groves (agent groups)",
-	Long:    `A grove is the grouping construct for a set of agents. The .scion folder represents a grove.`,
+// projectCmd represents the project command
+var projectCmd = &cobra.Command{
+	Use:     "project",
+	Aliases: []string{"grove", "group"},
+	Short:   "Manage scion projects (formerly groves)",
+	Long:    `A project is the grouping construct for a set of agents. The .scion folder represents a project.`,
 }
 
-// groveInitCmd represents the init subcommand for grove
-var groveInitCmd = &cobra.Command{
+// projectInitCmd represents the init subcommand for project
+var projectInitCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Initialize a new grove",
-	Long: `Initialize a new grove by creating the .scion directory structure
+	Short: "Initialize a new project",
+	Long: `Initialize a new project by creating the .scion directory structure
 and seeding the default template. 
 
 By default, it initializes in:
@@ -90,13 +90,13 @@ With --global, it initializes in the user's home folder.`,
 				}
 				return outputJSON(ActionResult{
 					Status:  "success",
-					Command: "grove init",
-					Message: "scion grove successfully initialized.",
+					Command: "project init",
+					Message: "scion project successfully initialized.",
 					Details: details,
 				})
 			}
 
-			fmt.Println("scion grove successfully initialized.")
+			fmt.Println("scion project successfully initialized.")
 			if registryValue != "" {
 				fmt.Printf("Image registry: %s\n", registryValue)
 			} else {
@@ -115,26 +115,26 @@ With --global, it initializes in the user's home folder.`,
 			return nil
 		}
 
-		// Check if ~/.scion/ exists; error if not since global grove is required
+		// Check if ~/.scion/ exists; error if not since global project is required
 		if globalDir, err := config.GetGlobalDir(); err == nil {
 			if _, err := os.Stat(globalDir); os.IsNotExist(err) {
 				return fmt.Errorf("global scion directory (~/.scion/) does not exist.\nRun 'scion init --machine' first to set up the global configuration")
 			}
 		}
 
-		// Check for existing grove at or above current directory
+		// Check for existing project at or above current directory
 		if _, rootDir, found := config.GetEnclosingProjectPath(); found {
 			wd, _ := os.Getwd()
 			if filepath.Clean(wd) == filepath.Clean(rootDir) {
-				// Re-running init in an existing grove is allowed — it ensures
-				// the grove structure is intact (dirs, gitignore, etc.).
+				// Re-running init in an existing project is allowed — it ensures
+				// the project structure is intact (dirs, gitignore, etc.).
 				if !isJSONOutput() {
-					fmt.Println("Grove already initialized. Ensuring integrity...")
+					fmt.Println("Project already initialized. Ensuring integrity...")
 				}
 				// Fall through to InitProject which is idempotent
 			} else if !isJSONOutput() {
-				// Inform user about parent grove — nested groves are allowed
-				fmt.Printf("Note: parent grove exists at %s. Initializing nested grove.\n", rootDir)
+				// Inform user about parent project — nested projects are allowed
+				fmt.Printf("Note: parent project exists at %s. Initializing nested project.\n", rootDir)
 			}
 		}
 
@@ -157,34 +157,34 @@ With --global, it initializes in the user's home folder.`,
 		}
 
 		if !isJSONOutput() {
-			fmt.Println("Initializing scion project grove...")
+			fmt.Println("Initializing scion project...")
 		}
 		if err := config.InitProject("", harnesses); err != nil {
-			return fmt.Errorf("failed to initialize project grove: %w", err)
+			return fmt.Errorf("failed to initialize project: %w", err)
 		}
 
-		// Resolve the grove_id and save it to settings.
-		// For non-git groves, targetDir (.scion) is now a marker file, so we must
-		// resolve through it to the external config path. The grove-id is already
+		// Resolve the projectID and save it to settings.
+		// For non-git projects, targetDir (.scion) is now a marker file, so we must
+		// resolve through it to the external config path. The projectID is already
 		// generated during InitProject — read it back rather than generating a new one.
 		var projectID string
 		markerPath := filepath.Join(filepath.Dir(targetDir), config.DotScion)
 		if config.IsProjectMarkerFile(markerPath) {
-			// Non-git grove: read grove-id from marker, save to external settings
+			// Non-git project: read projectID from marker, save to external settings
 			marker, err := config.ReadProjectMarker(markerPath)
 			if err == nil {
 				projectID = marker.ProjectID
-				// grove_id is already written during initExternalGrove
+				// projectID is already written during initExternalProject
 			}
 		} else {
-			// Git grove: read grove-id from file, save to in-repo settings
+			// Git project: read projectID from file, save to in-repo settings
 			projectID, _ = config.ReadProjectID(targetDir)
 			if projectID == "" {
 				projectID = config.GenerateProjectIDForDir(filepath.Dir(targetDir))
 			}
-			if err := config.UpdateSetting(targetDir, "grove_id", projectID, false); err != nil {
+			if err := config.UpdateSetting(targetDir, "project_id", projectID, false); err != nil {
 				if !isJSONOutput() {
-					fmt.Printf("Warning: failed to save grove_id: %v\n", err)
+					fmt.Printf("Warning: failed to save project_id: %v\n", err)
 				}
 			}
 		}
@@ -192,17 +192,17 @@ With --global, it initializes in the user's home folder.`,
 		if isJSONOutput() {
 			return outputJSON(ActionResult{
 				Status:  "success",
-				Command: "grove init",
-				Message: "scion grove successfully initialized.",
+				Command: "project init",
+				Message: "scion project successfully initialized.",
 				Details: map[string]interface{}{
-					"groveId": projectID,
-					"path":    targetDir,
+					"projectId": projectID,
+					"path":      targetDir,
 				},
 			})
 		}
 
-		fmt.Println("scion grove successfully initialized.")
-		fmt.Printf("Grove ID: %s\n", projectID)
+		fmt.Println("scion project successfully initialized.")
+		fmt.Printf("Project ID: %s\n", projectID)
 
 		// Prompt for Hub registration if Hub is configured
 		if err := promptHubRegistration(false); err != nil {
@@ -214,14 +214,14 @@ With --global, it initializes in the user's home folder.`,
 	},
 }
 
-// promptHubRegistration checks if Hub is configured and prompts to register the grove.
+// promptHubRegistration checks if Hub is configured and prompts to register the project.
 func promptHubRegistration(isGlobal bool) error {
 	// Skip if --no-hub is set
 	if noHub {
 		return nil
 	}
 
-	// Resolve grove path
+	// Resolve project path
 	var gp string
 	if isGlobal {
 		gp = "global"
@@ -241,7 +241,7 @@ func promptHubRegistration(isGlobal bool) error {
 		return nil
 	}
 
-	// Step 1: Prompt to link grove to Hub
+	// Step 1: Prompt to link project to Hub
 	if !hubsync.ShowInitLinkPrompt(autoConfirm) {
 		return nil
 	}
@@ -259,7 +259,7 @@ func promptHubRegistration(isGlobal bool) error {
 		return fmt.Errorf("Hub is not responding: %w", err)
 	}
 
-	// Get grove info
+	// Get project info
 	var projectName string
 	var gitRemote string
 	projectID := settings.ProjectID
@@ -275,7 +275,7 @@ func promptHubRegistration(isGlobal bool) error {
 		}
 	}
 
-	// Register grove without broker info first
+	// Register project without broker info first
 	req := &hubclient.RegisterProjectRequest{
 		ID:        projectID,
 		Name:      projectName,
@@ -295,14 +295,14 @@ func promptHubRegistration(isGlobal bool) error {
 	_ = config.UpdateSetting(resolvedPath, "hub.enabled", "true", isGlobal)
 
 	if resp.Created {
-		fmt.Printf("Created new grove on Hub: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
+		fmt.Printf("Created new project on Hub: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	} else {
-		fmt.Printf("Linked to existing grove on Hub: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
+		fmt.Printf("Linked to existing project on Hub: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	}
-	// Store the hub grove ID separately if it differs from the local grove_id
+	// Store the hub project ID separately if it differs from the local project_id
 	if resp.Project.ID != projectID {
-		if err := config.UpdateSetting(resolvedPath, "hub.groveId", resp.Project.ID, isGlobal); err != nil {
-			fmt.Printf("Warning: failed to save hub grove ID: %v\n", err)
+		if err := config.UpdateSetting(resolvedPath, "hub.projectId", resp.Project.ID, isGlobal); err != nil {
+			fmt.Printf("Warning: failed to save hub project ID: %v\n", err)
 		}
 		projectID = resp.Project.ID
 	}
@@ -314,7 +314,7 @@ func promptHubRegistration(isGlobal bool) error {
 	providersResp, err := client.Projects().ListProviders(ctxProviders, resp.Project.ID)
 	if err == nil && providersResp != nil && len(providersResp.Providers) > 0 {
 		fmt.Println()
-		fmt.Println("Brokers providing for this grove:")
+		fmt.Println("Brokers providing for this project:")
 		for _, p := range providersResp.Providers {
 			autoTag := ""
 			if p.Status == "online" {
@@ -425,10 +425,10 @@ func promptImageRegistry() string {
 }
 
 func init() {
-	rootCmd.AddCommand(groveCmd)
-	groveCmd.AddCommand(groveInitCmd)
+	rootCmd.AddCommand(projectCmd)
+	projectCmd.AddCommand(projectInitCmd)
 
-	groveInitCmd.Flags().BoolVar(&globalInit, "global", false, "Initialize the global grove in the home directory")
-	groveInitCmd.Flags().BoolVar(&machineInit, "machine", false, "Perform full machine-level setup (seeds harness-configs, templates, settings)")
-	groveInitCmd.Flags().StringVar(&initImageRegistry, "image-registry", "", "Container image registry path (e.g., ghcr.io/myorg)")
+	projectInitCmd.Flags().BoolVar(&globalInit, "global", false, "Initialize the global project in the home directory")
+	projectInitCmd.Flags().BoolVar(&machineInit, "machine", false, "Perform full machine-level setup (seeds harness-configs, templates, settings)")
+	projectInitCmd.Flags().StringVar(&initImageRegistry, "image-registry", "", "Container image registry path (e.g., ghcr.io/myorg)")
 }

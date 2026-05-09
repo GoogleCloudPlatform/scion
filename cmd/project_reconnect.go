@@ -23,15 +23,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var groveReconnectCmd = &cobra.Command{
+var projectReconnectCmd = &cobra.Command{
 	Use:   "reconnect <new-workspace-path>",
-	Short: "Reconnect a grove to a moved workspace",
-	Long: `Update the workspace_path in a grove's settings when the workspace
-directory has been moved to a new location. This fixes groves that show
-as 'orphaned' in 'scion grove list' because their workspace was relocated.
+	Short: "Reconnect a project to a moved workspace",
+	Long: `Update the workspace_path in a project's settings when the workspace
+directory has been moved to a new location. This fixes projects that show
+as 'orphaned' in 'scion project list' because their workspace was relocated.
 
 The command must be run from within the moved workspace directory, or the
-new workspace path can be provided as an argument. The grove is identified
+new workspace path can be provided as an argument. The project is identified
 by the .scion marker file in the workspace.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -58,7 +58,7 @@ by the .scion marker file in the workspace.`,
 		// Find the .scion marker file
 		markerPath := filepath.Join(workspacePath, config.DotScion)
 		if !config.IsProjectMarkerFile(markerPath) {
-			return fmt.Errorf("no .scion marker file found at %s\nReconnect only works for non-git groves with externalized storage", workspacePath)
+			return fmt.Errorf("no .scion marker file found at %s\nReconnect only works for non-git projects with externalized storage", workspacePath)
 		}
 
 		// Read the marker to find the external config
@@ -69,12 +69,12 @@ by the .scion marker file in the workspace.`,
 
 		configPath, err := marker.ExternalProjectPath()
 		if err != nil {
-			return fmt.Errorf("failed to resolve external grove path: %w", err)
+			return fmt.Errorf("failed to resolve external project path: %w", err)
 		}
 
 		// Verify config exists
 		if _, err := os.Stat(configPath); err != nil {
-			return fmt.Errorf("external grove config not found at %s\nThe grove may need to be re-initialized with 'scion init'", configPath)
+			return fmt.Errorf("external project config not found at %s\nThe project may need to be re-initialized with 'scion init'", configPath)
 		}
 
 		// Update workspace_path
@@ -85,22 +85,22 @@ by the .scion marker file in the workspace.`,
 		if isJSONOutput() {
 			return outputJSON(ActionResult{
 				Status:  "success",
-				Command: "grove reconnect",
-				Message: fmt.Sprintf("Grove %q reconnected to %s", marker.ProjectName, workspacePath),
+				Command: "project reconnect",
+				Message: fmt.Sprintf("Project %q reconnected to %s", marker.ProjectName, workspacePath),
 				Details: map[string]interface{}{
-					"grove_name":     marker.ProjectName,
-					"grove_id":       marker.ProjectID,
+					"project_name":   marker.ProjectName,
+					"project_id":     marker.ProjectID,
 					"config_path":    configPath,
 					"workspace_path": workspacePath,
 				},
 			})
 		}
 
-		fmt.Printf("Grove %q reconnected to %s\n", marker.ProjectName, workspacePath)
+		fmt.Printf("Project %q reconnected to %s\n", marker.ProjectName, workspacePath)
 		return nil
 	},
 }
 
 func init() {
-	groveCmd.AddCommand(groveReconnectCmd)
+	projectCmd.AddCommand(projectReconnectCmd)
 }
