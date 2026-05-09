@@ -51,7 +51,7 @@ const (
 func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, groveID string) {
 	ctx := r.Context()
 
-	grove, err := s.store.GetGrove(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, groveID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			NotFound(w, "Grove")
@@ -107,7 +107,7 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, g
 
 		applyProjectSettingsToAnnotations(grove, &req)
 
-		if err := s.store.UpdateGrove(ctx, grove); err != nil {
+		if err := s.store.UpdateProject(ctx, grove); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
@@ -121,7 +121,7 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, g
 }
 
 // groveSettingsFromAnnotations reads grove settings from the grove's annotations map.
-func groveSettingsFromAnnotations(grove *store.Grove) *hubclient.ProjectSettings {
+func groveSettingsFromAnnotations(grove *store.Project) *hubclient.ProjectSettings {
 	settings := &hubclient.ProjectSettings{}
 	if grove.Annotations == nil {
 		return settings
@@ -187,7 +187,7 @@ func groveResourcesFromAnnotations(annotations map[string]string) *hubclient.Pro
 }
 
 // applyProjectSettingsToAnnotations writes grove settings into the grove's annotations map.
-func applyProjectSettingsToAnnotations(grove *store.Grove, settings *hubclient.ProjectSettings) {
+func applyProjectSettingsToAnnotations(grove *store.Project, settings *hubclient.ProjectSettings) {
 	if grove.Annotations == nil {
 		grove.Annotations = make(map[string]string)
 	}
@@ -256,10 +256,10 @@ func setOrDelete(m map[string]string, key, value string) {
 	}
 }
 
-// applyGroveDefaults applies grove-level defaults from annotations to the agent's
+// applyProjectDefaults applies grove-level defaults from annotations to the agent's
 // AppliedConfig and InlineConfig. Only fills in values that are not already set
 // (0 or empty), so explicit agent/template-level values are preserved.
-func applyGroveDefaults(ac *store.AgentAppliedConfig, grove *store.Grove) {
+func applyProjectDefaults(ac *store.AgentAppliedConfig, grove *store.Project) {
 	if ac == nil || grove == nil || grove.Annotations == nil {
 		return
 	}

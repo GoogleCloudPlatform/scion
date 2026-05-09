@@ -41,7 +41,7 @@ func TestAgentTokenService_GenerateAndValidate(t *testing.T) {
 	claims, err := service.ValidateAgentToken(token)
 	require.NoError(t, err)
 	assert.Equal(t, "agent-123", claims.Subject)
-	assert.Equal(t, "grove-456", claims.GroveID)
+	assert.Equal(t, "grove-456", claims.ProjectID)
 	assert.Contains(t, claims.Scopes, ScopeAgentStatusUpdate)
 	assert.Equal(t, AgentTokenIssuer, claims.Issuer)
 }
@@ -107,7 +107,7 @@ func TestAgentTokenClaims_HasScope(t *testing.T) {
 
 	assert.True(t, claims.HasScope(ScopeAgentStatusUpdate))
 	assert.True(t, claims.HasScope(ScopeAgentLogAppend))
-	assert.False(t, claims.HasScope(ScopeGroveSecretRead))
+	assert.False(t, claims.HasScope(ScopeProjectSecretRead))
 }
 
 func TestAgentTokenService_AgentCreateAndLifecycleScopes(t *testing.T) {
@@ -130,11 +130,11 @@ func TestAgentTokenService_AgentCreateAndLifecycleScopes(t *testing.T) {
 	claims, err := service.ValidateAgentToken(token)
 	require.NoError(t, err)
 	assert.Equal(t, "agent-sub", claims.Subject)
-	assert.Equal(t, "grove-parent", claims.GroveID)
+	assert.Equal(t, "grove-parent", claims.ProjectID)
 	assert.True(t, claims.HasScope(ScopeAgentStatusUpdate))
 	assert.True(t, claims.HasScope(ScopeAgentCreate))
 	assert.True(t, claims.HasScope(ScopeAgentLifecycle))
-	assert.False(t, claims.HasScope(ScopeGroveSecretRead))
+	assert.False(t, claims.HasScope(ScopeProjectSecretRead))
 }
 
 func TestAgentTokenService_RandomKeyGeneration(t *testing.T) {
@@ -248,7 +248,7 @@ func TestRequireAgentScope(t *testing.T) {
 	})
 
 	t.Run("missing required scope", func(t *testing.T) {
-		wrapped := service.AgentAuthMiddleware(RequireAgentScope(ScopeGroveSecretRead)(handler))
+		wrapped := service.AgentAuthMiddleware(RequireAgentScope(ScopeProjectSecretRead)(handler))
 
 		req := httptest.NewRequest(http.MethodGet, "/test", nil)
 		req.Header.Set("X-Scion-Agent-Token", token)
@@ -294,7 +294,7 @@ func TestAgentTokenService_RefreshToken(t *testing.T) {
 	claims, err := service.ValidateAgentToken(newToken)
 	require.NoError(t, err)
 	assert.Equal(t, "agent-123", claims.Subject)
-	assert.Equal(t, "grove-456", claims.GroveID)
+	assert.Equal(t, "grove-456", claims.ProjectID)
 	assert.True(t, claims.HasScope(ScopeAgentStatusUpdate))
 	assert.True(t, claims.HasScope(ScopeAgentTokenRefresh))
 }
@@ -347,7 +347,7 @@ func TestGetAgentFromContext(t *testing.T) {
 
 	t.Run("agent in context", func(t *testing.T) {
 		claims := &AgentTokenClaims{
-			GroveID: "grove-123",
+			ProjectID: "grove-123",
 		}
 		ctx := context.WithValue(context.Background(), agentContextKey{}, claims)
 		retrieved := GetAgentFromContext(ctx)

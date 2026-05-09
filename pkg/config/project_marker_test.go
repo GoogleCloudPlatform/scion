@@ -20,9 +20,9 @@ import (
 	"testing"
 )
 
-func TestGroveMarker_ShortUUID(t *testing.T) {
+func TestProjectMarker_ShortUUID(t *testing.T) {
 	tests := []struct {
-		groveID string
+		projectID string
 		want    string
 	}{
 		{"550e8400-e29b-41d4-a716-446655440000", "550e8400"},
@@ -31,18 +31,18 @@ func TestGroveMarker_ShortUUID(t *testing.T) {
 		{"12345678", "12345678"},
 	}
 	for _, tt := range tests {
-		m := GroveMarker{ProjectID: tt.groveID, GroveSlug: "test"}
+		m := ProjectMarker{ProjectID: tt.projectID, ProjectSlug: "test"}
 		if got := m.ShortUUID(); got != tt.want {
-			t.Errorf("ShortUUID(%q) = %q, want %q", tt.groveID, got, tt.want)
+			t.Errorf("ShortUUID(%q) = %q, want %q", tt.projectID, got, tt.want)
 		}
 	}
 }
 
-func TestGroveMarker_DirName(t *testing.T) {
-	m := GroveMarker{
+func TestProjectMarker_DirName(t *testing.T) {
+	m := ProjectMarker{
 		ProjectID:   "550e8400-e29b-41d4-a716-446655440000",
-		GroveName: "My Project",
-		GroveSlug: "my-project",
+		ProjectName: "My Project",
+		ProjectSlug: "my-project",
 	}
 	want := "my-project__550e8400"
 	if got := m.DirName(); got != want {
@@ -50,39 +50,39 @@ func TestGroveMarker_DirName(t *testing.T) {
 	}
 }
 
-func TestGroveMarker_ExternalGrovePath(t *testing.T) {
+func TestProjectMarker_ExternalProjectPath(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	m := GroveMarker{
+	m := ProjectMarker{
 		ProjectID:   "550e8400-e29b-41d4-a716-446655440000",
-		GroveName: "My Project",
-		GroveSlug: "my-project",
+		ProjectName: "My Project",
+		ProjectSlug: "my-project",
 	}
 
-	got, err := m.ExternalGrovePath()
+	got, err := m.ExternalProjectPath()
 	if err != nil {
-		t.Fatalf("ExternalGrovePath() error: %v", err)
+		t.Fatalf("ExternalProjectPath() error: %v", err)
 	}
 
 	want := filepath.Join(tmpHome, ".scion", "grove-configs", "my-project__550e8400", ".scion")
 	if got != want {
-		t.Errorf("ExternalGrovePath() = %q, want %q", got, want)
+		t.Errorf("ExternalProjectPath() = %q, want %q", got, want)
 	}
 }
 
-func TestWriteAndReadGroveMarker(t *testing.T) {
+func TestWriteAndReadProjectMarker(t *testing.T) {
 	tmpDir := t.TempDir()
 	markerPath := filepath.Join(tmpDir, ".scion")
 
-	original := &GroveMarker{
+	original := &ProjectMarker{
 		ProjectID:   "550e8400-e29b-41d4-a716-446655440000",
-		GroveName: "Test Project",
-		GroveSlug: "test-project",
+		ProjectName: "Test Project",
+		ProjectSlug: "test-project",
 	}
 
-	if err := WriteGroveMarker(markerPath, original); err != nil {
-		t.Fatalf("WriteGroveMarker failed: %v", err)
+	if err := WriteProjectMarker(markerPath, original); err != nil {
+		t.Fatalf("WriteProjectMarker failed: %v", err)
 	}
 
 	// Verify it's a file, not a directory
@@ -95,61 +95,61 @@ func TestWriteAndReadGroveMarker(t *testing.T) {
 	}
 
 	// Read it back
-	got, err := ReadGroveMarker(markerPath)
+	got, err := ReadProjectMarker(markerPath)
 	if err != nil {
-		t.Fatalf("ReadGroveMarker failed: %v", err)
+		t.Fatalf("ReadProjectMarker failed: %v", err)
 	}
 
 	if got.ProjectID != original.ProjectID {
 		t.Errorf("ProjectID = %q, want %q", got.ProjectID, original.ProjectID)
 	}
-	if got.GroveName != original.GroveName {
-		t.Errorf("GroveName = %q, want %q", got.GroveName, original.GroveName)
+	if got.ProjectName != original.ProjectName {
+		t.Errorf("ProjectName = %q, want %q", got.ProjectName, original.ProjectName)
 	}
-	if got.GroveSlug != original.GroveSlug {
-		t.Errorf("GroveSlug = %q, want %q", got.GroveSlug, original.GroveSlug)
+	if got.ProjectSlug != original.ProjectSlug {
+		t.Errorf("ProjectSlug = %q, want %q", got.ProjectSlug, original.ProjectSlug)
 	}
 }
 
-func TestReadGroveMarker_InvalidContent(t *testing.T) {
+func TestReadProjectMarker_InvalidContent(t *testing.T) {
 	tmpDir := t.TempDir()
 	markerPath := filepath.Join(tmpDir, ".scion")
 
 	// Write invalid marker (missing required fields)
 	os.WriteFile(markerPath, []byte("grove-name: test\n"), 0644)
 
-	_, err := ReadGroveMarker(markerPath)
+	_, err := ReadProjectMarker(markerPath)
 	if err == nil {
 		t.Fatal("expected error for invalid marker, got nil")
 	}
 }
 
-func TestResolveGroveMarker(t *testing.T) {
+func TestResolveProjectMarker(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
 	tmpDir := t.TempDir()
 	markerPath := filepath.Join(tmpDir, ".scion")
 
-	marker := &GroveMarker{
+	marker := &ProjectMarker{
 		ProjectID:   "abcdef12-3456-7890-abcd-ef1234567890",
-		GroveName: "My App",
-		GroveSlug: "my-app",
+		ProjectName: "My App",
+		ProjectSlug: "my-app",
 	}
-	WriteGroveMarker(markerPath, marker)
+	WriteProjectMarker(markerPath, marker)
 
-	resolved, err := ResolveGroveMarker(markerPath)
+	resolved, err := ResolveProjectMarker(markerPath)
 	if err != nil {
-		t.Fatalf("ResolveGroveMarker failed: %v", err)
+		t.Fatalf("ResolveProjectMarker failed: %v", err)
 	}
 
 	want := filepath.Join(tmpHome, ".scion", "grove-configs", "my-app__abcdef12", ".scion")
 	if resolved != want {
-		t.Errorf("ResolveGroveMarker() = %q, want %q", resolved, want)
+		t.Errorf("ResolveProjectMarker() = %q, want %q", resolved, want)
 	}
 }
 
-func TestIsGroveMarkerFile(t *testing.T) {
+func TestIsProjectMarkerFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// File case
@@ -172,7 +172,7 @@ func TestIsGroveMarkerFile(t *testing.T) {
 	}
 }
 
-func TestIsOldStyleNonGitGrove(t *testing.T) {
+func TestIsOldStyleNonGitProject(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpHome)
@@ -181,7 +181,7 @@ func TestIsOldStyleNonGitGrove(t *testing.T) {
 	// Create global .scion — should NOT be flagged
 	globalDir := filepath.Join(tmpHome, ".scion")
 	os.MkdirAll(globalDir, 0755)
-	if IsOldStyleNonGitGrove(globalDir) {
+	if IsOldStyleNonGitProject(globalDir) {
 		t.Error("global ~/.scion should NOT be flagged as old-style")
 	}
 
@@ -189,7 +189,7 @@ func TestIsOldStyleNonGitGrove(t *testing.T) {
 	nonGitDir := t.TempDir()
 	scionDir := filepath.Join(nonGitDir, ".scion")
 	os.MkdirAll(scionDir, 0755)
-	if !IsOldStyleNonGitGrove(scionDir) {
+	if !IsOldStyleNonGitProject(scionDir) {
 		t.Error("non-git .scion directory should be flagged as old-style")
 	}
 
@@ -198,7 +198,7 @@ func TestIsOldStyleNonGitGrove(t *testing.T) {
 	os.MkdirAll(filepath.Join(gitDir, ".git"), 0755)
 	gitScionDir := filepath.Join(gitDir, ".scion")
 	os.MkdirAll(gitScionDir, 0755)
-	if IsOldStyleNonGitGrove(gitScionDir) {
+	if IsOldStyleNonGitProject(gitScionDir) {
 		t.Error("git .scion directory should NOT be flagged as old-style")
 	}
 
@@ -206,7 +206,7 @@ func TestIsOldStyleNonGitGrove(t *testing.T) {
 	fileDir := t.TempDir()
 	markerFile := filepath.Join(fileDir, ".scion")
 	os.WriteFile(markerFile, []byte("grove-id: test"), 0644)
-	if IsOldStyleNonGitGrove(markerFile) {
+	if IsOldStyleNonGitProject(markerFile) {
 		t.Error(".scion file should NOT be flagged as old-style")
 	}
 }
@@ -236,15 +236,15 @@ func TestFindProjectRoot_MarkerFile(t *testing.T) {
 
 	// Create a project directory with a .scion marker file
 	projectDir := t.TempDir()
-	marker := &GroveMarker{
+	marker := &ProjectMarker{
 		ProjectID:   "550e8400-e29b-41d4-a716-446655440000",
-		GroveName: "test-project",
-		GroveSlug: "test-project",
+		ProjectName: "test-project",
+		ProjectSlug: "test-project",
 	}
-	WriteGroveMarker(filepath.Join(projectDir, ".scion"), marker)
+	WriteProjectMarker(filepath.Join(projectDir, ".scion"), marker)
 
 	// Create the external directory so resolution works
-	externalPath, _ := marker.ExternalGrovePath()
+	externalPath, _ := marker.ExternalProjectPath()
 	os.MkdirAll(externalPath, 0755)
 
 	origWd, _ := os.Getwd()
@@ -261,26 +261,26 @@ func TestFindProjectRoot_MarkerFile(t *testing.T) {
 	}
 }
 
-func TestWriteAndReadGroveID(t *testing.T) {
+func TestWriteAndReadProjectID(t *testing.T) {
 	tmpDir := t.TempDir()
 	scionDir := filepath.Join(tmpDir, ".scion")
 	os.MkdirAll(scionDir, 0755)
 
-	groveID := "550e8400-e29b-41d4-a716-446655440000"
-	if err := WriteGroveID(scionDir, groveID); err != nil {
-		t.Fatalf("WriteGroveID failed: %v", err)
+	projectID := "550e8400-e29b-41d4-a716-446655440000"
+	if err := WriteProjectID(scionDir, projectID); err != nil {
+		t.Fatalf("WriteProjectID failed: %v", err)
 	}
 
 	got, err := ReadProjectID(scionDir)
 	if err != nil {
 		t.Fatalf("ReadProjectID failed: %v", err)
 	}
-	if got != groveID {
-		t.Errorf("ReadProjectID() = %q, want %q", got, groveID)
+	if got != projectID {
+		t.Errorf("ReadProjectID() = %q, want %q", got, projectID)
 	}
 }
 
-func TestReadGroveID_NotExist(t *testing.T) {
+func TestReadProjectID_NotExist(t *testing.T) {
 	tmpDir := t.TempDir()
 	_, err := ReadProjectID(tmpDir)
 	if err == nil {
@@ -291,33 +291,33 @@ func TestReadGroveID_NotExist(t *testing.T) {
 	}
 }
 
-func TestGetGitGroveExternalConfigDir(t *testing.T) {
+func TestGetGitProjectExternalConfigDir(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	os.MkdirAll(projectDir, 0755)
-	WriteGroveID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
+	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
-	got, err := GetGitGroveExternalConfigDir(projectDir)
+	got, err := GetGitProjectExternalConfigDir(projectDir)
 	if err != nil {
-		t.Fatalf("GetGitGroveExternalConfigDir failed: %v", err)
+		t.Fatalf("GetGitProjectExternalConfigDir failed: %v", err)
 	}
 
 	want := filepath.Join(tmpHome, ".scion", "grove-configs", "my-repo__550e8400", ".scion")
 	if got != want {
-		t.Errorf("GetGitGroveExternalConfigDir() = %q, want %q", got, want)
+		t.Errorf("GetGitProjectExternalConfigDir() = %q, want %q", got, want)
 	}
 }
 
-func TestGetGitGroveExternalConfigDir_NoGroveID(t *testing.T) {
+func TestGetGitProjectExternalConfigDir_NoProjectID(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	os.MkdirAll(projectDir, 0755)
 
-	got, err := GetGitGroveExternalConfigDir(projectDir)
+	got, err := GetGitProjectExternalConfigDir(projectDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -326,27 +326,27 @@ func TestGetGitGroveExternalConfigDir_NoGroveID(t *testing.T) {
 	}
 }
 
-func TestGetGitGroveExternalAgentsDir(t *testing.T) {
+func TestGetGitProjectExternalAgentsDir(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
 	// Create a simulated git grove .scion dir with grove-id
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	os.MkdirAll(projectDir, 0755)
-	WriteGroveID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
+	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
-	got, err := GetGitGroveExternalAgentsDir(projectDir)
+	got, err := GetGitProjectExternalAgentsDir(projectDir)
 	if err != nil {
-		t.Fatalf("GetGitGroveExternalAgentsDir failed: %v", err)
+		t.Fatalf("GetGitProjectExternalAgentsDir failed: %v", err)
 	}
 
 	want := filepath.Join(tmpHome, ".scion", "grove-configs", "my-repo__550e8400", ".scion", "agents")
 	if got != want {
-		t.Errorf("GetGitGroveExternalAgentsDir() = %q, want %q", got, want)
+		t.Errorf("GetGitProjectExternalAgentsDir() = %q, want %q", got, want)
 	}
 }
 
-func TestGetGitGroveExternalAgentsDir_NoGroveID(t *testing.T) {
+func TestGetGitProjectExternalAgentsDir_NoProjectID(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
@@ -354,7 +354,7 @@ func TestGetGitGroveExternalAgentsDir_NoGroveID(t *testing.T) {
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	os.MkdirAll(projectDir, 0755)
 
-	got, err := GetGitGroveExternalAgentsDir(projectDir)
+	got, err := GetGitProjectExternalAgentsDir(projectDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -370,7 +370,7 @@ func TestGetAgentHomePath_GitGroveSplitStorage(t *testing.T) {
 	// Create a git grove with grove-id (split storage)
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	os.MkdirAll(projectDir, 0755)
-	WriteGroveID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
+	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
 	got := GetAgentHomePath(projectDir, "test-agent")
 	want := filepath.Join(tmpHome, ".scion", "grove-configs", "my-repo__550e8400", ".scion", "agents", "test-agent", "home")
@@ -379,7 +379,7 @@ func TestGetAgentHomePath_GitGroveSplitStorage(t *testing.T) {
 	}
 }
 
-func TestGetAgentHomePath_NoGroveID(t *testing.T) {
+func TestGetAgentHomePath_NoProjectID(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
@@ -401,7 +401,7 @@ func TestGetAgentDir_SharedWorkspaceUsesExternal(t *testing.T) {
 	// Git grove with grove-id (split storage)
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	os.MkdirAll(projectDir, 0755)
-	WriteGroveID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
+	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
 	got := GetAgentDir(projectDir, "test-agent", true)
 	want := filepath.Join(tmpHome, ".scion", "grove-configs", "my-repo__550e8400", ".scion", "agents", "test-agent")
@@ -410,14 +410,14 @@ func TestGetAgentDir_SharedWorkspaceUsesExternal(t *testing.T) {
 	}
 }
 
-func TestGetAgentDir_WorktreeModeStaysInGrove(t *testing.T) {
+func TestGetAgentDir_WorktreeModeStaysInProject(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
 	// Git grove with grove-id (split storage), but caller is NOT shared-workspace
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	os.MkdirAll(projectDir, 0755)
-	WriteGroveID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
+	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
 	got := GetAgentDir(projectDir, "test-agent", false)
 	want := filepath.Join(projectDir, "agents", "test-agent")
@@ -426,7 +426,7 @@ func TestGetAgentDir_WorktreeModeStaysInGrove(t *testing.T) {
 	}
 }
 
-func TestGetAgentDir_SharedWorkspaceWithoutGroveIDFallsBack(t *testing.T) {
+func TestGetAgentDir_SharedWorkspaceWithoutProjectIDFallsBack(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
@@ -447,7 +447,7 @@ func TestResolveAgentDir_PrefersExternalWhenScionAgentJSONExists(t *testing.T) {
 
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	os.MkdirAll(projectDir, 0755)
-	WriteGroveID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
+	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
 	// Populate the external dir with a scion-agent.json (shared-workspace layout)
 	extAgentDir := filepath.Join(tmpHome, ".scion", "grove-configs", "my-repo__550e8400", ".scion", "agents", "test-agent")
@@ -470,7 +470,7 @@ func TestResolveAgentDir_FallsBackToInGroveWhenExternalAbsent(t *testing.T) {
 
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	os.MkdirAll(projectDir, 0755)
-	WriteGroveID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
+	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
 	// Worktree-mode layout: scion-agent.json lives in-grove, only home/ is external.
 	// (We do not create the external scion-agent.json.)
@@ -524,19 +524,19 @@ func TestWriteWorkspaceMarker(t *testing.T) {
 
 	// Read back the marker
 	markerPath := filepath.Join(workspaceDir, ".scion")
-	marker, err := ReadGroveMarker(markerPath)
+	marker, err := ReadProjectMarker(markerPath)
 	if err != nil {
-		t.Fatalf("ReadGroveMarker failed: %v", err)
+		t.Fatalf("ReadProjectMarker failed: %v", err)
 	}
 
 	if marker.ProjectID != "grove-id-123" {
 		t.Errorf("ProjectID = %q, want %q", marker.ProjectID, "grove-id-123")
 	}
-	if marker.GroveName != "my-project" {
-		t.Errorf("GroveName = %q, want %q", marker.GroveName, "my-project")
+	if marker.ProjectName != "my-project" {
+		t.Errorf("ProjectName = %q, want %q", marker.ProjectName, "my-project")
 	}
-	if marker.GroveSlug != "my-project" {
-		t.Errorf("GroveSlug = %q, want %q", marker.GroveSlug, "my-project")
+	if marker.ProjectSlug != "my-project" {
+		t.Errorf("ProjectSlug = %q, want %q", marker.ProjectSlug, "my-project")
 	}
 }
 
@@ -556,7 +556,7 @@ func TestWriteWorkspaceMarker_MissingRequiredFields(t *testing.T) {
 	}
 }
 
-func TestGetGroveName_ExternalDir(t *testing.T) {
+func TestGetProjectName_ExternalDir(t *testing.T) {
 	// Test that GetProjectName extracts the slug from external directory names
 	tests := []struct {
 		dir  string

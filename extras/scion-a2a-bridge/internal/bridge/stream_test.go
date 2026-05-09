@@ -306,7 +306,7 @@ func TestBlockingTaskIgnoresActiveDispatch(t *testing.T) {
 	now := time.Now()
 	taskID := "blocking-task-1"
 	store.CreateTask(&state.Task{
-		ID: taskID, ContextID: "ctx-1", GroveID: "grove1", AgentSlug: "agent-a",
+		ID: taskID, ContextID: "ctx-1", ProjectID: "grove1", AgentSlug: "agent-a",
 		State: TaskStateWorking, CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
@@ -315,7 +315,7 @@ func TestBlockingTaskIgnoresActiveDispatch(t *testing.T) {
 	b.addWaiter(taskID, &waiter{
 		ch:        responseCh,
 		agentSlug: "agent-a",
-		groveID:   "grove1",
+		projectID:   "grove1",
 	})
 	defer b.removeWaiter(taskID)
 

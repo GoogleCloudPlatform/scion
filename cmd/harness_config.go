@@ -41,8 +41,8 @@ var harnessConfigListCmd = &cobra.Command{
 	Short: "List available harness configurations",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var gp string
-		if grovePath != "" {
-			resolved, err := config.GetResolvedProjectDir(grovePath)
+		if projectPath != "" {
+			resolved, err := config.GetResolvedProjectDir(projectPath)
 			if err == nil {
 				gp = resolved
 			}
@@ -278,8 +278,8 @@ var harnessConfigSyncCmd = &cobra.Command{
 		name := args[0]
 
 		var gp string
-		if grovePath != "" {
-			resolved, err := config.GetResolvedProjectDir(grovePath)
+		if projectPath != "" {
+			resolved, err := config.GetResolvedProjectDir(projectPath)
 			if err == nil {
 				gp = resolved
 			}
@@ -326,8 +326,8 @@ var harnessConfigPullCmd = &cobra.Command{
 		name := args[0]
 
 		var gp string
-		if grovePath != "" {
-			resolved, err := config.GetResolvedProjectDir(grovePath)
+		if projectPath != "" {
+			resolved, err := config.GetResolvedProjectDir(projectPath)
 			if err == nil {
 				gp = resolved
 			}
@@ -379,8 +379,8 @@ var harnessConfigShowCmd = &cobra.Command{
 		name := args[0]
 
 		var gp string
-		if grovePath != "" {
-			resolved, err := config.GetResolvedProjectDir(grovePath)
+		if projectPath != "" {
+			resolved, err := config.GetResolvedProjectDir(projectPath)
 			if err == nil {
 				gp = resolved
 			}
@@ -454,8 +454,8 @@ var harnessConfigDeleteCmd = &cobra.Command{
 		name := args[0]
 
 		var gp string
-		if grovePath != "" {
-			resolved, err := config.GetResolvedProjectDir(grovePath)
+		if projectPath != "" {
+			resolved, err := config.GetResolvedProjectDir(projectPath)
 			if err == nil {
 				gp = resolved
 			}

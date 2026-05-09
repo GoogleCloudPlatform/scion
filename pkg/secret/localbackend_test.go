@@ -299,11 +299,11 @@ func TestLocalBackend_GetMeta(t *testing.T) {
 		EncryptedValue: "secret-value",
 		SecretType:     store.SecretTypeVariable,
 		Target:         "config",
-		Scope:          store.ScopeGrove,
+		Scope:          store.ScopeProject,
 		ScopeID:        "grove-1",
 	})
 
-	meta, err := backend.GetMeta(ctx, "META_KEY", ScopeGrove, "grove-1")
+	meta, err := backend.GetMeta(ctx, "META_KEY", ScopeProject, "grove-1")
 	if err != nil {
 		t.Fatalf("GetMeta failed: %v", err)
 	}
@@ -339,14 +339,14 @@ func TestLocalBackend_Resolve(t *testing.T) {
 		ScopeID:        "user-1",
 	})
 
-	// Grove-level override
+	// Project-level override
 	seedSecret(t, s, &store.Secret{
 		ID:             "s3",
 		Key:            "API_KEY",
 		EncryptedValue: "grove-api-key",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "API_KEY",
-		Scope:          store.ScopeGrove,
+		Scope:          store.ScopeProject,
 		ScopeID:        "grove-1",
 	})
 	seedSecret(t, s, &store.Secret{
@@ -355,7 +355,7 @@ func TestLocalBackend_Resolve(t *testing.T) {
 		EncryptedValue: "grove-db-pass",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "DATABASE_PASSWORD",
-		Scope:          store.ScopeGrove,
+		Scope:          store.ScopeProject,
 		ScopeID:        "grove-1",
 	})
 
@@ -377,8 +377,8 @@ func TestLocalBackend_Resolve(t *testing.T) {
 	if apiKey.Value != "grove-api-key" {
 		t.Errorf("expected grove API_KEY value %q, got %q", "grove-api-key", apiKey.Value)
 	}
-	if apiKey.Scope != ScopeGrove {
-		t.Errorf("expected API_KEY scope %q, got %q", ScopeGrove, apiKey.Scope)
+	if apiKey.Scope != ScopeProject {
+		t.Errorf("expected API_KEY scope %q, got %q", ScopeProject, apiKey.Scope)
 	}
 
 	// TLS_CERT from user (no override)
@@ -542,14 +542,14 @@ func TestLocalBackend_ResolveDuplicateTargetAcrossScopes(t *testing.T) {
 		InjectionMode:  store.InjectionModeAlways,
 	})
 
-	// Grove-level file secret targeting the SAME path
+	// Project-level file secret targeting the SAME path
 	seedSecret(t, s, &store.Secret{
 		ID:             "g1",
 		Key:            "my-key",
 		EncryptedValue: "grove-cert-data",
 		SecretType:     store.SecretTypeFile,
 		Target:         "/tmp/my-secret.json",
-		Scope:          store.ScopeGrove,
+		Scope:          store.ScopeProject,
 		ScopeID:        "grove-1",
 		InjectionMode:  store.InjectionModeAlways,
 	})
@@ -570,7 +570,7 @@ func TestLocalBackend_ResolveDuplicateTargetAcrossScopes(t *testing.T) {
 		t.Fatalf("expected 1 file secret for /tmp/my-secret.json, got %d", len(fileSecrets))
 	}
 
-	// Grove-level (higher scope) should win
+	// Project-level (higher scope) should win
 	if fileSecrets[0].Name != "my-key" {
 		t.Errorf("expected grove-level secret 'my-key' to win, got %q", fileSecrets[0].Name)
 	}
@@ -594,14 +594,14 @@ func TestLocalBackend_ResolveDuplicateEnvTargetAcrossScopes(t *testing.T) {
 		ScopeID:        "user-1",
 	})
 
-	// Grove-level env secret targeting the SAME env var
+	// Project-level env secret targeting the SAME env var
 	seedSecret(t, s, &store.Secret{
 		ID:             "g1",
 		Key:            "grove-foo",
 		EncryptedValue: "grove-val",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "FOO_VAR",
-		Scope:          store.ScopeGrove,
+		Scope:          store.ScopeProject,
 		ScopeID:        "grove-1",
 	})
 
@@ -651,7 +651,7 @@ func TestDeduplicateByTarget_NoDuplicates(t *testing.T) {
 			Value:      "val-a",
 		},
 		{
-			SecretMeta: SecretMeta{Name: "b", SecretType: TypeFile, Target: "/path/b", Scope: ScopeGrove},
+			SecretMeta: SecretMeta{Name: "b", SecretType: TypeFile, Target: "/path/b", Scope: ScopeProject},
 			Value:      "val-b",
 		},
 	}
@@ -765,14 +765,14 @@ func TestLocalBackend_ResolveProgeny_GroveOverridesProgeny(t *testing.T) {
 		CreatedBy:      "alice-123",
 	})
 
-	// Grove-scoped secret with same key (higher precedence)
+	// Project-scoped secret with same key (higher precedence)
 	seedSecret(t, s, &store.Secret{
 		ID:             "sec-prog-override-grove",
 		Key:            "API_KEY",
 		EncryptedValue: "grove-value",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "API_KEY",
-		Scope:          store.ScopeGrove,
+		Scope:          store.ScopeProject,
 		ScopeID:        "grove-1",
 	})
 
@@ -795,12 +795,12 @@ func TestLocalBackend_ResolveProgeny_GroveOverridesProgeny(t *testing.T) {
 	if !ok {
 		t.Fatal("expected API_KEY in resolved secrets")
 	}
-	// Grove should win
+	// Project should win
 	if apiKey.Value != "grove-value" {
 		t.Errorf("expected grove override %q, got %q", "grove-value", apiKey.Value)
 	}
-	if apiKey.Scope != ScopeGrove {
-		t.Errorf("expected scope %q, got %q", ScopeGrove, apiKey.Scope)
+	if apiKey.Scope != ScopeProject {
+		t.Errorf("expected scope %q, got %q", ScopeProject, apiKey.Scope)
 	}
 }
 

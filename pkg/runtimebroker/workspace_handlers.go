@@ -297,7 +297,7 @@ func (s *Server) getAgentWorkspacePath(ctx context.Context, agentID string) (str
 	for _, agent := range agents {
 		if agent.Name == agentID || agent.ContainerID == agentID || agent.Slug == agentID || strings.EqualFold(agent.Name, agentID) {
 			containerID = agent.ContainerID
-			grovePath = agent.GrovePath
+			grovePath = agent.ProjectPath
 			agentName = agent.Name
 			break
 		}
@@ -442,7 +442,7 @@ func (s *Server) countWorkspaceFiles(workspacePath string) (int, int64) {
 }
 
 // ============================================================================
-// Grove-Level Workspace Upload (Phase 3: Linked Grove Relay)
+// Project-Level Workspace Upload (Phase 3: Linked Project Relay)
 // ============================================================================
 
 // ProjectWorkspaceUploadRequest is the request body for uploading a grove's
@@ -454,7 +454,7 @@ type ProjectWorkspaceUploadRequest struct {
 	// StoragePath is the path within the bucket where files should be uploaded.
 	StoragePath string `json:"storagePath"`
 	// WorkspacePath is the local filesystem path to the grove workspace on this broker.
-	// Provided by the hub from the GroveProvider.LocalPath.
+	// Provided by the hub from the ProjectProvider.LocalPath.
 	WorkspacePath string `json:"workspacePath"`
 	// Bucket is the GCS bucket name for storage.
 	Bucket string `json:"bucket,omitempty"`
@@ -515,7 +515,7 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 	// Verify workspace path exists
 	if _, err := os.Stat(req.WorkspacePath); err != nil {
 		if os.IsNotExist(err) {
-			NotFound(w, "Grove workspace path")
+			NotFound(w, "Project workspace path")
 			return
 		}
 		RuntimeError(w, "Failed to access workspace path: "+err.Error())
@@ -523,7 +523,7 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 	}
 
 	if s.config.Debug {
-		slog.Debug("Grove workspace upload requested",
+		slog.Debug("Project workspace upload requested",
 			"groveId", req.ProjectID,
 			"bucket", bucket,
 			"storagePath", req.StoragePath,
@@ -564,7 +564,7 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 	}
 
 	if s.config.Debug {
-		slog.Debug("Grove workspace upload complete",
+		slog.Debug("Project workspace upload complete",
 			"groveId", req.ProjectID,
 			"files", resp.UploadedFiles,
 			"bytes", resp.UploadedBytes,

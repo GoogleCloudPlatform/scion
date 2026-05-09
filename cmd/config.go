@@ -40,10 +40,10 @@ var configListCmd = &cobra.Command{
 	Short: "List all effective settings",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Resolve grove path
-		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		// If we are not in a grove, we might only show global settings or defaults
 		// We handle the case where grove resolution fails gracefully for global listing?
-		// But LoadSettings expects grovePath. If empty, it loads Global + Defaults.
+		// But LoadSettings expects projectPath. If empty, it loads Global + Defaults.
 
 		var effective *config.Settings
 		if err == nil {
@@ -96,7 +96,7 @@ var configSetCmd = &cobra.Command{
 
 		targetPath := ""
 		if !configGlobal {
-			projectDir, err := config.GetResolvedProjectDir(grovePath)
+			projectDir, err := config.GetResolvedProjectDir(projectPath)
 			if err != nil {
 				return fmt.Errorf("cannot set local setting: not inside a grove or grove path invalid: %w", err)
 			}
@@ -137,7 +137,7 @@ var configGetCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		key := args[0]
 
-		projectDir, _ := config.GetResolvedProjectDir(grovePath)
+		projectDir, _ := config.GetResolvedProjectDir(projectPath)
 		// Even if error, we can try loading defaults/global
 
 		// Try versioned settings first (supports all v1 keys like image_registry)
@@ -201,7 +201,7 @@ against the schema — they use the pre-versioned format.`,
 			}{globalDir, "global"})
 		}
 
-		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err == nil && projectDir != "" && projectDir != globalDir {
 			filePaths = append(filePaths, struct {
 				dir   string
@@ -360,7 +360,7 @@ func runSettingsMigration() error {
 
 	// Include grove dir if applicable and --global was not specified
 	if !configMigrateGlobal {
-		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err == nil && projectDir != "" && projectDir != globalDir {
 			dirs = append(dirs, dirEntry{dir: projectDir, label: "grove"})
 		}
@@ -460,7 +460,7 @@ var configDirCmd = &cobra.Command{
 	Use:   "dir",
 	Short: "Print the path to the grove config directory",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err != nil {
 			return err
 		}
@@ -476,7 +476,7 @@ var configCdConfigCmd = &cobra.Command{
 	Use:   "cd-config",
 	Short: "Open a shell in the grove config directory",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err != nil {
 			return err
 		}
@@ -492,12 +492,12 @@ var configCdGroveCmd = &cobra.Command{
 For external groves (non-git), navigates to the workspace path stored in settings.
 For git groves, navigates to the project root (parent of the .scion directory).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err != nil {
 			return err
 		}
 
-		workspacePath, err := resolveGroveWorkspace(projectDir)
+		workspacePath, err := resolveProjectWorkspace(projectDir)
 		if err != nil {
 			return err
 		}
@@ -506,10 +506,10 @@ For git groves, navigates to the project root (parent of the .scion directory).`
 	},
 }
 
-// resolveGroveWorkspace returns the workspace path for a grove given its config dir.
+// resolveProjectWorkspace returns the workspace path for a grove given its config dir.
 // For external groves (under ~/.scion/grove-configs/), the workspace path is read from settings.
 // For git groves, the workspace is the parent directory of the .scion config dir.
-func resolveGroveWorkspace(configDir string) (string, error) {
+func resolveProjectWorkspace(configDir string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err

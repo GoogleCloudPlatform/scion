@@ -548,12 +548,12 @@ func TestGroupMembersAddAgent(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove for the agent
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove_agent_test",
-		Name: "Test Grove",
+		Name: "Test Project",
 		Slug: "test-grove-agent",
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -561,7 +561,7 @@ func TestGroupMembersAddAgent(t *testing.T) {
 	agent := &store.Agent{
 		ID:      "agent_abc123",
 		Name:    "Test Agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -667,11 +667,11 @@ func TestGroupCreateWithGroupType(t *testing.T) {
 	}
 }
 
-func TestGroupCreateGroveAgentsRejected(t *testing.T) {
+func TestGroupCreateProjectAgentsRejected(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := CreateGroupRequest{
-		Name:      "Grove Group",
+		Name:      "Project Group",
 		Slug:      "grove-group",
 		GroupType: "grove_agents",
 	}
@@ -738,7 +738,7 @@ func TestGroupListWithGroupTypeFilter(t *testing.T) {
 	}
 }
 
-func TestGroupDeleteGroveAgentsRejected(t *testing.T) {
+func TestGroupDeleteProjectAgentsRejected(t *testing.T) {
 	// This test requires the Ent-backed store to persist GroupType.
 	// The legacy SQLite store has no group_type column, so GroupType
 	// always defaults to "explicit" on read. This test validates the

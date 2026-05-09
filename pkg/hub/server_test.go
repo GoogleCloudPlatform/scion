@@ -729,7 +729,7 @@ func TestServer_GenerateAgentToken_DevAuthDeduplicatesScopes(t *testing.T) {
 
 	// Generate token with explicit scopes that overlap with auto-granted ones
 	token, err := srv.GenerateAgentToken("agent-1", "grove-1", nil,
-		ScopeAgentCreate, ScopeAgentLifecycle, ScopeGroveSecretRead)
+		ScopeAgentCreate, ScopeAgentLifecycle, ScopeProjectSecretRead)
 	if err != nil {
 		t.Fatalf("GenerateAgentToken failed: %v", err)
 	}
@@ -751,8 +751,8 @@ func TestServer_GenerateAgentToken_DevAuthDeduplicatesScopes(t *testing.T) {
 	if scopeCounts[ScopeAgentLifecycle] != 1 {
 		t.Errorf("expected ScopeAgentLifecycle once, got %d", scopeCounts[ScopeAgentLifecycle])
 	}
-	if !claims.HasScope(ScopeGroveSecretRead) {
-		t.Error("expected ScopeGroveSecretRead to be present from explicit scopes")
+	if !claims.HasScope(ScopeProjectSecretRead) {
+		t.Error("expected ScopeProjectSecretRead to be present from explicit scopes")
 	}
 }
 

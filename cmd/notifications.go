@@ -179,7 +179,7 @@ func init() {
 
 // requireHubClient resolves settings and returns a hub client, or errors if hub is not enabled.
 func requireHubClient() (*config.Settings, hubclient.Client, error) {
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to resolve grove path: %w", err)
 	}
@@ -208,20 +208,20 @@ func resolveGroveID(settings *config.Settings, groveFlag string) (string, error)
 	}
 
 	// Try hub grove ID first, then local grove ID
-	groveID := settings.GetHubGroveID()
-	if groveID == "" {
-		groveID = settings.GroveID
+	projectID := settings.GetHubProjectID()
+	if projectID == "" {
+		projectID = settings.ProjectID
 	}
-	if groveID == "" {
+	if projectID == "" {
 		return "", fmt.Errorf("cannot determine grove ID. Use --grove flag or link this grove with 'scion hub link'")
 	}
-	return groveID, nil
+	return projectID, nil
 }
 
 // resolveAgentIDForSubscription looks up an agent by name/slug in the grove and returns its ID.
-func resolveAgentIDForSubscription(ctx context.Context, client hubclient.Client, groveID, agentRef string) (string, error) {
+func resolveAgentIDForSubscription(ctx context.Context, client hubclient.Client, projectID, agentRef string) (string, error) {
 	slug := api.Slugify(agentRef)
-	resp, err := client.GroveAgents(groveID).List(ctx, nil)
+	resp, err := client.ProjectAgents(projectID).List(ctx, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to look up agents: %w", err)
 	}
@@ -327,7 +327,7 @@ func runNotificationsSubscribe(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	groveID, err := resolveGroveID(settings, subscribeGrove)
+	projectID, err := resolveGroveID(settings, subscribeGrove)
 	if err != nil {
 		return err
 	}
@@ -336,11 +336,11 @@ func runNotificationsSubscribe(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	// Determine scope
-	scope := store.SubscriptionScopeGrove
+	scope := store.SubscriptionScopeProject
 	var agentID string
 	if subscribeAgent != "" {
 		scope = store.SubscriptionScopeAgent
-		agentID, err = resolveAgentIDForSubscription(ctx, client, groveID, subscribeAgent)
+		agentID, err = resolveAgentIDForSubscription(ctx, client, projectID, subscribeAgent)
 		if err != nil {
 			return err
 		}
@@ -358,7 +358,7 @@ func runNotificationsSubscribe(cmd *cobra.Command, args []string) error {
 	req := &hubclient.CreateSubscriptionRequest{
 		Scope:             scope,
 		AgentID:           agentID,
-		GroveID:           groveID,
+		ProjectID:           projectID,
 		TriggerActivities: triggers,
 	}
 
@@ -375,7 +375,7 @@ func runNotificationsSubscribe(cmd *cobra.Command, args []string) error {
 	if sub.Scope == store.SubscriptionScopeAgent {
 		target = subscribeAgent
 	}
-	fmt.Printf("Subscribed to %s in grove %s\n", target, groveID)
+	fmt.Printf("Subscribed to %s in grove %s\n", target, projectID)
 	fmt.Printf("  ID:       %s\n", sub.ID)
 	fmt.Printf("  Scope:    %s\n", sub.Scope)
 	fmt.Printf("  Triggers: %s\n", strings.Join(sub.TriggerActivities, ", "))
@@ -439,14 +439,14 @@ func runNotificationsUnsubscribe(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	if unsubscribeAll {
-		groveID, err := resolveGroveID(settings, unsubscribeGrove)
+		projectID, err := resolveGroveID(settings, unsubscribeGrove)
 		if err != nil {
 			return fmt.Errorf("--grove is required with --all: %w", err)
 		}
 
 		// List all subscriptions in the grove, then delete each
 		subs, err := client.Subscriptions().List(ctx, &hubclient.ListSubscriptionsOptions{
-			GroveID: groveID,
+			ProjectID: projectID,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to list subscriptions: %w", err)
@@ -489,15 +489,15 @@ func runNotificationsSubscriptions(cmd *cobra.Command, args []string) error {
 
 	opts := &hubclient.ListSubscriptionsOptions{}
 	if subscriptionsGrove != "" {
-		opts.GroveID = subscriptionsGrove
+		opts.ProjectID = subscriptionsGrove
 	} else {
 		// Default to current grove if available
-		groveID := settings.GetHubGroveID()
-		if groveID == "" {
-			groveID = settings.GroveID
+		projectID := settings.GetHubProjectID()
+		if projectID == "" {
+			projectID = settings.ProjectID
 		}
-		if groveID != "" {
-			opts.GroveID = groveID
+		if projectID != "" {
+			opts.ProjectID = projectID
 		}
 	}
 
@@ -529,7 +529,7 @@ func runNotificationsSubscriptions(cmd *cobra.Command, args []string) error {
 				target = target[:13] + "..."
 			}
 		}
-		groveDisplay := s.GroveID
+		groveDisplay := s.ProjectID
 		if len(groveDisplay) > 16 {
 			groveDisplay = groveDisplay[:13] + "..."
 		}

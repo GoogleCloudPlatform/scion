@@ -96,7 +96,7 @@ func TestPromoteMessageAttrToLabels(t *testing.T) {
 		{"recipient promoted", AttrRecipient, "agent:dev", true},
 		{"recipient_id promoted", AttrRecipientID, "agent-uuid-456", true},
 		{"msg_type promoted", AttrMsgType, "instruction", true},
-		{"grove_id promoted", AttrMsgGroveID, "grove-abc", true},
+		{"grove_id promoted", AttrMsgProjectID, "grove-abc", true},
 		{"agent_id not promoted by message func", AttrAgentID, "abc123", false},
 		{"arbitrary not promoted", "foo", "bar", false},
 		{"empty value not promoted", AttrSender, "", false},

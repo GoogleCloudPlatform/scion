@@ -95,7 +95,7 @@ func TestScheduledEventCreateValidation(t *testing.T) {
 	})
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 
-	// Missing GroveID
+	// Missing ProjectID
 	err = s.CreateScheduledEvent(ctx, &store.ScheduledEvent{
 		ID:        api.NewUUID(),
 		EventType: "message",

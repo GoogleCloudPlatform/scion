@@ -119,8 +119,8 @@ func TestGetRuntime(t *testing.T) {
 		t.Setenv("HOME", tmpHome)
 
 		// Create a fake grove project
-		grovePath := filepath.Join(tmpHome, "myproject")
-		groveScionDir := filepath.Join(grovePath, ".scion")
+		projectPath := filepath.Join(tmpHome, "myproject")
+		groveScionDir := filepath.Join(projectPath, ".scion")
 		if err := os.MkdirAll(groveScionDir, 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -135,7 +135,7 @@ func TestGetRuntime(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Grove says docker
+		// Project says docker
 		if err := os.WriteFile(filepath.Join(groveScionDir, "settings.json"),
 			[]byte(`{"active_profile": "local", "runtimes": {"docker": {}}, "profiles": {"local": {"runtime": "docker"}}}`), 0644); err != nil {
 			t.Fatal(err)
@@ -154,8 +154,8 @@ func TestGetRuntime(t *testing.T) {
 		tmpHome := t.TempDir()
 		t.Setenv("HOME", tmpHome)
 
-		grovePath := filepath.Join(tmpHome, "myproject")
-		groveScionDir := filepath.Join(grovePath, ".scion")
+		projectPath := filepath.Join(tmpHome, "myproject")
+		groveScionDir := filepath.Join(projectPath, ".scion")
 		if err := os.MkdirAll(groveScionDir, 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -183,7 +183,7 @@ profiles:
 			t.Fatal(err)
 		}
 
-		// Grove overrides active_profile to apple
+		// Project overrides active_profile to apple
 		groveSettings := `
 schema_version: "1"
 active_profile: apple

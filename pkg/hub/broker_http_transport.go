@@ -447,7 +447,7 @@ func (t *brokerHTTPTransport) ExecAgent(ctx context.Context, brokerID, brokerEnd
 	return result.Output, result.ExitCode, nil
 }
 
-func (t *brokerHTTPTransport) CleanupGrove(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error {
+func (t *brokerHTTPTransport) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error {
 	endpoint := fmt.Sprintf("%s/api/v1/groves/%s", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(groveSlug))
 	resp, err := t.doRequest(ctx, brokerID, http.MethodDelete, endpoint, nil)
 	if err != nil {

@@ -134,16 +134,16 @@ func ShowInitProvidePrompt(brokerName, groveName string, autoConfirm bool) bool 
 	return ConfirmAction(fmt.Sprintf("Add as provider for '%s'?", groveName), true, autoConfirm)
 }
 
-// GroveChoice represents the user's choice when matching groves exist.
-type GroveChoice int
+// ProjectChoice represents the user's choice when matching groves exist.
+type ProjectChoice int
 
 const (
-	// GroveChoiceCancel means the user cancelled the operation.
-	GroveChoiceCancel GroveChoice = iota
-	// GroveChoiceLink means the user chose to link to an existing grove.
-	GroveChoiceLink
-	// GroveChoiceRegisterNew means the user chose to register a new grove.
-	GroveChoiceRegisterNew
+	// ProjectChoiceCancel means the user cancelled the operation.
+	ProjectChoiceCancel ProjectChoice = iota
+	// ProjectChoiceLink means the user chose to link to an existing grove.
+	ProjectChoiceLink
+	// ProjectChoiceRegisterNew means the user chose to register a new grove.
+	ProjectChoiceRegisterNew
 )
 
 // GroveMatch holds information about a matching grove for display.
@@ -154,12 +154,12 @@ type GroveMatch struct {
 	GitRemote string
 }
 
-// ShowMatchingGrovesPrompt displays matching groves and asks the user to choose.
+// ShowMatchingProjectsPrompt displays matching groves and asks the user to choose.
 // The "Register as new grove" option is always shown, allowing multiple groves
 // per git remote. When nextSlug is non-empty, it is displayed as the proposed
 // slug for a new grove.
 // Returns the choice and the selected grove ID if linking.
-func ShowMatchingGrovesPrompt(groveName string, matches []GroveMatch, nextSlug string, autoConfirm bool) (GroveChoice, string) {
+func ShowMatchingProjectsPrompt(groveName string, matches []GroveMatch, nextSlug string, autoConfirm bool) (ProjectChoice, string) {
 	fmt.Println()
 	fmt.Printf("Found %d existing grove(s) with the name '%s' on the Hub:\n", len(matches), groveName)
 	fmt.Println()
@@ -181,7 +181,7 @@ func ShowMatchingGrovesPrompt(groveName string, matches []GroveMatch, nextSlug s
 	if autoConfirm {
 		// Auto-confirm defaults to linking to the first match
 		fmt.Printf("Auto-linking to: %s (ID: %s)\n", matches[0].Name, matches[0].ID)
-		return GroveChoiceLink, matches[0].ID
+		return ProjectChoiceLink, matches[0].ID
 	}
 
 	maxChoice := len(matches) + 1
@@ -191,12 +191,12 @@ func ShowMatchingGrovesPrompt(groveName string, matches []GroveMatch, nextSlug s
 		fmt.Print("Enter choice (or 'c' to cancel): ")
 		input, err := reader.ReadString('\n')
 		if err != nil {
-			return GroveChoiceCancel, ""
+			return ProjectChoiceCancel, ""
 		}
 
 		input = strings.TrimSpace(strings.ToLower(input))
 		if input == "c" || input == "cancel" {
-			return GroveChoiceCancel, ""
+			return ProjectChoiceCancel, ""
 		}
 
 		choice := 0
@@ -211,10 +211,10 @@ func ShowMatchingGrovesPrompt(groveName string, matches []GroveMatch, nextSlug s
 		}
 
 		if choice == len(matches)+1 {
-			return GroveChoiceRegisterNew, ""
+			return ProjectChoiceRegisterNew, ""
 		}
 
-		return GroveChoiceLink, matches[choice-1].ID
+		return ProjectChoiceLink, matches[choice-1].ID
 	}
 }
 
@@ -385,9 +385,9 @@ func ShowLinkBeforeRegisterPrompt(groveName string, autoConfirm bool) bool {
 	return ConfirmAction("Link it first?", true, autoConfirm)
 }
 
-// ShowGroveProviderPrompt asks if user wants to add the broker as a provider to the grove.
+// ShowProjectProviderPrompt asks if user wants to add the broker as a provider to the grove.
 // Returns true if the user confirms, false otherwise.
-func ShowGroveProviderPrompt(groveName string, autoConfirm bool) bool {
+func ShowProjectProviderPrompt(groveName string, autoConfirm bool) bool {
 	fmt.Println()
 	fmt.Printf("Add this broker as a provider to grove '%s'?\n", groveName)
 	fmt.Println("This will allow the broker to execute agents for this grove.")

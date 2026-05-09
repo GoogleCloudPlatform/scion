@@ -32,7 +32,7 @@ import (
 // existing broker was found by name (deduplication).
 func registerGlobalGroveAndBroker(ctx context.Context, s store.Store, brokerID, brokerName, endpoint string, rt runtime.Runtime, autoProvide bool, settings *config.Settings) (string, error) {
 	// Check if global grove already exists
-	globalGrove, err := s.GetGroveBySlug(ctx, GlobalGroveName)
+	globalGrove, err := s.GetProjectBySlug(ctx, GlobalGroveName)
 	if err != nil && err != store.ErrNotFound {
 		return brokerID, fmt.Errorf("failed to check for global grove: %w", err)
 	}
@@ -40,7 +40,7 @@ func registerGlobalGroveAndBroker(ctx context.Context, s store.Store, brokerID, 
 	// Create global grove if it doesn't exist (without DefaultRuntimeBrokerID yet)
 	groveNeedsDefaultBroker := false
 	if globalGrove == nil {
-		globalGrove = &store.Grove{
+		globalGrove = &store.Project{
 			ID:         api.NewUUID(),
 			Name:       "Global",
 			Slug:       GlobalGroveName,
@@ -51,7 +51,7 @@ func registerGlobalGroveAndBroker(ctx context.Context, s store.Store, brokerID, 
 			},
 		}
 
-		if err := s.CreateGrove(ctx, globalGrove); err != nil {
+		if err := s.CreateProject(ctx, globalGrove); err != nil {
 			return brokerID, fmt.Errorf("failed to create global grove: %w", err)
 		}
 		groveNeedsDefaultBroker = true
@@ -126,7 +126,7 @@ func registerGlobalGroveAndBroker(ctx context.Context, s store.Store, brokerID, 
 	// Now that the runtime broker exists, set it as the default for the grove
 	if groveNeedsDefaultBroker {
 		globalGrove.DefaultRuntimeBrokerID = brokerID
-		if err := s.UpdateGrove(ctx, globalGrove); err != nil {
+		if err := s.UpdateProject(ctx, globalGrove); err != nil {
 			log.Printf("Warning: failed to set default runtime broker for global grove: %v", err)
 		}
 	}
@@ -139,8 +139,8 @@ func registerGlobalGroveAndBroker(ctx context.Context, s store.Store, brokerID, 
 	}
 
 	// Add runtime broker as provider to global grove
-	provider := &store.GroveProvider{
-		GroveID:    globalGrove.ID,
+	provider := &store.ProjectProvider{
+		ProjectID:    globalGrove.ID,
 		BrokerID:   brokerID,
 		BrokerName: brokerName,
 		LocalPath:  globalPath, // ~/.scion for the global grove
@@ -148,7 +148,7 @@ func registerGlobalGroveAndBroker(ctx context.Context, s store.Store, brokerID, 
 		LastSeen:   time.Now(),
 	}
 
-	if err := s.AddGroveProvider(ctx, provider); err != nil {
+	if err := s.AddProjectProvider(ctx, provider); err != nil {
 		// Ignore duplicate provider errors
 		if err != store.ErrAlreadyExists {
 			return brokerID, fmt.Errorf("failed to add grove provider: %w", err)

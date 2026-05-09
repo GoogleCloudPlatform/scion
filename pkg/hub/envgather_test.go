@@ -98,18 +98,18 @@ func TestEnvGather_HubDispatch_AllSatisfied(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-1",
 		Name: "test-grove",
 		Slug: "test-grove",
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
 
 	// Add provider so broker can serve this grove
-	if err := memStore.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID:  "grove-1",
+	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  "grove-1",
 		BrokerID: "broker-1",
 	}); err != nil {
 		t.Fatal(err)
@@ -122,7 +122,7 @@ func TestEnvGather_HubDispatch_AllSatisfied(t *testing.T) {
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "broker-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -179,7 +179,7 @@ func TestEnvGather_HubDispatch_NeedsGather(t *testing.T) {
 		ID:              "agent-2",
 		Name:            "test-agent-2",
 		Slug:            "test-agent-2",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "broker-2",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -227,7 +227,7 @@ func TestEnvGather_HubDispatch_FinalizeEnv(t *testing.T) {
 		ID:              "agent-3",
 		Name:            "test-agent-3",
 		Slug:            "test-agent-3",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "broker-3",
 	}
 
@@ -257,8 +257,8 @@ func TestEnvGather_HubHandler_202Response(t *testing.T) {
 	ctx := context.Background()
 
 	// Create grove
-	grove := &store.Grove{ID: "grove-gather", Name: "gather-grove", Slug: "gather-grove"}
-	if err := st.CreateGrove(ctx, grove); err != nil {
+	grove := &store.Project{ID: "grove-gather", Name: "gather-grove", Slug: "gather-grove"}
+	if err := st.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
 
@@ -272,8 +272,8 @@ func TestEnvGather_HubHandler_202Response(t *testing.T) {
 	}
 
 	// Add provider with local path so template can be resolved locally
-	if err := st.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID: "grove-gather", BrokerID: "broker-gather",
+	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: "grove-gather", BrokerID: "broker-gather",
 		LocalPath: "/tmp/test-grove",
 	}); err != nil {
 		t.Fatal(err)
@@ -333,8 +333,8 @@ func TestEnvGather_HubHandler_GroveRoute_202Response(t *testing.T) {
 	ctx := context.Background()
 
 	// Create grove
-	grove := &store.Grove{ID: "grove-gather-route", Name: "gather-route-grove", Slug: "gather-route-grove"}
-	if err := st.CreateGrove(ctx, grove); err != nil {
+	grove := &store.Project{ID: "grove-gather-route", Name: "gather-route-grove", Slug: "gather-route-grove"}
+	if err := st.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
 
@@ -348,8 +348,8 @@ func TestEnvGather_HubHandler_GroveRoute_202Response(t *testing.T) {
 	}
 
 	// Add provider with local path so template can be resolved locally
-	if err := st.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID: "grove-gather-route", BrokerID: "broker-gather-route",
+	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: "grove-gather-route", BrokerID: "broker-gather-route",
 		LocalPath: "/tmp/test-grove",
 	}); err != nil {
 		t.Fatal(err)
@@ -413,8 +413,8 @@ func TestEnvGather_HubHandler_SubmitEnv(t *testing.T) {
 	ctx := context.Background()
 
 	// Create grove
-	grove := &store.Grove{ID: "grove-submit", Name: "submit-grove", Slug: "submit-grove"}
-	if err := st.CreateGrove(ctx, grove); err != nil {
+	grove := &store.Project{ID: "grove-submit", Name: "submit-grove", Slug: "submit-grove"}
+	if err := st.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
 
@@ -432,7 +432,7 @@ func TestEnvGather_HubHandler_SubmitEnv(t *testing.T) {
 		ID:              "agent-submit",
 		Name:            "submit-agent",
 		Slug:            "submit-agent",
-		GroveID:         "grove-submit",
+		ProjectID:         "grove-submit",
 		RuntimeBrokerID: "broker-submit",
 		Phase:           string(state.PhaseProvisioning),
 		AppliedConfig: &store.AgentAppliedConfig{
@@ -487,8 +487,8 @@ func TestEnvGather_HubHandler_SubmitEnv_InvalidState(t *testing.T) {
 	ctx := context.Background()
 
 	// Create grove
-	grove := &store.Grove{ID: "grove-invalid", Name: "invalid-grove", Slug: "invalid-grove"}
-	if err := st.CreateGrove(ctx, grove); err != nil {
+	grove := &store.Project{ID: "grove-invalid", Name: "invalid-grove", Slug: "invalid-grove"}
+	if err := st.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
 
@@ -497,7 +497,7 @@ func TestEnvGather_HubHandler_SubmitEnv_InvalidState(t *testing.T) {
 		ID:      "agent-invalid",
 		Name:    "invalid-agent",
 		Slug:    "invalid-agent",
-		GroveID: "grove-invalid",
+		ProjectID: "grove-invalid",
 		Phase:   string(state.PhaseRunning),
 	}
 	if err := st.CreateAgent(ctx, agent); err != nil {
@@ -523,8 +523,8 @@ func TestEnvGather_HubEnvResolution(t *testing.T) {
 	memStore := createTestStore(t)
 
 	// Create grove
-	grove := &store.Grove{ID: "grove-env", Name: "env-grove", Slug: "env-grove"}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	grove := &store.Project{ID: "grove-env", Name: "env-grove", Slug: "env-grove"}
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
 
@@ -555,7 +555,7 @@ func TestEnvGather_HubEnvResolution(t *testing.T) {
 		ID:              "agent-env",
 		Name:            "env-agent",
 		Slug:            "env-agent",
-		GroveID:         "grove-env",
+		ProjectID:         "grove-env",
 		RuntimeBrokerID: "broker-env",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -585,8 +585,8 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GlobalRoute(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{ID: "grove-retry-global", Name: "retry-global-grove", Slug: "retry-global-grove"}
-	if err := st.CreateGrove(ctx, grove); err != nil {
+	grove := &store.Project{ID: "grove-retry-global", Name: "retry-global-grove", Slug: "retry-global-grove"}
+	if err := st.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
 
@@ -598,8 +598,8 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GlobalRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := st.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID: "grove-retry-global", BrokerID: "broker-retry-global",
+	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: "grove-retry-global", BrokerID: "broker-retry-global",
 		LocalPath: "/tmp/test-grove",
 	}); err != nil {
 		t.Fatal(err)
@@ -610,7 +610,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GlobalRoute(t *testing.T) {
 		ID:              "stale-agent-global",
 		Name:            "retry-agent",
 		Slug:            "retry-agent",
-		GroveID:         "grove-retry-global",
+		ProjectID:         "grove-retry-global",
 		RuntimeBrokerID: "broker-retry-global",
 		Phase:           string(state.PhaseProvisioning),
 		AppliedConfig: &store.AgentAppliedConfig{
@@ -711,7 +711,7 @@ func TestEnvGather_BuildResponse_SecretScope(t *testing.T) {
 		ID:      "agent-scope-test",
 		Name:    "scope-test-agent",
 		OwnerID: "owner-1",
-		GroveID: "grove-1",
+		ProjectID: "grove-1",
 	}
 
 	brokerReqs := &RemoteEnvRequirementsResponse{
@@ -756,8 +756,8 @@ func TestEnvGather_SecretInfoRelay(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{ID: "grove-si-relay", Name: "si-relay-grove", Slug: "si-relay-grove"}
-	if err := st.CreateGrove(ctx, grove); err != nil {
+	grove := &store.Project{ID: "grove-si-relay", Name: "si-relay-grove", Slug: "si-relay-grove"}
+	if err := st.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
 
@@ -769,8 +769,8 @@ func TestEnvGather_SecretInfoRelay(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := st.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID: "grove-si-relay", BrokerID: "broker-si-relay",
+	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: "grove-si-relay", BrokerID: "broker-si-relay",
 		LocalPath: "/tmp/test-grove",
 	}); err != nil {
 		t.Fatal(err)
@@ -835,8 +835,8 @@ func TestEnvGather_SecretInfoRelayType(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{ID: "grove-si-type", Name: "si-type-grove", Slug: "si-type-grove"}
-	if err := st.CreateGrove(ctx, grove); err != nil {
+	grove := &store.Project{ID: "grove-si-type", Name: "si-type-grove", Slug: "si-type-grove"}
+	if err := st.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
 
@@ -848,8 +848,8 @@ func TestEnvGather_SecretInfoRelayType(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := st.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID: "grove-si-type", BrokerID: "broker-si-type",
+	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: "grove-si-type", BrokerID: "broker-si-type",
 		LocalPath: "/tmp/test-grove",
 	}); err != nil {
 		t.Fatal(err)
@@ -923,8 +923,8 @@ func TestNonGatherEnv_MissingEnvVars_Returns422(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{ID: "grove-nogather-missing", Name: "nogather-missing-grove", Slug: "nogather-missing-grove"}
-	if err := st.CreateGrove(ctx, grove); err != nil {
+	grove := &store.Project{ID: "grove-nogather-missing", Name: "nogather-missing-grove", Slug: "nogather-missing-grove"}
+	if err := st.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
 
@@ -936,8 +936,8 @@ func TestNonGatherEnv_MissingEnvVars_Returns422(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := st.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID: "grove-nogather-missing", BrokerID: "broker-nogather-missing",
+	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: "grove-nogather-missing", BrokerID: "broker-nogather-missing",
 		LocalPath: "/tmp/test-grove",
 	}); err != nil {
 		t.Fatal(err)
@@ -993,7 +993,7 @@ func TestNonGatherEnv_MissingEnvVars_Returns422(t *testing.T) {
 	}
 
 	// Agent should have been cleaned up from the store
-	result, err := st.ListAgents(ctx, store.AgentFilter{GroveID: "grove-nogather-missing"}, store.ListOptions{})
+	result, err := st.ListAgents(ctx, store.AgentFilter{ProjectID: "grove-nogather-missing"}, store.ListOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1008,8 +1008,8 @@ func TestNonGatherEnv_MissingEnvVars_GroveRoute_Returns422(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{ID: "grove-nogather-route", Name: "nogather-route-grove", Slug: "nogather-route-grove"}
-	if err := st.CreateGrove(ctx, grove); err != nil {
+	grove := &store.Project{ID: "grove-nogather-route", Name: "nogather-route-grove", Slug: "nogather-route-grove"}
+	if err := st.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1021,8 +1021,8 @@ func TestNonGatherEnv_MissingEnvVars_GroveRoute_Returns422(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := st.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID: "grove-nogather-route", BrokerID: "broker-nogather-route",
+	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: "grove-nogather-route", BrokerID: "broker-nogather-route",
 		LocalPath: "/tmp/test-grove",
 	}); err != nil {
 		t.Fatal(err)
@@ -1063,7 +1063,7 @@ func TestNonGatherEnv_MissingEnvVars_GroveRoute_Returns422(t *testing.T) {
 	}
 
 	// Agent should have been cleaned up
-	result, err := st.ListAgents(ctx, store.AgentFilter{GroveID: "grove-nogather-route"}, store.ListOptions{})
+	result, err := st.ListAgents(ctx, store.AgentFilter{ProjectID: "grove-nogather-route"}, store.ListOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1078,8 +1078,8 @@ func TestNonGatherEnv_AllSatisfied_Returns201(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{ID: "grove-nogather-ok", Name: "nogather-ok-grove", Slug: "nogather-ok-grove"}
-	if err := st.CreateGrove(ctx, grove); err != nil {
+	grove := &store.Project{ID: "grove-nogather-ok", Name: "nogather-ok-grove", Slug: "nogather-ok-grove"}
+	if err := st.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1091,8 +1091,8 @@ func TestNonGatherEnv_AllSatisfied_Returns201(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := st.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID: "grove-nogather-ok", BrokerID: "broker-nogather-ok",
+	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: "grove-nogather-ok", BrokerID: "broker-nogather-ok",
 		LocalPath: "/tmp/test-grove",
 	}); err != nil {
 		t.Fatal(err)
@@ -1146,8 +1146,8 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GroveRoute(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{ID: "grove-retry-route", Name: "retry-route-grove", Slug: "retry-route-grove"}
-	if err := st.CreateGrove(ctx, grove); err != nil {
+	grove := &store.Project{ID: "grove-retry-route", Name: "retry-route-grove", Slug: "retry-route-grove"}
+	if err := st.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1159,8 +1159,8 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GroveRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := st.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID: "grove-retry-route", BrokerID: "broker-retry-route",
+	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: "grove-retry-route", BrokerID: "broker-retry-route",
 		LocalPath: "/tmp/test-grove",
 	}); err != nil {
 		t.Fatal(err)
@@ -1171,7 +1171,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GroveRoute(t *testing.T) {
 		ID:              "stale-agent-route",
 		Name:            "retry-route-agent",
 		Slug:            "retry-route-agent",
-		GroveID:         "grove-retry-route",
+		ProjectID:         "grove-retry-route",
 		RuntimeBrokerID: "broker-retry-route",
 		Phase:           string(state.PhaseProvisioning),
 		AppliedConfig: &store.AgentAppliedConfig{
@@ -1248,8 +1248,8 @@ func TestGroveRoute_ResolvesUserScopedEnvVars(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{ID: "grove-owner-env", Name: "owner-env-grove", Slug: "owner-env-grove"}
-	if err := st.CreateGrove(ctx, grove); err != nil {
+	grove := &store.Project{ID: "grove-owner-env", Name: "owner-env-grove", Slug: "owner-env-grove"}
+	if err := st.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1261,8 +1261,8 @@ func TestGroveRoute_ResolvesUserScopedEnvVars(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := st.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID: "grove-owner-env", BrokerID: "broker-owner-env",
+	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: "grove-owner-env", BrokerID: "broker-owner-env",
 		LocalPath: "/tmp/test-grove",
 	}); err != nil {
 		t.Fatal(err)
@@ -1335,8 +1335,8 @@ func TestGroveRoute_ResolvesUserScopedSecrets(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{ID: "grove-owner-secret", Name: "owner-secret-grove", Slug: "owner-secret-grove"}
-	if err := st.CreateGrove(ctx, grove); err != nil {
+	grove := &store.Project{ID: "grove-owner-secret", Name: "owner-secret-grove", Slug: "owner-secret-grove"}
+	if err := st.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1348,8 +1348,8 @@ func TestGroveRoute_ResolvesUserScopedSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := st.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID: "grove-owner-secret", BrokerID: "broker-owner-secret",
+	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: "grove-owner-secret", BrokerID: "broker-owner-secret",
 		LocalPath: "/tmp/test-grove",
 	}); err != nil {
 		t.Fatal(err)

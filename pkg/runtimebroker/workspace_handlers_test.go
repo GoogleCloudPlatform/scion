@@ -47,7 +47,7 @@ func (m *mockAgentManager) Stop(ctx context.Context, name string) error {
 	return nil
 }
 
-func (m *mockAgentManager) Delete(ctx context.Context, name string, deleteFiles bool, grovePath string, removeBranch bool) (bool, error) {
+func (m *mockAgentManager) Delete(ctx context.Context, name string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return true, nil
 }
 
@@ -55,11 +55,11 @@ func (m *mockAgentManager) List(ctx context.Context, filter map[string]string) (
 	return m.agents, nil
 }
 
-func (m *mockAgentManager) Message(ctx context.Context, name, groveID, message string, interrupt bool) error {
+func (m *mockAgentManager) Message(ctx context.Context, name, projectID, message string, interrupt bool) error {
 	return nil
 }
 
-func (m *mockAgentManager) MessageRaw(ctx context.Context, name, groveID string, keys string) error {
+func (m *mockAgentManager) MessageRaw(ctx context.Context, name, projectID string, keys string) error {
 	return nil
 }
 
@@ -885,7 +885,7 @@ func TestCountWorkspaceFiles_NestedDirectories(t *testing.T) {
 }
 
 // ============================================================================
-// Grove Workspace Upload Handler Tests (Phase 3: Linked Grove Relay)
+// Project Workspace Upload Handler Tests (Phase 3: Linked Project Relay)
 // ============================================================================
 
 func TestProjectWorkspaceUpload_MissingProjectID(t *testing.T) {
@@ -900,7 +900,7 @@ func TestProjectWorkspaceUpload_MissingProjectID(t *testing.T) {
 		WorkspacePath: "/tmp/test",
 	}
 
-	rec := doGroveUploadRequest(t, srv, body)
+	rec := doProjectUploadRequest(t, srv, body)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -918,7 +918,7 @@ func TestProjectWorkspaceUpload_MissingStoragePath(t *testing.T) {
 		WorkspacePath: "/tmp/test",
 	}
 
-	rec := doGroveUploadRequest(t, srv, body)
+	rec := doProjectUploadRequest(t, srv, body)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -936,7 +936,7 @@ func TestProjectWorkspaceUpload_MissingWorkspacePath(t *testing.T) {
 		StoragePath: "workspaces/test/grove-workspace",
 	}
 
-	rec := doGroveUploadRequest(t, srv, body)
+	rec := doProjectUploadRequest(t, srv, body)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -955,7 +955,7 @@ func TestProjectWorkspaceUpload_NoBucket(t *testing.T) {
 		WorkspacePath: "/tmp/test",
 	}
 
-	rec := doGroveUploadRequest(t, srv, body)
+	rec := doProjectUploadRequest(t, srv, body)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -975,7 +975,7 @@ func TestProjectWorkspaceUpload_NonExistentPath(t *testing.T) {
 		WorkspacePath: "/nonexistent/path/12345",
 	}
 
-	rec := doGroveUploadRequest(t, srv, body)
+	rec := doProjectUploadRequest(t, srv, body)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -997,7 +997,7 @@ func TestProjectWorkspaceUpload_MethodNotAllowed(t *testing.T) {
 	}
 }
 
-func doGroveUploadRequest(t *testing.T, srv *Server, body ProjectWorkspaceUploadRequest) *httptest.ResponseRecorder {
+func doProjectUploadRequest(t *testing.T, srv *Server, body ProjectWorkspaceUploadRequest) *httptest.ResponseRecorder {
 	t.Helper()
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {

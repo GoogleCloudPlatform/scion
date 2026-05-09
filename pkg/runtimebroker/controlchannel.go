@@ -43,8 +43,8 @@ type ControlChannelConfig struct {
 	SecretKey []byte
 	// Version is the runtime broker version string.
 	Version string
-	// Groves is a list of grove IDs this broker serves.
-	Groves []string
+	// Projects is a list of grove IDs this broker serves.
+	Projects []string
 
 	// ReconnectBackoff configuration
 	ReconnectInitial    time.Duration
@@ -245,7 +245,7 @@ func (c *ControlChannelClient) doConnect() error {
 	c.mu.Unlock()
 
 	// Send connect message
-	connectMsg := wsprotocol.NewConnectMessage(c.config.BrokerID, c.config.Version, c.config.Groves)
+	connectMsg := wsprotocol.NewConnectMessage(c.config.BrokerID, c.config.Version, c.config.Projects)
 	if err := conn.WriteJSON(connectMsg); err != nil {
 		c.conn.Close()
 		return fmt.Errorf("failed to send connect message: %w", err)
@@ -539,7 +539,7 @@ func (c *ControlChannelClient) handleStreamOpen(data []byte) error {
 		streamID:   open.StreamID,
 		streamType: open.StreamType,
 		slug:       open.Slug,
-		groveID:    open.GroveID,
+		groveID:    open.ProjectID,
 		dataCh:     make(chan []byte, 256),
 		resizeCh:   make(chan [2]int, 8),
 		closeCh:    make(chan struct{}),

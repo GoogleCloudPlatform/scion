@@ -83,13 +83,13 @@ func TestAgentHeartbeatTimeoutHandler_MarksStaleAgents(t *testing.T) {
 	ctx := context.Background()
 
 	// Create grove
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Test Grove",
+		Name:       "Test Project",
 		Slug:       "test-grove-hb",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -99,7 +99,7 @@ func TestAgentHeartbeatTimeoutHandler_MarksStaleAgents(t *testing.T) {
 		Slug:       "stale-runner",
 		Name:       "Stale Runner",
 		Template:   "claude",
-		GroveID:    grove.ID,
+		ProjectID:    grove.ID,
 		Phase:      string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
@@ -120,7 +120,7 @@ func TestAgentHeartbeatTimeoutHandler_MarksStaleAgents(t *testing.T) {
 		Slug:       "stopped-agent",
 		Name:       "Stopped Agent",
 		Template:   "claude",
-		GroveID:    grove.ID,
+		ProjectID:    grove.ID,
 		Phase:      string(state.PhaseStopped),
 		Visibility: store.VisibilityPrivate,
 	}
@@ -173,13 +173,13 @@ func TestAgentHeartbeatTimeoutHandler_ClearedBySubsequentHeartbeat(t *testing.T)
 	_, s, _ := setupHeartbeatTestServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Recovery Grove",
+		Name:       "Recovery Project",
 		Slug:       "recovery-grove",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -188,7 +188,7 @@ func TestAgentHeartbeatTimeoutHandler_ClearedBySubsequentHeartbeat(t *testing.T)
 		Slug:     "recovery-agent",
 		Name:     "Recovery Agent",
 		Template: "claude",
-		GroveID:  grove.ID,
+		ProjectID:  grove.ID,
 		Phase:    string(state.PhaseRunning), Activity: string(state.ActivityOffline),
 		Visibility: store.VisibilityPrivate,
 	}

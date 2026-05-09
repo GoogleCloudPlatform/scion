@@ -1963,12 +1963,12 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 	if legacy.Hub != nil && legacy.Hub.LastSyncedAt != "" {
 		result.StateMigrated = true
 		if !dryRun {
-			state, err := LoadGroveState(dir)
+			state, err := LoadProjectState(dir)
 			if err != nil {
 				return nil, fmt.Errorf("failed to load grove state: %w", err)
 			}
 			state.LastSyncedAt = legacy.Hub.LastSyncedAt
-			if err := SaveGroveState(dir, state); err != nil {
+			if err := SaveProjectState(dir, state); err != nil {
 				return nil, fmt.Errorf("failed to save grove state: %w", err)
 			}
 		}

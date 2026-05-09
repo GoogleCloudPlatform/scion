@@ -128,7 +128,7 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Verify grove exists
-	grove, err := s.store.GetGrove(r.Context(), groveID)
+	grove, err := s.store.GetProject(r.Context(), groveID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Grove")
@@ -152,7 +152,7 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 
 	sa := &store.GCPServiceAccount{
 		ID:            uuid.New().String(),
-		Scope:         store.ScopeGrove,
+		Scope:         store.ScopeProject,
 		ScopeID:       groveID,
 		Email:         req.Email,
 		ProjectID:     req.ProjectID,
@@ -227,7 +227,7 @@ type ListGCPServiceAccountsResponse struct {
 func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, groveID string) {
 	ctx := r.Context()
 	sas, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
-		Scope:   store.ScopeGrove,
+		Scope:   store.ScopeProject,
 		ScopeID: groveID,
 	})
 	if err != nil {
@@ -266,7 +266,7 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 	if s.gcpIAMAdmin != nil && s.config.GCPProjectID != "" {
 		managed := true
 		groveCount, _ := s.store.CountGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
-			Scope:   store.ScopeGrove,
+			Scope:   store.ScopeProject,
 			ScopeID: groveID,
 			Managed: &managed,
 		})
@@ -330,7 +330,7 @@ func (s *Server) deleteGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Authorization: grove owners and admins can manage GCP service accounts
-	grove, err := s.store.GetGrove(r.Context(), groveID)
+	grove, err := s.store.GetProject(r.Context(), groveID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -377,7 +377,7 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Authorization: grove owners and admins can manage GCP service accounts
-	grove, err := s.store.GetGrove(r.Context(), groveID)
+	grove, err := s.store.GetProject(r.Context(), groveID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -511,7 +511,7 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, g
 	}
 
 	// Verify grove exists
-	grove, err := s.store.GetGrove(r.Context(), groveID)
+	grove, err := s.store.GetProject(r.Context(), groveID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Grove")
@@ -536,7 +536,7 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, g
 	// Enforce per-grove mint cap
 	managed := true
 	groveCount, err := s.store.CountGCPServiceAccounts(r.Context(), store.GCPServiceAccountFilter{
-		Scope:   store.ScopeGrove,
+		Scope:   store.ScopeProject,
 		ScopeID: groveID,
 		Managed: &managed,
 	})
@@ -636,7 +636,7 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, g
 	// Store the SA record
 	sa := &store.GCPServiceAccount{
 		ID:                 uuid.New().String(),
-		Scope:              store.ScopeGrove,
+		Scope:              store.ScopeProject,
 		ScopeID:            groveID,
 		Email:              saEmail,
 		ProjectID:          projectID,
@@ -674,7 +674,7 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, g
 
 // GCPQuotaGroveInfo holds per-grove mint quota info for the admin endpoint.
 type GCPQuotaGroveInfo struct {
-	GroveID   string `json:"grove_id"`
+	ProjectID   string `json:"grove_id"`
 	GroveName string `json:"grove_name"`
 	Minted    int    `json:"minted"`
 }
@@ -736,11 +736,11 @@ func (s *Server) handleAdminGCPQuota(w http.ResponseWriter, r *http.Request) {
 
 		for groveID, count := range groveCounts {
 			name := groveID
-			if g, err := s.store.GetGrove(r.Context(), groveID); err == nil {
+			if g, err := s.store.GetProject(r.Context(), groveID); err == nil {
 				name = g.Name
 			}
 			resp.Groves = append(resp.Groves, GCPQuotaGroveInfo{
-				GroveID:   groveID,
+				ProjectID:   groveID,
 				GroveName: name,
 				Minted:    count,
 			})
@@ -819,7 +819,7 @@ func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 			s.gcpTokenMetrics.RecordAccessTokenRequest(false, time.Since(start))
 		}
 		LogGCPTokenGeneration(r.Context(), s.auditLogger, GCPTokenEventAccessToken,
-			agent.Subject, agentRecord.GroveID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, false, err.Error())
+			agent.Subject, agentRecord.ProjectID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, false, err.Error())
 		writeError(w, http.StatusBadGateway, "gcp_token_failed",
 			"token generation failed: "+err.Error(), nil)
 		return
@@ -829,7 +829,7 @@ func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 		s.gcpTokenMetrics.RecordAccessTokenRequest(true, time.Since(start))
 	}
 	LogGCPTokenGeneration(r.Context(), s.auditLogger, GCPTokenEventAccessToken,
-		agent.Subject, agentRecord.GroveID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, true, "")
+		agent.Subject, agentRecord.ProjectID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, true, "")
 	writeJSON(w, http.StatusOK, token)
 }
 
@@ -899,7 +899,7 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 			s.gcpTokenMetrics.RecordIDTokenRequest(false, time.Since(start))
 		}
 		LogGCPTokenGeneration(r.Context(), s.auditLogger, GCPTokenEventIdentityToken,
-			agent.Subject, agentRecord.GroveID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, false, err.Error())
+			agent.Subject, agentRecord.ProjectID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, false, err.Error())
 		writeError(w, http.StatusBadGateway, "gcp_token_failed",
 			"identity token generation failed: "+err.Error(), nil)
 		return
@@ -909,7 +909,7 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 		s.gcpTokenMetrics.RecordIDTokenRequest(true, time.Since(start))
 	}
 	LogGCPTokenGeneration(r.Context(), s.auditLogger, GCPTokenEventIdentityToken,
-		agent.Subject, agentRecord.GroveID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, true, "")
+		agent.Subject, agentRecord.ProjectID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, true, "")
 	writeJSON(w, http.StatusOK, token)
 }
 

@@ -23,74 +23,74 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestLoadGroveState_NonExistent(t *testing.T) {
+func TestLoadProjectState_NonExistent(t *testing.T) {
 	tmpDir := t.TempDir()
-	state, err := LoadGroveState(tmpDir)
+	state, err := LoadProjectState(tmpDir)
 	require.NoError(t, err)
 	assert.Equal(t, "", state.LastSyncedAt)
 }
 
-func TestSaveAndLoadGroveState_RoundTrip(t *testing.T) {
+func TestSaveAndLoadProjectState_RoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
-	grovePath := filepath.Join(tmpDir, ".scion")
-	require.NoError(t, os.MkdirAll(grovePath, 0755))
+	projectPath := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(projectPath, 0755))
 
 	// Save state
-	state := &GroveState{LastSyncedAt: "2026-02-16T10:30:00Z"}
-	err := SaveGroveState(grovePath, state)
+	state := &ProjectState{LastSyncedAt: "2026-02-16T10:30:00Z"}
+	err := SaveProjectState(projectPath, state)
 	require.NoError(t, err)
 
 	// Verify file exists
-	_, err = os.Stat(filepath.Join(grovePath, "state.yaml"))
+	_, err = os.Stat(filepath.Join(projectPath, "state.yaml"))
 	require.NoError(t, err)
 
 	// Load state back
-	loaded, err := LoadGroveState(grovePath)
+	loaded, err := LoadProjectState(projectPath)
 	require.NoError(t, err)
 	assert.Equal(t, "2026-02-16T10:30:00Z", loaded.LastSyncedAt)
 }
 
-func TestSaveGroveState_OverwritesExisting(t *testing.T) {
+func TestSaveProjectState_OverwritesExisting(t *testing.T) {
 	tmpDir := t.TempDir()
-	grovePath := filepath.Join(tmpDir, ".scion")
-	require.NoError(t, os.MkdirAll(grovePath, 0755))
+	projectPath := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(projectPath, 0755))
 
 	// Save initial state
-	state1 := &GroveState{LastSyncedAt: "2026-02-16T10:30:00Z"}
-	require.NoError(t, SaveGroveState(grovePath, state1))
+	state1 := &ProjectState{LastSyncedAt: "2026-02-16T10:30:00Z"}
+	require.NoError(t, SaveProjectState(projectPath, state1))
 
 	// Save updated state
-	state2 := &GroveState{LastSyncedAt: "2026-02-16T11:00:00Z"}
-	require.NoError(t, SaveGroveState(grovePath, state2))
+	state2 := &ProjectState{LastSyncedAt: "2026-02-16T11:00:00Z"}
+	require.NoError(t, SaveProjectState(projectPath, state2))
 
 	// Verify updated value
-	loaded, err := LoadGroveState(grovePath)
+	loaded, err := LoadProjectState(projectPath)
 	require.NoError(t, err)
 	assert.Equal(t, "2026-02-16T11:00:00Z", loaded.LastSyncedAt)
 }
 
-func TestSaveGroveState_CreatesDirectoryIfNeeded(t *testing.T) {
+func TestSaveProjectState_CreatesDirectoryIfNeeded(t *testing.T) {
 	tmpDir := t.TempDir()
-	grovePath := filepath.Join(tmpDir, "nested", "path", ".scion")
+	projectPath := filepath.Join(tmpDir, "nested", "path", ".scion")
 
-	state := &GroveState{LastSyncedAt: "2026-02-16T10:30:00Z"}
-	err := SaveGroveState(grovePath, state)
+	state := &ProjectState{LastSyncedAt: "2026-02-16T10:30:00Z"}
+	err := SaveProjectState(projectPath, state)
 	require.NoError(t, err)
 
-	loaded, err := LoadGroveState(grovePath)
+	loaded, err := LoadProjectState(projectPath)
 	require.NoError(t, err)
 	assert.Equal(t, "2026-02-16T10:30:00Z", loaded.LastSyncedAt)
 }
 
-func TestLoadGroveState_EmptyFile(t *testing.T) {
+func TestLoadProjectState_EmptyFile(t *testing.T) {
 	tmpDir := t.TempDir()
-	grovePath := filepath.Join(tmpDir, ".scion")
-	require.NoError(t, os.MkdirAll(grovePath, 0755))
+	projectPath := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(projectPath, 0755))
 
 	// Write empty file
-	require.NoError(t, os.WriteFile(filepath.Join(grovePath, "state.yaml"), []byte(""), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectPath, "state.yaml"), []byte(""), 0644))
 
-	state, err := LoadGroveState(grovePath)
+	state, err := LoadProjectState(projectPath)
 	require.NoError(t, err)
 	assert.Equal(t, "", state.LastSyncedAt)
 }

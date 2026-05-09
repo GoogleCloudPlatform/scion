@@ -57,13 +57,13 @@ func TestAgentStalledDetectionHandler_MarksStalledAgents(t *testing.T) {
 	srv, s, ep := setupStalledTestServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Stalled Detection Grove",
+		Name:       "Stalled Detection Project",
 		Slug:       "stalled-detect-grove",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -73,7 +73,7 @@ func TestAgentStalledDetectionHandler_MarksStalledAgents(t *testing.T) {
 		Slug:       "stalled-runner",
 		Name:       "Stalled Runner",
 		Template:   "claude",
-		GroveID:    grove.ID,
+		ProjectID:    grove.ID,
 		Phase:      string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
@@ -143,13 +143,13 @@ func TestAgentStalledDetectionHandler_ClearedByActivityEvent(t *testing.T) {
 	srv, s, ep := setupStalledTestServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Recovery Stalled Grove",
+		Name:       "Recovery Stalled Project",
 		Slug:       "recovery-stalled-grove",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -158,7 +158,7 @@ func TestAgentStalledDetectionHandler_ClearedByActivityEvent(t *testing.T) {
 		Slug:       "stalled-recovery",
 		Name:       "Stalled Recovery",
 		Template:   "claude",
-		GroveID:    grove.ID,
+		ProjectID:    grove.ID,
 		Phase:      string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
@@ -204,13 +204,13 @@ func TestAgentStalledDetectionHandler_StalledFromActivityIsPreserved(t *testing.
 	srv, s, _ := setupStalledTestServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Stalled Preserved Grove",
+		Name:       "Stalled Preserved Project",
 		Slug:       "stalled-preserved-grove",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -219,7 +219,7 @@ func TestAgentStalledDetectionHandler_StalledFromActivityIsPreserved(t *testing.
 		Slug:       "stalled-preserved",
 		Name:       "Stalled Preserved",
 		Template:   "claude",
-		GroveID:    grove.ID,
+		ProjectID:    grove.ID,
 		Phase:      string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
@@ -285,13 +285,13 @@ func TestAgentStalledDetectionHandler_BlockedAgentNotStalled(t *testing.T) {
 	srv, s, ep := setupStalledTestServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Blocked Not Stalled Grove",
+		Name:       "Blocked Not Stalled Project",
 		Slug:       "blocked-not-stalled-grove",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -300,7 +300,7 @@ func TestAgentStalledDetectionHandler_BlockedAgentNotStalled(t *testing.T) {
 		Slug:       "blocked-agent",
 		Name:       "Blocked Agent",
 		Template:   "claude",
-		GroveID:    grove.ID,
+		ProjectID:    grove.ID,
 		Phase:      string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
@@ -349,13 +349,13 @@ func TestAgentStalledDetectionHandler_IdleAgentMarkedStalled(t *testing.T) {
 	srv, s, ep := setupStalledTestServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Idle Stalled Grove",
+		Name:       "Idle Stalled Project",
 		Slug:       "idle-stalled-grove",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -364,7 +364,7 @@ func TestAgentStalledDetectionHandler_IdleAgentMarkedStalled(t *testing.T) {
 		Slug:       "idle-agent",
 		Name:       "Idle Agent",
 		Template:   "claude",
-		GroveID:    grove.ID,
+		ProjectID:    grove.ID,
 		Phase:      string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}

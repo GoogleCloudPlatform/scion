@@ -31,7 +31,7 @@ import (
 // secretTestState captures and restores package-level vars for test isolation.
 type secretTestState struct {
 	home              string
-	grovePath         string
+	projectPath         string
 	secretGroveScope  string
 	secretBrokerScope string
 	secretScope       string
@@ -41,7 +41,7 @@ type secretTestState struct {
 func saveSecretTestState() secretTestState {
 	return secretTestState{
 		home:              os.Getenv("HOME"),
-		grovePath:         grovePath,
+		projectPath:         projectPath,
 		secretGroveScope:  secretGroveScope,
 		secretBrokerScope: secretBrokerScope,
 		secretScope:       secretScope,
@@ -51,15 +51,15 @@ func saveSecretTestState() secretTestState {
 
 func (s secretTestState) restore() {
 	os.Setenv("HOME", s.home)
-	grovePath = s.grovePath
+	projectPath = s.projectPath
 	secretGroveScope = s.secretGroveScope
 	secretBrokerScope = s.secretBrokerScope
 	secretScope = s.secretScope
 	secretOutputJSON = s.secretOutputJSON
 }
 
-// setupSecretGrove creates a grove directory with settings pointing to the given hub endpoint.
-func setupSecretGrove(t *testing.T, home, endpoint string) string {
+// setupSecretProject creates a grove directory with settings pointing to the given hub endpoint.
+func setupSecretProject(t *testing.T, home, endpoint string) string {
 	t.Helper()
 	groveDir := filepath.Join(home, "project", ".scion")
 	require.NoError(t, os.MkdirAll(groveDir, 0755))
@@ -147,8 +147,8 @@ func TestRunSecretList_WithResults(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
-	groveDir := setupSecretGrove(t, tmpHome, server.URL)
-	grovePath = groveDir
+	groveDir := setupSecretProject(t, tmpHome, server.URL)
+	projectPath = groveDir
 
 	secretOutputJSON = false
 	secretGroveScope = ""
@@ -169,8 +169,8 @@ func TestRunSecretList_Empty(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
-	groveDir := setupSecretGrove(t, tmpHome, server.URL)
-	grovePath = groveDir
+	groveDir := setupSecretProject(t, tmpHome, server.URL)
+	projectPath = groveDir
 
 	secretOutputJSON = false
 	secretGroveScope = ""
@@ -195,8 +195,8 @@ func TestRunSecretList_JSON(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
-	groveDir := setupSecretGrove(t, tmpHome, server.URL)
-	grovePath = groveDir
+	groveDir := setupSecretProject(t, tmpHome, server.URL)
+	projectPath = groveDir
 
 	secretOutputJSON = true
 	secretGroveScope = ""
@@ -222,8 +222,8 @@ func TestResolveSecretScope_ScopeHub(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	os.Setenv("HOME", tmpHome)
-	groveDir := setupSecretGrove(t, tmpHome, "http://localhost:9999")
-	grovePath = groveDir
+	groveDir := setupSecretProject(t, tmpHome, "http://localhost:9999")
+	projectPath = groveDir
 
 	settings, err := config.LoadSettings(groveDir)
 	require.NoError(t, err)
@@ -234,9 +234,9 @@ func TestResolveSecretScope_ScopeHub(t *testing.T) {
 	assert.Equal(t, "", scopeID, "hub scope should return empty scopeID (server resolves it)")
 }
 
-func TestResolveSecretScope_GroveFallbackToGroveID(t *testing.T) {
-	// When --grove is set without value and settings.Hub.GroveID is empty,
-	// it should fall back to settings.GroveID (the top-level deterministic grove ID).
+func TestResolveSecretScope_GroveFallbackToProjectID(t *testing.T) {
+	// When --grove is set without value and settings.Hub.ProjectID is empty,
+	// it should fall back to settings.ProjectID (the top-level deterministic grove ID).
 	orig := saveSecretTestState()
 	defer orig.restore()
 
@@ -252,23 +252,23 @@ func TestResolveSecretScope_GroveFallbackToGroveID(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	os.Setenv("HOME", tmpHome)
-	// setupSecretGrove sets grove_id but NOT hub.groveId
-	groveDir := setupSecretGrove(t, tmpHome, "http://localhost:9999")
-	grovePath = groveDir
+	// setupSecretProject sets grove_id but NOT hub.groveId
+	groveDir := setupSecretProject(t, tmpHome, "http://localhost:9999")
+	projectPath = groveDir
 
 	settings, err := config.LoadSettings(groveDir)
 	require.NoError(t, err)
-	// Verify precondition: Hub.GroveID is empty but GroveID is set
-	assert.Empty(t, settings.GetHubGroveID(), "hub grove ID should be empty for this test")
-	assert.NotEmpty(t, settings.GroveID, "top-level grove ID should be set")
+	// Verify precondition: Hub.ProjectID is empty but ProjectID is set
+	assert.Empty(t, settings.GetHubProjectID(), "hub grove ID should be empty for this test")
+	assert.NotEmpty(t, settings.ProjectID, "top-level grove ID should be set")
 
 	scope, scopeID, err := resolveSecretScope(testCmd, settings)
 	assert.NoError(t, err)
 	assert.Equal(t, "grove", scope)
-	assert.Equal(t, settings.GroveID, scopeID, "should fall back to settings.GroveID")
+	assert.Equal(t, settings.ProjectID, scopeID, "should fall back to settings.ProjectID")
 }
 
-func TestResolveSecretScope_ScopeConflictsWithGrove(t *testing.T) {
+func TestResolveSecretScope_ScopeConflictsWithProject(t *testing.T) {
 	orig := saveSecretTestState()
 	defer orig.restore()
 
@@ -285,8 +285,8 @@ func TestResolveSecretScope_ScopeConflictsWithGrove(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	os.Setenv("HOME", tmpHome)
-	groveDir := setupSecretGrove(t, tmpHome, "http://localhost:9999")
-	grovePath = groveDir
+	groveDir := setupSecretProject(t, tmpHome, "http://localhost:9999")
+	projectPath = groveDir
 
 	settings, err := config.LoadSettings(groveDir)
 	require.NoError(t, err)
@@ -313,8 +313,8 @@ func TestResolveSecretScope_ScopeConflictsWithBroker(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	os.Setenv("HOME", tmpHome)
-	groveDir := setupSecretGrove(t, tmpHome, "http://localhost:9999")
-	grovePath = groveDir
+	groveDir := setupSecretProject(t, tmpHome, "http://localhost:9999")
+	projectPath = groveDir
 
 	settings, err := config.LoadSettings(groveDir)
 	require.NoError(t, err)

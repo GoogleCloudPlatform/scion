@@ -62,12 +62,12 @@ func TestCreateAgent_SkipsGCSSyncForEmbeddedBroker(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove (hub-native: no git remote)
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-embedded-test",
 		Name: "embedded-test",
 		Slug: "embedded-test",
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -84,19 +84,19 @@ func TestCreateAgent_SkipsGCSSyncForEmbeddedBroker(t *testing.T) {
 	}
 
 	// Create a grove provider WITHOUT LocalPath (simulating autoLinkProviders behavior)
-	provider := &store.GroveProvider{
-		GroveID:    grove.ID,
+	provider := &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   brokerID,
 		BrokerName: broker.Name,
 		// LocalPath intentionally empty — this is the bug scenario
 	}
-	if err := s.AddGroveProvider(ctx, provider); err != nil {
+	if err := s.AddProjectProvider(ctx, provider); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
 	// Set the default broker on the grove
 	grove.DefaultRuntimeBrokerID = brokerID
-	if err := s.UpdateGrove(ctx, grove); err != nil {
+	if err := s.UpdateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to update grove: %v", err)
 	}
 
@@ -106,7 +106,7 @@ func TestCreateAgent_SkipsGCSSyncForEmbeddedBroker(t *testing.T) {
 	// Create agent request for the hub-native grove
 	reqBody := CreateAgentRequest{
 		Name:    "test-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 	}
 	body, _ := json.Marshal(reqBody)
 
@@ -126,7 +126,7 @@ func TestCreateAgent_SkipsGCSSyncForEmbeddedBroker(t *testing.T) {
 	}
 
 	// Verify the agent was created in the store
-	agents, err := s.ListAgents(ctx, store.AgentFilter{GroveID: grove.ID}, store.ListOptions{})
+	agents, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: grove.ID}, store.ListOptions{})
 	if err != nil {
 		t.Fatalf("failed to list agents: %v", err)
 	}

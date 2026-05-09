@@ -51,7 +51,7 @@ var hubEnvCmd = &cobra.Command{
 Environment variables can be scoped to:
   - Hub: Available to all agents across the entire hub (admin-only writes)
   - User (default): Available to all your agents
-  - Grove: Available to agents in a specific grove
+  - Project: Available to agents in a specific grove
   - Broker: Available to agents running on a specific broker
 
 Variables are resolved hierarchically when an agent starts:
@@ -223,8 +223,8 @@ func resolveEnvScope(cmd *cobra.Command, settings *config.Settings) (scope, scop
 			scopeID = groveVal
 		} else {
 			// Infer from settings
-			if settings.Hub != nil && settings.Hub.GroveID != "" {
-				scopeID = settings.Hub.GroveID
+			if settings.Hub != nil && settings.Hub.ProjectID != "" {
+				scopeID = settings.Hub.ProjectID
 			} else {
 				return "", "", fmt.Errorf("cannot infer grove ID: not linked with Hub. Use 'scion hub link' first or provide explicit grove ID")
 			}
@@ -269,7 +269,7 @@ func resolveScopeID(ctx context.Context, client hubclient.Client, scope, scopeID
 	}
 	switch scope {
 	case "grove":
-		grove, err := resolveGroveByNameOrID(ctx, client, scopeID)
+		grove, err := resolveProjectByNameOrID(ctx, client, scopeID)
 		if err != nil {
 			return "", err
 		}
@@ -309,7 +309,7 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("key cannot contain spaces, tabs, newlines, or '='")
 	}
 
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return fmt.Errorf("failed to resolve grove path: %w", err)
 	}
@@ -413,7 +413,7 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 }
 
 func runEnvGet(cmd *cobra.Command, args []string) error {
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return fmt.Errorf("failed to resolve grove path: %w", err)
 	}
@@ -473,7 +473,7 @@ func runEnvGet(cmd *cobra.Command, args []string) error {
 }
 
 func runEnvList(cmd *cobra.Command, _ []string) error {
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return fmt.Errorf("failed to resolve grove path: %w", err)
 	}
@@ -554,7 +554,7 @@ func formatEnvAnnotations(v *hubclient.EnvVar) string {
 func runEnvClear(cmd *cobra.Command, args []string) error {
 	key := args[0]
 
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return fmt.Errorf("failed to resolve grove path: %w", err)
 	}

@@ -50,7 +50,7 @@ func (s *Server) resolveHarnessTypeFromConfigRef(ctx context.Context, groveID, c
 	}
 
 	if groveID != "" {
-		hc, err := s.store.GetHarnessConfigBySlug(ctx, configRef, store.HarnessConfigScopeGrove, groveID)
+		hc, err := s.store.GetHarnessConfigBySlug(ctx, configRef, store.HarnessConfigScopeProject, groveID)
 		if err == nil && hc != nil {
 			if h := canonicalHarnessName(hc.Harness); h != "" {
 				return h
@@ -98,7 +98,7 @@ func (s *Server) resolveAgentHarnessType(ctx context.Context, agent *store.Agent
 	refs = append(refs, agent.HarnessConfig)
 
 	for _, ref := range refs {
-		if h := s.resolveHarnessTypeFromConfigRef(ctx, agent.GroveID, ref); h != "" {
+		if h := s.resolveHarnessTypeFromConfigRef(ctx, agent.ProjectID, ref); h != "" {
 			return h
 		}
 	}

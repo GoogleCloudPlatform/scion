@@ -45,8 +45,8 @@ const (
 	ScopeAgentStatusUpdate AgentTokenScope = "agent:status:update"
 	// ScopeAgentLogAppend allows the agent to append logs.
 	ScopeAgentLogAppend AgentTokenScope = "agent:log:append"
-	// ScopeGroveSecretRead allows the agent to read grove secrets.
-	ScopeGroveSecretRead AgentTokenScope = "grove:secret:read"
+	// ScopeProjectSecretRead allows the agent to read grove secrets.
+	ScopeProjectSecretRead AgentTokenScope = "grove:secret:read"
 	// ScopeAgentCreate allows the agent to create sub-agents within the same grove.
 	ScopeAgentCreate AgentTokenScope = "grove:agent:create"
 	// ScopeAgentLifecycle allows the agent to start/stop/restart agents within the same grove.
@@ -63,7 +63,7 @@ const (
 // AgentTokenClaims represents the custom claims in an agent JWT.
 type AgentTokenClaims struct {
 	jwt.Claims
-	GroveID  string            `json:"grove_id,omitempty"`
+	ProjectID  string            `json:"grove_id,omitempty"`
 	Scopes   []AgentTokenScope `json:"scopes,omitempty"`
 	Ancestry []string          `json:"ancestry,omitempty"` // [root_user, ..., parent_agent]
 }
@@ -133,7 +133,7 @@ func (s *AgentTokenService) GenerateAgentToken(agentID, groveID string, scopes [
 			NotBefore: jwt.NewNumericDate(now),
 			ID:        generateTokenID(),
 		},
-		GroveID:  groveID,
+		ProjectID:  groveID,
 		Scopes:   scopes,
 		Ancestry: ancestry,
 	}
@@ -181,7 +181,7 @@ func (s *AgentTokenService) RefreshAgentToken(tokenString string) (string, time.
 		return "", time.Time{}, fmt.Errorf("cannot refresh invalid token: %w", err)
 	}
 
-	return s.GenerateAgentTokenWithExpiry(claims.Subject, claims.GroveID, claims.Scopes, claims.Ancestry)
+	return s.GenerateAgentTokenWithExpiry(claims.Subject, claims.ProjectID, claims.Scopes, claims.Ancestry)
 }
 
 // GenerateAgentTokenWithExpiry generates a JWT for an agent and also returns
@@ -204,7 +204,7 @@ func (s *AgentTokenService) GenerateAgentTokenWithExpiry(agentID, groveID string
 			NotBefore: jwt.NewNumericDate(now),
 			ID:        generateTokenID(),
 		},
-		GroveID:  groveID,
+		ProjectID:  groveID,
 		Scopes:   scopes,
 		Ancestry: ancestry,
 	}

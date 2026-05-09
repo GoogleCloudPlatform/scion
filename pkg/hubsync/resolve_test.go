@@ -97,12 +97,12 @@ func TestIsHubGroveRef_PathSeparator(t *testing.T) {
 }
 
 func TestResolveGroveOnHub_ByUUID(t *testing.T) {
-	groveID := "550e8400-e29b-41d4-a716-446655440000"
+	projectID := "550e8400-e29b-41d4-a716-446655440000"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/groves/"+groveID {
-			json.NewEncoder(w).Encode(hubclient.Grove{
-				ID:   groveID,
-				Name: "Test Grove",
+		if r.URL.Path == "/api/v1/groves/"+projectID {
+			json.NewEncoder(w).Encode(hubclient.Project{
+				ID:   projectID,
+				Name: "Test Project",
 				Slug: "test-grove",
 			})
 			return
@@ -114,10 +114,10 @@ func TestResolveGroveOnHub_ByUUID(t *testing.T) {
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 
-	grove, err := resolveGroveOnHub(context.Background(), client, groveID)
+	grove, err := resolveGroveOnHub(context.Background(), client, projectID)
 	require.NoError(t, err)
-	assert.Equal(t, groveID, grove.ID)
-	assert.Equal(t, "Test Grove", grove.Name)
+	assert.Equal(t, projectID, grove.ID)
+	assert.Equal(t, "Test Project", grove.Name)
 }
 
 func TestResolveGroveOnHub_BySlug(t *testing.T) {
@@ -126,7 +126,7 @@ func TestResolveGroveOnHub_BySlug(t *testing.T) {
 			slug := r.URL.Query().Get("slug")
 			if slug == "my-project" {
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"groves": []hubclient.Grove{
+					"groves": []hubclient.Project{
 						{ID: "abc-123", Name: "My Project", Slug: "my-project"},
 					},
 					"totalCount": 1,
@@ -135,7 +135,7 @@ func TestResolveGroveOnHub_BySlug(t *testing.T) {
 			}
 			// Empty for name fallback
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"groves":     []hubclient.Grove{},
+				"groves":     []hubclient.Project{},
 				"totalCount": 0,
 			})
 			return
@@ -161,14 +161,14 @@ func TestResolveGroveOnHub_ByName(t *testing.T) {
 			if slug != "" {
 				// Slug query returns nothing
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"groves":     []hubclient.Grove{},
+					"groves":     []hubclient.Project{},
 					"totalCount": 0,
 				})
 				return
 			}
 			if name == "My Project" {
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"groves": []hubclient.Grove{
+					"groves": []hubclient.Project{
 						{ID: "abc-456", Name: "My Project", Slug: "my-project"},
 					},
 					"totalCount": 1,
@@ -176,7 +176,7 @@ func TestResolveGroveOnHub_ByName(t *testing.T) {
 				return
 			}
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"groves":     []hubclient.Grove{},
+				"groves":     []hubclient.Project{},
 				"totalCount": 0,
 			})
 			return
@@ -199,7 +199,7 @@ func TestResolveGroveOnHub_ByGitURL(t *testing.T) {
 			gitRemote := r.URL.Query().Get("gitRemote")
 			if gitRemote != "" {
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"groves": []hubclient.Grove{
+					"groves": []hubclient.Project{
 						{ID: "git-grove-1", Name: "Git Project", Slug: "git-project"},
 					},
 					"totalCount": 1,
@@ -207,7 +207,7 @@ func TestResolveGroveOnHub_ByGitURL(t *testing.T) {
 				return
 			}
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"groves":     []hubclient.Grove{},
+				"groves":     []hubclient.Project{},
 				"totalCount": 0,
 			})
 			return
@@ -228,7 +228,7 @@ func TestResolveGroveOnHub_NotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/groves" {
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"groves":     []hubclient.Grove{},
+				"groves":     []hubclient.Project{},
 				"totalCount": 0,
 			})
 			return
@@ -252,14 +252,14 @@ func TestResolveGroveOnHub_MultipleByName(t *testing.T) {
 			if slug != "" {
 				// No slug match
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"groves":     []hubclient.Grove{},
+					"groves":     []hubclient.Project{},
 					"totalCount": 0,
 				})
 				return
 			}
 			// Name returns multiple
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"groves": []hubclient.Grove{
+				"groves": []hubclient.Project{
 					{ID: "id-1", Name: "dupe", Slug: "dupe-1"},
 					{ID: "id-2", Name: "dupe", Slug: "dupe-2"},
 				},

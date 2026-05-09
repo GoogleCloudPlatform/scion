@@ -181,7 +181,7 @@ func TestAgentAncestry(t *testing.T) {
 	ctx := context.Background()
 
 	grove := &store.Project{
-		ID: api.NewUUID(), Name: "Ancestry Grove", Slug: "ancestry-grove",
+		ID: api.NewUUID(), Name: "Ancestry Project", Slug: "ancestry-grove",
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateProject(ctx, grove))
@@ -857,7 +857,7 @@ func TestProjectList(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		grove := &store.Project{
 			ID:         api.NewUUID(),
-			Name:       "Grove " + string(rune('A'+i)),
+			Name:       "Project " + string(rune('A'+i)),
 			Slug:       "grove-" + string(rune('a'+i)),
 			Visibility: store.VisibilityPrivate,
 		}
@@ -893,21 +893,21 @@ func TestProjectList(t *testing.T) {
 	assert.Equal(t, 3, result.TotalCount)
 
 	// Verify computed fields on the first project (index 2 due to DESC sort by created_at)
-	var firstGrove store.Project
+	var firstProject store.Project
 	for _, g := range result.Items {
-		if g.Name == "Grove A" {
-			firstGrove = g
+		if g.Name == "Project A" {
+			firstProject = g
 			break
 		}
 	}
-	assert.Equal(t, 1, firstGrove.AgentCount)
-	assert.Equal(t, 1, firstGrove.ActiveBrokerCount)
+	assert.Equal(t, 1, firstProject.AgentCount)
+	assert.Equal(t, 1, firstProject.ActiveBrokerCount)
 
 	// List by visibility
 	result, err = s.ListProjects(ctx, store.ProjectFilter{Visibility: store.VisibilityPublic}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.TotalCount)
-	assert.Equal(t, "Grove A", result.Items[0].Name)
+	assert.Equal(t, "Project A", result.Items[0].Name)
 }
 
 // ============================================================================
@@ -1026,50 +1026,50 @@ func TestListProjectsSharedScope(t *testing.T) {
 	ownerID := api.NewUUID()
 	otherOwnerID := api.NewUUID()
 
-	ownedGrove := &store.Project{
+	ownedProject := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Owned Grove",
+		Name:       "Owned Project",
 		Slug:       "owned-grove",
 		OwnerID:    ownerID,
 		Visibility: store.VisibilityPrivate,
 	}
-	sharedGrove := &store.Project{
+	sharedProject := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Shared Grove",
+		Name:       "Shared Project",
 		Slug:       "shared-grove",
 		OwnerID:    otherOwnerID,
 		Visibility: store.VisibilityPrivate,
 	}
-	unrelatedGrove := &store.Project{
+	unrelatedProject := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Unrelated Grove",
+		Name:       "Unrelated Project",
 		Slug:       "unrelated-grove",
 		OwnerID:    otherOwnerID,
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, ownedGrove))
-	require.NoError(t, s.CreateProject(ctx, sharedGrove))
-	require.NoError(t, s.CreateProject(ctx, unrelatedGrove))
+	require.NoError(t, s.CreateProject(ctx, ownedProject))
+	require.NoError(t, s.CreateProject(ctx, sharedProject))
+	require.NoError(t, s.CreateProject(ctx, unrelatedProject))
 
 	// scope=mine: only groves owned by the user
 	result, err := s.ListProjects(ctx, store.ProjectFilter{OwnerID: ownerID}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.TotalCount)
-	assert.Equal(t, ownedGrove.ID, result.Items[0].ID)
+	assert.Equal(t, ownedProject.ID, result.Items[0].ID)
 
 	// scope=shared: MemberProjectIDs includes both owned and shared project IDs,
 	// but ExcludeOwnerID removes the owned one
 	result, err = s.ListProjects(ctx, store.ProjectFilter{
-		MemberProjectIDs: []string{ownedGrove.ID, sharedGrove.ID},
+		MemberProjectIDs: []string{ownedProject.ID, sharedProject.ID},
 		ExcludeOwnerID: ownerID,
 	}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.TotalCount)
-	assert.Equal(t, sharedGrove.ID, result.Items[0].ID)
+	assert.Equal(t, sharedProject.ID, result.Items[0].ID)
 
 	// MemberProjectIDs without ExcludeOwnerID returns all matched groves
 	result, err = s.ListProjects(ctx, store.ProjectFilter{
-		MemberProjectIDs: []string{ownedGrove.ID, sharedGrove.ID},
+		MemberProjectIDs: []string{ownedProject.ID, sharedProject.ID},
 	}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 2, result.TotalCount)
@@ -1091,23 +1091,23 @@ func TestListProjectsSharedScopeTransitiveGroup(t *testing.T) {
 	otherOwnerID := api.NewUUID()
 
 	// Create a project owned by someone else
-	sharedGrove := &store.Project{
+	sharedProject := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Transitively Shared Grove",
+		Name:       "Transitively Shared Project",
 		Slug:       "trans-shared-grove",
 		OwnerID:    otherOwnerID,
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, sharedGrove))
+	require.NoError(t, s.CreateProject(ctx, sharedProject))
 
 	// Create a grove_agents group linked to the project (simulates the grove
 	// membership group that is created when a project gains members).
 	groveGroup := &store.Group{
 		ID:        api.NewUUID(),
-		Name:      "Grove Agents",
+		Name:      "Project Agents",
 		Slug:      "grove-agents-trans",
 		GroupType: "grove_agents",
-		ProjectID:   sharedGrove.ID,
+		ProjectID:   sharedProject.ID,
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
@@ -1164,7 +1164,7 @@ func TestListProjectsSharedScopeTransitiveGroup(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, effectiveGroupIDs, 3)
 
-	// Resolve project IDs from effective groups (mirrors resolveUserGroveIDs)
+	// Resolve project IDs from effective groups (mirrors resolveUserProjectIDs)
 	groups, err := s.GetGroupsByIDs(ctx, effectiveGroupIDs)
 	require.NoError(t, err)
 
@@ -1175,7 +1175,7 @@ func TestListProjectsSharedScopeTransitiveGroup(t *testing.T) {
 		}
 	}
 	require.Len(t, projectIDs, 1, "should find project via transitive group membership")
-	assert.Equal(t, sharedGrove.ID, projectIDs[0])
+	assert.Equal(t, sharedProject.ID, projectIDs[0])
 
 	// Using the resolved project IDs in a shared scope filter should return the grove
 	result, err := s.ListProjects(ctx, store.ProjectFilter{
@@ -1184,7 +1184,7 @@ func TestListProjectsSharedScopeTransitiveGroup(t *testing.T) {
 	}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.TotalCount)
-	assert.Equal(t, sharedGrove.ID, result.Items[0].ID)
+	assert.Equal(t, sharedProject.ID, result.Items[0].ID)
 }
 
 func TestRuntimeBrokerLookupByName(t *testing.T) {
@@ -1883,9 +1883,9 @@ func TestProjectProviders(t *testing.T) {
 	}
 
 	// Verify grove's active broker count
-	retrievedGrove, err := s.GetProject(ctx, grove.ID)
+	retrievedProject, err := s.GetProject(ctx, grove.ID)
 	require.NoError(t, err)
-	assert.Equal(t, 1, retrievedGrove.ActiveBrokerCount) // Only broker2 is online
+	assert.Equal(t, 1, retrievedProject.ActiveBrokerCount) // Only broker2 is online
 
 	// Remove provider
 	err = s.RemoveProjectProvider(ctx, grove.ID, broker1.ID)
@@ -2047,7 +2047,7 @@ func TestNotFoundErrors(t *testing.T) {
 	err = s.DeleteAgent(ctx, nonExistentID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 
-	// Grove
+	// Project
 	_, err = s.GetProject(ctx, nonExistentID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 
@@ -2235,7 +2235,7 @@ func TestMarkStaleAgentsOffline(t *testing.T) {
 
 	grove := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Heartbeat Grove",
+		Name:       "Heartbeat Project",
 		Slug:       "heartbeat-grove",
 		Visibility: store.VisibilityPrivate,
 	}
@@ -2367,7 +2367,7 @@ func TestMarkStaleAgentsOffline_Idempotent(t *testing.T) {
 
 	grove := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Idempotent Grove",
+		Name:       "Idempotent Project",
 		Slug:       "idempotent-grove",
 		Visibility: store.VisibilityPrivate,
 	}
@@ -2421,7 +2421,7 @@ func TestMarkStalledAgents(t *testing.T) {
 
 	grove := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Stalled Grove",
+		Name:       "Stalled Project",
 		Slug:       "stalled-grove",
 		Visibility: store.VisibilityPrivate,
 	}
@@ -2616,7 +2616,7 @@ func TestMarkStalledAgents_Idempotent(t *testing.T) {
 
 	grove := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Idempotent Stalled Grove",
+		Name:       "Idempotent Stalled Project",
 		Slug:       "idempotent-stalled",
 		Visibility: store.VisibilityPrivate,
 	}
@@ -2670,7 +2670,7 @@ func TestUpdateAgentStatus_SetsLastActivityEvent(t *testing.T) {
 
 	grove := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Activity Event Grove",
+		Name:       "Activity Event Project",
 		Slug:       "activity-event-grove",
 		Visibility: store.VisibilityPrivate,
 	}

@@ -38,18 +38,18 @@ func setupNotificationHandlerTest(t *testing.T) (*Server, store.Store, string) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-notif-handler",
-		Name: "Notif Handler Grove",
+		Name: "Notif Handler Project",
 		Slug: "notif-handler-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	agent := &store.Agent{
 		ID:      "agent-watched",
 		Slug:    "watched-agent",
 		Name:    "Watched Agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -64,7 +64,7 @@ func setupNotificationHandlerTest(t *testing.T) (*Server, store.Store, string) {
 		AgentID:           agent.ID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      userID,
-		GroveID:           grove.ID,
+		ProjectID:           grove.ID,
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT"},
 		CreatedAt:         time.Now(),
 		CreatedBy:         "test",
@@ -76,7 +76,7 @@ func setupNotificationHandlerTest(t *testing.T) (*Server, store.Store, string) {
 		ID:             api.NewUUID(),
 		SubscriptionID: sub.ID,
 		AgentID:        agent.ID,
-		GroveID:        grove.ID,
+		ProjectID:        grove.ID,
 		SubscriberType: store.SubscriberTypeUser,
 		SubscriberID:   userID,
 		Status:         "COMPLETED",
@@ -91,7 +91,7 @@ func setupNotificationHandlerTest(t *testing.T) (*Server, store.Store, string) {
 		ID:             api.NewUUID(),
 		SubscriptionID: sub.ID,
 		AgentID:        agent.ID,
-		GroveID:        grove.ID,
+		ProjectID:        grove.ID,
 		SubscriberType: store.SubscriberTypeUser,
 		SubscriberID:   userID,
 		Status:         "WAITING_FOR_INPUT",
@@ -183,18 +183,18 @@ func TestHandleNotifications_RejectAgentToken(t *testing.T) {
 	ctx := context.Background()
 
 	// Create an agent and generate a token for it
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-agent-auth",
-		Name: "Agent Auth Grove",
+		Name: "Agent Auth Project",
 		Slug: "agent-auth-grove",
 	}
-	_ = s.CreateGrove(ctx, grove)
+	_ = s.CreateProject(ctx, grove)
 
 	agent := &store.Agent{
 		ID:      "agent-auth-test",
 		Slug:    "auth-agent",
 		Name:    "Auth Agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -234,7 +234,7 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 		ID:      "agent-other",
 		Slug:    "other-agent",
 		Name:    "Other Agent",
-		GroveID: "grove-notif-handler",
+		ProjectID: "grove-notif-handler",
 		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2))
@@ -246,7 +246,7 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 		AgentID:           "agent-other",
 		SubscriberType:    store.SubscriberTypeAgent,
 		SubscriberID:      "agent-watched",
-		GroveID:           "grove-notif-handler",
+		ProjectID:           "grove-notif-handler",
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedAt:         time.Now(),
 		CreatedBy:         "test",
@@ -258,7 +258,7 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 		ID:             api.NewUUID(),
 		SubscriptionID: sub2.ID,
 		AgentID:        "agent-other",
-		GroveID:        "grove-notif-handler",
+		ProjectID:        "grove-notif-handler",
 		SubscriberType: store.SubscriberTypeAgent,
 		SubscriberID:   "agent-watched",
 		Status:         "COMPLETED",
@@ -318,41 +318,41 @@ func TestHandleNotifications_EmptyList(t *testing.T) {
 
 // setupGroveWithBroker creates a grove with a registered runtime broker for
 // agent creation tests.
-func setupGroveWithBroker(t *testing.T, s store.Store, groveID, groveName string) *store.Grove {
+func setupGroveWithBroker(t *testing.T, s store.Store, projectID, projectName string) *store.Project {
 	t.Helper()
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
-		ID:     "broker-" + groveID,
+		ID:     "broker-" + projectID,
 		Name:   "Test Broker",
-		Slug:   "test-broker-" + groveID,
+		Slug:   "test-broker-" + projectID,
 		Status: store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	grove := &store.Grove{
-		ID:   groveID,
-		Name: groveName,
-		Slug: groveID,
+	grove := &store.Project{
+		ID:   projectID,
+		Name: projectName,
+		Slug: projectID,
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
-	provider := &store.GroveProvider{
-		GroveID:    grove.ID,
+	provider := &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}
-	require.NoError(t, s.AddGroveProvider(ctx, provider))
+	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	return grove
 }
 
-func TestCreateGroveAgent_NotifyCreatesSubscription(t *testing.T) {
+func TestCreateProjectAgent_NotifyCreatesSubscription(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := setupGroveWithBroker(t, s, "grove-notify-test", "Notify Test Grove")
+	grove := setupGroveWithBroker(t, s, "grove-notify-test", "Notify Test Project")
 
 	// Create an agent via the grove-scoped endpoint with notify=true
 	req := CreateAgentRequest{
@@ -375,7 +375,7 @@ func TestCreateGroveAgent_NotifyCreatesSubscription(t *testing.T) {
 	require.Len(t, subs, 1, "expected exactly 1 notification subscription for the agent")
 	assert.Equal(t, store.SubscriberTypeUser, subs[0].SubscriberType)
 	assert.Equal(t, DevUserID, subs[0].SubscriberID)
-	assert.Equal(t, grove.ID, subs[0].GroveID)
+	assert.Equal(t, grove.ID, subs[0].ProjectID)
 	assert.Contains(t, subs[0].TriggerActivities, "COMPLETED")
 	assert.Contains(t, subs[0].TriggerActivities, "WAITING_FOR_INPUT")
 	assert.Contains(t, subs[0].TriggerActivities, "LIMITS_EXCEEDED")
@@ -383,11 +383,11 @@ func TestCreateGroveAgent_NotifyCreatesSubscription(t *testing.T) {
 	assert.Contains(t, subs[0].TriggerActivities, "ERROR")
 }
 
-func TestCreateGroveAgent_NoNotifyNoSubscription(t *testing.T) {
+func TestCreateProjectAgent_NoNotifyNoSubscription(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := setupGroveWithBroker(t, s, "grove-no-notify-test", "No Notify Test Grove")
+	grove := setupGroveWithBroker(t, s, "grove-no-notify-test", "No Notify Test Project")
 
 	// Create an agent without notify
 	req := CreateAgentRequest{
@@ -417,7 +417,7 @@ func TestHandleSubscriptions_CreateAgentScoped(t *testing.T) {
 	req := createSubscriptionRequest{
 		Scope:             "agent",
 		AgentID:           "agent-watched",
-		GroveID:           "grove-notif-handler",
+		ProjectID:           "grove-notif-handler",
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT"},
 	}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions", req)
@@ -430,7 +430,7 @@ func TestHandleSubscriptions_CreateAgentScoped(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sub))
 	assert.Equal(t, "agent", sub.Scope)
 	assert.Equal(t, "agent-watched", sub.AgentID)
-	assert.Equal(t, "grove-notif-handler", sub.GroveID)
+	assert.Equal(t, "grove-notif-handler", sub.ProjectID)
 
 	// Verify in store
 	subs, err := s.GetSubscriptionsForSubscriber(context.Background(), store.SubscriberTypeUser, DevUserID)
@@ -438,12 +438,12 @@ func TestHandleSubscriptions_CreateAgentScoped(t *testing.T) {
 	assert.NotEmpty(t, subs)
 }
 
-func TestHandleSubscriptions_CreateGroveScoped(t *testing.T) {
+func TestHandleSubscriptions_CreateProjectScoped(t *testing.T) {
 	srv, _, _ := setupNotificationHandlerTest(t)
 
 	req := createSubscriptionRequest{
 		Scope:             "grove",
-		GroveID:           "grove-notif-handler",
+		ProjectID:           "grove-notif-handler",
 		TriggerActivities: []string{"COMPLETED"},
 	}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions", req)
@@ -453,7 +453,7 @@ func TestHandleSubscriptions_CreateGroveScoped(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sub))
 	assert.Equal(t, "grove", sub.Scope)
 	assert.Empty(t, sub.AgentID)
-	assert.Equal(t, "grove-notif-handler", sub.GroveID)
+	assert.Equal(t, "grove-notif-handler", sub.ProjectID)
 }
 
 func TestHandleSubscriptions_CreateValidation(t *testing.T) {
@@ -463,11 +463,11 @@ func TestHandleSubscriptions_CreateValidation(t *testing.T) {
 		name string
 		req  createSubscriptionRequest
 	}{
-		{"invalid scope", createSubscriptionRequest{Scope: "bad", GroveID: "g", TriggerActivities: []string{"COMPLETED"}}},
-		{"agent scope no agentId", createSubscriptionRequest{Scope: "agent", GroveID: "g", TriggerActivities: []string{"COMPLETED"}}},
-		{"grove scope with agentId", createSubscriptionRequest{Scope: "grove", AgentID: "a", GroveID: "g", TriggerActivities: []string{"COMPLETED"}}},
+		{"invalid scope", createSubscriptionRequest{Scope: "bad", ProjectID: "g", TriggerActivities: []string{"COMPLETED"}}},
+		{"agent scope no agentId", createSubscriptionRequest{Scope: "agent", ProjectID: "g", TriggerActivities: []string{"COMPLETED"}}},
+		{"grove scope with agentId", createSubscriptionRequest{Scope: "grove", AgentID: "a", ProjectID: "g", TriggerActivities: []string{"COMPLETED"}}},
 		{"no groveId", createSubscriptionRequest{Scope: "agent", AgentID: "a", TriggerActivities: []string{"COMPLETED"}}},
-		{"no triggers", createSubscriptionRequest{Scope: "agent", AgentID: "a", GroveID: "g"}},
+		{"no triggers", createSubscriptionRequest{Scope: "agent", AgentID: "a", ProjectID: "g"}},
 	}
 
 	for _, tt := range tests {
@@ -484,7 +484,7 @@ func TestHandleSubscriptions_List(t *testing.T) {
 	// Create a grove-scoped subscription
 	createReq := createSubscriptionRequest{
 		Scope:             "grove",
-		GroveID:           "grove-notif-handler",
+		ProjectID:           "grove-notif-handler",
 		TriggerActivities: []string{"COMPLETED"},
 	}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions", createReq)
@@ -515,7 +515,7 @@ func TestHandleSubscriptions_Delete(t *testing.T) {
 	// Create a new subscription to delete
 	createReq := createSubscriptionRequest{
 		Scope:             "grove",
-		GroveID:           "grove-notif-handler",
+		ProjectID:           "grove-notif-handler",
 		TriggerActivities: []string{"COMPLETED"},
 	}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions", createReq)

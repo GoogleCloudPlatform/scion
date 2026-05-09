@@ -84,7 +84,7 @@ type ConnectMessage struct {
 	Type      string   `json:"type"` // Always "connect"
 	BrokerID  string   `json:"brokerId"`
 	Version   string   `json:"version"`
-	Groves    []string `json:"groves,omitempty"`    // Grove IDs this broker serves
+	Projects    []string `json:"groves,omitempty"`    // Grove IDs this broker serves
 	Timestamp int64    `json:"timestamp,omitempty"` // Unix timestamp
 }
 
@@ -122,7 +122,7 @@ type StreamOpenMessage struct {
 	StreamID   string `json:"streamId"`
 	StreamType string `json:"streamType"` // "pty", "events", "logs"
 	Slug       string `json:"slug,omitempty"`
-	GroveID    string `json:"groveId,omitempty"`
+	ProjectID    string `json:"groveId,omitempty"`
 	Cols       int    `json:"cols,omitempty"` // For PTY streams
 	Rows       int    `json:"rows,omitempty"` // For PTY streams
 }
@@ -236,7 +236,7 @@ func NewConnectMessage(brokerID, version string, groves []string) *ConnectMessag
 		Type:      TypeConnect,
 		BrokerID:  brokerID,
 		Version:   version,
-		Groves:    groves,
+		Projects:    groves,
 		Timestamp: time.Now().Unix(),
 	}
 }
@@ -282,7 +282,7 @@ func NewStreamOpenMessage(streamID, streamType, slug, groveID string, cols, rows
 		StreamID:   streamID,
 		StreamType: streamType,
 		Slug:       slug,
-		GroveID:    groveID,
+		ProjectID:    groveID,
 		Cols:       cols,
 		Rows:       rows,
 	}

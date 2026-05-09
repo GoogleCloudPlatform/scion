@@ -363,7 +363,7 @@ func TestGCPBackend_GetMeta(t *testing.T) {
 		Value:       "secret-value",
 		SecretType:  TypeVariable,
 		Target:      "config",
-		Scope:       ScopeGrove,
+		Scope:       ScopeProject,
 		ScopeID:     "grove-1",
 		Description: "Test meta",
 	})
@@ -371,7 +371,7 @@ func TestGCPBackend_GetMeta(t *testing.T) {
 		t.Fatalf("Set failed: %v", err)
 	}
 
-	meta, err := backend.GetMeta(ctx, "META_KEY", ScopeGrove, "grove-1")
+	meta, err := backend.GetMeta(ctx, "META_KEY", ScopeProject, "grove-1")
 	if err != nil {
 		t.Fatalf("GetMeta failed: %v", err)
 	}
@@ -396,22 +396,22 @@ func TestGCPBackend_Resolve(t *testing.T) {
 		ScopeID:    "user-1",
 	})
 
-	// Grove-level override
+	// Project-level override
 	_, _, _ = backend.Set(ctx, &SetSecretInput{
 		Name:       "API_KEY",
 		Value:      "grove-api-key",
 		SecretType: TypeEnvironment,
-		Scope:      ScopeGrove,
+		Scope:      ScopeProject,
 		ScopeID:    "grove-1",
 	})
 
-	// Grove-only secret
+	// Project-only secret
 	_, _, _ = backend.Set(ctx, &SetSecretInput{
 		Name:       "DB_PASS",
 		Value:      "db-password",
 		SecretType: TypeEnvironment,
 		Target:     "DATABASE_PASSWORD",
-		Scope:      ScopeGrove,
+		Scope:      ScopeProject,
 		ScopeID:    "grove-1",
 	})
 
@@ -573,7 +573,7 @@ func TestGCPBackend_Labels_NoUserIDForNonUserScope(t *testing.T) {
 	backend, mock := createTestGCPBackend(t)
 	ctx := context.Background()
 
-	for _, scope := range []string{ScopeGrove, ScopeRuntimeBroker} {
+	for _, scope := range []string{ScopeProject, ScopeRuntimeBroker} {
 		t.Run(scope, func(t *testing.T) {
 			input := &SetSecretInput{
 				Name:       "KEY_" + scope,
@@ -617,7 +617,7 @@ func TestGCPBackend_Labels_DefaultTarget(t *testing.T) {
 		Name:       "MY_SECRET",
 		Value:      "value",
 		SecretType: TypeEnvironment,
-		Scope:      ScopeGrove,
+		Scope:      ScopeProject,
 		ScopeID:    "grove-1",
 	}
 

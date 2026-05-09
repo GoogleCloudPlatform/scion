@@ -31,7 +31,7 @@ import (
 
 // addGroveMemberWithRole is a small helper that adds the given user to the
 // grove's members group with the requested role.
-func addGroveMemberWithRole(t *testing.T, s store.Store, grove *store.Grove, userID, role string) {
+func addGroveMemberWithRole(t *testing.T, s store.Store, grove *store.Project, userID, role string) {
 	t.Helper()
 	ctx := context.Background()
 	membersGroup, err := s.GetGroupBySlug(ctx, "grove:"+grove.Slug+":members")
@@ -46,7 +46,7 @@ func addGroveMemberWithRole(t *testing.T, s store.Store, grove *store.Grove, use
 
 // makeGroveMemberUser creates a user, adds them to hub-members, and adds them
 // to the grove's members group with the given role.
-func makeGroveMemberUser(t *testing.T, s store.Store, grove *store.Grove, id, name, role string) *store.User {
+func makeGroveMemberUser(t *testing.T, s store.Store, grove *store.Project, id, name, role string) *store.User {
 	t.Helper()
 	ctx := context.Background()
 	u := &store.User{
@@ -67,7 +67,7 @@ func makeGroveMemberUser(t *testing.T, s store.Store, grove *store.Grove, id, na
 // AuthzService.CheckAccess: grove owner/admin bypass
 // =============================================================================
 
-func TestAuthz_GroveOwnerBypass_NonCreatorOwnerCanUpdateGrove(t *testing.T) {
+func TestAuthz_GroveOwnerBypass_NonCreatorOwnerCanUpdateProject(t *testing.T) {
 	srv, s, _, bob, grove := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
@@ -90,7 +90,7 @@ func TestAuthz_GroveOwnerBypass_NonCreatorAdminCanDeleteAgent(t *testing.T) {
 	// Alice creates the agent.
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "alice-agent-1", Slug: "alice-agent-1", Name: "Alice Agent",
-		GroveID: grove.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
+		ProjectID: grove.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
 	}))
 	a, err := s.GetAgent(ctx, "alice-agent-1")
 	require.NoError(t, err)
@@ -101,7 +101,7 @@ func TestAuthz_GroveOwnerBypass_NonCreatorAdminCanDeleteAgent(t *testing.T) {
 	assert.Equal(t, "grove owner/admin", decision.Reason)
 }
 
-func TestAuthz_GroveOwnerBypass_RegularMemberCannotUpdateGrove(t *testing.T) {
+func TestAuthz_GroveOwnerBypass_RegularMemberCannotUpdateProject(t *testing.T) {
 	srv, s, _, _, grove := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
@@ -121,7 +121,7 @@ func TestAuthz_GroveOwnerBypass_RegularMemberCannotDeleteOthersAgent(t *testing.
 	// Alice creates the agent; carol is just a regular member.
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "alice-agent-2", Slug: "alice-agent-2", Name: "Alice Agent 2",
-		GroveID: grove.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
+		ProjectID: grove.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
 	}))
 	a, err := s.GetAgent(ctx, "alice-agent-2")
 	require.NoError(t, err)
@@ -183,7 +183,7 @@ func TestCapabilities_GroveOwnerBypass_AgentAllActions(t *testing.T) {
 
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "alice-agent-cap", Slug: "alice-agent-cap", Name: "Alice Agent Cap",
-		GroveID: grove.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
+		ProjectID: grove.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
 	}))
 	a, err := s.GetAgent(ctx, "alice-agent-cap")
 	require.NoError(t, err)
@@ -205,11 +205,11 @@ func TestCapabilities_GroveOwnerBypass_BatchAllActions(t *testing.T) {
 	// Two agents: one owned by alice, one by bob.
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "agent-alice-b", Slug: "agent-alice-b", Name: "AliceB",
-		GroveID: grove.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
+		ProjectID: grove.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "agent-bob-b", Slug: "agent-bob-b", Name: "BobB",
-		GroveID: grove.ID, OwnerID: bob.ID, Phase: string(state.PhaseRunning),
+		ProjectID: grove.ID, OwnerID: bob.ID, Phase: string(state.PhaseRunning),
 	}))
 
 	a1, err := s.GetAgent(ctx, "agent-alice-b")
@@ -251,7 +251,7 @@ func TestCapabilities_RegularMember_AgentLimitedActions(t *testing.T) {
 
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "alice-agent-cap2", Slug: "alice-agent-cap2", Name: "Alice Agent Cap2",
-		GroveID: grove.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
+		ProjectID: grove.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
 	}))
 	a, err := s.GetAgent(ctx, "alice-agent-cap2")
 	require.NoError(t, err)
@@ -268,7 +268,7 @@ func TestCapabilities_RegularMember_AgentLimitedActions(t *testing.T) {
 // HTTP-level checks: closes the latent open-update bug on /groves/{id}.
 // =============================================================================
 
-func TestUpdateGrove_NonCreatorOwnerAllowed(t *testing.T) {
+func TestUpdateProject_NonCreatorOwnerAllowed(t *testing.T) {
 	srv, s, _, _, grove := setupDemoPolicyTest(t)
 	bob := makeGroveMemberUser(t, s, grove, "user-bob-http-owner", "Bob HTTP", store.GroupMemberRoleOwner)
 
@@ -278,7 +278,7 @@ func TestUpdateGrove_NonCreatorOwnerAllowed(t *testing.T) {
 		"grove owner (non-creator) should not get 403 on update; got: %s", rec.Body.String())
 }
 
-func TestUpdateGrove_RegularMemberDenied(t *testing.T) {
+func TestUpdateProject_RegularMemberDenied(t *testing.T) {
 	srv, s, _, _, grove := setupDemoPolicyTest(t)
 	carol := makeGroveMemberUser(t, s, grove, "user-carol-http", "Carol HTTP", store.GroupMemberRoleMember)
 
@@ -288,7 +288,7 @@ func TestUpdateGrove_RegularMemberDenied(t *testing.T) {
 		"regular member should be denied PATCH /groves; got: %s body=%s", http.StatusText(rec.Code), rec.Body.String())
 }
 
-func TestUpdateGrove_OutsiderDenied(t *testing.T) {
+func TestUpdateProject_OutsiderDenied(t *testing.T) {
 	srv, _, _, bob, grove := setupDemoPolicyTest(t)
 	// Bob is a hub-member but NOT a grove member at all.
 	body := map[string]string{"description": "updated by bob (outsider)"}
@@ -297,7 +297,7 @@ func TestUpdateGrove_OutsiderDenied(t *testing.T) {
 		"non-grove user should be denied PATCH /groves; got: %s body=%s", http.StatusText(rec.Code), rec.Body.String())
 }
 
-func TestUpdateGrove_CreatorOwnerAllowed(t *testing.T) {
+func TestUpdateProject_CreatorOwnerAllowed(t *testing.T) {
 	srv, _, alice, _, grove := setupDemoPolicyTest(t)
 	body := map[string]string{"description": "updated by alice (creator)"}
 	rec := doRequestAsUser(t, srv, alice, http.MethodPatch, "/api/v1/groves/"+grove.ID, body)

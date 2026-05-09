@@ -32,9 +32,9 @@ import (
 type TemplateLocation string
 
 const (
-	LocationLocalGrove  TemplateLocation = "local-grove"
+	LocationLocalProject  TemplateLocation = "local-grove"
 	LocationLocalGlobal TemplateLocation = "local-global"
-	LocationHubGrove    TemplateLocation = "hub-grove"
+	LocationHubProject    TemplateLocation = "hub-grove"
 	LocationHubGlobal   TemplateLocation = "hub-global"
 )
 
@@ -49,11 +49,11 @@ type TemplateMatch struct {
 // DisplayLocation returns a human-readable location string.
 func (m *TemplateMatch) DisplayLocation() string {
 	switch m.Location {
-	case LocationLocalGrove:
+	case LocationLocalProject:
 		return fmt.Sprintf("Local Grove    (%s)", m.LocalPath)
 	case LocationLocalGlobal:
 		return fmt.Sprintf("Local Global   (%s)", m.LocalPath)
-	case LocationHubGrove:
+	case LocationHubProject:
 		return fmt.Sprintf("Hub Grove      (scope=grove, ID: %s)", m.HubTemplate.ID)
 	case LocationHubGlobal:
 		return fmt.Sprintf("Hub Global     (scope=global, ID: %s)", m.HubTemplate.ID)
@@ -64,12 +64,12 @@ func (m *TemplateMatch) DisplayLocation() string {
 
 // IsLocal returns true if this is a local template.
 func (m *TemplateMatch) IsLocal() bool {
-	return m.Location == LocationLocalGrove || m.Location == LocationLocalGlobal
+	return m.Location == LocationLocalProject || m.Location == LocationLocalGlobal
 }
 
 // IsHub returns true if this is a hub template.
 func (m *TemplateMatch) IsHub() bool {
-	return m.Location == LocationHubGrove || m.Location == LocationHubGlobal
+	return m.Location == LocationHubProject || m.Location == LocationHubGlobal
 }
 
 // IsGlobal returns true if this template is in global scope.
@@ -79,7 +79,7 @@ func (m *TemplateMatch) IsGlobal() bool {
 
 // IsGrove returns true if this template is in grove scope.
 func (m *TemplateMatch) IsGrove() bool {
-	return m.Location == LocationLocalGrove || m.Location == LocationHubGrove
+	return m.Location == LocationLocalProject || m.Location == LocationHubProject
 }
 
 // ResolveOpts controls how template resolution behaves.
@@ -141,7 +141,7 @@ func findLocalTemplates(name string, opts *ResolveOpts) ([]TemplateMatch, error)
 		if tpl != nil {
 			matches = append(matches, TemplateMatch{
 				Name:      tpl.Name,
-				Location:  LocationLocalGrove,
+				Location:  LocationLocalProject,
 				LocalPath: tpl.Path,
 			})
 		}
@@ -185,14 +185,14 @@ func findHubTemplates(ctx context.Context, name string, hubCtx *HubContext, opts
 	defer cancel()
 
 	// Get grove ID for grove-scoped lookups
-	groveID, _ := GetGroveID(hubCtx)
+	projectID, _ := GetProjectID(hubCtx)
 
 	// Search grove scope unless GlobalOnly is set
-	if !opts.GlobalOnly && groveID != "" {
+	if !opts.GlobalOnly && projectID != "" {
 		resp, err := hubCtx.Client.Templates().List(listCtx, &hubclient.ListTemplatesOptions{
 			Name:    name,
 			Scope:   "grove",
-			GroveID: groveID,
+			ProjectID: projectID,
 			Status:  "active",
 		})
 		if err != nil {
@@ -204,7 +204,7 @@ func findHubTemplates(ctx context.Context, name string, hubCtx *HubContext, opts
 			if t.Name == name || t.Slug == name {
 				matches = append(matches, TemplateMatch{
 					Name:        t.Name,
-					Location:    LocationHubGrove,
+					Location:    LocationHubProject,
 					HubTemplate: t,
 				})
 			}
@@ -357,7 +357,7 @@ func ResolveTemplate(ctx context.Context, name string, hubCtx *HubContext, opts 
 		// In auto-confirm mode with multiple matches, we need a deterministic choice.
 		// Use priority: local-grove > local-global > hub-grove > hub-global
 		// This matches the existing FindTemplate behavior.
-		for _, loc := range []TemplateLocation{LocationLocalGrove, LocationLocalGlobal, LocationHubGrove, LocationHubGlobal} {
+		for _, loc := range []TemplateLocation{LocationLocalProject, LocationLocalGlobal, LocationHubProject, LocationHubGlobal} {
 			for i := range matches {
 				if matches[i].Location == loc {
 					return &matches[i], nil

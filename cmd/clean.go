@@ -66,12 +66,12 @@ func init() {
 
 func runClean(cmd *cobra.Command, args []string) error {
 	// Resolve grove path
-	gp := grovePath
+	gp := projectPath
 	if gp == "" && globalMode {
 		gp = "global"
 	}
 
-	resolvedPath, isGlobal, err := config.ResolveGrovePath(gp)
+	resolvedPath, isGlobal, err := config.ResolveProjectPath(gp)
 	if err != nil {
 		return fmt.Errorf("failed to resolve grove path: %w", err)
 	}
@@ -82,15 +82,15 @@ func runClean(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get grove name for display
-	var groveName string
+	var projectName string
 	if isGlobal {
-		groveName = "global"
+		projectName = "global"
 	} else {
 		gitRemote := util.GetGitRemoteDir(filepath.Dir(resolvedPath))
 		if gitRemote != "" {
-			groveName = util.ExtractRepoName(gitRemote)
+			projectName = util.ExtractRepoName(gitRemote)
 		} else {
-			groveName = config.GetGroveName(resolvedPath)
+			projectName = config.GetProjectName(resolvedPath)
 		}
 	}
 
@@ -131,12 +131,12 @@ func runClean(cmd *cobra.Command, args []string) error {
 					hubReachable = true
 
 					// Check if grove is registered on Hub
-					lookupID := settings.GetHubGroveID()
+					lookupID := settings.GetHubProjectID()
 					if lookupID == "" {
-						lookupID = settings.GroveID
+						lookupID = settings.ProjectID
 					}
 					if lookupID != "" {
-						linked, _ := isGroveLinked(ctx, client, lookupID)
+						linked, _ := isProjectLinked(ctx, client, lookupID)
 						hubLinked = linked
 					}
 				} else {
@@ -158,14 +158,14 @@ func runClean(cmd *cobra.Command, args []string) error {
 	// If linked to Hub, offer to unlink first
 	if hubLinked && hubReachable {
 		fmt.Println()
-		fmt.Printf("Grove '%s' is linked to the Hub.\n", groveName)
+		fmt.Printf("Grove '%s' is linked to the Hub.\n", projectName)
 
-		if hubsync.ShowCleanUnlinkPrompt(groveName, autoConfirm) {
+		if hubsync.ShowCleanUnlinkPrompt(projectName, autoConfirm) {
 			// Unlink from Hub
 			if err := config.UpdateSetting(resolvedPath, "hub.enabled", "false", isGlobal); err != nil {
 				return fmt.Errorf("failed to unlink from Hub: %w", err)
 			}
-			fmt.Printf("Grove '%s' has been unlinked from the Hub.\n", groveName)
+			fmt.Printf("Grove '%s' has been unlinked from the Hub.\n", projectName)
 			fmt.Println("The grove and its agents remain on the Hub for other brokers.")
 		}
 		// Note: We don't actually need to do anything on the hub side since we're just
@@ -173,7 +173,7 @@ func runClean(cmd *cobra.Command, args []string) error {
 	}
 
 	// Show final confirmation to remove .scion directory
-	if !hubsync.ShowCleanConfirmPrompt(groveName, resolvedPath, isGlobal, autoConfirm) {
+	if !hubsync.ShowCleanConfirmPrompt(projectName, resolvedPath, isGlobal, autoConfirm) {
 		return fmt.Errorf("clean cancelled")
 	}
 
@@ -186,9 +186,9 @@ func runClean(cmd *cobra.Command, args []string) error {
 		return outputJSON(ActionResult{
 			Status:  "success",
 			Command: "clean",
-			Message: fmt.Sprintf("Grove '%s' has been removed.", groveName),
+			Message: fmt.Sprintf("Grove '%s' has been removed.", projectName),
 			Details: map[string]interface{}{
-				"grove":  groveName,
+				"grove":  projectName,
 				"path":   resolvedPath,
 				"global": isGlobal,
 			},
@@ -196,7 +196,7 @@ func runClean(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println()
-	fmt.Printf("Grove '%s' has been removed.\n", groveName)
+	fmt.Printf("Grove '%s' has been removed.\n", projectName)
 	if isGlobal {
 		fmt.Println("The global scion configuration has been cleaned.")
 	} else {

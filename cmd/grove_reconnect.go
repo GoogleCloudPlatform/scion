@@ -57,17 +57,17 @@ by the .scion marker file in the workspace.`,
 
 		// Find the .scion marker file
 		markerPath := filepath.Join(workspacePath, config.DotScion)
-		if !config.IsGroveMarkerFile(markerPath) {
+		if !config.IsProjectMarkerFile(markerPath) {
 			return fmt.Errorf("no .scion marker file found at %s\nReconnect only works for non-git groves with externalized storage", workspacePath)
 		}
 
 		// Read the marker to find the external config
-		marker, err := config.ReadGroveMarker(markerPath)
+		marker, err := config.ReadProjectMarker(markerPath)
 		if err != nil {
 			return fmt.Errorf("invalid .scion marker file: %w", err)
 		}
 
-		configPath, err := marker.ExternalGrovePath()
+		configPath, err := marker.ExternalProjectPath()
 		if err != nil {
 			return fmt.Errorf("failed to resolve external grove path: %w", err)
 		}
@@ -86,17 +86,17 @@ by the .scion marker file in the workspace.`,
 			return outputJSON(ActionResult{
 				Status:  "success",
 				Command: "grove reconnect",
-				Message: fmt.Sprintf("Grove %q reconnected to %s", marker.GroveName, workspacePath),
+				Message: fmt.Sprintf("Grove %q reconnected to %s", marker.ProjectName, workspacePath),
 				Details: map[string]interface{}{
-					"grove_name":     marker.GroveName,
-					"grove_id":       marker.GroveID,
+					"grove_name":     marker.ProjectName,
+					"grove_id":       marker.ProjectID,
 					"config_path":    configPath,
 					"workspace_path": workspacePath,
 				},
 			})
 		}
 
-		fmt.Printf("Grove %q reconnected to %s\n", marker.GroveName, workspacePath)
+		fmt.Printf("Grove %q reconnected to %s\n", marker.ProjectName, workspacePath)
 		return nil
 	},
 }

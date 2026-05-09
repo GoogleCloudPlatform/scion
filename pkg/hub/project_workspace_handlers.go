@@ -212,7 +212,7 @@ func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, 
 	ctx := r.Context()
 
 	// Look up the grove
-	grove, err := s.store.GetGrove(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, groveID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -471,7 +471,7 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 	}
 
 	// Look up the grove
-	grove, err := s.store.GetGrove(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, groveID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -669,7 +669,7 @@ func (s *Server) handleProjectWorkspaceDelete(w http.ResponseWriter, workspacePa
 func (s *Server) handleSharedDirFiles(w http.ResponseWriter, r *http.Request, groveID, dirName, filePath string) {
 	ctx := r.Context()
 
-	grove, err := s.store.GetGrove(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, groveID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -731,7 +731,7 @@ type sharedDirResolution struct {
 // For git-based groves with a co-located broker that has a LocalPath, the path is
 // resolved via config.GetSharedDirPath(localPath, dirName). Otherwise, the path is
 // resolved via the .scion marker in the hub-native workspace directory.
-func (s *Server) resolveSharedDirPath(ctx context.Context, grove *store.Grove, dirName string) (*sharedDirResolution, error) {
+func (s *Server) resolveSharedDirPath(ctx context.Context, grove *store.Project, dirName string) (*sharedDirResolution, error) {
 	if grove.GitRemote == "" {
 		// Hub-native grove: resolve via the .scion marker in the workspace directory
 		// to find the grove-configs path where shared dirs actually live.
@@ -746,7 +746,7 @@ func (s *Server) resolveSharedDirPath(ctx context.Context, grove *store.Grove, d
 	}
 
 	// Git-based grove: find the co-located broker's local path for this grove
-	providers, err := s.store.GetGroveProviders(ctx, grove.ID)
+	providers, err := s.store.GetProjectProviders(ctx, grove.ID)
 	if err != nil {
 		slog.Warn("failed to get grove providers for shared dir browsing", "grove_id", grove.ID, "error", err)
 		return nil, fmt.Errorf("failed to resolve grove providers")
@@ -796,7 +796,7 @@ func (s *Server) resolveSharedDirPath(ctx context.Context, grove *store.Grove, d
 // marker (or grove-id for git clones) to find the external grove-configs path,
 // then returns the shared-dirs/<name> subdirectory within it.
 func resolveHubGroveSharedDirPath(groveSlug, dirName string) (string, error) {
-	workspacePath, err := hubNativeGrovePath(groveSlug)
+	workspacePath, err := hubNativeProjectPath(groveSlug)
 	if err != nil {
 		return "", err
 	}
@@ -838,7 +838,7 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 
 	ctx := r.Context()
 
-	grove, err := s.store.GetGrove(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, groveID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -849,7 +849,7 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	workspacePath, err := hubNativeGrovePath(grove.Slug)
+	workspacePath, err := hubNativeProjectPath(grove.Slug)
 	if err != nil {
 		InternalError(w)
 		return

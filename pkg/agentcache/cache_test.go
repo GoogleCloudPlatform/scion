@@ -23,7 +23,7 @@ import (
 func TestGenerateCacheKey(t *testing.T) {
 	tests := []struct {
 		name      string
-		grovePath string
+		projectPath string
 	}{
 		{"simple path", "/home/user/project/.scion"},
 		{"path with spaces", "/home/user/my project/.scion"},
@@ -32,7 +32,7 @@ func TestGenerateCacheKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			key := GenerateCacheKey(tt.grovePath)
+			key := GenerateCacheKey(tt.projectPath)
 
 			// Key should not be empty
 			if key == "" {
@@ -40,7 +40,7 @@ func TestGenerateCacheKey(t *testing.T) {
 			}
 
 			// Key should be consistent for same input
-			key2 := GenerateCacheKey(tt.grovePath)
+			key2 := GenerateCacheKey(tt.projectPath)
 			if key != key2 {
 				t.Errorf("GenerateCacheKey not consistent: got %q then %q", key, key2)
 			}

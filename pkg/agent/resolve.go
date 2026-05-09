@@ -22,6 +22,6 @@ import (
 // If profileFlag is non-empty, it is used as the profile name.
 // Otherwise, GetRuntime resolves the active profile from merged settings
 // (grove settings override global settings).
-func ResolveRuntime(grovePath, agentName, profileFlag string) runtime.Runtime {
-	return runtime.GetRuntime(grovePath, profileFlag)
+func ResolveRuntime(projectPath, agentName, profileFlag string) runtime.Runtime {
+	return runtime.GetRuntime(projectPath, profileFlag)
 }

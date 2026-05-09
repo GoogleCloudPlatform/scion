@@ -63,23 +63,23 @@ func doMultipartRequest(t *testing.T, srv *Server, method, path string, files ma
 	return rec
 }
 
-// createTestHubNativeGrove creates a hub-native grove (no git remote) via the API
+// createTestHubNativeProject creates a hub-native grove (no git remote) via the API
 // and returns the grove and its workspace path. Cleans up the workspace and any
 // external grove-config directory on test completion.
-func createTestHubNativeGrove(t *testing.T, srv *Server, name string) (*store.Grove, string) {
+func createTestHubNativeProject(t *testing.T, srv *Server, name string) (*store.Project, string) {
 	t.Helper()
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", CreateGroveRequest{Name: name})
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", CreateProjectRequest{Name: name})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var grove store.Grove
+	var grove store.Project
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove))
 
-	workspacePath, err := hubNativeGrovePath(grove.Slug)
+	workspacePath, err := hubNativeProjectPath(grove.Slug)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
-		// Clean up the external grove-config directory created by initInRepoGrove
+		// Clean up the external grove-config directory created by initInRepoProject
 		// (e.g. ~/.scion/grove-configs/<slug>__<uuid>/).
 		scionDir := filepath.Join(workspacePath, ".scion")
 		if extAgentsDir, err := config.GetGitGroveExternalAgentsDir(scionDir); err == nil && extAgentsDir != "" {
@@ -99,24 +99,24 @@ func createTestHubNativeGrove(t *testing.T, srv *Server, name string) (*store.Gr
 func resolveTestSharedDirPath(t *testing.T, workspacePath, dirName string) string {
 	t.Helper()
 	scionPath := filepath.Join(workspacePath, config.DotScion)
-	projectDir, _, err := config.ResolveGrovePath(scionPath)
+	projectDir, _, err := config.ResolveProjectPath(scionPath)
 	require.NoError(t, err, "failed to resolve grove path from marker at %s", scionPath)
 	sdPath, err := config.GetSharedDirPath(projectDir, dirName)
 	require.NoError(t, err)
 	return sdPath
 }
 
-// createTestGitGrove creates a git-backed grove via the API.
-func createTestGitGrove(t *testing.T, srv *Server, name, remote string) *store.Grove {
+// createTestGitProject creates a git-backed grove via the API.
+func createTestGitProject(t *testing.T, srv *Server, name, remote string) *store.Project {
 	t.Helper()
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", CreateGroveRequest{
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", CreateProjectRequest{
 		Name:      name,
 		GitRemote: remote,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var grove store.Grove
+	var grove store.Project
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove))
 	return &grove
 }
@@ -127,7 +127,7 @@ func createTestGitGrove(t *testing.T, srv *Server, name, remote string) *store.G
 
 func TestGroveWorkspaceList_EmptyWorkspace(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, _ := createTestHubNativeGrove(t, srv, "WS List Empty")
+	grove, _ := createTestHubNativeProject(t, srv, "WS List Empty")
 
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/workspace/files", grove.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
@@ -143,7 +143,7 @@ func TestGroveWorkspaceList_EmptyWorkspace(t *testing.T) {
 
 func TestGroveWorkspaceList_WithFiles(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS List Files")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS List Files")
 
 	// Create some test files
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "hello.txt"), []byte("hello world"), 0644))
@@ -166,7 +166,7 @@ func TestGroveWorkspaceList_WithFiles(t *testing.T) {
 
 func TestGroveWorkspaceList_IncludesScionDir(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS List Scion")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS List Scion")
 
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "visible.txt"), []byte("yes"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, ".scion", "extra.txt"), []byte("also visible"), 0644))
@@ -194,7 +194,7 @@ func TestGroveWorkspaceList_GroveNotFound(t *testing.T) {
 
 func TestGroveWorkspaceList_GitGroveRejected(t *testing.T) {
 	srv, _ := testServer(t)
-	grove := createTestGitGrove(t, srv, "Git Grove", "github.com/test/ws-list")
+	grove := createTestGitProject(t, srv, "Git Project", "github.com/test/ws-list")
 
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/workspace/files", grove.ID), nil)
 	assert.Equal(t, http.StatusConflict, rec.Code)
@@ -206,7 +206,7 @@ func TestGroveWorkspaceList_GitGroveRejected(t *testing.T) {
 
 func TestGroveWorkspaceUpload_SingleFile(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Upload Single")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS Upload Single")
 
 	files := map[string][]byte{
 		"readme.txt": []byte("hello from upload"),
@@ -229,7 +229,7 @@ func TestGroveWorkspaceUpload_SingleFile(t *testing.T) {
 
 func TestGroveWorkspaceUpload_MultipleFiles(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Upload Multi")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS Upload Multi")
 
 	files := map[string][]byte{
 		"a.txt": []byte("file a"),
@@ -253,7 +253,7 @@ func TestGroveWorkspaceUpload_MultipleFiles(t *testing.T) {
 
 func TestGroveWorkspaceUpload_NestedPath(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Upload Nested")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS Upload Nested")
 
 	files := map[string][]byte{
 		"src/main.go": []byte("package main"),
@@ -269,7 +269,7 @@ func TestGroveWorkspaceUpload_NestedPath(t *testing.T) {
 
 func TestGroveWorkspaceUpload_PathTraversalRejected(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, _ := createTestHubNativeGrove(t, srv, "WS Upload Traversal")
+	grove, _ := createTestHubNativeProject(t, srv, "WS Upload Traversal")
 
 	files := map[string][]byte{
 		"../escape.txt": []byte("bad"),
@@ -280,7 +280,7 @@ func TestGroveWorkspaceUpload_PathTraversalRejected(t *testing.T) {
 
 func TestGroveWorkspaceUpload_NoFilesRejected(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, _ := createTestHubNativeGrove(t, srv, "WS Upload Empty")
+	grove, _ := createTestHubNativeProject(t, srv, "WS Upload Empty")
 
 	// Send an empty multipart form
 	var buf bytes.Buffer
@@ -298,7 +298,7 @@ func TestGroveWorkspaceUpload_NoFilesRejected(t *testing.T) {
 
 func TestGroveWorkspaceUpload_GitGroveRejected(t *testing.T) {
 	srv, _ := testServer(t)
-	grove := createTestGitGrove(t, srv, "Git Upload", "github.com/test/ws-upload")
+	grove := createTestGitProject(t, srv, "Git Upload", "github.com/test/ws-upload")
 
 	files := map[string][]byte{
 		"test.txt": []byte("nope"),
@@ -313,7 +313,7 @@ func TestGroveWorkspaceUpload_GitGroveRejected(t *testing.T) {
 
 func TestGroveWorkspaceDelete_Success(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Delete OK")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS Delete OK")
 
 	// Create a file to delete
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "doomed.txt"), []byte("bye"), 0644))
@@ -328,7 +328,7 @@ func TestGroveWorkspaceDelete_Success(t *testing.T) {
 
 func TestGroveWorkspaceDelete_NotFound(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, _ := createTestHubNativeGrove(t, srv, "WS Delete NF")
+	grove, _ := createTestHubNativeProject(t, srv, "WS Delete NF")
 
 	rec := doRequest(t, srv, http.MethodDelete, fmt.Sprintf("/api/v1/groves/%s/workspace/files/nonexistent.txt", grove.ID), nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
@@ -336,7 +336,7 @@ func TestGroveWorkspaceDelete_NotFound(t *testing.T) {
 
 func TestGroveWorkspaceDelete_CleansEmptyDirs(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Delete Clean")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS Delete Clean")
 
 	// Create a nested file
 	nestedDir := filepath.Join(workspacePath, "deep", "nested")
@@ -362,7 +362,7 @@ func TestGroveWorkspaceDelete_CleansEmptyDirs(t *testing.T) {
 
 func TestGroveWorkspaceDownload_Success(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Download OK")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS Download OK")
 
 	content := []byte("hello download")
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "readme.txt"), content, 0644))
@@ -377,7 +377,7 @@ func TestGroveWorkspaceDownload_Success(t *testing.T) {
 
 func TestGroveWorkspaceDownload_NestedFile(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Download Nested")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS Download Nested")
 
 	require.NoError(t, os.MkdirAll(filepath.Join(workspacePath, "src"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "src", "main.go"), []byte("package main"), 0644))
@@ -391,7 +391,7 @@ func TestGroveWorkspaceDownload_NestedFile(t *testing.T) {
 
 func TestGroveWorkspaceDownload_NotFound(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, _ := createTestHubNativeGrove(t, srv, "WS Download NF")
+	grove, _ := createTestHubNativeProject(t, srv, "WS Download NF")
 
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/workspace/files/nonexistent.txt", grove.ID), nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
@@ -399,7 +399,7 @@ func TestGroveWorkspaceDownload_NotFound(t *testing.T) {
 
 func TestGroveWorkspaceDownload_InlineView(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Download Inline")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS Download Inline")
 
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "readme.txt"), []byte("inline content"), 0644))
 
@@ -417,7 +417,7 @@ func TestGroveWorkspaceDownload_InlineView(t *testing.T) {
 
 func TestGroveWorkspaceDownload_FormatJSON(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Download JSON")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS Download JSON")
 
 	content := "# Hello\n\nThis is markdown."
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "readme.md"), []byte(content), 0644))
@@ -436,7 +436,7 @@ func TestGroveWorkspaceDownload_FormatJSON(t *testing.T) {
 
 func TestGroveWorkspaceDownload_FormatJSON_BinaryRejected(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Download JSON Bin")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS Download JSON Bin")
 
 	// Write binary content (invalid UTF-8)
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "image.bin"), []byte{0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF, 0xFE}, 0644))
@@ -448,7 +448,7 @@ func TestGroveWorkspaceDownload_FormatJSON_BinaryRejected(t *testing.T) {
 
 func TestGroveWorkspaceDownload_FormatJSON_TooLarge(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Download JSON Big")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS Download JSON Big")
 
 	// Write a file larger than 1MB
 	bigContent := make([]byte, maxEditableFileSize+1)
@@ -468,7 +468,7 @@ func TestGroveWorkspaceDownload_FormatJSON_TooLarge(t *testing.T) {
 
 func TestGroveWorkspaceArchive_Success(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Archive OK")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS Archive OK")
 
 	// Create some test files
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "hello.txt"), []byte("hello world"), 0644))
@@ -501,7 +501,7 @@ func TestGroveWorkspaceArchive_Success(t *testing.T) {
 
 func TestGroveWorkspaceArchive_EmptyWorkspace(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, _ := createTestHubNativeGrove(t, srv, "WS Archive Empty")
+	grove, _ := createTestHubNativeProject(t, srv, "WS Archive Empty")
 
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/workspace/archive", grove.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -514,7 +514,7 @@ func TestGroveWorkspaceArchive_EmptyWorkspace(t *testing.T) {
 
 func TestGroveWorkspaceArchive_GitGroveRejected(t *testing.T) {
 	srv, _ := testServer(t)
-	grove := createTestGitGrove(t, srv, "Git Archive", "github.com/test/ws-archive")
+	grove := createTestGitProject(t, srv, "Git Archive", "github.com/test/ws-archive")
 
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/workspace/archive", grove.ID), nil)
 	assert.Equal(t, http.StatusConflict, rec.Code)
@@ -522,7 +522,7 @@ func TestGroveWorkspaceArchive_GitGroveRejected(t *testing.T) {
 
 func TestGroveWorkspaceArchive_MethodNotAllowed(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, _ := createTestHubNativeGrove(t, srv, "WS Archive Method")
+	grove, _ := createTestHubNativeProject(t, srv, "WS Archive Method")
 
 	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/groves/%s/workspace/archive", grove.ID), nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
@@ -534,7 +534,7 @@ func TestGroveWorkspaceArchive_MethodNotAllowed(t *testing.T) {
 
 func TestGroveWorkspaceWrite_CreateNewFile(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Write New")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS Write New")
 
 	body := ProjectWorkspaceWriteRequest{Content: "# New File\n\nHello!"}
 	rec := doRequest(t, srv, http.MethodPut, fmt.Sprintf("/api/v1/groves/%s/workspace/files/docs/readme.md", grove.ID), body)
@@ -553,7 +553,7 @@ func TestGroveWorkspaceWrite_CreateNewFile(t *testing.T) {
 
 func TestGroveWorkspaceWrite_OverwriteExisting(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Write Overwrite")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS Write Overwrite")
 
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "config.yaml"), []byte("old: true"), 0644))
 
@@ -568,7 +568,7 @@ func TestGroveWorkspaceWrite_OverwriteExisting(t *testing.T) {
 
 func TestGroveWorkspaceWrite_ConflictDetection(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Write Conflict")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS Write Conflict")
 
 	filePath := filepath.Join(workspacePath, "data.txt")
 	require.NoError(t, os.WriteFile(filePath, []byte("original"), 0644))
@@ -590,7 +590,7 @@ func TestGroveWorkspaceWrite_ConflictDetection(t *testing.T) {
 
 func TestGroveWorkspaceWrite_PathTraversalRejected(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, _ := createTestHubNativeGrove(t, srv, "WS Write Traversal")
+	grove, _ := createTestHubNativeProject(t, srv, "WS Write Traversal")
 
 	// Go's HTTP mux normalizes paths with "../" segments before they reach
 	// the handler (returns 307 Redirect to the cleaned path). To test the
@@ -613,7 +613,7 @@ func TestGroveWorkspaceWrite_PathTraversalRejected(t *testing.T) {
 
 func TestGroveWorkspace_RequiresAuth(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, _ := createTestHubNativeGrove(t, srv, "WS Auth")
+	grove, _ := createTestHubNativeProject(t, srv, "WS Auth")
 
 	endpoints := []struct {
 		method string
@@ -638,7 +638,7 @@ func TestGroveWorkspace_RequiresAuth(t *testing.T) {
 
 func TestGroveWorkspace_MethodNotAllowed(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, _ := createTestHubNativeGrove(t, srv, "WS Method")
+	grove, _ := createTestHubNativeProject(t, srv, "WS Method")
 
 	tests := []struct {
 		method string
@@ -704,7 +704,7 @@ func TestValidateWorkspaceFilePath(t *testing.T) {
 
 func TestGroveWorkspace_UploadListDelete_Integration(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, _ := createTestHubNativeGrove(t, srv, "WS Integration")
+	grove, _ := createTestHubNativeProject(t, srv, "WS Integration")
 
 	// Get baseline count (includes .scion files from grove init)
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/workspace/files", grove.ID), nil)
@@ -752,9 +752,9 @@ func TestGroveWorkspace_UploadListDelete_Integration(t *testing.T) {
 // Slug-format grove ID Tests
 // ============================================================================
 
-func TestGroveWorkspace_SlugFormatGroveID(t *testing.T) {
+func TestGroveWorkspace_SlugFormatProjectID(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, _ := createTestHubNativeGrove(t, srv, "WS Slug Format")
+	grove, _ := createTestHubNativeProject(t, srv, "WS Slug Format")
 
 	// Use {uuid}__{slug} format for grove ID
 	compositeID := grove.ID + "__" + grove.Slug
@@ -766,10 +766,10 @@ func TestGroveWorkspace_SlugFormatGroveID(t *testing.T) {
 // Shared Directory File Tests
 // ============================================================================
 
-// addSharedDirToGrove adds a shared directory to a grove via the API.
-func addSharedDirToGrove(t *testing.T, srv *Server, groveID, dirName string) {
+// addSharedDirToProject adds a shared directory to a grove via the API.
+func addSharedDirToProject(t *testing.T, srv *Server, projectID, dirName string) {
 	t.Helper()
-	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/groves/%s/shared-dirs", groveID), map[string]interface{}{
+	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/groves/%s/shared-dirs", projectID), map[string]interface{}{
 		"name": dirName,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
@@ -777,9 +777,9 @@ func addSharedDirToGrove(t *testing.T, srv *Server, groveID, dirName string) {
 
 func TestSharedDirFiles_ListEmpty(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, _ := createTestHubNativeGrove(t, srv, "SD List Empty")
+	grove, _ := createTestHubNativeProject(t, srv, "SD List Empty")
 
-	addSharedDirToGrove(t, srv, grove.ID, "build-cache")
+	addSharedDirToProject(t, srv, grove.ID, "build-cache")
 
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/shared-dirs/build-cache/files", grove.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
@@ -792,9 +792,9 @@ func TestSharedDirFiles_ListEmpty(t *testing.T) {
 
 func TestSharedDirFiles_UploadAndList(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "SD Upload List")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "SD Upload List")
 
-	addSharedDirToGrove(t, srv, grove.ID, "artifacts")
+	addSharedDirToProject(t, srv, grove.ID, "artifacts")
 
 	// Upload a file
 	files := map[string][]byte{
@@ -821,9 +821,9 @@ func TestSharedDirFiles_UploadAndList(t *testing.T) {
 
 func TestSharedDirFiles_Download(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "SD Download")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "SD Download")
 
-	addSharedDirToGrove(t, srv, grove.ID, "data")
+	addSharedDirToProject(t, srv, grove.ID, "data")
 
 	// Create a file directly at the grove-configs shared dir path
 	sharedDirPath := resolveTestSharedDirPath(t, workspacePath, "data")
@@ -837,9 +837,9 @@ func TestSharedDirFiles_Download(t *testing.T) {
 
 func TestSharedDirFiles_Delete(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "SD Delete")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "SD Delete")
 
-	addSharedDirToGrove(t, srv, grove.ID, "temp")
+	addSharedDirToProject(t, srv, grove.ID, "temp")
 
 	// Create a file at the grove-configs shared dir path
 	sharedDirPath := resolveTestSharedDirPath(t, workspacePath, "temp")
@@ -856,7 +856,7 @@ func TestSharedDirFiles_Delete(t *testing.T) {
 
 func TestSharedDirFiles_UndeclaredDirRejected(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, _ := createTestHubNativeGrove(t, srv, "SD Undeclared")
+	grove, _ := createTestHubNativeProject(t, srv, "SD Undeclared")
 
 	// Try to access files in a shared dir that hasn't been declared
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/shared-dirs/nonexistent/files", grove.ID), nil)
@@ -865,9 +865,9 @@ func TestSharedDirFiles_UndeclaredDirRejected(t *testing.T) {
 
 func TestSharedDirFiles_GitGroveNoLocalBroker(t *testing.T) {
 	srv, _ := testServer(t)
-	grove := createTestGitGrove(t, srv, "SD Git Grove", "github.com/test/sd-files")
+	grove := createTestGitProject(t, srv, "SD Git Project", "github.com/test/sd-files")
 
-	addSharedDirToGrove(t, srv, grove.ID, "cache")
+	addSharedDirToProject(t, srv, grove.ID, "cache")
 
 	// Without a co-located broker, shared dir browsing should return 409
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/shared-dirs/cache/files", grove.ID), nil)
@@ -879,8 +879,8 @@ func TestSharedDirFiles_GitGroveWithEmbeddedBroker(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := createTestGitGrove(t, srv, "SD Git Embedded", "github.com/test/sd-embedded")
-	addSharedDirToGrove(t, srv, grove.ID, "build-cache")
+	grove := createTestGitProject(t, srv, "SD Git Embedded", "github.com/test/sd-embedded")
+	addSharedDirToProject(t, srv, grove.ID, "build-cache")
 
 	// Create a broker and set it as the embedded broker
 	broker := &store.RuntimeBroker{
@@ -894,24 +894,24 @@ func TestSharedDirFiles_GitGroveWithEmbeddedBroker(t *testing.T) {
 	srv.SetEmbeddedBrokerID(broker.ID)
 
 	// Add as provider WITHOUT LocalPath (simulates auto-link / shared-workspace)
-	provider := &store.GroveProvider{
-		GroveID:    grove.ID,
+	provider := &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		// LocalPath intentionally empty — fallback resolves via hub workspace marker
 	}
-	require.NoError(t, s.AddGroveProvider(ctx, provider))
+	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	// Initialize a hub workspace so the .scion marker exists for path resolution.
 	// This simulates a shared-workspace grove that was cloned by the hub.
-	workspacePath, err := hubNativeGrovePath(grove.Slug)
+	workspacePath, err := hubNativeProjectPath(grove.Slug)
 	require.NoError(t, err)
 	scionDir := filepath.Join(workspacePath, config.DotScion)
 	require.NoError(t, config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}))
 
 	t.Cleanup(func() {
 		// Clean up the external grove-config directory via marker resolution
-		if resolved, rErr := config.ResolveGroveMarker(scionDir); rErr == nil {
+		if resolved, rErr := config.ResolveProjectMarker(scionDir); rErr == nil {
 			// resolved is ~/.scion/grove-configs/<slug>__<uuid>/.scion/
 			os.RemoveAll(filepath.Dir(resolved))
 		}
@@ -932,8 +932,8 @@ func TestSharedDirFiles_GitGroveMultipleProviders(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := createTestGitGrove(t, srv, "SD Git Multi", "github.com/test/sd-multi")
-	addSharedDirToGrove(t, srv, grove.ID, "artifacts")
+	grove := createTestGitProject(t, srv, "SD Git Multi", "github.com/test/sd-multi")
+	addSharedDirToProject(t, srv, grove.ID, "artifacts")
 
 	// Create embedded broker
 	embeddedBroker := &store.RuntimeBroker{
@@ -957,21 +957,21 @@ func TestSharedDirFiles_GitGroveMultipleProviders(t *testing.T) {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, remoteBroker))
 
 	// Add both as providers
-	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID: grove.ID, BrokerID: embeddedBroker.ID, BrokerName: embeddedBroker.Name,
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: grove.ID, BrokerID: embeddedBroker.ID, BrokerName: embeddedBroker.Name,
 	}))
-	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID: grove.ID, BrokerID: remoteBroker.ID, BrokerName: remoteBroker.Name,
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: grove.ID, BrokerID: remoteBroker.ID, BrokerName: remoteBroker.Name,
 	}))
 
 	// Initialize a hub workspace so the .scion marker exists for path resolution
-	workspacePath, err := hubNativeGrovePath(grove.Slug)
+	workspacePath, err := hubNativeProjectPath(grove.Slug)
 	require.NoError(t, err)
 	scionDir := filepath.Join(workspacePath, config.DotScion)
 	require.NoError(t, config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}))
 
 	t.Cleanup(func() {
-		if resolved, rErr := config.ResolveGroveMarker(scionDir); rErr == nil {
+		if resolved, rErr := config.ResolveProjectMarker(scionDir); rErr == nil {
 			os.RemoveAll(filepath.Dir(resolved))
 		}
 		os.RemoveAll(workspacePath)
@@ -990,10 +990,10 @@ func TestSharedDirFiles_GitGroveMultipleProviders(t *testing.T) {
 // Shared Workspace (Git-Workspace Hybrid) Tests
 // =============================================================================
 
-// createTestSharedWorkspaceGrove creates a shared-workspace git grove via the API.
+// createTestSharedWorkspaceProject creates a shared-workspace git grove via the API.
 // It uses a local git repo as the clone source so that tests don't require network
 // access or a GITHUB_TOKEN.
-func createTestSharedWorkspaceGrove(t *testing.T, srv *Server, name, remote string) (*store.Grove, string) {
+func createTestSharedWorkspaceProject(t *testing.T, srv *Server, name, remote string) (*store.Project, string) {
 	t.Helper()
 
 	// Create a local git repo to serve as the clone source
@@ -1009,7 +1009,7 @@ func createTestSharedWorkspaceGrove(t *testing.T, srv *Server, name, remote stri
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", CreateGroveRequest{
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", CreateProjectRequest{
 		Name:          name,
 		GitRemote:     remote,
 		WorkspaceMode: "shared",
@@ -1020,10 +1020,10 @@ func createTestSharedWorkspaceGrove(t *testing.T, srv *Server, name, remote stri
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var grove store.Grove
+	var grove store.Project
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove))
 
-	workspacePath, err := hubNativeGrovePath(grove.Slug)
+	workspacePath, err := hubNativeProjectPath(grove.Slug)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -1039,7 +1039,7 @@ func createTestSharedWorkspaceGrove(t *testing.T, srv *Server, name, remote stri
 
 func TestGroveWorkspaceList_SharedWorkspaceAllowed(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestSharedWorkspaceGrove(t, srv, "Shared List", "github.com/test/shared-list")
+	grove, workspacePath := createTestSharedWorkspaceProject(t, srv, "Shared List", "github.com/test/shared-list")
 
 	// Create a test file in the workspace
 	require.NoError(t, os.MkdirAll(workspacePath, 0755))
@@ -1055,7 +1055,7 @@ func TestGroveWorkspaceList_SharedWorkspaceAllowed(t *testing.T) {
 
 func TestGroveWorkspaceUpload_SharedWorkspaceAllowed(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, _ := createTestSharedWorkspaceGrove(t, srv, "Shared Upload", "github.com/test/shared-upload")
+	grove, _ := createTestSharedWorkspaceProject(t, srv, "Shared Upload", "github.com/test/shared-upload")
 
 	files := map[string][]byte{
 		"test.txt": []byte("shared workspace upload"),
@@ -1066,7 +1066,7 @@ func TestGroveWorkspaceUpload_SharedWorkspaceAllowed(t *testing.T) {
 
 func TestGroveWorkspaceArchive_SharedWorkspaceAllowed(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestSharedWorkspaceGrove(t, srv, "Shared Archive", "github.com/test/shared-archive")
+	grove, workspacePath := createTestSharedWorkspaceProject(t, srv, "Shared Archive", "github.com/test/shared-archive")
 
 	// Create a test file
 	require.NoError(t, os.MkdirAll(workspacePath, 0755))
@@ -1080,7 +1080,7 @@ func TestGroveWorkspacePull_RequiresSharedWorkspace(t *testing.T) {
 	srv, _ := testServer(t)
 
 	// Create a regular hub-native grove (not shared-workspace)
-	grove, _ := createTestHubNativeGrove(t, srv, "Pull NonShared")
+	grove, _ := createTestHubNativeProject(t, srv, "Pull NonShared")
 
 	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/groves/%s/workspace/pull", grove.ID), nil)
 	assert.Equal(t, http.StatusConflict, rec.Code, "pull should be rejected for non-shared-workspace groves")
@@ -1090,7 +1090,7 @@ func TestGroveWorkspacePull_MethodNotAllowed(t *testing.T) {
 	srv, _ := testServer(t)
 
 	// Create shared-workspace grove directly in the store to avoid clone attempt
-	grove := store.Grove{
+	grove := store.Project{
 		ID:        "pull-method-test-id",
 		Name:      "Pull Method Test",
 		Slug:      "pull-method-test",
@@ -1100,7 +1100,7 @@ func TestGroveWorkspacePull_MethodNotAllowed(t *testing.T) {
 		},
 	}
 	ctx := context.Background()
-	err := srv.store.CreateGrove(ctx, &grove)
+	err := srv.store.CreateProject(ctx, &grove)
 	require.NoError(t, err)
 
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/workspace/pull", grove.ID), nil)
@@ -1273,7 +1273,7 @@ func TestWalkDirSearcher_SortByModTimeDesc(t *testing.T) {
 
 func TestGroveWorkspaceList_SearchQuery(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Search Query")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS Search Query")
 
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "main.go"), []byte("go"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "README.md"), []byte("md"), 0644))
@@ -1295,7 +1295,7 @@ func TestGroveWorkspaceList_SearchQuery(t *testing.T) {
 
 func TestGroveWorkspaceList_LimitParam(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Limit Param")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS Limit Param")
 
 	for i := range 10 {
 		require.NoError(t, os.WriteFile(filepath.Join(workspacePath, fmt.Sprintf("f%02d.txt", i)), []byte("x"), 0644))
@@ -1315,7 +1315,7 @@ func TestGroveWorkspaceList_LimitParam(t *testing.T) {
 
 func TestGroveWorkspaceList_HasMoreFalseWhenFewFiles(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS HasMore False")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "WS HasMore False")
 
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "only.txt"), []byte("x"), 0644))
 
@@ -1330,8 +1330,8 @@ func TestGroveWorkspaceList_HasMoreFalseWhenFewFiles(t *testing.T) {
 
 func TestSharedDirFiles_SearchQuery(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeGrove(t, srv, "SD Search Query")
-	addSharedDirToGrove(t, srv, grove.ID, "cache")
+	grove, workspacePath := createTestHubNativeProject(t, srv, "SD Search Query")
+	addSharedDirToProject(t, srv, grove.ID, "cache")
 
 	sharedDirPath := resolveTestSharedDirPath(t, workspacePath, "cache")
 	require.NoError(t, os.MkdirAll(sharedDirPath, 0755))

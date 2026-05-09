@@ -56,7 +56,7 @@ func runDoctor() error {
 	// Resolve the active runtime
 	fmt.Printf("\n%sRuntime%s\n", util.Bold, util.Reset)
 
-	resolved, err := resolveActiveGrovePath()
+	resolved, err := resolveActiveProjectPath()
 	if err != nil {
 		printCheck("grove", "warn", "No grove found — skipping runtime checks", "Run 'scion init' to create a grove.")
 		if outputFormat == "json" {
@@ -140,9 +140,9 @@ func runDoctor() error {
 	return nil
 }
 
-func resolveActiveGrovePath() (string, error) {
-	if grovePath != "" {
-		return grovePath, nil
+func resolveActiveProjectPath() (string, error) {
+	if projectPath != "" {
+		return projectPath, nil
 	}
 	resolved, _, err := config.RequireGrovePath("")
 	if err != nil {

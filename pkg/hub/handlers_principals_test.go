@@ -66,18 +66,18 @@ func TestAgentGroups(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-1",
-		Name: "Test Grove",
+		Name: "Test Project",
 		Slug: "test-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	agent := &store.Agent{
 		ID:      "agent-1",
 		Slug:    "agent-1-slug",
 		Name:    "Agent 1",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -129,18 +129,18 @@ func TestPrincipalResolve_Agent(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-1",
-		Name: "Test Grove",
+		Name: "Test Project",
 		Slug: "test-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	agent := &store.Agent{
 		ID:      "agent-1",
 		Slug:    "agent-1-slug",
 		Name:    "Agent 1",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -154,7 +154,7 @@ func TestPrincipalResolve_Agent(t *testing.T) {
 	assert.Equal(t, "agent", resp.Principal.Type)
 	assert.Equal(t, "agent-1", resp.Principal.ID)
 	assert.Equal(t, "Agent 1", resp.Principal.DisplayName)
-	assert.Equal(t, "grove-1", resp.Principal.GroveID)
+	assert.Equal(t, "grove-1", resp.Principal.ProjectID)
 	assert.NotNil(t, resp.DirectGroups)
 	assert.NotNil(t, resp.EffectiveGroups)
 }
@@ -231,18 +231,18 @@ func TestPrincipalResolve_AgentWithCreator(t *testing.T) {
 	}
 	require.NoError(t, s.CreateUser(ctx, user))
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-1",
-		Name: "Test Grove",
+		Name: "Test Project",
 		Slug: "test-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	agent := &store.Agent{
 		ID:        "agent-deleg",
 		Slug:      "agent-deleg-slug",
 		Name:      "Delegated Agent",
-		GroveID:   grove.ID,
+		ProjectID:   grove.ID,
 		Phase:     string(state.PhaseRunning),
 		CreatedBy: "creator-1",
 	}

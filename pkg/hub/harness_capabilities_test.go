@@ -33,14 +33,14 @@ func seedCreatedAgentForHarnessTest(t *testing.T, s store.Store, id, harnessConf
 	t.Helper()
 	ctx := context.Background()
 
-	grove := &store.Grove{ID: "grove-" + id, Name: "Grove " + id, Slug: "grove-" + id}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	grove := &store.Project{ID: "grove-" + id, Name: "Project " + id, Slug: "grove-" + id}
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	agent := &store.Agent{
 		ID:      "agent-" + id,
 		Slug:    "agent-" + id,
 		Name:    "Agent " + id,
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseCreated),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: harnessConfig,

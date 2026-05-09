@@ -302,7 +302,7 @@ func TestGetHubEnabledScope_DefaultWhenNothingSet(t *testing.T) {
 	assert.False(t, scope.Enabled)
 }
 
-func TestGetHubEndpointScope_FromGrove(t *testing.T) {
+func TestGetHubEndpointScope_FromProject(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("SCION_HUB_ENDPOINT", "")

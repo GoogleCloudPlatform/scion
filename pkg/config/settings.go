@@ -933,11 +933,11 @@ func (s *Settings) GetHubEndpoint() string {
 	return ""
 }
 
-// GetHubGroveID returns the hub-side grove ID if configured.
+// GetHubProjectID returns the hub-side grove ID if configured.
 // This is the ID of the grove on the Hub, which may differ from the local
 // deterministic grove_id (especially for git-based groves where grove_id
 // is a UUID v5 hash of the git remote).
-func (s *Settings) GetHubGroveID() string {
+func (s *Settings) GetHubProjectID() string {
 	if s.Hub != nil {
 		return s.Hub.ProjectID
 	}

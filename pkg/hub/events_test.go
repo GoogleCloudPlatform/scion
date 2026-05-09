@@ -68,7 +68,7 @@ func TestChannelEventPublisher_PublishAgentStatus(t *testing.T) {
 
 	agent := &store.Agent{
 		ID:      "a1",
-		GroveID: "g1",
+		ProjectID: "g1",
 		Phase:   "running",
 	}
 
@@ -84,7 +84,7 @@ func TestChannelEventPublisher_PublishAgentStatus(t *testing.T) {
 		if err := json.Unmarshal(evt.Data, &data); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if data.AgentID != "a1" || data.Phase != "running" || data.GroveID != "g1" {
+		if data.AgentID != "a1" || data.Phase != "running" || data.ProjectID != "g1" {
 			t.Errorf("unexpected event data: %+v", data)
 		}
 	case <-time.After(time.Second):
@@ -111,7 +111,7 @@ func TestChannelEventPublisher_PublishAgentStatus_IncludesTurnCounts(t *testing.
 
 	agent := &store.Agent{
 		ID:                "a1",
-		GroveID:           "g1",
+		ProjectID:           "g1",
 		Phase:             "running",
 		Activity:          "thinking",
 		CurrentTurns:      5,
@@ -155,7 +155,7 @@ func TestChannelEventPublisher_PublishAgentCreated(t *testing.T) {
 
 	agent := &store.Agent{
 		ID:              "a1",
-		GroveID:         "g1",
+		ProjectID:         "g1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
 		Template:        "claude",
@@ -217,7 +217,7 @@ func TestChannelEventPublisher_PublishAgentDeleted(t *testing.T) {
 		if err := json.Unmarshal(evt.Data, &data); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if data.AgentID != "a1" || data.GroveID != "g1" {
+		if data.AgentID != "a1" || data.ProjectID != "g1" {
 			t.Errorf("unexpected event data: %+v", data)
 		}
 	case <-time.After(time.Second):
@@ -241,9 +241,9 @@ func TestChannelEventPublisher_PublishGroveCreated(t *testing.T) {
 	ch, unsub := pub.Subscribe("grove.g1.created")
 	defer unsub()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "g1",
-		Name: "My Grove",
+		Name: "My Project",
 		Slug: "my-grove",
 	}
 
@@ -258,7 +258,7 @@ func TestChannelEventPublisher_PublishGroveCreated(t *testing.T) {
 		if err := json.Unmarshal(evt.Data, &data); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if data.GroveID != "g1" || data.Name != "My Grove" || data.Slug != "my-grove" {
+		if data.ProjectID != "g1" || data.Name != "My Project" || data.Slug != "my-grove" {
 			t.Errorf("unexpected event data: %+v", data)
 		}
 	case <-time.After(time.Second):
@@ -276,14 +276,14 @@ func TestChannelEventPublisher_PublishUserMessage_FanOut(t *testing.T) {
 
 	userCh, unsubUser := pub.Subscribe("user.u1.message")
 	defer unsubUser()
-	groveCh, unsubGrove := pub.Subscribe("grove.g1.user.message")
-	defer unsubGrove()
+	groveCh, unsubProject := pub.Subscribe("grove.g1.user.message")
+	defer unsubProject()
 	agentCh, unsubAgent := pub.Subscribe("agent.a1.message")
 	defer unsubAgent()
 
 	msg := &store.Message{
 		ID:          "m1",
-		GroveID:     "g1",
+		ProjectID:     "g1",
 		Sender:      "agent:coder",
 		SenderID:    "a1",
 		Recipient:   "user:alice",
@@ -326,14 +326,14 @@ func TestChannelEventPublisher_PublishUserMessage_UserToAgent(t *testing.T) {
 
 	userCh, unsubUser := pub.Subscribe("user.a1.message")
 	defer unsubUser()
-	groveCh, unsubGrove := pub.Subscribe("grove.g1.user.message")
-	defer unsubGrove()
+	groveCh, unsubProject := pub.Subscribe("grove.g1.user.message")
+	defer unsubProject()
 	agentCh, unsubAgent := pub.Subscribe("agent.a1.message")
 	defer unsubAgent()
 
 	msg := &store.Message{
 		ID:          "m2",
-		GroveID:     "g1",
+		ProjectID:     "g1",
 		Sender:      "user:alice",
 		SenderID:    "u1",
 		Recipient:   "agent:coder",
@@ -385,7 +385,7 @@ func TestChannelEventPublisher_PublishUserMessage_Broadcasted(t *testing.T) {
 
 	msg := &store.Message{
 		ID:          "m3",
-		GroveID:     "g1",
+		ProjectID:     "g1",
 		Sender:      "user:alice",
 		SenderID:    "u1",
 		Recipient:   "agent:coder",
@@ -426,7 +426,7 @@ func TestChannelEventPublisher_PublishBrokerConnected(t *testing.T) {
 
 	for _, tc := range []struct {
 		ch      <-chan Event
-		groveID string
+		projectID string
 	}{
 		{ch1, "g1"},
 		{ch2, "g2"},
@@ -437,11 +437,11 @@ func TestChannelEventPublisher_PublishBrokerConnected(t *testing.T) {
 			if err := json.Unmarshal(evt.Data, &data); err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
-			if data.BrokerID != "b1" || data.GroveID != tc.groveID || data.Status != "online" || data.BrokerName != "broker-1" {
-				t.Errorf("unexpected event data for grove %s: %+v", tc.groveID, data)
+			if data.BrokerID != "b1" || data.ProjectID != tc.projectID || data.Status != "online" || data.BrokerName != "broker-1" {
+				t.Errorf("unexpected event data for grove %s: %+v", tc.projectID, data)
 			}
 		case <-time.After(time.Second):
-			t.Fatalf("timeout waiting for broker connected event for grove %s", tc.groveID)
+			t.Fatalf("timeout waiting for broker connected event for grove %s", tc.projectID)
 		}
 	}
 }
@@ -455,7 +455,7 @@ func TestChannelEventPublisher_Backpressure(t *testing.T) {
 
 	agent := &store.Agent{
 		ID:      "a1",
-		GroveID: "g1",
+		ProjectID: "g1",
 		Phase:   "running",
 	}
 
@@ -496,7 +496,7 @@ func TestChannelEventPublisher_SubscribeUnsubscribe(t *testing.T) {
 
 	agent := &store.Agent{
 		ID:      "a1",
-		GroveID: "g1",
+		ProjectID: "g1",
 		Phase:   "running",
 	}
 
@@ -550,7 +550,7 @@ func TestChannelEventPublisher_WildcardSubscription(t *testing.T) {
 	ch, unsub := pub.Subscribe("grove.>")
 	defer unsub()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "g1",
 		Name: "Test",
 		Slug: "test",
@@ -578,7 +578,7 @@ func TestChannelEventPublisher_PublishNotification(t *testing.T) {
 	notif := &store.Notification{
 		ID:        "n1",
 		AgentID:   "a1",
-		GroveID:   "g1",
+		ProjectID:   "g1",
 		Status:    "COMPLETED",
 		Message:   "test-agent has reached a state of COMPLETED",
 		CreatedAt: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC),
@@ -601,8 +601,8 @@ func TestChannelEventPublisher_PublishNotification(t *testing.T) {
 		if data.AgentID != "a1" {
 			t.Errorf("got AgentID %q, want %q", data.AgentID, "a1")
 		}
-		if data.GroveID != "g1" {
-			t.Errorf("got GroveID %q, want %q", data.GroveID, "g1")
+		if data.ProjectID != "g1" {
+			t.Errorf("got ProjectID %q, want %q", data.ProjectID, "g1")
 		}
 		if data.Status != "COMPLETED" {
 			t.Errorf("got Status %q, want %q", data.Status, "COMPLETED")
@@ -626,8 +626,8 @@ func TestNoopEventPublisher(t *testing.T) {
 	pub.PublishAgentStatus(ctx, &store.Agent{})
 	pub.PublishAgentCreated(ctx, &store.Agent{})
 	pub.PublishAgentDeleted(ctx, "", "")
-	pub.PublishGroveCreated(ctx, &store.Grove{})
-	pub.PublishGroveUpdated(ctx, &store.Grove{})
+	pub.PublishGroveCreated(ctx, &store.Project{})
+	pub.PublishGroveUpdated(ctx, &store.Project{})
 	pub.PublishGroveDeleted(ctx, "")
 	pub.PublishBrokerConnected(ctx, "", "", nil)
 	pub.PublishBrokerDisconnected(ctx, "", nil)

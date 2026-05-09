@@ -243,7 +243,7 @@ func (b *GCPBackend) GetMeta(ctx context.Context, name, scope, scopeID string) (
 	return fromStoreSecretMeta(s), nil
 }
 
-func (b *GCPBackend) Resolve(ctx context.Context, userID, groveID, brokerID string, opts *ResolveOpts) ([]SecretWithValue, error) {
+func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID string, opts *ResolveOpts) ([]SecretWithValue, error) {
 	merged := make(map[string]SecretWithValue)
 
 	type scopeEntry struct {
@@ -257,8 +257,8 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, groveID, brokerID stri
 	if userID != "" {
 		scopes = append(scopes, scopeEntry{scope: store.ScopeUser, scopeID: userID})
 	}
-	if groveID != "" {
-		scopes = append(scopes, scopeEntry{scope: store.ScopeGrove, scopeID: groveID})
+	if projectID != "" {
+		scopes = append(scopes, scopeEntry{scope: store.ScopeProject, scopeID: projectID})
 	}
 	if brokerID != "" {
 		scopes = append(scopes, scopeEntry{scope: store.ScopeRuntimeBroker, scopeID: brokerID})

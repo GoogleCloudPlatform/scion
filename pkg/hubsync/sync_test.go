@@ -31,12 +31,12 @@ import (
 )
 
 func TestEnsureHubReady_GlobalFallbackWithHubEnabled(t *testing.T) {
-	// When grovePath="" and the resolution falls back to global, EnsureHubReady
+	// When projectPath="" and the resolution falls back to global, EnsureHubReady
 	// should still attempt hub integration if hub is enabled in global settings.
 	// This was previously broken: the function returned (nil, nil) immediately
 	// when falling back to global, regardless of whether hub was enabled.
 
-	groveID := "test-global-grove-id"
+	projectID := "test-global-grove-id"
 
 	// Set up a mock hub server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -44,10 +44,10 @@ func TestEnsureHubReady_GlobalFallbackWithHubEnabled(t *testing.T) {
 		switch {
 		case r.URL.Path == "/healthz":
 			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-		case r.URL.Path == "/api/v1/groves/"+groveID:
-			// Grove is already registered
+		case r.URL.Path == "/api/v1/groves/"+projectID:
+			// Project is already registered
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"id":   groveID,
+				"id":   projectID,
 				"name": "Global",
 			})
 		case strings.Contains(r.URL.Path, "/agents"):
@@ -74,12 +74,12 @@ func TestEnsureHubReady_GlobalFallbackWithHubEnabled(t *testing.T) {
 hub:
   enabled: true
   endpoint: %s
-`, groveID, server.URL)
+`, projectID, server.URL)
 	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
 		t.Fatalf("Failed to write settings: %v", err)
 	}
 
-	// Override HOME so ResolveGrovePath("") falls back to our temp global dir
+	// Override HOME so ResolveProjectPath("") falls back to our temp global dir
 	t.Setenv("HOME", tmpHome)
 	// Override hub endpoint via env var to ensure it points to our test server
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
@@ -107,22 +107,22 @@ hub:
 	if !hubCtx.IsGlobal {
 		t.Error("Expected IsGlobal=true for global grove fallback")
 	}
-	if hubCtx.GroveID != groveID {
-		t.Errorf("GroveID = %q, want %q", hubCtx.GroveID, groveID)
+	if hubCtx.ProjectID != projectID {
+		t.Errorf("ProjectID = %q, want %q", hubCtx.ProjectID, projectID)
 	}
 }
 
 func TestEnsureHubReady_EndpointOverrideBeatsSettings(t *testing.T) {
-	groveID := "test-override-grove-id"
+	projectID := "test-override-grove-id"
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/healthz":
 			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-		case r.URL.Path == "/api/v1/groves/"+groveID:
+		case r.URL.Path == "/api/v1/groves/"+projectID:
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"id":   groveID,
+				"id":   projectID,
 				"name": "Override",
 			})
 		case strings.Contains(r.URL.Path, "/agents"):
@@ -146,7 +146,7 @@ func TestEnsureHubReady_EndpointOverrideBeatsSettings(t *testing.T) {
 hub:
   enabled: true
   endpoint: http://localhost:8080
-`, groveID)
+`, projectID)
 	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
 		t.Fatalf("Failed to write settings: %v", err)
 	}
@@ -179,7 +179,7 @@ hub:
 }
 
 func TestEnsureHubReady_GlobalFallbackWithHubDisabled(t *testing.T) {
-	// When grovePath="" and the resolution falls back to global with hub NOT
+	// When projectPath="" and the resolution falls back to global with hub NOT
 	// enabled, EnsureHubReady should return (nil, nil) - same behavior as before.
 
 	tmpHome := t.TempDir()
@@ -222,7 +222,7 @@ func TestEnsureHubReady_HubContextEnvVars(t *testing.T) {
 	// is present (inside a hub-connected container), EnsureHubReady should
 	// return a valid hub context via the env var detection path.
 
-	groveID := "container-grove-id"
+	projectID := "container-grove-id"
 
 	// Set up a mock hub server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -254,7 +254,7 @@ func TestEnsureHubReady_HubContextEnvVars(t *testing.T) {
 	// Simulate container env vars
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 	t.Setenv("SCION_HUB_URL", "")
-	t.Setenv("SCION_GROVE_ID", groveID)
+	t.Setenv("SCION_GROVE_ID", projectID)
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 	t.Setenv("SCION_DEV_TOKEN", "")
 
@@ -277,8 +277,8 @@ func TestEnsureHubReady_HubContextEnvVars(t *testing.T) {
 	if hubCtx.Endpoint != server.URL {
 		t.Errorf("Endpoint = %q, want %q", hubCtx.Endpoint, server.URL)
 	}
-	if hubCtx.GroveID != groveID {
-		t.Errorf("GroveID = %q, want %q", hubCtx.GroveID, groveID)
+	if hubCtx.ProjectID != projectID {
+		t.Errorf("ProjectID = %q, want %q", hubCtx.ProjectID, projectID)
 	}
 }
 
@@ -287,7 +287,7 @@ func TestEnsureHubReady_HubContextSkipsSyncAndRegistration(t *testing.T) {
 	// grove registration and sync checks. Verify that no registration or
 	// sync API calls are made.
 
-	groveID := "container-grove-id-2"
+	projectID := "container-grove-id-2"
 	registrationCalled := false
 	syncCalled := false
 
@@ -296,11 +296,11 @@ func TestEnsureHubReady_HubContextSkipsSyncAndRegistration(t *testing.T) {
 		switch {
 		case r.URL.Path == "/healthz":
 			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-		case r.URL.Path == "/api/v1/groves/"+groveID:
-			// Grove lookup — should not reach here in container context
+		case r.URL.Path == "/api/v1/groves/"+projectID:
+			// Project lookup — should not reach here in container context
 			registrationCalled = true
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"id":   groveID,
+				"id":   projectID,
 				"name": "test-grove",
 			})
 		case strings.Contains(r.URL.Path, "/agents"):
@@ -329,7 +329,7 @@ func TestEnsureHubReady_HubContextSkipsSyncAndRegistration(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 	t.Setenv("SCION_HUB_URL", "")
-	t.Setenv("SCION_GROVE_ID", groveID)
+	t.Setenv("SCION_GROVE_ID", projectID)
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 	t.Setenv("SCION_DEV_TOKEN", "")
 
@@ -351,21 +351,21 @@ func TestEnsureHubReady_HubContextSkipsSyncAndRegistration(t *testing.T) {
 	}
 
 	if registrationCalled {
-		t.Error("Grove registration API was called; should be skipped in hub context")
+		t.Error("Project registration API was called; should be skipped in hub context")
 	}
 	if syncCalled {
 		t.Error("Sync API was called; should be skipped in hub context")
 	}
 }
 
-func TestEnsureHubReady_HubContextGroveIDEnvPriority(t *testing.T) {
+func TestEnsureHubReady_HubContextProjectIDEnvPriority(t *testing.T) {
 	// When SCION_GROVE_ID env var and settings.grove_id both exist in hub
 	// context, the env var should take priority. This is important for
 	// template-sync agents that clone an external repo whose .scion/settings
 	// contains the source repo's grove_id.
 
-	envGroveID := "env-grove-id-target"
-	settingsGroveID := "settings-grove-id-source"
+	envProjectID := "env-grove-id-target"
+	settingsProjectID := "settings-grove-id-source"
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -386,7 +386,7 @@ func TestEnsureHubReady_HubContextGroveIDEnvPriority(t *testing.T) {
 		t.Fatalf("Failed to create scion dir: %v", err)
 	}
 
-	settingsContent := fmt.Sprintf("grove_id: %s\nruntime: docker\n", settingsGroveID)
+	settingsContent := fmt.Sprintf("grove_id: %s\nruntime: docker\n", settingsProjectID)
 	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
 		t.Fatalf("Failed to write settings: %v", err)
 	}
@@ -394,7 +394,7 @@ func TestEnsureHubReady_HubContextGroveIDEnvPriority(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 	t.Setenv("SCION_HUB_URL", "")
-	t.Setenv("SCION_GROVE_ID", envGroveID)
+	t.Setenv("SCION_GROVE_ID", envProjectID)
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
 	t.Setenv("SCION_DEV_TOKEN", "")
 
@@ -413,8 +413,8 @@ func TestEnsureHubReady_HubContextGroveIDEnvPriority(t *testing.T) {
 	if hubCtx == nil {
 		t.Fatal("EnsureHubReady returned nil")
 	}
-	if hubCtx.GroveID != envGroveID {
-		t.Errorf("GroveID = %q, want %q (SCION_GROVE_ID should take priority over settings.grove_id in hub context)", hubCtx.GroveID, envGroveID)
+	if hubCtx.ProjectID != envProjectID {
+		t.Errorf("ProjectID = %q, want %q (SCION_GROVE_ID should take priority over settings.grove_id in hub context)", hubCtx.ProjectID, envProjectID)
 	}
 }
 
@@ -796,16 +796,16 @@ func TestContainsIgnoreCase(t *testing.T) {
 	}
 }
 
-func TestGroveChoice_Constants(t *testing.T) {
+func TestProjectChoice_Constants(t *testing.T) {
 	// Verify that the choice constants have expected values
-	if GroveChoiceCancel != 0 {
-		t.Errorf("GroveChoiceCancel should be 0, got %d", GroveChoiceCancel)
+	if ProjectChoiceCancel != 0 {
+		t.Errorf("ProjectChoiceCancel should be 0, got %d", ProjectChoiceCancel)
 	}
-	if GroveChoiceLink != 1 {
-		t.Errorf("GroveChoiceLink should be 1, got %d", GroveChoiceLink)
+	if ProjectChoiceLink != 1 {
+		t.Errorf("ProjectChoiceLink should be 1, got %d", ProjectChoiceLink)
 	}
-	if GroveChoiceRegisterNew != 2 {
-		t.Errorf("GroveChoiceRegisterNew should be 2, got %d", GroveChoiceRegisterNew)
+	if ProjectChoiceRegisterNew != 2 {
+		t.Errorf("ProjectChoiceRegisterNew should be 2, got %d", ProjectChoiceRegisterNew)
 	}
 }
 
@@ -1004,7 +1004,7 @@ func TestUpdateLastSyncedAt_UsesHubTime(t *testing.T) {
 	UpdateLastSyncedAt(tmpDir, hubTime, false)
 
 	// Read back from state.yaml
-	state, err := config.LoadGroveState(tmpDir)
+	state, err := config.LoadProjectState(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to load grove state: %v", err)
 	}
@@ -1035,7 +1035,7 @@ func TestUpdateLastSyncedAt_FallbackToLocalTime(t *testing.T) {
 	UpdateLastSyncedAt(tmpDir, time.Time{}, false) // zero time = fallback
 	after := time.Now().UTC()
 
-	state, err := config.LoadGroveState(tmpDir)
+	state, err := config.LoadProjectState(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to load grove state: %v", err)
 	}
@@ -1065,7 +1065,7 @@ func TestUpdateLastSyncedAt_NanoPrecision(t *testing.T) {
 	hubTime := time.Date(2025, 6, 15, 10, 30, 45, 123456789, time.UTC)
 	UpdateLastSyncedAt(tmpDir, hubTime, false)
 
-	state, err := config.LoadGroveState(tmpDir)
+	state, err := config.LoadProjectState(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to load grove state: %v", err)
 	}
@@ -1096,7 +1096,7 @@ func TestUpdateLastSyncedAt_Monotonic(t *testing.T) {
 	UpdateLastSyncedAt(tmpDir, newer, false)
 	UpdateLastSyncedAt(tmpDir, older, false)
 
-	state, err := config.LoadGroveState(tmpDir)
+	state, err := config.LoadProjectState(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to load grove state: %v", err)
 	}
@@ -1122,7 +1122,7 @@ func TestUpdateLastSyncedAt_InvalidExistingTimestamp(t *testing.T) {
 	hubTime := time.Date(2026, 3, 2, 9, 30, 0, 123, time.UTC)
 	UpdateLastSyncedAt(tmpDir, hubTime, false)
 
-	state, err := config.LoadGroveState(tmpDir)
+	state, err := config.LoadProjectState(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to load grove state: %v", err)
 	}
@@ -1159,7 +1159,7 @@ func TestSyncResult_ServerTime(t *testing.T) {
 	}
 }
 
-// --- cleanupGroveBrokerCredentials tests ---
+// --- cleanupProjectBrokerCredentials tests ---
 
 func TestCleanupGroveBrokerCredentials_Legacy(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -1176,7 +1176,7 @@ hub:
 		t.Fatal(err)
 	}
 
-	cleanupGroveBrokerCredentials(tmpDir)
+	cleanupProjectBrokerCredentials(tmpDir)
 
 	// Read back and verify broker credentials were removed
 	data, err := os.ReadFile(filepath.Join(tmpDir, "settings.yaml"))
@@ -1220,7 +1220,7 @@ server:
 		t.Fatal(err)
 	}
 
-	cleanupGroveBrokerCredentials(tmpDir)
+	cleanupProjectBrokerCredentials(tmpDir)
 
 	// Read back and verify broker credentials were removed
 	data, err := os.ReadFile(filepath.Join(tmpDir, "settings.yaml"))
@@ -1265,7 +1265,7 @@ hub:
 	}
 
 	// Should be a no-op
-	cleanupGroveBrokerCredentials(tmpDir)
+	cleanupProjectBrokerCredentials(tmpDir)
 
 	// Verify file is unchanged
 	data, err := os.ReadFile(filepath.Join(tmpDir, "settings.yaml"))
@@ -1282,7 +1282,7 @@ hub:
 func TestCleanupGroveBrokerCredentials_NoFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	// Should not panic or error on missing file
-	cleanupGroveBrokerCredentials(tmpDir)
+	cleanupProjectBrokerCredentials(tmpDir)
 }
 
 func TestCreateHubClient_UsesAgentTokenFromEnv(t *testing.T) {
@@ -1410,11 +1410,11 @@ func TestCreateHubClient_FallsBackToDevAuth(t *testing.T) {
 }
 
 func TestIsGroveRegistered_Found(t *testing.T) {
-	groveID := "test-grove-uuid-1234"
+	projectID := "test-grove-uuid-1234"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/groves/"+groveID {
+		if r.URL.Path == "/api/v1/groves/"+projectID {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"id": groveID, "name": "my-grove"})
+			json.NewEncoder(w).Encode(map[string]string{"id": projectID, "name": "my-grove"})
 			return
 		}
 		http.NotFound(w, r)
@@ -1426,10 +1426,10 @@ func TestIsGroveRegistered_Found(t *testing.T) {
 		t.Fatalf("createTestHubClient failed: %v", err)
 	}
 
-	hubCtx := &HubContext{Client: client, GroveID: groveID}
-	registered, err := isGroveRegistered(context.Background(), hubCtx)
+	hubCtx := &HubContext{Client: client, ProjectID: projectID}
+	registered, err := isProjectRegistered(context.Background(), hubCtx)
 	if err != nil {
-		t.Fatalf("isGroveRegistered returned error: %v", err)
+		t.Fatalf("isProjectRegistered returned error: %v", err)
 	}
 	if !registered {
 		t.Error("expected grove to be registered")
@@ -1443,7 +1443,7 @@ func TestIsGroveRegistered_NotFound(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]string{
 				"code":    "not_found",
-				"message": "Grove not found",
+				"message": "Project not found",
 			},
 		})
 	}))
@@ -1454,10 +1454,10 @@ func TestIsGroveRegistered_NotFound(t *testing.T) {
 		t.Fatalf("createTestHubClient failed: %v", err)
 	}
 
-	hubCtx := &HubContext{Client: client, GroveID: "nonexistent-id"}
-	registered, err := isGroveRegistered(context.Background(), hubCtx)
+	hubCtx := &HubContext{Client: client, ProjectID: "nonexistent-id"}
+	registered, err := isProjectRegistered(context.Background(), hubCtx)
 	if err != nil {
-		t.Fatalf("isGroveRegistered should not return error for 404, got: %v", err)
+		t.Fatalf("isProjectRegistered should not return error for 404, got: %v", err)
 	}
 	if registered {
 		t.Error("expected grove to NOT be registered")
@@ -1485,20 +1485,20 @@ func TestIsGroveRegistered_NonNotFoundError(t *testing.T) {
 		t.Fatalf("createTestHubClient failed: %v", err)
 	}
 
-	hubCtx := &HubContext{Client: client, GroveID: "some-id"}
-	_, err = isGroveRegistered(context.Background(), hubCtx)
+	hubCtx := &HubContext{Client: client, ProjectID: "some-id"}
+	_, err = isProjectRegistered(context.Background(), hubCtx)
 	if err == nil {
 		t.Fatal("expected error for 500 response, got nil")
 	}
 }
 
 func TestFindGroveByID_Found(t *testing.T) {
-	groveID := "exact-match-uuid-5678"
+	projectID := "exact-match-uuid-5678"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/groves/"+groveID {
+		if r.URL.Path == "/api/v1/groves/"+projectID {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{
-				"id":   groveID,
+				"id":   projectID,
 				"name": "original-project-name",
 			})
 			return
@@ -1515,13 +1515,13 @@ func TestFindGroveByID_Found(t *testing.T) {
 		t.Fatalf("createTestHubClient failed: %v", err)
 	}
 
-	hubCtx := &HubContext{Client: client, GroveID: groveID}
-	grove := findGroveByID(context.Background(), hubCtx)
+	hubCtx := &HubContext{Client: client, ProjectID: projectID}
+	grove := findProjectByID(context.Background(), hubCtx)
 	if grove == nil {
 		t.Fatal("expected to find grove by ID, got nil")
 	}
-	if grove.ID != groveID {
-		t.Errorf("expected grove ID %s, got %s", groveID, grove.ID)
+	if grove.ID != projectID {
+		t.Errorf("expected grove ID %s, got %s", projectID, grove.ID)
 	}
 	if grove.Name != "original-project-name" {
 		t.Errorf("expected grove name 'original-project-name', got %s", grove.Name)
@@ -1543,8 +1543,8 @@ func TestFindGroveByID_NotFound(t *testing.T) {
 		t.Fatalf("createTestHubClient failed: %v", err)
 	}
 
-	hubCtx := &HubContext{Client: client, GroveID: "nonexistent-uuid"}
-	grove := findGroveByID(context.Background(), hubCtx)
+	hubCtx := &HubContext{Client: client, ProjectID: "nonexistent-uuid"}
+	grove := findProjectByID(context.Background(), hubCtx)
 	if grove != nil {
 		t.Errorf("expected nil for non-existent grove, got %+v", grove)
 	}
@@ -1674,7 +1674,7 @@ func TestGetLocalAgentInfo_NonexistentAgent(t *testing.T) {
 // This is the scenario when startAgentViaHub sets the watermark to
 // resp.Agent.Created — the agent's creation time matches the watermark exactly.
 func TestCompareAgents_WatermarkBoundary(t *testing.T) {
-	groveID := "test-grove-id"
+	projectID := "test-grove-id"
 	brokerID := "test-broker-id"
 	watermarkTime := time.Date(2026, 2, 22, 19, 18, 4, 123456789, time.UTC)
 
@@ -1741,10 +1741,10 @@ func TestCompareAgents_WatermarkBoundary(t *testing.T) {
 
 			// Write state.yaml with the lastSyncedAt watermark
 			if !tt.lastSyncedAt.IsZero() {
-				state := &config.GroveState{
+				state := &config.ProjectState{
 					LastSyncedAt: tt.lastSyncedAt.Format(time.RFC3339Nano),
 				}
-				if err := config.SaveGroveState(tmpDir, state); err != nil {
+				if err := config.SaveProjectState(tmpDir, state); err != nil {
 					t.Fatalf("Failed to save grove state: %v", err)
 				}
 			}
@@ -1778,9 +1778,9 @@ func TestCompareAgents_WatermarkBoundary(t *testing.T) {
 
 			hubCtx := &HubContext{
 				Client:    client,
-				GroveID:   groveID,
+				ProjectID:   projectID,
 				BrokerID:  brokerID,
-				GrovePath: tmpDir,
+				ProjectPath: tmpDir,
 				Settings:  &config.Settings{},
 			}
 
@@ -1803,7 +1803,7 @@ func TestCompareAgents_WatermarkBoundary(t *testing.T) {
 }
 
 func TestCompareAgents_LocalOnlyStaleAfterWatermark(t *testing.T) {
-	groveID := "test-grove-id"
+	projectID := "test-grove-id"
 	brokerID := "test-broker-id"
 	watermark := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC)
 
@@ -1822,7 +1822,7 @@ func TestCompareAgents_LocalOnlyStaleAfterWatermark(t *testing.T) {
 		t.Fatalf("failed to set config mtime: %v", err)
 	}
 
-	if err := config.SaveGroveState(tmpDir, &config.GroveState{
+	if err := config.SaveProjectState(tmpDir, &config.ProjectState{
 		LastSyncedAt: watermark.Format(time.RFC3339Nano),
 	}); err != nil {
 		t.Fatalf("failed to save state.yaml: %v", err)
@@ -1849,9 +1849,9 @@ func TestCompareAgents_LocalOnlyStaleAfterWatermark(t *testing.T) {
 	}
 	hubCtx := &HubContext{
 		Client:    client,
-		GroveID:   groveID,
+		ProjectID:   projectID,
 		BrokerID:  brokerID,
-		GrovePath: tmpDir,
+		ProjectPath: tmpDir,
 		Settings:  &config.Settings{},
 	}
 
@@ -1876,7 +1876,7 @@ func TestCompareAgents_LocalOnlyStaleAfterWatermark(t *testing.T) {
 // is classified as StaleLocal, even when its local timestamp is newer than the
 // watermark (the scenario that previously caused the bug).
 func TestCompareAgents_PreviouslySyncedDeletedFromHub(t *testing.T) {
-	groveID := "test-grove-id"
+	projectID := "test-grove-id"
 	brokerID := "test-broker-id"
 	watermark := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC)
 
@@ -1898,7 +1898,7 @@ func TestCompareAgents_PreviouslySyncedDeletedFromHub(t *testing.T) {
 	}
 
 	// Save state with the agent in SyncedAgents (it was previously synced)
-	if err := config.SaveGroveState(tmpDir, &config.GroveState{
+	if err := config.SaveProjectState(tmpDir, &config.ProjectState{
 		LastSyncedAt: watermark.Format(time.RFC3339Nano),
 		SyncedAgents: []string{"deleted-from-hub"},
 	}); err != nil {
@@ -1927,9 +1927,9 @@ func TestCompareAgents_PreviouslySyncedDeletedFromHub(t *testing.T) {
 	}
 	hubCtx := &HubContext{
 		Client:    client,
-		GroveID:   groveID,
+		ProjectID:   projectID,
 		BrokerID:  brokerID,
-		GrovePath: tmpDir,
+		ProjectPath: tmpDir,
 		Settings:  &config.Settings{},
 	}
 
@@ -1952,7 +1952,7 @@ func TestCompareAgents_PreviouslySyncedDeletedFromHub(t *testing.T) {
 // TestCompareAgents_NewLocalAgentNotInSyncedList verifies that a genuinely new
 // local agent (not in SyncedAgents) is still classified as ToRegister.
 func TestCompareAgents_NewLocalAgentNotInSyncedList(t *testing.T) {
-	groveID := "test-grove-id"
+	projectID := "test-grove-id"
 	brokerID := "test-broker-id"
 	watermark := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC)
 
@@ -1969,7 +1969,7 @@ func TestCompareAgents_NewLocalAgentNotInSyncedList(t *testing.T) {
 	}
 
 	// Save state with SyncedAgents that does NOT include this agent
-	if err := config.SaveGroveState(tmpDir, &config.GroveState{
+	if err := config.SaveProjectState(tmpDir, &config.ProjectState{
 		LastSyncedAt: watermark.Format(time.RFC3339Nano),
 		SyncedAgents: []string{"some-other-agent"},
 	}); err != nil {
@@ -1997,9 +1997,9 @@ func TestCompareAgents_NewLocalAgentNotInSyncedList(t *testing.T) {
 	}
 	hubCtx := &HubContext{
 		Client:    client,
-		GroveID:   groveID,
+		ProjectID:   projectID,
 		BrokerID:  brokerID,
-		GrovePath: tmpDir,
+		ProjectPath: tmpDir,
 		Settings:  &config.Settings{},
 	}
 
@@ -2023,7 +2023,7 @@ func TestUpdateSyncedAgents(t *testing.T) {
 
 	UpdateSyncedAgents(tmpDir, []string{"charlie", "alpha", "bravo"})
 
-	state, err := config.LoadGroveState(tmpDir)
+	state, err := config.LoadProjectState(tmpDir)
 	if err != nil {
 		t.Fatalf("failed to load state: %v", err)
 	}
@@ -2070,7 +2070,7 @@ func TestCollectSyncedAgentNames_IncludesStaleLocal(t *testing.T) {
 // multiple sync cycles, rather than being reclassified as ToRegister after the
 // SyncedAgents list is updated.
 func TestStaleLocalAgentSurvivesSyncCycle(t *testing.T) {
-	groveID := "test-grove-id"
+	projectID := "test-grove-id"
 	brokerID := "test-broker-id"
 	watermark := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC)
 
@@ -2094,7 +2094,7 @@ func TestStaleLocalAgentSurvivesSyncCycle(t *testing.T) {
 	}
 
 	// Initial state: both agents were previously synced
-	if err := config.SaveGroveState(tmpDir, &config.GroveState{
+	if err := config.SaveProjectState(tmpDir, &config.ProjectState{
 		LastSyncedAt: watermark.Format(time.RFC3339Nano),
 		SyncedAgents: []string{"deleted-agent", "in-sync-agent"},
 	}); err != nil {
@@ -2126,9 +2126,9 @@ func TestStaleLocalAgentSurvivesSyncCycle(t *testing.T) {
 	}
 	hubCtx := &HubContext{
 		Client:    client,
-		GroveID:   groveID,
+		ProjectID:   projectID,
 		BrokerID:  brokerID,
-		GrovePath: tmpDir,
+		ProjectPath: tmpDir,
 		Settings:  &config.Settings{},
 	}
 
@@ -2166,7 +2166,7 @@ func TestStaleLocalAgentSurvivesSyncCycle(t *testing.T) {
 // as InSync when it also exists locally, and the API request does NOT include
 // a runtimeBrokerId query parameter filter.
 func TestCompareAgents_HubAgentDifferentBrokerMatchesLocal(t *testing.T) {
-	groveID := "test-grove-id"
+	projectID := "test-grove-id"
 	localBrokerID := "local-broker-id"
 	hubBrokerID := "hub-broker-id" // different from local
 
@@ -2212,9 +2212,9 @@ func TestCompareAgents_HubAgentDifferentBrokerMatchesLocal(t *testing.T) {
 
 	hubCtx := &HubContext{
 		Client:    client,
-		GroveID:   groveID,
+		ProjectID:   projectID,
 		BrokerID:  localBrokerID,
-		GrovePath: tmpDir,
+		ProjectPath: tmpDir,
 		Settings:  &config.Settings{},
 	}
 
@@ -2241,7 +2241,7 @@ func TestCompareAgents_HubAgentDifferentBrokerMatchesLocal(t *testing.T) {
 // guard: a hub-only agent assigned to a different broker is always classified as
 // RemoteOnly, never as ToRemove, regardless of watermark timing.
 func TestCompareAgents_HubOnlyAgentDifferentBrokerIsRemoteOnly(t *testing.T) {
-	groveID := "test-grove-id"
+	projectID := "test-grove-id"
 	localBrokerID := "local-broker-id"
 	otherBrokerID := "other-broker-id"
 	watermark := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC)
@@ -2255,7 +2255,7 @@ func TestCompareAgents_HubOnlyAgentDifferentBrokerIsRemoteOnly(t *testing.T) {
 
 	// Set a watermark so the agent (created before watermark) would normally
 	// be classified as ToRemove if it were on the same broker.
-	if err := config.SaveGroveState(tmpDir, &config.GroveState{
+	if err := config.SaveProjectState(tmpDir, &config.ProjectState{
 		LastSyncedAt: watermark.Format(time.RFC3339Nano),
 	}); err != nil {
 		t.Fatalf("failed to save state: %v", err)
@@ -2289,9 +2289,9 @@ func TestCompareAgents_HubOnlyAgentDifferentBrokerIsRemoteOnly(t *testing.T) {
 
 	hubCtx := &HubContext{
 		Client:    client,
-		GroveID:   groveID,
+		ProjectID:   projectID,
 		BrokerID:  localBrokerID,
-		GrovePath: tmpDir,
+		ProjectPath: tmpDir,
 		Settings:  &config.Settings{},
 	}
 
@@ -2318,7 +2318,7 @@ func TestAddRemoveSyncedAgent(t *testing.T) {
 
 	// Add a new one
 	AddSyncedAgent(tmpDir, "agent-c")
-	state, err := config.LoadGroveState(tmpDir)
+	state, err := config.LoadProjectState(tmpDir)
 	if err != nil {
 		t.Fatalf("failed to load state: %v", err)
 	}
@@ -2328,14 +2328,14 @@ func TestAddRemoveSyncedAgent(t *testing.T) {
 
 	// Add duplicate — should be idempotent
 	AddSyncedAgent(tmpDir, "agent-c")
-	state, _ = config.LoadGroveState(tmpDir)
+	state, _ = config.LoadProjectState(tmpDir)
 	if len(state.SyncedAgents) != 3 {
 		t.Fatalf("expected 3 synced agents after duplicate add, got %v", state.SyncedAgents)
 	}
 
 	// Remove one
 	RemoveSyncedAgent(tmpDir, "agent-b")
-	state, _ = config.LoadGroveState(tmpDir)
+	state, _ = config.LoadProjectState(tmpDir)
 	if len(state.SyncedAgents) != 2 {
 		t.Fatalf("expected 2 synced agents after remove, got %v", state.SyncedAgents)
 	}

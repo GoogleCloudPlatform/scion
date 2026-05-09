@@ -326,7 +326,7 @@ func (c *ControlChannelBrokerClient) ExecAgent(ctx context.Context, brokerID, br
 	return result.Output, result.ExitCode, nil
 }
 
-func (c *ControlChannelBrokerClient) CleanupGrove(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error {
+func (c *ControlChannelBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error {
 	_ = brokerEndpoint
 	path := fmt.Sprintf("/api/v1/groves/%s", url.PathEscape(groveSlug))
 	resp, err := c.doRequest(ctx, brokerID, "DELETE", path, "", nil)
@@ -552,11 +552,11 @@ func (c *HybridBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndp
 	return c.httpClient.ExecAgent(ctx, brokerID, brokerEndpoint, agentID, groveID, command, timeout)
 }
 
-func (c *HybridBrokerClient) CleanupGrove(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error {
+func (c *HybridBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error {
 	if c.useControlChannel(brokerID) {
-		return c.controlChannel.CleanupGrove(ctx, brokerID, brokerEndpoint, groveSlug)
+		return c.controlChannel.CleanupProject(ctx, brokerID, brokerEndpoint, groveSlug)
 	}
-	return c.httpClient.CleanupGrove(ctx, brokerID, brokerEndpoint, groveSlug)
+	return c.httpClient.CleanupProject(ctx, brokerID, brokerEndpoint, groveSlug)
 }
 
 // FinalizeEnv sends gathered env vars to a broker, preferring control channel.

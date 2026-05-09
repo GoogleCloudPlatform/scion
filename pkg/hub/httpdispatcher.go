@@ -95,8 +95,8 @@ func (c *HTTPRuntimeBrokerClient) ExecAgent(ctx context.Context, brokerID, broke
 	return c.transport.ExecAgent(ctx, brokerID, brokerEndpoint, agentID, groveID, command, timeout)
 }
 
-func (c *HTTPRuntimeBrokerClient) CleanupGrove(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error {
-	return c.transport.CleanupGrove(ctx, brokerID, brokerEndpoint, groveSlug)
+func (c *HTTPRuntimeBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error {
+	return c.transport.CleanupProject(ctx, brokerID, brokerEndpoint, groveSlug)
 }
 
 // GetClient returns the underlying RuntimeBrokerClient.
@@ -114,7 +114,7 @@ type GitHubAppTokenMinter interface {
 	// MintGitHubAppTokenForGrove mints a GitHub App installation token for the given grove.
 	// Returns the token, expiry (ISO 8601 string), and any error.
 	// If the grove has no installation or the app is not configured, returns ("", "", nil).
-	MintGitHubAppTokenForGrove(ctx context.Context, grove *store.Grove) (token string, expiry string, err error)
+	MintGitHubAppTokenForGrove(ctx context.Context, grove *store.Project) (token string, expiry string, err error)
 }
 
 // HTTPAgentDispatcher dispatches agent operations to remote runtime brokers via HTTP.
@@ -216,10 +216,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		ID:          agent.ID,
 		Slug:        agent.Slug,
 		Name:        agent.Name,
-		GroveID:     agent.GroveID,
+		ProjectID:     agent.ProjectID,
 		UserID:      agent.OwnerID,
 		HubEndpoint: d.hubEndpoint,
-		GrovePath:   groveInfo.grovePath,
+		ProjectPath:   groveInfo.grovePath,
 		GroveSlug:   groveInfo.groveSlug,
 		SharedDirs:  groveInfo.sharedDirs,
 	}
@@ -261,7 +261,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 				additionalScopes = append(additionalScopes, GCPTokenScopeForSA(gcpID.ServiceAccountID))
 			}
 		}
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.GroveID, agent.Ancestry, additionalScopes...)
+		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, additionalScopes...)
 		if err != nil {
 			if d.debug {
 				d.log.Warn("Failed to generate agent token", "error", err)
@@ -326,7 +326,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 				"harnessConfig", agent.AppliedConfig.HarnessConfig,
 				"profile", agent.AppliedConfig.Profile,
 				"templateID", agent.AppliedConfig.TemplateID,
-				"grovePath", req.GrovePath,
+				"grovePath", req.ProjectPath,
 				"hasInlineConfig", agent.AppliedConfig.InlineConfig != nil,
 			)
 		}
@@ -404,8 +404,8 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	// GITHUB_TOKEN from secrets/env because they provide managed, scoped access
 	// with automatic refresh. If minting fails, fall back to any existing
 	// GITHUB_TOKEN from secrets/env.
-	if d.githubAppMinter != nil && agent.GroveID != "" {
-		grove, groveErr := d.store.GetGrove(ctx, agent.GroveID)
+	if d.githubAppMinter != nil && agent.ProjectID != "" {
+		grove, groveErr := d.store.GetProject(ctx, agent.ProjectID)
 		if groveErr == nil {
 			// Determine which grove to use for GitHub App token minting.
 			// Prefer the agent's own grove; fall back to a source grove
@@ -413,12 +413,12 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			// from an external repo whose git grove has the app installed).
 			mintGrove := grove
 			if grove.GitHubInstallationID == nil {
-				if sourceGroveID := agent.Labels["scion.dev/github-token-source-grove"]; sourceGroveID != "" {
-					if sg, sgErr := d.store.GetGrove(ctx, sourceGroveID); sgErr == nil && sg.GitHubInstallationID != nil {
+				if sourceProjectID := agent.Labels["scion.dev/github-token-source-grove"]; sourceProjectID != "" {
+					if sg, sgErr := d.store.GetProject(ctx, sourceProjectID); sgErr == nil && sg.GitHubInstallationID != nil {
 						mintGrove = sg
 						if d.debug {
 							d.log.Debug("buildCreateRequest: using source grove for GitHub App token",
-								"sourceGroveID", sourceGroveID,
+								"sourceProjectID", sourceProjectID,
 								"installationID", *sg.GitHubInstallationID)
 						}
 					}
@@ -429,7 +429,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 					// User already has a GITHUB_TOKEN from secrets/env.
 					// Respect it: skip overwriting with the GitHub App token.
 					d.log.Warn("buildCreateRequest: user has GITHUB_TOKEN from secrets; skipping GitHub App token injection — user token takes precedence for gh CLI, GitHub App will still be used for git credential helper",
-						"grove_id", agent.GroveID)
+						"grove_id", agent.ProjectID)
 					req.ResolvedEnv["SCION_USER_GITHUB_TOKEN"] = "true"
 					// Still enable the GitHub App machinery so the credential
 					// helper can mint tokens for git push/pull operations.
@@ -439,7 +439,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 					if mintErr != nil {
 						if d.debug {
 							d.log.Warn("buildCreateRequest: GitHub App token minting failed, falling back to PAT",
-								"error", mintErr, "grove_id", agent.GroveID)
+								"error", mintErr, "grove_id", agent.ProjectID)
 						}
 						// Fall through — PAT from secrets/env may still be available
 					} else if token != "" {
@@ -452,7 +452,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 						req.ResolvedEnv["SCION_GITHUB_TOKEN_PATH"] = "/tmp/.github-token"
 						if d.debug {
 							d.log.Debug("buildCreateRequest: injected GitHub App token",
-								"grove_id", agent.GroveID,
+								"grove_id", agent.ProjectID,
 								"installationID", *mintGrove.GitHubInstallationID,
 								"expiry", expiry)
 						}
@@ -495,7 +495,7 @@ type groveDispatchInfo struct {
 	sharedWorkspace bool // true for git-workspace hybrid groves
 }
 
-func (d *HTTPAgentDispatcher) resolveDispatchGrovePath(ctx context.Context, agent *store.Agent) (string, string) {
+func (d *HTTPAgentDispatcher) resolveDispatchProjectPath(ctx context.Context, agent *store.Agent) (string, string) {
 	info := d.resolveDispatchGroveInfo(ctx, agent)
 	return info.grovePath, info.groveSlug
 }
@@ -506,13 +506,13 @@ func (d *HTTPAgentDispatcher) resolveDispatchGroveInfo(ctx context.Context, agen
 	// slug resolution, even for groves without a git remote. Only when there
 	// is no provider path and no git remote do we fall back to groveSlug so
 	// the broker resolves the conventional ~/.scion/groves/<slug> path.
-	if agent.GroveID == "" {
+	if agent.ProjectID == "" {
 		return groveDispatchInfo{}
 	}
 
 	var info groveDispatchInfo
 
-	grove, err := d.store.GetGrove(ctx, agent.GroveID)
+	grove, err := d.store.GetProject(ctx, agent.ProjectID)
 	if err != nil {
 		return groveDispatchInfo{}
 	}
@@ -522,7 +522,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchGroveInfo(ctx context.Context, agen
 
 	// First check if the broker has a registered local path for this grove.
 	if agent.RuntimeBrokerID != "" {
-		provider, provErr := d.store.GetGroveProvider(ctx, agent.GroveID, agent.RuntimeBrokerID)
+		provider, provErr := d.store.GetProjectProvider(ctx, agent.ProjectID, agent.RuntimeBrokerID)
 		if provErr != nil {
 			if d.debug {
 				d.log.Warn("Failed to get grove provider for path lookup", "error", provErr)
@@ -747,8 +747,8 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 	}
 
 	// Query grove-scoped env vars
-	if agent.GroveID != "" {
-		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "grove", ScopeID: agent.GroveID})
+	if agent.ProjectID != "" {
+		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "grove", ScopeID: agent.ProjectID})
 		if err != nil {
 			if d.debug {
 				d.log.Warn("Failed to list grove env vars", "error", err)
@@ -759,7 +759,7 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 				for _, v := range vars {
 					keys = append(keys, v.Key)
 				}
-				d.log.Debug("resolveEnvFromStorage: grove scope", "grove_id", agent.GroveID, "count", len(vars), "keys", keys)
+				d.log.Debug("resolveEnvFromStorage: grove scope", "grove_id", agent.ProjectID, "count", len(vars), "keys", keys)
 			}
 			for _, v := range vars {
 				result[v.Key] = v.Value
@@ -833,8 +833,8 @@ func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.
 	}
 
 	// Check grove scope
-	if agent.GroveID != "" {
-		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "grove", ScopeID: agent.GroveID})
+	if agent.ProjectID != "" {
+		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "grove", ScopeID: agent.ProjectID})
 		if err == nil {
 			for _, v := range vars {
 				if _, inResolved := resolvedEnv[v.Key]; inResolved {
@@ -940,8 +940,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	if agent.ID != "" {
 		resolvedEnv["SCION_AGENT_ID"] = agent.ID
 	}
-	if agent.GroveID != "" {
-		resolvedEnv["SCION_GROVE_ID"] = agent.GroveID
+	if agent.ProjectID != "" {
+		resolvedEnv["SCION_GROVE_ID"] = agent.ProjectID
 	}
 	if agent.Slug != "" {
 		resolvedEnv["SCION_AGENT_SLUG"] = agent.Slug
@@ -981,7 +981,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 				additionalScopes = append(additionalScopes, GCPTokenScopeForSA(gcpID.ServiceAccountID))
 			}
 		}
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.GroveID, agent.Ancestry, additionalScopes...)
+		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, additionalScopes...)
 		if err != nil {
 			if d.debug {
 				d.log.Warn("DispatchAgentStart: failed to generate agent token", "error", err)
@@ -992,13 +992,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	}
 
 	// GitHub App token minting for agent start
-	if d.githubAppMinter != nil && agent.GroveID != "" {
-		grove, groveErr := d.store.GetGrove(ctx, agent.GroveID)
+	if d.githubAppMinter != nil && agent.ProjectID != "" {
+		grove, groveErr := d.store.GetProject(ctx, agent.ProjectID)
 		if groveErr == nil {
 			mintGrove := grove
 			if grove.GitHubInstallationID == nil {
-				if sourceGroveID := agent.Labels["scion.dev/github-token-source-grove"]; sourceGroveID != "" {
-					if sg, sgErr := d.store.GetGrove(ctx, sourceGroveID); sgErr == nil && sg.GitHubInstallationID != nil {
+				if sourceProjectID := agent.Labels["scion.dev/github-token-source-grove"]; sourceProjectID != "" {
+					if sg, sgErr := d.store.GetProject(ctx, sourceProjectID); sgErr == nil && sg.GitHubInstallationID != nil {
 						mintGrove = sg
 					}
 				}
@@ -1009,7 +1009,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 					if mintErr != nil {
 						if d.debug {
 							d.log.Warn("DispatchAgentStart: GitHub App token minting failed",
-								"error", mintErr, "grove_id", agent.GroveID)
+								"error", mintErr, "grove_id", agent.ProjectID)
 						}
 					} else if token != "" {
 						resolvedEnv["GITHUB_TOKEN"] = token
@@ -1019,7 +1019,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 					}
 				} else {
 					d.log.Warn("DispatchAgentStart: user GITHUB_TOKEN takes precedence over GitHub App token — user token will be used for gh CLI, GitHub App for git credential helper",
-						"grove_id", agent.GroveID)
+						"grove_id", agent.ProjectID)
 					resolvedEnv["SCION_USER_GITHUB_TOKEN"] = "true"
 					resolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
 				}
@@ -1053,7 +1053,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		inlineConfig = agent.AppliedConfig.InlineConfig
 	}
 
-	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.GroveID, task, grovePath, groveSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, groveInfo.sharedDirs, groveInfo.sharedWorkspace)
+	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, grovePath, groveSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, groveInfo.sharedDirs, groveInfo.sharedWorkspace)
 	if err != nil {
 		return err
 	}
@@ -1075,7 +1075,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 		return err
 	}
 
-	return d.client.StopAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.GroveID)
+	return d.client.StopAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID)
 }
 
 // DispatchAgentRestart restarts an agent on the runtime broker.
@@ -1098,8 +1098,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	if agent.ID != "" {
 		resolvedEnv["SCION_AGENT_ID"] = agent.ID
 	}
-	if agent.GroveID != "" {
-		resolvedEnv["SCION_GROVE_ID"] = agent.GroveID
+	if agent.ProjectID != "" {
+		resolvedEnv["SCION_GROVE_ID"] = agent.ProjectID
 	}
 	if agent.Slug != "" {
 		resolvedEnv["SCION_AGENT_SLUG"] = agent.Slug
@@ -1118,7 +1118,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 				additionalScopes = append(additionalScopes, GCPTokenScopeForSA(gcpID.ServiceAccountID))
 			}
 		}
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.GroveID, agent.Ancestry, additionalScopes...)
+		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, additionalScopes...)
 		if err != nil {
 			if d.debug {
 				d.log.Warn("DispatchAgentRestart: failed to generate agent token", "error", err)
@@ -1128,7 +1128,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		}
 	}
 
-	return d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.GroveID, resolvedEnv)
+	return d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv)
 }
 
 // DispatchAgentDelete deletes an agent from the runtime broker.
@@ -1142,7 +1142,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 		return err
 	}
 
-	return d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.GroveID, deleteFiles, removeBranch, softDelete, deletedAt)
+	return d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, deleteFiles, removeBranch, softDelete, deletedAt)
 }
 
 // DispatchAgentMessage sends a message to an agent on the runtime broker.
@@ -1156,7 +1156,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *s
 		return err
 	}
 
-	return d.client.MessageAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.GroveID, message, interrupt, structuredMsg)
+	return d.client.MessageAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, message, interrupt, structuredMsg)
 }
 
 // DispatchAgentLogs retrieves agent.log content from the runtime broker.
@@ -1170,7 +1170,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentLogs(ctx context.Context, agent *stor
 		return "", err
 	}
 
-	return d.client.GetAgentLogs(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.GroveID, tail)
+	return d.client.GetAgentLogs(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, tail)
 }
 
 // DispatchAgentExec executes a command in an agent on the runtime broker.
@@ -1184,7 +1184,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentExec(ctx context.Context, agent *stor
 		return "", 0, err
 	}
 
-	return d.client.ExecAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.GroveID, command, timeout)
+	return d.client.ExecAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, command, timeout)
 }
 
 // DispatchCheckAgentPrompt checks if an agent has a non-empty prompt.md file.
@@ -1198,7 +1198,7 @@ func (d *HTTPAgentDispatcher) DispatchCheckAgentPrompt(ctx context.Context, agen
 		return false, err
 	}
 
-	return d.client.CheckAgentPrompt(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.GroveID)
+	return d.client.CheckAgentPrompt(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID)
 }
 
 // resolveSecrets queries secrets from all applicable scopes and merges them
@@ -1213,7 +1213,7 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 	if d.debug {
 		d.log.Debug("resolveSecrets: querying secret backend",
 			"ownerID", agent.OwnerID,
-			"grove_id", agent.GroveID,
+			"grove_id", agent.ProjectID,
 			"brokerID", agent.RuntimeBrokerID,
 		)
 	}
@@ -1230,7 +1230,7 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 				decision := d.authzService.CheckAccess(ctx, &agentIdentityWrapper{
 					AgentTokenClaims: &AgentTokenClaims{
 						Claims:   jwt.Claims{Subject: agentID},
-						GroveID:  agent.GroveID,
+						ProjectID:  agent.ProjectID,
 						Ancestry: ancestry,
 					},
 				}, Resource{
@@ -1242,7 +1242,7 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 		}
 	}
 
-	resolved, err := d.secretBackend.Resolve(ctx, agent.OwnerID, agent.GroveID, agent.RuntimeBrokerID, resolveOpts)
+	resolved, err := d.secretBackend.Resolve(ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
 	if err != nil {
 		return nil, err
 	}

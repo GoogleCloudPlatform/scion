@@ -179,7 +179,7 @@ func TestHandleGitHubAppInstallations_ValidationErrors(t *testing.T) {
 }
 
 // ============================================================================
-// Grove GitHub Installation Association
+// Project GitHub Installation Association
 // ============================================================================
 
 func TestHandleGroveGitHubInstallation(t *testing.T) {
@@ -187,16 +187,16 @@ func TestHandleGroveGitHubInstallation(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:         "grove_gh_test",
 		Slug:       "gh-test-grove",
-		Name:       "GH Test Grove",
+		Name:       "GH Test Project",
 		GitRemote:  "https://github.com/acme/widgets",
 		Created:    time.Now(),
 		Updated:    time.Now(),
 		Visibility: "private",
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -221,14 +221,14 @@ func TestHandleGroveGitHubInstallation(t *testing.T) {
 	}
 
 	// Verify grove has installation ID
-	updatedGrove, err := s.GetGrove(ctx, "grove_gh_test")
+	updatedProject, err := s.GetProject(ctx, "grove_gh_test")
 	if err != nil {
 		t.Fatalf("failed to get grove: %v", err)
 	}
-	if updatedGrove.GitHubInstallationID == nil || *updatedGrove.GitHubInstallationID != 54321 {
-		t.Errorf("expected installation_id 54321, got %v", updatedGrove.GitHubInstallationID)
+	if updatedProject.GitHubInstallationID == nil || *updatedProject.GitHubInstallationID != 54321 {
+		t.Errorf("expected installation_id 54321, got %v", updatedProject.GitHubInstallationID)
 	}
-	if updatedGrove.GitHubAppStatus == nil || updatedGrove.GitHubAppStatus.State != store.GitHubAppStateUnchecked {
+	if updatedProject.GitHubAppStatus == nil || updatedProject.GitHubAppStatus.State != store.GitHubAppStateUnchecked {
 		t.Error("expected unchecked status after association")
 	}
 
@@ -245,11 +245,11 @@ func TestHandleGroveGitHubInstallation(t *testing.T) {
 	}
 
 	// Verify removed
-	clearedGrove, err := s.GetGrove(ctx, "grove_gh_test")
+	clearedProject, err := s.GetProject(ctx, "grove_gh_test")
 	if err != nil {
 		t.Fatalf("failed to get grove: %v", err)
 	}
-	if clearedGrove.GitHubInstallationID != nil {
+	if clearedProject.GitHubInstallationID != nil {
 		t.Error("expected nil installation_id after removal")
 	}
 }
@@ -258,12 +258,12 @@ func TestHandleGroveGitHubStatus_PostNoInstallation(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID: "grove_gh_status_check", Slug: "gh-status-check", Name: "GH Status Check",
 		GitRemote: "https://github.com/acme/widgets",
 		Created:   time.Now(), Updated: time.Now(), Visibility: "private",
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -291,17 +291,17 @@ func TestHandleGroveGitHubStatus_PostWithInstallation(t *testing.T) {
 		t.Fatalf("failed to create installation: %v", err)
 	}
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID: "grove_gh_status_check2", Slug: "gh-status-check2", Name: "GH Status Check 2",
 		GitRemote: "https://github.com/acme/widgets",
 		Created:   time.Now(), Updated: time.Now(), Visibility: "private",
 	}
 	grove.GitHubInstallationID = &instID
-	grove.GitHubAppStatus = &store.GitHubAppGroveStatus{
+	grove.GitHubAppStatus = &store.GitHubAppProjectStatus{
 		State:       store.GitHubAppStateUnchecked,
 		LastChecked: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -323,7 +323,7 @@ func TestHandleGroveGitHubStatus_PostWithInstallation(t *testing.T) {
 		t.Error("expected check_error in response since GitHub App is not configured")
 	}
 
-	// Grove status should now be updated (to error since minting failed)
+	// Project status should now be updated (to error since minting failed)
 	statusMap, ok := resp["status"].(map[string]interface{})
 	if !ok {
 		t.Fatal("expected status object in response")
@@ -337,11 +337,11 @@ func TestHandleGroveGitHubInstallation_NotFoundInstallation(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID: "grove_gh_notfound", Slug: "gh-nf", Name: "GH NF",
 		Created: time.Now(), Updated: time.Now(), Visibility: "private",
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -354,18 +354,18 @@ func TestHandleGroveGitHubInstallation_NotFoundInstallation(t *testing.T) {
 }
 
 // ============================================================================
-// Grove GitHub Permissions
+// Project GitHub Permissions
 // ============================================================================
 
 func TestHandleGroveGitHubPermissions(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID: "grove_gh_perms", Slug: "gh-perms", Name: "GH Perms",
 		Created: time.Now(), Updated: time.Now(), Visibility: "private",
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -393,11 +393,11 @@ func TestHandleGroveGitHubPermissions(t *testing.T) {
 	}
 
 	// Verify stored
-	updatedGrove, err := s.GetGrove(ctx, "grove_gh_perms")
+	updatedProject, err := s.GetProject(ctx, "grove_gh_perms")
 	if err != nil {
 		t.Fatalf("failed to get grove: %v", err)
 	}
-	if updatedGrove.GitHubPermissions == nil || updatedGrove.GitHubPermissions.Contents != "read" {
+	if updatedProject.GitHubPermissions == nil || updatedProject.GitHubPermissions.Contents != "read" {
 		t.Error("expected custom contents:read permission")
 	}
 
@@ -407,11 +407,11 @@ func TestHandleGroveGitHubPermissions(t *testing.T) {
 		t.Fatalf("expected 204, got %d", rec.Code)
 	}
 
-	clearedGrove, err := s.GetGrove(ctx, "grove_gh_perms")
+	clearedProject, err := s.GetProject(ctx, "grove_gh_perms")
 	if err != nil {
 		t.Fatalf("failed to get grove: %v", err)
 	}
-	if clearedGrove.GitHubPermissions != nil {
+	if clearedProject.GitHubPermissions != nil {
 		t.Error("expected nil permissions after reset")
 	}
 }
@@ -448,12 +448,12 @@ func TestHandleAgentGitHubTokenRefresh_NoAuth(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove and agent
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove_gh_refresh",
-		Name: "Test Grove",
+		Name: "Test Project",
 		Slug: "test-grove",
 	}
-	if err := srv.store.CreateGrove(ctx, grove); err != nil {
+	if err := srv.store.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -461,7 +461,7 @@ func TestHandleAgentGitHubTokenRefresh_NoAuth(t *testing.T) {
 		ID:      "agent_gh_refresh",
 		Name:    "test-agent",
 		Slug:    "test-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 	}
 	if err := srv.store.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -480,12 +480,12 @@ func TestHandleAgentGitHubTokenRefresh_DevAuth(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove and agent
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove_gh_refresh2",
-		Name: "Test Grove 2",
+		Name: "Test Project 2",
 		Slug: "test-grove-2",
 	}
-	if err := srv.store.CreateGrove(ctx, grove); err != nil {
+	if err := srv.store.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -493,7 +493,7 @@ func TestHandleAgentGitHubTokenRefresh_DevAuth(t *testing.T) {
 		ID:      "agent_gh_refresh2",
 		Name:    "test-agent-2",
 		Slug:    "test-agent-2",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 	}
 	if err := srv.store.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -512,12 +512,12 @@ func TestHandleAgentGitHubTokenRefresh_SelfAccess(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove and agent
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove_gh_refresh3",
-		Name: "Test Grove 3",
+		Name: "Test Project 3",
 		Slug: "test-grove-3",
 	}
-	if err := srv.store.CreateGrove(ctx, grove); err != nil {
+	if err := srv.store.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -525,7 +525,7 @@ func TestHandleAgentGitHubTokenRefresh_SelfAccess(t *testing.T) {
 		ID:      "agent_gh_refresh3",
 		Name:    "test-agent-3",
 		Slug:    "test-agent-3",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 	}
 	if err := srv.store.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -556,12 +556,12 @@ func TestHandleAgentGitHubTokenRefresh_NoInstallation(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove WITHOUT a GitHub App installation
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove_gh_refresh4",
-		Name: "Test Grove 4",
+		Name: "Test Project 4",
 		Slug: "test-grove-4",
 	}
-	if err := srv.store.CreateGrove(ctx, grove); err != nil {
+	if err := srv.store.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -569,7 +569,7 @@ func TestHandleAgentGitHubTokenRefresh_NoInstallation(t *testing.T) {
 		ID:      "agent_gh_refresh4",
 		Name:    "test-agent-4",
 		Slug:    "test-agent-4",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 	}
 	if err := srv.store.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)

@@ -35,7 +35,7 @@ var sharedDirListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List shared directories for the current grove",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err != nil {
 			return fmt.Errorf("failed to resolve grove: %w", err)
 		}
@@ -95,7 +95,7 @@ var sharedDirCreateCmd = &cobra.Command{
 			return err
 		}
 
-		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err != nil {
 			return fmt.Errorf("failed to resolve grove: %w", err)
 		}
@@ -156,7 +156,7 @@ var sharedDirRemoveCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 
-		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err != nil {
 			return fmt.Errorf("failed to resolve grove: %w", err)
 		}
@@ -219,7 +219,7 @@ var sharedDirInfoCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 
-		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err != nil {
 			return fmt.Errorf("failed to resolve grove: %w", err)
 		}

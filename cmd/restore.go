@@ -33,7 +33,7 @@ var restoreCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		agentName := api.Slugify(args[0])
 
-		hubCtx, err := CheckHubAvailability(grovePath)
+		hubCtx, err := CheckHubAvailability(projectPath)
 		if err != nil {
 			return err
 		}
@@ -47,7 +47,7 @@ var restoreCmd = &cobra.Command{
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		agent, err := hubCtx.Client.GroveAgents(hubCtx.GroveID).Restore(ctx, agentName)
+		agent, err := hubCtx.Client.ProjectAgents(hubCtx.ProjectID).Restore(ctx, agentName)
 		if err != nil {
 			return wrapHubError(fmt.Errorf("failed to restore agent: %w", err))
 		}

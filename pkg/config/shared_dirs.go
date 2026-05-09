@@ -32,7 +32,7 @@ const SharedDirsSubdir = "shared-dirs"
 // ~/.scion/grove-configs/<slug>__<uuid>/shared-dirs/.
 func GetSharedDirsBasePath(projectDir string) (string, error) {
 	// Check if this is a git grove with split storage (has grove-id file)
-	if externalAgentsDir, err := GetGitGroveExternalAgentsDir(projectDir); err == nil && externalAgentsDir != "" {
+	if externalAgentsDir, err := GetGitProjectExternalAgentsDir(projectDir); err == nil && externalAgentsDir != "" {
 		// externalAgentsDir is ~/.scion/grove-configs/<slug>__<uuid>/.scion/agents
 		// We want ~/.scion/grove-configs/<slug>__<uuid>/shared-dirs
 		// Go up past "agents" and ".scion" to reach the grove-config root

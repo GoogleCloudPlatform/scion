@@ -123,7 +123,7 @@ With --global, it initializes in the user's home folder.`,
 		}
 
 		// Check for existing grove at or above current directory
-		if _, rootDir, found := config.GetEnclosingGrovePath(); found {
+		if _, rootDir, found := config.GetEnclosingProjectPath(); found {
 			wd, _ := os.Getwd()
 			if filepath.Clean(wd) == filepath.Clean(rootDir) {
 				// Re-running init in an existing grove is allowed — it ensures
@@ -167,22 +167,22 @@ With --global, it initializes in the user's home folder.`,
 		// For non-git groves, targetDir (.scion) is now a marker file, so we must
 		// resolve through it to the external config path. The grove-id is already
 		// generated during InitProject — read it back rather than generating a new one.
-		var groveID string
+		var projectID string
 		markerPath := filepath.Join(filepath.Dir(targetDir), config.DotScion)
-		if config.IsGroveMarkerFile(markerPath) {
+		if config.IsProjectMarkerFile(markerPath) {
 			// Non-git grove: read grove-id from marker, save to external settings
-			marker, err := config.ReadGroveMarker(markerPath)
+			marker, err := config.ReadProjectMarker(markerPath)
 			if err == nil {
-				groveID = marker.GroveID
+				projectID = marker.ProjectID
 				// grove_id is already written during initExternalGrove
 			}
 		} else {
 			// Git grove: read grove-id from file, save to in-repo settings
-			groveID, _ = config.ReadGroveID(targetDir)
-			if groveID == "" {
-				groveID = config.GenerateGroveIDForDir(filepath.Dir(targetDir))
+			projectID, _ = config.ReadProjectID(targetDir)
+			if projectID == "" {
+				projectID = config.GenerateProjectIDForDir(filepath.Dir(targetDir))
 			}
-			if err := config.UpdateSetting(targetDir, "grove_id", groveID, false); err != nil {
+			if err := config.UpdateSetting(targetDir, "grove_id", projectID, false); err != nil {
 				if !isJSONOutput() {
 					fmt.Printf("Warning: failed to save grove_id: %v\n", err)
 				}
@@ -195,14 +195,14 @@ With --global, it initializes in the user's home folder.`,
 				Command: "grove init",
 				Message: "scion grove successfully initialized.",
 				Details: map[string]interface{}{
-					"groveId": groveID,
+					"groveId": projectID,
 					"path":    targetDir,
 				},
 			})
 		}
 
 		fmt.Println("scion grove successfully initialized.")
-		fmt.Printf("Grove ID: %s\n", groveID)
+		fmt.Printf("Grove ID: %s\n", projectID)
 
 		// Prompt for Hub registration if Hub is configured
 		if err := promptHubRegistration(false); err != nil {
@@ -226,7 +226,7 @@ func promptHubRegistration(isGlobal bool) error {
 	if isGlobal {
 		gp = "global"
 	}
-	resolvedPath, _, err := config.ResolveGrovePath(gp)
+	resolvedPath, _, err := config.ResolveProjectPath(gp)
 	if err != nil {
 		return nil // Silently skip if we can't resolve path
 	}
@@ -260,25 +260,25 @@ func promptHubRegistration(isGlobal bool) error {
 	}
 
 	// Get grove info
-	var groveName string
+	var projectName string
 	var gitRemote string
-	groveID := settings.GroveID
+	projectID := settings.ProjectID
 
 	if isGlobal {
-		groveName = "global"
+		projectName = "global"
 	} else {
 		gitRemote = util.GetGitRemote()
 		if gitRemote != "" {
-			groveName = util.ExtractRepoName(gitRemote)
+			projectName = util.ExtractRepoName(gitRemote)
 		} else {
-			groveName = config.GetGroveName(resolvedPath)
+			projectName = config.GetProjectName(resolvedPath)
 		}
 	}
 
 	// Register grove without broker info first
-	req := &hubclient.RegisterGroveRequest{
-		ID:        groveID,
-		Name:      groveName,
+	req := &hubclient.RegisterProjectRequest{
+		ID:        projectID,
+		Name:      projectName,
 		GitRemote: util.NormalizeGitRemote(gitRemote),
 		Path:      resolvedPath,
 	}
@@ -286,7 +286,7 @@ func promptHubRegistration(isGlobal bool) error {
 	ctxReg, cancelReg := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelReg()
 
-	resp, err := client.Groves().Register(ctxReg, req)
+	resp, err := client.Projects().Register(ctxReg, req)
 	if err != nil {
 		return fmt.Errorf("registration failed: %w", err)
 	}
@@ -295,23 +295,23 @@ func promptHubRegistration(isGlobal bool) error {
 	_ = config.UpdateSetting(resolvedPath, "hub.enabled", "true", isGlobal)
 
 	if resp.Created {
-		fmt.Printf("Created new grove on Hub: %s (ID: %s)\n", resp.Grove.Name, resp.Grove.ID)
+		fmt.Printf("Created new grove on Hub: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	} else {
-		fmt.Printf("Linked to existing grove on Hub: %s (ID: %s)\n", resp.Grove.Name, resp.Grove.ID)
+		fmt.Printf("Linked to existing grove on Hub: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	}
 	// Store the hub grove ID separately if it differs from the local grove_id
-	if resp.Grove.ID != groveID {
-		if err := config.UpdateSetting(resolvedPath, "hub.groveId", resp.Grove.ID, isGlobal); err != nil {
+	if resp.Project.ID != projectID {
+		if err := config.UpdateSetting(resolvedPath, "hub.groveId", resp.Project.ID, isGlobal); err != nil {
 			fmt.Printf("Warning: failed to save hub grove ID: %v\n", err)
 		}
-		groveID = resp.Grove.ID
+		projectID = resp.Project.ID
 	}
 
 	// Show any auto-provided brokers
 	ctxProviders, cancelProviders := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelProviders()
 
-	providersResp, err := client.Groves().ListProviders(ctxProviders, resp.Grove.ID)
+	providersResp, err := client.Projects().ListProviders(ctxProviders, resp.Project.ID)
 	if err == nil && providersResp != nil && len(providersResp.Providers) > 0 {
 		fmt.Println()
 		fmt.Println("Brokers providing for this grove:")
@@ -340,7 +340,7 @@ func promptHubRegistration(isGlobal bool) error {
 
 		if !alreadyProvider {
 			fmt.Println()
-			if hubsync.ShowInitProvidePrompt(localBrokerName, resp.Grove.Name, autoConfirm) {
+			if hubsync.ShowInitProvidePrompt(localBrokerName, resp.Project.Name, autoConfirm) {
 				// Add this broker as a provider
 				ctxAdd, cancelAdd := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancelAdd()
@@ -350,7 +350,7 @@ func promptHubRegistration(isGlobal bool) error {
 					LocalPath: resolvedPath,
 				}
 
-				_, err := client.Groves().AddProvider(ctxAdd, resp.Grove.ID, addReq)
+				_, err := client.Projects().AddProvider(ctxAdd, resp.Project.ID, addReq)
 				if err != nil {
 					fmt.Printf("Warning: failed to add broker as provider: %v\n", err)
 				} else {

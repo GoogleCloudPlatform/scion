@@ -466,7 +466,7 @@ func TestWebHealthz_CompositeMode(t *testing.T) {
 			ScionVersion: "abc1234",
 			Uptime:       "5m0s",
 			Checks:       map[string]string{"database": "healthy"},
-			Stats:        &HealthStats{ConnectedBrokers: 1, ActiveAgents: 2, Groves: 3},
+			Stats:        &HealthStats{ConnectedBrokers: 1, ActiveAgents: 2, Projects: 3},
 		}
 	})
 
@@ -1427,7 +1427,7 @@ func TestSSEHandler_EventDelivery(t *testing.T) {
 			case <-ticker.C:
 				pub.publish("grove.test123.agent.status", AgentStatusEvent{
 					AgentID: "agent-1",
-					GroveID: "test123",
+					ProjectID: "test123",
 					Phase:   "running",
 				})
 			case <-stop:

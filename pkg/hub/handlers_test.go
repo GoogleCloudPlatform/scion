@@ -182,15 +182,15 @@ func TestAgentList(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove first (agents reference groves)
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove_test123",
 		Slug:      "test-grove",
-		Name:      "Test Grove",
+		Name:      "Test Project",
 		GitRemote: "https://github.com/test/repo",
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -200,7 +200,7 @@ func TestAgentList(t *testing.T) {
 			ID:           "agent_" + string(rune('a'+i)),
 			Slug:         "test-agent-" + string(rune('a'+i)),
 			Name:         "Test Agent " + string(rune('A'+i)),
-			GroveID:      grove.ID,
+			ProjectID:      grove.ID,
 			Phase:        string(state.PhaseStopped),
 			StateVersion: 1,
 			Created:      time.Now(),
@@ -247,27 +247,27 @@ func TestAgentCreate(t *testing.T) {
 	}
 
 	// Create a grove with default runtime broker
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:                     "grove_abc123",
 		Slug:                   "my-grove",
-		Name:                   "My Grove",
+		Name:                   "My Project",
 		GitRemote:              "github.com/test/repo",
 		DefaultRuntimeBrokerID: broker.ID,
 		Created:                time.Now(),
 		Updated:                time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
 	// Register the broker as a provider to the grove
-	contrib := &store.GroveProvider{
-		GroveID:    grove.ID,
+	contrib := &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := s.AddGroveProvider(ctx, contrib); err != nil {
+	if err := s.AddProjectProvider(ctx, contrib); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
@@ -326,27 +326,27 @@ func TestAgentCreate_NoTask(t *testing.T) {
 	}
 
 	// Create a grove with default runtime broker
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:                     "grove_notask",
 		Slug:                   "notask-grove",
-		Name:                   "No Task Grove",
+		Name:                   "No Task Project",
 		GitRemote:              "github.com/test/notask",
 		DefaultRuntimeBrokerID: broker.ID,
 		Created:                time.Now(),
 		Updated:                time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
 	// Register the broker as a provider
-	contrib := &store.GroveProvider{
-		GroveID:    grove.ID,
+	contrib := &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := s.AddGroveProvider(ctx, contrib); err != nil {
+	if err := s.AddProjectProvider(ctx, contrib); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
@@ -380,8 +380,8 @@ func TestAgentCreate_NoTask(t *testing.T) {
 	}
 }
 
-// TestAgentCreate_NoTaskViaGrove tests creating an agent without a task via the grove endpoint.
-func TestAgentCreate_NoTaskViaGrove(t *testing.T) {
+// TestAgentCreate_NoTaskViaProject tests creating an agent without a task via the grove endpoint.
+func TestAgentCreate_NoTaskViaProject(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -389,7 +389,7 @@ func TestAgentCreate_NoTaskViaGrove(t *testing.T) {
 	broker := &store.RuntimeBroker{
 		ID:     "host_notask_grove",
 		Slug:   "notask-grove-host",
-		Name:   "No Task Grove Host",
+		Name:   "No Task Project Host",
 		Status: store.BrokerStatusOnline,
 	}
 	if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -397,33 +397,33 @@ func TestAgentCreate_NoTaskViaGrove(t *testing.T) {
 	}
 
 	// Create a grove with default runtime broker
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:                     "grove_notask_grove",
 		Slug:                   "notask-grove-ep",
-		Name:                   "No Task Grove EP",
+		Name:                   "No Task Project EP",
 		GitRemote:              "github.com/test/notask-grove",
 		DefaultRuntimeBrokerID: broker.ID,
 		Created:                time.Now(),
 		Updated:                time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
 	// Register the broker as a provider
-	contrib := &store.GroveProvider{
-		GroveID:    grove.ID,
+	contrib := &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := s.AddGroveProvider(ctx, contrib); err != nil {
+	if err := s.AddProjectProvider(ctx, contrib); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
 	// Create agent without a task via /api/v1/groves/{id}/agents
 	body := map[string]interface{}{
-		"name": "Grove Taskless Agent",
+		"name": "Project Taskless Agent",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+grove.ID+"/agents", body)
@@ -464,27 +464,27 @@ func TestAgentCreate_AttachNoTask(t *testing.T) {
 	}
 
 	// Create a grove with default runtime broker
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:                     "grove_attach",
 		Slug:                   "attach-grove",
-		Name:                   "Attach Grove",
+		Name:                   "Attach Project",
 		GitRemote:              "github.com/test/attach",
 		DefaultRuntimeBrokerID: broker.ID,
 		Created:                time.Now(),
 		Updated:                time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
 	// Register the broker as a provider
-	contrib := &store.GroveProvider{
-		GroveID:    grove.ID,
+	contrib := &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := s.AddGroveProvider(ctx, contrib); err != nil {
+	if err := s.AddProjectProvider(ctx, contrib); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
@@ -535,27 +535,27 @@ func TestAgentCreate_SingleProvider(t *testing.T) {
 	}
 
 	// Create a grove WITHOUT a default runtime broker
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove_single",
 		Slug:      "single-grove",
-		Name:      "Single Grove",
+		Name:      "Single Project",
 		GitRemote: "github.com/test/single",
 		// Note: DefaultRuntimeBrokerID is NOT set
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
 	// Register the broker as the only provider to the grove
-	contrib := &store.GroveProvider{
-		GroveID:    grove.ID,
+	contrib := &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := s.AddGroveProvider(ctx, contrib); err != nil {
+	if err := s.AddProjectProvider(ctx, contrib); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
@@ -598,25 +598,25 @@ func TestAgentCreate_SingleOfflineProvider(t *testing.T) {
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove_single_offline",
 		Slug:      "single-grove-offline",
-		Name:      "Single Grove Offline",
+		Name:      "Single Project Offline",
 		GitRemote: "github.com/test/single-offline",
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
-	contrib := &store.GroveProvider{
-		GroveID:    grove.ID,
+	contrib := &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOffline,
 	}
-	if err := s.AddGroveProvider(ctx, contrib); err != nil {
+	if err := s.AddProjectProvider(ctx, contrib); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
@@ -667,37 +667,37 @@ func TestAgentCreate_MultipleProviders(t *testing.T) {
 	}
 
 	// Create a grove WITHOUT a default runtime broker
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove_multi",
 		Slug:      "multi-grove",
-		Name:      "Multi Grove",
+		Name:      "Multi Project",
 		GitRemote: "github.com/test/multi",
 		// Note: DefaultRuntimeBrokerID is NOT set
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
 	// Register both brokers as providers to the grove
-	contrib1 := &store.GroveProvider{
-		GroveID:    grove.ID,
+	contrib1 := &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker1.ID,
 		BrokerName: broker1.Name,
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := s.AddGroveProvider(ctx, contrib1); err != nil {
+	if err := s.AddProjectProvider(ctx, contrib1); err != nil {
 		t.Fatalf("failed to add grove provider 1: %v", err)
 	}
 
-	contrib2 := &store.GroveProvider{
-		GroveID:    grove.ID,
+	contrib2 := &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker2.ID,
 		BrokerName: broker2.Name,
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := s.AddGroveProvider(ctx, contrib2); err != nil {
+	if err := s.AddProjectProvider(ctx, contrib2); err != nil {
 		t.Fatalf("failed to add grove provider 2: %v", err)
 	}
 
@@ -738,15 +738,15 @@ func TestAgentGetByID(t *testing.T) {
 	ctx := context.Background()
 
 	// Create grove and agent
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove_xyz",
 		Slug:      "grove-xyz",
-		Name:      "Grove XYZ",
+		Name:      "Project XYZ",
 		GitRemote: "https://github.com/test/repo",
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -754,7 +754,7 @@ func TestAgentGetByID(t *testing.T) {
 		ID:           "agent_test1",
 		Slug:         "test-agent",
 		Name:         "Test Agent",
-		GroveID:      grove.ID,
+		ProjectID:      grove.ID,
 		Phase:        string(state.PhaseStopped),
 		StateVersion: 1,
 		Created:      time.Now(),
@@ -804,15 +804,15 @@ func TestAgentDelete(t *testing.T) {
 	ctx := context.Background()
 
 	// Create grove and agent
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove_del",
 		Slug:      "grove-del",
-		Name:      "Grove Del",
+		Name:      "Project Del",
 		GitRemote: "https://github.com/test/repo",
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -820,7 +820,7 @@ func TestAgentDelete(t *testing.T) {
 		ID:           "agent_delete",
 		Slug:         "delete-me",
 		Name:         "Delete Me",
-		GroveID:      grove.ID,
+		ProjectID:      grove.ID,
 		Phase:        string(state.PhaseStopped),
 		StateVersion: 1,
 		Created:      time.Now(),
@@ -844,7 +844,7 @@ func TestAgentDelete(t *testing.T) {
 }
 
 // ============================================================================
-// Grove Endpoint Tests
+// Project Endpoint Tests
 // ============================================================================
 
 func TestGroveList(t *testing.T) {
@@ -852,15 +852,15 @@ func TestGroveList(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 2; i++ {
-		grove := &store.Grove{
+		grove := &store.Project{
 			ID:        "grove_" + string(rune('a'+i)),
 			Slug:      "grove-" + string(rune('a'+i)),
-			Name:      "Grove " + string(rune('A'+i)),
+			Name:      "Project " + string(rune('A'+i)),
 			GitRemote: "https://github.com/test/repo" + string(rune('a'+i)),
 			Created:   time.Now(),
 			Updated:   time.Now(),
 		}
-		if err := s.CreateGrove(ctx, grove); err != nil {
+		if err := s.CreateProject(ctx, grove); err != nil {
 			t.Fatalf("failed to create grove: %v", err)
 		}
 	}
@@ -871,13 +871,13 @@ func TestGroveList(t *testing.T) {
 		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp ListGrovesResponse
+	var resp ListProjectsResponse
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if len(resp.Groves) != 2 {
-		t.Errorf("expected 2 groves, got %d", len(resp.Groves))
+	if len(resp.Projects) != 2 {
+		t.Errorf("expected 2 groves, got %d", len(resp.Projects))
 	}
 }
 
@@ -891,7 +891,7 @@ func TestGroveRegister(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/register", body)
 
-	// Grove register always returns 200 (idempotent)
+	// Project register always returns 200 (idempotent)
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -901,7 +901,7 @@ func TestGroveRegister(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if resp.Grove.ID == "" {
+	if resp.Project.ID == "" {
 		t.Error("expected grove ID to be set")
 	}
 
@@ -910,8 +910,8 @@ func TestGroveRegister(t *testing.T) {
 	}
 
 	// The git remote should be normalized (no scheme, no .git suffix)
-	if resp.Grove.GitRemote != "github.com/test/my-project" {
-		t.Errorf("expected normalized git remote 'github.com/test/my-project', got %q", resp.Grove.GitRemote)
+	if resp.Project.GitRemote != "github.com/test/my-project" {
+		t.Errorf("expected normalized git remote 'github.com/test/my-project', got %q", resp.Project.GitRemote)
 	}
 }
 
@@ -950,8 +950,8 @@ func TestGroveRegisterIdempotent(t *testing.T) {
 	}
 
 	// Should return the same grove
-	if resp1.Grove.ID != resp2.Grove.ID {
-		t.Errorf("expected same grove ID on idempotent call, got %q and %q", resp1.Grove.ID, resp2.Grove.ID)
+	if resp1.Project.ID != resp2.Project.ID {
+		t.Errorf("expected same grove ID on idempotent call, got %q and %q", resp1.Project.ID, resp2.Project.ID)
 	}
 
 	// Second call should not have created=true
@@ -998,8 +998,8 @@ func TestGroveRegisterCaseInsensitive(t *testing.T) {
 	}
 
 	// Should return the same grove (case-insensitive match)
-	if resp1.Grove.ID != resp2.Grove.ID {
-		t.Errorf("expected same grove ID for case-insensitive match, got %q and %q", resp1.Grove.ID, resp2.Grove.ID)
+	if resp1.Project.ID != resp2.Project.ID {
+		t.Errorf("expected same grove ID for case-insensitive match, got %q and %q", resp1.Project.ID, resp2.Project.ID)
 	}
 
 	// Second call should not have created=true
@@ -1013,22 +1013,22 @@ func TestGroveRegisterMultipleGitRemoteMatches(t *testing.T) {
 	ctx := context.Background()
 
 	// Pre-create two groves for the same git remote.
-	grove1 := &store.Grove{
+	grove1 := &store.Project{
 		ID:        "grove-1",
 		Name:      "widgets",
 		Slug:      "widgets",
 		GitRemote: "github.com/acme/widgets",
 	}
-	grove2 := &store.Grove{
+	grove2 := &store.Project{
 		ID:        "grove-2",
 		Name:      "widgets (2)",
 		Slug:      "widgets-2",
 		GitRemote: "github.com/acme/widgets",
 	}
-	if err := s.CreateGrove(ctx, grove1); err != nil {
+	if err := s.CreateProject(ctx, grove1); err != nil {
 		t.Fatalf("failed to create grove1: %v", err)
 	}
-	if err := s.CreateGrove(ctx, grove2); err != nil {
+	if err := s.CreateProject(ctx, grove2); err != nil {
 		t.Fatalf("failed to create grove2: %v", err)
 	}
 
@@ -1069,8 +1069,8 @@ func TestGroveRegisterMultipleGitRemoteMatches(t *testing.T) {
 	// The newly created grove should have a serial slug.
 	// NextAvailableSlug fills gaps, so with "widgets" and "widgets-2" taken,
 	// the next available is "widgets-1".
-	if resp.Grove.Slug != "widgets-1" {
-		t.Errorf("expected serial slug 'widgets-1', got %q", resp.Grove.Slug)
+	if resp.Project.Slug != "widgets-1" {
+		t.Errorf("expected serial slug 'widgets-1', got %q", resp.Project.Slug)
 	}
 }
 
@@ -1079,7 +1079,7 @@ func TestGroveRegisterBrokerDeduplication(t *testing.T) {
 
 	// Register a grove with a broker
 	body1 := map[string]interface{}{
-		"name":      "Test Grove",
+		"name":      "Test Project",
 		"gitRemote": "https://github.com/test/dedup-host",
 		"broker": map[string]interface{}{
 			"name":    "test-host",
@@ -1101,7 +1101,7 @@ func TestGroveRegisterBrokerDeduplication(t *testing.T) {
 
 	// Register another grove with the same broker name (case-insensitive)
 	body2 := map[string]interface{}{
-		"name":      "Another Grove",
+		"name":      "Another Project",
 		"gitRemote": "https://github.com/test/another-grove",
 		"broker": map[string]interface{}{
 			"name":    "TEST-HOST", // Different case
@@ -1147,7 +1147,7 @@ func TestGroveRegisterWithBrokerID(t *testing.T) {
 
 	// Now register grove with brokerId (Phase 3)
 	body := map[string]interface{}{
-		"name":      "Two Phase Grove",
+		"name":      "Two Phase Project",
 		"gitRemote": "https://github.com/test/twophase-grove",
 		"brokerId":  broker.ID,
 		"path":      "/path/to/project/.scion",
@@ -1163,7 +1163,7 @@ func TestGroveRegisterWithBrokerID(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if resp.Grove.ID == "" {
+	if resp.Project.ID == "" {
 		t.Error("expected grove ID to be set")
 	}
 
@@ -1184,7 +1184,7 @@ func TestGroveRegisterWithBrokerID(t *testing.T) {
 	}
 
 	// Verify provider was created
-	providers, err := s.GetGroveProviders(ctx, resp.Grove.ID)
+	providers, err := s.GetProjectProviders(ctx, resp.Project.ID)
 	if err != nil {
 		t.Fatalf("failed to get providers: %v", err)
 	}
@@ -1204,7 +1204,7 @@ func TestGroveRegisterWithInvalidBrokerID(t *testing.T) {
 
 	// Try to register grove with non-existent brokerId
 	body := map[string]interface{}{
-		"name":      "Invalid Host Grove",
+		"name":      "Invalid Host Project",
 		"gitRemote": "https://github.com/test/invalid-host-grove",
 		"brokerId":  "non-existent-host-id",
 	}
@@ -1229,15 +1229,15 @@ func TestAddProvider(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove_contrib_test",
 		Slug:      "contrib-test",
-		Name:      "Provider Test Grove",
+		Name:      "Provider Test Project",
 		GitRemote: "https://github.com/test/contrib-test",
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -1280,12 +1280,12 @@ func TestAddProvider(t *testing.T) {
 	}
 
 	// Verify grove now has default runtime broker set
-	updatedGrove, err := s.GetGrove(ctx, grove.ID)
+	updatedProject, err := s.GetProject(ctx, grove.ID)
 	if err != nil {
 		t.Fatalf("failed to get updated grove: %v", err)
 	}
-	if updatedGrove.DefaultRuntimeBrokerID != broker.ID {
-		t.Errorf("expected default runtime broker to be set to %q, got %q", broker.ID, updatedGrove.DefaultRuntimeBrokerID)
+	if updatedProject.DefaultRuntimeBrokerID != broker.ID {
+		t.Errorf("expected default runtime broker to be set to %q, got %q", broker.ID, updatedProject.DefaultRuntimeBrokerID)
 	}
 }
 
@@ -1294,14 +1294,14 @@ func TestListProviders(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:      "grove_list_contrib",
 		Slug:    "list-contrib",
-		Name:    "List Providers Grove",
+		Name:    "List Providers Project",
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -1316,14 +1316,14 @@ func TestListProviders(t *testing.T) {
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	contrib := &store.GroveProvider{
-		GroveID:    grove.ID,
+	contrib := &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		LocalPath:  "/test/path",
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := s.AddGroveProvider(ctx, contrib); err != nil {
+	if err := s.AddProjectProvider(ctx, contrib); err != nil {
 		t.Fatalf("failed to add provider: %v", err)
 	}
 
@@ -1333,7 +1333,7 @@ func TestListProviders(t *testing.T) {
 		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string][]store.GroveProvider
+	var resp map[string][]store.ProjectProvider
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -1351,7 +1351,7 @@ func TestGroveGetByID(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove_gettest",
 		Slug:      "get-test",
 		Name:      "Get Test",
@@ -1359,7 +1359,7 @@ func TestGroveGetByID(t *testing.T) {
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -1369,7 +1369,7 @@ func TestGroveGetByID(t *testing.T) {
 		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp store.Grove
+	var resp store.Project
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -1511,43 +1511,43 @@ func TestRuntimeBrokerDeleteCascadesProviders(t *testing.T) {
 	}
 
 	// Create two groves, one with default_runtime_broker_id pointing to this broker
-	grove1 := &store.Grove{
+	grove1 := &store.Project{
 		ID:                     "grove_cascade_1",
-		Name:                   "Cascade Grove 1",
+		Name:                   "Cascade Project 1",
 		Slug:                   "cascade-grove-1",
 		DefaultRuntimeBrokerID: broker.ID,
 		Created:                time.Now(),
 		Updated:                time.Now(),
 	}
-	grove2 := &store.Grove{
+	grove2 := &store.Project{
 		ID:      "grove_cascade_2",
-		Name:    "Cascade Grove 2",
+		Name:    "Cascade Project 2",
 		Slug:    "cascade-grove-2",
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove1); err != nil {
+	if err := s.CreateProject(ctx, grove1); err != nil {
 		t.Fatalf("failed to create grove 1: %v", err)
 	}
-	if err := s.CreateGrove(ctx, grove2); err != nil {
+	if err := s.CreateProject(ctx, grove2); err != nil {
 		t.Fatalf("failed to create grove 2: %v", err)
 	}
 
 	// Add broker as provider to both groves
-	for _, groveID := range []string{grove1.ID, grove2.ID} {
-		provider := &store.GroveProvider{
-			GroveID:    groveID,
+	for _, projectID := range []string{grove1.ID, grove2.ID} {
+		provider := &store.ProjectProvider{
+			ProjectID:    projectID,
 			BrokerID:   broker.ID,
 			BrokerName: broker.Name,
 			Status:     store.BrokerStatusOnline,
 		}
-		if err := s.AddGroveProvider(ctx, provider); err != nil {
-			t.Fatalf("failed to add grove provider for %s: %v", groveID, err)
+		if err := s.AddProjectProvider(ctx, provider); err != nil {
+			t.Fatalf("failed to add grove provider for %s: %v", projectID, err)
 		}
 	}
 
 	// Verify providers exist before deletion
-	providers1, err := s.GetGroveProviders(ctx, grove1.ID)
+	providers1, err := s.GetProjectProviders(ctx, grove1.ID)
 	if err != nil {
 		t.Fatalf("failed to get providers for grove 1: %v", err)
 	}
@@ -1568,7 +1568,7 @@ func TestRuntimeBrokerDeleteCascadesProviders(t *testing.T) {
 	}
 
 	// Verify provider records are gone from both groves
-	providers1, err = s.GetGroveProviders(ctx, grove1.ID)
+	providers1, err = s.GetProjectProviders(ctx, grove1.ID)
 	if err != nil {
 		t.Fatalf("failed to get providers for grove 1 after deletion: %v", err)
 	}
@@ -1576,7 +1576,7 @@ func TestRuntimeBrokerDeleteCascadesProviders(t *testing.T) {
 		t.Errorf("expected 0 providers for grove 1 after broker deletion, got %d", len(providers1))
 	}
 
-	providers2, err := s.GetGroveProviders(ctx, grove2.ID)
+	providers2, err := s.GetProjectProviders(ctx, grove2.ID)
 	if err != nil {
 		t.Fatalf("failed to get providers for grove 2 after deletion: %v", err)
 	}
@@ -1585,7 +1585,7 @@ func TestRuntimeBrokerDeleteCascadesProviders(t *testing.T) {
 	}
 
 	// Verify default_runtime_broker_id was cleared on grove1
-	g1, err := s.GetGrove(ctx, grove1.ID)
+	g1, err := s.GetProject(ctx, grove1.ID)
 	if err != nil {
 		t.Fatalf("failed to get grove 1 after deletion: %v", err)
 	}
@@ -1818,15 +1818,15 @@ func TestRuntimeBrokerListWithGroveLocalPath(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:         "grove_localpath_test",
-		Name:       "Local Path Test Grove",
+		Name:       "Local Path Test Project",
 		Slug:       "local-path-test",
 		Visibility: store.VisibilityPrivate,
 		Created:    time.Now(),
 		Updated:    time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -1845,14 +1845,14 @@ func TestRuntimeBrokerListWithGroveLocalPath(t *testing.T) {
 	}
 
 	// Add broker as grove provider with a local path
-	contrib := &store.GroveProvider{
-		GroveID:    grove.ID,
+	contrib := &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		LocalPath:  "/path/to/project/.scion",
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := s.AddGroveProvider(ctx, contrib); err != nil {
+	if err := s.AddProjectProvider(ctx, contrib); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
@@ -1982,7 +1982,7 @@ func TestBrokerRegistrationTwoPhaseFlow(t *testing.T) {
 
 	// Phase 3: Register grove with brokerId
 	groveBody := map[string]interface{}{
-		"name":      "Two Phase Grove",
+		"name":      "Two Phase Project",
 		"gitRemote": "https://github.com/test/twophase",
 		"brokerId":  joinResp.BrokerID,
 	}
@@ -2081,7 +2081,7 @@ func TestTemplateList(t *testing.T) {
 	}
 }
 
-func TestTemplateListByGroveID(t *testing.T) {
+func TestTemplateListByProjectID(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	now := time.Now()
@@ -2098,7 +2098,7 @@ func TestTemplateListByGroveID(t *testing.T) {
 
 	// Create a grove-scoped template for grove "grove_abc"
 	if err := s.CreateTemplate(ctx, &store.Template{
-		ID: "tmpl_grove1", Slug: "grove-tmpl", Name: "Grove Template",
+		ID: "tmpl_grove1", Slug: "grove-tmpl", Name: "Project Template",
 		Harness: "gemini", Scope: "grove", ScopeID: "grove_abc",
 		Visibility: store.VisibilityPublic, Status: "active",
 		Created: now, Updated: now,
@@ -2108,7 +2108,7 @@ func TestTemplateListByGroveID(t *testing.T) {
 
 	// Create a grove-scoped template for a different grove
 	if err := s.CreateTemplate(ctx, &store.Template{
-		ID: "tmpl_grove2", Slug: "other-grove-tmpl", Name: "Other Grove Template",
+		ID: "tmpl_grove2", Slug: "other-grove-tmpl", Name: "Other Project Template",
 		Harness: "claude", Scope: "grove", ScopeID: "grove_xyz",
 		Visibility: store.VisibilityPublic, Status: "active",
 		Created: now, Updated: now,
@@ -2255,15 +2255,15 @@ func TestInvalidJSON(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove first
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove_invalid",
 		Slug:      "invalid-grove",
-		Name:      "Invalid Grove",
+		Name:      "Invalid Project",
 		GitRemote: "https://github.com/test/invalid",
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -2325,9 +2325,9 @@ func TestCORSPreflight(t *testing.T) {
 func TestGroveCreateIdempotent(t *testing.T) {
 	srv, _ := testServer(t)
 
-	body := CreateGroveRequest{
+	body := CreateProjectRequest{
 		ID:        "deterministic-id-1234",
-		Name:      "My Grove",
+		Name:      "My Project",
 		Slug:      "my-grove",
 		GitRemote: "github.com/acme/widgets",
 	}
@@ -2338,7 +2338,7 @@ func TestGroveCreateIdempotent(t *testing.T) {
 		t.Fatalf("first create: expected status 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var grove1 store.Grove
+	var grove1 store.Project
 	if err := json.NewDecoder(rec.Body).Decode(&grove1); err != nil {
 		t.Fatalf("failed to decode first response: %v", err)
 	}
@@ -2352,7 +2352,7 @@ func TestGroveCreateIdempotent(t *testing.T) {
 		t.Fatalf("second create: expected status 200, got %d: %s", rec2.Code, rec2.Body.String())
 	}
 
-	var grove2 store.Grove
+	var grove2 store.Project
 	if err := json.NewDecoder(rec2.Body).Decode(&grove2); err != nil {
 		t.Fatalf("failed to decode second response: %v", err)
 	}
@@ -2367,7 +2367,7 @@ func TestGroveCreateIdempotent(t *testing.T) {
 func TestGroveCreateWithSlug(t *testing.T) {
 	srv, _ := testServer(t)
 
-	body := CreateGroveRequest{
+	body := CreateProjectRequest{
 		Name: "My Project",
 		Slug: "custom-slug",
 	}
@@ -2377,7 +2377,7 @@ func TestGroveCreateWithSlug(t *testing.T) {
 		t.Fatalf("expected status 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var grove store.Grove
+	var grove store.Project
 	if err := json.NewDecoder(rec.Body).Decode(&grove); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -2387,7 +2387,7 @@ func TestGroveCreateWithSlug(t *testing.T) {
 	}
 
 	// Without slug — should auto-derive from name
-	body2 := CreateGroveRequest{
+	body2 := CreateProjectRequest{
 		Name: "Auto Slug Project",
 	}
 
@@ -2396,7 +2396,7 @@ func TestGroveCreateWithSlug(t *testing.T) {
 		t.Fatalf("expected status 201, got %d: %s", rec2.Code, rec2.Body.String())
 	}
 
-	var grove2 store.Grove
+	var grove2 store.Project
 	if err := json.NewDecoder(rec2.Body).Decode(&grove2); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -2429,27 +2429,27 @@ func TestAgentCreate_StoresTemplateSlug(t *testing.T) {
 	}
 
 	// Create a grove
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:                     "grove_tmpl_slug",
 		Slug:                   "tmpl-grove",
-		Name:                   "Template Grove",
+		Name:                   "Template Project",
 		GitRemote:              "github.com/test/tmpl-repo",
 		DefaultRuntimeBrokerID: broker.ID,
 		Created:                time.Now(),
 		Updated:                time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
 	// Register broker as provider
-	provider := &store.GroveProvider{
-		GroveID:    grove.ID,
+	provider := &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := s.AddGroveProvider(ctx, provider); err != nil {
+	if err := s.AddProjectProvider(ctx, provider); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
@@ -2588,13 +2588,13 @@ func TestOutboundMessage_UnknownRecipient(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "msg-grove",
 		Slug:       "msg-grove",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2613,7 +2613,7 @@ func TestOutboundMessage_UnknownRecipient(t *testing.T) {
 		ID:              api.NewUUID(),
 		Name:            "sender",
 		Slug:            "sender",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		Phase:           "running",
 		RuntimeBrokerID: "broker-msg",
 		Visibility:      store.VisibilityPrivate,
@@ -2631,7 +2631,7 @@ func TestOutboundMessage_UnknownRecipient(t *testing.T) {
 
 	agentIdent := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:  jwt.Claims{Subject: agent.ID},
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 	}}
 	req = req.WithContext(contextWithIdentity(req.Context(), agentIdent))
 

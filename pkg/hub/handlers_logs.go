@@ -52,7 +52,7 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID
 		}
 	}
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		if agent.GroveID != agentIdent.GroveID() {
+		if agent.ProjectID != agentIdent.ProjectID() {
 			NotFound(w, "Agent")
 			return
 		}
@@ -74,7 +74,7 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID
 
 	logs, err := dispatcher.DispatchAgentLogs(ctx, agent, tail)
 	if err != nil {
-		slog.Error("agent log relay failed", "agent_id", agentID, "grove_id", agent.GroveID, "error", err)
+		slog.Error("agent log relay failed", "agent_id", agentID, "grove_id", agent.ProjectID, "error", err)
 		writeError(w, http.StatusBadGateway, ErrCodeInternalError,
 			"Failed to retrieve logs from broker: "+err.Error(), nil)
 		return
@@ -114,7 +114,7 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 		}
 	}
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		if agent.GroveID != agentIdent.GroveID() {
+		if agent.ProjectID != agentIdent.ProjectID() {
 			NotFound(w, "Agent")
 			return
 		}
@@ -124,7 +124,7 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 	query := r.URL.Query()
 	opts := LogQueryOptions{
 		AgentID: agent.ID,
-		GroveID: agent.GroveID,
+		ProjectID: agent.ProjectID,
 	}
 
 	if v := query.Get("tail"); v != "" {
@@ -151,7 +151,7 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 
 	result, err := s.logQueryService.Query(ctx, opts)
 	if err != nil {
-		slog.Error("cloud log query failed", "agent_id", agentID, "grove_id", agent.GroveID, "error", err)
+		slog.Error("cloud log query failed", "agent_id", agentID, "grove_id", agent.ProjectID, "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"Failed to query cloud logs", nil)
 		return
@@ -220,7 +220,7 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 	// Open a Tail stream via the Cloud Logging Tail API
 	tailCh, tailCancel, err := s.logQueryService.Tail(ctx, opts)
 	if err != nil {
-		slog.Error("failed to open tail stream", "agent_id", agentID, "grove_id", agent.GroveID, "error", err)
+		slog.Error("failed to open tail stream", "agent_id", agentID, "grove_id", agent.ProjectID, "error", err)
 		fmt.Fprintf(w, "event: error\ndata: {\"message\":\"failed to open log stream\"}\n\n")
 		flusher.Flush()
 		return
@@ -292,7 +292,7 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		if agent.GroveID != agentIdent.GroveID() {
+		if agent.ProjectID != agentIdent.ProjectID() {
 			NotFound(w, "Agent")
 			return
 		}
@@ -301,7 +301,7 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 	query := r.URL.Query()
 	opts := LogQueryOptions{
 		AgentID: agent.ID,
-		GroveID: agent.GroveID,
+		ProjectID: agent.ProjectID,
 		LogID:   logging.MessageLogID,
 	}
 
@@ -323,7 +323,7 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 
 	result, err := s.logQueryService.Query(ctx, opts)
 	if err != nil {
-		slog.Error("message log query failed", "agent_id", agentID, "grove_id", agent.GroveID, "error", err)
+		slog.Error("message log query failed", "agent_id", agentID, "grove_id", agent.ProjectID, "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"Failed to query message logs", nil)
 		return
@@ -371,7 +371,7 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 
 	opts := LogQueryOptions{
 		AgentID: agent.ID,
-		GroveID: agent.GroveID,
+		ProjectID: agent.ProjectID,
 		LogID:   logging.MessageLogID,
 	}
 
@@ -383,7 +383,7 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 
 	tailCh, tailCancel, err := s.logQueryService.Tail(ctx, opts)
 	if err != nil {
-		slog.Error("failed to open message log tail stream", "agent_id", agentID, "grove_id", agent.GroveID, "error", err)
+		slog.Error("failed to open message log tail stream", "agent_id", agentID, "grove_id", agent.ProjectID, "error", err)
 		fmt.Fprintf(w, "event: error\ndata: {\"message\":\"failed to open message log stream\"}\n\n")
 		flusher.Flush()
 		return
@@ -438,7 +438,7 @@ func (s *Server) handleGroveMessageLogs(w http.ResponseWriter, r *http.Request, 
 
 	ctx := r.Context()
 
-	grove, err := s.store.GetGrove(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, groveID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -452,7 +452,7 @@ func (s *Server) handleGroveMessageLogs(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		if grove.ID != agentIdent.GroveID() {
+		if grove.ID != agentIdent.ProjectID() {
 			NotFound(w, "Grove")
 			return
 		}
@@ -460,7 +460,7 @@ func (s *Server) handleGroveMessageLogs(w http.ResponseWriter, r *http.Request, 
 
 	query := r.URL.Query()
 	opts := LogQueryOptions{
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		LogID:   logging.MessageLogID,
 	}
 
@@ -513,7 +513,7 @@ func (s *Server) handleGroveMessageLogsStream(w http.ResponseWriter, r *http.Req
 
 	ctx := r.Context()
 
-	grove, err := s.store.GetGrove(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, groveID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -528,7 +528,7 @@ func (s *Server) handleGroveMessageLogsStream(w http.ResponseWriter, r *http.Req
 	}
 
 	opts := LogQueryOptions{
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		LogID:   logging.MessageLogID,
 	}
 
@@ -588,7 +588,7 @@ func (s *Server) resolveGroveAgent(ctx context.Context, groveID, agentID string)
 			if err != nil {
 				return nil, err
 			}
-			if agent.GroveID != groveID {
+			if agent.ProjectID != groveID {
 				return nil, store.ErrNotFound
 			}
 			return agent, nil

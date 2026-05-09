@@ -122,15 +122,15 @@ func TestNextSlugFromMatches(t *testing.T) {
 	}
 }
 
-func TestShowMatchingGrovesPrompt_AutoConfirm(t *testing.T) {
+func TestShowMatchingProjectsPrompt_AutoConfirm(t *testing.T) {
 	matches := []GroveMatch{
 		{ID: "id-1", Name: "widgets", Slug: "widgets"},
 		{ID: "id-2", Name: "widgets (2)", Slug: "widgets-2"},
 	}
 
-	choice, selectedID := ShowMatchingGrovesPrompt("widgets", matches, "widgets-3", true)
-	if choice != GroveChoiceLink {
-		t.Errorf("expected GroveChoiceLink, got %v", choice)
+	choice, selectedID := ShowMatchingProjectsPrompt("widgets", matches, "widgets-3", true)
+	if choice != ProjectChoiceLink {
+		t.Errorf("expected ProjectChoiceLink, got %v", choice)
 	}
 	if selectedID != "id-1" {
 		t.Errorf("expected selected ID 'id-1', got %q", selectedID)

@@ -26,21 +26,21 @@ import (
 // createTestState captures and restores package-level vars for test isolation.
 type createTestState struct {
 	home      string
-	grovePath string
+	projectPath string
 	noHub     bool
 }
 
 func saveCreateTestState() createTestState {
 	return createTestState{
 		home:      os.Getenv("HOME"),
-		grovePath: grovePath,
+		projectPath: projectPath,
 		noHub:     noHub,
 	}
 }
 
 func (s createTestState) restore() {
 	os.Setenv("HOME", s.home)
-	grovePath = s.grovePath
+	projectPath = s.projectPath
 	noHub = s.noHub
 }
 
@@ -55,7 +55,7 @@ func TestCreateAgent_DuplicateReturnsError(t *testing.T) {
 	// Set up grove directory with an existing agent
 	groveDir := filepath.Join(tmpHome, "project", ".scion")
 	require.NoError(t, os.MkdirAll(filepath.Join(groveDir, "agents"), 0755))
-	grovePath = groveDir
+	projectPath = groveDir
 
 	createAgentDir(t, groveDir, "my-agent")
 

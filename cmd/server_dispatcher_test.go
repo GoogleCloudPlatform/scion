@@ -53,7 +53,7 @@ func (m *mockAgentManager) Stop(ctx context.Context, agentID string) error {
 	return nil
 }
 
-func (m *mockAgentManager) Delete(ctx context.Context, agentID string, deleteFiles bool, grovePath string, removeBranch bool) (bool, error) {
+func (m *mockAgentManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return true, nil
 }
 
@@ -61,11 +61,11 @@ func (m *mockAgentManager) List(ctx context.Context, filter map[string]string) (
 	return nil, nil
 }
 
-func (m *mockAgentManager) Message(ctx context.Context, agentID, groveID string, message string, interrupt bool) error {
+func (m *mockAgentManager) Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
 	return nil
 }
 
-func (m *mockAgentManager) MessageRaw(ctx context.Context, agentID, groveID string, keys string) error {
+func (m *mockAgentManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
 	return nil
 }
 
@@ -84,12 +84,12 @@ func TestDispatchAgentStart(t *testing.T) {
 	adapter := newAgentDispatcherAdapter(mgr, s, brokerID)
 
 	// Create test grove and broker
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-1",
 		Slug: "test-grove",
-		Name: "Test Grove",
+		Name: "Test Project",
 	}
-	err := s.CreateGrove(ctx, grove)
+	err := s.CreateProject(ctx, grove)
 	require.NoError(t, err)
 
 	broker := &store.RuntimeBroker{
@@ -99,12 +99,12 @@ func TestDispatchAgentStart(t *testing.T) {
 	err = s.CreateRuntimeBroker(ctx, broker)
 	require.NoError(t, err)
 
-	provider := &store.GroveProvider{
-		GroveID:   grove.ID,
+	provider := &store.ProjectProvider{
+		ProjectID:   grove.ID,
 		BrokerID:  brokerID,
 		LocalPath: "/tmp/fake/grove",
 	}
-	err = s.AddGroveProvider(ctx, provider)
+	err = s.AddProjectProvider(ctx, provider)
 	require.NoError(t, err)
 
 	// Create agent
@@ -112,7 +112,7 @@ func TestDispatchAgentStart(t *testing.T) {
 		ID:       "agent-1",
 		Slug:     "test-agent",
 		Name:     "test-agent",
-		GroveID:  grove.ID,
+		ProjectID:  grove.ID,
 		Template: "gemini",
 		Image:    "test-image",
 		Detached: true,
@@ -133,7 +133,7 @@ func TestDispatchAgentStart(t *testing.T) {
 	assert.Equal(t, "test-agent", mgr.startOpts.Name)
 	assert.Equal(t, true, mgr.startOpts.Resume)
 	assert.Equal(t, "new task", mgr.startOpts.Task)
-	assert.Equal(t, "/tmp/fake/grove", mgr.startOpts.GrovePath)
+	assert.Equal(t, "/tmp/fake/grove", mgr.startOpts.ProjectPath)
 	assert.Equal(t, "gemini", mgr.startOpts.Template)
 	assert.Equal(t, "BAR", mgr.startOpts.Env["FOO"])
 
@@ -154,19 +154,19 @@ func TestDispatchAgentRestart(t *testing.T) {
 	adapter := newAgentDispatcherAdapter(mgr, s, brokerID)
 
 	// Create test grove and agent
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-1",
 		Slug: "test-grove",
-		Name: "Test Grove",
+		Name: "Test Project",
 	}
-	err := s.CreateGrove(ctx, grove)
+	err := s.CreateProject(ctx, grove)
 	require.NoError(t, err)
 
 	agent := &store.Agent{
 		ID:      "agent-1",
 		Slug:    "test-agent",
 		Name:    "test-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 	}
 	err = s.CreateAgent(ctx, agent)
 	require.NoError(t, err)

@@ -67,7 +67,7 @@ func completeAgentNames(cmd *cobra.Command, args []string, toComplete string) ([
 	}
 
 	// Helper to scan a grove directory for local agents
-	scanGrove := func(groveDir string) {
+	scanProject:= func(groveDir string) {
 		if groveDir == "" {
 			return
 		}
@@ -93,23 +93,23 @@ func completeAgentNames(cmd *cobra.Command, args []string, toComplete string) ([
 	}
 
 	// Try to get grove from flag if specified by user in the command line so far
-	currentGrovePath, _ := cmd.Flags().GetString("grove")
+	currentProjectPath, _ := cmd.Flags().GetString("grove")
 
 	// If global flag is set
 	global, _ := cmd.Flags().GetBool("global")
 	if global {
-		currentGrovePath = "global"
+		currentProjectPath = "global"
 	}
 
-	resolvedPath, _ := config.GetResolvedProjectDir(currentGrovePath)
+	resolvedPath, _ := config.GetResolvedProjectDir(currentProjectPath)
 
 	// 1. Scan local/current grove
-	scanGrove(resolvedPath)
+	scanProject(resolvedPath)
 
 	// 2. Scan global grove if not already scanned
 	globalDir, _ := config.GetGlobalDir()
 	if globalDir != "" && globalDir != resolvedPath {
-		scanGrove(globalDir)
+		scanProject(globalDir)
 	}
 
 	// 3. Fetch Hub agents (if enabled)
@@ -126,9 +126,9 @@ func completeAgentNames(cmd *cobra.Command, args []string, toComplete string) ([
 // fetchHubAgentsForCompletion fetches agent names from the Hub for shell completion.
 // It uses a short timeout and falls back to cache if the Hub is slow or unavailable.
 // This function is designed to be silent - it never returns errors to avoid breaking completion.
-func fetchHubAgentsForCompletion(grovePath string) []string {
+func fetchHubAgentsForCompletion(projectPath string) []string {
 	// Load settings to check if Hub is enabled
-	settings, err := config.LoadSettings(grovePath)
+	settings, err := config.LoadSettings(projectPath)
 	if err != nil {
 		return nil
 	}
@@ -145,7 +145,7 @@ func fetchHubAgentsForCompletion(grovePath string) []string {
 	}
 
 	// Generate cache key for this grove
-	cacheKey := agentcache.GenerateCacheKey(grovePath)
+	cacheKey := agentcache.GenerateCacheKey(projectPath)
 
 	// Try to fetch from Hub with short timeout
 	ctx, cancel := context.WithTimeout(context.Background(), completionTimeout)
@@ -201,8 +201,8 @@ func fetchHubAgents(ctx context.Context, endpoint string, settings *config.Setti
 
 	// Determine grove ID for filtering
 	var agentService hubclient.AgentService
-	if settings.Hub != nil && settings.Hub.GroveID != "" {
-		agentService = client.GroveAgents(settings.Hub.GroveID)
+	if settings.Hub != nil && settings.Hub.ProjectID != "" {
+		agentService = client.ProjectAgents(settings.Hub.ProjectID)
 	} else {
 		agentService = client.Agents()
 	}

@@ -351,7 +351,7 @@ func TestIdentityFromContext(t *testing.T) {
 	t.Run("agent identity", func(t *testing.T) {
 		agent := &AgentTokenClaims{}
 		agent.Subject = "agent-123"
-		agent.GroveID = "grove-456"
+		agent.ProjectID = "grove-456"
 		ctx := context.WithValue(context.Background(), agentContextKey{}, agent)
 		identity := GetIdentityFromContext(ctx)
 		if identity == nil {

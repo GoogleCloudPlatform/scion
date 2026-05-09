@@ -202,14 +202,14 @@ func groveInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug str
 	return gi
 }
 
-func readWorkspaceMarkerForSlug(slug string) (*GroveMarker, string, error) {
+func readWorkspaceMarkerForSlug(slug string) (*ProjectMarker, string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, "", err
 	}
 	workspacePath := filepath.Join(home, GlobalDir, "groves", slug)
 	markerPath := filepath.Join(workspacePath, DotScion)
-	marker, err := ReadGroveMarker(markerPath)
+	marker, err := ReadProjectMarker(markerPath)
 	if err != nil {
 		return nil, "", err
 	}
@@ -264,7 +264,7 @@ func isValidWorkspace(workspacePath, expectedGroveID string, configPath ...strin
 	}
 
 	// Non-git grove — read marker and verify it resolves to the expected config path
-	marker, err := ReadGroveMarker(markerPath)
+	marker, err := ReadProjectMarker(markerPath)
 	if err != nil {
 		return false
 	}
@@ -273,7 +273,7 @@ func isValidWorkspace(workspacePath, expectedGroveID string, configPath ...strin
 	// This catches the case where a marker was deleted and re-created with a
 	// new grove-id, leaving the old grove-config orphaned.
 	if len(configPath) > 0 && configPath[0] != "" {
-		resolved, err := marker.ExternalGrovePath()
+		resolved, err := marker.ExternalProjectPath()
 		if err != nil {
 			return false
 		}

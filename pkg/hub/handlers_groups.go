@@ -96,7 +96,7 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 		OwnerID:   query.Get("ownerId"),
 		ParentID:  query.Get("parentId"),
 		GroupType: query.Get("groupType"),
-		GroveID:   query.Get("groveId"),
+		ProjectID:   query.Get("groveId"),
 	}
 
 	limit := 50

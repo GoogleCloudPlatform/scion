@@ -59,14 +59,14 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 	hubAvailable := false
 
 	if !noHub {
-		hubCtx, _ = CheckHubAvailabilityWithOptions(grovePath, true)
+		hubCtx, _ = CheckHubAvailabilityWithOptions(projectPath, true)
 		if hubCtx != nil {
 			hubAvailable = true
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
 			// Get grove ID for filtering grove-scoped templates
-			groveID, _ := GetGroveID(hubCtx)
+			projectID, _ := GetProjectID(hubCtx)
 
 			// Fetch global templates from Hub
 			globalResp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
@@ -78,10 +78,10 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 			}
 
 			// Fetch grove templates from Hub (if we have a grove ID)
-			if groveID != "" {
+			if projectID != "" {
 				groveResp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
 					Scope:   "grove",
-					GroveID: groveID,
+					ProjectID: projectID,
 					Status:  "active",
 				})
 				if err == nil {
@@ -167,9 +167,9 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 
 func printTemplateListLocalMode(w *tabwriter.Writer, global, grove []*config.Template) {
 	hasGlobal := len(global) > 0
-	hasGrove := len(grove) > 0
+	hasProject:= len(grove) > 0
 
-	if !hasGlobal && !hasGrove {
+	if !hasGlobal && !hasProject {
 		fmt.Fprintln(w, "No templates found.")
 		return
 	}
@@ -182,7 +182,7 @@ func printTemplateListLocalMode(w *tabwriter.Writer, global, grove []*config.Tem
 		}
 	}
 
-	if hasGrove {
+	if hasProject {
 		if hasGlobal {
 			fmt.Fprintln(w)
 		}
@@ -196,12 +196,12 @@ func printTemplateListLocalMode(w *tabwriter.Writer, global, grove []*config.Tem
 
 func printTemplateListHubMode(w *tabwriter.Writer, localGlobal, localGrove []*config.Template, hubGlobal, hubGrove []hubclient.Template) {
 	hasLocalGlobal := len(localGlobal) > 0
-	hasLocalGrove := len(localGrove) > 0
+	hasLocalProject:= len(localGrove) > 0
 	hasHubGlobal := len(hubGlobal) > 0
-	hasHubGrove := len(hubGrove) > 0
+	hasHubProject:= len(hubGrove) > 0
 
-	hasLocal := hasLocalGlobal || hasLocalGrove
-	hasHub := hasHubGlobal || hasHubGrove
+	hasLocal := hasLocalGlobal || hasLocalProject
+	hasHub := hasHubGlobal || hasHubProject
 
 	if !hasLocal && !hasHub {
 		fmt.Fprintln(w, "No templates found.")
@@ -218,11 +218,11 @@ func printTemplateListHubMode(w *tabwriter.Writer, localGlobal, localGrove []*co
 				fmt.Fprintf(w, "    %s\t%s\n", t.Name, t.Path)
 			}
 		}
-		if hasLocalGrove {
+		if hasLocalProject {
 			if hasLocalGlobal {
 				fmt.Fprintln(w)
 			}
-			fmt.Fprintln(w, "  Grove:")
+			fmt.Fprintln(w, "  Project:")
 			fmt.Fprintln(w, "    NAME\tPATH")
 			for _, t := range localGrove {
 				fmt.Fprintf(w, "    %s\t%s\n", t.Name, t.Path)
@@ -243,11 +243,11 @@ func printTemplateListHubMode(w *tabwriter.Writer, localGlobal, localGrove []*co
 				fmt.Fprintf(w, "    %s\t%s\t%s\n", t.Name, t.ID, truncateHash(t.ContentHash))
 			}
 		}
-		if hasHubGrove {
+		if hasHubProject {
 			if hasHubGlobal {
 				fmt.Fprintln(w)
 			}
-			fmt.Fprintln(w, "  Grove:")
+			fmt.Fprintln(w, "  Project:")
 			fmt.Fprintln(w, "    NAME\tID\tHASH")
 			for _, t := range hubGrove {
 				fmt.Fprintf(w, "    %s\t%s\t%s\n", t.Name, t.ID, truncateHash(t.ContentHash))
@@ -285,7 +285,7 @@ func runTemplateShow(cmd *cobra.Command, args []string) error {
 	// Check if Hub is available (suppress errors for read operations)
 	var hubCtx *HubContext
 	if !noHub && !localOnly {
-		hubCtx, _ = CheckHubAvailabilityWithOptions(grovePath, true)
+		hubCtx, _ = CheckHubAvailabilityWithOptions(projectPath, true)
 	}
 
 	ctx := context.Background()
@@ -423,7 +423,7 @@ func runTemplateDelete(cmd *cobra.Command, args []string) error {
 	// Check if Hub is available (suppress errors for delete operations)
 	var hubCtx *HubContext
 	if !noHub && !localOnly {
-		hubCtx, _ = CheckHubAvailabilityWithOptions(grovePath, true)
+		hubCtx, _ = CheckHubAvailabilityWithOptions(projectPath, true)
 	}
 
 	ctx := context.Background()
@@ -528,7 +528,7 @@ func runTemplateClone(cmd *cobra.Command, args []string) error {
 	// Check if Hub is available for cloning from Hub templates
 	var hubCtx *HubContext
 	if !noHub && !localOnly {
-		hubCtx, _ = CheckHubAvailabilityWithOptions(grovePath, true)
+		hubCtx, _ = CheckHubAvailabilityWithOptions(projectPath, true)
 	}
 
 	ctx := context.Background()
@@ -712,7 +712,7 @@ func runTemplateSync(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check Hub availability first (we need it for sync anyway)
-	hubCtx, err := CheckHubAvailability(grovePath)
+	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
 		return err
 	}
@@ -842,7 +842,7 @@ func runTemplatePull(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check Hub availability
-	hubCtx, err := CheckHubAvailability(grovePath)
+	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
 		return err
 	}
@@ -981,9 +981,9 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 	}
 
 	// Get grove ID for grove scope
-	var groveID string
+	var projectID string
 	if scope == "grove" {
-		groveID, err = GetGroveID(hubCtx)
+		projectID, err = GetProjectID(hubCtx)
 		if err != nil {
 			return err
 		}
@@ -994,7 +994,7 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 	existingResp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
 		Name:    name,
 		Scope:   scope,
-		GroveID: groveID,
+		ProjectID: projectID,
 		Status:  "active",
 	})
 	if err != nil {
@@ -1077,7 +1077,7 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 			Name:    name,
 			Harness: harnessType,
 			Scope:   scope,
-			GroveID: groveID,
+			ProjectID: projectID,
 		}
 
 		resp, err := hubCtx.Client.Templates().Create(ctx, createReq)
@@ -1225,7 +1225,7 @@ func runTemplateStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check Hub availability
-	hubCtx, err := CheckHubAvailability(grovePath)
+	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
 		return err
 	}
@@ -1238,14 +1238,14 @@ func runTemplateStatus(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	groveID, _ := GetGroveID(hubCtx)
+	projectID, _ := GetProjectID(hubCtx)
 
 	// Fetch hub templates
 	var hubGrove, hubGlobal []hubclient.Template
-	if groveID != "" {
+	if projectID != "" {
 		resp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
 			Scope:   "grove",
-			GroveID: groveID,
+			ProjectID: projectID,
 			Status:  "active",
 		})
 		if err == nil {
@@ -1346,16 +1346,16 @@ func runTemplateStatus(cmd *cobra.Command, args []string) error {
 	if isJSONOutput() {
 		return outputJSON(map[string]interface{}{
 			"scope":     scopeLabel,
-			"groveId":   groveID,
+			"groveId":   projectID,
 			"templates": entries,
 		})
 	}
 
-	groveName := ""
-	if groveID != "" {
-		groveName = groveID
+	projectName := ""
+	if projectID != "" {
+		projectName = projectID
 	}
-	fmt.Printf("Grove: %s\n\n", groveName)
+	fmt.Printf("Project: %s\n\n", projectName)
 
 	if len(entries) == 0 {
 		fmt.Println("No templates found.")

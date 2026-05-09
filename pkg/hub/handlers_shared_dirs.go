@@ -25,7 +25,7 @@ import (
 func (s *Server) handleGroveSharedDirs(w http.ResponseWriter, r *http.Request, groveID string) {
 	ctx := r.Context()
 
-	grove, err := s.store.GetGrove(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, groveID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			NotFound(w, "Grove")
@@ -102,7 +102,7 @@ func (s *Server) handleGroveSharedDirs(w http.ResponseWriter, r *http.Request, g
 		}
 
 		grove.SharedDirs = append(grove.SharedDirs, newDir)
-		if err := s.store.UpdateGrove(ctx, grove); err != nil {
+		if err := s.store.UpdateProject(ctx, grove); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
@@ -119,7 +119,7 @@ func (s *Server) handleGroveSharedDirs(w http.ResponseWriter, r *http.Request, g
 func (s *Server) handleGroveSharedDirByName(w http.ResponseWriter, r *http.Request, groveID, name string) {
 	ctx := r.Context()
 
-	grove, err := s.store.GetGrove(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, groveID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			NotFound(w, "Grove")
@@ -169,7 +169,7 @@ func (s *Server) handleGroveSharedDirByName(w http.ResponseWriter, r *http.Reque
 		}
 
 		grove.SharedDirs = updated
-		if err := s.store.UpdateGrove(ctx, grove); err != nil {
+		if err := s.store.UpdateProject(ctx, grove); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}

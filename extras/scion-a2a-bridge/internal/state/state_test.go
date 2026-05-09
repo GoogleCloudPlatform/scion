@@ -40,7 +40,7 @@ func TestTaskCRUD(t *testing.T) {
 	task := &Task{
 		ID:        "task-1",
 		ContextID: "ctx-1",
-		GroveID:   "grove-1",
+		ProjectID:   "grove-1",
 		AgentSlug: "agent-1",
 		AgentID:   "agent-id-1",
 		State:     "submitted",
@@ -95,12 +95,12 @@ func TestListTasksByContext(t *testing.T) {
 
 	for _, id := range []string{"t1", "t2", "t3"} {
 		s.CreateTask(&Task{
-			ID: id, ContextID: "ctx-a", GroveID: "g1", AgentSlug: "a1",
+			ID: id, ContextID: "ctx-a", ProjectID: "g1", AgentSlug: "a1",
 			State: "submitted", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 		})
 	}
 	s.CreateTask(&Task{
-		ID: "t4", ContextID: "ctx-b", GroveID: "g1", AgentSlug: "a1",
+		ID: "t4", ContextID: "ctx-b", ProjectID: "g1", AgentSlug: "a1",
 		State: "submitted", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
@@ -118,11 +118,11 @@ func TestListTasksByAgent(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 
 	s.CreateTask(&Task{
-		ID: "t1", ContextID: "ctx-1", GroveID: "g1", AgentSlug: "a1",
+		ID: "t1", ContextID: "ctx-1", ProjectID: "g1", AgentSlug: "a1",
 		State: "submitted", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 	s.CreateTask(&Task{
-		ID: "t2", ContextID: "ctx-2", GroveID: "g1", AgentSlug: "a2",
+		ID: "t2", ContextID: "ctx-2", ProjectID: "g1", AgentSlug: "a2",
 		State: "submitted", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
@@ -141,7 +141,7 @@ func TestContextCRUD(t *testing.T) {
 
 	ctx := &Context{
 		ContextID:  "ctx-1",
-		GroveID:    "grove-1",
+		ProjectID:    "grove-1",
 		AgentSlug:  "agent-1",
 		AgentID:    "agent-id-1",
 		CreatedAt:  now,
@@ -182,7 +182,7 @@ func TestPushNotificationConfig(t *testing.T) {
 
 	// Create parent task first (FK constraint).
 	s.CreateTask(&Task{
-		ID: "task-1", ContextID: "ctx-1", GroveID: "g1", AgentSlug: "a1",
+		ID: "task-1", ContextID: "ctx-1", ProjectID: "g1", AgentSlug: "a1",
 		State: "submitted", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 

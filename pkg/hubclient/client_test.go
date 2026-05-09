@@ -865,6 +865,3 @@ func TestTokenDelete(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
-	t.Fatalf("unexpected error: %v", err)
-	}
-}

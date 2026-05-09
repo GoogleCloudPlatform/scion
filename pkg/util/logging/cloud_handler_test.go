@@ -328,9 +328,9 @@ func TestPromoteAttrToLabels(t *testing.T) {
 
 	t.Run("grove_id promoted", func(t *testing.T) {
 		labels := map[string]string{}
-		promoteAttrToLabels(labels, slog.String(AttrGroveID, "grove-456"))
-		if labels[AttrGroveID] != "grove-456" {
-			t.Errorf("expected grove_id=grove-456, got %v", labels[AttrGroveID])
+		promoteAttrToLabels(labels, slog.String(AttrProjectID, "grove-456"))
+		if labels[AttrProjectID] != "grove-456" {
+			t.Errorf("expected grove_id=grove-456, got %v", labels[AttrProjectID])
 		}
 	})
 

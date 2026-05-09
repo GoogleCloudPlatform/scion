@@ -415,7 +415,7 @@ func evaluateConditions(policy store.Policy, resource Resource) bool {
 // request falls outside the token's allowed grove or scopes, nil otherwise.
 func (a *AuthzService) enforceUATConstraints(scoped *ScopedUserIdentity, resource Resource, action Action) *Decision {
 	// Enforce grove constraint: the resource must belong to the token's grove.
-	groveID := scoped.ScopedGroveID()
+	groveID := scoped.ScopedProjectID()
 	if resource.Type == "grove" {
 		if resource.ID != groveID {
 			return &Decision{Allowed: false, Reason: "token not scoped for this grove"}
@@ -467,7 +467,7 @@ func (a *AuthzService) isGroveOwnerOrAdmin(ctx context.Context, userID, groveID 
 		return false
 	}
 	groups, err := a.store.ListGroups(ctx, store.GroupFilter{
-		GroveID:   groveID,
+		ProjectID:   groveID,
 		GroupType: store.GroupTypeExplicit,
 	}, store.ListOptions{Limit: 10})
 	if err != nil || len(groups.Items) == 0 {

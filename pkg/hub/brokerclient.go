@@ -88,9 +88,9 @@ func (c *AuthenticatedBrokerClient) ExecAgent(ctx context.Context, brokerID, bro
 	return c.transport.ExecAgent(ctx, brokerID, brokerEndpoint, agentID, groveID, command, timeout)
 }
 
-// CleanupGrove asks a broker to remove its local hub-native grove directory with HMAC authentication.
-func (c *AuthenticatedBrokerClient) CleanupGrove(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error {
-	return c.transport.CleanupGrove(ctx, brokerID, brokerEndpoint, groveSlug)
+// CleanupProject asks a broker to remove its local hub-native grove directory with HMAC authentication.
+func (c *AuthenticatedBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error {
+	return c.transport.CleanupProject(ctx, brokerID, brokerEndpoint, groveSlug)
 }
 
 // FinalizeEnv sends gathered env vars to a broker to complete agent creation.

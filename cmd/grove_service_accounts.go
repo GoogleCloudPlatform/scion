@@ -146,7 +146,7 @@ func init() {
 
 // resolveGroveForSA resolves the grove ID and creates a hub client for SA operations.
 func resolveGroveForSA() (hubclient.Client, string, error) {
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to resolve grove path: %w", err)
 	}
@@ -161,21 +161,21 @@ func resolveGroveForSA() (hubclient.Client, string, error) {
 		return nil, "", err
 	}
 
-	groveID := ""
-	if settings.Hub != nil && settings.Hub.GroveID != "" {
-		groveID = settings.Hub.GroveID
+	projectID := ""
+	if settings.Hub != nil && settings.Hub.ProjectID != "" {
+		projectID = settings.Hub.ProjectID
 	}
-	if groveID == "" {
+	if projectID == "" {
 		return nil, "", fmt.Errorf("grove not linked to Hub. Use 'scion hub link' first")
 	}
 
-	return client, groveID, nil
+	return client, projectID, nil
 }
 
 func runSAAdd(cmd *cobra.Command, args []string) error {
 	email := args[0]
 
-	client, groveID, err := resolveGroveForSA()
+	client, projectID, err := resolveGroveForSA()
 	if err != nil {
 		return err
 	}
@@ -189,7 +189,7 @@ func runSAAdd(cmd *cobra.Command, args []string) error {
 		DisplayName: saDisplayName,
 	}
 
-	sa, err := client.GCPServiceAccounts(groveID).Create(ctx, req)
+	sa, err := client.GCPServiceAccounts(projectID).Create(ctx, req)
 	if err != nil {
 		return fmt.Errorf("failed to register service account: %w", err)
 	}
@@ -212,7 +212,7 @@ func runSAAdd(cmd *cobra.Command, args []string) error {
 }
 
 func runSAList(cmd *cobra.Command, args []string) error {
-	client, groveID, err := resolveGroveForSA()
+	client, projectID, err := resolveGroveForSA()
 	if err != nil {
 		return err
 	}
@@ -220,7 +220,7 @@ func runSAList(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	sas, err := client.GCPServiceAccounts(groveID).List(ctx)
+	sas, err := client.GCPServiceAccounts(projectID).List(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list service accounts: %w", err)
 	}
@@ -262,7 +262,7 @@ func runSAList(cmd *cobra.Command, args []string) error {
 func runSARemove(cmd *cobra.Command, args []string) error {
 	saID := args[0]
 
-	client, groveID, err := resolveGroveForSA()
+	client, projectID, err := resolveGroveForSA()
 	if err != nil {
 		return err
 	}
@@ -270,7 +270,7 @@ func runSARemove(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := client.GCPServiceAccounts(groveID).Delete(ctx, saID); err != nil {
+	if err := client.GCPServiceAccounts(projectID).Delete(ctx, saID); err != nil {
 		return fmt.Errorf("failed to remove service account: %w", err)
 	}
 
@@ -279,7 +279,7 @@ func runSARemove(cmd *cobra.Command, args []string) error {
 }
 
 func runSAMint(cmd *cobra.Command, args []string) error {
-	client, groveID, err := resolveGroveForSA()
+	client, projectID, err := resolveGroveForSA()
 	if err != nil {
 		return err
 	}
@@ -292,7 +292,7 @@ func runSAMint(cmd *cobra.Command, args []string) error {
 		DisplayName: saDisplayName,
 	}
 
-	sa, err := client.GCPServiceAccounts(groveID).Mint(ctx, req)
+	sa, err := client.GCPServiceAccounts(projectID).Mint(ctx, req)
 	if err != nil {
 		return fmt.Errorf("failed to mint service account: %w", err)
 	}
@@ -318,7 +318,7 @@ func runSAMint(cmd *cobra.Command, args []string) error {
 func runSAVerify(cmd *cobra.Command, args []string) error {
 	saID := args[0]
 
-	client, groveID, err := resolveGroveForSA()
+	client, projectID, err := resolveGroveForSA()
 	if err != nil {
 		return err
 	}
@@ -326,7 +326,7 @@ func runSAVerify(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	sa, err := client.GCPServiceAccounts(groveID).Verify(ctx, saID)
+	sa, err := client.GCPServiceAccounts(projectID).Verify(ctx, saID)
 	if err != nil {
 		return fmt.Errorf("verification failed: %w", err)
 	}

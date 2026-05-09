@@ -771,32 +771,32 @@ func TestAdapterRoundTripConsistency(t *testing.T) {
 	}
 }
 
-// --- resolveEffectiveGrovePath tests ---
+// --- resolveEffectiveProjectPath tests ---
 
-func TestResolveEffectiveGrovePath_Global(t *testing.T) {
-	result := resolveEffectiveGrovePath("global")
+func TestResolveEffectiveProjectPath_Global(t *testing.T) {
+	result := resolveEffectiveProjectPath("global")
 	assert.Equal(t, "", result, "global should resolve to empty (already loaded)")
 
-	result = resolveEffectiveGrovePath("home")
+	result = resolveEffectiveProjectPath("home")
 	assert.Equal(t, "", result, "home should resolve to empty (already loaded)")
 }
 
-func TestResolveEffectiveGrovePath_Explicit(t *testing.T) {
+func TestResolveEffectiveProjectPath_Explicit(t *testing.T) {
 	// A plain .scion path with no grove-id → returned as-is (non-git grove)
-	result := resolveEffectiveGrovePath("/some/path/.scion")
+	result := resolveEffectiveProjectPath("/some/path/.scion")
 	assert.Equal(t, "/some/path/.scion", result)
 }
 
-func TestResolveEffectiveGrovePath_GitGrove(t *testing.T) {
+func TestResolveEffectiveProjectPath_GitProject(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
 	// Simulate a git grove with grove-id → should redirect to external config dir
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	os.MkdirAll(projectDir, 0755)
-	WriteGroveID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
+	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
-	result := resolveEffectiveGrovePath(projectDir)
+	result := resolveEffectiveProjectPath(projectDir)
 
 	want := filepath.Join(tmpHome, ".scion", "grove-configs", "my-repo__550e8400", ".scion")
 	assert.Equal(t, want, result)
@@ -2065,7 +2065,7 @@ profiles:
 	assert.True(t, result.StateMigrated)
 
 	// Verify state.yaml was created with the timestamp
-	state, err := LoadGroveState(tmpDir)
+	state, err := LoadProjectState(tmpDir)
 	require.NoError(t, err)
 	assert.Equal(t, "2024-06-15T10:30:00Z", state.LastSyncedAt)
 }

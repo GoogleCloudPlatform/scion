@@ -146,7 +146,7 @@ Use 'scion grove reconnect' to fix a grove whose workspace moved.`,
 // cleanupOrphanedGrove stops any running containers for the orphaned grove's
 // agents before the grove config is removed. Errors are best-effort and logged
 // as warnings.
-func cleanupOrphanedGrove(g config.GroveInfo) {
+func cleanupOrphanedGrove(g config.ProjectInfo) {
 	if g.AgentCount == 0 {
 		return
 	}

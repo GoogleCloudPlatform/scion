@@ -136,7 +136,7 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 	// Create PTY session
 	// Use agent.Slug for the stream since that's what the broker uses to look up containers
 	// (containers are labeled with scion.name=<slug>)
-	session := newPTYSession(ctx, agent.Slug, agent.GroveID, agent.RuntimeBrokerID, conn, s.controlChannel, cols, rows)
+	session := newPTYSession(ctx, agent.Slug, agent.ProjectID, agent.RuntimeBrokerID, conn, s.controlChannel, cols, rows)
 	defer session.Close()
 
 	slog.Info("PTY session started", "agent_id", agentID, "slug", agent.Slug, "user", identity.ID())

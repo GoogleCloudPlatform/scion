@@ -32,7 +32,7 @@ import (
 
 // ProjectCacheRefreshResponse is the response for a grove cache refresh operation.
 type ProjectCacheRefreshResponse struct {
-	// GroveID is the grove that was refreshed.
+	// ProjectID is the grove that was refreshed.
 	ProjectID string `json:"groveId"`
 	// BrokerID is the broker that provided the workspace.
 	BrokerID string `json:"brokerId"`
@@ -46,7 +46,7 @@ type ProjectCacheRefreshResponse struct {
 
 // ProjectCacheStatusResponse is the response for the grove cache status endpoint.
 type ProjectCacheStatusResponse struct {
-	// GroveID is the grove identifier.
+	// ProjectID is the grove identifier.
 	ProjectID string `json:"groveId"`
 	// Cached indicates whether a cached copy exists on the hub.
 	Cached bool `json:"cached"`
@@ -63,7 +63,7 @@ type ProjectCacheStatusResponse struct {
 // RuntimeBrokerProjectUploadRequest is sent to a Runtime Broker to upload a grove's
 // workspace (not an individual agent workspace) to GCS.
 type RuntimeBrokerProjectUploadRequest struct {
-	// GroveID is the grove identifier.
+	// ProjectID is the grove identifier.
 	ProjectID string `json:"groveId"`
 	// StoragePath is the path within the bucket where files should be uploaded.
 	StoragePath string `json:"storagePath"`
@@ -102,7 +102,7 @@ func (s *Server) handleProjectCacheRefresh(w http.ResponseWriter, r *http.Reques
 
 	ctx := r.Context()
 
-	grove, err := s.store.GetGrove(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, groveID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -148,14 +148,14 @@ func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request
 
 	ctx := r.Context()
 
-	grove, err := s.store.GetGrove(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, groveID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
 	// Check if a cache exists on disk
-	cachePath, err := hubNativeGrovePath(grove.Slug)
+	cachePath, err := hubNativeProjectPath(grove.Slug)
 	if err != nil {
 		InternalError(w)
 		return
@@ -173,7 +173,7 @@ func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request
 	}
 
 	// Look up the latest sync state (from any broker)
-	states, err := s.store.ListGroveSyncStates(ctx, groveID)
+	states, err := s.store.ListProjectSyncStates(ctx, groveID)
 	if err == nil {
 		for _, st := range states {
 			if st.BrokerID != "" {
@@ -200,7 +200,7 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 
 	ctx := r.Context()
 
-	grove, err := s.store.GetGrove(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, groveID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -214,7 +214,7 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 	}
 
 	// Download the latest workspace from GCS to local cache
-	cachePath, err := hubNativeGrovePath(grove.Slug)
+	cachePath, err := hubNativeProjectPath(grove.Slug)
 	if err != nil {
 		InternalError(w)
 		return
@@ -226,7 +226,7 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	storagePath := storage.GroveWorkspaceStoragePath(groveID)
+	storagePath := storage.ProjectWorkspaceStoragePath(groveID)
 	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), storagePath+"/files", cachePath); err != nil {
 		RuntimeError(w, "Failed to download workspace from GCS: "+err.Error())
 		return
@@ -247,14 +247,14 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 		brokerID = brokerIdent.BrokerID()
 	}
 
-	state := &store.GroveSyncState{
-		GroveID:      groveID,
+	state := &store.ProjectSyncState{
+		ProjectID:      groveID,
 		BrokerID:     brokerID,
 		LastSyncTime: &now,
 		FileCount:    fileCount,
 		TotalBytes:   totalBytes,
 	}
-	if err := s.store.UpsertGroveSyncState(ctx, state); err != nil {
+	if err := s.store.UpsertProjectSyncState(ctx, state); err != nil {
 		s.workspaceLog.Warn("failed to update grove sync state after cache notify", "grove_id", groveID, "error", err)
 	}
 
@@ -262,7 +262,7 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 		"grove_id", groveID, "files", fileCount, "bytes", totalBytes)
 
 	writeJSON(w, http.StatusOK, ProjectCacheRefreshResponse{
-		GroveID:    groveID,
+		ProjectID:    groveID,
 		BrokerID:   brokerID,
 		FileCount:  fileCount,
 		TotalBytes: totalBytes,
@@ -272,14 +272,14 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 
 // refreshProjectCacheFromBroker triggers a broker to upload the grove workspace
 // to GCS, then downloads it to the hub's local cache.
-func (s *Server) refreshProjectCacheFromBroker(ctx context.Context, grove *store.Grove, brokerID string, stor storage.Storage) (*ProjectCacheRefreshResponse, error) {
+func (s *Server) refreshProjectCacheFromBroker(ctx context.Context, grove *store.Project, brokerID string, stor storage.Storage) (*ProjectCacheRefreshResponse, error) {
 	cc := s.GetControlChannelManager()
 	if cc == nil {
 		return nil, fmt.Errorf("control channel not available")
 	}
 
 	// Get the provider's local path so the broker knows which directory to upload
-	provider, err := s.store.GetGroveProvider(ctx, grove.ID, brokerID)
+	provider, err := s.store.GetProjectProvider(ctx, grove.ID, brokerID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get provider info: %w", err)
 	}
@@ -287,7 +287,7 @@ func (s *Server) refreshProjectCacheFromBroker(ctx context.Context, grove *store
 		return nil, fmt.Errorf("broker %s has no local path recorded for grove %s", brokerID, grove.Name)
 	}
 
-	storagePath := storage.GroveWorkspaceStoragePath(grove.ID)
+	storagePath := storage.ProjectWorkspaceStoragePath(grove.ID)
 
 	// Tunnel request to broker to upload grove workspace to GCS.
 	// The workspace path tells the broker which directory to upload.
@@ -303,7 +303,7 @@ func (s *Server) refreshProjectCacheFromBroker(ctx context.Context, grove *store
 	}
 
 	// Download from GCS to local cache
-	cachePath, err := hubNativeGrovePath(grove.Slug)
+	cachePath, err := hubNativeProjectPath(grove.Slug)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve cache path: %w", err)
 	}
@@ -318,14 +318,14 @@ func (s *Server) refreshProjectCacheFromBroker(ctx context.Context, grove *store
 
 	// Update sync state
 	now := time.Now()
-	state := &store.GroveSyncState{
-		GroveID:      grove.ID,
+	state := &store.ProjectSyncState{
+		ProjectID:      grove.ID,
 		BrokerID:     brokerID,
 		LastSyncTime: &now,
 		FileCount:    uploadResp.UploadedFiles,
 		TotalBytes:   uploadResp.UploadedBytes,
 	}
-	if err := s.store.UpsertGroveSyncState(ctx, state); err != nil {
+	if err := s.store.UpsertProjectSyncState(ctx, state); err != nil {
 		s.workspaceLog.Warn("failed to update sync state after cache refresh",
 			"grove_id", grove.ID, "error", err)
 	}
@@ -345,8 +345,8 @@ func (s *Server) refreshProjectCacheFromBroker(ctx context.Context, grove *store
 
 // isLinkedProject returns true if the grove has at least one provider broker
 // with a local_path, indicating the workspace lives on a remote broker.
-func (s *Server) isLinkedProject(ctx context.Context, grove *store.Grove) bool {
-	providers, err := s.store.GetGroveProviders(ctx, grove.ID)
+func (s *Server) isLinkedProject(ctx context.Context, grove *store.Project) bool {
+	providers, err := s.store.GetProjectProviders(ctx, grove.ID)
 	if err != nil {
 		return false
 	}
@@ -360,13 +360,13 @@ func (s *Server) isLinkedProject(ctx context.Context, grove *store.Grove) bool {
 
 // findConnectedProvider finds a connected provider broker for a grove.
 // It prefers the default runtime broker, then falls back to any connected provider.
-func (s *Server) findConnectedProvider(ctx context.Context, grove *store.Grove) (string, error) {
+func (s *Server) findConnectedProvider(ctx context.Context, grove *store.Project) (string, error) {
 	cc := s.GetControlChannelManager()
 	if cc == nil {
 		return "", fmt.Errorf("control channel not available")
 	}
 
-	providers, err := s.store.GetGroveProviders(ctx, grove.ID)
+	providers, err := s.store.GetProjectProviders(ctx, grove.ID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get grove providers: %w", err)
 	}
@@ -399,7 +399,7 @@ func (s *Server) findConnectedProvider(ctx context.Context, grove *store.Grove) 
 
 // hasProjectCache returns true if the hub has a cached copy of the grove workspace.
 func hasProjectCache(slug string) bool {
-	cachePath, err := hubNativeGrovePath(slug)
+	cachePath, err := hubNativeProjectPath(slug)
 	if err != nil {
 		return false
 	}

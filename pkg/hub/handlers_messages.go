@@ -48,7 +48,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		filter.OnlyUnread = true
 	}
 	if groveID := q.Get("grove"); groveID != "" {
-		filter.GroveID = groveID
+		filter.ProjectID = groveID
 	}
 	if agentID := q.Get("agent"); agentID != "" {
 		filter.AgentID = agentID

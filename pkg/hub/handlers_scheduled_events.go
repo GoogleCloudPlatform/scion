@@ -69,7 +69,7 @@ func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, g
 
 	// For agent identities, enforce grove isolation
 	if agentIdentity := GetAgentIdentityFromContext(r.Context()); agentIdentity != nil {
-		if agentIdentity.GroveID() != groveID {
+		if agentIdentity.ProjectID() != groveID {
 			Forbidden(w)
 			return
 		}
@@ -206,7 +206,7 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, gr
 
 	evt := store.ScheduledEvent{
 		ID:        api.NewUUID(),
-		GroveID:   groveID,
+		ProjectID:   groveID,
 		EventType: req.EventType,
 		FireAt:    fireAt,
 		Payload:   payload,
@@ -235,7 +235,7 @@ func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, gro
 	query := r.URL.Query()
 
 	filter := store.ScheduledEventFilter{
-		GroveID:   groveID,
+		ProjectID:   groveID,
 		EventType: query.Get("eventType"),
 		Status:    query.Get("status"),
 	}
@@ -273,7 +273,7 @@ func (s *Server) getScheduledEvent(w http.ResponseWriter, r *http.Request, grove
 	}
 
 	// Verify the event belongs to the requested grove
-	if evt.GroveID != groveID {
+	if evt.ProjectID != groveID {
 		NotFound(w, "Scheduled event")
 		return
 	}
@@ -289,7 +289,7 @@ func (s *Server) cancelScheduledEvent(w http.ResponseWriter, r *http.Request, gr
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	if evt.GroveID != groveID {
+	if evt.ProjectID != groveID {
 		NotFound(w, "Scheduled event")
 		return
 	}

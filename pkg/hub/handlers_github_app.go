@@ -467,7 +467,7 @@ func (s *Server) handleGroveGitHubInstallation(w http.ResponseWriter, r *http.Re
 			return
 		}
 
-		grove, err := s.store.GetGrove(r.Context(), groveID)
+		grove, err := s.store.GetProject(r.Context(), groveID)
 		if err != nil {
 			if err == store.ErrNotFound {
 				writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
@@ -478,12 +478,12 @@ func (s *Server) handleGroveGitHubInstallation(w http.ResponseWriter, r *http.Re
 		}
 
 		grove.GitHubInstallationID = &req.InstallationID
-		grove.GitHubAppStatus = &store.GitHubAppGroveStatus{
+		grove.GitHubAppStatus = &store.GitHubAppProjectStatus{
 			State:       store.GitHubAppStateUnchecked,
 			LastChecked: timeNow(),
 		}
 
-		if err := s.store.UpdateGrove(r.Context(), grove); err != nil {
+		if err := s.store.UpdateProject(r.Context(), grove); err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update grove", nil)
 			return
 		}
@@ -496,7 +496,7 @@ func (s *Server) handleGroveGitHubInstallation(w http.ResponseWriter, r *http.Re
 		})
 
 	case http.MethodDelete:
-		grove, err := s.store.GetGrove(r.Context(), groveID)
+		grove, err := s.store.GetProject(r.Context(), groveID)
 		if err != nil {
 			if err == store.ErrNotFound {
 				writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
@@ -509,7 +509,7 @@ func (s *Server) handleGroveGitHubInstallation(w http.ResponseWriter, r *http.Re
 		grove.GitHubInstallationID = nil
 		grove.GitHubAppStatus = nil
 
-		if err := s.store.UpdateGrove(r.Context(), grove); err != nil {
+		if err := s.store.UpdateProject(r.Context(), grove); err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update grove", nil)
 			return
 		}
@@ -528,7 +528,7 @@ func (s *Server) handleGroveGitHubInstallation(w http.ResponseWriter, r *http.Re
 func (s *Server) handleGroveGitHubStatus(w http.ResponseWriter, r *http.Request, groveID string) {
 	switch r.Method {
 	case http.MethodGet:
-		s.handleGetGroveGitHubStatus(w, r, groveID)
+		s.handleGetProjectGitHubStatus(w, r, groveID)
 	case http.MethodPost:
 		s.handleCheckGroveGitHubStatus(w, r, groveID)
 	default:
@@ -536,8 +536,8 @@ func (s *Server) handleGroveGitHubStatus(w http.ResponseWriter, r *http.Request,
 	}
 }
 
-func (s *Server) handleGetGroveGitHubStatus(w http.ResponseWriter, r *http.Request, groveID string) {
-	grove, err := s.store.GetGrove(r.Context(), groveID)
+func (s *Server) handleGetProjectGitHubStatus(w http.ResponseWriter, r *http.Request, groveID string) {
+	grove, err := s.store.GetProject(r.Context(), groveID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
@@ -562,7 +562,7 @@ func (s *Server) handleGetGroveGitHubStatus(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleCheckGroveGitHubStatus(w http.ResponseWriter, r *http.Request, groveID string) {
 	ctx := r.Context()
 
-	grove, err := s.store.GetGrove(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, groveID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
@@ -582,7 +582,7 @@ func (s *Server) handleCheckGroveGitHubStatus(w http.ResponseWriter, r *http.Req
 	_, _, mintErr := s.mintGitHubAppToken(ctx, grove)
 
 	// Re-read the grove to get the updated status (mintGitHubAppToken updates it)
-	grove, err = s.store.GetGrove(ctx, groveID)
+	grove, err = s.store.GetProject(ctx, groveID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to re-read grove after check", nil)
 		return
@@ -605,7 +605,7 @@ func (s *Server) handleCheckGroveGitHubStatus(w http.ResponseWriter, r *http.Req
 func (s *Server) handleGroveGitHubPermissions(w http.ResponseWriter, r *http.Request, groveID string) {
 	switch r.Method {
 	case http.MethodGet:
-		grove, err := s.store.GetGrove(r.Context(), groveID)
+		grove, err := s.store.GetProject(r.Context(), groveID)
 		if err != nil {
 			if err == store.ErrNotFound {
 				writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
@@ -633,7 +633,7 @@ func (s *Server) handleGroveGitHubPermissions(w http.ResponseWriter, r *http.Req
 			return
 		}
 
-		grove, err := s.store.GetGrove(r.Context(), groveID)
+		grove, err := s.store.GetProject(r.Context(), groveID)
 		if err != nil {
 			if err == store.ErrNotFound {
 				writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
@@ -644,7 +644,7 @@ func (s *Server) handleGroveGitHubPermissions(w http.ResponseWriter, r *http.Req
 		}
 
 		grove.GitHubPermissions = &perms
-		if err := s.store.UpdateGrove(r.Context(), grove); err != nil {
+		if err := s.store.UpdateProject(r.Context(), grove); err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update grove", nil)
 			return
 		}
@@ -652,7 +652,7 @@ func (s *Server) handleGroveGitHubPermissions(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusOK, perms)
 
 	case http.MethodDelete:
-		grove, err := s.store.GetGrove(r.Context(), groveID)
+		grove, err := s.store.GetProject(r.Context(), groveID)
 		if err != nil {
 			if err == store.ErrNotFound {
 				writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
@@ -663,7 +663,7 @@ func (s *Server) handleGroveGitHubPermissions(w http.ResponseWriter, r *http.Req
 		}
 
 		grove.GitHubPermissions = nil
-		if err := s.store.UpdateGrove(r.Context(), grove); err != nil {
+		if err := s.store.UpdateProject(r.Context(), grove); err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update grove", nil)
 			return
 		}
@@ -679,7 +679,7 @@ func (s *Server) handleGroveGitHubPermissions(w http.ResponseWriter, r *http.Req
 func (s *Server) handleGroveGitIdentity(w http.ResponseWriter, r *http.Request, groveID string) {
 	switch r.Method {
 	case http.MethodGet:
-		grove, err := s.store.GetGrove(r.Context(), groveID)
+		grove, err := s.store.GetProject(r.Context(), groveID)
 		if err != nil {
 			if err == store.ErrNotFound {
 				writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
@@ -710,7 +710,7 @@ func (s *Server) handleGroveGitIdentity(w http.ResponseWriter, r *http.Request, 
 			writeError(w, http.StatusBadRequest, ErrCodeValidationError, "name and email are required when mode is 'custom'", nil)
 			return
 		}
-		grove, err := s.store.GetGrove(r.Context(), groveID)
+		grove, err := s.store.GetProject(r.Context(), groveID)
 		if err != nil {
 			if err == store.ErrNotFound {
 				writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
@@ -720,14 +720,14 @@ func (s *Server) handleGroveGitIdentity(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		grove.GitIdentity = &identity
-		if err := s.store.UpdateGrove(r.Context(), grove); err != nil {
+		if err := s.store.UpdateProject(r.Context(), grove); err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update grove", nil)
 			return
 		}
 		writeJSON(w, http.StatusOK, identity)
 
 	case http.MethodDelete:
-		grove, err := s.store.GetGrove(r.Context(), groveID)
+		grove, err := s.store.GetProject(r.Context(), groveID)
 		if err != nil {
 			if err == store.ErrNotFound {
 				writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
@@ -737,7 +737,7 @@ func (s *Server) handleGroveGitIdentity(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		grove.GitIdentity = nil
-		if err := s.store.UpdateGrove(r.Context(), grove); err != nil {
+		if err := s.store.UpdateProject(r.Context(), grove); err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update grove", nil)
 			return
 		}
@@ -808,7 +808,7 @@ func (s *Server) syncAppPermissions(ctx context.Context) (map[string]string, []m
 	)
 
 	// List all groves and check their requested permissions against the app's permissions
-	groves, err := s.store.ListGroves(ctx, store.GroveFilter{}, store.ListOptions{Limit: 10000})
+	groves, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 10000})
 	if err != nil {
 		return appPermissions, nil, fmt.Errorf("failed to list groves: %v", err)
 	}
@@ -830,7 +830,7 @@ func (s *Server) syncAppPermissions(ctx context.Context) (map[string]string, []m
 		// Grove requests permissions the app doesn't have — mark as degraded
 		msg := fmt.Sprintf("App is missing permissions requested by this grove: %s. Update the GitHub App's permissions in the app settings.", strings.Join(missingPerms, ", "))
 
-		grove.GitHubAppStatus = &store.GitHubAppGroveStatus{
+		grove.GitHubAppStatus = &store.GitHubAppProjectStatus{
 			State:        store.GitHubAppStateDegraded,
 			ErrorCode:    githubapp.ErrCodePermissionDenied,
 			ErrorMessage: msg,
@@ -838,7 +838,7 @@ func (s *Server) syncAppPermissions(ctx context.Context) (map[string]string, []m
 			LastError:    &now,
 		}
 
-		if err := s.store.UpdateGrove(ctx, &grove); err != nil {
+		if err := s.store.UpdateProject(ctx, &grove); err != nil {
 			slog.Error("Failed to update grove after permission sync",
 				"grove_id", grove.ID, "error", err)
 			continue

@@ -108,8 +108,8 @@ func newBrokerTestStore(t *testing.T) store.Store {
 	return s
 }
 
-// setupBrokerTestGrove creates a grove and a runtime broker, returns the grove ID.
-func setupBrokerTestGrove(t *testing.T, s store.Store) string {
+// setupBrokerTestProject creates a grove and a runtime broker, returns the grove ID.
+func setupBrokerTestProject(t *testing.T, s store.Store) string {
 	t.Helper()
 	ctx := context.Background()
 
@@ -125,26 +125,26 @@ func setupBrokerTestGrove(t *testing.T, s store.Store) string {
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "test-grove",
 		Slug:       "test-grove",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 	return grove.ID
 }
 
 // setupBrokerTestAgent creates a running agent and returns it.
-func setupBrokerTestAgent(t *testing.T, s store.Store, groveID, slug, phase string) *store.Agent {
+func setupBrokerTestAgent(t *testing.T, s store.Store, projectID, slug, phase string) *store.Agent {
 	t.Helper()
 	agent := &store.Agent{
 		ID:              api.NewUUID(),
 		Name:            slug,
 		Slug:            slug,
-		GroveID:         groveID,
+		ProjectID:         projectID,
 		Phase:           phase,
 		RuntimeBrokerID: "broker-1",
 		Visibility:      store.VisibilityPrivate,
@@ -157,8 +157,8 @@ func setupBrokerTestAgent(t *testing.T, s store.Store, groveID, slug, phase stri
 
 func TestMessageBrokerProxy_DirectMessage(t *testing.T) {
 	s := newBrokerTestStore(t)
-	groveID := setupBrokerTestGrove(t, s)
-	setupBrokerTestAgent(t, s, groveID, "test-agent", "running")
+	projectID := setupBrokerTestProject(t, s)
+	setupBrokerTestAgent(t, s, projectID, "test-agent", "running")
 
 	events := NewChannelEventPublisher()
 	defer events.Close()
@@ -172,10 +172,10 @@ func TestMessageBrokerProxy_DirectMessage(t *testing.T) {
 	proxy.Start()
 	defer proxy.Stop()
 
-	proxy.subscribeAgent(groveID, "test-agent")
+	proxy.subscribeAgent(projectID, "test-agent")
 
 	msg := messages.NewInstruction("user:alice", "agent:test-agent", "hello agent")
-	if err := proxy.PublishMessage(context.Background(), groveID, msg); err != nil {
+	if err := proxy.PublishMessage(context.Background(), projectID, msg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -195,9 +195,9 @@ func TestMessageBrokerProxy_DirectMessage(t *testing.T) {
 
 func TestMessageBrokerProxy_GroveBroadcast(t *testing.T) {
 	s := newBrokerTestStore(t)
-	groveID := setupBrokerTestGrove(t, s)
-	setupBrokerTestAgent(t, s, groveID, "agent-a", "running")
-	setupBrokerTestAgent(t, s, groveID, "agent-b", "running")
+	projectID := setupBrokerTestProject(t, s)
+	setupBrokerTestAgent(t, s, projectID, "agent-a", "running")
+	setupBrokerTestAgent(t, s, projectID, "agent-b", "running")
 
 	events := NewChannelEventPublisher()
 	defer events.Close()
@@ -211,11 +211,11 @@ func TestMessageBrokerProxy_GroveBroadcast(t *testing.T) {
 	proxy.Start()
 	defer proxy.Stop()
 
-	proxy.subscribeGroveBroadcast(groveID)
+	proxy.subscribeGroveBroadcast(projectID)
 
 	msg := messages.NewInstruction("user:alice", "grove:test-grove", "hello everyone")
 	msg.Broadcasted = true
-	if err := proxy.PublishBroadcast(context.Background(), groveID, msg); err != nil {
+	if err := proxy.PublishBroadcast(context.Background(), projectID, msg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -237,9 +237,9 @@ func TestMessageBrokerProxy_GroveBroadcast(t *testing.T) {
 
 func TestMessageBrokerProxy_BroadcastSkipsSender(t *testing.T) {
 	s := newBrokerTestStore(t)
-	groveID := setupBrokerTestGrove(t, s)
-	setupBrokerTestAgent(t, s, groveID, "sender-agent", "running")
-	setupBrokerTestAgent(t, s, groveID, "other-agent", "running")
+	projectID := setupBrokerTestProject(t, s)
+	setupBrokerTestAgent(t, s, projectID, "sender-agent", "running")
+	setupBrokerTestAgent(t, s, projectID, "other-agent", "running")
 
 	events := NewChannelEventPublisher()
 	defer events.Close()
@@ -253,11 +253,11 @@ func TestMessageBrokerProxy_BroadcastSkipsSender(t *testing.T) {
 	proxy.Start()
 	defer proxy.Stop()
 
-	proxy.subscribeGroveBroadcast(groveID)
+	proxy.subscribeGroveBroadcast(projectID)
 
 	msg := messages.NewInstruction("agent:sender-agent", "grove:test-grove", "any updates?")
 	msg.Broadcasted = true
-	proxy.PublishBroadcast(context.Background(), groveID, msg)
+	proxy.PublishBroadcast(context.Background(), projectID, msg)
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -272,9 +272,9 @@ func TestMessageBrokerProxy_BroadcastSkipsSender(t *testing.T) {
 
 func TestMessageBrokerProxy_EnsureGroveSubscriptions(t *testing.T) {
 	s := newBrokerTestStore(t)
-	groveID := setupBrokerTestGrove(t, s)
-	setupBrokerTestAgent(t, s, groveID, "running-agent", "running")
-	setupBrokerTestAgent(t, s, groveID, "stopped-agent", "stopped")
+	projectID := setupBrokerTestProject(t, s)
+	setupBrokerTestAgent(t, s, projectID, "running-agent", "running")
+	setupBrokerTestAgent(t, s, projectID, "stopped-agent", "stopped")
 
 	events := NewChannelEventPublisher()
 	defer events.Close()
@@ -288,12 +288,12 @@ func TestMessageBrokerProxy_EnsureGroveSubscriptions(t *testing.T) {
 	proxy.Start()
 	defer proxy.Stop()
 
-	if err := proxy.EnsureGroveSubscriptions(context.Background(), groveID); err != nil {
+	if err := proxy.EnsureGroveSubscriptions(context.Background(), projectID); err != nil {
 		t.Fatal(err)
 	}
 
 	msg := messages.NewInstruction("user:alice", "agent:running-agent", "hello")
-	proxy.PublishMessage(context.Background(), groveID, msg)
+	proxy.PublishMessage(context.Background(), projectID, msg)
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -305,8 +305,8 @@ func TestMessageBrokerProxy_EnsureGroveSubscriptions(t *testing.T) {
 
 func TestMessageBrokerProxy_DeliverToAgentPersistence(t *testing.T) {
 	s := newBrokerTestStore(t)
-	groveID := setupBrokerTestGrove(t, s)
-	agent := setupBrokerTestAgent(t, s, groveID, "persist-agent", "running")
+	projectID := setupBrokerTestProject(t, s)
+	agent := setupBrokerTestAgent(t, s, projectID, "persist-agent", "running")
 
 	events := NewChannelEventPublisher()
 	defer events.Close()
@@ -320,12 +320,12 @@ func TestMessageBrokerProxy_DeliverToAgentPersistence(t *testing.T) {
 	proxy.Start()
 	defer proxy.Stop()
 
-	proxy.subscribeAgent(groveID, "persist-agent")
+	proxy.subscribeAgent(projectID, "persist-agent")
 
 	msg := messages.NewInstruction("user:alice", "agent:persist-agent", "persist this")
 	msg.SenderID = "user-alice-id"
 	msg.RecipientID = agent.ID
-	if err := proxy.PublishMessage(context.Background(), groveID, msg); err != nil {
+	if err := proxy.PublishMessage(context.Background(), projectID, msg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -356,8 +356,8 @@ func TestMessageBrokerProxy_DeliverToAgentPersistence(t *testing.T) {
 
 func TestMessageBrokerProxy_UserMessageDelivery(t *testing.T) {
 	s := newBrokerTestStore(t)
-	groveID := setupBrokerTestGrove(t, s)
-	setupBrokerTestAgent(t, s, groveID, "sending-agent", "running")
+	projectID := setupBrokerTestProject(t, s)
+	setupBrokerTestAgent(t, s, projectID, "sending-agent", "running")
 
 	events := NewChannelEventPublisher()
 	defer events.Close()
@@ -372,7 +372,7 @@ func TestMessageBrokerProxy_UserMessageDelivery(t *testing.T) {
 	defer proxy.Stop()
 
 	// Subscribe to user messages for this grove (as EnsureGroveSubscriptions would do)
-	proxy.subscribeGroveUserMessages(groveID)
+	proxy.subscribeGroveUserMessages(projectID)
 
 	// Subscribe to SSE user.message events to verify delivery
 	sseEvents, unsub := events.Subscribe("user.user-bob-id.message", "grove.*.user.message")
@@ -383,7 +383,7 @@ func TestMessageBrokerProxy_UserMessageDelivery(t *testing.T) {
 	msg.SenderID = "agent-uuid-123"
 	msg.RecipientID = userID
 
-	if err := proxy.PublishUserMessage(context.Background(), groveID, userID, msg); err != nil {
+	if err := proxy.PublishUserMessage(context.Background(), projectID, userID, msg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -418,8 +418,8 @@ func TestMessageBrokerProxy_UserMessageDelivery(t *testing.T) {
 
 func TestMessageBrokerProxy_EnsureGroveSubscriptionsIncludesUserMessages(t *testing.T) {
 	s := newBrokerTestStore(t)
-	groveID := setupBrokerTestGrove(t, s)
-	setupBrokerTestAgent(t, s, groveID, "some-agent", "running")
+	projectID := setupBrokerTestProject(t, s)
+	setupBrokerTestAgent(t, s, projectID, "some-agent", "running")
 
 	events := NewChannelEventPublisher()
 	defer events.Close()
@@ -434,7 +434,7 @@ func TestMessageBrokerProxy_EnsureGroveSubscriptionsIncludesUserMessages(t *test
 	defer proxy.Stop()
 
 	// EnsureGroveSubscriptions should also set up user message subscriptions
-	if err := proxy.EnsureGroveSubscriptions(context.Background(), groveID); err != nil {
+	if err := proxy.EnsureGroveSubscriptions(context.Background(), projectID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -442,7 +442,7 @@ func TestMessageBrokerProxy_EnsureGroveSubscriptionsIncludesUserMessages(t *test
 	msg := messages.NewInstruction("agent:some-agent", "user:carol", "auto-subscribed?")
 	msg.RecipientID = userID
 
-	if err := proxy.PublishUserMessage(context.Background(), groveID, userID, msg); err != nil {
+	if err := proxy.PublishUserMessage(context.Background(), projectID, userID, msg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -461,8 +461,8 @@ func TestMessageBrokerProxy_EnsureGroveSubscriptionsIncludesUserMessages(t *test
 
 func TestMessageBrokerProxy_PluginSubscription(t *testing.T) {
 	s := newBrokerTestStore(t)
-	groveID := setupBrokerTestGrove(t, s)
-	setupBrokerTestAgent(t, s, groveID, "agent-x", "running")
+	projectID := setupBrokerTestProject(t, s)
+	setupBrokerTestAgent(t, s, projectID, "agent-x", "running")
 
 	events := NewChannelEventPublisher()
 	defer events.Close()
@@ -477,7 +477,7 @@ func TestMessageBrokerProxy_PluginSubscription(t *testing.T) {
 	defer proxy.Stop()
 
 	// Plugin requests a subscription for the grove
-	pattern := broker.TopicAgentMessages(groveID, "*")
+	pattern := broker.TopicAgentMessages(projectID, "*")
 	if err := proxy.RequestSubscription(pattern); err != nil {
 		t.Fatalf("RequestSubscription failed: %v", err)
 	}
@@ -493,7 +493,7 @@ func TestMessageBrokerProxy_PluginSubscription(t *testing.T) {
 
 func TestMessageBrokerProxy_PluginSubscriptionDedup(t *testing.T) {
 	s := newBrokerTestStore(t)
-	_ = setupBrokerTestGrove(t, s)
+	_ = setupBrokerTestProject(t, s)
 
 	events := NewChannelEventPublisher()
 	defer events.Close()
@@ -527,7 +527,7 @@ func TestMessageBrokerProxy_PluginSubscriptionDedup(t *testing.T) {
 
 func TestMessageBrokerProxy_PluginSubscriptionCancel(t *testing.T) {
 	s := newBrokerTestStore(t)
-	_ = setupBrokerTestGrove(t, s)
+	_ = setupBrokerTestProject(t, s)
 
 	events := NewChannelEventPublisher()
 	defer events.Close()
@@ -565,7 +565,7 @@ func TestMessageBrokerProxy_PluginSubscriptionCancel(t *testing.T) {
 
 func TestMessageBrokerProxy_PluginSubscriptionCleanupOnStop(t *testing.T) {
 	s := newBrokerTestStore(t)
-	_ = setupBrokerTestGrove(t, s)
+	_ = setupBrokerTestProject(t, s)
 
 	events := NewChannelEventPublisher()
 	defer events.Close()
@@ -595,10 +595,10 @@ func TestMessageBrokerProxy_PluginSubscriptionCleanupOnStop(t *testing.T) {
 	}
 }
 
-func TestMessageBrokerProxy_StartBootstrapsExistingGroves(t *testing.T) {
+func TestMessageBrokerProxy_StartBootstrapsExistingProjects(t *testing.T) {
 	s := newBrokerTestStore(t)
-	groveID := setupBrokerTestGrove(t, s)
-	setupBrokerTestAgent(t, s, groveID, "pre-existing-agent", "running")
+	projectID := setupBrokerTestProject(t, s)
+	setupBrokerTestAgent(t, s, projectID, "pre-existing-agent", "running")
 
 	events := NewChannelEventPublisher()
 	defer events.Close()
@@ -625,7 +625,7 @@ func TestMessageBrokerProxy_StartBootstrapsExistingGroves(t *testing.T) {
 	msg.SenderID = "agent-uuid"
 	msg.RecipientID = userID
 
-	if err := proxy.PublishUserMessage(context.Background(), groveID, userID, msg); err != nil {
+	if err := proxy.PublishUserMessage(context.Background(), projectID, userID, msg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -654,8 +654,8 @@ func TestMessageBrokerProxy_StartBootstrapsExistingGroves(t *testing.T) {
 
 func TestMessageBrokerProxy_GroveSubscriptionDedup(t *testing.T) {
 	s := newBrokerTestStore(t)
-	groveID := setupBrokerTestGrove(t, s)
-	setupBrokerTestAgent(t, s, groveID, "dedup-agent", "running")
+	projectID := setupBrokerTestProject(t, s)
+	setupBrokerTestAgent(t, s, projectID, "dedup-agent", "running")
 
 	events := NewChannelEventPublisher()
 	defer events.Close()
@@ -670,10 +670,10 @@ func TestMessageBrokerProxy_GroveSubscriptionDedup(t *testing.T) {
 	defer proxy.Stop()
 
 	// Call EnsureGroveSubscriptions twice — second call should be a no-op
-	if err := proxy.EnsureGroveSubscriptions(context.Background(), groveID); err != nil {
+	if err := proxy.EnsureGroveSubscriptions(context.Background(), projectID); err != nil {
 		t.Fatal(err)
 	}
-	if err := proxy.EnsureGroveSubscriptions(context.Background(), groveID); err != nil {
+	if err := proxy.EnsureGroveSubscriptions(context.Background(), projectID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -682,7 +682,7 @@ func TestMessageBrokerProxy_GroveSubscriptionDedup(t *testing.T) {
 	msg := messages.NewInstruction("agent:dedup-agent", "user:dedup", "dedup test")
 	msg.RecipientID = userID
 
-	if err := proxy.PublishUserMessage(context.Background(), groveID, userID, msg); err != nil {
+	if err := proxy.PublishUserMessage(context.Background(), projectID, userID, msg); err != nil {
 		t.Fatal(err)
 	}
 

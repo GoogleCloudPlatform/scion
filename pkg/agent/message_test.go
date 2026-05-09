@@ -51,8 +51,8 @@ func TestMessage(t *testing.T) {
 		Runtime: mockRT,
 	}
 	// Initialize buffer (not used for interrupt messages, but needed to avoid nil).
-	mgr.msgBuffer = NewMessageBuffer(100*time.Millisecond, func(agentID, groveID, message string, interrupt bool) error {
-		return mgr.deliverImmediate(context.Background(), agentID, groveID, message, interrupt)
+	mgr.msgBuffer = NewMessageBuffer(100*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
+		return mgr.deliverImmediate(context.Background(), agentID, projectID, message, interrupt)
 	})
 	defer mgr.msgBuffer.Close()
 
@@ -123,8 +123,8 @@ func TestBroadcast(t *testing.T) {
 		Runtime: mockRT,
 	}
 	// Use a short buffer delay for testing.
-	mgr.msgBuffer = NewMessageBuffer(100*time.Millisecond, func(agentID, groveID, message string, interrupt bool) error {
-		return mgr.deliverImmediate(context.Background(), agentID, groveID, message, interrupt)
+	mgr.msgBuffer = NewMessageBuffer(100*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
+		return mgr.deliverImmediate(context.Background(), agentID, projectID, message, interrupt)
 	})
 	defer mgr.msgBuffer.Close()
 
@@ -208,8 +208,8 @@ func TestMessageRaw(t *testing.T) {
 	mgr := &AgentManager{
 		Runtime: mockRT,
 	}
-	mgr.msgBuffer = NewMessageBuffer(100*time.Millisecond, func(agentID, groveID, message string, interrupt bool) error {
-		return mgr.deliverImmediate(context.Background(), agentID, groveID, message, interrupt)
+	mgr.msgBuffer = NewMessageBuffer(100*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
+		return mgr.deliverImmediate(context.Background(), agentID, projectID, message, interrupt)
 	})
 	defer mgr.msgBuffer.Close()
 

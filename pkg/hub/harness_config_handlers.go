@@ -73,7 +73,7 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 		Name:    query.Get("name"),
 		Scope:   query.Get("scope"),
 		ScopeID: query.Get("scopeId"),
-		GroveID: query.Get("groveId"),
+		ProjectID: query.Get("groveId"),
 		Harness: query.Get("harness"),
 		Status:  query.Get("status"),
 		Search:  query.Get("search"),

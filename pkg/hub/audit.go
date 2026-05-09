@@ -59,7 +59,7 @@ const (
 type GCPTokenEvent struct {
 	EventType           GCPTokenEventType `json:"eventType"`
 	AgentID             string            `json:"agentId"`
-	GroveID             string            `json:"groveId"`
+	ProjectID             string            `json:"groveId"`
 	ServiceAccountEmail string            `json:"serviceAccountEmail"`
 	ServiceAccountID    string            `json:"serviceAccountId"`
 	Success             bool              `json:"success"`
@@ -192,7 +192,7 @@ func (l *LogAuditLogger) LogGCPTokenEvent(ctx context.Context, event *GCPTokenEv
 		slog.String("event_type", string(event.EventType)),
 		slog.Bool("success", event.Success),
 		slog.String("agent_id", event.AgentID),
-		slog.String("grove_id", event.GroveID),
+		slog.String("grove_id", event.ProjectID),
 		slog.String("sa_email", event.ServiceAccountEmail),
 	}
 
@@ -415,7 +415,7 @@ func LogGCPTokenGeneration(ctx context.Context, logger AuditLogger, eventType GC
 	event := &GCPTokenEvent{
 		EventType:           eventType,
 		AgentID:             agentID,
-		GroveID:             groveID,
+		ProjectID:             groveID,
 		ServiceAccountEmail: saEmail,
 		ServiceAccountID:    saID,
 		Success:             success,

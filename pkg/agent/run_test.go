@@ -288,7 +288,7 @@ profiles:
 	// In broker mode, empty env vars should NOT cause an error
 	_, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:       "broker-test",
-		GrovePath:  projectScionDir,
+		ProjectPath:  projectScionDir,
 		BrokerMode: true,
 		NoAuth:     true,
 		Env: map[string]string{
@@ -376,7 +376,7 @@ profiles:
 	// In local mode (BrokerMode=false), empty env vars should be fatal
 	_, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:      "local-test",
-		GrovePath: projectScionDir,
+		ProjectPath: projectScionDir,
 		NoAuth:    true,
 	})
 	if err == nil {
@@ -595,7 +595,7 @@ func TestStartResumeNonExistentAgent(t *testing.T) {
 	// Try to resume a non-existent agent
 	opts := api.StartOptions{
 		Name:      "non-existent-agent",
-		GrovePath: scionDir,
+		ProjectPath: scionDir,
 		Resume:    true,
 	}
 
@@ -669,7 +669,7 @@ profiles:
 
 	_, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:      "test-agent",
-		GrovePath: projectScionDir,
+		ProjectPath: projectScionDir,
 		NoAuth:    true,
 	})
 	if err != nil {
@@ -740,7 +740,7 @@ profiles:
 
 	_, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:      "test-agent",
-		GrovePath: projectScionDir,
+		ProjectPath: projectScionDir,
 		NoAuth:    true,
 	})
 	if err != nil {
@@ -811,7 +811,7 @@ profiles:
 	_, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:      "test-agent",
 		Template:  hydratedTplDir, // absolute path, simulating hydrated template
-		GrovePath: projectScionDir,
+		ProjectPath: projectScionDir,
 		NoAuth:    true,
 	})
 	if err != nil {
@@ -892,7 +892,7 @@ profiles:
 	_, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:      "test-agent",
 		Template:  "test4",
-		GrovePath: projectScionDir,
+		ProjectPath: projectScionDir,
 		NoAuth:    true,
 	})
 	if err != nil {
@@ -1112,7 +1112,7 @@ profiles:
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
 			Name:      "flag-test",
-			GrovePath: projectScionDir,
+			ProjectPath: projectScionDir,
 			Task:      "do something",
 			NoAuth:    true,
 		})
@@ -1161,7 +1161,7 @@ profiles:
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
 			Name:      "noflag-test",
-			GrovePath: projectScionDir,
+			ProjectPath: projectScionDir,
 			Task:      "do something",
 			NoAuth:    true,
 		})
@@ -1242,7 +1242,7 @@ profiles:
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
 			Name:      "telem-on",
-			GrovePath: projectScionDir,
+			ProjectPath: projectScionDir,
 			NoAuth:    true,
 		})
 		if err != nil {
@@ -1276,7 +1276,7 @@ profiles:
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
 			Name:      "telem-off",
-			GrovePath: projectScionDir,
+			ProjectPath: projectScionDir,
 			NoAuth:    true,
 		})
 		if err != nil {
@@ -1347,7 +1347,7 @@ profiles:
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
 			Name:              "override-enable",
-			GrovePath:         projectScionDir,
+			ProjectPath:         projectScionDir,
 			NoAuth:            true,
 			TelemetryOverride: boolPtr(true),
 		})
@@ -1382,7 +1382,7 @@ profiles:
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
 			Name:              "override-disable",
-			GrovePath:         projectScionDir,
+			ProjectPath:         projectScionDir,
 			NoAuth:            true,
 			TelemetryOverride: boolPtr(false),
 		})
@@ -1416,7 +1416,7 @@ profiles:
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
 			Name:              "override-no-config",
-			GrovePath:         projectScionDir,
+			ProjectPath:         projectScionDir,
 			NoAuth:            true,
 			TelemetryOverride: boolPtr(true),
 		})
@@ -1495,7 +1495,7 @@ telemetry:
 	env := make(map[string]string)
 	_, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:              "settings-telem",
-		GrovePath:         projectScionDir,
+		ProjectPath:         projectScionDir,
 		NoAuth:            true,
 		TelemetryOverride: boolPtr(true),
 		Env:               env,
@@ -1574,7 +1574,7 @@ profiles:
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
 			Name:        "auth-override",
-			GrovePath:   projectScionDir,
+			ProjectPath:   projectScionDir,
 			NoAuth:      true,
 			HarnessAuth: "vertex-ai",
 		})
@@ -1854,7 +1854,7 @@ profiles:
 
 	_, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:      "test-agent",
-		GrovePath: projectScionDir,
+		ProjectPath: projectScionDir,
 		NoAuth:    true,
 	})
 	if err != nil {
@@ -1949,7 +1949,7 @@ profiles:
 
 	_, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:      "test-agent",
-		GrovePath: projectScionDir,
+		ProjectPath: projectScionDir,
 		NoAuth:    true,
 		Env: map[string]string{
 			"SCION_HUB_ENDPOINT": "http://broker-dispatch:9810",
@@ -2142,7 +2142,7 @@ profiles:
 
 		_, err := mgr.Start(context.Background(), api.StartOptions{
 			Name:      "test-agent",
-			GrovePath: projectScionDir,
+			ProjectPath: projectScionDir,
 			NoAuth:    true,
 		})
 		if err != nil {
@@ -2194,7 +2194,7 @@ profiles:
 
 		_, err := mgr.Start(context.Background(), api.StartOptions{
 			Name:      "hub-disabled-agent",
-			GrovePath: projectScionDir,
+			ProjectPath: projectScionDir,
 			NoAuth:    true,
 		})
 		if err != nil {
@@ -2240,7 +2240,7 @@ profiles:
 
 		_, err := mgr.Start(context.Background(), api.StartOptions{
 			Name:      "hub-disabled-env",
-			GrovePath: projectScionDir,
+			ProjectPath: projectScionDir,
 			NoAuth:    true,
 		})
 		if err != nil {
@@ -2342,7 +2342,7 @@ profiles:
 
 	_, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:      "hub-env-test",
-		GrovePath: projectScionDir,
+		ProjectPath: projectScionDir,
 		NoAuth:    true,
 	})
 	if err != nil {
@@ -2465,7 +2465,7 @@ runtimes:
 
 	_, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:      "test-agent",
-		GrovePath: projectScionDir,
+		ProjectPath: projectScionDir,
 		NoAuth:    true,
 	})
 	if err != nil {

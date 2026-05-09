@@ -49,8 +49,8 @@ func TestGatherAndSubmitEnv_NonInteractiveGathersFromLocalEnv(t *testing.T) {
 	defer os.Unsetenv("TEST_SECRET_KEY")
 
 	// Set up mock Hub server
-	groveID := "grove-1"
-	server, captured := newEnvGatherMockHubServer(t, groveID)
+	projectID := "grove-1"
+	server, captured := newEnvGatherMockHubServer(t, projectID)
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
@@ -59,7 +59,7 @@ func TestGatherAndSubmitEnv_NonInteractiveGathersFromLocalEnv(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:   client,
 		Endpoint: server.URL,
-		GroveID:  groveID,
+		ProjectID:  projectID,
 	}
 
 	resp := &hubclient.CreateAgentResponse{
@@ -71,7 +71,7 @@ func TestGatherAndSubmitEnv_NonInteractiveGathersFromLocalEnv(t *testing.T) {
 		},
 	}
 
-	result, err := gatherAndSubmitEnv(context.Background(), hubCtx, groveID, resp)
+	result, err := gatherAndSubmitEnv(context.Background(), hubCtx, projectID, resp)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
@@ -164,7 +164,7 @@ func TestStartAgentViaHub_EnvGatherFailureCleansUp(t *testing.T) {
 	os.Unsetenv("MISSING_KEY")
 
 	agentID := "agent-cleanup-1"
-	groveID := "grove-cleanup"
+	projectID := "grove-cleanup"
 	var deleteCalled bool
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -173,7 +173,7 @@ func TestStartAgentViaHub_EnvGatherFailureCleansUp(t *testing.T) {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/groves/"+groveID+"/agents":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/groves/"+projectID+"/agents":
 			// CreateAgent — return 202 with env-gather requirements
 			w.WriteHeader(http.StatusAccepted)
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -192,7 +192,7 @@ func TestStartAgentViaHub_EnvGatherFailureCleansUp(t *testing.T) {
 
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/groves":
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"groves": []map[string]interface{}{{"id": groveID, "name": "test"}},
+				"groves": []map[string]interface{}{{"id": projectID, "name": "test"}},
 			})
 
 		default:
@@ -207,7 +207,7 @@ func TestStartAgentViaHub_EnvGatherFailureCleansUp(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:   client,
 		Endpoint: server.URL,
-		GroveID:  groveID,
+		ProjectID:  projectID,
 	}
 
 	err = startAgentViaHub(hubCtx, "test-agent", "", false, nil)
@@ -239,18 +239,18 @@ func TestStartAgentViaHub_GlobalGroveSkipsWorkspaceBootstrap(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "state.yaml"), []byte("syncedAgents: []\n"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "large-local-file.txt"), []byte("should-not-upload"), 0644))
 
-	groveID := "grove-global"
+	projectID := "grove-global"
 	var captured *hubclient.CreateAgentRequest
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/groves/"+groveID:
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/groves/"+projectID:
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"id":   groveID,
+				"id":   projectID,
 				"name": "global",
 			})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/groves/"+groveID+"/agents":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/groves/"+projectID+"/agents":
 			var req hubclient.CreateAgentRequest
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
 			captured = &req
@@ -278,8 +278,8 @@ func TestStartAgentViaHub_GlobalGroveSkipsWorkspaceBootstrap(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:    client,
 		Endpoint:  server.URL,
-		GroveID:   groveID,
-		GrovePath: settingsPath,
+		ProjectID:   projectID,
+		ProjectPath: settingsPath,
 		IsGlobal:  true,
 	}
 
@@ -291,7 +291,7 @@ func TestStartAgentViaHub_GlobalGroveSkipsWorkspaceBootstrap(t *testing.T) {
 
 // newEnvGatherMockHubServer creates a mock Hub server that handles the SubmitEnv
 // endpoint and captures the submitted environment variables.
-func newEnvGatherMockHubServer(t *testing.T, groveID string) (*httptest.Server, *map[string]string) {
+func newEnvGatherMockHubServer(t *testing.T, projectID string) (*httptest.Server, *map[string]string) {
 	t.Helper()
 	captured := make(map[string]string)
 
@@ -351,8 +351,8 @@ func TestGatherAndSubmitEnv_InteractiveSecretPrompt(t *testing.T) {
 	}
 
 	// Set up mock Hub server
-	groveID := "grove-prompt"
-	server, captured := newEnvGatherMockHubServer(t, groveID)
+	projectID := "grove-prompt"
+	server, captured := newEnvGatherMockHubServer(t, projectID)
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
@@ -361,7 +361,7 @@ func TestGatherAndSubmitEnv_InteractiveSecretPrompt(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:   client,
 		Endpoint: server.URL,
-		GroveID:  groveID,
+		ProjectID:  projectID,
 	}
 
 	resp := &hubclient.CreateAgentResponse{
@@ -379,7 +379,7 @@ func TestGatherAndSubmitEnv_InteractiveSecretPrompt(t *testing.T) {
 		},
 	}
 
-	result, err := gatherAndSubmitEnv(context.Background(), hubCtx, groveID, resp)
+	result, err := gatherAndSubmitEnv(context.Background(), hubCtx, projectID, resp)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 

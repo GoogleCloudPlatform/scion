@@ -125,22 +125,22 @@ func TestResolveLocalWorkspacePath_WorktreeExists(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	// Create grove directory structure
-	groveName := "my-project"
-	groveDir := filepath.Join(tmpDir, groveName)
+	projectName := "my-project"
+	groveDir := filepath.Join(tmpDir, projectName)
 	if err := os.MkdirAll(groveDir, 0755); err != nil {
 		t.Fatalf("failed to create grove dir: %v", err)
 	}
 
 	// Create worktree directory
-	worktreeDir := filepath.Join(tmpDir, ".scion_worktrees", groveName, "my-agent")
+	worktreeDir := filepath.Join(tmpDir, ".scion_worktrees", projectName, "my-agent")
 	if err := os.MkdirAll(worktreeDir, 0755); err != nil {
 		t.Fatalf("failed to create worktree dir: %v", err)
 	}
 
-	// Set grovePath to the grove directory
-	oldGrovePath := grovePath
-	grovePath = groveDir
-	defer func() { grovePath = oldGrovePath }()
+	// Set projectPath to the grove directory
+	oldProjectPath:= projectPath
+	projectPath = groveDir
+	defer func() { projectPath = oldProjectPath }()
 
 	workspacePath, err := resolveLocalWorkspacePath("my-agent")
 	if err != nil {
@@ -160,10 +160,10 @@ func TestResolveLocalWorkspacePath_FallbackToCurrent(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Set grovePath to the temp directory (no worktrees exist)
-	oldGrovePath := grovePath
-	grovePath = tmpDir
-	defer func() { grovePath = oldGrovePath }()
+	// Set projectPath to the temp directory (no worktrees exist)
+	oldProjectPath:= projectPath
+	projectPath = tmpDir
+	defer func() { projectPath = oldProjectPath }()
 
 	workspacePath, err := resolveLocalWorkspacePath("my-agent")
 	if err != nil {
@@ -176,11 +176,11 @@ func TestResolveLocalWorkspacePath_FallbackToCurrent(t *testing.T) {
 	}
 }
 
-func TestResolveLocalWorkspacePath_EmptyGrovePath(t *testing.T) {
+func TestResolveLocalWorkspacePath_EmptyProjectPath(t *testing.T) {
 	// Clear grove path
-	oldGrovePath := grovePath
-	grovePath = ""
-	defer func() { grovePath = oldGrovePath }()
+	oldProjectPath:= projectPath
+	projectPath = ""
+	defer func() { projectPath = oldProjectPath }()
 
 	workspacePath, err := resolveLocalWorkspacePath("my-agent")
 	if err != nil {

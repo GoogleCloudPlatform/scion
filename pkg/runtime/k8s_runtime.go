@@ -1662,9 +1662,9 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			ContainerID:     p.Name, // Pod name serves as the container identifier
 			Name:            p.Labels["scion.name"],
 			Template:        p.Labels["scion.template"],
-			Grove:           p.Labels["scion.grove"],
-			GroveID:         p.Labels["scion.grove_id"],
-			GrovePath:       grovePath,
+			Project:         p.Labels["scion.grove"],
+			ProjectID:       p.Labels["scion.grove_id"],
+			ProjectPath:     grovePath,
 			Labels:          p.Labels,
 			Annotations:     p.Annotations,
 			ContainerStatus: status,

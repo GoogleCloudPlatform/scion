@@ -40,12 +40,12 @@ func TestResolution_PlainEnvVar(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	grove := &store.Grove{ID: "grove-res-1", Name: "res-grove", Slug: "res-grove"}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	grove := &store.Project{ID: "grove-res-1", Name: "res-grove", Slug: "res-grove"}
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
-	if err := memStore.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID: "grove-res-1", BrokerID: "broker-res-1",
+	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: "grove-res-1", BrokerID: "broker-res-1",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestResolution_PlainEnvVar(t *testing.T) {
 		ID:              "agent-res-1",
 		Name:            "res-agent",
 		Slug:            "res-agent",
-		GroveID:         "grove-res-1",
+		ProjectID:         "grove-res-1",
 		OwnerID:         "user-res-1",
 		RuntimeBrokerID: "broker-res-1",
 		AppliedConfig:   &store.AgentAppliedConfig{},
@@ -101,12 +101,12 @@ func TestResolution_SecretUserScope(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	grove := &store.Grove{ID: "grove-res-2", Name: "res-grove-2", Slug: "res-grove-2"}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	grove := &store.Project{ID: "grove-res-2", Name: "res-grove-2", Slug: "res-grove-2"}
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
-	if err := memStore.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID: "grove-res-2", BrokerID: "broker-res-2",
+	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: "grove-res-2", BrokerID: "broker-res-2",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestResolution_SecretUserScope(t *testing.T) {
 		ID:              "agent-res-2",
 		Name:            "res-agent-2",
 		Slug:            "res-agent-2",
-		GroveID:         "grove-res-2",
+		ProjectID:         "grove-res-2",
 		OwnerID:         "user-res-2",
 		RuntimeBrokerID: "broker-res-2",
 		AppliedConfig:   &store.AgentAppliedConfig{},
@@ -177,12 +177,12 @@ func TestResolution_GroveEnvVar(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	grove := &store.Grove{ID: "grove-res-3", Name: "res-grove-3", Slug: "res-grove-3"}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	grove := &store.Project{ID: "grove-res-3", Name: "res-grove-3", Slug: "res-grove-3"}
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
-	if err := memStore.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID: "grove-res-3", BrokerID: "broker-res-3",
+	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: "grove-res-3", BrokerID: "broker-res-3",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestResolution_GroveEnvVar(t *testing.T) {
 		ID:              "agent-res-3",
 		Name:            "res-agent-3",
 		Slug:            "res-agent-3",
-		GroveID:         "grove-res-3",
+		ProjectID:         "grove-res-3",
 		OwnerID:         "user-res-3",
 		RuntimeBrokerID: "broker-res-3",
 		AppliedConfig:   &store.AgentAppliedConfig{},
@@ -240,12 +240,12 @@ func TestResolution_SecretPromotedEnvVar(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	grove := &store.Grove{ID: "grove-res-4", Name: "res-grove-4", Slug: "res-grove-4"}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	grove := &store.Project{ID: "grove-res-4", Name: "res-grove-4", Slug: "res-grove-4"}
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatal(err)
 	}
-	if err := memStore.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID: "grove-res-4", BrokerID: "broker-res-4",
+	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: "grove-res-4", BrokerID: "broker-res-4",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func TestResolution_SecretPromotedEnvVar(t *testing.T) {
 		ID:              "agent-res-4",
 		Name:            "res-agent-4",
 		Slug:            "res-agent-4",
-		GroveID:         "grove-res-4",
+		ProjectID:         "grove-res-4",
 		OwnerID:         "user-res-4",
 		RuntimeBrokerID: "broker-res-4",
 		AppliedConfig:   &store.AgentAppliedConfig{},

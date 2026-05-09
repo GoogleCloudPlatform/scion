@@ -103,7 +103,7 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 				interval = DefaultHeartbeatInterval
 			}
 
-			groveFilter := server.buildGroveFilterForHub(hc.HubEndpoint)
+			groveFilter := server.buildProjectFilterForHub(hc.HubEndpoint)
 
 			hb := NewHeartbeatService(
 				hc.HubClient.RuntimeBrokers(),

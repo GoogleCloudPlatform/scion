@@ -34,12 +34,12 @@ func TestStopAllAgents_Global(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-1",
-		Name: "Test Grove",
+		Name: "Test Project",
 		Slug: "test-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	// Create running agents
 	for i, name := range []string{"agent-1", "agent-2", "agent-3"} {
@@ -47,7 +47,7 @@ func TestStopAllAgents_Global(t *testing.T) {
 			ID:      name,
 			Slug:    name,
 			Name:    name,
-			GroveID: grove.ID,
+			ProjectID: grove.ID,
 			Phase:   string(state.PhaseRunning),
 		}
 		if i == 2 {
@@ -102,23 +102,23 @@ func TestStopAllAgents_GroveScoped(t *testing.T) {
 	ctx := context.Background()
 
 	// Create two groves
-	grove1 := &store.Grove{ID: "grove-1", Name: "Grove 1", Slug: "grove-1"}
-	grove2 := &store.Grove{ID: "grove-2", Name: "Grove 2", Slug: "grove-2"}
-	require.NoError(t, s.CreateGrove(ctx, grove1))
-	require.NoError(t, s.CreateGrove(ctx, grove2))
+	grove1 := &store.Project{ID: "grove-1", Name: "Project 1", Slug: "grove-1"}
+	grove2 := &store.Project{ID: "grove-2", Name: "Project 2", Slug: "grove-2"}
+	require.NoError(t, s.CreateProject(ctx, grove1))
+	require.NoError(t, s.CreateProject(ctx, grove2))
 
 	// Create running agents in both groves
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "g1-agent-1", Slug: "g1-agent-1", Name: "G1 Agent 1",
-		GroveID: grove1.ID, Phase: string(state.PhaseRunning),
+		ProjectID: grove1.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "g1-agent-2", Slug: "g1-agent-2", Name: "G1 Agent 2",
-		GroveID: grove1.ID, Phase: string(state.PhaseRunning),
+		ProjectID: grove1.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "g2-agent-1", Slug: "g2-agent-1", Name: "G2 Agent 1",
-		GroveID: grove2.ID, Phase: string(state.PhaseRunning),
+		ProjectID: grove2.ID, Phase: string(state.PhaseRunning),
 	}))
 
 	t.Run("stops only agents in scoped grove", func(t *testing.T) {
@@ -168,11 +168,11 @@ func TestStopAllAgents_GroveOwner_StopsAllAgents(t *testing.T) {
 	// Create running agents owned by different users
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "alice-agent", Slug: "alice-agent", Name: "Alice Agent",
-		GroveID: grove.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
+		ProjectID: grove.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "other-agent", Slug: "other-agent", Name: "Other Agent",
-		GroveID: grove.ID, OwnerID: "user-other", Phase: string(state.PhaseRunning),
+		ProjectID: grove.ID, OwnerID: "user-other", Phase: string(state.PhaseRunning),
 	}))
 
 	// Alice is grove owner — should stop ALL agents, scope = "all"
@@ -223,15 +223,15 @@ func TestStopAllAgents_GroveMember_StopsOnlyOwnAgents(t *testing.T) {
 	// Create agents owned by carol and by alice
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "carol-agent-1", Slug: "carol-agent-1", Name: "Carol Agent 1",
-		GroveID: grove.ID, OwnerID: carol.ID, Phase: string(state.PhaseRunning),
+		ProjectID: grove.ID, OwnerID: carol.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "carol-agent-2", Slug: "carol-agent-2", Name: "Carol Agent 2",
-		GroveID: grove.ID, OwnerID: carol.ID, Phase: string(state.PhaseRunning),
+		ProjectID: grove.ID, OwnerID: carol.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "alice-agent", Slug: "alice-agent", Name: "Alice Agent",
-		GroveID: grove.ID, OwnerID: "user-alice", Phase: string(state.PhaseRunning),
+		ProjectID: grove.ID, OwnerID: "user-alice", Phase: string(state.PhaseRunning),
 	}))
 
 	// Carol (regular member) should only stop her own agents, scope = "own"
@@ -264,7 +264,7 @@ func TestStopAllAgents_NonMember_Forbidden(t *testing.T) {
 	// Create a running agent in the grove
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "agent-1", Slug: "agent-1", Name: "Agent 1",
-		GroveID: grove.ID, Phase: string(state.PhaseRunning),
+		ProjectID: grove.ID, Phase: string(state.PhaseRunning),
 	}))
 
 	// Bob is NOT a grove member — should get 403

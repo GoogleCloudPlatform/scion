@@ -47,8 +47,8 @@ type Options struct {
 	LocalPath string
 	// HubEndpoint is the base Hub API URL (e.g. "https://hub.example.com").
 	HubEndpoint string
-	// GroveID is the grove identifier on the hub.
-	GroveID string
+	// ProjectID is the grove identifier on the hub.
+	ProjectID string
 	// AuthToken is the bearer token for hub authentication.
 	AuthToken string
 	// Direction specifies the sync direction.
@@ -86,12 +86,12 @@ func Sync(ctx context.Context, opts Options) (*Result, error) {
 	if opts.HubEndpoint == "" {
 		return nil, fmt.Errorf("hub endpoint is required")
 	}
-	if opts.GroveID == "" {
+	if opts.ProjectID == "" {
 		return nil, fmt.Errorf("grove ID is required")
 	}
 
 	// Build the WebDAV remote URL
-	davURL := buildWebDAVURL(opts.HubEndpoint, opts.GroveID)
+	davURL := buildWebDAVURL(opts.HubEndpoint, opts.ProjectID)
 
 	// Build rclone on-the-fly remote string.
 	// Values must be single-quoted so that special characters in the URL

@@ -24,7 +24,7 @@ import (
 // deliveryRecord captures a single call to the delivery function.
 type deliveryRecord struct {
 	agentID   string
-	groveID   string
+	projectID   string
 	message   string
 	interrupt bool
 }
@@ -35,9 +35,9 @@ func TestMessageBuffer_SingleMessage(t *testing.T) {
 	var deliveries []deliveryRecord
 	done := make(chan struct{}, 1)
 
-	buf := NewMessageBuffer(100*time.Millisecond, func(agentID, groveID, message string, interrupt bool) error {
+	buf := NewMessageBuffer(100*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
 		mu.Lock()
-		deliveries = append(deliveries, deliveryRecord{agentID, groveID, message, interrupt})
+		deliveries = append(deliveries, deliveryRecord{agentID, projectID, message, interrupt})
 		mu.Unlock()
 		done <- struct{}{}
 		return nil
@@ -60,8 +60,8 @@ func TestMessageBuffer_SingleMessage(t *testing.T) {
 	if deliveries[0].agentID != "agent-1" {
 		t.Errorf("expected agent-1, got %s", deliveries[0].agentID)
 	}
-	if deliveries[0].groveID != "grove-a" {
-		t.Errorf("expected grove-a, got %s", deliveries[0].groveID)
+	if deliveries[0].projectID != "grove-a" {
+		t.Errorf("expected grove-a, got %s", deliveries[0].projectID)
 	}
 	if deliveries[0].message != "hello" {
 		t.Errorf("expected 'hello', got %q", deliveries[0].message)
@@ -75,9 +75,9 @@ func TestMessageBuffer_CoalescesRapidMessages(t *testing.T) {
 	var deliveries []deliveryRecord
 	done := make(chan struct{}, 1)
 
-	buf := NewMessageBuffer(200*time.Millisecond, func(agentID, groveID, message string, interrupt bool) error {
+	buf := NewMessageBuffer(200*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
 		mu.Lock()
-		deliveries = append(deliveries, deliveryRecord{agentID, groveID, message, interrupt})
+		deliveries = append(deliveries, deliveryRecord{agentID, projectID, message, interrupt})
 		mu.Unlock()
 		done <- struct{}{}
 		return nil
@@ -115,9 +115,9 @@ func TestMessageBuffer_SeparateAgents(t *testing.T) {
 	var deliveries []deliveryRecord
 	done := make(chan struct{}, 2)
 
-	buf := NewMessageBuffer(100*time.Millisecond, func(agentID, groveID, message string, interrupt bool) error {
+	buf := NewMessageBuffer(100*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
 		mu.Lock()
-		deliveries = append(deliveries, deliveryRecord{agentID, groveID, message, interrupt})
+		deliveries = append(deliveries, deliveryRecord{agentID, projectID, message, interrupt})
 		mu.Unlock()
 		done <- struct{}{}
 		return nil
@@ -155,15 +155,15 @@ func TestMessageBuffer_SeparateAgents(t *testing.T) {
 	}
 }
 
-func TestMessageBuffer_SameAgentDifferentGroves(t *testing.T) {
+func TestMessageBuffer_SameAgentDifferentProjects(t *testing.T) {
 	// Same agent slug in different groves should be buffered independently.
 	var mu sync.Mutex
 	var deliveries []deliveryRecord
 	done := make(chan struct{}, 2)
 
-	buf := NewMessageBuffer(100*time.Millisecond, func(agentID, groveID, message string, interrupt bool) error {
+	buf := NewMessageBuffer(100*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
 		mu.Lock()
-		deliveries = append(deliveries, deliveryRecord{agentID, groveID, message, interrupt})
+		deliveries = append(deliveries, deliveryRecord{agentID, projectID, message, interrupt})
 		mu.Unlock()
 		done <- struct{}{}
 		return nil
@@ -189,7 +189,7 @@ func TestMessageBuffer_SameAgentDifferentGroves(t *testing.T) {
 
 	got := map[string]string{}
 	for _, d := range deliveries {
-		got[d.groveID] = d.message
+		got[d.projectID] = d.message
 	}
 	if got["grove-a"] != "for-grove-a" {
 		t.Errorf("grove-a got %q", got["grove-a"])
@@ -206,9 +206,9 @@ func TestMessageBuffer_DebounceResetsTimer(t *testing.T) {
 	var deliveries []deliveryRecord
 	done := make(chan struct{}, 1)
 
-	buf := NewMessageBuffer(150*time.Millisecond, func(agentID, groveID, message string, interrupt bool) error {
+	buf := NewMessageBuffer(150*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
 		mu.Lock()
-		deliveries = append(deliveries, deliveryRecord{agentID, groveID, message, interrupt})
+		deliveries = append(deliveries, deliveryRecord{agentID, projectID, message, interrupt})
 		mu.Unlock()
 		done <- struct{}{}
 		return nil
@@ -261,9 +261,9 @@ func TestMessageBuffer_Close(t *testing.T) {
 	var mu sync.Mutex
 	var deliveries []deliveryRecord
 
-	buf := NewMessageBuffer(10*time.Second, func(agentID, groveID, message string, interrupt bool) error {
+	buf := NewMessageBuffer(10*time.Second, func(agentID, projectID, message string, interrupt bool) error {
 		mu.Lock()
-		deliveries = append(deliveries, deliveryRecord{agentID, groveID, message, interrupt})
+		deliveries = append(deliveries, deliveryRecord{agentID, projectID, message, interrupt})
 		mu.Unlock()
 		return nil
 	})

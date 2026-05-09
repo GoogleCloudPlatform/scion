@@ -86,8 +86,8 @@ type SyncToFinalizeResponse struct {
 type WorkspaceStatusResponse struct {
 	// Slug is the agent's URL-safe identifier.
 	Slug string `json:"slug"`
-	// GroveID is the grove ID.
-	GroveID string `json:"groveId"`
+	// ProjectID is the grove ID.
+	ProjectID string `json:"groveId"`
 	// StorageURI is the GCS URI for the workspace storage.
 	StorageURI string `json:"storageUri"`
 	// LastSync contains information about the last sync operation.
@@ -182,14 +182,14 @@ func (s *Server) handleWorkspaceStatus(w http.ResponseWriter, r *http.Request, a
 	stor := s.GetStorage()
 	storageURI := ""
 	if stor != nil {
-		storageURI = storage.WorkspaceStorageURI(stor.Bucket(), agent.GroveID, agentID)
+		storageURI = storage.WorkspaceStorageURI(stor.Bucket(), agent.ProjectID, agentID)
 	}
 
 	// TODO: Fetch last sync info from storage metadata
 	// For now, return basic status
 	writeJSON(w, http.StatusOK, WorkspaceStatusResponse{
 		Slug:       agentID, // agentID parameter is the URL slug
-		GroveID:    agent.GroveID,
+		ProjectID:    agent.ProjectID,
 		StorageURI: storageURI,
 		LastSync:   nil, // Will be populated in Phase 4
 	})
@@ -233,7 +233,7 @@ func (s *Server) handleWorkspaceSyncFrom(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Get workspace storage path
-	storagePath := storage.WorkspaceStoragePath(agent.GroveID, agentID)
+	storagePath := storage.WorkspaceStoragePath(agent.ProjectID, agentID)
 
 	// Tunnel request to Runtime Broker to upload workspace to GCS
 	cc := s.GetControlChannelManager()
@@ -331,7 +331,7 @@ func (s *Server) handleWorkspaceSyncTo(w http.ResponseWriter, r *http.Request, a
 	}
 
 	// Get workspace storage path
-	storagePath := storage.WorkspaceStoragePath(agent.GroveID, agentID)
+	storagePath := storage.WorkspaceStoragePath(agent.ProjectID, agentID)
 
 	// Check for existing files with matching hashes (incremental sync)
 	expires := time.Now().Add(SignedURLExpiry)
@@ -422,7 +422,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 	}
 
 	// Get workspace storage path
-	storagePath := storage.WorkspaceStoragePath(agent.GroveID, agentID)
+	storagePath := storage.WorkspaceStoragePath(agent.ProjectID, agentID)
 
 	// Verify all files exist in storage
 	for _, file := range req.Manifest.Files {
@@ -660,13 +660,13 @@ func (e *brokerError) Error() string {
 // (~/.scion/groves/<slug>/) in sync after workspace changes on a remote broker.
 // This is a best-effort operation: errors are logged but do not fail the caller.
 func (s *Server) syncHubNativeWorkspaceBack(ctx context.Context, agent *store.Agent, storagePath string) {
-	if agent.GroveID == "" {
+	if agent.ProjectID == "" {
 		return
 	}
 
-	grove, err := s.store.GetGrove(ctx, agent.GroveID)
+	grove, err := s.store.GetProject(ctx, agent.ProjectID)
 	if err != nil {
-		s.workspaceLog.Warn("syncHubNativeWorkspaceBack: failed to get grove", "agent_id", agent.ID, "grove_id", agent.GroveID, "error", err)
+		s.workspaceLog.Warn("syncHubNativeWorkspaceBack: failed to get grove", "agent_id", agent.ID, "grove_id", agent.ProjectID, "error", err)
 		return
 	}
 
@@ -680,7 +680,7 @@ func (s *Server) syncHubNativeWorkspaceBack(ctx context.Context, agent *store.Ag
 		if s.isEmbeddedBroker(agent.RuntimeBrokerID) {
 			return // Embedded broker, no sync needed
 		}
-		provider, err := s.store.GetGroveProvider(ctx, grove.ID, agent.RuntimeBrokerID)
+		provider, err := s.store.GetProjectProvider(ctx, grove.ID, agent.RuntimeBrokerID)
 		if err == nil && provider.LocalPath != "" {
 			return // Colocated broker, no sync needed
 		}
@@ -691,14 +691,14 @@ func (s *Server) syncHubNativeWorkspaceBack(ctx context.Context, agent *store.Ag
 		return
 	}
 
-	workspacePath, err := hubNativeGrovePath(grove.Slug)
+	workspacePath, err := hubNativeProjectPath(grove.Slug)
 	if err != nil {
 		s.workspaceLog.Warn("syncHubNativeWorkspaceBack: failed to get grove path", "error", err)
 		return
 	}
 
 	// Use the grove-level storage path for hub-native groves
-	groveStoragePath := storage.GroveWorkspaceStoragePath(grove.ID)
+	groveStoragePath := storage.ProjectWorkspaceStoragePath(grove.ID)
 	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), groveStoragePath+"/files", workspacePath); err != nil {
 		s.workspaceLog.Warn("syncHubNativeWorkspaceBack: GCS download failed",
 			"grove_id", grove.ID, "storagePath", groveStoragePath, "error", err)

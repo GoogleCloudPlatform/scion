@@ -48,7 +48,7 @@ func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHu
 		hubEndpoint = hubEndpointFromResolvedEnv(resolvedEnv)
 	}
 	if hubEndpoint == "" {
-		hubEndpoint = hubEndpointFromGroveSettings(grovePath)
+		hubEndpoint = hubEndpointFromProjectSettings(grovePath)
 	}
 	// A localhost endpoint from a remote hub dispatch refers to the hub
 	// machine's loopback, not this broker's. When we have a non-localhost
@@ -70,7 +70,7 @@ func resolveHubEndpointForStart(brokerHubEndpoint string, resolvedEnv map[string
 		hubEndpoint = brokerHubEndpoint
 	}
 	if hubEndpoint == "" {
-		hubEndpoint = hubEndpointFromGroveSettings(grovePath)
+		hubEndpoint = hubEndpointFromProjectSettings(grovePath)
 	}
 	return applyContainerBridgeOverride(hubEndpoint, containerHubEndpoint, runtimeName)
 }
@@ -85,11 +85,11 @@ func hubEndpointFromResolvedEnv(resolvedEnv map[string]string) string {
 	return ""
 }
 
-func hubEndpointFromGroveSettings(grovePath string) string {
+func hubEndpointFromProjectSettings(grovePath string) string {
 	if grovePath == "" {
 		return ""
 	}
-	settingsDir := resolveGroveSettingsDir(grovePath)
+	settingsDir := resolveProjectSettingsDir(grovePath)
 	groveSettings, err := config.LoadSettingsFromDir(settingsDir)
 	if err != nil || groveSettings.IsHubExplicitlyDisabled() {
 		return ""

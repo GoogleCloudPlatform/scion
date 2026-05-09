@@ -49,7 +49,7 @@ func TestGroveInitNestedDetection(t *testing.T) {
 		require.NoError(t, os.Chdir(subDir))
 
 		// The enclosing grove check finds the parent grove
-		_, rootDir, found := config.GetEnclosingGrovePath()
+		_, rootDir, found := config.GetEnclosingProjectPath()
 		assert.True(t, found, "should find enclosing grove")
 
 		wd, _ := os.Getwd()
@@ -73,7 +73,7 @@ func TestGroveInitNestedDetection(t *testing.T) {
 		require.NoError(t, os.Chdir(projectDir))
 
 		// The enclosing grove check will find ~/.scion
-		grovePath, rootDir, found := config.GetEnclosingGrovePath()
+		projectPath, rootDir, found := config.GetEnclosingProjectPath()
 		assert.True(t, found, "should find global grove")
 
 		evalTmpHome, _ := filepath.EvalSymlinks(tmpHome)
@@ -83,10 +83,10 @@ func TestGroveInitNestedDetection(t *testing.T) {
 		globalDir, err := config.GetGlobalDir()
 		assert.NoError(t, err)
 
-		// grovePath should equal globalDir
-		evalGrovePath, _ := filepath.EvalSymlinks(grovePath)
+		// projectPath should equal globalDir
+		evalProjectPath, _ := filepath.EvalSymlinks(projectPath)
 		evalGlobalDir, _ := filepath.EvalSymlinks(globalDir)
-		assert.Equal(t, evalGrovePath, evalGlobalDir,
+		assert.Equal(t, evalProjectPath, evalGlobalDir,
 			"found grove should be the global grove - initialization should proceed")
 	})
 
@@ -107,7 +107,7 @@ func TestGroveInitNestedDetection(t *testing.T) {
 		require.NoError(t, os.Chdir(subDir))
 
 		// The enclosing grove check will find the project's .scion
-		_, _, found := config.GetEnclosingGrovePath()
+		_, _, found := config.GetEnclosingProjectPath()
 		assert.True(t, found, "should find enclosing project grove")
 
 		// Nested initialization is now allowed — no error expected

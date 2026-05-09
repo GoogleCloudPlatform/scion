@@ -76,7 +76,7 @@ func TestConnectMessage(t *testing.T) {
 	assert.Equal(t, TypeConnect, msg.Type)
 	assert.Equal(t, "host-123", msg.BrokerID)
 	assert.Equal(t, "1.0.0", msg.Version)
-	assert.Equal(t, []string{"grove-1", "grove-2"}, msg.Groves)
+	assert.Equal(t, []string{"grove-1", "grove-2"}, msg.Projects)
 	assert.Greater(t, msg.Timestamp, int64(0))
 
 	// Test JSON marshaling
@@ -144,7 +144,7 @@ func TestStreamOpenMessage(t *testing.T) {
 	assert.Equal(t, "stream-1", msg.StreamID)
 	assert.Equal(t, StreamTypePTY, msg.StreamType)
 	assert.Equal(t, "agent-123", msg.Slug)
-	assert.Equal(t, "grove-456", msg.GroveID)
+	assert.Equal(t, "grove-456", msg.ProjectID)
 	assert.Equal(t, 120, msg.Cols)
 	assert.Equal(t, 40, msg.Rows)
 }

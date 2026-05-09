@@ -82,7 +82,7 @@ func TestLoadSettings(t *testing.T) {
 		t.Errorf("expected global override runtime namespace 'scion-global', got '%s'", s.Runtimes["kubernetes"].Namespace)
 	}
 
-	// 3. Test Grove overrides
+	// 3. Test Project overrides
 	groveSettings := `{
 		"active_profile": "local-dev",
 		"profiles": {
@@ -884,16 +884,16 @@ func TestUpdateSetting_SplitStorageWritesToExternalDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	groveID := "abcd1234-5678-9abc-def0-123456789abc"
-	if err := WriteGroveID(scionDir, groveID); err != nil {
+	projectID := "abcd1234-5678-9abc-def0-123456789abc"
+	if err := WriteProjectID(scionDir, projectID); err != nil {
 		t.Fatal(err)
 	}
 
 	// Compute expected external config dir
-	groveSlug := api.Slugify("my-project")
-	shortUUID := strings.ReplaceAll(groveID, "-", "")[:8]
+	projectSlug := api.Slugify("my-project")
+	shortUUID := strings.ReplaceAll(projectID, "-", "")[:8]
 	externalDir := filepath.Join(tmpHome, ".scion", "grove-configs",
-		groveSlug+"__"+shortUUID, ".scion")
+		projectSlug+"__"+shortUUID, ".scion")
 	if err := os.MkdirAll(externalDir, 0755); err != nil {
 		t.Fatal(err)
 	}

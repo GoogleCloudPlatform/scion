@@ -178,9 +178,9 @@ func TestAuthz_ScopeOverride(t *testing.T) {
 		PolicyID: "policy-hub-deny", PrincipalType: "user", PrincipalID: "user-scope",
 	}))
 
-	// Grove-level allow (more specific scope overrides)
+	// Project-level allow (more specific scope overrides)
 	grovePolicy := &store.Policy{
-		ID: "policy-grove-allow", Name: "Grove Allow", ScopeType: "grove",
+		ID: "policy-grove-allow", Name: "Project Allow", ScopeType: "grove",
 		ScopeID:      "grove-1",
 		ResourceType: "agent", Actions: []string{"read"}, Effect: "allow", Priority: 0,
 	}
@@ -309,12 +309,12 @@ func TestAuthz_AgentDirectPolicy(t *testing.T) {
 	ctx := context.Background()
 
 	// Create grove and agent
-	require.NoError(t, s.CreateGrove(ctx, &store.Grove{
-		ID: "grove-agent-1", Name: "Test Grove", Slug: "test-grove-agent-1",
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: "grove-agent-1", Name: "Test Project", Slug: "test-grove-agent-1",
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "agent-direct", Slug: "agent-direct", Name: "Agent Direct",
-		GroveID: "grove-agent-1", Phase: string(state.PhaseRunning),
+		ProjectID: "grove-agent-1", Phase: string(state.PhaseRunning),
 	}))
 
 	// Create and bind policy to agent
@@ -327,7 +327,7 @@ func TestAuthz_AgentDirectPolicy(t *testing.T) {
 		PolicyID: "policy-agent", PrincipalType: "agent", PrincipalID: "agent-direct",
 	}))
 
-	agent := &evaluateAgentIdentity{id: "agent-direct", groveID: "grove-agent-1"}
+	agent := &evaluateAgentIdentity{id: "agent-direct", projectID: "grove-agent-1"}
 	resource := Resource{Type: "grove", ID: "grove-agent-1"}
 
 	decision := authz.CheckAccess(ctx, agent, resource, ActionRead)
@@ -387,7 +387,7 @@ func TestAuthz_ResourceTypeMismatch(t *testing.T) {
 	decision := authz.CheckAccess(ctx, user, Resource{Type: "agent", ID: "a1"}, ActionRead)
 	assert.True(t, decision.Allowed)
 
-	// Grove resource should not match
+	// Project resource should not match
 	decision = authz.CheckAccess(ctx, user, Resource{Type: "grove", ID: "g1"}, ActionRead)
 	assert.False(t, decision.Allowed)
 }
@@ -633,15 +633,15 @@ func TestAuthz_AncestryAccess_AgentToDescendant(t *testing.T) {
 	ctx := context.Background()
 
 	// Create grove and parent agent
-	require.NoError(t, s.CreateGrove(ctx, &store.Grove{
-		ID: "grove-ancestry-1", Name: "Ancestry Grove", Slug: "ancestry-grove-1",
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: "grove-ancestry-1", Name: "Ancestry Project", Slug: "ancestry-grove-1",
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "agent-parent", Slug: "agent-parent", Name: "Parent Agent",
-		GroveID: "grove-ancestry-1", Phase: string(state.PhaseRunning),
+		ProjectID: "grove-ancestry-1", Phase: string(state.PhaseRunning),
 	}))
 
-	agent := &evaluateAgentIdentity{id: "agent-parent", groveID: "grove-ancestry-1"}
+	agent := &evaluateAgentIdentity{id: "agent-parent", projectID: "grove-ancestry-1"}
 
 	// Grandchild agent with parent in ancestry
 	resource := Resource{

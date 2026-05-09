@@ -40,19 +40,19 @@ func TestAgentStatusUpdate_Authorization(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-1",
-		Name: "Test Grove",
+		Name: "Test Project",
 		Slug: "test-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	// Create two agents
 	agent1 := &store.Agent{
 		ID:      "agent-1",
 		Slug:    "agent-1-slug",
 		Name:    "Agent 1",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent1))
@@ -61,7 +61,7 @@ func TestAgentStatusUpdate_Authorization(t *testing.T) {
 		ID:      "agent-2",
 		Slug:    "agent-2-slug",
 		Name:    "Agent 2",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2))
@@ -146,19 +146,19 @@ func TestAgentStatusUpdate_Heartbeat(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-h",
-		Name: "Heartbeat Grove",
+		Name: "Heartbeat Project",
 		Slug: "heartbeat-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	// Create an agent
 	agent := &store.Agent{
 		ID:      "agent-h",
 		Slug:    "agent-h-slug",
 		Name:    "Agent Heartbeat",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -193,16 +193,16 @@ func TestAgentStatusUpdate_Heartbeat(t *testing.T) {
 }
 
 // setupOfflineBrokerAgent creates a grove, an offline broker, and an agent assigned to that broker.
-func setupOfflineBrokerAgent(t *testing.T, s store.Store, suffix string) (*store.Grove, *store.RuntimeBroker, *store.Agent) {
+func setupOfflineBrokerAgent(t *testing.T, s store.Store, suffix string) (*store.Project, *store.RuntimeBroker, *store.Agent) {
 	t.Helper()
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   fmt.Sprintf("grove-offline-%s", suffix),
-		Name: fmt.Sprintf("Offline Grove %s", suffix),
+		Name: fmt.Sprintf("Offline Project %s", suffix),
 		Slug: fmt.Sprintf("offline-grove-%s", suffix),
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID:     fmt.Sprintf("broker-offline-%s", suffix),
@@ -216,7 +216,7 @@ func setupOfflineBrokerAgent(t *testing.T, s store.Store, suffix string) (*store
 		ID:              fmt.Sprintf("agent-offline-%s", suffix),
 		Slug:            fmt.Sprintf("agent-offline-%s-slug", suffix),
 		Name:            fmt.Sprintf("Agent Offline %s", suffix),
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 	}
@@ -243,18 +243,18 @@ func TestDeleteAgent_NoBroker(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-nobroker",
-		Name: "No Broker Grove",
+		Name: "No Broker Project",
 		Slug: "no-broker-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	agent := &store.Agent{
 		ID:      "agent-nobroker",
 		Slug:    "agent-nobroker-slug",
 		Name:    "Agent No Broker",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseRunning),
 		// No RuntimeBrokerID set
 	}
@@ -285,16 +285,16 @@ func (d *deleteDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent
 }
 
 // setupOnlineBrokerAgent creates a grove, an online broker, and an agent assigned to that broker.
-func setupOnlineBrokerAgent(t *testing.T, s store.Store, suffix string) (*store.Grove, *store.RuntimeBroker, *store.Agent) {
+func setupOnlineBrokerAgent(t *testing.T, s store.Store, suffix string) (*store.Project, *store.RuntimeBroker, *store.Agent) {
 	t.Helper()
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   fmt.Sprintf("grove-online-%s", suffix),
-		Name: fmt.Sprintf("Online Grove %s", suffix),
+		Name: fmt.Sprintf("Online Project %s", suffix),
 		Slug: fmt.Sprintf("online-grove-%s", suffix),
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID:       fmt.Sprintf("broker-online-%s", suffix),
@@ -309,7 +309,7 @@ func setupOnlineBrokerAgent(t *testing.T, s store.Store, suffix string) (*store.
 		ID:              fmt.Sprintf("agent-online-%s", suffix),
 		Slug:            fmt.Sprintf("agent-online-%s-slug", suffix),
 		Name:            fmt.Sprintf("Agent Online %s", suffix),
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 	}
@@ -423,12 +423,12 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-parent",
-		Name: "Parent Grove",
+		Name: "Parent Project",
 		Slug: "parent-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	// Create a runtime broker and provider for the grove
 	broker := &store.RuntimeBroker{
@@ -439,24 +439,24 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	contrib := &store.GroveProvider{
-		GroveID:    grove.ID,
+	contrib := &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}
-	require.NoError(t, s.AddGroveProvider(ctx, contrib))
+	require.NoError(t, s.AddProjectProvider(ctx, contrib))
 
 	// Update grove default broker
 	grove.DefaultRuntimeBrokerID = broker.ID
-	require.NoError(t, s.UpdateGrove(ctx, grove))
+	require.NoError(t, s.UpdateProject(ctx, grove))
 
 	// Create the calling agent
 	callingAgent := &store.Agent{
 		ID:      "agent-caller",
 		Slug:    "agent-caller",
 		Name:    "Calling Agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, callingAgent))
@@ -473,7 +473,7 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 
 		body, _ := json.Marshal(CreateAgentRequest{
 			Name:    "Sub Agent",
-			GroveID: grove.ID,
+			ProjectID: grove.ID,
 			Task:    "do something",
 		})
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(body))
@@ -497,12 +497,12 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 
 	t.Run("Agent with grove:agent:create scope rejected for different grove", func(t *testing.T) {
 		// Create another grove
-		otherGrove := &store.Grove{
+		otherProject := &store.Project{
 			ID:   "grove-other",
-			Name: "Other Grove",
+			Name: "Other Project",
 			Slug: "other-grove",
 		}
-		require.NoError(t, s.CreateGrove(ctx, otherGrove))
+		require.NoError(t, s.CreateProject(ctx, otherProject))
 
 		token, err := tokenSvc.GenerateAgentToken(callingAgent.ID, grove.ID, []AgentTokenScope{
 			ScopeAgentStatusUpdate,
@@ -511,8 +511,8 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 		require.NoError(t, err)
 
 		body, _ := json.Marshal(CreateAgentRequest{
-			Name:    "Cross Grove Agent",
-			GroveID: otherGrove.ID,
+			Name:    "Cross Project Agent",
+			ProjectID: otherProject.ID,
 		})
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(body))
 		req.Header.Set("X-Scion-Agent-Token", token)
@@ -533,7 +533,7 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 
 		body, _ := json.Marshal(CreateAgentRequest{
 			Name:    "Unauthorized Sub",
-			GroveID: grove.ID,
+			ProjectID: grove.ID,
 		})
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(body))
 		req.Header.Set("X-Scion-Agent-Token", token)
@@ -551,19 +551,19 @@ func TestAgentLifecycle_WithScope(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-lc",
-		Name: "Lifecycle Grove",
+		Name: "Lifecycle Project",
 		Slug: "lifecycle-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	// Create the calling agent
 	callingAgent := &store.Agent{
 		ID:      "agent-lc-caller",
 		Slug:    "agent-lc-caller",
 		Name:    "Lifecycle Caller",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, callingAgent))
@@ -573,7 +573,7 @@ func TestAgentLifecycle_WithScope(t *testing.T) {
 		ID:      "agent-lc-target",
 		Slug:    "agent-lc-target",
 		Name:    "Lifecycle Target",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, targetAgent))
@@ -600,18 +600,18 @@ func TestAgentLifecycle_WithScope(t *testing.T) {
 
 	t.Run("Agent with grove:agent:lifecycle scope rejected for cross-grove lifecycle", func(t *testing.T) {
 		// Create another grove and agent
-		otherGrove := &store.Grove{
+		otherProject := &store.Project{
 			ID:   "grove-lc-other",
-			Name: "Other LC Grove",
+			Name: "Other LC Project",
 			Slug: "other-lc-grove",
 		}
-		require.NoError(t, s.CreateGrove(ctx, otherGrove))
+		require.NoError(t, s.CreateProject(ctx, otherProject))
 
 		otherAgent := &store.Agent{
 			ID:      "agent-lc-other",
 			Slug:    "agent-lc-other",
 			Name:    "Other LC Agent",
-			GroveID: otherGrove.ID,
+			ProjectID: otherProject.ID,
 			Phase:   string(state.PhaseRunning),
 		}
 		require.NoError(t, s.CreateAgent(ctx, otherAgent))
@@ -653,47 +653,47 @@ func TestAgentGetAgent_GroveIsolation(t *testing.T) {
 	ctx := context.Background()
 
 	// Create two groves
-	grove1 := &store.Grove{
+	grove1 := &store.Project{
 		ID:   "grove-get1",
-		Name: "Get Grove 1",
+		Name: "Get Project 1",
 		Slug: "get-grove-1",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove1))
+	require.NoError(t, s.CreateProject(ctx, grove1))
 
-	grove2 := &store.Grove{
+	grove2 := &store.Project{
 		ID:   "grove-get2",
-		Name: "Get Grove 2",
+		Name: "Get Project 2",
 		Slug: "get-grove-2",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove2))
+	require.NoError(t, s.CreateProject(ctx, grove2))
 
 	// Create agents in each grove
 	agent1 := &store.Agent{
 		ID:      "agent-get-caller",
 		Slug:    "agent-get-caller",
 		Name:    "Get Caller",
-		GroveID: grove1.ID,
+		ProjectID: grove1.ID,
 		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent1))
 
-	agent2SameGrove := &store.Agent{
+	agent2SameProject := &store.Agent{
 		ID:      "agent-get-same",
 		Slug:    "agent-get-same",
-		Name:    "Same Grove Agent",
-		GroveID: grove1.ID,
+		Name:    "Same Project Agent",
+		ProjectID: grove1.ID,
 		Phase:   string(state.PhaseRunning),
 	}
-	require.NoError(t, s.CreateAgent(ctx, agent2SameGrove))
+	require.NoError(t, s.CreateAgent(ctx, agent2SameProject))
 
-	agentOtherGrove := &store.Agent{
+	agentOtherProject := &store.Agent{
 		ID:      "agent-get-other",
 		Slug:    "agent-get-other",
-		Name:    "Other Grove Agent",
-		GroveID: grove2.ID,
+		Name:    "Other Project Agent",
+		ProjectID: grove2.ID,
 		Phase:   string(state.PhaseRunning),
 	}
-	require.NoError(t, s.CreateAgent(ctx, agentOtherGrove))
+	require.NoError(t, s.CreateAgent(ctx, agentOtherProject))
 
 	tokenSvc := srv.GetAgentTokenService()
 	require.NotNil(t, tokenSvc)
@@ -702,7 +702,7 @@ func TestAgentGetAgent_GroveIsolation(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("Agent can GET details of agents in same grove", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agent2SameGrove.ID, nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agent2SameProject.ID, nil)
 		req.Header.Set("X-Scion-Agent-Token", token)
 
 		rec := httptest.NewRecorder()
@@ -712,7 +712,7 @@ func TestAgentGetAgent_GroveIsolation(t *testing.T) {
 	})
 
 	t.Run("Agent cannot GET details of agents in different grove", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agentOtherGrove.ID, nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agentOtherProject.ID, nil)
 		req.Header.Set("X-Scion-Agent-Token", token)
 
 		rec := httptest.NewRecorder()
@@ -722,7 +722,7 @@ func TestAgentGetAgent_GroveIsolation(t *testing.T) {
 	})
 
 	t.Run("Agent cannot access workspace operations", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agent2SameGrove.ID+"/workspace", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agent2SameProject.ID+"/workspace", nil)
 		req.Header.Set("X-Scion-Agent-Token", token)
 
 		rec := httptest.NewRecorder()
@@ -732,7 +732,7 @@ func TestAgentGetAgent_GroveIsolation(t *testing.T) {
 	})
 }
 
-func TestDeleteGroveAgent_BrokerOffline(t *testing.T) {
+func TestDeleteProjectAgent_BrokerOffline(t *testing.T) {
 	srv, s := testServer(t)
 
 	grove, _, agent := setupOfflineBrokerAgent(t, s, "gdel")
@@ -832,17 +832,17 @@ func (d *createAgentDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.
 }
 
 // setupCreateAgentServer creates a test server with a dispatcher and a grove+broker ready for agent creation.
-func setupCreateAgentServer(t *testing.T, disp AgentDispatcher) (*Server, store.Store, *store.Grove) {
+func setupCreateAgentServer(t *testing.T, disp AgentDispatcher) (*Server, store.Store, *store.Project) {
 	t.Helper()
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-create",
-		Name: "Create Test Grove",
+		Name: "Create Test Project",
 		Slug: "create-test-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID:     "broker-create",
@@ -852,16 +852,16 @@ func setupCreateAgentServer(t *testing.T, disp AgentDispatcher) (*Server, store.
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	provider := &store.GroveProvider{
-		GroveID:    grove.ID,
+	provider := &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}
-	require.NoError(t, s.AddGroveProvider(ctx, provider))
+	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	grove.DefaultRuntimeBrokerID = broker.ID
-	require.NoError(t, s.UpdateGrove(ctx, grove))
+	require.NoError(t, s.UpdateProject(ctx, grove))
 
 	srv.SetDispatcher(disp)
 	return srv, s, grove
@@ -875,7 +875,7 @@ func TestCreateAgent_BrokerStatusPreserved(t *testing.T) {
 	// Create an agent with a task — should dispatch and preserve broker-reported "running" status
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "status-test",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "do something",
 	})
 
@@ -903,7 +903,7 @@ func TestCreateAgent_FallbackToProvisioningWhenNoBrokerStatus(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "fallback-test",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "do something",
 	})
 
@@ -944,7 +944,7 @@ func TestCreateAgent_RetriesVersionConflictAfterDispatch(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "version-conflict-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "do something",
 	})
 
@@ -977,7 +977,7 @@ func TestCreateAgent_EnvGatherRetriesVersionConflict(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:      "env-gather-conflict-agent",
-		GroveID:   grove.ID,
+		ProjectID:   grove.ID,
 		Task:      "do something",
 		GatherEnv: true,
 	})
@@ -1003,7 +1003,7 @@ func TestCreateAgent_ProvisionOnlyRetriesVersionConflict(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:          "provision-only-conflict-agent",
-		GroveID:       grove.ID,
+		ProjectID:       grove.ID,
 		Task:          "some task",
 		ProvisionOnly: true,
 	})
@@ -1025,7 +1025,7 @@ func TestCreateAgent_StartsWithoutTask(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "no-task-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		// No Task, no Attach — should still start (not provision-only)
 	})
 
@@ -1047,7 +1047,7 @@ func TestCreateAgent_ProvisionOnlyStaysCreated(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:          "provision-only-agent",
-		GroveID:       grove.ID,
+		ProjectID:       grove.ID,
 		Task:          "some task",
 		ProvisionOnly: true,
 	})
@@ -1072,7 +1072,7 @@ func TestCreateAgent_RestartFromProvisioningStatus(t *testing.T) {
 		ID:              "agent-stuck-prov",
 		Slug:            "stuck-agent",
 		Name:            "stuck-agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseProvisioning),
 	}
@@ -1081,7 +1081,7 @@ func TestCreateAgent_RestartFromProvisioningStatus(t *testing.T) {
 	// Try to start the same agent name — should succeed by re-starting, not 409
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "stuck-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "retry task",
 	})
 
@@ -1104,7 +1104,7 @@ func TestCreateAgent_RestartFromPendingStatus(t *testing.T) {
 		ID:              "agent-pending",
 		Slug:            "pending-agent",
 		Name:            "pending-agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseCreated),
 	}
@@ -1113,7 +1113,7 @@ func TestCreateAgent_RestartFromPendingStatus(t *testing.T) {
 	// Try to start the same agent name — should succeed
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "pending-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "retry task",
 	})
 
@@ -1131,7 +1131,7 @@ func TestCreateAgent_RecreateFromRunningStatus(t *testing.T) {
 		ID:              "agent-running-stale",
 		Slug:            "running-agent",
 		Name:            "running-agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseRunning),
 	}
@@ -1140,7 +1140,7 @@ func TestCreateAgent_RecreateFromRunningStatus(t *testing.T) {
 	// Start with the same name — should delete old agent and create new one
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "running-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "new task",
 	})
 
@@ -1172,7 +1172,7 @@ func TestCreateAgent_RecreateFromErrorStatus(t *testing.T) {
 		ID:              "agent-errored",
 		Slug:            "error-agent",
 		Name:            "error-agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseError),
 	}
@@ -1181,7 +1181,7 @@ func TestCreateAgent_RecreateFromErrorStatus(t *testing.T) {
 	// Start with the same name — should delete and recreate
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "error-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "retry after error",
 	})
 
@@ -1203,7 +1203,7 @@ func TestCreateAgent_RecreateFromStoppedStatus(t *testing.T) {
 		ID:              "agent-stopped",
 		Slug:            "stopped-agent",
 		Name:            "stopped-agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseStopped),
 	}
@@ -1211,7 +1211,7 @@ func TestCreateAgent_RecreateFromStoppedStatus(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "stopped-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "restart after stop",
 	})
 
@@ -1239,26 +1239,26 @@ func TestAgentCreate_LocalTemplateWithLocalBroker(t *testing.T) {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
 	// Create a grove with default runtime broker
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:                     "grove_local_tpl",
 		Slug:                   "local-tpl-grove",
-		Name:                   "Local Template Grove",
+		Name:                   "Local Template Project",
 		GitRemote:              "github.com/test/local-tpl",
 		DefaultRuntimeBrokerID: broker.ID,
 		Created:                time.Now(),
 		Updated:                time.Now(),
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	// Register the broker as a provider WITH a local path
-	provider := &store.GroveProvider{
-		GroveID:    grove.ID,
+	provider := &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		LocalPath:  "/home/user/project/.scion",
 		Status:     store.BrokerStatusOnline,
 	}
-	require.NoError(t, s.AddGroveProvider(ctx, provider))
+	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	// Create agent with a template name that does NOT exist on the Hub.
 	// Because the broker has a LocalPath, this should succeed.
@@ -1301,26 +1301,26 @@ func TestAgentCreate_LocalTemplateWithRemoteBroker(t *testing.T) {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
 	// Create a grove
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:                     "grove_remote_tpl",
 		Slug:                   "remote-tpl-grove",
-		Name:                   "Remote Template Grove",
+		Name:                   "Remote Template Project",
 		GitRemote:              "github.com/test/remote-tpl",
 		DefaultRuntimeBrokerID: broker.ID,
 		Created:                time.Now(),
 		Updated:                time.Now(),
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	// Register the broker as a provider WITHOUT a local path
-	provider := &store.GroveProvider{
-		GroveID:    grove.ID,
+	provider := &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 		// Note: LocalPath is NOT set — broker has no local access
 	}
-	require.NoError(t, s.AddGroveProvider(ctx, provider))
+	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	// Create agent with a template name that does NOT exist on the Hub.
 	// Without local access, this should fail with NotFound.
@@ -1343,15 +1343,15 @@ func TestAgentCreate_LocalTemplateNoBroker(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove WITHOUT a default runtime broker
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove_no_broker_tpl",
 		Slug:      "no-broker-tpl-grove",
-		Name:      "No Broker Template Grove",
+		Name:      "No Broker Template Project",
 		GitRemote: "github.com/test/no-broker-tpl",
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	// Create agent with a template name that does NOT exist on the Hub.
 	// Without any broker, this should fail (422 validation error for missing broker).
@@ -1375,7 +1375,7 @@ func TestCreateAgent_CreatorName_UserEmail(t *testing.T) {
 	// Use dev auth token (which creates a DevUser with email "dev@localhost")
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "user-created-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "do something",
 	})
 
@@ -1402,18 +1402,18 @@ func TestListAgents_ServerTimeIncluded(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove and agent
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-servertime",
-		Name: "ServerTime Grove",
+		Name: "ServerTime Project",
 		Slug: "servertime-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	agent := &store.Agent{
 		ID:      "agent-servertime",
 		Slug:    "agent-servertime-slug",
 		Name:    "ServerTime Agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -1437,17 +1437,17 @@ func TestListAgents_ServerTimeIncluded(t *testing.T) {
 		"ServerTime %v should not be after request end %v", resp.ServerTime, after)
 }
 
-func TestListGroveAgents_ServerTimeIncluded(t *testing.T) {
+func TestListProjectAgents_ServerTimeIncluded(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
 	// Create a grove
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-servertime-g",
-		Name: "ServerTime Grove G",
+		Name: "ServerTime Project G",
 		Slug: "servertime-grove-g",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	before := time.Now().UTC()
 
@@ -1467,10 +1467,10 @@ func TestListGroveAgents_ServerTimeIncluded(t *testing.T) {
 		"ServerTime should not be after request end")
 }
 
-// TestCreateGroveAgent_BrokerStatusPreserved tests that the grove-scoped agent creation
+// TestCreateProjectAgent_BrokerStatusPreserved tests that the grove-scoped agent creation
 // endpoint (/api/v1/groves/{groveId}/agents) preserves the status set by the broker's
 // response rather than unconditionally overwriting it with "provisioning".
-func TestCreateGroveAgent_BrokerStatusPreserved(t *testing.T) {
+func TestCreateProjectAgent_BrokerStatusPreserved(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, grove := setupCreateAgentServer(t, disp)
 	ctx := context.Background()
@@ -1500,9 +1500,9 @@ func TestCreateGroveAgent_BrokerStatusPreserved(t *testing.T) {
 		"persisted agent status should match broker response")
 }
 
-// TestCreateGroveAgent_FallbackToProvisioningWhenNoBrokerStatus tests that the grove-scoped
+// TestCreateProjectAgent_FallbackToProvisioningWhenNoBrokerStatus tests that the grove-scoped
 // endpoint falls back to "provisioning" when the broker doesn't report a status.
-func TestCreateGroveAgent_FallbackToProvisioningWhenNoBrokerStatus(t *testing.T) {
+func TestCreateProjectAgent_FallbackToProvisioningWhenNoBrokerStatus(t *testing.T) {
 	// Dispatcher that doesn't set a status (leaves it as "pending")
 	disp := &createAgentDispatcher{createPhase: ""}
 	srv, _, grove := setupCreateAgentServer(t, disp)
@@ -1531,9 +1531,9 @@ func TestCreateAgent_GitAnchoredGrovePopulatesGitClone(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove with GitRemote and labels
-	gitGrove := &store.Grove{
+	gitProject := &store.Project{
 		ID:        "grove-git",
-		Name:      "Git Grove",
+		Name:      "Git Project",
 		Slug:      "git-grove",
 		GitRemote: "github.com/example/myrepo",
 		Labels: map[string]string{
@@ -1542,20 +1542,20 @@ func TestCreateAgent_GitAnchoredGrovePopulatesGitClone(t *testing.T) {
 		},
 		DefaultRuntimeBrokerID: "broker-create",
 	}
-	require.NoError(t, s.CreateGrove(ctx, gitGrove))
+	require.NoError(t, s.CreateProject(ctx, gitProject))
 
 	// Add grove provider
-	provider := &store.GroveProvider{
-		GroveID:    gitGrove.ID,
+	provider := &store.ProjectProvider{
+		ProjectID:    gitProject.ID,
 		BrokerID:   "broker-create",
 		BrokerName: "Create Test Broker",
 		Status:     store.BrokerStatusOnline,
 	}
-	require.NoError(t, s.AddGroveProvider(ctx, provider))
+	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "git-agent",
-		GroveID: gitGrove.ID,
+		ProjectID: gitProject.ID,
 		Task:    "implement feature",
 	})
 
@@ -1582,7 +1582,7 @@ func TestCreateAgent_NonGitGroveNoGitClone(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "non-git-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "do something",
 	})
 
@@ -1599,15 +1599,15 @@ func TestCreateAgent_NonGitGroveNoGitClone(t *testing.T) {
 		"GitClone should be nil for non-git-anchored grove")
 }
 
-func TestCreateGroveAgent_GitAnchoredGrovePopulatesGitClone(t *testing.T) {
+func TestCreateProjectAgent_GitAnchoredGrovePopulatesGitClone(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, _ := setupCreateAgentServer(t, disp)
 	ctx := context.Background()
 
 	// Create a grove with GitRemote and labels
-	gitGrove := &store.Grove{
+	gitProject := &store.Project{
 		ID:        "grove-git-scoped",
-		Name:      "Git Grove Scoped",
+		Name:      "Git Project Scoped",
 		Slug:      "git-grove-scoped",
 		GitRemote: "github.com/example/myrepo",
 		Labels: map[string]string{
@@ -1616,19 +1616,19 @@ func TestCreateGroveAgent_GitAnchoredGrovePopulatesGitClone(t *testing.T) {
 		},
 		DefaultRuntimeBrokerID: "broker-create",
 	}
-	require.NoError(t, s.CreateGrove(ctx, gitGrove))
+	require.NoError(t, s.CreateProject(ctx, gitProject))
 
 	// Add grove provider
-	provider := &store.GroveProvider{
-		GroveID:    gitGrove.ID,
+	provider := &store.ProjectProvider{
+		ProjectID:    gitProject.ID,
 		BrokerID:   "broker-create",
 		BrokerName: "Create Test Broker",
 		Status:     store.BrokerStatusOnline,
 	}
-	require.NoError(t, s.AddGroveProvider(ctx, provider))
+	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/agents", gitGrove.ID),
+		fmt.Sprintf("/api/v1/groves/%s/agents", gitProject.ID),
 		CreateAgentRequest{
 			Name: "git-agent-scoped",
 			Task: "implement feature",
@@ -1650,7 +1650,7 @@ func TestCreateGroveAgent_GitAnchoredGrovePopulatesGitClone(t *testing.T) {
 	assert.Equal(t, 1, persisted.AppliedConfig.GitClone.Depth)
 }
 
-func TestCreateGroveAgent_NonGitGroveNoGitClone(t *testing.T) {
+func TestCreateProjectAgent_NonGitGroveNoGitClone(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, grove := setupCreateAgentServer(t, disp)
 	ctx := context.Background()
@@ -1682,9 +1682,9 @@ func TestCreateAgent_GitGroveCloneURLFallback(t *testing.T) {
 
 	// Create a grove with GitRemote but WITHOUT the scion.dev/clone-url label.
 	// The URL should be constructed from gitRemote as "https://<gitRemote>.git".
-	gitGrove := &store.Grove{
+	gitProject := &store.Project{
 		ID:        "grove-git-fallback-url",
-		Name:      "Git Grove Fallback URL",
+		Name:      "Git Project Fallback URL",
 		Slug:      "git-grove-fallback-url",
 		GitRemote: "github.com/example/fallback-repo",
 		Labels: map[string]string{
@@ -1692,19 +1692,19 @@ func TestCreateAgent_GitGroveCloneURLFallback(t *testing.T) {
 		},
 		DefaultRuntimeBrokerID: "broker-create",
 	}
-	require.NoError(t, s.CreateGrove(ctx, gitGrove))
+	require.NoError(t, s.CreateProject(ctx, gitProject))
 
-	provider := &store.GroveProvider{
-		GroveID:    gitGrove.ID,
+	provider := &store.ProjectProvider{
+		ProjectID:    gitProject.ID,
 		BrokerID:   "broker-create",
 		BrokerName: "Create Test Broker",
 		Status:     store.BrokerStatusOnline,
 	}
-	require.NoError(t, s.AddGroveProvider(ctx, provider))
+	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "fallback-url-agent",
-		GroveID: gitGrove.ID,
+		ProjectID: gitProject.ID,
 		Task:    "test fallback",
 	})
 
@@ -1733,9 +1733,9 @@ func TestCreateAgent_GitGroveSchemelessCloneURL(t *testing.T) {
 
 	// Create a grove where clone-url label is set but missing https:// scheme
 	// (as can happen when the web UI stores raw user input).
-	gitGrove := &store.Grove{
+	gitProject := &store.Project{
 		ID:        "grove-git-schemeless",
-		Name:      "Git Grove Schemeless",
+		Name:      "Git Project Schemeless",
 		Slug:      "git-grove-schemeless",
 		GitRemote: "github.com/example/schemeless-repo",
 		Labels: map[string]string{
@@ -1744,19 +1744,19 @@ func TestCreateAgent_GitGroveSchemelessCloneURL(t *testing.T) {
 		},
 		DefaultRuntimeBrokerID: "broker-create",
 	}
-	require.NoError(t, s.CreateGrove(ctx, gitGrove))
+	require.NoError(t, s.CreateProject(ctx, gitProject))
 
-	provider := &store.GroveProvider{
-		GroveID:    gitGrove.ID,
+	provider := &store.ProjectProvider{
+		ProjectID:    gitProject.ID,
 		BrokerID:   "broker-create",
 		BrokerName: "Create Test Broker",
 		Status:     store.BrokerStatusOnline,
 	}
-	require.NoError(t, s.AddGroveProvider(ctx, provider))
+	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "schemeless-url-agent",
-		GroveID: gitGrove.ID,
+		ProjectID: gitProject.ID,
 		Task:    "test schemeless",
 	})
 
@@ -1784,9 +1784,9 @@ func TestCreateAgent_GitGroveDefaultBranchFallback(t *testing.T) {
 
 	// Create a grove with GitRemote and clone-url label but WITHOUT default-branch.
 	// The branch should default to "main".
-	gitGrove := &store.Grove{
+	gitProject := &store.Project{
 		ID:        "grove-git-fallback-branch",
-		Name:      "Git Grove Fallback Branch",
+		Name:      "Git Project Fallback Branch",
 		Slug:      "git-grove-fallback-branch",
 		GitRemote: "github.com/example/branch-repo",
 		Labels: map[string]string{
@@ -1794,19 +1794,19 @@ func TestCreateAgent_GitGroveDefaultBranchFallback(t *testing.T) {
 		},
 		DefaultRuntimeBrokerID: "broker-create",
 	}
-	require.NoError(t, s.CreateGrove(ctx, gitGrove))
+	require.NoError(t, s.CreateProject(ctx, gitProject))
 
-	provider := &store.GroveProvider{
-		GroveID:    gitGrove.ID,
+	provider := &store.ProjectProvider{
+		ProjectID:    gitProject.ID,
 		BrokerID:   "broker-create",
 		BrokerName: "Create Test Broker",
 		Status:     store.BrokerStatusOnline,
 	}
-	require.NoError(t, s.AddGroveProvider(ctx, provider))
+	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "fallback-branch-agent",
-		GroveID: gitGrove.ID,
+		ProjectID: gitProject.ID,
 		Task:    "test branch fallback",
 	})
 
@@ -1835,7 +1835,7 @@ func TestCreateAgent_ProfileStoredInAppliedConfig(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "profiled-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Profile: "custom-profile",
 		Task:    "do something",
 	})
@@ -1863,7 +1863,7 @@ func TestCreateAgent_ProfileStoredWithConfigOverride(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "profiled-agent-with-config",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Profile: "other-profile",
 		Task:    "do something",
 		Config:  &api.ScionConfig{Image: "custom-image:latest"},
@@ -1893,7 +1893,7 @@ func TestCreateAgent_ScionConfigInlineConfigPreserved(t *testing.T) {
 	// Create an agent with a full ScionConfig including fields beyond the old AgentConfigOverride
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "inline-config-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "review code",
 		Config: &api.ScionConfig{
 			Image:            "custom:latest",
@@ -1942,7 +1942,7 @@ func TestCreateAgent_ScionConfigTaskFieldMerge(t *testing.T) {
 	// When both req.Task and Config.Task are set, req.Task takes precedence
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "task-merge-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "request-level task",
 		Config: &api.ScionConfig{
 			Task: "config-level task",
@@ -1966,7 +1966,7 @@ func TestCreateAgent_ScionConfigTaskFromConfigOnly(t *testing.T) {
 	// When only Config.Task is set (no req.Task), it should be used
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "task-config-only-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Config: &api.ScionConfig{
 			Task: "config-only task",
 		},
@@ -1989,18 +1989,18 @@ func TestListAgents_HarnessConfigEnriched(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-harness-enrich",
-		Name: "Harness Enrichment Grove",
+		Name: "Harness Enrichment Project",
 		Slug: "harness-enrich-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	agent := &store.Agent{
 		ID:      "agent-harness-enrich",
 		Slug:    "agent-harness-enrich",
 		Name:    "Harness Agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseRunning),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "gemini",
@@ -2044,18 +2044,18 @@ func TestGetAgent_HarnessConfigEnriched(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-harness-get",
-		Name: "Harness Get Grove",
+		Name: "Harness Get Project",
 		Slug: "harness-get-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	agent := &store.Agent{
 		ID:      "agent-harness-get",
 		Slug:    "agent-harness-get",
 		Name:    "Harness Get Agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseRunning),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -2083,7 +2083,7 @@ func TestCreateAgent_HarnessFromRequestField(t *testing.T) {
 	// Create agent with no template but explicit harness (sync scenario)
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:          "sync-agent",
-		GroveID:       grove.ID,
+		ProjectID:       grove.ID,
 		HarnessConfig: "gemini",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -2126,7 +2126,7 @@ func TestGetAgent_ProfileInResponse(t *testing.T) {
 	// Create agent with explicit profile
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "profile-get-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Profile: "docker-dev",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -2155,12 +2155,12 @@ func TestHeartbeat_BackfillsProfile(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-profile-hb",
-		Name: "Profile HB Grove",
+		Name: "Profile HB Project",
 		Slug: "profile-hb-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID:     "broker-profile-hb",
@@ -2173,7 +2173,7 @@ func TestHeartbeat_BackfillsProfile(t *testing.T) {
 		ID:              "agent-profile-hb",
 		Slug:            "profile-hb-agent",
 		Name:            "Profile HB Agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 		AppliedConfig:   &store.AgentAppliedConfig{},
@@ -2188,8 +2188,8 @@ func TestHeartbeat_BackfillsProfile(t *testing.T) {
 	// Send heartbeat with profile
 	heartbeat := brokerHeartbeatRequest{
 		Status: "online",
-		Groves: []brokerGroveHeartbeat{{
-			GroveID:    grove.ID,
+		Projects: []brokerProjectHeartbeat{{
+			ProjectID:    grove.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:    agent.Slug,
@@ -2220,8 +2220,8 @@ func TestCreateAgent_HarnessNotTemplateUUID(t *testing.T) {
 
 	// Update the existing provider to have a LocalPath so the hub allows
 	// the template to be resolved locally by the broker.
-	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID:    grove.ID,
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   "broker-create",
 		BrokerName: "Create Test Broker",
 		LocalPath:  "/some/local/path",
@@ -2232,7 +2232,7 @@ func TestCreateAgent_HarnessNotTemplateUUID(t *testing.T) {
 	templateUUID := "003879ad-f000-426d-b52f-08f537c4c6ce"
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:          "uuid-tmpl-agent",
-		GroveID:       grove.ID,
+		ProjectID:       grove.ID,
 		Template:      templateUUID,
 		HarnessConfig: "gemini",
 	})
@@ -2251,10 +2251,10 @@ func TestCreateAgent_HarnessNotTemplateUUID(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Grove-scoped existing-agent tests (mirror createAgent tests)
+// Project-scoped existing-agent tests (mirror createAgent tests)
 // ---------------------------------------------------------------------------
 
-func TestCreateGroveAgent_RecreateFromRunningStatus(t *testing.T) {
+func TestCreateProjectAgent_RecreateFromRunningStatus(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, grove := setupCreateAgentServer(t, disp)
 	ctx := context.Background()
@@ -2263,7 +2263,7 @@ func TestCreateGroveAgent_RecreateFromRunningStatus(t *testing.T) {
 		ID:              "grove-agent-running",
 		Slug:            "running-grove-agent",
 		Name:            "running-grove-agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseRunning),
 	}
@@ -2291,7 +2291,7 @@ func TestCreateGroveAgent_RecreateFromRunningStatus(t *testing.T) {
 	assert.Equal(t, string(state.PhaseRunning), resp.Agent.Phase)
 }
 
-func TestCreateGroveAgent_RecreateFromStoppedStatus(t *testing.T) {
+func TestCreateProjectAgent_RecreateFromStoppedStatus(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, grove := setupCreateAgentServer(t, disp)
 	ctx := context.Background()
@@ -2300,7 +2300,7 @@ func TestCreateGroveAgent_RecreateFromStoppedStatus(t *testing.T) {
 		ID:              "grove-agent-stopped",
 		Slug:            "stopped-grove-agent",
 		Name:            "stopped-grove-agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseStopped),
 	}
@@ -2320,7 +2320,7 @@ func TestCreateGroveAgent_RecreateFromStoppedStatus(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound, "old stopped agent should be deleted")
 }
 
-func TestCreateGroveAgent_RecreateFromErrorStatus(t *testing.T) {
+func TestCreateProjectAgent_RecreateFromErrorStatus(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, grove := setupCreateAgentServer(t, disp)
 	ctx := context.Background()
@@ -2329,7 +2329,7 @@ func TestCreateGroveAgent_RecreateFromErrorStatus(t *testing.T) {
 		ID:              "grove-agent-errored",
 		Slug:            "errored-grove-agent",
 		Name:            "errored-grove-agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseError),
 	}
@@ -2349,7 +2349,7 @@ func TestCreateGroveAgent_RecreateFromErrorStatus(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound, "old errored agent should be deleted")
 }
 
-func TestCreateGroveAgent_RestartFromProvisioningStatus(t *testing.T) {
+func TestCreateProjectAgent_RestartFromProvisioningStatus(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, grove := setupCreateAgentServer(t, disp)
 	ctx := context.Background()
@@ -2358,7 +2358,7 @@ func TestCreateGroveAgent_RestartFromProvisioningStatus(t *testing.T) {
 		ID:              "grove-agent-prov",
 		Slug:            "prov-grove-agent",
 		Name:            "prov-grove-agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseProvisioning),
 	}
@@ -2380,7 +2380,7 @@ func TestCreateGroveAgent_RestartFromProvisioningStatus(t *testing.T) {
 	assert.Equal(t, string(state.PhaseRunning), resp.Agent.Phase)
 }
 
-func TestCreateGroveAgent_RestartFromPendingStatus(t *testing.T) {
+func TestCreateProjectAgent_RestartFromPendingStatus(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, grove := setupCreateAgentServer(t, disp)
 	ctx := context.Background()
@@ -2389,7 +2389,7 @@ func TestCreateGroveAgent_RestartFromPendingStatus(t *testing.T) {
 		ID:              "grove-agent-pending",
 		Slug:            "pending-grove-agent",
 		Name:            "pending-grove-agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseCreated),
 	}
@@ -2410,7 +2410,7 @@ func TestCreateGroveAgent_RestartFromPendingStatus(t *testing.T) {
 // Config update and broker-ID recovery tests
 // ---------------------------------------------------------------------------
 
-func TestCreateGroveAgent_ConfigUpdateOnRestart(t *testing.T) {
+func TestCreateProjectAgent_ConfigUpdateOnRestart(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, grove := setupCreateAgentServer(t, disp)
 	ctx := context.Background()
@@ -2419,7 +2419,7 @@ func TestCreateGroveAgent_ConfigUpdateOnRestart(t *testing.T) {
 		ID:              "grove-agent-config",
 		Slug:            "config-grove-agent",
 		Name:            "config-grove-agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseCreated),
 		AppliedConfig: &store.AgentAppliedConfig{
@@ -2452,7 +2452,7 @@ func TestCreateGroveAgent_ConfigUpdateOnRestart(t *testing.T) {
 		"attach should be updated on restart")
 }
 
-func TestCreateGroveAgent_BrokerIDRecovery(t *testing.T) {
+func TestCreateProjectAgent_BrokerIDRecovery(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, grove := setupCreateAgentServer(t, disp)
 	ctx := context.Background()
@@ -2463,7 +2463,7 @@ func TestCreateGroveAgent_BrokerIDRecovery(t *testing.T) {
 		ID:              "grove-agent-no-broker",
 		Slug:            "no-broker-grove-agent",
 		Name:            "no-broker-grove-agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: "", // empty — should be recovered
 		Phase:           string(state.PhaseCreated),
 	}
@@ -2498,7 +2498,7 @@ func TestCreateAgent_BrokerIDRecovery(t *testing.T) {
 		ID:              "agent-no-broker",
 		Slug:            "no-broker-agent",
 		Name:            "no-broker-agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: "", // empty — should be recovered
 		Phase:           string(state.PhaseCreated),
 	}
@@ -2506,7 +2506,7 @@ func TestCreateAgent_BrokerIDRecovery(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "no-broker-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "start with recovered broker",
 	})
 
@@ -2535,7 +2535,7 @@ func TestCreateAgent_CleanupModeStrictFailsOnBrokerDeleteError(t *testing.T) {
 		ID:              "agent-stale-strict",
 		Slug:            "stale-strict-agent",
 		Name:            "stale-strict-agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseRunning),
 	}
@@ -2543,7 +2543,7 @@ func TestCreateAgent_CleanupModeStrictFailsOnBrokerDeleteError(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:        "stale-strict-agent",
-		GroveID:     grove.ID,
+		ProjectID:     grove.ID,
 		CleanupMode: "strict",
 	})
 	require.Equal(t, http.StatusBadGateway, rec.Code)
@@ -2566,7 +2566,7 @@ func TestCreateAgent_CleanupModeForceContinuesOnBrokerDeleteError(t *testing.T) 
 		ID:              "agent-stale-force",
 		Slug:            "stale-force-agent",
 		Name:            "stale-force-agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseRunning),
 	}
@@ -2574,7 +2574,7 @@ func TestCreateAgent_CleanupModeForceContinuesOnBrokerDeleteError(t *testing.T) 
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:        "stale-force-agent",
-		GroveID:     grove.ID,
+		ProjectID:     grove.ID,
 		CleanupMode: "force",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -2590,7 +2590,7 @@ func TestCreateAgent_InvalidCleanupMode(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:        "invalid-cleanup-agent",
-		GroveID:     grove.ID,
+		ProjectID:     grove.ID,
 		CleanupMode: "sometimes",
 	})
 	require.Equal(t, http.StatusBadRequest, rec.Code)
@@ -2603,12 +2603,12 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 	ctx := context.Background()
 
 	// Create grove and broker infrastructure
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-notify",
-		Name: "Notify Grove",
+		Name: "Notify Project",
 		Slug: "notify-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID:     "broker-notify",
@@ -2617,21 +2617,21 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 		Status: store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID:    grove.ID,
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}))
 	grove.DefaultRuntimeBrokerID = broker.ID
-	require.NoError(t, s.UpdateGrove(ctx, grove))
+	require.NoError(t, s.UpdateProject(ctx, grove))
 
 	// Create the calling agent (the one that will subscribe to notifications)
 	callingAgent := &store.Agent{
 		ID:      "agent-lead",
 		Slug:    "lead-agent",
 		Name:    "Lead Agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, callingAgent))
@@ -2649,7 +2649,7 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 
 		body, _ := json.Marshal(CreateAgentRequest{
 			Name:    "Sub Worker",
-			GroveID: grove.ID,
+			ProjectID: grove.ID,
 			Task:    "implement auth module",
 			Notify:  true,
 		})
@@ -2674,7 +2674,7 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 		assert.Equal(t, resp.Agent.ID, sub.AgentID)
 		assert.Equal(t, store.SubscriberTypeAgent, sub.SubscriberType)
 		assert.Equal(t, callingAgent.Slug, sub.SubscriberID)
-		assert.Equal(t, grove.ID, sub.GroveID)
+		assert.Equal(t, grove.ID, sub.ProjectID)
 		assert.Equal(t, callingAgent.ID, sub.CreatedBy)
 		assert.Contains(t, sub.TriggerActivities, "COMPLETED")
 		assert.Contains(t, sub.TriggerActivities, "WAITING_FOR_INPUT")
@@ -2692,7 +2692,7 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 
 		body, _ := json.Marshal(CreateAgentRequest{
 			Name:    "Sub Worker No Notify",
-			GroveID: grove.ID,
+			ProjectID: grove.ID,
 			Task:    "implement tests",
 			Notify:  false,
 		})
@@ -2716,7 +2716,7 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 	t.Run("Notify=true for user caller creates user subscription", func(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 			Name:    "User Notified Agent",
-			GroveID: grove.ID,
+			ProjectID: grove.ID,
 			Task:    "run analysis",
 			Notify:  true,
 		})
@@ -2733,7 +2733,7 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 		sub := subs[0]
 		assert.Equal(t, resp.Agent.ID, sub.AgentID)
 		assert.Equal(t, store.SubscriberTypeUser, sub.SubscriberType)
-		assert.Equal(t, grove.ID, sub.GroveID)
+		assert.Equal(t, grove.ID, sub.ProjectID)
 	})
 }
 
@@ -2741,12 +2741,12 @@ func TestCreateAgent_NotifySubscriptionCascadeOnDelete(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-cascade",
-		Name: "Cascade Grove",
+		Name: "Cascade Project",
 		Slug: "cascade-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID:     "broker-cascade",
@@ -2755,20 +2755,20 @@ func TestCreateAgent_NotifySubscriptionCascadeOnDelete(t *testing.T) {
 		Status: store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID:    grove.ID,
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}))
 	grove.DefaultRuntimeBrokerID = broker.ID
-	require.NoError(t, s.UpdateGrove(ctx, grove))
+	require.NoError(t, s.UpdateProject(ctx, grove))
 
 	callingAgent := &store.Agent{
 		ID:      "agent-cascade-lead",
 		Slug:    "cascade-lead",
 		Name:    "Cascade Lead",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, callingAgent))
@@ -2784,7 +2784,7 @@ func TestCreateAgent_NotifySubscriptionCascadeOnDelete(t *testing.T) {
 	// Create agent with notify
 	body, _ := json.Marshal(CreateAgentRequest{
 		Name:    "Cascade Sub",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "do work",
 		Notify:  true,
 	})
@@ -2822,8 +2822,8 @@ func TestBrokerHeartbeat_PublishesActivitySSE(t *testing.T) {
 	srv.SetEventPublisher(pub)
 
 	// Create grove, broker, and agent
-	grove := &store.Grove{ID: "grove-hb-sse", Name: "HB SSE Grove", Slug: "hb-sse-grove"}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	grove := &store.Project{ID: "grove-hb-sse", Name: "HB SSE Project", Slug: "hb-sse-grove"}
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID: "broker-hb-sse", Name: "HB SSE Broker", Slug: "hb-sse-broker",
@@ -2833,7 +2833,7 @@ func TestBrokerHeartbeat_PublishesActivitySSE(t *testing.T) {
 
 	agent := &store.Agent{
 		ID: "agent-hb-sse", Slug: "agent-hb-slug", Name: "HB SSE Agent",
-		GroveID: grove.ID, RuntimeBrokerID: broker.ID,
+		ProjectID: grove.ID, RuntimeBrokerID: broker.ID,
 		Phase: string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -2845,8 +2845,8 @@ func TestBrokerHeartbeat_PublishesActivitySSE(t *testing.T) {
 	// Send broker heartbeat with an activity change
 	heartbeat := brokerHeartbeatRequest{
 		Status: "online",
-		Groves: []brokerGroveHeartbeat{{
-			GroveID:    grove.ID,
+		Projects: []brokerProjectHeartbeat{{
+			ProjectID:    grove.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
@@ -2882,8 +2882,8 @@ func TestBrokerHeartbeat_RepeatedActivityDoesNotRefreshLastActivityEvent(t *test
 	ctx := context.Background()
 
 	// Create grove, broker, and agent
-	grove := &store.Grove{ID: "grove-stall-hb", Name: "Stall HB Grove", Slug: "stall-hb-grove"}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	grove := &store.Project{ID: "grove-stall-hb", Name: "Stall HB Project", Slug: "stall-hb-grove"}
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID: "broker-stall-hb", Name: "Stall HB Broker", Slug: "stall-hb-broker",
@@ -2893,7 +2893,7 @@ func TestBrokerHeartbeat_RepeatedActivityDoesNotRefreshLastActivityEvent(t *test
 
 	agent := &store.Agent{
 		ID: "agent-stall-hb", Slug: "stall-hb-slug", Name: "Stall HB Agent",
-		GroveID: grove.ID, RuntimeBrokerID: broker.ID,
+		ProjectID: grove.ID, RuntimeBrokerID: broker.ID,
 		Phase: string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -2901,8 +2901,8 @@ func TestBrokerHeartbeat_RepeatedActivityDoesNotRefreshLastActivityEvent(t *test
 	// First heartbeat: set activity to "thinking" — this should set last_activity_event
 	hb1 := brokerHeartbeatRequest{
 		Status: "online",
-		Groves: []brokerGroveHeartbeat{{
-			GroveID:    grove.ID,
+		Projects: []brokerProjectHeartbeat{{
+			ProjectID:    grove.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
@@ -2929,8 +2929,8 @@ func TestBrokerHeartbeat_RepeatedActivityDoesNotRefreshLastActivityEvent(t *test
 	// Second heartbeat: same activity "thinking" — should NOT refresh last_activity_event
 	hb2 := brokerHeartbeatRequest{
 		Status: "online",
-		Groves: []brokerGroveHeartbeat{{
-			GroveID:    grove.ID,
+		Projects: []brokerProjectHeartbeat{{
+			ProjectID:    grove.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
@@ -2952,8 +2952,8 @@ func TestBrokerHeartbeat_RepeatedActivityDoesNotRefreshLastActivityEvent(t *test
 	// Third heartbeat: different activity "executing" — SHOULD refresh last_activity_event
 	hb3 := brokerHeartbeatRequest{
 		Status: "online",
-		Groves: []brokerGroveHeartbeat{{
-			GroveID:    grove.ID,
+		Projects: []brokerProjectHeartbeat{{
+			ProjectID:    grove.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
@@ -2978,8 +2978,8 @@ func TestBrokerHeartbeat_StalledAgentNotOverwrittenBySameActivity(t *testing.T) 
 	ctx := context.Background()
 
 	// Create grove, broker, and agent
-	grove := &store.Grove{ID: "grove-stall-keep", Name: "Stall Keep Grove", Slug: "stall-keep-grove"}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	grove := &store.Project{ID: "grove-stall-keep", Name: "Stall Keep Project", Slug: "stall-keep-grove"}
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID: "broker-stall-keep", Name: "Stall Keep Broker", Slug: "stall-keep-broker",
@@ -2989,7 +2989,7 @@ func TestBrokerHeartbeat_StalledAgentNotOverwrittenBySameActivity(t *testing.T) 
 
 	agent := &store.Agent{
 		ID: "agent-stall-keep", Slug: "stall-keep-slug", Name: "Stall Keep Agent",
-		GroveID: grove.ID, RuntimeBrokerID: broker.ID,
+		ProjectID: grove.ID, RuntimeBrokerID: broker.ID,
 		Phase: string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -3011,8 +3011,8 @@ func TestBrokerHeartbeat_StalledAgentNotOverwrittenBySameActivity(t *testing.T) 
 	// Send heartbeat reporting the same pre-stall activity ("thinking")
 	hb := brokerHeartbeatRequest{
 		Status: "online",
-		Groves: []brokerGroveHeartbeat{{
-			GroveID:    grove.ID,
+		Projects: []brokerProjectHeartbeat{{
+			ProjectID:    grove.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
@@ -3036,8 +3036,8 @@ func TestBrokerHeartbeat_StalledAgentRecoveredByNewActivity(t *testing.T) {
 	ctx := context.Background()
 
 	// Create grove, broker, and agent
-	grove := &store.Grove{ID: "grove-stall-recover", Name: "Stall Recover Grove", Slug: "stall-recover-grove"}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	grove := &store.Project{ID: "grove-stall-recover", Name: "Stall Recover Project", Slug: "stall-recover-grove"}
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID: "broker-stall-recover", Name: "Stall Recover Broker", Slug: "stall-recover-broker",
@@ -3047,7 +3047,7 @@ func TestBrokerHeartbeat_StalledAgentRecoveredByNewActivity(t *testing.T) {
 
 	agent := &store.Agent{
 		ID: "agent-stall-recover", Slug: "stall-recover-slug", Name: "Stall Recover Agent",
-		GroveID: grove.ID, RuntimeBrokerID: broker.ID,
+		ProjectID: grove.ID, RuntimeBrokerID: broker.ID,
 		Phase: string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -3069,8 +3069,8 @@ func TestBrokerHeartbeat_StalledAgentRecoveredByNewActivity(t *testing.T) {
 	// Send heartbeat reporting a genuinely new activity ("executing")
 	hb := brokerHeartbeatRequest{
 		Status: "online",
-		Groves: []brokerGroveHeartbeat{{
-			GroveID:    grove.ID,
+		Projects: []brokerProjectHeartbeat{{
+			ProjectID:    grove.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
@@ -3093,8 +3093,8 @@ func TestBrokerHeartbeat_StalledIdleAgentNotOverwrittenBySameActivity(t *testing
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{ID: "grove-stall-idle", Name: "Stall Idle Grove", Slug: "stall-idle-grove"}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	grove := &store.Project{ID: "grove-stall-idle", Name: "Stall Idle Project", Slug: "stall-idle-grove"}
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID: "broker-stall-idle", Name: "Stall Idle Broker", Slug: "stall-idle-broker",
@@ -3104,7 +3104,7 @@ func TestBrokerHeartbeat_StalledIdleAgentNotOverwrittenBySameActivity(t *testing
 
 	agent := &store.Agent{
 		ID: "agent-stall-idle", Slug: "stall-idle-slug", Name: "Stall Idle Agent",
-		GroveID: grove.ID, RuntimeBrokerID: broker.ID,
+		ProjectID: grove.ID, RuntimeBrokerID: broker.ID,
 		Phase: string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -3126,8 +3126,8 @@ func TestBrokerHeartbeat_StalledIdleAgentNotOverwrittenBySameActivity(t *testing
 	// Send heartbeat still reporting "idle" — should NOT clear the stall
 	hb := brokerHeartbeatRequest{
 		Status: "online",
-		Groves: []brokerGroveHeartbeat{{
-			GroveID:    grove.ID,
+		Projects: []brokerProjectHeartbeat{{
+			ProjectID:    grove.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
@@ -3149,8 +3149,8 @@ func TestBrokerHeartbeat_DoesNotRevertStoppedAgent(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{ID: "grove-stop-revert", Name: "Stop Revert Grove", Slug: "stop-revert-grove"}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	grove := &store.Project{ID: "grove-stop-revert", Name: "Stop Revert Project", Slug: "stop-revert-grove"}
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID: "broker-stop-revert", Name: "Stop Revert Broker", Slug: "stop-revert-broker",
@@ -3160,7 +3160,7 @@ func TestBrokerHeartbeat_DoesNotRevertStoppedAgent(t *testing.T) {
 
 	agent := &store.Agent{
 		ID: "agent-stop-revert", Slug: "stop-revert-slug", Name: "Stop Revert Agent",
-		GroveID: grove.ID, RuntimeBrokerID: broker.ID,
+		ProjectID: grove.ID, RuntimeBrokerID: broker.ID,
 		Phase: string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -3182,8 +3182,8 @@ func TestBrokerHeartbeat_DoesNotRevertStoppedAgent(t *testing.T) {
 	// and still reports the old running+completed state)
 	hb := brokerHeartbeatRequest{
 		Status: "online",
-		Groves: []brokerGroveHeartbeat{{
-			GroveID:    grove.ID,
+		Projects: []brokerProjectHeartbeat{{
+			ProjectID:    grove.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:            agent.Slug,
@@ -3207,8 +3207,8 @@ func TestBrokerHeartbeat_DoesNotRevertStoppedAgent_LegacyPath(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{ID: "grove-stop-legacy", Name: "Stop Legacy Grove", Slug: "stop-legacy-grove"}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	grove := &store.Project{ID: "grove-stop-legacy", Name: "Stop Legacy Project", Slug: "stop-legacy-grove"}
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID: "broker-stop-legacy", Name: "Stop Legacy Broker", Slug: "stop-legacy-broker",
@@ -3218,7 +3218,7 @@ func TestBrokerHeartbeat_DoesNotRevertStoppedAgent_LegacyPath(t *testing.T) {
 
 	agent := &store.Agent{
 		ID: "agent-stop-legacy", Slug: "stop-legacy-slug", Name: "Stop Legacy Agent",
-		GroveID: grove.ID, RuntimeBrokerID: broker.ID,
+		ProjectID: grove.ID, RuntimeBrokerID: broker.ID,
 		Phase: string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -3233,8 +3233,8 @@ func TestBrokerHeartbeat_DoesNotRevertStoppedAgent_LegacyPath(t *testing.T) {
 	// Send heartbeat with NO Phase (legacy path) but container reports "Up"
 	hb := brokerHeartbeatRequest{
 		Status: "online",
-		Groves: []brokerGroveHeartbeat{{
-			GroveID:    grove.ID,
+		Projects: []brokerProjectHeartbeat{{
+			ProjectID:    grove.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:            agent.Slug,
@@ -3354,7 +3354,7 @@ func TestCreateAgent_RestartCreatesNotificationSubscription(t *testing.T) {
 		ID:              "agent-notify-restart",
 		Slug:            "notify-agent",
 		Name:            "notify-agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseCreated),
 	}
@@ -3363,7 +3363,7 @@ func TestCreateAgent_RestartCreatesNotificationSubscription(t *testing.T) {
 	// Restart the agent with Notify: true — should create a notification subscription
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "notify-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "restart task",
 		Notify:  true,
 	})
@@ -3379,7 +3379,7 @@ func TestCreateAgent_RestartCreatesNotificationSubscription(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, subs, 1, "expected one notification subscription after restart with Notify")
 	assert.Equal(t, existingAgent.ID, subs[0].AgentID)
-	assert.Equal(t, grove.ID, subs[0].GroveID)
+	assert.Equal(t, grove.ID, subs[0].ProjectID)
 }
 
 func TestCreateAgent_RestartNoSubscriptionWithoutNotify(t *testing.T) {
@@ -3392,7 +3392,7 @@ func TestCreateAgent_RestartNoSubscriptionWithoutNotify(t *testing.T) {
 		ID:              "agent-no-notify",
 		Slug:            "no-notify-agent",
 		Name:            "no-notify-agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseCreated),
 	}
@@ -3401,7 +3401,7 @@ func TestCreateAgent_RestartNoSubscriptionWithoutNotify(t *testing.T) {
 	// Restart the agent without Notify — should NOT create a subscription
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "no-notify-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "restart task",
 	})
 
@@ -3417,12 +3417,12 @@ func TestHandleAgentMessage_PlainTextBuildsStructuredMessage(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-msg",
-		Name: "Msg Test Grove",
+		Name: "Msg Test Project",
 		Slug: "msg-test-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID:     "broker-msg",
@@ -3432,8 +3432,8 @@ func TestHandleAgentMessage_PlainTextBuildsStructuredMessage(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID:    grove.ID,
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -3443,7 +3443,7 @@ func TestHandleAgentMessage_PlainTextBuildsStructuredMessage(t *testing.T) {
 		ID:              "agent-msg-1",
 		Slug:            "agent-msg-1",
 		Name:            "Msg Agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 	}
@@ -3483,12 +3483,12 @@ func TestHandleAgentMessage_StructuredMessagePopulatesSender(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-msg-sender",
-		Name: "Msg Sender Grove",
+		Name: "Msg Sender Project",
 		Slug: "msg-sender-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID:     "broker-msg-sender",
@@ -3497,8 +3497,8 @@ func TestHandleAgentMessage_StructuredMessagePopulatesSender(t *testing.T) {
 		Status: store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID:    grove.ID,
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -3508,7 +3508,7 @@ func TestHandleAgentMessage_StructuredMessagePopulatesSender(t *testing.T) {
 		ID:              "agent-msg-sender-1",
 		Slug:            "agent-msg-sender-1",
 		Name:            "Msg Sender Agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 	}
@@ -3545,12 +3545,12 @@ func TestHandleAgentMessage_NotifyCreatesSubscription(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-msg-notify",
-		Name: "Msg Notify Grove",
+		Name: "Msg Notify Project",
 		Slug: "msg-notify-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID:     "broker-msg-notify",
@@ -3559,8 +3559,8 @@ func TestHandleAgentMessage_NotifyCreatesSubscription(t *testing.T) {
 		Status: store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID:    grove.ID,
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -3570,7 +3570,7 @@ func TestHandleAgentMessage_NotifyCreatesSubscription(t *testing.T) {
 		ID:              "agent-msg-notify-1",
 		Slug:            "agent-msg-notify-1",
 		Name:            "Msg Notify Agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 	}
@@ -3596,7 +3596,7 @@ func TestHandleAgentMessage_NotifyCreatesSubscription(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, subs, 1, "expected one notification subscription for the agent")
 	assert.Equal(t, store.SubscriberTypeUser, subs[0].SubscriberType)
-	assert.Equal(t, agent.GroveID, subs[0].GroveID)
+	assert.Equal(t, agent.ProjectID, subs[0].ProjectID)
 }
 
 // TestHandleAgentMessage_NoNotifyNoSubscription verifies that sending a message
@@ -3605,12 +3605,12 @@ func TestHandleAgentMessage_NoNotifyNoSubscription(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-msg-no-notify",
-		Name: "Msg No Notify Grove",
+		Name: "Msg No Notify Project",
 		Slug: "msg-no-notify-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID:     "broker-msg-no-notify",
@@ -3619,8 +3619,8 @@ func TestHandleAgentMessage_NoNotifyNoSubscription(t *testing.T) {
 		Status: store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID:    grove.ID,
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -3630,7 +3630,7 @@ func TestHandleAgentMessage_NoNotifyNoSubscription(t *testing.T) {
 		ID:              "agent-msg-no-notify-1",
 		Slug:            "agent-msg-no-notify-1",
 		Name:            "Msg No Notify Agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 	}
@@ -3658,18 +3658,18 @@ func TestHandleAgentMessage_NoDispatcher_Returns503(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-msg-503",
-		Name: "Msg 503 Grove",
+		Name: "Msg 503 Project",
 		Slug: "msg-503-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	agent := &store.Agent{
 		ID:      "agent-msg-503",
 		Slug:    "agent-msg-503",
 		Name:    "Msg 503 Agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -3689,18 +3689,18 @@ func TestHandleAgentMessage_NoBrokerID_Returns503(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-msg-503-nobroker",
-		Name: "Msg 503 NoBroker Grove",
+		Name: "Msg 503 NoBroker Project",
 		Slug: "msg-503-nobroker-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	agent := &store.Agent{
 		ID:      "agent-msg-503-nobroker",
 		Slug:    "agent-msg-503-nobroker",
 		Name:    "Msg 503 NoBroker Agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Phase:   string(state.PhaseRunning),
 		// No RuntimeBrokerID set
 	}
@@ -3733,7 +3733,7 @@ func TestCreateAgent_DispatchFailure_CleansUpBroker(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "auth-fail-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "do something",
 	})
 
@@ -3765,7 +3765,7 @@ func TestCreateAgent_GCPIdentityAssign(t *testing.T) {
 	// Register and verify a GCP service account
 	sa := &store.GCPServiceAccount{
 		ID:         "sa-assign-1",
-		Scope:      store.ScopeGrove,
+		Scope:      store.ScopeProject,
 		ScopeID:    grove.ID,
 		Email:      "worker@project.iam.gserviceaccount.com",
 		ProjectID:  "my-project",
@@ -3778,7 +3778,7 @@ func TestCreateAgent_GCPIdentityAssign(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "gcp-assign-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "do something",
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode:     "assign",
@@ -3812,7 +3812,7 @@ func TestCreateAgent_GCPIdentityBlock(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "gcp-block-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "do something",
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode: "block",
@@ -3837,7 +3837,7 @@ func TestCreateAgent_GCPIdentityPassthrough(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "gcp-passthrough-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "do something",
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode: "passthrough",
@@ -3857,7 +3857,7 @@ func TestCreateAgent_GCPIdentityNoField(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "gcp-none-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "do something",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -3877,7 +3877,7 @@ func TestCreateAgent_GCPIdentityInvalidMode(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "gcp-invalid-mode",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode: "invalid",
 		},
@@ -3891,7 +3891,7 @@ func TestCreateAgent_GCPIdentityAssignMissingSA(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "gcp-missing-sa",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode: "assign",
 		},
@@ -3905,7 +3905,7 @@ func TestCreateAgent_GCPIdentityAssignNonexistentSA(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "gcp-nonexistent-sa",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode:     "assign",
 			ServiceAccountID: "nonexistent-sa-id",
@@ -3921,7 +3921,7 @@ func TestCreateAgent_GCPIdentityAssignUnverifiedSA(t *testing.T) {
 
 	sa := &store.GCPServiceAccount{
 		ID:        "sa-unverified-1",
-		Scope:     store.ScopeGrove,
+		Scope:     store.ScopeProject,
 		ScopeID:   grove.ID,
 		Email:     "unverified@project.iam.gserviceaccount.com",
 		ProjectID: "my-project",
@@ -3933,7 +3933,7 @@ func TestCreateAgent_GCPIdentityAssignUnverifiedSA(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "gcp-unverified-sa",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode:     "assign",
 			ServiceAccountID: sa.ID,
@@ -3942,14 +3942,14 @@ func TestCreateAgent_GCPIdentityAssignUnverifiedSA(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-func TestCreateAgent_GCPIdentityAssignWrongGrove(t *testing.T) {
+func TestCreateAgent_GCPIdentityAssignWrongProject(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, grove := setupCreateAgentServer(t, disp)
 	ctx := context.Background()
 
 	sa := &store.GCPServiceAccount{
 		ID:         "sa-other-grove-1",
-		Scope:      store.ScopeGrove,
+		Scope:      store.ScopeProject,
 		ScopeID:    "other-grove-id",
 		Email:      "other@project.iam.gserviceaccount.com",
 		ProjectID:  "my-project",
@@ -3962,7 +3962,7 @@ func TestCreateAgent_GCPIdentityAssignWrongGrove(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "gcp-wrong-grove",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode:     "assign",
 			ServiceAccountID: sa.ID,
@@ -3977,7 +3977,7 @@ func TestCreateAgent_GCPIdentityBlockWithSAID(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "gcp-block-with-sa",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode:     "block",
 			ServiceAccountID: "should-not-be-here",
@@ -3992,7 +3992,7 @@ func TestCreateAgent_GCPIdentityPassthroughWithSAID(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "gcp-passthrough-with-sa",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode:     "passthrough",
 			ServiceAccountID: "should-not-be-here",
@@ -4019,16 +4019,16 @@ func TestCreateAgent_GCPPassthrough_BrokerOwnerAllowed(t *testing.T) {
 	ensureHubMembership(ctx, s, owner.ID)
 
 	// Create a grove owned by the broker owner with proper policies
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove-pt-owner",
-		Name:      "Passthrough Owner Grove",
+		Name:      "Passthrough Owner Project",
 		Slug:      "passthrough-owner-grove",
 		OwnerID:   owner.ID,
 		CreatedBy: owner.ID,
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 	srv.createGroveMembersGroupAndPolicy(ctx, grove)
 
 	// Create a broker owned by the same user
@@ -4040,19 +4040,19 @@ func TestCreateAgent_GCPPassthrough_BrokerOwnerAllowed(t *testing.T) {
 		CreatedBy: owner.ID,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID:    grove.ID,
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}))
 	grove.DefaultRuntimeBrokerID = broker.ID
-	require.NoError(t, s.UpdateGrove(ctx, grove))
+	require.NoError(t, s.UpdateProject(ctx, grove))
 
 	// Broker owner should be allowed to use passthrough
 	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "pt-owner-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "do something",
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode: "passthrough",
@@ -4095,16 +4095,16 @@ func TestCreateAgent_GCPPassthrough_NonOwnerDenied(t *testing.T) {
 	ensureHubMembership(ctx, s, nonOwner.ID)
 
 	// Create a grove where the non-owner is a member
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove-pt-nonowner",
-		Name:      "Passthrough NonOwner Grove",
+		Name:      "Passthrough NonOwner Project",
 		Slug:      "passthrough-nonowner-grove",
 		OwnerID:   nonOwner.ID,
 		CreatedBy: nonOwner.ID,
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 	srv.createGroveMembersGroupAndPolicy(ctx, grove)
 
 	// Create a broker owned by a DIFFERENT user
@@ -4117,19 +4117,19 @@ func TestCreateAgent_GCPPassthrough_NonOwnerDenied(t *testing.T) {
 		AutoProvide: true, // AutoProvide so dispatch is allowed for any user
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID:    grove.ID,
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}))
 	grove.DefaultRuntimeBrokerID = broker.ID
-	require.NoError(t, s.UpdateGrove(ctx, grove))
+	require.NoError(t, s.UpdateProject(ctx, grove))
 
 	// Non-owner should be DENIED passthrough
 	rec := doRequestAsUser(t, srv, nonOwner, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "pt-denied-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "do something",
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode: "passthrough",
@@ -4168,16 +4168,16 @@ func TestCreateAgent_GCPPassthrough_AdminAllowed(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, adminUser))
 	ensureHubMembership(ctx, s, adminUser.ID)
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove-pt-admin",
-		Name:      "Passthrough Admin Grove",
+		Name:      "Passthrough Admin Project",
 		Slug:      "passthrough-admin-grove",
 		OwnerID:   adminUser.ID,
 		CreatedBy: adminUser.ID,
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 	srv.createGroveMembersGroupAndPolicy(ctx, grove)
 
 	// Broker owned by someone else
@@ -4189,19 +4189,19 @@ func TestCreateAgent_GCPPassthrough_AdminAllowed(t *testing.T) {
 		CreatedBy: brokerOwner.ID,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID:    grove.ID,
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}))
 	grove.DefaultRuntimeBrokerID = broker.ID
-	require.NoError(t, s.UpdateGrove(ctx, grove))
+	require.NoError(t, s.UpdateProject(ctx, grove))
 
 	// Admin (non-owner) should be allowed passthrough
 	rec := doRequestAsUser(t, srv, adminUser, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "pt-admin-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "do something",
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode: "passthrough",
@@ -4218,7 +4218,7 @@ func TestCreateAgent_GCPIdentityBlockOverridesGroveDefault(t *testing.T) {
 	// Register and verify a GCP service account
 	sa := &store.GCPServiceAccount{
 		ID:         "sa-grove-default",
-		Scope:      store.ScopeGrove,
+		Scope:      store.ScopeProject,
 		ScopeID:    grove.ID,
 		Email:      "grove-default@project.iam.gserviceaccount.com",
 		ProjectID:  "my-project",
@@ -4234,12 +4234,12 @@ func TestCreateAgent_GCPIdentityBlockOverridesGroveDefault(t *testing.T) {
 		"scion.io/default-gcp-identity-mode":               "assign",
 		"scion.io/default-gcp-identity-service-account-id": sa.ID,
 	}
-	require.NoError(t, s.UpdateGrove(ctx, grove))
+	require.NoError(t, s.UpdateProject(ctx, grove))
 
 	// Create agent with explicit "block" — should override grove default
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "gcp-block-override-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "do something",
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode: "block",
@@ -4264,7 +4264,7 @@ func TestCreateAgent_GCPIdentityGroveDefaultApplied(t *testing.T) {
 	// Register and verify a GCP service account
 	sa := &store.GCPServiceAccount{
 		ID:         "sa-grove-applied",
-		Scope:      store.ScopeGrove,
+		Scope:      store.ScopeProject,
 		ScopeID:    grove.ID,
 		Email:      "grove-applied@project.iam.gserviceaccount.com",
 		ProjectID:  "my-project",
@@ -4280,12 +4280,12 @@ func TestCreateAgent_GCPIdentityGroveDefaultApplied(t *testing.T) {
 		"scion.io/default-gcp-identity-mode":               "assign",
 		"scion.io/default-gcp-identity-service-account-id": sa.ID,
 	}
-	require.NoError(t, s.UpdateGrove(ctx, grove))
+	require.NoError(t, s.UpdateProject(ctx, grove))
 
 	// Create agent WITHOUT GCP identity — grove default should apply
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "gcp-grove-default-agent",
-		GroveID: grove.ID,
+		ProjectID: grove.ID,
 		Task:    "do something",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -4303,15 +4303,15 @@ func TestPreserveTerminalPhase(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{ID: "grove-tp", Name: "TP Grove", Slug: "tp-grove"}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	grove := &store.Project{ID: "grove-tp", Name: "TP Project", Slug: "tp-grove"}
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	t.Run("preserves error phase", func(t *testing.T) {
 		agent := &store.Agent{
 			ID:      "agent-tp-error",
 			Slug:    "agent-tp-error",
 			Name:    "TP Error Agent",
-			GroveID: grove.ID,
+			ProjectID: grove.ID,
 			Phase:   string(state.PhaseCreated),
 		}
 		require.NoError(t, s.CreateAgent(ctx, agent))
@@ -4338,7 +4338,7 @@ func TestPreserveTerminalPhase(t *testing.T) {
 			ID:      "agent-tp-stopped",
 			Slug:    "agent-tp-stopped",
 			Name:    "TP Stopped Agent",
-			GroveID: grove.ID,
+			ProjectID: grove.ID,
 			Phase:   string(state.PhaseCreated),
 		}
 		require.NoError(t, s.CreateAgent(ctx, agent))
@@ -4358,7 +4358,7 @@ func TestPreserveTerminalPhase(t *testing.T) {
 			ID:      "agent-tp-running",
 			Slug:    "agent-tp-running",
 			Name:    "TP Running Agent",
-			GroveID: grove.ID,
+			ProjectID: grove.ID,
 			Phase:   string(state.PhaseCreated),
 		}
 		require.NoError(t, s.CreateAgent(ctx, agent))
@@ -4379,18 +4379,18 @@ func TestListAgents_GlobalEndpointReturnsAllAgents(t *testing.T) {
 	ctx := context.Background()
 
 	// Create two groves with agents in each
-	grove1 := &store.Grove{ID: "grove-global-1", Name: "Grove One", Slug: "grove-one"}
-	grove2 := &store.Grove{ID: "grove-global-2", Name: "Grove Two", Slug: "grove-two"}
-	require.NoError(t, s.CreateGrove(ctx, grove1))
-	require.NoError(t, s.CreateGrove(ctx, grove2))
+	grove1 := &store.Project{ID: "grove-global-1", Name: "Project One", Slug: "grove-one"}
+	grove2 := &store.Project{ID: "grove-global-2", Name: "Project Two", Slug: "grove-two"}
+	require.NoError(t, s.CreateProject(ctx, grove1))
+	require.NoError(t, s.CreateProject(ctx, grove2))
 
 	agent1 := &store.Agent{
 		ID: "agent-g1", Slug: "agent-g1", Name: "Agent G1",
-		GroveID: grove1.ID, Phase: string(state.PhaseRunning),
+		ProjectID: grove1.ID, Phase: string(state.PhaseRunning),
 	}
 	agent2 := &store.Agent{
 		ID: "agent-g2", Slug: "agent-g2", Name: "Agent G2",
-		GroveID: grove2.ID, Phase: string(state.PhaseCreated),
+		ProjectID: grove2.ID, Phase: string(state.PhaseCreated),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent1))
 	require.NoError(t, s.CreateAgent(ctx, agent2))
@@ -4431,12 +4431,12 @@ func TestHandleAgentExec_DispatchesToRuntimeBroker(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-exec",
-		Name: "Exec Grove",
+		Name: "Exec Project",
 		Slug: "exec-grove",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID:     "broker-exec",
@@ -4445,8 +4445,8 @@ func TestHandleAgentExec_DispatchesToRuntimeBroker(t *testing.T) {
 		Status: store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID:    grove.ID,
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -4456,7 +4456,7 @@ func TestHandleAgentExec_DispatchesToRuntimeBroker(t *testing.T) {
 		ID:              "agent-exec-1",
 		Slug:            "agent-exec-1",
 		Name:            "Exec Agent",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 	}
@@ -4483,22 +4483,22 @@ func TestHandleGroveAgentExec_DispatchesToRuntimeBroker(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-exec-grove-route",
-		Name: "Exec Grove Route",
+		Name: "Exec Project Route",
 		Slug: "exec-grove-route",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID:     "broker-exec-grove-route",
-		Name:   "Exec Broker Grove Route",
+		Name:   "Exec Broker Project Route",
 		Slug:   "exec-broker-grove-route",
 		Status: store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID:    grove.ID,
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:    grove.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -4507,8 +4507,8 @@ func TestHandleGroveAgentExec_DispatchesToRuntimeBroker(t *testing.T) {
 	agent := &store.Agent{
 		ID:              "agent-exec-grove-route",
 		Slug:            "agent-exec-grove-route",
-		Name:            "Exec Agent Grove Route",
-		GroveID:         grove.ID,
+		Name:            "Exec Agent Project Route",
+		ProjectID:         grove.ID,
 		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 	}

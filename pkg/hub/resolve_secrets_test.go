@@ -45,17 +45,17 @@ func TestResolveSecrets(t *testing.T) {
 		EncryptedValue: "grove-db-pass",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "DATABASE_PASSWORD",
-		Scope:          store.ScopeGrove,
+		Scope:          store.ScopeProject,
 		ScopeID:        "grove-1",
 	}
-	// Grove-level override of user API_KEY
+	// Project-level override of user API_KEY
 	groveOverride := &store.Secret{
 		ID:             "s3",
 		Key:            "API_KEY",
 		EncryptedValue: "grove-api-key",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "API_KEY",
-		Scope:          store.ScopeGrove,
+		Scope:          store.ScopeProject,
 		ScopeID:        "grove-1",
 	}
 	fileSecret := &store.Secret{
@@ -93,7 +93,7 @@ func TestResolveSecrets(t *testing.T) {
 		ID:      "agent-1",
 		Name:    "test-agent",
 		OwnerID: "user-1",
-		GroveID: "grove-1",
+		ProjectID: "grove-1",
 	}
 
 	resolved, err := dispatcher.resolveSecrets(ctx, agent)
@@ -115,8 +115,8 @@ func TestResolveSecrets(t *testing.T) {
 	if apiKey.Value != "grove-api-key" {
 		t.Errorf("expected API_KEY value from grove scope %q, got %q", "grove-api-key", apiKey.Value)
 	}
-	if apiKey.Source != store.ScopeGrove {
-		t.Errorf("expected API_KEY source %q, got %q", store.ScopeGrove, apiKey.Source)
+	if apiKey.Source != store.ScopeProject {
+		t.Errorf("expected API_KEY source %q, got %q", store.ScopeProject, apiKey.Source)
 	}
 
 	// DB_PASS should come from grove scope
@@ -179,7 +179,7 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 			EncryptedValue: "grove-api-key",
 			SecretType:     store.SecretTypeEnvironment,
 			Target:         "API_KEY",
-			Scope:          store.ScopeGrove,
+			Scope:          store.ScopeProject,
 			ScopeID:        "grove-1",
 		},
 		{
@@ -188,7 +188,7 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 			EncryptedValue: "db-password",
 			SecretType:     store.SecretTypeEnvironment,
 			Target:         "DATABASE_PASSWORD",
-			Scope:          store.ScopeGrove,
+			Scope:          store.ScopeProject,
 			ScopeID:        "grove-1",
 		},
 	} {
@@ -207,7 +207,7 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 		ID:      "agent-1",
 		Name:    "test-agent",
 		OwnerID: "user-1",
-		GroveID: "grove-1",
+		ProjectID: "grove-1",
 	}
 
 	resolved, err := dispatcher.resolveSecrets(ctx, agent)
@@ -228,8 +228,8 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 	if apiKey.Value != "grove-api-key" {
 		t.Errorf("expected API_KEY value %q, got %q", "grove-api-key", apiKey.Value)
 	}
-	if apiKey.Source != store.ScopeGrove {
-		t.Errorf("expected API_KEY source %q, got %q", store.ScopeGrove, apiKey.Source)
+	if apiKey.Source != store.ScopeProject {
+		t.Errorf("expected API_KEY source %q, got %q", store.ScopeProject, apiKey.Source)
 	}
 
 	// DB_PASS target should be preserved
@@ -320,7 +320,7 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 		EncryptedValue: "grove-db-pass",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "DB_PASS",
-		Scope:          store.ScopeGrove,
+		Scope:          store.ScopeProject,
 		ScopeID:        "grove-1",
 	}
 
@@ -339,7 +339,7 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 		ID:      "agent-hub-1",
 		Name:    "hub-test-agent",
 		OwnerID: "user-1",
-		GroveID: "grove-1",
+		ProjectID: "grove-1",
 	}
 
 	resolved, err := dispatcher.resolveSecrets(ctx, agent)
@@ -384,8 +384,8 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 	if dbPass.Value != "grove-db-pass" {
 		t.Errorf("expected DB_PASS value %q, got %q", "grove-db-pass", dbPass.Value)
 	}
-	if dbPass.Source != store.ScopeGrove {
-		t.Errorf("expected DB_PASS source %q, got %q", store.ScopeGrove, dbPass.Source)
+	if dbPass.Source != store.ScopeProject {
+		t.Errorf("expected DB_PASS source %q, got %q", store.ScopeProject, dbPass.Source)
 	}
 
 	// Total: ORG_API_KEY, API_KEY, DB_PASS = 3
@@ -406,7 +406,7 @@ func TestResolveSecrets_NoBackend(t *testing.T) {
 		ID:      "agent-1",
 		Name:    "test-agent",
 		OwnerID: "user-1",
-		GroveID: "grove-1",
+		ProjectID: "grove-1",
 	}
 
 	resolved, err := dispatcher.resolveSecrets(ctx, agent)

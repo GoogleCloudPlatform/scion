@@ -52,7 +52,7 @@ var syncExcludeExtensions = []string{
 func (s *Server) handleGroveWebDAV(w http.ResponseWriter, r *http.Request, groveID, davPath string) {
 	ctx := r.Context()
 
-	grove, err := s.store.GetGrove(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, groveID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -118,15 +118,15 @@ func (s *Server) updateGroveSyncState(groveID, workspacePath string) {
 	})
 
 	now := time.Now()
-	state := &store.GroveSyncState{
-		GroveID:      groveID,
+	state := &store.ProjectSyncState{
+		ProjectID:      groveID,
 		BrokerID:     "", // hub-native
 		LastSyncTime: &now,
 		FileCount:    fileCount,
 		TotalBytes:   totalBytes,
 	}
 
-	if err := s.store.UpsertGroveSyncState(context.Background(), state); err != nil {
+	if err := s.store.UpsertProjectSyncState(context.Background(), state); err != nil {
 		slog.Warn("failed to update grove sync state", "grove_id", groveID, "error", err)
 	}
 }
@@ -135,10 +135,10 @@ func (s *Server) updateGroveSyncState(groveID, workspacePath string) {
 // for a given grove. For hub-native and shared-workspace groves, this is the
 // hub-managed workspace directory. For linked groves (workspace on a remote
 // broker), this is the hub's cached copy of that workspace.
-func (s *Server) resolveGroveWebDAVPath(ctx context.Context, grove *store.Grove) (string, error) {
+func (s *Server) resolveGroveWebDAVPath(ctx context.Context, grove *store.Project) (string, error) {
 	// Hub-native groves (no git remote) always have a managed workspace
 	if grove.GitRemote == "" {
-		path, err := hubNativeGrovePath(grove.Slug)
+		path, err := hubNativeProjectPath(grove.Slug)
 		if err != nil {
 			return "", fmt.Errorf("failed to resolve grove path")
 		}
@@ -147,7 +147,7 @@ func (s *Server) resolveGroveWebDAVPath(ctx context.Context, grove *store.Grove)
 
 	// Shared-workspace git groves have a managed workspace on the hub
 	if grove.IsSharedWorkspace() {
-		path, err := hubNativeGrovePath(grove.Slug)
+		path, err := hubNativeProjectPath(grove.Slug)
 		if err != nil {
 			return "", fmt.Errorf("failed to resolve grove path")
 		}
@@ -155,7 +155,7 @@ func (s *Server) resolveGroveWebDAVPath(ctx context.Context, grove *store.Grove)
 	}
 
 	// Linked groves: check if there's a co-located broker with a local path
-	providers, err := s.store.GetGroveProviders(ctx, grove.ID)
+	providers, err := s.store.GetProjectProviders(ctx, grove.ID)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve grove providers")
 	}
@@ -176,14 +176,14 @@ func (s *Server) resolveGroveWebDAVPath(ctx context.Context, grove *store.Grove)
 
 	// Remote linked grove: serve from the hub's cached copy.
 	// The cache is populated via cache/refresh or cache/notify endpoints.
-	cachePath, err := hubNativeGrovePath(grove.Slug)
+	cachePath, err := hubNativeProjectPath(grove.Slug)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve grove cache path")
 	}
 
 	// If cache doesn't exist yet, return the path anyway (MkdirAll will create it).
 	// The client should trigger a cache/refresh to populate it.
-	if !hasGroveCache(grove.Slug) {
+	if !hasProjectCache(grove.Slug) {
 		slog.Debug("linked grove cache not yet populated",
 			"grove_id", grove.ID, "slug", grove.Slug)
 	}
@@ -341,8 +341,8 @@ func isExcluded(name string) bool {
 
 // GroveSyncStatusResponse is the response for the sync status endpoint.
 type GroveSyncStatusResponse struct {
-	GroveID    string                 `json:"groveId"`
-	States     []store.GroveSyncState `json:"states"`
+	ProjectID    string                 `json:"groveId"`
+	States     []store.ProjectSyncState `json:"states"`
 	TotalFiles int                    `json:"totalFiles"`
 	TotalBytes int64                  `json:"totalBytes"`
 }
@@ -357,13 +357,13 @@ func (s *Server) handleGroveSyncStatus(w http.ResponseWriter, r *http.Request, g
 	ctx := r.Context()
 
 	// Verify grove exists
-	_, err := s.store.GetGrove(ctx, groveID)
+	_, err := s.store.GetProject(ctx, groveID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	states, err := s.store.ListGroveSyncStates(ctx, groveID)
+	states, err := s.store.ListProjectSyncStates(ctx, groveID)
 	if err != nil {
 		InternalError(w)
 		return
@@ -377,7 +377,7 @@ func (s *Server) handleGroveSyncStatus(w http.ResponseWriter, r *http.Request, g
 	}
 
 	writeJSON(w, http.StatusOK, GroveSyncStatusResponse{
-		GroveID:    groveID,
+		ProjectID:    groveID,
 		States:     states,
 		TotalFiles: totalFiles,
 		TotalBytes: totalBytes,

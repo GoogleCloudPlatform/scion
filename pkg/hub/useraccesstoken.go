@@ -51,11 +51,11 @@ var (
 type UserAccessTokenService struct {
 	tokens store.UserAccessTokenStore
 	users  store.UserStore
-	groves store.GroveStore
+	groves store.ProjectStore
 }
 
 // NewUserAccessTokenService creates a new UAT service.
-func NewUserAccessTokenService(tokens store.UserAccessTokenStore, users store.UserStore, groves store.GroveStore) *UserAccessTokenService {
+func NewUserAccessTokenService(tokens store.UserAccessTokenStore, users store.UserStore, groves store.ProjectStore) *UserAccessTokenService {
 	return &UserAccessTokenService{
 		tokens: tokens,
 		users:  users,
@@ -74,7 +74,7 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 	}
 
 	// Validate grove exists
-	if _, err := s.groves.GetGrove(ctx, groveID); err != nil {
+	if _, err := s.groves.GetProject(ctx, groveID); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return "", nil, fmt.Errorf("grove not found: %s", groveID)
 		}
@@ -136,7 +136,7 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 		Name:      name,
 		Prefix:    prefix,
 		KeyHash:   hashStr,
-		GroveID:   groveID,
+		ProjectID:   groveID,
 		Scopes:    expanded,
 		ExpiresAt: expiresAt,
 		Created:   now,
@@ -189,7 +189,7 @@ func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) 
 
 	return NewScopedUserIdentity(
 		NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeAPI)),
-		token.GroveID,
+		token.ProjectID,
 		token.Scopes,
 	), nil
 }

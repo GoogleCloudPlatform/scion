@@ -116,7 +116,7 @@ func TestStart_ErrorPropagation_Tmux(t *testing.T) {
 	// Run Start
 	opts := api.StartOptions{
 		Name:      "test-agent",
-		GrovePath: projectScionDir,
+		ProjectPath: projectScionDir,
 		Profile:   "test",
 		Task:      "do something",
 		Template:  "gemini",
@@ -222,7 +222,7 @@ func TestStart_ErrorPropagation_Tmux_Missing(t *testing.T) {
 	// Run Start
 	opts := api.StartOptions{
 		Name:      "test-agent",
-		GrovePath: projectScionDir,
+		ProjectPath: projectScionDir,
 		Profile:   "test",
 		Task:      "do something",
 		Template:  "gemini",
@@ -309,7 +309,7 @@ func TestStart_RunFailureMarksAgentInfoError(t *testing.T) {
 
 	_, err = manager.Start(context.Background(), api.StartOptions{
 		Name:      "test-agent",
-		GrovePath: projectScionDir,
+		ProjectPath: projectScionDir,
 		Profile:   "test",
 		Task:      "do something",
 		Template:  "gemini",
@@ -420,7 +420,7 @@ func TestStart_ErrorPropagation_FalsePositive_Tmux(t *testing.T) {
 
 	opts := api.StartOptions{
 		Name:      "test-agent",
-		GrovePath: projectScionDir,
+		ProjectPath: projectScionDir,
 		Profile:   "test",
 		Task:      "do something",
 		Template:  "gemini",
@@ -518,7 +518,7 @@ func TestStart_ErrorPropagation_Tmux_CommandNotFound(t *testing.T) {
 
 	opts := api.StartOptions{
 		Name:      "test-agent",
-		GrovePath: projectScionDir,
+		ProjectPath: projectScionDir,
 		Profile:   "test",
 		Task:      "do something",
 		Template:  "gemini",

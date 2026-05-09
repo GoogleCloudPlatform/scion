@@ -222,7 +222,7 @@ func TestEnvVar_UserScope_MemberIsolation(t *testing.T) {
 }
 
 // ============================================================================
-// Grove-Scoped Env Var Authorization Tests
+// Project-Scoped Env Var Authorization Tests
 // ============================================================================
 
 func TestEnvVar_GroveScope_OwnerAccess(t *testing.T) {
@@ -237,15 +237,15 @@ func TestEnvVar_GroveScope_OwnerAccess(t *testing.T) {
 		t.Fatalf("failed to create user: %v", err)
 	}
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:      "grove_env_owner",
-		Name:    "Owner Test Grove",
+		Name:    "Owner Test Project",
 		Slug:    "owner-test-grove",
 		OwnerID: "grove-owner-1",
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -275,15 +275,15 @@ func TestEnvVar_GroveScope_NonOwnerDenied(t *testing.T) {
 		t.Fatalf("failed to create user: %v", err)
 	}
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:      "grove_env_notown",
-		Name:    "Not Owned Grove",
+		Name:    "Not Owned Project",
 		Slug:    "not-owned-grove",
 		OwnerID: "someone-else",
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -298,15 +298,15 @@ func TestEnvVar_GroveScope_AdminAccess(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:      "grove_env_admin",
-		Name:    "Admin Test Grove",
+		Name:    "Admin Test Project",
 		Slug:    "admin-test-grove",
 		OwnerID: "someone-else",
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -317,18 +317,18 @@ func TestEnvVar_GroveScope_AdminAccess(t *testing.T) {
 	}
 }
 
-func TestEnvVar_GroveScope_AgentReadOwnGrove(t *testing.T) {
+func TestEnvVar_GroveScope_AgentReadOwnProject(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:      "grove_agent_env",
-		Name:    "Agent Grove",
+		Name:    "Agent Project",
 		Slug:    "agent-grove",
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -336,7 +336,7 @@ func TestEnvVar_GroveScope_AgentReadOwnGrove(t *testing.T) {
 		ID:           "agent_env_test",
 		Slug:         "env-test-agent",
 		Name:         "Env Test Agent",
-		GroveID:      grove.ID,
+		ProjectID:      grove.ID,
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      time.Now(),
@@ -362,24 +362,24 @@ func TestEnvVar_GroveScope_AgentOtherGroveDenied(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove1 := &store.Grove{
-		ID: "grove_agent_own", Name: "Agent's Grove", Slug: "agents-grove",
+	grove1 := &store.Project{
+		ID: "grove_agent_own", Name: "Agent's Project", Slug: "agents-grove",
 		Created: time.Now(), Updated: time.Now(),
 	}
-	grove2 := &store.Grove{
-		ID: "grove_agent_other", Name: "Other Grove", Slug: "other-grove",
+	grove2 := &store.Project{
+		ID: "grove_agent_other", Name: "Other Project", Slug: "other-grove",
 		Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove1); err != nil {
+	if err := s.CreateProject(ctx, grove1); err != nil {
 		t.Fatalf("failed to create grove1: %v", err)
 	}
-	if err := s.CreateGrove(ctx, grove2); err != nil {
+	if err := s.CreateProject(ctx, grove2); err != nil {
 		t.Fatalf("failed to create grove2: %v", err)
 	}
 
 	agent := &store.Agent{
-		ID: "agent_other_grove", Slug: "other-grove-agent", Name: "Other Grove Agent",
-		GroveID: grove1.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
+		ID: "agent_other_grove", Slug: "other-grove-agent", Name: "Other Project Agent",
+		ProjectID: grove1.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
 		Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
@@ -402,17 +402,17 @@ func TestEnvVar_GroveScope_AgentWriteDenied(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_agent_nowrite", Name: "Agent No Write Grove", Slug: "agent-nowrite-grove",
+	grove := &store.Project{
+		ID: "grove_agent_nowrite", Name: "Agent No Write Project", Slug: "agent-nowrite-grove",
 		Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
 	agent := &store.Agent{
 		ID: "agent_nowrite", Slug: "nowrite-agent", Name: "No Write Agent",
-		GroveID: grove.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
+		ProjectID: grove.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
 		Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
@@ -581,7 +581,7 @@ func TestSecret_UserScope_WriteAuthWorks(t *testing.T) {
 }
 
 // ============================================================================
-// Grove-Scoped Secrets Authorization Tests
+// Project-Scoped Secrets Authorization Tests
 // ============================================================================
 
 func TestSecret_GroveScope_OwnerAccess(t *testing.T) {
@@ -597,11 +597,11 @@ func TestSecret_GroveScope_OwnerAccess(t *testing.T) {
 		t.Fatalf("failed to create user: %v", err)
 	}
 
-	grove := &store.Grove{
-		ID: "grove_sec_owner", Name: "Secret Owner Grove", Slug: "secret-owner-grove",
+	grove := &store.Project{
+		ID: "grove_sec_owner", Name: "Secret Owner Project", Slug: "secret-owner-grove",
 		OwnerID: "grove-sec-owner", Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -624,11 +624,11 @@ func TestSecret_GroveScope_NonOwnerDenied(t *testing.T) {
 		t.Fatalf("failed to create user: %v", err)
 	}
 
-	grove := &store.Grove{
-		ID: "grove_sec_notown", Name: "Not Owned Secret Grove", Slug: "not-owned-secret-grove",
+	grove := &store.Project{
+		ID: "grove_sec_notown", Name: "Not Owned Secret Project", Slug: "not-owned-secret-grove",
 		OwnerID: "someone-else", Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -638,22 +638,22 @@ func TestSecret_GroveScope_NonOwnerDenied(t *testing.T) {
 	}
 }
 
-func TestSecret_GroveScope_AgentReadOwnGrove(t *testing.T) {
+func TestSecret_GroveScope_AgentReadOwnProject(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_agent_sec", Name: "Agent Secret Grove", Slug: "agent-secret-grove",
+	grove := &store.Project{
+		ID: "grove_agent_sec", Name: "Agent Secret Project", Slug: "agent-secret-grove",
 		Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
 	agent := &store.Agent{
 		ID: "agent_sec_test", Slug: "sec-test-agent", Name: "Secret Test Agent",
-		GroveID: grove.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
+		ProjectID: grove.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
 		Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
@@ -676,17 +676,17 @@ func TestSecret_GroveScope_AgentWriteDenied(t *testing.T) {
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID: "grove_agent_sec_nowrite", Name: "Agent Secret No Write", Slug: "agent-sec-nowrite-grove",
 		Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
 	agent := &store.Agent{
 		ID: "agent_sec_nowrite", Slug: "sec-nowrite-agent", Name: "Secret No Write Agent",
-		GroveID: grove.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
+		ProjectID: grove.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
 		Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
@@ -706,18 +706,18 @@ func TestSecret_GroveScope_AgentWriteDenied(t *testing.T) {
 }
 
 // ============================================================================
-// Hub-Level Env Var with Grove/Broker Scope via Query Params
+// Hub-Level Env Var with Project/Broker Scope via Query Params
 // ============================================================================
 
 func TestEnvVar_HubEndpoint_GroveScope_Authorized(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_hub_env", Name: "Hub Env Grove", Slug: "hub-env-grove",
+	grove := &store.Project{
+		ID: "grove_hub_env", Name: "Hub Env Project", Slug: "hub-env-grove",
 		Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -740,11 +740,11 @@ func TestEnvVar_HubEndpoint_GroveScope_NonOwnerDenied(t *testing.T) {
 		t.Fatalf("failed to create user: %v", err)
 	}
 
-	grove := &store.Grove{
-		ID: "grove_hub_env_deny", Name: "Hub Env Deny Grove", Slug: "hub-env-deny-grove",
+	grove := &store.Project{
+		ID: "grove_hub_env_deny", Name: "Hub Env Deny Project", Slug: "hub-env-deny-grove",
 		OwnerID: "someone-else", Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -1042,11 +1042,11 @@ func TestEnvVar_GroveScope_SecretPromotion_Succeeds(t *testing.T) {
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_promo_test", Name: "Promo Grove", Slug: "promo-grove",
+	grove := &store.Project{
+		ID: "grove_promo_test", Name: "Promo Project", Slug: "promo-grove",
 		OwnerID: DevUserID, Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -1062,11 +1062,11 @@ func TestEnvVar_GroveScope_UnifiedList(t *testing.T) {
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_unified_list", Name: "Unified Grove", Slug: "unified-grove",
+	grove := &store.Project{
+		ID: "grove_unified_list", Name: "Unified Project", Slug: "unified-grove",
 		OwnerID: DevUserID, Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -1084,7 +1084,7 @@ func TestEnvVar_GroveScope_UnifiedList(t *testing.T) {
 		EncryptedValue: "grove-secret-val",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "GROVE_SECRET_VAR",
-		Scope:          store.ScopeGrove,
+		Scope:          store.ScopeProject,
 		ScopeID:        grove.ID,
 	}); err != nil {
 		t.Fatalf("failed to create grove secret: %v", err)
@@ -1122,11 +1122,11 @@ func TestEnvVar_GroveScope_FallbackGet(t *testing.T) {
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_fallback_get", Name: "Fallback Get Grove", Slug: "fallback-get-grove",
+	grove := &store.Project{
+		ID: "grove_fallback_get", Name: "Fallback Get Project", Slug: "fallback-get-grove",
 		OwnerID: DevUserID, Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -1136,7 +1136,7 @@ func TestEnvVar_GroveScope_FallbackGet(t *testing.T) {
 		EncryptedValue: "secret-val",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "GROVE_ONLY_SEC",
-		Scope:          store.ScopeGrove,
+		Scope:          store.ScopeProject,
 		ScopeID:        grove.ID,
 	}); err != nil {
 		t.Fatalf("failed to create secret: %v", err)
@@ -1159,11 +1159,11 @@ func TestEnvVar_GroveScope_FallbackDelete(t *testing.T) {
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_fallback_del", Name: "Fallback Del Grove", Slug: "fallback-del-grove",
+	grove := &store.Project{
+		ID: "grove_fallback_del", Name: "Fallback Del Project", Slug: "fallback-del-grove",
 		OwnerID: DevUserID, Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -1173,7 +1173,7 @@ func TestEnvVar_GroveScope_FallbackDelete(t *testing.T) {
 		EncryptedValue: "secret-val",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "GROVE_DEL_SEC",
-		Scope:          store.ScopeGrove,
+		Scope:          store.ScopeProject,
 		ScopeID:        grove.ID,
 	}); err != nil {
 		t.Fatalf("failed to create secret: %v", err)
@@ -1331,17 +1331,17 @@ func TestEnvVar_HubScope_AgentCanRead(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_hub_agent", Name: "Hub Agent Grove", Slug: "hub-agent-grove",
+	grove := &store.Project{
+		ID: "grove_hub_agent", Name: "Hub Agent Project", Slug: "hub-agent-grove",
 		Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
+	if err := s.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
 	agent := &store.Agent{
 		ID: "agent_hub_read", Slug: "hub-read-agent", Name: "Hub Read Agent",
-		GroveID: grove.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
+		ProjectID: grove.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
 		Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {

@@ -154,34 +154,34 @@ func (m *mockUserStore) ListUsers(context.Context, store.UserFilter, store.ListO
 func (m *mockUserStore) DeleteUser(context.Context, string) error                    { return nil }
 func (m *mockUserStore) UpdateUserLastSeen(context.Context, string, time.Time) error { return nil }
 
-// mockGroveStore implements store.GroveStore for testing (minimal).
-type mockGroveStore struct {
-	groves map[string]*store.Grove
+// mockProjectStore implements store.ProjectStore for testing (minimal).
+type mockProjectStore struct {
+	groves map[string]*store.Project
 }
 
-func (m *mockGroveStore) GetGrove(_ context.Context, id string) (*store.Grove, error) {
+func (m *mockProjectStore) GetProject(_ context.Context, id string) (*store.Project, error) {
 	g, ok := m.groves[id]
 	if !ok {
 		return nil, store.ErrNotFound
 	}
 	return g, nil
 }
-func (m *mockGroveStore) CreateGrove(context.Context, *store.Grove) error { return nil }
-func (m *mockGroveStore) UpdateGrove(context.Context, *store.Grove) error { return nil }
-func (m *mockGroveStore) DeleteGrove(context.Context, string) error       { return nil }
-func (m *mockGroveStore) GetGroveBySlug(context.Context, string) (*store.Grove, error) {
+func (m *mockProjectStore) CreateProject(context.Context, *store.Project) error { return nil }
+func (m *mockProjectStore) UpdateProject(context.Context, *store.Project) error { return nil }
+func (m *mockProjectStore) DeleteProject(context.Context, string) error       { return nil }
+func (m *mockProjectStore) GetProjectBySlug(context.Context, string) (*store.Project, error) {
 	return nil, store.ErrNotFound
 }
-func (m *mockGroveStore) GetGroveBySlugCaseInsensitive(context.Context, string) (*store.Grove, error) {
+func (m *mockProjectStore) GetProjectBySlugCaseInsensitive(context.Context, string) (*store.Project, error) {
 	return nil, store.ErrNotFound
 }
-func (m *mockGroveStore) GetGrovesByGitRemote(context.Context, string) ([]*store.Grove, error) {
-	return []*store.Grove{}, nil
+func (m *mockProjectStore) GetProjectsByGitRemote(context.Context, string) ([]*store.Project, error) {
+	return []*store.Project{}, nil
 }
-func (m *mockGroveStore) NextAvailableSlug(_ context.Context, baseSlug string) (string, error) {
+func (m *mockProjectStore) NextAvailableSlug(_ context.Context, baseSlug string) (string, error) {
 	return baseSlug, nil
 }
-func (m *mockGroveStore) ListGroves(context.Context, store.GroveFilter, store.ListOptions) (*store.ListResult[store.Grove], error) {
+func (m *mockProjectStore) ListProjects(context.Context, store.ProjectFilter, store.ListOptions) (*store.ListResult[store.Project], error) {
 	return nil, nil
 }
 
@@ -192,8 +192,8 @@ func newTestUATService() (*UserAccessTokenService, *mockUATStore, *mockUserStore
 			"user-1": {ID: "user-1", Email: "test@example.com", DisplayName: "Test User", Role: "member"},
 		},
 	}
-	groveStore := &mockGroveStore{
-		groves: map[string]*store.Grove{
+	groveStore := &mockProjectStore{
+		groves: map[string]*store.Project{
 			"grove-1": {ID: "grove-1", Name: "test-grove"},
 		},
 	}
@@ -217,8 +217,8 @@ func TestCreateToken(t *testing.T) {
 		if token.Name != "ci-token" {
 			t.Errorf("expected name 'ci-token', got %q", token.Name)
 		}
-		if token.GroveID != "grove-1" {
-			t.Errorf("expected groveID 'grove-1', got %q", token.GroveID)
+		if token.ProjectID != "grove-1" {
+			t.Errorf("expected projectID 'grove-1', got %q", token.ProjectID)
 		}
 		if len(token.Scopes) != 2 {
 			t.Errorf("expected 2 scopes, got %d", len(token.Scopes))
@@ -291,8 +291,8 @@ func TestValidateToken(t *testing.T) {
 		if identity.ID() != "user-1" {
 			t.Errorf("expected user ID 'user-1', got %q", identity.ID())
 		}
-		if identity.ScopedGroveID() != "grove-1" {
-			t.Errorf("expected grove 'grove-1', got %q", identity.ScopedGroveID())
+		if identity.ScopedProjectID() != "grove-1" {
+			t.Errorf("expected grove 'grove-1', got %q", identity.ScopedProjectID())
 		}
 		if !identity.HasScope("agent:dispatch") {
 			t.Error("expected identity to have scope agent:dispatch")
@@ -450,8 +450,8 @@ func TestScopedUserIdentity(t *testing.T) {
 	if scoped.Email() != "test@example.com" {
 		t.Errorf("expected email 'test@example.com', got %q", scoped.Email())
 	}
-	if scoped.ScopedGroveID() != "grove-1" {
-		t.Errorf("expected grove 'grove-1', got %q", scoped.ScopedGroveID())
+	if scoped.ScopedProjectID() != "grove-1" {
+		t.Errorf("expected grove 'grove-1', got %q", scoped.ScopedProjectID())
 	}
 	if !scoped.HasScope("agent:dispatch") {
 		t.Error("expected HasScope('agent:dispatch') to be true")

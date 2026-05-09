@@ -51,7 +51,7 @@ func FindProjectRoot() (string, bool) {
 				return p, true
 			}
 			// .scion is a file (grove marker) — resolve to external path
-			if resolved, err := ResolveGroveMarker(p); err == nil {
+			if resolved, err := ResolveProjectMarker(p); err == nil {
 				// Verify the resolved external path actually exists on this
 				// filesystem. Inside a container the marker may reference a
 				// host-side grove-config directory that doesn't exist locally.
@@ -160,7 +160,7 @@ func GetGlobalDir() (string, error) {
 // is the external path under ~/.scion/grove-configs/. For all other groves
 // (non-git, global), projectDir is returned as-is since it is already the config dir.
 func GetGroveConfigDir(projectDir string) string {
-	if extDir, err := GetGitGroveExternalConfigDir(projectDir); err == nil && extDir != "" {
+	if extDir, err := GetGitProjectExternalConfigDir(projectDir); err == nil && extDir != "" {
 		return extDir
 	}
 	return projectDir
@@ -253,7 +253,7 @@ func ResolveProjectPath(path string) (string, bool, error) {
 				}
 			} else {
 				// .scion is a marker file — resolve to external path
-				if resolved, err := ResolveGroveMarker(candidate); err == nil {
+				if resolved, err := ResolveProjectMarker(candidate); err == nil {
 					abs = resolved
 				}
 			}
@@ -261,7 +261,7 @@ func ResolveProjectPath(path string) (string, bool, error) {
 	} else {
 		// Path ends in .scion — check if it's a marker file (not a directory)
 		if info, err := os.Stat(abs); err == nil && !info.IsDir() {
-			if resolved, err := ResolveGroveMarker(abs); err == nil {
+			if resolved, err := ResolveProjectMarker(abs); err == nil {
 				abs = resolved
 			}
 		} else if err == nil && info.IsDir() {
@@ -306,7 +306,7 @@ func RequireGrovePath(path string) (string, bool, error) {
 					}
 				} else {
 					// .scion is a marker file — resolve to external path
-					if resolved, err := ResolveGroveMarker(candidate); err == nil {
+					if resolved, err := ResolveProjectMarker(candidate); err == nil {
 						abs = resolved
 					}
 				}
@@ -314,7 +314,7 @@ func RequireGrovePath(path string) (string, bool, error) {
 		} else {
 			// Path ends in .scion — check if it's a marker file
 			if info, err := os.Stat(abs); err == nil && !info.IsDir() {
-				if resolved, err := ResolveGroveMarker(abs); err == nil {
+				if resolved, err := ResolveProjectMarker(abs); err == nil {
 					abs = resolved
 				}
 			} else if err == nil && info.IsDir() {

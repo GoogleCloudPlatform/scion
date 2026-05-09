@@ -91,7 +91,7 @@ func TestBuildLogFilter(t *testing.T) {
 			name: "grove ID filter",
 			opts: LogQueryOptions{
 				AgentID: "agent-123",
-				GroveID: "grove-abc",
+				ProjectID: "grove-abc",
 			},
 			expected: `labels.agent_id = "agent-123" AND labels.grove_id = "grove-abc"`,
 		},
@@ -153,7 +153,7 @@ func TestBuildLogFilter_LogID(t *testing.T) {
 			name: "message log with grove_id filter",
 			opts: LogQueryOptions{
 				AgentID: "agent-123",
-				GroveID: "grove-abc",
+				ProjectID: "grove-abc",
 				LogID:   "scion-messages",
 			},
 			projectID: "my-project",

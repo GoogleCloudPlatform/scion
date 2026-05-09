@@ -51,7 +51,7 @@ They are injected into agents at runtime but never exposed via the API.
 Secrets can be scoped to:
   - Hub: Available to all agents across the entire hub (admin-only writes)
   - User (default): Available to all your agents
-  - Grove: Available to agents in a specific grove
+  - Project: Available to agents in a specific grove
   - Broker: Available to agents running on a specific broker
 
 Secrets are resolved hierarchically when an agent starts:
@@ -236,10 +236,10 @@ func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, s
 			scopeID = groveVal
 		} else {
 			// Infer from settings: try explicit hub link first, then local grove ID
-			if settings.Hub != nil && settings.Hub.GroveID != "" {
-				scopeID = settings.Hub.GroveID
-			} else if settings.GroveID != "" {
-				scopeID = settings.GroveID
+			if settings.Hub != nil && settings.Hub.ProjectID != "" {
+				scopeID = settings.Hub.ProjectID
+			} else if settings.ProjectID != "" {
+				scopeID = settings.ProjectID
 			} else {
 				return "", "", fmt.Errorf("cannot infer grove ID: not linked with Hub. Use 'scion hub link' first or provide explicit grove ID")
 			}
@@ -320,7 +320,7 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return fmt.Errorf("failed to resolve grove path: %w", err)
 	}
@@ -377,7 +377,7 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 }
 
 func runSecretGet(cmd *cobra.Command, args []string) error {
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return fmt.Errorf("failed to resolve grove path: %w", err)
 	}
@@ -451,7 +451,7 @@ func runSecretGet(cmd *cobra.Command, args []string) error {
 }
 
 func runSecretList(cmd *cobra.Command, _ []string) error {
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return fmt.Errorf("failed to resolve grove path: %w", err)
 	}
@@ -521,7 +521,7 @@ func runSecretList(cmd *cobra.Command, _ []string) error {
 func runSecretClear(cmd *cobra.Command, args []string) error {
 	key := args[0]
 
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return fmt.Errorf("failed to resolve grove path: %w", err)
 	}

@@ -105,7 +105,7 @@ func TestGroveAndAgentEdge(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove
-	g, err := client.Grove.Create().
+	g, err := client.Project.Create().
 		SetName("test-grove").
 		SetSlug("test-grove").
 		Save(ctx)
@@ -115,13 +115,13 @@ func TestGroveAndAgentEdge(t *testing.T) {
 	a, err := client.Agent.Create().
 		SetSlug("agent-1").
 		SetName("Agent One").
-		SetGrove(g).
+		SetProject(g).
 		Save(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, g.ID, a.GroveID)
+	assert.Equal(t, g.ID, a.ProjectID)
 
 	// Query agents through grove edge
-	agents, err := client.Grove.QueryAgents(g).All(ctx)
+	agents, err := client.Project.QueryAgents(g).All(ctx)
 	require.NoError(t, err)
 	require.Len(t, agents, 1)
 	assert.Equal(t, a.ID, agents[0].ID)
@@ -131,7 +131,7 @@ func TestAgentSlugGroveUnique(t *testing.T) {
 	client := newTestClient(t)
 	ctx := context.Background()
 
-	g, err := client.Grove.Create().
+	g, err := client.Project.Create().
 		SetName("grove").
 		SetSlug("grove").
 		Save(ctx)
@@ -140,14 +140,14 @@ func TestAgentSlugGroveUnique(t *testing.T) {
 	_, err = client.Agent.Create().
 		SetSlug("dup-slug").
 		SetName("Agent A").
-		SetGrove(g).
+		SetProject(g).
 		Save(ctx)
 	require.NoError(t, err)
 
 	_, err = client.Agent.Create().
 		SetSlug("dup-slug").
 		SetName("Agent B").
-		SetGrove(g).
+		SetProject(g).
 		Save(ctx)
 	assert.Error(t, err, "duplicate slug+grove_id should fail")
 }
@@ -290,7 +290,7 @@ func TestGroupGroveEdge(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a grove
-	gv, err := client.Grove.Create().
+	gv, err := client.Project.Create().
 		SetName("my-grove").
 		SetSlug("my-grove").
 		Save(ctx)
@@ -301,26 +301,26 @@ func TestGroupGroveEdge(t *testing.T) {
 		SetName("my-grove-agents").
 		SetSlug("my-grove-agents").
 		SetGroupType("grove_agents").
-		SetGroveID(gv.ID).
+		SetProjectID(gv.ID).
 		Save(ctx)
 	require.NoError(t, err)
-	assert.NotNil(t, grp.GroveID)
-	assert.Equal(t, gv.ID, *grp.GroveID)
+	assert.NotNil(t, grp.ProjectID)
+	assert.Equal(t, gv.ID, *grp.ProjectID)
 
 	// Create a second group for the same grove (members group)
 	grp2, err := client.Group.Create().
 		SetName("my-grove-members").
 		SetSlug("my-grove-members").
 		SetGroupType("explicit").
-		SetGroveID(gv.ID).
+		SetProjectID(gv.ID).
 		Save(ctx)
 	require.NoError(t, err)
-	assert.NotNil(t, grp2.GroveID)
-	assert.Equal(t, gv.ID, *grp2.GroveID)
+	assert.NotNil(t, grp2.ProjectID)
+	assert.Equal(t, gv.ID, *grp2.ProjectID)
 
 	// Query groups by grove_id field
 	groups, err := client.Group.Query().
-		Where(group.GroveIDEQ(gv.ID)).
+		Where(group.ProjectIDEQ(gv.ID)).
 		All(ctx)
 	require.NoError(t, err)
 	require.Len(t, groups, 2)
@@ -342,7 +342,7 @@ func TestAgentOwnerAndCreatorEdges(t *testing.T) {
 		Save(ctx)
 	require.NoError(t, err)
 
-	gv, err := client.Grove.Create().
+	gv, err := client.Project.Create().
 		SetName("gv").
 		SetSlug("gv").
 		Save(ctx)
@@ -351,7 +351,7 @@ func TestAgentOwnerAndCreatorEdges(t *testing.T) {
 	a, err := client.Agent.Create().
 		SetSlug("owned-agent").
 		SetName("Owned Agent").
-		SetGrove(gv).
+		SetProject(gv).
 		SetCreator(creator).
 		SetOwner(owner).
 		SetDelegationEnabled(true).

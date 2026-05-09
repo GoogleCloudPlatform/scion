@@ -138,13 +138,13 @@ func runProjectSync(direction projectsync.Direction) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
 	// Get the project ID
-	projectID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
 
 	// Resolve local workspace path
-	workspacePath, err := resolveGroveWorkspacePath()
+	workspacePath, err := resolveProjectWorkspacePath()
 	if err != nil {
 		return err
 	}
@@ -167,7 +167,7 @@ func runProjectSync(direction projectsync.Direction) error {
 	result, err := projectsync.Sync(ctx, projectsync.Options{
 		LocalPath:       workspacePath,
 		HubEndpoint:     hubCtx.Endpoint,
-		GroveID:         projectID,
+		ProjectID:         projectID,
 		AuthToken:       authToken,
 		Direction:       direction,
 		DryRun:          syncDryRun,
@@ -198,17 +198,17 @@ func runProjectSync(direction projectsync.Direction) error {
 	return nil
 }
 
-// resolveGroveWorkspacePath resolves the local workspace path for project-level sync.
+// resolveProjectWorkspacePath resolves the local workspace path for project-level sync.
 // It finds the project root directory containing .scion/.
-func resolveGroveWorkspacePath() (string, error) {
+func resolveProjectWorkspacePath() (string, error) {
 	if projectPath != "" {
-		resolvedPath, _, err := config.ResolveGrovePath(projectPath)
+		resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 		if err != nil {
 			return "", fmt.Errorf("failed to resolve project path: %w", err)
 		}
 		// The workspace is the parent of the .scion directory (for project projects)
 		// or a recorded path (for external projects)
-		return resolveGroveWorkspace(resolvedPath)
+		return resolveProjectWorkspace(resolvedPath)
 	}
 
 	// Use current directory — find the project root
@@ -266,7 +266,7 @@ func syncViaHub(hubCtx *HubContext, agentName string, direction runtime.SyncDire
 	PrintUsingHub(hubCtx.Endpoint) // writes to stderr
 
 	// Get the project ID
-	projectID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -530,7 +530,7 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 // resolveAgentID resolves an agent name to an agent ID.
 func resolveAgentID(ctx context.Context, client hubclient.Client, projectID, agentName string) (string, error) {
 	// List agents in the project and find by name
-	resp, err := client.GroveAgents(projectID).List(ctx, nil)
+	resp, err := client.ProjectAgents(projectID).List(ctx, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to look up agent: %w", err)
 	}
@@ -579,10 +579,4 @@ func resolveLocalWorkspacePath(agentName string) (string, error) {
 
 	// Fall back to current directory
 	return ".", nil
-}
-nil
-}
-l
-}
-l
 }

@@ -125,11 +125,11 @@ func (p *MessageBrokerProxy) bootstrapExistingGroves() {
 
 	groves := make(map[string]bool)
 	for _, agent := range result.Items {
-		if !groves[agent.GroveID] {
-			groves[agent.GroveID] = true
-			if err := p.EnsureGroveSubscriptions(ctx, agent.GroveID); err != nil {
+		if !groves[agent.ProjectID] {
+			groves[agent.ProjectID] = true
+			if err := p.EnsureGroveSubscriptions(ctx, agent.ProjectID); err != nil {
 				p.log.Error("Failed to bootstrap grove subscriptions",
-					"grove_id", agent.GroveID, "error", err)
+					"grove_id", agent.ProjectID, "error", err)
 			}
 		}
 	}
@@ -248,7 +248,7 @@ func (p *MessageBrokerProxy) PublishUserMessage(ctx context.Context, groveID, us
 // in the specified grove. Called when a grove becomes active or a broker reconnects.
 func (p *MessageBrokerProxy) EnsureGroveSubscriptions(ctx context.Context, groveID string) error {
 	result, err := p.store.ListAgents(ctx, store.AgentFilter{
-		GroveID: groveID,
+		ProjectID: groveID,
 		Phase:   "running",
 	}, store.ListOptions{})
 	if err != nil {
@@ -275,9 +275,9 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 			p.log.Error("Failed to unmarshal agent created event", "error", err)
 			return
 		}
-		p.subscribeAgent(created.GroveID, created.Slug)
-		p.subscribeGroveBroadcast(created.GroveID)
-		p.subscribeGroveUserMessages(created.GroveID)
+		p.subscribeAgent(created.ProjectID, created.Slug)
+		p.subscribeGroveBroadcast(created.ProjectID)
+		p.subscribeGroveUserMessages(created.ProjectID)
 
 	case containsSuffix(evt.Subject, ".agent.status"):
 		var status AgentStatusEvent
@@ -299,7 +299,7 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 		// are rebuilt. Individual cleanup is handled by the broker's
 		// Unsubscribe mechanism if needed.
 		p.log.Debug("Agent deleted, broker subscriptions will be cleaned on next grove rebuild",
-			"agent_id", deleted.AgentID, "grove_id", deleted.GroveID)
+			"agent_id", deleted.AgentID, "grove_id", deleted.ProjectID)
 	}
 }
 
@@ -403,7 +403,7 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, groveID, topic s
 
 	storeMsg := &store.Message{
 		ID:          api.NewUUID(),
-		GroveID:     groveID,
+		ProjectID:     groveID,
 		Sender:      msg.Sender,
 		SenderID:    msg.SenderID,
 		Recipient:   msg.Recipient,
@@ -478,7 +478,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, groveID, agentS
 	// Persist to message store (write-through; non-fatal if store fails).
 	storeMsg := &store.Message{
 		ID:          api.NewUUID(),
-		GroveID:     groveID,
+		ProjectID:     groveID,
 		Sender:      msg.Sender,
 		SenderID:    msg.SenderID,
 		Recipient:   msg.Recipient,
@@ -499,7 +499,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, groveID, agentS
 		logAttrs := []any{
 			"agent_id", agent.ID,
 			"agent_name", agent.Name,
-			"grove_id", agent.GroveID,
+			"grove_id", agent.ProjectID,
 			"source", "broker",
 		}
 		logAttrs = append(logAttrs, msg.LogAttrs()...)
@@ -510,7 +510,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, groveID, agentS
 // fanOutToGrove dispatches a broadcast message to all running agents in a grove.
 func (p *MessageBrokerProxy) fanOutToGrove(ctx context.Context, groveID string, msg *messages.StructuredMessage) {
 	result, err := p.store.ListAgents(ctx, store.AgentFilter{
-		GroveID: groveID,
+		ProjectID: groveID,
 		Phase:   "running",
 	}, store.ListOptions{})
 	if err != nil {
@@ -552,7 +552,7 @@ func (p *MessageBrokerProxy) fanOutGlobal(ctx context.Context, msg *messages.Str
 		agentMsg := *msg
 		agentMsg.Recipient = "agent:" + agent.Slug
 		agentMsg.RecipientID = agent.ID
-		p.deliverToAgent(ctx, agent.GroveID, agent.Slug, &agentMsg)
+		p.deliverToAgent(ctx, agent.ProjectID, agent.Slug, &agentMsg)
 	}
 }
 

@@ -173,37 +173,37 @@ func TestProjectSettings_ClearDefaultLimits(t *testing.T) {
 
 func TestApplyGroveDefaults_HarnessConfig(t *testing.T) {
 	t.Run("applies default harness config when empty", func(t *testing.T) {
-		grove := &store.Grove{
+		grove := &store.Project{
 			Annotations: map[string]string{
 				"scion.io/default-harness-config": "claude-default",
 			},
 		}
 		ac := &store.AgentAppliedConfig{}
-		applyGroveDefaults(ac, grove)
+		applyProjectDefaults(ac, grove)
 		assert.Equal(t, "claude-default", ac.HarnessConfig)
 	})
 
 	t.Run("does not override explicit harness config", func(t *testing.T) {
-		grove := &store.Grove{
+		grove := &store.Project{
 			Annotations: map[string]string{
 				"scion.io/default-harness-config": "claude-default",
 			},
 		}
 		ac := &store.AgentAppliedConfig{HarnessConfig: "custom-config"}
-		applyGroveDefaults(ac, grove)
+		applyProjectDefaults(ac, grove)
 		assert.Equal(t, "custom-config", ac.HarnessConfig)
 	})
 
 	t.Run("nil grove is safe", func(t *testing.T) {
 		ac := &store.AgentAppliedConfig{}
-		applyGroveDefaults(ac, nil)
+		applyProjectDefaults(ac, nil)
 		assert.Empty(t, ac.HarnessConfig)
 	})
 
 	t.Run("nil annotations is safe", func(t *testing.T) {
-		grove := &store.Grove{}
+		grove := &store.Project{}
 		ac := &store.AgentAppliedConfig{}
-		applyGroveDefaults(ac, grove)
+		applyProjectDefaults(ac, grove)
 		assert.Empty(t, ac.HarnessConfig)
 	})
 }
@@ -259,17 +259,17 @@ func TestProjectSettings_ClearDefaultGCPIdentity(t *testing.T) {
 }
 
 func TestApplyGroveDefaults_GCPIdentityNotApplied(t *testing.T) {
-	// applyGroveDefaults does NOT apply GCP identity — that's handled
-	// directly in createAgentInGrove. This test verifies it doesn't interfere.
-	grove := &store.Grove{
+	// applyProjectDefaults does NOT apply GCP identity — that's handled
+	// directly in createAgentInProject. This test verifies it doesn't interfere.
+	grove := &store.Project{
 		Annotations: map[string]string{
 			"scion.io/default-gcp-identity-mode":               "passthrough",
 			"scion.io/default-gcp-identity-service-account-id": "sa-123",
 		},
 	}
 	ac := &store.AgentAppliedConfig{}
-	applyGroveDefaults(ac, grove)
-	// GCP identity should NOT be set by applyGroveDefaults
+	applyProjectDefaults(ac, grove)
+	// GCP identity should NOT be set by applyProjectDefaults
 	assert.Nil(t, ac.GCPIdentity)
 }
 
@@ -280,14 +280,14 @@ func TestProjectSettings_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-func createTestGroveForSettings(t *testing.T, s store.Store) *store.Grove {
+func createTestGroveForSettings(t *testing.T, s store.Store) *store.Project {
 	t.Helper()
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:         "test-grove-settings-" + t.Name(),
-		Name:       "Test Grove",
+		Name:       "Test Project",
 		Slug:       "test-grove-settings",
 		Visibility: "private",
 	}
-	require.NoError(t, s.CreateGrove(t.Context(), grove))
+	require.NoError(t, s.CreateProject(t.Context(), grove))
 	return grove
 }

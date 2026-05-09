@@ -119,10 +119,10 @@ func GenerateGroveID() string {
 	return uuid.New().String()
 }
 
-// GenerateGroveIDForDir creates a new random grove ID.
+// GenerateProjectIDForDir creates a new random grove ID.
 // The dir parameter is accepted for API compatibility but does not affect
 // the generated ID.
-func GenerateGroveIDForDir(_ string) string {
+func GenerateProjectIDForDir(_ string) string {
 	return uuid.New().String()
 }
 
@@ -152,7 +152,7 @@ func GetEnclosingProjectPath() (grovePath string, rootDir string, found bool) {
 				return p, dir, true
 			}
 			// .scion is a marker file — resolve to external path
-			if resolved, err := ResolveGroveMarker(p); err == nil {
+			if resolved, err := ResolveProjectMarker(p); err == nil {
 				return resolved, dir, true
 			}
 		}
@@ -297,7 +297,7 @@ func initExternalGrove(projectDir string, opt InitProjectOpts) error {
 
 	// If a marker file already exists, read it and use the existing external path
 	if IsProjectMarkerFile(markerPath) {
-		resolved, err := ResolveGroveMarker(markerPath)
+		resolved, err := ResolveProjectMarker(markerPath)
 		if err != nil {
 			return fmt.Errorf("existing grove marker is invalid: %w", err)
 		}
@@ -310,14 +310,14 @@ func initExternalGrove(projectDir string, opt InitProjectOpts) error {
 	groveName := filepath.Base(projectRoot)
 	groveSlug := api.Slugify(groveName)
 
-	marker := &GroveMarker{
+	marker := &ProjectMarker{
 		ProjectID:   groveID,
-		GroveName: groveName,
-		GroveSlug: groveSlug,
+		ProjectName: groveName,
+		ProjectSlug: groveSlug,
 	}
 
 	// Create external grove directory
-	externalPath, err := marker.ExternalGrovePath()
+	externalPath, err := marker.ExternalProjectPath()
 	if err != nil {
 		return fmt.Errorf("failed to compute external grove path: %w", err)
 	}
@@ -344,7 +344,7 @@ func initExternalGrove(projectDir string, opt InitProjectOpts) error {
 	}
 
 	// Write the marker file
-	if err := WriteGroveMarker(markerPath, marker); err != nil {
+	if err := WriteProjectMarker(markerPath, marker); err != nil {
 		return fmt.Errorf("failed to write grove marker: %w", err)
 	}
 
@@ -363,8 +363,8 @@ func initInRepoGrove(projectDir string, opt InitProjectOpts) error {
 	// Ensure grove-id file exists for split storage
 	if _, err := ReadProjectID(projectDir); err != nil {
 		if os.IsNotExist(err) {
-			groveID := GenerateGroveIDForDir(filepath.Dir(projectDir))
-			if err := WriteGroveID(projectDir, groveID); err != nil {
+			groveID := GenerateProjectIDForDir(filepath.Dir(projectDir))
+			if err := WriteProjectID(projectDir, groveID); err != nil {
 				return fmt.Errorf("failed to write grove-id: %w", err)
 			}
 		} else {
@@ -373,7 +373,7 @@ func initInRepoGrove(projectDir string, opt InitProjectOpts) error {
 	}
 
 	// Seed settings.yaml in the external config dir (machine-specific, not committed)
-	externalConfigDir, err := GetGitGroveExternalConfigDir(projectDir)
+	externalConfigDir, err := GetGitProjectExternalConfigDir(projectDir)
 	if err != nil {
 		return fmt.Errorf("failed to compute external config path: %w", err)
 	}
@@ -382,7 +382,7 @@ func initInRepoGrove(projectDir string, opt InitProjectOpts) error {
 	}
 
 	// Create external agents directory for agent homes
-	externalAgentsDir, err := GetGitGroveExternalAgentsDir(projectDir)
+	externalAgentsDir, err := GetGitProjectExternalAgentsDir(projectDir)
 	if err != nil {
 		return fmt.Errorf("failed to compute external agents path: %w", err)
 	}
@@ -421,7 +421,7 @@ func ensureGroveSettingsFile(configDir string, opt InitProjectOpts) error {
 			}
 		}
 
-		defaultSettings, err := GetGroveDefaultSettingsYAML()
+		defaultSettings, err := GetProjectDefaultSettingsYAML()
 		if err != nil {
 			return fmt.Errorf("failed to read default grove settings: %w", err)
 		}
@@ -449,7 +449,7 @@ func ensureGroveConfigFiles(configDir string, opt InitProjectOpts) error {
 			}
 		}
 
-		defaultSettings, err := GetGroveDefaultSettingsYAML()
+		defaultSettings, err := GetProjectDefaultSettingsYAML()
 		if err != nil {
 			return fmt.Errorf("failed to read default grove settings: %w", err)
 		}
@@ -489,7 +489,7 @@ func writeGroveSettings(externalPath, workspacePath, groveID string, opt InitPro
 		}
 	}
 
-	defaultSettings, err := GetGroveDefaultSettingsYAML()
+	defaultSettings, err := GetProjectDefaultSettingsYAML()
 	if err != nil {
 		return fmt.Errorf("failed to read default grove settings: %w", err)
 	}

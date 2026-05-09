@@ -50,7 +50,7 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server, *state.Store) {
 			Scheme: "apiKey",
 			APIKey: "test-api-key",
 		},
-		Groves: []GroveConfig{
+		Projects: []GroveConfig{
 			{
 				Slug:          "test-grove",
 				ExposedAgents: []string{"test-agent"},
@@ -204,7 +204,7 @@ func TestPerAgentCardNotExposed(t *testing.T) {
 	}
 }
 
-func TestPerAgentCardUnknownGrove(t *testing.T) {
+func TestPerAgentCardUnknownProject(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
 	resp, err := http.Get(ts.URL + "/groves/unknown-grove/agents/test-agent/.well-known/agent-card.json")
@@ -316,7 +316,7 @@ func TestCancelTaskSuccess(t *testing.T) {
 			Provider:    ProviderConfig{Organization: "Test Org", URL: "https://test.example.com"},
 		},
 		Auth: AuthConfig{Scheme: "apiKey", APIKey: "test-api-key"},
-		Groves: []GroveConfig{
+		Projects: []GroveConfig{
 			{Slug: "test-grove", ExposedAgents: []string{"test-agent"}},
 		},
 	}
@@ -329,7 +329,7 @@ func TestCancelTaskSuccess(t *testing.T) {
 
 	now := time.Now()
 	store.CreateTask(&state.Task{
-		ID: "cancel-me", ContextID: "ctx-1", GroveID: "test-grove", AgentSlug: "test-agent",
+		ID: "cancel-me", ContextID: "ctx-1", ProjectID: "test-grove", AgentSlug: "test-agent",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
@@ -367,7 +367,7 @@ func TestCancelTaskAlreadyTerminal(t *testing.T) {
 	cfg := &Config{
 		Bridge: BridgeConfig{ExternalURL: "https://a2a.test.example.com"},
 		Auth:   AuthConfig{Scheme: "apiKey", APIKey: "test-api-key"},
-		Groves: []GroveConfig{{Slug: "test-grove", ExposedAgents: []string{"test-agent"}}},
+		Projects: []GroveConfig{{Slug: "test-grove", ExposedAgents: []string{"test-agent"}}},
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -378,7 +378,7 @@ func TestCancelTaskAlreadyTerminal(t *testing.T) {
 
 	now := time.Now()
 	store.CreateTask(&state.Task{
-		ID: "done-task", ContextID: "ctx-1", GroveID: "test-grove", AgentSlug: "test-agent",
+		ID: "done-task", ContextID: "ctx-1", ProjectID: "test-grove", AgentSlug: "test-agent",
 		State: TaskStateCompleted, CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
@@ -482,7 +482,7 @@ func TestPushNotificationSetGetDelete(t *testing.T) {
 
 	now := time.Now()
 	store.CreateTask(&state.Task{
-		ID: "push-task-1", ContextID: "ctx-1", GroveID: "test-grove", AgentSlug: "test-agent",
+		ID: "push-task-1", ContextID: "ctx-1", ProjectID: "test-grove", AgentSlug: "test-agent",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
@@ -511,7 +511,7 @@ func TestPushNotificationSetRejectsPrivateIP(t *testing.T) {
 
 	now := time.Now()
 	store.CreateTask(&state.Task{
-		ID: "push-priv-task", ContextID: "ctx-1", GroveID: "test-grove", AgentSlug: "test-agent",
+		ID: "push-priv-task", ContextID: "ctx-1", ProjectID: "test-grove", AgentSlug: "test-agent",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
@@ -554,7 +554,7 @@ func TestPushNotificationGetReturnsEmpty(t *testing.T) {
 
 	now := time.Now()
 	store.CreateTask(&state.Task{
-		ID: "push-get-task", ContextID: "ctx-1", GroveID: "test-grove", AgentSlug: "test-agent",
+		ID: "push-get-task", ContextID: "ctx-1", ProjectID: "test-grove", AgentSlug: "test-agent",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
@@ -575,7 +575,7 @@ func TestPushNotificationDeleteNonexistent(t *testing.T) {
 
 	now := time.Now()
 	store.CreateTask(&state.Task{
-		ID: "push-del-task", ContextID: "ctx-1", GroveID: "test-grove", AgentSlug: "test-agent",
+		ID: "push-del-task", ContextID: "ctx-1", ProjectID: "test-grove", AgentSlug: "test-agent",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
@@ -677,7 +677,7 @@ func TestAuthorizeTaskReturnsNilNil(t *testing.T) {
 	_ = store // use the outer store for unrelated setup
 
 	s.CreateTask(&state.Task{
-		ID: "owned-task", ContextID: "ctx-1", GroveID: "grove-a", AgentSlug: "agent-x",
+		ID: "owned-task", ContextID: "ctx-1", ProjectID: "grove-a", AgentSlug: "agent-x",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 

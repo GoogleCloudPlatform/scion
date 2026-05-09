@@ -131,7 +131,7 @@ func TestFormatFlagCheck(t *testing.T) {
 
 func TestHubAuthLoginDoesNotRequireImageRegistry(t *testing.T) {
 	origGlobalMode := globalMode
-	origGrovePath := grovePath
+	origProjectPath:= projectPath
 	origProfile := profile
 	origOutputFormat := outputFormat
 	origNoHub := noHub
@@ -140,7 +140,7 @@ func TestHubAuthLoginDoesNotRequireImageRegistry(t *testing.T) {
 	origAutoConfirm := autoConfirm
 	defer func() {
 		globalMode = origGlobalMode
-		grovePath = origGrovePath
+		projectPath = origProjectPath
 		profile = origProfile
 		outputFormat = origOutputFormat
 		noHub = origNoHub
@@ -158,7 +158,7 @@ func TestHubAuthLoginDoesNotRequireImageRegistry(t *testing.T) {
 	}
 
 	globalMode = true
-	grovePath = ""
+	projectPath = ""
 	profile = ""
 	outputFormat = ""
 	noHub = false
@@ -172,7 +172,7 @@ func TestHubAuthLoginDoesNotRequireImageRegistry(t *testing.T) {
 
 func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
 	origGlobalMode := globalMode
-	origGrovePath := grovePath
+	origProjectPath:= projectPath
 	origProfile := profile
 	origOutputFormat := outputFormat
 	origNoHub := noHub
@@ -180,7 +180,7 @@ func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
 	origAutoConfirm := autoConfirm
 	defer func() {
 		globalMode = origGlobalMode
-		grovePath = origGrovePath
+		projectPath = origProjectPath
 		profile = origProfile
 		outputFormat = origOutputFormat
 		noHub = origNoHub
@@ -198,7 +198,7 @@ func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
 	}
 
 	globalMode = true
-	grovePath = ""
+	projectPath = ""
 	profile = ""
 	outputFormat = ""
 	noHub = true

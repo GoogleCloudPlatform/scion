@@ -114,7 +114,7 @@ func LoadSettingsKoanf(grovePath string) (*Settings, error) {
 		}, "."), nil)
 		// Also remap to hub.groveId (camelCase) so the legacy
 		// HubClientConfig.ProjectID field (koanf tag "groveId") is populated.
-		// Without this, GetHubGroveID() returns "" for V1 settings, causing
+		// Without this, GetHubProjectID() returns "" for V1 settings, causing
 		// EnsureHubReady to fall back to the local grove_id and loop on
 		// grove registration when the hub grove ID differs from the local ID.
 		if !k.Exists("hub.groveId") {
@@ -241,10 +241,10 @@ func GetDefaultSettingsDataYAML() ([]byte, error) {
 	return getDefaultSettingsYAMLForRuntime("container")
 }
 
-// GetGroveDefaultSettingsYAML returns the embedded grove-level default settings YAML.
+// GetProjectDefaultSettingsYAML returns the embedded grove-level default settings YAML.
 // Unlike the full default settings, grove settings do not include profiles or runtimes;
 // those are managed at the global/broker level (~/.scion/settings.yaml).
-func GetGroveDefaultSettingsYAML() ([]byte, error) {
+func GetProjectDefaultSettingsYAML() ([]byte, error) {
 	return EmbedsFS.ReadFile("embeds/default_grove_settings.yaml")
 }
 

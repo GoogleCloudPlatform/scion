@@ -159,7 +159,7 @@ func TestRemoveSharedDir(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "dir should not exist after removal")
 }
 
-func TestGetSharedDirsBasePath_GitGrove(t *testing.T) {
+func TestGetSharedDirsBasePath_GitProject(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Simulate a git grove with split storage
@@ -177,8 +177,8 @@ func TestGetSharedDirsBasePath_GitGrove(t *testing.T) {
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	// Write grove-id
-	groveID := "abc12345-test-id"
-	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "grove-id"), []byte(groveID+"\n"), 0644))
+	projectID := "abc12345-test-id"
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "grove-id"), []byte(projectID+"\n"), 0644))
 
 	basePath, err := GetSharedDirsBasePath(projectDir)
 	require.NoError(t, err)

@@ -44,23 +44,23 @@ type MessageBuffer struct {
 
 	// deliverFunc is the callback that performs actual message delivery via tmux.
 	// It receives the agent ID, grove ID, the concatenated message text, and the interrupt flag.
-	deliverFunc func(agentID, groveID string, message string, interrupt bool) error
+	deliverFunc func(agentID, projectID string, message string, interrupt bool) error
 
 	mu      sync.Mutex
-	buffers map[string]*agentBuffer // keyed by agentID + "\x00" + groveID
+	buffers map[string]*agentBuffer // keyed by agentID + "\x00" + projectID
 }
 
 // agentBuffer holds the pending messages and timer for a single agent.
 type agentBuffer struct {
 	messages []string    // accumulated messages waiting for delivery
 	timer    *time.Timer // debounce timer; fires to trigger delivery
-	groveID  string      // grove scope for delivery
+	projectID  string      // grove scope for delivery
 }
 
 // NewMessageBuffer creates a new MessageBuffer with the given debounce delay
 // and delivery function. The deliverFunc is called asynchronously when the
 // buffer flushes — it should perform the actual tmux send-keys delivery.
-func NewMessageBuffer(delay time.Duration, deliverFunc func(agentID, groveID string, message string, interrupt bool) error) *MessageBuffer {
+func NewMessageBuffer(delay time.Duration, deliverFunc func(agentID, projectID string, message string, interrupt bool) error) *MessageBuffer {
 	return &MessageBuffer{
 		bufferDelay: delay,
 		deliverFunc: deliverFunc,
@@ -72,21 +72,21 @@ func NewMessageBuffer(delay time.Duration, deliverFunc func(agentID, groveID str
 // The message is added to the agent's buffer and the debounce timer is
 // started (or reset if already running). The actual delivery occurs
 // asynchronously once the timer fires.
-// groveID scopes delivery to a specific grove.
-func (mb *MessageBuffer) Send(agentID, groveID string, message string) {
+// projectID scopes delivery to a specific grove.
+func (mb *MessageBuffer) Send(agentID, projectID string, message string) {
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
 
-	key := bufferKey(agentID, groveID)
+	key := bufferKey(agentID, projectID)
 	buf, exists := mb.buffers[key]
 	if !exists {
-		buf = &agentBuffer{groveID: groveID}
+		buf = &agentBuffer{projectID: projectID}
 		mb.buffers[key] = buf
 	}
 
 	// Append the message to the pending list.
 	buf.messages = append(buf.messages, message)
-	util.Debugf("msgbuffer: queued message for agent %s grove %s (%d pending)", agentID, groveID, len(buf.messages))
+	util.Debugf("msgbuffer: queued message for agent %s grove %s (%d pending)", agentID, projectID, len(buf.messages))
 
 	// Reset or start the debounce timer. If a timer is already running,
 	// stop it first so we can restart with a fresh delay window.
@@ -98,8 +98,8 @@ func (mb *MessageBuffer) Send(agentID, groveID string, message string) {
 	})
 }
 
-func bufferKey(agentID, groveID string) string {
-	return agentID + "\x00" + groveID
+func bufferKey(agentID, projectID string) string {
+	return agentID + "\x00" + projectID
 }
 
 // flush delivers all buffered messages for the given agent as a single
@@ -114,19 +114,19 @@ func (mb *MessageBuffer) flush(agentID, key string) {
 
 	// Take ownership of the pending messages and clean up the buffer entry.
 	pending := buf.messages
-	groveID := buf.groveID
+	projectID := buf.projectID
 	delete(mb.buffers, key)
 	mb.mu.Unlock()
 
 	// Concatenate all buffered messages with double-newline separators so
 	// each original message remains visually distinct in the agent's input.
 	combined := strings.Join(pending, "\n\n")
-	util.Debugf("msgbuffer: flushing %d message(s) for agent %s grove %s", len(pending), agentID, groveID)
+	util.Debugf("msgbuffer: flushing %d message(s) for agent %s grove %s", len(pending), agentID, projectID)
 
-	if err := mb.deliverFunc(agentID, groveID, combined, false); err != nil {
+	if err := mb.deliverFunc(agentID, projectID, combined, false); err != nil {
 		slog.Warn("msgbuffer: message delivery failed",
 			"agent_id", agentID,
-			"grove_id", groveID,
+			"grove_id", projectID,
 			"pending_count", len(pending),
 			"error", err,
 		)

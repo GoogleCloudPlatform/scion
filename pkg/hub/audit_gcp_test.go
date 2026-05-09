@@ -53,8 +53,8 @@ func TestLogGCPTokenGeneration_Success(t *testing.T) {
 	if event.AgentID != "agent-123" {
 		t.Errorf("expected agent ID %q, got %q", "agent-123", event.AgentID)
 	}
-	if event.GroveID != "grove-456" {
-		t.Errorf("expected grove ID %q, got %q", "grove-456", event.GroveID)
+	if event.ProjectID != "grove-456" {
+		t.Errorf("expected grove ID %q, got %q", "grove-456", event.ProjectID)
 	}
 	if event.ServiceAccountEmail != "sa@project.iam.gserviceaccount.com" {
 		t.Errorf("expected SA email %q, got %q", "sa@project.iam.gserviceaccount.com", event.ServiceAccountEmail)
@@ -109,7 +109,7 @@ func TestLogAuditLogger_LogGCPTokenEvent(t *testing.T) {
 	err := logger.LogGCPTokenEvent(context.Background(), &GCPTokenEvent{
 		EventType:           GCPTokenEventAccessToken,
 		AgentID:             "agent-1",
-		GroveID:             "grove-1",
+		ProjectID:             "grove-1",
 		ServiceAccountEmail: "sa@proj.iam.gserviceaccount.com",
 		Success:             true,
 	})
@@ -121,7 +121,7 @@ func TestLogAuditLogger_LogGCPTokenEvent(t *testing.T) {
 	err = logger.LogGCPTokenEvent(context.Background(), &GCPTokenEvent{
 		EventType:           GCPTokenEventIdentityToken,
 		AgentID:             "agent-1",
-		GroveID:             "grove-1",
+		ProjectID:             "grove-1",
 		ServiceAccountEmail: "sa@proj.iam.gserviceaccount.com",
 		Success:             false,
 		FailReason:          "permission denied",

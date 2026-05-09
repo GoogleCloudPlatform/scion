@@ -30,9 +30,9 @@ import (
 func TestListEnrichesTemplateAndHarnessFromAgentInfo(t *testing.T) {
 	// Create a temp grove structure
 	tmpDir := t.TempDir()
-	grovePath := filepath.Join(tmpDir, ".scion")
+	projectPath := filepath.Join(tmpDir, ".scion")
 	agentName := "test-agent"
-	agentHome := filepath.Join(grovePath, "agents", agentName, "home")
+	agentHome := filepath.Join(projectPath, "agents", agentName, "home")
 	if err := os.MkdirAll(agentHome, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestListEnrichesTemplateAndHarnessFromAgentInfo(t *testing.T) {
 	}
 
 	// Write scion-agent.json so the agent dir is recognized
-	if err := os.WriteFile(filepath.Join(grovePath, "agents", agentName, "scion-agent.json"), []byte("{}"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectPath, "agents", agentName, "scion-agent.json"), []byte("{}"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -63,7 +63,7 @@ func TestListEnrichesTemplateAndHarnessFromAgentInfo(t *testing.T) {
 			return []api.AgentInfo{
 				{
 					Name:            agentName,
-					GrovePath:       grovePath,
+					ProjectPath:       projectPath,
 					ContainerStatus: "Up 2 hours",
 					// Template and HarnessConfig intentionally empty
 				},
@@ -104,9 +104,9 @@ func TestListDoesNotOverrideRuntimeTemplate(t *testing.T) {
 	// When the runtime already provides a template via label, it should not
 	// be overwritten by agent-info.json.
 	tmpDir := t.TempDir()
-	grovePath := filepath.Join(tmpDir, ".scion")
+	projectPath := filepath.Join(tmpDir, ".scion")
 	agentName := "labeled-agent"
-	agentHome := filepath.Join(grovePath, "agents", agentName, "home")
+	agentHome := filepath.Join(projectPath, "agents", agentName, "home")
 	if err := os.MkdirAll(agentHome, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestListDoesNotOverrideRuntimeTemplate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), infoData, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(grovePath, "agents", agentName, "scion-agent.json"), []byte("{}"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectPath, "agents", agentName, "scion-agent.json"), []byte("{}"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -130,7 +130,7 @@ func TestListDoesNotOverrideRuntimeTemplate(t *testing.T) {
 			return []api.AgentInfo{
 				{
 					Name:      agentName,
-					GrovePath: grovePath,
+					ProjectPath: projectPath,
 					Template:  "from-runtime-label", // already set by runtime
 				},
 			}, nil
@@ -162,9 +162,9 @@ func TestListDoesNotOverrideRuntimeTemplate(t *testing.T) {
 
 func TestListSetsLastSeenFromAgentInfoMtime(t *testing.T) {
 	tmpDir := t.TempDir()
-	grovePath := filepath.Join(tmpDir, ".scion")
+	projectPath := filepath.Join(tmpDir, ".scion")
 	agentName := "mtime-agent"
-	agentHome := filepath.Join(grovePath, "agents", agentName, "home")
+	agentHome := filepath.Join(projectPath, "agents", agentName, "home")
 	if err := os.MkdirAll(agentHome, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestListSetsLastSeenFromAgentInfoMtime(t *testing.T) {
 	if err := os.WriteFile(infoPath, infoData, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(grovePath, "agents", agentName, "scion-agent.json"), []byte("{}"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectPath, "agents", agentName, "scion-agent.json"), []byte("{}"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -187,7 +187,7 @@ func TestListSetsLastSeenFromAgentInfoMtime(t *testing.T) {
 			return []api.AgentInfo{
 				{
 					Name:      agentName,
-					GrovePath: grovePath,
+					ProjectPath: projectPath,
 				},
 			}, nil
 		},
@@ -222,9 +222,9 @@ func TestListSetsLastSeenFromAgentInfoMtime(t *testing.T) {
 
 func TestListNonRunningAgentIncludesHarnessConfig(t *testing.T) {
 	tmpDir := t.TempDir()
-	grovePath := filepath.Join(tmpDir, ".scion")
+	projectPath := filepath.Join(tmpDir, ".scion")
 	agentName := "stopped-agent"
-	agentHome := filepath.Join(grovePath, "agents", agentName, "home")
+	agentHome := filepath.Join(projectPath, "agents", agentName, "home")
 	if err := os.MkdirAll(agentHome, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestListNonRunningAgentIncludesHarnessConfig(t *testing.T) {
 	if err := os.WriteFile(infoPath, infoData, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(grovePath, "agents", agentName, "scion-agent.json"), []byte("{}"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectPath, "agents", agentName, "scion-agent.json"), []byte("{}"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -249,7 +249,7 @@ func TestListNonRunningAgentIncludesHarnessConfig(t *testing.T) {
 
 	mgr := NewManager(mock)
 	agents, err := mgr.List(context.Background(), map[string]string{
-		"scion.grove_path": grovePath,
+		"scion.grove_path": projectPath,
 	})
 	if err != nil {
 		t.Fatalf("List() error: %v", err)
@@ -333,9 +333,9 @@ func TestListReconcilesPhaseWithContainerStatus(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			tmpDir := t.TempDir()
-			grovePath := filepath.Join(tmpDir, ".scion")
+			projectPath := filepath.Join(tmpDir, ".scion")
 			agentName := "reconcile-agent"
-			agentHome := filepath.Join(grovePath, "agents", agentName, "home")
+			agentHome := filepath.Join(projectPath, "agents", agentName, "home")
 			if err := os.MkdirAll(agentHome, 0755); err != nil {
 				t.Fatal(err)
 			}
@@ -349,7 +349,7 @@ func TestListReconcilesPhaseWithContainerStatus(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), infoData, 0644); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(grovePath, "agents", agentName, "scion-agent.json"), []byte("{}"), 0644); err != nil {
+			if err := os.WriteFile(filepath.Join(projectPath, "agents", agentName, "scion-agent.json"), []byte("{}"), 0644); err != nil {
 				t.Fatal(err)
 			}
 
@@ -358,7 +358,7 @@ func TestListReconcilesPhaseWithContainerStatus(t *testing.T) {
 					return []api.AgentInfo{
 						{
 							Name:            agentName,
-							GrovePath:       grovePath,
+							ProjectPath:       projectPath,
 							ContainerStatus: tc.containerStatus,
 						},
 					}, nil
@@ -423,9 +423,9 @@ func TestListPreservesRuntimeTerminalStateForKubernetes(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			tmpDir := t.TempDir()
-			grovePath := filepath.Join(tmpDir, ".scion")
+			projectPath := filepath.Join(tmpDir, ".scion")
 			agentName := "k8s-agent"
-			agentHome := filepath.Join(grovePath, "agents", agentName, "home")
+			agentHome := filepath.Join(projectPath, "agents", agentName, "home")
 			if err := os.MkdirAll(agentHome, 0755); err != nil {
 				t.Fatal(err)
 			}
@@ -441,7 +441,7 @@ func TestListPreservesRuntimeTerminalStateForKubernetes(t *testing.T) {
 			if err := os.WriteFile(infoPath, infoData, 0644); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(grovePath, "agents", agentName, "scion-agent.json"), []byte("{}"), 0644); err != nil {
+			if err := os.WriteFile(filepath.Join(projectPath, "agents", agentName, "scion-agent.json"), []byte("{}"), 0644); err != nil {
 				t.Fatal(err)
 			}
 
@@ -450,7 +450,7 @@ func TestListPreservesRuntimeTerminalStateForKubernetes(t *testing.T) {
 					return []api.AgentInfo{
 						{
 							Name:            agentName,
-							GrovePath:       grovePath,
+							ProjectPath:       projectPath,
 							Runtime:         "kubernetes",
 							Phase:           tc.runtimePhase,
 							ContainerStatus: tc.containerStatus,
@@ -461,7 +461,7 @@ func TestListPreservesRuntimeTerminalStateForKubernetes(t *testing.T) {
 
 			mgr := NewManager(mock)
 			agents, err := mgr.List(context.Background(), map[string]string{
-				"scion.grove_path": grovePath,
+				"scion.grove_path": projectPath,
 			})
 			if err != nil {
 				t.Fatalf("List() error: %v", err)

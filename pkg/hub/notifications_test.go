@@ -138,7 +138,7 @@ type notificationTestEnv struct {
 	pub        *ChannelEventPublisher
 	dispatcher *recordingDispatcher
 	nd         *NotificationDispatcher
-	grove      *store.Grove
+	grove      *store.Project
 	watched    *store.Agent // the agent being watched
 	subscriber *store.Agent // the agent receiving notifications
 	sub        *store.NotificationSubscription
@@ -163,13 +163,13 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Notification Test Grove",
+		Name:       "Notification Test Project",
 		Slug:       "notif-test-grove",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	broker := &store.RuntimeBroker{
 		ID:     "broker-1",
@@ -184,7 +184,7 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 		Slug:            "watched-agent",
 		Name:            "Watched Agent",
 		Template:        "claude",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: "broker-1",
 		Visibility:      store.VisibilityPrivate,
@@ -196,7 +196,7 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 		Slug:            "subscriber-agent",
 		Name:            "Subscriber Agent",
 		Template:        "claude",
-		GroveID:         grove.ID,
+		ProjectID:         grove.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: "broker-1",
 		Visibility:      store.VisibilityPrivate,
@@ -209,7 +209,7 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 		AgentID:           watched.ID,
 		SubscriberType:    store.SubscriberTypeAgent,
 		SubscriberID:      subscriber.Slug,
-		GroveID:           grove.ID,
+		ProjectID:           grove.ID,
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT"},
 		CreatedAt:         time.Now().Add(-time.Minute), // Predate agent creation so the stale event filter doesn't skip test events
 		CreatedBy:         "test",
@@ -235,7 +235,7 @@ func (env *notificationTestEnv) publishStatus(activity string) {
 	env.pub.PublishAgentStatus(context.Background(), &store.Agent{
 		ID:       env.watched.ID,
 		Slug:     env.watched.Slug,
-		GroveID:  env.grove.ID,
+		ProjectID:  env.grove.ID,
 		Phase:    string(state.PhaseRunning),
 		Activity: activity,
 	})
@@ -246,7 +246,7 @@ func (env *notificationTestEnv) publishStatusWithPhase(phase, activity string) {
 	env.pub.PublishAgentStatus(context.Background(), &store.Agent{
 		ID:       env.watched.ID,
 		Slug:     env.watched.Slug,
-		GroveID:  env.grove.ID,
+		ProjectID:  env.grove.ID,
 		Phase:    phase,
 		Activity: activity,
 	})
@@ -354,7 +354,7 @@ func TestNotificationDispatcher_NoSubscriptions(t *testing.T) {
 	// Publish status for an agent with no subscriptions
 	env.pub.PublishAgentStatus(context.Background(), &store.Agent{
 		ID:       api.NewUUID(), // different agent
-		GroveID:  env.grove.ID,
+		ProjectID:  env.grove.ID,
 		Phase:    string(state.PhaseRunning),
 		Activity: "completed",
 	})
@@ -442,7 +442,7 @@ func TestNotificationDispatcher_UserSubscriber(t *testing.T) {
 		AgentID:           env.watched.ID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "user-123",
-		GroveID:           env.grove.ID,
+		ProjectID:           env.grove.ID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedAt:         time.Now().Add(-time.Minute), // Predate agent creation so stale filter doesn't skip
 		CreatedBy:         "test",
@@ -469,7 +469,7 @@ func TestNotificationDispatcher_UserSubscriber(t *testing.T) {
 	// Inbox message should also be created (no broker → direct persistence)
 	msgs, err := env.store.ListMessages(context.Background(), store.MessageFilter{
 		RecipientID: "user-123",
-		GroveID:     env.grove.ID,
+		ProjectID:     env.grove.ID,
 	}, store.ListOptions{})
 	require.NoError(t, err)
 	require.Len(t, msgs.Items, 1)
@@ -488,7 +488,7 @@ func TestNotificationDispatcher_UserSubscriberInboxWithBroker(t *testing.T) {
 		AgentID:           env.watched.ID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "user-broker-inbox",
-		GroveID:           env.grove.ID,
+		ProjectID:           env.grove.ID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedAt:         time.Now().Add(-time.Minute),
 		CreatedBy:         "test",
@@ -515,7 +515,7 @@ func TestNotificationDispatcher_UserSubscriberInboxWithBroker(t *testing.T) {
 	// Inbox message should be created directly for the web UI.
 	msgs, err := env.store.ListMessages(context.Background(), store.MessageFilter{
 		RecipientID: "user-broker-inbox",
-		GroveID:     env.grove.ID,
+		ProjectID:     env.grove.ID,
 	}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Len(t, msgs.Items, 1, "inbox message should be created directly even when broker is present")
@@ -538,7 +538,7 @@ func TestNotificationDispatcher_UserSubscriberInboxWaitingForInput(t *testing.T)
 		AgentID:           env.watched.ID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "user-wfi",
-		GroveID:           env.grove.ID,
+		ProjectID:           env.grove.ID,
 		TriggerActivities: []string{"WAITING_FOR_INPUT"},
 		CreatedAt:         time.Now().Add(-time.Minute),
 		CreatedBy:         "test",
@@ -556,7 +556,7 @@ func TestNotificationDispatcher_UserSubscriberInboxWaitingForInput(t *testing.T)
 	// Inbox message should use the agent's raw Message field and input-needed type
 	msgs, err := env.store.ListMessages(ctx, store.MessageFilter{
 		RecipientID: "user-wfi",
-		GroveID:     env.grove.ID,
+		ProjectID:     env.grove.ID,
 	}, store.ListOptions{})
 	require.NoError(t, err)
 	require.Len(t, msgs.Items, 1)
@@ -731,7 +731,7 @@ func TestNotificationDispatcher_MultipleSubscribers(t *testing.T) {
 		AgentID:           env.watched.ID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "user-456",
-		GroveID:           env.grove.ID,
+		ProjectID:           env.grove.ID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedAt:         time.Now().Add(-time.Minute),
 		CreatedBy:         "test",
@@ -875,7 +875,7 @@ func TestNotificationDispatcher_StalledActivity(t *testing.T) {
 		AgentID:           env.watched.ID,
 		SubscriberType:    store.SubscriberTypeAgent,
 		SubscriberID:      env.subscriber.Slug,
-		GroveID:           env.grove.ID,
+		ProjectID:           env.grove.ID,
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "STALLED"},
 		CreatedAt:         time.Now().Add(-time.Minute),
 		CreatedBy:         "test",
@@ -915,7 +915,7 @@ func TestNotificationDispatcher_ErrorPhase(t *testing.T) {
 		AgentID:           env.watched.ID,
 		SubscriberType:    store.SubscriberTypeAgent,
 		SubscriberID:      env.subscriber.Slug,
-		GroveID:           env.grove.ID,
+		ProjectID:           env.grove.ID,
 		TriggerActivities: []string{"COMPLETED", "ERROR"},
 		CreatedAt:         time.Now().Add(-time.Minute),
 		CreatedBy:         "test",
@@ -951,7 +951,7 @@ func TestNotificationDispatcher_BrokerNotUsedForUserNotification(t *testing.T) {
 		AgentID:           env.watched.ID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "user-broker",
-		GroveID:           env.grove.ID,
+		ProjectID:           env.grove.ID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedAt:         time.Now().Add(-time.Minute),
 		CreatedBy:         "test",
@@ -986,7 +986,7 @@ func TestNotificationDispatcher_BrokerNotUsedForUserNotification(t *testing.T) {
 	// Inbox message should be created directly for the web UI.
 	msgs, err := env.store.ListMessages(context.Background(), store.MessageFilter{
 		RecipientID: "user-broker",
-		GroveID:     env.grove.ID,
+		ProjectID:     env.grove.ID,
 	}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Len(t, msgs.Items, 1, "inbox message should be created directly")
@@ -1005,7 +1005,7 @@ func TestNotificationDispatcher_FallbackToChannelWhenNoBroker(t *testing.T) {
 		AgentID:           env.watched.ID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "user-fallback",
-		GroveID:           env.grove.ID,
+		ProjectID:           env.grove.ID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedAt:         time.Now().Add(-time.Minute),
 		CreatedBy:         "test",
@@ -1045,7 +1045,7 @@ func TestNotificationDispatcher_ChannelDispatchOnUserNotification(t *testing.T) 
 		AgentID:           env.watched.ID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "user-123",
-		GroveID:           env.grove.ID,
+		ProjectID:           env.grove.ID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedAt:         time.Now().Add(-time.Minute),
 		CreatedBy:         "test",
@@ -1128,10 +1128,10 @@ func TestNotificationDispatcher_GroveScopedSubscription(t *testing.T) {
 	// Create a grove-scoped user subscription
 	groveSub := &store.NotificationSubscription{
 		ID:                api.NewUUID(),
-		Scope:             store.SubscriptionScopeGrove,
+		Scope:             store.SubscriptionScopeProject,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "grove-watcher",
-		GroveID:           env.grove.ID,
+		ProjectID:           env.grove.ID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedAt:         time.Now().Add(-time.Minute),
 		CreatedBy:         "test",
@@ -1167,7 +1167,7 @@ func TestNotificationDispatcher_DeletedTrigger(t *testing.T) {
 		AgentID:           env.watched.ID,
 		SubscriberType:    store.SubscriberTypeAgent,
 		SubscriberID:      env.subscriber.Slug,
-		GroveID:           env.grove.ID,
+		ProjectID:           env.grove.ID,
 		TriggerActivities: []string{"COMPLETED", "DELETED"},
 		CreatedAt:         time.Now().Add(-time.Minute),
 		CreatedBy:         "test",
@@ -1256,9 +1256,9 @@ func TestSubscriptionTemplates_CRUD(t *testing.T) {
 	tmpl := &store.SubscriptionTemplate{
 		ID:                api.NewUUID(),
 		Name:              "Critical Only",
-		Scope:             store.SubscriptionScopeGrove,
+		Scope:             store.SubscriptionScopeProject,
 		TriggerActivities: []string{"ERROR", "LIMITS_EXCEEDED"},
-		GroveID:           env.grove.ID,
+		ProjectID:           env.grove.ID,
 		CreatedBy:         "test-user",
 	}
 	require.NoError(t, env.store.CreateSubscriptionTemplate(ctx, tmpl))
@@ -1293,9 +1293,9 @@ func TestSubscriptionTemplates_DuplicateName(t *testing.T) {
 	tmpl := &store.SubscriptionTemplate{
 		ID:                api.NewUUID(),
 		Name:              "My Template",
-		Scope:             store.SubscriptionScopeGrove,
+		Scope:             store.SubscriptionScopeProject,
 		TriggerActivities: []string{"COMPLETED"},
-		GroveID:           env.grove.ID,
+		ProjectID:           env.grove.ID,
 		CreatedBy:         "test-user",
 	}
 	require.NoError(t, env.store.CreateSubscriptionTemplate(ctx, tmpl))
@@ -1304,9 +1304,9 @@ func TestSubscriptionTemplates_DuplicateName(t *testing.T) {
 	tmpl2 := &store.SubscriptionTemplate{
 		ID:                api.NewUUID(),
 		Name:              "My Template",
-		Scope:             store.SubscriptionScopeGrove,
+		Scope:             store.SubscriptionScopeProject,
 		TriggerActivities: []string{"ERROR"},
-		GroveID:           env.grove.ID,
+		ProjectID:           env.grove.ID,
 		CreatedBy:         "test-user",
 	}
 	err := env.store.CreateSubscriptionTemplate(ctx, tmpl2)
@@ -1321,10 +1321,10 @@ func TestNotificationDispatcher_DeduplicateAcrossScopes(t *testing.T) {
 	ctx := context.Background()
 	groveSub := &store.NotificationSubscription{
 		ID:                api.NewUUID(),
-		Scope:             store.SubscriptionScopeGrove,
+		Scope:             store.SubscriptionScopeProject,
 		SubscriberType:    store.SubscriberTypeAgent,
 		SubscriberID:      env.subscriber.Slug,
-		GroveID:           env.grove.ID,
+		ProjectID:           env.grove.ID,
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT"},
 		CreatedAt:         time.Now().Add(-time.Minute),
 		CreatedBy:         "test",

@@ -28,38 +28,38 @@ func TestBuildWebDAVURL(t *testing.T) {
 	tests := []struct {
 		name     string
 		endpoint string
-		groveID  string
+		projectID  string
 		expected string
 	}{
 		{
 			name:     "basic",
 			endpoint: "https://hub.example.com",
-			groveID:  "my-grove",
+			projectID:  "my-grove",
 			expected: "https://hub.example.com/api/v1/groves/my-grove/dav",
 		},
 		{
 			name:     "trailing slash",
 			endpoint: "https://hub.example.com/",
-			groveID:  "my-grove",
+			projectID:  "my-grove",
 			expected: "https://hub.example.com/api/v1/groves/my-grove/dav",
 		},
 		{
 			name:     "with port",
 			endpoint: "http://localhost:8080",
-			groveID:  "test-grove-123",
+			projectID:  "test-grove-123",
 			expected: "http://localhost:8080/api/v1/groves/test-grove-123/dav",
 		},
 		{
 			name:     "uuid grove id",
 			endpoint: "https://hub.example.com",
-			groveID:  "550e8400-e29b-41d4-a716-446655440000",
+			projectID:  "550e8400-e29b-41d4-a716-446655440000",
 			expected: "https://hub.example.com/api/v1/groves/550e8400-e29b-41d4-a716-446655440000/dav",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildWebDAVURL(tt.endpoint, tt.groveID)
+			got := buildWebDAVURL(tt.endpoint, tt.projectID)
 			assert.Equal(t, tt.expected, got)
 		})
 	}
@@ -75,12 +75,12 @@ func TestSync_ValidationErrors(t *testing.T) {
 	}{
 		{
 			name:   "missing local path",
-			opts:   Options{HubEndpoint: "https://hub.example.com", GroveID: "test"},
+			opts:   Options{HubEndpoint: "https://hub.example.com", ProjectID: "test"},
 			errMsg: "local workspace path is required",
 		},
 		{
 			name:   "missing hub endpoint",
-			opts:   Options{LocalPath: "/tmp/workspace", GroveID: "test"},
+			opts:   Options{LocalPath: "/tmp/workspace", ProjectID: "test"},
 			errMsg: "hub endpoint is required",
 		},
 		{

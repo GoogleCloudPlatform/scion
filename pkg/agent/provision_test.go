@@ -238,7 +238,7 @@ func TestProvisionWritesTaskToPromptMd(t *testing.T) {
 			Name:      "agent-with-task",
 			Task:      "implement feature X",
 			Template:  "default",
-			GrovePath: projectScionDir,
+			ProjectPath: projectScionDir,
 		}
 
 		_, err := mgr.Provision(context.Background(), opts)
@@ -260,7 +260,7 @@ func TestProvisionWritesTaskToPromptMd(t *testing.T) {
 		opts := api.StartOptions{
 			Name:      "agent-no-task",
 			Template:  "default",
-			GrovePath: projectScionDir,
+			ProjectPath: projectScionDir,
 		}
 
 		_, err := mgr.Provision(context.Background(), opts)
@@ -602,18 +602,18 @@ func TestProvisionAgentUsesGroveTemplate(t *testing.T) {
 
 	// Create a grove with its own version of the same template
 	projectDir := filepath.Join(tmpDir, "project")
-	grovePath := filepath.Join(projectDir, ".scion")
-	groveTplDir := filepath.Join(grovePath, "templates", "my-tpl")
+	projectPath := filepath.Join(projectDir, ".scion")
+	groveTplDir := filepath.Join(projectPath, "templates", "my-tpl")
 	os.MkdirAll(groveTplDir, 0755)
 	os.WriteFile(filepath.Join(groveTplDir, "scion-agent.json"), []byte(`{
 		"default_harness_config": "grove-harness",
 		"env": {"SOURCE": "grove"}
 	}`), 0644)
 
-	// Provision agent using grovePath — the grove template should be used
+	// Provision agent using projectPath — the grove template should be used
 	// even though CWD has no .scion directory.
 	agentName := "grove-tpl-agent"
-	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "my-tpl", "", "", grovePath, "", "", "", "")
+	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "my-tpl", "", "", projectPath, "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -1151,8 +1151,8 @@ func TestProvisionAgent_SharedWorkspaceRelocatesAgentState(t *testing.T) {
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	os.MkdirAll(projectScionDir, 0755)
-	if err := config.WriteGroveID(projectScionDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
-		t.Fatalf("WriteGroveID failed: %v", err)
+	if err := config.WriteProjectID(projectScionDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
+		t.Fatalf("WriteProjectID failed: %v", err)
 	}
 
 	sharedWorkspace := filepath.Join(tmpDir, "shared-ws")
@@ -1166,7 +1166,7 @@ func TestProvisionAgent_SharedWorkspaceRelocatesAgentState(t *testing.T) {
 		Name:            "shared-agent",
 		Task:            "do the thing",
 		Template:        "gemini",
-		GrovePath:       projectScionDir,
+		ProjectPath:       projectScionDir,
 		Workspace:       sharedWorkspace,
 		SharedWorkspace: true,
 	}
@@ -1220,8 +1220,8 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	os.MkdirAll(projectScionDir, 0755)
-	if err := config.WriteGroveID(projectScionDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
-		t.Fatalf("WriteGroveID failed: %v", err)
+	if err := config.WriteProjectID(projectScionDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
+		t.Fatalf("WriteProjectID failed: %v", err)
 	}
 
 	// Seed legacy in-grove state from a pre-isolation provisioning.
@@ -1245,7 +1245,7 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	opts := api.StartOptions{
 		Name:            "legacy-agent",
 		Template:        "gemini",
-		GrovePath:       projectScionDir,
+		ProjectPath:       projectScionDir,
 		Workspace:       sharedWorkspace,
 		SharedWorkspace: true,
 	}

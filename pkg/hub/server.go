@@ -314,10 +314,10 @@ type RuntimeBrokerClient interface {
 	// Returns the command output, exit code, and any error.
 	ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, command []string, timeout int) (string, int, error)
 
-	// CleanupGrove asks a broker to remove its local hub-native grove directory.
+	// CleanupProject asks a broker to remove its local hub-native grove directory.
 	// brokerID is used for HMAC authentication lookup.
 	// 404 responses are tolerated for idempotency.
-	CleanupGrove(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error
+	CleanupProject(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error
 }
 
 // RemoteCreateAgentRequest is the request body for creating an agent on a remote runtime broker.
@@ -326,7 +326,7 @@ type RemoteCreateAgentRequest struct {
 	ID          string             `json:"id,omitempty"` // Hub UUID for status reporting
 	Slug        string             `json:"slug"`         // URL-safe identifier for the agent
 	Name        string             `json:"name"`
-	GroveID     string             `json:"groveId"`
+	ProjectID     string             `json:"groveId"`
 	UserID      string             `json:"userId,omitempty"`
 	Config      *RemoteAgentConfig `json:"config,omitempty"`
 	ResolvedEnv map[string]string  `json:"resolvedEnv,omitempty"`
@@ -343,11 +343,11 @@ type RemoteCreateAgentRequest struct {
 	// ProvisionOnly indicates the agent should be provisioned (dirs, worktree, templates)
 	// but not started. The container will not be launched.
 	ProvisionOnly bool `json:"provisionOnly,omitempty"`
-	// GrovePath is the local filesystem path to the grove on the target runtime broker.
+	// ProjectPath is the local filesystem path to the grove on the target runtime broker.
 	// This is looked up from the grove provider record for the target broker.
-	GrovePath string `json:"grovePath,omitempty"`
+	ProjectPath string `json:"grovePath,omitempty"`
 	// WorkspaceStoragePath is the GCS storage path for bootstrapped workspaces.
-	// When set, the broker downloads the workspace from GCS instead of using GrovePath.
+	// When set, the broker downloads the workspace from GCS instead of using ProjectPath.
 	WorkspaceStoragePath string `json:"workspaceStoragePath,omitempty"`
 
 	// GatherEnv indicates the broker should evaluate env completeness before starting.
@@ -680,20 +680,20 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		}
 
 		// Update all grove provider records for this broker
-		providers, err := s.GetBrokerGroves(ctx, brokerID)
+		providers, err := s.GetBrokerProjects(ctx, brokerID)
 		if err != nil {
 			slog.Error("Failed to get broker groves for status update", "brokerID", brokerID, "error", err)
 		} else {
 			for _, provider := range providers {
-				if err := s.UpdateProviderStatus(ctx, provider.GroveID, brokerID, store.BrokerStatusOffline); err != nil {
-					slog.Error("Failed to update provider status", "brokerID", brokerID, "grove_id", provider.GroveID, "error", err)
+				if err := s.UpdateProviderStatus(ctx, provider.ProjectID, brokerID, store.BrokerStatusOffline); err != nil {
+					slog.Error("Failed to update provider status", "brokerID", brokerID, "grove_id", provider.ProjectID, "error", err)
 				}
 			}
 
 			// Publish broker disconnected event
 			groveIDs := make([]string, len(providers))
 			for i, p := range providers {
-				groveIDs[i] = p.GroveID
+				groveIDs[i] = p.ProjectID
 			}
 			srv.events.PublishBrokerDisconnected(ctx, brokerID, groveIDs)
 		}
@@ -1538,8 +1538,8 @@ func (s *Server) messageEventHandler() EventHandler {
 		var err error
 		if payload.AgentID != "" {
 			agent, err = s.store.GetAgent(ctx, payload.AgentID)
-		} else if payload.AgentName != "" && evt.GroveID != "" {
-			agent, err = s.store.GetAgentBySlug(ctx, evt.GroveID, payload.AgentName)
+		} else if payload.AgentName != "" && evt.ProjectID != "" {
+			agent, err = s.store.GetAgentBySlug(ctx, evt.ProjectID, payload.AgentName)
 		} else {
 			return fmt.Errorf("message payload must include agentId or agentName")
 		}
@@ -1549,7 +1549,7 @@ func (s *Server) messageEventHandler() EventHandler {
 					"eventID", evt.ID,
 					"agentName", payload.AgentName,
 					"agent_id", payload.AgentID,
-					"groveID", evt.GroveID,
+					"groveID", evt.ProjectID,
 					"message", payload.Message)
 				return fmt.Errorf("target agent %q no longer exists", targetName)
 			}
@@ -1616,28 +1616,28 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		}
 
 		// Verify grove exists
-		grove, err := s.store.GetGrove(ctx, evt.GroveID)
+		grove, err := s.store.GetProject(ctx, evt.ProjectID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				return fmt.Errorf("grove %q no longer exists", evt.GroveID)
+				return fmt.Errorf("grove %q no longer exists", evt.ProjectID)
 			}
-			return fmt.Errorf("failed to resolve grove %q: %w", evt.GroveID, err)
+			return fmt.Errorf("failed to resolve grove %q: %w", evt.ProjectID, err)
 		}
 
 		// Resolve the runtime broker for this grove
 		runtimeBrokerID := ""
-		providers, provErr := s.store.GetGroveProviders(ctx, evt.GroveID)
+		providers, provErr := s.store.GetProjectProviders(ctx, evt.ProjectID)
 		if provErr == nil && len(providers) > 0 {
 			runtimeBrokerID = providers[0].BrokerID
 		}
 
 		// Check if an agent with this name already exists
-		existingAgent, err := s.store.GetAgentBySlug(ctx, evt.GroveID, slug)
+		existingAgent, err := s.store.GetAgentBySlug(ctx, evt.ProjectID, slug)
 		if err == nil && existingAgent != nil {
 			slog.Warn("Scheduler: agent already exists, skipping dispatch_agent",
 				"eventID", evt.ID,
 				"agentName", slug,
-				"groveID", evt.GroveID,
+				"groveID", evt.ProjectID,
 				"existingPhase", existingAgent.Phase)
 			return fmt.Errorf("agent %q already exists in grove", slug)
 		}
@@ -1648,7 +1648,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			Slug:            slug,
 			Name:            slug,
 			Template:        payload.Template,
-			GroveID:         evt.GroveID,
+			ProjectID:         evt.ProjectID,
 			RuntimeBrokerID: runtimeBrokerID,
 			Phase:           "created",
 			Detached:        true,
@@ -1674,7 +1674,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 
 		// Resolve template if specified
 		if payload.Template != "" {
-			tmpl, tmplErr := s.resolveTemplate(ctx, payload.Template, evt.GroveID)
+			tmpl, tmplErr := s.resolveTemplate(ctx, payload.Template, evt.ProjectID)
 			if tmplErr == nil && tmpl != nil {
 				if tmpl.Slug != "" {
 					agent.Template = tmpl.Slug
@@ -1687,7 +1687,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		}
 
 		// Apply grove-level defaults (harness config, limits, resources) from annotations
-		applyGroveDefaults(agent.AppliedConfig, grove)
+		applyProjectDefaults(agent.AppliedConfig, grove)
 
 		s.populateAgentConfig(agent, grove, nil)
 
@@ -1716,7 +1716,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 
 		slog.Info("Scheduler: agent dispatched successfully",
 			"eventID", evt.ID, "agent_id", agent.ID, "agentName", agent.Name,
-			"grove_id", evt.GroveID)
+			"grove_id", evt.ProjectID)
 		return nil
 	}
 }
@@ -1751,7 +1751,7 @@ func (s *Server) evaluateSchedulesHandler() func(ctx context.Context) {
 func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now time.Time) {
 	log := slog.With("subsystem", "scheduler",
 		"schedule_id", sched.ID, "schedule_name", sched.Name,
-		"grove_id", sched.GroveID)
+		"grove_id", sched.ProjectID)
 
 	// Compute next run time
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
@@ -1768,7 +1768,7 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 	// Create a one-shot event from the schedule
 	evt := store.ScheduledEvent{
 		ID:         api.NewUUID(),
-		GroveID:    sched.GroveID,
+		ProjectID:    sched.ProjectID,
 		EventType:  sched.EventType,
 		FireAt:     now,
 		Payload:    sched.Payload,
@@ -2387,21 +2387,21 @@ func (s *Server) markBrokerOnline(brokerID string) {
 		slog.Error("Failed to mark broker online", "brokerID", brokerID, "error", err)
 	}
 
-	providers, err := s.store.GetBrokerGroves(ctx, brokerID)
+	providers, err := s.store.GetBrokerProjects(ctx, brokerID)
 	if err != nil {
 		slog.Error("Failed to get broker groves for status update", "brokerID", brokerID, "error", err)
 		return
 	}
 	for _, provider := range providers {
-		if err := s.store.UpdateProviderStatus(ctx, provider.GroveID, brokerID, store.BrokerStatusOnline); err != nil {
-			slog.Error("Failed to update provider status", "brokerID", brokerID, "grove_id", provider.GroveID, "error", err)
+		if err := s.store.UpdateProviderStatus(ctx, provider.ProjectID, brokerID, store.BrokerStatusOnline); err != nil {
+			slog.Error("Failed to update provider status", "brokerID", brokerID, "grove_id", provider.ProjectID, "error", err)
 		}
 	}
 
 	// Publish broker connected event
 	groveIDs := make([]string, len(providers))
 	for i, p := range providers {
-		groveIDs[i] = p.GroveID
+		groveIDs[i] = p.ProjectID
 	}
 	broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
 	var brokerName string

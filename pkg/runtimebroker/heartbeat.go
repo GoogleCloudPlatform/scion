@@ -178,17 +178,17 @@ func (s *HeartbeatService) buildHeartbeat() *hubclient.BrokerHeartbeat {
 
 	// If we have a manager, gather per-grove agent counts
 	if s.manager != nil {
-		groveAgents := s.gatherGroveAgents()
+		groveAgents := s.gatherProjectAgents()
 		if len(groveAgents) > 0 {
-			heartbeat.Groves = groveAgents
+			heartbeat.Projects = groveAgents
 		}
 	}
 
 	return heartbeat
 }
 
-// gatherGroveAgents collects agent information grouped by grove.
-func (s *HeartbeatService) gatherGroveAgents() []hubclient.GroveHeartbeat {
+// gatherProjectAgents collects agent information grouped by grove.
+func (s *HeartbeatService) gatherProjectAgents() []hubclient.ProjectHeartbeat {
 	if s.manager == nil {
 		return nil
 	}
@@ -223,9 +223,9 @@ func (s *HeartbeatService) gatherGroveAgents() []hubclient.GroveHeartbeat {
 	// Group agents by grove
 	groveMap := make(map[string][]hubclient.AgentHeartbeat)
 	for _, ag := range agents {
-		groveID := ag.GroveID
+		groveID := ag.ProjectID
 		if groveID == "" {
-			groveID = ag.Grove
+			groveID = ag.Project
 		}
 		if groveID == "" {
 			groveID = "default"
@@ -250,13 +250,13 @@ func (s *HeartbeatService) gatherGroveAgents() []hubclient.GroveHeartbeat {
 	}
 
 	// Convert to slice, applying grove filter
-	var groves []hubclient.GroveHeartbeat
+	var groves []hubclient.ProjectHeartbeat
 	for groveID, agentList := range groveMap {
 		if s.groveFilter != nil && !s.groveFilter(groveID) {
 			continue
 		}
-		groves = append(groves, hubclient.GroveHeartbeat{
-			GroveID:    groveID,
+		groves = append(groves, hubclient.ProjectHeartbeat{
+			ProjectID:    groveID,
 			AgentCount: len(agentList),
 			Agents:     agentList,
 		})

@@ -123,7 +123,7 @@ func TestEvaluateEndpoint_ScopeOverride(t *testing.T) {
 
 	// Create grove-level allow (should override hub deny)
 	grovePolicy := &store.Policy{
-		ID: "grove-allow-1", Name: "Grove Allow", ScopeType: "grove",
+		ID: "grove-allow-1", Name: "Project Allow", ScopeType: "grove",
 		ScopeID: "grove-scope-1", ResourceType: "agent",
 		Actions: []string{"read"}, Effect: "allow",
 	}
@@ -152,12 +152,12 @@ func TestEvaluateEndpoint_AgentPolicy(t *testing.T) {
 	ctx := context.Background()
 
 	// Create grove and agent
-	require.NoError(t, s.CreateGrove(ctx, &store.Grove{
-		ID: "grove-eval", Name: "Eval Grove", Slug: "grove-eval",
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: "grove-eval", Name: "Eval Project", Slug: "grove-eval",
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "agent-eval", Slug: "agent-eval", Name: "Eval Agent",
-		GroveID: "grove-eval", Phase: string(state.PhaseRunning),
+		ProjectID: "grove-eval", Phase: string(state.PhaseRunning),
 	}))
 
 	// Create and bind policy to agent
@@ -189,12 +189,12 @@ func TestEvaluateEndpoint_AgentBinding(t *testing.T) {
 	ctx := context.Background()
 
 	// Create grove and agent
-	require.NoError(t, s.CreateGrove(ctx, &store.Grove{
-		ID: "grove-bind", Name: "Bind Grove", Slug: "grove-bind",
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: "grove-bind", Name: "Bind Project", Slug: "grove-bind",
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "agent-bind", Slug: "agent-bind", Name: "Bind Agent",
-		GroveID: "grove-bind", Phase: string(state.PhaseRunning),
+		ProjectID: "grove-bind", Phase: string(state.PhaseRunning),
 	}))
 
 	// Create policy via API

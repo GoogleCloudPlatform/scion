@@ -25,20 +25,20 @@ func TestParseAgentMessageTopic(t *testing.T) {
 	tests := []struct {
 		name      string
 		topic     string
-		groveID   string
+		projectID   string
 		agentSlug string
 		wantErr   bool
 	}{
 		{
 			name:      "valid topic",
 			topic:     "scion.grove.my-grove-123.agent.coder.messages",
-			groveID:   "my-grove-123",
+			projectID:   "my-grove-123",
 			agentSlug: "coder",
 		},
 		{
 			name:      "valid topic with uuid grove",
 			topic:     "scion.grove.abc-def-123.agent.code-reviewer.messages",
-			groveID:   "abc-def-123",
+			projectID:   "abc-def-123",
 			agentSlug: "code-reviewer",
 		},
 		{
@@ -75,13 +75,13 @@ func TestParseAgentMessageTopic(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			groveID, agentSlug, err := parseAgentMessageTopic(tt.topic)
+			projectID, agentSlug, err := parseAgentMessageTopic(tt.topic)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tt.groveID, groveID)
+			assert.Equal(t, tt.projectID, projectID)
 			assert.Equal(t, tt.agentSlug, agentSlug)
 		})
 	}

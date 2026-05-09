@@ -27,14 +27,14 @@ func TestSetAgentSubscription_CrossGroveIsolation(t *testing.T) {
 		PlatformUserID: "user-1",
 		Platform:       "googlechat",
 		AgentID:        "deploy",
-		GroveID:        "grove-A",
+		ProjectID:        "grove-A",
 		Activities:     "COMPLETED",
 	}
 	subB := &AgentSubscription{
 		PlatformUserID: "user-1",
 		Platform:       "googlechat",
 		AgentID:        "deploy",
-		GroveID:        "grove-B",
+		ProjectID:        "grove-B",
 		Activities:     "ERROR",
 	}
 
@@ -77,14 +77,14 @@ func TestDeleteAgentSubscription_GroveScoped(t *testing.T) {
 		PlatformUserID: "user-1",
 		Platform:       "googlechat",
 		AgentID:        "deploy",
-		GroveID:        "grove-A",
+		ProjectID:        "grove-A",
 		Activities:     "COMPLETED",
 	}
 	subB := &AgentSubscription{
 		PlatformUserID: "user-1",
 		Platform:       "googlechat",
 		AgentID:        "deploy",
-		GroveID:        "grove-B",
+		ProjectID:        "grove-B",
 		Activities:     "ERROR",
 	}
 
@@ -100,7 +100,7 @@ func TestDeleteAgentSubscription_GroveScoped(t *testing.T) {
 		t.Fatalf("delete: %v", err)
 	}
 
-	// Grove-A subscription should be gone.
+	// Project-A subscription should be gone.
 	got, err := s.GetAgentSubscription("user-1", "googlechat", "deploy", "grove-A")
 	if err != nil {
 		t.Fatalf("get subA after delete: %v", err)
@@ -109,7 +109,7 @@ func TestDeleteAgentSubscription_GroveScoped(t *testing.T) {
 		t.Errorf("expected grove-A subscription to be deleted, got %+v", got)
 	}
 
-	// Grove-B subscription must be untouched.
+	// Project-B subscription must be untouched.
 	got, err = s.GetAgentSubscription("user-1", "googlechat", "deploy", "grove-B")
 	if err != nil {
 		t.Fatalf("get subB after delete: %v", err)
@@ -138,9 +138,9 @@ func TestListAgentSubscriptions_GroveScoped(t *testing.T) {
 	s := newTestStore(t)
 
 	for _, sub := range []*AgentSubscription{
-		{PlatformUserID: "user-1", Platform: "googlechat", AgentID: "deploy", GroveID: "grove-A"},
-		{PlatformUserID: "user-2", Platform: "googlechat", AgentID: "deploy", GroveID: "grove-B"},
-		{PlatformUserID: "user-1", Platform: "googlechat", AgentID: "deploy", GroveID: "grove-B"},
+		{PlatformUserID: "user-1", Platform: "googlechat", AgentID: "deploy", ProjectID: "grove-A"},
+		{PlatformUserID: "user-2", Platform: "googlechat", AgentID: "deploy", ProjectID: "grove-B"},
+		{PlatformUserID: "user-1", Platform: "googlechat", AgentID: "deploy", ProjectID: "grove-B"},
 	} {
 		if err := s.SetAgentSubscription(sub); err != nil {
 			t.Fatalf("set subscription: %v", err)
@@ -214,7 +214,7 @@ func TestMigrateAgentSubscriptionsPK_PreservesData(t *testing.T) {
 		PlatformUserID: "user-1",
 		Platform:       "googlechat",
 		AgentID:        "deploy",
-		GroveID:        "grove-B",
+		ProjectID:        "grove-B",
 		Activities:     "ERROR",
 	}); err != nil {
 		t.Fatalf("set cross-grove sub: %v", err)

@@ -59,8 +59,8 @@ type mockRuntimeBrokerClient struct {
 	lastEndpoint     string
 	lastAgentID      string
 	lastTask         string
-	lastGrovePath    string
-	lastGroveSlug    string
+	lastProjectPath    string
+	lastProjectSlug    string
 	lastMessage      string
 	lastInterrupt    bool
 	lastResolvedEnv  map[string]string
@@ -95,14 +95,14 @@ func (m *mockRuntimeBrokerClient) CreateAgent(ctx context.Context, brokerID, bro
 	}, nil
 }
 
-func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID, task, grovePath, groveSlug, harnessConfig string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace bool) (*RemoteAgentResponse, error) {
+func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace bool) (*RemoteAgentResponse, error) {
 	m.startCalled = true
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
 	m.lastTask = task
-	m.lastGrovePath = grovePath
-	m.lastGroveSlug = groveSlug
+	m.lastProjectPath = projectPath
+	m.lastProjectSlug = projectSlug
 	m.lastResolvedEnv = resolvedEnv
 	m.lastInlineConfig = inlineConfig
 	if m.returnErr != nil {
@@ -121,7 +121,7 @@ func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brok
 	}, nil
 }
 
-func (m *mockRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string) error {
+func (m *mockRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
 	m.stopCalled = true
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
@@ -129,7 +129,7 @@ func (m *mockRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, broke
 	return m.returnErr
 }
 
-func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, resolvedEnv map[string]string) error {
+func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string) error {
 	m.restartCalled = true
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
@@ -137,7 +137,7 @@ func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, br
 	return m.returnErr
 }
 
-func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
+func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
 	m.deleteCalled = true
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
@@ -147,7 +147,7 @@ func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, bro
 	return m.returnErr
 }
 
-func (m *mockRuntimeBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, command []string, timeout int) (string, int, error) {
+func (m *mockRuntimeBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, command []string, timeout int) (string, int, error) {
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
@@ -157,7 +157,7 @@ func (m *mockRuntimeBrokerClient) ExecAgent(ctx context.Context, brokerID, broke
 	return "mock exec output", 0, nil
 }
 
-func (m *mockRuntimeBrokerClient) MessageAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
+func (m *mockRuntimeBrokerClient) MessageAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
 	m.messageCalled = true
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
@@ -167,7 +167,7 @@ func (m *mockRuntimeBrokerClient) MessageAgent(ctx context.Context, brokerID, br
 	return m.returnErr
 }
 
-func (m *mockRuntimeBrokerClient) CheckAgentPrompt(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string) (bool, error) {
+func (m *mockRuntimeBrokerClient) CheckAgentPrompt(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) (bool, error) {
 	return false, m.returnErr
 }
 
@@ -177,16 +177,16 @@ func (m *mockRuntimeBrokerClient) FinalizeEnv(ctx context.Context, brokerID, bro
 	}, m.returnErr
 }
 
-func (m *mockRuntimeBrokerClient) GetAgentLogs(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, tail int) (string, error) {
+func (m *mockRuntimeBrokerClient) GetAgentLogs(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, tail int) (string, error) {
 	return "", nil
 }
 
-func (m *mockRuntimeBrokerClient) CleanupGrove(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error {
+func (m *mockRuntimeBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug string) error {
 	m.cleanupCalled = true
 	m.cleanupCalls++
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
-	m.cleanupSlugs = append(m.cleanupSlugs, groveSlug)
+	m.cleanupSlugs = append(m.cleanupSlugs, projectSlug)
 	return m.cleanupErr
 }
 
@@ -232,7 +232,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate(t *testing.T) {
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -409,7 +409,7 @@ func TestHTTPRuntimeBrokerClient_CreateAgent(t *testing.T) {
 		ID:      "hub-uuid-1",
 		Slug:    "agent-1",
 		Name:    "test-agent",
-		GroveID: "grove-1",
+		ProjectID: "grove-1",
 	}
 
 	resp, err := client.CreateAgent(context.Background(), "host-1", server.URL, req)
@@ -538,14 +538,14 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithGroveProviderPath(t *testin
 
 	// Create the grove with a GitRemote so it is treated as a linked grove
 	// (not hub-native). This ensures buildCreateRequest looks up the
-	// provider's LocalPath instead of sending a groveSlug.
-	grove := &store.Grove{
+	// provider's LocalPath instead of sending a projectSlug.
+	grove := &store.Project{
 		ID:        "grove-1",
 		Name:      "test-grove",
 		Slug:      "test-grove",
 		GitRemote: "https://github.com/example/repo.git",
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -562,14 +562,14 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithGroveProviderPath(t *testin
 	}
 
 	// Add a grove provider record WITH a local path
-	provider := &store.GroveProvider{
-		GroveID:    "grove-1",
+	provider := &store.ProjectProvider{
+		ProjectID:    "grove-1",
 		BrokerID:   "broker-1",
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/projects/myproject/.scion",
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := memStore.AddGroveProvider(ctx, provider); err != nil {
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
@@ -580,7 +580,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithGroveProviderPath(t *testin
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "broker-1",
 	}
 
@@ -592,8 +592,8 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithGroveProviderPath(t *testin
 	if !mockClient.createCalled {
 		t.Fatal("expected CreateAgent to be called")
 	}
-	if mockClient.lastCreateReq.GrovePath != "/home/user/projects/myproject/.scion" {
-		t.Errorf("expected GrovePath '/home/user/projects/myproject/.scion', got '%s'", mockClient.lastCreateReq.GrovePath)
+	if mockClient.lastCreateReq.ProjectPath != "/home/user/projects/myproject/.scion" {
+		t.Errorf("expected ProjectPath '/home/user/projects/myproject/.scion', got '%s'", mockClient.lastCreateReq.ProjectPath)
 	}
 }
 
@@ -653,12 +653,12 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithoutGroveProviderPath(t *tes
 	memStore := createTestStore(t)
 
 	// Create the grove (required by FK constraint)
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-1",
 		Name: "test-grove",
 		Slug: "test-grove",
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -675,15 +675,15 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithoutGroveProviderPath(t *tes
 	}
 
 	// Add a grove provider record WITHOUT a local path (simulating auto-provide)
-	provider := &store.GroveProvider{
-		GroveID:    "grove-1",
+	provider := &store.ProjectProvider{
+		ProjectID:    "grove-1",
 		BrokerID:   "broker-1",
 		BrokerName: "test-broker",
 		LocalPath:  "",
 		Status:     store.BrokerStatusOnline,
 		LinkedBy:   "auto-provide",
 	}
-	if err := memStore.AddGroveProvider(ctx, provider); err != nil {
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
@@ -694,7 +694,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithoutGroveProviderPath(t *tes
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "broker-1",
 	}
 
@@ -706,9 +706,9 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithoutGroveProviderPath(t *tes
 	if !mockClient.createCalled {
 		t.Fatal("expected CreateAgent to be called")
 	}
-	// When auto-provide didn't set a path, GrovePath should be empty
-	if mockClient.lastCreateReq.GrovePath != "" {
-		t.Errorf("expected empty GrovePath for auto-provided broker, got '%s'", mockClient.lastCreateReq.GrovePath)
+	// When auto-provide didn't set a path, ProjectPath should be empty
+	if mockClient.lastCreateReq.ProjectPath != "" {
+		t.Errorf("expected empty ProjectPath for auto-provided broker, got '%s'", mockClient.lastCreateReq.ProjectPath)
 	}
 }
 
@@ -735,7 +735,7 @@ func TestHTTPAgentDispatcher_DispatchAgentProvision(t *testing.T) {
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -813,7 +813,7 @@ func TestHTTPAgentDispatcher_DispatchAgentProvision_PassesTaskThrough(t *testing
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			Task: "implement feature X",
@@ -862,7 +862,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithWorkspace(t *testing.T) {
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -910,7 +910,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithCreatorName(t *testing.T) {
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -956,7 +956,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithoutCreatorName(t *testing.T
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -997,7 +997,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_DoesNotSetProvisionOnly(t *test
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			Task: "do something",
@@ -1020,13 +1020,13 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_WithGroveProviderPath(t *testing
 	memStore := createTestStore(t)
 
 	// Create the grove with a GitRemote so it is treated as a linked grove
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove-1",
 		Name:      "test-grove",
 		Slug:      "test-grove",
 		GitRemote: "https://github.com/example/repo.git",
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -1043,14 +1043,14 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_WithGroveProviderPath(t *testing
 	}
 
 	// Add a grove provider record with a local path
-	provider := &store.GroveProvider{
-		GroveID:    "grove-1",
+	provider := &store.ProjectProvider{
+		ProjectID:    "grove-1",
 		BrokerID:   "broker-1",
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/projects/myproject/.scion",
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := memStore.AddGroveProvider(ctx, provider); err != nil {
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
@@ -1061,7 +1061,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_WithGroveProviderPath(t *testing
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "broker-1",
 	}
 
@@ -1073,8 +1073,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_WithGroveProviderPath(t *testing
 	if !mockClient.startCalled {
 		t.Fatal("expected StartAgent to be called")
 	}
-	if mockClient.lastGrovePath != "/home/user/projects/myproject/.scion" {
-		t.Errorf("expected grovePath '/home/user/projects/myproject/.scion', got '%s'", mockClient.lastGrovePath)
+	if mockClient.lastProjectPath != "/home/user/projects/myproject/.scion" {
+		t.Errorf("expected projectPath '/home/user/projects/myproject/.scion', got '%s'", mockClient.lastProjectPath)
 	}
 	if mockClient.lastTask != "do task" {
 		t.Errorf("expected task 'do task', got '%s'", mockClient.lastTask)
@@ -1084,9 +1084,9 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_WithGroveProviderPath(t *testing
 	if agent.Phase != "running" {
 		t.Errorf("expected agent status 'running', got '%s'", agent.Phase)
 	}
-	// With a local provider path, groveSlug should not be set
-	if mockClient.lastGroveSlug != "" {
-		t.Errorf("expected empty groveSlug when provider has local path, got %q", mockClient.lastGroveSlug)
+	// With a local provider path, projectSlug should not be set
+	if mockClient.lastProjectSlug != "" {
+		t.Errorf("expected empty projectSlug when provider has local path, got %q", mockClient.lastProjectSlug)
 	}
 }
 
@@ -1097,13 +1097,13 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIdentity(t *testing
 	ctx := context.Background()
 	memStore := createTestStore(t)
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove-1",
 		Name:      "test-grove",
 		Slug:      "test-grove",
 		GitRemote: "https://github.com/example/repo.git",
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -1118,14 +1118,14 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIdentity(t *testing
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	provider := &store.GroveProvider{
-		GroveID:    "grove-1",
+	provider := &store.ProjectProvider{
+		ProjectID:    "grove-1",
 		BrokerID:   "broker-1",
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/projects/myproject/.scion",
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := memStore.AddGroveProvider(ctx, provider); err != nil {
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
@@ -1136,7 +1136,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIdentity(t *testing
 		ID:              "agent-uuid-123",
 		Name:            "test-agent",
 		Slug:            "test-agent-slug",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "broker-1",
 	}
 
@@ -1171,18 +1171,18 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIdentity(t *testing
 	}
 }
 
-func TestHTTPAgentDispatcher_DispatchAgentStart_HubNativeGrove(t *testing.T) {
+func TestHTTPAgentDispatcher_DispatchAgentStart_HubNativeProject(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
 
 	// Create a hub-native grove (no git remote)
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-hub",
-		Name: "My Hub Grove",
+		Name: "My Hub Project",
 		Slug: "my-hub-grove",
 		// No GitRemote — this is a hub-native grove
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -1205,7 +1205,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_HubNativeGrove(t *testing.T) {
 		ID:              "agent-hub-1",
 		Name:            "hub-agent",
 		Slug:            "hub-agent",
-		GroveID:         "grove-hub",
+		ProjectID:         "grove-hub",
 		RuntimeBrokerID: "broker-1",
 	}
 
@@ -1217,30 +1217,30 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_HubNativeGrove(t *testing.T) {
 	if !mockClient.startCalled {
 		t.Fatal("expected StartAgent to be called")
 	}
-	// No local provider path — grovePath should be empty
-	if mockClient.lastGrovePath != "" {
-		t.Errorf("expected empty grovePath for hub-native grove, got %q", mockClient.lastGrovePath)
+	// No local provider path — projectPath should be empty
+	if mockClient.lastProjectPath != "" {
+		t.Errorf("expected empty projectPath for hub-native grove, got %q", mockClient.lastProjectPath)
 	}
-	// GroveSlug should be set so the broker can resolve the path
-	if mockClient.lastGroveSlug != "my-hub-grove" {
-		t.Errorf("expected groveSlug 'my-hub-grove', got %q", mockClient.lastGroveSlug)
+	// ProjectSlug should be set so the broker can resolve the path
+	if mockClient.lastProjectSlug != "my-hub-grove" {
+		t.Errorf("expected projectSlug 'my-hub-grove', got %q", mockClient.lastProjectSlug)
 	}
 }
 
-func TestHTTPAgentDispatcher_DispatchAgentStart_GroveSlugSetForGitRemoteWithoutLocalPath(t *testing.T) {
+func TestHTTPAgentDispatcher_DispatchAgentStart_ProjectSlugSetForGitRemoteWithoutLocalPath(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
 
 	// Create a grove with a git remote but no local provider path.
-	// The broker needs the groveSlug to resolve agent directories under
+	// The broker needs the projectSlug to resolve agent directories under
 	// ~/.scion/groves/<slug>/ instead of falling back to the global grove.
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove-git",
-		Name:      "Git Grove",
+		Name:      "Git Project",
 		Slug:      "git-grove",
 		GitRemote: "https://github.com/user/repo.git",
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -1262,7 +1262,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_GroveSlugSetForGitRemoteWithoutL
 		ID:              "agent-git-1",
 		Name:            "git-agent",
 		Slug:            "git-agent",
-		GroveID:         "grove-git",
+		ProjectID:         "grove-git",
 		RuntimeBrokerID: "broker-1",
 	}
 
@@ -1274,10 +1274,10 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_GroveSlugSetForGitRemoteWithoutL
 	if !mockClient.startCalled {
 		t.Fatal("expected StartAgent to be called")
 	}
-	// Git-remote grove without a local provider path should have groveSlug set
+	// Git-remote grove without a local provider path should have projectSlug set
 	// so the broker resolves agent dirs under ~/.scion/groves/<slug>/
-	if mockClient.lastGroveSlug != "git-grove" {
-		t.Errorf("expected groveSlug='git-grove' for git grove without local path, got %q", mockClient.lastGroveSlug)
+	if mockClient.lastProjectSlug != "git-grove" {
+		t.Errorf("expected projectSlug='git-grove' for git grove without local path, got %q", mockClient.lastProjectSlug)
 	}
 }
 
@@ -1286,12 +1286,12 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 	memStore := createTestStore(t)
 
 	// Create a grove
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-env",
 		Name: "env-test-grove",
 		Slug: "env-test-grove",
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -1308,14 +1308,14 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 	}
 
 	// Add a grove provider with a local path
-	provider := &store.GroveProvider{
-		GroveID:    "grove-env",
+	provider := &store.ProjectProvider{
+		ProjectID:    "grove-env",
 		BrokerID:   "broker-env",
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/project/.scion",
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := memStore.AddGroveProvider(ctx, provider); err != nil {
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
@@ -1348,7 +1348,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 		ID:              "agent-env",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-env",
+		ProjectID:         "grove-env",
 		OwnerID:         "owner-1",
 		RuntimeBrokerID: "broker-env",
 		AppliedConfig: &store.AgentAppliedConfig{
@@ -1376,7 +1376,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 		t.Errorf("expected EXISTING_VAR='from-config', got '%s' (ok=%v)", v, ok)
 	}
 
-	// Grove-scoped env should be present
+	// Project-scoped env should be present
 	if v, ok := mockClient.lastResolvedEnv["GEMINI_API_KEY"]; !ok || v != "test-api-key-123" {
 		t.Errorf("expected GEMINI_API_KEY='test-api-key-123', got '%s' (ok=%v)", v, ok)
 	}
@@ -1392,12 +1392,12 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ConfigEnvTakesPrecedence(t *test
 	memStore := createTestStore(t)
 
 	// Create grove and broker
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-prec",
 		Name: "precedence-test",
 		Slug: "precedence-test",
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -1430,7 +1430,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ConfigEnvTakesPrecedence(t *test
 		ID:              "agent-prec",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-prec",
+		ProjectID:         "grove-prec",
 		RuntimeBrokerID: "broker-prec",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "gemini",
@@ -1455,12 +1455,12 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_StorageOverridesEmptyConfigEnv(t
 	ctx := context.Background()
 	memStore := createTestStore(t)
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-empty-env",
 		Name: "empty-env-test",
 		Slug: "empty-env-test",
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -1493,7 +1493,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_StorageOverridesEmptyConfigEnv(t
 		ID:              "agent-empty-env",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-empty-env",
+		ProjectID:         "grove-empty-env",
 		RuntimeBrokerID: "broker-empty-env",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "gemini",
@@ -1544,7 +1544,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_InjectsDevToken(t *testing.T) {
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -1593,7 +1593,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoDevToken(t *testing.T) {
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "host-1",
 	}
 
@@ -1633,7 +1633,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_DevTokenMergesWithExistingEnv(t
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -1692,7 +1692,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_AppliesBrokerResponse(t *testing
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "broker-1",
 		Phase:           string(state.PhaseCreated),
 	}
@@ -1742,7 +1742,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesGitClone(t *testing.T
 		ID:              "agent-gc-1",
 		Name:            "git-clone-agent",
 		Slug:            "git-clone-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -1805,7 +1805,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProfile(t *testing.T)
 		ID:              "agent-profile-1",
 		Name:            "profile-agent",
 		Slug:            "profile-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -1830,18 +1830,18 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProfile(t *testing.T)
 	}
 }
 
-func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesGroveSlug_HubNative(t *testing.T) {
+func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProjectSlug_HubNative(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
 
 	// Create a hub-native grove (no GitRemote)
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-hub-native",
-		Name: "Hub Native Grove",
+		Name: "Hub Native Project",
 		Slug: "hub-native-grove",
 		// No GitRemote = hub-native
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -1863,7 +1863,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesGroveSlug_HubNative(t
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-hub-native",
+		ProjectID:         "grove-hub-native",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -1878,23 +1878,23 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesGroveSlug_HubNative(t
 	if !mockClient.createCalled {
 		t.Fatal("expected CreateAgent to be called")
 	}
-	if mockClient.lastCreateReq.GroveSlug != "hub-native-grove" {
-		t.Errorf("expected GroveSlug 'hub-native-grove', got '%s'", mockClient.lastCreateReq.GroveSlug)
+	if mockClient.lastCreateReq.ProjectSlug != "hub-native-grove" {
+		t.Errorf("expected ProjectSlug 'hub-native-grove', got '%s'", mockClient.lastCreateReq.ProjectSlug)
 	}
 }
 
-func TestHTTPAgentDispatcher_DispatchAgentCreate_GroveSlugSet_GitGrove(t *testing.T) {
+func TestHTTPAgentDispatcher_DispatchAgentCreate_ProjectSlugSet_GitProject(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
 
 	// Create a git-backed grove (has GitRemote) without a local provider path.
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove-git",
-		Name:      "Git Grove",
+		Name:      "Git Project",
 		Slug:      "git-grove",
 		GitRemote: "github.com/test/repo",
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -1916,7 +1916,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_GroveSlugSet_GitGrove(t *testin
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-git",
+		ProjectID:         "grove-git",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -1931,10 +1931,10 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_GroveSlugSet_GitGrove(t *testin
 	if !mockClient.createCalled {
 		t.Fatal("expected CreateAgent to be called")
 	}
-	// Git-backed groves without a local provider path should have GroveSlug set
+	// Git-backed groves without a local provider path should have ProjectSlug set
 	// so the broker resolves agent dirs under ~/.scion/groves/<slug>/
-	if mockClient.lastCreateReq.GroveSlug != "git-grove" {
-		t.Errorf("expected GroveSlug='git-grove' for git-backed grove without local path, got '%s'", mockClient.lastCreateReq.GroveSlug)
+	if mockClient.lastCreateReq.ProjectSlug != "git-grove" {
+		t.Errorf("expected ProjectSlug='git-grove' for git-backed grove without local path, got '%s'", mockClient.lastCreateReq.ProjectSlug)
 	}
 }
 
@@ -1960,7 +1960,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_EmptyProfile(t *testing.T) {
 		ID:              "agent-no-profile-1",
 		Name:            "no-profile-agent",
 		Slug:            "no-profile-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -1984,7 +1984,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_EmptyProfile(t *testing.T) {
 	}
 }
 
-func TestHTTPAgentDispatcher_DispatchAgentCreate_NoGroveSlug_LocalPathGrove(t *testing.T) {
+func TestHTTPAgentDispatcher_DispatchAgentCreate_NoProjectSlug_LocalPathProject(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
 
@@ -1992,13 +1992,13 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoGroveSlug_LocalPathGrove(t *t
 	// This grove has a GitRemote so it is treated as a linked grove (not hub-native).
 	// Even though the broker has the repo locally, all hub-linked groves with a
 	// git remote use clone-based provisioning (HTTPS + GitHub token).
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove-local",
-		Name:      "Local Grove",
+		Name:      "Local Project",
 		Slug:      "local-grove",
 		GitRemote: "https://github.com/example/local-project.git",
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -2014,14 +2014,14 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoGroveSlug_LocalPathGrove(t *t
 	}
 
 	// Add a grove provider record WITH a local path
-	provider := &store.GroveProvider{
-		GroveID:    "grove-local",
+	provider := &store.ProjectProvider{
+		ProjectID:    "grove-local",
 		BrokerID:   "broker-1",
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/projects/myproject/.scion",
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := memStore.AddGroveProvider(ctx, provider); err != nil {
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
@@ -2032,7 +2032,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoGroveSlug_LocalPathGrove(t *t
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-local",
+		ProjectID:         "grove-local",
 		RuntimeBrokerID: "broker-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -2058,15 +2058,15 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoGroveSlug_LocalPathGrove(t *t
 		t.Fatal("expected CreateAgent to be called")
 	}
 
-	// A non-git grove with a local provider path should NOT have GroveSlug set.
-	// GroveSlug is only for hub-native groves (no local path on the broker).
-	if mockClient.lastCreateReq.GroveSlug != "" {
-		t.Errorf("expected empty GroveSlug for local-path grove, got '%s'", mockClient.lastCreateReq.GroveSlug)
+	// A non-git grove with a local provider path should NOT have ProjectSlug set.
+	// ProjectSlug is only for hub-native groves (no local path on the broker).
+	if mockClient.lastCreateReq.ProjectSlug != "" {
+		t.Errorf("expected empty ProjectSlug for local-path grove, got '%s'", mockClient.lastCreateReq.ProjectSlug)
 	}
 
-	// The GrovePath should be set from the provider
-	if mockClient.lastCreateReq.GrovePath != "/home/user/projects/myproject/.scion" {
-		t.Errorf("expected GrovePath '/home/user/projects/myproject/.scion', got '%s'", mockClient.lastCreateReq.GrovePath)
+	// The ProjectPath should be set from the provider
+	if mockClient.lastCreateReq.ProjectPath != "/home/user/projects/myproject/.scion" {
+		t.Errorf("expected ProjectPath '/home/user/projects/myproject/.scion', got '%s'", mockClient.lastCreateReq.ProjectPath)
 	}
 
 	// Config.Workspace should be cleared when a local provider path exists,
@@ -2098,13 +2098,13 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_LinkedGroveNoGitRemote(t *testi
 
 	// Create a linked grove WITHOUT a GitRemote — this is what happens when
 	// a user links a local project via `scion hub groves link`.
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-linked-no-git",
-		Name: "Linked No Git Grove",
+		Name: "Linked No Git Project",
 		Slug: "linked-no-git",
 		// No GitRemote — looks like hub-native, but has a provider path
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -2120,14 +2120,14 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_LinkedGroveNoGitRemote(t *testi
 	}
 
 	// Add a grove provider record WITH a local path
-	provider := &store.GroveProvider{
-		GroveID:    "grove-linked-no-git",
+	provider := &store.ProjectProvider{
+		ProjectID:    "grove-linked-no-git",
 		BrokerID:   "broker-1",
 		BrokerName: "test-broker",
 		LocalPath:  "/Users/user/dev/projects/my-project/.scion",
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := memStore.AddGroveProvider(ctx, provider); err != nil {
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
@@ -2138,7 +2138,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_LinkedGroveNoGitRemote(t *testi
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-linked-no-git",
+		ProjectID:         "grove-linked-no-git",
 		RuntimeBrokerID: "broker-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -2156,13 +2156,13 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_LinkedGroveNoGitRemote(t *testi
 	}
 
 	// Provider path must take precedence — should NOT be treated as hub-native
-	if mockClient.lastCreateReq.GroveSlug != "" {
-		t.Errorf("expected empty GroveSlug for linked grove with provider path, got '%s'", mockClient.lastCreateReq.GroveSlug)
+	if mockClient.lastCreateReq.ProjectSlug != "" {
+		t.Errorf("expected empty ProjectSlug for linked grove with provider path, got '%s'", mockClient.lastCreateReq.ProjectSlug)
 	}
 
-	// The GrovePath should be set from the provider
-	if mockClient.lastCreateReq.GrovePath != "/Users/user/dev/projects/my-project/.scion" {
-		t.Errorf("expected GrovePath '/Users/user/dev/projects/my-project/.scion', got '%s'", mockClient.lastCreateReq.GrovePath)
+	// The ProjectPath should be set from the provider
+	if mockClient.lastCreateReq.ProjectPath != "/Users/user/dev/projects/my-project/.scion" {
+		t.Errorf("expected ProjectPath '/Users/user/dev/projects/my-project/.scion', got '%s'", mockClient.lastCreateReq.ProjectPath)
 	}
 
 	// Config.Workspace should be cleared when a local provider path exists
@@ -2287,12 +2287,12 @@ func TestBuildCreateRequest_ResolvesGroveAndUserScopes(t *testing.T) {
 	memStore := createTestStore(t)
 
 	// Create grove and broker
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-1",
 		Name: "test-grove",
 		Slug: "test-grove",
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -2351,7 +2351,7 @@ func TestBuildCreateRequest_ResolvesGroveAndUserScopes(t *testing.T) {
 		Name:            "test-agent",
 		Slug:            "test-agent",
 		OwnerID:         "user-1",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig:   &store.AgentAppliedConfig{},
 	}
@@ -2366,7 +2366,7 @@ func TestBuildCreateRequest_ResolvesGroveAndUserScopes(t *testing.T) {
 		t.Errorf("expected user-scoped value to win: got %q", req.ResolvedEnv["SHARED_KEY"])
 	}
 
-	// Grove-only key should also be present
+	// Project-only key should also be present
 	if req.ResolvedEnv["GROVE_ONLY_KEY"] != "grove-only-value" {
 		t.Errorf("expected GROVE_ONLY_KEY='grove-only-value', got %q", req.ResolvedEnv["GROVE_ONLY_KEY"])
 	}
@@ -2455,7 +2455,7 @@ func TestBuildCreateRequest_PropagatesHarnessName(t *testing.T) {
 		ID:              "agent-harness-1",
 		Name:            "harness-agent",
 		Slug:            "harness-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "gemini",
@@ -2633,23 +2633,23 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIDAndSlug(t *testin
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-id-test",
 		Name: "test-grove",
 		Slug: "test-grove",
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
-	provider := &store.GroveProvider{
-		GroveID:    "grove-id-test",
+	provider := &store.ProjectProvider{
+		ProjectID:    "grove-id-test",
 		BrokerID:   "broker-id-test",
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/project/.scion",
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := memStore.AddGroveProvider(ctx, provider); err != nil {
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
@@ -2660,7 +2660,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIDAndSlug(t *testin
 		ID:              "agent-uuid-123",
 		Name:            "my-agent",
 		Slug:            "my-agent",
-		GroveID:         "grove-id-test",
+		ProjectID:         "grove-id-test",
 		RuntimeBrokerID: "broker-id-test",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -2705,23 +2705,23 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesInlineConfig(t *testing.
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:   "grove-inline",
 		Name: "test-grove",
 		Slug: "test-grove",
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
-	provider := &store.GroveProvider{
-		GroveID:    "grove-inline",
+	provider := &store.ProjectProvider{
+		ProjectID:    "grove-inline",
 		BrokerID:   "broker-inline",
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/project/.scion",
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := memStore.AddGroveProvider(ctx, provider); err != nil {
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
@@ -2737,7 +2737,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesInlineConfig(t *testing.
 		ID:              "agent-inline-cfg",
 		Name:            "inline-agent",
 		Slug:            "inline-agent",
-		GroveID:         "grove-inline",
+		ProjectID:         "grove-inline",
 		RuntimeBrokerID: "broker-inline",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -2788,7 +2788,7 @@ func TestDispatchAgentStart_IncludesHubEndpoint(t *testing.T) {
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		OwnerID:         "user-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
@@ -2830,7 +2830,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesSharedWorkspace(t *te
 	memStore := createTestStore(t)
 
 	// Create a shared-workspace git grove
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove-shared-ws",
 		Name:      "Shared WS",
 		Slug:      "shared-ws",
@@ -2839,7 +2839,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesSharedWorkspace(t *te
 			store.LabelWorkspaceMode: store.WorkspaceModeShared,
 		},
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -2861,7 +2861,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesSharedWorkspace(t *te
 		ID:              "agent-shared-1",
 		Name:            "shared-agent",
 		Slug:            "shared-agent",
-		GroveID:         "grove-shared-ws",
+		ProjectID:         "grove-shared-ws",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -2896,13 +2896,13 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_InjectsGCPIdentityEnv(t *testing
 	ctx := context.Background()
 	memStore := createTestStore(t)
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove-gcp",
 		Name:      "gcp-grove",
 		Slug:      "gcp-grove",
 		GitRemote: "https://github.com/example/repo.git",
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -2917,14 +2917,14 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_InjectsGCPIdentityEnv(t *testing
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	provider := &store.GroveProvider{
-		GroveID:    "grove-gcp",
+	provider := &store.ProjectProvider{
+		ProjectID:    "grove-gcp",
 		BrokerID:   "broker-gcp",
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/projects/myproject/.scion",
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := memStore.AddGroveProvider(ctx, provider); err != nil {
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
@@ -2935,7 +2935,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_InjectsGCPIdentityEnv(t *testing
 		ID:              "agent-gcp-1",
 		Name:            "gcp-agent",
 		Slug:            "gcp-agent",
-		GroveID:         "grove-gcp",
+		ProjectID:         "grove-gcp",
 		RuntimeBrokerID: "broker-gcp",
 		AppliedConfig: &store.AgentAppliedConfig{
 			GCPIdentity: &store.GCPIdentityConfig{
@@ -2972,13 +2972,13 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_GCPBlockMode(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:        "grove-gcp-block",
 		Name:      "gcp-grove",
 		Slug:      "gcp-grove",
 		GitRemote: "https://github.com/example/repo.git",
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -2993,14 +2993,14 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_GCPBlockMode(t *testing.T) {
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	provider := &store.GroveProvider{
-		GroveID:    "grove-gcp-block",
+	provider := &store.ProjectProvider{
+		ProjectID:    "grove-gcp-block",
 		BrokerID:   "broker-gcp-block",
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/projects/myproject/.scion",
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := memStore.AddGroveProvider(ctx, provider); err != nil {
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
 		t.Fatalf("failed to add grove provider: %v", err)
 	}
 
@@ -3011,7 +3011,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_GCPBlockMode(t *testing.T) {
 		ID:              "agent-gcp-block",
 		Name:            "gcp-agent",
 		Slug:            "gcp-agent",
-		GroveID:         "grove-gcp-block",
+		ProjectID:         "grove-gcp-block",
 		RuntimeBrokerID: "broker-gcp-block",
 		AppliedConfig: &store.AgentAppliedConfig{
 			GCPIdentity: &store.GCPIdentityConfig{
@@ -3042,7 +3042,7 @@ type mockGitHubAppMinter struct {
 	called bool
 }
 
-func (m *mockGitHubAppMinter) MintGitHubAppTokenForGrove(_ context.Context, _ *store.Grove) (string, string, error) {
+func (m *mockGitHubAppMinter) MintGitHubAppTokenForProject(_ context.Context, _ *store.Project) (string, string, error) {
 	m.called = true
 	return m.token, m.expiry, m.err
 }
@@ -3062,13 +3062,13 @@ func TestBuildCreateRequest_UserGitHubTokenPrecedesApp(t *testing.T) {
 		t.Fatalf("failed to create GitHub installation: %v", err)
 	}
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:                   "grove-1",
 		Name:                 "test-grove",
 		Slug:                 "test-grove",
 		GitHubInstallationID: &installID,
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -3097,7 +3097,7 @@ func TestBuildCreateRequest_UserGitHubTokenPrecedesApp(t *testing.T) {
 		Name:            "test-agent",
 		Slug:            "test-agent",
 		OwnerID:         "user-1",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			Env: map[string]string{
@@ -3147,13 +3147,13 @@ func TestBuildCreateRequest_GitHubAppTokenWhenNoUserToken(t *testing.T) {
 		t.Fatalf("failed to create GitHub installation: %v", err)
 	}
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:                   "grove-1",
 		Name:                 "test-grove",
 		Slug:                 "test-grove",
 		GitHubInstallationID: &installID,
 	}
-	if err := memStore.CreateGrove(ctx, grove); err != nil {
+	if err := memStore.CreateProject(ctx, grove); err != nil {
 		t.Fatalf("failed to create grove: %v", err)
 	}
 
@@ -3182,7 +3182,7 @@ func TestBuildCreateRequest_GitHubAppTokenWhenNoUserToken(t *testing.T) {
 		Name:            "test-agent",
 		Slug:            "test-agent",
 		OwnerID:         "user-1",
-		GroveID:         "grove-1",
+		ProjectID:         "grove-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig:   &store.AgentAppliedConfig{},
 	}

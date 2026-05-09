@@ -132,7 +132,7 @@ Examples:
 
 var (
 	tokenCreateName    string
-	tokenCreateGrove   string
+	tokenCreateProject   string
 	tokenCreateScopes  string
 	tokenCreateExpires string
 	tokenListGrove     string
@@ -146,7 +146,7 @@ func init() {
 	hubTokenCmd.AddCommand(hubTokenDeleteCmd)
 
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateName, "name", "", "Token name/label (required)")
-	hubTokenCreateCmd.Flags().StringVar(&tokenCreateGrove, "grove", "", "Grove name or ID to scope the token to (required)")
+	hubTokenCreateCmd.Flags().StringVar(&tokenCreateProject, "grove", "", "Grove name or ID to scope the token to (required)")
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateScopes, "scopes", "", "Comma-separated list of scopes (required)")
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateExpires, "expires", "", "Expiry duration (e.g., 30d, 90d, 1y) or RFC 3339 date (default: 90d)")
 
@@ -159,7 +159,7 @@ func init() {
 }
 
 func runTokenCreate(cmd *cobra.Command, args []string) error {
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return fmt.Errorf("failed to resolve grove path: %w", err)
 	}
@@ -178,9 +178,9 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	// Resolve grove name/slug to ID
-	grove, err := resolveGroveByNameOrID(ctx, client, tokenCreateGrove)
+	grove, err := resolveProjectByNameOrID(ctx, client, tokenCreateProject)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove %q: %w", tokenCreateGrove, err)
+		return fmt.Errorf("failed to resolve grove %q: %w", tokenCreateProject, err)
 	}
 
 	scopes := strings.Split(tokenCreateScopes, ",")
@@ -199,7 +199,7 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 
 	req := &hubclient.CreateTokenRequest{
 		Name:      tokenCreateName,
-		GroveID:   grove.ID,
+		ProjectID:   grove.ID,
 		Scopes:    scopes,
 		ExpiresAt: expiresAt,
 	}
@@ -217,7 +217,7 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Created access token: %s\n", resp.AccessToken.Name)
 	fmt.Printf("  ID:      %s\n", resp.AccessToken.ID)
-	fmt.Printf("  Grove:   %s (%s)\n", grove.Name, grove.ID)
+	fmt.Printf("  Project:   %s (%s)\n", grove.Name, grove.ID)
 	fmt.Printf("  Scopes:  %s\n", strings.Join(resp.AccessToken.Scopes, ", "))
 	if resp.AccessToken.ExpiresAt != nil {
 		fmt.Printf("  Expires: %s\n", resp.AccessToken.ExpiresAt.Format(time.RFC3339))
@@ -231,7 +231,7 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 }
 
 func runTokenList(cmd *cobra.Command, args []string) error {
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return fmt.Errorf("failed to resolve grove path: %w", err)
 	}
@@ -255,20 +255,20 @@ func runTokenList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Optionally filter by grove
-	var groveID string
+	var projectID string
 	if tokenListGrove != "" {
-		grove, err := resolveGroveByNameOrID(ctx, client, tokenListGrove)
+		grove, err := resolveProjectByNameOrID(ctx, client, tokenListGrove)
 		if err != nil {
 			return fmt.Errorf("failed to resolve grove %q: %w", tokenListGrove, err)
 		}
-		groveID = grove.ID
+		projectID = grove.ID
 	}
 
 	items := resp.Items
-	if groveID != "" {
+	if projectID != "" {
 		var filtered []hubclient.TokenInfo
 		for _, t := range items {
-			if t.GroveID == groveID {
+			if t.ProjectID == projectID {
 				filtered = append(filtered, t)
 			}
 		}
@@ -318,7 +318,7 @@ func runTokenList(cmd *cobra.Command, args []string) error {
 func runTokenRevoke(cmd *cobra.Command, args []string) error {
 	tokenID := args[0]
 
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return fmt.Errorf("failed to resolve grove path: %w", err)
 	}
@@ -347,7 +347,7 @@ func runTokenRevoke(cmd *cobra.Command, args []string) error {
 func runTokenDelete(cmd *cobra.Command, args []string) error {
 	tokenID := args[0]
 
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return fmt.Errorf("failed to resolve grove path: %w", err)
 	}

@@ -38,7 +38,7 @@ type UserIdentity interface {
 // AgentIdentity represents an authenticated agent.
 type AgentIdentity interface {
 	Identity
-	GroveID() string
+	ProjectID() string
 	Scopes() []AgentTokenScope
 	HasScope(scope AgentTokenScope) bool
 	Ancestry() []string   // Ordered ancestor chain: [root_user, ..., parent_agent]
@@ -100,8 +100,8 @@ func NewScopedUserIdentity(user UserIdentity, groveID string, scopes []string) *
 	}
 }
 
-// ScopedGroveID returns the grove this identity is restricted to.
-func (s *ScopedUserIdentity) ScopedGroveID() string { return s.groveID }
+// ScopedProjectID returns the grove this identity is restricted to.
+func (s *ScopedUserIdentity) ScopedProjectID() string { return s.groveID }
 
 // ScopedScopes returns the action scopes this identity is limited to.
 func (s *ScopedUserIdentity) ScopedScopes() []string { return s.scopes }
@@ -127,8 +127,8 @@ func (a *agentIdentityWrapper) ID() string { return a.Subject }
 // Type returns the identity type ("agent").
 func (a *agentIdentityWrapper) Type() string { return "agent" }
 
-// GroveID returns the grove ID.
-func (a *agentIdentityWrapper) GroveID() string { return a.AgentTokenClaims.GroveID }
+// ProjectID returns the grove ID.
+func (a *agentIdentityWrapper) ProjectID() string { return a.AgentTokenClaims.ProjectID }
 
 // Scopes returns the agent scopes.
 func (a *agentIdentityWrapper) Scopes() []AgentTokenScope { return a.AgentTokenClaims.Scopes }

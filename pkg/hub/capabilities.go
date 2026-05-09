@@ -56,14 +56,14 @@ func agentResource(a *store.Agent) Resource {
 		ID:         a.ID,
 		OwnerID:    a.OwnerID,
 		ParentType: "grove",
-		ParentID:   a.GroveID,
+		ParentID:   a.ProjectID,
 		Labels:     a.Labels,
 		Ancestry:   a.Ancestry,
 	}
 }
 
-// groveResource constructs a Resource from a store.Grove for capability computation.
-func groveResource(g *store.Grove) Resource {
+// groveResource constructs a Resource from a store.Project for capability computation.
+func groveResource(g *store.Project) Resource {
 	return Resource{
 		Type:    "grove",
 		ID:      g.ID,
@@ -91,9 +91,9 @@ func groupResource(g *store.Group) Resource {
 	}
 	// Grove-scoped groups (e.g. "grove:<slug>:members") are children of the
 	// grove. Setting the parent lets grove owner/admin bypass apply.
-	if g.GroveID != "" {
+	if g.ProjectID != "" {
 		r.ParentType = "grove"
-		r.ParentID = g.GroveID
+		r.ParentID = g.ProjectID
 	}
 	return r
 }

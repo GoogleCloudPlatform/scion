@@ -126,10 +126,10 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 		return
 	}
 
-	groveSubs, err := nd.store.GetNotificationSubscriptionsByGroveScope(ctx, statusEvt.GroveID)
+	groveSubs, err := nd.store.GetNotificationSubscriptionsByProjectScope(ctx, statusEvt.ProjectID)
 	if err != nil {
 		nd.log.Error("Failed to get grove notification subscriptions",
-			"grove_id", statusEvt.GroveID, "error", err)
+			"grove_id", statusEvt.ProjectID, "error", err)
 		// Continue with agent-scoped only
 		groveSubs = nil
 	}
@@ -198,10 +198,10 @@ func (nd *NotificationDispatcher) handleDeletedEvent(evt Event) {
 		agentSubs = nil
 	}
 
-	groveSubs, err := nd.store.GetNotificationSubscriptionsByGroveScope(ctx, deletedEvt.GroveID)
+	groveSubs, err := nd.store.GetNotificationSubscriptionsByProjectScope(ctx, deletedEvt.ProjectID)
 	if err != nil {
 		nd.log.Error("Failed to get grove notification subscriptions for deleted event",
-			"groveID", deletedEvt.GroveID, "error", err)
+			"groveID", deletedEvt.ProjectID, "error", err)
 		groveSubs = nil
 	}
 
@@ -229,7 +229,7 @@ func (nd *NotificationDispatcher) handleDeletedEvent(evt Event) {
 		// Build a synthetic status event for storeAndDispatch
 		statusEvt := AgentStatusEvent{
 			AgentID:  deletedEvt.AgentID,
-			GroveID:  deletedEvt.GroveID,
+			ProjectID:  deletedEvt.ProjectID,
 			Phase:    "stopped",
 			Activity: "DELETED",
 		}
@@ -274,7 +274,7 @@ func (nd *NotificationDispatcher) storeAndDispatch(ctx context.Context, sub *sto
 		ID:             api.NewUUID(),
 		SubscriptionID: sub.ID,
 		AgentID:        evt.AgentID,
-		GroveID:        sub.GroveID,
+		ProjectID:        sub.ProjectID,
 		SubscriberType: sub.SubscriberType,
 		SubscriberID:   sub.SubscriberID,
 		Status:         strings.ToUpper(effectiveStatus),
@@ -314,10 +314,10 @@ func (nd *NotificationDispatcher) storeAndDispatch(ctx context.Context, sub *sto
 // structured message. The sender is the watched agent (agent:<slug>), and
 // the type is state-change or input-needed based on the notification status.
 func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *store.NotificationSubscription, notif *store.Notification, watchedAgentID, watchedSlug string) {
-	subscriber, err := nd.store.GetAgentBySlug(ctx, sub.GroveID, sub.SubscriberID)
+	subscriber, err := nd.store.GetAgentBySlug(ctx, sub.ProjectID, sub.SubscriberID)
 	if err != nil {
 		nd.log.Warn("Subscriber agent not found, skipping dispatch",
-			"subscriberID", sub.SubscriberID, "groveID", sub.GroveID, "error", err)
+			"subscriberID", sub.SubscriberID, "groveID", sub.ProjectID, "error", err)
 		return
 	}
 
@@ -364,7 +364,7 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 			logAttrs := []any{
 				"agent_id", subscriber.ID,
 				"agent_name", subscriber.Name,
-				"grove_id", subscriber.GroveID,
+				"grove_id", subscriber.ProjectID,
 				"notification_id", notif.ID,
 			}
 			logAttrs = append(logAttrs, structuredMsg.LogAttrs()...)
@@ -423,7 +423,7 @@ func (nd *NotificationDispatcher) dispatchToBroker(ctx context.Context, sub *sto
 	structuredMsg.RecipientID = sub.SubscriberID
 	structuredMsg.Status = strings.ToUpper(notif.Status)
 
-	if err := nd.brokerProxy.PublishUserMessage(ctx, sub.GroveID, sub.SubscriberID, structuredMsg); err != nil {
+	if err := nd.brokerProxy.PublishUserMessage(ctx, sub.ProjectID, sub.SubscriberID, structuredMsg); err != nil {
 		nd.log.Error("Failed to dispatch notification through broker",
 			"subscriberID", sub.SubscriberID, "notificationID", notif.ID, "error", err)
 	} else {
@@ -448,7 +448,7 @@ func (nd *NotificationDispatcher) createInboxMessage(ctx context.Context, sub *s
 
 	storeMsg := &store.Message{
 		ID:          api.NewUUID(),
-		GroveID:     notif.GroveID,
+		ProjectID:     notif.ProjectID,
 		Sender:      "agent:" + agent.Slug,
 		SenderID:    agent.ID,
 		Recipient:   "user:" + sub.SubscriberID,

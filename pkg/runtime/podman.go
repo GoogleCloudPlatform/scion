@@ -300,9 +300,9 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 				Template:        labels["scion.template"],
 				HarnessConfig:   labels["scion.harness_config"],
 				HarnessAuth:     labels["scion.harness_auth"],
-				Grove:           labels["scion.grove"],
-				GroveID:         labels["scion.grove_id"],
-				GrovePath:       labels["scion.grove_path"],
+				Project:         labels["scion.grove"],
+				ProjectID:       labels["scion.grove_id"],
+				ProjectPath:     labels["scion.grove_path"],
 				Runtime:         r.Name(),
 			})
 		}

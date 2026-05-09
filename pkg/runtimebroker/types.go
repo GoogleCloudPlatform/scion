@@ -48,7 +48,7 @@ type BrokerInfoResponse struct {
 	Version      string              `json:"version"`
 	Capabilities *BrokerCapabilities `json:"capabilities,omitempty"`
 	Profiles     []BrokerProfile     `json:"profiles,omitempty"`
-	Groves       []GroveInfo         `json:"groves,omitempty"`
+	Projects       []ProjectInfo         `json:"groves,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -68,10 +68,10 @@ type BrokerCapabilities struct {
 	Exec   bool `json:"exec"`
 }
 
-// GroveInfo is a summary of a grove registered on this broker.
-type GroveInfo struct {
-	GroveID    string `json:"groveId"`
-	GroveName  string `json:"groveName"`
+// ProjectInfo is a summary of a grove registered on this broker.
+type ProjectInfo struct {
+	ProjectID    string `json:"groveId"`
+	ProjectName  string `json:"groveName"`
 	GitRemote  string `json:"gitRemote,omitempty"`
 	AgentCount int    `json:"agentCount"`
 }
@@ -118,7 +118,7 @@ type AgentResponse struct {
 	Image                 string            `json:"image,omitempty"`       // Resolved container image
 	RuntimeType           string            `json:"runtime,omitempty"`     // Runtime type (docker, kubernetes, apple)
 	Profile               string            `json:"profile,omitempty"`     // Settings profile used
-	GroveID               string            `json:"groveId,omitempty"`
+	ProjectID               string            `json:"groveId,omitempty"`
 	UserID                string            `json:"userId,omitempty"`
 	Status                string            `json:"status"`
 	Phase                 string            `json:"phase,omitempty"`
@@ -168,7 +168,7 @@ type CreateAgentRequest struct {
 	ID          string             `json:"id,omitempty"`   // Hub UUID for status reporting
 	Slug        string             `json:"slug,omitempty"` // URL-safe identifier
 	Name        string             `json:"name"`
-	GroveID     string             `json:"groveId,omitempty"`
+	ProjectID     string             `json:"groveId,omitempty"`
 	UserID      string             `json:"userId,omitempty"`
 	Config      *CreateAgentConfig `json:"config,omitempty"`
 	HubEndpoint string             `json:"hubEndpoint,omitempty"`
@@ -194,17 +194,17 @@ type CreateAgentRequest struct {
 	// ProvisionOnly indicates the agent should be provisioned (dirs, worktree, templates)
 	// but not started. The container will not be launched.
 	ProvisionOnly bool `json:"provisionOnly,omitempty"`
-	// GrovePath is the local filesystem path to the grove on this runtime broker.
+	// ProjectPath is the local filesystem path to the grove on this runtime broker.
 	// This is provided by the Hub from the grove provider record.
-	GrovePath string `json:"grovePath,omitempty"`
+	ProjectPath string `json:"grovePath,omitempty"`
 	// WorkspaceStoragePath is the GCS storage path for bootstrapped workspaces.
-	// When set, the broker downloads the workspace from GCS instead of using GrovePath.
+	// When set, the broker downloads the workspace from GCS instead of using ProjectPath.
 	WorkspaceStoragePath string `json:"workspaceStoragePath,omitempty"`
 
-	// GroveSlug is the grove slug for hub-native groves.
+	// ProjectSlug is the grove slug for hub-native groves.
 	// When set, the broker creates the workspace at ~/.scion/groves/<slug>/
 	// instead of the default worktree-based path.
-	GroveSlug string `json:"groveSlug,omitempty"`
+	ProjectSlug string `json:"groveSlug,omitempty"`
 
 	// GatherEnv indicates the broker should evaluate env completeness before starting.
 	// If required keys are missing, the broker returns HTTP 202 with EnvRequirementsResponse
@@ -317,8 +317,8 @@ type MessageRequest struct {
 	// Interrupt the harness before sending.
 	Interrupt bool `json:"interrupt,omitempty"`
 
-	// GroveID is the grove ID for the target agent (used for message log labels).
-	GroveID string `json:"grove_id,omitempty"`
+	// ProjectID is the grove ID for the target agent (used for message log labels).
+	ProjectID string `json:"grove_id,omitempty"`
 }
 
 // ExecRequest is the request body for executing a command in an agent.
@@ -397,7 +397,7 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		Image:                 info.Image,
 		RuntimeType:           info.Runtime,
 		Profile:               info.Profile,
-		GroveID:               info.GroveID,
+		ProjectID:               info.ProjectID,
 		Status:                status,
 		Phase:                 phase,
 		Activity:              activity,

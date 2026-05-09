@@ -61,7 +61,7 @@ func TestHarnessConfigList(t *testing.T) {
 	}
 }
 
-func TestHarnessConfigListByGroveID(t *testing.T) {
+func TestHarnessConfigListByProjectID(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	now := time.Now()
@@ -78,7 +78,7 @@ func TestHarnessConfigListByGroveID(t *testing.T) {
 
 	// Create a grove-scoped harness config for grove "grove_abc"
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
-		ID: "hc_grove1", Slug: "grove-hc", Name: "Grove HC",
+		ID: "hc_grove1", Slug: "grove-hc", Name: "Project HC",
 		Harness: "gemini", Scope: "grove", ScopeID: "grove_abc",
 		Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
@@ -88,7 +88,7 @@ func TestHarnessConfigListByGroveID(t *testing.T) {
 
 	// Create a grove-scoped harness config for a different grove
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
-		ID: "hc_grove2", Slug: "other-grove-hc", Name: "Other Grove HC",
+		ID: "hc_grove2", Slug: "other-grove-hc", Name: "Other Project HC",
 		Harness: "claude", Scope: "grove", ScopeID: "grove_xyz",
 		Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
