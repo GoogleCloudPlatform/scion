@@ -271,6 +271,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 	if in.ProjectID != "" {
 		env["SCION_GROVE_ID"] = in.ProjectID
+		env["SCION_PROJECT_ID"] = in.ProjectID
+	}
+	if in.ProjectPath != "" {
+		env["SCION_GROVE_PATH"] = in.ProjectPath
+		env["SCION_PROJECT_PATH"] = in.ProjectPath
 	}
 
 	// 6. Broker identity

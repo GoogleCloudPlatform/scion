@@ -256,6 +256,9 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	var groveID string
 	if hubContext {
 		groveID = os.Getenv("SCION_GROVE_ID")
+		if groveID == "" {
+			groveID = os.Getenv("SCION_PROJECT_ID")
+		}
 	}
 	if groveID == "" {
 		groveID = settings.ProjectID

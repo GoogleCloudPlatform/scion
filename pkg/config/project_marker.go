@@ -143,7 +143,8 @@ func IsOldStyleNonGitProject(scionPath string) bool {
 func IsHubContext() bool {
 	return os.Getenv("SCION_HUB_ENDPOINT") != "" ||
 		os.Getenv("SCION_HUB_URL") != "" ||
-		os.Getenv("SCION_GROVE_ID") != ""
+		os.Getenv("SCION_GROVE_ID") != "" ||
+		os.Getenv("SCION_PROJECT_ID") != ""
 }
 
 // WriteWorkspaceMarker writes a minimal .scion marker file into a workspace

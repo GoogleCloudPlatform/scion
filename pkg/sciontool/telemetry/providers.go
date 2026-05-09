@@ -67,6 +67,10 @@ func buildResource(ctx context.Context) (*resource.Resource, error) {
 		attrs = append(attrs, resource.WithAttributes(
 			attribute.String("scion.grove.id", groveID),
 		))
+	} else if projectID := os.Getenv("SCION_PROJECT_ID"); projectID != "" {
+		attrs = append(attrs, resource.WithAttributes(
+			attribute.String("scion.grove.id", projectID),
+		))
 	}
 	if harness := os.Getenv("SCION_HARNESS"); harness != "" {
 		attrs = append(attrs, resource.WithAttributes(

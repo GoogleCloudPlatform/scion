@@ -91,6 +91,8 @@ func NewGCPExporter(config *Config) (*GCPExporter, error) {
 	}
 	if groveID := os.Getenv("SCION_GROVE_ID"); groveID != "" {
 		commonLabels["grove_id"] = groveID
+	} else if projectID := os.Getenv("SCION_PROJECT_ID"); projectID != "" {
+		commonLabels["grove_id"] = projectID
 	}
 
 	var loggerOpts []logging.LoggerOption

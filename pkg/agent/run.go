@@ -69,6 +69,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	projectID := ""
 	if opts.Env != nil {
 		projectID = opts.Env["SCION_GROVE_ID"]
+		if projectID == "" {
+			projectID = opts.Env["SCION_PROJECT_ID"]
+		}
 	}
 
 	// 0. Check if container already exists (scoped to this grove)
@@ -527,6 +530,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 	opts.Env["SCION_AGENT_NAME"] = opts.Name
 	opts.Env["SCION_GROVE"] = projectName
+	opts.Env["SCION_PROJECT"] = projectName
 	if template != "" {
 		opts.Env["SCION_TEMPLATE_NAME"] = template
 	} else {
@@ -889,6 +893,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			// In broker/hosted mode this comes from the SCION_GROVE_ID env var
 			// injected by the hub dispatcher.
 			if projectID := opts.Env["SCION_GROVE_ID"]; projectID != "" {
+				l["scion.grove_id"] = projectID
+			} else if projectID := opts.Env["SCION_PROJECT_ID"]; projectID != "" {
 				l["scion.grove_id"] = projectID
 			}
 			return l

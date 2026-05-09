@@ -942,6 +942,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	}
 	if agent.ProjectID != "" {
 		resolvedEnv["SCION_GROVE_ID"] = agent.ProjectID
+		resolvedEnv["SCION_PROJECT_ID"] = agent.ProjectID
 	}
 	if agent.Slug != "" {
 		resolvedEnv["SCION_AGENT_SLUG"] = agent.Slug
@@ -1100,6 +1101,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	}
 	if agent.ProjectID != "" {
 		resolvedEnv["SCION_GROVE_ID"] = agent.ProjectID
+		resolvedEnv["SCION_PROJECT_ID"] = agent.ProjectID
 	}
 	if agent.Slug != "" {
 		resolvedEnv["SCION_AGENT_SLUG"] = agent.Slug
