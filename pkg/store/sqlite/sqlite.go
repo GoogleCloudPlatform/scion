@@ -141,6 +141,8 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV45,
 		migrationV46,
 		migrationV47,
+		migrationV48,
+		migrationV49,
 	}
 
 	// Create migrations table if not exists
@@ -1145,6 +1147,33 @@ VALUES (
     'operation',
     'pending'
 );
+`
+
+const migrationV48 = `
+CREATE TABLE IF NOT EXISTS allow_list (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    note TEXT NOT NULL DEFAULT '',
+    added_by TEXT NOT NULL,
+    invite_id TEXT NOT NULL DEFAULT '',
+    created DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+`
+
+const migrationV49 = `
+CREATE TABLE IF NOT EXISTS invite_codes (
+    id TEXT PRIMARY KEY,
+    code_hash TEXT NOT NULL UNIQUE,
+    code_prefix TEXT NOT NULL,
+    max_uses INTEGER NOT NULL DEFAULT 1,
+    use_count INTEGER NOT NULL DEFAULT 0,
+    expires_at DATETIME NOT NULL,
+    revoked INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    created DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_invite_codes_expires ON invite_codes(expires_at);
 `
 
 // Helper functions for JSON marshaling/unmarshaling
@@ -3490,6 +3519,438 @@ func (s *SQLiteStore) ListUsers(ctx context.Context, filter store.UserFilter, op
 	}
 
 	return result, nil
+}
+
+// ============================================================================
+// Allow List Operations
+// ============================================================================
+
+func (s *SQLiteStore) AddAllowListEntry(ctx context.Context, entry *store.AllowListEntry) error {
+	if entry.Created.IsZero() {
+		entry.Created = time.Now()
+	}
+	entry.Email = strings.ToLower(entry.Email)
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO allow_list (id, email, note, added_by, invite_id, created)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, entry.ID, entry.Email, entry.Note, entry.AddedBy, entry.InviteID, entry.Created)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return store.ErrAlreadyExists
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *SQLiteStore) RemoveAllowListEntry(ctx context.Context, email string) error {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM allow_list WHERE email = ?", strings.ToLower(email))
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) GetAllowListEntry(ctx context.Context, email string) (*store.AllowListEntry, error) {
+	entry := &store.AllowListEntry{}
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, email, note, added_by, invite_id, created
+		FROM allow_list WHERE email = ?
+	`, strings.ToLower(email)).Scan(
+		&entry.ID, &entry.Email, &entry.Note, &entry.AddedBy, &entry.InviteID, &entry.Created,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
+	}
+	return entry, nil
+}
+
+func (s *SQLiteStore) ListAllowListEntries(ctx context.Context, opts store.ListOptions) (*store.ListResult[store.AllowListEntry], error) {
+	var totalCount int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM allow_list").Scan(&totalCount); err != nil {
+		return nil, err
+	}
+
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+
+	var conditions []string
+	var args []interface{}
+
+	if opts.Cursor != "" {
+		conditions = append(conditions, `(created < (SELECT created FROM allow_list WHERE id = ?)
+			OR (created = (SELECT created FROM allow_list WHERE id = ?) AND id < ?))`)
+		args = append(args, opts.Cursor, opts.Cursor, opts.Cursor)
+	}
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, email, note, added_by, invite_id, created
+		FROM allow_list %s ORDER BY created DESC, id DESC LIMIT ?
+	`, whereClause)
+	args = append(args, limit+1)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []store.AllowListEntry
+	for rows.Next() {
+		var entry store.AllowListEntry
+		if err := rows.Scan(&entry.ID, &entry.Email, &entry.Note, &entry.AddedBy, &entry.InviteID, &entry.Created); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if entries == nil {
+		entries = []store.AllowListEntry{}
+	}
+
+	var nextCursor string
+	if len(entries) > limit {
+		nextCursor = entries[limit-1].ID
+		entries = entries[:limit]
+	}
+
+	return &store.ListResult[store.AllowListEntry]{
+		Items:      entries,
+		TotalCount: totalCount,
+		NextCursor: nextCursor,
+	}, nil
+}
+
+func (s *SQLiteStore) IsEmailAllowListed(ctx context.Context, email string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM allow_list WHERE email = ?", strings.ToLower(email)).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (s *SQLiteStore) BulkAddAllowListEntries(ctx context.Context, entries []*store.AllowListEntry) (int, int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT OR IGNORE INTO allow_list (id, email, note, added_by, invite_id, created)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer stmt.Close()
+
+	added := 0
+	skipped := 0
+	now := time.Now()
+
+	for _, entry := range entries {
+		entry.Email = strings.ToLower(entry.Email)
+		if entry.Created.IsZero() {
+			entry.Created = now
+		}
+		result, err := stmt.ExecContext(ctx, entry.ID, entry.Email, entry.Note, entry.AddedBy, entry.InviteID, entry.Created)
+		if err != nil {
+			return added, skipped, err
+		}
+		rows, _ := result.RowsAffected()
+		if rows > 0 {
+			added++
+		} else {
+			skipped++
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return added, skipped, nil
+}
+
+func (s *SQLiteStore) ListEmailDomains(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT SUBSTR(email, INSTR(email, '@') + 1) AS domain
+		FROM users
+		WHERE email LIKE '%@%'
+		ORDER BY domain
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var domains []string
+	for rows.Next() {
+		var domain string
+		if err := rows.Scan(&domain); err != nil {
+			return nil, err
+		}
+		domains = append(domains, domain)
+	}
+	return domains, rows.Err()
+}
+
+// ============================================================================
+// Invite Code Operations
+// ============================================================================
+
+func (s *SQLiteStore) CreateInviteCode(ctx context.Context, invite *store.InviteCode) error {
+	if invite.Created.IsZero() {
+		invite.Created = time.Now()
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO invite_codes (id, code_hash, code_prefix, max_uses, use_count, expires_at, revoked, created_by, note, created)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, invite.ID, invite.CodeHash, invite.CodePrefix, invite.MaxUses, invite.UseCount,
+		invite.ExpiresAt, invite.Revoked, invite.CreatedBy, invite.Note, invite.Created)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return store.ErrAlreadyExists
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *SQLiteStore) GetInviteCodeByHash(ctx context.Context, codeHash string) (*store.InviteCode, error) {
+	invite := &store.InviteCode{}
+	var revoked int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, code_hash, code_prefix, max_uses, use_count, expires_at, revoked, created_by, note, created
+		FROM invite_codes WHERE code_hash = ?
+	`, codeHash).Scan(
+		&invite.ID, &invite.CodeHash, &invite.CodePrefix, &invite.MaxUses, &invite.UseCount,
+		&invite.ExpiresAt, &revoked, &invite.CreatedBy, &invite.Note, &invite.Created,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
+	}
+	invite.Revoked = revoked != 0
+	return invite, nil
+}
+
+func (s *SQLiteStore) GetInviteCode(ctx context.Context, id string) (*store.InviteCode, error) {
+	invite := &store.InviteCode{}
+	var revoked int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, code_hash, code_prefix, max_uses, use_count, expires_at, revoked, created_by, note, created
+		FROM invite_codes WHERE id = ?
+	`, id).Scan(
+		&invite.ID, &invite.CodeHash, &invite.CodePrefix, &invite.MaxUses, &invite.UseCount,
+		&invite.ExpiresAt, &revoked, &invite.CreatedBy, &invite.Note, &invite.Created,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
+	}
+	invite.Revoked = revoked != 0
+	return invite, nil
+}
+
+func (s *SQLiteStore) ListInviteCodes(ctx context.Context, opts store.ListOptions) (*store.ListResult[store.InviteCode], error) {
+	var totalCount int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM invite_codes").Scan(&totalCount); err != nil {
+		return nil, err
+	}
+
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+
+	var conditions []string
+	var args []interface{}
+
+	if opts.Cursor != "" {
+		conditions = append(conditions, `(created < (SELECT created FROM invite_codes WHERE id = ?)
+			OR (created = (SELECT created FROM invite_codes WHERE id = ?) AND id < ?))`)
+		args = append(args, opts.Cursor, opts.Cursor, opts.Cursor)
+	}
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, code_prefix, max_uses, use_count, expires_at, revoked, created_by, note, created
+		FROM invite_codes %s ORDER BY created DESC, id DESC LIMIT ?
+	`, whereClause)
+	args = append(args, limit+1)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var invites []store.InviteCode
+	for rows.Next() {
+		var invite store.InviteCode
+		var revoked int
+		if err := rows.Scan(
+			&invite.ID, &invite.CodePrefix, &invite.MaxUses, &invite.UseCount,
+			&invite.ExpiresAt, &revoked, &invite.CreatedBy, &invite.Note, &invite.Created,
+		); err != nil {
+			return nil, err
+		}
+		invite.Revoked = revoked != 0
+		invites = append(invites, invite)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if invites == nil {
+		invites = []store.InviteCode{}
+	}
+
+	var nextCursor string
+	if len(invites) > limit {
+		nextCursor = invites[limit-1].ID
+		invites = invites[:limit]
+	}
+
+	return &store.ListResult[store.InviteCode]{
+		Items:      invites,
+		TotalCount: totalCount,
+		NextCursor: nextCursor,
+	}, nil
+}
+
+func (s *SQLiteStore) IncrementInviteUseCount(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE invite_codes SET use_count = use_count + 1
+		WHERE id = ? AND revoked = 0 AND expires_at > datetime('now')
+		  AND (max_uses = 0 OR use_count < max_uses)
+	`, id)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) RevokeInviteCode(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, "UPDATE invite_codes SET revoked = 1 WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) DeleteInviteCode(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM invite_codes WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) GetInviteStats(ctx context.Context) (*store.InviteStats, error) {
+	stats := &store.InviteStats{}
+
+	// Count pending (active, not expired, not exhausted) invites
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM invite_codes
+		WHERE revoked = 0
+		  AND expires_at > datetime('now')
+		  AND (max_uses = 0 OR use_count < max_uses)
+	`).Scan(&stats.PendingInvites)
+	if err != nil {
+		return nil, err
+	}
+
+	// Total redemptions across all invites
+	err = s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(use_count), 0) FROM invite_codes
+	`).Scan(&stats.TotalRedemptions)
+	if err != nil {
+		return nil, err
+	}
+
+	// Allow list count
+	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM allow_list`).Scan(&stats.AllowListCount)
+	if err != nil {
+		return nil, err
+	}
+
+	// Recent invites that have been redeemed (use_count > 0), ordered by most recently created
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, code_prefix, use_count, max_uses, expires_at, note, created
+		FROM invite_codes
+		WHERE use_count > 0
+		ORDER BY created DESC
+		LIMIT 10
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var info store.InviteCodeInfo
+		if err := rows.Scan(&info.ID, &info.CodePrefix, &info.UseCount, &info.MaxUses, &info.ExpiresAt, &info.Note, &info.Created); err != nil {
+			return nil, err
+		}
+		stats.RecentRedemptions = append(stats.RecentRedemptions, info)
+	}
+	if stats.RecentRedemptions == nil {
+		stats.RecentRedemptions = []store.InviteCodeInfo{}
+	}
+
+	return stats, rows.Err()
 }
 
 // ============================================================================

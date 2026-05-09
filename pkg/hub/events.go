@@ -38,6 +38,8 @@ type EventPublisher interface {
 	PublishBrokerStatus(ctx context.Context, brokerID, status string)
 	PublishNotification(ctx context.Context, notif *store.Notification)
 	PublishUserMessage(ctx context.Context, msg *store.Message)
+	PublishAllowListChanged(ctx context.Context, action string, email string)
+	PublishInviteChanged(ctx context.Context, action string, inviteID string, codePrefix string)
 	Close()
 }
 
@@ -56,6 +58,8 @@ func (noopEventPublisher) PublishBrokerDisconnected(_ context.Context, _ string,
 func (noopEventPublisher) PublishBrokerStatus(_ context.Context, _, _ string)                {}
 func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notification)      {}
 func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message)            {}
+func (noopEventPublisher) PublishAllowListChanged(_ context.Context, _, _ string)             {}
+func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _, _ string)             {}
 func (noopEventPublisher) Close()                                                            {}
 
 // Event is a published event with a subject and JSON-encoded data.
@@ -171,6 +175,19 @@ type NotificationCreatedEvent struct {
 	Status    string `json:"status"`
 	Message   string `json:"message"`
 	CreatedAt string `json:"createdAt"`
+}
+
+// AllowListChangedEvent is published when the allow list is modified.
+type AllowListChangedEvent struct {
+	Action string `json:"action"` // "added", "removed", "bulk_added"
+	Email  string `json:"email,omitempty"`
+}
+
+// InviteChangedEvent is published when an invite code is created, redeemed, revoked, or deleted.
+type InviteChangedEvent struct {
+	Action     string `json:"action"` // "created", "redeemed", "revoked", "deleted"
+	InviteID   string `json:"inviteId"`
+	CodePrefix string `json:"codePrefix,omitempty"`
 }
 
 // ChannelEventPublisher is an in-process event publisher that fans out events
@@ -413,6 +430,25 @@ func (p *ChannelEventPublisher) PublishNotification(_ context.Context, notif *st
 		CreatedAt: notif.CreatedAt.Format("2006-01-02T15:04:05.000Z"),
 	}
 	p.publish("notification.created", evt)
+}
+
+// PublishAllowListChanged publishes an allow list change event.
+// Email is intentionally omitted from the event to avoid PII leak via SSE.
+func (p *ChannelEventPublisher) PublishAllowListChanged(_ context.Context, action, _ string) {
+	evt := AllowListChangedEvent{
+		Action: action,
+	}
+	p.publish("admin.allowlist.changed", evt)
+}
+
+// PublishInviteChanged publishes an invite code change event.
+func (p *ChannelEventPublisher) PublishInviteChanged(_ context.Context, action, inviteID, codePrefix string) {
+	evt := InviteChangedEvent{
+		Action:     action,
+		InviteID:   inviteID,
+		CodePrefix: codePrefix,
+	}
+	p.publish("admin.invite.changed", evt)
 }
 
 // PublishUserMessage publishes a user.message event when a message involving

@@ -86,6 +86,9 @@ type ServerConfig struct {
 	// AdminEmails is a list of email addresses that should be auto-promoted to admin role.
 	// Useful for bootstrapping the first admin user.
 	AdminEmails []string
+	// UserAccessMode controls how user access is evaluated at login time.
+	// Values: "open" (default), "domain_restricted", "invite_only".
+	UserAccessMode string
 	// BrokerAuthConfig holds configuration for Runtime Broker HMAC authentication.
 	BrokerAuthConfig BrokerAuthConfig
 	// HubEndpoint is the public endpoint URL for this Hub (used in broker join responses).
@@ -485,6 +488,7 @@ type Server struct {
 	agentTokenService      *AgentTokenService      // Agent JWT token service
 	userTokenService       *UserTokenService       // User JWT token service
 	uatService             *UserAccessTokenService // User access token service
+	inviteService          *InviteService          // Invite code service
 	oauthService           *OAuthService           // OAuth service for CLI authentication
 	authConfig             AuthConfig              // Unified auth configuration
 	brokerAuthService      *BrokerAuthService      // Broker HMAC authentication service
@@ -626,6 +630,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Initialize user access token service
 	srv.uatService = NewUserAccessTokenService(s, s, s)
 
+	// Initialize invite code service
+	srv.inviteService = NewInviteService(s, s)
+
 	// Initialize OAuth service if configured
 	if cfg.OAuthConfig.IsConfigured() {
 		srv.oauthService = NewOAuthService(cfg.OAuthConfig)
@@ -644,10 +651,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		slog.Info("Authorized domains", "domains", strings.Join(cfg.AuthorizedDomains, ", "))
 	}
 
+	// Initialize audit logger (used by broker auth and invite system)
+	srv.auditLogger = NewLogAuditLogger("[Hub Audit]", cfg.Debug)
+
 	// Initialize broker auth service if enabled
 	if cfg.BrokerAuthConfig.Enabled {
 		srv.brokerAuthService = NewBrokerAuthService(cfg.BrokerAuthConfig, s)
-		srv.auditLogger = NewLogAuditLogger("[Hub Audit]", cfg.Debug)
 		srv.metrics = NewBrokerAuthMetrics()
 		slog.Info("Broker HMAC authentication enabled")
 	}
@@ -1988,6 +1997,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/auth/providers", s.handleCLIAuthProviders)
 
 	// CLI OAuth endpoints (unauthenticated - used for login)
+	s.mux.HandleFunc("/api/v1/auth/invite/redeem", s.handleInviteRedeem)
 	s.mux.HandleFunc("/api/v1/auth/cli/authorize", s.handleCLIAuthAuthorize)
 	s.mux.HandleFunc("/api/v1/auth/cli/token", s.handleCLIAuthToken)
 	s.mux.HandleFunc("/api/v1/auth/cli/device", s.handleCLIDeviceAuthorize)
@@ -2046,6 +2056,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/maintenance/migrations/", s.handleAdminMaintenanceMigrations)
 	s.mux.HandleFunc("/api/v1/admin/maintenance/check-updates", s.handleCheckForUpdates)
 	s.mux.HandleFunc("/api/v1/admin/scheduler", s.handleAdminScheduler)
+	s.mux.HandleFunc("/api/v1/admin/allow-list", s.handleAdminAllowList)
+	s.mux.HandleFunc("/api/v1/admin/allow-list/", s.handleAdminAllowListByEmail)
+	s.mux.HandleFunc("/api/v1/admin/invites", s.handleAdminInvites)
+	s.mux.HandleFunc("/api/v1/admin/invites/", s.handleAdminInviteByID)
 	s.mux.HandleFunc("/api/v1/admin/server-config", s.handleAdminServerConfig)
 	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.handleAdminGCPQuota)
 

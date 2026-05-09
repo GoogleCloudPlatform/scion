@@ -126,6 +126,7 @@ interface RouteConfig {
 
 const ROUTES: RouteConfig[] = [
   { pattern: /^\/login$/, tag: 'scion-login-page', load: () => import('../components/pages/login.js') },
+  { pattern: /^\/invite$/, tag: 'scion-page-invite', load: () => import('../components/pages/invite.js') },
   { pattern: /^\/$/, tag: 'scion-page-home', load: () => import('../components/pages/home.js') },
   { pattern: /^\/groves$/, tag: 'scion-page-groves', load: () => import('../components/pages/groves.js') },
   { pattern: /^\/agents$/, tag: 'scion-page-agents', load: () => import('../components/pages/agents.js') },
@@ -158,7 +159,7 @@ const ROUTES: RouteConfig[] = [
 /**
  * Routes that render without the app shell (full-page layout)
  */
-const STANDALONE_ROUTES = new Set(['scion-login-page']);
+const STANDALONE_ROUTES = new Set(['scion-login-page', 'scion-page-invite']);
 
 /**
  * Routes that render inside the profile shell instead of the main app shell
@@ -348,7 +349,7 @@ async function renderRoute(path: string): Promise<void> {
     activeShell = null;
     const page = document.createElement(tag);
     appContainer.appendChild(page);
-    setDocumentTitle(tag === 'scion-login-page' ? 'Login' : 'Page Not Found');
+    setDocumentTitle(tag === 'scion-login-page' ? 'Login' : tag === 'scion-page-invite' ? 'Invite' : 'Page Not Found');
   } else if (activeShell) {
     // Reuse existing shell — just update properties and swap page content
     const shell = activeShell.element as HTMLElement & {

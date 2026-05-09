@@ -229,15 +229,20 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if user's email domain is authorized.
-	if !isEmailAuthorized(userInfo.Email, s.config.AuthorizedDomains, s.config.AdminEmails) {
+	// Check if user is authorized (admin bypass, domain check, access mode)
+	ctx := r.Context()
+	if !s.isUserAuthorized(ctx, userInfo.Email) {
+		reason := "not_on_allow_list"
+		if s.config.UserAccessMode != "invite_only" {
+			reason = "domain_not_authorized"
+		}
+		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, userInfo.Email, reason)
 		writeError(w, http.StatusForbidden, "unauthorized_domain",
 			"your email domain is not authorized", nil)
 		return
 	}
 
 	// Find or create user
-	ctx := r.Context()
 	user, err := s.store.GetUserByEmail(ctx, userInfo.Email)
 	if err != nil {
 		// Create new user
@@ -366,6 +371,18 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 		slog.Error("OAuth code exchange failed", "provider", provider, "error", err)
 		writeError(w, http.StatusBadRequest, "oauth_error",
 			"failed to exchange authorization code", nil)
+		return
+	}
+
+	// Check if user is authorized (admin bypass, domain check, access mode)
+	if !s.isUserAuthorized(ctx, userInfo.Email) {
+		reason := "not_on_allow_list"
+		if s.config.UserAccessMode != "invite_only" {
+			reason = "domain_not_authorized"
+		}
+		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, userInfo.Email, reason)
+		writeError(w, http.StatusForbidden, "unauthorized_domain",
+			"your email domain is not authorized", nil)
 		return
 	}
 
@@ -891,8 +908,13 @@ func (s *Server) handleCLIAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if user's email domain is authorized
-	if !isEmailAuthorized(userInfo.Email, s.config.AuthorizedDomains, s.config.AdminEmails) {
+	// Check if user is authorized (admin bypass, domain check, access mode)
+	if !s.isUserAuthorized(ctx, userInfo.Email) {
+		reason := "not_on_allow_list"
+		if s.config.UserAccessMode != "invite_only" {
+			reason = "domain_not_authorized"
+		}
+		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, userInfo.Email, reason)
 		writeError(w, http.StatusForbidden, "unauthorized_domain",
 			"your email domain is not authorized", nil)
 		return
@@ -1142,8 +1164,13 @@ func (s *Server) getDeviceFlowUserInfo(ctx context.Context, provider, accessToke
 func (s *Server) completeOAuthLogin(w http.ResponseWriter, r *http.Request, userInfo *OAuthUserInfo) {
 	ctx := r.Context()
 
-	// Check if user's email domain is authorized
-	if !isEmailAuthorized(userInfo.Email, s.config.AuthorizedDomains, s.config.AdminEmails) {
+	// Check if user is authorized (admin bypass, domain check, access mode)
+	if !s.isUserAuthorized(ctx, userInfo.Email) {
+		reason := "not_on_allow_list"
+		if s.config.UserAccessMode != "invite_only" {
+			reason = "domain_not_authorized"
+		}
+		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, userInfo.Email, reason)
 		writeError(w, http.StatusForbidden, "unauthorized_domain",
 			"your email domain is not authorized", nil)
 		return
@@ -1218,6 +1245,78 @@ func generateID() string {
 	return uuid.New().String()
 }
 
+// isUserAuthorized checks whether a user is permitted to log in based on
+// admin_emails, authorized_domains, and user_access_mode (allow list).
+func (s *Server) isUserAuthorized(ctx context.Context, email string) bool {
+	return checkUserAuthorized(ctx, email, s.config.AuthorizedDomains, s.config.AdminEmails, s.config.UserAccessMode, s.store)
+}
+
+// checkUserAuthorized is a package-level authorization check used by both
+// Server and WebServer to enforce admin bypass, domain, and access mode rules.
+func checkUserAuthorized(ctx context.Context, email string, authorizedDomains, adminEmails []string, accessMode string, st store.Store) bool {
+	emailLower := strings.ToLower(email)
+
+	// Admin emails always bypass all checks
+	for _, admin := range adminEmails {
+		if strings.ToLower(admin) == emailLower {
+			return true
+		}
+	}
+
+	// Domain check (applies when authorized_domains is configured)
+	if len(authorizedDomains) > 0 {
+		if !isEmailInDomains(emailLower, authorizedDomains) {
+			return false
+		}
+	}
+
+	// Access mode check
+	switch accessMode {
+	case "invite_only":
+		if st == nil {
+			slog.Error("allow list check failed: store is nil", "email", emailLower)
+			return false
+		}
+		allowed, err := st.IsEmailAllowListed(ctx, emailLower)
+		if err != nil {
+			slog.Error("allow list check failed", "email", emailLower, "error", err)
+			return false
+		}
+		return allowed
+	case "domain_restricted":
+		if len(authorizedDomains) == 0 {
+			slog.Warn("user_access_mode is domain_restricted but no authorized_domains configured; all users will be blocked",
+				"email", emailLower)
+		}
+		return len(authorizedDomains) > 0
+	default: // "open" or empty
+		return true
+	}
+}
+
+// isEmailInDomains checks if the email's domain matches any authorized domain.
+func isEmailInDomains(emailLower string, authorizedDomains []string) bool {
+	atIndex := strings.LastIndex(emailLower, "@")
+	if atIndex == -1 {
+		return false
+	}
+	domain := emailLower[atIndex+1:]
+
+	for _, authorized := range authorizedDomains {
+		authorizedLower := strings.ToLower(authorized)
+		if authorizedLower == domain {
+			return true
+		}
+		if strings.HasPrefix(authorizedLower, "*.") {
+			suffix := authorizedLower[1:]
+			if strings.HasSuffix(domain, suffix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // isEmailAuthorized checks if an email address is from an authorized domain.
 // If authorizedDomains is empty, all emails are allowed.
 // Bootstrap admin emails (from AdminEmails config) bypass the domain check.
@@ -1277,4 +1376,78 @@ func determineUserRole(email string, adminEmails []string) string {
 // (s *Server) getUserRole is a convenience method to determine role using server config.
 func (s *Server) getUserRole(email string) string {
 	return determineUserRole(email, s.config.AdminEmails)
+}
+
+// handleInviteRedeem handles POST /api/v1/auth/invite/redeem.
+func (s *Server) handleInviteRedeem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
+		return
+	}
+
+	var req struct {
+		Code string `json:"code"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", nil)
+		return
+	}
+
+	if req.Code == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "code is required", nil)
+		return
+	}
+
+	if s.inviteService == nil {
+		InternalError(w)
+		return
+	}
+
+	// Check authorized domains before allowing redemption
+	if len(s.config.AuthorizedDomains) > 0 {
+		if !isEmailInDomains(strings.ToLower(user.Email()), s.config.AuthorizedDomains) {
+			writeError(w, http.StatusForbidden, "unauthorized_domain",
+				"your email domain is not authorized to join this hub", nil)
+			return
+		}
+	}
+
+	invite, err := s.inviteService.RedeemCode(r.Context(), req.Code, user.Email(), user.ID())
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInviteInvalidFormat):
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid invite code format", nil)
+		case errors.Is(err, ErrInviteNotFound),
+			errors.Is(err, ErrInviteExpired),
+			errors.Is(err, ErrInviteRevoked),
+			errors.Is(err, ErrInviteExhausted):
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, "invite code not found or no longer valid", nil)
+		default:
+			slog.Error("invite redemption failed", "error", err)
+			InternalError(w)
+		}
+		return
+	}
+
+	slog.Info("invite code redeemed",
+		"invite_id", invite.ID,
+		"email", user.Email(),
+	)
+	LogInviteAudit(r.Context(), s.auditLogger, InviteAuditInviteRedeemed, user.Email(), invite.ID, user.ID(), user.Email(), nil)
+	s.events.PublishInviteChanged(r.Context(), "redeemed", invite.ID, invite.CodePrefix)
+	s.events.PublishAllowListChanged(r.Context(), "added", user.Email())
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"message": "You have been added to the hub.",
+		"user": map[string]string{
+			"id":    user.ID(),
+			"email": user.Email(),
+		},
+	})
 }

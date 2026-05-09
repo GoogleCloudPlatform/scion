@@ -75,6 +75,7 @@ interface V1AuthConfig {
   dev_token?: string;
   dev_token_file?: string;
   authorized_domains?: string[];
+  user_access_mode?: string;
 }
 
 interface V1OAuthProviderConfig {
@@ -321,6 +322,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private authDevMode = false;
   @state() private authDevToken = '';
   @state() private authAuthorizedDomains = '';
+  @state() private authUserAccessMode = 'open';
 
   // Storage
   @state() private storageProvider = '';
@@ -754,6 +756,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.authDevMode = srv.auth.dev_mode || false;
         this.authDevToken = srv.auth.dev_token || '';
         this.authAuthorizedDomains = (srv.auth.authorized_domains || []).join(', ');
+        this.authUserAccessMode = srv.auth.user_access_mode || 'open';
       }
 
       // Storage
@@ -891,6 +894,9 @@ export class ScionPageAdminServerConfig extends LitElement {
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
+    }
+    if (this.authUserAccessMode) {
+      auth.user_access_mode = this.authUserAccessMode;
     }
     server.auth = auth;
 
@@ -1701,6 +1707,36 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private renderAuthTab() {
     return html`
+      <div class="section">
+        <h3 class="section-title">User Access Mode</h3>
+        <div class="form-grid">
+          <div class="form-field full-width">
+            <label>Access Mode</label>
+            <span class="hint">Controls who can log in to this hub. Takes effect immediately (hot-reloaded).</span>
+            <sl-select
+              value=${this.authUserAccessMode}
+              @sl-change=${(e: Event) => {
+                this.authUserAccessMode = (e.target as HTMLSelectElement).value;
+              }}
+            >
+              <sl-option value="open">Open (all authenticated users)</sl-option>
+              <sl-option value="domain_restricted">Domain Restricted (authorized domains only)</sl-option>
+              <sl-option value="invite_only">Invite Only (allow list + authorized domains)</sl-option>
+            </sl-select>
+            ${this.authUserAccessMode === 'invite_only'
+              ? html`<sl-alert variant="warning" open style="margin-top: 0.75rem">
+                  <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                  Only emails on the <strong>Allow List</strong> (and admin emails) will be able to log in.
+                  Manage the allow list from the <a href="/admin/users">Users page</a>.
+                  ${this.authAuthorizedDomains
+                    ? html`<br/><br/>Authorized domains are also enforced — users must match both the allow list <em>and</em> an authorized domain.`
+                    : ''}
+                </sl-alert>`
+              : ''}
+          </div>
+        </div>
+      </div>
+
       <div class="section">
         <h3 class="section-title">Development Auth</h3>
         <div class="form-grid">

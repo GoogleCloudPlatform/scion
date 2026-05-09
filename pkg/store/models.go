@@ -491,6 +491,69 @@ const (
 )
 
 // =============================================================================
+// Allow List (User Access Control)
+// =============================================================================
+
+// AllowListEntry represents an email address permitted to log in when invite_only mode is active.
+type AllowListEntry struct {
+	ID       string    `json:"id"`
+	Email    string    `json:"email"`
+	Note     string    `json:"note"`
+	AddedBy  string    `json:"addedBy"`
+	InviteID string    `json:"inviteId,omitempty"`
+	Created  time.Time `json:"created"`
+}
+
+// =============================================================================
+// Invite Codes
+// =============================================================================
+
+// InviteCode represents a time-limited, shareable token that allows a new user to join the hub.
+type InviteCode struct {
+	ID         string    `json:"id"`
+	CodeHash   string    `json:"-"`
+	CodePrefix string    `json:"codePrefix"`
+	MaxUses    int       `json:"maxUses"`
+	UseCount   int       `json:"useCount"`
+	ExpiresAt  time.Time `json:"expiresAt"`
+	Revoked    bool      `json:"revoked"`
+	CreatedBy  string    `json:"createdBy"`
+	Note       string    `json:"note"`
+	Created    time.Time `json:"created"`
+}
+
+// InviteCodePrefix distinguishes invite codes from other token types.
+const InviteCodePrefix = "scion_inv_"
+
+// InviteCodeRandomBytes is the number of random bytes in an invite code.
+const InviteCodeRandomBytes = 24
+
+// InviteCodeMaxExpiry is the maximum expiry duration for an invite code (5 days).
+const InviteCodeMaxExpiry = 5 * 24 * time.Hour
+
+// InviteCodePrefixLength is the length of the visible prefix for identification.
+const InviteCodePrefixLength = 8
+
+// InviteStats contains aggregate statistics about invite codes and the allow list.
+type InviteStats struct {
+	PendingInvites     int              `json:"pendingInvites"`
+	TotalRedemptions   int              `json:"totalRedemptions"`
+	AllowListCount     int              `json:"allowListCount"`
+	RecentRedemptions  []InviteCodeInfo `json:"recentRedemptions"`
+}
+
+// InviteCodeInfo is a lightweight representation of an invite code for stats.
+type InviteCodeInfo struct {
+	ID         string    `json:"id"`
+	CodePrefix string    `json:"codePrefix"`
+	UseCount   int       `json:"useCount"`
+	MaxUses    int       `json:"maxUses"`
+	ExpiresAt  time.Time `json:"expiresAt"`
+	Note       string    `json:"note"`
+	Created    time.Time `json:"created"`
+}
+
+// =============================================================================
 // Broker Authentication (Runtime Broker HMAC Authentication)
 // =============================================================================
 

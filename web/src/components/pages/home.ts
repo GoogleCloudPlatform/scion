@@ -29,6 +29,21 @@ import '../shared/status-badge.js';
 import { stateManager } from '../../client/state.js';
 import { apiFetch } from '../../client/api.js';
 
+interface InviteStats {
+  pendingInvites: number;
+  totalRedemptions: number;
+  allowListCount: number;
+  recentRedemptions: {
+    id: string;
+    codePrefix: string;
+    useCount: number;
+    maxUses: number;
+    expiresAt: string;
+    note: string;
+    created: string;
+  }[];
+}
+
 @customElement('scion-page-home')
 export class ScionPageHome extends LitElement {
   /**
@@ -42,6 +57,9 @@ export class ScionPageHome extends LitElement {
 
   @state()
   private groves: Grove[] = [];
+
+  @state()
+  private inviteStats: InviteStats | null = null;
 
   private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
   private boundOnGrovesUpdated = this.onGrovesUpdated.bind(this);
@@ -84,9 +102,11 @@ export class ScionPageHome extends LitElement {
 
   private async loadData(): Promise<void> {
     try {
-      const [agentsResp, grovesResp] = await Promise.all([
+      const isAdmin = this.pageData?.user?.role === 'admin';
+      const [agentsResp, grovesResp, inviteStatsResp] = await Promise.all([
         apiFetch('/api/v1/agents'),
-        apiFetch('/api/v1/groves')
+        apiFetch('/api/v1/groves'),
+        isAdmin ? apiFetch('/api/v1/admin/invites/stats').catch(() => null) : Promise.resolve(null),
       ]);
 
       if (!this.isConnected || stateManager.currentScope?.type !== 'dashboard') return;
@@ -105,6 +125,12 @@ export class ScionPageHome extends LitElement {
         const groves = Array.isArray(data) ? data : data.groves || [];
         this.groves = groves;
         stateManager.seedGroves(groves);
+      }
+
+      if (inviteStatsResp?.ok) {
+        const stats = (await inviteStatsResp.json()) as InviteStats;
+        if (!this.isConnected || stateManager.currentScope?.type !== 'dashboard') return;
+        this.inviteStats = stats;
       }
     } catch (err) {
       console.error('Failed to load data for dashboard:', err);
@@ -331,16 +357,14 @@ export class ScionPageHome extends LitElement {
           <div class="stat-change">Project workspaces</div>
         </div>
         <div class="stat-card">
-          <h3>Tasks Completed</h3>
-          <div class="stat-value">--</div>
-          <div class="stat-change">This week</div>
+          <h3>Pending Invites</h3>
+          <div class="stat-value">${this.inviteStats?.pendingInvites ?? '--'}</div>
+          <div class="stat-change">${this.inviteStats ? `${this.inviteStats.totalRedemptions} total redemptions` : ''}</div>
         </div>
         <div class="stat-card">
-          <h3>System Status</h3>
-          <div class="stat-value">
-            <scion-status-badge status="healthy" size="large" label="Healthy"></scion-status-badge>
-          </div>
-          <div class="stat-change">All systems operational</div>
+          <h3>Allow List</h3>
+          <div class="stat-value">${this.inviteStats?.allowListCount ?? '--'}</div>
+          <div class="stat-change">Authorized users</div>
         </div>
       </div>
 
@@ -387,19 +411,49 @@ export class ScionPageHome extends LitElement {
       <div class="activity-section">
         <h2 class="section-title">Recent Activity</h2>
         <div class="activity-list">
-          <div class="empty-state">
-            <sl-icon name="clock-history"></sl-icon>
-            <p>No recent activity to display.<br />Start by creating your first agent.</p>
-            <a href="/agents/new" style="text-decoration: none; margin-top: 1rem; display: inline-block;">
-              <sl-button variant="primary">
-                <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-                Create Agent
-              </sl-button>
-            </a>
-          </div>
+          ${this.inviteStats && this.inviteStats.recentRedemptions.length > 0
+            ? this.inviteStats.recentRedemptions.map(r => html`
+                <div class="activity-item">
+                  <div class="activity-icon">
+                    <sl-icon name="person-plus"></sl-icon>
+                  </div>
+                  <div class="activity-content">
+                    <p class="activity-title">Invite <code>${r.codePrefix}...</code> redeemed (${r.useCount}/${r.maxUses > 0 ? r.maxUses : '∞'} uses)</p>
+                    <p class="activity-time">${r.note ? r.note + ' • ' : ''}${this.formatRelativeTime(r.created)}</p>
+                  </div>
+                </div>
+              `)
+            : html`
+                <div class="empty-state">
+                  <sl-icon name="clock-history"></sl-icon>
+                  <p>No recent activity to display.<br />Start by creating your first agent.</p>
+                  <a href="/agents/new" style="text-decoration: none; margin-top: 1rem; display: inline-block;">
+                    <sl-button variant="primary">
+                      <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                      Create Agent
+                    </sl-button>
+                  </a>
+                </div>
+              `}
         </div>
       </div>
     `;
+  }
+
+  private formatRelativeTime(dateStr: string): string {
+    if (!dateStr) return '';
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffSecs = Math.floor(diffMs / 1000);
+    if (diffSecs < 60) return 'just now';
+    const diffMins = Math.floor(diffSecs / 60);
+    if (diffMins < 60) return `${diffMins}m ago`;
+    const diffHours = Math.floor(diffMins / 60);
+    if (diffHours < 24) return `${diffHours}h ago`;
+    const diffDays = Math.floor(diffHours / 24);
+    if (diffDays < 30) return `${diffDays}d ago`;
+    return date.toLocaleDateString();
   }
 }
 

@@ -29,6 +29,7 @@ import { extractApiError } from '../../client/api.js';
 
 type SortField = 'name' | 'created' | 'lastSeen';
 type SortDir = 'asc' | 'desc';
+type AdminTab = 'users' | 'allow-list' | 'invites';
 
 interface ConfirmAction {
   title: string;
@@ -38,6 +39,45 @@ interface ConfirmAction {
   user: AdminUser;
   action: () => Promise<void>;
 }
+
+interface AllowListEntry {
+  id: string;
+  email: string;
+  note: string;
+  addedBy: string;
+  inviteId?: string;
+  created: string;
+}
+
+interface InviteCodeEntry {
+  id: string;
+  codePrefix: string;
+  maxUses: number;
+  useCount: number;
+  expiresAt: string;
+  revoked: boolean;
+  createdBy: string;
+  note: string;
+  created: string;
+}
+
+interface InviteCreateResult {
+  code: string;
+  inviteUrl: string;
+  invite: InviteCodeEntry;
+}
+
+const EXPIRY_PRESETS = [
+  { label: '5 minutes', value: '5m' },
+  { label: '15 minutes', value: '15m' },
+  { label: '30 minutes', value: '30m' },
+  { label: '1 hour', value: '1h' },
+  { label: '4 hours', value: '4h' },
+  { label: '12 hours', value: '12h' },
+  { label: '24 hours', value: '24h' },
+  { label: '3 days', value: '72h' },
+  { label: '5 days', value: '120h' },
+];
 
 const PAGE_SIZE = 50;
 
@@ -81,6 +121,70 @@ export class ScionPageAdminUsers extends LitElement {
 
   @state()
   private actionFeedback: { message: string; variant: 'success' | 'danger' } | null = null;
+
+  @state()
+  private activeTab: AdminTab = 'users';
+
+  @state()
+  private allowListEntries: AllowListEntry[] = [];
+
+  @state()
+  private allowListLoading = false;
+
+  @state()
+  private allowListTotalCount = 0;
+
+  @state()
+  private showAddEmailDialog = false;
+
+  @state()
+  private addEmailValue = '';
+
+  @state()
+  private addEmailNote = '';
+
+  @state()
+  private addEmailInProgress = false;
+
+  @state()
+  private showImportDialog = false;
+
+  @state()
+  private importInProgress = false;
+
+  @state()
+  private emailDomains: string[] = [];
+
+  // Invites tab state
+  @state()
+  private invites: InviteCodeEntry[] = [];
+
+  @state()
+  private invitesLoading = false;
+
+  @state()
+  private invitesTotalCount = 0;
+
+  @state()
+  private showCreateInviteDialog = false;
+
+  @state()
+  private createInviteExpiry = '1h';
+
+  @state()
+  private createInviteMaxUses = 1;
+
+  @state()
+  private createInviteNote = '';
+
+  @state()
+  private createInviteInProgress = false;
+
+  @state()
+  private createdInviteResult: InviteCreateResult | null = null;
+
+  @state()
+  private inviteCopied = false;
 
   static override styles = css`
     :host {
@@ -438,6 +542,135 @@ export class ScionPageAdminUsers extends LitElement {
       margin-bottom: 1rem;
     }
 
+    .tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      margin-bottom: 1.5rem;
+    }
+
+    .tab-btn {
+      padding: 0.625rem 1.25rem;
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: var(--scion-text-muted, #64748b);
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s;
+    }
+
+    .tab-btn:hover {
+      color: var(--scion-text, #1e293b);
+    }
+
+    .tab-btn.active {
+      color: var(--scion-primary, #3b82f6);
+      border-bottom-color: var(--scion-primary, #3b82f6);
+    }
+
+    .allow-list-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+    }
+
+    .allow-list-header span {
+      font-size: 0.875rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .add-email-form {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .domain-suggestions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.375rem;
+      margin-top: -0.5rem;
+    }
+
+    .domain-label {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .invite-status {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.125rem 0.5rem;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+
+    .invite-status.active {
+      background: var(--sl-color-success-100, #dcfce7);
+      color: var(--sl-color-success-700, #15803d);
+    }
+
+    .invite-status.expired {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .invite-status.revoked {
+      background: var(--sl-color-danger-100, #fee2e2);
+      color: var(--sl-color-danger-700, #b91c1c);
+    }
+
+    .invite-status.exhausted {
+      background: var(--sl-color-warning-100, #fef3c7);
+      color: var(--sl-color-warning-700, #a16207);
+    }
+
+    .create-invite-form {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .reveal-code {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .reveal-code .code-display {
+      font-family: var(--scion-font-mono, monospace);
+      font-size: 0.8125rem;
+      background: var(--scion-bg-subtle, #f1f5f9);
+      padding: 0.75rem 1rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      word-break: break-all;
+      user-select: all;
+    }
+
+    .reveal-code .link-display {
+      font-family: var(--scion-font-mono, monospace);
+      font-size: 0.75rem;
+      background: var(--scion-bg-subtle, #f1f5f9);
+      padding: 0.75rem 1rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      word-break: break-all;
+      user-select: all;
+    }
+
+    .reveal-warning {
+      font-size: 0.8125rem;
+      color: var(--sl-color-warning-700, #a16207);
+      background: var(--sl-color-warning-50, #fffbeb);
+      padding: 0.5rem 0.75rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      border: 1px solid var(--sl-color-warning-200, #fde68a);
+    }
+
     @media (max-width: 768px) {
       .hide-mobile {
         display: none;
@@ -684,11 +917,6 @@ export class ScionPageAdminUsers extends LitElement {
     return html`
       <div class="header">
         <h1>Users</h1>
-        ${!this.loading && !this.error
-          ? html`<span class="user-count"
-              >${this.totalCount} user${this.totalCount !== 1 ? 's' : ''}</span
-            >`
-          : ''}
       </div>
 
       ${this.actionFeedback
@@ -707,9 +935,41 @@ export class ScionPageAdminUsers extends LitElement {
           `
         : nothing}
 
-      ${this.loading ? this.renderLoading() : this.error ? this.renderError() : this.renderUsers()}
+      <div class="tabs" role="tablist">
+        <button
+          role="tab"
+          aria-selected=${this.activeTab === 'users'}
+          aria-controls="panel-users"
+          class="tab-btn ${this.activeTab === 'users' ? 'active' : ''}"
+          @click=${() => { this.activeTab = 'users'; }}
+        >Users ${!this.loading ? `(${this.totalCount})` : ''}</button>
+        <button
+          role="tab"
+          aria-selected=${this.activeTab === 'allow-list'}
+          aria-controls="panel-allow-list"
+          class="tab-btn ${this.activeTab === 'allow-list' ? 'active' : ''}"
+          @click=${() => { this.activeTab = 'allow-list'; this.loadAllowList(); }}
+        >Allow List ${this.allowListTotalCount > 0 ? `(${this.allowListTotalCount})` : ''}</button>
+        <button
+          role="tab"
+          aria-selected=${this.activeTab === 'invites'}
+          aria-controls="panel-invites"
+          class="tab-btn ${this.activeTab === 'invites' ? 'active' : ''}"
+          @click=${() => { this.activeTab = 'invites'; this.loadInvites(); }}
+        >Invites ${this.invitesTotalCount > 0 ? `(${this.invitesTotalCount})` : ''}</button>
+      </div>
+
+      ${this.activeTab === 'users'
+        ? this.loading ? this.renderLoading() : this.error ? this.renderError() : this.renderUsers()
+        : this.activeTab === 'allow-list'
+          ? this.renderAllowListTab()
+          : this.renderInvitesTab()}
 
       ${this.renderConfirmDialog()}
+      ${this.renderAddEmailDialog()}
+      ${this.renderImportDialog()}
+      ${this.renderCreateInviteDialog()}
+      ${this.renderInviteRevealDialog()}
     `;
   }
 
@@ -905,6 +1165,211 @@ export class ScionPageAdminUsers extends LitElement {
     `;
   }
 
+  private async loadAllowList(): Promise<void> {
+    this.allowListLoading = true;
+    try {
+      const response = await fetch('/api/v1/admin/allow-list', {
+        credentials: 'include',
+      });
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      const data = (await response.json()) as {
+        items: AllowListEntry[];
+        totalCount: number;
+      };
+      this.allowListEntries = data.items || [];
+      this.allowListTotalCount = data.totalCount ?? 0;
+    } catch (err) {
+      this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to load allow list');
+    } finally {
+      this.allowListLoading = false;
+    }
+  }
+
+  private async loadEmailDomains(): Promise<void> {
+    try {
+      const response = await fetch('/api/v1/admin/allow-list/domains', {
+        credentials: 'include',
+      });
+      if (response.ok) {
+        const data = (await response.json()) as { domains: string[] };
+        this.emailDomains = data.domains || [];
+      }
+    } catch {
+      // Non-critical, ignore
+    }
+  }
+
+  private async addToAllowList(): Promise<void> {
+    const email = this.addEmailValue.trim().toLowerCase();
+    if (!email || !email.includes('@')) return;
+
+    this.addEmailInProgress = true;
+    try {
+      const response = await fetch('/api/v1/admin/allow-list', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, note: this.addEmailNote }),
+      });
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      this.showFeedback('success', `Added ${email} to the allow list.`);
+      this.showAddEmailDialog = false;
+      this.addEmailValue = '';
+      this.addEmailNote = '';
+      void this.loadAllowList();
+    } catch (err) {
+      this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to add email');
+    } finally {
+      this.addEmailInProgress = false;
+    }
+  }
+
+  private async removeFromAllowList(email: string): Promise<void> {
+    try {
+      const response = await fetch(`/api/v1/admin/allow-list/${encodeURIComponent(email)}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      this.showFeedback('success', `Removed ${email} from the allow list.`);
+      void this.loadAllowList();
+    } catch (err) {
+      this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to remove email');
+    }
+  }
+
+  private renderAllowListTab() {
+    if (this.allowListLoading) {
+      return this.renderLoading();
+    }
+
+    return html`
+      <div class="allow-list-header">
+        <span>${this.allowListTotalCount} email${this.allowListTotalCount !== 1 ? 's' : ''} on the allow list</span>
+        <div style="display: flex; gap: 0.5rem">
+          <sl-button size="small" variant="default" @click=${() => { this.showImportDialog = true; }}>
+            <sl-icon slot="prefix" name="upload"></sl-icon>
+            Import CSV
+          </sl-button>
+          <sl-button size="small" variant="primary" @click=${() => { this.showAddEmailDialog = true; this.loadEmailDomains(); }}>
+            <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+            Add Email
+          </sl-button>
+        </div>
+      </div>
+
+      ${this.allowListEntries.length === 0
+        ? html`
+            <div class="empty-state">
+              <sl-icon name="shield-lock"></sl-icon>
+              <h2>No Allow List Entries</h2>
+              <p>When invite-only mode is enabled, only emails on this list (and admin emails) can log in.</p>
+            </div>
+          `
+        : html`
+            <div class="table-container">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Email</th>
+                    <th class="hide-mobile">Note</th>
+                    <th class="hide-mobile">Added</th>
+                    <th class="actions-cell"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${this.allowListEntries.map(
+                    (entry) => html`
+                      <tr>
+                        <td>${entry.email}</td>
+                        <td class="hide-mobile"><span class="meta-text">${entry.note || '-'}</span></td>
+                        <td class="hide-mobile"><span class="meta-text">${this.formatRelativeTime(entry.created)}</span></td>
+                        <td class="actions-cell">
+                          <sl-button
+                            size="small"
+                            variant="text"
+                            @click=${() => this.removeFromAllowList(entry.email)}
+                          >
+                            <sl-icon name="trash" style="color: var(--sl-color-danger-600, #dc2626)"></sl-icon>
+                          </sl-button>
+                        </td>
+                      </tr>
+                    `,
+                  )}
+                </tbody>
+              </table>
+            </div>
+          `}
+    `;
+  }
+
+  private renderAddEmailDialog() {
+    if (!this.showAddEmailDialog) return nothing;
+
+    // Show domain suggestions when user has typed something but no @ yet, or partial domain
+    const val = this.addEmailValue.trim();
+    const atIdx = val.indexOf('@');
+    const showDomainSuggestions = this.emailDomains.length > 0 && val.length > 0 && (atIdx === -1 || (atIdx > 0 && atIdx === val.length - 1));
+    const username = atIdx > 0 ? val.substring(0, atIdx) : val;
+
+    return html`
+      <sl-dialog
+        label="Add Email to Allow List"
+        open
+        @sl-request-close=${() => { if (!this.addEmailInProgress) this.showAddEmailDialog = false; }}
+      >
+        <div class="add-email-form">
+          <sl-input
+            label="Email address"
+            type="email"
+            placeholder="user@example.com"
+            .value=${this.addEmailValue}
+            @sl-input=${(e: Event) => { this.addEmailValue = (e.target as HTMLInputElement).value; }}
+            required
+          ></sl-input>
+          ${showDomainSuggestions ? html`
+            <div class="domain-suggestions">
+              <span class="domain-label">Suggested domains:</span>
+              ${this.emailDomains.slice(0, 5).map(domain => html`
+                <sl-tag
+                  size="small"
+                  pill
+                  style="cursor: pointer"
+                  @click=${() => { this.addEmailValue = `${username}@${domain}`; }}
+                >@${domain}</sl-tag>
+              `)}
+            </div>
+          ` : nothing}
+          <sl-input
+            label="Note (optional)"
+            placeholder="e.g., New hire, Q3 contractor"
+            .value=${this.addEmailNote}
+            @sl-input=${(e: Event) => { this.addEmailNote = (e.target as HTMLInputElement).value; }}
+          ></sl-input>
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          ?disabled=${this.addEmailInProgress}
+          @click=${() => { this.showAddEmailDialog = false; }}
+        >Cancel</sl-button>
+        <sl-button
+          slot="footer"
+          variant="primary"
+          ?loading=${this.addEmailInProgress}
+          ?disabled=${!this.addEmailValue.trim().includes('@')}
+          @click=${() => this.addToAllowList()}
+        >Add</sl-button>
+      </sl-dialog>
+    `;
+  }
+
   private renderConfirmDialog() {
     const action = this.confirmAction;
     if (!action) return nothing;
@@ -940,6 +1405,359 @@ export class ScionPageAdminUsers extends LitElement {
           ?loading=${this.actionInProgress}
           @click=${() => this.executeConfirmedAction()}
         >${action.confirmLabel}</sl-button>
+      </sl-dialog>
+    `;
+  }
+
+  private renderImportDialog() {
+    if (!this.showImportDialog) return nothing;
+    return html`
+      <sl-dialog
+        label="Import Emails from CSV"
+        open
+        @sl-request-close=${() => { if (!this.importInProgress) this.showImportDialog = false; }}
+      >
+        <div class="import-form">
+          <p style="margin: 0 0 1rem; font-size: 0.875rem; color: var(--scion-text-muted)">
+            Upload a CSV file with one email per line. An optional second column can contain notes.
+          </p>
+          <input
+            type="file"
+            accept=".csv,.txt"
+            id="import-file-input"
+            style="margin-bottom: 1rem"
+          />
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          ?disabled=${this.importInProgress}
+          @click=${() => { this.showImportDialog = false; }}
+        >Cancel</sl-button>
+        <sl-button
+          slot="footer"
+          variant="primary"
+          ?loading=${this.importInProgress}
+          @click=${() => this.importCSV()}
+        >Import</sl-button>
+      </sl-dialog>
+    `;
+  }
+
+  private async importCSV(): Promise<void> {
+    const input = this.shadowRoot?.querySelector('#import-file-input') as HTMLInputElement;
+    if (!input?.files?.length) {
+      this.showFeedback('danger', 'Please select a file.');
+      return;
+    }
+
+    const file = input.files[0];
+    const formData = new FormData();
+    formData.append('file', file);
+
+    this.importInProgress = true;
+    try {
+      const response = await fetch('/api/v1/admin/allow-list/import', {
+        method: 'POST',
+        credentials: 'include',
+        body: formData,
+      });
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      const result = (await response.json()) as { added: number; skipped: number; total: number };
+      this.showFeedback('success', `Import complete: ${result.added} added, ${result.skipped} skipped.`);
+      this.showImportDialog = false;
+      void this.loadAllowList();
+    } catch (err) {
+      this.showFeedback('danger', err instanceof Error ? err.message : 'Import failed');
+    } finally {
+      this.importInProgress = false;
+    }
+  }
+
+  // ==================== Invites Tab ====================
+
+  private async loadInvites(): Promise<void> {
+    this.invitesLoading = true;
+    try {
+      const response = await fetch('/api/v1/admin/invites', {
+        credentials: 'include',
+      });
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      const data = (await response.json()) as {
+        items: InviteCodeEntry[];
+        totalCount: number;
+      };
+      this.invites = data.items || [];
+      this.invitesTotalCount = data.totalCount ?? 0;
+    } catch (err) {
+      this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to load invites');
+    } finally {
+      this.invitesLoading = false;
+    }
+  }
+
+  private getInviteStatus(invite: InviteCodeEntry): string {
+    if (invite.revoked) return 'revoked';
+    if (new Date() > new Date(invite.expiresAt)) return 'expired';
+    if (invite.maxUses > 0 && invite.useCount >= invite.maxUses) return 'exhausted';
+    return 'active';
+  }
+
+  private async createInvite(): Promise<void> {
+    this.createInviteInProgress = true;
+    try {
+      const response = await fetch('/api/v1/admin/invites', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          expiresIn: this.createInviteExpiry,
+          maxUses: this.createInviteMaxUses,
+          note: this.createInviteNote,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      const result = (await response.json()) as InviteCreateResult;
+      this.createdInviteResult = result;
+      this.showCreateInviteDialog = false;
+      this.createInviteExpiry = '1h';
+      this.createInviteMaxUses = 1;
+      this.createInviteNote = '';
+      void this.loadInvites();
+    } catch (err) {
+      this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to create invite');
+    } finally {
+      this.createInviteInProgress = false;
+    }
+  }
+
+  private async revokeInvite(id: string): Promise<void> {
+    try {
+      const response = await fetch(`/api/v1/admin/invites/${encodeURIComponent(id)}/revoke`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      this.showFeedback('success', 'Invite code revoked.');
+      void this.loadInvites();
+    } catch (err) {
+      this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to revoke invite');
+    }
+  }
+
+  private async deleteInvite(id: string): Promise<void> {
+    try {
+      const response = await fetch(`/api/v1/admin/invites/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      this.showFeedback('success', 'Invite code deleted.');
+      void this.loadInvites();
+    } catch (err) {
+      this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to delete invite');
+    }
+  }
+
+  private async copyInviteLink(): Promise<void> {
+    if (!this.createdInviteResult) return;
+    try {
+      await navigator.clipboard.writeText(this.createdInviteResult.inviteUrl);
+      this.inviteCopied = true;
+      setTimeout(() => { this.inviteCopied = false; }, 2000);
+    } catch {
+      const input = document.createElement('input');
+      input.value = this.createdInviteResult.inviteUrl;
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand('copy');
+      document.body.removeChild(input);
+      this.inviteCopied = true;
+      setTimeout(() => { this.inviteCopied = false; }, 2000);
+    }
+  }
+
+  private renderInvitesTab() {
+    if (this.invitesLoading) {
+      return this.renderLoading();
+    }
+
+    return html`
+      <div class="allow-list-header">
+        <span>${this.invitesTotalCount} invite${this.invitesTotalCount !== 1 ? 's' : ''}</span>
+        <sl-button size="small" variant="primary" @click=${() => { this.showCreateInviteDialog = true; }}>
+          <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+          Create Invite
+        </sl-button>
+      </div>
+
+      ${this.invites.length === 0
+        ? html`
+            <div class="empty-state">
+              <sl-icon name="envelope-open"></sl-icon>
+              <h2>No Invite Codes</h2>
+              <p>Create invite codes to allow new users to join the hub.</p>
+            </div>
+          `
+        : html`
+            <div class="table-container">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Code</th>
+                    <th>Status</th>
+                    <th>Uses</th>
+                    <th class="hide-mobile">Expires</th>
+                    <th class="hide-mobile">Note</th>
+                    <th class="actions-cell"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${this.invites.map((invite) => this.renderInviteRow(invite))}
+                </tbody>
+              </table>
+            </div>
+          `}
+    `;
+  }
+
+  private renderInviteRow(invite: InviteCodeEntry) {
+    const status = this.getInviteStatus(invite);
+    const uses = invite.maxUses > 0
+      ? `${invite.useCount}/${invite.maxUses}`
+      : `${invite.useCount}`;
+    return html`
+      <tr>
+        <td>
+          <code style="font-size: 0.8125rem">${invite.codePrefix}...</code>
+        </td>
+        <td>
+          <span class="invite-status ${status}">${status}</span>
+        </td>
+        <td><span class="meta-text">${uses}</span></td>
+        <td class="hide-mobile">
+          <span class="meta-text">${this.formatRelativeTime(invite.expiresAt)}</span>
+        </td>
+        <td class="hide-mobile">
+          <span class="meta-text">${invite.note || '-'}</span>
+        </td>
+        <td class="actions-cell">
+          <sl-dropdown placement="bottom-end" hoist>
+            <sl-button slot="trigger" size="small" variant="text" caret>
+              <sl-icon name="three-dots-vertical"></sl-icon>
+            </sl-button>
+            <sl-menu>
+              ${status === 'active'
+                ? html`<sl-menu-item @click=${() => this.revokeInvite(invite.id)}>
+                    <sl-icon slot="prefix" name="slash-circle"></sl-icon>
+                    Revoke
+                  </sl-menu-item>
+                  <sl-divider></sl-divider>`
+                : nothing}
+              <sl-menu-item class="menu-item-danger" @click=${() => this.deleteInvite(invite.id)}>
+                <sl-icon slot="prefix" name="trash"></sl-icon>
+                Delete
+              </sl-menu-item>
+            </sl-menu>
+          </sl-dropdown>
+        </td>
+      </tr>
+    `;
+  }
+
+  private renderCreateInviteDialog() {
+    if (!this.showCreateInviteDialog) return nothing;
+    return html`
+      <sl-dialog
+        label="Create Invite Code"
+        open
+        @sl-request-close=${() => { if (!this.createInviteInProgress) this.showCreateInviteDialog = false; }}
+      >
+        <div class="create-invite-form">
+          <sl-select
+            label="Expiration"
+            .value=${this.createInviteExpiry}
+            @sl-change=${(e: Event) => { this.createInviteExpiry = (e.target as HTMLSelectElement).value; }}
+          >
+            ${EXPIRY_PRESETS.map((p) => html`
+              <sl-option value=${p.value}>${p.label}</sl-option>
+            `)}
+          </sl-select>
+          <sl-select
+            label="Max uses"
+            .value=${String(this.createInviteMaxUses)}
+            @sl-change=${(e: Event) => { this.createInviteMaxUses = parseInt((e.target as HTMLSelectElement).value, 10); }}
+          >
+            <sl-option value="1">Single use</sl-option>
+            <sl-option value="5">5 uses</sl-option>
+            <sl-option value="10">10 uses</sl-option>
+            <sl-option value="25">25 uses</sl-option>
+            <sl-option value="0">Unlimited</sl-option>
+          </sl-select>
+          <sl-input
+            label="Note (optional)"
+            placeholder="e.g., Workshop, new team member"
+            .value=${this.createInviteNote}
+            @sl-input=${(e: Event) => { this.createInviteNote = (e.target as HTMLInputElement).value; }}
+          ></sl-input>
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          ?disabled=${this.createInviteInProgress}
+          @click=${() => { this.showCreateInviteDialog = false; }}
+        >Cancel</sl-button>
+        <sl-button
+          slot="footer"
+          variant="primary"
+          ?loading=${this.createInviteInProgress}
+          @click=${() => this.createInvite()}
+        >Create</sl-button>
+      </sl-dialog>
+    `;
+  }
+
+  private renderInviteRevealDialog() {
+    if (!this.createdInviteResult) return nothing;
+    return html`
+      <sl-dialog
+        label="Invite Created"
+        open
+        @sl-request-close=${() => { this.createdInviteResult = null; this.inviteCopied = false; }}
+      >
+        <div class="reveal-code">
+          <p style="margin: 0; font-size: 0.875rem">Your invite link has been created. Copy it now — it will not be shown again.</p>
+          <div>
+            <label style="font-size: 0.75rem; font-weight: 600; color: var(--scion-text-muted)">Invite Link</label>
+            <div class="link-display">${this.createdInviteResult.inviteUrl}</div>
+          </div>
+          <div class="reveal-warning">
+            This link will not be shown again. Make sure to copy it before closing.
+          </div>
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          @click=${() => { this.createdInviteResult = null; this.inviteCopied = false; }}
+        >Close</sl-button>
+        <sl-button
+          slot="footer"
+          variant="primary"
+          @click=${() => this.copyInviteLink()}
+        >
+          <sl-icon slot="prefix" name=${this.inviteCopied ? 'check' : 'clipboard'}></sl-icon>
+          ${this.inviteCopied ? 'Copied!' : 'Copy Link'}
+        </sl-button>
       </sl-dialog>
     `;
   }

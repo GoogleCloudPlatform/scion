@@ -102,6 +102,12 @@ type Store interface {
 
 	// Grove Sync State operations (Workspace Sync Metadata)
 	GroveSyncStateStore
+
+	// Allow List operations (User Access Control)
+	AllowListStore
+
+	// Invite Code operations (User Invitation System)
+	InviteCodeStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -421,6 +427,29 @@ type UserFilter struct {
 	Role   string
 	Status string
 	Search string // fuzzy match on email and display_name
+}
+
+// AllowListStore defines operations for the email allow list used in invite_only mode.
+type AllowListStore interface {
+	AddAllowListEntry(ctx context.Context, entry *AllowListEntry) error
+	RemoveAllowListEntry(ctx context.Context, email string) error
+	GetAllowListEntry(ctx context.Context, email string) (*AllowListEntry, error)
+	ListAllowListEntries(ctx context.Context, opts ListOptions) (*ListResult[AllowListEntry], error)
+	IsEmailAllowListed(ctx context.Context, email string) (bool, error)
+	BulkAddAllowListEntries(ctx context.Context, entries []*AllowListEntry) (added int, skipped int, err error)
+	ListEmailDomains(ctx context.Context) ([]string, error)
+}
+
+// InviteCodeStore defines operations for invite code management.
+type InviteCodeStore interface {
+	CreateInviteCode(ctx context.Context, invite *InviteCode) error
+	GetInviteCodeByHash(ctx context.Context, codeHash string) (*InviteCode, error)
+	GetInviteCode(ctx context.Context, id string) (*InviteCode, error)
+	ListInviteCodes(ctx context.Context, opts ListOptions) (*ListResult[InviteCode], error)
+	IncrementInviteUseCount(ctx context.Context, id string) error
+	RevokeInviteCode(ctx context.Context, id string) error
+	DeleteInviteCode(ctx context.Context, id string) error
+	GetInviteStats(ctx context.Context) (*InviteStats, error)
 }
 
 // GroveProviderStore defines grove-broker relationship operations.
