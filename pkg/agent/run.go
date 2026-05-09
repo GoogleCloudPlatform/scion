@@ -819,6 +819,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		ContainerWorkspace: containerWorkspace,
 		ResolvedAuth:       resolvedAuth,
 		Harness:            h,
+		Project:            projectName,
+		ProjectID:          projectID,
 		TelemetryEnabled:   telemetryEnabled,
 		Task: func() string {
 			// When task_flag is set, task is delivered via CommandArgs instead
