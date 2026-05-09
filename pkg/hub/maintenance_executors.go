@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -397,6 +398,42 @@ func (e *RebuildWebExecutor) Run(ctx context.Context, logger io.Writer, params m
 
 	log.Info("Web frontend rebuild complete")
 	fmt.Fprintln(logger, "Web frontend rebuild complete. Changes take effect on the next page load.")
+	return nil
+}
+
+// RebuildContainerBinariesExecutor rebuilds scion and sciontool binaries
+// for bind-mounting into agent containers via SCION_DEV_BINARIES.
+type RebuildContainerBinariesExecutor struct {
+	repoPath string
+}
+
+func (e *RebuildContainerBinariesExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
+	log := logging.Subsystem("hub.maintenance.rebuild-container-binaries")
+
+	if e.repoPath == "" {
+		return fmt.Errorf("no repository path configured for rebuild-container-binaries")
+	}
+
+	devBinDir := os.Getenv("SCION_DEV_BINARIES")
+	fmt.Fprintf(logger, "SCION_DEV_BINARIES=%s\n", devBinDir)
+	if devBinDir == "" {
+		fmt.Fprintln(logger, "WARNING: SCION_DEV_BINARIES is not set; built binaries will not be mounted into containers until it is configured.")
+	}
+
+	log.Debug("Starting rebuild-container-binaries", "repo_path", e.repoPath)
+
+	fmt.Fprintf(logger, "==> Building container binaries\n")
+	cmd := exec.CommandContext(ctx, "make", "container-binaries")
+	cmd.Dir = e.repoPath
+	cmd.Stdout = logger
+	cmd.Stderr = logger
+	if err := cmd.Run(); err != nil {
+		log.Error("Build failed", "error", err)
+		return fmt.Errorf("make container-binaries failed: %w", err)
+	}
+
+	log.Info("Container binaries rebuild complete")
+	fmt.Fprintln(logger, "\nContainer binaries rebuild complete.")
 	return nil
 }
 

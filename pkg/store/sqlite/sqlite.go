@@ -140,6 +140,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV44,
 		migrationV45,
 		migrationV46,
+		migrationV47,
 	}
 
 	// Create migrations table if not exists
@@ -1132,6 +1133,18 @@ ALTER TABLE secrets ADD COLUMN allow_progeny INTEGER NOT NULL DEFAULT 0;
 
 const migrationV46 = `
 ALTER TABLE templates ADD COLUMN default_harness_config TEXT;
+`
+
+const migrationV47 = `
+INSERT INTO maintenance_operations (id, key, title, description, category, status)
+VALUES (
+    lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)),2) || '-' || substr('89ab', abs(random()) % 4 + 1, 1) || substr(hex(randomblob(2)),2) || '-' || hex(randomblob(6))),
+    'rebuild-container-binaries',
+    'Rebuild Container Binaries',
+    'Rebuilds scion and sciontool binaries for Linux containers (make container-binaries). Only available when SCION_DEV_BINARIES is set. Binaries are written to .build/container/ in the source checkout.',
+    'operation',
+    'pending'
+);
 `
 
 // Helper functions for JSON marshaling/unmarshaling

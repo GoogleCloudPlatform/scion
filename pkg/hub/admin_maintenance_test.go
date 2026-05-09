@@ -535,3 +535,68 @@ func TestCheckForUpdates_NonAdmin(t *testing.T) {
 		t.Fatalf("expected 403, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestListMaintenanceOperations_HidesContainerBinariesByDefault(t *testing.T) {
+	srv, _ := newTestServerWithStore(t)
+	t.Setenv("SCION_DEV_BINARIES", "")
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/maintenance/operations", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminMaintenanceOps(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var body struct {
+		Operations []struct {
+			Key string `json:"key"`
+		} `json:"operations"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	for _, op := range body.Operations {
+		if op.Key == "rebuild-container-binaries" {
+			t.Error("rebuild-container-binaries should be hidden when SCION_DEV_BINARIES is not set")
+		}
+	}
+}
+
+func TestListMaintenanceOperations_ShowsContainerBinariesWhenEnvSet(t *testing.T) {
+	srv, _ := newTestServerWithStore(t)
+	t.Setenv("SCION_DEV_BINARIES", "/tmp/test-binaries")
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/maintenance/operations", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminMaintenanceOps(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var body struct {
+		Operations []struct {
+			Key string `json:"key"`
+		} `json:"operations"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	found := false
+	for _, op := range body.Operations {
+		if op.Key == "rebuild-container-binaries" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("rebuild-container-binaries should be visible when SCION_DEV_BINARIES is set")
+	}
+}
