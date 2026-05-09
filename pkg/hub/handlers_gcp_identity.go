@@ -645,7 +645,7 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 		Scope:              store.ScopeProject,
 		ScopeID:            projectID,
 		Email:              saEmail,
-		ProjectID:          projectID,
+		ProjectID:          hubGCPProjectID,
 		DisplayName:        displayName,
 		DefaultScopes:      []string{"https://www.googleapis.com/auth/cloud-platform"},
 		Verified:           true,
