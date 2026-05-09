@@ -16,6 +16,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -530,9 +531,9 @@ type AgentInfo struct {
 	HarnessAuth           string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
 
 	// Project association
-	Project     string `json:"grove"`               // Project name (legacy, simple string)
-	ProjectID   string `json:"groveId,omitempty"`   // Hosted format: <uuid>__<name>
-	ProjectPath string `json:"grovePath,omitempty"` // Filesystem path (solo mode)
+	Project     string `json:"project"`               // Project name (legacy, simple string)
+	ProjectID   string `json:"projectId,omitempty"`   // Hosted format: <uuid>__<name>
+	ProjectPath string `json:"projectPath,omitempty"` // Filesystem path (solo mode)
 
 	// Metadata
 	Labels      map[string]string `json:"labels,omitempty"`
@@ -577,6 +578,48 @@ type AgentInfo struct {
 	StateVersion int64 `json:"stateVersion,omitempty"` // Version for concurrent update detection
 }
 
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (a *AgentInfo) UnmarshalJSON(data []byte) error {
+	type Alias AgentInfo
+	aux := &struct {
+		Grove     string `json:"grove"`
+		GroveID   string `json:"groveId"`
+		GrovePath string `json:"grovePath"`
+		*Alias
+	}{
+		Alias: (*Alias)(a),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if a.Project == "" && aux.Grove != "" {
+		a.Project = aux.Grove
+	}
+	if a.ProjectID == "" && aux.GroveID != "" {
+		a.ProjectID = aux.GroveID
+	}
+	if a.ProjectPath == "" && aux.GrovePath != "" {
+		a.ProjectPath = aux.GrovePath
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (a AgentInfo) MarshalJSON() ([]byte, error) {
+	type Alias AgentInfo
+	return json.Marshal(&struct {
+		Alias
+		Grove     string `json:"grove,omitempty"`
+		GroveID   string `json:"groveId,omitempty"`
+		GrovePath string `json:"grovePath,omitempty"`
+	}{
+		Alias:     Alias(a),
+		Grove:     a.Project,
+		GroveID:   a.ProjectID,
+		GrovePath: a.ProjectPath,
+	})
+}
+
 // AgentDetail provides freeform context about the current activity.
 type AgentDetail struct {
 	ToolName    string `json:"toolName,omitempty"`
@@ -615,6 +658,35 @@ type ResolvedSecret struct {
 	Value  string `json:"value"`         // Decrypted secret value
 	Source string `json:"source"`        // Scope that provided this secret (user, project, runtime_broker)
 	Ref    string `json:"ref,omitempty"` // External secret reference (e.g., "gcpsm:projects/123/secrets/name")
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy "grove" source.
+func (s *ResolvedSecret) UnmarshalJSON(data []byte) error {
+	type Alias ResolvedSecret
+	aux := (*Alias)(s)
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if s.Source == "grove" {
+		s.Source = "project"
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy "grove" source.
+func (s ResolvedSecret) MarshalJSON() ([]byte, error) {
+	type Alias ResolvedSecret
+	source := s.Source
+	// Note: We don't necessarily need to emit "grove" as a shadow field since it's a value,
+	// but if we wanted to be perfectly symmetric we could. For now, following instructions
+	// to accept 'grove' as 'project'.
+	return json.Marshal(&struct {
+		Alias
+		Source string `json:"source"`
+	}{
+		Alias:  Alias(s),
+		Source: source,
+	})
 }
 
 // GitCloneConfig specifies how to clone a git repository into the workspace.
