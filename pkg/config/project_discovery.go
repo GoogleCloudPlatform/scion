@@ -86,7 +86,8 @@ func DiscoverProjects() ([]ProjectInfo, error) {
 			pi.ProjectID = settings.ProjectID
 			pi.GroveID = settings.ProjectID
 		}
-		projects = append(projects, pi)		seenSlugs["global"] = true
+		projects = append(projects, pi)
+		seenSlugs["global"] = true
 	}
 
 	// 2. Scan project-configs directory (preferred)
