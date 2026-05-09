@@ -86,8 +86,8 @@ func listAgentsLocal() error {
 	} else {
 		projectDir, _ := config.GetResolvedProjectDir(projectPath)
 		if projectDir != "" {
-			filters["scion.grove_path"] = projectDir
-			filters["scion.grove"] = config.GetProjectName(projectDir)
+			filters["scion.project_path"] = projectDir
+			filters["scion.project"] = config.GetProjectName(projectDir)
 		}
 	}
 

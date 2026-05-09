@@ -33,13 +33,13 @@ func createTestProject(t *testing.T, s *SQLiteStore) string {
 	ctx := context.Background()
 
 	projectID := api.NewUUID()
-	grove := &store.Project{
+	project := &store.Project{
 		ID:         projectID,
 		Name:       "Scheduled Event Test Project",
-		Slug:       "sched-grove-" + projectID[:8],
+		Slug:       "sched-project-" + projectID[:8],
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 	return projectID
 }
 
@@ -53,7 +53,7 @@ func TestScheduledEventCRUD(t *testing.T) {
 
 	evt := &store.ScheduledEvent{
 		ID:        eventID,
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    fireAt,
 		Payload:   `{"text":"hello"}`,
@@ -90,7 +90,7 @@ func TestScheduledEventCreateValidation(t *testing.T) {
 
 	// Missing ID
 	err := s.CreateScheduledEvent(ctx, &store.ScheduledEvent{
-		ProjectID:   "grove-1",
+		ProjectID: "project-1",
 		EventType: "message",
 	})
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
@@ -104,15 +104,15 @@ func TestScheduledEventCreateValidation(t *testing.T) {
 
 	// Missing EventType
 	err = s.CreateScheduledEvent(ctx, &store.ScheduledEvent{
-		ID:      api.NewUUID(),
-		ProjectID: "grove-1",
+		ID:        api.NewUUID(),
+		ProjectID: "project-1",
 	})
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 
 	// Non-existent project (FK constraint)
 	err = s.CreateScheduledEvent(ctx, &store.ScheduledEvent{
 		ID:        api.NewUUID(),
-		ProjectID:   "nonexistent-grove",
+		ProjectID: "nonexistent-project",
 		EventType: "message",
 		Payload:   "{}",
 	})
@@ -127,7 +127,7 @@ func TestScheduledEventListPending(t *testing.T) {
 	// Create events with different statuses
 	pending1 := &store.ScheduledEvent{
 		ID:        api.NewUUID(),
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(2 * time.Hour),
 		Payload:   "{}",
@@ -135,7 +135,7 @@ func TestScheduledEventListPending(t *testing.T) {
 	}
 	pending2 := &store.ScheduledEvent{
 		ID:        api.NewUUID(),
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour), // Fires sooner
 		Payload:   "{}",
@@ -163,14 +163,14 @@ func TestScheduledEventListPendingOrderByFireAt(t *testing.T) {
 	// Create events in reverse fire_at order
 	later := &store.ScheduledEvent{
 		ID:        api.NewUUID(),
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(3 * time.Hour),
 		Payload:   "{}",
 	}
 	sooner := &store.ScheduledEvent{
 		ID:        api.NewUUID(),
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour),
 		Payload:   "{}",
@@ -194,7 +194,7 @@ func TestScheduledEventUpdateStatus(t *testing.T) {
 	eventID := api.NewUUID()
 	evt := &store.ScheduledEvent{
 		ID:        eventID,
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour),
 		Payload:   "{}",
@@ -231,7 +231,7 @@ func TestScheduledEventCancel(t *testing.T) {
 	eventID := api.NewUUID()
 	evt := &store.ScheduledEvent{
 		ID:        eventID,
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour),
 		Payload:   "{}",
@@ -261,7 +261,7 @@ func TestScheduledEventListWithFilter(t *testing.T) {
 	projectID1 := createTestProject(t, s)
 	projectID2 := createTestProject(t, s)
 
-	// Create events across groves and types
+	// Create events across projects and types
 	events := []*store.ScheduledEvent{
 		{ID: api.NewUUID(), ProjectID: projectID1, EventType: "message", FireAt: time.Now().Add(1 * time.Hour), Payload: "{}"},
 		{ID: api.NewUUID(), ProjectID: projectID1, EventType: "status_update", FireAt: time.Now().Add(2 * time.Hour), Payload: "{}"},
@@ -271,7 +271,7 @@ func TestScheduledEventListWithFilter(t *testing.T) {
 		require.NoError(t, s.CreateScheduledEvent(ctx, evt))
 	}
 
-	// Filter by grove
+	// Filter by project
 	result, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectID1}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Len(t, result.Items, 2)
@@ -358,7 +358,7 @@ func TestScheduledEventOptionalCreatedBy(t *testing.T) {
 
 	evt := &store.ScheduledEvent{
 		ID:        api.NewUUID(),
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour),
 		Payload:   "{}",

@@ -25,7 +25,7 @@ const (
 	// FieldGroupType holds the string denoting the group_type field in the database.
 	FieldGroupType = "group_type"
 	// FieldProjectID holds the string denoting the project_id field in the database.
-	FieldProjectID = "grove_id"
+	FieldProjectID = "project_id"
 	// FieldLabels holds the string denoting the labels field in the database.
 	FieldLabels = "labels"
 	// FieldAnnotations holds the string denoting the annotations field in the database.
@@ -135,8 +135,8 @@ const DefaultGroupType = GroupTypeExplicit
 
 // GroupType values.
 const (
-	GroupTypeExplicit    GroupType = "explicit"
-	GroupTypeGroveAgents GroupType = "grove_agents"
+	GroupTypeExplicit      GroupType = "explicit"
+	GroupTypeProjectAgents GroupType = "project_agents"
 )
 
 func (gt GroupType) String() string {
@@ -146,7 +146,7 @@ func (gt GroupType) String() string {
 // GroupTypeValidator is a validator for the "group_type" field enum values. It is called by the builders before save.
 func GroupTypeValidator(gt GroupType) error {
 	switch gt {
-	case GroupTypeExplicit, GroupTypeGroveAgents:
+	case GroupTypeExplicit, GroupTypeProjectAgents:
 		return nil
 	default:
 		return fmt.Errorf("group: invalid enum value for group_type field: %q", gt)

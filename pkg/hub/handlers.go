@@ -1251,7 +1251,7 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 			agents[i].HarnessConfig = agents[i].AppliedConfig.HarnessConfig
 		}
 		if name, ok := groveNames[agents[i].ProjectID]; ok {
-			agents[i].Grove = name
+			agents[i].Project = name
 		}
 		if broker, ok := brokerInfo[agents[i].RuntimeBrokerID]; ok {
 			agents[i].RuntimeBrokerName = broker.Name
@@ -1293,10 +1293,10 @@ func (s *Server) enrichAgent(ctx context.Context, agent *store.Agent, grove *sto
 
 	// Populate grove name
 	if grove != nil {
-		agent.Grove = grove.Name
+		agent.Project = grove.Name
 	} else if agent.ProjectID != "" {
 		if g, err := s.store.GetProject(ctx, agent.ProjectID); err == nil {
-			agent.Grove = g.Name
+			agent.Project = g.Name
 		}
 	}
 

@@ -393,16 +393,16 @@ func TestListGCPServiceAccounts_IncludesMintQuota(t *testing.T) {
 	var resp struct {
 		Items     []json.RawMessage `json:"items"`
 		MintQuota *struct {
-			GroveMinted  int `json:"grove_minted"`
-			GroveCap     int `json:"grove_cap"`
-			GlobalMinted int `json:"global_minted"`
-			GlobalCap    int `json:"global_cap"`
+			ProjectMinted int `json:"project_minted"`
+			ProjectCap    int `json:"project_cap"`
+			GlobalMinted  int `json:"global_minted"`
+			GlobalCap     int `json:"global_cap"`
 		} `json:"mint_quota"`
 	}
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	require.NotNil(t, resp.MintQuota, "mint_quota should be present")
-	assert.Equal(t, 1, resp.MintQuota.GroveMinted)
-	assert.Equal(t, 5, resp.MintQuota.GroveCap)
+	assert.Equal(t, 1, resp.MintQuota.ProjectMinted)
+	assert.Equal(t, 5, resp.MintQuota.ProjectCap)
 	assert.Equal(t, 1, resp.MintQuota.GlobalMinted)
 	assert.Equal(t, 10, resp.MintQuota.GlobalCap)
 }

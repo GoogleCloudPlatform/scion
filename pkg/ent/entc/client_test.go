@@ -300,7 +300,7 @@ func TestGroupProjectEdge(t *testing.T) {
 	grp, err := client.Group.Create().
 		SetName("my-grove-agents").
 		SetSlug("my-grove-agents").
-		SetGroupType("grove_agents").
+		SetGroupType("project_agents").
 		SetProjectID(gv.ID).
 		Save(ctx)
 	require.NoError(t, err)

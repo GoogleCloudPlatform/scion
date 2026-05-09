@@ -164,7 +164,7 @@ func TestCompositeStore_AddGroupMember_AgentShadowRecord(t *testing.T) {
 		ID:           agentID,
 		Name:         "Test Agent",
 		Slug:         "test-agent",
-		ProjectID:      projectID,
+		ProjectID:    projectID,
 		Phase:        string(state.PhaseStopped),
 		StateVersion: 1,
 		Created:      time.Now(),
@@ -264,7 +264,7 @@ func TestCompositeStore_CreateGroup_WithProjectID(t *testing.T) {
 		Name:      "Shadow Project Agents",
 		Slug:      "project:shadow-project:agents",
 		GroupType: store.GroupTypeProjectAgents,
-		ProjectID:   projectID,
+		ProjectID: projectID,
 	})
 	require.NoError(t, err, "CreateGroup should succeed for project that exists only in base store")
 
@@ -299,7 +299,7 @@ func TestCompositeStore_CreateGroup_MultipleGroupsPerProject(t *testing.T) {
 		Name:      "Multi-Group Project Agents",
 		Slug:      "project:multi-group-project:agents",
 		GroupType: store.GroupTypeProjectAgents,
-		ProjectID:   projectID,
+		ProjectID: projectID,
 	})
 	require.NoError(t, err, "agents group creation should succeed")
 
@@ -310,7 +310,7 @@ func TestCompositeStore_CreateGroup_MultipleGroupsPerProject(t *testing.T) {
 		Name:      "Multi-Group Project Members",
 		Slug:      "project:multi-group-project:members",
 		GroupType: store.GroupTypeExplicit,
-		ProjectID:   projectID,
+		ProjectID: projectID,
 	})
 	require.NoError(t, err, "members group creation should succeed for same project")
 

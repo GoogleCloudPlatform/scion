@@ -215,7 +215,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	// Add optional filters
 	if groveID := query.Get("groveId"); groveID != "" {
-		filter["scion.grove"] = groveID
+		filter["scion.project_id"] = groveID
 	}
 	if status := query.Get("status"); status != "" {
 		filter["status"] = status
@@ -235,14 +235,17 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	s.auxiliaryRuntimesMu.RUnlock()
 
-	// Dedup by name+groveID to prevent collision across groves while still
+	// Dedup by name+projectID to prevent collision across projects while still
 	// deduplicating the same agent found on multiple runtimes.
 	agentKey := func(a api.AgentInfo) string {
-		gid := a.ProjectID
-		if gid == "" {
-			gid = a.Labels["scion.grove_id"]
+		pid := a.ProjectID
+		if pid == "" {
+			pid = a.Labels["scion.project_id"]
 		}
-		return a.Name + "\x00" + gid
+		if pid == "" {
+			pid = a.Labels["scion.grove_id"]
+		}
+		return a.Name + "\x00" + pid
 	}
 	seen := make(map[string]bool)
 	for _, ag := range agents {
@@ -2028,7 +2031,7 @@ func (s *Server) resolveManagerForAgent(ctx context.Context, id, groveID string)
 	slug := strings.ToLower(id)
 	filter := map[string]string{"scion.name": slug}
 	if groveID != "" {
-		filter["scion.grove_id"] = groveID
+		filter["scion.project_id"] = groveID
 	}
 
 	// Try the default manager first
@@ -2083,7 +2086,7 @@ func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, groveID string)
 	slug := strings.ToLower(id)
 	filter := map[string]string{"scion.name": slug}
 	if groveID != "" {
-		filter["scion.grove_id"] = groveID
+		filter["scion.project_id"] = groveID
 	}
 
 	// Try the default manager first

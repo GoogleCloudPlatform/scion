@@ -72,7 +72,7 @@ func TestProjectSyncStateCRUD(t *testing.T) {
 
 	// Add a broker-scoped state
 	brokerState := &store.ProjectSyncState{
-		ProjectID:    projectID,
+		ProjectID:  projectID,
 		BrokerID:   "broker-1",
 		FileCount:  10,
 		TotalBytes: 5000,
@@ -120,7 +120,7 @@ func TestProjectSyncStateCascadeDelete(t *testing.T) {
 
 	now := time.Now().UTC().Truncate(time.Second)
 	state := &store.ProjectSyncState{
-		ProjectID:      projectID,
+		ProjectID:    projectID,
 		LastSyncTime: &now,
 		FileCount:    5,
 		TotalBytes:   1000,
@@ -128,7 +128,7 @@ func TestProjectSyncStateCascadeDelete(t *testing.T) {
 	err := s.UpsertProjectSyncState(ctx, state)
 	require.NoError(t, err)
 
-	// Delete the project (grove) - sync state should cascade
+	// Delete the project (project) - sync state should cascade
 	err = s.DeleteProject(ctx, projectID)
 	require.NoError(t, err)
 

@@ -28,11 +28,11 @@ import (
 )
 
 var (
-	policyTestUserUID  = uuid.MustParse("10000000-0000-0000-0000-000000000010")
-	policyTestUser2UID = uuid.MustParse("10000000-0000-0000-0000-000000000020")
-	policyTestAgentUID = uuid.MustParse("20000000-0000-0000-0000-000000000010")
+	policyTestUserUID    = uuid.MustParse("10000000-0000-0000-0000-000000000010")
+	policyTestUser2UID   = uuid.MustParse("10000000-0000-0000-0000-000000000020")
+	policyTestAgentUID   = uuid.MustParse("20000000-0000-0000-0000-000000000010")
 	policyTestProjectUID = uuid.MustParse("30000000-0000-0000-0000-000000000010")
-	policyTestGroupUID = uuid.MustParse("40000000-0000-0000-0000-000000000010")
+	policyTestGroupUID   = uuid.MustParse("40000000-0000-0000-0000-000000000010")
 )
 
 func newTestPolicyStore(t *testing.T) *PolicyStore {
@@ -118,7 +118,7 @@ func TestGetPolicy(t *testing.T) {
 	p := &store.Policy{
 		ID:           id,
 		Name:         "Test Policy",
-		ScopeType:    "grove",
+		ScopeType:    "project",
 		ScopeID:      policyTestProjectUID.String(),
 		ResourceType: "agent",
 		Actions:      []string{"read", "update"},
@@ -130,7 +130,7 @@ func TestGetPolicy(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, id, got.ID)
 	assert.Equal(t, "Test Policy", got.Name)
-	assert.Equal(t, "grove", got.ScopeType)
+	assert.Equal(t, "project", got.ScopeType)
 	assert.Equal(t, policyTestProjectUID.String(), got.ScopeID)
 	assert.Equal(t, []string{"read", "update"}, got.Actions)
 }
@@ -224,7 +224,7 @@ func TestListPolicies_Filter(t *testing.T) {
 		ResourceType: "*", Actions: []string{"*"}, Effect: "deny",
 	}))
 	require.NoError(t, ps.CreatePolicy(ctx, &store.Policy{
-		ID: uuid.New().String(), Name: "Project Allow", ScopeType: "grove",
+		ID: uuid.New().String(), Name: "Project Allow", ScopeType: "project",
 		ScopeID: policyTestProjectUID.String(), ResourceType: "agent",
 		Actions: []string{"read"}, Effect: "allow",
 	}))
@@ -235,7 +235,7 @@ func TestListPolicies_Filter(t *testing.T) {
 	assert.Equal(t, 1, result.TotalCount)
 
 	// Filter by scope
-	result, err = ps.ListPolicies(ctx, store.PolicyFilter{ScopeType: "grove"}, store.ListOptions{})
+	result, err = ps.ListPolicies(ctx, store.PolicyFilter{ScopeType: "project"}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.TotalCount)
 }
@@ -360,7 +360,7 @@ func TestGetPoliciesForPrincipal(t *testing.T) {
 	}
 	p2 := &store.Policy{
 		ID: uuid.New().String(), Name: "Other Policy", ScopeType: "hub",
-		ResourceType: "grove", Actions: []string{"list"}, Effect: "allow",
+		ResourceType: "project", Actions: []string{"list"}, Effect: "allow",
 	}
 	require.NoError(t, ps.CreatePolicy(ctx, p1))
 	require.NoError(t, ps.CreatePolicy(ctx, p2))
@@ -390,13 +390,13 @@ func TestGetPoliciesForPrincipals_BulkQuery(t *testing.T) {
 		ResourceType: "*", Actions: []string{"read"}, Effect: "allow", Priority: 0,
 	}
 	p2 := &store.Policy{
-		ID: uuid.New().String(), Name: "Group Policy", ScopeType: "grove",
+		ID: uuid.New().String(), Name: "Group Policy", ScopeType: "project",
 		ScopeID: policyTestProjectUID.String(), ResourceType: "agent",
 		Actions: []string{"update"}, Effect: "allow", Priority: 10,
 	}
 	p3 := &store.Policy{
 		ID: uuid.New().String(), Name: "Agent Direct", ScopeType: "hub",
-		ResourceType: "grove", Actions: []string{"list"}, Effect: "deny", Priority: 5,
+		ResourceType: "project", Actions: []string{"list"}, Effect: "deny", Priority: 5,
 	}
 	require.NoError(t, ps.CreatePolicy(ctx, p1))
 	require.NoError(t, ps.CreatePolicy(ctx, p2))
@@ -429,7 +429,7 @@ func TestGetPoliciesForPrincipals_BulkQuery(t *testing.T) {
 		scopeTypes[p.ScopeType] = true
 	}
 	assert.True(t, scopeTypes["hub"])
-	assert.True(t, scopeTypes["grove"])
+	assert.True(t, scopeTypes["project"])
 }
 
 func TestGetPoliciesForPrincipals_Empty(t *testing.T) {

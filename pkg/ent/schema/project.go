@@ -75,6 +75,6 @@ func (Project) Edges() []ent.Edge {
 // Annotations of the Project.
 func (Project) Annotations() []schema.Annotation {
 	return []schema.Annotation{
-		entsql.Annotation{Table: "groves"},
+		entsql.Annotation{Table: "projects"},
 	}
 }

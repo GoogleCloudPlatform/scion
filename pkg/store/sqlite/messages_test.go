@@ -30,7 +30,7 @@ import (
 func newTestMessage(projectID, agentID string) *store.Message {
 	return &store.Message{
 		ID:          api.NewUUID(),
-		ProjectID:     projectID,
+		ProjectID:   projectID,
 		Sender:      "user:alice",
 		SenderID:    "user-uuid-alice",
 		Recipient:   "agent:coder",
@@ -178,7 +178,7 @@ func TestListMessages_ParticipantID(t *testing.T) {
 	// Outbound: agent → user. Sender=agent, recipient=user.
 	outbound := &store.Message{
 		ID:          api.NewUUID(),
-		ProjectID:     projectID,
+		ProjectID:   projectID,
 		Sender:      "agent:coder",
 		SenderID:    agentID,
 		Recipient:   "user:alice",
@@ -190,10 +190,10 @@ func TestListMessages_ParticipantID(t *testing.T) {
 	}
 	require.NoError(t, s.CreateMessage(ctx, outbound))
 
-	// Unrelated message in the same grove/agent with a different user.
+	// Unrelated message in the same project/agent with a different user.
 	other := &store.Message{
 		ID:          api.NewUUID(),
-		ProjectID:     projectID,
+		ProjectID:   projectID,
 		Sender:      "user:bob",
 		SenderID:    "user-uuid-bob",
 		Recipient:   "agent:coder",

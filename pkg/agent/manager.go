@@ -198,7 +198,7 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 func (m *AgentManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
 	filter := map[string]string{"scion.name": strings.ToLower(agentID)}
 	if projectID != "" {
-		filter["scion.grove_id"] = projectID
+		filter["scion.project_id"] = projectID
 	}
 	agents, err := m.List(ctx, filter)
 	if err != nil {
@@ -233,7 +233,7 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	// 1. Find the agent, scoped to grove to prevent cross-grove delivery
 	filter := map[string]string{"scion.name": strings.ToLower(agentID)}
 	if projectID != "" {
-		filter["scion.grove_id"] = projectID
+		filter["scion.project_id"] = projectID
 	}
 	agents, err := m.List(ctx, filter)
 	if err != nil {

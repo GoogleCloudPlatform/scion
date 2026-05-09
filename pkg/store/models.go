@@ -27,12 +27,12 @@ import (
 type Agent struct {
 	// Identity
 	ID       string `json:"id"`       // UUID primary key
-	Slug     string `json:"slug"`     // URL-safe slug identifier (unique per grove)
+	Slug     string `json:"slug"`     // URL-safe slug identifier (unique per project)
 	Name     string `json:"name"`     // Human-friendly display name
 	Template string `json:"template"` // Template used to create this agent
 
 	// Project association
-	ProjectID string `json:"groveId"` // FK to Grove.ID
+	ProjectID string `json:"projectId"` // FK to Project.ID
 
 	// Metadata (stored as JSON)
 	Labels      map[string]string `json:"labels,omitempty"`
@@ -64,7 +64,7 @@ type Agent struct {
 	Message         string `json:"message,omitempty"`
 
 	// Enriched fields (populated by Hub when returning data, not persisted)
-	Grove             string `json:"grove,omitempty"`             // Project name (resolved from ProjectID)
+	Project           string `json:"project,omitempty"`           // Project name (resolved from ProjectID)
 	RuntimeBrokerName string `json:"runtimeBrokerName,omitempty"` // Broker name (resolved from RuntimeBrokerID)
 	HarnessConfig     string `json:"harnessConfig,omitempty"`     // Harness config name (resolved from AppliedConfig.HarnessConfig)
 	HarnessAuth       string `json:"harnessAuth,omitempty"`       // Harness auth method (resolved from AppliedConfig.HarnessAuth)
@@ -120,7 +120,7 @@ type AgentAppliedConfig struct {
 	HubAccessScopes []string `json:"hubAccessScopes,omitempty"`
 
 	// WorkspaceStoragePath is the GCS storage path for bootstrapped workspaces.
-	// Set during workspace bootstrap for non-git groves.
+	// Set during workspace bootstrap for non-git projects.
 	WorkspaceStoragePath string `json:"workspaceStoragePath,omitempty"`
 
 	// InlineConfig holds the full ScionConfig provided via the --config flag
@@ -143,7 +143,7 @@ const (
 	ProjectTypeHubNative = "hub-native" // Hub-native workspace
 )
 
-// Workspace mode constants for git groves.
+// Workspace mode constants for git projects.
 // When a git project has the workspace mode label set to "shared", it uses a
 // single shared clone mounted by all agents instead of per-agent clones.
 const (
@@ -160,11 +160,11 @@ type Project struct {
 	Slug string `json:"slug"` // URL-safe identifier
 
 	// Git integration
-	GitRemote string `json:"gitRemote,omitempty"` // Normalized git remote URL (multiple groves may share the same remote)
+	GitRemote string `json:"gitRemote,omitempty"` // Normalized git remote URL (multiple projects may share the same remote)
 
 	// Runtime broker configuration
 	// DefaultRuntimeBrokerID is the runtime broker used when creating agents without
-	// an explicit runtimeBrokerId. Set to the first broker that registers with this grove.
+	// an explicit runtimeBrokerId. Set to the first broker that registers with this project.
 	DefaultRuntimeBrokerID string `json:"defaultRuntimeBrokerId,omitempty"`
 
 	// Metadata (stored as JSON)
@@ -194,8 +194,8 @@ type Project struct {
 	// Computed fields (not stored, populated on read)
 	AgentCount        int    `json:"agentCount,omitempty"`
 	ActiveBrokerCount int    `json:"activeBrokerCount,omitempty"`
-	ProjectType         string `json:"groveType,omitempty"` // "git", "linked", or "hub-native"
-	OwnerName         string `json:"ownerName,omitempty"` // Enriched: resolved from OwnerID
+	ProjectType       string `json:"projectType,omitempty"` // "git", "linked", or "hub-native"
+	OwnerName         string `json:"ownerName,omitempty"`   // Enriched: resolved from OwnerID
 }
 
 // IsSharedWorkspace returns true if this is a git project configured to use a
@@ -233,7 +233,7 @@ type RuntimeBroker struct {
 	Endpoint string `json:"endpoint,omitempty"`
 
 	// Auto-provide configuration
-	// When true, this broker is automatically added as a provider for new groves
+	// When true, this broker is automatically added as a provider for new projects
 	AutoProvide bool `json:"autoProvide,omitempty"`
 
 	// Timestamps
@@ -261,16 +261,16 @@ type BrokerProfile struct {
 	Namespace string `json:"namespace,omitempty"` // K8s namespace
 }
 
-// ProjectProvider links a runtime broker to a grove.
+// ProjectProvider links a runtime broker to a project.
 type ProjectProvider struct {
-	ProjectID    string    `json:"groveId"`
+	ProjectID  string    `json:"projectId"`
 	BrokerID   string    `json:"brokerId"`
 	BrokerName string    `json:"brokerName"`
 	LocalPath  string    `json:"localPath,omitempty"` // Filesystem path to the project on this broker (e.g., ~/.scion or /path/to/project/.scion)
 	Status     string    `json:"status"`              // online, offline
 	LastSeen   time.Time `json:"lastSeen,omitempty"`
 
-	// Ownership - tracks who linked this broker to the grove
+	// Ownership - tracks who linked this broker to the project
 	LinkedBy string    `json:"linkedBy,omitempty"` // User ID who performed the link
 	LinkedAt time.Time `json:"linkedAt,omitempty"` // Timestamp when the link was created
 }
@@ -294,9 +294,9 @@ type Template struct {
 	ContentHash string `json:"contentHash,omitempty"` // SHA-256 hash of template contents
 
 	// Scope
-	Scope   string `json:"scope"`             // global, grove, user
-	ScopeID string `json:"scopeId,omitempty"` // groveId or userId (null for global)
-	ProjectID string `json:"groveId,omitempty"` // Project association (if scope=grove) - deprecated, use ScopeID
+	Scope     string `json:"scope"`               // global, project, user
+	ScopeID   string `json:"scopeId,omitempty"`   // projectId or userId (null for global)
+	ProjectID string `json:"projectId,omitempty"` // Project association (if scope=project) - deprecated, use ScopeID
 
 	// Storage
 	StorageURI    string `json:"storageUri,omitempty"`    // Full bucket URI (e.g., "gs://bucket/templates/path/")
@@ -317,7 +317,7 @@ type Template struct {
 	OwnerID    string `json:"ownerId,omitempty"`
 	CreatedBy  string `json:"createdBy,omitempty"`
 	UpdatedBy  string `json:"updatedBy,omitempty"`
-	Visibility string `json:"visibility"` // private, grove, public
+	Visibility string `json:"visibility"` // private, project, public
 
 	// Timestamps
 	Created time.Time `json:"created"`
@@ -341,9 +341,9 @@ const (
 
 // TemplateScope constants
 const (
-	TemplateScopeGlobal = "global"
-	TemplateScopeProject = "grove"
-	TemplateScopeUser   = "user"
+	TemplateScopeGlobal  = "global"
+	TemplateScopeProject = "project"
+	TemplateScopeUser    = "user"
 )
 
 // HarnessConfig represents a harness configuration in the Hub database.
@@ -363,8 +363,8 @@ type HarnessConfig struct {
 	ContentHash string `json:"contentHash,omitempty"` // SHA-256 hash of harness config contents
 
 	// Scope
-	Scope   string `json:"scope"`             // global, grove, user
-	ScopeID string `json:"scopeId,omitempty"` // groveId or userId (null for global)
+	Scope   string `json:"scope"`             // global, project, user
+	ScopeID string `json:"scopeId,omitempty"` // projectId or userId (null for global)
 
 	// Storage
 	StorageURI    string `json:"storageUri,omitempty"`    // Full bucket URI (e.g., "gs://bucket/harness-configs/path/")
@@ -382,7 +382,7 @@ type HarnessConfig struct {
 	OwnerID    string `json:"ownerId,omitempty"`
 	CreatedBy  string `json:"createdBy,omitempty"`
 	UpdatedBy  string `json:"updatedBy,omitempty"`
-	Visibility string `json:"visibility"` // private, grove, public
+	Visibility string `json:"visibility"` // private, project, public
 
 	// Timestamps
 	Created time.Time `json:"created"`
@@ -410,9 +410,9 @@ const (
 
 // HarnessConfigScope constants
 const (
-	HarnessConfigScopeGlobal = "global"
-	HarnessConfigScopeProject = "grove"
-	HarnessConfigScopeUser   = "user"
+	HarnessConfigScopeGlobal  = "global"
+	HarnessConfigScopeProject = "project"
+	HarnessConfigScopeUser    = "user"
 )
 
 // TemplateConfig holds template configuration details.
@@ -608,19 +608,19 @@ const (
 
 // SubscriptionScope constants define what a subscription targets.
 const (
-	SubscriptionScopeAgent = "agent" // Watch a specific agent
-	SubscriptionScopeProject = "grove" // Watch all agents in a project
+	SubscriptionScopeAgent   = "agent"   // Watch a specific agent
+	SubscriptionScopeProject = "project" // Watch all agents in a project
 )
 
 // NotificationSubscription represents a subscription to agent activity changes.
 type NotificationSubscription struct {
 	ID                string    `json:"id"`                  // UUID primary key
-	Scope             string    `json:"scope"`               // "agent" or "grove"
-	AgentID           string    `json:"agentId,omitempty"`   // Required when Scope="agent", empty when Scope="grove"
+	Scope             string    `json:"scope"`               // "agent" or "project"
+	AgentID           string    `json:"agentId,omitempty"`   // Required when Scope="agent", empty when Scope="project"
 	AgentSlug         string    `json:"agentSlug,omitempty"` // Display-only: resolved agent slug (not persisted)
 	SubscriberType    string    `json:"subscriberType"`      // "agent" or "user"
 	SubscriberID      string    `json:"subscriberId"`        // Slug or ID of the subscriber
-	ProjectID           string    `json:"groveId"`             // Always required (grove context)
+	ProjectID         string    `json:"projectId"`           // Always required (project context)
 	TriggerActivities []string  `json:"triggerActivities"`   // e.g. ["COMPLETED", "WAITING_FOR_INPUT"]
 	CreatedAt         time.Time `json:"createdAt"`
 	CreatedBy         string    `json:"createdBy"`
@@ -643,9 +643,9 @@ func (s *NotificationSubscription) MatchesActivity(activity string) bool {
 type SubscriptionTemplate struct {
 	ID                string   `json:"id"`                // UUID primary key
 	Name              string   `json:"name"`              // Display name (e.g., "All Events", "Critical Only")
-	Scope             string   `json:"scope"`             // Default scope: "agent" or "grove"
+	Scope             string   `json:"scope"`             // Default scope: "agent" or "project"
 	TriggerActivities []string `json:"triggerActivities"` // Pre-configured trigger set
-	ProjectID           string   `json:"groveId"`           // Project scope (empty = global)
+	ProjectID         string   `json:"projectId"`         // Project scope (empty = global)
 	CreatedBy         string   `json:"createdBy"`
 }
 
@@ -654,7 +654,7 @@ type Notification struct {
 	ID             string    `json:"id"`             // UUID primary key
 	SubscriptionID string    `json:"subscriptionId"` // FK to NotificationSubscription
 	AgentID        string    `json:"agentId"`        // Agent that triggered the notification
-	ProjectID        string    `json:"groveId"`
+	ProjectID      string    `json:"projectId"`
 	SubscriberType string    `json:"subscriberType"` // "agent" or "user"
 	SubscriberID   string    `json:"subscriberId"`
 	Status         string    `json:"status"` // Trigger status (UPPER CASE)
@@ -681,7 +681,7 @@ type ListResult[T any] struct {
 }
 
 // EnvVar represents an environment variable stored in the Hub database.
-// Environment variables are scoped to users, groves, or runtime brokers.
+// Environment variables are scoped to users, projects, or runtime brokers.
 type EnvVar struct {
 	// Identity
 	ID  string `json:"id"`  // UUID primary key
@@ -691,7 +691,7 @@ type EnvVar struct {
 	Value string `json:"value"` // Variable value
 
 	// Scope
-	Scope   string `json:"scope"`   // user, grove, runtime_broker
+	Scope   string `json:"scope"`   // user, project, runtime_broker
 	ScopeID string `json:"scopeId"` // ID of the scoped entity
 
 	// Metadata
@@ -726,7 +726,7 @@ type Secret struct {
 	Target     string `json:"target,omitempty"` // Projection target: env var name, json key, or file path
 
 	// Scope
-	Scope   string `json:"scope"`   // user, grove, runtime_broker
+	Scope   string `json:"scope"`   // user, project, runtime_broker
 	ScopeID string `json:"scopeId"` // ID of the scoped entity
 
 	// Metadata
@@ -756,7 +756,7 @@ const (
 const (
 	ScopeHub           = "hub"
 	ScopeUser          = "user"
-	ScopeProject       = "grove"
+	ScopeProject       = "project"
 	ScopeRuntimeBroker = "runtime_broker"
 )
 
@@ -783,8 +783,8 @@ type Group struct {
 	Name        string `json:"name"` // Human-friendly display name
 	Slug        string `json:"slug"` // URL-safe identifier
 	Description string `json:"description,omitempty"`
-	GroupType   string `json:"groupType,omitempty"` // "explicit" or "grove_agents"
-	ProjectID     string `json:"groveId,omitempty"`   // FK to Grove.ID (for grove_agents groups)
+	GroupType   string `json:"groupType,omitempty"` // "explicit" or "project_agents"
+	ProjectID   string `json:"projectId,omitempty"` // FK to Project.ID (for project_agents groups)
 
 	// Hierarchy
 	ParentID string `json:"parentId,omitempty"` // Optional parent group for hierarchy
@@ -823,7 +823,7 @@ const (
 // GroupType constants
 const (
 	GroupTypeExplicit      = "explicit"
-	GroupTypeProjectAgents = "grove_agents" // Watch all agents in a project
+	GroupTypeProjectAgents = "project_agents" // Watch all agents in a project
 )
 
 // PolicyPrincipalType agent constant
@@ -847,11 +847,11 @@ type Policy struct {
 	Description string `json:"description,omitempty"` // Detailed description
 
 	// Scope
-	ScopeType string `json:"scopeType"` // "hub", "grove", "resource"
+	ScopeType string `json:"scopeType"` // "hub", "project", "resource"
 	ScopeID   string `json:"scopeId"`   // ID of the scoped entity (empty for hub scope)
 
 	// Resource targeting
-	ResourceType string `json:"resourceType"`         // "*" for all, or specific type (agent, grove, etc.)
+	ResourceType string `json:"resourceType"`         // "*" for all, or specific type (agent, project, etc.)
 	ResourceID   string `json:"resourceId,omitempty"` // Specific resource ID (optional)
 
 	// Permissions
@@ -902,7 +902,7 @@ const (
 // PolicyScopeType constants
 const (
 	PolicyScopeHub      = "hub"
-	PolicyScopeProject  = "grove"
+	PolicyScopeProject  = "project"
 	PolicyScopeResource = "resource"
 )
 
@@ -924,7 +924,7 @@ const (
 // =============================================================================
 
 // UserAccessToken represents a scoped personal access token.
-// UATs are opaque bearer tokens that carry grove-scoped, action-limited permissions.
+// UATs are opaque bearer tokens that carry project-scoped, action-limited permissions.
 type UserAccessToken struct {
 	ID      string `json:"id"`     // UUID
 	UserID  string `json:"userId"` // FK to User.ID
@@ -933,8 +933,8 @@ type UserAccessToken struct {
 	KeyHash string `json:"-"`      // SHA-256 hash (never exposed)
 
 	// Scoping
-	ProjectID string   `json:"groveId"` // Required: project this token is scoped to
-	Scopes  []string `json:"scopes"`  // Action scopes (resource:action pairs)
+	ProjectID string   `json:"projectId"` // Required: project this token is scoped to
+	Scopes    []string `json:"scopes"`    // Action scopes (resource:action pairs)
 
 	// Lifecycle
 	Revoked   bool       `json:"revoked"`
@@ -948,7 +948,7 @@ const UATPrefix = "scion_pat_"
 
 // UAT scope constants define the allowed capability scopes.
 const (
-	UATScopeGroveRead     = "grove:read"
+	UATScopeProjectRead   = "project:read"
 	UATScopeAgentCreate   = "agent:create"
 	UATScopeAgentRead     = "agent:read"
 	UATScopeAgentList     = "agent:list"
@@ -963,7 +963,7 @@ const (
 
 // UATValidScopes is the set of all valid UAT scope strings.
 var UATValidScopes = map[string]bool{
-	UATScopeGroveRead:     true,
+	UATScopeProjectRead:   true,
 	UATScopeAgentCreate:   true,
 	UATScopeAgentRead:     true,
 	UATScopeAgentList:     true,
@@ -1014,8 +1014,8 @@ const UATDefaultExpiry = 90 * 24 * time.Hour
 // token-generation time via the IAM Credentials API.
 type GCPServiceAccount struct {
 	ID                 string    `json:"id"`                      // UUID
-	Scope              string    `json:"scope"`                   // "hub", "grove", "user"
-	ScopeID            string    `json:"scopeId"`                 // ID of the hub/grove/user
+	Scope              string    `json:"scope"`                   // "hub", "project", "user"
+	ScopeID            string    `json:"scopeId"`                 // ID of the hub/project/user
 	Email              string    `json:"email"`                   // e.g. "agent-worker@project.iam.gserviceaccount.com"
 	ProjectID          string    `json:"projectId"`               // GCP project containing the SA
 	DisplayName        string    `json:"displayName"`             // Human-friendly label
@@ -1051,7 +1051,7 @@ const (
 // These functions convert persistence models to API models for external use.
 // Key ID semantics:
 //   - store.Agent.ID   = UUID (database primary key, globally unique)
-//   - store.Agent.Slug = URL-safe identifier (unique per grove)
+//   - store.Agent.Slug = URL-safe identifier (unique per project)
 //   - api.AgentInfo.ID   = Hub UUID (same as store.Agent.ID)
 //   - api.AgentInfo.Slug = URL-safe identifier (same as store.Agent.Slug)
 //   - api.AgentInfo.ContainerID = Runtime container ID (ephemeral, runtime-assigned)
@@ -1064,7 +1064,7 @@ const (
 // Message represents a persisted structured message between agents and humans.
 type Message struct {
 	ID          string    `json:"id"`
-	ProjectID     string    `json:"groveId"`
+	ProjectID   string    `json:"projectId"`
 	Sender      string    `json:"sender"`    // "user:alice", "agent:code-reviewer"
 	SenderID    string    `json:"senderId"`  // UUID or identity key
 	Recipient   string    `json:"recipient"` // "user:alice", "agent:code-reviewer"
@@ -1103,7 +1103,7 @@ type MessageFilter struct {
 // ScheduledEvent represents a one-shot timer persisted in the database.
 type ScheduledEvent struct {
 	ID         string     `json:"id"`
-	ProjectID    string     `json:"groveId"`
+	ProjectID  string     `json:"projectId"`
 	EventType  string     `json:"eventType"` // "message", "status_update"
 	FireAt     time.Time  `json:"fireAt"`    // When to fire (UTC)
 	Payload    string     `json:"payload"`   // JSON blob (handler-specific)
@@ -1125,7 +1125,7 @@ const (
 
 // ScheduledEventFilter for listing events.
 type ScheduledEventFilter struct {
-	ProjectID    string
+	ProjectID  string
 	EventType  string
 	Status     string
 	ScheduleID string // Filter events generated by a specific recurring schedule
@@ -1138,7 +1138,7 @@ type ScheduledEventFilter struct {
 // Schedule represents a user-defined recurring schedule backed by a cron expression.
 type Schedule struct {
 	ID            string     `json:"id"`
-	ProjectID       string     `json:"groveId"`
+	ProjectID     string     `json:"projectId"`
 	Name          string     `json:"name"`
 	CronExpr      string     `json:"cronExpr"`  // Standard 5-field cron expression (UTC)
 	EventType     string     `json:"eventType"` // "message" (future: "dispatch_agent")
@@ -1171,8 +1171,8 @@ const (
 // ScheduleFilter for listing schedules.
 type ScheduleFilter struct {
 	ProjectID string
-	Status  string
-	Name    string
+	Status    string
+	Name      string
 }
 
 // ToAPI converts a store.Agent to an api.AgentInfo for external consumption.
@@ -1313,7 +1313,7 @@ const (
 )
 
 // GitHubTokenPermissions specifies the permissions to request when minting
-// installation tokens for a grove.
+// installation tokens for a project.
 type GitHubTokenPermissions struct {
 	Contents     string `json:"contents,omitempty"`
 	PullRequests string `json:"pull_requests,omitempty"`
@@ -1385,7 +1385,7 @@ const (
 
 // ProjectSyncState tracks sync metadata per project (and optionally per broker).
 type ProjectSyncState struct {
-	ProjectID     string     `json:"groveId"`
+	ProjectID     string     `json:"projectId"`
 	BrokerID      string     `json:"brokerId,omitempty"`
 	LastSyncTime  *time.Time `json:"lastSyncTime,omitempty"`
 	LastCommitSHA string     `json:"lastCommitSha,omitempty"`

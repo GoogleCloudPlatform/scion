@@ -48,7 +48,7 @@ func (s *SQLiteStore) CreateSchedule(ctx context.Context, schedule *store.Schedu
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO schedules (
-			id, grove_id, name, cron_expr, event_type, payload, status,
+			id, project_id, name, cron_expr, event_type, payload, status,
 			next_run_at, last_run_at, last_run_status, last_run_error,
 			run_count, error_count, created_at, created_by, updated_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -66,7 +66,7 @@ func (s *SQLiteStore) CreateSchedule(ctx context.Context, schedule *store.Schedu
 			return store.ErrAlreadyExists
 		}
 		if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
-			return fmt.Errorf("grove %s does not exist: %w", schedule.ProjectID, store.ErrInvalidInput)
+			return fmt.Errorf("project %s does not exist: %w", schedule.ProjectID, store.ErrInvalidInput)
 		}
 		return err
 	}
@@ -80,7 +80,7 @@ func (s *SQLiteStore) GetSchedule(ctx context.Context, id string) (*store.Schedu
 	var lastRunStatus, lastRunError, createdBy sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, grove_id, name, cron_expr, event_type, payload, status,
+		SELECT id, project_id, name, cron_expr, event_type, payload, status,
 			next_run_at, last_run_at, last_run_status, last_run_error,
 			run_count, error_count, created_at, created_by, updated_at
 		FROM schedules WHERE id = ?
@@ -123,7 +123,7 @@ func (s *SQLiteStore) ListSchedules(ctx context.Context, filter store.ScheduleFi
 	var args []interface{}
 
 	if filter.ProjectID != "" {
-		conditions = append(conditions, "grove_id = ?")
+		conditions = append(conditions, "project_id = ?")
 		args = append(args, filter.ProjectID)
 	}
 	if filter.Status != "" {
@@ -160,7 +160,7 @@ func (s *SQLiteStore) ListSchedules(ctx context.Context, filter store.ScheduleFi
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, grove_id, name, cron_expr, event_type, payload, status,
+		SELECT id, project_id, name, cron_expr, event_type, payload, status,
 			next_run_at, last_run_at, last_run_status, last_run_error,
 			run_count, error_count, created_at, created_by, updated_at
 		FROM schedules %s
@@ -296,7 +296,7 @@ func (s *SQLiteStore) DeleteSchedule(ctx context.Context, id string) error {
 // ListDueSchedules returns active schedules whose next_run_at has passed.
 func (s *SQLiteStore) ListDueSchedules(ctx context.Context, now time.Time) ([]store.Schedule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, grove_id, name, cron_expr, event_type, payload, status,
+		SELECT id, project_id, name, cron_expr, event_type, payload, status,
 			next_run_at, last_run_at, last_run_status, last_run_error,
 			run_count, error_count, created_at, created_by, updated_at
 		FROM schedules

@@ -45,7 +45,7 @@ func (Agent) Fields() []ent.Field {
 		field.String("template").
 			Optional(),
 		field.UUID("project_id", uuid.UUID{}).
-			StorageKey("grove_id"),
+			StorageKey("project_id"),
 		field.Enum("status").
 			Values("created", "provisioning", "cloning", "starting", "running", "suspended", "stopping", "stopped", "error").
 			Default("created"),

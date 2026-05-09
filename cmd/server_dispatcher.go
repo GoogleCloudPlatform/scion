@@ -57,6 +57,7 @@ func (d *agentDispatcherAdapter) DispatchAgentCreate(ctx context.Context, hubAge
 	if hubAgent.Labels == nil {
 		hubAgent.Labels = make(map[string]string)
 	}
+	hubAgent.Labels["scion.project"] = hubAgent.ProjectID
 	hubAgent.Labels["scion.grove"] = hubAgent.ProjectID
 
 	// Start the agent on the runtime broker
@@ -90,6 +91,7 @@ func (d *agentDispatcherAdapter) DispatchAgentStart(ctx context.Context, hubAgen
 	if hubAgent.Labels == nil {
 		hubAgent.Labels = make(map[string]string)
 	}
+	hubAgent.Labels["scion.project"] = hubAgent.ProjectID
 	hubAgent.Labels["scion.grove"] = hubAgent.ProjectID
 	if task != "" {
 		opts.Task = task
@@ -149,6 +151,7 @@ func (d *agentDispatcherAdapter) DispatchAgentRestart(ctx context.Context, hubAg
 	if hubAgent.Labels == nil {
 		hubAgent.Labels = make(map[string]string)
 	}
+	hubAgent.Labels["scion.project"] = hubAgent.ProjectID
 	hubAgent.Labels["scion.grove"] = hubAgent.ProjectID
 
 	agentInfo, err := d.manager.Start(ctx, opts)

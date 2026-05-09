@@ -884,23 +884,27 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			l := map[string]string{
 				"scion.agent":          "true",
 				"scion.name":           api.Slugify(opts.Name),
+				"scion.project":        projectName,
 				"scion.grove":          projectName,
 				"scion.template":       template,
 				"scion.harness_config": harnessConfigName,
 				"scion.harness_auth":   opts.HarnessAuth,
 			}
-			// Add grove_id label for grove-scoped agent isolation.
-			// In broker/hosted mode this comes from the SCION_GROVE_ID env var
-			// injected by the hub dispatcher.
+			// Add project_id/grove_id label for project-scoped agent isolation.
+			// In broker/hosted mode this comes from the SCION_GROVE_ID or
+			// SCION_PROJECT_ID env var injected by the hub dispatcher.
 			if projectID := opts.Env["SCION_GROVE_ID"]; projectID != "" {
+				l["scion.project_id"] = projectID
 				l["scion.grove_id"] = projectID
 			} else if projectID := opts.Env["SCION_PROJECT_ID"]; projectID != "" {
+				l["scion.project_id"] = projectID
 				l["scion.grove_id"] = projectID
 			}
 			return l
 		}(),
 		Annotations: map[string]string{
-			"scion.grove_path": projectDir,
+			"scion.project_path": projectDir,
+			"scion.grove_path":   projectDir,
 		},
 	}
 	id, err := m.Runtime.Run(ctx, runCfg)
@@ -991,8 +995,11 @@ func filterWorkspaceVolume(volumes []api.VolumeMount) []api.VolumeMount {
 // It checks the project_id label first (authoritative in hosted mode), then
 // falls back to the project name label.
 func matchAgentProject(a api.AgentInfo, projectName, projectID string) bool {
-	// If we have a projectID, check the scion.grove_id label (authoritative)
+	// If we have a projectID, check the scion.project_id or scion.grove_id label (authoritative)
 	if projectID != "" {
+		if labelProjectID := a.Labels["scion.project_id"]; labelProjectID != "" {
+			return labelProjectID == projectID
+		}
 		if labelProjectID := a.Labels["scion.grove_id"]; labelProjectID != "" {
 			return labelProjectID == projectID
 		}
@@ -1002,6 +1009,9 @@ func matchAgentProject(a api.AgentInfo, projectName, projectID string) bool {
 	}
 	// Fall back to project name matching
 	if projectName != "" {
+		if labelProject := a.Labels["scion.project"]; labelProject != "" {
+			return labelProject == projectName
+		}
 		if labelProject := a.Labels["scion.grove"]; labelProject != "" {
 			return labelProject == projectName
 		}

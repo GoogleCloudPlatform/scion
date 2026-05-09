@@ -14,7 +14,7 @@ var (
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "name", Type: field.TypeString},
 		{Name: "description", Type: field.TypeString, Nullable: true},
-		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"hub", "grove", "resource"}},
+		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"hub", "project", "resource"}},
 		{Name: "scope_id", Type: field.TypeString, Nullable: true},
 		{Name: "resource_type", Type: field.TypeString},
 		{Name: "resource_id", Type: field.TypeString, Nullable: true},
@@ -45,7 +45,7 @@ var (
 		{Name: "visibility", Type: field.TypeString, Default: "private"},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
-		{Name: "grove_id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "created_by", Type: field.TypeUUID, Nullable: true},
 		{Name: "owner_id", Type: field.TypeUUID, Nullable: true},
 	}
@@ -56,9 +56,9 @@ var (
 		PrimaryKey: []*schema.Column{AgentsColumns[0]},
 		ForeignKeys: []*schema.ForeignKey{
 			{
-				Symbol:     "agents_groves_agents",
+				Symbol:     "agents_projects_agents",
 				Columns:    []*schema.Column{AgentsColumns[9]},
-				RefColumns: []*schema.Column{GrovesColumns[0]},
+				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
 			{
@@ -76,7 +76,7 @@ var (
 		},
 		Indexes: []*schema.Index{
 			{
-				Name:    "agent_slug_grove_id",
+				Name:    "agent_slug_project_id",
 				Unique:  true,
 				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[9]},
 			},
@@ -88,8 +88,8 @@ var (
 		{Name: "name", Type: field.TypeString},
 		{Name: "slug", Type: field.TypeString, Unique: true},
 		{Name: "description", Type: field.TypeString, Nullable: true},
-		{Name: "group_type", Type: field.TypeEnum, Enums: []string{"explicit", "grove_agents"}, Default: "explicit"},
-		{Name: "grove_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "group_type", Type: field.TypeEnum, Enums: []string{"explicit", "project_agents"}, Default: "explicit"},
+		{Name: "project_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "labels", Type: field.TypeJSON, Nullable: true},
 		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
@@ -202,8 +202,8 @@ var (
 			},
 		},
 	}
-	// GrovesColumns holds the columns for the "groves" table.
-	GrovesColumns = []*schema.Column{
+	// ProjectsColumns holds the columns for the "projects" table.
+	ProjectsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "name", Type: field.TypeString},
 		{Name: "slug", Type: field.TypeString, Unique: true},
@@ -216,11 +216,11 @@ var (
 		{Name: "owner_id", Type: field.TypeString, Nullable: true},
 		{Name: "visibility", Type: field.TypeString, Default: "private"},
 	}
-	// GrovesTable holds the schema information for the "groves" table.
-	GrovesTable = &schema.Table{
-		Name:       "groves",
-		Columns:    GrovesColumns,
-		PrimaryKey: []*schema.Column{GrovesColumns[0]},
+	// ProjectsTable holds the schema information for the "projects" table.
+	ProjectsTable = &schema.Table{
+		Name:       "projects",
+		Columns:    ProjectsColumns,
+		PrimaryKey: []*schema.Column{ProjectsColumns[0]},
 	}
 	// UsersColumns holds the columns for the "users" table.
 	UsersColumns = []*schema.Column{
@@ -272,14 +272,14 @@ var (
 		GroupsTable,
 		GroupMembershipsTable,
 		PolicyBindingsTable,
-		GrovesTable,
+		ProjectsTable,
 		UsersTable,
 		GroupChildGroupsTable,
 	}
 )
 
 func init() {
-	AgentsTable.ForeignKeys[0].RefTable = GrovesTable
+	AgentsTable.ForeignKeys[0].RefTable = ProjectsTable
 	AgentsTable.ForeignKeys[1].RefTable = UsersTable
 	AgentsTable.ForeignKeys[2].RefTable = UsersTable
 	GroupsTable.ForeignKeys[0].RefTable = UsersTable
@@ -290,8 +290,8 @@ func init() {
 	PolicyBindingsTable.ForeignKeys[1].RefTable = UsersTable
 	PolicyBindingsTable.ForeignKeys[2].RefTable = GroupsTable
 	PolicyBindingsTable.ForeignKeys[3].RefTable = AgentsTable
-	GrovesTable.Annotation = &entsql.Annotation{
-		Table: "groves",
+	ProjectsTable.Annotation = &entsql.Annotation{
+		Table: "projects",
 	}
 	GroupChildGroupsTable.ForeignKeys[0].RefTable = GroupsTable
 	GroupChildGroupsTable.ForeignKeys[1].RefTable = GroupsTable

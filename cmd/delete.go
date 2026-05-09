@@ -89,9 +89,9 @@ var deleteCmd = &cobra.Command{
 			mgr := agent.NewManager(rt)
 
 			filters := map[string]string{
-				"scion.agent":      "true",
-				"scion.grove_path": resolvedGrove,
-				"scion.grove":      config.GetProjectName(resolvedGrove),
+				"scion.agent":        "true",
+				"scion.project_path": resolvedGrove,
+				"scion.project":      config.GetProjectName(resolvedGrove),
 			}
 
 			agents, err := mgr.List(context.Background(), filters)

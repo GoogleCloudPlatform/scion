@@ -344,14 +344,14 @@ type TemplateStore interface {
 
 // TemplateFilter defines criteria for filtering templates.
 type TemplateFilter struct {
-	Name    string // Exact match on template name
-	Scope   string
-	ScopeID string
-	ProjectID string // When set without Scope, returns global + grove-scoped templates for this project
-	Harness string
-	OwnerID string
-	Status  string
-	Search  string // Full-text search on name/description
+	Name      string // Exact match on template name
+	Scope     string
+	ScopeID   string
+	ProjectID string // When set without Scope, returns global + project-scoped templates for this project
+	Harness   string
+	OwnerID   string
+	Status    string
+	Search    string // Full-text search on name/description
 }
 
 // HarnessConfigStore defines harness config persistence operations.
@@ -385,14 +385,14 @@ type HarnessConfigStore interface {
 
 // HarnessConfigFilter defines criteria for filtering harness configs.
 type HarnessConfigFilter struct {
-	Name    string // Exact match on name
-	Scope   string
-	ScopeID string
-	ProjectID string // When set without Scope, returns global + grove-scoped configs for this project
-	Harness string
-	OwnerID string
-	Status  string
-	Search  string // Full-text search on name/description
+	Name      string // Exact match on name
+	Scope     string
+	ScopeID   string
+	ProjectID string // When set without Scope, returns global + project-scoped configs for this project
+	Harness   string
+	OwnerID   string
+	Status    string
+	Search    string // Full-text search on name/description
 }
 
 // UserStore defines user persistence operations.

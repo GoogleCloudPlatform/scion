@@ -63,8 +63,8 @@ func newTestGroupStore(t *testing.T) *GroupStore {
 }
 
 var (
-	testUserUID  = uuid.MustParse("10000000-0000-0000-0000-000000000001")
-	testAgentUID = uuid.MustParse("20000000-0000-0000-0000-000000000001")
+	testUserUID    = uuid.MustParse("10000000-0000-0000-0000-000000000001")
+	testAgentUID   = uuid.MustParse("20000000-0000-0000-0000-000000000001")
 	testProjectUID = uuid.MustParse("30000000-0000-0000-0000-000000000001")
 )
 
@@ -255,7 +255,7 @@ func TestListGroupsWithGroupTypeFilter(t *testing.T) {
 	}
 	require.NoError(t, gs.CreateGroup(ctx, g1))
 
-	// For grove_agents, we create directly to bypass the API guard
+	// For project_agents, we create directly to bypass the API guard
 	g2 := &store.Group{
 		ID:        uuid.New().String(),
 		Name:      "Project Group",
@@ -885,7 +885,7 @@ func TestCreateProjectGroup(t *testing.T) {
 		Name:      "Test Project Agents",
 		Slug:      "project:test-project:agents",
 		GroupType: store.GroupTypeProjectAgents,
-		ProjectID:   testProjectUID.String(),
+		ProjectID: testProjectUID.String(),
 	}
 
 	err := gs.CreateGroup(ctx, g)
@@ -909,7 +909,7 @@ func TestGetGroupByProjectID(t *testing.T) {
 		Name:      "Test Project Agents",
 		Slug:      "project:test-project:agents",
 		GroupType: store.GroupTypeProjectAgents,
-		ProjectID:   testProjectUID.String(),
+		ProjectID: testProjectUID.String(),
 	}
 	require.NoError(t, gs.CreateGroup(ctx, g))
 
@@ -932,13 +932,13 @@ func TestGetGroupMembersProjectGroup(t *testing.T) {
 	gs := newTestGroupStore(t)
 	ctx := context.Background()
 
-	// Create a grove_agents group linked to the test project
+	// Create a project_agents group linked to the test project
 	projectGroup := &store.Group{
 		ID:        uuid.New().String(),
 		Name:      "Test Project Agents",
 		Slug:      "project:test-project:agents-members",
 		GroupType: store.GroupTypeProjectAgents,
-		ProjectID:   testProjectUID.String(),
+		ProjectID: testProjectUID.String(),
 	}
 	require.NoError(t, gs.CreateGroup(ctx, projectGroup))
 
@@ -975,13 +975,13 @@ func TestGetEffectiveGroupsForAgent(t *testing.T) {
 	gs := newTestGroupStore(t)
 	ctx := context.Background()
 
-	// Create a grove_agents group linked to the test project
+	// Create a project_agents group linked to the test project
 	projectGroup := &store.Group{
 		ID:        uuid.New().String(),
 		Name:      "Test Project Agents",
 		Slug:      "project:test-project:agents-eff",
 		GroupType: store.GroupTypeProjectAgents,
-		ProjectID:   testProjectUID.String(),
+		ProjectID: testProjectUID.String(),
 	}
 	require.NoError(t, gs.CreateGroup(ctx, projectGroup))
 
@@ -1050,7 +1050,7 @@ func TestProjectGroupLifecycle(t *testing.T) {
 		Name:      "Test Project Agents",
 		Slug:      "project:test-project:agents-lc",
 		GroupType: store.GroupTypeProjectAgents,
-		ProjectID:   testProjectUID.String(),
+		ProjectID: testProjectUID.String(),
 	}
 	require.NoError(t, gs.CreateGroup(ctx, projectGroup))
 
@@ -1449,14 +1449,14 @@ func TestListGroupsWithProjectIDFilter(t *testing.T) {
 		Name:      "Project 1 Agents",
 		Slug:      "project:project-1:agents",
 		GroupType: store.GroupTypeProjectAgents,
-		ProjectID:   projectID1,
+		ProjectID: projectID1,
 	}
 	g2 := &store.Group{
 		ID:        uuid.New().String(),
 		Name:      "Project 2 Agents",
 		Slug:      "project:project-2:agents",
 		GroupType: store.GroupTypeProjectAgents,
-		ProjectID:   projectID2,
+		ProjectID: projectID2,
 	}
 	require.NoError(t, gs.CreateGroup(ctx, g1))
 	require.NoError(t, gs.CreateGroup(ctx, g2))

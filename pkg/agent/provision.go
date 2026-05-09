@@ -804,8 +804,11 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if len(chain) > 0 {
 		displayTemplateName = chain[len(chain)-1].Name
 	}
+	projectID, _ := config.ReadProjectID(projectDir)
 	info := &api.AgentInfo{
-		Project:                 projectName,
+		Project:               projectName,
+		ProjectID:             projectID,
+		ProjectPath:           projectDir,
 		Name:                  agentName,
 		Template:              displayTemplateName,
 		HarnessConfig:         harnessConfigName,

@@ -23,7 +23,7 @@ const (
 	// FieldTemplate holds the string denoting the template field in the database.
 	FieldTemplate = "template"
 	// FieldProjectID holds the string denoting the project_id field in the database.
-	FieldProjectID = "grove_id"
+	FieldProjectID = "project_id"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
 	// FieldCreatedBy holds the string denoting the created_by field in the database.
@@ -54,9 +54,9 @@ const (
 	ProjectTable = "agents"
 	// ProjectInverseTable is the table name for the Project entity.
 	// It exists in this package in order to avoid circular dependency with the "project" package.
-	ProjectInverseTable = "groves"
+	ProjectInverseTable = "projects"
 	// ProjectColumn is the table column denoting the project relation/edge.
-	ProjectColumn = "grove_id"
+	ProjectColumn = "project_id"
 	// CreatorTable is the table that holds the creator relation/edge.
 	CreatorTable = "agents"
 	// CreatorInverseTable is the table name for the User entity.

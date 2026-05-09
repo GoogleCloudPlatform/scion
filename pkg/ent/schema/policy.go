@@ -41,7 +41,7 @@ func (AccessPolicy) Fields() []ent.Field {
 		field.String("description").
 			Optional(),
 		field.Enum("scope_type").
-			Values("hub", "grove", "resource"),
+			Values("hub", "project", "resource"),
 		field.String("scope_id").
 			Optional(),
 		field.String("resource_type").

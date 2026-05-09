@@ -41,7 +41,7 @@ func (s *SQLiteStore) CreateMessage(ctx context.Context, msg *store.Message) err
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO messages (
-			id, grove_id, sender, sender_id, recipient, recipient_id,
+			id, project_id, sender, sender_id, recipient, recipient_id,
 			msg, type, urgent, broadcasted, read, agent_id, created_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
@@ -62,7 +62,7 @@ func (s *SQLiteStore) CreateMessage(ctx context.Context, msg *store.Message) err
 // GetMessage returns a single message by ID.
 func (s *SQLiteStore) GetMessage(ctx context.Context, id string) (*store.Message, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, grove_id, sender, sender_id, recipient, recipient_id,
+		SELECT id, project_id, sender, sender_id, recipient, recipient_id,
 			msg, type, urgent, broadcasted, read, agent_id, created_at
 		FROM messages
 		WHERE id = ?
@@ -92,7 +92,7 @@ func (s *SQLiteStore) ListMessages(ctx context.Context, filter store.MessageFilt
 	var args []interface{}
 
 	if filter.ProjectID != "" {
-		conditions = append(conditions, "grove_id = ?")
+		conditions = append(conditions, "project_id = ?")
 		args = append(args, filter.ProjectID)
 	}
 	if filter.AgentID != "" {
@@ -139,7 +139,7 @@ func (s *SQLiteStore) ListMessages(ctx context.Context, filter store.MessageFilt
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, grove_id, sender, sender_id, recipient, recipient_id,
+		SELECT id, project_id, sender, sender_id, recipient, recipient_id,
 			msg, type, urgent, broadcasted, read, agent_id, created_at
 		FROM messages %s ORDER BY created_at DESC LIMIT ?
 	`, whereClause)

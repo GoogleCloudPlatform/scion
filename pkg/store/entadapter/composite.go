@@ -56,8 +56,8 @@ func (c *CompositeStore) Close() error {
 // GroupStore method overrides — delegate to Ent-backed GroupStore.
 
 func (c *CompositeStore) CreateGroup(ctx context.Context, group *store.Group) error {
-	// Ensure the grove exists in the Ent database before creating the group,
-	// since groves are stored in the base (SQLite) store but groups are in Ent
+	// Ensure the project exists in the Ent database before creating the group,
+	// since projects are stored in the base (SQLite) store but groups are in Ent
 	// which has a foreign key constraint on project_id.
 	if group.ProjectID != "" {
 		if err := c.ensureEntProject(ctx, group.ProjectID); err != nil {
@@ -168,7 +168,7 @@ func (c *CompositeStore) ensureEntAgent(ctx context.Context, agentID string) err
 		return fmt.Errorf("fetching agent from base store: %w", err)
 	}
 
-	// Ensure the grove exists in Ent first (required FK)
+	// Ensure the project exists in Ent first (required FK)
 	if err := c.ensureEntProject(ctx, a.ProjectID); err != nil {
 		return fmt.Errorf("ensuring project in ent store: %w", err)
 	}
@@ -195,7 +195,7 @@ func (c *CompositeStore) ensureEntAgent(ctx context.Context, agentID string) err
 	return nil
 }
 
-// ensureEntProject checks if a grove exists in the Ent database and, if not,
+// ensureEntProject checks if a project exists in the Ent database and, if not,
 // creates a minimal shadow record from the base store.
 func (c *CompositeStore) ensureEntProject(ctx context.Context, projectID string) error {
 	uid, err := parseUUID(projectID)

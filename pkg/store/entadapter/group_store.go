@@ -335,7 +335,7 @@ func (s *GroupStore) AddGroupMember(ctx context.Context, member *store.GroupMemb
 	if err != nil {
 		return mapError(err)
 	}
-	if g.GroupType == group.GroupTypeGroveAgents {
+	if g.GroupType == group.GroupTypeProjectAgents {
 		return fmt.Errorf("%w: cannot manually modify members of project_agents groups", store.ErrInvalidInput)
 	}
 
@@ -402,7 +402,7 @@ func (s *GroupStore) RemoveGroupMember(ctx context.Context, groupID, memberType,
 	if err != nil {
 		return mapError(err)
 	}
-	if g.GroupType == group.GroupTypeGroveAgents {
+	if g.GroupType == group.GroupTypeProjectAgents {
 		return fmt.Errorf("%w: cannot manually modify members of project_agents groups", store.ErrInvalidInput)
 	}
 
@@ -514,7 +514,7 @@ func (s *GroupStore) GetGroupMembers(ctx context.Context, groupID string) ([]sto
 		return nil, mapError(err)
 	}
 
-	if g.GroupType == group.GroupTypeGroveAgents && g.ProjectID != nil {
+	if g.GroupType == group.GroupTypeProjectAgents && g.ProjectID != nil {
 		// Query-time resolution: find all agents in this project
 		agents, err := s.client.Agent.Query().
 			Where(agent.ProjectIDEQ(*g.ProjectID)).
@@ -771,7 +771,7 @@ func (s *GroupStore) GetGroupByProjectID(ctx context.Context, projectID string) 
 
 	g, err := s.client.Group.Query().
 		Where(
-			group.GroupTypeEQ(group.GroupTypeGroveAgents),
+			group.GroupTypeEQ(group.GroupTypeProjectAgents),
 			group.ProjectIDEQ(uid),
 		).
 		Only(ctx)
@@ -790,13 +790,13 @@ func (s *GroupStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID str
 		return nil, err
 	}
 
-	// Get the agent to find its grove_id
+	// Get the agent to find its project_id
 	a, err := s.client.Agent.Get(ctx, uid)
 	if err != nil {
 		return nil, mapError(err)
 	}
 
-	// Collect direct group IDs: explicit memberships + implicit grove group
+	// Collect direct group IDs: explicit memberships + implicit project group
 	visited := make(map[uuid.UUID]bool)
 	queue := make([]uuid.UUID, 0)
 
@@ -811,17 +811,17 @@ func (s *GroupStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID str
 		queue = append(queue, m.GroupID)
 	}
 
-	// 2. Find the implicit project_agents group for this agent's grove
-	groveGroup, err := s.client.Group.Query().
+	// 2. Find the implicit project_agents group for this agent's project
+	projectGroup, err := s.client.Group.Query().
 		Where(
-			group.GroupTypeEQ(group.GroupTypeGroveAgents),
+			group.GroupTypeEQ(group.GroupTypeProjectAgents),
 			group.ProjectIDEQ(a.ProjectID),
 		).
 		Only(ctx)
 	if err == nil {
-		queue = append(queue, groveGroup.ID)
+		queue = append(queue, projectGroup.ID)
 	}
-	// If no grove group exists, that's fine — just skip it
+	// If no project group exists, that's fine — just skip it
 
 	// 3. BFS upward through parent_groups (reuse same logic as GetEffectiveGroups)
 	var result []string

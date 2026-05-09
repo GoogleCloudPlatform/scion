@@ -54,13 +54,13 @@ func TestAgentCRUD(t *testing.T) {
 	ctx := context.Background()
 
 	// First create a project for the agent
-	grove := &store.Project{
+	project := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Test Project",
-		Slug:       "test-grove",
+		Slug:       "test-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create agent
 	agent := &store.Agent{
@@ -68,7 +68,7 @@ func TestAgentCRUD(t *testing.T) {
 		Slug:       "test-agent",
 		Name:       "Test Agent",
 		Template:   "claude",
-		ProjectID:    grove.ID,
+		ProjectID:  project.ID,
 		Phase:      string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 		Labels:     map[string]string{"env": "test"},
@@ -89,7 +89,7 @@ func TestAgentCRUD(t *testing.T) {
 	assert.Equal(t, "test", retrieved.Labels["env"])
 
 	// Get by slug
-	retrieved, err = s.GetAgentBySlug(ctx, grove.ID, "test-agent")
+	retrieved, err = s.GetAgentBySlug(ctx, project.ID, "test-agent")
 	require.NoError(t, err)
 	assert.Equal(t, agent.ID, retrieved.ID)
 
@@ -128,14 +128,14 @@ func TestAgentList(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// Create grove
-	grove := &store.Project{
+	// Create project
+	project := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Test Project",
-		Slug:       "test-grove",
+		Slug:       "test-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create multiple agents
 	for i := 0; i < 5; i++ {
@@ -144,7 +144,7 @@ func TestAgentList(t *testing.T) {
 			Slug:       api.Slugify("agent-" + string(rune('a'+i))),
 			Name:       "Agent " + string(rune('A'+i)),
 			Template:   "claude",
-			ProjectID:    grove.ID,
+			ProjectID:  project.ID,
 			Phase:      string(state.PhaseRunning),
 			Visibility: store.VisibilityPrivate,
 		}
@@ -165,8 +165,8 @@ func TestAgentList(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, result.TotalCount)
 
-	// List by grove
-	result, err = s.ListAgents(ctx, store.AgentFilter{ProjectID: grove.ID}, store.ListOptions{})
+	// List by project
+	result, err = s.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 5, result.TotalCount)
 
@@ -180,18 +180,18 @@ func TestAgentAncestry(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	grove := &store.Project{
-		ID: api.NewUUID(), Name: "Ancestry Project", Slug: "ancestry-grove",
+	project := &store.Project{
+		ID: api.NewUUID(), Name: "Ancestry Project", Slug: "ancestry-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	userID := "user-root-123"
 
 	// Agent A: created by user (ancestry = [userID])
 	agentA := &store.Agent{
 		ID: api.NewUUID(), Slug: "agent-a", Name: "Agent A",
-		Template: "claude", ProjectID: grove.ID,
+		Template: "claude", ProjectID: project.ID,
 		Phase: string(state.PhaseRunning), Visibility: store.VisibilityPrivate,
 		CreatedBy: userID, OwnerID: userID,
 		Ancestry: []string{userID},
@@ -201,7 +201,7 @@ func TestAgentAncestry(t *testing.T) {
 	// Agent B: created by Agent A (ancestry = [userID, agentA.ID])
 	agentB := &store.Agent{
 		ID: api.NewUUID(), Slug: "agent-b", Name: "Agent B",
-		Template: "claude", ProjectID: grove.ID,
+		Template: "claude", ProjectID: project.ID,
 		Phase: string(state.PhaseRunning), Visibility: store.VisibilityPrivate,
 		CreatedBy: agentA.ID, OwnerID: agentA.ID,
 		Ancestry: []string{userID, agentA.ID},
@@ -211,7 +211,7 @@ func TestAgentAncestry(t *testing.T) {
 	// Agent C: created by Agent B (ancestry = [userID, agentA.ID, agentB.ID])
 	agentC := &store.Agent{
 		ID: api.NewUUID(), Slug: "agent-c", Name: "Agent C",
-		Template: "claude", ProjectID: grove.ID,
+		Template: "claude", ProjectID: project.ID,
 		Phase: string(state.PhaseRunning), Visibility: store.VisibilityPrivate,
 		CreatedBy: agentB.ID, OwnerID: agentB.ID,
 		Ancestry: []string{userID, agentA.ID, agentB.ID},
@@ -226,13 +226,13 @@ func TestAgentAncestry(t *testing.T) {
 	})
 
 	t.Run("GetAgentBySlug preserves ancestry", func(t *testing.T) {
-		retrieved, err := s.GetAgentBySlug(ctx, grove.ID, "agent-b")
+		retrieved, err := s.GetAgentBySlug(ctx, project.ID, "agent-b")
 		require.NoError(t, err)
 		assert.Equal(t, []string{userID, agentA.ID}, retrieved.Ancestry)
 	})
 
 	t.Run("ListAgents preserves ancestry", func(t *testing.T) {
-		result, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: grove.ID}, store.ListOptions{})
+		result, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
 		require.NoError(t, err)
 		assert.Len(t, result.Items, 3)
 		for _, agent := range result.Items {
@@ -274,7 +274,7 @@ func TestAgentAncestry(t *testing.T) {
 	t.Run("nil ancestry persists as empty", func(t *testing.T) {
 		agentNoAnc := &store.Agent{
 			ID: api.NewUUID(), Slug: "agent-no-anc", Name: "No Ancestry",
-			Template: "claude", ProjectID: grove.ID,
+			Template: "claude", ProjectID: project.ID,
 			Phase: string(state.PhaseRunning), Visibility: store.VisibilityPrivate,
 		}
 		require.NoError(t, s.CreateAgent(ctx, agentNoAnc))
@@ -287,7 +287,7 @@ func TestAgentAncestry(t *testing.T) {
 		// Create agent normally, then set ancestry to NULL to simulate pre-migration state
 		agentNullAnc := &store.Agent{
 			ID: api.NewUUID(), Slug: "agent-null-anc", Name: "Null Ancestry",
-			Template: "claude", ProjectID: grove.ID,
+			Template: "claude", ProjectID: project.ID,
 			Phase: string(state.PhaseRunning), Visibility: store.VisibilityPrivate,
 			Ancestry: []string{"some-user"},
 		}
@@ -300,11 +300,11 @@ func TestAgentAncestry(t *testing.T) {
 		require.NoError(t, err)
 		assert.Nil(t, retrieved.Ancestry)
 
-		retrievedBySlug, err := s.GetAgentBySlug(ctx, grove.ID, "agent-null-anc")
+		retrievedBySlug, err := s.GetAgentBySlug(ctx, project.ID, "agent-null-anc")
 		require.NoError(t, err)
 		assert.Nil(t, retrievedBySlug.Ancestry)
 
-		result, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: grove.ID}, store.ListOptions{})
+		result, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
 		require.NoError(t, err)
 		assert.True(t, result.TotalCount > 0)
 	})
@@ -315,20 +315,20 @@ func TestAgentStatusUpdate(t *testing.T) {
 	ctx := context.Background()
 
 	// Create project and agent
-	grove := &store.Project{
+	project := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Test Project",
-		Slug:       "test-grove",
+		Slug:       "test-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
 		ID:         api.NewUUID(),
 		Slug:       "test-agent",
 		Name:       "Test Agent",
 		Template:   "claude",
-		ProjectID:    grove.ID,
+		ProjectID:  project.ID,
 		Phase:      string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
@@ -409,13 +409,13 @@ func TestAgentStatusUpdate_PhaseActivityRoundTrip(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	grove := &store.Project{
+	project := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Test Project",
-		Slug:       "test-grove-rt",
+		Slug:       "test-project-rt",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create agent with initial phase/activity
 	agent := &store.Agent{
@@ -423,7 +423,7 @@ func TestAgentStatusUpdate_PhaseActivityRoundTrip(t *testing.T) {
 		Slug:       "roundtrip-agent",
 		Name:       "Roundtrip Agent",
 		Template:   "claude",
-		ProjectID:    grove.ID,
+		ProjectID:  project.ID,
 		Phase:      "running",
 		Activity:   "idle",
 		Visibility: store.VisibilityPrivate,
@@ -437,13 +437,13 @@ func TestAgentStatusUpdate_PhaseActivityRoundTrip(t *testing.T) {
 	assert.Equal(t, "idle", retrieved.Activity)
 
 	// Verify round-trip through GetBySlug
-	retrieved, err = s.GetAgentBySlug(ctx, grove.ID, "roundtrip-agent")
+	retrieved, err = s.GetAgentBySlug(ctx, project.ID, "roundtrip-agent")
 	require.NoError(t, err)
 	assert.Equal(t, "running", retrieved.Phase)
 	assert.Equal(t, "idle", retrieved.Activity)
 
 	// Verify round-trip through List
-	result, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: grove.ID}, store.ListOptions{})
+	result, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
 	assert.Equal(t, "running", result.Items[0].Phase)
@@ -454,14 +454,14 @@ func TestSoftDeleteFilterExclusion(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// Create grove
-	grove := &store.Project{
+	// Create project
+	project := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Test Project",
-		Slug:       "test-grove-sd",
+		Slug:       "test-project-sd",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create 3 agents: 2 running, 1 soft-deleted
 	for i := 0; i < 3; i++ {
@@ -470,7 +470,7 @@ func TestSoftDeleteFilterExclusion(t *testing.T) {
 			Slug:       api.Slugify("sd-agent-" + string(rune('a'+i))),
 			Name:       "SD Agent " + string(rune('A'+i)),
 			Template:   "claude",
-			ProjectID:    grove.ID,
+			ProjectID:  project.ID,
 			Phase:      string(state.PhaseRunning),
 			Visibility: store.VisibilityPrivate,
 		}
@@ -510,13 +510,13 @@ func TestPurgeDeletedAgents(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	grove := &store.Project{
+	project := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Test Project",
-		Slug:       "test-grove-purge",
+		Slug:       "test-project-purge",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	now := time.Now()
 
@@ -526,7 +526,7 @@ func TestPurgeDeletedAgents(t *testing.T) {
 		Slug:       "old-deleted",
 		Name:       "Old Deleted",
 		Template:   "claude",
-		ProjectID:    grove.ID,
+		ProjectID:  project.ID,
 		Phase:      string(state.PhaseStopped),
 		DeletedAt:  now.Add(-48 * time.Hour),
 		Visibility: store.VisibilityPrivate,
@@ -536,7 +536,7 @@ func TestPurgeDeletedAgents(t *testing.T) {
 		Slug:       "recent-deleted",
 		Name:       "Recent Deleted",
 		Template:   "claude",
-		ProjectID:    grove.ID,
+		ProjectID:  project.ID,
 		Phase:      string(state.PhaseStopped),
 		DeletedAt:  now.Add(-1 * time.Hour),
 		Visibility: store.VisibilityPrivate,
@@ -546,7 +546,7 @@ func TestPurgeDeletedAgents(t *testing.T) {
 		Slug:       "active-agent",
 		Name:       "Active Agent",
 		Template:   "claude",
-		ProjectID:    grove.ID,
+		ProjectID:  project.ID,
 		Phase:      string(state.PhaseRunning),
 		Visibility: store.VisibilityPrivate,
 	}
@@ -577,13 +577,13 @@ func TestDeletedAtPersistence(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	grove := &store.Project{
+	project := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Test Project",
-		Slug:       "test-grove-dat",
+		Slug:       "test-project-dat",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create and soft-delete an agent
 	agent := &store.Agent{
@@ -591,7 +591,7 @@ func TestDeletedAtPersistence(t *testing.T) {
 		Slug:       "soft-del-test",
 		Name:       "Soft Delete Test",
 		Template:   "claude",
-		ProjectID:    grove.ID,
+		ProjectID:  project.ID,
 		Phase:      string(state.PhaseRunning),
 		Visibility: store.VisibilityPrivate,
 	}
@@ -615,7 +615,7 @@ func TestDeletedAtPersistence(t *testing.T) {
 	assert.WithinDuration(t, deletedAt, retrieved2.DeletedAt, time.Second)
 
 	// Verify GetAgentBySlug also returns DeletedAt
-	bySlug, err := s.GetAgentBySlug(ctx, grove.ID, "soft-del-test")
+	bySlug, err := s.GetAgentBySlug(ctx, project.ID, "soft-del-test")
 	require.NoError(t, err)
 	assert.False(t, bySlug.DeletedAt.IsZero(), "soft-deleted agent fetched by slug should have non-zero DeletedAt")
 
@@ -637,8 +637,8 @@ func TestProjectCRUD(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// Create grove
-	grove := &store.Project{
+	// Create project
+	project := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "My Project",
 		Slug:       "my-project",
@@ -647,27 +647,27 @@ func TestProjectCRUD(t *testing.T) {
 		Labels:     map[string]string{"team": "platform"},
 	}
 
-	err := s.CreateProject(ctx, grove)
+	err := s.CreateProject(ctx, project)
 	require.NoError(t, err)
-	assert.NotZero(t, grove.Created)
+	assert.NotZero(t, project.Created)
 
-	// Get grove
-	retrieved, err := s.GetProject(ctx, grove.ID)
+	// Get project
+	retrieved, err := s.GetProject(ctx, project.ID)
 	require.NoError(t, err)
-	assert.Equal(t, grove.Name, retrieved.Name)
-	assert.Equal(t, grove.GitRemote, retrieved.GitRemote)
+	assert.Equal(t, project.Name, retrieved.Name)
+	assert.Equal(t, project.GitRemote, retrieved.GitRemote)
 	assert.Equal(t, "platform", retrieved.Labels["team"])
 
 	// Get by slug
 	retrieved, err = s.GetProjectBySlug(ctx, "my-project")
 	require.NoError(t, err)
-	assert.Equal(t, grove.ID, retrieved.ID)
+	assert.Equal(t, project.ID, retrieved.ID)
 
 	// Get by git remote (plural)
-	groves, err := s.GetProjectsByGitRemote(ctx, "github.com/org/repo")
+	projects, err := s.GetProjectsByGitRemote(ctx, "github.com/org/repo")
 	require.NoError(t, err)
-	require.Len(t, groves, 1)
-	assert.Equal(t, grove.ID, groves[0].ID)
+	require.Len(t, projects, 1)
+	assert.Equal(t, project.ID, projects[0].ID)
 
 	// Duplicate git remotes are now allowed (slug must still be unique)
 	duplicate := &store.Project{
@@ -680,27 +680,27 @@ func TestProjectCRUD(t *testing.T) {
 	err = s.CreateProject(ctx, duplicate)
 	require.NoError(t, err)
 
-	// Verify both groves are returned
-	groves, err = s.GetProjectsByGitRemote(ctx, "github.com/org/repo")
+	// Verify both projects are returned
+	projects, err = s.GetProjectsByGitRemote(ctx, "github.com/org/repo")
 	require.NoError(t, err)
-	assert.Len(t, groves, 2)
+	assert.Len(t, projects, 2)
 
-	// Update grove
+	// Update project
 	retrieved.Name = "Updated Project"
 	err = s.UpdateProject(ctx, retrieved)
 	require.NoError(t, err)
 
 	// Verify update
-	retrieved, err = s.GetProject(ctx, grove.ID)
+	retrieved, err = s.GetProject(ctx, project.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "Updated Project", retrieved.Name)
 
-	// Delete grove
-	err = s.DeleteProject(ctx, grove.ID)
+	// Delete project
+	err = s.DeleteProject(ctx, project.ID)
 	require.NoError(t, err)
 
 	// Verify deleted
-	_, err = s.GetProject(ctx, grove.ID)
+	_, err = s.GetProject(ctx, project.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
@@ -710,54 +710,54 @@ func TestMultiProjectPerGitRemote(t *testing.T) {
 
 	remote := "github.com/acme/widgets"
 
-	// Create 3 groves with the same git remote but different slugs
+	// Create 3 projects with the same git remote but different slugs
 	slugs := []string{"acme-widgets", "acme-widgets-1", "acme-widgets-2"}
 	for i, slug := range slugs {
-		grove := &store.Project{
+		project := &store.Project{
 			ID:         api.NewUUID(),
 			Name:       fmt.Sprintf("acme-widgets project %d", i),
 			Slug:       slug,
 			GitRemote:  remote,
 			Visibility: store.VisibilityPrivate,
 		}
-		require.NoError(t, s.CreateProject(ctx, grove))
+		require.NoError(t, s.CreateProject(ctx, project))
 	}
 
-	groves, err := s.GetProjectsByGitRemote(ctx, remote)
+	projects, err := s.GetProjectsByGitRemote(ctx, remote)
 	require.NoError(t, err)
-	assert.Len(t, groves, 3)
+	assert.Len(t, projects, 3)
 
 	// Verify ordering is by created_at ASC
-	assert.Equal(t, "acme-widgets", groves[0].Slug)
-	assert.Equal(t, "acme-widgets-1", groves[1].Slug)
-	assert.Equal(t, "acme-widgets-2", groves[2].Slug)
+	assert.Equal(t, "acme-widgets", projects[0].Slug)
+	assert.Equal(t, "acme-widgets-1", projects[1].Slug)
+	assert.Equal(t, "acme-widgets-2", projects[2].Slug)
 }
 
 func TestGetProjectsByGitRemoteEmpty(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	groves, err := s.GetProjectsByGitRemote(ctx, "github.com/nonexistent/repo")
+	projects, err := s.GetProjectsByGitRemote(ctx, "github.com/nonexistent/repo")
 	require.NoError(t, err)
-	assert.Empty(t, groves)
+	assert.Empty(t, projects)
 }
 
 func TestSlugUniqueness(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	grove1 := &store.Project{
-		ID: api.NewUUID(), Name: "Test", Slug: "test-grove",
+	project1 := &store.Project{
+		ID: api.NewUUID(), Name: "Test", Slug: "test-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove1))
+	require.NoError(t, s.CreateProject(ctx, project1))
 
 	// Duplicate slug should fail
-	grove2 := &store.Project{
-		ID: api.NewUUID(), Name: "Test 2", Slug: "test-grove",
+	project2 := &store.Project{
+		ID: api.NewUUID(), Name: "Test 2", Slug: "test-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	err := s.CreateProject(ctx, grove2)
+	err := s.CreateProject(ctx, project2)
 	assert.ErrorIs(t, err, store.ErrAlreadyExists)
 }
 
@@ -853,33 +853,33 @@ func TestProjectList(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	// Create groves
+	// Create projects
 	for i := 0; i < 3; i++ {
-		grove := &store.Project{
+		project := &store.Project{
 			ID:         api.NewUUID(),
 			Name:       "Project " + string(rune('A'+i)),
-			Slug:       "grove-" + string(rune('a'+i)),
+			Slug:       "project-" + string(rune('a'+i)),
 			Visibility: store.VisibilityPrivate,
 		}
 		if i == 0 {
-			grove.Visibility = store.VisibilityPublic
+			project.Visibility = store.VisibilityPublic
 		}
-		require.NoError(t, s.CreateProject(ctx, grove))
+		require.NoError(t, s.CreateProject(ctx, project))
 
-		// Add an agent to the first grove
+		// Add an agent to the first project
 		if i == 0 {
 			agent := &store.Agent{
-				ID:      api.NewUUID(),
-				Slug:    "test-agent",
-				Name:    "Test Agent",
-				ProjectID: grove.ID,
-				Phase:   string(state.PhaseRunning),
+				ID:        api.NewUUID(),
+				Slug:      "test-agent",
+				Name:      "Test Agent",
+				ProjectID: project.ID,
+				Phase:     string(state.PhaseRunning),
 			}
 			require.NoError(t, s.CreateAgent(ctx, agent))
 
-			// Link the broker to the first grove
+			// Link the broker to the first project
 			require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-				ProjectID:    grove.ID,
+				ProjectID:  project.ID,
 				BrokerID:   broker.ID,
 				BrokerName: broker.Name,
 				Status:     store.BrokerStatusOnline,
@@ -919,28 +919,28 @@ func TestProjectLookupCaseInsensitive(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a project with mixed case name
-	grove := &store.Project{
+	project := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Global",
 		Slug:       "global",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Look up with exact case - should work
 	retrieved, err := s.GetProjectBySlugCaseInsensitive(ctx, "global")
 	require.NoError(t, err)
-	assert.Equal(t, grove.ID, retrieved.ID)
+	assert.Equal(t, project.ID, retrieved.ID)
 
 	// Look up with different case - should still work
 	retrieved, err = s.GetProjectBySlugCaseInsensitive(ctx, "GLOBAL")
 	require.NoError(t, err)
-	assert.Equal(t, grove.ID, retrieved.ID)
+	assert.Equal(t, project.ID, retrieved.ID)
 
 	// Look up with mixed case - should still work
 	retrieved, err = s.GetProjectBySlugCaseInsensitive(ctx, "Global")
 	require.NoError(t, err)
-	assert.Equal(t, grove.ID, retrieved.ID)
+	assert.Equal(t, project.ID, retrieved.ID)
 
 	// Look up non-existent - should return ErrNotFound
 	_, err = s.GetProjectBySlugCaseInsensitive(ctx, "nonexistent")
@@ -951,33 +951,33 @@ func TestProjectListBySlug(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// Create two groves with distinct slugs
-	grove1 := &store.Project{
+	// Create two projects with distinct slugs
+	project1 := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Alpha Project",
 		Slug:       "alpha-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	grove2 := &store.Project{
+	project2 := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Beta Project",
 		Slug:       "beta-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove1))
-	require.NoError(t, s.CreateProject(ctx, grove2))
+	require.NoError(t, s.CreateProject(ctx, project1))
+	require.NoError(t, s.CreateProject(ctx, project2))
 
 	// Filter by slug — exact match
 	result, err := s.ListProjects(ctx, store.ProjectFilter{Slug: "alpha-project"}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.TotalCount)
-	assert.Equal(t, grove1.ID, result.Items[0].ID)
+	assert.Equal(t, project1.ID, result.Items[0].ID)
 
 	// Filter by slug — case-insensitive
 	result, err = s.ListProjects(ctx, store.ProjectFilter{Slug: "ALPHA-PROJECT"}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.TotalCount)
-	assert.Equal(t, grove1.ID, result.Items[0].ID)
+	assert.Equal(t, project1.ID, result.Items[0].ID)
 
 	// Filter by slug — no match
 	result, err = s.ListProjects(ctx, store.ProjectFilter{Slug: "nonexistent"}, store.ListOptions{})
@@ -989,34 +989,34 @@ func TestListProjectsByGitRemoteExactMatch(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	grove1 := &store.Project{
+	project1 := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Repo",
 		Slug:       "repo",
 		GitRemote:  "github.com/org/repo",
 		Visibility: store.VisibilityPrivate,
 	}
-	grove2 := &store.Project{
+	project2 := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Repo Clone",
 		Slug:       "repo-clone",
 		GitRemote:  "github.com/org/repo-clone",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove1))
-	require.NoError(t, s.CreateProject(ctx, grove2))
+	require.NoError(t, s.CreateProject(ctx, project1))
+	require.NoError(t, s.CreateProject(ctx, project2))
 
-	// Exact match should return only the exact grove, not the one with repo-clone
+	// Exact match should return only the exact project, not the one with repo-clone
 	result, err := s.ListProjects(ctx, store.ProjectFilter{GitRemote: "github.com/org/repo"}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.TotalCount)
-	assert.Equal(t, grove1.ID, result.Items[0].ID)
+	assert.Equal(t, project1.ID, result.Items[0].ID)
 
-	// Exact match on the clone URL should return only that grove
+	// Exact match on the clone URL should return only that project
 	result, err = s.ListProjects(ctx, store.ProjectFilter{GitRemote: "github.com/org/repo-clone"}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.TotalCount)
-	assert.Equal(t, grove2.ID, result.Items[0].ID)
+	assert.Equal(t, project2.ID, result.Items[0].ID)
 }
 
 func TestListProjectsSharedScope(t *testing.T) {
@@ -1029,21 +1029,21 @@ func TestListProjectsSharedScope(t *testing.T) {
 	ownedProject := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Owned Project",
-		Slug:       "owned-grove",
+		Slug:       "owned-project",
 		OwnerID:    ownerID,
 		Visibility: store.VisibilityPrivate,
 	}
 	sharedProject := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Shared Project",
-		Slug:       "shared-grove",
+		Slug:       "shared-project",
 		OwnerID:    otherOwnerID,
 		Visibility: store.VisibilityPrivate,
 	}
 	unrelatedProject := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Unrelated Project",
-		Slug:       "unrelated-grove",
+		Slug:       "unrelated-project",
 		OwnerID:    otherOwnerID,
 		Visibility: store.VisibilityPrivate,
 	}
@@ -1051,7 +1051,7 @@ func TestListProjectsSharedScope(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, sharedProject))
 	require.NoError(t, s.CreateProject(ctx, unrelatedProject))
 
-	// scope=mine: only groves owned by the user
+	// scope=mine: only projects owned by the user
 	result, err := s.ListProjects(ctx, store.ProjectFilter{OwnerID: ownerID}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.TotalCount)
@@ -1061,13 +1061,13 @@ func TestListProjectsSharedScope(t *testing.T) {
 	// but ExcludeOwnerID removes the owned one
 	result, err = s.ListProjects(ctx, store.ProjectFilter{
 		MemberProjectIDs: []string{ownedProject.ID, sharedProject.ID},
-		ExcludeOwnerID: ownerID,
+		ExcludeOwnerID:   ownerID,
 	}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.TotalCount)
 	assert.Equal(t, sharedProject.ID, result.Items[0].ID)
 
-	// MemberProjectIDs without ExcludeOwnerID returns all matched groves
+	// MemberProjectIDs without ExcludeOwnerID returns all matched projects
 	result, err = s.ListProjects(ctx, store.ProjectFilter{
 		MemberProjectIDs: []string{ownedProject.ID, sharedProject.ID},
 	}, store.ListOptions{})
@@ -1079,7 +1079,7 @@ func TestListProjectsSharedScope(t *testing.T) {
 		ExcludeOwnerID: ownerID,
 	}, store.ListOptions{})
 	require.NoError(t, err)
-	// Returns all groves not owned by ownerID
+	// Returns all projects not owned by ownerID
 	assert.Equal(t, 2, result.TotalCount)
 }
 
@@ -1094,20 +1094,20 @@ func TestListProjectsSharedScopeTransitiveGroup(t *testing.T) {
 	sharedProject := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Transitively Shared Project",
-		Slug:       "trans-shared-grove",
+		Slug:       "trans-shared-project",
 		OwnerID:    otherOwnerID,
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateProject(ctx, sharedProject))
 
-	// Create a grove_agents group linked to the project (simulates the grove
+	// Create a project_agents group linked to the project (simulates the project
 	// membership group that is created when a project gains members).
-	groveGroup := &store.Group{
+	projectGroup := &store.Group{
 		ID:        api.NewUUID(),
 		Name:      "Project Agents",
-		Slug:      "grove-agents-trans",
-		GroupType: "grove_agents",
-		ProjectID:   sharedProject.ID,
+		Slug:      "project-agents-trans",
+		GroupType: "project_agents",
+		ProjectID: sharedProject.ID,
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
@@ -1128,13 +1128,13 @@ func TestListProjectsSharedScopeTransitiveGroup(t *testing.T) {
 		Updated: time.Now(),
 	}
 
-	for _, g := range []*store.Group{groveGroup, parentGroup, childGroup} {
+	for _, g := range []*store.Group{projectGroup, parentGroup, childGroup} {
 		require.NoError(t, s.CreateGroup(ctx, g))
 	}
 
-	// parentGroup is a member of groveGroup (admin access to the grove)
+	// parentGroup is a member of projectGroup (admin access to the project)
 	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
-		GroupID:    groveGroup.ID,
+		GroupID:    projectGroup.ID,
 		MemberType: "group",
 		MemberID:   parentGroup.ID,
 		Role:       "admin",
@@ -1159,7 +1159,7 @@ func TestListProjectsSharedScopeTransitiveGroup(t *testing.T) {
 		AddedAt:    time.Now(),
 	}))
 
-	// GetEffectiveGroups should return all three groups (child, parent, grove)
+	// GetEffectiveGroups should return all three groups (child, parent, project)
 	effectiveGroupIDs, err := s.GetEffectiveGroups(ctx, userID)
 	require.NoError(t, err)
 	assert.Len(t, effectiveGroupIDs, 3)
@@ -1177,10 +1177,10 @@ func TestListProjectsSharedScopeTransitiveGroup(t *testing.T) {
 	require.Len(t, projectIDs, 1, "should find project via transitive group membership")
 	assert.Equal(t, sharedProject.ID, projectIDs[0])
 
-	// Using the resolved project IDs in a shared scope filter should return the grove
+	// Using the resolved project IDs in a shared scope filter should return the project
 	result, err := s.ListProjects(ctx, store.ProjectFilter{
 		MemberProjectIDs: projectIDs,
-		ExcludeOwnerID: userID,
+		ExcludeOwnerID:   userID,
 	}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.TotalCount)
@@ -1340,17 +1340,17 @@ func TestRuntimeBrokerListByProjectIncludesAutoProvide(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// Create a grove
-	grove := &store.Project{
-		ID:      "grove-autoprovide-test",
+	// Create a project
+	project := &store.Project{
+		ID:      "project-autoprovide-test",
 		Slug:    "autoprovide-test",
 		Name:    "AutoProvide Test",
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
-	// Create a regular broker explicitly linked to the grove
+	// Create a regular broker explicitly linked to the project
 	linkedBroker := &store.RuntimeBroker{
 		ID:     "broker-linked",
 		Name:   "Linked Broker",
@@ -1359,13 +1359,13 @@ func TestRuntimeBrokerListByProjectIncludesAutoProvide(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, linkedBroker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:    grove.ID,
+		ProjectID:  project.ID,
 		BrokerID:   linkedBroker.ID,
 		BrokerName: linkedBroker.Name,
 		Status:     store.BrokerStatusOnline,
 	}))
 
-	// Create an auto-provide broker (NOT explicitly linked to the grove)
+	// Create an auto-provide broker (NOT explicitly linked to the project)
 	autoBroker := &store.RuntimeBroker{
 		ID:          "broker-auto",
 		Name:        "Auto Broker",
@@ -1375,7 +1375,7 @@ func TestRuntimeBrokerListByProjectIncludesAutoProvide(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, autoBroker))
 
-	// Create a regular broker NOT linked to the grove
+	// Create a regular broker NOT linked to the project
 	unlinkedBroker := &store.RuntimeBroker{
 		ID:     "broker-unlinked",
 		Name:   "Unlinked Broker",
@@ -1385,7 +1385,7 @@ func TestRuntimeBrokerListByProjectIncludesAutoProvide(t *testing.T) {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, unlinkedBroker))
 
 	// List brokers for the project — should include linked + auto-provide, but not unlinked
-	result, err := s.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{ProjectID: grove.ID}, store.ListOptions{})
+	result, err := s.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{ProjectID: project.ID}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 2, result.TotalCount)
 
@@ -1577,7 +1577,7 @@ func TestHarnessConfigList(t *testing.T) {
 func TestHarnessConfigListDeduplication(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	projectID := "grove-dedup-test"
+	projectID := "project-dedup-test"
 
 	globalHC := &store.HarnessConfig{
 		ID:      api.NewUUID(),
@@ -1586,12 +1586,12 @@ func TestHarnessConfigListDeduplication(t *testing.T) {
 		Harness: "gemini",
 		Scope:   "global",
 	}
-	groveHC := &store.HarnessConfig{
+	projectHC := &store.HarnessConfig{
 		ID:      api.NewUUID(),
 		Name:    "gemini",
 		Slug:    "gemini",
 		Harness: "gemini",
-		Scope:   "grove",
+		Scope:   "project",
 		ScopeID: projectID,
 	}
 	globalOnly := &store.HarnessConfig{
@@ -1601,16 +1601,16 @@ func TestHarnessConfigListDeduplication(t *testing.T) {
 		Harness: "claude",
 		Scope:   "global",
 	}
-	groveOnly := &store.HarnessConfig{
+	projectOnly := &store.HarnessConfig{
 		ID:      api.NewUUID(),
 		Name:    "opencode",
 		Slug:    "opencode",
 		Harness: "opencode",
-		Scope:   "grove",
+		Scope:   "project",
 		ScopeID: projectID,
 	}
 
-	for _, hc := range []*store.HarnessConfig{globalHC, groveHC, globalOnly, groveOnly} {
+	for _, hc := range []*store.HarnessConfig{globalHC, projectHC, globalOnly, projectOnly} {
 		require.NoError(t, s.CreateHarnessConfig(ctx, hc))
 	}
 
@@ -1619,7 +1619,7 @@ func TestHarnessConfigListDeduplication(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 4, result.TotalCount)
 
-	// With ProjectID filter: deduplicates, preferring grove-scoped
+	// With ProjectID filter: deduplicates, preferring project-scoped
 	result, err = s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{ProjectID: projectID}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 3, result.TotalCount)
@@ -1628,9 +1628,9 @@ func TestHarnessConfigListDeduplication(t *testing.T) {
 	for _, hc := range result.Items {
 		slugs[hc.Slug] = hc.Scope
 	}
-	assert.Equal(t, "grove", slugs["gemini"], "grove-scoped should win over global")
+	assert.Equal(t, "project", slugs["gemini"], "project-scoped should win over global")
 	assert.Equal(t, "global", slugs["claude"], "global-only config should still appear")
-	assert.Equal(t, "grove", slugs["opencode"], "grove-only config should still appear")
+	assert.Equal(t, "project", slugs["opencode"], "project-only config should still appear")
 }
 
 // ============================================================================
@@ -1793,14 +1793,14 @@ func TestProjectProviders(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// Create grove
-	grove := &store.Project{
+	// Create project
+	project := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Test Project",
-		Slug:       "test-grove",
+		Slug:       "test-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create brokers
 	broker1 := &store.RuntimeBroker{
@@ -1828,7 +1828,7 @@ func TestProjectProviders(t *testing.T) {
 
 	// Add providers with user tracking
 	provider1 := &store.ProjectProvider{
-		ProjectID:    grove.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker1.ID,
 		BrokerName: broker1.Name,
 		Status:     store.BrokerStatusOnline,
@@ -1837,7 +1837,7 @@ func TestProjectProviders(t *testing.T) {
 	require.NoError(t, s.AddProjectProvider(ctx, provider1))
 
 	provider2 := &store.ProjectProvider{
-		ProjectID:    grove.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker2.ID,
 		BrokerName: broker2.Name,
 		Status:     store.BrokerStatusOnline,
@@ -1845,7 +1845,7 @@ func TestProjectProviders(t *testing.T) {
 	require.NoError(t, s.AddProjectProvider(ctx, provider2))
 
 	// Get project providers
-	providers, err := s.GetProjectProviders(ctx, grove.ID)
+	providers, err := s.GetProjectProviders(ctx, project.ID)
 	require.NoError(t, err)
 	assert.Len(t, providers, 2)
 
@@ -1858,23 +1858,23 @@ func TestProjectProviders(t *testing.T) {
 	}
 
 	// Verify GetProjectProvider also returns user tracking fields
-	provider, err := s.GetProjectProvider(ctx, grove.ID, broker1.ID)
+	provider, err := s.GetProjectProvider(ctx, project.ID, broker1.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "user-123", provider.LinkedBy)
 	assert.False(t, provider.LinkedAt.IsZero(), "LinkedAt should be set")
 
-	// Get broker groves
-	groves, err := s.GetBrokerProjects(ctx, broker1.ID)
+	// Get broker projects
+	projects, err := s.GetBrokerProjects(ctx, broker1.ID)
 	require.NoError(t, err)
-	assert.Len(t, groves, 1)
-	assert.Equal(t, grove.ID, groves[0].ProjectID)
+	assert.Len(t, projects, 1)
+	assert.Equal(t, project.ID, projects[0].ProjectID)
 
 	// Update provider status
-	err = s.UpdateProviderStatus(ctx, grove.ID, broker1.ID, store.BrokerStatusOffline)
+	err = s.UpdateProviderStatus(ctx, project.ID, broker1.ID, store.BrokerStatusOffline)
 	require.NoError(t, err)
 
 	// Verify update
-	providers, err = s.GetProjectProviders(ctx, grove.ID)
+	providers, err = s.GetProjectProviders(ctx, project.ID)
 	require.NoError(t, err)
 	for _, p := range providers {
 		if p.BrokerID == broker1.ID {
@@ -1882,16 +1882,16 @@ func TestProjectProviders(t *testing.T) {
 		}
 	}
 
-	// Verify grove's active broker count
-	retrievedProject, err := s.GetProject(ctx, grove.ID)
+	// Verify project's active broker count
+	retrievedProject, err := s.GetProject(ctx, project.ID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, retrievedProject.ActiveBrokerCount) // Only broker2 is online
 
 	// Remove provider
-	err = s.RemoveProjectProvider(ctx, grove.ID, broker1.ID)
+	err = s.RemoveProjectProvider(ctx, project.ID, broker1.ID)
 	require.NoError(t, err)
 
-	providers, err = s.GetProjectProviders(ctx, grove.ID)
+	providers, err = s.GetProjectProviders(ctx, project.ID)
 	require.NoError(t, err)
 	assert.Len(t, providers, 1)
 	assert.Equal(t, broker2.ID, providers[0].BrokerID)
@@ -1917,13 +1917,13 @@ func TestMigration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify tables exist by inserting data
-	grove := &store.Project{
+	project := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Test",
 		Slug:       "test",
 		Visibility: store.VisibilityPrivate,
 	}
-	err = s.CreateProject(ctx, grove)
+	err = s.CreateProject(ctx, project)
 	require.NoError(t, err)
 }
 
@@ -1952,9 +1952,9 @@ func TestDropTableCascadesWithForeignKeysOn(t *testing.T) {
 
 	// With foreign_keys ON (default), DROP TABLE cascades
 	_, err = s.db.ExecContext(ctx, `
-		CREATE TABLE groves_copy AS SELECT * FROM groves;
-		DROP TABLE groves;
-		ALTER TABLE groves_copy RENAME TO groves;
+		CREATE TABLE projects_copy AS SELECT * FROM projects;
+		DROP TABLE projects;
+		ALTER TABLE projects_copy RENAME TO projects;
 	`)
 	require.NoError(t, err)
 
@@ -1964,9 +1964,9 @@ func TestDropTableCascadesWithForeignKeysOn(t *testing.T) {
 }
 
 func TestMigrationV40PreservesAgents(t *testing.T) {
-	// Regression test: V40 drops and recreates the groves table. Without
+	// Regression test: V40 drops and recreates the projects table. Without
 	// PRAGMA foreign_keys=OFF (which must be set OUTSIDE the transaction),
-	// DROP TABLE groves triggers ON DELETE CASCADE on agents, deleting all rows.
+	// DROP TABLE projects triggers ON DELETE CASCADE on agents, deleting all rows.
 	s, err := New(":memory:")
 	require.NoError(t, err)
 	defer s.Close()
@@ -1981,7 +1981,7 @@ func TestMigrationV40PreservesAgents(t *testing.T) {
 	err = s.CreateProject(ctx, &store.Project{
 		ID:         projectID,
 		Name:       "TestProject",
-		Slug:       "test-grove",
+		Slug:       "test-project",
 		Visibility: store.VisibilityPrivate,
 	})
 	require.NoError(t, err)
@@ -1991,7 +1991,7 @@ func TestMigrationV40PreservesAgents(t *testing.T) {
 		ID:         agentID,
 		Slug:       "test-agent",
 		Name:       "Test Agent",
-		ProjectID:    projectID,
+		ProjectID:  projectID,
 		Visibility: store.VisibilityPrivate,
 	})
 	require.NoError(t, err)
@@ -2001,15 +2001,15 @@ func TestMigrationV40PreservesAgents(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Test Agent", agent.Name)
 
-	// Simulate re-running V40 by dropping and recreating groves table
+	// Simulate re-running V40 by dropping and recreating projects table
 	// using the same pattern as the migration, with proper FK handling.
 	_, err = s.db.ExecContext(ctx, "PRAGMA foreign_keys=OFF")
 	require.NoError(t, err)
 
 	_, err = s.db.ExecContext(ctx, `
-		CREATE TABLE groves_new2 AS SELECT * FROM groves;
-		DROP TABLE groves;
-		ALTER TABLE groves_new2 RENAME TO groves;
+		CREATE TABLE projects_new2 AS SELECT * FROM projects;
+		DROP TABLE projects;
+		ALTER TABLE projects_new2 RENAME TO projects;
 	`)
 	require.NoError(t, err)
 
@@ -2081,27 +2081,27 @@ func TestCascadeDelete(t *testing.T) {
 	ctx := context.Background()
 
 	// Create project with agent
-	grove := &store.Project{
+	project := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Test Project",
-		Slug:       "test-grove",
+		Slug:       "test-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
 		ID:         api.NewUUID(),
 		Slug:       "test-agent",
 		Name:       "Test Agent",
 		Template:   "claude",
-		ProjectID:    grove.ID,
+		ProjectID:  project.ID,
 		Phase:      string(state.PhaseRunning),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	// Delete grove
-	err := s.DeleteProject(ctx, grove.ID)
+	// Delete project
+	err := s.DeleteProject(ctx, project.ID)
 	require.NoError(t, err)
 
 	// Verify agent was cascade deleted
@@ -2119,7 +2119,7 @@ func TestCascadeDeleteEnvVarsSecrets(t *testing.T) {
 		Visibility: store.VisibilityPrivate,
 	}))
 
-	// Create grove-scoped env vars
+	// Create project-scoped env vars
 	require.NoError(t, s.CreateEnvVar(ctx, &store.EnvVar{
 		ID: api.NewUUID(), Key: "A", Value: "1",
 		Scope: store.ScopeProject, ScopeID: projectID,
@@ -2129,7 +2129,7 @@ func TestCascadeDeleteEnvVarsSecrets(t *testing.T) {
 		Scope: store.ScopeProject, ScopeID: projectID,
 	}))
 
-	// Create grove-scoped secrets
+	// Create project-scoped secrets
 	require.NoError(t, s.CreateSecret(ctx, &store.Secret{
 		ID: api.NewUUID(), Key: "S1", EncryptedValue: "enc1",
 		Scope: store.ScopeProject, ScopeID: projectID, Version: 1,
@@ -2150,7 +2150,7 @@ func TestCascadeDeleteEnvVarsSecrets(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
 
-	// Verify grove-scoped are gone
+	// Verify project-scoped are gone
 	envVars, err := s.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeProject, ScopeID: projectID})
 	require.NoError(t, err)
 	assert.Empty(t, envVars)
@@ -2233,13 +2233,13 @@ func TestMarkStaleAgentsOffline(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	grove := &store.Project{
+	project := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Heartbeat Project",
-		Slug:       "heartbeat-grove",
+		Slug:       "heartbeat-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	staleTime := time.Now().Add(-5 * time.Minute)
 	threshold := time.Now().Add(-2 * time.Minute)
@@ -2254,7 +2254,7 @@ func TestMarkStaleAgentsOffline(t *testing.T) {
 			Slug:       "active-agent-" + activity,
 			Name:       "Active Agent " + activity,
 			Template:   "claude",
-			ProjectID:    grove.ID,
+			ProjectID:  project.ID,
 			Phase:      string(state.PhaseCreated),
 			Visibility: store.VisibilityPrivate,
 		}
@@ -2279,7 +2279,7 @@ func TestMarkStaleAgentsOffline(t *testing.T) {
 	// Sticky activity: completed (phase=running)
 	completedAgent := &store.Agent{
 		ID: api.NewUUID(), Slug: "completed-agent", Name: "Completed Agent",
-		Template: "claude", ProjectID: grove.ID, Phase: string(state.PhaseCreated),
+		Template: "claude", ProjectID: project.ID, Phase: string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, completedAgent))
@@ -2292,7 +2292,7 @@ func TestMarkStaleAgentsOffline(t *testing.T) {
 	// Sticky activity: limits_exceeded (phase=running)
 	limitsAgent := &store.Agent{
 		ID: api.NewUUID(), Slug: "limits-agent", Name: "Limits Agent",
-		Template: "claude", ProjectID: grove.ID, Phase: string(state.PhaseCreated),
+		Template: "claude", ProjectID: project.ID, Phase: string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, limitsAgent))
@@ -2305,7 +2305,7 @@ func TestMarkStaleAgentsOffline(t *testing.T) {
 	// Non-running phase: stopped
 	stoppedAgent := &store.Agent{
 		ID: api.NewUUID(), Slug: "stopped-agent", Name: "Stopped Agent",
-		Template: "claude", ProjectID: grove.ID, Phase: string(state.PhaseStopped),
+		Template: "claude", ProjectID: project.ID, Phase: string(state.PhaseStopped),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, stoppedAgent))
@@ -2315,7 +2315,7 @@ func TestMarkStaleAgentsOffline(t *testing.T) {
 	// Recent heartbeat (should not be affected)
 	recentAgent := &store.Agent{
 		ID: api.NewUUID(), Slug: "recent-agent", Name: "Recent Agent",
-		Template: "claude", ProjectID: grove.ID, Phase: string(state.PhaseCreated),
+		Template: "claude", ProjectID: project.ID, Phase: string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, recentAgent))
@@ -2365,20 +2365,20 @@ func TestMarkStaleAgentsOffline_Idempotent(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	grove := &store.Project{
+	project := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Idempotent Project",
-		Slug:       "idempotent-grove",
+		Slug:       "idempotent-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	staleTime := time.Now().Add(-5 * time.Minute)
 	threshold := time.Now().Add(-2 * time.Minute)
 
 	agent := &store.Agent{
 		ID: api.NewUUID(), Slug: "stale-agent", Name: "Stale Agent",
-		Template: "claude", ProjectID: grove.ID, Phase: string(state.PhaseCreated),
+		Template: "claude", ProjectID: project.ID, Phase: string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -2419,13 +2419,13 @@ func TestMarkStalledAgents(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	grove := &store.Project{
+	project := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Stalled Project",
-		Slug:       "stalled-grove",
+		Slug:       "stalled-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	staleActivityTime := time.Now().Add(-10 * time.Minute)
 	recentHeartbeat := time.Now().Add(-30 * time.Second)
@@ -2438,7 +2438,7 @@ func TestMarkStalledAgents(t *testing.T) {
 	for _, activity := range stalledActivities {
 		agent := &store.Agent{
 			ID: api.NewUUID(), Slug: "stalled-" + activity, Name: "Stalled " + activity,
-			Template: "claude", ProjectID: grove.ID, Phase: string(state.PhaseCreated),
+			Template: "claude", ProjectID: project.ID, Phase: string(state.PhaseCreated),
 			Visibility: store.VisibilityPrivate,
 		}
 		require.NoError(t, s.CreateAgent(ctx, agent))
@@ -2458,7 +2458,7 @@ func TestMarkStalledAgents(t *testing.T) {
 	// Recent activity (within threshold)
 	recentAgent := &store.Agent{
 		ID: api.NewUUID(), Slug: "recent-activity", Name: "Recent Activity",
-		Template: "claude", ProjectID: grove.ID, Phase: string(state.PhaseCreated),
+		Template: "claude", ProjectID: project.ID, Phase: string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, recentAgent))
@@ -2470,7 +2470,7 @@ func TestMarkStalledAgents(t *testing.T) {
 	// Stale activity + stale heartbeat (offline territory, not stalled)
 	offlineAgent := &store.Agent{
 		ID: api.NewUUID(), Slug: "offline-territory", Name: "Offline Territory",
-		Template: "claude", ProjectID: grove.ID, Phase: string(state.PhaseCreated),
+		Template: "claude", ProjectID: project.ID, Phase: string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, offlineAgent))
@@ -2486,7 +2486,7 @@ func TestMarkStalledAgents(t *testing.T) {
 	// Completed activity (sticky — should not be stalled)
 	completedAgent := &store.Agent{
 		ID: api.NewUUID(), Slug: "completed-stall", Name: "Completed Stall",
-		Template: "claude", ProjectID: grove.ID, Phase: string(state.PhaseCreated),
+		Template: "claude", ProjectID: project.ID, Phase: string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, completedAgent))
@@ -2501,7 +2501,7 @@ func TestMarkStalledAgents(t *testing.T) {
 	// limits_exceeded activity (sticky)
 	limitsAgent := &store.Agent{
 		ID: api.NewUUID(), Slug: "limits-stall", Name: "Limits Stall",
-		Template: "claude", ProjectID: grove.ID, Phase: string(state.PhaseCreated),
+		Template: "claude", ProjectID: project.ID, Phase: string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, limitsAgent))
@@ -2516,7 +2516,7 @@ func TestMarkStalledAgents(t *testing.T) {
 	// Stopped phase (not running)
 	stoppedAgent := &store.Agent{
 		ID: api.NewUUID(), Slug: "stopped-stall", Name: "Stopped Stall",
-		Template: "claude", ProjectID: grove.ID, Phase: string(state.PhaseStopped),
+		Template: "claude", ProjectID: project.ID, Phase: string(state.PhaseStopped),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, stoppedAgent))
@@ -2528,7 +2528,7 @@ func TestMarkStalledAgents(t *testing.T) {
 	// Already offline
 	alreadyOfflineAgent := &store.Agent{
 		ID: api.NewUUID(), Slug: "already-offline", Name: "Already Offline",
-		Template: "claude", ProjectID: grove.ID, Phase: string(state.PhaseCreated),
+		Template: "claude", ProjectID: project.ID, Phase: string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, alreadyOfflineAgent))
@@ -2543,7 +2543,7 @@ func TestMarkStalledAgents(t *testing.T) {
 	// waiting_for_input activity (sticky waiting state — must NOT stall)
 	waitingAgent := &store.Agent{
 		ID: api.NewUUID(), Slug: "waiting-for-input", Name: "Waiting For Input",
-		Template: "claude", ProjectID: grove.ID, Phase: string(state.PhaseCreated),
+		Template: "claude", ProjectID: project.ID, Phase: string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, waitingAgent))
@@ -2614,13 +2614,13 @@ func TestMarkStalledAgents_Idempotent(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	grove := &store.Project{
+	project := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Idempotent Stalled Project",
 		Slug:       "idempotent-stalled",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	staleActivityTime := time.Now().Add(-10 * time.Minute)
 	recentHeartbeat := time.Now().Add(-30 * time.Second)
@@ -2629,7 +2629,7 @@ func TestMarkStalledAgents_Idempotent(t *testing.T) {
 
 	agent := &store.Agent{
 		ID: api.NewUUID(), Slug: "stalled-idem", Name: "Stalled Idem",
-		Template: "claude", ProjectID: grove.ID, Phase: string(state.PhaseCreated),
+		Template: "claude", ProjectID: project.ID, Phase: string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -2668,17 +2668,17 @@ func TestUpdateAgentStatus_SetsLastActivityEvent(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	grove := &store.Project{
+	project := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Activity Event Project",
-		Slug:       "activity-event-grove",
+		Slug:       "activity-event-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
 		ID: api.NewUUID(), Slug: "activity-tracker", Name: "Activity Tracker",
-		Template: "claude", ProjectID: grove.ID, Phase: string(state.PhaseCreated),
+		Template: "claude", ProjectID: project.ID, Phase: string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -2820,12 +2820,12 @@ func TestConcurrentReadDuringWrite(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	grove := &store.Project{
+	project := &store.Project{
 		ID:   api.NewUUID(),
 		Name: "Concurrency Test",
 		Slug: "concurrency-test",
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create several agents to write to
 	const agentCount = 10
@@ -2833,10 +2833,10 @@ func TestConcurrentReadDuringWrite(t *testing.T) {
 	for i := range agentCount {
 		slug := fmt.Sprintf("agent-%d", i)
 		agent := &store.Agent{
-			ID:      api.NewUUID(),
-			Slug:    slug,
-			Name:    slug,
-			ProjectID: grove.ID,
+			ID:        api.NewUUID(),
+			Slug:      slug,
+			Name:      slug,
+			ProjectID: project.ID,
 		}
 		require.NoError(t, s.CreateAgent(ctx, agent))
 		agentIDs[i] = agent.ID

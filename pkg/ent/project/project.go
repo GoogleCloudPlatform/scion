@@ -38,14 +38,14 @@ const (
 	// EdgeAgents holds the string denoting the agents edge name in mutations.
 	EdgeAgents = "agents"
 	// Table holds the table name of the project in the database.
-	Table = "groves"
+	Table = "projects"
 	// AgentsTable is the table that holds the agents relation/edge.
 	AgentsTable = "agents"
 	// AgentsInverseTable is the table name for the Agent entity.
 	// It exists in this package in order to avoid circular dependency with the "agent" package.
 	AgentsInverseTable = "agents"
 	// AgentsColumn is the table column denoting the agents relation/edge.
-	AgentsColumn = "grove_id"
+	AgentsColumn = "project_id"
 )
 
 // Columns holds all SQL columns for project fields.

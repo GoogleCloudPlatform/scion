@@ -90,7 +90,7 @@ If the agent was started with tmux support, this will attach to the tmux session
 
 		// Use grove-scoped lookup to find the exact container,
 		// preventing cross-grove collision when agents share a name.
-		filter := map[string]string{"scion.name": agentName, "scion.grove": projectName}
+		filter := map[string]string{"scion.name": agentName, "scion.project": projectName}
 		agents, listErr := rt.List(context.Background(), filter)
 		attachID := agentName
 		if listErr == nil && len(agents) > 0 {

@@ -211,10 +211,10 @@ type GCPServiceAccountWithCapabilities struct {
 
 // GCPMintQuotaInfo provides quota information for minted service accounts.
 type GCPMintQuotaInfo struct {
-	GroveMinted  int `json:"grove_minted"`
-	GroveCap     int `json:"grove_cap"` // 0 = unlimited
-	GlobalMinted int `json:"global_minted"`
-	GlobalCap    int `json:"global_cap"` // 0 = unlimited
+	ProjectMinted int `json:"project_minted"`
+	ProjectCap    int `json:"project_cap"` // 0 = unlimited
+	GlobalMinted  int `json:"global_minted"`
+	GlobalCap     int `json:"global_cap"`
 }
 
 // ListGCPServiceAccountsResponse is the response for listing GCP service accounts.
@@ -274,10 +274,10 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 			Managed: &managed,
 		})
 		mintQuota = &GCPMintQuotaInfo{
-			GroveMinted:  groveCount,
-			GroveCap:     s.config.GCPMintCapPerProject,
-			GlobalMinted: globalCount,
-			GlobalCap:    s.config.GCPMintCapGlobal,
+			ProjectMinted: groveCount,
+			ProjectCap:    s.config.GCPMintCapPerProject,
+			GlobalMinted:  globalCount,
+			GlobalCap:     s.config.GCPMintCapGlobal,
 		}
 	}
 
@@ -673,20 +673,20 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, g
 }
 
 // GCPQuotaGroveInfo holds per-grove mint quota info for the admin endpoint.
-type GCPQuotaGroveInfo struct {
-	ProjectID   string `json:"grove_id"`
-	GroveName string `json:"grove_name"`
-	Minted    int    `json:"minted"`
+type GCPQuotaProjectInfo struct {
+	ProjectID   string `json:"project_id"`
+	ProjectName string `json:"project_name"`
+	Minted      int    `json:"minted"`
 }
 
 // GCPQuotaResponse is the response for GET /api/v1/admin/gcp-quota.
 type GCPQuotaResponse struct {
-	MintingConfigured bool                `json:"minting_configured"`
-	GCPProjectID      string              `json:"gcp_project_id,omitempty"`
-	GlobalMinted      int                 `json:"global_minted"`
-	GlobalCap         int                 `json:"global_cap"`
-	PerGroveCap       int                 `json:"per_grove_cap"`
-	Groves            []GCPQuotaGroveInfo `json:"groves,omitempty"`
+	MintingConfigured bool                  `json:"minting_configured"`
+	GCPProjectID      string                `json:"gcp_project_id,omitempty"`
+	GlobalMinted      int                   `json:"global_minted"`
+	GlobalCap         int                   `json:"global_cap"`
+	PerProjectCap     int                   `json:"per_project_cap"`
+	Projects          []GCPQuotaProjectInfo `json:"projects,omitempty"`
 }
 
 // handleAdminGCPQuota handles GET /api/v1/admin/gcp-quota.
@@ -706,7 +706,7 @@ func (s *Server) handleAdminGCPQuota(w http.ResponseWriter, r *http.Request) {
 		MintingConfigured: s.gcpIAMAdmin != nil && s.config.GCPProjectID != "",
 		GCPProjectID:      s.config.GCPProjectID,
 		GlobalCap:         s.config.GCPMintCapGlobal,
-		PerGroveCap:       s.config.GCPMintCapPerProject,
+		PerProjectCap:     s.config.GCPMintCapPerProject,
 	}
 
 	if resp.MintingConfigured {
@@ -739,10 +739,10 @@ func (s *Server) handleAdminGCPQuota(w http.ResponseWriter, r *http.Request) {
 			if g, err := s.store.GetProject(r.Context(), groveID); err == nil {
 				name = g.Name
 			}
-			resp.Groves = append(resp.Groves, GCPQuotaGroveInfo{
+			resp.Projects = append(resp.Projects, GCPQuotaProjectInfo{
 				ProjectID:   groveID,
-				GroveName: name,
-				Minted:    count,
+				ProjectName: name,
+				Minted:      count,
 			})
 		}
 	}

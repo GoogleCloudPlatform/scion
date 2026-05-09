@@ -32,9 +32,9 @@ func (s *SQLiteStore) UpsertProjectSyncState(ctx context.Context, state *store.P
 	}
 
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO grove_sync_state (grove_id, broker_id, last_sync_time, last_commit_sha, file_count, total_bytes)
+		INSERT INTO project_sync_state (project_id, broker_id, last_sync_time, last_commit_sha, file_count, total_bytes)
 		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(grove_id, broker_id) DO UPDATE SET
+		ON CONFLICT(project_id, broker_id) DO UPDATE SET
 			last_sync_time = excluded.last_sync_time,
 			last_commit_sha = excluded.last_commit_sha,
 			file_count = excluded.file_count,
@@ -54,9 +54,9 @@ func (s *SQLiteStore) GetProjectSyncState(ctx context.Context, projectID, broker
 	var lastCommitSHA sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
-		SELECT grove_id, broker_id, last_sync_time, last_commit_sha, file_count, total_bytes
-		FROM grove_sync_state
-		WHERE grove_id = ? AND broker_id = ?
+		SELECT project_id, broker_id, last_sync_time, last_commit_sha, file_count, total_bytes
+		FROM project_sync_state
+		WHERE project_id = ? AND broker_id = ?
 	`, projectID, brokerID).Scan(
 		&state.ProjectID, &state.BrokerID,
 		&lastSyncTime, &lastCommitSHA,
@@ -82,9 +82,9 @@ func (s *SQLiteStore) GetProjectSyncState(ctx context.Context, projectID, broker
 // ListProjectSyncStates returns all sync states for a project.
 func (s *SQLiteStore) ListProjectSyncStates(ctx context.Context, projectID string) ([]store.ProjectSyncState, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT grove_id, broker_id, last_sync_time, last_commit_sha, file_count, total_bytes
-		FROM grove_sync_state
-		WHERE grove_id = ?
+		SELECT project_id, broker_id, last_sync_time, last_commit_sha, file_count, total_bytes
+		FROM project_sync_state
+		WHERE project_id = ?
 		ORDER BY broker_id
 	`, projectID)
 	if err != nil {
@@ -125,7 +125,7 @@ func (s *SQLiteStore) ListProjectSyncStates(ctx context.Context, projectID strin
 // DeleteProjectSyncState removes sync state for a project and optional broker.
 func (s *SQLiteStore) DeleteProjectSyncState(ctx context.Context, projectID, brokerID string) error {
 	result, err := s.db.ExecContext(ctx, `
-		DELETE FROM grove_sync_state WHERE grove_id = ? AND broker_id = ?
+		DELETE FROM project_sync_state WHERE project_id = ? AND broker_id = ?
 	`, projectID, brokerID)
 	if err != nil {
 		return err

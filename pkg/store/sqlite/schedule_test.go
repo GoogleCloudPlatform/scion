@@ -37,7 +37,7 @@ func TestScheduleCRUD(t *testing.T) {
 
 	sched := &store.Schedule{
 		ID:        scheduleID,
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		Name:      "daily-standup",
 		CronExpr:  "0 9 * * 1-5",
 		EventType: "message",
@@ -100,7 +100,7 @@ func TestSchedule_DuplicateName(t *testing.T) {
 
 	sched1 := &store.Schedule{
 		ID:        api.NewUUID(),
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		Name:      "duplicate-name",
 		CronExpr:  "0 * * * *",
 		EventType: "message",
@@ -110,7 +110,7 @@ func TestSchedule_DuplicateName(t *testing.T) {
 
 	sched2 := &store.Schedule{
 		ID:        api.NewUUID(),
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		Name:      "duplicate-name",
 		CronExpr:  "0 * * * *",
 		EventType: "message",
@@ -133,7 +133,7 @@ func TestSchedule_List(t *testing.T) {
 		}
 		sched := &store.Schedule{
 			ID:        api.NewUUID(),
-			ProjectID:   projectID,
+			ProjectID: projectID,
 			Name:      name,
 			CronExpr:  "0 * * * *",
 			EventType: "message",
@@ -167,7 +167,7 @@ func TestSchedule_UpdateAfterRun(t *testing.T) {
 	nextRun := time.Now().Add(-1 * time.Minute).UTC().Truncate(time.Second)
 	sched := &store.Schedule{
 		ID:        api.NewUUID(),
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		Name:      "run-test",
 		CronExpr:  "0 * * * *",
 		EventType: "message",
@@ -214,7 +214,7 @@ func TestSchedule_ListDue(t *testing.T) {
 	pastRun := now.Add(-5 * time.Minute)
 	dueSchedule := &store.Schedule{
 		ID:        api.NewUUID(),
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		Name:      "due-schedule",
 		CronExpr:  "0 * * * *",
 		EventType: "message",
@@ -227,7 +227,7 @@ func TestSchedule_ListDue(t *testing.T) {
 	futureRun := now.Add(1 * time.Hour)
 	futureSchedule := &store.Schedule{
 		ID:        api.NewUUID(),
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		Name:      "future-schedule",
 		CronExpr:  "0 * * * *",
 		EventType: "message",
@@ -239,7 +239,7 @@ func TestSchedule_ListDue(t *testing.T) {
 	// Create a paused schedule (should not be listed even if due)
 	pausedSchedule := &store.Schedule{
 		ID:        api.NewUUID(),
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		Name:      "paused-schedule",
 		CronExpr:  "0 * * * *",
 		EventType: "message",
@@ -266,7 +266,7 @@ func TestScheduledEvent_WithScheduleID(t *testing.T) {
 
 	evt := &store.ScheduledEvent{
 		ID:         eventID,
-		ProjectID:    projectID,
+		ProjectID:  projectID,
 		EventType:  "message",
 		FireAt:     time.Now().UTC(),
 		Payload:    `{"message":"test"}`,
@@ -281,7 +281,7 @@ func TestScheduledEvent_WithScheduleID(t *testing.T) {
 
 	// Filter by schedule_id
 	result, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{
-		ProjectID:    projectID,
+		ProjectID:  projectID,
 		ScheduleID: scheduleID,
 	}, store.ListOptions{})
 	require.NoError(t, err)

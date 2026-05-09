@@ -38,23 +38,31 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 	}
 
 	// Also find "created" agents that don't have a container yet
-	// We need to know which groves to scan.
-	// If filter has scion.grove, we scan that one.
-	// Otherwise, we scan current and global?
+	// We need to know which projects to scan.
+	// Preference is given to scion.project, then scion.grove.
+	var projectName string
+	if pn, ok := filter["scion.project"]; ok {
+		projectName = pn
+	} else if pn, ok := filter["scion.grove"]; ok {
+		projectName = pn
+	}
 
 	var grovesToScan []string
-	if projectName, ok := filter["scion.grove"]; ok {
+	if projectName != "" {
 		_ = projectName
 		// We need to resolve projectName to a path. This is currently not easy without searching.
-		// For now, if scion.grove is provided, we assume we only care about running ones
-		// OR we need to be passed a grove path.
+		// For now, if scion.project/grove is provided, we assume we only care about running ones
+		// OR we need to be passed a project path.
 	}
 
 	// This logic is a bit tied to how CLI uses it.
-	// Let's at least support scanning a specific grove if provided in filter?
-	// Or maybe Add a special filter key for GrovePath.
+	// Let's at least support scanning a specific project if provided in filter?
+	// Or maybe Add a special filter key for ProjectPath.
 
-	projectPath := filter["scion.grove_path"]
+	projectPath := filter["scion.project_path"]
+	if projectPath == "" {
+		projectPath = filter["scion.grove_path"]
+	}
 	if projectPath != "" {
 		grovesToScan = append(grovesToScan, projectPath)
 	} else if len(filter) == 0 || (len(filter) == 1 && filter["scion.agent"] == "true") {
