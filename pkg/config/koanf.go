@@ -245,6 +245,7 @@ func GetDefaultSettingsDataYAML() ([]byte, error) {
 // Unlike the full default settings, project settings do not include profiles or runtimes;
 // those are managed at the global/broker level (~/.scion/settings.yaml).
 func GetProjectDefaultSettingsYAML() ([]byte, error) {
+
 	return EmbedsFS.ReadFile("embeds/default_grove_settings.yaml")
 }
 

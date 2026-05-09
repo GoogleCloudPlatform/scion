@@ -292,10 +292,10 @@ func GetGitProjectExternalAgentsDir(projectDir string) (string, error) {
 }
 
 // GetAgentHomePath returns the correct home directory path for an agent.
-// For git groves with split storage (grove-id file exists), this returns
+// For git projects with split storage (project-id file exists), this returns
 // the external path under ~/.scion/project-configs/.
-// For non-git groves (projectDir already resolved to external via marker),
-// or git groves without split storage, returns the in-repo path.
+// For non-git projects (projectDir already resolved to external via marker),
+// or git projects without split storage, returns the in-repo path.
 func GetAgentHomePath(projectDir, agentName string) string {
 	if externalDir, err := GetGitProjectExternalAgentsDir(projectDir); err == nil && externalDir != "" {
 		return filepath.Join(externalDir, agentName, "home")
@@ -307,14 +307,14 @@ func GetAgentHomePath(projectDir, agentName string) string {
 // files (prompt.md, scion-agent.json, and — in worktree mode — the workspace
 // subdir).
 //
-// For shared-workspace git groves (sharedWorkspace == true and a grove-id
+// For shared-workspace git projects (sharedWorkspace == true and a project-id
 // marker exists), this returns the external path under
 // ~/.scion/project-configs/<slug>__<uuid>/.scion/agents/<name>/ so that sibling
 // agents do not see each other's state via the shared /workspace mount. See
 // .design/hub-shared-workspace-isolation.md for the threat model.
 //
-// For all other modes (worktree mode, non-git groves, or shared-workspace
-// groves without an initialized grove-id), this returns the in-grove path
+// For all other modes (worktree mode, non-git projects, or shared-workspace
+// projects without an initialized project-id), this returns the in-project path
 // <projectDir>/agents/<name>/ — preserving the worktree-relative layout that
 // git's worktree pointers depend on.
 func GetAgentDir(projectDir, agentName string, sharedWorkspace bool) string {
@@ -328,15 +328,15 @@ func GetAgentDir(projectDir, agentName string, sharedWorkspace bool) string {
 
 // ResolveAgentDir returns the broker-side per-agent state directory when the
 // shared-workspace mode is not known to the caller. It probes the external
-// path first (used by shared-workspace groves), then falls back to the
-// in-grove path. A read-time companion to GetAgentDir, used by code paths
+// path first (used by shared-workspace projects), then falls back to the
+// in-project path. A read-time companion to GetAgentDir, used by code paths
 // that look up an existing agent by name without carrying the
 // sharedWorkspace flag through the call stack.
 //
-// Returns the external path only when a grove-id marker exists *and* the
+// Returns the external path only when a project-id marker exists *and* the
 // external per-agent directory contains scion-agent.json (which never lives
 // external in worktree mode — only home/ does). Otherwise returns the
-// in-grove path.
+// in-project path.
 func ResolveAgentDir(projectDir, agentName string) string {
 	if externalDir, err := GetGitProjectExternalAgentsDir(projectDir); err == nil && externalDir != "" {
 		ext := filepath.Join(externalDir, agentName)
