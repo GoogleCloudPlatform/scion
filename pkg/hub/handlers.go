@@ -3025,6 +3025,18 @@ func (s *Server) createGrove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.GitHubToken != "" {
+		req.GitHubToken = strings.TrimSpace(req.GitHubToken)
+		if req.GitHubToken == "" {
+			ValidationError(w, "GitHub token must not be blank", nil)
+			return
+		}
+		if len(req.GitHubToken) > 500 {
+			ValidationError(w, "GitHub token exceeds maximum length", nil)
+			return
+		}
+	}
+
 	normalizedRemote := util.NormalizeGitRemote(req.GitRemote)
 
 	// Idempotency: if we have a client-provided ID, check for existing grove
@@ -3121,14 +3133,9 @@ func (s *Server) createGrove(w http.ResponseWriter, r *http.Request) {
 	// resolveCloneToken can find it during the initial clone.
 	// Only applies to git-backed groves (GitRemote != "").
 	if req.GitHubToken != "" && s.secretBackend != nil && grove.GitRemote != "" {
-		token := strings.TrimSpace(req.GitHubToken)
-		if len(token) > 500 {
-			ValidationError(w, "GitHub token exceeds maximum length", nil)
-			return
-		}
 		tokenInput := &secret.SetSecretInput{
 			Name:          "GITHUB_TOKEN",
-			Value:         token,
+			Value:         req.GitHubToken,
 			SecretType:    secret.TypeEnvironment,
 			Target:        "GITHUB_TOKEN",
 			Scope:         secret.ScopeGrove,
