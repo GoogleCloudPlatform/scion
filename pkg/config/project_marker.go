@@ -26,14 +26,41 @@ import (
 
 // ProjectMarker represents the content of a .scion marker file.
 // When .scion is a file (not a directory), it points to an external
-// grove-config directory under ~/.scion/project-configs/.
+// project-config directory under ~/.scion/project-configs/.
 type ProjectMarker struct {
-	ProjectID   string `yaml:"grove-id"`
-	ProjectName string `yaml:"grove-name"`
-	ProjectSlug string `yaml:"grove-slug"`
+	ProjectID   string `yaml:"project-id"`
+	ProjectName string `yaml:"project-name"`
+	ProjectSlug string `yaml:"project-slug"`
 }
 
-// ShortUUID returns a short form of the grove ID for use in directory names.
+// UnmarshalYAML implements custom unmarshaling to handle legacy "grove-" tags.
+func (m *ProjectMarker) UnmarshalYAML(value *yaml.Node) error {
+	type Alias ProjectMarker
+	var aux struct {
+		GroveID   string `yaml:"grove-id"`
+		GroveName string `yaml:"grove-name"`
+		GroveSlug string `yaml:"grove-slug"`
+		Alias     Alias  `yaml:",inline"`
+	}
+	if err := value.Decode(&aux); err != nil {
+		return err
+	}
+
+	*m = ProjectMarker(aux.Alias)
+
+	if m.ProjectID == "" {
+		m.ProjectID = aux.GroveID
+	}
+	if m.ProjectName == "" {
+		m.ProjectName = aux.GroveName
+	}
+	if m.ProjectSlug == "" {
+		m.ProjectSlug = aux.GroveSlug
+	}
+	return nil
+}
+
+// ShortUUID returns a short form of the project ID for use in directory names.
 func (m ProjectMarker) ShortUUID() string {
 	id := strings.ReplaceAll(m.ProjectID, "-", "")
 	if len(id) > 8 {
@@ -47,14 +74,29 @@ func (m ProjectMarker) DirName() string {
 	return fmt.Sprintf("%s__%s", m.ProjectSlug, m.ShortUUID())
 }
 
-// ExternalProjectPath returns the absolute path to the external grove config
-// directory: ~/.scion/project-configs/<grove-slug>__<short-uuid>/.scion/
+// ExternalProjectPath returns the absolute path to the external project config
+// directory: ~/.scion/project-configs/<project-slug>__<short-uuid>/.scion/
+// Checks project-configs first, falling back to legacy grove-configs if not found.
 func (m ProjectMarker) ExternalProjectPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, GlobalDir, "project-configs", m.DirName(), DotScion), nil
+
+	// 1. Try project-configs/
+	projectPath := filepath.Join(home, GlobalDir, ProjectConfigsDir, m.DirName(), DotScion)
+	if _, err := os.Stat(projectPath); err == nil {
+		return projectPath, nil
+	}
+
+	// 2. Fallback to legacy grove-configs/
+	grovePath := filepath.Join(home, GlobalDir, GroveConfigsDir, m.DirName(), DotScion)
+	if _, err := os.Stat(grovePath); err == nil {
+		return grovePath, nil
+	}
+
+	// 3. Default to project-configs/
+	return projectPath, nil
 }
 
 // ReadProjectMarker reads and parses a .scion marker file.
@@ -65,10 +107,10 @@ func ReadProjectMarker(path string) (*ProjectMarker, error) {
 	}
 	var marker ProjectMarker
 	if err := yaml.Unmarshal(data, &marker); err != nil {
-		return nil, fmt.Errorf("invalid grove marker at %s: %w", path, err)
+		return nil, fmt.Errorf("invalid project marker at %s: %w", path, err)
 	}
 	if marker.ProjectID == "" || marker.ProjectSlug == "" {
-		return nil, fmt.Errorf("invalid grove marker at %s: missing grove-id or grove-slug", path)
+		return nil, fmt.Errorf("invalid project marker at %s: missing project-id or project-slug", path)
 	}
 	return &marker, nil
 }
@@ -77,13 +119,13 @@ func ReadProjectMarker(path string) (*ProjectMarker, error) {
 func WriteProjectMarker(path string, marker *ProjectMarker) error {
 	data, err := yaml.Marshal(marker)
 	if err != nil {
-		return fmt.Errorf("failed to marshal grove marker: %w", err)
+		return fmt.Errorf("failed to marshal project marker: %w", err)
 	}
 	return os.WriteFile(path, data, 0644)
 }
 
 // ResolveProjectMarker reads a .scion marker file and returns the resolved
-// external grove path. Returns an error if the marker is invalid or the
+// external project path. Returns an error if the marker is invalid or the
 // external path cannot be computed.
 func ResolveProjectMarker(markerPath string) (string, error) {
 	marker, err := ReadProjectMarker(markerPath)
@@ -94,7 +136,7 @@ func ResolveProjectMarker(markerPath string) (string, error) {
 }
 
 // IsProjectMarkerFile returns true if the given path is a regular file
-// (not a directory) that could be a grove marker. Does not validate content.
+// (not a directory) that could be a project marker. Does not validate content.
 func IsProjectMarkerFile(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -105,14 +147,14 @@ func IsProjectMarkerFile(path string) bool {
 
 // IsOldStyleNonGitProject returns true if the path is a .scion directory
 // in a non-git project (not the global ~/.scion/). This indicates an
-// old-format grove that needs to be re-initialized.
+// old-format project that needs to be re-initialized.
 func IsOldStyleNonGitProject(scionPath string) bool {
 	info, err := os.Stat(scionPath)
 	if err != nil || !info.IsDir() {
 		return false
 	}
 
-	// Don't flag the global grove
+	// Don't flag the global project
 	home, err := os.UserHomeDir()
 	if err == nil {
 		globalDir := filepath.Join(home, GlobalDir)
@@ -129,7 +171,7 @@ func IsOldStyleNonGitProject(scionPath string) bool {
 	parent := filepath.Dir(scionPath)
 	gitDir := filepath.Join(parent, ".git")
 	if _, err := os.Stat(gitDir); err == nil {
-		return false // Git grove — not old-style (handled by Phase 3)
+		return false // Git project — not old-style (handled by Phase 3)
 	}
 
 	return true
@@ -137,7 +179,7 @@ func IsOldStyleNonGitProject(scionPath string) bool {
 
 // IsHubContext returns true if hub context environment variables are available,
 // indicating the CLI is running inside a hub-connected agent container where
-// grove data should be accessed via the Hub API rather than the local filesystem.
+// project data should be accessed via the Hub API rather than the local filesystem.
 // Checks SCION_HUB_ENDPOINT (primary), SCION_HUB_URL (legacy), and
 // SCION_GROVE_ID (always set for broker-dispatched agents).
 func IsHubContext() bool {
@@ -148,23 +190,23 @@ func IsHubContext() bool {
 }
 
 // WriteWorkspaceMarker writes a minimal .scion marker file into a workspace
-// directory so that in-container CLI can discover the grove context.
-// This is called during agent provisioning for git groves (where the worktree
-// doesn't contain .scion because it's gitignored) and for hub-native groves.
-func WriteWorkspaceMarker(workspacePath string, groveID, groveName, groveSlug string) error {
-	if groveID == "" || groveSlug == "" {
-		return fmt.Errorf("grove-id and grove-slug are required for workspace marker")
+// directory so that in-container CLI can discover the project context.
+// This is called during agent provisioning for git projects (where the worktree
+// doesn't contain .scion because it's gitignored) and for hub-native projects.
+func WriteWorkspaceMarker(workspacePath string, projectID, projectName, projectSlug string) error {
+	if projectID == "" || projectSlug == "" {
+		return fmt.Errorf("project-id and project-slug are required for workspace marker")
 	}
 	marker := &ProjectMarker{
-		ProjectID:   groveID,
-		ProjectName: groveName,
-		ProjectSlug: groveSlug,
+		ProjectID:   projectID,
+		ProjectName: projectName,
+		ProjectSlug: projectSlug,
 	}
 	return WriteProjectMarker(filepath.Join(workspacePath, DotScion), marker)
 }
 
-// ExtractSlugFromExternalDir extracts the grove slug from an external
-// grove-config directory name in the format "slug__shortuuid".
+// ExtractSlugFromExternalDir extracts the project slug from an external
+// project-config directory name in the format "slug__shortuuid".
 func ExtractSlugFromExternalDir(dirName string) string {
 	if parts := strings.SplitN(dirName, "__", 2); len(parts) == 2 {
 		return parts[0]
@@ -172,26 +214,37 @@ func ExtractSlugFromExternalDir(dirName string) string {
 	return ""
 }
 
-// ReadProjectID reads the grove-id file from a git grove's .scion directory.
+// ReadProjectID reads the project-id file from a git project's .scion directory.
+// Checks project-id first, then falls back to grove-id for legacy projects.
 func ReadProjectID(projectDir string) (string, error) {
-	data, err := os.ReadFile(filepath.Join(projectDir, "grove-id"))
+	// 1. Try project-id
+	data, err := os.ReadFile(filepath.Join(projectDir, "project-id"))
+	if err == nil {
+		return strings.TrimSpace(string(data)), nil
+	}
+	if !os.IsNotExist(err) {
+		return "", err
+	}
+
+	// 2. Fallback to legacy grove-id
+	data, err = os.ReadFile(filepath.Join(projectDir, "grove-id"))
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(data)), nil
 }
 
-// WriteProjectID writes a grove-id file to a git grove's .scion directory.
-func WriteProjectID(projectDir string, groveID string) error {
-	return os.WriteFile(filepath.Join(projectDir, "grove-id"), []byte(groveID+"\n"), 0644)
+// WriteProjectID writes a project-id file to a git project's .scion directory.
+func WriteProjectID(projectDir string, projectID string) error {
+	return os.WriteFile(filepath.Join(projectDir, "project-id"), []byte(projectID+"\n"), 0644)
 }
 
-// GetGitProjectExternalConfigDir returns the external config directory for a git grove.
-// Git groves store settings and templates externally at ~/.scion/project-configs/<slug>__<uuid>/.scion/
+// GetGitProjectExternalConfigDir returns the external config directory for a git project.
+// Git projects store settings and templates externally at ~/.scion/project-configs/<slug>__<uuid>/.scion/
 // while keeping worktrees in-repo.
-// Returns ("", nil) if the grove-id file does not exist (not yet initialized for split storage).
+// Returns ("", nil) if the project-id file does not exist (not yet initialized for split storage).
 func GetGitProjectExternalConfigDir(projectDir string) (string, error) {
-	groveID, err := ReadProjectID(projectDir)
+	projectID, err := ReadProjectID(projectDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", nil
@@ -199,27 +252,23 @@ func GetGitProjectExternalConfigDir(projectDir string) (string, error) {
 		return "", err
 	}
 
-	groveName := GetProjectName(projectDir)
-	groveSlug := api.Slugify(groveName)
+	projectName := GetProjectName(projectDir)
+	projectSlug := api.Slugify(projectName)
 	marker := &ProjectMarker{
-		ProjectID:   groveID,
-		ProjectName: groveName,
-		ProjectSlug: groveSlug,
+		ProjectID:   projectID,
+		ProjectName: projectName,
+		ProjectSlug: projectSlug,
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, GlobalDir, "project-configs", marker.DirName(), DotScion), nil
+	return marker.ExternalProjectPath()
 }
 
-// GetGitProjectExternalAgentsDir returns the external agents directory for a git grove.
-// Git groves store agent homes externally at ~/.scion/project-configs/<slug>__<uuid>/.scion/agents/
+// GetGitProjectExternalAgentsDir returns the external agents directory for a git project.
+// Git projects store agent homes externally at ~/.scion/project-configs/<slug>__<uuid>/.scion/agents/
 // while keeping worktrees in-repo.
-// Returns ("", nil) if the grove-id file does not exist (not yet initialized for split storage).
+// Returns ("", nil) if the project-id file does not exist (not yet initialized for split storage).
 func GetGitProjectExternalAgentsDir(projectDir string) (string, error) {
-	groveID, err := ReadProjectID(projectDir)
+	projectID, err := ReadProjectID(projectDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", nil
@@ -227,19 +276,19 @@ func GetGitProjectExternalAgentsDir(projectDir string) (string, error) {
 		return "", err
 	}
 
-	groveName := GetProjectName(projectDir)
-	groveSlug := api.Slugify(groveName)
+	projectName := GetProjectName(projectDir)
+	projectSlug := api.Slugify(projectName)
 	marker := &ProjectMarker{
-		ProjectID:   groveID,
-		ProjectName: groveName,
-		ProjectSlug: groveSlug,
+		ProjectID:   projectID,
+		ProjectName: projectName,
+		ProjectSlug: projectSlug,
 	}
 
-	home, err := os.UserHomeDir()
+	extPath, err := marker.ExternalProjectPath()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, GlobalDir, "project-configs", marker.DirName(), DotScion, "agents"), nil
+	return filepath.Join(extPath, "agents"), nil
 }
 
 // GetAgentHomePath returns the correct home directory path for an agent.

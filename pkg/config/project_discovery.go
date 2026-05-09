@@ -39,13 +39,13 @@ const (
 
 // ProjectInfo describes a discovered project.
 type ProjectInfo struct {
-	Name          string      `json:"name"`
-	ProjectID       string      `json:"grove_id,omitempty"`
+	Name          string        `json:"name"`
+	ProjectID     string        `json:"project_id,omitempty"`
 	Type          ProjectType   `json:"type"`
-	ConfigPath    string      `json:"config_path"`
-	WorkspacePath string      `json:"workspace_path,omitempty"`
+	ConfigPath    string        `json:"config_path"`
+	WorkspacePath string        `json:"workspace_path,omitempty"`
 	Status        ProjectStatus `json:"status"`
-	AgentCount    int         `json:"agent_count"`
+	AgentCount    int           `json:"agent_count"`
 	// agentsPath overrides the default agents directory derivation.
 	// Used for legacy git projects where agents are a sibling of .scion/.
 	agentsPath string
@@ -60,8 +60,8 @@ func (g ProjectInfo) AgentsDir() string {
 }
 
 // DiscoverProjects scans for all known projects on this machine.
-// It checks the global project, then scans ~/.scion/project-configs/ for
-// external and git project configs.
+// It checks the global project, then scans ~/.scion/project-configs/ and
+// the legacy ~/.scion/grove-configs/ for external and git project configs.
 func DiscoverProjects() ([]ProjectInfo, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -69,6 +69,7 @@ func DiscoverProjects() ([]ProjectInfo, error) {
 	}
 
 	var projects []ProjectInfo
+	seenSlugs := make(map[string]bool)
 
 	// 1. Global project
 	globalDir := filepath.Join(home, GlobalDir)
@@ -84,16 +85,25 @@ func DiscoverProjects() ([]ProjectInfo, error) {
 			pi.ProjectID = settings.ProjectID
 		}
 		projects = append(projects, pi)
+		seenSlugs["global"] = true
 	}
 
-	// 2. Scan project-configs directory
-	projectConfigsDir := filepath.Join(home, GlobalDir, "project-configs")
-	entries, err := os.ReadDir(projectConfigsDir)
+	// 2. Scan project-configs directory (preferred)
+	projectConfigsDir := filepath.Join(home, GlobalDir, ProjectConfigsDir)
+	projects = scanConfigDir(projects, projectConfigsDir, seenSlugs)
+
+	// 3. Scan legacy grove-configs directory
+	groveConfigsDir := filepath.Join(home, GlobalDir, GroveConfigsDir)
+	projects = scanConfigDir(projects, groveConfigsDir, seenSlugs)
+
+	return projects, nil
+}
+
+// scanConfigDir is a helper for DiscoverProjects to scan a directory for project configs.
+func scanConfigDir(projects []ProjectInfo, configDir string, seenSlugs map[string]bool) []ProjectInfo {
+	entries, err := os.ReadDir(configDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return projects, nil
-		}
-		return projects, err
+		return projects
 	}
 
 	for _, entry := range entries {
@@ -103,12 +113,12 @@ func DiscoverProjects() ([]ProjectInfo, error) {
 
 		dirName := entry.Name()
 		slug := ExtractSlugFromExternalDir(dirName)
-		if slug == "" {
+		if slug == "" || seenSlugs[slug] {
 			continue
 		}
 
-		configPath := filepath.Join(projectConfigsDir, dirName, DotScion)
-		legacyAgentsSibling := filepath.Join(projectConfigsDir, dirName, "agents")
+		configPath := filepath.Join(configDir, dirName, DotScion)
+		legacyAgentsSibling := filepath.Join(configDir, dirName, "agents")
 
 		_, scionErr := os.Stat(configPath)
 		_, legacyAgentsErr := os.Stat(legacyAgentsSibling)
@@ -135,15 +145,16 @@ func DiscoverProjects() ([]ProjectInfo, error) {
 			pi = ProjectInfo{
 				Name:       slug,
 				Type:       ProjectTypeGit,
-				ConfigPath: filepath.Join(projectConfigsDir, dirName),
+				ConfigPath: filepath.Join(configDir, dirName),
 				Status:     ProjectStatusOrphaned,
 			}
 		}
 
 		projects = append(projects, pi)
+		seenSlugs[slug] = true
 	}
 
-	return projects, nil
+	return projects
 }
 
 // projectInfoFromExternal builds a ProjectInfo for a non-git external project.
@@ -207,13 +218,22 @@ func readWorkspaceMarkerForSlug(slug string) (*ProjectMarker, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	workspacePath := filepath.Join(home, GlobalDir, "projects", slug)
+
+	// 1. Try projects/
+	workspacePath := filepath.Join(home, GlobalDir, ProjectsDir, slug)
 	markerPath := filepath.Join(workspacePath, DotScion)
-	marker, err := ReadProjectMarker(markerPath)
-	if err != nil {
-		return nil, "", err
+	if marker, err := ReadProjectMarker(markerPath); err == nil {
+		return marker, workspacePath, nil
 	}
-	return marker, workspacePath, nil
+
+	// 2. Fallback to legacy groves/
+	workspacePath = filepath.Join(home, GlobalDir, GrovesDir, slug)
+	markerPath = filepath.Join(workspacePath, DotScion)
+	if marker, err := ReadProjectMarker(markerPath); err == nil {
+		return marker, workspacePath, nil
+	}
+
+	return nil, "", os.ErrNotExist
 }
 
 // projectInfoFromGitExternal builds a ProjectInfo for a legacy git project's external agents
@@ -332,13 +352,15 @@ func RemoveProjectConfig(configPath string) error {
 		parent = filepath.Dir(parent)
 	}
 
-	// Safety: only remove if it's under project-configs/
+	// Safety: only remove if it's under project-configs/ or legacy grove-configs/
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
-	projectConfigsDir := filepath.Join(home, GlobalDir, "project-configs")
-	if !strings.HasPrefix(parent, projectConfigsDir) {
+	projectConfigsDir := filepath.Join(home, GlobalDir, ProjectConfigsDir)
+	groveConfigsDir := filepath.Join(home, GlobalDir, GroveConfigsDir)
+
+	if !strings.HasPrefix(parent, projectConfigsDir) && !strings.HasPrefix(parent, groveConfigsDir) {
 		return os.ErrPermission
 	}
 

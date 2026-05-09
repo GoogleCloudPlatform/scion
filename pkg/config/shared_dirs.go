@@ -26,26 +26,27 @@ import (
 const SharedDirsSubdir = "shared-dirs"
 
 // GetSharedDirsBasePath returns the host-side base directory for shared dirs
-// for the given grove. For non-git groves (where projectDir is already the
-// external grove-config path), this is <projectDir>/../shared-dirs/.
-// For git groves with split storage, this is
+// for the given project. For non-git projects (where projectDir is already the
+// external project-config path), this is <projectDir>/../shared-dirs/.
+// For git projects with split storage, this is
 // ~/.scion/project-configs/<slug>__<uuid>/shared-dirs/.
 func GetSharedDirsBasePath(projectDir string) (string, error) {
-	// Check if this is a git grove with split storage (has grove-id file)
+	// Check if this is a git project with split storage (has project-id file)
 	if externalAgentsDir, err := GetGitProjectExternalAgentsDir(projectDir); err == nil && externalAgentsDir != "" {
 		// externalAgentsDir is ~/.scion/project-configs/<slug>__<uuid>/.scion/agents
 		// We want ~/.scion/project-configs/<slug>__<uuid>/shared-dirs
-		// Go up past "agents" and ".scion" to reach the grove-config root
-		groveConfigRoot := filepath.Dir(filepath.Dir(externalAgentsDir))
-		return filepath.Join(groveConfigRoot, SharedDirsSubdir), nil
+		// Go up past "agents" and ".scion" to reach the project-config root
+		projectConfigRoot := filepath.Dir(filepath.Dir(externalAgentsDir))
+		return filepath.Join(projectConfigRoot, SharedDirsSubdir), nil
 	}
 
-	// For non-git groves, projectDir is already resolved to
+	// For non-git projects, projectDir is already resolved to
 	// ~/.scion/project-configs/<slug>__<uuid>/.scion/
-	// Go up one level to get the grove-config root, then into shared-dirs
+	// Go up one level to get the project-config root, then into shared-dirs
 	parent := filepath.Dir(projectDir)
-	// Verify we're in a project-configs directory structure
-	if filepath.Base(filepath.Dir(parent)) == "project-configs" || filepath.Base(parent) != ".scion" {
+	// Verify we're in a project-configs or grove-configs directory structure
+	parentBase := filepath.Base(filepath.Dir(parent))
+	if parentBase == ProjectConfigsDir || parentBase == GroveConfigsDir || filepath.Base(parent) != DotScion {
 		return filepath.Join(parent, SharedDirsSubdir), nil
 	}
 
