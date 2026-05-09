@@ -69,7 +69,7 @@ type AgentService interface {
 	// If notify is true, the sender subscribes to status notifications for the target agent.
 	SendStructuredMessage(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt bool, notify bool) error
 
-	// BroadcastMessage broadcasts a structured message to all running agents in the grove.
+	// BroadcastMessage broadcasts a structured message to all running agents in the project.
 	// Uses the Hub's broadcast endpoint which routes through the message broker (if available)
 	// or performs direct fan-out as a fallback.
 	BroadcastMessage(ctx context.Context, msg *messages.StructuredMessage, interrupt bool) error
@@ -101,27 +101,27 @@ type AgentService interface {
 
 // agentService is the implementation of AgentService.
 type agentService struct {
-	c       *client
-	groveID string
+	c         *client
+	projectID string
 }
 
 func (s *agentService) agentPath(agentID string) string {
-	if s.groveID != "" {
-		return "/api/v1/groves/" + s.groveID + "/agents/" + agentID
+	if s.projectID != "" {
+		return "/api/v1/groves/" + s.projectID + "/agents/" + agentID
 	}
 	return "/api/v1/agents/" + agentID
 }
 
 func (s *agentService) agentsPath() string {
-	if s.groveID != "" {
-		return "/api/v1/groves/" + s.groveID + "/agents"
+	if s.projectID != "" {
+		return "/api/v1/groves/" + s.projectID + "/agents"
 	}
 	return "/api/v1/agents"
 }
 
 // ListAgentsOptions configures agent list filtering.
 type ListAgentsOptions struct {
-	GroveID         string            // Filter by grove
+	ProjectID       string            // Filter by project
 	Phase           string            // Filter by lifecycle phase (created, running, stopped, error, etc.)
 	RuntimeBrokerID string            // Filter by runtime broker
 	Labels          map[string]string // Label selector
@@ -155,7 +155,7 @@ type StopAllResponse struct {
 // CreateAgentRequest is the request body for creating an agent.
 type CreateAgentRequest struct {
 	Name            string            `json:"name"`
-	GroveID         string            `json:"groveId"`
+	ProjectID       string            `json:"groveId"`
 	Template        string            `json:"template,omitempty"`
 	HarnessConfig   string            `json:"harnessConfig,omitempty"` // Explicit harness config name (used during sync when template may not be on Hub)
 	HarnessAuth     string            `json:"harnessAuth,omitempty"`   // Late-binding override for auth_selected_type
@@ -187,7 +187,7 @@ type CreateAgentRequest struct {
 type CreateAgentResponse struct {
 	Agent    *Agent   `json:"agent"`
 	Warnings []string `json:"warnings,omitempty"`
-	// UploadURLs is populated during workspace bootstrap (non-git groves).
+	// UploadURLs is populated during workspace bootstrap (non-git projects).
 	UploadURLs []transfer.UploadURLInfo `json:"uploadUrls,omitempty"`
 	// Expires indicates when the upload URLs expire.
 	Expires *time.Time `json:"expires,omitempty"`
@@ -260,8 +260,8 @@ type ExecResponse struct {
 func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*ListAgentsResponse, error) {
 	query := url.Values{}
 	if opts != nil {
-		if opts.GroveID != "" {
-			query.Set("groveId", opts.GroveID)
+		if opts.ProjectID != "" {
+			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.Phase != "" {
 			query.Set("phase", opts.Phase)
@@ -476,10 +476,10 @@ func (s *agentService) SendOutboundMessage(ctx context.Context, agentID string, 
 	return apiclient.CheckResponse(resp)
 }
 
-// BroadcastMessage broadcasts a structured message to all running agents in the grove.
+// BroadcastMessage broadcasts a structured message to all running agents in the project.
 func (s *agentService) BroadcastMessage(ctx context.Context, msg *messages.StructuredMessage, interrupt bool) error {
-	if s.groveID == "" {
-		return fmt.Errorf("broadcast requires a grove-scoped agent service")
+	if s.projectID == "" {
+		return fmt.Errorf("broadcast requires a project-scoped agent service")
 	}
 	body := struct {
 		StructuredMessage *messages.StructuredMessage `json:"structured_message"`
@@ -488,7 +488,7 @@ func (s *agentService) BroadcastMessage(ctx context.Context, msg *messages.Struc
 		StructuredMessage: msg,
 		Interrupt:         interrupt,
 	}
-	resp, err := s.c.transport.Post(ctx, "/api/v1/groves/"+s.groveID+"/broadcast", body, nil)
+	resp, err := s.c.transport.Post(ctx, "/api/v1/groves/"+s.projectID+"/broadcast", body, nil)
 	if err != nil {
 		return err
 	}

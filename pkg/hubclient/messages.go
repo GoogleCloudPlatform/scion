@@ -48,7 +48,7 @@ type messageService struct {
 type ListMessagesOptions struct {
 	OnlyUnread bool
 	AgentID    string
-	GroveID    string
+	ProjectID  string
 	Type       string
 	Limit      int
 	Cursor     string
@@ -63,7 +63,7 @@ type MessageListResult = store.ListResult[store.Message]
 // AgentMessage is a lightweight view of a message used in agent-scoped listings.
 type AgentMessage struct {
 	ID          string    `json:"id"`
-	GroveID     string    `json:"groveId"`
+	ProjectID   string    `json:"groveId"`
 	Sender      string    `json:"sender"`
 	SenderID    string    `json:"senderId"`
 	Recipient   string    `json:"recipient"`
@@ -87,8 +87,8 @@ func (s *messageService) List(ctx context.Context, opts *ListMessagesOptions) (*
 		if opts.AgentID != "" {
 			query.Set("agent", opts.AgentID)
 		}
-		if opts.GroveID != "" {
-			query.Set("grove", opts.GroveID)
+		if opts.ProjectID != "" {
+			query.Set("grove", opts.ProjectID)
 		}
 		if opts.Type != "" {
 			query.Set("type", opts.Type)

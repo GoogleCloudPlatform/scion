@@ -49,7 +49,7 @@ type Notification struct {
 	ID             string    `json:"id"`
 	SubscriptionID string    `json:"subscriptionId"`
 	AgentID        string    `json:"agentId"`
-	GroveID        string    `json:"groveId"`
+	ProjectID      string    `json:"groveId"`
 	SubscriberType string    `json:"subscriberType"`
 	SubscriberID   string    `json:"subscriberId"`
 	Status         string    `json:"status"`
@@ -128,7 +128,7 @@ type subscriptionService struct {
 type CreateSubscriptionRequest struct {
 	Scope             string   `json:"scope"`
 	AgentID           string   `json:"agentId,omitempty"`
-	GroveID           string   `json:"groveId"`
+	ProjectID         string   `json:"groveId"`
 	TriggerActivities []string `json:"triggerActivities"`
 }
 
@@ -139,9 +139,9 @@ type UpdateSubscriptionRequest struct {
 
 // ListSubscriptionsOptions configures subscription listing.
 type ListSubscriptionsOptions struct {
-	GroveID string
-	AgentID string
-	Scope   string
+	ProjectID string
+	AgentID   string
+	Scope     string
 }
 
 // Subscription represents a notification subscription from the Hub API.
@@ -151,7 +151,7 @@ type Subscription struct {
 	AgentID           string    `json:"agentId,omitempty"`
 	SubscriberType    string    `json:"subscriberType"`
 	SubscriberID      string    `json:"subscriberId"`
-	GroveID           string    `json:"groveId"`
+	ProjectID         string    `json:"groveId"`
 	TriggerActivities []string  `json:"triggerActivities"`
 	CreatedAt         time.Time `json:"createdAt"`
 	CreatedBy         string    `json:"createdBy"`
@@ -170,8 +170,8 @@ func (s *subscriptionService) Create(ctx context.Context, req *CreateSubscriptio
 func (s *subscriptionService) List(ctx context.Context, opts *ListSubscriptionsOptions) ([]Subscription, error) {
 	query := url.Values{}
 	if opts != nil {
-		if opts.GroveID != "" {
-			query.Set("groveId", opts.GroveID)
+		if opts.ProjectID != "" {
+			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.AgentID != "" {
 			query.Set("agentId", opts.AgentID)
@@ -234,8 +234,8 @@ type SubscriptionTemplateService interface {
 	// Create creates a new subscription template.
 	Create(ctx context.Context, req *CreateSubscriptionTemplateRequest) (*SubscriptionTemplate, error)
 
-	// List returns subscription templates, optionally filtered by grove.
-	List(ctx context.Context, groveID string) ([]SubscriptionTemplate, error)
+	// List returns subscription templates, optionally filtered by project.
+	List(ctx context.Context, projectID string) ([]SubscriptionTemplate, error)
 
 	// Delete removes a template by ID.
 	Delete(ctx context.Context, id string) error
@@ -251,7 +251,7 @@ type CreateSubscriptionTemplateRequest struct {
 	Name              string   `json:"name"`
 	Scope             string   `json:"scope"`
 	TriggerActivities []string `json:"triggerActivities"`
-	GroveID           string   `json:"groveId"`
+	ProjectID         string   `json:"groveId"`
 }
 
 // SubscriptionTemplate represents a subscription template from the Hub API.
@@ -260,7 +260,7 @@ type SubscriptionTemplate struct {
 	Name              string   `json:"name"`
 	Scope             string   `json:"scope"`
 	TriggerActivities []string `json:"triggerActivities"`
-	GroveID           string   `json:"groveId"`
+	ProjectID         string   `json:"groveId"`
 	CreatedBy         string   `json:"createdBy"`
 }
 
@@ -273,11 +273,11 @@ func (s *subscriptionTemplateService) Create(ctx context.Context, req *CreateSub
 	return apiclient.DecodeResponse[SubscriptionTemplate](resp)
 }
 
-// List returns subscription templates, optionally filtered by grove.
-func (s *subscriptionTemplateService) List(ctx context.Context, groveID string) ([]SubscriptionTemplate, error) {
+// List returns subscription templates, optionally filtered by project.
+func (s *subscriptionTemplateService) List(ctx context.Context, projectID string) ([]SubscriptionTemplate, error) {
 	query := url.Values{}
-	if groveID != "" {
-		query.Set("groveId", groveID)
+	if projectID != "" {
+		query.Set("groveId", projectID)
 	}
 	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/notifications/templates", query, nil)
 	if err != nil {

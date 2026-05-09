@@ -68,13 +68,13 @@ type templateService struct {
 
 // ListTemplatesOptions configures template list filtering.
 type ListTemplatesOptions struct {
-	Name    string // Filter by exact template name
-	Search  string // Full-text search on name/description
-	Scope   string // Filter by scope (global, grove, user)
-	GroveID string // Filter by grove
-	Harness string // Filter by harness type
-	Status  string // Filter by status (active, archived)
-	Page    apiclient.PageOptions
+	Name      string // Filter by exact template name
+	Search    string // Full-text search on name/description
+	Scope     string // Filter by scope (global, project, user)
+	ProjectID string // Filter by project
+	Harness   string // Filter by harness type
+	Status    string // Filter by status (active, archived)
+	Page      apiclient.PageOptions
 }
 
 // ListTemplatesResponse is the response from listing templates.
@@ -88,7 +88,7 @@ type CreateTemplateRequest struct {
 	Name       string          `json:"name"`
 	Harness    string          `json:"harness,omitempty"`
 	Scope      string          `json:"scope"`
-	GroveID    string          `json:"groveId,omitempty"`
+	ProjectID  string          `json:"groveId,omitempty"`
 	Config     *TemplateConfig `json:"config,omitempty"`
 	Visibility string          `json:"visibility,omitempty"`
 }
@@ -102,9 +102,9 @@ type UpdateTemplateRequest struct {
 
 // CloneTemplateRequest is the request for cloning a template.
 type CloneTemplateRequest struct {
-	Name    string `json:"name"`
-	Scope   string `json:"scope"`
-	GroveID string `json:"groveId,omitempty"`
+	Name      string `json:"name"`
+	Scope     string `json:"scope"`
+	ProjectID string `json:"groveId,omitempty"`
 }
 
 // FileUploadRequest describes a file to upload.
@@ -175,8 +175,8 @@ func (s *templateService) List(ctx context.Context, opts *ListTemplatesOptions) 
 		if opts.Scope != "" {
 			query.Set("scope", opts.Scope)
 		}
-		if opts.GroveID != "" {
-			query.Set("groveId", opts.GroveID)
+		if opts.ProjectID != "" {
+			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.Harness != "" {
 			query.Set("harness", opts.Harness)

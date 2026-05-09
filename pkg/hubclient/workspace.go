@@ -88,8 +88,8 @@ type SyncToFinalizeResponse struct {
 type WorkspaceStatusResponse struct {
 	// Slug is the agent's URL-safe identifier.
 	Slug string `json:"slug"`
-	// GroveID is the grove ID.
-	GroveID string `json:"groveId"`
+	// ProjectID is the project ID.
+	ProjectID string `json:"groveId"`
 	// StorageURI is the GCS URI for the workspace storage.
 	StorageURI string `json:"storageUri"`
 	// LastSync contains information about the last sync operation.

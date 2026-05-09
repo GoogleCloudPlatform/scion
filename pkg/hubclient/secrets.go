@@ -46,8 +46,8 @@ type secretService struct {
 
 // ListSecretOptions configures secret listing.
 type ListSecretOptions struct {
-	Scope   string // user, grove, runtime_broker (default: user)
-	ScopeID string // ID of the scoped entity (required for grove/runtime_broker)
+	Scope   string // user, project, runtime_broker (default: user)
+	ScopeID string // ID of the scoped entity (required for project/runtime_broker)
 	Type    string // Optional: filter by secret type (environment, variable, file)
 }
 
@@ -60,15 +60,15 @@ type ListSecretResponse struct {
 
 // SecretScopeOptions specifies the scope for get/delete operations.
 type SecretScopeOptions struct {
-	Scope   string // user, grove, runtime_broker (default: user)
-	ScopeID string // ID of the scoped entity (required for grove/runtime_broker)
+	Scope   string // user, project, runtime_broker (default: user)
+	ScopeID string // ID of the scoped entity (required for project/runtime_broker)
 }
 
 // SetSecretRequest is the request for setting a secret.
 type SetSecretRequest struct {
 	Value         string `json:"value"`                   // Required: secret value (write-only)
 	Scope         string `json:"scope,omitempty"`         // Scope type (default: user)
-	ScopeID       string `json:"scopeId,omitempty"`       // Required for grove/runtime_broker scope
+	ScopeID       string `json:"scopeId,omitempty"`       // Required for project/runtime_broker scope
 	Description   string `json:"description,omitempty"`   // Optional description
 	InjectionMode string `json:"injectionMode,omitempty"` // "always" or "as_needed" (default: as_needed)
 	Type          string `json:"type,omitempty"`          // Secret type: environment (default), variable, file

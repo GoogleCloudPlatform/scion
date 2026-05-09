@@ -201,7 +201,7 @@ type AgentK8sMetadata struct {
 	SyncedAt  string `json:"syncedAt,omitempty"`
 }
 
-// SharedDir defines a grove-level shared directory available to all agents.
+// SharedDir defines a project-level shared directory available to all agents.
 type SharedDir struct {
 	Name        string `json:"name" yaml:"name"`
 	ReadOnly    bool   `json:"read_only,omitempty" yaml:"read_only,omitempty"`
@@ -330,7 +330,7 @@ type ResourceList struct {
 
 // AgentHubConfig holds hub connection settings that can be specified per-agent
 // or per-template in scion-agent.yaml. When set, these take highest priority
-// for the agent's hub endpoint, overriding grove settings and server config.
+// for the agent's hub endpoint, overriding project settings and server config.
 type AgentHubConfig struct {
 	Endpoint string `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
 }
@@ -515,7 +515,7 @@ type FileMapping struct {
 type AgentInfo struct {
 	// Identity fields
 	ID            string `json:"id,omitempty"`          // Hub UUID (database primary key, globally unique)
-	Slug          string `json:"slug,omitempty"`        // URL-safe slug identifier (unique per grove)
+	Slug          string `json:"slug,omitempty"`        // URL-safe slug identifier (unique per project)
 	ContainerID   string `json:"containerId,omitempty"` // Runtime container ID (ephemeral, runtime-assigned)
 	Name          string `json:"name"`                  // Human-friendly display name
 	Template      string `json:"template"`
@@ -529,10 +529,10 @@ type AgentInfo struct {
 	HarnessConfigRevision string `json:"harnessConfigRevision,omitempty"`
 	HarnessAuth           string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
 
-	// Grove association
-	Grove     string `json:"grove"`               // Grove name (legacy, simple string)
-	GroveID   string `json:"groveId,omitempty"`   // Hosted format: <uuid>__<name>
-	GrovePath string `json:"grovePath,omitempty"` // Filesystem path (solo mode)
+	// Project association
+	Project     string `json:"grove"`               // Project name (legacy, simple string)
+	ProjectID   string `json:"groveId,omitempty"`   // Hosted format: <uuid>__<name>
+	ProjectPath string `json:"grovePath,omitempty"` // Filesystem path (solo mode)
 
 	// Metadata
 	Labels      map[string]string `json:"labels,omitempty"`
@@ -613,7 +613,7 @@ type ResolvedSecret struct {
 	Type   string `json:"type"`          // environment, variable, file
 	Target string `json:"target"`        // Projection target (env var name, json key, or file path)
 	Value  string `json:"value"`         // Decrypted secret value
-	Source string `json:"source"`        // Scope that provided this secret (user, grove, runtime_broker)
+	Source string `json:"source"`        // Scope that provided this secret (user, project, runtime_broker)
 	Ref    string `json:"ref,omitempty"` // External secret reference (e.g., "gcpsm:projects/123/secrets/name")
 }
 
@@ -687,7 +687,7 @@ type StartOptions struct {
 	HarnessConfig     string
 	HarnessAuth       string // Late-binding override for auth_selected_type (api-key, oauth-token, auth-file, vertex-ai)
 	Image             string
-	GrovePath         string
+	ProjectPath       string
 	Env               map[string]string
 	ResolvedSecrets   []ResolvedSecret
 	BrokerMode        bool // When true, auth gathering skips local sources (broker env + filesystem)
@@ -700,7 +700,7 @@ type StartOptions struct {
 	SharedWorkspace   bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper
 	TelemetryOverride *bool           // Explicit telemetry override from CLI flags (--enable-telemetry / --disable-telemetry)
 	InlineConfig      *ScionConfig    // Inline config from --config flag, merged over template config
-	SharedDirs        []SharedDir     // Grove-level shared directories (from Hub, merged with settings)
+	SharedDirs        []SharedDir     // Project-level shared directories (from Hub, merged with settings)
 	ExtraHosts        []string        // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
 }
 
@@ -711,7 +711,7 @@ type StatusEvent struct {
 	Timestamp string `json:"timestamp"`
 }
 
-// Visibility constants for agent and grove access control.
+// Visibility constants for agent and project access control.
 const (
 	VisibilityPrivate = "private" // Only the owner can access
 	VisibilityTeam    = "team"    // Team members can access

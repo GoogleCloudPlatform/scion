@@ -47,7 +47,7 @@ type tokenService struct {
 // CreateTokenRequest is the request for creating a user access token.
 type CreateTokenRequest struct {
 	Name      string     `json:"name"`
-	GroveID   string     `json:"groveId"`
+	ProjectID string     `json:"groveId"`
 	Scopes    []string   `json:"scopes"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
@@ -63,7 +63,7 @@ type TokenInfo struct {
 	ID        string     `json:"id"`
 	Name      string     `json:"name"`
 	Prefix    string     `json:"prefix"`
-	GroveID   string     `json:"groveId"`
+	ProjectID string     `json:"groveId"`
 	Scopes    []string   `json:"scopes"`
 	Revoked   bool       `json:"revoked"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`

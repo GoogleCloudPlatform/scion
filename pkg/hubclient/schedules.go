@@ -23,7 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
-// ScheduleService handles recurring schedule operations scoped to a grove.
+// ScheduleService handles recurring schedule operations scoped to a project.
 type ScheduleService interface {
 	// Create creates a new recurring schedule.
 	Create(ctx context.Context, req *CreateScheduleRequest) (*Schedule, error)
@@ -52,12 +52,12 @@ type ScheduleService interface {
 
 // scheduleService is the implementation of ScheduleService.
 type scheduleService struct {
-	c       *client
-	groveID string
+	c         *client
+	projectID string
 }
 
 func (s *scheduleService) basePath() string {
-	return fmt.Sprintf("/api/v1/groves/%s/schedules", url.PathEscape(s.groveID))
+	return fmt.Sprintf("/api/v1/groves/%s/schedules", url.PathEscape(s.projectID))
 }
 
 // CreateScheduleRequest is the client-side request for creating a recurring schedule.
@@ -86,7 +86,7 @@ type UpdateScheduleRequest struct {
 // Schedule represents a recurring schedule returned by the Hub API.
 type Schedule struct {
 	ID            string     `json:"id"`
-	GroveID       string     `json:"groveId"`
+	ProjectID     string     `json:"groveId"`
 	Name          string     `json:"name"`
 	CronExpr      string     `json:"cronExpr"`
 	EventType     string     `json:"eventType"`

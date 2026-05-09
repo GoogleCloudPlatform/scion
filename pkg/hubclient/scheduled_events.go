@@ -23,7 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
-// ScheduledEventService handles scheduled event operations scoped to a grove.
+// ScheduledEventService handles scheduled event operations scoped to a project.
 type ScheduledEventService interface {
 	// Create creates a new scheduled event.
 	Create(ctx context.Context, req *CreateScheduledEventRequest) (*ScheduledEvent, error)
@@ -40,12 +40,12 @@ type ScheduledEventService interface {
 
 // scheduledEventService is the implementation of ScheduledEventService.
 type scheduledEventService struct {
-	c       *client
-	groveID string
+	c         *client
+	projectID string
 }
 
 func (s *scheduledEventService) basePath() string {
-	return fmt.Sprintf("/api/v1/groves/%s/scheduled-events", url.PathEscape(s.groveID))
+	return fmt.Sprintf("/api/v1/groves/%s/scheduled-events", url.PathEscape(s.projectID))
 }
 
 // CreateScheduledEventRequest is the client-side request for creating a scheduled event.
@@ -66,7 +66,7 @@ type CreateScheduledEventRequest struct {
 // ScheduledEvent represents a scheduled event returned by the Hub API.
 type ScheduledEvent struct {
 	ID         string     `json:"id"`
-	GroveID    string     `json:"groveId"`
+	ProjectID  string     `json:"groveId"`
 	EventType  string     `json:"eventType"`
 	FireAt     time.Time  `json:"fireAt"`
 	Payload    string     `json:"payload"`

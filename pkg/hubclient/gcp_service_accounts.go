@@ -24,9 +24,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
-// GCPServiceAccountService handles GCP service account operations for a grove.
+// GCPServiceAccountService handles GCP service account operations for a project.
 type GCPServiceAccountService interface {
-	// List returns all GCP service accounts for the grove.
+	// List returns all GCP service accounts for the project.
 	List(ctx context.Context) ([]GCPServiceAccount, error)
 
 	// Get returns a specific GCP service account by ID.
@@ -51,7 +51,7 @@ type GCPServiceAccount struct {
 	Scope              string    `json:"scope"`
 	ScopeID            string    `json:"scopeId"`
 	Email              string    `json:"email"`
-	ProjectID          string    `json:"projectId"`
+	ProjectID          string    `json:"projectId"` // GCP Project ID
 	DisplayName        string    `json:"displayName"`
 	DefaultScopes      []string  `json:"defaultScopes,omitempty"`
 	Verified           bool      `json:"verified"`
@@ -81,12 +81,12 @@ type MintGCPServiceAccountRequest struct {
 
 // gcpServiceAccountService is the implementation of GCPServiceAccountService.
 type gcpServiceAccountService struct {
-	c       *client
-	groveID string
+	c         *client
+	projectID string
 }
 
 func (s *gcpServiceAccountService) basePath() string {
-	return fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", s.groveID)
+	return fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", s.projectID)
 }
 
 func (s *gcpServiceAccountService) List(ctx context.Context) ([]GCPServiceAccount, error) {
