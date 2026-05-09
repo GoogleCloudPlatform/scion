@@ -175,6 +175,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 	config.PrintDeprecationWarnings(settingsWarnings)
 
+	// Phase 5: Resolve project ID from settings if not already provided via env
+	if projectID == "" && settings != nil && settings.Hub != nil {
+		projectID = settings.Hub.ProjectID
+	}
+
 	harnessName := ""
 	if finalScionCfg != nil {
 		harnessName = finalScionCfg.Harness
