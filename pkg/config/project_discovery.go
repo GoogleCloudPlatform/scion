@@ -41,6 +41,7 @@ const (
 type ProjectInfo struct {
 	Name          string        `json:"name"`
 	ProjectID     string        `json:"project_id,omitempty"`
+	GroveID       string        `json:"grove_id,omitempty"`
 	Type          ProjectType   `json:"type"`
 	ConfigPath    string        `json:"config_path"`
 	WorkspacePath string        `json:"workspace_path,omitempty"`
@@ -83,9 +84,9 @@ func DiscoverProjects() ([]ProjectInfo, error) {
 		pi.AgentCount = countAgents(filepath.Join(globalDir, "agents"))
 		if settings, err := LoadSettings(globalDir); err == nil {
 			pi.ProjectID = settings.ProjectID
+			pi.GroveID = settings.ProjectID
 		}
-		projects = append(projects, pi)
-		seenSlugs["global"] = true
+		projects = append(projects, pi)		seenSlugs["global"] = true
 	}
 
 	// 2. Scan project-configs directory (preferred)
@@ -169,6 +170,7 @@ func projectInfoFromExternal(configPath, dirName, slug string) ProjectInfo {
 	settings, err := LoadSettings(configPath)
 	if err == nil {
 		pi.ProjectID = settings.ProjectID
+		pi.GroveID = settings.ProjectID
 		pi.WorkspacePath = settings.WorkspacePath
 	}
 
@@ -200,6 +202,7 @@ func projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug s
 	pi.AgentCount = countAgents(agentsDir)
 	if settings, err := LoadSettings(configPath); err == nil {
 		pi.ProjectID = settings.ProjectID
+		pi.GroveID = settings.ProjectID
 	}
 	if pi.ProjectID == "" {
 		if marker, workspacePath, err := readWorkspaceMarkerForSlug(slug); err == nil {

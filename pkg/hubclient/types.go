@@ -173,11 +173,13 @@ func (p Project) MarshalJSON() ([]byte, error) {
 	type Alias Project
 	return json.Marshal(&struct {
 		Alias
+		ProjectID string `json:"projectId,omitempty"`
 		GroveID   string `json:"groveId,omitempty"`
 		GroveName string `json:"groveName,omitempty"`
 		GroveType string `json:"groveType,omitempty"`
 	}{
 		Alias:     Alias(p),
+		ProjectID: p.ID,
 		GroveID:   p.ID,
 		GroveName: p.Name,
 		GroveType: p.ProjectType,

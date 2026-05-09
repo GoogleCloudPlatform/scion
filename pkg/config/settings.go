@@ -548,6 +548,18 @@ func UpdateSetting(grovePath string, key string, value string, global bool) erro
 		// storage write to the external config dir (~/.scion/project-configs/…)
 		// — the same location LoadSettingsKoanf reads from.
 		dir = GetProjectConfigDir(grovePath)
+
+		// Phase 5: Migrate .scion/grove-id to project-id if it exists.
+		// This ensures that subsequent reads prefer the new filename.
+		if grovePath != "" {
+			groveIDFile := filepath.Join(grovePath, "grove-id")
+			projectIDFile := filepath.Join(grovePath, "project-id")
+			if _, err := os.Stat(groveIDFile); err == nil {
+				if _, err := os.Stat(projectIDFile); os.IsNotExist(err) {
+					_ = os.Rename(groveIDFile, projectIDFile)
+				}
+			}
+		}
 	}
 
 	// Find existing settings file (YAML or JSON)
