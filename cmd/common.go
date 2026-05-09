@@ -68,7 +68,7 @@ var (
 	runtimeBrokerID   string
 	harnessConfigFlag string
 	harnessAuthFlag   string
-	notify            bool
+	startNoNotify     bool
 	enableTelemetry   bool
 	disableTelemetry  bool
 	inlineConfigPath  string
@@ -356,11 +356,6 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		return startAgentViaHub(hubCtx, agentName, task, resume, inlineCfg)
 	}
 
-	// --notify requires Hub mode
-	if notify {
-		return fmt.Errorf("--notify requires Hub mode. Connect to a Hub with 'scion hub status <endpoint>'")
-	}
-
 	// Local mode
 	rt := runtime.GetRuntime(grovePath, profile)
 	mgr := agent.NewManager(rt)
@@ -639,7 +634,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		Resume:          resume,
 		Attach:          attach,
 		GatherEnv:       true, // Enable env-gather flow
-		Notify:          notify,
+		Notify:          !startNoNotify,
 	}
 
 	// Thread inline config from --config flag into the Hub request.

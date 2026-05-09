@@ -507,7 +507,7 @@ func TestBuildStructuredMessage(t *testing.T) {
 	assert.Equal(t, []string{"file1.go", "file2.go"}, msg.Attachments)
 }
 
-func TestSendMessageViaHub_NotifyDefault(t *testing.T) {
+func TestSendMessageViaHub_NotifyFlag(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
@@ -547,61 +547,11 @@ func TestSendMessageViaHub_NotifyDefault(t *testing.T) {
 		GroveID:  groveID,
 	}
 
-	// Default behavior (no --no-notify): notify should be true
 	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false, true)
 	require.NoError(t, err)
 
 	mu.Lock()
-	assert.True(t, notifyReceived, "notify should be true by default")
-	mu.Unlock()
-}
-
-func TestSendMessageViaHub_NoNotifyFlag(t *testing.T) {
-	orig := saveMessageTestState()
-	defer orig.restore()
-
-	groveID := "grove-msg-no-notify"
-
-	var notifyReceived bool
-	var mu sync.Mutex
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		case r.Method == http.MethodPost:
-			var body struct {
-				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
-				Interrupt         bool                        `json:"interrupt"`
-				Notify            bool                        `json:"notify"`
-			}
-			json.NewDecoder(r.Body).Decode(&body)
-			mu.Lock()
-			notifyReceived = body.Notify
-			mu.Unlock()
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	client, err := hubclient.New(server.URL)
-	require.NoError(t, err)
-
-	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		GroveID:  groveID,
-	}
-
-	// Explicit --no-notify: notify should be false
-	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false, false)
-	require.NoError(t, err)
-
-	mu.Lock()
-	assert.False(t, notifyReceived, "notify should be false when --no-notify is used")
+	assert.True(t, notifyReceived, "notify flag should be sent in request body")
 	mu.Unlock()
 }
 
@@ -716,8 +666,52 @@ func TestUserRecipientFlagValidation(t *testing.T) {
 	}
 }
 
-func TestNoNotifyFlagRegistered(t *testing.T) {
-	f := messageCmd.Flags().Lookup("no-notify")
-	require.NotNil(t, f, "--no-notify flag should be registered")
-	assert.Equal(t, "false", f.DefValue, "--no-notify should default to false (notify enabled)")
+func TestNotifyFlagValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		notify    bool
+		broadcast bool
+		all       bool
+		wantErr   string
+	}{
+		{
+			name:      "notify with broadcast not allowed",
+			notify:    true,
+			broadcast: true,
+			wantErr:   "--notify cannot be combined with --broadcast or --all",
+		},
+		{
+			name:    "notify with all not allowed",
+			notify:  true,
+			all:     true,
+			wantErr: "--notify cannot be combined with --broadcast or --all",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origNotify := msgNotify
+			origBroadcast, origAll := msgBroadcast, msgAll
+			defer func() {
+				msgNotify = origNotify
+				msgBroadcast = origBroadcast
+				msgAll = origAll
+			}()
+
+			msgNotify = tc.notify
+			msgBroadcast = tc.broadcast
+			msgAll = tc.all
+
+			var args []string
+			if tc.broadcast || tc.all {
+				args = []string{"hello"}
+			} else {
+				args = []string{"agent1", "hello"}
+			}
+
+			err := messageCmd.RunE(messageCmd, args)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
 }

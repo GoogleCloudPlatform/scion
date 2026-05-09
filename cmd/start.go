@@ -58,8 +58,8 @@ func init() {
 
 	startCmd.Flags().StringVar(&harnessAuthFlag, "harness-auth", "", "Override auth method for the harness (api-key, oauth-token, auth-file, vertex-ai)")
 
-	// Notification flag
-	startCmd.Flags().BoolVar(&notify, "notify", false, "Get notified when the spawned agent reaches a terminal state")
+	// Notification flag — on by default for Hub mode; use --no-notify to opt out
+	startCmd.Flags().BoolVar(&startNoNotify, "no-notify", false, "Do not subscribe to notifications for the spawned agent")
 
 	// Template resolution flags for Hub mode (Section 9.4)
 	startCmd.Flags().BoolVar(&uploadTemplate, "upload-template", false, "Automatically upload local template to Hub if not found")
