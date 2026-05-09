@@ -4870,7 +4870,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 		}
 	}
 
-	// Clean up the grove-configs directory (~/.scion/grove-configs/<slug>__<short-uuid>/).
+	// Clean up the project-configs directory (~/.scion/project-configs/<slug>__<short-uuid>/).
 	// This stores external settings, templates, and agent homes for both
 	// git-backed linked groves and non-git external groves.
 	if grove.Slug != "" && grove.ID != "" {
@@ -4879,7 +4879,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 			ProjectSlug: grove.Slug,
 		}
 		if configPath, err := marker.ExternalProjectPath(); err == nil {
-			// ExternalProjectPath returns <grove-configs>/<slug__uuid>/.scion —
+			// ExternalProjectPath returns <project-configs>/<slug__uuid>/.scion —
 			// remove the parent (<slug__uuid>) directory.
 			groveConfigDir := filepath.Dir(configPath)
 			if err := config.RemoveProjectConfig(groveConfigDir); err != nil && !os.IsNotExist(err) {

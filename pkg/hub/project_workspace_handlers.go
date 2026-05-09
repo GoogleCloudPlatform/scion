@@ -726,7 +726,7 @@ type sharedDirResolution struct {
 }
 
 // resolveSharedDirPath resolves the host-side path for a shared directory.
-// Shared dirs always live under ~/.scion/grove-configs/<slug>__<uuid>/shared-dirs/<name>,
+// Shared dirs always live under ~/.scion/project-configs/<slug>__<uuid>/shared-dirs/<name>,
 // matching the path used by agent provisioning (config.GetSharedDirPath).
 // For git-based groves with a co-located broker that has a LocalPath, the path is
 // resolved via config.GetSharedDirPath(localPath, dirName). Otherwise, the path is
@@ -734,7 +734,7 @@ type sharedDirResolution struct {
 func (s *Server) resolveSharedDirPath(ctx context.Context, grove *store.Project, dirName string) (*sharedDirResolution, error) {
 	if grove.GitRemote == "" {
 		// Hub-native grove: resolve via the .scion marker in the workspace directory
-		// to find the grove-configs path where shared dirs actually live.
+		// to find the project-configs path where shared dirs actually live.
 		sdPath, err := resolveHubProjectSharedDirPath(grove.Slug, dirName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve shared directory path: %w", err)
@@ -775,7 +775,7 @@ func (s *Server) resolveSharedDirPath(ctx context.Context, grove *store.Project,
 
 	// Fallback: embedded broker is a provider but has no LocalPath recorded
 	// (e.g. auto-linked or shared-workspace grove). Resolve via the .scion marker
-	// in the hub workspace to find the grove-configs path.
+	// in the hub workspace to find the project-configs path.
 	if embeddedIsProvider {
 		sdPath, err := resolveHubProjectSharedDirPath(grove.Slug, dirName)
 		if err != nil {

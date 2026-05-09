@@ -80,10 +80,10 @@ func createTestHubNativeProject(t *testing.T, srv *Server, name string) (*store.
 
 	t.Cleanup(func() {
 		// Clean up the external grove-config directory created by initInRepoProject
-		// (e.g. ~/.scion/grove-configs/<slug>__<uuid>/).
+		// (e.g. ~/.scion/project-configs/<slug>__<uuid>/).
 		scionDir := filepath.Join(workspacePath, ".scion")
 		if extAgentsDir, err := config.GetGitProjectExternalAgentsDir(scionDir); err == nil && extAgentsDir != "" {
-			// extAgentsDir is ~/.scion/grove-configs/<slug>__<uuid>/.scion/agents
+			// extAgentsDir is ~/.scion/project-configs/<slug>__<uuid>/.scion/agents
 			// Go up past "agents" and ".scion" to remove the <slug>__<uuid> parent dir
 			os.RemoveAll(filepath.Dir(filepath.Dir(extAgentsDir)))
 		}
@@ -93,9 +93,9 @@ func createTestHubNativeProject(t *testing.T, srv *Server, name string) (*store.
 	return &grove, workspacePath
 }
 
-// resolveTestSharedDirPath resolves the grove-configs shared dir path for a test
+// resolveTestSharedDirPath resolves the project-configs shared dir path for a test
 // hub-native grove. This matches the path that resolveHubGroveSharedDirPath uses
-// in production: it reads the .scion marker to find the grove-configs directory.
+// in production: it reads the .scion marker to find the project-configs directory.
 func resolveTestSharedDirPath(t *testing.T, workspacePath, dirName string) string {
 	t.Helper()
 	scionPath := filepath.Join(workspacePath, config.DotScion)
@@ -803,7 +803,7 @@ func TestSharedDirFiles_UploadAndList(t *testing.T) {
 	rec := doMultipartRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/groves/%s/shared-dirs/artifacts/files", grove.ID), files)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	// Verify file on disk — shared dirs live under grove-configs, not the workspace
+	// Verify file on disk — shared dirs live under project-configs, not the workspace
 	sdPath := resolveTestSharedDirPath(t, workspacePath, "artifacts")
 	content, err := os.ReadFile(filepath.Join(sdPath, "output.log"))
 	require.NoError(t, err)
@@ -825,7 +825,7 @@ func TestSharedDirFiles_Download(t *testing.T) {
 
 	addSharedDirToProject(t, srv, grove.ID, "data")
 
-	// Create a file directly at the grove-configs shared dir path
+	// Create a file directly at the project-configs shared dir path
 	sharedDirPath := resolveTestSharedDirPath(t, workspacePath, "data")
 	require.NoError(t, os.MkdirAll(sharedDirPath, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(sharedDirPath, "result.txt"), []byte("result data"), 0644))
@@ -841,7 +841,7 @@ func TestSharedDirFiles_Delete(t *testing.T) {
 
 	addSharedDirToProject(t, srv, grove.ID, "temp")
 
-	// Create a file at the grove-configs shared dir path
+	// Create a file at the project-configs shared dir path
 	sharedDirPath := resolveTestSharedDirPath(t, workspacePath, "temp")
 	require.NoError(t, os.MkdirAll(sharedDirPath, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(sharedDirPath, "old.txt"), []byte("old"), 0644))
@@ -912,7 +912,7 @@ func TestSharedDirFiles_GitGroveWithEmbeddedBroker(t *testing.T) {
 	t.Cleanup(func() {
 		// Clean up the external grove-config directory via marker resolution
 		if resolved, rErr := config.ResolveProjectMarker(scionDir); rErr == nil {
-			// resolved is ~/.scion/grove-configs/<slug>__<uuid>/.scion/
+			// resolved is ~/.scion/project-configs/<slug>__<uuid>/.scion/
 			os.RemoveAll(filepath.Dir(resolved))
 		}
 		os.RemoveAll(workspacePath)

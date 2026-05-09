@@ -202,7 +202,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// live under <workspace>/.scion/agents/ on the broker — that path
 			// would be visible to every container in the grove. Provisioning
 			// relocates prompt.md and scion-agent.json to
-			// ~/.scion/grove-configs/<slug>__<uuid>/.scion/agents/<name>/
+			// ~/.scion/project-configs/<slug>__<uuid>/.scion/agents/<name>/
 			// (config.GetAgentDir with sharedWorkspace=true), so there is
 			// nothing to leak through this mount. See
 			// .design/hub-shared-workspace-isolation.md (defense by absence).

@@ -507,14 +507,14 @@ For git groves, navigates to the project root (parent of the .scion directory).`
 }
 
 // resolveProjectWorkspace returns the workspace path for a grove given its config dir.
-// For external groves (under ~/.scion/grove-configs/), the workspace path is read from settings.
+// For external groves (under ~/.scion/project-configs/), the workspace path is read from settings.
 // For git groves, the workspace is the parent directory of the .scion config dir.
 func resolveProjectWorkspace(configDir string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	groveConfigsDir := filepath.Join(home, config.GlobalDir, "grove-configs")
+	groveConfigsDir := filepath.Join(home, config.GlobalDir, "project-configs")
 
 	if strings.HasPrefix(configDir, groveConfigsDir) {
 		// External grove — workspace path is recorded in settings

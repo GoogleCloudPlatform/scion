@@ -1060,7 +1060,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 // set in the web configure form) are applied before the agent starts.
 //
 // sharedWorkspace branches the path: shared-workspace agents store
-// scion-agent.json externally (~/.scion.grove-configs/<slug>__<uuid>/.scion/
+// scion-agent.json externally (~/.scion.project-configs/<slug>__<uuid>/.scion/
 // agents/<name>/) so siblings cannot read it via /workspace.
 func (s *Server) applyInlineConfigUpdate(agentName, grovePath string, inlineConfig *api.ScionConfig, sharedWorkspace bool) {
 	projectDir, err := config.GetResolvedProjectDir(grovePath)
@@ -2310,7 +2310,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 // grove path can't be determined from container labels.
 //
 // Probes both the in-grove location (worktree-mode agents) and the external
-// per-agent state dir under ~/.scion.grove-configs/ (shared-workspace agents,
+// per-agent state dir under ~/.scion.project-configs/ (shared-workspace agents,
 // whose state lives external to the shared checkout).
 func findAgentInHubNativeProjects(agentName string) string {
 	globalDir, err := config.GetGlobalDir()

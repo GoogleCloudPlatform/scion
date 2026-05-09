@@ -1126,7 +1126,7 @@ func TestGetAgentGitClone_ClearsExistingWorkspace(t *testing.T) {
 
 // TestProvisionAgent_SharedWorkspaceRelocatesAgentState verifies that when
 // SharedWorkspace context is set, the agent's prompt.md and scion-agent.json
-// land at the external grove-configs path rather than inside the grove tree.
+// land at the external project-configs path rather than inside the grove tree.
 // This is the structural fix from .design/hub-shared-workspace-isolation.md
 // — sibling agents must not see each other's state via /workspace.
 func TestProvisionAgent_SharedWorkspaceRelocatesAgentState(t *testing.T) {
@@ -1175,7 +1175,7 @@ func TestProvisionAgent_SharedWorkspaceRelocatesAgentState(t *testing.T) {
 	}
 
 	// External per-agent dir must contain prompt.md and scion-agent.json.
-	extAgentDir := filepath.Join(tmpDir, ".scion", "grove-configs", "project__550e8400", ".scion", "agents", "shared-agent")
+	extAgentDir := filepath.Join(tmpDir, ".scion", "project-configs", "project__550e8400", ".scion", "agents", "shared-agent")
 	if _, err := os.Stat(filepath.Join(extAgentDir, "prompt.md")); err != nil {
 		t.Errorf("expected prompt.md at external path %s: %v", extAgentDir, err)
 	}
@@ -1262,7 +1262,7 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	}
 
 	// External path must contain the migrated content.
-	extAgentDir := filepath.Join(tmpDir, ".scion", "grove-configs", "project__550e8400", ".scion", "agents", "legacy-agent")
+	extAgentDir := filepath.Join(tmpDir, ".scion", "project-configs", "project__550e8400", ".scion", "agents", "legacy-agent")
 	data, err := os.ReadFile(filepath.Join(extAgentDir, "prompt.md"))
 	if err != nil {
 		t.Fatalf("expected prompt.md at external path: %v", err)

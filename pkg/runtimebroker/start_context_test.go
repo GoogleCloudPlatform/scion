@@ -366,7 +366,7 @@ func TestBuildStartContext_HubNativeProjectWritesMarker(t *testing.T) {
 		t.Errorf("expected grove-slug 'web-demo', got %q", marker.ProjectSlug)
 	}
 
-	// Verify external grove-configs directories were created
+	// Verify external project-configs directories were created
 	extPath, err := marker.ExternalProjectPath()
 	if err != nil {
 		t.Fatalf("failed to get external grove path: %v", err)

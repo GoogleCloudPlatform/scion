@@ -31,7 +31,7 @@ import (
 var grovePruneCmd = &cobra.Command{
 	Use:   "prune",
 	Short: "Remove orphaned grove configs",
-	Long: `Detect and remove grove configs in ~/.scion/grove-configs/ whose
+	Long: `Detect and remove grove configs in ~/.scion/project-configs/ whose
 workspaces no longer exist. This cleans up leftover configuration from
 deleted or moved projects.
 

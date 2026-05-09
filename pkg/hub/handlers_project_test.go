@@ -1176,14 +1176,14 @@ func TestDeleteProject_CascadesEnvVarsSecretsHarnessConfigs(t *testing.T) {
 }
 
 // TestDeleteProject_CleansUpGroveConfigsDir verifies that deleting a grove
-// removes the ~/.scion/grove-configs/<slug>__<short-uuid>/ directory.
+// removes the ~/.scion/project-configs/<slug>__<short-uuid>/ directory.
 func TestDeleteProject_CleansUpGroveConfigsDir(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
 	grove := createTestGitProject(t, srv, "Config Cleanup Test", "github.com/test/config-cleanup-repo")
 
-	// Create the grove-configs directory that would exist in workstation mode
+	// Create the project-configs directory that would exist in workstation mode
 	marker := &config.ProjectMarker{
 		ProjectID:   grove.ID,
 		ProjectSlug: grove.Slug,
@@ -1191,7 +1191,7 @@ func TestDeleteProject_CleansUpGroveConfigsDir(t *testing.T) {
 	extPath, err := marker.ExternalProjectPath()
 	require.NoError(t, err)
 
-	// Create the directory structure: ~/.scion/grove-configs/<slug>__<uuid>/.scion/
+	// Create the directory structure: ~/.scion/project-configs/<slug>__<uuid>/.scion/
 	require.NoError(t, os.MkdirAll(extPath, 0755))
 	// Also create an agents/ sibling directory
 	agentsDir := filepath.Join(filepath.Dir(extPath), "agents", "test-agent", "home")
@@ -1202,15 +1202,15 @@ func TestDeleteProject_CleansUpGroveConfigsDir(t *testing.T) {
 
 	// Verify directory exists before deletion
 	_, err = os.Stat(groveConfigDir)
-	require.NoError(t, err, "grove-configs dir should exist before deletion")
+	require.NoError(t, err, "project-configs dir should exist before deletion")
 
 	// Delete grove via API
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/groves/"+grove.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
-	// Verify grove-configs directory was removed
+	// Verify project-configs directory was removed
 	_, err = os.Stat(groveConfigDir)
-	assert.True(t, os.IsNotExist(err), "grove-configs dir should be removed after grove deletion")
+	assert.True(t, os.IsNotExist(err), "project-configs dir should be removed after grove deletion")
 
 	// Verify grove deleted from database
 	_, err = s.GetProject(ctx, grove.ID)

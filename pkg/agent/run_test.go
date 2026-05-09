@@ -1431,6 +1431,7 @@ profiles:
 }
 
 func TestSettingsTelemetryMergedIntoStart(t *testing.T) {
+	for _, e := range os.Environ() { if strings.HasPrefix(e, "SCION_") { k := strings.SplitN(e, "=", 2)[0]; os.Unsetenv(k); val := os.Getenv(k); os.Unsetenv(k); defer os.Setenv(k, val) } }
 	// Verify that telemetry cloud config from settings.yaml gets merged into
 	// the container env vars during Start(), enabling cloud export.
 	tmpDir := t.TempDir()

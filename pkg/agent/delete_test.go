@@ -126,7 +126,7 @@ func TestDeleteAgentFiles_CleansStaleWorktree(t *testing.T) {
 // TestDeleteAgentFiles_CleansSharedWorkspaceExternalState verifies that for
 // shared-workspace git groves (whose per-agent state lives outside the grove
 // tree per .design/hub-shared-workspace-isolation.md), DeleteAgentFiles
-// removes the external <grove-configs>/<slug>__<uuid>/.scion/agents/<name>
+// removes the external <project-configs>/<slug>__<uuid>/.scion/agents/<name>
 // directory in addition to any in-grove residue.
 func TestDeleteAgentFiles_CleansSharedWorkspaceExternalState(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
