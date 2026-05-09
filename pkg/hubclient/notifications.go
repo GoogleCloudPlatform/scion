@@ -66,7 +66,7 @@ func (s *notificationService) List(ctx context.Context, opts *ListNotificationsO
 		query.Set("acknowledged", "true")
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/notifications", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/notifications", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +82,7 @@ func (s *notificationService) List(ctx context.Context, opts *ListNotificationsO
 
 // Acknowledge marks a single notification as acknowledged.
 func (s *notificationService) Acknowledge(ctx context.Context, id string) error {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/notifications/"+url.PathEscape(id)+"/ack", nil, nil)
+	resp, err := s.c.post(ctx, "/api/v1/notifications/"+url.PathEscape(id)+"/ack", nil, nil)
 	if err != nil {
 		return err
 	}
@@ -91,7 +91,7 @@ func (s *notificationService) Acknowledge(ctx context.Context, id string) error 
 
 // AcknowledgeAll marks all unacknowledged notifications as acknowledged.
 func (s *notificationService) AcknowledgeAll(ctx context.Context) error {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/notifications/ack-all", nil, nil)
+	resp, err := s.c.post(ctx, "/api/v1/notifications/ack-all", nil, nil)
 	if err != nil {
 		return err
 	}
@@ -159,7 +159,7 @@ type Subscription struct {
 
 // Create creates a new notification subscription.
 func (s *subscriptionService) Create(ctx context.Context, req *CreateSubscriptionRequest) (*Subscription, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/notifications/subscriptions", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/notifications/subscriptions", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +181,7 @@ func (s *subscriptionService) List(ctx context.Context, opts *ListSubscriptionsO
 		}
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/notifications/subscriptions", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/notifications/subscriptions", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +197,7 @@ func (s *subscriptionService) List(ctx context.Context, opts *ListSubscriptionsO
 
 // Update modifies the trigger activities of a subscription.
 func (s *subscriptionService) Update(ctx context.Context, id string, req *UpdateSubscriptionRequest) (*Subscription, error) {
-	resp, err := s.c.transport.Patch(ctx, "/api/v1/notifications/subscriptions/"+url.PathEscape(id), req, nil)
+	resp, err := s.c.patch(ctx, "/api/v1/notifications/subscriptions/"+url.PathEscape(id), req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +206,7 @@ func (s *subscriptionService) Update(ctx context.Context, id string, req *Update
 
 // Delete removes a subscription by ID.
 func (s *subscriptionService) Delete(ctx context.Context, id string) error {
-	resp, err := s.c.transport.Delete(ctx, "/api/v1/notifications/subscriptions/"+url.PathEscape(id), nil)
+	resp, err := s.c.delete(ctx, "/api/v1/notifications/subscriptions/"+url.PathEscape(id), nil)
 	if err != nil {
 		return err
 	}
@@ -215,7 +215,7 @@ func (s *subscriptionService) Delete(ctx context.Context, id string) error {
 
 // BulkCreate creates multiple subscriptions in a single request.
 func (s *subscriptionService) BulkCreate(ctx context.Context, reqs []CreateSubscriptionRequest) ([]Subscription, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/notifications/subscriptions/bulk", reqs, nil)
+	resp, err := s.c.post(ctx, "/api/v1/notifications/subscriptions/bulk", reqs, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +266,7 @@ type SubscriptionTemplate struct {
 
 // Create creates a new subscription template.
 func (s *subscriptionTemplateService) Create(ctx context.Context, req *CreateSubscriptionTemplateRequest) (*SubscriptionTemplate, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/notifications/templates", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/notifications/templates", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +279,7 @@ func (s *subscriptionTemplateService) List(ctx context.Context, projectID string
 	if projectID != "" {
 		query.Set("groveId", projectID)
 	}
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/notifications/templates", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/notifications/templates", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +295,7 @@ func (s *subscriptionTemplateService) List(ctx context.Context, projectID string
 
 // Delete removes a template by ID.
 func (s *subscriptionTemplateService) Delete(ctx context.Context, id string) error {
-	resp, err := s.c.transport.Delete(ctx, "/api/v1/notifications/templates/"+url.PathEscape(id), nil)
+	resp, err := s.c.delete(ctx, "/api/v1/notifications/templates/"+url.PathEscape(id), nil)
 	if err != nil {
 		return err
 	}
@@ -307,7 +307,7 @@ func (s *subscriptionService) BulkDelete(ctx context.Context, ids []string) (int
 	body := struct {
 		IDs []string `json:"ids"`
 	}{IDs: ids}
-	resp, err := s.c.transport.Post(ctx, "/api/v1/notifications/subscriptions/bulk-delete", body, nil)
+	resp, err := s.c.post(ctx, "/api/v1/notifications/subscriptions/bulk-delete", body, nil)
 	if err != nil {
 		return 0, err
 	}

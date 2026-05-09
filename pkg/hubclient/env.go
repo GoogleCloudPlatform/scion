@@ -93,7 +93,7 @@ func (s *envService) List(ctx context.Context, opts *ListEnvOptions) (*ListEnvRe
 		}
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/env", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/env", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +112,7 @@ func (s *envService) Get(ctx context.Context, key string, opts *EnvScopeOptions)
 		}
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/env/"+url.PathEscape(key), query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/env/"+url.PathEscape(key), query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +121,7 @@ func (s *envService) Get(ctx context.Context, key string, opts *EnvScopeOptions)
 
 // Set creates or updates an environment variable.
 func (s *envService) Set(ctx context.Context, key string, req *SetEnvRequest) (*SetEnvResponse, error) {
-	resp, err := s.c.transport.Put(ctx, "/api/v1/env/"+url.PathEscape(key), req, nil)
+	resp, err := s.c.put(ctx, "/api/v1/env/"+url.PathEscape(key), req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +145,7 @@ func (s *envService) Delete(ctx context.Context, key string, opts *EnvScopeOptio
 		path += "?" + query.Encode()
 	}
 
-	resp, err := s.c.transport.Delete(ctx, path, nil)
+	resp, err := s.c.delete(ctx, path, nil)
 	if err != nil {
 		return err
 	}

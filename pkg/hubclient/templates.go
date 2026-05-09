@@ -187,7 +187,7 @@ func (s *templateService) List(ctx context.Context, opts *ListTemplatesOptions) 
 		opts.Page.ToQuery(query)
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/templates", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/templates", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +214,7 @@ func (s *templateService) List(ctx context.Context, opts *ListTemplatesOptions) 
 
 // Get returns a single template by ID.
 func (s *templateService) Get(ctx context.Context, templateID string) (*Template, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/templates/"+templateID, nil)
+	resp, err := s.c.get(ctx, "/api/v1/templates/"+templateID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +223,7 @@ func (s *templateService) Get(ctx context.Context, templateID string) (*Template
 
 // Create creates a new template.
 func (s *templateService) Create(ctx context.Context, req *CreateTemplateRequest) (*CreateTemplateResponse, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/templates", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/templates", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +232,7 @@ func (s *templateService) Create(ctx context.Context, req *CreateTemplateRequest
 
 // Update updates a template.
 func (s *templateService) Update(ctx context.Context, templateID string, req *UpdateTemplateRequest) (*Template, error) {
-	resp, err := s.c.transport.Patch(ctx, "/api/v1/templates/"+templateID, req, nil)
+	resp, err := s.c.patch(ctx, "/api/v1/templates/"+templateID, req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -241,7 +241,7 @@ func (s *templateService) Update(ctx context.Context, templateID string, req *Up
 
 // Delete removes a template.
 func (s *templateService) Delete(ctx context.Context, templateID string) error {
-	resp, err := s.c.transport.Delete(ctx, "/api/v1/templates/"+templateID, nil)
+	resp, err := s.c.delete(ctx, "/api/v1/templates/"+templateID, nil)
 	if err != nil {
 		return err
 	}
@@ -250,7 +250,7 @@ func (s *templateService) Delete(ctx context.Context, templateID string) error {
 
 // Clone creates a copy of a template.
 func (s *templateService) Clone(ctx context.Context, templateID string, req *CloneTemplateRequest) (*Template, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/templates/"+templateID+"/clone", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/templates/"+templateID+"/clone", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +264,7 @@ func (s *templateService) RequestUploadURLs(ctx context.Context, templateID stri
 	}{
 		Files: files,
 	}
-	resp, err := s.c.transport.Post(ctx, "/api/v1/templates/"+templateID+"/upload", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/templates/"+templateID+"/upload", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +276,7 @@ func (s *templateService) Finalize(ctx context.Context, templateID string, manif
 	req := FinalizeRequest{
 		Manifest: manifest,
 	}
-	resp, err := s.c.transport.Post(ctx, "/api/v1/templates/"+templateID+"/finalize", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/templates/"+templateID+"/finalize", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +285,7 @@ func (s *templateService) Finalize(ctx context.Context, templateID string, manif
 
 // RequestDownloadURLs requests signed URLs for downloading template files.
 func (s *templateService) RequestDownloadURLs(ctx context.Context, templateID string) (*DownloadResponse, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/templates/"+templateID+"/download", nil)
+	resp, err := s.c.get(ctx, "/api/v1/templates/"+templateID+"/download", nil)
 	if err != nil {
 		return nil, err
 	}

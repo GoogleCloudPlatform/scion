@@ -19,6 +19,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -255,9 +257,69 @@ func (c *client) Invites() InviteService {
 	return c.invites
 }
 
+// get performs an HTTP GET request with fallback.
+func (c *client) get(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
+	return c.getWithQuery(ctx, path, nil, headers)
+}
+
+// getWithQuery performs an HTTP GET request with query parameters and fallback.
+func (c *client) getWithQuery(ctx context.Context, path string, query url.Values, headers http.Header) (*http.Response, error) {
+	resp, err := c.transport.GetWithQuery(ctx, path, query, headers)
+	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
+		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
+		resp.Body.Close()
+		return c.transport.GetWithQuery(ctx, legacyPath, query, headers)
+	}
+	return resp, err
+}
+
+// post performs an HTTP POST request with fallback.
+func (c *client) post(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
+	resp, err := c.transport.Post(ctx, path, body, headers)
+	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
+		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
+		resp.Body.Close()
+		return c.transport.Post(ctx, legacyPath, body, headers)
+	}
+	return resp, err
+}
+
+// put performs an HTTP PUT request with fallback.
+func (c *client) put(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
+	resp, err := c.transport.Put(ctx, path, body, headers)
+	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
+		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
+		resp.Body.Close()
+		return c.transport.Put(ctx, legacyPath, body, headers)
+	}
+	return resp, err
+}
+
+// patch performs an HTTP PATCH request with fallback.
+func (c *client) patch(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
+	resp, err := c.transport.Patch(ctx, path, body, headers)
+	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
+		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
+		resp.Body.Close()
+		return c.transport.Patch(ctx, legacyPath, body, headers)
+	}
+	return resp, err
+}
+
+// delete performs an HTTP DELETE request with fallback.
+func (c *client) delete(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
+	resp, err := c.transport.Delete(ctx, path, headers)
+	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
+		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
+		resp.Body.Close()
+		return c.transport.Delete(ctx, legacyPath, headers)
+	}
+	return resp, err
+}
+
 // Health checks API availability.
 func (c *client) Health(ctx context.Context) (*HealthResponse, error) {
-	resp, err := c.transport.Get(ctx, "/healthz", nil)
+	resp, err := c.get(ctx, "/healthz", nil)
 	if err != nil {
 		return nil, err
 	}

@@ -97,7 +97,7 @@ func (s *secretService) List(ctx context.Context, opts *ListSecretOptions) (*Lis
 		}
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/secrets", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/secrets", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +116,7 @@ func (s *secretService) Get(ctx context.Context, key string, opts *SecretScopeOp
 		}
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/secrets/"+url.PathEscape(key), query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/secrets/"+url.PathEscape(key), query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +125,7 @@ func (s *secretService) Get(ctx context.Context, key string, opts *SecretScopeOp
 
 // Set creates or updates a secret.
 func (s *secretService) Set(ctx context.Context, key string, req *SetSecretRequest) (*SetSecretResponse, error) {
-	resp, err := s.c.transport.Put(ctx, "/api/v1/secrets/"+url.PathEscape(key), req, nil)
+	resp, err := s.c.put(ctx, "/api/v1/secrets/"+url.PathEscape(key), req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +149,7 @@ func (s *secretService) Delete(ctx context.Context, key string, opts *SecretScop
 		path += "?" + query.Encode()
 	}
 
-	resp, err := s.c.transport.Delete(ctx, path, nil)
+	resp, err := s.c.delete(ctx, path, nil)
 	if err != nil {
 		return err
 	}

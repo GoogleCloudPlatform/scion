@@ -277,8 +277,8 @@ func TestProjectsRegister(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
-		if r.URL.Path != "/api/v1/groves/register" {
-			t.Errorf("expected path /api/v1/groves/register, got %s", r.URL.Path)
+		if r.URL.Path != "/api/v1/projects/register" {
+			t.Errorf("expected path /api/v1/projects/register, got %s", r.URL.Path)
 		}
 
 		var req RegisterProjectRequest
@@ -322,6 +322,44 @@ func TestProjectsRegister(t *testing.T) {
 	}
 	if resp.BrokerToken != "secret-host-token" {
 		t.Errorf("expected brokerToken 'secret-host-token', got %q", resp.BrokerToken)
+	}
+}
+
+func TestFallback(t *testing.T) {
+	var attempts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts = append(attempts, r.URL.Path)
+		if r.URL.Path == "/api/v1/projects/my-project" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.URL.Path == "/api/v1/groves/my-project" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(Project{ID: "my-project", Name: "My Project"})
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client, _ := New(server.URL)
+	project, err := client.Projects().Get(context.Background(), "my-project")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if project.Name != "My Project" {
+		t.Errorf("expected 'My Project', got %q", project.Name)
+	}
+
+	if len(attempts) != 2 {
+		t.Errorf("expected 2 attempts, got %d", len(attempts))
+	}
+	if attempts[0] != "/api/v1/projects/my-project" {
+		t.Errorf("expected first attempt to /api/v1/projects/my-project, got %s", attempts[0])
+	}
+	if attempts[1] != "/api/v1/groves/my-project" {
+		t.Errorf("expected second attempt to /api/v1/groves/my-project, got %s", attempts[1])
 	}
 }
 

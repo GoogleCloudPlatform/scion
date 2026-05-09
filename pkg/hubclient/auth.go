@@ -137,7 +137,7 @@ type CLITokenResponse struct {
 
 // Login performs user login.
 func (s *authService) Login(ctx context.Context, req *LoginRequest) (*LoginResponse, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/auth/login", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/auth/login", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +146,7 @@ func (s *authService) Login(ctx context.Context, req *LoginRequest) (*LoginRespo
 
 // Logout invalidates the current session.
 func (s *authService) Logout(ctx context.Context) error {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/auth/logout", nil, nil)
+	resp, err := s.c.post(ctx, "/api/v1/auth/logout", nil, nil)
 	if err != nil {
 		return err
 	}
@@ -160,7 +160,7 @@ func (s *authService) Refresh(ctx context.Context, refreshToken string) (*TokenR
 	}{
 		RefreshToken: refreshToken,
 	}
-	resp, err := s.c.transport.Post(ctx, "/api/v1/auth/refresh", body, nil)
+	resp, err := s.c.post(ctx, "/api/v1/auth/refresh", body, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +169,7 @@ func (s *authService) Refresh(ctx context.Context, refreshToken string) (*TokenR
 
 // Me returns the current authenticated user.
 func (s *authService) Me(ctx context.Context) (*User, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/auth/me", nil)
+	resp, err := s.c.get(ctx, "/api/v1/auth/me", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +178,7 @@ func (s *authService) Me(ctx context.Context) (*User, error) {
 
 // GetWSTicket gets a short-lived WebSocket authentication ticket.
 func (s *authService) GetWSTicket(ctx context.Context) (*WSTicketResponse, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/auth/ws-ticket", nil, nil)
+	resp, err := s.c.post(ctx, "/api/v1/auth/ws-ticket", nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +190,7 @@ func (s *authService) GetAuthProviders(ctx context.Context, clientType string) (
 	query := url.Values{}
 	query.Set("clientType", clientType)
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/auth/providers", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/auth/providers", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +221,7 @@ func (s *authService) GetAuthURL(ctx context.Context, callbackURL, state, provid
 		State:       state,
 		Provider:    provider,
 	}
-	resp, err := s.c.transport.Post(ctx, "/api/v1/auth/cli/authorize", body, nil)
+	resp, err := s.c.post(ctx, "/api/v1/auth/cli/authorize", body, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -239,7 +239,7 @@ func (s *authService) ExchangeCode(ctx context.Context, code, callbackURL, provi
 		CallbackURL: callbackURL,
 		Provider:    provider,
 	}
-	resp, err := s.c.transport.Post(ctx, "/api/v1/auth/cli/token", body, nil)
+	resp, err := s.c.post(ctx, "/api/v1/auth/cli/token", body, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +273,7 @@ func (s *authService) RequestDeviceCode(ctx context.Context, provider string) (*
 	}{
 		Provider: provider,
 	}
-	resp, err := s.c.transport.Post(ctx, "/api/v1/auth/cli/device", body, nil)
+	resp, err := s.c.post(ctx, "/api/v1/auth/cli/device", body, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +291,7 @@ func (s *authService) PollDeviceToken(ctx context.Context, deviceCode, provider 
 		DeviceCode: deviceCode,
 		Provider:   provider,
 	}
-	resp, err := s.c.transport.Post(ctx, "/api/v1/auth/cli/device/token", body, nil)
+	resp, err := s.c.post(ctx, "/api/v1/auth/cli/device/token", body, nil)
 	if err != nil {
 		return nil, err
 	}

@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"time"
@@ -45,7 +46,7 @@ type scheduledEventService struct {
 }
 
 func (s *scheduledEventService) basePath() string {
-	return fmt.Sprintf("/api/v1/groves/%s/scheduled-events", url.PathEscape(s.projectID))
+	return fmt.Sprintf("/api/v1/projects/%s/scheduled-events", url.PathEscape(s.projectID))
 }
 
 // CreateScheduledEventRequest is the client-side request for creating a scheduled event.
@@ -66,7 +67,7 @@ type CreateScheduledEventRequest struct {
 // ScheduledEvent represents a scheduled event returned by the Hub API.
 type ScheduledEvent struct {
 	ID         string     `json:"id"`
-	ProjectID  string     `json:"groveId"`
+	ProjectID  string     `json:"projectId"`
 	EventType  string     `json:"eventType"`
 	FireAt     time.Time  `json:"fireAt"`
 	Payload    string     `json:"payload"`
@@ -76,6 +77,36 @@ type ScheduledEvent struct {
 	FiredAt    *time.Time `json:"firedAt,omitempty"`
 	Error      string     `json:"error,omitempty"`
 	ScheduleID string     `json:"scheduleId,omitempty"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (e *ScheduledEvent) UnmarshalJSON(data []byte) error {
+	type Alias ScheduledEvent
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(e),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if e.ProjectID == "" && aux.GroveID != "" {
+		e.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (e ScheduledEvent) MarshalJSON() ([]byte, error) {
+	type Alias ScheduledEvent
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(e),
+		GroveID: e.ProjectID,
+	})
 }
 
 // ListScheduledEventsOptions configures scheduled event listing.
@@ -95,7 +126,7 @@ type ListScheduledEventsResponse struct {
 
 // Create creates a new scheduled event.
 func (s *scheduledEventService) Create(ctx context.Context, req *CreateScheduledEventRequest) (*ScheduledEvent, error) {
-	resp, err := s.c.transport.Post(ctx, s.basePath(), req, nil)
+	resp, err := s.c.post(ctx, s.basePath(), req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +135,7 @@ func (s *scheduledEventService) Create(ctx context.Context, req *CreateScheduled
 
 // Get retrieves a scheduled event by ID.
 func (s *scheduledEventService) Get(ctx context.Context, id string) (*ScheduledEvent, error) {
-	resp, err := s.c.transport.Get(ctx, s.basePath()+"/"+url.PathEscape(id), nil)
+	resp, err := s.c.get(ctx, s.basePath()+"/"+url.PathEscape(id), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +155,7 @@ func (s *scheduledEventService) List(ctx context.Context, opts *ListScheduledEve
 		opts.Page.ToQuery(query)
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, s.basePath(), query, nil)
+	resp, err := s.c.getWithQuery(ctx, s.basePath(), query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +164,7 @@ func (s *scheduledEventService) List(ctx context.Context, opts *ListScheduledEve
 
 // Cancel cancels a pending scheduled event.
 func (s *scheduledEventService) Cancel(ctx context.Context, id string) error {
-	resp, err := s.c.transport.Delete(ctx, s.basePath()+"/"+url.PathEscape(id), nil)
+	resp, err := s.c.delete(ctx, s.basePath()+"/"+url.PathEscape(id), nil)
 	if err != nil {
 		return err
 	}

@@ -139,7 +139,49 @@ type Project struct {
 	Providers              []ProjectProvider `json:"providers,omitempty"`
 	AgentCount             int               `json:"agentCount,omitempty"`
 	ActiveBrokerCount      int               `json:"activeBrokerCount,omitempty"`
-	ProjectType            string            `json:"groveType,omitempty"`
+	ProjectType            string            `json:"projectType,omitempty"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (p *Project) UnmarshalJSON(data []byte) error {
+	type Alias Project
+	aux := &struct {
+		GroveID   string `json:"groveId"`
+		GroveName string `json:"groveName"`
+		GroveType string `json:"groveType"`
+		*Alias
+	}{
+		Alias: (*Alias)(p),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if p.ID == "" && aux.GroveID != "" {
+		p.ID = aux.GroveID
+	}
+	if p.Name == "" && aux.GroveName != "" {
+		p.Name = aux.GroveName
+	}
+	if p.ProjectType == "" && aux.GroveType != "" {
+		p.ProjectType = aux.GroveType
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (p Project) MarshalJSON() ([]byte, error) {
+	type Alias Project
+	return json.Marshal(&struct {
+		Alias
+		GroveID   string `json:"groveId,omitempty"`
+		GroveName string `json:"groveName,omitempty"`
+		GroveType string `json:"groveType,omitempty"`
+	}{
+		Alias:     Alias(p),
+		GroveID:   p.ID,
+		GroveName: p.Name,
+		GroveType: p.ProjectType,
+	})
 }
 
 // ProjectProvider represents a broker providing runtime services to a project.
@@ -476,16 +518,6 @@ func (s *ResolvedSecret) UnmarshalJSON(data []byte) error {
 		s.Source = "project"
 	}
 	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy "grove" source.
-func (s ResolvedSecret) MarshalJSON() ([]byte, error) {
-	type Alias ResolvedSecret
-	return json.Marshal(&struct {
-		Alias
-	}{
-		Alias: Alias(s),
-	})
 }
 
 // HarnessConfig represents a harness config from the Hub API.

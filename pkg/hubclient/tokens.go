@@ -78,7 +78,7 @@ type ListTokensResponse struct {
 
 // Create creates a new user access token.
 func (s *tokenService) Create(ctx context.Context, req *CreateTokenRequest) (*CreateTokenResponse, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/auth/tokens", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/auth/tokens", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +87,7 @@ func (s *tokenService) Create(ctx context.Context, req *CreateTokenRequest) (*Cr
 
 // List returns all tokens for the authenticated user.
 func (s *tokenService) List(ctx context.Context) (*ListTokensResponse, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/auth/tokens", nil)
+	resp, err := s.c.get(ctx, "/api/v1/auth/tokens", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +96,7 @@ func (s *tokenService) List(ctx context.Context) (*ListTokensResponse, error) {
 
 // Get returns details for a specific token.
 func (s *tokenService) Get(ctx context.Context, id string) (*TokenInfo, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/auth/tokens/"+id, nil)
+	resp, err := s.c.get(ctx, "/api/v1/auth/tokens/"+id, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +105,7 @@ func (s *tokenService) Get(ctx context.Context, id string) (*TokenInfo, error) {
 
 // Revoke soft-revokes a token.
 func (s *tokenService) Revoke(ctx context.Context, id string) error {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/auth/tokens/"+id+"/revoke", nil, nil)
+	resp, err := s.c.post(ctx, "/api/v1/auth/tokens/"+id+"/revoke", nil, nil)
 	if err != nil {
 		return err
 	}
@@ -114,7 +114,7 @@ func (s *tokenService) Revoke(ctx context.Context, id string) error {
 
 // Delete permanently removes a token.
 func (s *tokenService) Delete(ctx context.Context, id string) error {
-	resp, err := s.c.transport.Delete(ctx, "/api/v1/auth/tokens/"+id, nil)
+	resp, err := s.c.delete(ctx, "/api/v1/auth/tokens/"+id, nil)
 	if err != nil {
 		return err
 	}

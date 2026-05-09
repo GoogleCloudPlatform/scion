@@ -531,7 +531,7 @@ type AgentInfo struct {
 	HarnessAuth           string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
 
 	// Project association
-	Project     string `json:"project"`               // Project name (legacy, simple string)
+	Project     string `json:"project"`               // Project name (standard field)
 	ProjectID   string `json:"projectId,omitempty"`   // Hosted format: <uuid>__<name>
 	ProjectPath string `json:"projectPath,omitempty"` // Filesystem path (solo mode)
 
@@ -671,22 +671,6 @@ func (s *ResolvedSecret) UnmarshalJSON(data []byte) error {
 		s.Source = "project"
 	}
 	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy "grove" source.
-func (s ResolvedSecret) MarshalJSON() ([]byte, error) {
-	type Alias ResolvedSecret
-	source := s.Source
-	// Note: We don't necessarily need to emit "grove" as a shadow field since it's a value,
-	// but if we wanted to be perfectly symmetric we could. For now, following instructions
-	// to accept 'grove' as 'project'.
-	return json.Marshal(&struct {
-		Alias
-		Source string `json:"source"`
-	}{
-		Alias:  Alias(s),
-		Source: source,
-	})
 }
 
 // GitCloneConfig specifies how to clone a git repository into the workspace.

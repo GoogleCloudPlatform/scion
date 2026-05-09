@@ -215,7 +215,7 @@ func (s *projectService) List(ctx context.Context, opts *ListProjectsOptions) (*
 		opts.Page.ToQuery(query)
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/groves", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/projects", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -242,7 +242,7 @@ func (s *projectService) List(ctx context.Context, opts *ListProjectsOptions) (*
 
 // Get returns a single project by ID.
 func (s *projectService) Get(ctx context.Context, projectID string) (*Project, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/groves/"+projectID, nil)
+	resp, err := s.c.get(ctx, "/api/v1/projects/"+projectID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +251,7 @@ func (s *projectService) Get(ctx context.Context, projectID string) (*Project, e
 
 // Register registers a project (upsert based on git remote).
 func (s *projectService) Register(ctx context.Context, req *RegisterProjectRequest) (*RegisterProjectResponse, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/groves/register", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/projects/register", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +260,7 @@ func (s *projectService) Register(ctx context.Context, req *RegisterProjectReque
 
 // Create creates a project without a contributing broker.
 func (s *projectService) Create(ctx context.Context, req *CreateProjectRequest) (*Project, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/groves", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/projects", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +269,7 @@ func (s *projectService) Create(ctx context.Context, req *CreateProjectRequest) 
 
 // Update updates project metadata.
 func (s *projectService) Update(ctx context.Context, projectID string, req *UpdateProjectRequest) (*Project, error) {
-	resp, err := s.c.transport.Patch(ctx, "/api/v1/groves/"+projectID, req, nil)
+	resp, err := s.c.patch(ctx, "/api/v1/projects/"+projectID, req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -278,8 +278,8 @@ func (s *projectService) Update(ctx context.Context, projectID string, req *Upda
 
 // Delete removes a project and all its agents.
 func (s *projectService) Delete(ctx context.Context, projectID string) error {
-	path := "/api/v1/groves/" + projectID
-	resp, err := s.c.transport.Delete(ctx, path, nil)
+	path := "/api/v1/projects/" + projectID
+	resp, err := s.c.delete(ctx, path, nil)
 	if err != nil {
 		return err
 	}
@@ -302,7 +302,7 @@ func (s *projectService) ListAgents(ctx context.Context, projectID string, opts 
 		opts.Page.ToQuery(query)
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/groves/"+projectID+"/agents", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/projects/"+projectID+"/agents", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -329,7 +329,7 @@ func (s *projectService) ListAgents(ctx context.Context, projectID string, opts 
 
 // ListProviders returns runtime brokers providing services to a project.
 func (s *projectService) ListProviders(ctx context.Context, projectID string) (*ListProvidersResponse, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/groves/"+projectID+"/providers", nil)
+	resp, err := s.c.get(ctx, "/api/v1/projects/"+projectID+"/providers", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -338,7 +338,7 @@ func (s *projectService) ListProviders(ctx context.Context, projectID string) (*
 
 // AddProvider adds a broker as a provider to a project.
 func (s *projectService) AddProvider(ctx context.Context, projectID string, req *AddProviderRequest) (*AddProviderResponse, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/groves/"+projectID+"/providers", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/projects/"+projectID+"/providers", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -347,7 +347,7 @@ func (s *projectService) AddProvider(ctx context.Context, projectID string, req 
 
 // RemoveProvider removes a broker from a project.
 func (s *projectService) RemoveProvider(ctx context.Context, projectID, brokerID string) error {
-	resp, err := s.c.transport.Delete(ctx, "/api/v1/groves/"+projectID+"/providers/"+brokerID, nil)
+	resp, err := s.c.delete(ctx, "/api/v1/projects/"+projectID+"/providers/"+brokerID, nil)
 	if err != nil {
 		return err
 	}
@@ -356,7 +356,7 @@ func (s *projectService) RemoveProvider(ctx context.Context, projectID, brokerID
 
 // GetSettings retrieves project settings.
 func (s *projectService) GetSettings(ctx context.Context, projectID string) (*ProjectSettings, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/groves/"+projectID+"/settings", nil)
+	resp, err := s.c.get(ctx, "/api/v1/projects/"+projectID+"/settings", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -365,7 +365,7 @@ func (s *projectService) GetSettings(ctx context.Context, projectID string) (*Pr
 
 // UpdateSettings updates project settings.
 func (s *projectService) UpdateSettings(ctx context.Context, projectID string, settings *ProjectSettings) (*ProjectSettings, error) {
-	resp, err := s.c.transport.Put(ctx, "/api/v1/groves/"+projectID+"/settings", settings, nil)
+	resp, err := s.c.put(ctx, "/api/v1/projects/"+projectID+"/settings", settings, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -374,7 +374,7 @@ func (s *projectService) UpdateSettings(ctx context.Context, projectID string, s
 
 // GetAgent returns an agent by ID or slug within a project.
 func (s *projectService) GetAgent(ctx context.Context, projectID, agentID string) (*Agent, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/groves/"+projectID+"/agents/"+agentID, nil)
+	resp, err := s.c.get(ctx, "/api/v1/projects/"+projectID+"/agents/"+agentID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +383,7 @@ func (s *projectService) GetAgent(ctx context.Context, projectID, agentID string
 
 // DeleteAgent removes an agent by ID or slug within a project.
 func (s *projectService) DeleteAgent(ctx context.Context, projectID, agentID string, opts *DeleteAgentOptions) error {
-	path := "/api/v1/groves/" + projectID + "/agents/" + agentID
+	path := "/api/v1/projects/" + projectID + "/agents/" + agentID
 	if opts != nil {
 		query := url.Values{}
 		if opts.DeleteFiles {
@@ -397,7 +397,7 @@ func (s *projectService) DeleteAgent(ctx context.Context, projectID, agentID str
 		}
 	}
 
-	resp, err := s.c.transport.Delete(ctx, path, nil)
+	resp, err := s.c.delete(ctx, path, nil)
 	if err != nil {
 		return err
 	}
@@ -425,7 +425,7 @@ type ProjectCacheStatusResponse struct {
 
 // RefreshCache triggers a cache refresh for a linked project.
 func (s *projectService) RefreshCache(ctx context.Context, projectID string) (*ProjectCacheRefreshResponse, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/groves/"+projectID+"/workspace/cache/refresh", nil, nil)
+	resp, err := s.c.post(ctx, "/api/v1/projects/"+projectID+"/workspace/cache/refresh", nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -434,7 +434,7 @@ func (s *projectService) RefreshCache(ctx context.Context, projectID string) (*P
 
 // GetCacheStatus returns the cache status for a project workspace.
 func (s *projectService) GetCacheStatus(ctx context.Context, projectID string) (*ProjectCacheStatusResponse, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/groves/"+projectID+"/workspace/cache/status", nil)
+	resp, err := s.c.get(ctx, "/api/v1/projects/"+projectID+"/workspace/cache/status", nil)
 	if err != nil {
 		return nil, err
 	}
