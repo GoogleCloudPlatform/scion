@@ -46,12 +46,19 @@ func init() {
 }
 
 func runGhWrapper(args []string) int {
-	// If GitHub App is enabled, read the fresh token from the token file
+	// If GitHub App is enabled, read the fresh token from the token file.
+	// However, if the user has explicitly set their own GITHUB_TOKEN (flagged
+	// by SCION_USER_GITHUB_TOKEN=true during provisioning), skip injection
+	// so that gh uses the user's token from the environment instead.
 	if hub.IsGitHubAppEnabled() {
-		tokenPath := hub.GitHubTokenPath()
-		token := hub.ReadGitHubTokenFile(tokenPath)
-		if token != "" {
-			os.Setenv("GH_TOKEN", token)
+		if os.Getenv(hub.EnvUserGitHubToken) == "true" {
+			fmt.Fprintf(os.Stderr, "sciontool gh-wrapper: user-provided GITHUB_TOKEN detected; using it instead of GitHub App token\n")
+		} else {
+			tokenPath := hub.GitHubTokenPath()
+			token := hub.ReadGitHubTokenFile(tokenPath)
+			if token != "" {
+				os.Setenv("GH_TOKEN", token)
+			}
 		}
 	}
 
@@ -73,10 +80,13 @@ func runGhWrapper(args []string) int {
 
 // findRealGh looks for the real `gh` binary, skipping any sciontool-based wrapper.
 func findRealGh() (string, error) {
-	// Look for gh in standard locations
+	// Look for gh in standard locations. The .real paths are checked first
+	// because the Dockerfile renames the real binary to gh.real and installs
+	// a wrapper script at the original path.
 	paths := []string{
-		"/usr/bin/gh",
+		"/usr/bin/gh.real",
 		"/usr/local/bin/gh.real",
+		"/usr/bin/gh",
 		"/usr/local/bin/gh",
 	}
 

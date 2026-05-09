@@ -3033,3 +3033,180 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_GCPBlockMode(t *testing.T) {
 		t.Errorf("expected empty SCION_METADATA_SA_EMAIL in block mode, got %q", v)
 	}
 }
+
+// mockGitHubAppMinter is a test implementation of GitHubAppTokenMinter.
+type mockGitHubAppMinter struct {
+	token  string
+	expiry string
+	err    error
+	called bool
+}
+
+func (m *mockGitHubAppMinter) MintGitHubAppTokenForGrove(_ context.Context, _ *store.Grove) (string, string, error) {
+	m.called = true
+	return m.token, m.expiry, m.err
+}
+
+func TestBuildCreateRequest_UserGitHubTokenPrecedesApp(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	installID := int64(12345)
+	if err := memStore.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: installID,
+		AccountLogin:   "test-org",
+		AccountType:    "Organization",
+		AppID:          1,
+		Status:         store.GitHubInstallationStatusActive,
+	}); err != nil {
+		t.Fatalf("failed to create GitHub installation: %v", err)
+	}
+
+	grove := &store.Grove{
+		ID:                   "grove-1",
+		Name:                 "test-grove",
+		Slug:                 "test-grove",
+		GitHubInstallationID: &installID,
+	}
+	if err := memStore.CreateGrove(ctx, grove); err != nil {
+		t.Fatalf("failed to create grove: %v", err)
+	}
+
+	broker := &store.RuntimeBroker{
+		ID:       "host-1",
+		Name:     "test-host",
+		Slug:     "test-host",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	minter := &mockGitHubAppMinter{
+		token:  "ghs_app_token_abc",
+		expiry: "2026-01-01T02:00:00Z",
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetGitHubAppMinter(minter)
+
+	agent := &store.Agent{
+		ID:              "agent-1",
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		OwnerID:         "user-1",
+		GroveID:         "grove-1",
+		RuntimeBrokerID: "host-1",
+		AppliedConfig: &store.AgentAppliedConfig{
+			Env: map[string]string{
+				"GITHUB_TOKEN": "ghp_user_pat_xyz",
+			},
+		},
+	}
+
+	req, err := dispatcher.buildCreateRequest(ctx, agent, "TestBuildCreateRequest")
+	if err != nil {
+		t.Fatalf("buildCreateRequest failed: %v", err)
+	}
+
+	// User's GITHUB_TOKEN must be preserved — not overwritten by the app token
+	if got := req.ResolvedEnv["GITHUB_TOKEN"]; got != "ghp_user_pat_xyz" {
+		t.Errorf("expected user GITHUB_TOKEN to be preserved, got %q", got)
+	}
+
+	// SCION_USER_GITHUB_TOKEN flag must be set
+	if got := req.ResolvedEnv["SCION_USER_GITHUB_TOKEN"]; got != "true" {
+		t.Errorf("expected SCION_USER_GITHUB_TOKEN=true, got %q", got)
+	}
+
+	// GitHub App should still be marked as enabled (for credential helper)
+	if got := req.ResolvedEnv["SCION_GITHUB_APP_ENABLED"]; got != "true" {
+		t.Errorf("expected SCION_GITHUB_APP_ENABLED=true, got %q", got)
+	}
+
+	// Minter should NOT have been called since user token takes precedence
+	if minter.called {
+		t.Error("expected GitHub App minter to NOT be called when user GITHUB_TOKEN exists")
+	}
+}
+
+func TestBuildCreateRequest_GitHubAppTokenWhenNoUserToken(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	installID := int64(12345)
+	if err := memStore.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: installID,
+		AccountLogin:   "test-org",
+		AccountType:    "Organization",
+		AppID:          1,
+		Status:         store.GitHubInstallationStatusActive,
+	}); err != nil {
+		t.Fatalf("failed to create GitHub installation: %v", err)
+	}
+
+	grove := &store.Grove{
+		ID:                   "grove-1",
+		Name:                 "test-grove",
+		Slug:                 "test-grove",
+		GitHubInstallationID: &installID,
+	}
+	if err := memStore.CreateGrove(ctx, grove); err != nil {
+		t.Fatalf("failed to create grove: %v", err)
+	}
+
+	broker := &store.RuntimeBroker{
+		ID:       "host-1",
+		Name:     "test-host",
+		Slug:     "test-host",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	minter := &mockGitHubAppMinter{
+		token:  "ghs_app_token_abc",
+		expiry: "2026-01-01T02:00:00Z",
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetGitHubAppMinter(minter)
+
+	agent := &store.Agent{
+		ID:              "agent-1",
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		OwnerID:         "user-1",
+		GroveID:         "grove-1",
+		RuntimeBrokerID: "host-1",
+		AppliedConfig:   &store.AgentAppliedConfig{},
+	}
+
+	req, err := dispatcher.buildCreateRequest(ctx, agent, "TestBuildCreateRequest")
+	if err != nil {
+		t.Fatalf("buildCreateRequest failed: %v", err)
+	}
+
+	// GitHub App token should be injected when no user token exists
+	if got := req.ResolvedEnv["GITHUB_TOKEN"]; got != "ghs_app_token_abc" {
+		t.Errorf("expected GitHub App token, got %q", got)
+	}
+
+	if got := req.ResolvedEnv["SCION_GITHUB_APP_ENABLED"]; got != "true" {
+		t.Errorf("expected SCION_GITHUB_APP_ENABLED=true, got %q", got)
+	}
+
+	// User token flag should NOT be set
+	if got := req.ResolvedEnv["SCION_USER_GITHUB_TOKEN"]; got != "" {
+		t.Errorf("expected empty SCION_USER_GITHUB_TOKEN, got %q", got)
+	}
+
+	if !minter.called {
+		t.Error("expected GitHub App minter to be called when no user GITHUB_TOKEN exists")
+	}
+}
