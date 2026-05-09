@@ -41,25 +41,25 @@ var syncExcludeExtensions = []string{
 	".env",
 }
 
-// handleProjectWebDAV serves a WebDAV endpoint for grove workspace file sync.
-// It mounts at /api/v1/groves/{groveId}/dav/ and serves the grove's workspace
+// handleProjectWebDAV serves a WebDAV endpoint for project workspace file sync.
+// It mounts at /api/v1/projects/{projectId}/dav/ and serves the project's workspace
 // directory with file exclusion filters applied.
 //
-// For hub-native and shared-workspace groves, it serves the workspace directly.
-// For linked groves (workspace on a remote broker), it serves from the hub's
+// For hub-native and shared-workspace projects, it serves the workspace directly.
+// For linked projects (workspace on a remote broker), it serves from the hub's
 // cached copy. The cache is populated via the cache/refresh or cache/notify
-// endpoints (Phase 3: Linked Grove Relay).
-func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, groveID, davPath string) {
+// endpoints (Phase 3: Linked Project Relay).
+func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, projectID, davPath string) {
 	ctx := r.Context()
 
-	grove, err := s.store.GetProject(ctx, groveID)
+	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	// Determine workspace path based on grove type
-	workspacePath, err := s.resolveProjectWebDAVPath(ctx, grove)
+	// Determine workspace path based on project type
+	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
 	if err != nil {
 		Conflict(w, err.Error())
 		return
@@ -67,13 +67,13 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, gro
 
 	// Ensure the workspace directory exists
 	if err := os.MkdirAll(workspacePath, 0755); err != nil {
-		slog.Error("failed to create grove workspace directory", "grove_id", groveID, "error", err)
+		slog.Error("failed to create project workspace directory", "project_id", projectID, "error", err)
 		InternalError(w)
 		return
 	}
 
 	// Build the prefix that the WebDAV handler should strip.
-	// The full URL path is /api/v1/{groves|projects}/{id}/dav/...
+	// The full URL path is /api/v1/{projects|projects}/{id}/dav/...
 	// We need to strip everything up to and including /dav
 	prefixEnd := strings.Index(r.URL.Path, "/dav/")
 	if prefixEnd == -1 {
@@ -100,12 +100,12 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, gro
 
 	// Update sync state after successful write operations
 	if r.Method == "PUT" || r.Method == "DELETE" || r.Method == "MKCOL" || r.Method == "MOVE" {
-		go s.updateProjectSyncState(grove.ID, workspacePath)
+		go s.updateProjectSyncState(project.ID, workspacePath)
 	}
 }
 
-// updateProjectSyncState recalculates and persists file count and total bytes for a grove.
-func (s *Server) updateProjectSyncState(groveID, workspacePath string) {
+// updateProjectSyncState recalculates and persists file count and total bytes for a project.
+func (s *Server) updateProjectSyncState(projectID, workspacePath string) {
 	var fileCount int
 	var totalBytes int64
 
@@ -116,7 +116,7 @@ func (s *Server) updateProjectSyncState(groveID, workspacePath string) {
 
 	now := time.Now()
 	state := &store.ProjectSyncState{
-		ProjectID:      groveID,
+		ProjectID:      projectID,
 		BrokerID:     "", // hub-native
 		LastSyncTime: &now,
 		FileCount:    fileCount,
@@ -124,43 +124,43 @@ func (s *Server) updateProjectSyncState(groveID, workspacePath string) {
 	}
 
 	if err := s.store.UpsertProjectSyncState(context.Background(), state); err != nil {
-		slog.Warn("failed to update grove sync state", "grove_id", groveID, "error", err)
+		slog.Warn("failed to update project sync state", "project_id", projectID, "error", err)
 	}
 }
 
 // resolveProjectWebDAVPath determines the filesystem path to serve via WebDAV
-// for a given grove. For hub-native and shared-workspace groves, this is the
-// hub-managed workspace directory. For linked groves (workspace on a remote
+// for a given project. For hub-native and shared-workspace projects, this is the
+// hub-managed workspace directory. For linked projects (workspace on a remote
 // broker), this is the hub's cached copy of that workspace.
-func (s *Server) resolveProjectWebDAVPath(ctx context.Context, grove *store.Project) (string, error) {
-	// Hub-native groves (no git remote) always have a managed workspace
-	if grove.GitRemote == "" {
-		path, err := hubNativeProjectPath(grove.Slug)
+func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Project) (string, error) {
+	// Hub-native projects (no git remote) always have a managed workspace
+	if project.GitRemote == "" {
+		path, err := hubNativeProjectPath(project.Slug)
 		if err != nil {
-			return "", fmt.Errorf("failed to resolve grove path")
+			return "", fmt.Errorf("failed to resolve project path")
 		}
 		return path, nil
 	}
 
-	// Shared-workspace git groves have a managed workspace on the hub
-	if grove.IsSharedWorkspace() {
-		path, err := hubNativeProjectPath(grove.Slug)
+	// Shared-workspace git projects have a managed workspace on the hub
+	if project.IsSharedWorkspace() {
+		path, err := hubNativeProjectPath(project.Slug)
 		if err != nil {
-			return "", fmt.Errorf("failed to resolve grove path")
+			return "", fmt.Errorf("failed to resolve project path")
 		}
 		return path, nil
 	}
 
-	// Linked groves: check if there's a co-located broker with a local path
-	providers, err := s.store.GetProjectProviders(ctx, grove.ID)
+	// Linked projects: check if there's a co-located broker with a local path
+	providers, err := s.store.GetProjectProviders(ctx, project.ID)
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve grove providers")
+		return "", fmt.Errorf("failed to resolve project providers")
 	}
 
-	// Git groves with no providers have no accessible workspace — the workspace
-	// lives on broker machines and no broker has registered for this grove yet.
+	// Git projects with no providers have no accessible workspace — the workspace
+	// lives on broker machines and no broker has registered for this project yet.
 	if len(providers) == 0 {
-		return "", fmt.Errorf("workspace is not available for git-anchored groves without a registered provider")
+		return "", fmt.Errorf("workspace is not available for git-anchored projects without a registered provider")
 	}
 
 	// Check for co-located (embedded) broker with a local path
@@ -171,18 +171,18 @@ func (s *Server) resolveProjectWebDAVPath(ctx context.Context, grove *store.Proj
 		}
 	}
 
-	// Remote linked grove: serve from the hub's cached copy.
+	// Remote linked project: serve from the hub's cached copy.
 	// The cache is populated via cache/refresh or cache/notify endpoints.
-	cachePath, err := hubNativeProjectPath(grove.Slug)
+	cachePath, err := hubNativeProjectPath(project.Slug)
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve grove cache path")
+		return "", fmt.Errorf("failed to resolve project cache path")
 	}
 
 	// If cache doesn't exist yet, return the path anyway (MkdirAll will create it).
 	// The client should trigger a cache/refresh to populate it.
-	if !hasProjectCache(grove.Slug) {
-		slog.Debug("linked grove cache not yet populated",
-			"grove_id", grove.ID, "slug", grove.Slug)
+	if !hasProjectCache(project.Slug) {
+		slog.Debug("linked project cache not yet populated",
+			"project_id", project.ID, "slug", project.Slug)
 	}
 
 	return cachePath, nil
@@ -336,16 +336,16 @@ func isExcluded(name string) bool {
 	return false
 }
 
-// GroveSyncStatusResponse is the response for the sync status endpoint.
-type GroveSyncStatusResponse struct {
-	ProjectID    string                 `json:"groveId"`
+// ProjectSyncStatusResponse is the response for the sync status endpoint.
+type ProjectSyncStatusResponse struct {
+	ProjectID    string                 `json:"projectId"`
 	States     []store.ProjectSyncState `json:"states"`
 	TotalFiles int                    `json:"totalFiles"`
 	TotalBytes int64                  `json:"totalBytes"`
 }
 
-// handleProjectSyncStatus returns the sync status for a grove.
-func (s *Server) handleProjectSyncStatus(w http.ResponseWriter, r *http.Request, groveID string) {
+// handleProjectSyncStatus returns the sync status for a project.
+func (s *Server) handleProjectSyncStatus(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return
@@ -353,14 +353,14 @@ func (s *Server) handleProjectSyncStatus(w http.ResponseWriter, r *http.Request,
 
 	ctx := r.Context()
 
-	// Verify grove exists
-	_, err := s.store.GetProject(ctx, groveID)
+	// Verify project exists
+	_, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	states, err := s.store.ListProjectSyncStates(ctx, groveID)
+	states, err := s.store.ListProjectSyncStates(ctx, projectID)
 	if err != nil {
 		InternalError(w)
 		return
@@ -373,8 +373,8 @@ func (s *Server) handleProjectSyncStatus(w http.ResponseWriter, r *http.Request,
 		totalBytes += st.TotalBytes
 	}
 
-	writeJSON(w, http.StatusOK, GroveSyncStatusResponse{
-		ProjectID:    groveID,
+	writeJSON(w, http.StatusOK, ProjectSyncStatusResponse{
+		ProjectID:    projectID,
 		States:     states,
 		TotalFiles: totalFiles,
 		TotalBytes: totalBytes,

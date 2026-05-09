@@ -40,7 +40,7 @@ func TestLogGCPTokenGeneration_Success(t *testing.T) {
 	ctx := context.Background()
 
 	LogGCPTokenGeneration(ctx, mock, GCPTokenEventAccessToken,
-		"agent-123", "grove-456", "sa@project.iam.gserviceaccount.com", "sa-789", true, "")
+		"agent-123", "project-456", "sa@project.iam.gserviceaccount.com", "sa-789", true, "")
 
 	if len(mock.gcpEvents) != 1 {
 		t.Fatalf("expected 1 GCP event, got %d", len(mock.gcpEvents))
@@ -53,8 +53,8 @@ func TestLogGCPTokenGeneration_Success(t *testing.T) {
 	if event.AgentID != "agent-123" {
 		t.Errorf("expected agent ID %q, got %q", "agent-123", event.AgentID)
 	}
-	if event.ProjectID != "grove-456" {
-		t.Errorf("expected grove ID %q, got %q", "grove-456", event.ProjectID)
+	if event.ProjectID != "project-456" {
+		t.Errorf("expected project ID %q, got %q", "project-456", event.ProjectID)
 	}
 	if event.ServiceAccountEmail != "sa@project.iam.gserviceaccount.com" {
 		t.Errorf("expected SA email %q, got %q", "sa@project.iam.gserviceaccount.com", event.ServiceAccountEmail)
@@ -78,7 +78,7 @@ func TestLogGCPTokenGeneration_Failure(t *testing.T) {
 	ctx := context.Background()
 
 	LogGCPTokenGeneration(ctx, mock, GCPTokenEventIdentityToken,
-		"agent-123", "grove-456", "sa@project.iam.gserviceaccount.com", "sa-789", false, "impersonation denied")
+		"agent-123", "project-456", "sa@project.iam.gserviceaccount.com", "sa-789", false, "impersonation denied")
 
 	if len(mock.gcpEvents) != 1 {
 		t.Fatalf("expected 1 GCP event, got %d", len(mock.gcpEvents))
@@ -99,7 +99,7 @@ func TestLogGCPTokenGeneration_Failure(t *testing.T) {
 func TestLogGCPTokenGeneration_NilLogger(t *testing.T) {
 	// Should not panic with nil logger
 	LogGCPTokenGeneration(context.Background(), nil, GCPTokenEventAccessToken,
-		"agent-123", "grove-456", "sa@project.iam.gserviceaccount.com", "sa-789", true, "")
+		"agent-123", "project-456", "sa@project.iam.gserviceaccount.com", "sa-789", true, "")
 }
 
 func TestLogAuditLogger_LogGCPTokenEvent(t *testing.T) {
@@ -109,7 +109,7 @@ func TestLogAuditLogger_LogGCPTokenEvent(t *testing.T) {
 	err := logger.LogGCPTokenEvent(context.Background(), &GCPTokenEvent{
 		EventType:           GCPTokenEventAccessToken,
 		AgentID:             "agent-1",
-		ProjectID:             "grove-1",
+		ProjectID:             "project-1",
 		ServiceAccountEmail: "sa@proj.iam.gserviceaccount.com",
 		Success:             true,
 	})
@@ -121,7 +121,7 @@ func TestLogAuditLogger_LogGCPTokenEvent(t *testing.T) {
 	err = logger.LogGCPTokenEvent(context.Background(), &GCPTokenEvent{
 		EventType:           GCPTokenEventIdentityToken,
 		AgentID:             "agent-1",
-		ProjectID:             "grove-1",
+		ProjectID:             "project-1",
 		ServiceAccountEmail: "sa@proj.iam.gserviceaccount.com",
 		Success:             false,
 		FailReason:          "permission denied",

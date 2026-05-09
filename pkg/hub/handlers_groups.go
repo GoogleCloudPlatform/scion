@@ -96,7 +96,7 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 		OwnerID:   query.Get("ownerId"),
 		ParentID:  query.Get("parentId"),
 		GroupType: query.Get("groupType"),
-		ProjectID:   query.Get("groveId"),
+		ProjectID:   query.Get("projectId"),
 	}
 
 	limit := 50
@@ -166,11 +166,11 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		groupType = store.GroupTypeExplicit
 	}
 	if groupType != store.GroupTypeExplicit && groupType != store.GroupTypeProjectAgents {
-		ValidationError(w, "groupType must be 'explicit' or 'grove_agents'", nil)
+		ValidationError(w, "groupType must be 'explicit' or 'project_agents'", nil)
 		return
 	}
 	if groupType == store.GroupTypeProjectAgents {
-		ValidationError(w, "grove_agents groups are system-managed and cannot be created via API", nil)
+		ValidationError(w, "project_agents groups are system-managed and cannot be created via API", nil)
 		return
 	}
 
@@ -384,7 +384,7 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request, id string) 
 	}
 
 	if group.GroupType == store.GroupTypeProjectAgents {
-		BadRequest(w, "grove_agents groups are system-managed and cannot be deleted via API")
+		BadRequest(w, "project_agents groups are system-managed and cannot be deleted via API")
 		return
 	}
 

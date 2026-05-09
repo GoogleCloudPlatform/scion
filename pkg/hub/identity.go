@@ -83,25 +83,25 @@ func (u *AuthenticatedUser) Role() string { return u.role }
 // ClientType returns the client type (web, cli, api).
 func (u *AuthenticatedUser) ClientType() string { return u.clientType }
 
-// ScopedUserIdentity wraps a UserIdentity with grove and scope constraints.
+// ScopedUserIdentity wraps a UserIdentity with project and scope constraints.
 // It is produced when authenticating with a User Access Token (UAT).
 type ScopedUserIdentity struct {
 	UserIdentity
-	groveID string
+	projectID string
 	scopes  []string
 }
 
 // NewScopedUserIdentity creates a ScopedUserIdentity.
-func NewScopedUserIdentity(user UserIdentity, groveID string, scopes []string) *ScopedUserIdentity {
+func NewScopedUserIdentity(user UserIdentity, projectID string, scopes []string) *ScopedUserIdentity {
 	return &ScopedUserIdentity{
 		UserIdentity: user,
-		groveID:      groveID,
+		projectID:      projectID,
 		scopes:       scopes,
 	}
 }
 
-// ScopedProjectID returns the grove this identity is restricted to.
-func (s *ScopedUserIdentity) ScopedProjectID() string { return s.groveID }
+// ScopedProjectID returns the project this identity is restricted to.
+func (s *ScopedUserIdentity) ScopedProjectID() string { return s.projectID }
 
 // ScopedScopes returns the action scopes this identity is limited to.
 func (s *ScopedUserIdentity) ScopedScopes() []string { return s.scopes }
@@ -127,7 +127,7 @@ func (a *agentIdentityWrapper) ID() string { return a.Subject }
 // Type returns the identity type ("agent").
 func (a *agentIdentityWrapper) Type() string { return "agent" }
 
-// ProjectID returns the grove ID.
+// ProjectID returns the project ID.
 func (a *agentIdentityWrapper) ProjectID() string { return a.AgentTokenClaims.ProjectID }
 
 // Scopes returns the agent scopes.

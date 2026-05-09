@@ -87,8 +87,8 @@ func TestAuthzRemediation_ListEndpointsFilterUnauthorizedItems(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, hiddenUser))
 
 	visibleProject := &store.Project{
-		ID:        "grove-visible-authz",
-		Slug:      "grove-visible-authz",
+		ID:        "project-visible-authz",
+		Slug:      "project-visible-authz",
 		Name:      "Visible Project",
 		OwnerID:   "owner-outside-user",
 		CreatedBy: "owner-outside-user",
@@ -98,8 +98,8 @@ func TestAuthzRemediation_ListEndpointsFilterUnauthorizedItems(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, visibleProject))
 
 	hiddenProject := &store.Project{
-		ID:        "grove-hidden-authz",
-		Slug:      "grove-hidden-authz",
+		ID:        "project-hidden-authz",
+		Slug:      "project-hidden-authz",
 		Name:      "Hidden Project",
 		OwnerID:   "owner-outside-user",
 		CreatedBy: "owner-outside-user",
@@ -146,18 +146,18 @@ func TestAuthzRemediation_ListEndpointsFilterUnauthorizedItems(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, hiddenAgent))
 
-	grantUserActionOnResource(t, s, member.ID, "grove", visibleProject.ID, ActionRead)
+	grantUserActionOnResource(t, s, member.ID, "project", visibleProject.ID, ActionRead)
 	grantUserActionOnResource(t, s, member.ID, "agent", visibleAgent.ID, ActionRead)
 	grantUserActionOnResource(t, s, member.ID, "broker", visibleBroker.ID, ActionRead)
 	grantUserActionOnResource(t, s, member.ID, "user", visibleUser.ID, ActionRead)
 
-	rec := doRequestAsUser(t, srv, member, http.MethodGet, "/api/v1/groves", nil)
+	rec := doRequestAsUser(t, srv, member, http.MethodGet, "/api/v1/projects", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var grovesResp ListProjectsResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grovesResp))
-	require.Len(t, grovesResp.Projects, 1)
-	assert.Equal(t, visibleProject.ID, grovesResp.Projects[0].Project.ID)
-	assert.Equal(t, 1, grovesResp.TotalCount)
+	var projectsResp ListProjectsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&projectsResp))
+	require.Len(t, projectsResp.Projects, 1)
+	assert.Equal(t, visibleProject.ID, projectsResp.Projects[0].Project.ID)
+	assert.Equal(t, 1, projectsResp.TotalCount)
 
 	rec = doRequestAsUser(t, srv, member, http.MethodGet, "/api/v1/agents", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -198,22 +198,22 @@ func TestAuthzRemediation_AgentAndWorkspaceRoutesEnforceResourcePermissions(t *t
 	}
 	require.NoError(t, s.CreateUser(ctx, member))
 
-	grove := &store.Project{
-		ID:        "grove-workspace-authz",
-		Slug:      "grove-workspace-authz",
+	project := &store.Project{
+		ID:        "project-workspace-authz",
+		Slug:      "project-workspace-authz",
 		Name:      "Workspace Project",
 		OwnerID:   "owner-outside-user",
 		CreatedBy: "owner-outside-user",
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
 		ID:      "agent-workspace-authz",
 		Slug:    "agent-workspace-authz",
 		Name:    "Workspace Agent",
-		ProjectID: grove.ID,
+		ProjectID: project.ID,
 		OwnerID: "owner-outside-user",
 		Phase:   string(state.PhaseStopped),
 	}

@@ -108,7 +108,7 @@ func newBrokerTestStore(t *testing.T) store.Store {
 	return s
 }
 
-// setupBrokerTestProject creates a grove and a runtime broker, returns the grove ID.
+// setupBrokerTestProject creates a project and a runtime broker, returns the project ID.
 func setupBrokerTestProject(t *testing.T, s store.Store) string {
 	t.Helper()
 	ctx := context.Background()
@@ -125,16 +125,16 @@ func setupBrokerTestProject(t *testing.T, s store.Store) string {
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	grove := &store.Project{
+	project := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "test-grove",
-		Slug:       "test-grove",
+		Name:       "test-project",
+		Slug:       "test-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateProject(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
-	return grove.ID
+	return project.ID
 }
 
 // setupBrokerTestAgent creates a running agent and returns it.
@@ -375,7 +375,7 @@ func TestMessageBrokerProxy_UserMessageDelivery(t *testing.T) {
 	proxy.subscribeProjectUserMessages(projectID)
 
 	// Subscribe to SSE user.message events to verify delivery
-	sseEvents, unsub := events.Subscribe("user.user-bob-id.message", "grove.*.user.message")
+	sseEvents, unsub := events.Subscribe("user.user-bob-id.message", "project.*.user.message")
 	defer unsub()
 
 	userID := "user-bob-id"
@@ -476,7 +476,7 @@ func TestMessageBrokerProxy_PluginSubscription(t *testing.T) {
 	proxy.Start()
 	defer proxy.Stop()
 
-	// Plugin requests a subscription for the grove
+	// Plugin requests a subscription for the project
 	pattern := broker.TopicAgentMessages(projectID, "*")
 	if err := proxy.RequestSubscription(pattern); err != nil {
 		t.Fatalf("RequestSubscription failed: %v", err)
@@ -507,7 +507,7 @@ func TestMessageBrokerProxy_PluginSubscriptionDedup(t *testing.T) {
 	proxy.Start()
 	defer proxy.Stop()
 
-	pattern := "scion.grove.test.>"
+	pattern := "scion.project.test.>"
 	if err := proxy.RequestSubscription(pattern); err != nil {
 		t.Fatalf("first RequestSubscription failed: %v", err)
 	}
@@ -541,7 +541,7 @@ func TestMessageBrokerProxy_PluginSubscriptionCancel(t *testing.T) {
 	proxy.Start()
 	defer proxy.Stop()
 
-	pattern := "scion.grove.test.>"
+	pattern := "scion.project.test.>"
 	if err := proxy.RequestSubscription(pattern); err != nil {
 		t.Fatalf("RequestSubscription failed: %v", err)
 	}
@@ -578,10 +578,10 @@ func TestMessageBrokerProxy_PluginSubscriptionCleanupOnStop(t *testing.T) {
 	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
 	proxy.Start()
 
-	if err := proxy.RequestSubscription("scion.grove.a.>"); err != nil {
+	if err := proxy.RequestSubscription("scion.project.a.>"); err != nil {
 		t.Fatal(err)
 	}
-	if err := proxy.RequestSubscription("scion.grove.b.>"); err != nil {
+	if err := proxy.RequestSubscription("scion.project.b.>"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -611,15 +611,15 @@ func TestMessageBrokerProxy_StartBootstrapsExistingProjects(t *testing.T) {
 	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
 
 	// Subscribe to SSE events before Start() so we can verify delivery
-	sseEvents, unsub := events.Subscribe("user.user-dave-id.message", "grove.*.user.message")
+	sseEvents, unsub := events.Subscribe("user.user-dave-id.message", "project.*.user.message")
 	defer unsub()
 
-	// Start() should bootstrap subscriptions for the pre-existing grove
+	// Start() should bootstrap subscriptions for the pre-existing project
 	proxy.Start()
 	defer proxy.Stop()
 
 	// Publish a user message — should be received because Start() bootstrapped
-	// the grove's user message subscription
+	// the project's user message subscription
 	userID := "user-dave-id"
 	msg := messages.NewInstruction("agent:pre-existing-agent", "user:dave", "bootstrap test")
 	msg.SenderID = "agent-uuid"
@@ -720,10 +720,10 @@ func TestContainsSuffix(t *testing.T) {
 		suffix  string
 		match   bool
 	}{
-		{"grove.g1.agent.created", ".agent.created", true},
-		{"grove.g1.agent.status", ".agent.status", true},
-		{"grove.g1.agent.deleted", ".agent.deleted", true},
-		{"grove.g1.agent.status", ".agent.created", false},
+		{"project.g1.agent.created", ".agent.created", true},
+		{"project.g1.agent.status", ".agent.status", true},
+		{"project.g1.agent.deleted", ".agent.deleted", true},
+		{"project.g1.agent.status", ".agent.created", false},
 		{"short", ".agent.created", false},
 	}
 	for _, tt := range tests {

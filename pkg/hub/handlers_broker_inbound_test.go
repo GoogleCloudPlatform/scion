@@ -31,29 +31,29 @@ func TestParseAgentMessageTopic(t *testing.T) {
 	}{
 		{
 			name:      "valid topic",
-			topic:     "scion.grove.my-grove-123.agent.coder.messages",
-			projectID:   "my-grove-123",
+			topic:     "scion.project.my-project-123.agent.coder.messages",
+			projectID:   "my-project-123",
 			agentSlug: "coder",
 		},
 		{
-			name:      "valid topic with uuid grove",
-			topic:     "scion.grove.abc-def-123.agent.code-reviewer.messages",
+			name:      "valid topic with uuid project",
+			topic:     "scion.project.abc-def-123.agent.code-reviewer.messages",
 			projectID:   "abc-def-123",
 			agentSlug: "code-reviewer",
 		},
 		{
 			name:    "too few segments",
-			topic:   "scion.grove.g1.agent.coder",
+			topic:   "scion.project.g1.agent.coder",
 			wantErr: true,
 		},
 		{
 			name:    "too many segments",
-			topic:   "scion.grove.g1.agent.coder.messages.extra",
+			topic:   "scion.project.g1.agent.coder.messages.extra",
 			wantErr: true,
 		},
 		{
 			name:    "wrong prefix",
-			topic:   "other.grove.g1.agent.coder.messages",
+			topic:   "other.project.g1.agent.coder.messages",
 			wantErr: true,
 		},
 		{
@@ -63,7 +63,7 @@ func TestParseAgentMessageTopic(t *testing.T) {
 		},
 		{
 			name:    "broadcast topic not agent",
-			topic:   "scion.grove.g1.broadcast.all.messages",
+			topic:   "scion.project.g1.broadcast.all.messages",
 			wantErr: true,
 		},
 		{

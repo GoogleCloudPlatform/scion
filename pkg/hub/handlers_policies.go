@@ -40,7 +40,7 @@ type ListPoliciesResponse struct {
 type CreatePolicyRequest struct {
 	Name         string                  `json:"name"`
 	Description  string                  `json:"description,omitempty"`
-	ScopeType    string                  `json:"scopeType"` // "hub", "grove", "resource"
+	ScopeType    string                  `json:"scopeType"` // "hub", "project", "resource"
 	ScopeID      string                  `json:"scopeId,omitempty"`
 	ResourceType string                  `json:"resourceType"` // "*" for all
 	ResourceID   string                  `json:"resourceId,omitempty"`
@@ -185,11 +185,11 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.ScopeType != store.PolicyScopeHub && req.ScopeType != store.PolicyScopeProject && req.ScopeType != store.PolicyScopeResource {
-		ValidationError(w, "scopeType must be 'hub', 'grove', or 'resource'", nil)
+		ValidationError(w, "scopeType must be 'hub', 'project', or 'resource'", nil)
 		return
 	}
 	if req.ScopeType != store.PolicyScopeHub && req.ScopeID == "" {
-		ValidationError(w, "scopeId is required for grove and resource scopes", nil)
+		ValidationError(w, "scopeId is required for project and resource scopes", nil)
 		return
 	}
 	if len(req.Actions) == 0 {
@@ -618,13 +618,13 @@ func populateResourceContext(ctx context.Context, s *Server, resource *Resource,
 		agent, err := s.store.GetAgent(ctx, resourceID)
 		if err == nil {
 			resource.OwnerID = agent.OwnerID
-			resource.ParentType = "grove"
+			resource.ParentType = "project"
 			resource.ParentID = agent.ProjectID
 		}
-	case "grove":
-		grove, err := s.store.GetProject(ctx, resourceID)
+	case "project":
+		project, err := s.store.GetProject(ctx, resourceID)
 		if err == nil {
-			resource.OwnerID = grove.OwnerID
+			resource.OwnerID = project.OwnerID
 		}
 	}
 }

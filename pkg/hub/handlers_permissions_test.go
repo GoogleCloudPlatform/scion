@@ -547,21 +547,21 @@ func TestGroupMembersAddAgent(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a grove for the agent
-	grove := &store.Project{
-		ID:   "grove_agent_test",
+	// Create a project for the agent
+	project := &store.Project{
+		ID:   "project_agent_test",
 		Name: "Test Project",
-		Slug: "test-grove-agent",
+		Slug: "test-project-agent",
 	}
-	if err := s.CreateProject(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	// Create the agent
 	agent := &store.Agent{
 		ID:      "agent_abc123",
 		Name:    "Test Agent",
-		ProjectID: grove.ID,
+		ProjectID: project.ID,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -672,12 +672,12 @@ func TestGroupCreateProjectAgentsRejected(t *testing.T) {
 
 	body := CreateGroupRequest{
 		Name:      "Project Group",
-		Slug:      "grove-group",
-		GroupType: "grove_agents",
+		Slug:      "project-group",
+		GroupType: "project_agents",
 	}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groups", body)
 	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected status 400 for grove_agents creation, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("expected status 400 for project_agents creation, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1107,7 +1107,7 @@ func TestPolicyList(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	// 3 test policies + 2 seeded policies (hub-member-read-all, hub-member-create-groves) = 5
+	// 3 test policies + 2 seeded policies (hub-member-read-all, hub-member-create-projects) = 5
 	if len(resp.Policies) != 5 {
 		t.Errorf("expected 5 policies (3 test + 2 seeded), got %d", len(resp.Policies))
 	}

@@ -86,8 +86,8 @@ type SyncToFinalizeResponse struct {
 type WorkspaceStatusResponse struct {
 	// Slug is the agent's URL-safe identifier.
 	Slug string `json:"slug"`
-	// ProjectID is the grove ID.
-	ProjectID string `json:"groveId"`
+	// ProjectID is the project ID.
+	ProjectID string `json:"projectId"`
 	// StorageURI is the GCS URI for the workspace storage.
 	StorageURI string `json:"storageUri"`
 	// LastSync contains information about the last sync operation.
@@ -284,7 +284,7 @@ func (s *Server) handleWorkspaceSyncFrom(w http.ResponseWriter, r *http.Request,
 		})
 	}
 
-	// For hub-native groves on remote brokers, also sync workspace back
+	// For hub-native projects on remote brokers, also sync workspace back
 	// to the Hub filesystem so the local copy stays up-to-date.
 	s.syncHubNativeWorkspaceBack(ctx, agent, storagePath)
 
@@ -656,22 +656,22 @@ func (e *brokerError) Error() string {
 }
 
 // syncHubNativeWorkspaceBack downloads workspace files from GCS to the Hub's local
-// filesystem for hub-native groves on remote brokers. This keeps the Hub's copy
-// (~/.scion/groves/<slug>/) in sync after workspace changes on a remote broker.
+// filesystem for hub-native projects on remote brokers. This keeps the Hub's copy
+// (~/.scion/projects/<slug>/) in sync after workspace changes on a remote broker.
 // This is a best-effort operation: errors are logged but do not fail the caller.
 func (s *Server) syncHubNativeWorkspaceBack(ctx context.Context, agent *store.Agent, storagePath string) {
 	if agent.ProjectID == "" {
 		return
 	}
 
-	grove, err := s.store.GetProject(ctx, agent.ProjectID)
+	project, err := s.store.GetProject(ctx, agent.ProjectID)
 	if err != nil {
-		s.workspaceLog.Warn("syncHubNativeWorkspaceBack: failed to get grove", "agent_id", agent.ID, "grove_id", agent.ProjectID, "error", err)
+		s.workspaceLog.Warn("syncHubNativeWorkspaceBack: failed to get project", "agent_id", agent.ID, "project_id", agent.ProjectID, "error", err)
 		return
 	}
 
-	// Only applies to hub-native and shared-workspace groves
-	if grove.GitRemote != "" && !grove.IsSharedWorkspace() {
+	// Only applies to hub-native and shared-workspace projects
+	if project.GitRemote != "" && !project.IsSharedWorkspace() {
 		return
 	}
 
@@ -680,7 +680,7 @@ func (s *Server) syncHubNativeWorkspaceBack(ctx context.Context, agent *store.Ag
 		if s.isEmbeddedBroker(agent.RuntimeBrokerID) {
 			return // Embedded broker, no sync needed
 		}
-		provider, err := s.store.GetProjectProvider(ctx, grove.ID, agent.RuntimeBrokerID)
+		provider, err := s.store.GetProjectProvider(ctx, project.ID, agent.RuntimeBrokerID)
 		if err == nil && provider.LocalPath != "" {
 			return // Colocated broker, no sync needed
 		}
@@ -691,19 +691,19 @@ func (s *Server) syncHubNativeWorkspaceBack(ctx context.Context, agent *store.Ag
 		return
 	}
 
-	workspacePath, err := hubNativeProjectPath(grove.Slug)
+	workspacePath, err := hubNativeProjectPath(project.Slug)
 	if err != nil {
-		s.workspaceLog.Warn("syncHubNativeWorkspaceBack: failed to get grove path", "error", err)
+		s.workspaceLog.Warn("syncHubNativeWorkspaceBack: failed to get project path", "error", err)
 		return
 	}
 
-	// Use the grove-level storage path for hub-native groves
-	groveStoragePath := storage.ProjectWorkspaceStoragePath(grove.ID)
-	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), groveStoragePath+"/files", workspacePath); err != nil {
+	// Use the project-level storage path for hub-native projects
+	projectStoragePath := storage.ProjectWorkspaceStoragePath(project.ID)
+	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), projectStoragePath+"/files", workspacePath); err != nil {
 		s.workspaceLog.Warn("syncHubNativeWorkspaceBack: GCS download failed",
-			"grove_id", grove.ID, "storagePath", groveStoragePath, "error", err)
+			"project_id", project.ID, "storagePath", projectStoragePath, "error", err)
 	} else {
 		s.workspaceLog.Info("syncHubNativeWorkspaceBack: workspace synced to Hub filesystem",
-			"grove_id", grove.ID, "path", workspacePath)
+			"project_id", project.ID, "path", workspacePath)
 	}
 }

@@ -23,38 +23,38 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Annotation keys for grove settings stored in grove annotations.
+// Annotation keys for project settings stored in project annotations.
 const (
-	groveSettingDefaultTemplate      = "scion.io/default-template"
-	groveSettingDefaultHarnessConfig = "scion.io/default-harness-config"
-	groveSettingTelemetryEnabled     = "scion.io/telemetry-enabled"
-	groveSettingActiveProfile        = "scion.io/active-profile"
+	projectSettingDefaultTemplate      = "scion.io/default-template"
+	projectSettingDefaultHarnessConfig = "scion.io/default-harness-config"
+	projectSettingTelemetryEnabled     = "scion.io/telemetry-enabled"
+	projectSettingActiveProfile        = "scion.io/active-profile"
 
 	// Default agent limits
-	groveSettingDefaultMaxTurns      = "scion.io/default-max-turns"
-	groveSettingDefaultMaxModelCalls = "scion.io/default-max-model-calls"
-	groveSettingDefaultMaxDuration   = "scion.io/default-max-duration"
+	projectSettingDefaultMaxTurns      = "scion.io/default-max-turns"
+	projectSettingDefaultMaxModelCalls = "scion.io/default-max-model-calls"
+	projectSettingDefaultMaxDuration   = "scion.io/default-max-duration"
 
 	// Default GCP identity
-	groveSettingDefaultGCPIdentityMode = "scion.io/default-gcp-identity-mode"
-	groveSettingDefaultGCPIdentitySAID = "scion.io/default-gcp-identity-service-account-id"
+	projectSettingDefaultGCPIdentityMode = "scion.io/default-gcp-identity-mode"
+	projectSettingDefaultGCPIdentitySAID = "scion.io/default-gcp-identity-service-account-id"
 
 	// Default resource spec (flat keys)
-	groveSettingDefaultResourcesCPUReq = "scion.io/default-resources-cpu-request"
-	groveSettingDefaultResourcesMemReq = "scion.io/default-resources-memory-request"
-	groveSettingDefaultResourcesCPULim = "scion.io/default-resources-cpu-limit"
-	groveSettingDefaultResourcesMemLim = "scion.io/default-resources-memory-limit"
-	groveSettingDefaultResourcesDisk   = "scion.io/default-resources-disk"
+	projectSettingDefaultResourcesCPUReq = "scion.io/default-resources-cpu-request"
+	projectSettingDefaultResourcesMemReq = "scion.io/default-resources-memory-request"
+	projectSettingDefaultResourcesCPULim = "scion.io/default-resources-cpu-limit"
+	projectSettingDefaultResourcesMemLim = "scion.io/default-resources-memory-limit"
+	projectSettingDefaultResourcesDisk   = "scion.io/default-resources-disk"
 )
 
-// handleProjectSettings handles GET/PUT on /api/v1/groves/{groveId}/settings.
-func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, groveID string) {
+// handleProjectSettings handles GET/PUT on /api/v1/projects/{projectId}/settings.
+func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
 
-	grove, err := s.store.GetProject(ctx, groveID)
+	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
-			NotFound(w, "Grove")
+			NotFound(w, "Project")
 			return
 		}
 		writeErrorFromErr(w, err, "")
@@ -71,9 +71,9 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, g
 	case http.MethodGet:
 		if userIdent, ok := identity.(UserIdentity); ok {
 			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type:    "grove",
-				ID:      grove.ID,
-				OwnerID: grove.OwnerID,
+				Type:    "project",
+				ID:      project.ID,
+				OwnerID: project.OwnerID,
 			}, ActionRead)
 			if !decision.Allowed {
 				Forbidden(w)
@@ -81,14 +81,14 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, g
 			}
 		}
 
-		writeJSON(w, http.StatusOK, projectSettingsFromAnnotations(grove))
+		writeJSON(w, http.StatusOK, projectSettingsFromAnnotations(project))
 
 	case http.MethodPut:
 		if userIdent, ok := identity.(UserIdentity); ok {
 			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type:    "grove",
-				ID:      grove.ID,
-				OwnerID: grove.OwnerID,
+				Type:    "project",
+				ID:      project.ID,
+				OwnerID: project.OwnerID,
 			}, ActionUpdate)
 			if !decision.Allowed {
 				Forbidden(w)
@@ -105,15 +105,15 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, g
 			return
 		}
 
-		applyProjectSettingsToAnnotations(grove, &req)
+		applyProjectSettingsToAnnotations(project, &req)
 
-		if err := s.store.UpdateProject(ctx, grove); err != nil {
+		if err := s.store.UpdateProject(ctx, project); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
 
-		s.events.PublishProjectUpdated(ctx, grove)
-		writeJSON(w, http.StatusOK, projectSettingsFromAnnotations(grove))
+		s.events.PublishProjectUpdated(ctx, project)
+		writeJSON(w, http.StatusOK, projectSettingsFromAnnotations(project))
 
 	default:
 		MethodNotAllowed(w)
@@ -127,32 +127,32 @@ func projectSettingsFromAnnotations(project *store.Project) *hubclient.ProjectSe
 		return settings
 	}
 
-	settings.DefaultTemplate = project.Annotations[groveSettingDefaultTemplate]
-	settings.DefaultHarnessConfig = project.Annotations[groveSettingDefaultHarnessConfig]
-	settings.ActiveProfile = project.Annotations[groveSettingActiveProfile]
+	settings.DefaultTemplate = project.Annotations[projectSettingDefaultTemplate]
+	settings.DefaultHarnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
+	settings.ActiveProfile = project.Annotations[projectSettingActiveProfile]
 
-	if val, ok := project.Annotations[groveSettingTelemetryEnabled]; ok {
+	if val, ok := project.Annotations[projectSettingTelemetryEnabled]; ok {
 		if b, err := strconv.ParseBool(val); err == nil {
 			settings.TelemetryEnabled = &b
 		}
 	}
 
 	// Default agent limits
-	if val, ok := project.Annotations[groveSettingDefaultMaxTurns]; ok {
+	if val, ok := project.Annotations[projectSettingDefaultMaxTurns]; ok {
 		if n, err := strconv.Atoi(val); err == nil {
 			settings.DefaultMaxTurns = n
 		}
 	}
-	if val, ok := project.Annotations[groveSettingDefaultMaxModelCalls]; ok {
+	if val, ok := project.Annotations[projectSettingDefaultMaxModelCalls]; ok {
 		if n, err := strconv.Atoi(val); err == nil {
 			settings.DefaultMaxModelCalls = n
 		}
 	}
-	settings.DefaultMaxDuration = project.Annotations[groveSettingDefaultMaxDuration]
+	settings.DefaultMaxDuration = project.Annotations[projectSettingDefaultMaxDuration]
 
 	// Default GCP identity
-	settings.DefaultGCPIdentityMode = project.Annotations[groveSettingDefaultGCPIdentityMode]
-	settings.DefaultGCPIdentityServiceAccountID = project.Annotations[groveSettingDefaultGCPIdentitySAID]
+	settings.DefaultGCPIdentityMode = project.Annotations[projectSettingDefaultGCPIdentityMode]
+	settings.DefaultGCPIdentityServiceAccountID = project.Annotations[projectSettingDefaultGCPIdentitySAID]
 
 	// Default resources (flat annotation keys)
 	res := projectResourcesFromAnnotations(project.Annotations)
@@ -166,11 +166,11 @@ func projectSettingsFromAnnotations(project *store.Project) *hubclient.ProjectSe
 // projectResourcesFromAnnotations reads the flat resource annotation keys into a ProjectResourceSpec.
 // Returns nil if no resource annotations are set.
 func projectResourcesFromAnnotations(annotations map[string]string) *hubclient.ProjectResourceSpec {
-	cpuReq := annotations[groveSettingDefaultResourcesCPUReq]
-	memReq := annotations[groveSettingDefaultResourcesMemReq]
-	cpuLim := annotations[groveSettingDefaultResourcesCPULim]
-	memLim := annotations[groveSettingDefaultResourcesMemLim]
-	disk := annotations[groveSettingDefaultResourcesDisk]
+	cpuReq := annotations[projectSettingDefaultResourcesCPUReq]
+	memReq := annotations[projectSettingDefaultResourcesMemReq]
+	cpuLim := annotations[projectSettingDefaultResourcesCPULim]
+	memLim := annotations[projectSettingDefaultResourcesMemLim]
+	disk := annotations[projectSettingDefaultResourcesDisk]
 
 	if cpuReq == "" && memReq == "" && cpuLim == "" && memLim == "" && disk == "" {
 		return nil
@@ -186,55 +186,55 @@ func projectResourcesFromAnnotations(annotations map[string]string) *hubclient.P
 	return res
 }
 
-// applyProjectSettingsToAnnotations writes grove settings into the grove's annotations map.
-func applyProjectSettingsToAnnotations(grove *store.Project, settings *hubclient.ProjectSettings) {
-	if grove.Annotations == nil {
-		grove.Annotations = make(map[string]string)
+// applyProjectSettingsToAnnotations writes project settings into the project's annotations map.
+func applyProjectSettingsToAnnotations(project *store.Project, settings *hubclient.ProjectSettings) {
+	if project.Annotations == nil {
+		project.Annotations = make(map[string]string)
 	}
 
-	setOrDelete(grove.Annotations, groveSettingDefaultTemplate, settings.DefaultTemplate)
-	setOrDelete(grove.Annotations, groveSettingDefaultHarnessConfig, settings.DefaultHarnessConfig)
-	setOrDelete(grove.Annotations, groveSettingActiveProfile, settings.ActiveProfile)
+	setOrDelete(project.Annotations, projectSettingDefaultTemplate, settings.DefaultTemplate)
+	setOrDelete(project.Annotations, projectSettingDefaultHarnessConfig, settings.DefaultHarnessConfig)
+	setOrDelete(project.Annotations, projectSettingActiveProfile, settings.ActiveProfile)
 
 	if settings.TelemetryEnabled != nil {
-		grove.Annotations[groveSettingTelemetryEnabled] = strconv.FormatBool(*settings.TelemetryEnabled)
+		project.Annotations[projectSettingTelemetryEnabled] = strconv.FormatBool(*settings.TelemetryEnabled)
 	} else {
-		delete(grove.Annotations, groveSettingTelemetryEnabled)
+		delete(project.Annotations, projectSettingTelemetryEnabled)
 	}
 
 	// Default GCP identity
-	setOrDelete(grove.Annotations, groveSettingDefaultGCPIdentityMode, settings.DefaultGCPIdentityMode)
-	setOrDelete(grove.Annotations, groveSettingDefaultGCPIdentitySAID, settings.DefaultGCPIdentityServiceAccountID)
+	setOrDelete(project.Annotations, projectSettingDefaultGCPIdentityMode, settings.DefaultGCPIdentityMode)
+	setOrDelete(project.Annotations, projectSettingDefaultGCPIdentitySAID, settings.DefaultGCPIdentityServiceAccountID)
 
 	// Default agent limits
-	setOrDeleteInt(grove.Annotations, groveSettingDefaultMaxTurns, settings.DefaultMaxTurns)
-	setOrDeleteInt(grove.Annotations, groveSettingDefaultMaxModelCalls, settings.DefaultMaxModelCalls)
-	setOrDelete(grove.Annotations, groveSettingDefaultMaxDuration, settings.DefaultMaxDuration)
+	setOrDeleteInt(project.Annotations, projectSettingDefaultMaxTurns, settings.DefaultMaxTurns)
+	setOrDeleteInt(project.Annotations, projectSettingDefaultMaxModelCalls, settings.DefaultMaxModelCalls)
+	setOrDelete(project.Annotations, projectSettingDefaultMaxDuration, settings.DefaultMaxDuration)
 
 	// Default resources (flat keys)
 	if settings.DefaultResources != nil {
 		res := settings.DefaultResources
 		if res.Requests != nil {
-			setOrDelete(grove.Annotations, groveSettingDefaultResourcesCPUReq, res.Requests.CPU)
-			setOrDelete(grove.Annotations, groveSettingDefaultResourcesMemReq, res.Requests.Memory)
+			setOrDelete(project.Annotations, projectSettingDefaultResourcesCPUReq, res.Requests.CPU)
+			setOrDelete(project.Annotations, projectSettingDefaultResourcesMemReq, res.Requests.Memory)
 		} else {
-			delete(grove.Annotations, groveSettingDefaultResourcesCPUReq)
-			delete(grove.Annotations, groveSettingDefaultResourcesMemReq)
+			delete(project.Annotations, projectSettingDefaultResourcesCPUReq)
+			delete(project.Annotations, projectSettingDefaultResourcesMemReq)
 		}
 		if res.Limits != nil {
-			setOrDelete(grove.Annotations, groveSettingDefaultResourcesCPULim, res.Limits.CPU)
-			setOrDelete(grove.Annotations, groveSettingDefaultResourcesMemLim, res.Limits.Memory)
+			setOrDelete(project.Annotations, projectSettingDefaultResourcesCPULim, res.Limits.CPU)
+			setOrDelete(project.Annotations, projectSettingDefaultResourcesMemLim, res.Limits.Memory)
 		} else {
-			delete(grove.Annotations, groveSettingDefaultResourcesCPULim)
-			delete(grove.Annotations, groveSettingDefaultResourcesMemLim)
+			delete(project.Annotations, projectSettingDefaultResourcesCPULim)
+			delete(project.Annotations, projectSettingDefaultResourcesMemLim)
 		}
-		setOrDelete(grove.Annotations, groveSettingDefaultResourcesDisk, res.Disk)
+		setOrDelete(project.Annotations, projectSettingDefaultResourcesDisk, res.Disk)
 	} else {
-		delete(grove.Annotations, groveSettingDefaultResourcesCPUReq)
-		delete(grove.Annotations, groveSettingDefaultResourcesMemReq)
-		delete(grove.Annotations, groveSettingDefaultResourcesCPULim)
-		delete(grove.Annotations, groveSettingDefaultResourcesMemLim)
-		delete(grove.Annotations, groveSettingDefaultResourcesDisk)
+		delete(project.Annotations, projectSettingDefaultResourcesCPUReq)
+		delete(project.Annotations, projectSettingDefaultResourcesMemReq)
+		delete(project.Annotations, projectSettingDefaultResourcesCPULim)
+		delete(project.Annotations, projectSettingDefaultResourcesMemLim)
+		delete(project.Annotations, projectSettingDefaultResourcesDisk)
 	}
 }
 
@@ -256,22 +256,22 @@ func setOrDelete(m map[string]string, key, value string) {
 	}
 }
 
-// applyProjectDefaults applies grove-level defaults from annotations to the agent's
+// applyProjectDefaults applies project-level defaults from annotations to the agent's
 // AppliedConfig and InlineConfig. Only fills in values that are not already set
 // (0 or empty), so explicit agent/template-level values are preserved.
-func applyProjectDefaults(ac *store.AgentAppliedConfig, grove *store.Project) {
-	if ac == nil || grove == nil || grove.Annotations == nil {
+func applyProjectDefaults(ac *store.AgentAppliedConfig, project *store.Project) {
+	if ac == nil || project == nil || project.Annotations == nil {
 		return
 	}
 
-	settings := projectSettingsFromAnnotations(grove)
+	settings := projectSettingsFromAnnotations(project)
 
 	// Apply default harness config (only if not already set)
 	if ac.HarnessConfig == "" && settings.DefaultHarnessConfig != "" {
 		ac.HarnessConfig = settings.DefaultHarnessConfig
 	}
 
-	// Check if there are any grove limit/resource defaults to apply
+	// Check if there are any project limit/resource defaults to apply
 	hasLimits := settings.DefaultMaxTurns > 0 || settings.DefaultMaxModelCalls > 0 || settings.DefaultMaxDuration != ""
 	hasResources := settings.DefaultResources != nil
 	if !hasLimits && !hasResources {
@@ -296,17 +296,17 @@ func applyProjectDefaults(ac *store.AgentAppliedConfig, grove *store.Project) {
 
 	// Apply resource defaults
 	if hasResources {
-		groveRes := projectResourceSpecToAPI(settings.DefaultResources)
-		if groveRes != nil {
+		projectRes := projectResourceSpecToAPI(settings.DefaultResources)
+		if projectRes != nil {
 			if ac.InlineConfig.Resources == nil {
-				ac.InlineConfig.Resources = groveRes
+				ac.InlineConfig.Resources = projectRes
 			}
 			// If inline already has resources, don't override — agent/template level wins
 		}
 	}
 }
 
-// groveResourceSpecToAPI converts a ProjectResourceSpec to an api.ResourceSpec.
+// projectResourceSpecToAPI converts a ProjectResourceSpec to an api.ResourceSpec.
 func projectResourceSpecToAPI(grs *hubclient.ProjectResourceSpec) *api.ResourceSpec {
 	if grs == nil {
 		return nil

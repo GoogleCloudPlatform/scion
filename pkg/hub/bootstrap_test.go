@@ -217,7 +217,7 @@ func doBootstrapRequest(t *testing.T, srv *Server, method, path string, body int
 	return rec
 }
 
-// setupProjectAndBroker creates a grove and broker for agent creation tests.
+// setupProjectAndBroker creates a project and broker for agent creation tests.
 func setupProjectAndBroker(t *testing.T, s store.Store) (string, string) {
 	t.Helper()
 	ctx := context.Background()
@@ -232,30 +232,30 @@ func setupProjectAndBroker(t *testing.T, s store.Store) (string, string) {
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	grove := &store.Project{
-		ID:                     "grove_bootstrap_test",
-		Slug:                   "bootstrap-grove",
+	project := &store.Project{
+		ID:                     "project_bootstrap_test",
+		Slug:                   "bootstrap-project",
 		Name:                   "Bootstrap Project",
 		GitRemote:              "https://github.com/test/bootstrap",
 		DefaultRuntimeBrokerID: broker.ID,
 		Created:                time.Now(),
 		Updated:                time.Now(),
 	}
-	if err := s.CreateProject(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	provider := &store.ProjectProvider{
-		ProjectID:    grove.ID,
+		ProjectID:    project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}
 	if err := s.AddProjectProvider(ctx, provider); err != nil {
-		t.Fatalf("failed to add grove provider: %v", err)
+		t.Fatalf("failed to add project provider: %v", err)
 	}
 
-	return grove.ID, broker.ID
+	return project.ID, broker.ID
 }
 
 // ============================================================================
@@ -471,7 +471,7 @@ func TestCreateAgentWithWorkspaceBootstrap_LocalProvider(t *testing.T) {
 	srv, s, _, disp := testBootstrapServer(t)
 	ctx := context.Background()
 
-	// Create broker and grove
+	// Create broker and project
 	broker := &store.RuntimeBroker{
 		ID:     "broker_local_path_test",
 		Slug:   "local-path-host",
@@ -482,35 +482,35 @@ func TestCreateAgentWithWorkspaceBootstrap_LocalProvider(t *testing.T) {
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	grove := &store.Project{
-		ID:                     "grove_local_path_test",
-		Slug:                   "local-path-grove",
+	project := &store.Project{
+		ID:                     "project_local_path_test",
+		Slug:                   "local-path-project",
 		Name:                   "Local Path Project",
 		GitRemote:              "https://github.com/test/local-path",
 		DefaultRuntimeBrokerID: broker.ID,
 		Created:                time.Now(),
 		Updated:                time.Now(),
 	}
-	if err := s.CreateProject(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
-	// Add grove provider WITH a LocalPath — this is the key difference
+	// Add project provider WITH a LocalPath — this is the key difference
 	provider := &store.ProjectProvider{
-		ProjectID:    grove.ID,
+		ProjectID:    project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		LocalPath:  "/home/user/project/.scion",
 		Status:     store.BrokerStatusOnline,
 	}
 	if err := s.AddProjectProvider(ctx, provider); err != nil {
-		t.Fatalf("failed to add grove provider: %v", err)
+		t.Fatalf("failed to add project provider: %v", err)
 	}
 
 	// Create an agent with workspace files and a task
 	body := CreateAgentRequest{
 		Name:    "local-workspace-agent",
-		ProjectID: grove.ID,
+		ProjectID: project.ID,
 		Task:    "do something locally",
 		WorkspaceFiles: []transfer.FileInfo{
 			{Path: "main.go", Size: 100, Hash: "sha256:abc123"},
@@ -926,12 +926,12 @@ func TestDispatcherPassesWorkspaceStoragePath(t *testing.T) {
 		ID:              "agent_with_storage_path",
 		Slug:            "storage-path-agent",
 		Name:            "Storage Path Agent",
-		ProjectID:         "grove_test",
+		ProjectID:         "project_test",
 		RuntimeBrokerID: "broker_test",
 		Phase:           string(state.PhaseProvisioning),
 		AppliedConfig: &store.AgentAppliedConfig{
 			Task:                 "test task",
-			WorkspaceStoragePath: "workspaces/grove_test/agent_with_storage_path",
+			WorkspaceStoragePath: "workspaces/project_test/agent_with_storage_path",
 		},
 	}
 
@@ -939,7 +939,7 @@ func TestDispatcherPassesWorkspaceStoragePath(t *testing.T) {
 	if agent.AppliedConfig.WorkspaceStoragePath == "" {
 		t.Error("expected WorkspaceStoragePath to be set")
 	}
-	if agent.AppliedConfig.WorkspaceStoragePath != "workspaces/grove_test/agent_with_storage_path" {
+	if agent.AppliedConfig.WorkspaceStoragePath != "workspaces/project_test/agent_with_storage_path" {
 		t.Errorf("unexpected WorkspaceStoragePath: %q", agent.AppliedConfig.WorkspaceStoragePath)
 	}
 }
@@ -1064,8 +1064,8 @@ func TestBrokerCreateAgentRequest_WorkspaceStoragePath(t *testing.T) {
 	// in the broker's CreateAgentRequest
 	reqJSON := `{
 		"name": "test-agent",
-		"projectPath": "/path/to/grove",
-		"workspaceStoragePath": "workspaces/grove1/agent1"
+		"projectPath": "/path/to/project",
+		"workspaceStoragePath": "workspaces/project1/agent1"
 	}`
 
 	var req struct {
@@ -1078,11 +1078,11 @@ func TestBrokerCreateAgentRequest_WorkspaceStoragePath(t *testing.T) {
 		t.Fatalf("failed to unmarshal: %v", err)
 	}
 
-	if req.WorkspaceStoragePath != "workspaces/grove1/agent1" {
-		t.Errorf("expected WorkspaceStoragePath 'workspaces/grove1/agent1', got %q", req.WorkspaceStoragePath)
+	if req.WorkspaceStoragePath != "workspaces/project1/agent1" {
+		t.Errorf("expected WorkspaceStoragePath 'workspaces/project1/agent1', got %q", req.WorkspaceStoragePath)
 	}
-	if req.ProjectPath != "/path/to/grove" {
-		t.Errorf("expected ProjectPath '/path/to/grove', got %q", req.ProjectPath)
+	if req.ProjectPath != "/path/to/project" {
+		t.Errorf("expected ProjectPath '/path/to/project', got %q", req.ProjectPath)
 	}
 }
 
@@ -1094,7 +1094,7 @@ func TestAgentAppliedConfig_WorkspaceStoragePath(t *testing.T) {
 	// Test that WorkspaceStoragePath is properly serialized in AgentAppliedConfig
 	config := &store.AgentAppliedConfig{
 		Task:                 "test task",
-		WorkspaceStoragePath: "workspaces/grove1/agent1",
+		WorkspaceStoragePath: "workspaces/project1/agent1",
 	}
 
 	data, err := json.Marshal(config)
@@ -1107,8 +1107,8 @@ func TestAgentAppliedConfig_WorkspaceStoragePath(t *testing.T) {
 		t.Fatalf("failed to unmarshal: %v", err)
 	}
 
-	if decoded.WorkspaceStoragePath != "workspaces/grove1/agent1" {
-		t.Errorf("expected WorkspaceStoragePath 'workspaces/grove1/agent1', got %q", decoded.WorkspaceStoragePath)
+	if decoded.WorkspaceStoragePath != "workspaces/project1/agent1" {
+		t.Errorf("expected WorkspaceStoragePath 'workspaces/project1/agent1', got %q", decoded.WorkspaceStoragePath)
 	}
 	if decoded.Task != "test task" {
 		t.Errorf("expected Task 'test task', got %q", decoded.Task)

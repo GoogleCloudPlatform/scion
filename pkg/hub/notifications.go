@@ -68,8 +68,8 @@ func (nd *NotificationDispatcher) SetBrokerProxy(p *MessageBrokerProxy) {
 
 // Start subscribes to agent status and deletion events and spawns goroutines to process them.
 func (nd *NotificationDispatcher) Start() {
-	statusCh, unsubStatus := nd.events.Subscribe("grove.>.agent.status")
-	deletedCh, unsubDeleted := nd.events.Subscribe("grove.>.agent.deleted")
+	statusCh, unsubStatus := nd.events.Subscribe("project.>.agent.status")
+	deletedCh, unsubDeleted := nd.events.Subscribe("project.>.agent.deleted")
 
 	nd.wg.Add(1)
 	go func() {
@@ -118,7 +118,7 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 	ctx := context.Background()
 
 	// Collect subscriptions from both scopes: agent-scoped first (more specific),
-	// then grove-scoped.
+	// then project-scoped.
 	agentSubs, err := nd.store.GetNotificationSubscriptions(ctx, statusEvt.AgentID)
 	if err != nil {
 		nd.log.Error("Failed to get agent notification subscriptions",
@@ -126,15 +126,15 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 		return
 	}
 
-	groveSubs, err := nd.store.GetNotificationSubscriptionsByProjectScope(ctx, statusEvt.ProjectID)
+	projectSubs, err := nd.store.GetNotificationSubscriptionsByProjectScope(ctx, statusEvt.ProjectID)
 	if err != nil {
-		nd.log.Error("Failed to get grove notification subscriptions",
-			"grove_id", statusEvt.ProjectID, "error", err)
+		nd.log.Error("Failed to get project notification subscriptions",
+			"project_id", statusEvt.ProjectID, "error", err)
 		// Continue with agent-scoped only
-		groveSubs = nil
+		projectSubs = nil
 	}
 
-	allSubs := append(agentSubs, groveSubs...)
+	allSubs := append(agentSubs, projectSubs...)
 	if len(allSubs) == 0 {
 		return
 	}
@@ -198,14 +198,14 @@ func (nd *NotificationDispatcher) handleDeletedEvent(evt Event) {
 		agentSubs = nil
 	}
 
-	groveSubs, err := nd.store.GetNotificationSubscriptionsByProjectScope(ctx, deletedEvt.ProjectID)
+	projectSubs, err := nd.store.GetNotificationSubscriptionsByProjectScope(ctx, deletedEvt.ProjectID)
 	if err != nil {
-		nd.log.Error("Failed to get grove notification subscriptions for deleted event",
-			"groveID", deletedEvt.ProjectID, "error", err)
-		groveSubs = nil
+		nd.log.Error("Failed to get project notification subscriptions for deleted event",
+			"projectID", deletedEvt.ProjectID, "error", err)
+		projectSubs = nil
 	}
 
-	allSubs := append(agentSubs, groveSubs...)
+	allSubs := append(agentSubs, projectSubs...)
 	if len(allSubs) == 0 {
 		return
 	}
@@ -247,7 +247,7 @@ func (nd *NotificationDispatcher) storeAndDispatch(ctx context.Context, sub *sto
 	}
 
 	// Skip stale status events that predate this subscription. This prevents
-	// retroactive notifications when a new grove-scoped subscription is created
+	// retroactive notifications when a new project-scoped subscription is created
 	// and existing agents' statuses are re-reported.
 	if !sub.CreatedAt.IsZero() {
 		activityTime := agent.LastActivityEvent
@@ -317,7 +317,7 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 	subscriber, err := nd.store.GetAgentBySlug(ctx, sub.ProjectID, sub.SubscriberID)
 	if err != nil {
 		nd.log.Warn("Subscriber agent not found, skipping dispatch",
-			"subscriberID", sub.SubscriberID, "groveID", sub.ProjectID, "error", err)
+			"subscriberID", sub.SubscriberID, "projectID", sub.ProjectID, "error", err)
 		return
 	}
 
@@ -364,7 +364,7 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 			logAttrs := []any{
 				"agent_id", subscriber.ID,
 				"agent_name", subscriber.Name,
-				"grove_id", subscriber.ProjectID,
+				"project_id", subscriber.ProjectID,
 				"notification_id", notif.ID,
 			}
 			logAttrs = append(logAttrs, structuredMsg.LogAttrs()...)

@@ -29,12 +29,12 @@ import (
 type EventPublisher interface {
 	PublishAgentStatus(ctx context.Context, agent *store.Agent)
 	PublishAgentCreated(ctx context.Context, agent *store.Agent)
-	PublishAgentDeleted(ctx context.Context, agentID, groveID string)
-	PublishProjectCreated(ctx context.Context, grove *store.Project)
-	PublishProjectUpdated(ctx context.Context, grove *store.Project)
-	PublishProjectDeleted(ctx context.Context, groveID string)
-	PublishBrokerConnected(ctx context.Context, brokerID, brokerName string, groveIDs []string)
-	PublishBrokerDisconnected(ctx context.Context, brokerID string, groveIDs []string)
+	PublishAgentDeleted(ctx context.Context, agentID, projectID string)
+	PublishProjectCreated(ctx context.Context, project *store.Project)
+	PublishProjectUpdated(ctx context.Context, project *store.Project)
+	PublishProjectDeleted(ctx context.Context, projectID string)
+	PublishBrokerConnected(ctx context.Context, brokerID, brokerName string, projectIDs []string)
+	PublishBrokerDisconnected(ctx context.Context, brokerID string, projectIDs []string)
 	PublishBrokerStatus(ctx context.Context, brokerID, status string)
 	PublishNotification(ctx context.Context, notif *store.Notification)
 	PublishUserMessage(ctx context.Context, msg *store.Message)
@@ -83,7 +83,7 @@ type AgentDetail struct {
 // AgentStatusEvent is published when an agent's status changes.
 type AgentStatusEvent struct {
 	AgentID         string       `json:"agentId"`
-	ProjectID         string       `json:"groveId"`
+	ProjectID         string       `json:"projectId"`
 	Phase           string       `json:"phase,omitempty"`
 	Activity        string       `json:"activity,omitempty"`
 	Detail          *AgentDetail `json:"detail,omitempty"`
@@ -95,7 +95,7 @@ type AgentStatusEvent struct {
 // subscribers can render a complete row without an extra REST fetch.
 type AgentCreatedEvent struct {
 	AgentID         string `json:"agentId"`
-	ProjectID         string `json:"groveId"`
+	ProjectID         string `json:"projectId"`
 	Name            string `json:"name"`
 	Slug            string `json:"slug"`
 	Template        string `json:"template,omitempty"`
@@ -114,25 +114,25 @@ type AgentCreatedEvent struct {
 // AgentDeletedEvent is published when an agent is deleted.
 type AgentDeletedEvent struct {
 	AgentID string `json:"agentId"`
-	ProjectID string `json:"groveId"`
+	ProjectID string `json:"projectId"`
 }
 
 // ProjectCreatedEvent is published when a project is created.
 type ProjectCreatedEvent struct {
-	ProjectID string `json:"groveId"`
+	ProjectID string `json:"projectId"`
 	Name      string `json:"name"`
 	Slug      string `json:"slug"`
 }
 
 // ProjectUpdatedEvent is published when a project is updated.
 type ProjectUpdatedEvent struct {
-	ProjectID string `json:"groveId"`
+	ProjectID string `json:"projectId"`
 	Name      string `json:"name"`
 }
 
 // ProjectDeletedEvent is published when a project is deleted.
 type ProjectDeletedEvent struct {
-	ProjectID string `json:"groveId"`
+	ProjectID string `json:"projectId"`
 }
 
 // BrokerProjectEvent is published when a broker connects or disconnects,
@@ -140,7 +140,7 @@ type ProjectDeletedEvent struct {
 type BrokerProjectEvent struct {
 	BrokerID   string `json:"brokerId"`
 	BrokerName string `json:"brokerName,omitempty"`
-	ProjectID  string `json:"groveId"`
+	ProjectID  string `json:"projectId"`
 	Status     string `json:"status"` // "online" or "offline"
 }
 
@@ -154,7 +154,7 @@ type BrokerStatusEvent struct {
 // persisted — either an agent→user reply or a user→agent instruction.
 type UserMessageEvent struct {
 	ID          string `json:"id"`
-	ProjectID     string `json:"groveId"`
+	ProjectID     string `json:"projectId"`
 	Sender      string `json:"sender"`
 	SenderID    string `json:"senderId"`
 	Recipient   string `json:"recipient"`
@@ -171,7 +171,7 @@ type UserMessageEvent struct {
 type NotificationCreatedEvent struct {
 	ID        string `json:"id"`
 	AgentID   string `json:"agentId"`
-	ProjectID   string `json:"groveId"`
+	ProjectID   string `json:"projectId"`
 	Status    string `json:"status"`
 	Message   string `json:"message"`
 	CreatedAt string `json:"createdAt"`
@@ -288,7 +288,7 @@ func (p *ChannelEventPublisher) Close() {
 }
 
 // PublishAgentStatus publishes an agent status event to both agent-specific
-// and grove-scoped subjects (dual-publish pattern).
+// and project-scoped subjects (dual-publish pattern).
 func (p *ChannelEventPublisher) PublishAgentStatus(_ context.Context, agent *store.Agent) {
 	evt := AgentStatusEvent{
 		AgentID:         agent.ID,
@@ -313,12 +313,12 @@ func (p *ChannelEventPublisher) PublishAgentStatus(_ context.Context, agent *sto
 	}
 	p.publish("agent."+agent.ID+".status", evt)
 	if agent.ProjectID != "" {
-		p.publish("grove."+agent.ProjectID+".agent.status", evt)
+		p.publish("project."+agent.ProjectID+".agent.status", evt)
 	}
 }
 
 // PublishAgentCreated publishes an agent created event to both agent-specific
-// and grove-scoped subjects (dual-publish pattern).
+// and project-scoped subjects (dual-publish pattern).
 func (p *ChannelEventPublisher) PublishAgentCreated(_ context.Context, agent *store.Agent) {
 	evt := AgentCreatedEvent{
 		AgentID:         agent.ID,
@@ -341,72 +341,72 @@ func (p *ChannelEventPublisher) PublishAgentCreated(_ context.Context, agent *st
 	}
 	p.publish("agent."+agent.ID+".created", evt)
 	if agent.ProjectID != "" {
-		p.publish("grove."+agent.ProjectID+".agent.created", evt)
+		p.publish("project."+agent.ProjectID+".agent.created", evt)
 	}
 }
 
 // PublishAgentDeleted publishes an agent deleted event to both agent-specific
-// and grove-scoped subjects (dual-publish pattern).
-func (p *ChannelEventPublisher) PublishAgentDeleted(_ context.Context, agentID, groveID string) {
+// and project-scoped subjects (dual-publish pattern).
+func (p *ChannelEventPublisher) PublishAgentDeleted(_ context.Context, agentID, projectID string) {
 	evt := AgentDeletedEvent{
 		AgentID: agentID,
-		ProjectID: groveID,
+		ProjectID: projectID,
 	}
 	p.publish("agent."+agentID+".deleted", evt)
-	if groveID != "" {
-		p.publish("grove."+groveID+".agent.deleted", evt)
+	if projectID != "" {
+		p.publish("project."+projectID+".agent.deleted", evt)
 	}
 }
 
 // PublishProjectCreated publishes a project created event.
-func (p *ChannelEventPublisher) PublishProjectCreated(_ context.Context, grove *store.Project) {
+func (p *ChannelEventPublisher) PublishProjectCreated(_ context.Context, project *store.Project) {
 	evt := ProjectCreatedEvent{
-		ProjectID: grove.ID,
-		Name:      grove.Name,
-		Slug:      grove.Slug,
+		ProjectID: project.ID,
+		Name:      project.Name,
+		Slug:      project.Slug,
 	}
-	p.publish("grove."+grove.ID+".created", evt)
+	p.publish("project."+project.ID+".created", evt)
 }
 
 // PublishProjectUpdated publishes a project updated event.
-func (p *ChannelEventPublisher) PublishProjectUpdated(_ context.Context, grove *store.Project) {
+func (p *ChannelEventPublisher) PublishProjectUpdated(_ context.Context, project *store.Project) {
 	evt := ProjectUpdatedEvent{
-		ProjectID: grove.ID,
-		Name:      grove.Name,
+		ProjectID: project.ID,
+		Name:      project.Name,
 	}
-	p.publish("grove."+grove.ID+".updated", evt)
+	p.publish("project."+project.ID+".updated", evt)
 }
 
 // PublishProjectDeleted publishes a project deleted event.
-func (p *ChannelEventPublisher) PublishProjectDeleted(_ context.Context, groveID string) {
+func (p *ChannelEventPublisher) PublishProjectDeleted(_ context.Context, projectID string) {
 	evt := ProjectDeletedEvent{
-		ProjectID: groveID,
+		ProjectID: projectID,
 	}
-	p.publish("grove."+groveID+".deleted", evt)
+	p.publish("project."+projectID+".deleted", evt)
 }
 
 // PublishBrokerConnected publishes broker connection events, one per project the broker serves.
-func (p *ChannelEventPublisher) PublishBrokerConnected(_ context.Context, brokerID, brokerName string, groveIDs []string) {
-	for _, gid := range groveIDs {
+func (p *ChannelEventPublisher) PublishBrokerConnected(_ context.Context, brokerID, brokerName string, projectIDs []string) {
+	for _, gid := range projectIDs {
 		evt := BrokerProjectEvent{
 			BrokerID:   brokerID,
 			BrokerName: brokerName,
 			ProjectID:  gid,
 			Status:     "online",
 		}
-		p.publish("grove."+gid+".broker.status", evt)
+		p.publish("project."+gid+".broker.status", evt)
 	}
 }
 
 // PublishBrokerDisconnected publishes broker disconnection events, one per project the broker serves.
-func (p *ChannelEventPublisher) PublishBrokerDisconnected(_ context.Context, brokerID string, groveIDs []string) {
-	for _, gid := range groveIDs {
+func (p *ChannelEventPublisher) PublishBrokerDisconnected(_ context.Context, brokerID string, projectIDs []string) {
+	for _, gid := range projectIDs {
 		evt := BrokerProjectEvent{
 			BrokerID:  brokerID,
 			ProjectID: gid,
 			Status:    "offline",
 		}
-		p.publish("grove."+gid+".broker.status", evt)
+		p.publish("project."+gid+".broker.status", evt)
 	}
 }
 
@@ -459,7 +459,7 @@ func (p *ChannelEventPublisher) PublishInviteChanged(_ context.Context, action, 
 //
 //   - user.<recipientID>.message — inbox-tray for the message's addressee
 //     (only when the recipient is a user, not an agent)
-//   - grove.<groveID>.user.message — grove-level user-message feeds
+//   - project.<projectID>.user.message — project-level user-message feeds
 //     (only when the recipient is a user)
 //   - agent.<agentID>.message — per-agent conversation streams (both
 //     directions; subscribers filter by user participation themselves)
@@ -478,17 +478,17 @@ func (p *ChannelEventPublisher) PublishUserMessage(_ context.Context, msg *store
 		AgentID:     msg.AgentID,
 		CreatedAt:   msg.CreatedAt.Format("2006-01-02T15:04:05.000Z"),
 	}
-	// Only fan out to user-inbox and grove-level subjects when the
+	// Only fan out to user-inbox and project-level subjects when the
 	// recipient is actually a human user. For user→agent messages the
 	// RecipientID is the agent UUID, so publishing to user.<agentID>
-	// would be a no-op (no subscriber) and grove feeds would double-
+	// would be a no-op (no subscriber) and project feeds would double-
 	// count by mixing user→agent prompts with agent→user replies.
 	recipientIsUser := strings.HasPrefix(msg.Recipient, "user:")
 	if recipientIsUser && msg.RecipientID != "" {
 		p.publish("user."+msg.RecipientID+".message", evt)
 	}
 	if recipientIsUser && msg.ProjectID != "" {
-		p.publish("grove."+msg.ProjectID+".user.message", evt)
+		p.publish("project."+msg.ProjectID+".user.message", evt)
 	}
 	if msg.AgentID != "" {
 		p.publish("agent."+msg.AgentID+".message", evt)

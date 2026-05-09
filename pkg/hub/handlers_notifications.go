@@ -146,7 +146,7 @@ func (s *Server) handleNotificationRoutes(w http.ResponseWriter, r *http.Request
 type createSubscriptionRequest struct {
 	Scope             string   `json:"scope"`
 	AgentID           string   `json:"agentId,omitempty"`
-	ProjectID           string   `json:"groveId"`
+	ProjectID           string   `json:"projectId"`
 	TriggerActivities []string `json:"triggerActivities"`
 }
 
@@ -170,7 +170,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 
 		// Validate scope
 		if req.Scope != store.SubscriptionScopeAgent && req.Scope != store.SubscriptionScopeProject {
-			writeError(w, http.StatusBadRequest, "bad_request", "scope must be 'agent' or 'grove'", nil)
+			writeError(w, http.StatusBadRequest, "bad_request", "scope must be 'agent' or 'project'", nil)
 			return
 		}
 		if req.Scope == store.SubscriptionScopeAgent && req.AgentID == "" {
@@ -178,11 +178,11 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if req.Scope == store.SubscriptionScopeProject && req.AgentID != "" {
-			writeError(w, http.StatusBadRequest, "bad_request", "agentId must be empty when scope is 'grove'", nil)
+			writeError(w, http.StatusBadRequest, "bad_request", "agentId must be empty when scope is 'project'", nil)
 			return
 		}
 		if req.ProjectID == "" {
-			writeError(w, http.StatusBadRequest, "bad_request", "groveId is required", nil)
+			writeError(w, http.StatusBadRequest, "bad_request", "projectId is required", nil)
 			return
 		}
 		if len(req.TriggerActivities) == 0 {
@@ -247,13 +247,16 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		}
 
 		// Apply optional filters
-		groveID := r.URL.Query().Get("groveId")
+		projectID := r.URL.Query().Get("projectId")
 		agentID := r.URL.Query().Get("agentId")
 		scope := r.URL.Query().Get("scope")
+		if scope == "project" {
+			scope = "project"
+		}
 
 		filtered := make([]store.NotificationSubscription, 0)
 		for _, sub := range subs {
-			if groveID != "" && sub.ProjectID != groveID {
+			if projectID != "" && sub.ProjectID != projectID {
 				continue
 			}
 			if agentID != "" && sub.AgentID != agentID {
@@ -450,7 +453,7 @@ type createTemplateRequest struct {
 	Name              string   `json:"name"`
 	Scope             string   `json:"scope"`
 	TriggerActivities []string `json:"triggerActivities"`
-	ProjectID           string   `json:"groveId"`
+	ProjectID           string   `json:"projectId"`
 }
 
 // handleSubscriptionTemplateRoutes handles CRUD for subscription templates.
@@ -488,7 +491,7 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 
 		if err := s.store.CreateSubscriptionTemplate(ctx, tmpl); err != nil {
 			if err == store.ErrAlreadyExists {
-				writeError(w, http.StatusConflict, "already_exists", "A template with that name already exists in this grove", nil)
+				writeError(w, http.StatusConflict, "already_exists", "A template with that name already exists in this project", nil)
 				return
 			}
 			writeErrorFromErr(w, err, "")
@@ -501,8 +504,8 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 
 	// GET /api/v1/notifications/templates — List
 	case templateID == "" && r.Method == http.MethodGet:
-		groveID := r.URL.Query().Get("groveId")
-		templates, err := s.store.ListSubscriptionTemplates(ctx, groveID)
+		projectID := r.URL.Query().Get("projectId")
+		templates, err := s.store.ListSubscriptionTemplates(ctx, projectID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return

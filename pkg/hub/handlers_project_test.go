@@ -38,13 +38,13 @@ import (
 )
 
 func TestHubNativeProjectPath(t *testing.T) {
-	path, err := hubNativeProjectPath("my-test-grove")
+	path, err := hubNativeProjectPath("my-test-project")
 	require.NoError(t, err)
 
 	homeDir, err := os.UserHomeDir()
 	require.NoError(t, err)
 
-	expected := filepath.Join(homeDir, ".scion", "groves", "my-test-grove")
+	expected := filepath.Join(homeDir, ".scion", "projects", "my-test-project")
 	assert.Equal(t, expected, path)
 }
 
@@ -55,25 +55,25 @@ func TestCreateProject_HubNative_NoGitRemote(t *testing.T) {
 		Name: "Hub Native Project",
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body)
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var grove store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove))
+	var project store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
-	assert.Equal(t, "Hub Native Project", grove.Name)
-	assert.Equal(t, "hub-native-project", grove.Slug)
-	assert.Empty(t, grove.GitRemote, "hub-native grove should have no git remote")
+	assert.Equal(t, "Hub Native Project", project.Name)
+	assert.Equal(t, "hub-native-project", project.Slug)
+	assert.Empty(t, project.GitRemote, "hub-native project should have no git remote")
 
 	// Verify the filesystem was initialized
-	workspacePath, err := hubNativeProjectPath(grove.Slug)
+	workspacePath, err := hubNativeProjectPath(project.Slug)
 	require.NoError(t, err)
 
 	scionDir := filepath.Join(workspacePath, ".scion")
 	settingsPath := filepath.Join(scionDir, "settings.yaml")
 
 	_, err = os.Stat(settingsPath)
-	assert.NoError(t, err, "settings.yaml should exist for hub-native grove")
+	assert.NoError(t, err, "settings.yaml should exist for hub-native project")
 
 	// Cleanup
 	t.Cleanup(func() {
@@ -89,30 +89,30 @@ func TestCreateProject_GitBacked_NoFilesystemInit(t *testing.T) {
 		GitRemote: "github.com/test/repo",
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body)
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var grove store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove))
+	var project store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
-	assert.Equal(t, "github.com/test/repo", grove.GitRemote)
+	assert.Equal(t, "github.com/test/repo", project.GitRemote)
 
-	// Verify no filesystem was created for git-backed grove
-	workspacePath, err := hubNativeProjectPath(grove.Slug)
+	// Verify no filesystem was created for git-backed project
+	workspacePath, err := hubNativeProjectPath(project.Slug)
 	require.NoError(t, err)
 
 	_, err = os.Stat(workspacePath)
-	assert.True(t, os.IsNotExist(err), "no workspace directory should be created for git-backed groves")
+	assert.True(t, os.IsNotExist(err), "no workspace directory should be created for git-backed projects")
 }
 
-func TestPopulateAgentConfig_HubNativeGrove_SetsWorkspace(t *testing.T) {
+func TestPopulateAgentConfig_HubNativeProject_SetsWorkspace(t *testing.T) {
 	srv, _ := testServer(t)
 
-	grove := &store.Project{
-		ID:   "grove-hub-native",
+	project := &store.Project{
+		ID:   "project-hub-native",
 		Name: "Hub Native",
 		Slug: "hub-native",
-		// No GitRemote — hub-native grove
+		// No GitRemote — hub-native project
 	}
 
 	agent := &store.Agent{
@@ -120,24 +120,24 @@ func TestPopulateAgentConfig_HubNativeGrove_SetsWorkspace(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, grove, nil)
+	srv.populateAgentConfig(agent, project, nil)
 
 	expectedPath, err := hubNativeProjectPath("hub-native")
 	require.NoError(t, err)
 	assert.Equal(t, expectedPath, agent.AppliedConfig.Workspace,
-		"Workspace should be set for hub-native groves")
+		"Workspace should be set for hub-native projects")
 	assert.Nil(t, agent.AppliedConfig.GitClone,
-		"GitClone should not be set for hub-native groves")
+		"GitClone should not be set for hub-native projects")
 }
 
-func TestPopulateAgentConfig_HubNativeGrove_RemoteBroker_WorkspaceSet(t *testing.T) {
+func TestPopulateAgentConfig_HubNativeProject_RemoteBroker_WorkspaceSet(t *testing.T) {
 	srv, _ := testServer(t)
 
-	grove := &store.Project{
-		ID:   "grove-hub-native-remote",
+	project := &store.Project{
+		ID:   "project-hub-native-remote",
 		Name: "Hub Native Remote",
 		Slug: "hub-native-remote",
-		// No GitRemote — hub-native grove
+		// No GitRemote — hub-native project
 	}
 
 	agent := &store.Agent{
@@ -145,9 +145,9 @@ func TestPopulateAgentConfig_HubNativeGrove_RemoteBroker_WorkspaceSet(t *testing
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, grove, nil)
+	srv.populateAgentConfig(agent, project, nil)
 
-	// populateAgentConfig sets Workspace for hub-native groves.
+	// populateAgentConfig sets Workspace for hub-native projects.
 	// For remote brokers, the createAgent handler later swaps this to
 	// WorkspaceStoragePath. Here we verify the initial workspace is set.
 	expectedPath, err := hubNativeProjectPath("hub-native-remote")
@@ -155,13 +155,13 @@ func TestPopulateAgentConfig_HubNativeGrove_RemoteBroker_WorkspaceSet(t *testing
 	assert.Equal(t, expectedPath, agent.AppliedConfig.Workspace)
 }
 
-func TestPopulateAgentConfig_GitGrove_NoWorkspace(t *testing.T) {
+func TestPopulateAgentConfig_GitProject_NoWorkspace(t *testing.T) {
 	srv, _ := testServer(t)
 
-	grove := &store.Project{
-		ID:        "grove-git",
+	project := &store.Project{
+		ID:        "project-git",
 		Name:      "Git Project",
-		Slug:      "git-grove",
+		Slug:      "git-project",
 		GitRemote: "github.com/test/repo",
 	}
 
@@ -170,21 +170,21 @@ func TestPopulateAgentConfig_GitGrove_NoWorkspace(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, grove, nil)
+	srv.populateAgentConfig(agent, project, nil)
 
 	assert.Empty(t, agent.AppliedConfig.Workspace,
-		"Workspace should not be set for git-backed groves")
+		"Workspace should not be set for git-backed projects")
 	assert.NotNil(t, agent.AppliedConfig.GitClone,
-		"GitClone should be set for git-backed groves")
+		"GitClone should be set for git-backed projects")
 }
 
 func TestPopulateAgentConfig_TemplateTelemetryMerged(t *testing.T) {
 	srv, _ := testServer(t)
 
-	grove := &store.Project{
-		ID:   "grove-telem",
+	project := &store.Project{
+		ID:   "project-telem",
 		Name: "Telemetry Project",
-		Slug: "telemetry-grove",
+		Slug: "telemetry-project",
 	}
 
 	enabled := true
@@ -209,7 +209,7 @@ func TestPopulateAgentConfig_TemplateTelemetryMerged(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, grove, template)
+	srv.populateAgentConfig(agent, project, template)
 
 	require.NotNil(t, agent.AppliedConfig.InlineConfig,
 		"InlineConfig should be created to hold template telemetry")
@@ -223,10 +223,10 @@ func TestPopulateAgentConfig_TemplateTelemetryMerged(t *testing.T) {
 func TestPopulateAgentConfig_InlineTelemetryNotOverwritten(t *testing.T) {
 	srv, _ := testServer(t)
 
-	grove := &store.Project{
-		ID:   "grove-telem2",
+	project := &store.Project{
+		ID:   "project-telem2",
 		Name: "Telemetry Project 2",
-		Slug: "telemetry-grove-2",
+		Slug: "telemetry-project-2",
 	}
 
 	enabled := true
@@ -260,7 +260,7 @@ func TestPopulateAgentConfig_InlineTelemetryNotOverwritten(t *testing.T) {
 		},
 	}
 
-	srv.populateAgentConfig(agent, grove, template)
+	srv.populateAgentConfig(agent, project, template)
 
 	// Inline telemetry should NOT be overwritten by template telemetry
 	assert.Equal(t, "https://inline-otel.example.com",
@@ -281,10 +281,10 @@ func TestPopulateAgentConfig_HubTelemetryDefault(t *testing.T) {
 		},
 	}
 
-	grove := &store.Project{
-		ID:   "grove-hub-tel",
+	project := &store.Project{
+		ID:   "project-hub-tel",
 		Name: "Hub Telemetry Project",
-		Slug: "hub-telemetry-grove",
+		Slug: "hub-telemetry-project",
 	}
 
 	agent := &store.Agent{
@@ -292,7 +292,7 @@ func TestPopulateAgentConfig_HubTelemetryDefault(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, grove, nil)
+	srv.populateAgentConfig(agent, project, nil)
 
 	require.NotNil(t, agent.AppliedConfig.InlineConfig,
 		"InlineConfig should be created to hold hub telemetry")
@@ -329,14 +329,14 @@ func TestPopulateAgentConfig_HubTelemetryNotOverwrittenByTemplate(t *testing.T) 
 		},
 	}
 
-	grove := &store.Project{ID: "grove-hub-tel2", Slug: "hub-tel-grove-2"}
+	project := &store.Project{ID: "project-hub-tel2", Slug: "hub-tel-project-2"}
 
 	agent := &store.Agent{
 		ID:            "agent-hub-tel2",
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, grove, template)
+	srv.populateAgentConfig(agent, project, template)
 
 	// Template telemetry should win over hub telemetry
 	assert.Equal(t, "https://template-otel.example.com",
@@ -344,7 +344,7 @@ func TestPopulateAgentConfig_HubTelemetryNotOverwrittenByTemplate(t *testing.T) 
 		"Template telemetry should take precedence over hub default")
 }
 
-func TestPopulateAgentConfig_GroveTelemetryEnabledOverride(t *testing.T) {
+func TestPopulateAgentConfig_ProjectTelemetryEnabledOverride(t *testing.T) {
 	srv, _ := testServer(t)
 
 	// Set hub-level telemetry config with enabled=true
@@ -357,11 +357,11 @@ func TestPopulateAgentConfig_GroveTelemetryEnabledOverride(t *testing.T) {
 	}
 
 	// Project disables telemetry
-	grove := &store.Project{
-		ID:   "grove-tel-override",
-		Slug: "tel-override-grove",
+	project := &store.Project{
+		ID:   "project-tel-override",
+		Slug: "tel-override-project",
 		Annotations: map[string]string{
-			groveSettingTelemetryEnabled: "false",
+			projectSettingTelemetryEnabled: "false",
 		},
 	}
 
@@ -370,27 +370,27 @@ func TestPopulateAgentConfig_GroveTelemetryEnabledOverride(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, grove, nil)
+	srv.populateAgentConfig(agent, project, nil)
 
 	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry)
 	// Hub cloud config should still be present
 	assert.Equal(t, "https://hub-otel.example.com",
 		agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint)
-	// But enabled should be overridden by grove setting
+	// But enabled should be overridden by project setting
 	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry.Enabled)
 	assert.False(t, *agent.AppliedConfig.InlineConfig.Telemetry.Enabled,
 		"Project TelemetryEnabled=false should override hub Enabled=true")
 }
 
-func TestPopulateAgentConfig_GroveTelemetryEnabledWithoutOtherConfig(t *testing.T) {
+func TestPopulateAgentConfig_ProjectTelemetryEnabledWithoutOtherConfig(t *testing.T) {
 	srv, _ := testServer(t)
 
-	// No hub telemetry config, no template — only grove sets enabled
-	grove := &store.Project{
-		ID:   "grove-tel-only",
-		Slug: "tel-only-grove",
+	// No hub telemetry config, no template — only project sets enabled
+	project := &store.Project{
+		ID:   "project-tel-only",
+		Slug: "tel-only-project",
 		Annotations: map[string]string{
-			groveSettingTelemetryEnabled: "true",
+			projectSettingTelemetryEnabled: "true",
 		},
 	}
 
@@ -399,7 +399,7 @@ func TestPopulateAgentConfig_GroveTelemetryEnabledWithoutOtherConfig(t *testing.
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, grove, nil)
+	srv.populateAgentConfig(agent, project, nil)
 
 	require.NotNil(t, agent.AppliedConfig.InlineConfig)
 	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry)
@@ -408,10 +408,10 @@ func TestPopulateAgentConfig_GroveTelemetryEnabledWithoutOtherConfig(t *testing.
 		"Project TelemetryEnabled=true should create telemetry config with Enabled=true")
 }
 
-// TestCreateAgent_HubNativeGrove_ExplicitBroker_AutoLinks tests that creating an agent
-// in a hub-native grove with an explicitly selected broker auto-links the broker as a
+// TestCreateAgent_HubNativeProject_ExplicitBroker_AutoLinks tests that creating an agent
+// in a hub-native project with an explicitly selected broker auto-links the broker as a
 // provider, even if it wasn't previously registered as one.
-func TestCreateAgent_HubNativeGrove_ExplicitBroker_AutoLinks(t *testing.T) {
+func TestCreateAgent_HubNativeProject_ExplicitBroker_AutoLinks(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -424,20 +424,20 @@ func TestCreateAgent_HubNativeGrove_ExplicitBroker_AutoLinks(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	// Create a hub-native grove (no git remote, no default broker, no providers)
-	grove := &store.Project{
-		ID:   "grove-hub-autolink",
+	// Create a hub-native project (no git remote, no default broker, no providers)
+	project := &store.Project{
+		ID:   "project-hub-autolink",
 		Slug: "hub-autolink",
 		Name: "Hub Autolink Project",
 		// No GitRemote — hub-native
 		// No DefaultRuntimeBrokerID
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create agent with explicit broker — this should auto-link the broker
 	body := map[string]interface{}{
 		"name":            "autolink-agent",
-		"groveId":         grove.ID,
+		"projectId":         project.ID,
 		"runtimeBrokerId": broker.ID,
 	}
 
@@ -452,19 +452,19 @@ func TestCreateAgent_HubNativeGrove_ExplicitBroker_AutoLinks(t *testing.T) {
 		"Agent should be assigned to the explicitly selected broker")
 
 	// Verify the broker was auto-linked as a provider
-	provider, err := s.GetProjectProvider(ctx, grove.ID, broker.ID)
+	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	require.NoError(t, err, "Broker should have been auto-linked as a provider")
 	assert.Equal(t, broker.ID, provider.BrokerID)
 	assert.Equal(t, "agent-create", provider.LinkedBy)
 
 	// Verify the broker was set as the default
-	updatedProject, err := s.GetProject(ctx, grove.ID)
+	updatedProject, err := s.GetProject(ctx, project.ID)
 	require.NoError(t, err)
 	assert.Equal(t, broker.ID, updatedProject.DefaultRuntimeBrokerID,
-		"Broker should be set as the default for the grove")
+		"Broker should be set as the default for the project")
 }
 
-// TestCreateProject_HubNative_AutoProvide tests that creating a hub-native grove
+// TestCreateProject_HubNative_AutoProvide tests that creating a hub-native project
 // auto-links brokers with auto_provide enabled.
 func TestCreateProject_HubNative_AutoProvide(t *testing.T) {
 	srv, s := testServer(t)
@@ -480,25 +480,25 @@ func TestCreateProject_HubNative_AutoProvide(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	// Create a hub-native grove via the API
+	// Create a hub-native project via the API
 	body := CreateProjectRequest{
 		Name: "Auto Provide Project",
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body)
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var grove store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove))
-	assert.Empty(t, grove.GitRemote, "should be hub-native")
+	var project store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
+	assert.Empty(t, project.GitRemote, "should be hub-native")
 
 	// Verify the auto-provide broker was linked
-	provider, err := s.GetProjectProvider(ctx, grove.ID, broker.ID)
+	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	require.NoError(t, err, "Auto-provide broker should be linked as a provider")
 	assert.Equal(t, "auto-provide", provider.LinkedBy)
 
 	// Verify the broker was set as the default
-	updatedProject, err := s.GetProject(ctx, grove.ID)
+	updatedProject, err := s.GetProject(ctx, project.ID)
 	require.NoError(t, err)
 	assert.Equal(t, broker.ID, updatedProject.DefaultRuntimeBrokerID,
 		"Auto-provide broker should be set as the default")
@@ -506,7 +506,7 @@ func TestCreateProject_HubNative_AutoProvide(t *testing.T) {
 	// Now create an agent — should work without explicit broker
 	agentBody := map[string]interface{}{
 		"name":    "autoprovide-agent",
-		"groveId": grove.ID,
+		"projectId": project.ID,
 	}
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents", agentBody)
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
@@ -516,53 +516,53 @@ func TestCreateProject_HubNative_AutoProvide(t *testing.T) {
 	assert.Equal(t, broker.ID, resp.Agent.RuntimeBrokerID,
 		"Agent should use the auto-provided default broker")
 
-	// Cleanup hub-native grove filesystem
-	workspacePath, err := hubNativeProjectPath(grove.Slug)
+	// Cleanup hub-native project filesystem
+	workspacePath, err := hubNativeProjectPath(project.Slug)
 	if err == nil {
 		t.Cleanup(func() { os.RemoveAll(workspacePath) })
 	}
 }
 
-// TestCreateAgent_HubNativeGrove_NoProviders_NoBroker tests that creating an agent
-// in a hub-native grove with no providers and no explicit broker returns an appropriate error.
+// TestCreateAgent_HubNativeProject_NoProviders_NoBroker tests that creating an agent
+// in a hub-native project with no providers and no explicit broker returns an appropriate error.
 func TestDeleteProject_HubNative_RemovesFilesystem(t *testing.T) {
 	srv, s := testServer(t)
 
-	// Create a hub-native grove via the API (initializes filesystem)
-	grove, workspacePath := createTestHubNativeProject(t, srv, "FS Delete Test")
+	// Create a hub-native project via the API (initializes filesystem)
+	project, workspacePath := createTestHubNativeProject(t, srv, "FS Delete Test")
 
 	// Verify filesystem exists before deletion
 	_, err := os.Stat(workspacePath)
 	require.NoError(t, err, "workspace should exist before deletion")
 
-	// Delete grove via API
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/groves/"+grove.ID, nil)
+	// Delete project via API
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Verify filesystem was removed
 	_, err = os.Stat(workspacePath)
 	assert.True(t, os.IsNotExist(err), "workspace should be deleted from filesystem")
 
-	// Verify grove deleted from database
+	// Verify project deleted from database
 	ctx := context.Background()
-	_, err = s.GetProject(ctx, grove.ID)
-	assert.ErrorIs(t, err, store.ErrNotFound, "grove should be deleted from database")
+	_, err = s.GetProject(ctx, project.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "project should be deleted from database")
 }
 
 func TestDeleteProject_GitBacked_NoFilesystemCleanup(t *testing.T) {
 	srv, s := testServer(t)
 
-	// Create a git-backed grove (no filesystem initialization)
-	grove := createTestGitProject(t, srv, "Git Delete Test", "github.com/test/git-delete-repo")
+	// Create a git-backed project (no filesystem initialization)
+	project := createTestGitProject(t, srv, "Git Delete Test", "github.com/test/git-delete-repo")
 
-	// Delete grove via API
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/groves/"+grove.ID, nil)
+	// Delete project via API
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
-	// Verify grove deleted from database
+	// Verify project deleted from database
 	ctx := context.Background()
-	_, err := s.GetProject(ctx, grove.ID)
-	assert.ErrorIs(t, err, store.ErrNotFound, "grove should be deleted from database")
+	_, err := s.GetProject(ctx, project.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "project should be deleted from database")
 }
 
 func TestDeleteProject_DeleteAgents_DispatchesToBroker(t *testing.T) {
@@ -573,34 +573,34 @@ func TestDeleteProject_DeleteAgents_DispatchesToBroker(t *testing.T) {
 	disp := &deleteDispatcher{}
 	srv.SetDispatcher(disp)
 
-	grove, _, _ := setupOnlineBrokerAgent(t, s, "grove-del")
+	project, _, _ := setupOnlineBrokerAgent(t, s, "project-del")
 
-	// Create a second agent in the same grove
+	// Create a second agent in the same project
 	agent2 := &store.Agent{
-		ID:              "agent-online-grove-del-2",
-		Slug:            "agent-online-grove-del-2-slug",
-		Name:            "Agent Online grove-del 2",
-		ProjectID:         grove.ID,
-		RuntimeBrokerID: "broker-online-grove-del",
+		ID:              "agent-online-project-del-2",
+		Slug:            "agent-online-project-del-2-slug",
+		Name:            "Agent Online project-del 2",
+		ProjectID:         project.ID,
+		RuntimeBrokerID: "broker-online-project-del",
 		Phase:           string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2))
 
-	// Delete grove — agents are always cascade-deleted
+	// Delete project — agents are always cascade-deleted
 	rec := doRequest(t, srv, http.MethodDelete,
-		"/api/v1/groves/"+grove.ID, nil)
+		"/api/v1/projects/"+project.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Verify dispatcher was called for both agents
 	assert.Equal(t, 2, disp.deleteCalls,
 		"DispatchAgentDelete should be called once per agent")
 
-	// Verify grove deleted from database
-	_, err := s.GetProject(ctx, grove.ID)
+	// Verify project deleted from database
+	_, err := s.GetProject(ctx, project.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 
 	// Verify agents cascade-deleted from database
-	_, err = s.GetAgent(ctx, "agent-online-grove-del")
+	_, err = s.GetAgent(ctx, "agent-online-project-del")
 	assert.ErrorIs(t, err, store.ErrNotFound)
 	_, err = s.GetAgent(ctx, agent2.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
@@ -612,37 +612,37 @@ func TestDeleteProject_AlwaysCascadeDeletesAgents(t *testing.T) {
 	disp := &deleteDispatcher{}
 	srv.SetDispatcher(disp)
 
-	grove, _, _ := setupOnlineBrokerAgent(t, s, "grove-nodelflag")
+	project, _, _ := setupOnlineBrokerAgent(t, s, "project-nodelflag")
 
-	// Delete grove without explicit deleteAgents param — agents should still be deleted
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/groves/"+grove.ID, nil)
+	// Delete project without explicit deleteAgents param — agents should still be deleted
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Dispatcher should have been called (cascade delete is always on)
 	assert.Equal(t, 1, disp.deleteCalls,
-		"DispatchAgentDelete should always be called when deleting a grove")
+		"DispatchAgentDelete should always be called when deleting a project")
 
 	// Project should be deleted from database
 	ctx := context.Background()
-	_, err := s.GetProject(ctx, grove.ID)
+	_, err := s.GetProject(ctx, project.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
-func TestCreateAgent_HubNativeGrove_NoProviders_NoBroker(t *testing.T) {
+func TestCreateAgent_HubNativeProject_NoProviders_NoBroker(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a hub-native grove with no providers
-	grove := &store.Project{
-		ID:   "grove-hub-noproviders",
+	// Create a hub-native project with no providers
+	project := &store.Project{
+		ID:   "project-hub-noproviders",
 		Slug: "hub-noproviders",
 		Name: "No Providers Project",
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	body := map[string]interface{}{
 		"name":    "orphan-agent",
-		"groveId": grove.ID,
+		"projectId": project.ID,
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
@@ -651,11 +651,11 @@ func TestCreateAgent_HubNativeGrove_NoProviders_NoBroker(t *testing.T) {
 		"Should fail when no providers exist and no broker is specified")
 }
 
-// TestAutoLinkProviders_HubNativeGrove_NoLocalPath verifies that autoLinkProviders
-// does NOT set LocalPath on the provider for hub-native groves. The hub's local
+// TestAutoLinkProviders_HubNativeProject_NoLocalPath verifies that autoLinkProviders
+// does NOT set LocalPath on the provider for hub-native projects. The hub's local
 // path is not valid for remote brokers — instead, projectSlug is sent so each
 // broker resolves the path on its own filesystem.
-func TestAutoLinkProviders_HubNativeGrove_NoLocalPath(t *testing.T) {
+func TestAutoLinkProviders_HubNativeProject_NoLocalPath(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -669,35 +669,35 @@ func TestAutoLinkProviders_HubNativeGrove_NoLocalPath(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	// Create a hub-native grove via the API — this triggers autoLinkProviders
+	// Create a hub-native project via the API — this triggers autoLinkProviders
 	body := CreateProjectRequest{
 		Name: "LocalPath Auto Project",
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body)
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var grove store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove))
-	assert.Empty(t, grove.GitRemote, "should be hub-native")
+	var project store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
+	assert.Empty(t, project.GitRemote, "should be hub-native")
 
 	// Verify the auto-linked provider does NOT have LocalPath set
-	provider, err := s.GetProjectProvider(ctx, grove.ID, broker.ID)
+	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	require.NoError(t, err, "Auto-provide broker should be linked as a provider")
 	assert.Equal(t, "auto-provide", provider.LinkedBy)
 	assert.Empty(t, provider.LocalPath,
-		"LocalPath should NOT be set for hub-native grove auto-linked provider")
+		"LocalPath should NOT be set for hub-native project auto-linked provider")
 
-	// Cleanup hub-native grove filesystem
-	workspacePath, err := hubNativeProjectPath(grove.Slug)
+	// Cleanup hub-native project filesystem
+	workspacePath, err := hubNativeProjectPath(project.Slug)
 	if err == nil {
 		t.Cleanup(func() { os.RemoveAll(workspacePath) })
 	}
 }
 
-// TestAutoLinkProviders_GitGrove_NoLocalPath verifies that autoLinkProviders
-// does NOT set LocalPath on the provider for git-backed groves.
-func TestAutoLinkProviders_GitGrove_NoLocalPath(t *testing.T) {
+// TestAutoLinkProviders_GitProject_NoLocalPath verifies that autoLinkProviders
+// does NOT set LocalPath on the provider for git-backed projects.
+func TestAutoLinkProviders_GitProject_NoLocalPath(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -711,40 +711,40 @@ func TestAutoLinkProviders_GitGrove_NoLocalPath(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	// Create a git-backed grove via the API — this also triggers autoLinkProviders
+	// Create a git-backed project via the API — this also triggers autoLinkProviders
 	body := CreateProjectRequest{
 		Name:      "LocalPath Git Project",
 		GitRemote: "github.com/test/localpath-git-repo",
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body)
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var grove store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove))
+	var project store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
 	// Verify the provider does NOT have LocalPath set
-	provider, err := s.GetProjectProvider(ctx, grove.ID, broker.ID)
+	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	require.NoError(t, err, "Auto-provide broker should be linked")
 	assert.Empty(t, provider.LocalPath,
-		"LocalPath should NOT be set for git-backed grove providers")
+		"LocalPath should NOT be set for git-backed project providers")
 }
 
 // TestDeleteProject_HubNative_DispatchesCleanupToBrokers verifies that deleting a
-// hub-native grove dispatches CleanupProject to each provider broker (except the
+// hub-native project dispatches CleanupProject to each provider broker (except the
 // embedded/co-located broker).
 func TestDeleteProject_HubNative_DispatchesCleanupToBrokers(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a hub-native grove
-	grove := &store.Project{
-		ID:   "grove-cleanup-dispatch",
+	// Create a hub-native project
+	project := &store.Project{
+		ID:   "project-cleanup-dispatch",
 		Slug: "cleanup-dispatch",
 		Name: "Cleanup Dispatch Project",
 		// No GitRemote — hub-native
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create two brokers
 	broker1 := &store.RuntimeBroker{
@@ -766,12 +766,12 @@ func TestDeleteProject_HubNative_DispatchesCleanupToBrokers(t *testing.T) {
 
 	// Link both as providers
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  grove.ID,
+		ProjectID:  project.ID,
 		BrokerID: broker1.ID,
 		LinkedBy: "test",
 	}))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  grove.ID,
+		ProjectID:  project.ID,
 		BrokerID: broker2.ID,
 		LinkedBy: "test",
 	}))
@@ -781,16 +781,16 @@ func TestDeleteProject_HubNative_DispatchesCleanupToBrokers(t *testing.T) {
 	disp := NewHTTPAgentDispatcherWithClient(s, mockClient, false, slog.Default())
 	srv.SetDispatcher(disp)
 
-	// Delete grove
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/groves/"+grove.ID, nil)
+	// Delete project
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Verify CleanupProject was called for both brokers
 	assert.Equal(t, 2, mockClient.cleanupCalls, "CleanupProject should be called for each provider broker")
 	assert.Contains(t, mockClient.cleanupSlugs, "cleanup-dispatch")
 
-	// Verify grove deleted from database
-	_, err := s.GetProject(ctx, grove.ID)
+	// Verify project deleted from database
+	_, err := s.GetProject(ctx, project.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
@@ -800,13 +800,13 @@ func TestDeleteProject_HubNative_SkipsEmbeddedBroker(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a hub-native grove
-	grove := &store.Project{
-		ID:   "grove-cleanup-embedded",
+	// Create a hub-native project
+	project := &store.Project{
+		ID:   "project-cleanup-embedded",
 		Slug: "cleanup-embedded",
 		Name: "Cleanup Embedded Project",
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create embedded and remote brokers
 	embeddedBroker := &store.RuntimeBroker{
@@ -828,12 +828,12 @@ func TestDeleteProject_HubNative_SkipsEmbeddedBroker(t *testing.T) {
 
 	// Link both as providers
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  grove.ID,
+		ProjectID:  project.ID,
 		BrokerID: embeddedBroker.ID,
 		LinkedBy: "test",
 	}))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  grove.ID,
+		ProjectID:  project.ID,
 		BrokerID: remoteBroker.ID,
 		LinkedBy: "test",
 	}))
@@ -846,8 +846,8 @@ func TestDeleteProject_HubNative_SkipsEmbeddedBroker(t *testing.T) {
 	disp := NewHTTPAgentDispatcherWithClient(s, mockClient, false, slog.Default())
 	srv.SetDispatcher(disp)
 
-	// Delete grove
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/groves/"+grove.ID, nil)
+	// Delete project
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Only the remote broker should receive CleanupProject, not the embedded one
@@ -856,19 +856,19 @@ func TestDeleteProject_HubNative_SkipsEmbeddedBroker(t *testing.T) {
 }
 
 // TestDeleteProject_GitBacked_NoCleanupDispatched verifies that deleting a git-backed
-// grove does NOT trigger broker cleanup (those directories are externally managed).
+// project does NOT trigger broker cleanup (those directories are externally managed).
 func TestDeleteProject_GitBacked_NoCleanupDispatched(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a git-backed grove
-	grove := &store.Project{
-		ID:        "grove-git-nocleanup",
+	// Create a git-backed project
+	project := &store.Project{
+		ID:        "project-git-nocleanup",
 		Slug:      "git-nocleanup",
 		Name:      "Git No Cleanup Project",
 		GitRemote: "github.com/test/nocleanup",
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create a broker and link as provider
 	broker := &store.RuntimeBroker{
@@ -880,7 +880,7 @@ func TestDeleteProject_GitBacked_NoCleanupDispatched(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  grove.ID,
+		ProjectID:  project.ID,
 		BrokerID: broker.ID,
 		LinkedBy: "test",
 	}))
@@ -890,18 +890,18 @@ func TestDeleteProject_GitBacked_NoCleanupDispatched(t *testing.T) {
 	disp := NewHTTPAgentDispatcherWithClient(s, mockClient, false, slog.Default())
 	srv.SetDispatcher(disp)
 
-	// Delete grove
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/groves/"+grove.ID, nil)
+	// Delete project
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
-	// CleanupProject should NOT be called for git-backed groves
-	assert.Equal(t, 0, mockClient.cleanupCalls, "CleanupProject should not be called for git-backed groves")
+	// CleanupProject should NOT be called for git-backed projects
+	assert.Equal(t, 0, mockClient.cleanupCalls, "CleanupProject should not be called for git-backed projects")
 }
 
-// TestResolveRuntimeBroker_HubNativeGrove_NoLocalPath verifies that when a broker
-// is auto-linked during agent creation for a hub-native grove, LocalPath is NOT
+// TestResolveRuntimeBroker_HubNativeProject_NoLocalPath verifies that when a broker
+// is auto-linked during agent creation for a hub-native project, LocalPath is NOT
 // set. Remote brokers resolve the path themselves via projectSlug.
-func TestResolveRuntimeBroker_HubNativeGrove_NoLocalPath(t *testing.T) {
+func TestResolveRuntimeBroker_HubNativeProject_NoLocalPath(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -914,18 +914,18 @@ func TestResolveRuntimeBroker_HubNativeGrove_NoLocalPath(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	// Create a hub-native grove with no providers
-	grove := &store.Project{
-		ID:   "grove-resolve-localpath",
+	// Create a hub-native project with no providers
+	project := &store.Project{
+		ID:   "project-resolve-localpath",
 		Slug: "resolve-localpath",
 		Name: "Resolve LocalPath Project",
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create agent with explicit broker — triggers resolveRuntimeBroker auto-link
 	agentBody := map[string]interface{}{
 		"name":            "resolve-localpath-agent",
-		"groveId":         grove.ID,
+		"projectId":         project.ID,
 		"runtimeBrokerId": broker.ID,
 	}
 
@@ -933,17 +933,17 @@ func TestResolveRuntimeBroker_HubNativeGrove_NoLocalPath(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
 	// Verify the auto-linked provider does NOT have LocalPath set
-	provider, err := s.GetProjectProvider(ctx, grove.ID, broker.ID)
+	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	require.NoError(t, err, "Broker should have been auto-linked")
 	assert.Equal(t, "agent-create", provider.LinkedBy)
 	assert.Empty(t, provider.LocalPath,
-		"LocalPath should NOT be set when auto-linking during agent creation for hub-native grove")
+		"LocalPath should NOT be set when auto-linking during agent creation for hub-native project")
 }
 
 // TestProjectRegisterPreservesProviderLocalPath verifies that re-registering a
-// grove from a local checkout does not overwrite an existing provider's empty
-// localPath. This prevents a hub-native git grove (where agents clone from a
-// URL) from being accidentally converted into a linked grove.
+// project from a local checkout does not overwrite an existing provider's empty
+// localPath. This prevents a hub-native git project (where agents clone from a
+// URL) from being accidentally converted into a linked project.
 func TestProjectRegisterPreservesProviderLocalPath(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -957,27 +957,27 @@ func TestProjectRegisterPreservesProviderLocalPath(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	// Step 1: Register grove (creates it) — this is the initial hub-native creation.
+	// Step 1: Register project (creates it) — this is the initial hub-native creation.
 	// The broker is linked WITH a localPath (simulating CLI-initiated creation).
 	body := map[string]interface{}{
-		"name":      "preserve-path-grove",
+		"name":      "preserve-path-project",
 		"gitRemote": "github.com/test/preserve-path",
 		"brokerId":  broker.ID,
 		"path":      "/original/path/.scion",
 	}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/register", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", body)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
 	var resp RegisterProjectResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	require.True(t, resp.Created, "grove should be newly created")
+	require.True(t, resp.Created, "project should be newly created")
 	projectID := resp.Project.ID
 
 	// Verify provider has localPath from initial registration
 	provider, err := s.GetProjectProvider(ctx, projectID, broker.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "/original/path/.scion", provider.LocalPath,
-		"newly created grove should have localPath from registration")
+		"newly created project should have localPath from registration")
 
 	// Now simulate converting to hub-native: clear localPath directly
 	// (as autoLinkProviders would do, or via admin action)
@@ -998,17 +998,17 @@ func TestProjectRegisterPreservesProviderLocalPath(t *testing.T) {
 	// Step 2: Re-register from local checkout (CLI hubsync). This should NOT
 	// overwrite the empty localPath with the new path.
 	body2 := map[string]interface{}{
-		"name":      "preserve-path-grove",
+		"name":      "preserve-path-project",
 		"gitRemote": "github.com/test/preserve-path",
 		"brokerId":  broker.ID,
 		"path":      "/new/local/checkout/.scion",
 	}
-	rec2 := doRequest(t, srv, http.MethodPost, "/api/v1/groves/register", body2)
+	rec2 := doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", body2)
 	require.Equal(t, http.StatusOK, rec2.Code, "body: %s", rec2.Body.String())
 
 	var resp2 RegisterProjectResponse
 	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&resp2))
-	assert.False(t, resp2.Created, "grove should already exist")
+	assert.False(t, resp2.Created, "project should already exist")
 
 	// Verify the provider's localPath was preserved (still empty)
 	provider, err = s.GetProjectProvider(ctx, projectID, broker.ID)
@@ -1017,8 +1017,8 @@ func TestProjectRegisterPreservesProviderLocalPath(t *testing.T) {
 		"re-registration should not overwrite existing provider's empty localPath")
 }
 
-// TestCreateProject_GitBacked_RandomID verifies that groves created with a git
-// remote (but no explicit ID) get random UUIDs, and that creating two groves
+// TestCreateProject_GitBacked_RandomID verifies that projects created with a git
+// remote (but no explicit ID) get random UUIDs, and that creating two projects
 // for the same repository produces different IDs with serial-numbered slugs.
 func TestCreateProject_GitBacked_RandomID(t *testing.T) {
 	srv, _ := testServer(t)
@@ -1026,56 +1026,56 @@ func TestCreateProject_GitBacked_RandomID(t *testing.T) {
 	sshURL := "git@github.com:acme/widgets.git"
 	httpsURL := "https://github.com/acme/widgets.git"
 
-	// Create first grove via SSH URL
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", CreateProjectRequest{
+	// Create first project via SSH URL
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
 		Name:      "Widgets",
 		GitRemote: sshURL,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var grove1 store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove1))
-	assert.NotEmpty(t, grove1.ID)
-	assert.Equal(t, "widgets", grove1.Slug)
+	var project1 store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project1))
+	assert.NotEmpty(t, project1.ID)
+	assert.Equal(t, "widgets", project1.Slug)
 
-	// Create second grove via HTTPS URL (same repo) — should create a NEW grove
-	rec = doRequest(t, srv, http.MethodPost, "/api/v1/groves", CreateProjectRequest{
+	// Create second project via HTTPS URL (same repo) — should create a NEW project
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
 		Name:      "Widgets",
 		GitRemote: httpsURL,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var grove2 store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove2))
-	assert.NotEmpty(t, grove2.ID)
-	assert.NotEqual(t, grove1.ID, grove2.ID, "two groves for same URL should have different IDs")
-	assert.Equal(t, "widgets-1", grove2.Slug, "second grove should get serial-numbered slug")
-	assert.Equal(t, "Widgets (1)", grove2.Name, "second grove should get serial display name")
+	var project2 store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project2))
+	assert.NotEmpty(t, project2.ID)
+	assert.NotEqual(t, project1.ID, project2.ID, "two projects for same URL should have different IDs")
+	assert.Equal(t, "widgets-1", project2.Slug, "second project should get serial-numbered slug")
+	assert.Equal(t, "Widgets (1)", project2.Name, "second project should get serial display name")
 }
 
-// TestCreateProject_NoGitRemote_RandomID verifies that groves without a git
+// TestCreateProject_NoGitRemote_RandomID verifies that projects without a git
 // remote get a random UUID.
 func TestCreateProject_NoGitRemote_RandomID(t *testing.T) {
 	srv, _ := testServer(t)
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", CreateProjectRequest{
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
 		Name: "No Remote Project",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var grove store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove))
-	assert.NotEmpty(t, grove.ID)
+	var project store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
+	assert.NotEmpty(t, project.ID)
 }
 
 // TestRegisterProject_GitBacked_RandomID verifies that the register endpoint
-// assigns a random UUID (not deterministic) to groves created from a git remote.
+// assigns a random UUID (not deterministic) to projects created from a git remote.
 func TestRegisterProject_GitBacked_RandomID(t *testing.T) {
 	srv, _ := testServer(t)
 
 	gitRemote := "git@github.com:acme/gadgets.git"
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/register", RegisterProjectRequest{
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name:      "Gadgets",
 		GitRemote: gitRemote,
 	})
@@ -1088,44 +1088,44 @@ func TestRegisterProject_GitBacked_RandomID(t *testing.T) {
 
 	// ID should NOT be the deterministic hash — it should be a random UUID
 	deterministicID := util.HashProjectID(util.NormalizeGitRemote(gitRemote))
-	assert.NotEqual(t, deterministicID, resp.Project.ID, "registered grove ID should be random, not deterministic")
+	assert.NotEqual(t, deterministicID, resp.Project.ID, "registered project ID should be random, not deterministic")
 }
 
 // TestDeleteProject_CascadesEnvVarsSecretsHarnessConfigs verifies that deleting a
-// grove removes all grove-scoped env vars, secrets, and harness configs.
+// project removes all project-scoped env vars, secrets, and harness configs.
 func TestDeleteProject_CascadesEnvVarsSecretsHarnessConfigs(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := createTestGitProject(t, srv, "Cascade Resources Test", "github.com/test/cascade-resources")
+	project := createTestGitProject(t, srv, "Cascade Resources Test", "github.com/test/cascade-resources")
 
-	// Create grove-scoped env vars
+	// Create project-scoped env vars
 	require.NoError(t, s.CreateEnvVar(ctx, &store.EnvVar{
 		ID: api.NewUUID(), Key: "LOG_LEVEL", Value: "debug",
-		Scope: store.ScopeProject, ScopeID: grove.ID,
+		Scope: store.ScopeProject, ScopeID: project.ID,
 	}))
 	require.NoError(t, s.CreateEnvVar(ctx, &store.EnvVar{
 		ID: api.NewUUID(), Key: "REGION", Value: "us-east-1",
-		Scope: store.ScopeProject, ScopeID: grove.ID,
+		Scope: store.ScopeProject, ScopeID: project.ID,
 	}))
 
-	// Create grove-scoped secrets
+	// Create project-scoped secrets
 	require.NoError(t, s.CreateSecret(ctx, &store.Secret{
 		ID: api.NewUUID(), Key: "API_KEY", EncryptedValue: "enc-val-1",
-		Scope: store.ScopeProject, ScopeID: grove.ID, Version: 1,
+		Scope: store.ScopeProject, ScopeID: project.ID, Version: 1,
 	}))
 
-	// Create grove-scoped harness config
+	// Create project-scoped harness config
 	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
-		ID: api.NewUUID(), Name: "grove-hc", Slug: "grove-hc",
-		Harness: "claude", Scope: store.ScopeProject, ScopeID: grove.ID,
+		ID: api.NewUUID(), Name: "project-hc", Slug: "project-hc",
+		Harness: "claude", Scope: store.ScopeProject, ScopeID: project.ID,
 		Status: store.HarnessConfigStatusActive, Visibility: store.VisibilityPrivate,
 	}))
 
-	// Create grove-scoped templates
+	// Create project-scoped templates
 	require.NoError(t, s.CreateTemplate(ctx, &store.Template{
-		ID: api.NewUUID(), Name: "grove-tmpl", Slug: "grove-tmpl",
-		Harness: "claude", Scope: store.ScopeProject, ScopeID: grove.ID,
+		ID: api.NewUUID(), Name: "project-tmpl", Slug: "project-tmpl",
+		Harness: "claude", Scope: store.ScopeProject, ScopeID: project.ID,
 		Status: store.TemplateStatusActive, Visibility: store.VisibilityPrivate,
 	}))
 
@@ -1137,37 +1137,37 @@ func TestDeleteProject_CascadesEnvVarsSecretsHarnessConfigs(t *testing.T) {
 	}))
 
 	// Verify resources exist before deletion
-	envVars, err := s.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeProject, ScopeID: grove.ID})
+	envVars, err := s.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeProject, ScopeID: project.ID})
 	require.NoError(t, err)
 	assert.Len(t, envVars, 2)
 
-	secrets, err := s.ListSecrets(ctx, store.SecretFilter{Scope: store.ScopeProject, ScopeID: grove.ID})
+	secrets, err := s.ListSecrets(ctx, store.SecretFilter{Scope: store.ScopeProject, ScopeID: project.ID})
 	require.NoError(t, err)
 	assert.Len(t, secrets, 1)
 
-	// Delete grove via API
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/groves/"+grove.ID, nil)
+	// Delete project via API
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
-	// Verify grove-scoped env vars were deleted
-	envVars, err = s.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeProject, ScopeID: grove.ID})
+	// Verify project-scoped env vars were deleted
+	envVars, err = s.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeProject, ScopeID: project.ID})
 	require.NoError(t, err)
-	assert.Empty(t, envVars, "grove env vars should be cascade deleted")
+	assert.Empty(t, envVars, "project env vars should be cascade deleted")
 
-	// Verify grove-scoped secrets were deleted
-	secrets, err = s.ListSecrets(ctx, store.SecretFilter{Scope: store.ScopeProject, ScopeID: grove.ID})
+	// Verify project-scoped secrets were deleted
+	secrets, err = s.ListSecrets(ctx, store.SecretFilter{Scope: store.ScopeProject, ScopeID: project.ID})
 	require.NoError(t, err)
-	assert.Empty(t, secrets, "grove secrets should be cascade deleted")
+	assert.Empty(t, secrets, "project secrets should be cascade deleted")
 
-	// Verify grove-scoped harness configs were deleted
-	hcResult, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{Scope: store.ScopeProject, ScopeID: grove.ID}, store.ListOptions{})
+	// Verify project-scoped harness configs were deleted
+	hcResult, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{Scope: store.ScopeProject, ScopeID: project.ID}, store.ListOptions{})
 	require.NoError(t, err)
-	assert.Empty(t, hcResult.Items, "grove harness configs should be cascade deleted")
+	assert.Empty(t, hcResult.Items, "project harness configs should be cascade deleted")
 
-	// Verify grove-scoped templates were deleted
-	tmplResult, err := s.ListTemplates(ctx, store.TemplateFilter{Scope: store.ScopeProject, ScopeID: grove.ID}, store.ListOptions{})
+	// Verify project-scoped templates were deleted
+	tmplResult, err := s.ListTemplates(ctx, store.TemplateFilter{Scope: store.ScopeProject, ScopeID: project.ID}, store.ListOptions{})
 	require.NoError(t, err)
-	assert.Empty(t, tmplResult.Items, "grove templates should be cascade deleted")
+	assert.Empty(t, tmplResult.Items, "project templates should be cascade deleted")
 
 	// Verify hub-scoped env var was NOT deleted
 	hubVars, err := s.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeHub, ScopeID: "test-hub-id"})
@@ -1175,18 +1175,18 @@ func TestDeleteProject_CascadesEnvVarsSecretsHarnessConfigs(t *testing.T) {
 	assert.Len(t, hubVars, 1, "hub-scoped env var should not be affected")
 }
 
-// TestDeleteProject_CleansUpGroveConfigsDir verifies that deleting a grove
+// TestDeleteProject_CleansUpProjectConfigsDir verifies that deleting a project
 // removes the ~/.scion/project-configs/<slug>__<short-uuid>/ directory.
-func TestDeleteProject_CleansUpGroveConfigsDir(t *testing.T) {
+func TestDeleteProject_CleansUpProjectConfigsDir(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := createTestGitProject(t, srv, "Config Cleanup Test", "github.com/test/config-cleanup-repo")
+	project := createTestGitProject(t, srv, "Config Cleanup Test", "github.com/test/config-cleanup-repo")
 
 	// Create the project-configs directory that would exist in workstation mode
 	marker := &config.ProjectMarker{
-		ProjectID:   grove.ID,
-		ProjectSlug: grove.Slug,
+		ProjectID:   project.ID,
+		ProjectSlug: project.Slug,
 	}
 	extPath, err := marker.ExternalProjectPath()
 	require.NoError(t, err)
@@ -1197,33 +1197,33 @@ func TestDeleteProject_CleansUpGroveConfigsDir(t *testing.T) {
 	agentsDir := filepath.Join(filepath.Dir(extPath), "agents", "test-agent", "home")
 	require.NoError(t, os.MkdirAll(agentsDir, 0755))
 
-	groveConfigDir := filepath.Dir(extPath)
-	t.Cleanup(func() { os.RemoveAll(groveConfigDir) })
+	projectConfigDir := filepath.Dir(extPath)
+	t.Cleanup(func() { os.RemoveAll(projectConfigDir) })
 
 	// Verify directory exists before deletion
-	_, err = os.Stat(groveConfigDir)
+	_, err = os.Stat(projectConfigDir)
 	require.NoError(t, err, "project-configs dir should exist before deletion")
 
-	// Delete grove via API
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/groves/"+grove.ID, nil)
+	// Delete project via API
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Verify project-configs directory was removed
-	_, err = os.Stat(groveConfigDir)
-	assert.True(t, os.IsNotExist(err), "project-configs dir should be removed after grove deletion")
+	_, err = os.Stat(projectConfigDir)
+	assert.True(t, os.IsNotExist(err), "project-configs dir should be removed after project deletion")
 
-	// Verify grove deleted from database
-	_, err = s.GetProject(ctx, grove.ID)
+	// Verify project deleted from database
+	_, err = s.GetProject(ctx, project.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
-// TestProjectRegister_CreatesMembershipGroup verifies that registering a new grove
+// TestProjectRegister_CreatesMembershipGroup verifies that registering a new project
 // automatically creates a membership group with the caller as owner.
 func TestProjectRegister_CreatesMembershipGroup(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/register", RegisterProjectRequest{
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name:      "Membership Test",
 		GitRemote: "https://github.com/test/membership-test.git",
 	})
@@ -1234,7 +1234,7 @@ func TestProjectRegister_CreatesMembershipGroup(t *testing.T) {
 	require.True(t, resp.Created)
 
 	// Members group should exist
-	membersSlug := "grove:" + resp.Project.Slug + ":members"
+	membersSlug := "project:" + resp.Project.Slug + ":members"
 	group, err := s.GetGroupBySlug(ctx, membersSlug)
 	require.NoError(t, err, "members group should have been created")
 	assert.Equal(t, resp.Project.ID, group.ProjectID)
@@ -1247,44 +1247,44 @@ func TestProjectRegister_CreatesMembershipGroup(t *testing.T) {
 	assert.Equal(t, store.GroupMemberRoleOwner, members[0].Role)
 }
 
-// TestProjectRegister_ExistingGrove_CreatesMembershipGroup verifies that
-// registering against an existing grove (linking) still creates the membership
+// TestProjectRegister_ExistingProject_CreatesMembershipGroup verifies that
+// registering against an existing project (linking) still creates the membership
 // group and adds the linking user as owner.
-func TestProjectRegister_ExistingGrove_CreatesMembershipGroup(t *testing.T) {
+func TestProjectRegister_ExistingProject_CreatesMembershipGroup(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a grove directly in the store (simulating one created before
+	// Create a project directly in the store (simulating one created before
 	// membership group support was added — no group exists yet).
-	grove := &store.Project{
+	project := &store.Project{
 		ID:        api.NewUUID(),
 		Name:      "Pre-Existing Project",
-		Slug:      "pre-existing-grove",
+		Slug:      "pre-existing-project",
 		GitRemote: "github.com/test/pre-existing",
 		CreatedBy: "original-creator-id",
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Verify no members group exists yet
-	_, err := s.GetGroupBySlug(ctx, "grove:"+grove.Slug+":members")
+	_, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
 	require.ErrorIs(t, err, store.ErrNotFound, "members group should not exist yet")
 
 	// Register (link) via the API — this should backfill the group
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/register", RegisterProjectRequest{
-		ID:   grove.ID,
-		Name: grove.Name,
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		ID:   project.ID,
+		Name: project.Name,
 	})
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
 	var resp RegisterProjectResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	assert.False(t, resp.Created, "should find existing grove")
+	assert.False(t, resp.Created, "should find existing project")
 
 	// Members group should now exist
-	membersSlug := "grove:" + grove.Slug + ":members"
+	membersSlug := "project:" + project.Slug + ":members"
 	group, err := s.GetGroupBySlug(ctx, membersSlug)
 	require.NoError(t, err, "members group should have been created on link")
-	assert.Equal(t, grove.ID, group.ProjectID)
+	assert.Equal(t, project.ID, group.ProjectID)
 
 	// Both the original creator and the linking user should be owners
 	members, err := s.GetGroupMembers(ctx, group.ID)
@@ -1330,19 +1330,19 @@ func TestCreateProject_SharedWorkspace_SetsLabelAndInitFilesystem(t *testing.T) 
 		},
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body)
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var grove store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove))
+	var project store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
-	assert.Equal(t, "github.com/test/shared-ws", grove.GitRemote)
-	assert.Equal(t, store.WorkspaceModeShared, grove.Labels[store.LabelWorkspaceMode],
+	assert.Equal(t, "github.com/test/shared-ws", project.GitRemote)
+	assert.Equal(t, store.WorkspaceModeShared, project.Labels[store.LabelWorkspaceMode],
 		"shared workspace label should be set")
-	assert.True(t, grove.IsSharedWorkspace(), "grove should report as shared workspace")
+	assert.True(t, project.IsSharedWorkspace(), "project should report as shared workspace")
 
 	// Verify workspace was cloned (it's a git repo)
-	workspacePath, err := hubNativeProjectPath(grove.Slug)
+	workspacePath, err := hubNativeProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { os.RemoveAll(workspacePath) })
 
@@ -1351,7 +1351,7 @@ func TestCreateProject_SharedWorkspace_SetsLabelAndInitFilesystem(t *testing.T) 
 	// Verify .scion directory was seeded
 	scionDir := filepath.Join(workspacePath, ".scion")
 	_, err = os.Stat(scionDir)
-	assert.NoError(t, err, ".scion directory should exist for shared-workspace grove")
+	assert.NoError(t, err, ".scion directory should exist for shared-workspace project")
 }
 
 func TestCreateProject_PerAgentGit_NoWorkspaceLabel(t *testing.T) {
@@ -1362,22 +1362,22 @@ func TestCreateProject_PerAgentGit_NoWorkspaceLabel(t *testing.T) {
 		GitRemote: "github.com/test/per-agent",
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body)
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var grove store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove))
+	var project store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
-	assert.Empty(t, grove.Labels[store.LabelWorkspaceMode],
-		"per-agent git grove should not have workspace mode label")
-	assert.False(t, grove.IsSharedWorkspace())
+	assert.Empty(t, project.Labels[store.LabelWorkspaceMode],
+		"per-agent git project should not have workspace mode label")
+	assert.False(t, project.IsSharedWorkspace())
 }
 
 func TestPopulateAgentConfig_SharedWorkspace_SetsWorkspaceNotClone(t *testing.T) {
 	srv, _ := testServer(t)
 
-	grove := &store.Project{
-		ID:        "grove-shared-ws",
+	project := &store.Project{
+		ID:        "project-shared-ws",
 		Name:      "Shared WS",
 		Slug:      "shared-ws",
 		GitRemote: "github.com/test/shared",
@@ -1391,22 +1391,22 @@ func TestPopulateAgentConfig_SharedWorkspace_SetsWorkspaceNotClone(t *testing.T)
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, grove, nil)
+	srv.populateAgentConfig(agent, project, nil)
 
 	expectedPath, err := hubNativeProjectPath("shared-ws")
 	require.NoError(t, err)
 	assert.Equal(t, expectedPath, agent.AppliedConfig.Workspace,
-		"Workspace should be set for shared-workspace git groves")
+		"Workspace should be set for shared-workspace git projects")
 	assert.Nil(t, agent.AppliedConfig.GitClone,
-		"GitClone should NOT be set for shared-workspace git groves")
+		"GitClone should NOT be set for shared-workspace git projects")
 }
 
 func TestPopulateAgentConfig_SharedWorkspace_DefaultsBranch(t *testing.T) {
 	srv, _ := testServer(t)
 
-	// Shared-workspace grove with explicit default branch label
-	grove := &store.Project{
-		ID:        "grove-shared-branch",
+	// Shared-workspace project with explicit default branch label
+	project := &store.Project{
+		ID:        "project-shared-branch",
 		Name:      "Shared Branch",
 		Slug:      "shared-branch",
 		GitRemote: "github.com/test/shared-branch",
@@ -1421,10 +1421,10 @@ func TestPopulateAgentConfig_SharedWorkspace_DefaultsBranch(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, grove, nil)
+	srv.populateAgentConfig(agent, project, nil)
 
 	assert.Equal(t, "develop", agent.AppliedConfig.Branch,
-		"Branch should default to grove's default-branch label for shared workspace")
+		"Branch should default to project's default-branch label for shared workspace")
 
 	// When branch is already set, it should not be overridden
 	agent2 := &store.Agent{
@@ -1432,14 +1432,14 @@ func TestPopulateAgentConfig_SharedWorkspace_DefaultsBranch(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{Branch: "custom-branch"},
 	}
 
-	srv.populateAgentConfig(agent2, grove, nil)
+	srv.populateAgentConfig(agent2, project, nil)
 
 	assert.Equal(t, "custom-branch", agent2.AppliedConfig.Branch,
 		"Explicit branch should not be overridden by shared workspace default")
 
 	// Without default-branch label, should default to "main"
-	groveNoLabel := &store.Project{
-		ID:        "grove-shared-nolabel",
+	projectNoLabel := &store.Project{
+		ID:        "project-shared-nolabel",
 		Name:      "No Label",
 		Slug:      "shared-nolabel",
 		GitRemote: "github.com/test/nolabel",
@@ -1453,13 +1453,13 @@ func TestPopulateAgentConfig_SharedWorkspace_DefaultsBranch(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent3, groveNoLabel, nil)
+	srv.populateAgentConfig(agent3, projectNoLabel, nil)
 
 	assert.Equal(t, "main", agent3.AppliedConfig.Branch,
 		"Branch should default to 'main' when no default-branch label is set")
 }
 
-func TestCloneSharedWorkspaceGrove_Success(t *testing.T) {
+func TestCloneSharedWorkspaceProject_Success(t *testing.T) {
 	srv, _ := testServer(t)
 
 	// Create a local git repo to serve as the "remote"
@@ -1475,8 +1475,8 @@ func TestCloneSharedWorkspaceGrove_Success(t *testing.T) {
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
 
-	grove := &store.Project{
-		ID:        "grove-clone-test",
+	project := &store.Project{
+		ID:        "project-clone-test",
 		Name:      "Clone Test",
 		Slug:      "clone-test-" + api.NewUUID()[:8],
 		GitRemote: "local/test/repo",
@@ -1487,11 +1487,11 @@ func TestCloneSharedWorkspaceGrove_Success(t *testing.T) {
 		},
 	}
 
-	err := srv.cloneSharedWorkspaceProject(context.Background(), grove)
+	err := srv.cloneSharedWorkspaceProject(context.Background(), project)
 	require.NoError(t, err)
 
 	// Verify the workspace was created with a git repo
-	workspacePath, err := hubNativeProjectPath(grove.Slug)
+	workspacePath, err := hubNativeProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { os.RemoveAll(workspacePath) })
 
@@ -1509,11 +1509,11 @@ func TestCloneSharedWorkspaceGrove_Success(t *testing.T) {
 	assert.Equal(t, "Scion", strings.TrimSpace(string(output)))
 }
 
-func TestCloneSharedWorkspaceGrove_Failure_CleansUp(t *testing.T) {
+func TestCloneSharedWorkspaceProject_Failure_CleansUp(t *testing.T) {
 	srv, _ := testServer(t)
 
-	grove := &store.Project{
-		ID:        "grove-clone-fail",
+	project := &store.Project{
+		ID:        "project-clone-fail",
 		Name:      "Clone Fail",
 		Slug:      "clone-fail-" + api.NewUUID()[:8],
 		GitRemote: "github.com/nonexistent/repo",
@@ -1522,12 +1522,12 @@ func TestCloneSharedWorkspaceGrove_Failure_CleansUp(t *testing.T) {
 		},
 	}
 
-	err := srv.cloneSharedWorkspaceProject(context.Background(), grove)
+	err := srv.cloneSharedWorkspaceProject(context.Background(), project)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "shared workspace clone failed")
 
 	// Verify the workspace directory was cleaned up
-	workspacePath, pathErr := hubNativeProjectPath(grove.Slug)
+	workspacePath, pathErr := hubNativeProjectPath(project.Slug)
 	require.NoError(t, pathErr)
 	_, statErr := os.Stat(workspacePath)
 	assert.True(t, os.IsNotExist(statErr), "workspace directory should be cleaned up on clone failure")
@@ -1542,28 +1542,28 @@ func TestCreateProject_SharedWorkspace_CloneFailure_RollsBackProject(t *testing.
 		WorkspaceMode: "shared",
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body)
 	// Clone failure returns 422 for classified errors (auth, not-found) or 500 for generic errors
 	assert.True(t, rec.Code == http.StatusInternalServerError || rec.Code == http.StatusUnprocessableEntity,
-		"shared workspace grove creation should fail when clone fails (got %d): %s", rec.Code, rec.Body.String())
+		"shared workspace project creation should fail when clone fails (got %d): %s", rec.Code, rec.Body.String())
 
-	// Verify no grove record was left behind
+	// Verify no project record was left behind
 	result, err := st.ListProjects(context.Background(), store.ProjectFilter{
 		Name: "Clone Fail Project",
 	}, store.ListOptions{})
 	require.NoError(t, err)
-	assert.Empty(t, result.Items, "grove record should be rolled back on clone failure")
+	assert.Empty(t, result.Items, "project record should be rolled back on clone failure")
 }
 
 func TestResolveCloneToken_NoCredentials(t *testing.T) {
 	srv, _ := testServer(t)
 
-	grove := &store.Project{
-		ID:        "grove-no-creds",
+	project := &store.Project{
+		ID:        "project-no-creds",
 		GitRemote: "github.com/test/repo",
 	}
 
-	token := srv.resolveCloneToken(context.Background(), grove)
+	token := srv.resolveCloneToken(context.Background(), project)
 	assert.Empty(t, token, "should return empty when no credentials available")
 }
 
@@ -1584,28 +1584,28 @@ func TestResolveCloneToken_FallsBackToCreatorUserToken(t *testing.T) {
 	backend := secret.NewLocalBackend(st, "test-hub-id")
 	srv.SetSecretBackend(backend)
 
-	grove := &store.Project{
-		ID:        "grove-bootstrap",
+	project := &store.Project{
+		ID:        "project-bootstrap",
 		GitRemote: "github.com/test/private-repo",
 		CreatedBy: "creator-user-1",
 	}
 
-	token := srv.resolveCloneToken(ctx, grove)
+	token := srv.resolveCloneToken(ctx, project)
 	assert.Equal(t, "ghp_user_token_123", token, "should fall back to creator's user-scoped GITHUB_TOKEN")
 }
 
-func TestResolveCloneToken_PrefersGroveTokenOverUserToken(t *testing.T) {
+func TestResolveCloneToken_PrefersProjectTokenOverUserToken(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
 	require.NoError(t, st.CreateSecret(ctx, &store.Secret{
-		ID:             "sec-grove-gh",
+		ID:             "sec-project-gh",
 		Key:            "GITHUB_TOKEN",
-		EncryptedValue: "ghp_grove_token",
+		EncryptedValue: "ghp_project_token",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "GITHUB_TOKEN",
 		Scope:          store.ScopeProject,
-		ScopeID:        "grove-with-both",
+		ScopeID:        "project-with-both",
 	}))
 	require.NoError(t, st.CreateSecret(ctx, &store.Secret{
 		ID:             "sec-user-gh-2",
@@ -1620,14 +1620,14 @@ func TestResolveCloneToken_PrefersGroveTokenOverUserToken(t *testing.T) {
 	backend := secret.NewLocalBackend(st, "test-hub-id")
 	srv.SetSecretBackend(backend)
 
-	grove := &store.Project{
-		ID:        "grove-with-both",
+	project := &store.Project{
+		ID:        "project-with-both",
 		GitRemote: "github.com/test/repo",
 		CreatedBy: "creator-user-2",
 	}
 
-	token := srv.resolveCloneToken(ctx, grove)
-	assert.Equal(t, "ghp_grove_token", token, "should prefer grove-scoped token over user-scoped token")
+	token := srv.resolveCloneToken(ctx, project)
+	assert.Equal(t, "ghp_project_token", token, "should prefer project-scoped token over user-scoped token")
 }
 
 func TestCreateProject_AutoAssociatesGitHubInstallation(t *testing.T) {
@@ -1645,7 +1645,7 @@ func TestCreateProject_AutoAssociatesGitHubInstallation(t *testing.T) {
 	}
 	require.NoError(t, st.CreateGitHubInstallation(ctx, inst))
 
-	// Create a grove whose git remote matches the installation's repo.
+	// Create a project whose git remote matches the installation's repo.
 	// Use a local git repo as clone source so the clone actually succeeds.
 	sourceDir := t.TempDir()
 	for _, args := range [][]string{
@@ -1669,22 +1669,22 @@ func TestCreateProject_AutoAssociatesGitHubInstallation(t *testing.T) {
 		},
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", body)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body)
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var grove store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove))
+	var project store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
 	// Clean up the cloned workspace
-	workspacePath, err := hubNativeProjectPath(grove.Slug)
+	workspacePath, err := hubNativeProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { os.RemoveAll(workspacePath) })
 
-	// Verify the grove was auto-associated with the installation
-	updated, err := st.GetProject(ctx, grove.ID)
+	// Verify the project was auto-associated with the installation
+	updated, err := st.GetProject(ctx, project.ID)
 	require.NoError(t, err)
 	require.NotNil(t, updated.GitHubInstallationID,
-		"grove should be auto-associated with GitHub App installation")
+		"project should be auto-associated with GitHub App installation")
 	assert.Equal(t, int64(77777), *updated.GitHubInstallationID)
 }
 
@@ -1703,18 +1703,18 @@ func TestAutoAssociateGitHubInstallation_NoMatch(t *testing.T) {
 	}
 	require.NoError(t, st.CreateGitHubInstallation(ctx, inst))
 
-	grove := &store.Project{
-		ID:        "grove-no-match",
+	project := &store.Project{
+		ID:        "project-no-match",
 		Name:      "No Match",
 		Slug:      "no-match",
 		GitRemote: "github.com/myorg/myrepo",
 	}
-	require.NoError(t, st.CreateProject(ctx, grove))
+	require.NoError(t, st.CreateProject(ctx, project))
 
-	srv.autoAssociateGitHubInstallation(ctx, grove)
+	srv.autoAssociateGitHubInstallation(ctx, project)
 
-	assert.Nil(t, grove.GitHubInstallationID,
-		"grove should not be associated when no installation matches")
+	assert.Nil(t, project.GitHubInstallationID,
+		"project should not be associated when no installation matches")
 }
 
 func TestAutoAssociateGitHubInstallation_SkipsSuspended(t *testing.T) {
@@ -1732,97 +1732,97 @@ func TestAutoAssociateGitHubInstallation_SkipsSuspended(t *testing.T) {
 	}
 	require.NoError(t, st.CreateGitHubInstallation(ctx, inst))
 
-	grove := &store.Project{
-		ID:        "grove-suspended",
+	project := &store.Project{
+		ID:        "project-suspended",
 		Name:      "Suspended",
 		Slug:      "suspended",
 		GitRemote: "github.com/myorg/myrepo",
 	}
-	require.NoError(t, st.CreateProject(ctx, grove))
+	require.NoError(t, st.CreateProject(ctx, project))
 
-	srv.autoAssociateGitHubInstallation(ctx, grove)
+	srv.autoAssociateGitHubInstallation(ctx, project)
 
-	assert.Nil(t, grove.GitHubInstallationID,
-		"grove should not be associated with a suspended installation")
+	assert.Nil(t, project.GitHubInstallationID,
+		"project should not be associated with a suspended installation")
 }
 
 func TestCreateProject_DuplicateGitRemote_SerialSlug(t *testing.T) {
 	srv, _ := testServer(t)
 
-	// Create the first grove for a git remote.
+	// Create the first project for a git remote.
 	body1 := CreateProjectRequest{
 		Name:      "widgets",
 		GitRemote: "github.com/acme/widgets",
 	}
-	rec1 := doRequest(t, srv, http.MethodPost, "/api/v1/groves", body1)
+	rec1 := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body1)
 	require.Equal(t, http.StatusCreated, rec1.Code, "body: %s", rec1.Body.String())
 
-	var grove1 store.Project
-	require.NoError(t, json.NewDecoder(rec1.Body).Decode(&grove1))
-	assert.Equal(t, "widgets", grove1.Slug)
+	var project1 store.Project
+	require.NoError(t, json.NewDecoder(rec1.Body).Decode(&project1))
+	assert.Equal(t, "widgets", project1.Slug)
 
-	// Create a second grove for the same git remote.
+	// Create a second project for the same git remote.
 	body2 := CreateProjectRequest{
 		Name:      "widgets",
 		GitRemote: "github.com/acme/widgets",
 	}
-	rec2 := doRequest(t, srv, http.MethodPost, "/api/v1/groves", body2)
+	rec2 := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body2)
 	require.Equal(t, http.StatusCreated, rec2.Code, "body: %s", rec2.Body.String())
 
-	var grove2 store.Project
-	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&grove2))
-	assert.Equal(t, "widgets-1", grove2.Slug, "second grove should get serial slug")
-	assert.Equal(t, "widgets (1)", grove2.Name, "display name should have serial qualifier")
-	assert.NotEqual(t, grove1.ID, grove2.ID, "groves should have different IDs")
-	assert.Equal(t, grove1.GitRemote, grove2.GitRemote, "groves should share the same git remote")
+	var project2 store.Project
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&project2))
+	assert.Equal(t, "widgets-1", project2.Slug, "second project should get serial slug")
+	assert.Equal(t, "widgets (1)", project2.Name, "display name should have serial qualifier")
+	assert.NotEqual(t, project1.ID, project2.ID, "projects should have different IDs")
+	assert.Equal(t, project1.GitRemote, project2.GitRemote, "projects should share the same git remote")
 
-	// Create a third grove.
+	// Create a third project.
 	body3 := CreateProjectRequest{
 		Name:      "widgets",
 		GitRemote: "github.com/acme/widgets",
 	}
-	rec3 := doRequest(t, srv, http.MethodPost, "/api/v1/groves", body3)
+	rec3 := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body3)
 	require.Equal(t, http.StatusCreated, rec3.Code, "body: %s", rec3.Body.String())
 
-	var grove3 store.Project
-	require.NoError(t, json.NewDecoder(rec3.Body).Decode(&grove3))
-	assert.Equal(t, "widgets-2", grove3.Slug, "third grove should get next serial slug")
-	assert.Equal(t, "widgets (2)", grove3.Name)
+	var project3 store.Project
+	require.NoError(t, json.NewDecoder(rec3.Body).Decode(&project3))
+	assert.Equal(t, "widgets-2", project3.Slug, "third project should get next serial slug")
+	assert.Equal(t, "widgets (2)", project3.Name)
 }
 
 func TestCreateProject_ExplicitSlug_Unique(t *testing.T) {
 	srv, _ := testServer(t)
 
-	// Create first grove with an explicit slug.
+	// Create first project with an explicit slug.
 	body1 := CreateProjectRequest{
 		Name: "My Project",
 		Slug: "my-project",
 	}
-	rec1 := doRequest(t, srv, http.MethodPost, "/api/v1/groves", body1)
+	rec1 := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body1)
 	require.Equal(t, http.StatusCreated, rec1.Code, "body: %s", rec1.Body.String())
 
-	var grove1 store.Project
-	require.NoError(t, json.NewDecoder(rec1.Body).Decode(&grove1))
-	assert.Equal(t, "my-project", grove1.Slug)
+	var project1 store.Project
+	require.NoError(t, json.NewDecoder(rec1.Body).Decode(&project1))
+	assert.Equal(t, "my-project", project1.Slug)
 
-	// Create second grove with the same explicit slug — should get serial suffix.
+	// Create second project with the same explicit slug — should get serial suffix.
 	body2 := CreateProjectRequest{
 		Name: "My Project",
 		Slug: "my-project",
 	}
-	rec2 := doRequest(t, srv, http.MethodPost, "/api/v1/groves", body2)
+	rec2 := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body2)
 	require.Equal(t, http.StatusCreated, rec2.Code, "body: %s", rec2.Body.String())
 
-	var grove2 store.Project
-	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&grove2))
-	assert.Equal(t, "my-project-1", grove2.Slug, "server should assign serial slug when explicit slug is taken")
+	var project2 store.Project
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&project2))
+	assert.Equal(t, "my-project-1", project2.Slug, "server should assign serial slug when explicit slug is taken")
 }
 
 func TestCreateProject_ListByGitRemote_ReturnsMultiple(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Pre-create two groves for the same git remote.
+	// Pre-create two projects for the same git remote.
 	for _, g := range []*store.Project{
 		{ID: "g1", Name: "widgets", Slug: "widgets", GitRemote: "github.com/acme/widgets"},
 		{ID: "g2", Name: "widgets (1)", Slug: "widgets-1", GitRemote: "github.com/acme/widgets"},
@@ -1830,13 +1830,13 @@ func TestCreateProject_ListByGitRemote_ReturnsMultiple(t *testing.T) {
 		require.NoError(t, s.CreateProject(ctx, g))
 	}
 
-	// List groves by git remote should return both.
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/groves?gitRemote=github.com/acme/widgets", nil)
+	// List projects by git remote should return both.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects?gitRemote=github.com/acme/widgets", nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
 	var resp struct {
-		Projects []store.Project `json:"groves"`
+		Projects []store.Project `json:"projects"`
 	}
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	assert.Len(t, resp.Projects, 2, "listing by git remote should return all matching groves")
+	assert.Len(t, resp.Projects, 2, "listing by git remote should return all matching projects")
 }

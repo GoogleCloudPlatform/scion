@@ -48,7 +48,7 @@ const maxUploadFileSize = 50 * 1024 * 1024
 // maxEditableFileSize is the maximum file size the editor will serve for inline editing (1MB).
 const maxEditableFileSize = 1 * 1024 * 1024
 
-// ProjectWorkspaceFile represents a file in a grove workspace.
+// ProjectWorkspaceFile represents a file in a project workspace.
 type ProjectWorkspaceFile struct {
 	Path    string    `json:"path"`
 	Size    int64     `json:"size"`
@@ -56,7 +56,7 @@ type ProjectWorkspaceFile struct {
 	Mode    string    `json:"mode"`
 }
 
-// ProjectWorkspaceListResponse is the response for listing grove workspace files.
+// ProjectWorkspaceListResponse is the response for listing project workspace files.
 type ProjectWorkspaceListResponse struct {
 	Files      []ProjectWorkspaceFile `json:"files"`
 	TotalSize  int64                `json:"totalSize"`
@@ -198,28 +198,28 @@ func intQueryParam(r *http.Request, name string, defaultVal, maxVal int) int {
 	return v
 }
 
-// ProjectWorkspaceUploadResponse is the response for uploading files to a grove workspace.
+// ProjectWorkspaceUploadResponse is the response for uploading files to a project workspace.
 type ProjectWorkspaceUploadResponse struct {
 	Files []ProjectWorkspaceFile `json:"files"`
 }
 
-// handleProjectWorkspace dispatches grove workspace file operations.
+// handleProjectWorkspace dispatches project workspace file operations.
 // Routes:
 //   - GET  (filePath="")  → list files
 //   - POST (filePath="")  → upload files
 //   - DELETE (filePath!="") → delete file
-func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, groveID, filePath string) {
+func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, projectID, filePath string) {
 	ctx := r.Context()
 
-	// Look up the grove
-	grove, err := s.store.GetProject(ctx, groveID)
+	// Look up the project
+	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	// Resolve workspace path — supports hub-native, shared-workspace, and linked groves
-	workspacePath, err := s.resolveProjectWebDAVPath(ctx, grove)
+	// Resolve workspace path — supports hub-native, shared-workspace, and linked projects
+	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
 	if err != nil {
 		Conflict(w, err.Error())
 		return
@@ -241,7 +241,7 @@ func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
-// handleProjectWorkspaceList lists files in a grove workspace.
+// handleProjectWorkspaceList lists files in a project workspace.
 // Accepts optional query parameters:
 //   - q:     filter pattern (regex or fuzzy fallback, case-insensitive)
 //   - limit: max results (default 500, cap 2000)
@@ -285,7 +285,7 @@ func (s *Server) handleSharedDirFileList(w http.ResponseWriter, r *http.Request,
 	})
 }
 
-// handleProjectWorkspaceUpload handles file uploads to a grove workspace.
+// handleProjectWorkspaceUpload handles file uploads to a project workspace.
 func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Request, workspacePath string) {
 	// Apply total request body size limit
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadTotalSize)
@@ -377,7 +377,7 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 	})
 }
 
-// handleProjectWorkspaceDownload serves a single file from a grove workspace.
+// handleProjectWorkspaceDownload serves a single file from a project workspace.
 // When the query parameter "view=true" is set, the file is served inline for
 // in-browser preview; otherwise the response forces a download.
 // When "format=json" is set, the file content is returned as a JSON object
@@ -462,7 +462,7 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 }
 
 // handleProjectWorkspaceArchive creates a zip archive of the entire workspace and serves it for download.
-func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Request, groveID string) {
+func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
 
 	if r.Method != http.MethodGet {
@@ -470,15 +470,15 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Look up the grove
-	grove, err := s.store.GetProject(ctx, groveID)
+	// Look up the project
+	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	// Resolve workspace path — supports hub-native, shared-workspace, and linked groves
-	workspacePath, err := s.resolveProjectWebDAVPath(ctx, grove)
+	// Resolve workspace path — supports hub-native, shared-workspace, and linked projects
+	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
 	if err != nil {
 		Conflict(w, err.Error())
 		return
@@ -494,7 +494,7 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	archiveName := grove.Slug + "-workspace.zip"
+	archiveName := project.Slug + "-workspace.zip"
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, archiveName))
 
@@ -561,7 +561,7 @@ type ProjectWorkspaceWriteRequest struct {
 	ExpectedModTime string `json:"expectedModTime,omitempty"` // optional optimistic concurrency
 }
 
-// handleProjectWorkspaceWrite writes (creates or overwrites) a file in a grove workspace.
+// handleProjectWorkspaceWrite writes (creates or overwrites) a file in a project workspace.
 // The content is provided as a JSON request body. If expectedModTime is set, the
 // server checks that the file has not been modified since that time and returns
 // 409 Conflict if it has.
@@ -628,7 +628,7 @@ func (s *Server) handleProjectWorkspaceWrite(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-// handleProjectWorkspaceDelete deletes a file from a grove workspace.
+// handleProjectWorkspaceDelete deletes a file from a project workspace.
 func (s *Server) handleProjectWorkspaceDelete(w http.ResponseWriter, workspacePath, filePath string) {
 	// Validate the file path
 	if err := validateWorkspaceFilePath(filePath); err != nil {
@@ -666,18 +666,18 @@ func (s *Server) handleProjectWorkspaceDelete(w http.ResponseWriter, workspacePa
 //   - POST (filePath="")  → upload files
 //   - GET  (filePath!="") → download file
 //   - DELETE (filePath!="") → delete file
-func (s *Server) handleSharedDirFiles(w http.ResponseWriter, r *http.Request, groveID, dirName, filePath string) {
+func (s *Server) handleSharedDirFiles(w http.ResponseWriter, r *http.Request, projectID, dirName, filePath string) {
 	ctx := r.Context()
 
-	grove, err := s.store.GetProject(ctx, groveID)
+	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	// Verify the shared dir is declared on this grove
+	// Verify the shared dir is declared on this project
 	found := false
-	for _, d := range grove.SharedDirs {
+	for _, d := range project.SharedDirs {
 		if d.Name == dirName {
 			found = true
 			break
@@ -688,8 +688,8 @@ func (s *Server) handleSharedDirFiles(w http.ResponseWriter, r *http.Request, gr
 		return
 	}
 
-	// Resolve shared dir host path based on grove type
-	resolution, resolveErr := s.resolveSharedDirPath(ctx, grove, dirName)
+	// Resolve shared dir host path based on project type
+	resolution, resolveErr := s.resolveSharedDirPath(ctx, project, dirName)
 	if resolveErr != nil {
 		Conflict(w, resolveErr.Error())
 		return
@@ -721,21 +721,21 @@ func (s *Server) handleSharedDirFiles(w http.ResponseWriter, r *http.Request, gr
 // sharedDirResolution holds the resolved path and metadata for shared dir browsing.
 type sharedDirResolution struct {
 	Path          string
-	ProviderCount int  // total grove providers (for multi-broker warning)
+	ProviderCount int  // total project providers (for multi-broker warning)
 	IsLocal       bool // true when resolved via co-located broker
 }
 
 // resolveSharedDirPath resolves the host-side path for a shared directory.
 // Shared dirs always live under ~/.scion/project-configs/<slug>__<uuid>/shared-dirs/<name>,
 // matching the path used by agent provisioning (config.GetSharedDirPath).
-// For git-based groves with a co-located broker that has a LocalPath, the path is
+// For git-based projects with a co-located broker that has a LocalPath, the path is
 // resolved via config.GetSharedDirPath(localPath, dirName). Otherwise, the path is
 // resolved via the .scion marker in the hub-native workspace directory.
-func (s *Server) resolveSharedDirPath(ctx context.Context, grove *store.Project, dirName string) (*sharedDirResolution, error) {
-	if grove.GitRemote == "" {
-		// Hub-native grove: resolve via the .scion marker in the workspace directory
+func (s *Server) resolveSharedDirPath(ctx context.Context, project *store.Project, dirName string) (*sharedDirResolution, error) {
+	if project.GitRemote == "" {
+		// Hub-native project: resolve via the .scion marker in the workspace directory
 		// to find the project-configs path where shared dirs actually live.
-		sdPath, err := resolveHubProjectSharedDirPath(grove.Slug, dirName)
+		sdPath, err := resolveHubProjectSharedDirPath(project.Slug, dirName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve shared directory path: %w", err)
 		}
@@ -745,11 +745,11 @@ func (s *Server) resolveSharedDirPath(ctx context.Context, grove *store.Project,
 		}, nil
 	}
 
-	// Git-based grove: find the co-located broker's local path for this grove
-	providers, err := s.store.GetProjectProviders(ctx, grove.ID)
+	// Git-based project: find the co-located broker's local path for this project
+	providers, err := s.store.GetProjectProviders(ctx, project.ID)
 	if err != nil {
-		slog.Warn("failed to get grove providers for shared dir browsing", "grove_id", grove.ID, "error", err)
-		return nil, fmt.Errorf("failed to resolve grove providers")
+		slog.Warn("failed to get project providers for shared dir browsing", "project_id", project.ID, "error", err)
+		return nil, fmt.Errorf("failed to resolve project providers")
 	}
 
 	providerCount := len(providers)
@@ -774,10 +774,10 @@ func (s *Server) resolveSharedDirPath(ctx context.Context, grove *store.Project,
 	}
 
 	// Fallback: embedded broker is a provider but has no LocalPath recorded
-	// (e.g. auto-linked or shared-workspace grove). Resolve via the .scion marker
+	// (e.g. auto-linked or shared-workspace project). Resolve via the .scion marker
 	// in the hub workspace to find the project-configs path.
 	if embeddedIsProvider {
-		sdPath, err := resolveHubProjectSharedDirPath(grove.Slug, dirName)
+		sdPath, err := resolveHubProjectSharedDirPath(project.Slug, dirName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve shared directory path: %w", err)
 		}
@@ -795,15 +795,15 @@ func (s *Server) resolveSharedDirPath(ctx context.Context, grove *store.Project,
 // a project whose workspace lives at ~/.scion/projects/<slug>/. It reads the .scion
 // marker (or project-id for git clones) to find the external project-configs path,
 // then returns the shared-dirs/<name> subdirectory within it.
-func resolveHubProjectSharedDirPath(groveSlug, dirName string) (string, error) {
-	workspacePath, err := hubNativeProjectPath(groveSlug)
+func resolveHubProjectSharedDirPath(projectSlug, dirName string) (string, error) {
+	workspacePath, err := hubNativeProjectPath(projectSlug)
 	if err != nil {
 		return "", err
 	}
 	scionPath := filepath.Join(workspacePath, config.DotScion)
 	projectDir, _, err := config.ResolveProjectPath(scionPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve project path for %s: %w", groveSlug, err)
+		return "", fmt.Errorf("failed to resolve project path for %s: %w", projectSlug, err)
 	}
 	return config.GetSharedDirPath(projectDir, dirName)
 }
@@ -829,8 +829,8 @@ func validateWorkspaceFilePath(path string) error {
 	return nil
 }
 
-// handleProjectWorkspacePull performs a `git pull --ff-only` on a shared-workspace grove.
-func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Request, groveID string) {
+// handleProjectWorkspacePull performs a `git pull --ff-only` on a shared-workspace project.
+func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
@@ -838,29 +838,29 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 
 	ctx := r.Context()
 
-	grove, err := s.store.GetProject(ctx, groveID)
+	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	if !grove.IsSharedWorkspace() {
-		Conflict(w, "Pull is only available for shared-workspace git groves")
+	if !project.IsSharedWorkspace() {
+		Conflict(w, "Pull is only available for shared-workspace git projects")
 		return
 	}
 
-	workspacePath, err := hubNativeProjectPath(grove.Slug)
+	workspacePath, err := hubNativeProjectPath(project.Slug)
 	if err != nil {
 		InternalError(w)
 		return
 	}
 
-	token := s.resolveCloneToken(ctx, grove)
+	token := s.resolveCloneToken(ctx, project)
 
 	pullResult, err := util.PullSharedWorkspace(workspacePath, token)
 	if err != nil {
 		slog.Warn("shared workspace pull failed",
-			"grove_id", grove.ID, "error", err.Error())
+			"project_id", project.ID, "error", err.Error())
 
 		statusCode := http.StatusConflict
 		errorCode := ErrCodePullFailed

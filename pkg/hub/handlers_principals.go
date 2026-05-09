@@ -30,7 +30,7 @@ type PrincipalInfo struct {
 	Type        string `json:"type"`
 	ID          string `json:"id"`
 	DisplayName string `json:"displayName,omitempty"`
-	ProjectID     string `json:"groveId,omitempty"`
+	ProjectID     string `json:"projectId,omitempty"`
 }
 
 // PrincipalResolutionResponse is the response for principal resolution.

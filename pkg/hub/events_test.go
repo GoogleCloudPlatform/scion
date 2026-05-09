@@ -35,11 +35,11 @@ func TestSubjectMatchesPattern(t *testing.T) {
 		{"no match extra tokens", "agent.123", "agent.123.status", false},
 		{"no match fewer tokens", "agent.123.status", "agent.123", false},
 		{"star matches single token", "agent.*.status", "agent.123.status", true},
-		{"star matches single token middle", "grove.*.agent.status", "grove.g1.agent.status", true},
+		{"star matches single token middle", "project.*.agent.status", "project.g1.agent.status", true},
 		{"star does not match multiple tokens", "agent.*.status", "agent.123.456.status", false},
-		{"gt matches remainder", "grove.>", "grove.g1.agent.status", true},
-		{"gt matches single remaining", "grove.>", "grove.g1", true},
-		{"gt does not match zero remaining", "grove.>", "grove", false},
+		{"gt matches remainder", "project.>", "project.g1.agent.status", true},
+		{"gt matches single remaining", "project.>", "project.g1", true},
+		{"gt does not match zero remaining", "project.>", "project", false},
 		{"gt at start matches all", ">", "agent.123.status", true},
 		{"empty pattern empty subject", "", "", true},
 		{"combined star and literal", "agent.*.created", "agent.abc.created", true},
@@ -60,10 +60,10 @@ func TestChannelEventPublisher_PublishAgentStatus(t *testing.T) {
 	pub := NewChannelEventPublisher()
 	defer pub.Close()
 
-	// Subscribe to agent-specific and grove-scoped subjects
+	// Subscribe to agent-specific and project-scoped subjects
 	agentCh, unsub1 := pub.Subscribe("agent.a1.status")
 	defer unsub1()
-	groveCh, unsub2 := pub.Subscribe("grove.g1.agent.status")
+	projectCh, unsub2 := pub.Subscribe("project.g1.agent.status")
 	defer unsub2()
 
 	agent := &store.Agent{
@@ -91,14 +91,14 @@ func TestChannelEventPublisher_PublishAgentStatus(t *testing.T) {
 		t.Fatal("timeout waiting for agent event")
 	}
 
-	// Verify grove-scoped event
+	// Verify project-scoped event
 	select {
-	case evt := <-groveCh:
-		if evt.Subject != "grove.g1.agent.status" {
-			t.Errorf("got subject %q, want %q", evt.Subject, "grove.g1.agent.status")
+	case evt := <-projectCh:
+		if evt.Subject != "project.g1.agent.status" {
+			t.Errorf("got subject %q, want %q", evt.Subject, "project.g1.agent.status")
 		}
 	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for grove event")
+		t.Fatal("timeout waiting for project event")
 	}
 }
 
@@ -150,7 +150,7 @@ func TestChannelEventPublisher_PublishAgentCreated(t *testing.T) {
 
 	agentCh, unsub1 := pub.Subscribe("agent.a1.created")
 	defer unsub1()
-	groveCh, unsub2 := pub.Subscribe("grove.g1.agent.created")
+	projectCh, unsub2 := pub.Subscribe("project.g1.agent.created")
 	defer unsub2()
 
 	agent := &store.Agent{
@@ -191,12 +191,12 @@ func TestChannelEventPublisher_PublishAgentCreated(t *testing.T) {
 	}
 
 	select {
-	case evt := <-groveCh:
-		if evt.Subject != "grove.g1.agent.created" {
-			t.Errorf("got subject %q, want %q", evt.Subject, "grove.g1.agent.created")
+	case evt := <-projectCh:
+		if evt.Subject != "project.g1.agent.created" {
+			t.Errorf("got subject %q, want %q", evt.Subject, "project.g1.agent.created")
 		}
 	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for grove agent created event")
+		t.Fatal("timeout waiting for project agent created event")
 	}
 }
 
@@ -206,7 +206,7 @@ func TestChannelEventPublisher_PublishAgentDeleted(t *testing.T) {
 
 	agentCh, unsub1 := pub.Subscribe("agent.a1.deleted")
 	defer unsub1()
-	groveCh, unsub2 := pub.Subscribe("grove.g1.agent.deleted")
+	projectCh, unsub2 := pub.Subscribe("project.g1.agent.deleted")
 	defer unsub2()
 
 	pub.PublishAgentDeleted(context.Background(), "a1", "g1")
@@ -225,12 +225,12 @@ func TestChannelEventPublisher_PublishAgentDeleted(t *testing.T) {
 	}
 
 	select {
-	case evt := <-groveCh:
-		if evt.Subject != "grove.g1.agent.deleted" {
-			t.Errorf("got subject %q, want %q", evt.Subject, "grove.g1.agent.deleted")
+	case evt := <-projectCh:
+		if evt.Subject != "project.g1.agent.deleted" {
+			t.Errorf("got subject %q, want %q", evt.Subject, "project.g1.agent.deleted")
 		}
 	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for grove agent deleted event")
+		t.Fatal("timeout waiting for project agent deleted event")
 	}
 }
 
@@ -238,37 +238,37 @@ func TestChannelEventPublisher_PublishProjectCreated(t *testing.T) {
 	pub := NewChannelEventPublisher()
 	defer pub.Close()
 
-	ch, unsub := pub.Subscribe("grove.g1.created")
+	ch, unsub := pub.Subscribe("project.g1.created")
 	defer unsub()
 
-	grove := &store.Project{
+	project := &store.Project{
 		ID:   "g1",
 		Name: "My Project",
-		Slug: "my-grove",
+		Slug: "my-project",
 	}
 
-	pub.PublishProjectCreated(context.Background(), grove)
+	pub.PublishProjectCreated(context.Background(), project)
 
 	select {
 	case evt := <-ch:
-		if evt.Subject != "grove.g1.created" {
-			t.Errorf("got subject %q, want %q", evt.Subject, "grove.g1.created")
+		if evt.Subject != "project.g1.created" {
+			t.Errorf("got subject %q, want %q", evt.Subject, "project.g1.created")
 		}
 		var data ProjectCreatedEvent
 		if err := json.Unmarshal(evt.Data, &data); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if data.ProjectID != "g1" || data.Name != "My Project" || data.Slug != "my-grove" {
+		if data.ProjectID != "g1" || data.Name != "My Project" || data.Slug != "my-project" {
 			t.Errorf("unexpected event data: %+v", data)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for grove created event")
+		t.Fatal("timeout waiting for project created event")
 	}
 }
 
 func TestChannelEventPublisher_PublishUserMessage_FanOut(t *testing.T) {
 	// Verify a single PublishUserMessage call fans out to all three
-	// subjects: user.<recipient>.message, grove.<grove>.user.message,
+	// subjects: user.<recipient>.message, project.<project>.user.message,
 	// and agent.<agent>.message (the last one is what the per-agent
 	// Messages tab stream subscribes to).
 	pub := NewChannelEventPublisher()
@@ -276,7 +276,7 @@ func TestChannelEventPublisher_PublishUserMessage_FanOut(t *testing.T) {
 
 	userCh, unsubUser := pub.Subscribe("user.u1.message")
 	defer unsubUser()
-	groveCh, unsubProject := pub.Subscribe("grove.g1.user.message")
+	projectCh, unsubProject := pub.Subscribe("project.g1.user.message")
 	defer unsubProject()
 	agentCh, unsubAgent := pub.Subscribe("agent.a1.message")
 	defer unsubAgent()
@@ -298,7 +298,7 @@ func TestChannelEventPublisher_PublishUserMessage_FanOut(t *testing.T) {
 
 	for name, ch := range map[string]<-chan Event{
 		"user":  userCh,
-		"grove": groveCh,
+		"project": projectCh,
 		"agent": agentCh,
 	} {
 		select {
@@ -319,14 +319,14 @@ func TestChannelEventPublisher_PublishUserMessage_FanOut(t *testing.T) {
 
 func TestChannelEventPublisher_PublishUserMessage_UserToAgent(t *testing.T) {
 	// When the message direction is user→agent, only the per-agent
-	// subject should fire. The user-inbox and grove-level subjects
+	// subject should fire. The user-inbox and project-level subjects
 	// should NOT receive events because the recipient is an agent.
 	pub := NewChannelEventPublisher()
 	defer pub.Close()
 
 	userCh, unsubUser := pub.Subscribe("user.a1.message")
 	defer unsubUser()
-	groveCh, unsubProject := pub.Subscribe("grove.g1.user.message")
+	projectCh, unsubProject := pub.Subscribe("project.g1.user.message")
 	defer unsubProject()
 	agentCh, unsubAgent := pub.Subscribe("agent.a1.message")
 	defer unsubAgent()
@@ -360,7 +360,7 @@ func TestChannelEventPublisher_PublishUserMessage_UserToAgent(t *testing.T) {
 		t.Fatal("agent: timeout waiting for user message event")
 	}
 
-	// User-inbox and grove channels should NOT receive anything.
+	// User-inbox and project channels should NOT receive anything.
 	select {
 	case evt := <-userCh:
 		t.Errorf("user channel should not receive user→agent messages, got: %s", evt.Data)
@@ -368,8 +368,8 @@ func TestChannelEventPublisher_PublishUserMessage_UserToAgent(t *testing.T) {
 		// expected
 	}
 	select {
-	case evt := <-groveCh:
-		t.Errorf("grove channel should not receive user→agent messages, got: %s", evt.Data)
+	case evt := <-projectCh:
+		t.Errorf("project channel should not receive user→agent messages, got: %s", evt.Data)
 	case <-time.After(100 * time.Millisecond):
 		// expected
 	}
@@ -417,9 +417,9 @@ func TestChannelEventPublisher_PublishBrokerConnected(t *testing.T) {
 	pub := NewChannelEventPublisher()
 	defer pub.Close()
 
-	ch1, unsub1 := pub.Subscribe("grove.g1.broker.status")
+	ch1, unsub1 := pub.Subscribe("project.g1.broker.status")
 	defer unsub1()
-	ch2, unsub2 := pub.Subscribe("grove.g2.broker.status")
+	ch2, unsub2 := pub.Subscribe("project.g2.broker.status")
 	defer unsub2()
 
 	pub.PublishBrokerConnected(context.Background(), "b1", "broker-1", []string{"g1", "g2"})
@@ -438,10 +438,10 @@ func TestChannelEventPublisher_PublishBrokerConnected(t *testing.T) {
 				t.Fatalf("unmarshal: %v", err)
 			}
 			if data.BrokerID != "b1" || data.ProjectID != tc.projectID || data.Status != "online" || data.BrokerName != "broker-1" {
-				t.Errorf("unexpected event data for grove %s: %+v", tc.projectID, data)
+				t.Errorf("unexpected event data for project %s: %+v", tc.projectID, data)
 			}
 		case <-time.After(time.Second):
-			t.Fatalf("timeout waiting for broker connected event for grove %s", tc.projectID)
+			t.Fatalf("timeout waiting for broker connected event for project %s", tc.projectID)
 		}
 	}
 }
@@ -546,22 +546,22 @@ func TestChannelEventPublisher_WildcardSubscription(t *testing.T) {
 	pub := NewChannelEventPublisher()
 	defer pub.Close()
 
-	// Subscribe to all grove events with >
-	ch, unsub := pub.Subscribe("grove.>")
+	// Subscribe to all project events with >
+	ch, unsub := pub.Subscribe("project.>")
 	defer unsub()
 
-	grove := &store.Project{
+	project := &store.Project{
 		ID:   "g1",
 		Name: "Test",
 		Slug: "test",
 	}
 
-	pub.PublishProjectCreated(context.Background(), grove)
+	pub.PublishProjectCreated(context.Background(), project)
 
 	select {
 	case evt := <-ch:
-		if evt.Subject != "grove.g1.created" {
-			t.Errorf("got subject %q, want %q", evt.Subject, "grove.g1.created")
+		if evt.Subject != "project.g1.created" {
+			t.Errorf("got subject %q, want %q", evt.Subject, "project.g1.created")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for wildcard event")

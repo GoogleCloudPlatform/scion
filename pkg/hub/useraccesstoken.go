@@ -51,34 +51,34 @@ var (
 type UserAccessTokenService struct {
 	tokens store.UserAccessTokenStore
 	users  store.UserStore
-	groves store.ProjectStore
+	projects store.ProjectStore
 }
 
 // NewUserAccessTokenService creates a new UAT service.
-func NewUserAccessTokenService(tokens store.UserAccessTokenStore, users store.UserStore, groves store.ProjectStore) *UserAccessTokenService {
+func NewUserAccessTokenService(tokens store.UserAccessTokenStore, users store.UserStore, projects store.ProjectStore) *UserAccessTokenService {
 	return &UserAccessTokenService{
 		tokens: tokens,
 		users:  users,
-		groves: groves,
+		projects: projects,
 	}
 }
 
 // CreateToken generates a new user access token.
 // Returns the plaintext token (shown only once) and the stored metadata.
-func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, groveID string, scopes []string, expiresAt *time.Time) (string, *store.UserAccessToken, error) {
+func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, projectID string, scopes []string, expiresAt *time.Time) (string, *store.UserAccessToken, error) {
 	if name == "" {
 		return "", nil, fmt.Errorf("token name is required")
 	}
-	if groveID == "" {
-		return "", nil, fmt.Errorf("grove ID is required")
+	if projectID == "" {
+		return "", nil, fmt.Errorf("project ID is required")
 	}
 
-	// Validate grove exists
-	if _, err := s.groves.GetProject(ctx, groveID); err != nil {
+	// Validate project exists
+	if _, err := s.projects.GetProject(ctx, projectID); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return "", nil, fmt.Errorf("grove not found: %s", groveID)
+			return "", nil, fmt.Errorf("project not found: %s", projectID)
 		}
-		return "", nil, fmt.Errorf("failed to validate grove: %w", err)
+		return "", nil, fmt.Errorf("failed to validate project: %w", err)
 	}
 
 	// Expand and validate scopes
@@ -136,7 +136,7 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 		Name:      name,
 		Prefix:    prefix,
 		KeyHash:   hashStr,
-		ProjectID:   groveID,
+		ProjectID:   projectID,
 		Scopes:    expanded,
 		ExpiresAt: expiresAt,
 		Created:   now,

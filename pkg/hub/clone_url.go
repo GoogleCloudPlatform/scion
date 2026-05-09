@@ -22,7 +22,7 @@ import (
 )
 
 // normalizeCloneURLLabel preserves explicit clone URL overrides while still
-// normalizing schemeless git remotes stored in grove labels.
+// normalizing schemeless git remotes stored in project labels.
 func normalizeCloneURLLabel(cloneURL string) string {
 	if cloneURL == "" {
 		return ""

@@ -40,7 +40,7 @@ func canonicalHarnessName(name string) string {
 	}
 }
 
-func (s *Server) resolveHarnessTypeFromConfigRef(ctx context.Context, groveID, configRef string) string {
+func (s *Server) resolveHarnessTypeFromConfigRef(ctx context.Context, projectID, configRef string) string {
 	configRef = strings.TrimSpace(configRef)
 	if configRef == "" {
 		return ""
@@ -49,8 +49,8 @@ func (s *Server) resolveHarnessTypeFromConfigRef(ctx context.Context, groveID, c
 		return h
 	}
 
-	if groveID != "" {
-		hc, err := s.store.GetHarnessConfigBySlug(ctx, configRef, store.HarnessConfigScopeProject, groveID)
+	if projectID != "" {
+		hc, err := s.store.GetHarnessConfigBySlug(ctx, configRef, store.HarnessConfigScopeProject, projectID)
 		if err == nil && hc != nil {
 			if h := canonicalHarnessName(hc.Harness); h != "" {
 				return h

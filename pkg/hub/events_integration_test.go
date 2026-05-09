@@ -66,7 +66,7 @@ func (noopDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ m
 	return nil
 }
 
-// setupEventTestServer creates a test server with an event publisher, grove, broker, and dispatcher.
+// setupEventTestServer creates a test server with an event publisher, project, broker, and dispatcher.
 func setupEventTestServer(t *testing.T) (*Server, store.Store, *ChannelEventPublisher, *store.Project) {
 	t.Helper()
 	srv, s := testServer(t)
@@ -76,13 +76,13 @@ func setupEventTestServer(t *testing.T) (*Server, store.Store, *ChannelEventPubl
 	srv.SetEventPublisher(pub)
 	t.Cleanup(func() { pub.Close() })
 
-	grove := &store.Project{
-		ID:         "grove-evt",
+	project := &store.Project{
+		ID:         "project-evt",
 		Name:       "Event Test Project",
-		Slug:       "event-test-grove",
+		Slug:       "event-test-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	broker := &store.RuntimeBroker{
 		ID:     "broker-evt",
@@ -93,42 +93,42 @@ func setupEventTestServer(t *testing.T) (*Server, store.Store, *ChannelEventPubl
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
 	provider := &store.ProjectProvider{
-		ProjectID:    grove.ID,
+		ProjectID:    project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
-	grove.DefaultRuntimeBrokerID = broker.ID
-	require.NoError(t, s.UpdateProject(ctx, grove))
+	project.DefaultRuntimeBrokerID = broker.ID
+	require.NoError(t, s.UpdateProject(ctx, project))
 
 	srv.SetDispatcher(noopDispatcher{})
 
-	return srv, s, pub, grove
+	return srv, s, pub, project
 }
 
 func TestEventPublisher_CreateAgentEmitsEvent(t *testing.T) {
-	srv, _, pub, grove := setupEventTestServer(t)
+	srv, _, pub, project := setupEventTestServer(t)
 
-	// Subscribe to grove agent events
-	ch, unsub := pub.Subscribe("grove." + grove.ID + ".agent.created")
+	// Subscribe to project agent events
+	ch, unsub := pub.Subscribe("project." + project.ID + ".agent.created")
 	defer unsub()
 
 	// Create agent via API
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "event-agent",
-		ProjectID: grove.ID,
+		ProjectID: project.ID,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
 	// Verify event was published
 	select {
 	case evt := <-ch:
-		assert.Equal(t, "grove."+grove.ID+".agent.created", evt.Subject)
+		assert.Equal(t, "project."+project.ID+".agent.created", evt.Subject)
 		var data AgentCreatedEvent
 		require.NoError(t, json.Unmarshal(evt.Data, &data))
-		assert.Equal(t, grove.ID, data.ProjectID)
+		assert.Equal(t, project.ID, data.ProjectID)
 		assert.Equal(t, "event-agent", data.Name)
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for agent created event")
@@ -136,20 +136,20 @@ func TestEventPublisher_CreateAgentEmitsEvent(t *testing.T) {
 }
 
 func TestEventPublisher_DeleteAgentEmitsEvent(t *testing.T) {
-	srv, s, pub, grove := setupEventTestServer(t)
+	srv, s, pub, project := setupEventTestServer(t)
 	ctx := context.Background()
 
 	agent := &store.Agent{
 		ID:      "agent-evt-del",
 		Slug:    "agent-evt-del",
 		Name:    "Delete Me",
-		ProjectID: grove.ID,
+		ProjectID: project.ID,
 		Phase:   string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
 	// Subscribe to agent deleted events
-	ch, unsub := pub.Subscribe("grove." + grove.ID + ".agent.deleted")
+	ch, unsub := pub.Subscribe("project." + project.ID + ".agent.deleted")
 	defer unsub()
 
 	// Delete agent via API
@@ -158,11 +158,11 @@ func TestEventPublisher_DeleteAgentEmitsEvent(t *testing.T) {
 
 	select {
 	case evt := <-ch:
-		assert.Equal(t, "grove."+grove.ID+".agent.deleted", evt.Subject)
+		assert.Equal(t, "project."+project.ID+".agent.deleted", evt.Subject)
 		var data AgentDeletedEvent
 		require.NoError(t, json.Unmarshal(evt.Data, &data))
 		assert.Equal(t, "agent-evt-del", data.AgentID)
-		assert.Equal(t, grove.ID, data.ProjectID)
+		assert.Equal(t, project.ID, data.ProjectID)
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for agent deleted event")
 	}
@@ -175,29 +175,29 @@ func TestEventPublisher_CreateProjectEmitsEvent(t *testing.T) {
 	srv.SetEventPublisher(pub)
 	defer pub.Close()
 
-	// Subscribe to all grove created events using wildcard
-	ch, unsub := pub.Subscribe("grove.>")
+	// Subscribe to all project created events using wildcard
+	ch, unsub := pub.Subscribe("project.>")
 	defer unsub()
 
-	// Create grove via API
+	// Create project via API
 	reqBody := map[string]interface{}{
 		"name": "Event Project",
 	}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", reqBody)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", reqBody)
 	require.Equal(t, http.StatusCreated, rec.Code)
 
-	// Parse response to get grove ID
-	var grove store.Project
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &grove))
+	// Parse response to get project ID
+	var project store.Project
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &project))
 
 	select {
 	case evt := <-ch:
-		assert.Equal(t, "grove."+grove.ID+".created", evt.Subject)
+		assert.Equal(t, "project."+project.ID+".created", evt.Subject)
 		var data ProjectCreatedEvent
 		require.NoError(t, json.Unmarshal(evt.Data, &data))
-		assert.Equal(t, grove.ID, data.ProjectID)
+		assert.Equal(t, project.ID, data.ProjectID)
 		assert.Equal(t, "Event Project", data.Name)
 	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for grove created event")
+		t.Fatal("timeout waiting for project created event")
 	}
 }

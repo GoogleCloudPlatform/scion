@@ -31,20 +31,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// createTestLinkedProject creates a git-backed grove with a provider broker,
-// simulating a linked grove whose workspace lives on a remote broker.
+// createTestLinkedProject creates a git-backed project with a provider broker,
+// simulating a linked project whose workspace lives on a remote broker.
 func createTestLinkedProject(t *testing.T, srv *Server, s store.Store, name, remote string) (*store.Project, string) {
 	t.Helper()
 
-	// Create grove
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", CreateProjectRequest{
+	// Create project
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
 		Name:      name,
 		GitRemote: remote,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var grove store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove))
+	var project store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
 	// Create a provider broker record with a local path
 	brokerLocalPath := t.TempDir()
@@ -54,51 +54,51 @@ func createTestLinkedProject(t *testing.T, srv *Server, s store.Store, name, rem
 	}
 	require.NoError(t, s.CreateRuntimeBroker(context.Background(), broker))
 	require.NoError(t, s.AddProjectProvider(context.Background(), &store.ProjectProvider{
-		ProjectID:  grove.ID,
+		ProjectID:  project.ID,
 		BrokerID: broker.ID,
-		// LocalPath is set to simulate a linked grove with workspace on broker
+		// LocalPath is set to simulate a linked project with workspace on broker
 		LocalPath: brokerLocalPath,
 	}))
 
 	// Set up the hub-side cache directory
-	cachePath, err := hubNativeProjectPath(grove.Slug)
+	cachePath, err := hubNativeProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { os.RemoveAll(cachePath) })
 
-	return &grove, brokerLocalPath
+	return &project, brokerLocalPath
 }
 
 // ============================================================================
 // resolveProjectWebDAVPath Tests
 // ============================================================================
 
-func TestResolveGroveWebDAVPath_HubNativeProject(t *testing.T) {
+func TestResolveProjectWebDAVPath_HubNativeProject(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, workspacePath := createTestHubNativeProject(t, srv, "WebDAV HubNative")
+	project, workspacePath := createTestHubNativeProject(t, srv, "WebDAV HubNative")
 
-	path, err := srv.resolveProjectWebDAVPath(context.Background(), grove)
+	path, err := srv.resolveProjectWebDAVPath(context.Background(), project)
 	require.NoError(t, err)
 	assert.Equal(t, workspacePath, path)
 }
 
-func TestResolveGroveWebDAVPath_LinkedGrove_CacheDir(t *testing.T) {
+func TestResolveProjectWebDAVPath_LinkedProject_CacheDir(t *testing.T) {
 	srv, s := testServer(t)
-	grove, _ := createTestLinkedProject(t, srv, s, "WebDAV Linked", "https://github.com/org/linked-repo.git")
+	project, _ := createTestLinkedProject(t, srv, s, "WebDAV Linked", "https://github.com/org/linked-repo.git")
 
-	// resolveProjectWebDAVPath should return the hub cache path for remote linked groves
-	path, err := srv.resolveProjectWebDAVPath(context.Background(), grove)
+	// resolveProjectWebDAVPath should return the hub cache path for remote linked projects
+	path, err := srv.resolveProjectWebDAVPath(context.Background(), project)
 	require.NoError(t, err)
 
-	expectedCache, err := hubNativeProjectPath(grove.Slug)
+	expectedCache, err := hubNativeProjectPath(project.Slug)
 	require.NoError(t, err)
 	assert.Equal(t, expectedCache, path)
 }
 
-func TestResolveGroveWebDAVPath_LinkedGrove_EmbeddedBroker(t *testing.T) {
+func TestResolveProjectWebDAVPath_LinkedProject_EmbeddedBroker(t *testing.T) {
 	srv, s := testServer(t)
 
-	// Create a grove and set up an embedded broker
-	grove := createTestGitProject(t, srv, "WebDAV Embedded", "https://github.com/org/embedded-repo.git")
+	// Create a project and set up an embedded broker
+	project := createTestGitProject(t, srv, "WebDAV Embedded", "https://github.com/org/embedded-repo.git")
 
 	embeddedPath := t.TempDir()
 	embeddedBrokerID := "test-embedded-broker"
@@ -110,13 +110,13 @@ func TestResolveGroveWebDAVPath_LinkedGrove_EmbeddedBroker(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(context.Background(), broker))
 	require.NoError(t, s.AddProjectProvider(context.Background(), &store.ProjectProvider{
-		ProjectID:   grove.ID,
+		ProjectID:   project.ID,
 		BrokerID:  embeddedBrokerID,
 		LocalPath: embeddedPath,
 	}))
 
 	// For embedded broker, should serve directly from local path
-	path, err := srv.resolveProjectWebDAVPath(context.Background(), grove)
+	path, err := srv.resolveProjectWebDAVPath(context.Background(), project)
 	require.NoError(t, err)
 	assert.Equal(t, embeddedPath, path)
 }
@@ -125,23 +125,23 @@ func TestResolveGroveWebDAVPath_LinkedGrove_EmbeddedBroker(t *testing.T) {
 // isLinkedProject Tests
 // ============================================================================
 
-func TestIsLinkedGrove_HubNative(t *testing.T) {
+func TestIsLinkedProject_HubNative(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, _ := createTestHubNativeProject(t, srv, "IsLinked HubNative")
+	project, _ := createTestHubNativeProject(t, srv, "IsLinked HubNative")
 
-	assert.False(t, srv.isLinkedProject(context.Background(), grove))
+	assert.False(t, srv.isLinkedProject(context.Background(), project))
 }
 
-func TestIsLinkedGrove_RemoteBroker(t *testing.T) {
+func TestIsLinkedProject_RemoteBroker(t *testing.T) {
 	srv, s := testServer(t)
-	grove, _ := createTestLinkedProject(t, srv, s, "IsLinked Remote", "https://github.com/org/remote.git")
+	project, _ := createTestLinkedProject(t, srv, s, "IsLinked Remote", "https://github.com/org/remote.git")
 
-	assert.True(t, srv.isLinkedProject(context.Background(), grove))
+	assert.True(t, srv.isLinkedProject(context.Background(), project))
 }
 
-func TestIsLinkedGrove_EmbeddedBrokerOnly(t *testing.T) {
+func TestIsLinkedProject_EmbeddedBrokerOnly(t *testing.T) {
 	srv, s := testServer(t)
-	grove := createTestGitProject(t, srv, "IsLinked Embedded", "https://github.com/org/emb.git")
+	project := createTestGitProject(t, srv, "IsLinked Embedded", "https://github.com/org/emb.git")
 
 	embeddedBrokerID := "embedded-only"
 	srv.SetEmbeddedBrokerID(embeddedBrokerID)
@@ -149,61 +149,61 @@ func TestIsLinkedGrove_EmbeddedBrokerOnly(t *testing.T) {
 	broker := &store.RuntimeBroker{ID: embeddedBrokerID, Name: "emb"}
 	require.NoError(t, s.CreateRuntimeBroker(context.Background(), broker))
 	require.NoError(t, s.AddProjectProvider(context.Background(), &store.ProjectProvider{
-		ProjectID:   grove.ID,
+		ProjectID:   project.ID,
 		BrokerID:  embeddedBrokerID,
 		LocalPath: "/some/path",
 	}))
 
 	// Embedded broker with local path should NOT be considered "linked" (it's co-located)
-	assert.False(t, srv.isLinkedProject(context.Background(), grove))
+	assert.False(t, srv.isLinkedProject(context.Background(), project))
 }
 
 // ============================================================================
 // Cache Status Endpoint Tests
 // ============================================================================
 
-func TestGroveCacheStatus_NoCacheExists(t *testing.T) {
+func TestProjectCacheStatus_NoCacheExists(t *testing.T) {
 	srv, s := testServer(t)
-	grove, _ := createTestLinkedProject(t, srv, s, "Cache Status Empty", "https://github.com/org/cache-status.git")
+	project, _ := createTestLinkedProject(t, srv, s, "Cache Status Empty", "https://github.com/org/cache-status.git")
 
 	rec := doRequest(t, srv, http.MethodGet,
-		fmt.Sprintf("/api/v1/groves/%s/workspace/cache/status", grove.ID), nil)
+		fmt.Sprintf("/api/v1/projects/%s/workspace/cache/status", project.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
 	var resp ProjectCacheStatusResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
-	assert.Equal(t, grove.ID, resp.ProjectID)
+	assert.Equal(t, project.ID, resp.ProjectID)
 	assert.False(t, resp.Cached)
 }
 
-func TestGroveCacheStatus_CacheExists(t *testing.T) {
+func TestProjectCacheStatus_CacheExists(t *testing.T) {
 	srv, s := testServer(t)
-	grove, _ := createTestLinkedProject(t, srv, s, "Cache Status With", "https://github.com/org/cache-with.git")
+	project, _ := createTestLinkedProject(t, srv, s, "Cache Status With", "https://github.com/org/cache-with.git")
 
 	// Create the cache directory with some files
-	cachePath, err := hubNativeProjectPath(grove.Slug)
+	cachePath, err := hubNativeProjectPath(project.Slug)
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(cachePath, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(cachePath, "cached.txt"), []byte("cached"), 0644))
 
 	rec := doRequest(t, srv, http.MethodGet,
-		fmt.Sprintf("/api/v1/groves/%s/workspace/cache/status", grove.ID), nil)
+		fmt.Sprintf("/api/v1/projects/%s/workspace/cache/status", project.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
 	var resp ProjectCacheStatusResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
-	assert.Equal(t, grove.ID, resp.ProjectID)
+	assert.Equal(t, project.ID, resp.ProjectID)
 	assert.True(t, resp.Cached)
 }
 
-func TestGroveCacheStatus_MethodNotAllowed(t *testing.T) {
+func TestProjectCacheStatus_MethodNotAllowed(t *testing.T) {
 	srv, s := testServer(t)
-	grove, _ := createTestLinkedProject(t, srv, s, "Cache Status Method", "https://github.com/org/method.git")
+	project, _ := createTestLinkedProject(t, srv, s, "Cache Status Method", "https://github.com/org/method.git")
 
 	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/workspace/cache/status", grove.ID), nil)
+		fmt.Sprintf("/api/v1/projects/%s/workspace/cache/status", project.ID), nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 }
 
@@ -211,30 +211,30 @@ func TestGroveCacheStatus_MethodNotAllowed(t *testing.T) {
 // WebDAV Access for Linked Projects
 // ============================================================================
 
-func TestGroveWebDAV_LinkedGrove_ServesFromCache(t *testing.T) {
+func TestProjectWebDAV_LinkedProject_ServesFromCache(t *testing.T) {
 	srv, s := testServer(t)
-	grove, _ := createTestLinkedProject(t, srv, s, "WebDAV Linked Serve", "https://github.com/org/dav-linked.git")
+	project, _ := createTestLinkedProject(t, srv, s, "WebDAV Linked Serve", "https://github.com/org/dav-linked.git")
 
 	// Populate the cache directory
-	cachePath, err := hubNativeProjectPath(grove.Slug)
+	cachePath, err := hubNativeProjectPath(project.Slug)
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(cachePath, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(cachePath, "hello.txt"), []byte("hello from cache"), 0644))
 
-	// WebDAV PROPFIND should work for linked groves (serves from cache)
+	// WebDAV PROPFIND should work for linked projects (serves from cache)
 	rec := doRequestWithMethod(t, srv, "PROPFIND",
-		fmt.Sprintf("/api/v1/groves/%s/dav/", grove.ID))
+		fmt.Sprintf("/api/v1/projects/%s/dav/", project.ID))
 	// WebDAV PROPFIND returns 207 Multi-Status on success
 	assert.Equal(t, http.StatusMultiStatus, rec.Code, "body: %s", rec.Body.String())
 }
 
-func TestGroveWebDAV_LinkedGrove_EmptyCache(t *testing.T) {
+func TestProjectWebDAV_LinkedProject_EmptyCache(t *testing.T) {
 	srv, s := testServer(t)
-	grove, _ := createTestLinkedProject(t, srv, s, "WebDAV Linked Empty", "https://github.com/org/dav-empty.git")
+	project, _ := createTestLinkedProject(t, srv, s, "WebDAV Linked Empty", "https://github.com/org/dav-empty.git")
 
 	// WebDAV PROPFIND on empty cache should still work (creates the directory)
 	rec := doRequestWithMethod(t, srv, "PROPFIND",
-		fmt.Sprintf("/api/v1/groves/%s/dav/", grove.ID))
+		fmt.Sprintf("/api/v1/projects/%s/dav/", project.ID))
 	assert.Equal(t, http.StatusMultiStatus, rec.Code, "body: %s", rec.Body.String())
 }
 
@@ -242,18 +242,18 @@ func TestGroveWebDAV_LinkedGrove_EmptyCache(t *testing.T) {
 // Workspace File API for Linked Projects
 // ============================================================================
 
-func TestGroveWorkspaceList_LinkedProject(t *testing.T) {
+func TestProjectWorkspaceList_LinkedProject(t *testing.T) {
 	srv, s := testServer(t)
-	grove, _ := createTestLinkedProject(t, srv, s, "WS List Linked", "https://github.com/org/ws-list.git")
+	project, _ := createTestLinkedProject(t, srv, s, "WS List Linked", "https://github.com/org/ws-list.git")
 
 	// Populate the cache
-	cachePath, err := hubNativeProjectPath(grove.Slug)
+	cachePath, err := hubNativeProjectPath(project.Slug)
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(cachePath, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(cachePath, "file1.txt"), []byte("one"), 0644))
 
 	rec := doRequest(t, srv, http.MethodGet,
-		fmt.Sprintf("/api/v1/groves/%s/workspace/files", grove.ID), nil)
+		fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
 	var resp ProjectWorkspaceListResponse
@@ -267,22 +267,22 @@ func TestGroveWorkspaceList_LinkedProject(t *testing.T) {
 // Cache Refresh Endpoint Tests
 // ============================================================================
 
-func TestGroveCacheRefresh_HubNativeGrove_Conflict(t *testing.T) {
+func TestProjectCacheRefresh_HubNativeProject_Conflict(t *testing.T) {
 	srv, _ := testServer(t)
-	grove, _ := createTestHubNativeProject(t, srv, "Cache Refresh HubNative")
+	project, _ := createTestHubNativeProject(t, srv, "Cache Refresh HubNative")
 
 	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/workspace/cache/refresh", grove.ID), nil)
-	// Hub-native groves should return conflict (they don't need cache refresh)
+		fmt.Sprintf("/api/v1/projects/%s/workspace/cache/refresh", project.ID), nil)
+	// Hub-native projects should return conflict (they don't need cache refresh)
 	assert.Equal(t, http.StatusConflict, rec.Code)
 }
 
-func TestGroveCacheRefresh_MethodNotAllowed(t *testing.T) {
+func TestProjectCacheRefresh_MethodNotAllowed(t *testing.T) {
 	srv, s := testServer(t)
-	grove, _ := createTestLinkedProject(t, srv, s, "Cache Refresh Method", "https://github.com/org/refresh-method.git")
+	project, _ := createTestLinkedProject(t, srv, s, "Cache Refresh Method", "https://github.com/org/refresh-method.git")
 
 	rec := doRequest(t, srv, http.MethodGet,
-		fmt.Sprintf("/api/v1/groves/%s/workspace/cache/refresh", grove.ID), nil)
+		fmt.Sprintf("/api/v1/projects/%s/workspace/cache/refresh", project.ID), nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 }
 

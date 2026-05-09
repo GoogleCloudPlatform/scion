@@ -61,14 +61,14 @@ func TestCreateAgent_SkipsGCSSyncForEmbeddedBroker(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a grove (hub-native: no git remote)
-	grove := &store.Project{
-		ID:   "grove-embedded-test",
+	// Create a project (hub-native: no git remote)
+	project := &store.Project{
+		ID:   "project-embedded-test",
 		Name: "embedded-test",
 		Slug: "embedded-test",
 	}
-	if err := s.CreateProject(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	// Create a runtime broker
@@ -83,30 +83,30 @@ func TestCreateAgent_SkipsGCSSyncForEmbeddedBroker(t *testing.T) {
 		t.Fatalf("failed to create broker: %v", err)
 	}
 
-	// Create a grove provider WITHOUT LocalPath (simulating autoLinkProviders behavior)
+	// Create a project provider WITHOUT LocalPath (simulating autoLinkProviders behavior)
 	provider := &store.ProjectProvider{
-		ProjectID:    grove.ID,
+		ProjectID:    project.ID,
 		BrokerID:   brokerID,
 		BrokerName: broker.Name,
 		// LocalPath intentionally empty — this is the bug scenario
 	}
 	if err := s.AddProjectProvider(ctx, provider); err != nil {
-		t.Fatalf("failed to add grove provider: %v", err)
+		t.Fatalf("failed to add project provider: %v", err)
 	}
 
-	// Set the default broker on the grove
-	grove.DefaultRuntimeBrokerID = brokerID
-	if err := s.UpdateProject(ctx, grove); err != nil {
-		t.Fatalf("failed to update grove: %v", err)
+	// Set the default broker on the project
+	project.DefaultRuntimeBrokerID = brokerID
+	if err := s.UpdateProject(ctx, project); err != nil {
+		t.Fatalf("failed to update project: %v", err)
 	}
 
 	// Mark the broker as the embedded broker
 	srv.SetEmbeddedBrokerID(brokerID)
 
-	// Create agent request for the hub-native grove
+	// Create agent request for the hub-native project
 	reqBody := CreateAgentRequest{
 		Name:    "test-agent",
-		ProjectID: grove.ID,
+		ProjectID: project.ID,
 	}
 	body, _ := json.Marshal(reqBody)
 
@@ -126,7 +126,7 @@ func TestCreateAgent_SkipsGCSSyncForEmbeddedBroker(t *testing.T) {
 	}
 
 	// Verify the agent was created in the store
-	agents, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: grove.ID}, store.ListOptions{})
+	agents, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
 	if err != nil {
 		t.Fatalf("failed to list agents: %v", err)
 	}

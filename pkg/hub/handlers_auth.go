@@ -145,7 +145,7 @@ type CLIAuthTokenResponse struct {
 // TokenCreateRequest is the request body for creating a user access token.
 type TokenCreateRequest struct {
 	Name      string     `json:"name"`
-	ProjectID   string     `json:"groveId"`
+	ProjectID   string     `json:"projectId"`
 	Scopes    []string   `json:"scopes"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
@@ -161,7 +161,7 @@ type TokenResponse struct {
 	ID        string     `json:"id"`
 	Name      string     `json:"name"`
 	Prefix    string     `json:"prefix"`
-	ProjectID   string     `json:"groveId"`
+	ProjectID   string     `json:"projectId"`
 	Scopes    []string   `json:"scopes"`
 	Revoked   bool       `json:"revoked"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
@@ -668,7 +668,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 			ValidationError(w, err.Error(), nil)
 		case strings.Contains(err.Error(), "required"):
 			ValidationError(w, err.Error(), nil)
-		case strings.Contains(err.Error(), "grove not found"):
+		case strings.Contains(err.Error(), "project not found"):
 			ValidationError(w, err.Error(), nil)
 		default:
 			InternalError(w)

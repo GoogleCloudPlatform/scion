@@ -25,14 +25,14 @@ import (
 func TestComparePermissions(t *testing.T) {
 	tests := []struct {
 		name          string
-		grovePerms    *store.GitHubTokenPermissions
+		projectPerms    *store.GitHubTokenPermissions
 		appPerms      map[string]string
 		expectedCount int
 		expectedFirst string // first missing perm substring (if any)
 	}{
 		{
 			name: "all permissions satisfied",
-			grovePerms: &store.GitHubTokenPermissions{
+			projectPerms: &store.GitHubTokenPermissions{
 				Contents:     "write",
 				PullRequests: "write",
 				Metadata:     "read",
@@ -45,8 +45,8 @@ func TestComparePermissions(t *testing.T) {
 			expectedCount: 0,
 		},
 		{
-			name: "app has write, grove requests read — satisfied",
-			grovePerms: &store.GitHubTokenPermissions{
+			name: "app has write, project requests read — satisfied",
+			projectPerms: &store.GitHubTokenPermissions{
 				Contents: "read",
 			},
 			appPerms: map[string]string{
@@ -55,8 +55,8 @@ func TestComparePermissions(t *testing.T) {
 			expectedCount: 0,
 		},
 		{
-			name: "app has read, grove requests write — insufficient",
-			grovePerms: &store.GitHubTokenPermissions{
+			name: "app has read, project requests write — insufficient",
+			projectPerms: &store.GitHubTokenPermissions{
 				Contents: "write",
 			},
 			appPerms: map[string]string{
@@ -67,7 +67,7 @@ func TestComparePermissions(t *testing.T) {
 		},
 		{
 			name: "app missing permission entirely",
-			grovePerms: &store.GitHubTokenPermissions{
+			projectPerms: &store.GitHubTokenPermissions{
 				Issues: "write",
 			},
 			appPerms: map[string]string{
@@ -78,7 +78,7 @@ func TestComparePermissions(t *testing.T) {
 		},
 		{
 			name: "multiple missing permissions",
-			grovePerms: &store.GitHubTokenPermissions{
+			projectPerms: &store.GitHubTokenPermissions{
 				Contents: "write",
 				Issues:   "read",
 				Checks:   "write",
@@ -91,8 +91,8 @@ func TestComparePermissions(t *testing.T) {
 			expectedCount: 3,
 		},
 		{
-			name:       "empty grove permissions — no missing",
-			grovePerms: &store.GitHubTokenPermissions{},
+			name:       "empty project permissions — no missing",
+			projectPerms: &store.GitHubTokenPermissions{},
 			appPerms: map[string]string{
 				"contents": "write",
 			},
@@ -100,7 +100,7 @@ func TestComparePermissions(t *testing.T) {
 		},
 		{
 			name: "empty app permissions — all missing",
-			grovePerms: &store.GitHubTokenPermissions{
+			projectPerms: &store.GitHubTokenPermissions{
 				Contents: "read",
 				Metadata: "read",
 			},
@@ -111,7 +111,7 @@ func TestComparePermissions(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			missing := comparePermissions(tc.grovePerms, tc.appPerms)
+			missing := comparePermissions(tc.projectPerms, tc.appPerms)
 			if len(missing) != tc.expectedCount {
 				t.Errorf("expected %d missing permissions, got %d: %v",
 					tc.expectedCount, len(missing), missing)

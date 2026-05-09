@@ -126,7 +126,7 @@ func (s *Server) handleInstallationWebhook(w http.ResponseWriter, r *http.Reques
 
 	switch event.Action {
 	case "created":
-		// Record the installation and match to groves
+		// Record the installation and match to projects
 		repos := make([]string, len(event.Repositories))
 		for i, r := range event.Repositories {
 			repos[i] = r.FullName
@@ -698,12 +698,12 @@ func (s *Server) getGitHubAppClient() (*githubapp.Client, error) {
 	}, keyData)
 }
 
-// mintGitHubAppToken mints a GitHub App installation token for a grove.
-// It handles error classification and updates the grove's GitHub App status.
+// mintGitHubAppToken mints a GitHub App installation token for a project.
+// It handles error classification and updates the project's GitHub App status.
 // Returns the token string and expiry, or an error.
-func (s *Server) mintGitHubAppToken(ctx context.Context, grove *store.Project) (string, string, error) {
-	if grove.GitHubInstallationID == nil {
-		return "", "", fmt.Errorf("grove has no GitHub App installation")
+func (s *Server) mintGitHubAppToken(ctx context.Context, project *store.Project) (string, string, error) {
+	if project.GitHubInstallationID == nil {
+		return "", "", fmt.Errorf("project has no GitHub App installation")
 	}
 
 	client, err := s.getGitHubAppClient()
@@ -716,30 +716,30 @@ func (s *Server) mintGitHubAppToken(ctx context.Context, grove *store.Project) (
 		} else if strings.Contains(err.Error(), "private key") || strings.Contains(err.Error(), "PEM") {
 			errorCode = githubapp.ErrCodePrivateKeyInvalid
 		}
-		s.updateProjectGitHubAppStatus(ctx, grove, store.GitHubAppStateError,
+		s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
 			errorCode, err.Error())
 		return "", "", err
 	}
 
-	installationID := *grove.GitHubInstallationID
+	installationID := *project.GitHubInstallationID
 
 	// Determine permissions to request
 	perms := githubapp.DefaultTokenPermissions()
-	if grove.GitHubPermissions != nil {
+	if project.GitHubPermissions != nil {
 		perms = githubapp.TokenPermissions{
-			Contents:     grove.GitHubPermissions.Contents,
-			PullRequests: grove.GitHubPermissions.PullRequests,
-			Issues:       grove.GitHubPermissions.Issues,
-			Metadata:     grove.GitHubPermissions.Metadata,
-			Checks:       grove.GitHubPermissions.Checks,
-			Actions:      grove.GitHubPermissions.Actions,
+			Contents:     project.GitHubPermissions.Contents,
+			PullRequests: project.GitHubPermissions.PullRequests,
+			Issues:       project.GitHubPermissions.Issues,
+			Metadata:     project.GitHubPermissions.Metadata,
+			Checks:       project.GitHubPermissions.Checks,
+			Actions:      project.GitHubPermissions.Actions,
 		}
 	}
 
 	// Extract repo name from git remote (just the repo name, not owner/repo)
 	var repos []string
-	if grove.GitRemote != "" {
-		ownerRepo := extractOwnerRepo(grove.GitRemote)
+	if project.GitRemote != "" {
+		ownerRepo := extractOwnerRepo(project.GitRemote)
 		if ownerRepo != "" {
 			// GitHub API expects just the repo name, not owner/repo
 			parts := strings.SplitN(ownerRepo, "/", 2)
@@ -751,7 +751,7 @@ func (s *Server) mintGitHubAppToken(ctx context.Context, grove *store.Project) (
 
 	token, err := client.MintInstallationToken(ctx, installationID, repos, perms)
 	if err != nil {
-		// Classify the error and update grove status
+		// Classify the error and update project status
 		var mintErr *githubapp.TokenMintError
 		errorCode := githubapp.ErrCodeTokenMintFailed
 		errorMessage := err.Error()
@@ -765,7 +765,7 @@ func (s *Server) mintGitHubAppToken(ctx context.Context, grove *store.Project) (
 			state = store.GitHubAppStateDegraded
 		}
 
-		s.updateProjectGitHubAppStatus(ctx, grove, state, errorCode, errorMessage)
+		s.updateProjectGitHubAppStatus(ctx, project, state, errorCode, errorMessage)
 		return "", "", err
 	}
 
@@ -776,36 +776,36 @@ func (s *Server) mintGitHubAppToken(ctx context.Context, grove *store.Project) (
 		s.mu.Unlock()
 	}
 
-	// Success — update grove status
+	// Success — update project status
 	now := timeNow()
-	grove.GitHubAppStatus = &store.GitHubAppProjectStatus{
+	project.GitHubAppStatus = &store.GitHubAppProjectStatus{
 		State:         store.GitHubAppStateOK,
 		LastTokenMint: &now,
 		LastChecked:   now,
 	}
-	if err := s.store.UpdateProject(ctx, grove); err != nil {
-		slog.Warn("Failed to update grove status after successful token mint", "error", err)
+	if err := s.store.UpdateProject(ctx, project); err != nil {
+		slog.Warn("Failed to update project status after successful token mint", "error", err)
 	} else {
-		s.events.PublishProjectUpdated(ctx, grove)
+		s.events.PublishProjectUpdated(ctx, project)
 	}
 
 	return token.Token, token.ExpiresAt.Format("2006-01-02T15:04:05Z"), nil
 }
 
 // updateProjectGitHubAppStatus is a helper to update a project's GitHub App status.
-func (s *Server) updateProjectGitHubAppStatus(ctx context.Context, grove *store.Project, state, errorCode, errorMessage string) {
+func (s *Server) updateProjectGitHubAppStatus(ctx context.Context, project *store.Project, state, errorCode, errorMessage string) {
 	now := timeNow()
-	grove.GitHubAppStatus = &store.GitHubAppProjectStatus{
+	project.GitHubAppStatus = &store.GitHubAppProjectStatus{
 		State:        state,
 		ErrorCode:    errorCode,
 		ErrorMessage: errorMessage,
 		LastChecked:  now,
 		LastError:    &now,
 	}
-	if err := s.store.UpdateProject(ctx, grove); err != nil {
-		slog.Warn("Failed to update project GitHub App status", "project_id", grove.ID, "error", err)
+	if err := s.store.UpdateProject(ctx, project); err != nil {
+		slog.Warn("Failed to update project GitHub App status", "project_id", project.ID, "error", err)
 	} else {
-		s.events.PublishProjectUpdated(ctx, grove)
+		s.events.PublishProjectUpdated(ctx, project)
 	}
 }
 
@@ -819,9 +819,9 @@ func isTokenMintError(err error, target **githubapp.TokenMintError) bool {
 }
 
 // MintGitHubAppTokenForProject implements GitHubAppTokenMinter.
-// It mints a GitHub App installation token for the given grove.
-func (s *Server) MintGitHubAppTokenForProject(ctx context.Context, grove *store.Project) (string, string, error) {
-	if grove.GitHubInstallationID == nil {
+// It mints a GitHub App installation token for the given project.
+func (s *Server) MintGitHubAppTokenForProject(ctx context.Context, project *store.Project) (string, string, error) {
+	if project.GitHubInstallationID == nil {
 		return "", "", nil
 	}
 
@@ -834,5 +834,5 @@ func (s *Server) MintGitHubAppTokenForProject(ctx context.Context, grove *store.
 		return "", "", nil
 	}
 
-	return s.mintGitHubAppToken(ctx, grove)
+	return s.mintGitHubAppToken(ctx, project)
 }
