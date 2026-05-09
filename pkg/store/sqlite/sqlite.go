@@ -1198,7 +1198,6 @@ ALTER TABLE subscription_templates RENAME COLUMN grove_id TO project_id;
 ALTER TABLE user_access_tokens RENAME COLUMN grove_id TO project_id;
 ALTER TABLE messages RENAME COLUMN grove_id TO project_id;
 ALTER TABLE groups RENAME COLUMN grove_id TO project_id;
-ALTER TABLE gcp_service_accounts RENAME COLUMN grove_id TO project_id;
 
 -- 3. Update Data Values
 UPDATE env_vars SET scope = 'project' WHERE scope = 'grove';
