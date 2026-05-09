@@ -264,7 +264,7 @@ func TestResolveSecretScope_GroveFallbackToProjectID(t *testing.T) {
 
 	scope, scopeID, err := resolveSecretScope(testCmd, settings)
 	assert.NoError(t, err)
-	assert.Equal(t, "grove", scope)
+	assert.Equal(t, "project", scope)
 	assert.Equal(t, settings.ProjectID, scopeID, "should fall back to settings.ProjectID")
 }
 

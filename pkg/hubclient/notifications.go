@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"net/url"
 	"time"
 
@@ -49,7 +50,7 @@ type Notification struct {
 	ID             string    `json:"id"`
 	SubscriptionID string    `json:"subscriptionId"`
 	AgentID        string    `json:"agentId"`
-	ProjectID      string    `json:"groveId"`
+	ProjectID      string    `json:"projectId"`
 	SubscriberType string    `json:"subscriberType"`
 	SubscriberID   string    `json:"subscriberId"`
 	Status         string    `json:"status"`
@@ -57,6 +58,36 @@ type Notification struct {
 	Dispatched     bool      `json:"dispatched"`
 	Acknowledged   bool      `json:"acknowledged"`
 	CreatedAt      time.Time `json:"createdAt"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (n *Notification) UnmarshalJSON(data []byte) error {
+	type Alias Notification
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(n),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if n.ProjectID == "" && aux.GroveID != "" {
+		n.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (n Notification) MarshalJSON() ([]byte, error) {
+	type Alias Notification
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(n),
+		GroveID: n.ProjectID,
+	})
 }
 
 // List returns notifications for the current user.
@@ -128,8 +159,38 @@ type subscriptionService struct {
 type CreateSubscriptionRequest struct {
 	Scope             string   `json:"scope"`
 	AgentID           string   `json:"agentId,omitempty"`
-	ProjectID         string   `json:"groveId"`
+	ProjectID         string   `json:"projectId"`
 	TriggerActivities []string `json:"triggerActivities"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (r CreateSubscriptionRequest) MarshalJSON() ([]byte, error) {
+	type Alias CreateSubscriptionRequest
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(r),
+		GroveID: r.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (r *CreateSubscriptionRequest) UnmarshalJSON(data []byte) error {
+	type Alias CreateSubscriptionRequest
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // UpdateSubscriptionRequest is the request body for updating a subscription.
@@ -151,10 +212,40 @@ type Subscription struct {
 	AgentID           string    `json:"agentId,omitempty"`
 	SubscriberType    string    `json:"subscriberType"`
 	SubscriberID      string    `json:"subscriberId"`
-	ProjectID         string    `json:"groveId"`
+	ProjectID         string    `json:"projectId"`
 	TriggerActivities []string  `json:"triggerActivities"`
 	CreatedAt         time.Time `json:"createdAt"`
 	CreatedBy         string    `json:"createdBy"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (s *Subscription) UnmarshalJSON(data []byte) error {
+	type Alias Subscription
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(s),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if s.ProjectID == "" && aux.GroveID != "" {
+		s.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (s Subscription) MarshalJSON() ([]byte, error) {
+	type Alias Subscription
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(s),
+		GroveID: s.ProjectID,
+	})
 }
 
 // Create creates a new notification subscription.

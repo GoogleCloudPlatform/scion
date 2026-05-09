@@ -379,7 +379,7 @@ func TestResolveEnvScope_SentinelInfersFromSettings(t *testing.T) {
 
 	scope, scopeID, err := resolveEnvScope(testCmd, settings)
 	assert.NoError(t, err)
-	assert.Equal(t, "grove", scope)
+	assert.Equal(t, "project", scope)
 	assert.Equal(t, groveUUID, scopeID, "should infer grove ID from settings when bare --grove is used")
 }
 
@@ -407,7 +407,7 @@ func TestResolveEnvScope_ExplicitGroveValue(t *testing.T) {
 
 	scope, scopeID, err := resolveEnvScope(testCmd, settings)
 	assert.NoError(t, err)
-	assert.Equal(t, "grove", scope)
+	assert.Equal(t, "project", scope)
 	assert.Equal(t, "hub-local", scopeID, "should pass through the explicit grove name for later resolution")
 }
 
