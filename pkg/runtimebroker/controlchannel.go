@@ -129,7 +129,7 @@ type StreamHandler struct {
 	streamID   string
 	streamType string
 	slug       string
-	groveID    string
+	projectID  string
 	dataCh     chan []byte
 	resizeCh   chan [2]int // [cols, rows]
 	closeCh    chan struct{}
@@ -534,12 +534,12 @@ func (c *ControlChannelClient) handleStreamOpen(data []byte) error {
 		)
 	}
 
-	// Create stream handler
+		// Create stream handler
 	handler := &StreamHandler{
 		streamID:   open.StreamID,
 		streamType: open.StreamType,
 		slug:       open.Slug,
-		groveID:    open.ProjectID,
+		projectID:  open.ProjectID,
 		dataCh:     make(chan []byte, 256),
 		resizeCh:   make(chan [2]int, 8),
 		closeCh:    make(chan struct{}),
@@ -662,7 +662,7 @@ func (c *ControlChannelClient) handlePTYStream(handler *StreamHandler, cols, row
 		return
 	}
 
-	result, err := c.agentLookup.LookupAgent(c.ctx, handler.slug, handler.groveID)
+	result, err := c.agentLookup.LookupAgent(c.ctx, handler.slug, handler.projectID)
 	if err != nil {
 		c.log.Error("PTY stream failed: agent lookup error", "slug", handler.slug, "error", err)
 		c.CloseStream(handler.streamID, fmt.Sprintf("agent lookup failed: %v", err), 404)

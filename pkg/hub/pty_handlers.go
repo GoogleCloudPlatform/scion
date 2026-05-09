@@ -179,7 +179,7 @@ type PTYSession struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	agentID     string
-	groveID     string
+	projectID   string
 	brokerID    string
 	conn        *websocket.Conn
 	controlChan *ControlChannelManager
@@ -192,13 +192,13 @@ type PTYSession struct {
 }
 
 // newPTYSession creates a new PTY session.
-func newPTYSession(ctx context.Context, agentID, groveID, brokerID string, conn *websocket.Conn, cc *ControlChannelManager, cols, rows int) *PTYSession {
+func newPTYSession(ctx context.Context, agentID, projectID, brokerID string, conn *websocket.Conn, cc *ControlChannelManager, cols, rows int) *PTYSession {
 	ctx, cancel := context.WithCancel(ctx)
 	return &PTYSession{
 		ctx:         ctx,
 		cancel:      cancel,
 		agentID:     agentID,
-		groveID:     groveID,
+		projectID:   projectID,
 		brokerID:    brokerID,
 		conn:        conn,
 		controlChan: cc,
@@ -210,7 +210,7 @@ func newPTYSession(ctx context.Context, agentID, groveID, brokerID string, conn 
 // Run starts the PTY session and blocks until it ends.
 func (s *PTYSession) Run() error {
 	// Open stream to broker
-	stream, err := s.controlChan.OpenStream(s.ctx, s.brokerID, wsprotocol.StreamTypePTY, s.agentID, s.groveID, s.cols, s.rows)
+	stream, err := s.controlChan.OpenStream(s.ctx, s.brokerID, wsprotocol.StreamTypePTY, s.agentID, s.projectID, s.cols, s.rows)
 	if err != nil {
 		return err
 	}
