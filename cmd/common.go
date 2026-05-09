@@ -59,19 +59,20 @@ var isInteractiveTerminal = func() bool {
 }
 
 var (
-	templateName      string
-	agentImage        string
-	noAuth            bool
-	attach            bool
-	branch            string
-	workspace         string
-	runtimeBrokerID   string
-	harnessConfigFlag string
-	harnessAuthFlag   string
-	startNoNotify     bool
-	enableTelemetry   bool
-	disableTelemetry  bool
-	inlineConfigPath  string
+	templateName          string
+	agentImage            string
+	noAuth                bool
+	attach                bool
+	branch                string
+	workspace             string
+	runtimeBrokerID       string
+	harnessConfigFlag     string
+	harnessAuthFlag       string
+	startNoNotify         bool
+	startNotifyDeprecated bool
+	enableTelemetry       bool
+	disableTelemetry      bool
+	inlineConfigPath      string
 )
 
 // loadInlineConfig loads a ScionConfig from the --config flag path.

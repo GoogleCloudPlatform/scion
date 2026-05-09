@@ -25,9 +25,9 @@ You can use the scion CLI to create and manage other agents as your instructions
 
 - **Inspect an Agent**: Use the command `scion look <agent-id>` to inspect the
   recent output and current terminal-UI state of any running agent.
-- **Getting Notified**: To get notified of updates to agents you create or message: you MUST include the
-  `--notify` flag when starting or messaging agents. You will then be notified when they are done or need
-  your help.
+- **Getting Notified**: Notifications are enabled by default when starting agents — you will
+  automatically be notified when they complete or need your help. When messaging an agent and
+  you want to subscribe to its notifications, add the `--notify` flag to the message command.
 - **Signal Blocked**: When you are waiting for a child agent to complete or for a
   scheduled event, signal that you are blocked so the system does not falsely mark you
   as stalled: `sciontool status blocked "Waiting for agent <name> to complete"`. This

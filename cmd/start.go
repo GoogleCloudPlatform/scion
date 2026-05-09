@@ -61,6 +61,10 @@ func init() {
 	// Notification flag — on by default for Hub mode; use --no-notify to opt out
 	startCmd.Flags().BoolVar(&startNoNotify, "no-notify", false, "Do not subscribe to notifications for the spawned agent")
 
+	// Back-compat: accept --notify without error (it's now the default)
+	startCmd.Flags().BoolVar(&startNotifyDeprecated, "notify", false, "")
+	startCmd.Flags().MarkDeprecated("notify", "notifications are now enabled by default; remove --notify from your instructions")
+
 	// Template resolution flags for Hub mode (Section 9.4)
 	startCmd.Flags().BoolVar(&uploadTemplate, "upload-template", false, "Automatically upload local template to Hub if not found")
 	startCmd.Flags().BoolVar(&noUpload, "no-upload", false, "Fail if template requires upload (never prompt)")
