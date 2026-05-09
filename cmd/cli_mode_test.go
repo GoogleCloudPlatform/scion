@@ -176,14 +176,14 @@ func buildTestTree() *cobra.Command {
 
 	// templates with subcommands
 	templates := &cobra.Command{Use: "templates"}
-	for _, name := range []string{"list", "show", "delete", "clone"} {
+	for _, name := range []string{"list", "show", "create", "delete", "clone", "update-default", "import", "sync", "push", "pull", "status"} {
 		templates.AddCommand(&cobra.Command{Use: name})
 	}
 	root.AddCommand(templates)
 
 	// template (singular alias)
 	template := &cobra.Command{Use: "template"}
-	for _, name := range []string{"list", "show", "delete", "clone"} {
+	for _, name := range []string{"list", "show", "delete", "clone", "import", "sync", "push", "pull", "status"} {
 		template.AddCommand(&cobra.Command{Use: name})
 	}
 	root.AddCommand(template)
@@ -285,7 +285,17 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 		"resume",
 		"schedule", "schedule.cancel", "schedule.get", "schedule.history", "schedule.list",
 		"shared-dir", "shared-dir.info", "shared-dir.list",
-		"start", "stop", "version",
+		"start", "stop",
+		"template",
+		"template.clone", "template.delete", "template.import",
+		"template.list", "template.pull", "template.push",
+		"template.show", "template.status", "template.sync",
+		"templates",
+		"templates.clone", "templates.create", "templates.delete", "templates.import",
+		"templates.list", "templates.pull", "templates.push",
+		"templates.show", "templates.status", "templates.sync",
+		"templates.update-default",
+		"version",
 	}
 	assert.Equal(t, expected, remaining)
 
@@ -293,7 +303,7 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 	absent := []string{
 		"attach", "broker", "cdw", "clean", "completion", "config", "doctor",
 		"grove", "harness-config", "hub",
-		"init", "messages", "restore", "server", "sync", "template", "templates",
+		"init", "messages", "restore", "server", "sync",
 	}
 	for _, cmd := range absent {
 		assert.NotContains(t, remaining, cmd, "agent mode should remove %s", cmd)
@@ -363,8 +373,12 @@ func TestApplyModeRestrictions_TemplateAlias(t *testing.T) {
 	applyModeRestrictions(root)
 	remaining := collectCommandNames(root)
 
-	assert.NotContains(t, remaining, "template")
-	assert.NotContains(t, remaining, "templates")
+	assert.Contains(t, remaining, "template")
+	assert.Contains(t, remaining, "template.list")
+	assert.Contains(t, remaining, "template.show")
+	assert.Contains(t, remaining, "templates")
+	assert.Contains(t, remaining, "templates.list")
+	assert.Contains(t, remaining, "templates.show")
 }
 
 func TestRemoveCommands_DoesNotPanicOnEmptyTree(t *testing.T) {
@@ -400,6 +414,12 @@ func TestAgentAllowedList(t *testing.T) {
 		"notifications",
 		"schedule", "schedule.list", "schedule.get", "schedule.cancel", "schedule.history",
 		"shared-dir", "shared-dir.list", "shared-dir.info",
+		"templates", "templates.list", "templates.show", "templates.create",
+		"templates.clone", "templates.delete", "templates.update-default",
+		"templates.import", "templates.sync", "templates.push", "templates.pull", "templates.status",
+		"template", "template.list", "template.show", "template.clone",
+		"template.delete", "template.import", "template.sync",
+		"template.push", "template.pull", "template.status",
 	}
 	for _, path := range expectedAllowed {
 		assert.True(t, agentAllowed[path], "agentAllowed should contain %s", path)
@@ -408,7 +428,7 @@ func TestAgentAllowedList(t *testing.T) {
 	notAllowed := []string{
 		"attach", "restore", "sync", "clean", "cdw", "init",
 		"completion", "config", "doctor", "hub", "messages",
-		"server", "broker", "grove", "templates", "template",
+		"server", "broker", "grove",
 		"harness-config",
 		"config.set", "config.validate", "config.migrate",
 		"config.list", "config.get", "config.dir", "config.schema",
