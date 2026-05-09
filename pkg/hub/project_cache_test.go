@@ -122,21 +122,21 @@ func TestResolveGroveWebDAVPath_LinkedGrove_EmbeddedBroker(t *testing.T) {
 }
 
 // ============================================================================
-// isLinkedGrove Tests
+// isLinkedProject Tests
 // ============================================================================
 
 func TestIsLinkedGrove_HubNative(t *testing.T) {
 	srv, _ := testServer(t)
 	grove, _ := createTestHubNativeGrove(t, srv, "IsLinked HubNative")
 
-	assert.False(t, srv.isLinkedGrove(context.Background(), grove))
+	assert.False(t, srv.isLinkedProject(context.Background(), grove))
 }
 
 func TestIsLinkedGrove_RemoteBroker(t *testing.T) {
 	srv, s := testServer(t)
 	grove, _ := createTestLinkedGrove(t, srv, s, "IsLinked Remote", "https://github.com/org/remote.git")
 
-	assert.True(t, srv.isLinkedGrove(context.Background(), grove))
+	assert.True(t, srv.isLinkedProject(context.Background(), grove))
 }
 
 func TestIsLinkedGrove_EmbeddedBrokerOnly(t *testing.T) {
@@ -155,7 +155,7 @@ func TestIsLinkedGrove_EmbeddedBrokerOnly(t *testing.T) {
 	}))
 
 	// Embedded broker with local path should NOT be considered "linked" (it's co-located)
-	assert.False(t, srv.isLinkedGrove(context.Background(), grove))
+	assert.False(t, srv.isLinkedProject(context.Background(), grove))
 }
 
 // ============================================================================
@@ -170,7 +170,7 @@ func TestGroveCacheStatus_NoCacheExists(t *testing.T) {
 		fmt.Sprintf("/api/v1/groves/%s/workspace/cache/status", grove.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	var resp GroveCacheStatusResponse
+	var resp ProjectCacheStatusResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
 	assert.Equal(t, grove.ID, resp.GroveID)
@@ -191,7 +191,7 @@ func TestGroveCacheStatus_CacheExists(t *testing.T) {
 		fmt.Sprintf("/api/v1/groves/%s/workspace/cache/status", grove.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	var resp GroveCacheStatusResponse
+	var resp ProjectCacheStatusResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
 	assert.Equal(t, grove.ID, resp.GroveID)
@@ -256,7 +256,7 @@ func TestGroveWorkspaceList_LinkedGrove(t *testing.T) {
 		fmt.Sprintf("/api/v1/groves/%s/workspace/files", grove.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	var resp GroveWorkspaceListResponse
+	var resp ProjectWorkspaceListResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
 	assert.Equal(t, 1, resp.TotalCount)
@@ -287,12 +287,12 @@ func TestGroveCacheRefresh_MethodNotAllowed(t *testing.T) {
 }
 
 // ============================================================================
-// hasGroveCache Tests
+// hasProjectCache Tests
 // ============================================================================
 
 func TestHasGroveCache(t *testing.T) {
 	// Non-existent slug should return false
-	assert.False(t, hasGroveCache("non-existent-slug-12345"))
+	assert.False(t, hasProjectCache("non-existent-slug-12345"))
 }
 
 // ============================================================================

@@ -30,10 +30,10 @@ import (
 	"github.com/google/uuid"
 )
 
-// GroveCacheRefreshResponse is the response for a grove cache refresh operation.
-type GroveCacheRefreshResponse struct {
+// ProjectCacheRefreshResponse is the response for a grove cache refresh operation.
+type ProjectCacheRefreshResponse struct {
 	// GroveID is the grove that was refreshed.
-	GroveID string `json:"groveId"`
+	ProjectID string `json:"groveId"`
 	// BrokerID is the broker that provided the workspace.
 	BrokerID string `json:"brokerId"`
 	// FileCount is the number of files in the cached workspace.
@@ -44,10 +44,10 @@ type GroveCacheRefreshResponse struct {
 	CachedAt time.Time `json:"cachedAt"`
 }
 
-// GroveCacheStatusResponse is the response for the grove cache status endpoint.
-type GroveCacheStatusResponse struct {
+// ProjectCacheStatusResponse is the response for the grove cache status endpoint.
+type ProjectCacheStatusResponse struct {
 	// GroveID is the grove identifier.
-	GroveID string `json:"groveId"`
+	ProjectID string `json:"groveId"`
 	// Cached indicates whether a cached copy exists on the hub.
 	Cached bool `json:"cached"`
 	// BrokerID is the broker that last provided the workspace.
@@ -60,11 +60,11 @@ type GroveCacheStatusResponse struct {
 	LastRefresh *time.Time `json:"lastRefresh,omitempty"`
 }
 
-// RuntimeBrokerGroveUploadRequest is sent to a Runtime Broker to upload a grove's
+// RuntimeBrokerProjectUploadRequest is sent to a Runtime Broker to upload a grove's
 // workspace (not an individual agent workspace) to GCS.
-type RuntimeBrokerGroveUploadRequest struct {
+type RuntimeBrokerProjectUploadRequest struct {
 	// GroveID is the grove identifier.
-	GroveID string `json:"groveId"`
+	ProjectID string `json:"groveId"`
 	// StoragePath is the path within the bucket where files should be uploaded.
 	StoragePath string `json:"storagePath"`
 	// WorkspacePath is the local filesystem path to the grove workspace on the broker.
@@ -74,9 +74,9 @@ type RuntimeBrokerGroveUploadRequest struct {
 	ExcludePatterns []string `json:"excludePatterns,omitempty"`
 }
 
-// RuntimeBrokerGroveUploadResponse is the response from the Runtime Broker after
+// RuntimeBrokerProjectUploadResponse is the response from the Runtime Broker after
 // uploading a grove workspace.
-type RuntimeBrokerGroveUploadResponse struct {
+type RuntimeBrokerProjectUploadResponse struct {
 	// Manifest contains the list of files uploaded with their hashes.
 	Manifest *transfer.Manifest `json:"manifest"`
 	// UploadedFiles is the number of files uploaded.
@@ -85,7 +85,7 @@ type RuntimeBrokerGroveUploadResponse struct {
 	UploadedBytes int64 `json:"uploadedBytes"`
 }
 
-// handleGroveCacheRefresh triggers a cache refresh for a linked grove.
+// handleProjectCacheRefresh triggers a cache refresh for a linked grove.
 // POST /api/v1/groves/{groveId}/workspace/cache/refresh
 //
 // This endpoint:
@@ -94,7 +94,7 @@ type RuntimeBrokerGroveUploadResponse struct {
 // 3. Tunnels a request to the broker to upload the workspace to GCS
 // 4. Downloads the workspace from GCS to the hub's local cache
 // 5. Updates sync state
-func (s *Server) handleGroveCacheRefresh(w http.ResponseWriter, r *http.Request, groveID string) {
+func (s *Server) handleProjectCacheRefresh(w http.ResponseWriter, r *http.Request, groveID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
@@ -109,7 +109,7 @@ func (s *Server) handleGroveCacheRefresh(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Hub-native groves don't need cache refresh — they are the source of truth
-	if grove.GitRemote == "" && !s.isLinkedGrove(ctx, grove) {
+	if grove.GitRemote == "" && !s.isLinkedProject(ctx, grove) {
 		Conflict(w, "Cache refresh is only applicable to linked groves with remote workspaces")
 		return
 	}
@@ -129,7 +129,7 @@ func (s *Server) handleGroveCacheRefresh(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Perform the cache refresh
-	resp, err := s.refreshGroveCacheFromBroker(ctx, grove, brokerID, stor)
+	resp, err := s.refreshProjectCacheFromBroker(ctx, grove, brokerID, stor)
 	if err != nil {
 		RuntimeError(w, "Cache refresh failed: "+err.Error())
 		return
@@ -138,9 +138,9 @@ func (s *Server) handleGroveCacheRefresh(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleGroveCacheStatus returns the cache status for a linked grove.
+// handleProjectCacheStatus returns the cache status for a linked grove.
 // GET /api/v1/groves/{groveId}/workspace/cache/status
-func (s *Server) handleGroveCacheStatus(w http.ResponseWriter, r *http.Request, groveID string) {
+func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request, groveID string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return
@@ -167,8 +167,8 @@ func (s *Server) handleGroveCacheStatus(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Get sync state for the cache
-	resp := GroveCacheStatusResponse{
-		GroveID: groveID,
+	resp := ProjectCacheStatusResponse{
+		ProjectID: groveID,
 		Cached:  cached,
 	}
 
@@ -189,10 +189,10 @@ func (s *Server) handleGroveCacheStatus(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleGroveCacheNotify handles a notification from a broker that it has pushed
+// handleProjectCacheNotify handles a notification from a broker that it has pushed
 // workspace updates to GCS and the hub cache should be refreshed.
 // POST /api/v1/groves/{groveId}/workspace/cache/notify
-func (s *Server) handleGroveCacheNotify(w http.ResponseWriter, r *http.Request, groveID string) {
+func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request, groveID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
@@ -261,7 +261,7 @@ func (s *Server) handleGroveCacheNotify(w http.ResponseWriter, r *http.Request, 
 	s.workspaceLog.Info("grove cache refreshed via notify",
 		"grove_id", groveID, "files", fileCount, "bytes", totalBytes)
 
-	writeJSON(w, http.StatusOK, GroveCacheRefreshResponse{
+	writeJSON(w, http.StatusOK, ProjectCacheRefreshResponse{
 		GroveID:    groveID,
 		BrokerID:   brokerID,
 		FileCount:  fileCount,
@@ -270,9 +270,9 @@ func (s *Server) handleGroveCacheNotify(w http.ResponseWriter, r *http.Request, 
 	})
 }
 
-// refreshGroveCacheFromBroker triggers a broker to upload the grove workspace
+// refreshProjectCacheFromBroker triggers a broker to upload the grove workspace
 // to GCS, then downloads it to the hub's local cache.
-func (s *Server) refreshGroveCacheFromBroker(ctx context.Context, grove *store.Grove, brokerID string, stor storage.Storage) (*GroveCacheRefreshResponse, error) {
+func (s *Server) refreshProjectCacheFromBroker(ctx context.Context, grove *store.Grove, brokerID string, stor storage.Storage) (*ProjectCacheRefreshResponse, error) {
 	cc := s.GetControlChannelManager()
 	if cc == nil {
 		return nil, fmt.Errorf("control channel not available")
@@ -291,14 +291,14 @@ func (s *Server) refreshGroveCacheFromBroker(ctx context.Context, grove *store.G
 
 	// Tunnel request to broker to upload grove workspace to GCS.
 	// The workspace path tells the broker which directory to upload.
-	uploadReq := RuntimeBrokerGroveUploadRequest{
-		GroveID:       grove.ID,
+	uploadReq := RuntimeBrokerProjectUploadRequest{
+		ProjectID:       grove.ID,
 		StoragePath:   storagePath,
 		WorkspacePath: provider.LocalPath,
 	}
 
-	var uploadResp RuntimeBrokerGroveUploadResponse
-	if err := tunnelGroveWorkspaceRequest(ctx, cc, brokerID, "POST", "/api/v1/workspace/grove-upload", uploadReq, &uploadResp); err != nil {
+	var uploadResp RuntimeBrokerProjectUploadResponse
+	if err := tunnelProjectWorkspaceRequest(ctx, cc, brokerID, "POST", "/api/v1/workspace/grove-upload", uploadReq, &uploadResp); err != nil {
 		return nil, fmt.Errorf("broker upload failed: %w", err)
 	}
 
@@ -334,8 +334,8 @@ func (s *Server) refreshGroveCacheFromBroker(ctx context.Context, grove *store.G
 		"grove_id", grove.ID, "broker_id", brokerID,
 		"files", uploadResp.UploadedFiles, "bytes", uploadResp.UploadedBytes)
 
-	return &GroveCacheRefreshResponse{
-		GroveID:    grove.ID,
+	return &ProjectCacheRefreshResponse{
+		ProjectID:    grove.ID,
 		BrokerID:   brokerID,
 		FileCount:  uploadResp.UploadedFiles,
 		TotalBytes: uploadResp.UploadedBytes,
@@ -343,9 +343,9 @@ func (s *Server) refreshGroveCacheFromBroker(ctx context.Context, grove *store.G
 	}, nil
 }
 
-// isLinkedGrove returns true if the grove has at least one provider broker
+// isLinkedProject returns true if the grove has at least one provider broker
 // with a local_path, indicating the workspace lives on a remote broker.
-func (s *Server) isLinkedGrove(ctx context.Context, grove *store.Grove) bool {
+func (s *Server) isLinkedProject(ctx context.Context, grove *store.Grove) bool {
 	providers, err := s.store.GetGroveProviders(ctx, grove.ID)
 	if err != nil {
 		return false
@@ -397,8 +397,8 @@ func (s *Server) findConnectedProvider(ctx context.Context, grove *store.Grove) 
 	return "", fmt.Errorf("no provider broker is currently connected for grove %s", grove.Name)
 }
 
-// hasGroveCache returns true if the hub has a cached copy of the grove workspace.
-func hasGroveCache(slug string) bool {
+// hasProjectCache returns true if the hub has a cached copy of the grove workspace.
+func hasProjectCache(slug string) bool {
 	cachePath, err := hubNativeGrovePath(slug)
 	if err != nil {
 		return false
@@ -407,10 +407,10 @@ func hasGroveCache(slug string) bool {
 	return err == nil && info.IsDir()
 }
 
-// tunnelGroveWorkspaceRequest tunnels a grove workspace request to a Runtime Broker
+// tunnelProjectWorkspaceRequest tunnels a grove workspace request to a Runtime Broker
 // via the control channel. This is similar to tunnelWorkspaceRequest but for
 // grove-level (not agent-level) operations.
-func tunnelGroveWorkspaceRequest(ctx context.Context, cc *ControlChannelManager, brokerID, method, path string, reqBody interface{}, respBody interface{}) error {
+func tunnelProjectWorkspaceRequest(ctx context.Context, cc *ControlChannelManager, brokerID, method, path string, reqBody interface{}, respBody interface{}) error {
 	if !cc.IsConnected(brokerID) {
 		return errBrokerNotConnected(brokerID)
 	}

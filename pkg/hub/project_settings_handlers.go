@@ -47,8 +47,8 @@ const (
 	groveSettingDefaultResourcesDisk   = "scion.io/default-resources-disk"
 )
 
-// handleGroveSettings handles GET/PUT on /api/v1/groves/{groveId}/settings.
-func (s *Server) handleGroveSettings(w http.ResponseWriter, r *http.Request, groveID string) {
+// handleProjectSettings handles GET/PUT on /api/v1/groves/{groveId}/settings.
+func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, groveID string) {
 	ctx := r.Context()
 
 	grove, err := s.store.GetGrove(ctx, groveID)
@@ -99,13 +99,13 @@ func (s *Server) handleGroveSettings(w http.ResponseWriter, r *http.Request, gro
 			return
 		}
 
-		var req hubclient.GroveSettings
+		var req hubclient.ProjectSettings
 		if err := readJSON(r, &req); err != nil {
 			BadRequest(w, "Invalid request body: "+err.Error())
 			return
 		}
 
-		applyGroveSettingsToAnnotations(grove, &req)
+		applyProjectSettingsToAnnotations(grove, &req)
 
 		if err := s.store.UpdateGrove(ctx, grove); err != nil {
 			writeErrorFromErr(w, err, "")
@@ -121,8 +121,8 @@ func (s *Server) handleGroveSettings(w http.ResponseWriter, r *http.Request, gro
 }
 
 // groveSettingsFromAnnotations reads grove settings from the grove's annotations map.
-func groveSettingsFromAnnotations(grove *store.Grove) *hubclient.GroveSettings {
-	settings := &hubclient.GroveSettings{}
+func groveSettingsFromAnnotations(grove *store.Grove) *hubclient.ProjectSettings {
+	settings := &hubclient.ProjectSettings{}
 	if grove.Annotations == nil {
 		return settings
 	}
@@ -163,9 +163,9 @@ func groveSettingsFromAnnotations(grove *store.Grove) *hubclient.GroveSettings {
 	return settings
 }
 
-// groveResourcesFromAnnotations reads the flat resource annotation keys into a GroveResourceSpec.
+// groveResourcesFromAnnotations reads the flat resource annotation keys into a ProjectResourceSpec.
 // Returns nil if no resource annotations are set.
-func groveResourcesFromAnnotations(annotations map[string]string) *hubclient.GroveResourceSpec {
+func groveResourcesFromAnnotations(annotations map[string]string) *hubclient.ProjectResourceSpec {
 	cpuReq := annotations[groveSettingDefaultResourcesCPUReq]
 	memReq := annotations[groveSettingDefaultResourcesMemReq]
 	cpuLim := annotations[groveSettingDefaultResourcesCPULim]
@@ -176,18 +176,18 @@ func groveResourcesFromAnnotations(annotations map[string]string) *hubclient.Gro
 		return nil
 	}
 
-	res := &hubclient.GroveResourceSpec{Disk: disk}
+	res := &hubclient.ProjectResourceSpec{Disk: disk}
 	if cpuReq != "" || memReq != "" {
-		res.Requests = &hubclient.GroveResourceList{CPU: cpuReq, Memory: memReq}
+		res.Requests = &hubclient.ProjectResourceList{CPU: cpuReq, Memory: memReq}
 	}
 	if cpuLim != "" || memLim != "" {
-		res.Limits = &hubclient.GroveResourceList{CPU: cpuLim, Memory: memLim}
+		res.Limits = &hubclient.ProjectResourceList{CPU: cpuLim, Memory: memLim}
 	}
 	return res
 }
 
-// applyGroveSettingsToAnnotations writes grove settings into the grove's annotations map.
-func applyGroveSettingsToAnnotations(grove *store.Grove, settings *hubclient.GroveSettings) {
+// applyProjectSettingsToAnnotations writes grove settings into the grove's annotations map.
+func applyProjectSettingsToAnnotations(grove *store.Grove, settings *hubclient.ProjectSettings) {
 	if grove.Annotations == nil {
 		grove.Annotations = make(map[string]string)
 	}
@@ -306,8 +306,8 @@ func applyGroveDefaults(ac *store.AgentAppliedConfig, grove *store.Grove) {
 	}
 }
 
-// groveResourceSpecToAPI converts a GroveResourceSpec to an api.ResourceSpec.
-func groveResourceSpecToAPI(grs *hubclient.GroveResourceSpec) *api.ResourceSpec {
+// groveResourceSpecToAPI converts a ProjectResourceSpec to an api.ResourceSpec.
+func groveResourceSpecToAPI(grs *hubclient.ProjectResourceSpec) *api.ResourceSpec {
 	if grs == nil {
 		return nil
 	}

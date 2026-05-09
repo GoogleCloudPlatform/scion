@@ -132,7 +132,7 @@ func TestGroveWorkspaceList_EmptyWorkspace(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/workspace/files", grove.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	var resp GroveWorkspaceListResponse
+	var resp ProjectWorkspaceListResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
 	// Only .scion/settings.yaml from grove init should be present
@@ -153,7 +153,7 @@ func TestGroveWorkspaceList_WithFiles(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/workspace/files", grove.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	var resp GroveWorkspaceListResponse
+	var resp ProjectWorkspaceListResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
 	paths := make(map[string]bool)
@@ -174,7 +174,7 @@ func TestGroveWorkspaceList_IncludesScionDir(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/workspace/files", grove.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	var resp GroveWorkspaceListResponse
+	var resp ProjectWorkspaceListResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
 	paths := make(map[string]bool)
@@ -214,7 +214,7 @@ func TestGroveWorkspaceUpload_SingleFile(t *testing.T) {
 	rec := doMultipartRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/groves/%s/workspace/files", grove.ID), files)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	var resp GroveWorkspaceUploadResponse
+	var resp ProjectWorkspaceUploadResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
 	require.Len(t, resp.Files, 1)
@@ -238,7 +238,7 @@ func TestGroveWorkspaceUpload_MultipleFiles(t *testing.T) {
 	rec := doMultipartRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/groves/%s/workspace/files", grove.ID), files)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	var resp GroveWorkspaceUploadResponse
+	var resp ProjectWorkspaceUploadResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
 	assert.Len(t, resp.Files, 2)
@@ -536,11 +536,11 @@ func TestGroveWorkspaceWrite_CreateNewFile(t *testing.T) {
 	srv, _ := testServer(t)
 	grove, workspacePath := createTestHubNativeGrove(t, srv, "WS Write New")
 
-	body := GroveWorkspaceWriteRequest{Content: "# New File\n\nHello!"}
+	body := ProjectWorkspaceWriteRequest{Content: "# New File\n\nHello!"}
 	rec := doRequest(t, srv, http.MethodPut, fmt.Sprintf("/api/v1/groves/%s/workspace/files/docs/readme.md", grove.ID), body)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	var resp GroveWorkspaceFile
+	var resp ProjectWorkspaceFile
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Equal(t, "docs/readme.md", resp.Path)
 	assert.Equal(t, int64(len(body.Content)), resp.Size)
@@ -557,7 +557,7 @@ func TestGroveWorkspaceWrite_OverwriteExisting(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "config.yaml"), []byte("old: true"), 0644))
 
-	body := GroveWorkspaceWriteRequest{Content: "new: true"}
+	body := ProjectWorkspaceWriteRequest{Content: "new: true"}
 	rec := doRequest(t, srv, http.MethodPut, fmt.Sprintf("/api/v1/groves/%s/workspace/files/config.yaml", grove.ID), body)
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -575,7 +575,7 @@ func TestGroveWorkspaceWrite_ConflictDetection(t *testing.T) {
 
 	// Set expectedModTime to a time in the past
 	pastTime := time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339Nano)
-	body := GroveWorkspaceWriteRequest{
+	body := ProjectWorkspaceWriteRequest{
 		Content:         "updated",
 		ExpectedModTime: pastTime,
 	}
@@ -594,16 +594,16 @@ func TestGroveWorkspaceWrite_PathTraversalRejected(t *testing.T) {
 
 	// Go's HTTP mux normalizes paths with "../" segments before they reach
 	// the handler (returns 307 Redirect to the cleaned path). To test the
-	// handler's own path validation, call handleGroveWorkspace directly
+	// handler's own path validation, call handleProjectWorkspace directly
 	// with a traversal path.
-	body := GroveWorkspaceWriteRequest{Content: "bad"}
+	body := ProjectWorkspaceWriteRequest{Content: "bad"}
 	bodyBytes, err := json.Marshal(body)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	srv.handleGroveWorkspace(rec, req, grove.ID, "../../../etc/passwd")
+	srv.handleProjectWorkspace(rec, req, grove.ID, "../../../etc/passwd")
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
@@ -709,7 +709,7 @@ func TestGroveWorkspace_UploadListDelete_Integration(t *testing.T) {
 	// Get baseline count (includes .scion files from grove init)
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/workspace/files", grove.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code)
-	var baseResp GroveWorkspaceListResponse
+	var baseResp ProjectWorkspaceListResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&baseResp))
 	baseCount := baseResp.TotalCount
 
@@ -725,7 +725,7 @@ func TestGroveWorkspace_UploadListDelete_Integration(t *testing.T) {
 	rec = doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/workspace/files", grove.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	var listResp GroveWorkspaceListResponse
+	var listResp ProjectWorkspaceListResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&listResp))
 	assert.Equal(t, baseCount+2, listResp.TotalCount)
 
@@ -784,7 +784,7 @@ func TestSharedDirFiles_ListEmpty(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/shared-dirs/build-cache/files", grove.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	var resp GroveWorkspaceListResponse
+	var resp ProjectWorkspaceListResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Equal(t, 0, resp.TotalCount)
 	assert.Empty(t, resp.Files)
@@ -813,7 +813,7 @@ func TestSharedDirFiles_UploadAndList(t *testing.T) {
 	rec = doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/shared-dirs/artifacts/files", grove.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	var resp GroveWorkspaceListResponse
+	var resp ProjectWorkspaceListResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Equal(t, 1, resp.TotalCount)
 	assert.Equal(t, "output.log", resp.Files[0].Path)
@@ -1048,7 +1048,7 @@ func TestGroveWorkspaceList_SharedWorkspaceAllowed(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/groves/%s/workspace/files", grove.ID), nil)
 	assert.Equal(t, http.StatusOK, rec.Code, "shared-workspace grove should allow file listing")
 
-	var resp GroveWorkspaceListResponse
+	var resp ProjectWorkspaceListResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.GreaterOrEqual(t, resp.TotalCount, 1, "should list at least the created file")
 }
@@ -1284,7 +1284,7 @@ func TestGroveWorkspaceList_SearchQuery(t *testing.T) {
 		fmt.Sprintf("/api/v1/groves/%s/workspace/files?q=\\.go$", grove.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	var resp GroveWorkspaceListResponse
+	var resp ProjectWorkspaceListResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
 	for _, f := range resp.Files {
@@ -1305,7 +1305,7 @@ func TestGroveWorkspaceList_LimitParam(t *testing.T) {
 		fmt.Sprintf("/api/v1/groves/%s/workspace/files?limit=3", grove.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	var resp GroveWorkspaceListResponse
+	var resp ProjectWorkspaceListResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
 	assert.LessOrEqual(t, len(resp.Files), 3)
@@ -1323,7 +1323,7 @@ func TestGroveWorkspaceList_HasMoreFalseWhenFewFiles(t *testing.T) {
 		fmt.Sprintf("/api/v1/groves/%s/workspace/files", grove.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	var resp GroveWorkspaceListResponse
+	var resp ProjectWorkspaceListResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.False(t, resp.HasMore)
 }

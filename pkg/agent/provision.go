@@ -283,7 +283,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		profileName = settings.ActiveProfile
 	}
 
-	groveName := config.GetGroveName(projectDir)
+	groveName := config.GetProjectName(projectDir)
 	isGit := util.IsGitRepoDir(projectDir)
 	if isGit && os.Getenv("SCION_HOST_UID") != "" {
 		// Inside an agent container: treat as non-git to prevent worktree
@@ -459,7 +459,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		// can discover the grove context. Worktrees don't contain .scion
 		// (it's gitignored), so without this marker the CLI would report
 		// "not in a scion project" inside the container.
-		if groveID, err := config.ReadGroveID(projectDir); err == nil && groveID != "" {
+		if groveID, err := config.ReadProjectID(projectDir); err == nil && groveID != "" {
 			groveSlug := api.Slugify(groveName)
 			if writeErr := config.WriteWorkspaceMarker(agentWorkspace, groveID, groveName, groveSlug); writeErr != nil {
 				util.Debugf("provision: failed to write workspace marker: %v", writeErr)

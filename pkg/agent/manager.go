@@ -125,7 +125,7 @@ func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles b
 	deletionGroveName := ""
 	if grovePath != "" {
 		if resolvedDir, err := config.GetResolvedProjectDir(grovePath); err == nil {
-			deletionGroveName = config.GetGroveName(resolvedDir)
+			deletionGroveName = config.GetProjectName(resolvedDir)
 		}
 	}
 	if err == nil {

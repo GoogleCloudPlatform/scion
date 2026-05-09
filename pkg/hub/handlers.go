@@ -4133,7 +4133,7 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 
 	// Check for nested /settings path
 	if subPath == "settings" {
-		s.handleGroveSettings(w, r, groveID)
+		s.handleProjectSettings(w, r, groveID)
 		return
 	}
 
@@ -4159,27 +4159,27 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 
 	// Check for nested /workspace/cache/ paths (linked grove cache management)
 	if subPath == "workspace/cache/refresh" {
-		s.handleGroveCacheRefresh(w, r, groveID)
+		s.handleProjectCacheRefresh(w, r, groveID)
 		return
 	}
 	if subPath == "workspace/cache/status" {
-		s.handleGroveCacheStatus(w, r, groveID)
+		s.handleProjectCacheStatus(w, r, groveID)
 		return
 	}
 	if subPath == "workspace/cache/notify" {
-		s.handleGroveCacheNotify(w, r, groveID)
+		s.handleProjectCacheNotify(w, r, groveID)
 		return
 	}
 
 	// Check for nested /workspace/pull path (git pull for shared-workspace groves)
 	if subPath == "workspace/pull" {
-		s.handleGroveWorkspacePull(w, r, groveID)
+		s.handleProjectWorkspacePull(w, r, groveID)
 		return
 	}
 
 	// Check for nested /workspace/archive path (download workspace as zip)
 	if subPath == "workspace/archive" {
-		s.handleGroveWorkspaceArchive(w, r, groveID)
+		s.handleProjectWorkspaceArchive(w, r, groveID)
 		return
 	}
 
@@ -4187,7 +4187,7 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(subPath, "workspace/files") {
 		filePath := strings.TrimPrefix(subPath, "workspace/files")
 		filePath = strings.TrimPrefix(filePath, "/")
-		s.handleGroveWorkspace(w, r, groveID, filePath)
+		s.handleProjectWorkspace(w, r, groveID, filePath)
 		return
 	}
 
@@ -5754,18 +5754,18 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	w.WriteHeader(http.StatusOK)
 }
 
-// BrokerGroveInfo describes a grove from a broker's perspective.
-type BrokerGroveInfo struct {
-	GroveID    string `json:"groveId"`
-	GroveName  string `json:"groveName"`
+// BrokerProjectInfo describes a grove from a broker's perspective.
+type BrokerProjectInfo struct {
+	ProjectID    string `json:"groveId"`
+	ProjectName  string `json:"groveName"`
 	GitRemote  string `json:"gitRemote,omitempty"`
 	AgentCount int    `json:"agentCount"`
 	LocalPath  string `json:"localPath,omitempty"`
 }
 
-// ListBrokerGrovesResponse is the response for listing groves a broker provides.
-type ListBrokerGrovesResponse struct {
-	Groves []BrokerGroveInfo `json:"groves"`
+// ListBrokerProjectsResponse is the response for listing groves a broker provides.
+type ListBrokerProjectsResponse struct {
+	Projects []BrokerProjectInfo `json:"groves"`
 }
 
 func (s *Server) getBrokerGroves(w http.ResponseWriter, r *http.Request, brokerID string) {
@@ -5786,16 +5786,16 @@ func (s *Server) getBrokerGroves(w http.ResponseWriter, r *http.Request, brokerI
 	}
 
 	// Build response with grove details
-	groves := make([]BrokerGroveInfo, 0, len(providers))
+	groves := make([]BrokerProjectInfo, 0, len(providers))
 	for _, p := range providers {
-		info := BrokerGroveInfo{
-			GroveID:   p.GroveID,
+		info := BrokerProjectInfo{
+			ProjectID:   p.GroveID,
 			LocalPath: p.LocalPath,
 		}
 
 		// Fetch grove details for name and git remote
 		if grove, err := s.store.GetGrove(ctx, p.GroveID); err == nil {
-			info.GroveName = grove.Name
+			info.ProjectName = grove.Name
 			info.GitRemote = grove.GitRemote
 		}
 
@@ -5810,10 +5810,10 @@ func (s *Server) getBrokerGroves(w http.ResponseWriter, r *http.Request, brokerI
 
 		groves = append(groves, info)
 	}
-
-	writeJSON(w, http.StatusOK, ListBrokerGrovesResponse{Groves: groves})
+writeJSON(w, http.StatusOK, ListBrokerProjectsResponse{
+	Projects: groves,
+})
 }
-
 // ============================================================================
 // Template Endpoints
 // ============================================================================

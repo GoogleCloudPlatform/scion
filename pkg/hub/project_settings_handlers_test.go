@@ -27,26 +27,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGroveSettings_GetEmpty(t *testing.T) {
+func TestProjectSettings_GetEmpty(t *testing.T) {
 	srv, s := testServer(t)
 	grove := createTestGroveForSettings(t, s)
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/groves/"+grove.ID+"/settings", nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	var settings hubclient.GroveSettings
+	var settings hubclient.ProjectSettings
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&settings))
 	assert.Empty(t, settings.DefaultTemplate)
 	assert.Empty(t, settings.DefaultHarnessConfig)
 	assert.Nil(t, settings.TelemetryEnabled)
 }
 
-func TestGroveSettings_PutAndGet(t *testing.T) {
+func TestProjectSettings_PutAndGet(t *testing.T) {
 	srv, s := testServer(t)
 	grove := createTestGroveForSettings(t, s)
 
 	telemetry := true
-	putBody := hubclient.GroveSettings{
+	putBody := hubclient.ProjectSettings{
 		DefaultTemplate:      "my-template",
 		DefaultHarnessConfig: "claude-default",
 		TelemetryEnabled:     &telemetry,
@@ -55,7 +55,7 @@ func TestGroveSettings_PutAndGet(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/groves/"+grove.ID+"/settings", putBody)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	var putResp hubclient.GroveSettings
+	var putResp hubclient.ProjectSettings
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&putResp))
 	assert.Equal(t, "my-template", putResp.DefaultTemplate)
 	assert.Equal(t, "claude-default", putResp.DefaultHarnessConfig)
@@ -66,7 +66,7 @@ func TestGroveSettings_PutAndGet(t *testing.T) {
 	rec = doRequest(t, srv, http.MethodGet, "/api/v1/groves/"+grove.ID+"/settings", nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	var getResp hubclient.GroveSettings
+	var getResp hubclient.ProjectSettings
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&getResp))
 	assert.Equal(t, "my-template", getResp.DefaultTemplate)
 	assert.Equal(t, "claude-default", getResp.DefaultHarnessConfig)
@@ -74,13 +74,13 @@ func TestGroveSettings_PutAndGet(t *testing.T) {
 	assert.True(t, *getResp.TelemetryEnabled)
 }
 
-func TestGroveSettings_ClearValues(t *testing.T) {
+func TestProjectSettings_ClearValues(t *testing.T) {
 	srv, s := testServer(t)
 	grove := createTestGroveForSettings(t, s)
 
 	// Set values first
 	telemetry := true
-	putBody := hubclient.GroveSettings{
+	putBody := hubclient.ProjectSettings{
 		DefaultTemplate:      "my-template",
 		DefaultHarnessConfig: "claude-default",
 		TelemetryEnabled:     &telemetry,
@@ -89,28 +89,28 @@ func TestGroveSettings_ClearValues(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	// Clear by sending empty values
-	clearBody := hubclient.GroveSettings{}
+	clearBody := hubclient.ProjectSettings{}
 	rec = doRequest(t, srv, http.MethodPut, "/api/v1/groves/"+grove.ID+"/settings", clearBody)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	var resp hubclient.GroveSettings
+	var resp hubclient.ProjectSettings
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Empty(t, resp.DefaultTemplate)
 	assert.Empty(t, resp.DefaultHarnessConfig)
 	assert.Nil(t, resp.TelemetryEnabled)
 }
 
-func TestGroveSettings_DefaultLimits(t *testing.T) {
+func TestProjectSettings_DefaultLimits(t *testing.T) {
 	srv, s := testServer(t)
 	grove := createTestGroveForSettings(t, s)
 
-	putBody := hubclient.GroveSettings{
+	putBody := hubclient.ProjectSettings{
 		DefaultMaxTurns:      100,
 		DefaultMaxModelCalls: 500,
 		DefaultMaxDuration:   "2h",
-		DefaultResources: &hubclient.GroveResourceSpec{
-			Requests: &hubclient.GroveResourceList{CPU: "500m", Memory: "1Gi"},
-			Limits:   &hubclient.GroveResourceList{CPU: "2", Memory: "4Gi"},
+		DefaultResources: &hubclient.ProjectResourceSpec{
+			Requests: &hubclient.ProjectResourceList{CPU: "500m", Memory: "1Gi"},
+			Limits:   &hubclient.ProjectResourceList{CPU: "2", Memory: "4Gi"},
 			Disk:     "10Gi",
 		},
 	}
@@ -118,7 +118,7 @@ func TestGroveSettings_DefaultLimits(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/groves/"+grove.ID+"/settings", putBody)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	var putResp hubclient.GroveSettings
+	var putResp hubclient.ProjectSettings
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&putResp))
 	assert.Equal(t, 100, putResp.DefaultMaxTurns)
 	assert.Equal(t, 500, putResp.DefaultMaxModelCalls)
@@ -136,7 +136,7 @@ func TestGroveSettings_DefaultLimits(t *testing.T) {
 	rec = doRequest(t, srv, http.MethodGet, "/api/v1/groves/"+grove.ID+"/settings", nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	var getResp hubclient.GroveSettings
+	var getResp hubclient.ProjectSettings
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&getResp))
 	assert.Equal(t, 100, getResp.DefaultMaxTurns)
 	assert.Equal(t, 500, getResp.DefaultMaxModelCalls)
@@ -145,12 +145,12 @@ func TestGroveSettings_DefaultLimits(t *testing.T) {
 	assert.Equal(t, "10Gi", getResp.DefaultResources.Disk)
 }
 
-func TestGroveSettings_ClearDefaultLimits(t *testing.T) {
+func TestProjectSettings_ClearDefaultLimits(t *testing.T) {
 	srv, s := testServer(t)
 	grove := createTestGroveForSettings(t, s)
 
 	// Set values first
-	putBody := hubclient.GroveSettings{
+	putBody := hubclient.ProjectSettings{
 		DefaultMaxTurns:      100,
 		DefaultMaxModelCalls: 500,
 		DefaultMaxDuration:   "2h",
@@ -159,11 +159,11 @@ func TestGroveSettings_ClearDefaultLimits(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	// Clear by sending zero/empty values
-	clearBody := hubclient.GroveSettings{}
+	clearBody := hubclient.ProjectSettings{}
 	rec = doRequest(t, srv, http.MethodPut, "/api/v1/groves/"+grove.ID+"/settings", clearBody)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	var resp hubclient.GroveSettings
+	var resp hubclient.ProjectSettings
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Equal(t, 0, resp.DefaultMaxTurns)
 	assert.Equal(t, 0, resp.DefaultMaxModelCalls)
@@ -208,11 +208,11 @@ func TestApplyGroveDefaults_HarnessConfig(t *testing.T) {
 	})
 }
 
-func TestGroveSettings_DefaultGCPIdentity(t *testing.T) {
+func TestProjectSettings_DefaultGCPIdentity(t *testing.T) {
 	srv, s := testServer(t)
 	grove := createTestGroveForSettings(t, s)
 
-	putBody := hubclient.GroveSettings{
+	putBody := hubclient.ProjectSettings{
 		DefaultGCPIdentityMode:             "assign",
 		DefaultGCPIdentityServiceAccountID: "sa-123",
 	}
@@ -220,7 +220,7 @@ func TestGroveSettings_DefaultGCPIdentity(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/groves/"+grove.ID+"/settings", putBody)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	var putResp hubclient.GroveSettings
+	var putResp hubclient.ProjectSettings
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&putResp))
 	assert.Equal(t, "assign", putResp.DefaultGCPIdentityMode)
 	assert.Equal(t, "sa-123", putResp.DefaultGCPIdentityServiceAccountID)
@@ -229,18 +229,18 @@ func TestGroveSettings_DefaultGCPIdentity(t *testing.T) {
 	rec = doRequest(t, srv, http.MethodGet, "/api/v1/groves/"+grove.ID+"/settings", nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	var getResp hubclient.GroveSettings
+	var getResp hubclient.ProjectSettings
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&getResp))
 	assert.Equal(t, "assign", getResp.DefaultGCPIdentityMode)
 	assert.Equal(t, "sa-123", getResp.DefaultGCPIdentityServiceAccountID)
 }
 
-func TestGroveSettings_ClearDefaultGCPIdentity(t *testing.T) {
+func TestProjectSettings_ClearDefaultGCPIdentity(t *testing.T) {
 	srv, s := testServer(t)
 	grove := createTestGroveForSettings(t, s)
 
 	// Set values first
-	putBody := hubclient.GroveSettings{
+	putBody := hubclient.ProjectSettings{
 		DefaultGCPIdentityMode:             "passthrough",
 		DefaultGCPIdentityServiceAccountID: "",
 	}
@@ -248,11 +248,11 @@ func TestGroveSettings_ClearDefaultGCPIdentity(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	// Clear by sending empty values
-	clearBody := hubclient.GroveSettings{}
+	clearBody := hubclient.ProjectSettings{}
 	rec = doRequest(t, srv, http.MethodPut, "/api/v1/groves/"+grove.ID+"/settings", clearBody)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	var resp hubclient.GroveSettings
+	var resp hubclient.ProjectSettings
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Empty(t, resp.DefaultGCPIdentityMode)
 	assert.Empty(t, resp.DefaultGCPIdentityServiceAccountID)
@@ -273,7 +273,7 @@ func TestApplyGroveDefaults_GCPIdentityNotApplied(t *testing.T) {
 	assert.Nil(t, ac.GCPIdentity)
 }
 
-func TestGroveSettings_NotFound(t *testing.T) {
+func TestProjectSettings_NotFound(t *testing.T) {
 	srv, _ := testServer(t)
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/groves/nonexistent/settings", nil)

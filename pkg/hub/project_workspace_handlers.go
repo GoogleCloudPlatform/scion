@@ -48,17 +48,17 @@ const maxUploadFileSize = 50 * 1024 * 1024
 // maxEditableFileSize is the maximum file size the editor will serve for inline editing (1MB).
 const maxEditableFileSize = 1 * 1024 * 1024
 
-// GroveWorkspaceFile represents a file in a grove workspace.
-type GroveWorkspaceFile struct {
+// ProjectWorkspaceFile represents a file in a grove workspace.
+type ProjectWorkspaceFile struct {
 	Path    string    `json:"path"`
 	Size    int64     `json:"size"`
 	ModTime time.Time `json:"modTime"`
 	Mode    string    `json:"mode"`
 }
 
-// GroveWorkspaceListResponse is the response for listing grove workspace files.
-type GroveWorkspaceListResponse struct {
-	Files      []GroveWorkspaceFile `json:"files"`
+// ProjectWorkspaceListResponse is the response for listing grove workspace files.
+type ProjectWorkspaceListResponse struct {
+	Files      []ProjectWorkspaceFile `json:"files"`
 	TotalSize  int64                `json:"totalSize"`
 	TotalCount int                  `json:"totalCount"`
 	HasMore    bool                 `json:"hasMore,omitempty"`
@@ -66,7 +66,7 @@ type GroveWorkspaceListResponse struct {
 
 // SharedDirListResponse extends the workspace list response with provider metadata.
 type SharedDirListResponse struct {
-	Files         []GroveWorkspaceFile `json:"files"`
+	Files         []ProjectWorkspaceFile `json:"files"`
 	TotalSize     int64                `json:"totalSize"`
 	TotalCount    int                  `json:"totalCount"`
 	HasMore       bool                 `json:"hasMore,omitempty"`
@@ -75,7 +75,7 @@ type SharedDirListResponse struct {
 
 // FileSearchResult holds the result of a workspace file search.
 type FileSearchResult struct {
-	Files      []GroveWorkspaceFile
+	Files      []ProjectWorkspaceFile
 	TotalSize  int64
 	TotalCount int
 	HasMore    bool
@@ -104,7 +104,7 @@ func (walkDirSearcher) Search(root, query string, limit int) (FileSearchResult, 
 		}
 	}
 
-	var allFiles []GroveWorkspaceFile
+	var allFiles []ProjectWorkspaceFile
 	var totalSize int64
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -124,7 +124,7 @@ func (walkDirSearcher) Search(root, query string, limit int) (FileSearchResult, 
 		}
 		totalSize += info.Size()
 		if matcher == nil || matcher(relPath) {
-			allFiles = append(allFiles, GroveWorkspaceFile{
+			allFiles = append(allFiles, ProjectWorkspaceFile{
 				Path:    relPath,
 				Size:    info.Size(),
 				ModTime: info.ModTime(),
@@ -136,13 +136,13 @@ func (walkDirSearcher) Search(root, query string, limit int) (FileSearchResult, 
 
 	if err != nil {
 		if os.IsNotExist(err) {
-			return FileSearchResult{Files: []GroveWorkspaceFile{}}, nil
+			return FileSearchResult{Files: []ProjectWorkspaceFile{}}, nil
 		}
 		return FileSearchResult{}, err
 	}
 
 	if allFiles == nil {
-		allFiles = []GroveWorkspaceFile{}
+		allFiles = []ProjectWorkspaceFile{}
 	}
 
 	// Sort by modTime descending (most recently modified first).
@@ -198,17 +198,17 @@ func intQueryParam(r *http.Request, name string, defaultVal, maxVal int) int {
 	return v
 }
 
-// GroveWorkspaceUploadResponse is the response for uploading files to a grove workspace.
-type GroveWorkspaceUploadResponse struct {
-	Files []GroveWorkspaceFile `json:"files"`
+// ProjectWorkspaceUploadResponse is the response for uploading files to a grove workspace.
+type ProjectWorkspaceUploadResponse struct {
+	Files []ProjectWorkspaceFile `json:"files"`
 }
 
-// handleGroveWorkspace dispatches grove workspace file operations.
+// handleProjectWorkspace dispatches grove workspace file operations.
 // Routes:
 //   - GET  (filePath="")  → list files
 //   - POST (filePath="")  → upload files
 //   - DELETE (filePath!="") → delete file
-func (s *Server) handleGroveWorkspace(w http.ResponseWriter, r *http.Request, groveID, filePath string) {
+func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, groveID, filePath string) {
 	ctx := r.Context()
 
 	// Look up the grove
@@ -227,25 +227,25 @@ func (s *Server) handleGroveWorkspace(w http.ResponseWriter, r *http.Request, gr
 
 	switch {
 	case r.Method == http.MethodGet && filePath == "":
-		s.handleGroveWorkspaceList(w, r, workspacePath)
+		s.handleProjectWorkspaceList(w, r, workspacePath)
 	case r.Method == http.MethodGet && filePath != "":
-		s.handleGroveWorkspaceDownload(w, r, workspacePath, filePath)
+		s.handleProjectWorkspaceDownload(w, r, workspacePath, filePath)
 	case r.Method == http.MethodPost && filePath == "":
-		s.handleGroveWorkspaceUpload(w, r, workspacePath)
+		s.handleProjectWorkspaceUpload(w, r, workspacePath)
 	case r.Method == http.MethodPut && filePath != "":
-		s.handleGroveWorkspaceWrite(w, r, workspacePath, filePath)
+		s.handleProjectWorkspaceWrite(w, r, workspacePath, filePath)
 	case r.Method == http.MethodDelete && filePath != "":
-		s.handleGroveWorkspaceDelete(w, workspacePath, filePath)
+		s.handleProjectWorkspaceDelete(w, workspacePath, filePath)
 	default:
 		MethodNotAllowed(w)
 	}
 }
 
-// handleGroveWorkspaceList lists files in a grove workspace.
+// handleProjectWorkspaceList lists files in a grove workspace.
 // Accepts optional query parameters:
 //   - q:     filter pattern (regex or fuzzy fallback, case-insensitive)
 //   - limit: max results (default 500, cap 2000)
-func (s *Server) handleGroveWorkspaceList(w http.ResponseWriter, r *http.Request, workspacePath string) {
+func (s *Server) handleProjectWorkspaceList(w http.ResponseWriter, r *http.Request, workspacePath string) {
 	query := r.URL.Query().Get("q")
 	limit := intQueryParam(r, "limit", 500, 2000)
 
@@ -255,7 +255,7 @@ func (s *Server) handleGroveWorkspaceList(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	writeJSON(w, http.StatusOK, GroveWorkspaceListResponse{
+	writeJSON(w, http.StatusOK, ProjectWorkspaceListResponse{
 		Files:      result.Files,
 		TotalSize:  result.TotalSize,
 		TotalCount: result.TotalCount,
@@ -265,7 +265,7 @@ func (s *Server) handleGroveWorkspaceList(w http.ResponseWriter, r *http.Request
 
 // handleSharedDirFileList lists files in a shared directory, adding provider metadata
 // to the response so the frontend can show multi-broker warnings.
-// Accepts the same optional query parameters as handleGroveWorkspaceList (q, limit).
+// Accepts the same optional query parameters as handleProjectWorkspaceList (q, limit).
 func (s *Server) handleSharedDirFileList(w http.ResponseWriter, r *http.Request, sharedDirPath string, res *sharedDirResolution) {
 	query := r.URL.Query().Get("q")
 	limit := intQueryParam(r, "limit", 500, 2000)
@@ -285,8 +285,8 @@ func (s *Server) handleSharedDirFileList(w http.ResponseWriter, r *http.Request,
 	})
 }
 
-// handleGroveWorkspaceUpload handles file uploads to a grove workspace.
-func (s *Server) handleGroveWorkspaceUpload(w http.ResponseWriter, r *http.Request, workspacePath string) {
+// handleProjectWorkspaceUpload handles file uploads to a grove workspace.
+func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Request, workspacePath string) {
 	// Apply total request body size limit
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadTotalSize)
 
@@ -305,7 +305,7 @@ func (s *Server) handleGroveWorkspaceUpload(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	var uploaded []GroveWorkspaceFile
+	var uploaded []ProjectWorkspaceFile
 
 	for fieldName, fileHeaders := range r.MultipartForm.File {
 		for _, fh := range fileHeaders {
@@ -363,7 +363,7 @@ func (s *Server) handleGroveWorkspaceUpload(w http.ResponseWriter, r *http.Reque
 				return
 			}
 
-			uploaded = append(uploaded, GroveWorkspaceFile{
+			uploaded = append(uploaded, ProjectWorkspaceFile{
 				Path:    relPath,
 				Size:    written,
 				ModTime: info.ModTime(),
@@ -372,17 +372,17 @@ func (s *Server) handleGroveWorkspaceUpload(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	writeJSON(w, http.StatusOK, GroveWorkspaceUploadResponse{
+	writeJSON(w, http.StatusOK, ProjectWorkspaceUploadResponse{
 		Files: uploaded,
 	})
 }
 
-// handleGroveWorkspaceDownload serves a single file from a grove workspace.
+// handleProjectWorkspaceDownload serves a single file from a grove workspace.
 // When the query parameter "view=true" is set, the file is served inline for
 // in-browser preview; otherwise the response forces a download.
 // When "format=json" is set, the file content is returned as a JSON object
 // with metadata, suitable for the inline file editor.
-func (s *Server) handleGroveWorkspaceDownload(w http.ResponseWriter, r *http.Request, workspacePath, filePath string) {
+func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.Request, workspacePath, filePath string) {
 	// Validate the file path
 	if err := validateWorkspaceFilePath(filePath); err != nil {
 		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
@@ -461,8 +461,8 @@ func (s *Server) handleGroveWorkspaceDownload(w http.ResponseWriter, r *http.Req
 	io.Copy(w, f)
 }
 
-// handleGroveWorkspaceArchive creates a zip archive of the entire workspace and serves it for download.
-func (s *Server) handleGroveWorkspaceArchive(w http.ResponseWriter, r *http.Request, groveID string) {
+// handleProjectWorkspaceArchive creates a zip archive of the entire workspace and serves it for download.
+func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Request, groveID string) {
 	ctx := r.Context()
 
 	if r.Method != http.MethodGet {
@@ -555,24 +555,24 @@ func (s *Server) handleGroveWorkspaceArchive(w http.ResponseWriter, r *http.Requ
 	}
 }
 
-// GroveWorkspaceWriteRequest is the request body for writing file content.
-type GroveWorkspaceWriteRequest struct {
+// ProjectWorkspaceWriteRequest is the request body for writing file content.
+type ProjectWorkspaceWriteRequest struct {
 	Content         string `json:"content"`
 	ExpectedModTime string `json:"expectedModTime,omitempty"` // optional optimistic concurrency
 }
 
-// handleGroveWorkspaceWrite writes (creates or overwrites) a file in a grove workspace.
+// handleProjectWorkspaceWrite writes (creates or overwrites) a file in a grove workspace.
 // The content is provided as a JSON request body. If expectedModTime is set, the
 // server checks that the file has not been modified since that time and returns
 // 409 Conflict if it has.
-func (s *Server) handleGroveWorkspaceWrite(w http.ResponseWriter, r *http.Request, workspacePath, filePath string) {
+func (s *Server) handleProjectWorkspaceWrite(w http.ResponseWriter, r *http.Request, workspacePath, filePath string) {
 	// Validate the file path
 	if err := validateWorkspaceFilePath(filePath); err != nil {
 		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
 		return
 	}
 
-	var req GroveWorkspaceWriteRequest
+	var req ProjectWorkspaceWriteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
@@ -620,7 +620,7 @@ func (s *Server) handleGroveWorkspaceWrite(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	writeJSON(w, http.StatusOK, GroveWorkspaceFile{
+	writeJSON(w, http.StatusOK, ProjectWorkspaceFile{
 		Path:    filePath,
 		Size:    info.Size(),
 		ModTime: info.ModTime(),
@@ -628,8 +628,8 @@ func (s *Server) handleGroveWorkspaceWrite(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-// handleGroveWorkspaceDelete deletes a file from a grove workspace.
-func (s *Server) handleGroveWorkspaceDelete(w http.ResponseWriter, workspacePath, filePath string) {
+// handleProjectWorkspaceDelete deletes a file from a grove workspace.
+func (s *Server) handleProjectWorkspaceDelete(w http.ResponseWriter, workspacePath, filePath string) {
 	// Validate the file path
 	if err := validateWorkspaceFilePath(filePath); err != nil {
 		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
@@ -706,13 +706,13 @@ func (s *Server) handleSharedDirFiles(w http.ResponseWriter, r *http.Request, gr
 	case r.Method == http.MethodGet && filePath == "":
 		s.handleSharedDirFileList(w, r, sharedDirPath, resolution)
 	case r.Method == http.MethodGet && filePath != "":
-		s.handleGroveWorkspaceDownload(w, r, sharedDirPath, filePath)
+		s.handleProjectWorkspaceDownload(w, r, sharedDirPath, filePath)
 	case r.Method == http.MethodPost && filePath == "":
-		s.handleGroveWorkspaceUpload(w, r, sharedDirPath)
+		s.handleProjectWorkspaceUpload(w, r, sharedDirPath)
 	case r.Method == http.MethodPut && filePath != "":
-		s.handleGroveWorkspaceWrite(w, r, sharedDirPath, filePath)
+		s.handleProjectWorkspaceWrite(w, r, sharedDirPath, filePath)
 	case r.Method == http.MethodDelete && filePath != "":
-		s.handleGroveWorkspaceDelete(w, sharedDirPath, filePath)
+		s.handleProjectWorkspaceDelete(w, sharedDirPath, filePath)
 	default:
 		MethodNotAllowed(w)
 	}
@@ -801,7 +801,7 @@ func resolveHubGroveSharedDirPath(groveSlug, dirName string) (string, error) {
 		return "", err
 	}
 	scionPath := filepath.Join(workspacePath, config.DotScion)
-	projectDir, _, err := config.ResolveGrovePath(scionPath)
+	projectDir, _, err := config.ResolveProjectPath(scionPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve grove path for %s: %w", groveSlug, err)
 	}
@@ -829,8 +829,8 @@ func validateWorkspaceFilePath(path string) error {
 	return nil
 }
 
-// handleGroveWorkspacePull performs a `git pull --ff-only` on a shared-workspace grove.
-func (s *Server) handleGroveWorkspacePull(w http.ResponseWriter, r *http.Request, groveID string) {
+// handleProjectWorkspacePull performs a `git pull --ff-only` on a shared-workspace grove.
+func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Request, groveID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
