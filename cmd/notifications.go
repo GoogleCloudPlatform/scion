@@ -202,7 +202,7 @@ func requireHubClient() (*config.Settings, hubclient.Client, error) {
 }
 
 // resolveGroveID resolves the grove ID from flag, settings, or current context.
-func resolveGroveID(settings *config.Settings, groveFlag string) (string, error) {
+func resolveProjectID(settings *config.Settings, groveFlag string) (string, error) {
 	if groveFlag != "" {
 		return groveFlag, nil
 	}
@@ -327,7 +327,7 @@ func runNotificationsSubscribe(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	projectID, err := resolveGroveID(settings, subscribeGrove)
+	projectID, err := resolveProjectID(settings, subscribeGrove)
 	if err != nil {
 		return err
 	}
@@ -439,7 +439,7 @@ func runNotificationsUnsubscribe(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	if unsubscribeAll {
-		projectID, err := resolveGroveID(settings, unsubscribeGrove)
+		projectID, err := resolveProjectID(settings, unsubscribeGrove)
 		if err != nil {
 			return fmt.Errorf("--grove is required with --all: %w", err)
 		}

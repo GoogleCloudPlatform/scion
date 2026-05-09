@@ -21,8 +21,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// handleGroveSharedDirs handles GET/POST on /api/v1/groves/{groveId}/shared-dirs.
-func (s *Server) handleGroveSharedDirs(w http.ResponseWriter, r *http.Request, groveID string) {
+// handleProjectSharedDirs handles GET/POST on /api/v1/groves/{groveId}/shared-dirs.
+func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request, groveID string) {
 	ctx := r.Context()
 
 	grove, err := s.store.GetProject(ctx, groveID)
@@ -107,7 +107,7 @@ func (s *Server) handleGroveSharedDirs(w http.ResponseWriter, r *http.Request, g
 			return
 		}
 
-		s.events.PublishGroveUpdated(ctx, grove)
+		s.events.PublishProjectUpdated(ctx, grove)
 		writeJSON(w, http.StatusCreated, newDir)
 
 	default:
@@ -115,8 +115,8 @@ func (s *Server) handleGroveSharedDirs(w http.ResponseWriter, r *http.Request, g
 	}
 }
 
-// handleGroveSharedDirByName handles DELETE on /api/v1/groves/{groveId}/shared-dirs/{name}.
-func (s *Server) handleGroveSharedDirByName(w http.ResponseWriter, r *http.Request, groveID, name string) {
+// handleProjectSharedDirByName handles DELETE on /api/v1/groves/{groveId}/shared-dirs/{name}.
+func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Request, groveID, name string) {
 	ctx := r.Context()
 
 	grove, err := s.store.GetProject(ctx, groveID)
@@ -174,7 +174,7 @@ func (s *Server) handleGroveSharedDirByName(w http.ResponseWriter, r *http.Reque
 			return
 		}
 
-		s.events.PublishGroveUpdated(ctx, grove)
+		s.events.PublishProjectUpdated(ctx, grove)
 		w.WriteHeader(http.StatusNoContent)
 
 	default:

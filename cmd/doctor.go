@@ -144,7 +144,7 @@ func resolveActiveProjectPath() (string, error) {
 	if projectPath != "" {
 		return projectPath, nil
 	}
-	resolved, _, err := config.RequireGrovePath("")
+	resolved, _, err := config.RequireProjectPath("")
 	if err != nil {
 		return "", err
 	}

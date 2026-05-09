@@ -59,7 +59,7 @@ type HealthResponse struct {
 type HealthStats struct {
 	ConnectedBrokers int `json:"connectedBrokers,omitempty"`
 	ActiveAgents     int `json:"activeAgents,omitempty"`
-	Groves           int `json:"groves,omitempty"`
+	Projects         int `json:"groves,omitempty"`
 }
 
 // GetHealthInfo returns the current health status of the Hub server.
@@ -81,7 +81,7 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		stats.ActiveAgents = agentResult.TotalCount
 	}
 	if groveResult, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1}); err == nil {
-		stats.Groves = groveResult.TotalCount
+		stats.Projects = groveResult.TotalCount
 	}
 	if brokerResult, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{Status: store.BrokerStatusOnline}, store.ListOptions{Limit: 1}); err == nil {
 		stats.ConnectedBrokers = brokerResult.TotalCount
@@ -289,8 +289,8 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		}
 	case "shared":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			if groveIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(groveIDs) > 0 {
-				filter.MemberProjectIDs = groveIDs
+			if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
+				filter.MemberProjectIDs = projectIDs
 				filter.ExcludeOwnerID = userIdent.ID()
 			} else {
 				filter.MemberProjectIDs = []string{"__none__"}
@@ -300,8 +300,8 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		if query.Get("mine") == "true" {
 			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 				filter.OwnerID = userIdent.ID()
-				if groveIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(groveIDs) > 0 {
-					filter.MemberOrOwnerProjectIDs = groveIDs
+				if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
+					filter.MemberOrOwnerProjectIDs = projectIDs
 				}
 			}
 		}
@@ -461,7 +461,7 @@ func (s *Server) createAgentInProject(
 	w http.ResponseWriter,
 	r *http.Request,
 	req CreateAgentRequest,
-	groveID string,
+	projectID string,
 	createdBy string,
 	creatorName string,
 	ancestry []string,
@@ -471,7 +471,7 @@ func (s *Server) createAgentInProject(
 	ctx := r.Context()
 
 	// Verify grove exists and get its configuration
-	grove, err := s.store.GetProject(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			NotFound(w, "Grove")
@@ -524,7 +524,7 @@ func (s *Server) createAgentInProject(
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		if sa.ScopeID != groveID {
+		if sa.ScopeID != projectID {
 			ValidationError(w, "GCP service account does not belong to this grove", nil)
 			return
 		}
@@ -555,7 +555,7 @@ func (s *Server) createAgentInProject(
 		writeError(w, http.StatusBadRequest, "invalid_name", err.Error(), nil)
 		return
 	}
-	existingAgent, err := s.store.GetAgentBySlug(ctx, groveID, slug)
+	existingAgent, err := s.store.GetAgentBySlug(ctx, projectID, slug)
 	if err != nil && err != store.ErrNotFound {
 		writeErrorFromErr(w, err, "")
 		return
@@ -580,7 +580,7 @@ func (s *Server) createAgentInProject(
 	// Resolve template if specified - the client may pass either a template ID or name
 	var resolvedTemplate *store.Template
 	if req.Template != "" {
-		resolvedTemplate, err = s.resolveTemplate(ctx, req.Template, groveID)
+		resolvedTemplate, err = s.resolveTemplate(ctx, req.Template, projectID)
 		if err != nil && err != store.ErrNotFound {
 			writeErrorFromErr(w, err, "")
 			return
@@ -589,7 +589,7 @@ func (s *Server) createAgentInProject(
 		if resolvedTemplate == nil {
 			brokerHasLocal := false
 			if runtimeBrokerID != "" {
-				provider, err := s.store.GetProjectProvider(ctx, groveID, runtimeBrokerID)
+				provider, err := s.store.GetProjectProvider(ctx, projectID, runtimeBrokerID)
 				if err == nil && provider.LocalPath != "" {
 					brokerHasLocal = true
 				}
@@ -614,7 +614,7 @@ func (s *Server) createAgentInProject(
 		Slug:            slug,
 		Name:            slug,
 		Template:        req.Template,
-		ProjectID:         groveID,
+		ProjectID:         projectID,
 		RuntimeBrokerID: runtimeBrokerID,
 		Phase:           string(state.PhaseCreated),
 		Labels:          req.Labels,
@@ -655,7 +655,7 @@ func (s *Server) createAgentInProject(
 		}
 	} else {
 		// No explicit GCP identity — check grove default, then fall back to block.
-		groveSettings := groveSettingsFromAnnotations(grove)
+		groveSettings := projectSettingsFromAnnotations(grove)
 		switch groveSettings.DefaultGCPIdentityMode {
 		case store.GCPMetadataModePassthrough:
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
@@ -664,7 +664,7 @@ func (s *Server) createAgentInProject(
 		case store.GCPMetadataModeAssign:
 			if groveSettings.DefaultGCPIdentityServiceAccountID != "" {
 				sa, err := s.store.GetGCPServiceAccount(ctx, groveSettings.DefaultGCPIdentityServiceAccountID)
-				if err == nil && sa.ScopeID == groveID && sa.Verified {
+				if err == nil && sa.ScopeID == projectID && sa.Verified {
 					agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 						MetadataMode:        store.GCPMetadataModeAssign,
 						ServiceAccountID:    sa.ID,
@@ -713,7 +713,7 @@ func (s *Server) createAgentInProject(
 
 	// Create notification subscription if requested
 	if req.Notify {
-		s.createNotifySubscription(ctx, agent.ID, groveID, notifySubscriberType, notifySubscriberID, createdBy)
+		s.createNotifySubscription(ctx, agent.ID, projectID, notifySubscriberType, notifySubscriberID, createdBy)
 	}
 
 	// Workspace bootstrap mode: if WorkspaceFiles are provided with a task,
@@ -727,7 +727,7 @@ func (s *Server) createAgentInProject(
 		// Check if the target broker has local filesystem access to this grove
 		hasLocalPath := false
 		if runtimeBrokerID != "" {
-			provider, err := s.store.GetProjectProvider(ctx, groveID, runtimeBrokerID)
+			provider, err := s.store.GetProjectProvider(ctx, projectID, runtimeBrokerID)
 			if err == nil && provider.LocalPath != "" {
 				hasLocalPath = true
 				s.agentLifecycleLog.Debug("Workspace bootstrap: broker has local path, skipping upload",
@@ -1127,7 +1127,7 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 
 // submitAgentEnv handles POST /api/v1/groves/{groveId}/agents/{agentId}/env
 // CLI submits gathered env vars after receiving a 202 env-gather response.
-func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, groveID, agentID string) {
+func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
 	ctx := r.Context()
 
 	var req SubmitEnvRequest
@@ -1142,7 +1142,7 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, groveID,
 	}
 
 	// Resolve agent
-	agent, err := s.store.GetAgentBySlug(ctx, groveID, agentID)
+	agent, err := s.store.GetAgentBySlug(ctx, projectID, agentID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			agent, err = s.store.GetAgent(ctx, agentID)
@@ -1150,7 +1150,7 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, groveID,
 				writeErrorFromErr(w, err, "")
 				return
 			}
-			if agent.ProjectID != groveID {
+			if agent.ProjectID != projectID {
 				NotFound(w, "Agent")
 				return
 			}
@@ -1189,7 +1189,7 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, groveID,
 	}
 
 	// Enrich and return
-	grove, _ := s.store.GetProject(ctx, groveID)
+	grove, _ := s.store.GetProject(ctx, projectID)
 	s.enrichAgent(ctx, agent, grove, nil)
 
 	writeJSON(w, http.StatusOK, CreateAgentResponse{
@@ -1205,12 +1205,12 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 	}
 
 	// Collect unique grove, broker, and template IDs
-	groveIDs := make(map[string]struct{})
+	projectIDs := make(map[string]struct{})
 	brokerIDs := make(map[string]struct{})
 	templateIDs := make(map[string]struct{})
 	for _, a := range agents {
 		if a.ProjectID != "" {
-			groveIDs[a.ProjectID] = struct{}{}
+			projectIDs[a.ProjectID] = struct{}{}
 		}
 		if a.RuntimeBrokerID != "" {
 			brokerIDs[a.RuntimeBrokerID] = struct{}{}
@@ -1222,7 +1222,7 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 
 	// Fetch groves
 	groveNames := make(map[string]string)
-	for id := range groveIDs {
+	for id := range projectIDs {
 		if grove, err := s.store.GetProject(ctx, id); err == nil {
 			groveNames[id] = grove.Name
 		}
@@ -2129,7 +2129,7 @@ func (s *Server) handleAgentGitHubTokenRefresh(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	token, expiry, err := s.MintGitHubAppTokenForGrove(ctx, grove)
+	token, expiry, err := s.MintGitHubAppTokenForProject(ctx, grove)
 	if err != nil {
 		// Classify the error to return an appropriate status code.
 		// Configuration errors (bad key, wrong app_id) are 502 (upstream auth failed),
@@ -2365,10 +2365,10 @@ type BroadcastMessageRequest struct {
 	Interrupt         bool                        `json:"interrupt,omitempty"`
 }
 
-// handleGroveBroadcast handles POST /api/v1/groves/{groveId}/broadcast.
+// handleProjectBroadcast handles POST /api/v1/groves/{groveId}/broadcast.
 // It publishes a broadcast message to the grove's message broker topic,
 // which fans out to all running agents in the grove.
-func (s *Server) handleGroveBroadcast(w http.ResponseWriter, r *http.Request, groveID string) {
+func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
@@ -2389,7 +2389,7 @@ func (s *Server) handleGroveBroadcast(w http.ResponseWriter, r *http.Request, gr
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: grove:agent:lifecycle", nil)
 			return
 		}
-		if agentIdent.ProjectID() != groveID {
+		if agentIdent.ProjectID() != projectID {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only broadcast within their own grove", nil)
 			return
 		}
@@ -2425,16 +2425,16 @@ func (s *Server) handleGroveBroadcast(w http.ResponseWriter, r *http.Request, gr
 	proxy := s.GetMessageBrokerProxy()
 	if proxy == nil {
 		// Fallback: no broker configured, do direct fan-out
-		s.broadcastDirect(w, r, groveID, req.StructuredMessage, req.Interrupt)
+		s.broadcastDirect(w, r, projectID, req.StructuredMessage, req.Interrupt)
 		return
 	}
 
 	// Log the broadcast
-	logAttrs := []any{"grove_id", groveID}
+	logAttrs := []any{"grove_id", projectID}
 	logAttrs = append(logAttrs, req.StructuredMessage.LogAttrs()...)
 	s.logMessage("broadcast message published", logAttrs...)
 
-	if err := proxy.PublishBroadcast(ctx, groveID, req.StructuredMessage); err != nil {
+	if err := proxy.PublishBroadcast(ctx, projectID, req.StructuredMessage); err != nil {
 		RuntimeError(w, "Failed to publish broadcast message: "+err.Error())
 		return
 	}
@@ -2445,7 +2445,7 @@ func (s *Server) handleGroveBroadcast(w http.ResponseWriter, r *http.Request, gr
 // broadcastDirect fans out a broadcast message directly to all running agents
 // in the grove without using the message broker. This is the fallback when
 // no broker is configured.
-func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, groveID string, msg *messages.StructuredMessage, interrupt bool) {
+func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, projectID string, msg *messages.StructuredMessage, interrupt bool) {
 	ctx := r.Context()
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
@@ -2454,7 +2454,7 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, groveID
 	}
 
 	result, err := s.store.ListAgents(ctx, store.AgentFilter{
-		ProjectID: groveID,
+		ProjectID: projectID,
 		Phase:   "running",
 	}, store.ListOptions{})
 	if err != nil {
@@ -2478,7 +2478,7 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, groveID
 		// Persist broadcast message per recipient (non-fatal)
 		storeMsg := &store.Message{
 			ID:          api.NewUUID(),
-			ProjectID:     groveID,
+			ProjectID:     projectID,
 			Sender:      agentMsg.Sender,
 			SenderID:    agentMsg.SenderID,
 			Recipient:   agentMsg.Recipient,
@@ -2674,9 +2674,9 @@ type StopAllAgentsResponse struct {
 }
 
 // handleStopAllAgents stops all running agents, optionally scoped to a grove.
-// Global (groveID=="") requires platform admin. Grove-scoped allows any grove
+// Global (projectID=="") requires platform admin. Grove-scoped allows any grove
 // member: owners/admins stop all agents, regular members stop only their own.
-func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, groveID string) {
+func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
@@ -2694,11 +2694,11 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, gro
 	// Determine authorization and scope
 	scope := "all"
 	filter := store.AgentFilter{
-		ProjectID: groveID,
+		ProjectID: projectID,
 		Phase:   string(state.PhaseRunning),
 	}
 
-	if groveID == "" {
+	if projectID == "" {
 		// Global stop-all: platform admin only
 		if userIdent.Role() != "admin" {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
@@ -2709,7 +2709,7 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, gro
 		// Grove-scoped stop-all: any grove member allowed
 		isAdmin := userIdent.Role() == "admin"
 		if !isAdmin {
-			groveRole := s.resolveUserGroveRole(ctx, groveID, userIdent.ID())
+			groveRole := s.resolveUserProjectRole(ctx, projectID, userIdent.ID())
 			if groveRole == "" {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden,
 					"You are not a member of this grove", nil)
@@ -2819,9 +2819,9 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, gro
 
 // resolveUserGroveRole returns the user's role in the grove's members group.
 // Returns "" if the user is not a member of the grove.
-func (s *Server) resolveUserGroveRole(ctx context.Context, groveID, userID string) string {
+func (s *Server) resolveUserProjectRole(ctx context.Context, projectID, userID string) string {
 	groups, err := s.store.ListGroups(ctx, store.GroupFilter{
-		ProjectID:   groveID,
+		ProjectID:   projectID,
 		GroupType: store.GroupTypeExplicit,
 	}, store.ListOptions{Limit: 10})
 	if err != nil || len(groups.Items) == 0 {
@@ -2843,7 +2843,7 @@ func (s *Server) resolveUserGroveRole(ctx context.Context, groveID, userID strin
 // ============================================================================
 
 type ListProjectsResponse struct {
-	Groves       []ProjectWithCapabilities `json:"groves"`
+	Projects []ProjectWithCapabilities `json:"groves"`
 	NextCursor   string                  `json:"nextCursor,omitempty"`
 	TotalCount   int                     `json:"totalCount"`
 	Capabilities *Capabilities           `json:"_capabilities,omitempty"`
@@ -2860,18 +2860,18 @@ type CreateProjectRequest struct {
 	GitHubToken   string            `json:"githubToken,omitempty"`
 }
 
-type RegisterGroveRequest struct {
+type RegisterProjectRequest struct {
 	ID        string              `json:"id,omitempty"` // Client-provided grove ID
 	Name      string              `json:"name"`
 	GitRemote string              `json:"gitRemote"`
 	Path      string              `json:"path,omitempty"`
 	BrokerID  string              `json:"brokerId,omitempty"` // Link to existing broker (two-phase flow)
-	Broker    *RegisterBrokerInfo `json:"broker,omitempty"`   // DEPRECATED: Use BrokerID with two-phase registration
+	Broker    *RegisterProjectBrokerInfo `json:"broker,omitempty"`   // DEPRECATED: Use BrokerID with two-phase registration
 	Profiles  []string            `json:"profiles,omitempty"`
 	Labels    map[string]string   `json:"labels,omitempty"`
 }
 
-type RegisterBrokerInfo struct {
+type RegisterProjectBrokerInfo struct {
 	ID           string                    `json:"id,omitempty"`
 	Name         string                    `json:"name"`
 	Version      string                    `json:"version,omitempty"`
@@ -2879,8 +2879,8 @@ type RegisterBrokerInfo struct {
 	Profiles     []store.BrokerProfile     `json:"profiles,omitempty"`
 }
 
-type RegisterGroveResponse struct {
-	Grove       *store.Project           `json:"grove"`
+type RegisterProjectResponse struct {
+	Project *store.Project           `json:"grove"`
 	Broker      *store.RuntimeBroker   `json:"broker,omitempty"`
 	Created     bool                   `json:"created"`
 	Matches     []hubclient.ProjectMatch `json:"matches,omitempty"`     // Populated when multiple groves share the same git remote
@@ -2899,18 +2899,18 @@ type AddProviderResponse struct {
 	Provider *store.ProjectProvider `json:"provider"`
 }
 
-func (s *Server) handleGroves(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		s.listGroves(w, r)
+		s.listProjects(w, r)
 	case http.MethodPost:
-		s.createGrove(w, r)
+		s.createProject(w, r)
 	default:
 		MethodNotAllowed(w)
 	}
 }
 
-func (s *Server) listGroves(w http.ResponseWriter, r *http.Request) {
+func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	query := r.URL.Query()
 
@@ -2933,8 +2933,8 @@ func (s *Server) listGroves(w http.ResponseWriter, r *http.Request) {
 		}
 	case "shared":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			if groveIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(groveIDs) > 0 {
-				filter.MemberProjectIDs = groveIDs
+			if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
+				filter.MemberProjectIDs = projectIDs
 				filter.ExcludeOwnerID = userIdent.ID()
 			} else {
 				// User has no group memberships — return empty result
@@ -2946,8 +2946,8 @@ func (s *Server) listGroves(w http.ResponseWriter, r *http.Request) {
 		if query.Get("mine") == "true" {
 			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 				filter.OwnerID = userIdent.ID()
-				if groveIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(groveIDs) > 0 {
-					filter.MemberOrOwnerIDs = groveIDs
+				if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
+					filter.MemberOrOwnerIDs = projectIDs
 				}
 			}
 		}
@@ -2978,7 +2978,7 @@ func (s *Server) listGroves(w http.ResponseWriter, r *http.Request) {
 	if identity != nil {
 		resources := make([]Resource, len(result.Items))
 		for i := range result.Items {
-			resources[i] = groveResource(&result.Items[i])
+			resources[i] = projectResource(&result.Items[i])
 		}
 		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "grove")
 		for i := range result.Items {
@@ -3004,14 +3004,14 @@ func (s *Server) listGroves(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, ListProjectsResponse{
-		Groves:       groves,
+		Projects: groves,
 		NextCursor:   result.NextCursor,
 		TotalCount:   totalCount,
 		Capabilities: scopeCap,
 	})
 }
 
-func (s *Server) createGrove(w http.ResponseWriter, r *http.Request) {
+func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var req CreateProjectRequest
@@ -3050,8 +3050,8 @@ func (s *Server) createGrove(w http.ResponseWriter, r *http.Request) {
 			if user := GetUserIdentityFromContext(ctx); user != nil {
 				callerID = user.ID()
 			}
-			s.createGroveGroup(ctx, existing)
-			s.createGroveMembersGroupAndPolicy(ctx, existing, callerID)
+			s.createProjectGroup(ctx, existing)
+			s.createProjectMembersGroupAndPolicy(ctx, existing, callerID)
 			writeJSON(w, http.StatusOK, existing)
 			return
 		}
@@ -3062,9 +3062,9 @@ func (s *Server) createGrove(w http.ResponseWriter, r *http.Request) {
 		// Not found — proceed to create with this ID
 	}
 
-	groveID := req.ID
-	if groveID == "" {
-		groveID = api.NewUUID()
+	projectID := req.ID
+	if projectID == "" {
+		projectID = api.NewUUID()
 	}
 
 	baseSlug := req.Slug
@@ -3092,7 +3092,7 @@ func (s *Server) createGrove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	grove := &store.Project{
-		ID:         groveID,
+		ID:         projectID,
 		Name:       displayName,
 		Slug:       slug,
 		GitRemote:  normalizedRemote,
@@ -3116,10 +3116,10 @@ func (s *Server) createGrove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create the associated grove_agents group (best-effort)
-	s.createGroveGroup(ctx, grove)
+	s.createProjectGroup(ctx, grove)
 
 	// Create grove members group and policy (best-effort)
-	s.createGroveMembersGroupAndPolicy(ctx, grove)
+	s.createProjectMembersGroupAndPolicy(ctx, grove)
 
 	// For git groves, try to auto-associate a GitHub App installation so that
 	// clone/pull operations can mint tokens. This covers the case where the app
@@ -3162,7 +3162,7 @@ func (s *Server) createGrove(w http.ResponseWriter, r *http.Request) {
 	if grove.IsSharedWorkspace() {
 		// Shared-workspace git grove: clone the repository into the workspace.
 		// Clone failure is a creation failure — clean up the grove record.
-		if err := s.cloneSharedWorkspaceGrove(ctx, grove); err != nil {
+		if err := s.cloneSharedWorkspaceProject(ctx, grove); err != nil {
 			slog.Error("shared workspace clone failed, rolling back grove creation",
 				"grove_id", grove.ID, "slug", grove.Slug, "error", err)
 			if req.GitHubToken != "" && s.secretBackend != nil && grove.GitRemote != "" {
@@ -3196,25 +3196,25 @@ func (s *Server) createGrove(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if grove.GitRemote == "" {
 		// Hub-native grove (no git remote): create workspace directory.
-		if err := s.initHubNativeGrove(grove); err != nil {
+		if err := s.initHubNativeProject(grove); err != nil {
 			slog.Warn("failed to initialize grove workspace",
 				"grove_id", grove.ID, "slug", grove.Slug, "error", err)
 		}
 	}
 
-	// Auto-link brokers that have auto_provide enabled (mirrors registerGrove behavior).
+	// Auto-link brokers that have auto_provide enabled (mirrors registerProject behavior).
 	s.autoLinkProviders(ctx, grove)
 
-	s.events.PublishGroveCreated(ctx, grove)
+	s.events.PublishProjectCreated(ctx, grove)
 
 	writeJSON(w, http.StatusCreated, grove)
 }
 
-// createGroveGroup creates the implicit grove_agents group for a grove.
+// createProjectGroup creates the implicit grove_agents group for a grove.
 // This is a best-effort operation; failures are logged but don't fail the caller.
 // If the group already exists (e.g., grove was deleted and recreated with the same
 // slug), the existing group is reused and its grove ID association is updated.
-func (s *Server) createGroveGroup(ctx context.Context, grove *store.Project) {
+func (s *Server) createProjectGroup(ctx context.Context, grove *store.Project) {
 	agentsSlug := "grove:" + grove.Slug + ":agents"
 	groveGroup := &store.Group{
 		ID:        api.NewUUID(),
@@ -3246,14 +3246,14 @@ func (s *Server) createGroveGroup(ctx context.Context, grove *store.Project) {
 	}
 }
 
-// createGroveMembersGroupAndPolicy creates an explicit members group for a grove
+// createProjectMembersGroupAndPolicy creates an explicit members group for a grove
 // and a policy allowing members to create agents. Best-effort; failures are logged.
 // If the group already exists (e.g., grove was deleted and recreated with the same
 // slug), the existing group is reused and the creator is still added as a member.
 // callerUserID, when non-empty, is also added as an owner of the members group
 // (e.g. the user who linked the grove). It is safe to pass the same value as
 // grove.CreatedBy — duplicate additions are handled gracefully.
-func (s *Server) createGroveMembersGroupAndPolicy(ctx context.Context, grove *store.Project, callerUserID ...string) {
+func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, grove *store.Project, callerUserID ...string) {
 	membersSlug := "grove:" + grove.Slug + ":members"
 
 	slog.Debug("ensuring grove members group",
@@ -3421,11 +3421,11 @@ func hubNativeProjectPath(slug string) (string, error) {
 	return filepath.Join(globalDir, "groves", slug), nil
 }
 
-// initHubNativeGrove initializes the filesystem workspace for a hub-native grove.
+// initHubNativeProject initializes the filesystem workspace for a hub-native grove.
 // It creates the workspace directory and seeds the .scion project structure with
 // hub connection settings. Unlike regular projects, hub-native groves store
 // settings directly in the .scion directory (no split storage or marker files).
-func (s *Server) initHubNativeGrove(grove *store.Project) error {
+func (s *Server) initHubNativeProject(grove *store.Project) error {
 	workspacePath, err := hubNativeProjectPath(grove.Slug)
 	if err != nil {
 		return err
@@ -3471,11 +3471,11 @@ func (s *Server) initHubNativeGrove(grove *store.Project) error {
 	return nil
 }
 
-// cloneSharedWorkspaceGrove performs the host-side git clone for a shared-workspace
+// cloneSharedWorkspaceProject performs the host-side git clone for a shared-workspace
 // git grove. It clones the repository into the hub-native workspace path and
 // seeds the .scion project structure on top. If the clone fails, the workspace
 // directory is cleaned up and an error is returned.
-func (s *Server) cloneSharedWorkspaceGrove(ctx context.Context, grove *store.Project) error {
+func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, grove *store.Project) error {
 	workspacePath, err := hubNativeProjectPath(grove.Slug)
 	if err != nil {
 		return err
@@ -3561,7 +3561,7 @@ func (s *Server) autoAssociateGitHubInstallation(ctx context.Context, grove *sto
 					slog.Info("auto-associated grove with GitHub App installation at creation time",
 						"grove_id", grove.ID, "grove_name", grove.Name,
 						"installation_id", installID, "account", inst.AccountLogin)
-					s.events.PublishGroveUpdated(ctx, grove)
+					s.events.PublishProjectUpdated(ctx, grove)
 				}
 				return
 			}
@@ -3577,7 +3577,7 @@ func (s *Server) autoAssociateGitHubInstallation(ctx context.Context, grove *sto
 func (s *Server) resolveCloneToken(ctx context.Context, grove *store.Project) string {
 	// Try GitHub App token first
 	if grove.GitHubInstallationID != nil {
-		token, _, err := s.MintGitHubAppTokenForGrove(ctx, grove)
+		token, _, err := s.MintGitHubAppTokenForProject(ctx, grove)
 		if err == nil && token != "" {
 			return token
 		}
@@ -3669,7 +3669,7 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 	}
 }
 
-func (s *Server) handleGroveRegister(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
@@ -3677,7 +3677,7 @@ func (s *Server) handleGroveRegister(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	var req RegisterGroveRequest
+	var req RegisterProjectRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
@@ -3739,9 +3739,9 @@ func (s *Server) handleGroveRegister(w http.ResponseWriter, r *http.Request) {
 	// Create new grove if not found
 	if grove == nil {
 		// Use client-provided ID if available; fall back to random UUID.
-		groveID := req.ID
-		if groveID == "" {
-			groveID = api.NewUUID()
+		projectID := req.ID
+		if projectID == "" {
+			projectID = api.NewUUID()
 		}
 
 		baseSlug := api.Slugify(req.Name)
@@ -3757,7 +3757,7 @@ func (s *Server) handleGroveRegister(w http.ResponseWriter, r *http.Request) {
 		}
 
 		grove = &store.Project{
-			ID:         groveID,
+			ID:         projectID,
 			Name:       displayName,
 			Slug:       slug,
 			GitRemote:  normalizedRemote,
@@ -3778,10 +3778,10 @@ func (s *Server) handleGroveRegister(w http.ResponseWriter, r *http.Request) {
 		created = true
 
 		// Create the associated grove_agents group (best-effort)
-		s.createGroveGroup(ctx, grove)
+		s.createProjectGroup(ctx, grove)
 
 		// Create grove members group and policy (best-effort)
-		s.createGroveMembersGroupAndPolicy(ctx, grove)
+		s.createProjectMembersGroupAndPolicy(ctx, grove)
 
 		// Auto-link brokers that have auto_provide enabled
 		s.autoLinkProviders(ctx, grove)
@@ -3796,8 +3796,8 @@ func (s *Server) handleGroveRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		slog.Debug("ensuring groups for existing grove during register",
 			"grove_id", grove.ID, "slug", grove.Slug, "caller", callerID)
-		s.createGroveGroup(ctx, grove)
-		s.createGroveMembersGroupAndPolicy(ctx, grove, callerID)
+		s.createProjectGroup(ctx, grove)
+		s.createProjectMembersGroupAndPolicy(ctx, grove, callerID)
 	}
 
 	// Handle broker linking - two paths:
@@ -3982,8 +3982,8 @@ func (s *Server) handleGroveRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, RegisterGroveResponse{
-		Grove:       grove,
+	writeJSON(w, http.StatusOK, RegisterProjectResponse{
+		Project:     grove,
 		Broker:      broker,
 		Created:     created,
 		Matches:     matches,
@@ -3992,9 +3992,9 @@ func (s *Server) handleGroveRegister(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleGroveRoutes routes requests under /api/v1/groves/{groveId}/...
+// handleProjectRoutes routes requests under /api/v1/groves/{groveId}/...
 // It supports both the grove resource endpoints and nested agent endpoints.
-func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 	// Extract grove ID and remaining path
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/groves/")
 	if path == "" {
@@ -4005,26 +4005,26 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 	// Parse the grove ID (supports both UUID and {uuid}__{slug} format)
 	// The grove ID may contain "__" so we need to find the first "/"
 	parts := strings.SplitN(path, "/", 2)
-	groveIDRaw := parts[0]
+	projectIDRaw := parts[0]
 	subPath := ""
 	if len(parts) > 1 {
 		subPath = parts[1]
 	}
 
 	// Skip the register endpoint - it's handled separately
-	if groveIDRaw == "register" {
+	if projectIDRaw == "register" {
 		NotFound(w, "Grove")
 		return
 	}
 
 	// Parse grove ID to extract UUID (supports {uuid}__{slug} format)
-	groveID := resolveProjectID(groveIDRaw)
+	projectID := resolveProjectID(projectIDRaw)
 
 	// Check for nested /agents path
 	if strings.HasPrefix(subPath, "agents") {
 		agentPath := strings.TrimPrefix(subPath, "agents")
 		agentPath = strings.TrimPrefix(agentPath, "/")
-		s.handleGroveAgents(w, r, groveID, agentPath)
+		s.handleProjectAgents(w, r, projectID, agentPath)
 		return
 	}
 
@@ -4033,9 +4033,9 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 		envPath := strings.TrimPrefix(subPath, "env")
 		envPath = strings.TrimPrefix(envPath, "/")
 		if envPath == "" {
-			s.handleGroveEnvVars(w, r, groveID)
+			s.handleProjectEnvVars(w, r, projectID)
 		} else {
-			s.handleGroveEnvVarByKey(w, r, groveID, envPath)
+			s.handleProjectEnvVarByKey(w, r, projectID, envPath)
 		}
 		return
 	}
@@ -4045,9 +4045,9 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 		secretPath := strings.TrimPrefix(subPath, "secrets")
 		secretPath = strings.TrimPrefix(secretPath, "/")
 		if secretPath == "" {
-			s.handleGroveSecrets(w, r, groveID)
+			s.handleProjectSecrets(w, r, projectID)
 		} else {
-			s.handleGroveSecretByKey(w, r, groveID, secretPath)
+			s.handleProjectSecretByKey(w, r, projectID, secretPath)
 		}
 		return
 	}
@@ -4056,7 +4056,7 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(subPath, "providers") {
 		providerPath := strings.TrimPrefix(subPath, "providers")
 		providerPath = strings.TrimPrefix(providerPath, "/")
-		s.handleGroveProviders(w, r, groveID, providerPath)
+		s.handleProjectProviders(w, r, projectID, providerPath)
 		return
 	}
 
@@ -4065,7 +4065,7 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 		sdPath := strings.TrimPrefix(subPath, "shared-dirs")
 		sdPath = strings.TrimPrefix(sdPath, "/")
 		if sdPath == "" {
-			s.handleGroveSharedDirs(w, r, groveID)
+			s.handleProjectSharedDirs(w, r, projectID)
 		} else {
 			// Split into name and optional sub-path (e.g. "my-dir/files/some/path")
 			parts := strings.SplitN(sdPath, "/", 2)
@@ -4077,9 +4077,9 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 			if strings.HasPrefix(rest, "files") {
 				filePath := strings.TrimPrefix(rest, "files")
 				filePath = strings.TrimPrefix(filePath, "/")
-				s.handleSharedDirFiles(w, r, groveID, name, filePath)
+				s.handleSharedDirFiles(w, r, projectID, name, filePath)
 			} else if rest == "" {
-				s.handleGroveSharedDirByName(w, r, groveID, name)
+				s.handleProjectSharedDirByName(w, r, projectID, name)
 			} else {
 				NotFound(w, "Resource")
 			}
@@ -4092,26 +4092,26 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 		saPath := strings.TrimPrefix(subPath, "gcp-service-accounts")
 		saPath = strings.TrimPrefix(saPath, "/")
 		if saPath == "" {
-			s.handleGroveGCPServiceAccounts(w, r, groveID)
+			s.handleProjectGCPServiceAccounts(w, r, projectID)
 		} else {
-			s.handleGroveGCPServiceAccountByID(w, r, groveID, saPath)
+			s.handleProjectGCPServiceAccountByID(w, r, projectID, saPath)
 		}
 		return
 	}
 
 	// Check for nested /message-logs path (grove-level message audit log)
 	if subPath == api.AgentActionMessageLogs {
-		s.handleGroveMessageLogs(w, r, groveID)
+		s.handleProjectMessageLogs(w, r, projectID)
 		return
 	}
 	if subPath == api.AgentActionMessageLogsStream {
-		s.handleGroveMessageLogsStream(w, r, groveID)
+		s.handleProjectMessageLogsStream(w, r, projectID)
 		return
 	}
 
 	// Check for nested /broadcast path (message broker broadcast)
 	if subPath == "broadcast" {
-		s.handleGroveBroadcast(w, r, groveID)
+		s.handleProjectBroadcast(w, r, projectID)
 		return
 	}
 
@@ -4119,7 +4119,7 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(subPath, "scheduled-events") {
 		eventPath := strings.TrimPrefix(subPath, "scheduled-events")
 		eventPath = strings.TrimPrefix(eventPath, "/")
-		s.handleScheduledEvents(w, r, groveID, eventPath)
+		s.handleScheduledEvents(w, r, projectID, eventPath)
 		return
 	}
 
@@ -4127,19 +4127,19 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(subPath, "schedules") {
 		schedulePath := strings.TrimPrefix(subPath, "schedules")
 		schedulePath = strings.TrimPrefix(schedulePath, "/")
-		s.handleSchedules(w, r, groveID, schedulePath)
+		s.handleSchedules(w, r, projectID, schedulePath)
 		return
 	}
 
 	// Check for nested /settings path
 	if subPath == "settings" {
-		s.handleProjectSettings(w, r, groveID)
+		s.handleProjectSettings(w, r, projectID)
 		return
 	}
 
 	// Check for nested /import-templates path
 	if subPath == "import-templates" {
-		s.handleGroveImportTemplates(w, r, groveID)
+		s.handleProjectImportTemplates(w, r, projectID)
 		return
 	}
 
@@ -4147,39 +4147,39 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(subPath, "dav") {
 		davPath := strings.TrimPrefix(subPath, "dav")
 		davPath = strings.TrimPrefix(davPath, "/")
-		s.handleGroveWebDAV(w, r, groveID, davPath)
+		s.handleProjectWebDAV(w, r, projectID, davPath)
 		return
 	}
 
 	// Check for nested /sync/status path (sync metadata)
 	if subPath == "sync/status" {
-		s.handleGroveSyncStatus(w, r, groveID)
+		s.handleProjectSyncStatus(w, r, projectID)
 		return
 	}
 
 	// Check for nested /workspace/cache/ paths (linked grove cache management)
 	if subPath == "workspace/cache/refresh" {
-		s.handleProjectCacheRefresh(w, r, groveID)
+		s.handleProjectCacheRefresh(w, r, projectID)
 		return
 	}
 	if subPath == "workspace/cache/status" {
-		s.handleProjectCacheStatus(w, r, groveID)
+		s.handleProjectCacheStatus(w, r, projectID)
 		return
 	}
 	if subPath == "workspace/cache/notify" {
-		s.handleProjectCacheNotify(w, r, groveID)
+		s.handleProjectCacheNotify(w, r, projectID)
 		return
 	}
 
 	// Check for nested /workspace/pull path (git pull for shared-workspace groves)
 	if subPath == "workspace/pull" {
-		s.handleProjectWorkspacePull(w, r, groveID)
+		s.handleProjectWorkspacePull(w, r, projectID)
 		return
 	}
 
 	// Check for nested /workspace/archive path (download workspace as zip)
 	if subPath == "workspace/archive" {
-		s.handleProjectWorkspaceArchive(w, r, groveID)
+		s.handleProjectWorkspaceArchive(w, r, projectID)
 		return
 	}
 
@@ -4187,40 +4187,40 @@ func (s *Server) handleGroveRoutes(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(subPath, "workspace/files") {
 		filePath := strings.TrimPrefix(subPath, "workspace/files")
 		filePath = strings.TrimPrefix(filePath, "/")
-		s.handleProjectWorkspace(w, r, groveID, filePath)
+		s.handleProjectWorkspace(w, r, projectID, filePath)
 		return
 	}
 
 	// Check for nested /github-installation path
 	if subPath == "github-installation" {
-		s.handleGroveGitHubInstallation(w, r, groveID)
+		s.handleProjectGitHubInstallation(w, r, projectID)
 		return
 	}
 
 	// Check for nested /github-status path
 	if subPath == "github-status" {
-		s.handleGroveGitHubStatus(w, r, groveID)
+		s.handleProjectGitHubStatus(w, r, projectID)
 		return
 	}
 
 	// Check for nested /github-permissions path
 	if subPath == "github-permissions" {
-		s.handleGroveGitHubPermissions(w, r, groveID)
+		s.handleProjectGitHubPermissions(w, r, projectID)
 		return
 	}
 
 	// Check for nested /git-identity path
 	if subPath == "git-identity" {
-		s.handleGroveGitIdentity(w, r, groveID)
+		s.handleProjectGitIdentity(w, r, projectID)
 		return
 	}
 
 	// Otherwise handle as grove resource
-	s.handleGroveByIDInternal(w, r, groveID, subPath)
+	s.handleProjectByIDInternal(w, r, projectID, subPath)
 }
 
-// handleGroveByIDInternal handles grove resource operations
-func (s *Server) handleGroveByIDInternal(w http.ResponseWriter, r *http.Request, groveID, subPath string) {
+// handleProjectByIDInternal handles grove resource operations
+func (s *Server) handleProjectByIDInternal(w http.ResponseWriter, r *http.Request, projectID, subPath string) {
 	// Only handle if no subpath (direct grove resource)
 	if subPath != "" {
 		NotFound(w, "Grove resource")
@@ -4229,23 +4229,23 @@ func (s *Server) handleGroveByIDInternal(w http.ResponseWriter, r *http.Request,
 
 	switch r.Method {
 	case http.MethodGet:
-		s.getGrove(w, r, groveID)
+		s.getProject(w, r, projectID)
 	case http.MethodPatch:
-		s.updateGrove(w, r, groveID)
+		s.updateProject(w, r, projectID)
 	case http.MethodDelete:
-		s.deleteGrove(w, r, groveID)
+		s.deleteProject(w, r, projectID)
 	default:
 		MethodNotAllowed(w)
 	}
 }
 
-// handleGroveAgents handles agent operations scoped to a grove
+// handleProjectAgents handles agent operations scoped to a grove
 // Path: /api/v1/groves/{groveId}/agents[/{agentId}[/{action}]]
-func (s *Server) handleGroveAgents(w http.ResponseWriter, r *http.Request, groveID, agentPath string) {
+func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request, projectID, agentPath string) {
 	ctx := r.Context()
 
 	// Verify grove exists
-	grove, err := s.store.GetProject(ctx, groveID)
+	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			NotFound(w, "Grove")
@@ -4257,7 +4257,7 @@ func (s *Server) handleGroveAgents(w http.ResponseWriter, r *http.Request, grove
 
 	// Handle stop-all (POST /api/v1/groves/{groveId}/agents/stop-all)
 	if agentPath == "stop-all" {
-		s.handleStopAllAgents(w, r, grove.ID)
+		s.handleStopAllAgents(w, r, project.ID)
 		return
 	}
 
@@ -4265,9 +4265,9 @@ func (s *Server) handleGroveAgents(w http.ResponseWriter, r *http.Request, grove
 	if agentPath == "" {
 		switch r.Method {
 		case http.MethodGet:
-			s.listGroveAgents(w, r, grove.ID)
+			s.listProjectAgents(w, r, project.ID)
 		case http.MethodPost:
-			s.createGroveAgent(w, r, grove.ID)
+			s.createProjectAgent(w, r, project.ID)
 		default:
 			MethodNotAllowed(w)
 		}
@@ -4284,30 +4284,30 @@ func (s *Server) handleGroveAgents(w http.ResponseWriter, r *http.Request, grove
 
 	// Handle actions
 	if action != "" {
-		s.handleGroveAgentAction(w, r, grove.ID, agentIDRaw, action)
+		s.handleProjectAgentAction(w, r, project.ID, agentIDRaw, action)
 		return
 	}
 
 	// Handle agent by ID within grove
 	switch r.Method {
 	case http.MethodGet:
-		s.getGroveAgent(w, r, grove.ID, agentIDRaw)
+		s.getProjectAgent(w, r, project.ID, agentIDRaw)
 	case http.MethodPatch:
-		s.updateGroveAgent(w, r, grove.ID, agentIDRaw)
+		s.updateProjectAgent(w, r, project.ID, agentIDRaw)
 	case http.MethodDelete:
-		s.deleteGroveAgent(w, r, grove.ID, agentIDRaw)
+		s.deleteProjectAgent(w, r, project.ID, agentIDRaw)
 	default:
 		MethodNotAllowed(w)
 	}
 }
 
-// listGroveAgents lists agents within a specific grove
-func (s *Server) listGroveAgents(w http.ResponseWriter, r *http.Request, groveID string) {
+// listProjectAgents lists agents within a specific grove
+func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
 	query := r.URL.Query()
 
 	filter := store.AgentFilter{
-		ProjectID:         groveID,
+		ProjectID:         projectID,
 		RuntimeBrokerID: query.Get("runtimeBrokerId"),
 		Phase:           query.Get("phase"),
 		IncludeDeleted:  query.Get("includeDeleted") == "true",
@@ -4352,7 +4352,7 @@ func (s *Server) listGroveAgents(w http.ResponseWriter, r *http.Request, groveID
 
 	var scopeCap *Capabilities
 	if identity != nil {
-		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "grove", groveID, "agent")
+		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "grove", projectID, "agent")
 	}
 
 	writeJSON(w, http.StatusOK, ListAgentsResponse{
@@ -4364,8 +4364,8 @@ func (s *Server) listGroveAgents(w http.ResponseWriter, r *http.Request, groveID
 	})
 }
 
-// createGroveAgent creates an agent within a specific grove
-func (s *Server) createGroveAgent(w http.ResponseWriter, r *http.Request, groveID string) {
+// createProjectAgent creates an agent within a specific grove
+func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
 
 	var req CreateAgentRequest
@@ -4407,15 +4407,15 @@ func (s *Server) createGroveAgent(w http.ResponseWriter, r *http.Request, groveI
 		// User-created agents: ancestry is [userID]
 		ancestry = []string{userIdent.ID()}
 	}
-	s.createAgentInProject(w, r, req, groveID, createdBy, creatorName, ancestry, notifySubscriberType, notifySubscriberID)
+	s.createAgentInProject(w, r, req, projectID, createdBy, creatorName, ancestry, notifySubscriberType, notifySubscriberID)
 }
 
-// getGroveAgent gets an agent by ID within a specific grove
-func (s *Server) getGroveAgent(w http.ResponseWriter, r *http.Request, groveID, agentID string) {
+// getProjectAgent gets an agent by ID within a specific grove
+func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
 	ctx := r.Context()
 
 	// Try to get by slug first (more common case)
-	agent, err := s.store.GetAgentBySlug(ctx, groveID, agentID)
+	agent, err := s.store.GetAgentBySlug(ctx, projectID, agentID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			// Try by UUID
@@ -4425,7 +4425,7 @@ func (s *Server) getGroveAgent(w http.ResponseWriter, r *http.Request, groveID, 
 				return
 			}
 			// Verify it belongs to this grove
-			if agent.ProjectID != groveID {
+			if agent.ProjectID != projectID {
 				NotFound(w, "Agent")
 				return
 			}
@@ -4441,12 +4441,12 @@ func (s *Server) getGroveAgent(w http.ResponseWriter, r *http.Request, groveID, 
 	writeJSON(w, http.StatusOK, agent)
 }
 
-// updateGroveAgent updates an agent within a specific grove
-func (s *Server) updateGroveAgent(w http.ResponseWriter, r *http.Request, groveID, agentID string) {
+// updateProjectAgent updates an agent within a specific grove
+func (s *Server) updateProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
 	ctx := r.Context()
 
 	// Try to get by slug first
-	agent, err := s.store.GetAgentBySlug(ctx, groveID, agentID)
+	agent, err := s.store.GetAgentBySlug(ctx, projectID, agentID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			// Try by UUID
@@ -4455,7 +4455,7 @@ func (s *Server) updateGroveAgent(w http.ResponseWriter, r *http.Request, groveI
 				writeErrorFromErr(w, err, "")
 				return
 			}
-			if agent.ProjectID != groveID {
+			if agent.ProjectID != projectID {
 				NotFound(w, "Agent")
 				return
 			}
@@ -4506,12 +4506,12 @@ func (s *Server) updateGroveAgent(w http.ResponseWriter, r *http.Request, groveI
 	writeJSON(w, http.StatusOK, agent)
 }
 
-// deleteGroveAgent deletes an agent within a specific grove
-func (s *Server) deleteGroveAgent(w http.ResponseWriter, r *http.Request, groveID, agentID string) {
+// deleteProjectAgent deletes an agent within a specific grove
+func (s *Server) deleteProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
 	ctx := r.Context()
 
 	// Try to get by slug first to verify grove membership
-	agent, err := s.store.GetAgentBySlug(ctx, groveID, agentID)
+	agent, err := s.store.GetAgentBySlug(ctx, projectID, agentID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			// Try by UUID
@@ -4520,7 +4520,7 @@ func (s *Server) deleteGroveAgent(w http.ResponseWriter, r *http.Request, groveI
 				writeErrorFromErr(w, err, "")
 				return
 			}
-			if agent.ProjectID != groveID {
+			if agent.ProjectID != projectID {
 				NotFound(w, "Agent")
 				return
 			}
@@ -4533,11 +4533,11 @@ func (s *Server) deleteGroveAgent(w http.ResponseWriter, r *http.Request, groveI
 	s.performAgentDelete(w, r, agent)
 }
 
-// handleGroveAgentAction handles actions on agents within a grove
-func (s *Server) handleGroveAgentAction(w http.ResponseWriter, r *http.Request, groveID, agentID, action string) {
+// handleProjectAgentAction handles actions on agents within a grove
+func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request, projectID, agentID, action string) {
 	// Agent logs relay (GET, proxied to broker); handle before the POST-only gate.
 	if action == "logs" {
-		resolvedAgent, err := s.resolveGroveAgent(r.Context(), groveID, agentID)
+		resolvedAgent, err := s.resolveProjectAgent(r.Context(), projectID, agentID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -4548,7 +4548,7 @@ func (s *Server) handleGroveAgentAction(w http.ResponseWriter, r *http.Request, 
 
 	// Cloud-logs actions are GET endpoints; handle before the POST-only gate.
 	if action == "cloud-logs" || action == "cloud-logs/stream" {
-		resolvedAgent, err := s.resolveGroveAgent(r.Context(), groveID, agentID)
+		resolvedAgent, err := s.resolveProjectAgent(r.Context(), projectID, agentID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -4563,7 +4563,7 @@ func (s *Server) handleGroveAgentAction(w http.ResponseWriter, r *http.Request, 
 
 	// Message-logs actions are GET endpoints; handle before the POST-only gate.
 	if action == api.AgentActionMessageLogs || action == api.AgentActionMessageLogsStream {
-		resolvedAgent, err := s.resolveGroveAgent(r.Context(), groveID, agentID)
+		resolvedAgent, err := s.resolveProjectAgent(r.Context(), projectID, agentID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -4589,7 +4589,7 @@ func (s *Server) handleGroveAgentAction(w http.ResponseWriter, r *http.Request, 
 	ctx := r.Context()
 
 	// Resolve agent ID
-	agent, err := s.store.GetAgentBySlug(ctx, groveID, agentID)
+	agent, err := s.store.GetAgentBySlug(ctx, projectID, agentID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			agent, err = s.store.GetAgent(ctx, agentID)
@@ -4597,7 +4597,7 @@ func (s *Server) handleGroveAgentAction(w http.ResponseWriter, r *http.Request, 
 				writeErrorFromErr(w, err, "")
 				return
 			}
-			if agent.ProjectID != groveID {
+			if agent.ProjectID != projectID {
 				NotFound(w, "Agent")
 				return
 			}
@@ -4641,7 +4641,7 @@ func (s *Server) handleGroveAgentAction(w http.ResponseWriter, r *http.Request, 
 	case api.AgentActionExec:
 		s.handleAgentExec(w, r, agent.ID)
 	case api.AgentActionEnv:
-		s.submitAgentEnv(w, r, groveID, agentID)
+		s.submitAgentEnv(w, r, projectID, agentID)
 	case api.AgentActionRestore:
 		s.restoreAgent(w, r, agent.ID)
 	case api.AgentActionOutboundMessage:
@@ -4652,38 +4652,38 @@ func (s *Server) handleGroveAgentAction(w http.ResponseWriter, r *http.Request, 
 }
 
 // resolveProjectID extracts the UUID from a grove ID that may be in {uuid}__{slug} format
-func resolveProjectID(groveIDRaw string) string {
-	id, _, ok := api.ParseProjectID(groveIDRaw)
+func resolveProjectID(projectIDRaw string) string {
+	id, _, ok := api.ParseProjectID(projectIDRaw)
 	if ok {
 		return id
 	}
 	// Not in hosted format - return as-is (may be just a UUID or slug)
-	return groveIDRaw
+	return projectIDRaw
 }
 
-// handleGroveByID is deprecated - use handleGroveRoutes instead
-func (s *Server) handleGroveByID(w http.ResponseWriter, r *http.Request) {
+// handleProjectByID is deprecated - use handleProjectRoutes instead
+func (s *Server) handleProjectByID(w http.ResponseWriter, r *http.Request) {
 	id := extractID(r, "/api/v1/groves")
 
 	if id == "" || id == "register" {
-		// Handled by handleGroveRegister
+		// Handled by handleProjectRegister
 		NotFound(w, "Grove")
 		return
 	}
 
 	switch r.Method {
 	case http.MethodGet:
-		s.getGrove(w, r, id)
+		s.getProject(w, r, id)
 	case http.MethodPatch:
-		s.updateGrove(w, r, id)
+		s.updateProject(w, r, id)
 	case http.MethodDelete:
-		s.deleteGrove(w, r, id)
+		s.deleteProject(w, r, id)
 	default:
 		MethodNotAllowed(w)
 	}
 }
 
-func (s *Server) getGrove(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 	grove, err := s.store.GetProject(ctx, id)
 	if err != nil {
@@ -4693,8 +4693,8 @@ func (s *Server) getGrove(w http.ResponseWriter, r *http.Request, id string) {
 
 	// Ensure associated groups exist (backfill for groves created before
 	// group support was added). These calls are idempotent.
-	s.createGroveGroup(ctx, grove)
-	s.createGroveMembersGroupAndPolicy(ctx, grove)
+	s.createProjectGroup(ctx, grove)
+	s.createProjectMembersGroupAndPolicy(ctx, grove)
 
 	// Enrich owner display name
 	if grove.OwnerID != "" {
@@ -4709,13 +4709,13 @@ func (s *Server) getGrove(w http.ResponseWriter, r *http.Request, id string) {
 
 	resp := ProjectWithCapabilities{Project: *grove, CloudLogging: s.logQueryService != nil}
 	if identity := GetIdentityFromContext(ctx); identity != nil {
-		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, groveResource(grove))
+		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, projectResource(grove))
 	}
 
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) updateGrove(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
 	grove, err := s.store.GetProject(ctx, id)
@@ -4725,7 +4725,7 @@ func (s *Server) updateGrove(w http.ResponseWriter, r *http.Request, id string) 
 	}
 
 	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, groveResource(grove), ActionUpdate)
+		decision := s.authzService.CheckAccess(ctx, userIdent, projectResource(grove), ActionUpdate)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"You do not have permission to update this grove", nil)
@@ -4763,12 +4763,12 @@ func (s *Server) updateGrove(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 
-	s.events.PublishGroveUpdated(ctx, grove)
+	s.events.PublishProjectUpdated(ctx, grove)
 
 	writeJSON(w, http.StatusOK, grove)
 }
 
-func (s *Server) deleteGrove(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
 	// Fetch the grove record before deletion so we can clean up the filesystem.
@@ -4779,7 +4779,7 @@ func (s *Server) deleteGrove(w http.ResponseWriter, r *http.Request, id string) 
 	}
 
 	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, groveResource(grove), ActionDelete)
+		decision := s.authzService.CheckAccess(ctx, userIdent, projectResource(grove), ActionDelete)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"You do not have permission to delete this grove", nil)
@@ -4790,7 +4790,7 @@ func (s *Server) deleteGrove(w http.ResponseWriter, r *http.Request, id string) 
 	// Dispatch agent deletions to runtime brokers so containers are stopped
 	// and agent files are cleaned up. The DB cascade will remove agent records,
 	// but we need the broker to tear down the actual resources first.
-	s.deleteGroveAgents(ctx, grove)
+	s.deleteProjectAgents(ctx, grove)
 
 	// Clean up all groups associated with the grove (agents group, members group, etc.)
 	if groveGroups, err := s.store.ListGroups(ctx, store.GroupFilter{ProjectID: id}, store.ListOptions{Limit: 100}); err == nil {
@@ -4843,16 +4843,16 @@ func (s *Server) deleteGrove(w http.ResponseWriter, r *http.Request, id string) 
 	}
 
 	// Clean up grove-scoped templates (best-effort), including storage files.
-	s.deleteGroveTemplates(ctx, id)
+	s.deleteProjectTemplates(ctx, id)
 
 	// Clean up grove-scoped harness configs (best-effort), including storage files.
-	s.deleteGroveHarnessConfigs(ctx, id)
+	s.deleteProjectHarnessConfigs(ctx, id)
 
 	// For hub-native and shared-workspace groves, notify provider brokers to clean up
 	// their local grove directories. This must run before DeleteProject because
 	// the cascade deletes the grove_providers we need to enumerate.
 	if grove.GitRemote == "" || grove.IsSharedWorkspace() {
-		s.cleanupBrokerGroveDirectories(ctx, grove)
+		s.cleanupBrokerProjectDirectories(ctx, grove)
 	}
 
 	if err := s.store.DeleteProject(ctx, id); err != nil {
@@ -4882,22 +4882,22 @@ func (s *Server) deleteGrove(w http.ResponseWriter, r *http.Request, id string) 
 			// ExternalProjectPath returns <grove-configs>/<slug__uuid>/.scion —
 			// remove the parent (<slug__uuid>) directory.
 			groveConfigDir := filepath.Dir(configPath)
-			if err := config.RemoveGroveConfig(groveConfigDir); err != nil && !os.IsNotExist(err) {
+			if err := config.RemoveProjectConfig(groveConfigDir); err != nil && !os.IsNotExist(err) {
 				slog.Warn("failed to remove grove config directory",
 					"grove_id", id, "slug", grove.Slug, "path", groveConfigDir, "error", err)
 			}
 		}
 	}
 
-	s.events.PublishGroveDeleted(ctx, id)
+	s.events.PublishProjectDeleted(ctx, id)
 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// deleteGroveAgents dispatches deletion of all agents in a grove to their
+// deleteProjectAgents dispatches deletion of all agents in a grove to their
 // runtime brokers. This is best-effort: failures are logged but do not block
 // grove deletion. The database cascade will remove agent records regardless.
-func (s *Server) deleteGroveAgents(ctx context.Context, grove *store.Project) {
+func (s *Server) deleteProjectAgents(ctx context.Context, grove *store.Project) {
 	dispatcher := s.GetDispatcher()
 
 	result, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: grove.ID}, store.ListOptions{Limit: 1000})
@@ -4921,81 +4921,81 @@ func (s *Server) deleteGroveAgents(ctx context.Context, grove *store.Project) {
 	}
 }
 
-// deleteGroveTemplates deletes all grove-scoped templates including their
+// deleteProjectTemplates deletes all grove-scoped templates including their
 // storage files (GCS/local). This is best-effort: failures are logged but
 // do not block grove deletion.
-func (s *Server) deleteGroveTemplates(ctx context.Context, groveID string) {
+func (s *Server) deleteProjectTemplates(ctx context.Context, projectID string) {
 	// List all grove-scoped templates so we can clean up their storage files.
 	templates, err := s.store.ListTemplates(ctx, store.TemplateFilter{
 		Scope:   store.ScopeProject,
-		ScopeID: groveID,
+		ScopeID: projectID,
 	}, store.ListOptions{Limit: 1000})
 	if err != nil {
-		slog.Warn("failed to list grove templates for deletion", "grove_id", groveID, "error", err)
+		slog.Warn("failed to list grove templates for deletion", "grove_id", projectID, "error", err)
 	} else if stor := s.GetStorage(); stor != nil {
 		for _, tmpl := range templates.Items {
 			if tmpl.StoragePath != "" {
 				if err := stor.DeletePrefix(ctx, tmpl.StoragePath); err != nil {
 					slog.Warn("failed to delete template storage files",
-						"grove_id", groveID, "template", tmpl.ID, "path", tmpl.StoragePath, "error", err)
+						"grove_id", projectID, "template", tmpl.ID, "path", tmpl.StoragePath, "error", err)
 				}
 			}
 		}
 	}
 
-	if n, err := s.store.DeleteTemplatesByScope(ctx, store.ScopeProject, groveID); err != nil {
-		slog.Warn("failed to delete grove templates", "grove_id", groveID, "error", err)
+	if n, err := s.store.DeleteTemplatesByScope(ctx, store.ScopeProject, projectID); err != nil {
+		slog.Warn("failed to delete grove templates", "grove_id", projectID, "error", err)
 	} else if n > 0 {
-		slog.Info("deleted grove templates", "grove_id", groveID, "count", n)
+		slog.Info("deleted grove templates", "grove_id", projectID, "count", n)
 	}
 }
 
 // warnManagedGCPServiceAccounts logs a warning for any hub-minted GCP service
 // accounts that will be retained in GCP when a grove is deleted.
-func (s *Server) warnManagedGCPServiceAccounts(ctx context.Context, groveID string) {
+func (s *Server) warnManagedGCPServiceAccounts(ctx context.Context, projectID string) {
 	managed := true
 	sas, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
 		Scope:   store.ScopeProject,
-		ScopeID: groveID,
+		ScopeID: projectID,
 		Managed: &managed,
 	})
 	if err != nil {
 		slog.Warn("failed to list managed GCP SAs for grove deletion warning",
-			"grove_id", groveID, "error", err)
+			"grove_id", projectID, "error", err)
 		return
 	}
 	for _, sa := range sas {
 		slog.Warn("grove deletion: managed GCP service account retained in GCP — manual cleanup may be required",
-			"grove_id", groveID, "sa_email", sa.Email, "sa_id", sa.ID, "project_id", sa.ProjectID)
+			"grove_id", projectID, "sa_email", sa.Email, "sa_id", sa.ID, "project_id", sa.ProjectID)
 	}
 }
 
-// deleteGroveHarnessConfigs deletes all grove-scoped harness configs including
+// deleteProjectHarnessConfigs deletes all grove-scoped harness configs including
 // their storage files (GCS/local). This is best-effort: failures are logged
 // but do not block grove deletion.
-func (s *Server) deleteGroveHarnessConfigs(ctx context.Context, groveID string) {
+func (s *Server) deleteProjectHarnessConfigs(ctx context.Context, projectID string) {
 	// List all grove-scoped harness configs so we can clean up their storage files.
 	configs, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
 		Scope:   store.ScopeProject,
-		ScopeID: groveID,
+		ScopeID: projectID,
 	}, store.ListOptions{Limit: 1000})
 	if err != nil {
-		slog.Warn("failed to list grove harness configs for deletion", "grove_id", groveID, "error", err)
+		slog.Warn("failed to list grove harness configs for deletion", "grove_id", projectID, "error", err)
 	} else if stor := s.GetStorage(); stor != nil {
 		for _, hc := range configs.Items {
 			if hc.StoragePath != "" {
 				if err := stor.DeletePrefix(ctx, hc.StoragePath); err != nil {
 					slog.Warn("failed to delete harness config storage files",
-						"grove_id", groveID, "harnessConfig", hc.ID, "path", hc.StoragePath, "error", err)
+						"grove_id", projectID, "harnessConfig", hc.ID, "path", hc.StoragePath, "error", err)
 				}
 			}
 		}
 	}
 
-	if n, err := s.store.DeleteHarnessConfigsByScope(ctx, store.ScopeProject, groveID); err != nil {
-		slog.Warn("failed to delete grove harness configs", "grove_id", groveID, "error", err)
+	if n, err := s.store.DeleteHarnessConfigsByScope(ctx, store.ScopeProject, projectID); err != nil {
+		slog.Warn("failed to delete grove harness configs", "grove_id", projectID, "error", err)
 	} else if n > 0 {
-		slog.Info("deleted grove harness configs", "grove_id", groveID, "count", n)
+		slog.Info("deleted grove harness configs", "grove_id", projectID, "count", n)
 	}
 }
 
@@ -5003,7 +5003,7 @@ func (s *Server) deleteGroveHarnessConfigs(ctx context.Context, groveID string) 
 // copies of a hub-native grove directory. This is best-effort: failures are
 // logged but do not block grove deletion. The embedded broker is skipped
 // because the hub already cleans up its own filesystem copy.
-func (s *Server) cleanupBrokerGroveDirectories(ctx context.Context, grove *store.Project) {
+func (s *Server) cleanupBrokerProjectDirectories(ctx context.Context, grove *store.Project) {
 	if grove.Slug == "" {
 		return
 	}
@@ -5097,10 +5097,10 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	query := r.URL.Query()
 
-	groveID := query.Get("groveId")
+	projectID := query.Get("groveId")
 	filter := store.RuntimeBrokerFilter{
 		Status:  query.Get("status"),
-		ProjectID: groveID,
+		ProjectID: projectID,
 		Name:    query.Get("name"),
 	}
 
@@ -5141,9 +5141,9 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// If filtering by groveId, include grove-specific provider data (like localPath)
-	if groveID != "" {
+	if projectID != "" {
 		// Get provider data for this grove to include localPath
-		providers, err := s.store.GetProjectProviders(ctx, groveID)
+		providers, err := s.store.GetProjectProviders(ctx, projectID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -5266,7 +5266,7 @@ func (s *Server) handleRuntimeBrokerByIDInternal(w http.ResponseWriter, r *http.
 
 	// Handle groves action
 	if subPath == "groves" && r.Method == http.MethodGet {
-		s.getBrokerGroves(w, r, id)
+		s.getBrokerProjects(w, r, id)
 		return
 	}
 
@@ -5550,28 +5550,28 @@ func (s *Server) resolveUserProjectIDs(ctx context.Context, userID string) []str
 		return nil
 	}
 
-	groveIDSet := make(map[string]struct{})
+	projectIDSet := make(map[string]struct{})
 	for _, g := range groups {
 		if g.ProjectID != "" {
-			groveIDSet[g.ProjectID] = struct{}{}
+			projectIDSet[g.ProjectID] = struct{}{}
 		}
 	}
 
-	groveIDs := make([]string, 0, len(groveIDSet))
-	for id := range groveIDSet {
-		groveIDs = append(groveIDs, id)
+	projectIDs := make([]string, 0, len(projectIDSet))
+	for id := range projectIDSet {
+		projectIDs = append(projectIDs, id)
 	}
-	return groveIDs
+	return projectIDs
 }
 
 // brokerHeartbeatRequest is the request body for broker heartbeats.
 type brokerHeartbeatRequest struct {
 	Status string                 `json:"status"`
-	Groves []brokerGroveHeartbeat `json:"groves,omitempty"`
+	Projects []brokerProjectHeartbeat `json:"groves,omitempty"`
 }
 
-// brokerGroveHeartbeat is per-grove status in a heartbeat.
-type brokerGroveHeartbeat struct {
+// brokerProjectHeartbeat is per-grove status in a heartbeat.
+type brokerProjectHeartbeat struct {
 	ProjectID    string                 `json:"groveId"`
 	AgentCount int                    `json:"agentCount"`
 	Agents     []brokerAgentHeartbeat `json:"agents,omitempty"`
@@ -5605,7 +5605,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	}
 
 	// Process agent status updates from each grove
-	for _, grove := range heartbeat.Groves {
+	for _, grove := range heartbeat.Projects {
 		for _, agentHB := range grove.Agents {
 			// Look up the agent by name (slug) within the grove
 			agent, err := s.store.GetAgentBySlug(ctx, grove.ProjectID, agentHB.Slug)
@@ -5768,7 +5768,7 @@ type ListBrokerProjectsResponse struct {
 	Projects []BrokerProjectInfo `json:"groves"`
 }
 
-func (s *Server) getBrokerGroves(w http.ResponseWriter, r *http.Request, brokerID string) {
+func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, brokerID string) {
 	ctx := r.Context()
 
 	// Verify broker exists
@@ -7020,11 +7020,11 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request, key string
 // Grove-scoped Env and Secrets Endpoints
 // ============================================================================
 
-func (s *Server) handleGroveEnvVars(w http.ResponseWriter, r *http.Request, groveID string) {
+func (s *Server) handleProjectEnvVars(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
 
 	// Verify grove exists
-	grove, err := s.store.GetProject(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			NotFound(w, "Grove")
@@ -7041,7 +7041,7 @@ func (s *Server) handleGroveEnvVars(w http.ResponseWriter, r *http.Request, grov
 		return
 	}
 	if agentIdent, ok := identity.(AgentIdentity); ok {
-		if agentIdent.ProjectID() != groveID {
+		if agentIdent.ProjectID() != projectID {
 			Forbidden(w)
 			return
 		}
@@ -7065,7 +7065,7 @@ func (s *Server) handleGroveEnvVars(w http.ResponseWriter, r *http.Request, grov
 	case http.MethodGet:
 		envVars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{
 			Scope:   store.ScopeProject,
-			ScopeID: groveID,
+			ScopeID: projectID,
 		})
 		if err != nil {
 			writeErrorFromErr(w, err, "")
@@ -7075,7 +7075,7 @@ func (s *Server) handleGroveEnvVars(w http.ResponseWriter, r *http.Request, grov
 		if s.secretBackend != nil {
 			metas, err := s.secretBackend.List(ctx, secret.Filter{
 				Scope:   store.ScopeProject,
-				ScopeID: groveID,
+				ScopeID: projectID,
 				Type:    "environment",
 			})
 			if err != nil {
@@ -7107,18 +7107,18 @@ func (s *Server) handleGroveEnvVars(w http.ResponseWriter, r *http.Request, grov
 		writeJSON(w, http.StatusOK, ListEnvVarsResponse{
 			EnvVars: envVars,
 			Scope:   store.ScopeProject,
-			ScopeID: groveID,
+			ScopeID: projectID,
 		})
 	default:
 		MethodNotAllowed(w)
 	}
 }
 
-func (s *Server) handleGroveEnvVarByKey(w http.ResponseWriter, r *http.Request, groveID, key string) {
+func (s *Server) handleProjectEnvVarByKey(w http.ResponseWriter, r *http.Request, projectID, key string) {
 	ctx := r.Context()
 
 	// Verify grove exists
-	grove, err := s.store.GetProject(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			NotFound(w, "Grove")
@@ -7140,7 +7140,7 @@ func (s *Server) handleGroveEnvVarByKey(w http.ResponseWriter, r *http.Request, 
 			Forbidden(w)
 			return
 		}
-		if agentIdent.ProjectID() != groveID {
+		if agentIdent.ProjectID() != projectID {
 			Forbidden(w)
 			return
 		}
@@ -7165,10 +7165,10 @@ func (s *Server) handleGroveEnvVarByKey(w http.ResponseWriter, r *http.Request, 
 
 	switch r.Method {
 	case http.MethodGet:
-		envVar, err := s.store.GetEnvVar(ctx, key, store.ScopeProject, groveID)
+		envVar, err := s.store.GetEnvVar(ctx, key, store.ScopeProject, projectID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
-				meta, metaErr := s.secretBackend.GetMeta(ctx, key, store.ScopeProject, groveID)
+				meta, metaErr := s.secretBackend.GetMeta(ctx, key, store.ScopeProject, projectID)
 				if metaErr == nil && meta.SecretType == "environment" {
 					ev := secretMetaToEnvVar(*meta)
 					writeJSON(w, http.StatusOK, &ev)
@@ -7213,7 +7213,7 @@ func (s *Server) handleGroveEnvVarByKey(w http.ResponseWriter, r *http.Request, 
 				SecretType:    "environment",
 				Target:        key,
 				Scope:         store.ScopeProject,
-				ScopeID:       groveID,
+				ScopeID:       projectID,
 				Description:   req.Description,
 				InjectionMode: req.InjectionMode,
 				CreatedBy:     createdBy,
@@ -7230,7 +7230,7 @@ func (s *Server) handleGroveEnvVarByKey(w http.ResponseWriter, r *http.Request, 
 				writeErrorFromErr(w, err, "")
 				return
 			}
-			_ = s.store.DeleteEnvVar(ctx, key, store.ScopeProject, groveID)
+			_ = s.store.DeleteEnvVar(ctx, key, store.ScopeProject, projectID)
 			syntheticEnvVar := secretMetaToEnvVar(*meta)
 			writeJSON(w, http.StatusOK, SetEnvVarResponse{EnvVar: &syntheticEnvVar, Created: created})
 			return
@@ -7246,7 +7246,7 @@ func (s *Server) handleGroveEnvVarByKey(w http.ResponseWriter, r *http.Request, 
 			Key:           key,
 			Value:         req.Value,
 			Scope:         store.ScopeProject,
-			ScopeID:       groveID,
+			ScopeID:       projectID,
 			Description:   req.Description,
 			Sensitive:     req.Sensitive,
 			InjectionMode: groveInjectionMode,
@@ -7260,7 +7260,7 @@ func (s *Server) handleGroveEnvVarByKey(w http.ResponseWriter, r *http.Request, 
 		}
 		// Demotion cleanup
 		if s.secretBackend != nil {
-			_ = s.secretBackend.Delete(ctx, key, store.ScopeProject, groveID)
+			_ = s.secretBackend.Delete(ctx, key, store.ScopeProject, projectID)
 		}
 		if envVar.Sensitive {
 			envVar.Value = "********"
@@ -7268,9 +7268,9 @@ func (s *Server) handleGroveEnvVarByKey(w http.ResponseWriter, r *http.Request, 
 		writeJSON(w, http.StatusOK, SetEnvVarResponse{EnvVar: envVar, Created: created})
 
 	case http.MethodDelete:
-		if err := s.store.DeleteEnvVar(ctx, key, store.ScopeProject, groveID); err != nil {
+		if err := s.store.DeleteEnvVar(ctx, key, store.ScopeProject, projectID); err != nil {
 			if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
-				if secErr := s.secretBackend.Delete(ctx, key, store.ScopeProject, groveID); secErr == nil {
+				if secErr := s.secretBackend.Delete(ctx, key, store.ScopeProject, projectID); secErr == nil {
 					w.WriteHeader(http.StatusNoContent)
 					return
 				}
@@ -7279,7 +7279,7 @@ func (s *Server) handleGroveEnvVarByKey(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		if s.secretBackend != nil {
-			_ = s.secretBackend.Delete(ctx, key, store.ScopeProject, groveID)
+			_ = s.secretBackend.Delete(ctx, key, store.ScopeProject, projectID)
 		}
 		w.WriteHeader(http.StatusNoContent)
 
@@ -7288,11 +7288,11 @@ func (s *Server) handleGroveEnvVarByKey(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
-func (s *Server) handleGroveSecrets(w http.ResponseWriter, r *http.Request, groveID string) {
+func (s *Server) handleProjectSecrets(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
 
 	// Verify grove exists
-	grove, err := s.store.GetProject(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			NotFound(w, "Grove")
@@ -7309,7 +7309,7 @@ func (s *Server) handleGroveSecrets(w http.ResponseWriter, r *http.Request, grov
 		return
 	}
 	if agentIdent, ok := identity.(AgentIdentity); ok {
-		if agentIdent.ProjectID() != groveID {
+		if agentIdent.ProjectID() != projectID {
 			Forbidden(w)
 			return
 		}
@@ -7333,7 +7333,7 @@ func (s *Server) handleGroveSecrets(w http.ResponseWriter, r *http.Request, grov
 	case http.MethodGet:
 		metas, err := s.secretBackend.List(ctx, secret.Filter{
 			Scope:   store.ScopeProject,
-			ScopeID: groveID,
+			ScopeID: projectID,
 		})
 		if err != nil {
 			writeErrorFromErr(w, err, "")
@@ -7346,18 +7346,18 @@ func (s *Server) handleGroveSecrets(w http.ResponseWriter, r *http.Request, grov
 		writeJSON(w, http.StatusOK, ListSecretsResponse{
 			Secrets: secrets,
 			Scope:   store.ScopeProject,
-			ScopeID: groveID,
+			ScopeID: projectID,
 		})
 	default:
 		MethodNotAllowed(w)
 	}
 }
 
-func (s *Server) handleGroveSecretByKey(w http.ResponseWriter, r *http.Request, groveID, key string) {
+func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request, projectID, key string) {
 	ctx := r.Context()
 
 	// Verify grove exists
-	grove, err := s.store.GetProject(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			NotFound(w, "Grove")
@@ -7379,7 +7379,7 @@ func (s *Server) handleGroveSecretByKey(w http.ResponseWriter, r *http.Request, 
 			Forbidden(w)
 			return
 		}
-		if agentIdent.ProjectID() != groveID {
+		if agentIdent.ProjectID() != projectID {
 			Forbidden(w)
 			return
 		}
@@ -7404,7 +7404,7 @@ func (s *Server) handleGroveSecretByKey(w http.ResponseWriter, r *http.Request, 
 
 	switch r.Method {
 	case http.MethodGet:
-		meta, err := s.secretBackend.GetMeta(ctx, key, store.ScopeProject, groveID)
+		meta, err := s.secretBackend.GetMeta(ctx, key, store.ScopeProject, projectID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -7451,7 +7451,7 @@ func (s *Server) handleGroveSecretByKey(w http.ResponseWriter, r *http.Request, 
 			SecretType:    secretType,
 			Target:        target,
 			Scope:         store.ScopeProject,
-			ScopeID:       groveID,
+			ScopeID:       projectID,
 			Description:   req.Description,
 			InjectionMode: req.InjectionMode,
 		}
@@ -7468,7 +7468,7 @@ func (s *Server) handleGroveSecretByKey(w http.ResponseWriter, r *http.Request, 
 		writeJSON(w, http.StatusOK, SetSecretResponse{Secret: &result, Created: created})
 
 	case http.MethodDelete:
-		if err := s.secretBackend.Delete(ctx, key, store.ScopeProject, groveID); err != nil {
+		if err := s.secretBackend.Delete(ctx, key, store.ScopeProject, projectID); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
@@ -7520,13 +7520,13 @@ func (s *Server) autoLinkProviders(ctx context.Context, grove *store.Project) {
 // Grove Providers Endpoints
 // ============================================================================
 
-// handleGroveProviders handles provider operations for a grove.
+// handleProjectProviders handles provider operations for a grove.
 // Path: /api/v1/groves/{groveId}/providers[/{brokerId}]
-func (s *Server) handleGroveProviders(w http.ResponseWriter, r *http.Request, groveID, subPath string) {
+func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, projectID, subPath string) {
 	ctx := r.Context()
 
 	// Verify grove exists
-	_, err := s.store.GetProject(ctx, groveID)
+	_, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			NotFound(w, "Grove")
@@ -7540,9 +7540,9 @@ func (s *Server) handleGroveProviders(w http.ResponseWriter, r *http.Request, gr
 	if subPath == "" {
 		switch r.Method {
 		case http.MethodGet:
-			s.listGroveProviders(w, r, groveID)
+			s.listProjectProviders(w, r, projectID)
 		case http.MethodPost:
-			s.addGroveProvider(w, r, groveID)
+			s.addProjectProvider(w, r, projectID)
 		default:
 			MethodNotAllowed(w)
 		}
@@ -7553,17 +7553,17 @@ func (s *Server) handleGroveProviders(w http.ResponseWriter, r *http.Request, gr
 	brokerID := subPath
 	switch r.Method {
 	case http.MethodDelete:
-		s.removeGroveProvider(w, r, groveID, brokerID)
+		s.removeProjectProvider(w, r, projectID, brokerID)
 	default:
 		MethodNotAllowed(w)
 	}
 }
 
 // listGroveProviders returns all providers for a grove.
-func (s *Server) listGroveProviders(w http.ResponseWriter, r *http.Request, groveID string) {
+func (s *Server) listProjectProviders(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
 
-	providers, err := s.store.GetProjectProviders(ctx, groveID)
+	providers, err := s.store.GetProjectProviders(ctx, projectID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -7575,7 +7575,7 @@ func (s *Server) listGroveProviders(w http.ResponseWriter, r *http.Request, grov
 }
 
 // addGroveProvider adds a broker as a provider to a grove.
-func (s *Server) addGroveProvider(w http.ResponseWriter, r *http.Request, groveID string) {
+func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
 
 	var req AddProviderRequest
@@ -7611,7 +7611,7 @@ func (s *Server) addGroveProvider(w http.ResponseWriter, r *http.Request, groveI
 
 	// Create provider record
 	provider := &store.ProjectProvider{
-		ProjectID:    groveID,
+		ProjectID:    projectID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		LocalPath:  req.LocalPath,
@@ -7625,14 +7625,14 @@ func (s *Server) addGroveProvider(w http.ResponseWriter, r *http.Request, groveI
 	}
 
 	// Get the grove to check if we should set default runtime broker
-	grove, err := s.store.GetProject(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, projectID)
 	if err == nil && grove.DefaultRuntimeBrokerID == "" {
 		grove.DefaultRuntimeBrokerID = broker.ID
 		_ = s.store.UpdateProject(ctx, grove)
 	}
 
 	// Log the link event
-	LogLinkEvent(ctx, s.auditLogger, broker.ID, broker.Name, groveID, linkedBy, getClientIP(r))
+	LogLinkEvent(ctx, s.auditLogger, broker.ID, broker.Name, projectID, linkedBy, getClientIP(r))
 
 	writeJSON(w, http.StatusCreated, AddProviderResponse{
 		Provider: provider,
@@ -7640,7 +7640,7 @@ func (s *Server) addGroveProvider(w http.ResponseWriter, r *http.Request, groveI
 }
 
 // removeGroveProvider removes a broker from a grove's providers.
-func (s *Server) removeGroveProvider(w http.ResponseWriter, r *http.Request, groveID, brokerID string) {
+func (s *Server) removeProjectProvider(w http.ResponseWriter, r *http.Request, projectID, brokerID string) {
 	ctx := r.Context()
 
 	// Get the user who is performing this action for audit logging
@@ -7649,13 +7649,13 @@ func (s *Server) removeGroveProvider(w http.ResponseWriter, r *http.Request, gro
 		actorID = user.ID()
 	}
 
-	if err := s.store.RemoveProjectProvider(ctx, groveID, brokerID); err != nil {
+	if err := s.store.RemoveProjectProvider(ctx, projectID, brokerID); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
 	// Log the unlink event
-	LogUnlinkEvent(ctx, s.auditLogger, brokerID, groveID, actorID, getClientIP(r))
+	LogUnlinkEvent(ctx, s.auditLogger, brokerID, projectID, actorID, getClientIP(r))
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -8111,7 +8111,7 @@ func (s *Server) handleBrokerSecretByKey(w http.ResponseWriter, r *http.Request,
 // resolveTemplate looks up a template by ID or name/slug.
 // It tries: 1) by ID, 2) by slug in grove scope, 3) by slug in global scope.
 // Returns nil if not found, or an error for actual failures.
-func (s *Server) resolveTemplate(ctx context.Context, templateRef, groveID string) (*store.Template, error) {
+func (s *Server) resolveTemplate(ctx context.Context, templateRef, projectID string) (*store.Template, error) {
 	// Try looking up by ID first (the CLI typically resolves names to IDs)
 	template, err := s.store.GetTemplate(ctx, templateRef)
 	if err != nil && err != store.ErrNotFound {
@@ -8122,7 +8122,7 @@ func (s *Server) resolveTemplate(ctx context.Context, templateRef, groveID strin
 	}
 
 	// Try by slug/name within grove scope
-	template, err = s.store.GetTemplateBySlug(ctx, templateRef, "grove", groveID)
+	template, err = s.store.GetTemplateBySlug(ctx, templateRef, "grove", projectID)
 	if err != nil && err != store.ErrNotFound {
 		return nil, err
 	}
@@ -8328,7 +8328,7 @@ const (
 
 // createNotifySubscription creates a notification subscription for the given agent
 // if notify is true and a subscriber has been identified.
-func (s *Server) createNotifySubscription(ctx context.Context, agentID, groveID, notifySubscriberType, notifySubscriberID, createdBy string) {
+func (s *Server) createNotifySubscription(ctx context.Context, agentID, projectID, notifySubscriberType, notifySubscriberID, createdBy string) {
 	if notifySubscriberID == "" {
 		return
 	}
@@ -8338,7 +8338,7 @@ func (s *Server) createNotifySubscription(ctx context.Context, agentID, groveID,
 		AgentID:           agentID,
 		SubscriberType:    notifySubscriberType,
 		SubscriberID:      notifySubscriberID,
-		ProjectID:           groveID,
+		ProjectID:           projectID,
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR"},
 		CreatedAt:         time.Now(),
 		CreatedBy:         createdBy,
@@ -8544,7 +8544,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 	}
 
 	// Get available (online) brokers for fallback logic
-	availableBrokers, err := s.getAvailableBrokersForGrove(ctx, grove.ID)
+	availableBrokers, err := s.getAvailableBrokersForProject(ctx, grove.ID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return "", err
@@ -8703,10 +8703,10 @@ func (s *Server) canDispatchToBroker(ctx context.Context, broker *store.RuntimeB
 	return decision.Allowed
 }
 
-// getAvailableBrokersForGrove returns online runtime brokers that are providers to the grove.
-func (s *Server) getAvailableBrokersForGrove(ctx context.Context, groveID string) ([]store.RuntimeBroker, error) {
+// getAvailableBrokersForProject returns online runtime brokers that are providers to the grove.
+func (s *Server) getAvailableBrokersForProject(ctx context.Context, projectID string) ([]store.RuntimeBroker, error) {
 	// Get providers for this grove
-	providers, err := s.store.GetProjectProviders(ctx, groveID)
+	providers, err := s.store.GetProjectProviders(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -8787,9 +8787,9 @@ type ImportTemplatesResponse struct {
 	Count     int      `json:"count"`
 }
 
-// handleGroveImportTemplates imports templates directly from a remote URL into
+// handleProjectImportTemplates imports templates directly from a remote URL into
 // the grove's template store without spawning a bootstrap container agent.
-func (s *Server) handleGroveImportTemplates(w http.ResponseWriter, r *http.Request, groveID string) {
+func (s *Server) handleProjectImportTemplates(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
@@ -8803,7 +8803,7 @@ func (s *Server) handleGroveImportTemplates(w http.ResponseWriter, r *http.Reque
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: grove:agent:create", nil)
 			return
 		}
-		if groveID != agentIdent.ProjectID() {
+		if projectID != agentIdent.ProjectID() {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only import templates within their own grove", nil)
 			return
 		}
@@ -8811,7 +8811,7 @@ func (s *Server) handleGroveImportTemplates(w http.ResponseWriter, r *http.Reque
 		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
 			Type:       "agent",
 			ParentType: "grove",
-			ParentID:   groveID,
+			ParentID:   projectID,
 		}, ActionCreate)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
@@ -8835,7 +8835,7 @@ func (s *Server) handleGroveImportTemplates(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Verify grove exists
-	grove, err := s.store.GetProject(ctx, groveID)
+	grove, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			NotFound(w, "Grove")
@@ -8855,7 +8855,7 @@ func (s *Server) handleGroveImportTemplates(w http.ResponseWriter, r *http.Reque
 		imported, err = s.importTemplatesFromWorkspace(ctx, grove, req.WorkspacePath)
 	} else {
 		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
-		imported, err = s.importTemplatesFromRemote(ctx, groveID, req.SourceURL)
+		imported, err = s.importTemplatesFromRemote(ctx, projectID, req.SourceURL)
 	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)

@@ -145,7 +145,7 @@ func init() {
 }
 
 // resolveGroveForSA resolves the grove ID and creates a hub client for SA operations.
-func resolveGroveForSA() (hubclient.Client, string, error) {
+func resolveProjectForSA() (hubclient.Client, string, error) {
 	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to resolve grove path: %w", err)
@@ -175,7 +175,7 @@ func resolveGroveForSA() (hubclient.Client, string, error) {
 func runSAAdd(cmd *cobra.Command, args []string) error {
 	email := args[0]
 
-	client, projectID, err := resolveGroveForSA()
+	client, projectID, err := resolveProjectForSA()
 	if err != nil {
 		return err
 	}
@@ -212,7 +212,7 @@ func runSAAdd(cmd *cobra.Command, args []string) error {
 }
 
 func runSAList(cmd *cobra.Command, args []string) error {
-	client, projectID, err := resolveGroveForSA()
+	client, projectID, err := resolveProjectForSA()
 	if err != nil {
 		return err
 	}
@@ -262,7 +262,7 @@ func runSAList(cmd *cobra.Command, args []string) error {
 func runSARemove(cmd *cobra.Command, args []string) error {
 	saID := args[0]
 
-	client, projectID, err := resolveGroveForSA()
+	client, projectID, err := resolveProjectForSA()
 	if err != nil {
 		return err
 	}
@@ -279,7 +279,7 @@ func runSARemove(cmd *cobra.Command, args []string) error {
 }
 
 func runSAMint(cmd *cobra.Command, args []string) error {
-	client, projectID, err := resolveGroveForSA()
+	client, projectID, err := resolveProjectForSA()
 	if err != nil {
 		return err
 	}
@@ -318,7 +318,7 @@ func runSAMint(cmd *cobra.Command, args []string) error {
 func runSAVerify(cmd *cobra.Command, args []string) error {
 	saID := args[0]
 
-	client, projectID, err := resolveGroveForSA()
+	client, projectID, err := resolveProjectForSA()
 	if err != nil {
 		return err
 	}

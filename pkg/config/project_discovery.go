@@ -20,24 +20,24 @@ import (
 	"strings"
 )
 
-// ProjectType indicates the kind of grove.
+// ProjectType indicates the kind of project.
 type ProjectType string
 
 const (
-	GroveTypeGlobal   ProjectType = "global"
-	GroveTypeGit      ProjectType = "git"
-	GroveTypeExternal ProjectType = "external"
+	ProjectTypeGlobal   ProjectType = "global"
+	ProjectTypeGit      ProjectType = "git"
+	ProjectTypeExternal ProjectType = "external"
 )
 
-// ProjectStatus indicates the health of a grove config.
+// ProjectStatus indicates the health of a project config.
 type ProjectStatus string
 
 const (
-	GroveStatusOK       ProjectStatus = "ok"
-	GroveStatusOrphaned ProjectStatus = "orphaned"
+	ProjectStatusOK       ProjectStatus = "ok"
+	ProjectStatusOrphaned ProjectStatus = "orphaned"
 )
 
-// ProjectInfo describes a discovered grove.
+// ProjectInfo describes a discovered project.
 type ProjectInfo struct {
 	Name          string      `json:"name"`
 	ProjectID       string      `json:"grove_id,omitempty"`
@@ -47,11 +47,11 @@ type ProjectInfo struct {
 	Status        ProjectStatus `json:"status"`
 	AgentCount    int         `json:"agent_count"`
 	// agentsPath overrides the default agents directory derivation.
-	// Used for legacy git groves where agents are a sibling of .scion/.
+	// Used for legacy git projects where agents are a sibling of .scion/.
 	agentsPath string
 }
 
-// AgentsDir returns the path to the agents directory for this grove.
+// AgentsDir returns the path to the agents directory for this project.
 func (g ProjectInfo) AgentsDir() string {
 	if g.agentsPath != "" {
 		return g.agentsPath
@@ -59,41 +59,41 @@ func (g ProjectInfo) AgentsDir() string {
 	return filepath.Join(g.ConfigPath, "agents")
 }
 
-// DiscoverProjects scans for all known groves on this machine.
-// It checks the global grove, then scans ~/.scion/grove-configs/ for
-// external and git grove configs.
+// DiscoverProjects scans for all known projects on this machine.
+// It checks the global project, then scans ~/.scion/project-configs/ for
+// external and git project configs.
 func DiscoverProjects() ([]ProjectInfo, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
 	}
 
-	var groves []ProjectInfo
+	var projects []ProjectInfo
 
-	// 1. Global grove
+	// 1. Global project
 	globalDir := filepath.Join(home, GlobalDir)
 	if info, err := os.Stat(globalDir); err == nil && info.IsDir() {
-		gi := ProjectInfo{
+		pi := ProjectInfo{
 			Name:       "global",
-			Type:       GroveTypeGlobal,
+			Type:       ProjectTypeGlobal,
 			ConfigPath: globalDir,
-			Status:     GroveStatusOK,
+			Status:     ProjectStatusOK,
 		}
-		gi.AgentCount = countAgents(filepath.Join(globalDir, "agents"))
+		pi.AgentCount = countAgents(filepath.Join(globalDir, "agents"))
 		if settings, err := LoadSettings(globalDir); err == nil {
-			gi.ProjectID = settings.ProjectID
+			pi.ProjectID = settings.ProjectID
 		}
-		groves = append(groves, gi)
+		projects = append(projects, pi)
 	}
 
-	// 2. Scan grove-configs directory
-	groveConfigsDir := filepath.Join(home, GlobalDir, "grove-configs")
-	entries, err := os.ReadDir(groveConfigsDir)
+	// 2. Scan project-configs directory
+	projectConfigsDir := filepath.Join(home, GlobalDir, "project-configs")
+	entries, err := os.ReadDir(projectConfigsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return groves, nil
+			return projects, nil
 		}
-		return groves, err
+		return projects, err
 	}
 
 	for _, entry := range entries {
@@ -107,99 +107,99 @@ func DiscoverProjects() ([]ProjectInfo, error) {
 			continue
 		}
 
-		configPath := filepath.Join(groveConfigsDir, dirName, DotScion)
-		legacyAgentsSibling := filepath.Join(groveConfigsDir, dirName, "agents")
+		configPath := filepath.Join(projectConfigsDir, dirName, DotScion)
+		legacyAgentsSibling := filepath.Join(projectConfigsDir, dirName, "agents")
 
 		_, scionErr := os.Stat(configPath)
 		_, legacyAgentsErr := os.Stat(legacyAgentsSibling)
 		scionExists := scionErr == nil
 		legacyAgentsExist := legacyAgentsErr == nil
 
-		var gi ProjectInfo
+		var pi ProjectInfo
 		switch {
 		case scionExists:
 			// .scion/ exists — distinguish external vs git by checking for
-			// a workspace_path in settings (external groves point back to
+			// a workspace_path in settings (external projects point back to
 			// their original project directory).
 			if settings, err := LoadSettings(configPath); err == nil && settings.WorkspacePath != "" {
-				gi = groveInfoFromExternal(configPath, dirName, slug)
+				pi = projectInfoFromExternal(configPath, dirName, slug)
 			} else {
 				agentsDir := filepath.Join(configPath, "agents")
-				gi = groveInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug)
+				pi = projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug)
 			}
 		case legacyAgentsExist:
-			// Legacy git grove: agents/ as sibling without .scion/ dir.
-			gi = groveInfoFromGitExternal(legacyAgentsSibling, dirName, slug)
+			// Legacy git project: agents/ as sibling without .scion/ dir.
+			pi = projectInfoFromGitExternal(legacyAgentsSibling, dirName, slug)
 		default:
 			// No .scion and no agents dir — orphaned leftover.
-			gi = ProjectInfo{
+			pi = ProjectInfo{
 				Name:       slug,
-				Type:       GroveTypeGit,
-				ConfigPath: filepath.Join(groveConfigsDir, dirName),
-				Status:     GroveStatusOrphaned,
+				Type:       ProjectTypeGit,
+				ConfigPath: filepath.Join(projectConfigsDir, dirName),
+				Status:     ProjectStatusOrphaned,
 			}
 		}
 
-		groves = append(groves, gi)
+		projects = append(projects, pi)
 	}
 
-	return groves, nil
+	return projects, nil
 }
 
-// groveInfoFromExternal builds a ProjectInfo for a non-git external grove.
-func groveInfoFromExternal(configPath, dirName, slug string) ProjectInfo {
-	gi := ProjectInfo{
+// projectInfoFromExternal builds a ProjectInfo for a non-git external project.
+func projectInfoFromExternal(configPath, dirName, slug string) ProjectInfo {
+	pi := ProjectInfo{
 		Name:       slug,
-		Type:       GroveTypeExternal,
+		Type:       ProjectTypeExternal,
 		ConfigPath: configPath,
-		Status:     GroveStatusOK,
+		Status:     ProjectStatusOK,
 	}
 
 	settings, err := LoadSettings(configPath)
 	if err == nil {
-		gi.ProjectID = settings.ProjectID
-		gi.WorkspacePath = settings.WorkspacePath
+		pi.ProjectID = settings.ProjectID
+		pi.WorkspacePath = settings.WorkspacePath
 	}
 
-	gi.AgentCount = countAgents(filepath.Join(configPath, "agents"))
+	pi.AgentCount = countAgents(filepath.Join(configPath, "agents"))
 
 	// Check if workspace still exists and has a valid marker pointing back here
-	if gi.WorkspacePath != "" {
-		if !isValidWorkspace(gi.WorkspacePath, gi.ProjectID, configPath) {
-			gi.Status = GroveStatusOrphaned
+	if pi.WorkspacePath != "" {
+		if !isValidWorkspace(pi.WorkspacePath, pi.ProjectID, configPath) {
+			pi.Status = ProjectStatusOrphaned
 		}
 	} else {
 		// No workspace path recorded — orphaned
-		gi.Status = GroveStatusOrphaned
+		pi.Status = ProjectStatusOrphaned
 	}
 
-	return gi
+	return pi
 }
 
-// groveInfoFromGitExternalWithConfig builds a ProjectInfo for a git grove that has
+// projectInfoFromGitExternalWithConfig builds a ProjectInfo for a git project that has
 // an external config dir (.scion/) with agents stored at .scion/agents/.
-// This is the layout produced by initInRepoGrove after the config externalization change.
-func groveInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug string) ProjectInfo {
-	gi := ProjectInfo{
+// This is the layout produced by initInRepoProject after the config externalization change.
+func projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug string) ProjectInfo {
+	pi := ProjectInfo{
 		Name:       slug,
-		Type:       GroveTypeGit,
+		Type:       ProjectTypeGit,
 		ConfigPath: configPath,
-		Status:     GroveStatusOK,
+		Status:     ProjectStatusOK,
 	}
-	gi.AgentCount = countAgents(agentsDir)
+	pi.AgentCount = countAgents(agentsDir)
 	if settings, err := LoadSettings(configPath); err == nil {
-		gi.ProjectID = settings.ProjectID
+		pi.ProjectID = settings.ProjectID
 	}
-	if gi.ProjectID == "" {
+	if pi.ProjectID == "" {
 		if marker, workspacePath, err := readWorkspaceMarkerForSlug(slug); err == nil {
-			gi.ProjectID = marker.ProjectID
-			gi.WorkspacePath = workspacePath
+			pi.ProjectID = marker.ProjectID
+			pi.WorkspacePath = workspacePath
 		}
 	}
-	if gi.AgentCount == 0 {
-		gi.Status = GroveStatusOrphaned
+	if pi.AgentCount == 0 {
+		pi.Status = ProjectStatusOrphaned
 	}
-	return gi
+	return pi
 }
 
 func readWorkspaceMarkerForSlug(slug string) (*ProjectMarker, string, error) {
@@ -207,7 +207,7 @@ func readWorkspaceMarkerForSlug(slug string) (*ProjectMarker, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	workspacePath := filepath.Join(home, GlobalDir, "groves", slug)
+	workspacePath := filepath.Join(home, GlobalDir, "projects", slug)
 	markerPath := filepath.Join(workspacePath, DotScion)
 	marker, err := ReadProjectMarker(markerPath)
 	if err != nil {
@@ -216,37 +216,37 @@ func readWorkspaceMarkerForSlug(slug string) (*ProjectMarker, string, error) {
 	return marker, workspacePath, nil
 }
 
-// groveInfoFromGitExternal builds a ProjectInfo for a legacy git grove's external agents
-// directory (no .scion/ subdir). If the agents directory is empty, the grove is marked
+// projectInfoFromGitExternal builds a ProjectInfo for a legacy git project's external agents
+// directory (no .scion/ subdir). If the agents directory is empty, the project is marked
 // as orphaned since there is no config to link back to the source project.
-func groveInfoFromGitExternal(agentsDir, dirName, slug string) ProjectInfo {
-	gi := ProjectInfo{
+func projectInfoFromGitExternal(agentsDir, dirName, slug string) ProjectInfo {
+	pi := ProjectInfo{
 		Name:       slug,
-		Type:       GroveTypeGit,
+		Type:       ProjectTypeGit,
 		ConfigPath: filepath.Join(filepath.Dir(agentsDir), DotScion),
 		agentsPath: agentsDir, // legacy: agents as sibling of .scion/
-		Status:     GroveStatusOK,
+		Status:     ProjectStatusOK,
 	}
 
-	gi.AgentCount = countAgents(agentsDir)
+	pi.AgentCount = countAgents(agentsDir)
 
-	if gi.AgentCount == 0 {
+	if pi.AgentCount == 0 {
 		// No agents and no .scion directory — this is an orphaned leftover
 		// (e.g. from a deleted workspace or test run).
-		gi.Status = GroveStatusOrphaned
+		pi.Status = ProjectStatusOrphaned
 	} else {
 		// Has agents but no .scion — can't determine workspace path.
-		gi.WorkspacePath = "(git repo)"
+		pi.WorkspacePath = "(git repo)"
 	}
 
-	return gi
+	return pi
 }
 
 // isValidWorkspace checks if a workspace path exists and has a valid .scion
-// marker or directory pointing back to the expected grove config.
-// For external (non-git) groves, configPath is the expected grove-config path;
+// marker or directory pointing back to the expected project config.
+// For external (non-git) projects, configPath is the expected project-config path;
 // the workspace marker must resolve to the same path.
-func isValidWorkspace(workspacePath, expectedGroveID string, configPath ...string) bool {
+func isValidWorkspace(workspacePath, expectedProjectID string, configPath ...string) bool {
 	markerPath := filepath.Join(workspacePath, DotScion)
 	info, err := os.Stat(markerPath)
 	if err != nil {
@@ -254,16 +254,16 @@ func isValidWorkspace(workspacePath, expectedGroveID string, configPath ...strin
 	}
 
 	if info.IsDir() {
-		// Git grove — check grove-id file
-		if expectedGroveID != "" {
+		// Git project — check project-id file
+		if expectedProjectID != "" {
 			if id, err := ReadProjectID(markerPath); err == nil {
-				return id == expectedGroveID
+				return id == expectedProjectID
 			}
 		}
 		return true
 	}
 
-	// Non-git grove — read marker and verify it resolves to the expected config path
+	// Non-git project — read marker and verify it resolves to the expected config path
 	marker, err := ReadProjectMarker(markerPath)
 	if err != nil {
 		return false
@@ -271,7 +271,7 @@ func isValidWorkspace(workspacePath, expectedGroveID string, configPath ...strin
 
 	// If a config path was provided, check that the marker resolves to it.
 	// This catches the case where a marker was deleted and re-created with a
-	// new grove-id, leaving the old grove-config orphaned.
+	// new project-id, leaving the old project-config orphaned.
 	if len(configPath) > 0 && configPath[0] != "" {
 		resolved, err := marker.ExternalProjectPath()
 		if err != nil {
@@ -280,8 +280,8 @@ func isValidWorkspace(workspacePath, expectedGroveID string, configPath ...strin
 		return filepath.Clean(resolved) == filepath.Clean(configPath[0])
 	}
 
-	if expectedGroveID != "" {
-		return marker.ProjectID == expectedGroveID
+	if expectedProjectID != "" {
+		return marker.ProjectID == expectedProjectID
 	}
 	return true
 }
@@ -306,49 +306,49 @@ func ListAgentNames(agentsDir string) []string {
 	return names
 }
 
-// FindOrphanedGroveConfigs returns grove configs that are orphaned
+// FindOrphanedProjectConfigs returns project configs that are orphaned
 // (their workspace no longer exists or no longer points back to them).
-func FindOrphanedGroveConfigs() ([]ProjectInfo, error) {
-	groves, err := DiscoverProjects()
+func FindOrphanedProjectConfigs() ([]ProjectInfo, error) {
+	projects, err := DiscoverProjects()
 	if err != nil {
 		return nil, err
 	}
 
 	var orphaned []ProjectInfo
-	for _, g := range groves {
-		if g.Status == GroveStatusOrphaned {
+	for _, g := range projects {
+		if g.Status == ProjectStatusOrphaned {
 			orphaned = append(orphaned, g)
 		}
 	}
 	return orphaned, nil
 }
 
-// RemoveGroveConfig removes an external grove config directory.
-func RemoveGroveConfig(configPath string) error {
-	// The configPath points to the .scion subdirectory or the grove-configs/<slug__uuid> directory.
-	// We want to remove the grove-configs/<slug__uuid> directory.
+// RemoveProjectConfig removes an external project config directory.
+func RemoveProjectConfig(configPath string) error {
+	// The configPath points to the .scion subdirectory or the project-configs/<slug__uuid> directory.
+	// We want to remove the project-configs/<slug__uuid> directory.
 	parent := configPath
 	if filepath.Base(parent) == DotScion {
 		parent = filepath.Dir(parent)
 	}
 
-	// Safety: only remove if it's under grove-configs/
+	// Safety: only remove if it's under project-configs/
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
-	groveConfigsDir := filepath.Join(home, GlobalDir, "grove-configs")
-	if !strings.HasPrefix(parent, groveConfigsDir) {
+	projectConfigsDir := filepath.Join(home, GlobalDir, "project-configs")
+	if !strings.HasPrefix(parent, projectConfigsDir) {
 		return os.ErrPermission
 	}
 
 	return os.RemoveAll(parent)
 }
 
-// ReconnectGrove updates the workspace_path in an external grove's settings
+// ReconnectProject updates the workspace_path in an external project's settings
 // to point to a new workspace location. It also updates the marker file
 // at the new workspace path.
-func ReconnectGrove(configPath, newWorkspacePath string) error {
+func ReconnectProject(configPath, newWorkspacePath string) error {
 	absWorkspace, err := filepath.Abs(newWorkspacePath)
 	if err != nil {
 		return err

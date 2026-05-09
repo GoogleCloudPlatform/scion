@@ -441,8 +441,8 @@ func (s *Server) handleGitHubAppInstallationByID(w http.ResponseWriter, r *http.
 	}
 }
 
-// handleGroveGitHubInstallation handles PUT and DELETE /api/v1/groves/{id}/github-installation.
-func (s *Server) handleGroveGitHubInstallation(w http.ResponseWriter, r *http.Request, groveID string) {
+// handleProjectGitHubInstallation handles PUT and DELETE /api/v1/groves/{id}/github-installation.
+func (s *Server) handleProjectGitHubInstallation(w http.ResponseWriter, r *http.Request, groveID string) {
 	switch r.Method {
 	case http.MethodPut:
 		var req struct {
@@ -487,7 +487,7 @@ func (s *Server) handleGroveGitHubInstallation(w http.ResponseWriter, r *http.Re
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update grove", nil)
 			return
 		}
-		s.events.PublishGroveUpdated(r.Context(), grove)
+		s.events.PublishProjectUpdated(r.Context(), grove)
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"grove_id":        groveID,
@@ -513,7 +513,7 @@ func (s *Server) handleGroveGitHubInstallation(w http.ResponseWriter, r *http.Re
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update grove", nil)
 			return
 		}
-		s.events.PublishGroveUpdated(r.Context(), grove)
+		s.events.PublishProjectUpdated(r.Context(), grove)
 
 		w.WriteHeader(http.StatusNoContent)
 
@@ -522,15 +522,15 @@ func (s *Server) handleGroveGitHubInstallation(w http.ResponseWriter, r *http.Re
 	}
 }
 
-// handleGroveGitHubStatus handles GET and POST /api/v1/groves/{id}/github-status.
+// handleProjectGitHubStatus handles GET and POST /api/v1/groves/{id}/github-status.
 // GET returns the current status. POST actively verifies the installation by
 // checking with GitHub and attempting a token mint, then returns the updated status.
-func (s *Server) handleGroveGitHubStatus(w http.ResponseWriter, r *http.Request, groveID string) {
+func (s *Server) handleProjectGitHubStatus(w http.ResponseWriter, r *http.Request, groveID string) {
 	switch r.Method {
 	case http.MethodGet:
 		s.handleGetProjectGitHubStatus(w, r, groveID)
 	case http.MethodPost:
-		s.handleCheckGroveGitHubStatus(w, r, groveID)
+		s.handleCheckProjectGitHubStatus(w, r, groveID)
 	default:
 		MethodNotAllowed(w)
 	}
@@ -559,10 +559,10 @@ func (s *Server) handleGetProjectGitHubStatus(w http.ResponseWriter, r *http.Req
 // handleCheckGroveGitHubStatus actively verifies the grove's GitHub App
 // installation by checking the installation on GitHub and attempting to mint
 // a token. The grove's status is updated to reflect the result.
-func (s *Server) handleCheckGroveGitHubStatus(w http.ResponseWriter, r *http.Request, groveID string) {
+func (s *Server) handleCheckProjectGitHubStatus(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
 
-	grove, err := s.store.GetProject(ctx, groveID)
+	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
@@ -572,27 +572,27 @@ func (s *Server) handleCheckGroveGitHubStatus(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if grove.GitHubInstallationID == nil {
+	if project.GitHubInstallationID == nil {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError, "grove has no GitHub App installation", nil)
 		return
 	}
 
 	// Try minting a token — this validates the installation, permissions, and
 	// repo access in one shot, and updates the grove's status accordingly.
-	_, _, mintErr := s.mintGitHubAppToken(ctx, grove)
+	_, _, mintErr := s.mintGitHubAppToken(ctx, project)
 
-	// Re-read the grove to get the updated status (mintGitHubAppToken updates it)
-	grove, err = s.store.GetProject(ctx, groveID)
+	// Re-read the project to get the updated status (mintGitHubAppToken updates it)
+	project, err = s.store.GetProject(ctx, projectID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to re-read grove after check", nil)
 		return
 	}
 
 	resp := map[string]interface{}{
-		"grove_id":        groveID,
-		"installation_id": grove.GitHubInstallationID,
-		"status":          grove.GitHubAppStatus,
-		"permissions":     grove.GitHubPermissions,
+		"project_id":      projectID,
+		"installation_id": project.GitHubInstallationID,
+		"status":          project.GitHubAppStatus,
+		"permissions":     project.GitHubPermissions,
 	}
 	if mintErr != nil {
 		resp["check_error"] = mintErr.Error()
@@ -601,8 +601,8 @@ func (s *Server) handleCheckGroveGitHubStatus(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleGroveGitHubPermissions handles GET, PUT, DELETE /api/v1/groves/{id}/github-permissions.
-func (s *Server) handleGroveGitHubPermissions(w http.ResponseWriter, r *http.Request, groveID string) {
+// handleProjectGitHubPermissions handles GET, PUT, DELETE /api/v1/groves/{id}/github-permissions.
+func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.Request, groveID string) {
 	switch r.Method {
 	case http.MethodGet:
 		grove, err := s.store.GetProject(r.Context(), groveID)
@@ -675,8 +675,8 @@ func (s *Server) handleGroveGitHubPermissions(w http.ResponseWriter, r *http.Req
 	}
 }
 
-// handleGroveGitIdentity handles GET, PUT, DELETE /api/v1/groves/{id}/git-identity.
-func (s *Server) handleGroveGitIdentity(w http.ResponseWriter, r *http.Request, groveID string) {
+// handleProjectGitIdentity handles GET, PUT, DELETE /api/v1/groves/{id}/git-identity.
+func (s *Server) handleProjectGitIdentity(w http.ResponseWriter, r *http.Request, groveID string) {
 	switch r.Method {
 	case http.MethodGet:
 		grove, err := s.store.GetProject(r.Context(), groveID)

@@ -99,7 +99,7 @@ profiles:
 	}
 }
 
-func TestLoadSettingsKoanfWithGroveOverride(t *testing.T) {
+func TestLoadSettingsKoanfWithProjectOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")

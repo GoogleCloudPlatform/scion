@@ -194,11 +194,11 @@ func printTemplateListLocalMode(w *tabwriter.Writer, global, grove []*config.Tem
 	}
 }
 
-func printTemplateListHubMode(w *tabwriter.Writer, localGlobal, localGrove []*config.Template, hubGlobal, hubGrove []hubclient.Template) {
+func printTemplateListHubMode(w *tabwriter.Writer, localGlobal, localProject []*config.Template, hubGlobal, hubProject []hubclient.Template) {
 	hasLocalGlobal := len(localGlobal) > 0
-	hasLocalProject:= len(localGrove) > 0
+	hasLocalProject := len(localProject) > 0
 	hasHubGlobal := len(hubGlobal) > 0
-	hasHubProject:= len(hubGrove) > 0
+	hasHubProject := len(hubProject) > 0
 
 	hasLocal := hasLocalGlobal || hasLocalProject
 	hasHub := hasHubGlobal || hasHubProject
@@ -224,7 +224,7 @@ func printTemplateListHubMode(w *tabwriter.Writer, localGlobal, localGrove []*co
 			}
 			fmt.Fprintln(w, "  Project:")
 			fmt.Fprintln(w, "    NAME\tPATH")
-			for _, t := range localGrove {
+			for _, t := range localProject {
 				fmt.Fprintf(w, "    %s\t%s\n", t.Name, t.Path)
 			}
 		}
@@ -249,13 +249,12 @@ func printTemplateListHubMode(w *tabwriter.Writer, localGlobal, localGrove []*co
 			}
 			fmt.Fprintln(w, "  Project:")
 			fmt.Fprintln(w, "    NAME\tID\tHASH")
-			for _, t := range hubGrove {
+			for _, t := range hubProject {
 				fmt.Fprintf(w, "    %s\t%s\t%s\n", t.Name, t.ID, truncateHash(t.ContentHash))
 			}
 		}
 	}
 }
-
 var templatesShowCmd = &cobra.Command{
 	Use:   "show <name>",
 	Short: "Show template configuration",

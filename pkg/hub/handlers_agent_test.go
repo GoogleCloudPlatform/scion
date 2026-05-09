@@ -4029,7 +4029,7 @@ func TestCreateAgent_GCPPassthrough_BrokerOwnerAllowed(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, grove))
-	srv.createGroveMembersGroupAndPolicy(ctx, grove)
+	srv.createProjectMembersGroupAndPolicy(ctx, grove)
 
 	// Create a broker owned by the same user
 	broker := &store.RuntimeBroker{
@@ -4105,7 +4105,7 @@ func TestCreateAgent_GCPPassthrough_NonOwnerDenied(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, grove))
-	srv.createGroveMembersGroupAndPolicy(ctx, grove)
+	srv.createProjectMembersGroupAndPolicy(ctx, grove)
 
 	// Create a broker owned by a DIFFERENT user
 	broker := &store.RuntimeBroker{
@@ -4178,7 +4178,7 @@ func TestCreateAgent_GCPPassthrough_AdminAllowed(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, grove))
-	srv.createGroveMembersGroupAndPolicy(ctx, grove)
+	srv.createProjectMembersGroupAndPolicy(ctx, grove)
 
 	// Broker owned by someone else
 	broker := &store.RuntimeBroker{

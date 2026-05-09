@@ -940,11 +940,11 @@ func TestResolveRuntimeBroker_HubNativeGrove_NoLocalPath(t *testing.T) {
 		"LocalPath should NOT be set when auto-linking during agent creation for hub-native grove")
 }
 
-// TestGroveRegisterPreservesProviderLocalPath verifies that re-registering a
+// TestProjectRegisterPreservesProviderLocalPath verifies that re-registering a
 // grove from a local checkout does not overwrite an existing provider's empty
 // localPath. This prevents a hub-native git grove (where agents clone from a
 // URL) from being accidentally converted into a linked grove.
-func TestGroveRegisterPreservesProviderLocalPath(t *testing.T) {
+func TestProjectRegisterPreservesProviderLocalPath(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -968,7 +968,7 @@ func TestGroveRegisterPreservesProviderLocalPath(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/register", body)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	var resp RegisterGroveResponse
+	var resp RegisterProjectResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	require.True(t, resp.Created, "grove should be newly created")
 	projectID := resp.Project.ID
@@ -1006,7 +1006,7 @@ func TestGroveRegisterPreservesProviderLocalPath(t *testing.T) {
 	rec2 := doRequest(t, srv, http.MethodPost, "/api/v1/groves/register", body2)
 	require.Equal(t, http.StatusOK, rec2.Code, "body: %s", rec2.Body.String())
 
-	var resp2 RegisterGroveResponse
+	var resp2 RegisterProjectResponse
 	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&resp2))
 	assert.False(t, resp2.Created, "grove should already exist")
 
@@ -1068,20 +1068,20 @@ func TestCreateProject_NoGitRemote_RandomID(t *testing.T) {
 	assert.NotEmpty(t, grove.ID)
 }
 
-// TestRegisterGrove_GitBacked_RandomID verifies that the register endpoint
+// TestRegisterProject_GitBacked_RandomID verifies that the register endpoint
 // assigns a random UUID (not deterministic) to groves created from a git remote.
-func TestRegisterGrove_GitBacked_RandomID(t *testing.T) {
+func TestRegisterProject_GitBacked_RandomID(t *testing.T) {
 	srv, _ := testServer(t)
 
 	gitRemote := "git@github.com:acme/gadgets.git"
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/register", RegisterGroveRequest{
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/register", RegisterProjectRequest{
 		Name:      "Gadgets",
 		GitRemote: gitRemote,
 	})
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	var resp RegisterGroveResponse
+	var resp RegisterProjectResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.NotEmpty(t, resp.Project.ID)
 	assert.True(t, resp.Created)
@@ -1217,19 +1217,19 @@ func TestDeleteProject_CleansUpGroveConfigsDir(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
-// TestGroveRegister_CreatesMembershipGroup verifies that registering a new grove
+// TestProjectRegister_CreatesMembershipGroup verifies that registering a new grove
 // automatically creates a membership group with the caller as owner.
-func TestGroveRegister_CreatesMembershipGroup(t *testing.T) {
+func TestProjectRegister_CreatesMembershipGroup(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/register", RegisterGroveRequest{
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/register", RegisterProjectRequest{
 		Name:      "Membership Test",
 		GitRemote: "https://github.com/test/membership-test.git",
 	})
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	var resp RegisterGroveResponse
+	var resp RegisterProjectResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	require.True(t, resp.Created)
 
@@ -1247,10 +1247,10 @@ func TestGroveRegister_CreatesMembershipGroup(t *testing.T) {
 	assert.Equal(t, store.GroupMemberRoleOwner, members[0].Role)
 }
 
-// TestGroveRegister_ExistingGrove_CreatesMembershipGroup verifies that
+// TestProjectRegister_ExistingGrove_CreatesMembershipGroup verifies that
 // registering against an existing grove (linking) still creates the membership
 // group and adds the linking user as owner.
-func TestGroveRegister_ExistingGrove_CreatesMembershipGroup(t *testing.T) {
+func TestProjectRegister_ExistingGrove_CreatesMembershipGroup(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -1270,13 +1270,13 @@ func TestGroveRegister_ExistingGrove_CreatesMembershipGroup(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrNotFound, "members group should not exist yet")
 
 	// Register (link) via the API — this should backfill the group
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/register", RegisterGroveRequest{
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/register", RegisterProjectRequest{
 		ID:   grove.ID,
 		Name: grove.Name,
 	})
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	var resp RegisterGroveResponse
+	var resp RegisterProjectResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.False(t, resp.Created, "should find existing grove")
 

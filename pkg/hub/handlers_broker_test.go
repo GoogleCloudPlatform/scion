@@ -86,7 +86,7 @@ func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob,
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, grove))
-	srv.createGroveMembersGroupAndPolicy(ctx, grove)
+	srv.createProjectMembersGroupAndPolicy(ctx, grove)
 
 	// Add bob as a grove member so he can create agents (grove-level authz)
 	membersGroup, err := s.GetGroupBySlug(ctx, "grove:"+grove.Slug+":members")

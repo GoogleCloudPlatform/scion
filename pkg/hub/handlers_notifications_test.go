@@ -316,9 +316,9 @@ func TestHandleNotifications_EmptyList(t *testing.T) {
 	assert.Empty(t, notifs)
 }
 
-// setupGroveWithBroker creates a grove with a registered runtime broker for
+// setupProjectWithBroker creates a grove with a registered runtime broker for
 // agent creation tests.
-func setupGroveWithBroker(t *testing.T, s store.Store, projectID, projectName string) *store.Project {
+func setupProjectWithBroker(t *testing.T, s store.Store, projectID, projectName string) *store.Project {
 	t.Helper()
 	ctx := context.Background()
 
@@ -352,7 +352,7 @@ func TestCreateProjectAgent_NotifyCreatesSubscription(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := setupGroveWithBroker(t, s, "grove-notify-test", "Notify Test Project")
+	grove := setupProjectWithBroker(t, s, "grove-notify-test", "Notify Test Project")
 
 	// Create an agent via the grove-scoped endpoint with notify=true
 	req := CreateAgentRequest{
@@ -387,7 +387,7 @@ func TestCreateProjectAgent_NoNotifyNoSubscription(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := setupGroveWithBroker(t, s, "grove-no-notify-test", "No Notify Test Project")
+	grove := setupProjectWithBroker(t, s, "grove-no-notify-test", "No Notify Test Project")
 
 	// Create an agent without notify
 	req := CreateAgentRequest{

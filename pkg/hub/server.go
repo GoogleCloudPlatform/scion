@@ -131,9 +131,9 @@ type ServerConfig struct {
 	// GCPProjectID is the GCP project ID used for minting service accounts.
 	// If empty, auto-detected from the metadata server when running on GCE/Cloud Run.
 	GCPProjectID string
-	// GCPMintCapPerGrove is the maximum number of minted service accounts allowed per grove.
+	// GCPMintCapPerProject is the maximum number of minted service accounts allowed per grove.
 	// Zero means unlimited (default).
-	GCPMintCapPerGrove int
+	GCPMintCapPerProject int
 	// GCPMintCapGlobal is the maximum total number of minted service accounts across all groves.
 	// Zero means unlimited (default).
 	GCPMintCapGlobal int
@@ -362,10 +362,10 @@ type RemoteCreateAgentRequest struct {
 	// Only populated when GatherEnv is true.
 	EnvSources map[string]string `json:"envSources,omitempty"`
 
-	// GroveSlug is the grove slug for hub-native groves.
-	// When set, the broker creates the workspace at ~/.scion/groves/<slug>/
+	// ProjectSlug is the project slug for hub-native projects.
+	// When set, the broker creates the workspace at ~/.scion/projects/<slug>/
 	// instead of the default worktree-based path.
-	GroveSlug string `json:"groveSlug,omitempty"`
+	ProjectSlug string `json:"groveSlug,omitempty"`
 
 	// InlineConfig carries the full ScionConfig provided via the Hub API's
 	// config field. The broker applies this during agent provisioning,
@@ -2007,11 +2007,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/agents", s.handleAgents)
 	s.mux.HandleFunc("/api/v1/agents/", s.handleAgentByID)
 
-	s.mux.HandleFunc("/api/v1/groves", s.handleGroves)
-	s.mux.HandleFunc("/api/v1/groves/register", s.handleGroveRegister)
+	s.mux.HandleFunc("/api/v1/groves", s.handleProjects)
+	s.mux.HandleFunc("/api/v1/groves/register", s.handleProjectRegister)
 	// Grove-nested routes: /api/v1/groves/{groveId}/agents, /api/v1/groves/{groveId}/env, etc.
 	// This handler must come before the generic grove-by-id handler
-	s.mux.HandleFunc("/api/v1/groves/", s.handleGroveRoutes)
+	s.mux.HandleFunc("/api/v1/groves/", s.handleProjectRoutes)
 
 	s.mux.HandleFunc("/api/v1/runtime-brokers", s.handleRuntimeBrokers)
 	s.mux.HandleFunc("/api/v1/runtime-brokers/", s.handleRuntimeBrokerRoutes)

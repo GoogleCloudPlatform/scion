@@ -574,7 +574,7 @@ auth_selectedType: vertex-ai
 	}
 }
 
-func TestProvisionAgentUsesGroveTemplate(t *testing.T) {
+func TestProvisionAgentUsesProjectTemplate(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Move to tmpDir — this is NOT the grove's directory,

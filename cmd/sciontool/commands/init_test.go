@@ -20,7 +20,7 @@ import (
 // This is a compile-time guarantee that in-container code cannot access grove data paths.
 // If this test fails, it means someone added a pkg/config import to sciontool code,
 // which would break the agent isolation model.
-func TestInitGroveDataIsolation(t *testing.T) {
+func TestInitProjectDataIsolation(t *testing.T) {
 	// Use go list to get all transitive dependencies of cmd/sciontool
 	cmd := exec.Command("go", "list", "-deps", "./cmd/sciontool/...")
 	cmd.Dir = filepath.Join(findRepoRoot(t))

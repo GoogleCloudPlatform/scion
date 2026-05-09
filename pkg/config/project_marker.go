@@ -103,10 +103,10 @@ func IsProjectMarkerFile(path string) bool {
 	return !info.IsDir()
 }
 
-// IsOldStyleNonGitGrove returns true if the path is a .scion directory
+// IsOldStyleNonGitProject returns true if the path is a .scion directory
 // in a non-git project (not the global ~/.scion/). This indicates an
 // old-format grove that needs to be re-initialized.
-func IsOldStyleNonGitGrove(scionPath string) bool {
+func IsOldStyleNonGitProject(scionPath string) bool {
 	info, err := os.Stat(scionPath)
 	if err != nil || !info.IsDir() {
 		return false

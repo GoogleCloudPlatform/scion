@@ -94,6 +94,14 @@ func TestGenerateProjectIDForDir_NoGitRepo(t *testing.T) {
 }
 
 func TestIsInsideProject(t *testing.T) {
+	// Unset Hub context to avoid synthetic project root detection
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID"} {
+		if val, ok := os.LookupEnv(e); ok {
+			os.Unsetenv(e)
+			defer os.Setenv(e, val)
+		}
+	}
+
 	// Create a directory with .scion
 	tmpProject := t.TempDir()
 	scionDir := filepath.Join(tmpProject, ".scion")
@@ -599,9 +607,9 @@ func TestInitProject_UsesDetectedRuntime(t *testing.T) {
 	}
 
 	// Project settings should not contain profiles or runtimes; those live in global settings.
-	// For git groves settings.yaml is in the external config dir; use GetGroveConfigDir
+	// For git groves settings.yaml is in the external config dir; use GetProjectConfigDir
 	// to find the canonical location regardless of grove type.
-	configDir := GetGroveConfigDir(projectDir)
+	configDir := GetProjectConfigDir(projectDir)
 	data, err := os.ReadFile(filepath.Join(configDir, "settings.yaml"))
 	if err != nil {
 		t.Fatalf("failed to read settings.yaml: %v", err)
@@ -805,9 +813,9 @@ func TestWriteGroveSettings_V1PlacesProjectIDUnderHub(t *testing.T) {
 	tmpDir := t.TempDir()
 	projectID := "test-grove-id-abc123"
 
-	err := writeGroveSettings(tmpDir, "/tmp/project", projectID, InitProjectOpts{SkipRuntimeCheck: true})
+	err := writeProjectSettings(tmpDir, "/tmp/project", projectID, InitProjectOpts{SkipRuntimeCheck: true})
 	if err != nil {
-		t.Fatalf("writeGroveSettings failed: %v", err)
+		t.Fatalf("writeProjectSettings failed: %v", err)
 	}
 
 	// Read the written settings file

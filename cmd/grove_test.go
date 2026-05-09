@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGroveInitNestedDetection(t *testing.T) {
+func TestProjectInitNestedDetection(t *testing.T) {
 	// Save and restore working directory
 	origWd, err := os.Getwd()
 	require.NoError(t, err)

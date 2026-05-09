@@ -22,7 +22,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
-func TestStopGroveContainers_StopsMatchingContainers(t *testing.T) {
+func TestStopProjectContainers_StopsMatchingContainers(t *testing.T) {
 	var deletedIDs []string
 
 	allContainers := []api.AgentInfo{
@@ -64,7 +64,7 @@ func TestStopGroveContainers_StopsMatchingContainers(t *testing.T) {
 	}
 
 	mgr := NewManager(mock)
-	stopped := StopGroveContainers(context.Background(), mgr, "mygrove", []string{"agent-a", "agent-b"})
+	stopped := StopProjectContainers(context.Background(), mgr, "mygrove", []string{"agent-a", "agent-b"})
 
 	if len(stopped) != 2 {
 		t.Fatalf("expected 2 stopped, got %d: %v", len(stopped), stopped)
@@ -81,7 +81,7 @@ func TestStopGroveContainers_StopsMatchingContainers(t *testing.T) {
 	}
 }
 
-func TestStopGroveContainers_NoContainers(t *testing.T) {
+func TestStopProjectContainers_NoContainers(t *testing.T) {
 	mock := &runtime.MockRuntime{
 		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
 			return []api.AgentInfo{}, nil
@@ -89,14 +89,14 @@ func TestStopGroveContainers_NoContainers(t *testing.T) {
 	}
 
 	mgr := NewManager(mock)
-	stopped := StopGroveContainers(context.Background(), mgr, "empty-grove", []string{"agent-a"})
+	stopped := StopProjectContainers(context.Background(), mgr, "empty-project", []string{"agent-a"})
 
 	if len(stopped) != 0 {
 		t.Errorf("expected 0 stopped, got %d", len(stopped))
 	}
 }
 
-func TestStopGroveContainers_SkipsEmptyContainerID(t *testing.T) {
+func TestStopProjectContainers_SkipsEmptyContainerID(t *testing.T) {
 	deleteCount := 0
 	mock := &runtime.MockRuntime{
 		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
@@ -115,7 +115,7 @@ func TestStopGroveContainers_SkipsEmptyContainerID(t *testing.T) {
 	}
 
 	mgr := NewManager(mock)
-	stopped := StopGroveContainers(context.Background(), mgr, "mygrove", []string{"agent-a"})
+	stopped := StopProjectContainers(context.Background(), mgr, "myproject", []string{"agent-a"})
 
 	if len(stopped) != 0 {
 		t.Errorf("expected 0 stopped, got %d", len(stopped))

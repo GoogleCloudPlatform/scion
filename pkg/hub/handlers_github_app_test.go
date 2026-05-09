@@ -182,7 +182,7 @@ func TestHandleGitHubAppInstallations_ValidationErrors(t *testing.T) {
 // Project GitHub Installation Association
 // ============================================================================
 
-func TestHandleGroveGitHubInstallation(t *testing.T) {
+func TestHandleProjectGitHubInstallation(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -357,7 +357,7 @@ func TestHandleGroveGitHubInstallation_NotFoundInstallation(t *testing.T) {
 // Project GitHub Permissions
 // ============================================================================
 
-func TestHandleGroveGitHubPermissions(t *testing.T) {
+func TestHandleProjectGitHubPermissions(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 

@@ -219,7 +219,7 @@ func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Resolve workspace path — supports hub-native, shared-workspace, and linked groves
-	workspacePath, err := s.resolveGroveWebDAVPath(ctx, grove)
+	workspacePath, err := s.resolveProjectWebDAVPath(ctx, grove)
 	if err != nil {
 		Conflict(w, err.Error())
 		return
@@ -478,7 +478,7 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 	}
 
 	// Resolve workspace path — supports hub-native, shared-workspace, and linked groves
-	workspacePath, err := s.resolveGroveWebDAVPath(ctx, grove)
+	workspacePath, err := s.resolveProjectWebDAVPath(ctx, grove)
 	if err != nil {
 		Conflict(w, err.Error())
 		return
@@ -735,7 +735,7 @@ func (s *Server) resolveSharedDirPath(ctx context.Context, grove *store.Project,
 	if grove.GitRemote == "" {
 		// Hub-native grove: resolve via the .scion marker in the workspace directory
 		// to find the grove-configs path where shared dirs actually live.
-		sdPath, err := resolveHubGroveSharedDirPath(grove.Slug, dirName)
+		sdPath, err := resolveHubProjectSharedDirPath(grove.Slug, dirName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve shared directory path: %w", err)
 		}
@@ -777,7 +777,7 @@ func (s *Server) resolveSharedDirPath(ctx context.Context, grove *store.Project,
 	// (e.g. auto-linked or shared-workspace grove). Resolve via the .scion marker
 	// in the hub workspace to find the grove-configs path.
 	if embeddedIsProvider {
-		sdPath, err := resolveHubGroveSharedDirPath(grove.Slug, dirName)
+		sdPath, err := resolveHubProjectSharedDirPath(grove.Slug, dirName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve shared directory path: %w", err)
 		}
@@ -791,11 +791,11 @@ func (s *Server) resolveSharedDirPath(ctx context.Context, grove *store.Project,
 	return nil, fmt.Errorf("shared directory file browsing requires a co-located runtime broker")
 }
 
-// resolveHubGroveSharedDirPath resolves the grove-configs shared dir path for
-// a grove whose workspace lives at ~/.scion/groves/<slug>/. It reads the .scion
-// marker (or grove-id for git clones) to find the external grove-configs path,
+// resolveHubProjectSharedDirPath resolves the project-configs shared dir path for
+// a project whose workspace lives at ~/.scion/projects/<slug>/. It reads the .scion
+// marker (or project-id for git clones) to find the external project-configs path,
 // then returns the shared-dirs/<name> subdirectory within it.
-func resolveHubGroveSharedDirPath(groveSlug, dirName string) (string, error) {
+func resolveHubProjectSharedDirPath(groveSlug, dirName string) (string, error) {
 	workspacePath, err := hubNativeProjectPath(groveSlug)
 	if err != nil {
 		return "", err
@@ -803,7 +803,7 @@ func resolveHubGroveSharedDirPath(groveSlug, dirName string) (string, error) {
 	scionPath := filepath.Join(workspacePath, config.DotScion)
 	projectDir, _, err := config.ResolveProjectPath(scionPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve grove path for %s: %w", groveSlug, err)
+		return "", fmt.Errorf("failed to resolve project path for %s: %w", groveSlug, err)
 	}
 	return config.GetSharedDirPath(projectDir, dirName)
 }

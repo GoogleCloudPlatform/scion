@@ -325,7 +325,7 @@ func TestResourceBuilders(t *testing.T) {
 
 	t.Run("groveResource", func(t *testing.T) {
 		g := &store.Project{ID: "g1", OwnerID: "u1"}
-		r := groveResource(g)
+		r := projectResource(g)
 		assert.Equal(t, "grove", r.Type)
 		assert.Equal(t, "g1", r.ID)
 		assert.Equal(t, "u1", r.OwnerID)

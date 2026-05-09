@@ -104,7 +104,7 @@ func setupDemoPolicyTest(t *testing.T) (*Server, store.Store, *store.User, *stor
 	require.NoError(t, s.CreateProject(ctx, grove))
 
 	// Create grove members group and policy (simulates what grove creation handler does)
-	srv.createGroveMembersGroupAndPolicy(ctx, grove)
+	srv.createProjectMembersGroupAndPolicy(ctx, grove)
 
 	return srv, s, alice, bob, grove
 }
@@ -586,7 +586,7 @@ func TestDemoPolicy_GroveRecreation_CreatorCanCreateAgent(t *testing.T) {
 }
 
 // TestDemoPolicy_GroveMembersGroupIdempotent tests that calling
-// createGroveMembersGroupAndPolicy twice for the same grove is safe — the
+// createProjectMembersGroupAndPolicy twice for the same grove is safe — the
 // second call should still ensure the creator is a member.
 func TestDemoPolicy_GroveMembersGroupIdempotent(t *testing.T) {
 	srv, s := testServer(t)
@@ -615,8 +615,8 @@ func TestDemoPolicy_GroveMembersGroupIdempotent(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, grove))
 
 	// Call twice — second call should not fail or skip adding the user
-	srv.createGroveMembersGroupAndPolicy(ctx, grove)
-	srv.createGroveMembersGroupAndPolicy(ctx, grove)
+	srv.createProjectMembersGroupAndPolicy(ctx, grove)
+	srv.createProjectMembersGroupAndPolicy(ctx, grove)
 
 	// Verify alice is still a member of the grove members group
 	membersGroup, err := s.GetGroupBySlug(ctx, "grove:"+grove.Slug+":members")

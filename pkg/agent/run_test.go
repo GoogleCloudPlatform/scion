@@ -1785,7 +1785,7 @@ func TestFilterResolvedSecretsForResolvedAuth(t *testing.T) {
 	}
 }
 
-func TestStartInjectsHubEnvFromGroveSettings(t *testing.T) {
+func TestStartInjectsHubEnvFromProjectSettings(t *testing.T) {
 	// When grove settings have hub enabled with an endpoint, Start() should
 	// inject SCION_HUB_ENDPOINT and SCION_HUB_URL into the container env.
 	tmpDir := t.TempDir()

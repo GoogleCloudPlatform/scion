@@ -512,7 +512,7 @@ func (s *Server) matchGrovesToInstallation(ctx context.Context, installation *st
 				"grove_id", grove.ID, "installation_id", installation.InstallationID, "error", err)
 			continue
 		}
-		s.events.PublishGroveUpdated(ctx, &grove)
+		s.events.PublishProjectUpdated(ctx, &grove)
 
 		slog.Info("Auto-associated grove with GitHub App installation",
 			"grove_id", grove.ID, "grove_name", grove.Name,
@@ -559,7 +559,7 @@ func (s *Server) updateGrovesForInstallation(ctx context.Context, installationID
 			slog.Error("Failed to update grove GitHub App status",
 				"grove_id", grove.ID, "error", err)
 		} else {
-			s.events.PublishGroveUpdated(ctx, &grove)
+			s.events.PublishProjectUpdated(ctx, &grove)
 		}
 	}
 }
@@ -600,7 +600,7 @@ func (s *Server) checkGrovesForRemovedRepos(ctx context.Context, installationID 
 			slog.Error("Failed to update grove after repo removal",
 				"grove_id", grove.ID, "error", err)
 		} else {
-			s.events.PublishGroveUpdated(ctx, &grove)
+			s.events.PublishProjectUpdated(ctx, &grove)
 		}
 	}
 }
@@ -786,7 +786,7 @@ func (s *Server) mintGitHubAppToken(ctx context.Context, grove *store.Project) (
 	if err := s.store.UpdateProject(ctx, grove); err != nil {
 		slog.Warn("Failed to update grove status after successful token mint", "error", err)
 	} else {
-		s.events.PublishGroveUpdated(ctx, grove)
+		s.events.PublishProjectUpdated(ctx, grove)
 	}
 
 	return token.Token, token.ExpiresAt.Format("2006-01-02T15:04:05Z"), nil
@@ -805,7 +805,7 @@ func (s *Server) updateGroveGitHubAppStatus(ctx context.Context, grove *store.Pr
 	if err := s.store.UpdateProject(ctx, grove); err != nil {
 		slog.Warn("Failed to update grove GitHub App status", "grove_id", grove.ID, "error", err)
 	} else {
-		s.events.PublishGroveUpdated(ctx, grove)
+		s.events.PublishProjectUpdated(ctx, grove)
 	}
 }
 
@@ -818,9 +818,9 @@ func isTokenMintError(err error, target **githubapp.TokenMintError) bool {
 	return false
 }
 
-// MintGitHubAppTokenForGrove implements GitHubAppTokenMinter.
+// MintGitHubAppTokenForProject implements GitHubAppTokenMinter.
 // It mints a GitHub App installation token for the given grove.
-func (s *Server) MintGitHubAppTokenForGrove(ctx context.Context, grove *store.Project) (string, string, error) {
+func (s *Server) MintGitHubAppTokenForProject(ctx context.Context, grove *store.Project) (string, string, error) {
 	if grove.GitHubInstallationID == nil {
 		return "", "", nil
 	}

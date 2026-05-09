@@ -544,10 +544,10 @@ func UpdateSetting(grovePath string, key string, value string, global bool) erro
 		if grovePath == "" {
 			return fmt.Errorf("grove path required for local settings")
 		}
-		// Resolve through GetGroveConfigDir so that git groves with split
+		// Resolve through GetProjectConfigDir so that git groves with split
 		// storage write to the external config dir (~/.scion/grove-configs/…)
 		// — the same location LoadSettingsKoanf reads from.
-		dir = GetGroveConfigDir(grovePath)
+		dir = GetProjectConfigDir(grovePath)
 	}
 
 	// Find existing settings file (YAML or JSON)
@@ -1003,10 +1003,10 @@ func DeleteHubConnection(grovePath string, name string, global bool) error {
 		if grovePath == "" {
 			return fmt.Errorf("grove path required for local settings")
 		}
-		// Resolve through GetGroveConfigDir so that git groves with split
+		// Resolve through GetProjectConfigDir so that git groves with split
 		// storage write to the external config dir (~/.scion/grove-configs/…)
 		// — the same location LoadSettingsKoanf reads from.
-		dir = GetGroveConfigDir(grovePath)
+		dir = GetProjectConfigDir(grovePath)
 	}
 
 	existingPath := GetSettingsPath(dir)

@@ -146,8 +146,8 @@ const (
 	ProjectChoiceRegisterNew
 )
 
-// GroveMatch holds information about a matching grove for display.
-type GroveMatch struct {
+// ProjectMatch holds information about a matching grove for display.
+type ProjectMatch struct {
 	ID        string
 	Name      string
 	Slug      string
@@ -159,9 +159,9 @@ type GroveMatch struct {
 // per git remote. When nextSlug is non-empty, it is displayed as the proposed
 // slug for a new grove.
 // Returns the choice and the selected grove ID if linking.
-func ShowMatchingProjectsPrompt(groveName string, matches []GroveMatch, nextSlug string, autoConfirm bool) (ProjectChoice, string) {
+func ShowMatchingProjectsPrompt(projectName string, matches []ProjectMatch, nextSlug string, autoConfirm bool) (ProjectChoice, string) {
 	fmt.Println()
-	fmt.Printf("Found %d existing grove(s) with the name '%s' on the Hub:\n", len(matches), groveName)
+	fmt.Printf("Found %d existing grove(s) with the name '%s' on the Hub:\n", len(matches), projectName)
 	fmt.Println()
 
 	for i, m := range matches {
@@ -221,7 +221,7 @@ func ShowMatchingProjectsPrompt(groveName string, matches []GroveMatch, nextSlug
 // NextSlugFromMatches computes a proposed next serial slug from a list of
 // existing grove matches. This is a client-side estimate for display purposes;
 // the server computes the authoritative slug at creation time.
-func NextSlugFromMatches(baseSlug string, matches []GroveMatch) string {
+func NextSlugFromMatches(baseSlug string, matches []ProjectMatch) string {
 	maxSerial := 0
 	for _, m := range matches {
 		if m.Slug == baseSlug {
@@ -284,9 +284,9 @@ func ShowBrokerDeregistrationPrompt(brokerID string, groves []string, autoConfir
 	return ConfirmAction("Continue with deregistration?", false, autoConfirm)
 }
 
-// ShowGroveLinkPrompt displays the grove link confirmation.
+// ShowProjectLinkPrompt displays the grove link confirmation.
 // Returns true if the user confirms, false otherwise.
-func ShowGroveLinkPrompt(groveName, endpoint string, autoConfirm bool) bool {
+func ShowProjectLinkPrompt(groveName, endpoint string, autoConfirm bool) bool {
 	fmt.Println()
 	fmt.Printf("This will link grove '%s' to the Hub.\n", groveName)
 	fmt.Printf("Hub endpoint: %s\n", endpoint)
@@ -299,9 +299,9 @@ func ShowGroveLinkPrompt(groveName, endpoint string, autoConfirm bool) bool {
 	return ConfirmAction("Continue with linking?", true, autoConfirm)
 }
 
-// ShowGroveUnlinkPrompt displays the grove unlink confirmation.
+// ShowProjectUnlinkPrompt displays the grove unlink confirmation.
 // Returns true if the user confirms, false otherwise.
-func ShowGroveUnlinkPrompt(groveName string, autoConfirm bool) bool {
+func ShowProjectUnlinkPrompt(groveName string, autoConfirm bool) bool {
 	fmt.Println()
 	fmt.Printf("This will unlink grove '%s' from the Hub locally.\n", groveName)
 	fmt.Println()
@@ -324,9 +324,9 @@ const (
 	LinkOrDisableDisable
 )
 
-// ShowLinkOrDisablePrompt displays a prompt when Hub is enabled but grove is not linked.
+// ShowProjectLinkOrDisablePrompt displays a prompt when Hub is enabled but grove is not linked.
 // Returns the user's choice.
-func ShowLinkOrDisablePrompt(groveName string, autoConfirm bool) LinkOrDisableChoice {
+func ShowProjectLinkOrDisablePrompt(groveName string, autoConfirm bool) LinkOrDisableChoice {
 	fmt.Println()
 	fmt.Println("Hub is enabled but this grove is not linked.")
 	fmt.Println()
@@ -462,15 +462,15 @@ func ShowWithdrawPrompt(groveName, brokerName string, autoConfirm bool) bool {
 	return ConfirmAction("Continue?", false, autoConfirm)
 }
 
-// GroveProviders is an interface to abstract ListProvidersResponse for the delete prompt.
-type GroveProviders interface {
+// ProjectProviders is an interface to abstract ListProvidersResponse for the delete prompt.
+type ProjectProviders interface {
 	ProviderCount() int
 	ProviderNames() []string
 }
 
-// ShowGroveDeletePrompt displays the grove deletion confirmation.
+// ShowProjectDeletePrompt displays the grove deletion confirmation.
 // Returns true if the user confirms, false otherwise.
-func ShowGroveDeletePrompt(groveName string, agentCount int, providers GroveProviders, autoConfirm bool) bool {
+func ShowProjectDeletePrompt(groveName string, agentCount int, providers ProjectProviders, autoConfirm bool) bool {
 	fmt.Println()
 	fmt.Printf("This will permanently delete grove '%s' from the Hub.\n", groveName)
 	fmt.Println()

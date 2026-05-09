@@ -102,10 +102,10 @@ return an error instead of blocking.`,
 			requiresProject = false
 		}
 
-		// For commands that require grove context, use RequireGrovePath
+		// For commands that require grove context, use RequireProjectPath
 		// to error if no project found and --global not specified
 		if requiresProject && projectPath == "" {
-			if _, _, err := config.RequireGrovePath(projectPath); err != nil {
+			if _, _, err := config.RequireProjectPath(projectPath); err != nil {
 				return err
 			}
 		}

@@ -50,7 +50,7 @@ func newAgentDispatcherAdapter(mgr agent.Manager, s store.Store, brokerID string
 // DispatchAgentCreate implements hub.AgentDispatcher.
 // It starts the agent on the runtime broker and updates the hub store with runtime info.
 func (d *agentDispatcherAdapter) DispatchAgentCreate(ctx context.Context, hubAgent *store.Agent) error {
-	projectPath := d.resolveGrovePath(ctx, hubAgent.ProjectID)
+	projectPath := d.resolveProjectPath(ctx, hubAgent.ProjectID)
 	opts := d.buildStartOptions(hubAgent, projectPath, false)
 
 	// Ensure grove ID label is present for tracking
@@ -83,7 +83,7 @@ func (d *agentDispatcherAdapter) DispatchAgentCreate(ctx context.Context, hubAge
 // DispatchAgentStart implements hub.AgentDispatcher.
 // For co-located runtime brokers, this resumes a stopped agent.
 func (d *agentDispatcherAdapter) DispatchAgentStart(ctx context.Context, hubAgent *store.Agent, task string) error {
-	projectPath := d.resolveGrovePath(ctx, hubAgent.ProjectID)
+	projectPath := d.resolveProjectPath(ctx, hubAgent.ProjectID)
 	opts := d.buildStartOptions(hubAgent, projectPath, true)
 
 	// Ensure grove ID label is present for tracking
@@ -142,7 +142,7 @@ func (d *agentDispatcherAdapter) DispatchAgentRestart(ctx context.Context, hubAg
 		log.Printf("Warning: failed to stop agent during restart: %v", err)
 	}
 
-	projectPath := d.resolveGrovePath(ctx, hubAgent.ProjectID)
+	projectPath := d.resolveProjectPath(ctx, hubAgent.ProjectID)
 	opts := d.buildStartOptions(hubAgent, projectPath, true)
 
 	// Ensure grove ID label is present for tracking
@@ -196,7 +196,7 @@ func (d *agentDispatcherAdapter) buildStartOptions(hubAgent *store.Agent, projec
 	return opts
 }
 
-func (d *agentDispatcherAdapter) resolveGrovePath(ctx context.Context, projectID string) string {
+func (d *agentDispatcherAdapter) resolveProjectPath(ctx context.Context, projectID string) string {
 	if projectID == "" || d.brokerID == "" {
 		return ""
 	}

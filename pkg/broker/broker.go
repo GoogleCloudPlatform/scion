@@ -59,9 +59,9 @@ func TopicAgentMessages(groveID, agentSlug string) string {
 	return "scion.grove." + groveID + ".agent." + agentSlug + ".messages"
 }
 
-// TopicGroveBroadcast returns the topic for grove-wide broadcast messages.
-func TopicGroveBroadcast(groveID string) string {
-	return "scion.grove." + groveID + ".broadcast"
+// TopicProjectBroadcast returns the topic for project-wide broadcast messages.
+func TopicProjectBroadcast(projectID string) string {
+	return "scion.grove." + projectID + ".broadcast"
 }
 
 // TopicGlobalBroadcast returns the topic for global broadcast messages.

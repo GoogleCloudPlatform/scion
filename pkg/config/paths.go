@@ -155,11 +155,11 @@ func GetGlobalDir() (string, error) {
 	return filepath.Join(home, GlobalDir), nil
 }
 
-// GetGroveConfigDir returns the directory where grove config files (settings.yaml,
+// GetProjectConfigDir returns the directory where grove config files (settings.yaml,
 // templates/) live. For git groves with split storage (grove-id file exists), this
 // is the external path under ~/.scion/grove-configs/. For all other groves
 // (non-git, global), projectDir is returned as-is since it is already the config dir.
-func GetGroveConfigDir(projectDir string) string {
+func GetProjectConfigDir(projectDir string) string {
 	if extDir, err := GetGitProjectExternalConfigDir(projectDir); err == nil && extDir != "" {
 		return extDir
 	}
@@ -276,11 +276,11 @@ func ResolveProjectPath(path string) (string, bool, error) {
 	return abs, isGlobal, nil
 }
 
-// RequireGrovePath resolves a grove path, erroring if no project is found and global is not specified.
+// RequireProjectPath resolves a grove path, erroring if no project is found and global is not specified.
 // This is used by commands that require an explicit grove context.
 // If path is empty and no project grove is found, returns an error suggesting --global.
 // Returns the absolute path, whether it's the global grove, and any error.
-func RequireGrovePath(path string) (string, bool, error) {
+func RequireProjectPath(path string) (string, bool, error) {
 	// Explicit global request
 	if path == "global" || path == "home" {
 		g, err := GetGlobalDir()

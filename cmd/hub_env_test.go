@@ -213,9 +213,9 @@ func TestHubEnvListCmd_GroveFlagNoOptDefVal(t *testing.T) {
 	assert.Equal(t, scopeInferSentinel, f.NoOptDefVal, "--grove should have NoOptDefVal set to sentinel")
 }
 
-// setupEnvGroveWithHubProjectID creates a grove directory with settings that include
+// setupEnvProjectWithHubProjectID creates a grove directory with settings that include
 // a hub grove ID, endpoint, and enabled flag.
-func setupEnvGroveWithHubProjectID(t *testing.T, home, endpoint, projectID string) string {
+func setupEnvProjectWithHubProjectID(t *testing.T, home, endpoint, projectID string) string {
 	t.Helper()
 	groveDir := filepath.Join(home, "project", ".scion")
 	require.NoError(t, os.MkdirAll(groveDir, 0755))
@@ -235,9 +235,9 @@ func setupEnvGroveWithHubProjectID(t *testing.T, home, endpoint, projectID strin
 	return groveDir
 }
 
-// newEnvGroveResolveMockServer creates a mock Hub server that handles both grove
+// newEnvProjectResolveMockServer creates a mock Hub server that handles both grove
 // resolution (by slug/name) and env list requests.
-func newEnvGroveResolveMockServer(t *testing.T, projectID, projectName, projectSlug string, envVars []map[string]interface{}) *httptest.Server {
+func newEnvProjectResolveMockServer(t *testing.T, projectID, projectName, projectSlug string, envVars []map[string]interface{}) *httptest.Server {
 	t.Helper()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -300,14 +300,14 @@ func TestRunEnvList_BareGroveFlag(t *testing.T) {
 		{"key": "GROVE_VAR", "value": "grove-value", "scope": "grove"},
 	}
 
-	server := newEnvGroveResolveMockServer(t, groveUUID, "My Project", "my-grove", envVars)
+	server := newEnvProjectResolveMockServer(t, groveUUID, "My Project", "my-grove", envVars)
 	defer server.Close()
 
 	tmpHome := t.TempDir()
 	os.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
-	groveDir := setupEnvGroveWithHubProjectID(t, tmpHome, server.URL, groveUUID)
+	groveDir := setupEnvProjectWithHubProjectID(t, tmpHome, server.URL, groveUUID)
 	projectPath = groveDir
 
 	envOutputJSON = false
@@ -331,7 +331,7 @@ func TestRunEnvList_GroveByName(t *testing.T) {
 		{"key": "GROVE_VAR", "value": "grove-value", "scope": "grove"},
 	}
 
-	server := newEnvGroveResolveMockServer(t, groveUUID, "Hub Local", "hub-local", envVars)
+	server := newEnvProjectResolveMockServer(t, groveUUID, "Hub Local", "hub-local", envVars)
 	defer server.Close()
 
 	tmpHome := t.TempDir()
@@ -371,7 +371,7 @@ func TestResolveEnvScope_SentinelInfersFromSettings(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	os.Setenv("HOME", tmpHome)
-	groveDir := setupEnvGroveWithHubProjectID(t, tmpHome, "http://localhost:9999", groveUUID)
+	groveDir := setupEnvProjectWithHubProjectID(t, tmpHome, "http://localhost:9999", groveUUID)
 	projectPath = groveDir
 
 	settings, err := config.LoadSettings(groveDir)

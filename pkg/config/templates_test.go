@@ -611,7 +611,7 @@ func TestGetTemplateChainInProject(t *testing.T) {
 	}
 }
 
-func TestGetTemplateChainInGroveWithDefault(t *testing.T) {
+func TestGetTemplateChainInProjectWithDefault(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "scion-test-chain-default-*")
 	if err != nil {
 		t.Fatal(err)

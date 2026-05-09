@@ -847,7 +847,7 @@ func TestAgentDelete(t *testing.T) {
 // Project Endpoint Tests
 // ============================================================================
 
-func TestGroveList(t *testing.T) {
+func TestProjectList(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -881,7 +881,7 @@ func TestGroveList(t *testing.T) {
 	}
 }
 
-func TestGroveRegister(t *testing.T) {
+func TestProjectRegister(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := map[string]interface{}{
@@ -896,7 +896,7 @@ func TestGroveRegister(t *testing.T) {
 		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp RegisterGroveResponse
+	var resp RegisterProjectResponse
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -915,7 +915,7 @@ func TestGroveRegister(t *testing.T) {
 	}
 }
 
-func TestGroveRegisterIdempotent(t *testing.T) {
+func TestProjectRegisterIdempotent(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := map[string]interface{}{
@@ -929,7 +929,7 @@ func TestGroveRegisterIdempotent(t *testing.T) {
 		t.Errorf("expected status 200, got %d: %s", rec1.Code, rec1.Body.String())
 	}
 
-	var resp1 RegisterGroveResponse
+	var resp1 RegisterProjectResponse
 	if err := json.NewDecoder(rec1.Body).Decode(&resp1); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -944,7 +944,7 @@ func TestGroveRegisterIdempotent(t *testing.T) {
 		t.Errorf("expected status 200 for idempotent call, got %d: %s", rec2.Code, rec2.Body.String())
 	}
 
-	var resp2 RegisterGroveResponse
+	var resp2 RegisterProjectResponse
 	if err := json.NewDecoder(rec2.Body).Decode(&resp2); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -960,7 +960,7 @@ func TestGroveRegisterIdempotent(t *testing.T) {
 	}
 }
 
-func TestGroveRegisterCaseInsensitive(t *testing.T) {
+func TestProjectRegisterCaseInsensitive(t *testing.T) {
 	srv, _ := testServer(t)
 
 	// First registration with "Global" (title case)
@@ -973,7 +973,7 @@ func TestGroveRegisterCaseInsensitive(t *testing.T) {
 		t.Errorf("expected status 200, got %d: %s", rec1.Code, rec1.Body.String())
 	}
 
-	var resp1 RegisterGroveResponse
+	var resp1 RegisterProjectResponse
 	if err := json.NewDecoder(rec1.Body).Decode(&resp1); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -992,7 +992,7 @@ func TestGroveRegisterCaseInsensitive(t *testing.T) {
 		t.Errorf("expected status 200 for idempotent call, got %d: %s", rec2.Code, rec2.Body.String())
 	}
 
-	var resp2 RegisterGroveResponse
+	var resp2 RegisterProjectResponse
 	if err := json.NewDecoder(rec2.Body).Decode(&resp2); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -1008,7 +1008,7 @@ func TestGroveRegisterCaseInsensitive(t *testing.T) {
 	}
 }
 
-func TestGroveRegisterMultipleGitRemoteMatches(t *testing.T) {
+func TestProjectRegisterMultipleGitRemoteMatches(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -1043,7 +1043,7 @@ func TestGroveRegisterMultipleGitRemoteMatches(t *testing.T) {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp RegisterGroveResponse
+	var resp RegisterProjectResponse
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -1074,7 +1074,7 @@ func TestGroveRegisterMultipleGitRemoteMatches(t *testing.T) {
 	}
 }
 
-func TestGroveRegisterBrokerDeduplication(t *testing.T) {
+func TestProjectRegisterBrokerDeduplication(t *testing.T) {
 	srv, _ := testServer(t)
 
 	// Register a grove with a broker
@@ -1092,7 +1092,7 @@ func TestGroveRegisterBrokerDeduplication(t *testing.T) {
 		t.Errorf("expected status 200, got %d: %s", rec1.Code, rec1.Body.String())
 	}
 
-	var resp1 RegisterGroveResponse
+	var resp1 RegisterProjectResponse
 	if err := json.NewDecoder(rec1.Body).Decode(&resp1); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -1114,7 +1114,7 @@ func TestGroveRegisterBrokerDeduplication(t *testing.T) {
 		t.Errorf("expected status 200, got %d: %s", rec2.Code, rec2.Body.String())
 	}
 
-	var resp2 RegisterGroveResponse
+	var resp2 RegisterProjectResponse
 	if err := json.NewDecoder(rec2.Body).Decode(&resp2); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -1130,7 +1130,7 @@ func TestGroveRegisterBrokerDeduplication(t *testing.T) {
 	}
 }
 
-func TestGroveRegisterWithBrokerID(t *testing.T) {
+func TestProjectRegisterWithBrokerID(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -1158,7 +1158,7 @@ func TestGroveRegisterWithBrokerID(t *testing.T) {
 		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp RegisterGroveResponse
+	var resp RegisterProjectResponse
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -1199,7 +1199,7 @@ func TestGroveRegisterWithBrokerID(t *testing.T) {
 	}
 }
 
-func TestGroveRegisterWithInvalidBrokerID(t *testing.T) {
+func TestProjectRegisterWithInvalidBrokerID(t *testing.T) {
 	srv, _ := testServer(t)
 
 	// Try to register grove with non-existent brokerId
@@ -1347,7 +1347,7 @@ func TestListProviders(t *testing.T) {
 	}
 }
 
-func TestGroveGetByID(t *testing.T) {
+func TestProjectGetByID(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -1813,7 +1813,7 @@ func TestRuntimeBrokerList_CreatedByName(t *testing.T) {
 	}
 }
 
-func TestRuntimeBrokerListWithGroveLocalPath(t *testing.T) {
+func TestRuntimeBrokerListWithProjectLocalPath(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -1992,7 +1992,7 @@ func TestBrokerRegistrationTwoPhaseFlow(t *testing.T) {
 		t.Errorf("Phase 3: expected status 200, got %d: %s", rec3.Code, rec3.Body.String())
 	}
 
-	var groveResp RegisterGroveResponse
+	var groveResp RegisterProjectResponse
 	if err := json.NewDecoder(rec3.Body).Decode(&groveResp); err != nil {
 		t.Fatalf("failed to decode grove response: %v", err)
 	}
@@ -2322,7 +2322,7 @@ func TestCORSPreflight(t *testing.T) {
 	}
 }
 
-func TestGroveCreateIdempotent(t *testing.T) {
+func TestProjectCreateIdempotent(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := CreateProjectRequest{
@@ -2364,7 +2364,7 @@ func TestGroveCreateIdempotent(t *testing.T) {
 	}
 }
 
-func TestGroveCreateWithSlug(t *testing.T) {
+func TestProjectCreateWithSlug(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := CreateProjectRequest{

@@ -1252,7 +1252,7 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	// Find the grove by name
-	grove, err := findGroveByName(ctx, client, projectName)
+	grove, err := findProjectByName(ctx, client, projectName)
 	if err != nil {
 		return err
 	}
@@ -1383,7 +1383,7 @@ func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	// Find the grove by name
-	grove, err := findGroveByName(ctx, client, projectName)
+	grove, err := findProjectByName(ctx, client, projectName)
 	if err != nil {
 		return err
 	}
@@ -1395,7 +1395,7 @@ func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	// Show confirmation prompt
-	if !hubsync.ShowGroveDeletePrompt(grove.Name, grove.AgentCount, providersResp, autoConfirm) {
+	if !hubsync.ShowProjectDeletePrompt(grove.Name, grove.AgentCount, providersResp, autoConfirm) {
 		return fmt.Errorf("deletion cancelled")
 	}
 
@@ -1502,9 +1502,9 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 
 	if len(existing.Projects) > 0 {
 		// Build matches for the prompt and compute next serial slug.
-		matches := make([]hubsync.GroveMatch, len(existing.Projects))
+		matches := make([]hubsync.ProjectMatch, len(existing.Projects))
 		for i, g := range existing.Projects {
-			matches[i] = hubsync.GroveMatch{
+			matches[i] = hubsync.ProjectMatch{
 				ID:        g.ID,
 				Name:      g.Name,
 				Slug:      g.Slug,
@@ -1616,7 +1616,7 @@ func parseDefaultBranch(output string) string {
 
 // findGroveByName finds a grove by name (case-insensitive) and returns it.
 // Returns an error if not found or multiple matches are found.
-func findGroveByName(ctx context.Context, client hubclient.Client, name string) (*hubclient.Project, error) {
+func findProjectByName(ctx context.Context, client hubclient.Client, name string) (*hubclient.Project, error) {
 	resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{
 		Name: name,
 	})
@@ -2178,7 +2178,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	}
 
 	// Show confirmation prompt
-	if !hubsync.ShowGroveLinkPrompt(projectName, endpoint, autoConfirm) {
+	if !hubsync.ShowProjectLinkPrompt(projectName, endpoint, autoConfirm) {
 		return fmt.Errorf("linking cancelled")
 	}
 
@@ -2224,7 +2224,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	if hubLookupID == "" {
 		hubLookupID = projectID
 	}
-	hubGrove, err := getLinkedGrove(ctx, client, hubLookupID)
+	hubGrove, err := getLinkedProject(ctx, client, hubLookupID)
 	if err != nil {
 		util.Debugf("Error checking grove link status: %v", err)
 	}
@@ -2232,7 +2232,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	if hubGrove != nil && hubGrove.Name == projectName {
 		// Already linked — still call register so the server can backfill
 		// the membership group if it was created before group support.
-		if _, err := registerGroveOnHub(ctx, client, hubLookupID, projectName, resolvedPath, isGlobal); err != nil {
+		if _, err := registerProjectOnHub(ctx, client, hubLookupID, projectName, resolvedPath, isGlobal); err != nil {
 			util.Debugf("Failed to register during re-link (non-fatal): %v", err)
 		}
 		fmt.Printf("Grove '%s' is already linked to the Hub (ID: %s)\n", projectName, projectID)
@@ -2280,9 +2280,9 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 
 		if len(resp.Projects) > 0 {
 			// Found matching groves - ask user what to do
-			matches := make([]hubsync.GroveMatch, len(resp.Projects))
+			matches := make([]hubsync.ProjectMatch, len(resp.Projects))
 			for i, g := range resp.Projects {
-				matches[i] = hubsync.GroveMatch{
+				matches[i] = hubsync.ProjectMatch{
 					ID:        g.ID,
 					Name:      g.Name,
 					Slug:      g.Slug,
@@ -2300,7 +2300,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 				// Register with the selected grove's ID so the hub creates
 				// the membership group (and adds this user as owner) if it
 				// doesn't already exist.
-				if _, err := registerGroveOnHub(ctx, client, selectedID, projectName, resolvedPath, isGlobal); err != nil {
+				if _, err := registerProjectOnHub(ctx, client, selectedID, projectName, resolvedPath, isGlobal); err != nil {
 					util.Debugf("Failed to register during link (non-fatal): %v", err)
 				}
 				// Store the hub grove ID separately — don't overwrite the
@@ -2312,7 +2312,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 				fmt.Printf("Linked to existing grove (ID: %s)\n", selectedID)
 			case hubsync.ProjectChoiceRegisterNew:
 				// Register as a new grove on the Hub using the local grove_id.
-				hubProjectID, err := registerGroveOnHub(ctx, client, projectID, projectName, resolvedPath, isGlobal)
+				hubProjectID, err := registerProjectOnHub(ctx, client, projectID, projectName, resolvedPath, isGlobal)
 				if err != nil {
 					return err
 				}
@@ -2326,7 +2326,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 			}
 		} else {
 			// No matching groves - create new one
-			hubProjectID, err := registerGroveOnHub(ctx, client, projectID, projectName, resolvedPath, isGlobal)
+			hubProjectID, err := registerProjectOnHub(ctx, client, projectID, projectName, resolvedPath, isGlobal)
 			if err != nil {
 				return err
 			}
@@ -2422,7 +2422,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	offerTemplateSyncOnLink(resolvedPath, endpoint, projectID)
 
 	// Display available brokers for this grove
-	listBrokersForGrove(ctx, client, projectID)
+	listBrokersForProject(ctx, client, projectID)
 
 	return nil
 }
@@ -2495,7 +2495,7 @@ func offerTemplateSyncOnLink(projectPath, endpoint, projectID string) {
 }
 
 // registerGroveOnHub registers a new grove on the Hub.
-func registerGroveOnHub(ctx context.Context, client hubclient.Client, projectID, projectName, projectPath string, isGlobal bool) (string, error) {
+func registerProjectOnHub(ctx context.Context, client hubclient.Client, projectID, projectName, projectPath string, isGlobal bool) (string, error) {
 	var gitRemote string
 	if !isGlobal {
 		gitRemote = util.GetGitRemote()
@@ -2559,7 +2559,7 @@ func runHubUnlink(cmd *cobra.Command, args []string) error {
 	}
 
 	// Show confirmation prompt
-	if !hubsync.ShowGroveUnlinkPrompt(projectName, autoConfirm) {
+	if !hubsync.ShowProjectUnlinkPrompt(projectName, autoConfirm) {
 		return fmt.Errorf("unlinking cancelled")
 	}
 
@@ -2639,12 +2639,12 @@ func checkLocalBrokerServer(port int) (*BrokerHealthResponse, error) {
 
 // isProjectLinked checks if the grove exists on the Hub.
 func isProjectLinked(ctx context.Context, client hubclient.Client, projectID string) (bool, error) {
-	grove, err := getLinkedGrove(ctx, client, projectID)
+	grove, err := getLinkedProject(ctx, client, projectID)
 	return grove != nil, err
 }
 
 // getLinkedGrove returns the hub grove for the given ID, or nil if not found.
-func getLinkedGrove(ctx context.Context, client hubclient.Client, projectID string) (*hubclient.Project, error) {
+func getLinkedProject(ctx context.Context, client hubclient.Client, projectID string) (*hubclient.Project, error) {
 	if projectID == "" {
 		return nil, nil
 	}
@@ -2699,7 +2699,7 @@ func equalFoldSlice(a, b string) bool {
 }
 
 // listBrokersForGrove fetches and displays available runtime brokers for a grove.
-func listBrokersForGrove(ctx context.Context, client hubclient.Client, projectID string) {
+func listBrokersForProject(ctx context.Context, client hubclient.Client, projectID string) {
 	resp, err := client.RuntimeBrokers().List(ctx, &hubclient.ListBrokersOptions{
 		ProjectID: projectID,
 	})

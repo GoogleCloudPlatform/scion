@@ -145,8 +145,8 @@ func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity
 	// in the grove's members group has the same access as the grove's
 	// creator-owner. This applies to the grove resource itself and to all
 	// resources scoped to the grove (agents, members group, etc.).
-	if groveID := groveIDForResource(resource); groveID != "" {
-		if a.isGroveOwnerOrAdmin(ctx, user.ID(), groveID) {
+	if projectID := projectIDForResource(resource); projectID != "" {
+		if a.isProjectOwnerOrAdmin(ctx, user.ID(), projectID) {
 			return Decision{
 				Allowed: true,
 				Reason:  "grove owner/admin",
@@ -445,10 +445,10 @@ func canAccessAsAncestor(principalID string, resource Resource) bool {
 	return false
 }
 
-// groveIDForResource returns the grove ID a resource belongs to, or "" if the
-// resource is not grove-scoped. A grove resource maps to its own ID; any
+// projectIDForResource returns the project ID a resource belongs to, or "" if the
+// resource is not project-scoped. A project resource maps to its own ID; any
 // resource with ParentType="grove" maps to its ParentID.
-func groveIDForResource(r Resource) string {
+func projectIDForResource(r Resource) string {
 	if r.Type == "grove" {
 		return r.ID
 	}
@@ -458,16 +458,16 @@ func groveIDForResource(r Resource) string {
 	return ""
 }
 
-// isGroveOwnerOrAdmin reports whether the user is recorded with role=owner
-// or role=admin in any explicit group that belongs to the grove (typically
+// isProjectOwnerOrAdmin reports whether the user is recorded with role=owner
+// or role=admin in any explicit group that belongs to the project (typically
 // the "grove:<slug>:members" group). These users get the same access as the
-// grove's creator-owner.
-func (a *AuthzService) isGroveOwnerOrAdmin(ctx context.Context, userID, groveID string) bool {
-	if userID == "" || groveID == "" {
+// project's creator-owner.
+func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projectID string) bool {
+	if userID == "" || projectID == "" {
 		return false
 	}
 	groups, err := a.store.ListGroups(ctx, store.GroupFilter{
-		ProjectID:   groveID,
+		ProjectID:   projectID,
 		GroupType: store.GroupTypeExplicit,
 	}, store.ListOptions{Limit: 10})
 	if err != nil || len(groups.Items) == 0 {

@@ -34,7 +34,7 @@ type GroveDiscovery struct {
 }
 
 // NewGroveDiscovery creates a GroveDiscovery for the given grove ID.
-func NewGroveDiscovery(dockerClient *client.Client, groveID string, debug bool) *GroveDiscovery {
+func NewProjectDiscovery(dockerClient *client.Client, groveID string, debug bool) *GroveDiscovery {
 	return &GroveDiscovery{
 		dockerClient: dockerClient,
 		groveID:      groveID,

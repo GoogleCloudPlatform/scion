@@ -41,7 +41,7 @@ and removed before the grove config is deleted.
 Use 'scion grove list' to see all groves and their status first.
 Use 'scion grove reconnect' to fix a grove whose workspace moved.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		orphaned, err := config.FindOrphanedGroveConfigs()
+		orphaned, err := config.FindOrphanedProjectConfigs()
 		if err != nil {
 			return fmt.Errorf("failed to scan for orphaned groves: %w", err)
 		}
@@ -80,8 +80,8 @@ Use 'scion grove reconnect' to fix a grove whose workspace moved.`,
 
 			var removed []string
 			for _, g := range orphaned {
-				cleanupOrphanedGrove(g)
-				if err := config.RemoveGroveConfig(g.ConfigPath); err != nil {
+				cleanupOrphanedProject(g)
+				if err := config.RemoveProjectConfig(g.ConfigPath); err != nil {
 					return fmt.Errorf("failed to remove %s: %w", g.ConfigPath, err)
 				}
 				removed = append(removed, g.Name)
@@ -131,8 +131,8 @@ Use 'scion grove reconnect' to fix a grove whose workspace moved.`,
 		}
 
 		for _, g := range orphaned {
-			cleanupOrphanedGrove(g)
-			if err := config.RemoveGroveConfig(g.ConfigPath); err != nil {
+			cleanupOrphanedProject(g)
+			if err := config.RemoveProjectConfig(g.ConfigPath); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to remove %s: %v\n", g.Name, err)
 				continue
 			}
@@ -146,7 +146,7 @@ Use 'scion grove reconnect' to fix a grove whose workspace moved.`,
 // cleanupOrphanedGrove stops any running containers for the orphaned grove's
 // agents before the grove config is removed. Errors are best-effort and logged
 // as warnings.
-func cleanupOrphanedGrove(g config.ProjectInfo) {
+func cleanupOrphanedProject(g config.ProjectInfo) {
 	if g.AgentCount == 0 {
 		return
 	}
@@ -160,7 +160,7 @@ func cleanupOrphanedGrove(g config.ProjectInfo) {
 	mgr := agent.NewManager(rt)
 	ctx := context.Background()
 
-	stopped := agent.StopGroveContainers(ctx, mgr, g.Name, agentNames)
+	stopped := agent.StopProjectContainers(ctx, mgr, g.Name, agentNames)
 	for _, name := range stopped {
 		fmt.Fprintf(os.Stderr, "Stopped container for agent '%s'\n", name)
 	}

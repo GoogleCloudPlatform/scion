@@ -62,8 +62,8 @@ func agentResource(a *store.Agent) Resource {
 	}
 }
 
-// groveResource constructs a Resource from a store.Project for capability computation.
-func groveResource(g *store.Project) Resource {
+// projectResource constructs a Resource from a store.Project for capability computation.
+func projectResource(g *store.Project) Resource {
 	return Resource{
 		Type:    "grove",
 		ID:      g.ID,
@@ -157,8 +157,8 @@ func (a *AuthzService) ComputeCapabilities(ctx context.Context, identity Identit
 	// resources. Mirrors the bypass in checkAccessForUser so capability lists
 	// match what the user can actually do.
 	if user, ok := identity.(UserIdentity); ok {
-		if groveID := groveIDForResource(resource); groveID != "" {
-			if a.isGroveOwnerOrAdmin(ctx, user.ID(), groveID) {
+		if groveID := projectIDForResource(resource); groveID != "" {
+			if a.isProjectOwnerOrAdmin(ctx, user.ID(), groveID) {
 				return allActions(actions)
 			}
 		}
@@ -198,7 +198,7 @@ func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Id
 	// Grove owner/admin short-circuit at scope level (e.g. agent:create
 	// inside a grove the user owns).
 	if user, ok := identity.(UserIdentity); ok && scopeType == "grove" && scopeID != "" {
-		if a.isGroveOwnerOrAdmin(ctx, user.ID(), scopeID) {
+		if a.isProjectOwnerOrAdmin(ctx, user.ID(), scopeID) {
 			return allActions(actions)
 		}
 	}
@@ -255,7 +255,7 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 		if cached, ok := groveOwnerCache[groveID]; ok {
 			return cached
 		}
-		v := a.isGroveOwnerOrAdmin(ctx, user.ID(), groveID)
+		v := a.isProjectOwnerOrAdmin(ctx, user.ID(), groveID)
 		groveOwnerCache[groveID] = v
 		return v
 	}
@@ -273,7 +273,7 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 			continue
 		}
 		// Grove owner/admin short-circuit
-		if isGroveOwner(groveIDForResource(resource)) {
+		if isGroveOwner(projectIDForResource(resource)) {
 			caps[i] = allActions(actions)
 			continue
 		}

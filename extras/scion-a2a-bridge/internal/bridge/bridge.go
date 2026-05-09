@@ -509,7 +509,7 @@ func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMes
 		return
 	}
 
-	groveID := extractGroveIDFromTopic(topic)
+	groveID := extractProjectIDFromTopic(topic)
 	if groveID == "" {
 		b.log.Warn("dropping message with unparseable grove ID", "topic", topic)
 		return
@@ -947,7 +947,7 @@ func parseTopic(topic string) (groveID, agentSlug string, err error) {
 	return groveID, agentSlug, nil
 }
 
-func extractGroveIDFromTopic(topic string) string {
+func extractProjectIDFromTopic(topic string) string {
 	groveID, _, _ := parseTopic(topic)
 	return groveID
 }

@@ -28,7 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestIsHubGroveRef(t *testing.T) {
+func TestIsHubProjectRef(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    string
@@ -54,13 +54,13 @@ func TestIsHubGroveRef(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := IsHubGroveRef(tt.input)
-			assert.Equal(t, tt.expected, result, "IsHubGroveRef(%q)", tt.input)
+			result := IsHubProjectRef(tt.input)
+			assert.Equal(t, tt.expected, result, "IsHubProjectRef(%q)", tt.input)
 		})
 	}
 }
 
-func TestIsHubGroveRef_LocalDirExists(t *testing.T) {
+func TestIsHubProjectRef_LocalDirExists(t *testing.T) {
 	// Create a temporary directory that matches a slug-like name
 	tmpDir := t.TempDir()
 	dirName := "my-local-project"
@@ -74,10 +74,10 @@ func TestIsHubGroveRef_LocalDirExists(t *testing.T) {
 	require.NoError(t, os.Chdir(tmpDir))
 
 	// The slug-like name should resolve as a local path since the dir exists
-	assert.False(t, IsHubGroveRef(dirName), "should be false when local directory exists")
+	assert.False(t, IsHubProjectRef(dirName), "should be false when local directory exists")
 }
 
-func TestIsHubGroveRef_LocalScionDirExists(t *testing.T) {
+func TestIsHubProjectRef_LocalScionDirExists(t *testing.T) {
 	// Create a temporary directory with a .scion subdirectory
 	tmpDir := t.TempDir()
 	dirName := "my-project"
@@ -88,12 +88,12 @@ func TestIsHubGroveRef_LocalScionDirExists(t *testing.T) {
 	t.Cleanup(func() { os.Chdir(origDir) })
 	require.NoError(t, os.Chdir(tmpDir))
 
-	assert.False(t, IsHubGroveRef(dirName), "should be false when .scion subdirectory exists")
+	assert.False(t, IsHubProjectRef(dirName), "should be false when .scion subdirectory exists")
 }
 
-func TestIsHubGroveRef_PathSeparator(t *testing.T) {
+func TestIsHubProjectRef_PathSeparator(t *testing.T) {
 	// Paths with separators (even without leading ./ or /) are filesystem paths
-	assert.False(t, IsHubGroveRef("path/to/project"))
+	assert.False(t, IsHubProjectRef("path/to/project"))
 }
 
 func TestResolveGroveOnHub_ByUUID(t *testing.T) {
@@ -114,7 +114,7 @@ func TestResolveGroveOnHub_ByUUID(t *testing.T) {
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 
-	grove, err := resolveGroveOnHub(context.Background(), client, projectID)
+	grove, err := resolveProjectOnHub(context.Background(), client, projectID)
 	require.NoError(t, err)
 	assert.Equal(t, projectID, grove.ID)
 	assert.Equal(t, "Test Project", grove.Name)
@@ -147,7 +147,7 @@ func TestResolveGroveOnHub_BySlug(t *testing.T) {
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 
-	grove, err := resolveGroveOnHub(context.Background(), client, "my-project")
+	grove, err := resolveProjectOnHub(context.Background(), client, "my-project")
 	require.NoError(t, err)
 	assert.Equal(t, "abc-123", grove.ID)
 	assert.Equal(t, "my-project", grove.Slug)
@@ -188,7 +188,7 @@ func TestResolveGroveOnHub_ByName(t *testing.T) {
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 
-	grove, err := resolveGroveOnHub(context.Background(), client, "My Project")
+	grove, err := resolveProjectOnHub(context.Background(), client, "My Project")
 	require.NoError(t, err)
 	assert.Equal(t, "abc-456", grove.ID)
 }
@@ -219,7 +219,7 @@ func TestResolveGroveOnHub_ByGitURL(t *testing.T) {
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 
-	grove, err := resolveGroveOnHub(context.Background(), client, "https://github.com/org/repo.git")
+	grove, err := resolveProjectOnHub(context.Background(), client, "https://github.com/org/repo.git")
 	require.NoError(t, err)
 	assert.Equal(t, "git-grove-1", grove.ID)
 }
@@ -240,7 +240,7 @@ func TestResolveGroveOnHub_NotFound(t *testing.T) {
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 
-	_, err = resolveGroveOnHub(context.Background(), client, "nonexistent")
+	_, err = resolveProjectOnHub(context.Background(), client, "nonexistent")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
@@ -274,7 +274,7 @@ func TestResolveGroveOnHub_MultipleByName(t *testing.T) {
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 
-	_, err = resolveGroveOnHub(context.Background(), client, "dupe")
+	_, err = resolveProjectOnHub(context.Background(), client, "dupe")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "multiple groves found")
 }

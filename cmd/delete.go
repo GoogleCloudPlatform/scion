@@ -80,7 +80,7 @@ var deleteCmd = &cobra.Command{
 			}
 
 			// Require an explicit grove context — error if not in a grove (unless --global)
-			resolvedGrove, _, err := config.RequireGrovePath(projectPath)
+			resolvedGrove, _, err := config.RequireProjectPath(projectPath)
 			if err != nil {
 				return err
 			}

@@ -29,7 +29,7 @@ import (
 
 func TestProjectSettings_GetEmpty(t *testing.T) {
 	srv, s := testServer(t)
-	grove := createTestGroveForSettings(t, s)
+	grove := createTestProjectForSettings(t, s)
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/groves/"+grove.ID+"/settings", nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
@@ -43,7 +43,7 @@ func TestProjectSettings_GetEmpty(t *testing.T) {
 
 func TestProjectSettings_PutAndGet(t *testing.T) {
 	srv, s := testServer(t)
-	grove := createTestGroveForSettings(t, s)
+	grove := createTestProjectForSettings(t, s)
 
 	telemetry := true
 	putBody := hubclient.ProjectSettings{
@@ -76,7 +76,7 @@ func TestProjectSettings_PutAndGet(t *testing.T) {
 
 func TestProjectSettings_ClearValues(t *testing.T) {
 	srv, s := testServer(t)
-	grove := createTestGroveForSettings(t, s)
+	grove := createTestProjectForSettings(t, s)
 
 	// Set values first
 	telemetry := true
@@ -102,7 +102,7 @@ func TestProjectSettings_ClearValues(t *testing.T) {
 
 func TestProjectSettings_DefaultLimits(t *testing.T) {
 	srv, s := testServer(t)
-	grove := createTestGroveForSettings(t, s)
+	grove := createTestProjectForSettings(t, s)
 
 	putBody := hubclient.ProjectSettings{
 		DefaultMaxTurns:      100,
@@ -147,7 +147,7 @@ func TestProjectSettings_DefaultLimits(t *testing.T) {
 
 func TestProjectSettings_ClearDefaultLimits(t *testing.T) {
 	srv, s := testServer(t)
-	grove := createTestGroveForSettings(t, s)
+	grove := createTestProjectForSettings(t, s)
 
 	// Set values first
 	putBody := hubclient.ProjectSettings{
@@ -210,7 +210,7 @@ func TestApplyGroveDefaults_HarnessConfig(t *testing.T) {
 
 func TestProjectSettings_DefaultGCPIdentity(t *testing.T) {
 	srv, s := testServer(t)
-	grove := createTestGroveForSettings(t, s)
+	grove := createTestProjectForSettings(t, s)
 
 	putBody := hubclient.ProjectSettings{
 		DefaultGCPIdentityMode:             "assign",
@@ -237,7 +237,7 @@ func TestProjectSettings_DefaultGCPIdentity(t *testing.T) {
 
 func TestProjectSettings_ClearDefaultGCPIdentity(t *testing.T) {
 	srv, s := testServer(t)
-	grove := createTestGroveForSettings(t, s)
+	grove := createTestProjectForSettings(t, s)
 
 	// Set values first
 	putBody := hubclient.ProjectSettings{
@@ -280,7 +280,7 @@ func TestProjectSettings_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-func createTestGroveForSettings(t *testing.T, s store.Store) *store.Project {
+func createTestProjectForSettings(t *testing.T, s store.Store) *store.Project {
 	t.Helper()
 	grove := &store.Project{
 		ID:         "test-grove-settings-" + t.Name(),

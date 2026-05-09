@@ -421,10 +421,10 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 	}
 }
 
-// handleGroveMessageLogs handles GET /api/v1/groves/{groveId}/message-logs
+// handleProjectMessageLogs handles GET /api/v1/groves/{groveId}/message-logs
 // It queries the "scion-messages" Cloud Logging log for all message entries
 // within the given grove (across all agents).
-func (s *Server) handleGroveMessageLogs(w http.ResponseWriter, r *http.Request, groveID string) {
+func (s *Server) handleProjectMessageLogs(w http.ResponseWriter, r *http.Request, groveID string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return
@@ -445,7 +445,7 @@ func (s *Server) handleGroveMessageLogs(w http.ResponseWriter, r *http.Request, 
 	}
 
 	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, groveResource(grove), ActionRead)
+		decision := s.authzService.CheckAccess(ctx, userIdent, projectResource(grove), ActionRead)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
 			return
@@ -491,9 +491,9 @@ func (s *Server) handleGroveMessageLogs(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, http.StatusOK, result)
 }
 
-// handleGroveMessageLogsStream handles GET /api/v1/groves/{groveId}/message-logs/stream
+// handleProjectMessageLogsStream handles GET /api/v1/groves/{groveId}/message-logs/stream
 // It returns an SSE stream of all message log entries within the grove.
-func (s *Server) handleGroveMessageLogsStream(w http.ResponseWriter, r *http.Request, groveID string) {
+func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.Request, groveID string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return
@@ -520,7 +520,7 @@ func (s *Server) handleGroveMessageLogsStream(w http.ResponseWriter, r *http.Req
 	}
 
 	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, groveResource(grove), ActionRead)
+		decision := s.authzService.CheckAccess(ctx, userIdent, projectResource(grove), ActionRead)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
 			return
@@ -578,9 +578,9 @@ func (s *Server) handleGroveMessageLogsStream(w http.ResponseWriter, r *http.Req
 	}
 }
 
-// resolveGroveAgent resolves an agent by slug or ID within a grove, returning
+// resolveProjectAgent resolves an agent by slug or ID within a grove, returning
 // the agent if found and it belongs to the specified grove.
-func (s *Server) resolveGroveAgent(ctx context.Context, groveID, agentID string) (*store.Agent, error) {
+func (s *Server) resolveProjectAgent(ctx context.Context, groveID, agentID string) (*store.Agent, error) {
 	agent, err := s.store.GetAgentBySlug(ctx, groveID, agentID)
 	if err != nil {
 		if err == store.ErrNotFound {

@@ -30,8 +30,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// handleGroveGCPServiceAccounts handles /api/v1/groves/{groveId}/gcp-service-accounts
-func (s *Server) handleGroveGCPServiceAccounts(w http.ResponseWriter, r *http.Request, groveID string) {
+// handleProjectGCPServiceAccounts handles /api/v1/groves/{groveId}/gcp-service-accounts
+func (s *Server) handleProjectGCPServiceAccounts(w http.ResponseWriter, r *http.Request, groveID string) {
 	switch r.Method {
 	case http.MethodGet:
 		s.listGCPServiceAccounts(w, r, groveID)
@@ -42,8 +42,8 @@ func (s *Server) handleGroveGCPServiceAccounts(w http.ResponseWriter, r *http.Re
 	}
 }
 
-// handleGroveGCPServiceAccountByID handles /api/v1/groves/{groveId}/gcp-service-accounts/{id}[/action]
-func (s *Server) handleGroveGCPServiceAccountByID(w http.ResponseWriter, r *http.Request, groveID, saPath string) {
+// handleProjectGCPServiceAccountByID handles /api/v1/groves/{groveId}/gcp-service-accounts/{id}[/action]
+func (s *Server) handleProjectGCPServiceAccountByID(w http.ResponseWriter, r *http.Request, groveID, saPath string) {
 	// Handle collection-level actions first
 	if saPath == "mint" && r.Method == http.MethodPost {
 		s.mintGCPServiceAccount(w, r, groveID)
@@ -275,7 +275,7 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 		})
 		mintQuota = &GCPMintQuotaInfo{
 			GroveMinted:  groveCount,
-			GroveCap:     s.config.GCPMintCapPerGrove,
+			GroveCap:     s.config.GCPMintCapPerProject,
 			GlobalMinted: globalCount,
 			GlobalCap:    s.config.GCPMintCapGlobal,
 		}
@@ -544,9 +544,9 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, g
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	if s.config.GCPMintCapPerGrove > 0 && groveCount >= s.config.GCPMintCapPerGrove {
+	if s.config.GCPMintCapPerProject > 0 && groveCount >= s.config.GCPMintCapPerProject {
 		writeError(w, http.StatusConflict, ErrCodeConflict,
-			fmt.Sprintf("per-grove mint limit reached (%d/%d)", groveCount, s.config.GCPMintCapPerGrove), nil)
+			fmt.Sprintf("per-grove mint limit reached (%d/%d)", groveCount, s.config.GCPMintCapPerProject), nil)
 		return
 	}
 
@@ -706,7 +706,7 @@ func (s *Server) handleAdminGCPQuota(w http.ResponseWriter, r *http.Request) {
 		MintingConfigured: s.gcpIAMAdmin != nil && s.config.GCPProjectID != "",
 		GCPProjectID:      s.config.GCPProjectID,
 		GlobalCap:         s.config.GCPMintCapGlobal,
-		PerGroveCap:       s.config.GCPMintCapPerGrove,
+		PerGroveCap:       s.config.GCPMintCapPerProject,
 	}
 
 	if resp.MintingConfigured {

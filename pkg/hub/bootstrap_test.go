@@ -217,8 +217,8 @@ func doBootstrapRequest(t *testing.T, srv *Server, method, path string, body int
 	return rec
 }
 
-// setupGroveAndBroker creates a grove and broker for agent creation tests.
-func setupGroveAndBroker(t *testing.T, s store.Store) (string, string) {
+// setupProjectAndBroker creates a grove and broker for agent creation tests.
+func setupProjectAndBroker(t *testing.T, s store.Store) (string, string) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -264,7 +264,7 @@ func setupGroveAndBroker(t *testing.T, s store.Store) (string, string) {
 
 func TestCreateAgentWithWorkspaceBootstrap(t *testing.T) {
 	srv, s, _, _ := testBootstrapServer(t)
-	projectID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 
 	// Create an agent with workspace files and a task
 	body := CreateAgentRequest{
@@ -329,7 +329,7 @@ func TestCreateAgentWithWorkspaceBootstrap(t *testing.T) {
 
 func TestCreateAgentWithWorkspaceBootstrap_ExistingFiles(t *testing.T) {
 	srv, s, stor, _ := testBootstrapServer(t)
-	projectID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 
 	// Pre-populate one file in storage with matching hash
 	// The agent ID is generated, so we can't predict the exact path.
@@ -410,7 +410,7 @@ func TestCreateAgentWithWorkspaceBootstrap_NoStorage(t *testing.T) {
 	}
 	// No storage set
 
-	projectID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 
 	body := CreateAgentRequest{
 		Name:    "bootstrap-no-storage",
@@ -431,7 +431,7 @@ func TestCreateAgentWithWorkspaceBootstrap_NoStorage(t *testing.T) {
 
 func TestCreateAgentWithWorkspaceBootstrap_NoTask(t *testing.T) {
 	srv, s, _, _ := testBootstrapServer(t)
-	projectID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 
 	// WorkspaceFiles without a task should NOT trigger bootstrap upload —
 	// since ProvisionOnly is not set, the agent is dispatched via DispatchAgentCreate.
@@ -560,7 +560,7 @@ func TestCreateAgentWithWorkspaceBootstrap_LocalProvider(t *testing.T) {
 
 func TestCreateAgentWithoutBootstrap(t *testing.T) {
 	srv, s, _, _ := testBootstrapServer(t)
-	projectID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 
 	// Normal create without workspace files - should use normal dispatch path
 	body := CreateAgentRequest{
@@ -600,7 +600,7 @@ func TestCreateAgentWithoutBootstrap(t *testing.T) {
 
 func TestCreateThenStartWithTask(t *testing.T) {
 	srv, s, _, disp := testBootstrapServer(t)
-	projectID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 
 	// Step 1: Create the agent (provision-only)
 	createBody := CreateAgentRequest{
@@ -656,7 +656,7 @@ func TestCreateThenStartWithTask(t *testing.T) {
 
 func TestCreateThenStartWithoutTask(t *testing.T) {
 	srv, s, _, disp := testBootstrapServer(t)
-	projectID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 
 	// Step 1: Create the agent with a task (provision-only, task written to prompt.md)
 	createBody := CreateAgentRequest{
@@ -700,7 +700,7 @@ func TestCreateThenStartWithoutTask(t *testing.T) {
 
 func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 	srv, s, stor, disp := testBootstrapServer(t)
-	projectID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 	ctx := context.Background()
 
 	// Create an agent in provisioning status (simulating post-bootstrap-create)
@@ -786,7 +786,7 @@ func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 
 func TestSyncToFinalize_BootstrapMode_MissingFile(t *testing.T) {
 	srv, s, stor, _ := testBootstrapServer(t)
-	projectID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 	ctx := context.Background()
 
 	// Create an agent in provisioning status
@@ -830,7 +830,7 @@ func TestSyncToFinalize_BootstrapMode_MissingFile(t *testing.T) {
 
 func TestSyncToFinalize_RejectsStoppedAgent(t *testing.T) {
 	srv, s, _, _ := testBootstrapServer(t)
-	projectID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 	ctx := context.Background()
 
 	// Create an agent in stopped status
@@ -881,7 +881,7 @@ func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 	srv.SetStorage(stor)
 	// No dispatcher set
 
-	projectID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 	ctx := context.Background()
 
 	agent := &store.Agent{

@@ -54,7 +54,7 @@ func LoadSettingsKoanf(grovePath string) (*Settings, error) {
 	}
 
 	// 3. Load grove settings
-	effectiveGrovePath := resolveEffectiveGrovePath(grovePath)
+	effectiveGrovePath := resolveEffectiveProjectPath(grovePath)
 	// Only load grove settings if it's different from global (avoid double-loading)
 	if effectiveGrovePath != "" && effectiveGrovePath != globalDir {
 		if err := loadSettingsFile(k, effectiveGrovePath); err != nil {
@@ -127,7 +127,7 @@ func LoadSettingsKoanf(grovePath string) (*Settings, error) {
 	// For git groves, the grove_id is stored in a grove-id file inside the
 	// .scion directory rather than in the settings file. Read it here so that
 	// it overrides any grove_id inherited from global settings. The original
-	// grovePath points to the .scion directory (before resolveEffectiveGrovePath
+	// grovePath points to the .scion directory (before resolveEffectiveProjectPath
 	// redirects to the external config dir).
 	if grovePath != "" && grovePath != globalDir {
 		if groveID, err := ReadProjectID(grovePath); err == nil && groveID != "" {

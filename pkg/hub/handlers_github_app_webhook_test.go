@@ -384,7 +384,7 @@ func TestHandleGitHubWebhook_IgnoredEvent(t *testing.T) {
 	}
 }
 
-func TestMatchGrovesToInstallation(t *testing.T) {
+func TestMatchProjectsToInstallation(t *testing.T) {
 	srv, s := webhookTestServer(t)
 	ctx := context.Background()
 
@@ -556,7 +556,7 @@ type recordingEventPublisher struct {
 	groveUpdates []*store.Project
 }
 
-func (r *recordingEventPublisher) PublishGroveUpdated(_ context.Context, grove *store.Project) {
+func (r *recordingEventPublisher) PublishProjectUpdated(_ context.Context, grove *store.Project) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.groveUpdates = append(r.groveUpdates, grove)

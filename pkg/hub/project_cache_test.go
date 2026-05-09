@@ -69,14 +69,14 @@ func createTestLinkedProject(t *testing.T, srv *Server, s store.Store, name, rem
 }
 
 // ============================================================================
-// resolveGroveWebDAVPath Tests
+// resolveProjectWebDAVPath Tests
 // ============================================================================
 
 func TestResolveGroveWebDAVPath_HubNativeProject(t *testing.T) {
 	srv, _ := testServer(t)
 	grove, workspacePath := createTestHubNativeProject(t, srv, "WebDAV HubNative")
 
-	path, err := srv.resolveGroveWebDAVPath(context.Background(), grove)
+	path, err := srv.resolveProjectWebDAVPath(context.Background(), grove)
 	require.NoError(t, err)
 	assert.Equal(t, workspacePath, path)
 }
@@ -85,8 +85,8 @@ func TestResolveGroveWebDAVPath_LinkedGrove_CacheDir(t *testing.T) {
 	srv, s := testServer(t)
 	grove, _ := createTestLinkedProject(t, srv, s, "WebDAV Linked", "https://github.com/org/linked-repo.git")
 
-	// resolveGroveWebDAVPath should return the hub cache path for remote linked groves
-	path, err := srv.resolveGroveWebDAVPath(context.Background(), grove)
+	// resolveProjectWebDAVPath should return the hub cache path for remote linked groves
+	path, err := srv.resolveProjectWebDAVPath(context.Background(), grove)
 	require.NoError(t, err)
 
 	expectedCache, err := hubNativeProjectPath(grove.Slug)
@@ -116,7 +116,7 @@ func TestResolveGroveWebDAVPath_LinkedGrove_EmbeddedBroker(t *testing.T) {
 	}))
 
 	// For embedded broker, should serve directly from local path
-	path, err := srv.resolveGroveWebDAVPath(context.Background(), grove)
+	path, err := srv.resolveProjectWebDAVPath(context.Background(), grove)
 	require.NoError(t, err)
 	assert.Equal(t, embeddedPath, path)
 }
@@ -290,7 +290,7 @@ func TestGroveCacheRefresh_MethodNotAllowed(t *testing.T) {
 // hasProjectCache Tests
 // ============================================================================
 
-func TestHasGroveCache(t *testing.T) {
+func TestHasProjectCache(t *testing.T) {
 	// Non-existent slug should return false
 	assert.False(t, hasProjectCache("non-existent-slug-12345"))
 }

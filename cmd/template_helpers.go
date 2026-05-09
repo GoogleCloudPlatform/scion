@@ -77,8 +77,8 @@ func (m *TemplateMatch) IsGlobal() bool {
 	return m.Location == LocationLocalGlobal || m.Location == LocationHubGlobal
 }
 
-// IsGrove returns true if this template is in grove scope.
-func (m *TemplateMatch) IsGrove() bool {
+// IsProjectScoped returns true if this template is in project scope.
+func (m *TemplateMatch) IsProjectScoped() bool {
 	return m.Location == LocationLocalProject || m.Location == LocationHubProject
 }
 
@@ -425,7 +425,7 @@ func FilterMatchesByScope(matches []TemplateMatch, groveOnly, globalOnly bool) [
 
 	var filtered []TemplateMatch
 	for _, m := range matches {
-		if groveOnly && m.IsGrove() {
+		if groveOnly && m.IsProjectScoped() {
 			filtered = append(filtered, m)
 		} else if globalOnly && m.IsGlobal() {
 			filtered = append(filtered, m)

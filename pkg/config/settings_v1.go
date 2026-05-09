@@ -680,32 +680,32 @@ type V1ProfileConfig struct {
 	Secrets              []api.RequiredSecret         `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
 }
 
-// resolveEffectiveGrovePath resolves the effective grove path for settings loading.
+// resolveEffectiveProjectPath resolves the effective project path for settings loading.
 // Shared by both LoadSettingsKoanf and LoadVersionedSettings.
-// For git groves with split storage, this redirects to the external config dir
-// so that settings are loaded from ~/.scion/grove-configs/<slug>__<uuid>/.scion/.
-func resolveEffectiveGrovePath(grovePath string) string {
-	effectiveGrovePath := grovePath
-	if effectiveGrovePath == "" {
+// For git projects with split storage, this redirects to the external config dir
+// so that settings are loaded from ~/.scion/project-configs/<slug>__<uuid>/.scion/.
+func resolveEffectiveProjectPath(projectPath string) string {
+	effectiveProjectPath := projectPath
+	if effectiveProjectPath == "" {
 		if projectPath, ok := FindProjectRoot(); ok {
-			effectiveGrovePath = projectPath
+			effectiveProjectPath = projectPath
 		}
-	} else if effectiveGrovePath == "global" || effectiveGrovePath == "home" {
-		effectiveGrovePath = ""
+	} else if effectiveProjectPath == "global" || effectiveProjectPath == "home" {
+		effectiveProjectPath = ""
 	}
-	if effectiveGrovePath != "" {
-		effectiveGrovePath = GetGroveConfigDir(effectiveGrovePath)
+	if effectiveProjectPath != "" {
+		effectiveProjectPath = GetProjectConfigDir(effectiveProjectPath)
 	}
-	return effectiveGrovePath
+	return effectiveProjectPath
 }
 
 // LoadVersionedSettings loads settings using Koanf into VersionedSettings.
 // Provider priority:
 // 1. Embedded defaults (YAML) with OS-specific runtime adjustment
 // 2. Global settings file (~/.scion/settings.yaml or .json)
-// 3. Grove settings file (.scion/settings.yaml or .json)
+// 3. Project settings file (.scion/settings.yaml or .json)
 // 4. Environment variables (SCION_ prefix)
-func LoadVersionedSettings(grovePath string) (*VersionedSettings, error) {
+func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	k := koanf.New(".")
 
 	// 1. Load embedded defaults (YAML)
@@ -721,10 +721,10 @@ func LoadVersionedSettings(grovePath string) (*VersionedSettings, error) {
 		}
 	}
 
-	// 3. Load grove settings
-	effectiveGrovePath := resolveEffectiveGrovePath(grovePath)
-	if effectiveGrovePath != "" && effectiveGrovePath != globalDir {
-		if err := loadSettingsFile(k, effectiveGrovePath); err != nil {
+	// 3. Load project settings
+	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
+	if effectiveProjectPath != "" && effectiveProjectPath != globalDir {
+		if err := loadSettingsFile(k, effectiveProjectPath); err != nil {
 			return nil, err
 		}
 	}
@@ -732,15 +732,15 @@ func LoadVersionedSettings(grovePath string) (*VersionedSettings, error) {
 	// 4. Load environment variables (SCION_ prefix)
 	_ = k.Load(env.Provider("SCION_", ".", versionedEnvKeyMapper), nil)
 
-	// For git groves, the grove_id is stored in a grove-id file inside the
+	// For git projects, the project_id is stored in a project-id file inside the
 	// .scion directory rather than in the settings file. Read it here so that
-	// it overrides any hub.grove_id inherited from global settings.
-	if grovePath != "" {
+	// it overrides any hub.project_id inherited from global settings.
+	if projectPath != "" {
 		globalDir, _ := GetGlobalDir()
-		if grovePath != globalDir {
-			if groveID, err := ReadProjectID(grovePath); err == nil && groveID != "" {
+		if projectPath != globalDir {
+			if projectID, err := ReadProjectID(projectPath); err == nil && projectID != "" {
 				_ = k.Load(confmap.Provider(map[string]interface{}{
-					"hub.grove_id": groveID,
+					"hub.grove_id": projectID,
 				}, "."), nil)
 			}
 		}
@@ -1557,10 +1557,10 @@ func convertVersionedToLegacy(vs *VersionedSettings) *Settings {
 	return s
 }
 
-// detectHierarchyFormat checks settings files in the global and grove directories
+// detectHierarchyFormat checks settings files in the global and project directories
 // to determine if any user file uses the versioned format.
 // Returns true if any user file is versioned (has schema_version).
-func detectHierarchyFormat(grovePath string) (hasVersioned bool) {
+func detectHierarchyFormat(projectPath string) (hasVersioned bool) {
 	// Check global settings
 	globalDir, _ := GetGlobalDir()
 	if globalDir != "" {
@@ -1573,10 +1573,10 @@ func detectHierarchyFormat(grovePath string) (hasVersioned bool) {
 		}
 	}
 
-	// Check grove settings
-	effectiveGrovePath := resolveEffectiveGrovePath(grovePath)
-	if effectiveGrovePath != "" && effectiveGrovePath != globalDir {
-		if path := GetSettingsPath(effectiveGrovePath); path != "" {
+	// Check project settings
+	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
+	if effectiveProjectPath != "" && effectiveProjectPath != globalDir {
+		if path := GetSettingsPath(effectiveProjectPath); path != "" {
 			if data, err := os.ReadFile(path); err == nil {
 				if version, _ := DetectSettingsFormat(data); version != "" {
 					return true
@@ -1593,9 +1593,9 @@ func detectHierarchyFormat(grovePath string) (hasVersioned bool) {
 // - If any user file is versioned → uses LoadVersionedSettings
 // - If all user files are legacy or absent → uses LoadSettingsKoanf + AdaptLegacySettings
 // Returns (settings, deprecation_warnings, error).
-func LoadEffectiveSettings(grovePath string) (*VersionedSettings, []string, error) {
-	if detectHierarchyFormat(grovePath) {
-		vs, err := LoadVersionedSettings(grovePath)
+func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, error) {
+	if detectHierarchyFormat(projectPath) {
+		vs, err := LoadVersionedSettings(projectPath)
 		if err != nil {
 			return nil, nil, fmt.Errorf("loading versioned settings: %w", err)
 		}
@@ -1603,7 +1603,7 @@ func LoadEffectiveSettings(grovePath string) (*VersionedSettings, []string, erro
 	}
 
 	// Legacy path: load via existing loader, then adapt
-	legacy, err := LoadSettingsKoanf(grovePath)
+	legacy, err := LoadSettingsKoanf(projectPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading legacy settings: %w", err)
 	}

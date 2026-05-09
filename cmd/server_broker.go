@@ -30,7 +30,7 @@ import (
 // runtime broker as a provider. This enables automatic agent handoff.
 // Returns the effective broker ID, which may differ from the input if an
 // existing broker was found by name (deduplication).
-func registerGlobalGroveAndBroker(ctx context.Context, s store.Store, brokerID, brokerName, endpoint string, rt runtime.Runtime, autoProvide bool, settings *config.Settings) (string, error) {
+func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID, brokerName, endpoint string, rt runtime.Runtime, autoProvide bool, settings *config.Settings) (string, error) {
 	// Check if global grove already exists
 	globalGrove, err := s.GetProjectBySlug(ctx, GlobalGroveName)
 	if err != nil && err != store.ErrNotFound {

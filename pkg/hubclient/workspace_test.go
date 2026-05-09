@@ -559,5 +559,3 @@ func TestWorkspaceSyncFrom_EmptyManifest(t *testing.T) {
 		t.Errorf("expected empty download URLs, got %d", len(resp.DownloadURLs))
 	}
 }
-}
-}

@@ -78,7 +78,7 @@ by the .scion marker file in the workspace.`,
 		}
 
 		// Update workspace_path
-		if err := config.ReconnectGrove(configPath, workspacePath); err != nil {
+		if err := config.ReconnectProject(configPath, workspacePath); err != nil {
 			return fmt.Errorf("failed to update workspace path: %w", err)
 		}
 

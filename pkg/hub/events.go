@@ -30,9 +30,9 @@ type EventPublisher interface {
 	PublishAgentStatus(ctx context.Context, agent *store.Agent)
 	PublishAgentCreated(ctx context.Context, agent *store.Agent)
 	PublishAgentDeleted(ctx context.Context, agentID, groveID string)
-	PublishGroveCreated(ctx context.Context, grove *store.Project)
-	PublishGroveUpdated(ctx context.Context, grove *store.Project)
-	PublishGroveDeleted(ctx context.Context, groveID string)
+	PublishProjectCreated(ctx context.Context, grove *store.Project)
+	PublishProjectUpdated(ctx context.Context, grove *store.Project)
+	PublishProjectDeleted(ctx context.Context, groveID string)
 	PublishBrokerConnected(ctx context.Context, brokerID, brokerName string, groveIDs []string)
 	PublishBrokerDisconnected(ctx context.Context, brokerID string, groveIDs []string)
 	PublishBrokerStatus(ctx context.Context, brokerID, status string)
@@ -50,9 +50,9 @@ type noopEventPublisher struct{}
 func (noopEventPublisher) PublishAgentStatus(_ context.Context, _ *store.Agent)              {}
 func (noopEventPublisher) PublishAgentCreated(_ context.Context, _ *store.Agent)             {}
 func (noopEventPublisher) PublishAgentDeleted(_ context.Context, _, _ string)                {}
-func (noopEventPublisher) PublishGroveCreated(_ context.Context, _ *store.Project)             {}
-func (noopEventPublisher) PublishGroveUpdated(_ context.Context, _ *store.Project)             {}
-func (noopEventPublisher) PublishGroveDeleted(_ context.Context, _ string)                   {}
+func (noopEventPublisher) PublishProjectCreated(_ context.Context, _ *store.Project)             {}
+func (noopEventPublisher) PublishProjectUpdated(_ context.Context, _ *store.Project)             {}
+func (noopEventPublisher) PublishProjectDeleted(_ context.Context, _ string)                   {}
 func (noopEventPublisher) PublishBrokerConnected(_ context.Context, _, _ string, _ []string) {}
 func (noopEventPublisher) PublishBrokerDisconnected(_ context.Context, _ string, _ []string) {}
 func (noopEventPublisher) PublishBrokerStatus(_ context.Context, _, _ string)                {}
@@ -117,30 +117,30 @@ type AgentDeletedEvent struct {
 	ProjectID string `json:"groveId"`
 }
 
-// GroveCreatedEvent is published when a grove is created.
-type GroveCreatedEvent struct {
+// ProjectCreatedEvent is published when a project is created.
+type ProjectCreatedEvent struct {
 	ProjectID string `json:"groveId"`
-	Name    string `json:"name"`
-	Slug    string `json:"slug"`
+	Name      string `json:"name"`
+	Slug      string `json:"slug"`
 }
 
-// GroveUpdatedEvent is published when a grove is updated.
-type GroveUpdatedEvent struct {
+// ProjectUpdatedEvent is published when a project is updated.
+type ProjectUpdatedEvent struct {
 	ProjectID string `json:"groveId"`
-	Name    string `json:"name"`
+	Name      string `json:"name"`
 }
 
-// GroveDeletedEvent is published when a grove is deleted.
-type GroveDeletedEvent struct {
+// ProjectDeletedEvent is published when a project is deleted.
+type ProjectDeletedEvent struct {
 	ProjectID string `json:"groveId"`
 }
 
-// BrokerGroveEvent is published when a broker connects or disconnects,
-// with one event per grove the broker serves.
-type BrokerGroveEvent struct {
+// BrokerProjectEvent is published when a broker connects or disconnects,
+// with one event per project the broker serves.
+type BrokerProjectEvent struct {
 	BrokerID   string `json:"brokerId"`
 	BrokerName string `json:"brokerName,omitempty"`
-	ProjectID    string `json:"groveId"`
+	ProjectID  string `json:"groveId"`
 	Status     string `json:"status"` // "online" or "offline"
 }
 
@@ -358,53 +358,53 @@ func (p *ChannelEventPublisher) PublishAgentDeleted(_ context.Context, agentID, 
 	}
 }
 
-// PublishGroveCreated publishes a grove created event.
-func (p *ChannelEventPublisher) PublishGroveCreated(_ context.Context, grove *store.Project) {
-	evt := GroveCreatedEvent{
+// PublishProjectCreated publishes a project created event.
+func (p *ChannelEventPublisher) PublishProjectCreated(_ context.Context, grove *store.Project) {
+	evt := ProjectCreatedEvent{
 		ProjectID: grove.ID,
-		Name:    grove.Name,
-		Slug:    grove.Slug,
+		Name:      grove.Name,
+		Slug:      grove.Slug,
 	}
 	p.publish("grove."+grove.ID+".created", evt)
 }
 
-// PublishGroveUpdated publishes a grove updated event.
-func (p *ChannelEventPublisher) PublishGroveUpdated(_ context.Context, grove *store.Project) {
-	evt := GroveUpdatedEvent{
+// PublishProjectUpdated publishes a project updated event.
+func (p *ChannelEventPublisher) PublishProjectUpdated(_ context.Context, grove *store.Project) {
+	evt := ProjectUpdatedEvent{
 		ProjectID: grove.ID,
-		Name:    grove.Name,
+		Name:      grove.Name,
 	}
 	p.publish("grove."+grove.ID+".updated", evt)
 }
 
-// PublishGroveDeleted publishes a grove deleted event.
-func (p *ChannelEventPublisher) PublishGroveDeleted(_ context.Context, groveID string) {
-	evt := GroveDeletedEvent{
+// PublishProjectDeleted publishes a project deleted event.
+func (p *ChannelEventPublisher) PublishProjectDeleted(_ context.Context, groveID string) {
+	evt := ProjectDeletedEvent{
 		ProjectID: groveID,
 	}
 	p.publish("grove."+groveID+".deleted", evt)
 }
 
-// PublishBrokerConnected publishes broker connection events, one per grove the broker serves.
+// PublishBrokerConnected publishes broker connection events, one per project the broker serves.
 func (p *ChannelEventPublisher) PublishBrokerConnected(_ context.Context, brokerID, brokerName string, groveIDs []string) {
 	for _, gid := range groveIDs {
-		evt := BrokerGroveEvent{
+		evt := BrokerProjectEvent{
 			BrokerID:   brokerID,
 			BrokerName: brokerName,
-			ProjectID:    gid,
+			ProjectID:  gid,
 			Status:     "online",
 		}
 		p.publish("grove."+gid+".broker.status", evt)
 	}
 }
 
-// PublishBrokerDisconnected publishes broker disconnection events, one per grove the broker serves.
+// PublishBrokerDisconnected publishes broker disconnection events, one per project the broker serves.
 func (p *ChannelEventPublisher) PublishBrokerDisconnected(_ context.Context, brokerID string, groveIDs []string) {
 	for _, gid := range groveIDs {
-		evt := BrokerGroveEvent{
-			BrokerID: brokerID,
-			ProjectID:  gid,
-			Status:   "offline",
+		evt := BrokerProjectEvent{
+			BrokerID:  brokerID,
+			ProjectID: gid,
+			Status:    "offline",
 		}
 		p.publish("grove."+gid+".broker.status", evt)
 	}

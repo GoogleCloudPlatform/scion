@@ -547,7 +547,7 @@ func resolveAgentID(ctx context.Context, client hubclient.Client, projectID, age
 		}
 	}
 
-	return "", fmt.Errorf("agent '%s' not found in project", agentName)
+	return "", fmt.Errorf("agent '%s' not found in grove", agentName)
 }
 
 // resolveLocalWorkspacePath resolves the local workspace path for an agent.

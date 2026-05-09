@@ -26,12 +26,12 @@ func TestDiscoverProjects_EmptyHome(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", origHome)
 
-	groves, err := DiscoverProjects()
+	projects, err := DiscoverProjects()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(groves) != 0 {
-		t.Errorf("expected 0 groves, got %d", len(groves))
+	if len(projects) != 0 {
+		t.Errorf("expected 0 projects, got %d", len(projects))
 	}
 }
 
@@ -44,25 +44,33 @@ func TestDiscoverProjects_GlobalOnly(t *testing.T) {
 	globalDir := filepath.Join(tmpHome, ".scion")
 	os.MkdirAll(filepath.Join(globalDir, "agents"), 0755)
 
-	groves, err := DiscoverProjects()
+	projects, err := DiscoverProjects()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(groves) != 1 {
-		t.Fatalf("expected 1 grove, got %d", len(groves))
+	if len(projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(projects))
 	}
-	if groves[0].Type != GroveTypeGlobal {
-		t.Errorf("expected global type, got %s", groves[0].Type)
+	if projects[0].Type != ProjectTypeGlobal {
+		t.Errorf("expected global type, got %s", projects[0].Type)
 	}
-	if groves[0].Name != "global" {
-		t.Errorf("expected name 'global', got %s", groves[0].Name)
+	if projects[0].Name != "global" {
+		t.Errorf("expected name 'global', got %s", projects[0].Name)
 	}
-	if groves[0].Status != GroveStatusOK {
-		t.Errorf("expected status ok, got %s", groves[0].Status)
+	if projects[0].Status != ProjectStatusOK {
+		t.Errorf("expected status ok, got %s", projects[0].Status)
 	}
 }
 
 func TestDiscoverProjects_ExternalProject(t *testing.T) {
+	// Unset Hub environment variables to avoid pollution
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID"} {
+		if val, ok := os.LookupEnv(e); ok {
+			os.Unsetenv(e)
+			defer os.Setenv(e, val)
+		}
+	}
+
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpHome)
@@ -71,9 +79,9 @@ func TestDiscoverProjects_ExternalProject(t *testing.T) {
 	// Create global dir
 	os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
 
-	// Create an external grove config
-	groveConfigDir := filepath.Join(tmpHome, ".scion", "grove-configs", "myproject__abcd1234", ".scion")
-	os.MkdirAll(filepath.Join(groveConfigDir, "agents", "agent1"), 0755)
+	// Create an external project config
+	projectConfigDir := filepath.Join(tmpHome, ".scion", "project-configs", "myproject__abcd1234", ".scion")
+	os.MkdirAll(filepath.Join(projectConfigDir, "agents", "agent1"), 0755)
 
 	// Create a workspace directory with a marker file
 	workspace := filepath.Join(tmpHome, "projects", "myproject")
@@ -89,26 +97,26 @@ func TestDiscoverProjects_ExternalProject(t *testing.T) {
 
 	// Write settings with workspace_path
 	settingsContent := "workspace_path: " + workspace + "\ngrove_id: abcd1234-0000-0000-0000-000000000000\n"
-	os.WriteFile(filepath.Join(groveConfigDir, "settings.yaml"), []byte(settingsContent), 0644)
+	os.WriteFile(filepath.Join(projectConfigDir, "settings.yaml"), []byte(settingsContent), 0644)
 
-	groves, err := DiscoverProjects()
+	projects, err := DiscoverProjects()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	// Should find global + external
-	if len(groves) != 2 {
-		t.Fatalf("expected 2 groves, got %d", len(groves))
+	if len(projects) != 2 {
+		t.Fatalf("expected 2 projects, got %d", len(projects))
 	}
 
-	ext := groves[1]
-	if ext.Type != GroveTypeExternal {
+	ext := projects[1]
+	if ext.Type != ProjectTypeExternal {
 		t.Errorf("expected external type, got %s", ext.Type)
 	}
 	if ext.Name != "myproject" {
 		t.Errorf("expected name 'myproject', got %s", ext.Name)
 	}
-	if ext.Status != GroveStatusOK {
+	if ext.Status != ProjectStatusOK {
 		t.Errorf("expected status ok, got %s", ext.Status)
 	}
 	if ext.AgentCount != 1 {
@@ -120,6 +128,14 @@ func TestDiscoverProjects_ExternalProject(t *testing.T) {
 }
 
 func TestDiscoverProjects_OrphanedExternal(t *testing.T) {
+	// Unset Hub environment variables to avoid pollution
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID"} {
+		if val, ok := os.LookupEnv(e); ok {
+			os.Unsetenv(e)
+			defer os.Setenv(e, val)
+		}
+	}
+
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpHome)
@@ -127,35 +143,35 @@ func TestDiscoverProjects_OrphanedExternal(t *testing.T) {
 
 	os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
 
-	// Create external grove config pointing to a non-existent workspace
-	groveConfigDir := filepath.Join(tmpHome, ".scion", "grove-configs", "gone-project__deadbeef", ".scion")
-	os.MkdirAll(filepath.Join(groveConfigDir, "agents"), 0755)
+	// Create external project config pointing to a non-existent workspace
+	projectConfigDir := filepath.Join(tmpHome, ".scion", "project-configs", "gone-project__deadbeef", ".scion")
+	os.MkdirAll(filepath.Join(projectConfigDir, "agents"), 0755)
 
 	settingsContent := "workspace_path: /nonexistent/workspace\n"
-	os.WriteFile(filepath.Join(groveConfigDir, "settings.yaml"), []byte(settingsContent), 0644)
+	os.WriteFile(filepath.Join(projectConfigDir, "settings.yaml"), []byte(settingsContent), 0644)
 
-	groves, err := DiscoverProjects()
+	projects, err := DiscoverProjects()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Find the external grove
+	// Find the external project
 	var ext *ProjectInfo
-	for i := range groves {
-		if groves[i].Type == GroveTypeExternal {
-			ext = &groves[i]
+	for i := range projects {
+		if projects[i].Type == ProjectTypeExternal {
+			ext = &projects[i]
 			break
 		}
 	}
 	if ext == nil {
-		t.Fatal("expected to find external grove")
+		t.Fatal("expected to find external project")
 	}
-	if ext.Status != GroveStatusOrphaned {
+	if ext.Status != ProjectStatusOrphaned {
 		t.Errorf("expected status orphaned, got %s", ext.Status)
 	}
 }
 
-func TestFindOrphanedGroveConfigs(t *testing.T) {
+func TestFindOrphanedProjectConfigs(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpHome)
@@ -163,12 +179,12 @@ func TestFindOrphanedGroveConfigs(t *testing.T) {
 
 	os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
 
-	// Create one orphaned grove
-	orphanedDir := filepath.Join(tmpHome, ".scion", "grove-configs", "orphan__12345678", ".scion")
+	// Create one orphaned project
+	orphanedDir := filepath.Join(tmpHome, ".scion", "project-configs", "orphan__12345678", ".scion")
 	os.MkdirAll(filepath.Join(orphanedDir, "agents"), 0755)
 	os.WriteFile(filepath.Join(orphanedDir, "settings.yaml"), []byte("workspace_path: /does/not/exist\n"), 0644)
 
-	orphaned, err := FindOrphanedGroveConfigs()
+	orphaned, err := FindOrphanedProjectConfigs()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -180,17 +196,17 @@ func TestFindOrphanedGroveConfigs(t *testing.T) {
 	}
 }
 
-func TestRemoveGroveConfig(t *testing.T) {
+func TestRemoveProjectConfig(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", origHome)
 
-	configDir := filepath.Join(tmpHome, ".scion", "grove-configs", "test__aabbccdd", ".scion")
+	configDir := filepath.Join(tmpHome, ".scion", "project-configs", "test__aabbccdd", ".scion")
 	os.MkdirAll(configDir, 0755)
 	os.WriteFile(filepath.Join(configDir, "settings.yaml"), []byte(""), 0644)
 
-	if err := RemoveGroveConfig(configDir); err != nil {
+	if err := RemoveProjectConfig(configDir); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -200,19 +216,19 @@ func TestRemoveGroveConfig(t *testing.T) {
 	}
 }
 
-func TestRemoveGroveConfig_SafetyCheck(t *testing.T) {
+func TestRemoveProjectConfig_SafetyCheck(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", origHome)
 
-	// Try to remove something outside grove-configs — should fail
+	// Try to remove something outside project-configs — should fail
 	outsideDir := filepath.Join(tmpHome, "projects", "important")
 	os.MkdirAll(outsideDir, 0755)
 
-	err := RemoveGroveConfig(outsideDir)
+	err := RemoveProjectConfig(outsideDir)
 	if err == nil {
-		t.Error("expected error when removing path outside grove-configs")
+		t.Error("expected error when removing path outside project-configs")
 	}
 }
 
@@ -222,8 +238,8 @@ func TestReconnectProject(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", origHome)
 
-	// Create external grove config
-	configDir := filepath.Join(tmpHome, ".scion", "grove-configs", "proj__11223344", ".scion")
+	// Create external project config
+	configDir := filepath.Join(tmpHome, ".scion", "project-configs", "proj__11223344", ".scion")
 	os.MkdirAll(configDir, 0755)
 	os.WriteFile(filepath.Join(configDir, "settings.yaml"), []byte("workspace_path: /old/path\n"), 0644)
 
@@ -291,32 +307,32 @@ func TestListAgentNames_NonExistentDir(t *testing.T) {
 	}
 }
 
-func TestGroveInfo_AgentsDir(t *testing.T) {
+func TestProjectInfo_AgentsDir(t *testing.T) {
 	tests := []struct {
 		name     string
-		grove    ProjectInfo
+		project  ProjectInfo
 		expected string
 	}{
 		{
-			name: "external grove",
-			grove: ProjectInfo{
-				Type:       GroveTypeExternal,
-				ConfigPath: "/home/user/.scion/grove-configs/proj__abc123/.scion",
+			name: "external project",
+			project: ProjectInfo{
+				Type:       ProjectTypeExternal,
+				ConfigPath: "/home/user/.scion/project-configs/proj__abc123/.scion",
 			},
-			expected: "/home/user/.scion/grove-configs/proj__abc123/.scion/agents",
+			expected: "/home/user/.scion/project-configs/proj__abc123/.scion/agents",
 		},
 		{
-			name: "git grove",
-			grove: ProjectInfo{
-				Type:       GroveTypeGit,
-				ConfigPath: "/home/user/.scion/grove-configs/repo__def456/.scion",
+			name: "git project",
+			project: ProjectInfo{
+				Type:       ProjectTypeGit,
+				ConfigPath: "/home/user/.scion/project-configs/repo__def456/.scion",
 			},
-			expected: "/home/user/.scion/grove-configs/repo__def456/.scion/agents",
+			expected: "/home/user/.scion/project-configs/repo__def456/.scion/agents",
 		},
 		{
-			name: "global grove",
-			grove: ProjectInfo{
-				Type:       GroveTypeGlobal,
+			name: "global project",
+			project: ProjectInfo{
+				Type:       ProjectTypeGlobal,
 				ConfigPath: "/home/user/.scion",
 			},
 			expected: "/home/user/.scion/agents",
@@ -324,7 +340,7 @@ func TestGroveInfo_AgentsDir(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tt.grove.AgentsDir()
+			got := tt.project.AgentsDir()
 			if got != tt.expected {
 				t.Errorf("AgentsDir() = %s, want %s", got, tt.expected)
 			}
@@ -333,6 +349,14 @@ func TestGroveInfo_AgentsDir(t *testing.T) {
 }
 
 func TestDiscoverProjects_StaleExternalAfterMarkerRecreate(t *testing.T) {
+	// Unset Hub environment variables to avoid pollution
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID"} {
+		if val, ok := os.LookupEnv(e); ok {
+			os.Unsetenv(e)
+			defer os.Setenv(e, val)
+		}
+	}
+
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpHome)
@@ -343,19 +367,19 @@ func TestDiscoverProjects_StaleExternalAfterMarkerRecreate(t *testing.T) {
 	workspace := filepath.Join(tmpHome, "projects", "myproject")
 	os.MkdirAll(workspace, 0755)
 
-	// Simulate the old grove-config (from a previous init)
-	oldConfigDir := filepath.Join(tmpHome, ".scion", "grove-configs", "myproject__aaaaaaaa", ".scion")
+	// Simulate the old project-config (from a previous init)
+	oldConfigDir := filepath.Join(tmpHome, ".scion", "project-configs", "myproject__aaaaaaaa", ".scion")
 	os.MkdirAll(filepath.Join(oldConfigDir, "agents"), 0755)
 	os.WriteFile(filepath.Join(oldConfigDir, "settings.yaml"),
 		[]byte("workspace_path: "+workspace+"\ngrove_id: aaaaaaaa-0000-0000-0000-000000000000\n"), 0644)
 
-	// Simulate new grove-config (from re-init after marker was deleted)
-	newConfigDir := filepath.Join(tmpHome, ".scion", "grove-configs", "myproject__bbbbbbbb", ".scion")
+	// Simulate new project-config (from re-init after marker was deleted)
+	newConfigDir := filepath.Join(tmpHome, ".scion", "project-configs", "myproject__bbbbbbbb", ".scion")
 	os.MkdirAll(filepath.Join(newConfigDir, "agents"), 0755)
 	os.WriteFile(filepath.Join(newConfigDir, "settings.yaml"),
 		[]byte("workspace_path: "+workspace+"\ngrove_id: bbbbbbbb-0000-0000-0000-000000000000\n"), 0644)
 
-	// Workspace marker now points to the new grove-config
+	// Workspace marker now points to the new project-config
 	marker := &ProjectMarker{
 		ProjectID:   "bbbbbbbb-0000-0000-0000-000000000000",
 		ProjectName: "myproject",
@@ -364,12 +388,12 @@ func TestDiscoverProjects_StaleExternalAfterMarkerRecreate(t *testing.T) {
 	WriteProjectMarker(filepath.Join(workspace, DotScion), marker)
 
 	// The old config should be orphaned because the marker resolves to the new config
-	orphaned, err := FindOrphanedGroveConfigs()
+	orphaned, err := FindOrphanedProjectConfigs()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(orphaned) != 1 {
-		t.Fatalf("expected 1 orphaned grove-config, got %d", len(orphaned))
+		t.Fatalf("expected 1 orphaned project-config, got %d", len(orphaned))
 	}
 	if orphaned[0].Name != "myproject" {
 		t.Errorf("expected orphaned name 'myproject', got %s", orphaned[0].Name)
@@ -380,7 +404,7 @@ func TestDiscoverProjects_StaleExternalAfterMarkerRecreate(t *testing.T) {
 	}
 }
 
-func TestDiscoverProjects_GitGroveExternal(t *testing.T) {
+func TestDiscoverProjects_GitProjectExternal(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpHome)
@@ -388,25 +412,25 @@ func TestDiscoverProjects_GitGroveExternal(t *testing.T) {
 
 	os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
 
-	// Create a git grove external directory (agents only, no .scion subdir)
-	groveDir := filepath.Join(tmpHome, ".scion", "grove-configs", "myrepo__aabb1122")
-	agentsDir := filepath.Join(groveDir, "agents", "worker1", "home")
+	// Create a git project external directory (agents only, no .scion subdir)
+	projectDir := filepath.Join(tmpHome, ".scion", "project-configs", "myrepo__aabb1122")
+	agentsDir := filepath.Join(projectDir, "agents", "worker1", "home")
 	os.MkdirAll(agentsDir, 0755)
 
-	groves, err := DiscoverProjects()
+	projects, err := DiscoverProjects()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	var gitProject *ProjectInfo
-	for i := range groves {
-		if groves[i].Type == GroveTypeGit {
-			gitProject = &groves[i]
+	for i := range projects {
+		if projects[i].Type == ProjectTypeGit {
+			gitProject = &projects[i]
 			break
 		}
 	}
 	if gitProject == nil {
-		t.Fatal("expected to find git grove")
+		t.Fatal("expected to find git project")
 	}
 	if gitProject.Name != "myrepo" {
 		t.Errorf("expected name 'myrepo', got %s", gitProject.Name)
@@ -414,12 +438,12 @@ func TestDiscoverProjects_GitGroveExternal(t *testing.T) {
 	if gitProject.AgentCount != 1 {
 		t.Errorf("expected 1 agent, got %d", gitProject.AgentCount)
 	}
-	if gitProject.Status != GroveStatusOK {
-		t.Errorf("expected status ok for git grove with agents, got %s", gitProject.Status)
+	if gitProject.Status != ProjectStatusOK {
+		t.Errorf("expected status ok for git project with agents, got %s", gitProject.Status)
 	}
 }
 
-func TestDiscoverProjects_GitGroveExternalEmptyAgents(t *testing.T) {
+func TestDiscoverProjects_GitProjectExternalEmptyAgents(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpHome)
@@ -427,31 +451,31 @@ func TestDiscoverProjects_GitGroveExternalEmptyAgents(t *testing.T) {
 
 	os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
 
-	// Create a git grove external directory with an empty agents dir (no .scion subdir)
-	groveDir := filepath.Join(tmpHome, ".scion", "grove-configs", "leftover__deadbeef")
-	os.MkdirAll(filepath.Join(groveDir, "agents"), 0755)
+	// Create a git project external directory with an empty agents dir (no .scion subdir)
+	projectDir := filepath.Join(tmpHome, ".scion", "project-configs", "leftover__deadbeef")
+	os.MkdirAll(filepath.Join(projectDir, "agents"), 0755)
 
-	groves, err := DiscoverProjects()
+	projects, err := DiscoverProjects()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	var gitProject *ProjectInfo
-	for i := range groves {
-		if groves[i].Type == GroveTypeGit {
-			gitProject = &groves[i]
+	for i := range projects {
+		if projects[i].Type == ProjectTypeGit {
+			gitProject = &projects[i]
 			break
 		}
 	}
 	if gitProject == nil {
-		t.Fatal("expected to find git grove")
+		t.Fatal("expected to find git project")
 	}
-	if gitProject.Status != GroveStatusOrphaned {
-		t.Errorf("expected orphaned status for git grove with empty agents dir, got %s", gitProject.Status)
+	if gitProject.Status != ProjectStatusOrphaned {
+		t.Errorf("expected orphaned status for git project with empty agents dir, got %s", gitProject.Status)
 	}
 }
 
-func TestDiscoverProjects_GitGroveWithExternalConfig(t *testing.T) {
+func TestDiscoverProjects_GitProjectWithExternalConfig(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpHome)
@@ -459,32 +483,32 @@ func TestDiscoverProjects_GitGroveWithExternalConfig(t *testing.T) {
 
 	os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
 
-	// Create a git grove in the new layout: .scion/ (config + agents)
-	groveDir := filepath.Join(tmpHome, ".scion", "grove-configs", "newrepo__ccdd1122")
-	scionDir := filepath.Join(groveDir, ".scion")
+	// Create a git project in the new layout: .scion/ (config + agents)
+	projectDir := filepath.Join(tmpHome, ".scion", "project-configs", "newrepo__ccdd1122")
+	scionDir := filepath.Join(projectDir, ".scion")
 	agentsDir := filepath.Join(scionDir, "agents", "worker1", "home")
 	os.MkdirAll(scionDir, 0755)
 	os.MkdirAll(agentsDir, 0755)
 
-	groves, err := DiscoverProjects()
+	projects, err := DiscoverProjects()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	var gitProject *ProjectInfo
-	for i := range groves {
-		if groves[i].Name == "newrepo" {
-			gitProject = &groves[i]
+	for i := range projects {
+		if projects[i].Name == "newrepo" {
+			gitProject = &projects[i]
 			break
 		}
 	}
 	if gitProject == nil {
-		t.Fatal("expected to find git grove with external config")
+		t.Fatal("expected to find git project with external config")
 	}
-	if gitProject.Type != GroveTypeGit {
-		t.Errorf("expected GroveTypeGit, got %s", gitProject.Type)
+	if gitProject.Type != ProjectTypeGit {
+		t.Errorf("expected ProjectTypeGit, got %s", gitProject.Type)
 	}
-	if gitProject.Status != GroveStatusOK {
+	if gitProject.Status != ProjectStatusOK {
 		t.Errorf("expected status ok, got %s", gitProject.Status)
 	}
 	if gitProject.AgentCount != 1 {
@@ -493,14 +517,14 @@ func TestDiscoverProjects_GitGroveWithExternalConfig(t *testing.T) {
 	if gitProject.ConfigPath != scionDir {
 		t.Errorf("expected ConfigPath %q, got %q", scionDir, gitProject.ConfigPath)
 	}
-	// AgentsDir() should point to .scion/agents/ inside the grove config dir
+	// AgentsDir() should point to .scion/agents/ inside the project config dir
 	wantAgentsDir := filepath.Join(scionDir, "agents")
 	if got := gitProject.AgentsDir(); got != wantAgentsDir {
 		t.Errorf("AgentsDir() = %q, want %q", got, wantAgentsDir)
 	}
 }
 
-func TestDiscoverProjects_GitGroveWithExternalConfigUsesWorkspaceMarkerProjectID(t *testing.T) {
+func TestDiscoverProjects_GitProjectWithExternalConfigUsesWorkspaceMarkerProjectID(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
 	if err := os.Setenv("HOME", tmpHome); err != nil {
@@ -527,14 +551,14 @@ func TestDiscoverProjects_GitGroveWithExternalConfigUsesWorkspaceMarkerProjectID
 		}()
 	}
 
-	groveDir := filepath.Join(tmpHome, ".scion", "grove-configs", "newrepo__ccdd1122")
-	scionDir := filepath.Join(groveDir, ".scion")
+	projectDir := filepath.Join(tmpHome, ".scion", "project-configs", "newrepo__ccdd1122")
+	scionDir := filepath.Join(projectDir, ".scion")
 	agentsDir := filepath.Join(scionDir, "agents", "worker1", "home")
 	if err := os.MkdirAll(agentsDir, 0755); err != nil {
 		t.Fatalf("mkdir agents dir: %v", err)
 	}
 
-	workspaceDir := filepath.Join(tmpHome, ".scion", "groves", "newrepo")
+	workspaceDir := filepath.Join(tmpHome, ".scion", "projects", "newrepo")
 	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
 		t.Fatalf("mkdir workspace dir: %v", err)
 	}
@@ -542,20 +566,20 @@ func TestDiscoverProjects_GitGroveWithExternalConfigUsesWorkspaceMarkerProjectID
 		t.Fatalf("WriteWorkspaceMarker failed: %v", err)
 	}
 
-	groves, err := DiscoverProjects()
+	projects, err := DiscoverProjects()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	var gitProject *ProjectInfo
-	for i := range groves {
-		if groves[i].Name == "newrepo" {
-			gitProject = &groves[i]
+	for i := range projects {
+		if projects[i].Name == "newrepo" {
+			gitProject = &projects[i]
 			break
 		}
 	}
 	if gitProject == nil {
-		t.Fatal("expected to find git grove with external config")
+		t.Fatal("expected to find git project with external config")
 	}
 	if gitProject.ProjectID != "3c619ec9-517e-4321-8c6a-4757f6a95607" {
 		t.Fatalf("ProjectID = %q, want %q", gitProject.ProjectID, "3c619ec9-517e-4321-8c6a-4757f6a95607")
@@ -565,7 +589,7 @@ func TestDiscoverProjects_GitGroveWithExternalConfigUsesWorkspaceMarkerProjectID
 	}
 }
 
-func TestDiscoverProjects_GroveConfigNoScionNoAgents(t *testing.T) {
+func TestDiscoverProjects_ProjectConfigNoScionNoAgents(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpHome)
@@ -573,31 +597,31 @@ func TestDiscoverProjects_GroveConfigNoScionNoAgents(t *testing.T) {
 
 	os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
 
-	// Create a grove-config directory with no .scion and no agents subdir
-	groveDir := filepath.Join(tmpHome, ".scion", "grove-configs", "empty-leftover__aabb1122")
-	os.MkdirAll(groveDir, 0755)
+	// Create a project-config directory with no .scion and no agents subdir
+	projectDir := filepath.Join(tmpHome, ".scion", "project-configs", "empty-leftover__aabb1122")
+	os.MkdirAll(projectDir, 0755)
 
-	groves, err := DiscoverProjects()
+	projects, err := DiscoverProjects()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	var found *ProjectInfo
-	for i := range groves {
-		if groves[i].Name == "empty-leftover" {
-			found = &groves[i]
+	for i := range projects {
+		if projects[i].Name == "empty-leftover" {
+			found = &projects[i]
 			break
 		}
 	}
 	if found == nil {
-		t.Fatal("expected to find orphaned grove-config dir with no .scion and no agents")
+		t.Fatal("expected to find orphaned project-config dir with no .scion and no agents")
 	}
-	if found.Status != GroveStatusOrphaned {
+	if found.Status != ProjectStatusOrphaned {
 		t.Errorf("expected orphaned status, got %s", found.Status)
 	}
 }
 
-func TestFindOrphanedGroveConfigs_IncludesEmptyGitProjects(t *testing.T) {
+func TestFindOrphanedProjectConfigs_IncludesEmptyGitProjects(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpHome)
@@ -605,11 +629,11 @@ func TestFindOrphanedGroveConfigs_IncludesEmptyGitProjects(t *testing.T) {
 
 	os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
 
-	// Create leftover grove-config with empty agents dir (typical test residue)
-	groveDir := filepath.Join(tmpHome, ".scion", "grove-configs", "ws-test__abcd1234")
-	os.MkdirAll(filepath.Join(groveDir, "agents"), 0755)
+	// Create leftover project-config with empty agents dir (typical test residue)
+	projectDir := filepath.Join(tmpHome, ".scion", "project-configs", "ws-test__abcd1234")
+	os.MkdirAll(filepath.Join(projectDir, "agents"), 0755)
 
-	orphaned, err := FindOrphanedGroveConfigs()
+	orphaned, err := FindOrphanedProjectConfigs()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

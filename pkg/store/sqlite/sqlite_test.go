@@ -1336,7 +1336,7 @@ func TestRuntimeBrokerList(t *testing.T) {
 	assert.Equal(t, 0, result.TotalCount)
 }
 
-func TestRuntimeBrokerListByGroveIncludesAutoProvide(t *testing.T) {
+func TestRuntimeBrokerListByProjectIncludesAutoProvide(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 

@@ -193,7 +193,7 @@ func TestEventPublisher_CreateProjectEmitsEvent(t *testing.T) {
 	select {
 	case evt := <-ch:
 		assert.Equal(t, "grove."+grove.ID+".created", evt.Subject)
-		var data GroveCreatedEvent
+		var data ProjectCreatedEvent
 		require.NoError(t, json.Unmarshal(evt.Data, &data))
 		assert.Equal(t, grove.ID, data.ProjectID)
 		assert.Equal(t, "Event Project", data.Name)

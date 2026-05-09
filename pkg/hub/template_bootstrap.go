@@ -445,7 +445,7 @@ func (s *Server) importTemplatesFromRemote(ctx context.Context, groveID, sourceU
 	var authToken string
 	grove, err := s.store.GetProject(ctx, groveID)
 	if err == nil && grove != nil && grove.GitHubInstallationID != nil {
-		if token, _, mintErr := s.MintGitHubAppTokenForGrove(ctx, grove); mintErr == nil && token != "" {
+		if token, _, mintErr := s.MintGitHubAppTokenForProject(ctx, grove); mintErr == nil && token != "" {
 			authToken = token
 		}
 	}
@@ -521,7 +521,7 @@ func (s *Server) importTemplatesFromWorkspace(ctx context.Context, grove *store.
 	}
 
 	// Resolve the grove's workspace root on disk
-	groveRoot, err := s.resolveGroveWebDAVPath(ctx, grove)
+	groveRoot, err := s.resolveProjectWebDAVPath(ctx, grove)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve grove workspace: %w", err)
 	}

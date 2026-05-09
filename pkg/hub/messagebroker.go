@@ -225,7 +225,7 @@ func (p *MessageBrokerProxy) PublishBroadcast(ctx context.Context, groveID strin
 	if groveID == "" {
 		return p.broker.Publish(ctx, broker.TopicGlobalBroadcast(), msg)
 	}
-	return p.broker.Publish(ctx, broker.TopicGroveBroadcast(groveID), msg)
+	return p.broker.Publish(ctx, broker.TopicProjectBroadcast(groveID), msg)
 }
 
 // PublishUserMessage publishes a message to the user-targeted broker topic and
@@ -334,7 +334,7 @@ func (p *MessageBrokerProxy) subscribeAgent(groveID, agentSlug string) {
 // subscribeGroveBroadcast creates a broker subscription for grove-wide broadcasts
 // that fans out to all running agents in the grove.
 func (p *MessageBrokerProxy) subscribeGroveBroadcast(groveID string) {
-	topic := broker.TopicGroveBroadcast(groveID)
+	topic := broker.TopicProjectBroadcast(groveID)
 
 	p.mu.Lock()
 	if p.subscribedTopics[topic] {

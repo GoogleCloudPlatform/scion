@@ -234,7 +234,7 @@ func TestChannelEventPublisher_PublishAgentDeleted(t *testing.T) {
 	}
 }
 
-func TestChannelEventPublisher_PublishGroveCreated(t *testing.T) {
+func TestChannelEventPublisher_PublishProjectCreated(t *testing.T) {
 	pub := NewChannelEventPublisher()
 	defer pub.Close()
 
@@ -247,14 +247,14 @@ func TestChannelEventPublisher_PublishGroveCreated(t *testing.T) {
 		Slug: "my-grove",
 	}
 
-	pub.PublishGroveCreated(context.Background(), grove)
+	pub.PublishProjectCreated(context.Background(), grove)
 
 	select {
 	case evt := <-ch:
 		if evt.Subject != "grove.g1.created" {
 			t.Errorf("got subject %q, want %q", evt.Subject, "grove.g1.created")
 		}
-		var data GroveCreatedEvent
+		var data ProjectCreatedEvent
 		if err := json.Unmarshal(evt.Data, &data); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
@@ -433,7 +433,7 @@ func TestChannelEventPublisher_PublishBrokerConnected(t *testing.T) {
 	} {
 		select {
 		case evt := <-tc.ch:
-			var data BrokerGroveEvent
+			var data BrokerProjectEvent
 			if err := json.Unmarshal(evt.Data, &data); err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
@@ -556,7 +556,7 @@ func TestChannelEventPublisher_WildcardSubscription(t *testing.T) {
 		Slug: "test",
 	}
 
-	pub.PublishGroveCreated(context.Background(), grove)
+	pub.PublishProjectCreated(context.Background(), grove)
 
 	select {
 	case evt := <-ch:
@@ -626,9 +626,9 @@ func TestNoopEventPublisher(t *testing.T) {
 	pub.PublishAgentStatus(ctx, &store.Agent{})
 	pub.PublishAgentCreated(ctx, &store.Agent{})
 	pub.PublishAgentDeleted(ctx, "", "")
-	pub.PublishGroveCreated(ctx, &store.Project{})
-	pub.PublishGroveUpdated(ctx, &store.Project{})
-	pub.PublishGroveDeleted(ctx, "")
+	pub.PublishProjectCreated(ctx, &store.Project{})
+	pub.PublishProjectUpdated(ctx, &store.Project{})
+	pub.PublishProjectDeleted(ctx, "")
 	pub.PublishBrokerConnected(ctx, "", "", nil)
 	pub.PublishBrokerDisconnected(ctx, "", nil)
 	pub.PublishBrokerStatus(ctx, "", "")

@@ -1242,7 +1242,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GroveRoute(t *testing.T) {
 // TestGroveRoute_ResolvesUserScopedEnvVars verifies that agents created via
 // the grove-scoped route (/api/v1/groves/{groveId}/agents) properly resolve
 // user-scoped env vars. This is a regression test for a bug where
-// createGroveAgent did not set OwnerID on the agent, causing user-scoped
+// createProjectAgent did not set OwnerID on the agent, causing user-scoped
 // env vars and secrets to be silently skipped during dispatch.
 func TestGroveRoute_ResolvesUserScopedEnvVars(t *testing.T) {
 	srv, st := testServer(t)

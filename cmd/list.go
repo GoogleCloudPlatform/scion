@@ -455,7 +455,7 @@ func handleUnlinkedProjectPrompt(cmd *cobra.Command, args []string) bool {
 	}
 
 	// Show prompt
-	choice := hubsync.ShowLinkOrDisablePrompt(projectName, autoConfirm)
+	choice := hubsync.ShowProjectLinkOrDisablePrompt(projectName, autoConfirm)
 
 	switch choice {
 	case hubsync.LinkOrDisableLink:

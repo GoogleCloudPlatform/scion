@@ -576,7 +576,7 @@ func (s *Server) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request) {
 		}
 		evalIdentity = &evaluateAgentIdentity{
 			id:      agent.ID,
-			groveID: agent.ProjectID,
+			projectID: agent.ProjectID,
 		}
 		groupIDs, _ := s.store.GetEffectiveGroupsForAgent(ctx, agent.ID)
 		effectiveGroups = groupIDs
@@ -600,12 +600,12 @@ func (s *Server) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request) {
 // evaluateAgentIdentity is a minimal AgentIdentity for evaluation purposes.
 type evaluateAgentIdentity struct {
 	id      string
-	groveID string
+	projectID string
 }
 
 func (e *evaluateAgentIdentity) ID() string                    { return e.id }
 func (e *evaluateAgentIdentity) Type() string                  { return "agent" }
-func (e *evaluateAgentIdentity) ProjectID() string               { return e.groveID }
+func (e *evaluateAgentIdentity) ProjectID() string               { return e.projectID }
 func (e *evaluateAgentIdentity) Scopes() []AgentTokenScope     { return nil }
 func (e *evaluateAgentIdentity) HasScope(AgentTokenScope) bool { return true }
 func (e *evaluateAgentIdentity) Ancestry() []string            { return nil }

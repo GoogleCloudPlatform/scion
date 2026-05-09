@@ -34,26 +34,26 @@ type, agent count, and status for each grove.
 Orphaned groves (where the workspace no longer exists) are flagged.
 Use 'scion grove prune' to clean them up.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		groves, err := config.DiscoverProjects()
+		projects, err := config.DiscoverProjects()
 		if err != nil {
 			return fmt.Errorf("failed to discover groves: %w", err)
 		}
 
 		if isJSONOutput() {
-			if groves == nil {
-				groves = []config.ProjectInfo{}
+			if projects == nil {
+				projects = []config.ProjectInfo{}
 			}
-			return outputJSON(groves)
+			return outputJSON(projects)
 		}
 
-		if len(groves) == 0 {
+		if len(projects) == 0 {
 			fmt.Println("No groves found. Run 'scion init' to create one.")
 			return nil
 		}
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(w, "NAME\tTYPE\tAGENTS\tSTATUS\tWORKSPACE")
-		for _, g := range groves {
+		for _, g := range projects {
 			workspace := g.WorkspacePath
 			if workspace == "" {
 				workspace = "-"

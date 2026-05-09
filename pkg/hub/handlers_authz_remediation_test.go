@@ -156,7 +156,7 @@ func TestAuthzRemediation_ListEndpointsFilterUnauthorizedItems(t *testing.T) {
 	var grovesResp ListProjectsResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grovesResp))
 	require.Len(t, grovesResp.Projects, 1)
-	assert.Equal(t, visibleProject.ID, grovesResp.Projects[0].ID)
+	assert.Equal(t, visibleProject.ID, grovesResp.Projects[0].Project.ID)
 	assert.Equal(t, 1, grovesResp.TotalCount)
 
 	rec = doRequestAsUser(t, srv, member, http.MethodGet, "/api/v1/agents", nil)

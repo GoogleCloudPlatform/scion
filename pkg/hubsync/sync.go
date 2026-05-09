@@ -171,26 +171,26 @@ type EnsureHubReadyOptions struct {
 // 6. Check Hub connectivity
 // 7. Check grove registration (prompt to register if not)
 // 8. Compare and sync agents (unless SkipSync is true)
-func EnsureHubReady(grovePath string, opts EnsureHubReadyOptions) (*HubContext, error) {
-	debugf("EnsureHubReady: grovePath=%s, opts=%+v", grovePath, opts)
+func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext, error) {
+	debugf("EnsureHubReady: projectPath=%s, opts=%+v", projectPath, opts)
 
 	// Check if --no-hub flag is set
 	if opts.NoHub {
-		if grovePath != "" && IsHubProjectRef(grovePath) {
+		if projectPath != "" && IsHubProjectRef(projectPath) {
 			return nil, fmt.Errorf("cannot use --no-hub with a hub grove reference (%s)\n\n"+
-				"Hub grove references (slugs, names, git URLs) require hub connectivity.", grovePath)
+				"Hub grove references (slugs, names, git URLs) require hub connectivity.", projectPath)
 		}
 		debugf("NoHub flag set, returning nil")
 		return nil, nil
 	}
 
-	// Check if grovePath is a hub grove reference (slug, name, UUID, or git URL)
-	if grovePath != "" && IsHubProjectRef(grovePath) {
-		return resolveHubProjectRef(grovePath, opts)
+	// Check if projectPath is a hub grove reference (slug, name, UUID, or git URL)
+	if projectPath != "" && IsHubProjectRef(projectPath) {
+		return resolveHubProjectRef(projectPath, opts)
 	}
 
 	// Resolve grove path
-	resolvedPath, isGlobal, err := config.ResolveProjectPath(grovePath)
+	resolvedPath, isGlobal, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve grove path: %w", err)
 	}
@@ -1194,20 +1194,20 @@ func findProjectByID(ctx context.Context, hubCtx *HubContext) *hubclient.Project
 }
 
 // findMatchingProjects finds groves with the same name on the Hub.
-func findMatchingProjects(ctx context.Context, hubCtx *HubContext, groveName string) ([]GroveMatch, error) {
+func findMatchingProjects(ctx context.Context, hubCtx *HubContext, projectName string) ([]ProjectMatch, error) {
 	ctxTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	resp, err := hubCtx.Client.Projects().List(ctxTimeout, &hubclient.ListProjectsOptions{
-		Name: groveName,
+		Name: projectName,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to search for matching groves: %w", err)
 	}
 
-	var matches []GroveMatch
+	var matches []ProjectMatch
 	for _, g := range resp.Projects {
-		matches = append(matches, GroveMatch{
+		matches = append(matches, ProjectMatch{
 			ID:        g.ID,
 			Name:      g.Name,
 			Slug:      g.Slug,

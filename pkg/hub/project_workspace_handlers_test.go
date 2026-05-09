@@ -82,7 +82,7 @@ func createTestHubNativeProject(t *testing.T, srv *Server, name string) (*store.
 		// Clean up the external grove-config directory created by initInRepoProject
 		// (e.g. ~/.scion/grove-configs/<slug>__<uuid>/).
 		scionDir := filepath.Join(workspacePath, ".scion")
-		if extAgentsDir, err := config.GetGitGroveExternalAgentsDir(scionDir); err == nil && extAgentsDir != "" {
+		if extAgentsDir, err := config.GetGitProjectExternalAgentsDir(scionDir); err == nil && extAgentsDir != "" {
 			// extAgentsDir is ~/.scion/grove-configs/<slug>__<uuid>/.scion/agents
 			// Go up past "agents" and ".scion" to remove the <slug>__<uuid> parent dir
 			os.RemoveAll(filepath.Dir(filepath.Dir(extAgentsDir)))
@@ -1028,7 +1028,7 @@ func createTestSharedWorkspaceProject(t *testing.T, srv *Server, name, remote st
 
 	t.Cleanup(func() {
 		scionDir := filepath.Join(workspacePath, ".scion")
-		if extAgentsDir, err := config.GetGitGroveExternalAgentsDir(scionDir); err == nil && extAgentsDir != "" {
+		if extAgentsDir, err := config.GetGitProjectExternalAgentsDir(scionDir); err == nil && extAgentsDir != "" {
 			os.RemoveAll(filepath.Dir(filepath.Dir(extAgentsDir)))
 		}
 		os.RemoveAll(workspacePath)

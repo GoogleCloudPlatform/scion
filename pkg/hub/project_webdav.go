@@ -41,7 +41,7 @@ var syncExcludeExtensions = []string{
 	".env",
 }
 
-// handleGroveWebDAV serves a WebDAV endpoint for grove workspace file sync.
+// handleProjectWebDAV serves a WebDAV endpoint for grove workspace file sync.
 // It mounts at /api/v1/groves/{groveId}/dav/ and serves the grove's workspace
 // directory with file exclusion filters applied.
 //
@@ -49,7 +49,7 @@ var syncExcludeExtensions = []string{
 // For linked groves (workspace on a remote broker), it serves from the hub's
 // cached copy. The cache is populated via the cache/refresh or cache/notify
 // endpoints (Phase 3: Linked Grove Relay).
-func (s *Server) handleGroveWebDAV(w http.ResponseWriter, r *http.Request, groveID, davPath string) {
+func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, groveID, davPath string) {
 	ctx := r.Context()
 
 	grove, err := s.store.GetProject(ctx, groveID)
@@ -59,7 +59,7 @@ func (s *Server) handleGroveWebDAV(w http.ResponseWriter, r *http.Request, grove
 	}
 
 	// Determine workspace path based on grove type
-	workspacePath, err := s.resolveGroveWebDAVPath(ctx, grove)
+	workspacePath, err := s.resolveProjectWebDAVPath(ctx, grove)
 	if err != nil {
 		Conflict(w, err.Error())
 		return
@@ -131,11 +131,11 @@ func (s *Server) updateGroveSyncState(groveID, workspacePath string) {
 	}
 }
 
-// resolveGroveWebDAVPath determines the filesystem path to serve via WebDAV
+// resolveProjectWebDAVPath determines the filesystem path to serve via WebDAV
 // for a given grove. For hub-native and shared-workspace groves, this is the
 // hub-managed workspace directory. For linked groves (workspace on a remote
 // broker), this is the hub's cached copy of that workspace.
-func (s *Server) resolveGroveWebDAVPath(ctx context.Context, grove *store.Project) (string, error) {
+func (s *Server) resolveProjectWebDAVPath(ctx context.Context, grove *store.Project) (string, error) {
 	// Hub-native groves (no git remote) always have a managed workspace
 	if grove.GitRemote == "" {
 		path, err := hubNativeProjectPath(grove.Slug)
@@ -347,8 +347,8 @@ type GroveSyncStatusResponse struct {
 	TotalBytes int64                  `json:"totalBytes"`
 }
 
-// handleGroveSyncStatus returns the sync status for a grove.
-func (s *Server) handleGroveSyncStatus(w http.ResponseWriter, r *http.Request, groveID string) {
+// handleProjectSyncStatus returns the sync status for a grove.
+func (s *Server) handleProjectSyncStatus(w http.ResponseWriter, r *http.Request, groveID string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return

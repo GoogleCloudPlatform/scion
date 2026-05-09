@@ -100,7 +100,7 @@ func TestUserEmailUnique(t *testing.T) {
 	assert.Error(t, err, "duplicate email should fail")
 }
 
-func TestGroveAndAgentEdge(t *testing.T) {
+func TestProjectAndAgentEdge(t *testing.T) {
 	client := newTestClient(t)
 	ctx := context.Background()
 
@@ -127,7 +127,7 @@ func TestGroveAndAgentEdge(t *testing.T) {
 	assert.Equal(t, a.ID, agents[0].ID)
 }
 
-func TestAgentSlugGroveUnique(t *testing.T) {
+func TestAgentSlugProjectUnique(t *testing.T) {
 	client := newTestClient(t)
 	ctx := context.Background()
 
@@ -285,7 +285,7 @@ func TestGroupSelfReferentialEdge(t *testing.T) {
 	assert.Equal(t, parent.ID, parents[0].ID)
 }
 
-func TestGroupGroveEdge(t *testing.T) {
+func TestGroupProjectEdge(t *testing.T) {
 	client := newTestClient(t)
 	ctx := context.Background()
 
