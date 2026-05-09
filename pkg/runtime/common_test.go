@@ -268,7 +268,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 			},
 			wantIn: []string{
 				"-e FOO=BAR",
-				"tmux new-session -d -s scion -n agent gemini --yolo --resume --prompt-interactive hello",
+				"tmux new-session -d -s scion -n agent 'gemini' '--yolo' '--resume' '--prompt-interactive' 'hello'",
 			},
 		},
 		{
@@ -281,7 +281,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 				Resume:  true,
 			},
 			wantIn: []string{
-				"tmux new-session -d -s scion -n agent gemini --yolo --resume --prompt-interactive hello",
+				"tmux new-session -d -s scion -n agent 'gemini' '--yolo' '--resume' '--prompt-interactive' 'hello'",
 			},
 		},
 		{
@@ -529,6 +529,45 @@ func TestBuildCommonRunArgs(t *testing.T) {
 			},
 			wantOut: []string{
 				":/workspace:",
+			},
+		},
+		{
+			name: "gcs volume triggers fuse mount path",
+			config: RunConfig{
+				Harness:      &harness.GeminiCLI{},
+				Name:         "test-agent",
+				UnixUsername: "scion",
+				Image:        "scion-agent:latest",
+				Task:         "hello",
+				Volumes: []api.VolumeMount{
+					{Type: "gcs", Bucket: "my-bucket", Target: "/data"},
+				},
+			},
+			wantIn: []string{
+				"--cap-add SYS_ADMIN",
+				"--device /dev/fuse",
+				"-e SCION_START_CMD=",
+				`exec sh -c "$SCION_START_CMD"`,
+				"gcsfuse",
+			},
+		},
+		{
+			name: "gcs volume with prefix and mode",
+			config: RunConfig{
+				Harness:      &harness.GeminiCLI{},
+				Name:         "test-agent",
+				UnixUsername: "scion",
+				Image:        "scion-agent:latest",
+				Task:         "do stuff",
+				Volumes: []api.VolumeMount{
+					{Type: "gcs", Bucket: "b", Prefix: "subdir", Mode: "ro", Target: "/mnt"},
+				},
+			},
+			wantIn: []string{
+				"--only-dir",
+				"-o",
+				"--implicit-dirs",
+				"-e SCION_START_CMD=",
 			},
 		},
 	}
@@ -1312,5 +1351,110 @@ func TestSharedWorkspace_NoAgentStateInMounts(t *testing.T) {
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, fmt.Sprintf("%s:/workspace", groveDir)) {
 		t.Errorf("expected grove %s to be mounted at /workspace, args: %s", groveDir, joined)
+	}
+}
+
+func TestBuildCommonRunArgs_FuseMountArgOrdering(t *testing.T) {
+	config := RunConfig{
+		Harness:      &harness.ClaudeCode{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		Task:         "hello world",
+		Volumes: []api.VolumeMount{
+			{Type: "gcs", Bucket: "my-bucket", Target: "/data"},
+		},
+	}
+	args, err := buildCommonRunArgs(config)
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+
+	imageIdx := -1
+	envIdx := -1
+	for i, a := range args {
+		if a == config.Image {
+			imageIdx = i
+		}
+		if a == "-e" && i+1 < len(args) && strings.HasPrefix(args[i+1], "SCION_START_CMD=") {
+			envIdx = i
+		}
+	}
+	if envIdx == -1 {
+		t.Fatalf("SCION_START_CMD env var not found in args: %v", args)
+	}
+	if imageIdx == -1 {
+		t.Fatalf("image %q not found in args: %v", config.Image, args)
+	}
+	if envIdx >= imageIdx {
+		t.Errorf("-e SCION_START_CMD at index %d must come before image %q at index %d; args: %v",
+			envIdx, config.Image, imageIdx, args)
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"simple", "hello", "'hello'"},
+		{"empty", "", "''"},
+		{"spaces", "hello world", "'hello world'"},
+		{"backticks", "use `command` here", "'use `command` here'"},
+		{"dollar sign", "value is $HOME", "'value is $HOME'"},
+		{"command substitution", "$(rm -rf /)", "'$(rm -rf /)'"},
+		{"double quotes", `say "hello"`, `'say "hello"'`},
+		{"single quotes", "it's", "'it'\\''s'"},
+		{"mixed metacharacters", "run `cmd` with $VAR and 'quotes'", "'run `cmd` with $VAR and '\\''quotes'\\'''"},
+		{"newlines", "line1\nline2", "'line1\nline2'"},
+		{"backslashes", `path\to\file`, `'path\to\file'`},
+		{"semicolons", "cmd1; cmd2", "'cmd1; cmd2'"},
+		{"pipes", "cmd1 | cmd2", "'cmd1 | cmd2'"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shellQuote(tt.input)
+			if got != tt.want {
+				t.Errorf("shellQuote(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildCommonRunArgs_ShellMetacharsInPrompt(t *testing.T) {
+	prompts := []struct {
+		name string
+		task string
+	}{
+		{"backticks", "Fix the bug in `main.go` using ```go\nfmt.Println()\n```"},
+		{"dollar signs", "Set $HOME and $(whoami) correctly"},
+		{"single quotes", "Don't use 'unsafe' code"},
+		{"mixed", "Run `cmd` with $VAR and 'quotes' in $(subshell)"},
+	}
+
+	for _, tt := range prompts {
+		t.Run(tt.name, func(t *testing.T) {
+			config := RunConfig{
+				Harness:      &harness.ClaudeCode{},
+				Name:         "test-agent",
+				UnixUsername: "scion",
+				Image:        "scion-agent:latest",
+				Task:         tt.task,
+			}
+			args, err := buildCommonRunArgs(config)
+			if err != nil {
+				t.Fatalf("buildCommonRunArgs failed: %v", err)
+			}
+
+			// The last arg is the tmux command passed to "sh -c".
+			// Verify the prompt is single-quoted (not double-quoted).
+			shCmd := args[len(args)-1]
+			quoted := shellQuote(tt.task)
+			if !strings.Contains(shCmd, quoted) {
+				t.Errorf("expected single-quoted prompt %q in sh -c arg, got: %s", quoted, shCmd)
+			}
+		})
 	}
 }

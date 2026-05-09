@@ -355,7 +355,7 @@ export class ScionPageAgents extends LitElement {
 
   private async handleAgentAction(
     agentId: string,
-    action: 'start' | 'stop' | 'delete',
+    action: 'start' | 'stop' | 'suspend' | 'resume' | 'delete',
     event?: MouseEvent
   ): Promise<void> {
     if (action === 'delete') {
@@ -387,20 +387,30 @@ export class ScionPageAgents extends LitElement {
       return;
     }
 
-    // Start/stop: apply optimistic phase update immediately
+    // Apply optimistic phase update immediately
+    const optimisticPhase: Record<string, string> = {
+      start: 'starting',
+      stop: 'stopping',
+      suspend: 'stopping',
+      resume: 'starting',
+    };
     const agentIndex = this.agents.findIndex(a => a.id === agentId);
     if (agentIndex >= 0) {
       const updated = { ...this.agents[agentIndex] };
-      updated.phase = action === 'start' ? 'starting' : 'stopping';
+      updated.phase = optimisticPhase[action] as Agent['phase'];
       this.agents = [...this.agents];
       this.agents[agentIndex] = updated;
     }
 
+    const actionUrls: Record<string, string> = {
+      start: `/api/v1/agents/${agentId}/start`,
+      stop: `/api/v1/agents/${agentId}/stop`,
+      suspend: `/api/v1/agents/${agentId}/suspend`,
+      resume: `/api/v1/agents/${agentId}/start`,
+    };
+
     try {
-      const url = action === 'start'
-        ? `/api/v1/agents/${agentId}/start`
-        : `/api/v1/agents/${agentId}/stop`;
-      const response = await apiFetch(url, { method: 'POST' });
+      const response = await apiFetch(actionUrls[action], { method: 'POST' });
 
       if (!response.ok) {
         throw new Error(await extractApiError(response, `Failed to ${action} agent`));
@@ -658,6 +668,19 @@ export class ScionPageAgents extends LitElement {
           ` : nothing}
           ${isAgentRunning(agent)
             ? can(agent._capabilities, 'stop') ? html`
+                ${agent.harnessCapabilities?.resume?.support !== 'no' ? html`
+                  <sl-button
+                    variant="warning"
+                    size="small"
+                    outline
+                    ?loading=${isLoading}
+                    ?disabled=${isLoading}
+                    @click=${() => this.handleAgentAction(agent.id, 'suspend')}
+                  >
+                    <sl-icon slot="prefix" name="pause-circle"></sl-icon>
+                    Suspend
+                  </sl-button>
+                ` : nothing}
                 <sl-button
                   variant="danger"
                   size="small"
@@ -670,19 +693,33 @@ export class ScionPageAgents extends LitElement {
                   Stop
                 </sl-button>
               ` : nothing
-            : can(agent._capabilities, 'start') ? html`
-                <sl-button
-                  variant="success"
-                  size="small"
-                  outline
-                  ?loading=${isLoading}
-                  ?disabled=${isLoading}
-                  @click=${() => this.handleAgentAction(agent.id, 'start')}
-                >
-                  <sl-icon slot="prefix" name="play-circle"></sl-icon>
-                  Start
-                </sl-button>
-              ` : nothing}
+            : agent.phase === 'suspended'
+              ? can(agent._capabilities, 'start') ? html`
+                  <sl-button
+                    variant="success"
+                    size="small"
+                    outline
+                    ?loading=${isLoading}
+                    ?disabled=${isLoading}
+                    @click=${() => this.handleAgentAction(agent.id, 'resume')}
+                  >
+                    <sl-icon slot="prefix" name="play-circle"></sl-icon>
+                    Resume
+                  </sl-button>
+                ` : nothing
+              : can(agent._capabilities, 'start') ? html`
+                  <sl-button
+                    variant="success"
+                    size="small"
+                    outline
+                    ?loading=${isLoading}
+                    ?disabled=${isLoading}
+                    @click=${() => this.handleAgentAction(agent.id, 'start')}
+                  >
+                    <sl-icon slot="prefix" name="play-circle"></sl-icon>
+                    Start
+                  </sl-button>
+                ` : nothing}
           ${can(agent._capabilities, 'delete') ? html`
             <sl-button
               variant="default"
@@ -759,6 +796,18 @@ export class ScionPageAgents extends LitElement {
             ` : nothing}
             ${isAgentRunning(agent)
               ? can(agent._capabilities, 'stop') ? html`
+                  ${agent.harnessCapabilities?.resume?.support !== 'no' ? html`
+                    <sl-button
+                      variant="warning"
+                      size="small"
+                      outline
+                      ?loading=${isLoading}
+                      ?disabled=${isLoading}
+                      @click=${() => this.handleAgentAction(agent.id, 'suspend')}
+                    >
+                      <sl-icon slot="prefix" name="pause-circle"></sl-icon>
+                    </sl-button>
+                  ` : nothing}
                   <sl-button
                     variant="danger"
                     size="small"
@@ -770,18 +819,31 @@ export class ScionPageAgents extends LitElement {
                     <sl-icon slot="prefix" name="stop-circle"></sl-icon>
                   </sl-button>
                 ` : nothing
-              : can(agent._capabilities, 'start') ? html`
-                  <sl-button
-                    variant="success"
-                    size="small"
-                    outline
-                    ?loading=${isLoading}
-                    ?disabled=${isLoading}
-                    @click=${() => this.handleAgentAction(agent.id, 'start')}
-                  >
-                    <sl-icon slot="prefix" name="play-circle"></sl-icon>
-                  </sl-button>
-                ` : nothing}
+              : agent.phase === 'suspended'
+                ? can(agent._capabilities, 'start') ? html`
+                    <sl-button
+                      variant="success"
+                      size="small"
+                      outline
+                      ?loading=${isLoading}
+                      ?disabled=${isLoading}
+                      @click=${() => this.handleAgentAction(agent.id, 'resume')}
+                    >
+                      <sl-icon slot="prefix" name="play-circle"></sl-icon>
+                    </sl-button>
+                  ` : nothing
+                : can(agent._capabilities, 'start') ? html`
+                    <sl-button
+                      variant="success"
+                      size="small"
+                      outline
+                      ?loading=${isLoading}
+                      ?disabled=${isLoading}
+                      @click=${() => this.handleAgentAction(agent.id, 'start')}
+                    >
+                      <sl-icon slot="prefix" name="play-circle"></sl-icon>
+                    </sl-button>
+                  ` : nothing}
             ${can(agent._capabilities, 'delete') ? html`
               <sl-button
                 variant="default"

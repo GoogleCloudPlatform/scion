@@ -66,8 +66,9 @@ const (
 	EventSessionEnd   = "session-end"
 
 	// Agent turn events
-	EventAgentStart = "agent-start"
-	EventAgentEnd   = "agent-end"
+	EventAgentStart  = "agent-start"
+	EventAgentEnd    = "agent-end"
+	EventSubagentEnd = "subagent-end"
 
 	// Tool execution events
 	EventToolStart = "tool-start"

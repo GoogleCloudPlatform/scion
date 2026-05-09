@@ -27,6 +27,7 @@ func TestValidateType(t *testing.T) {
 		{TypeInstruction, false},
 		{TypeInputNeeded, false},
 		{TypeStateChange, false},
+		{TypeAssistantReply, false},
 		{"unknown", true},
 		{"", true},
 	}

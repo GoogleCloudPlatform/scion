@@ -188,3 +188,56 @@ func TestRebuildServerExecutor_MissingRepoPath(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+func TestRebuildContainerBinariesExecutor_MissingRepoPath(t *testing.T) {
+	executor := &RebuildContainerBinariesExecutor{}
+
+	var buf bytes.Buffer
+	err := executor.Run(context.Background(), &buf, nil)
+	if err == nil {
+		t.Fatal("expected error for missing repo path, got nil")
+	}
+	if !strings.Contains(err.Error(), "no repository path") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestRebuildContainerBinariesExecutor_RunsMake(t *testing.T) {
+	repoDir := t.TempDir()
+	stubDir := t.TempDir()
+	logFile := filepath.Join(t.TempDir(), "commands.log")
+
+	// Create a stub make script that records its invocation.
+	script := fmt.Sprintf("#!/bin/sh\necho 'make' \"$@\" >> '%s'\n", logFile)
+	stubPath := filepath.Join(stubDir, "make")
+	if err := os.WriteFile(stubPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed to write stub make: %v", err)
+	}
+
+	t.Setenv("PATH", stubDir+":"+os.Getenv("PATH"))
+	t.Setenv("SCION_DEV_BINARIES", "/tmp/test-dev-binaries")
+
+	executor := &RebuildContainerBinariesExecutor{
+		repoPath: repoDir,
+	}
+
+	var buf bytes.Buffer
+	err := executor.Run(context.Background(), &buf, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("failed to read command log: %v", err)
+	}
+
+	if !strings.Contains(string(logData), "make container-binaries") {
+		t.Errorf("expected 'make container-binaries' in log, got: %s", string(logData))
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "SCION_DEV_BINARIES=/tmp/test-dev-binaries") {
+		t.Errorf("expected output to contain SCION_DEV_BINARIES value, got: %s", output)
+	}
+}

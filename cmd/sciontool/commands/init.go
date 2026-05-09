@@ -554,6 +554,12 @@ func runInit(args []string) int {
 			log.Debug("Hub client not configured - skipping status report")
 		}
 
+		// Warn if user-provided GITHUB_TOKEN overlaps with GitHub App
+		if os.Getenv(hub.EnvUserGitHubToken) == "true" {
+			log.Info("User-provided GITHUB_TOKEN detected alongside GitHub App installation")
+			log.Info("The user's GITHUB_TOKEN will be used for gh CLI; GitHub App tokens will be used for git credential helper")
+		}
+
 		// Start GitHub App token refresh loop if enabled
 		if hub.IsGitHubAppEnabled() && hubClient != nil && hubClient.IsConfigured() {
 			tokenPath := hub.GitHubTokenPath()

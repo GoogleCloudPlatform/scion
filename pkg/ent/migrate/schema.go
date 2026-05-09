@@ -39,7 +39,7 @@ var (
 		{Name: "slug", Type: field.TypeString},
 		{Name: "name", Type: field.TypeString},
 		{Name: "template", Type: field.TypeString, Nullable: true},
-		{Name: "status", Type: field.TypeEnum, Enums: []string{"created", "provisioning", "cloning", "starting", "running", "stopping", "stopped", "error"}, Default: "created"},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"created", "provisioning", "cloning", "starting", "running", "suspended", "stopping", "stopped", "error"}, Default: "created"},
 		{Name: "delegation_enabled", Type: field.TypeBool, Default: false},
 		{Name: "visibility", Type: field.TypeString, Default: "private"},
 		{Name: "created", Type: field.TypeTime},

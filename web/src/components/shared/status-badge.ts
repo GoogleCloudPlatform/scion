@@ -46,8 +46,9 @@ export type StatusType =
   | 'danger'
   | 'info'
   | 'neutral'
-  // Agent lifecycle phase
+  // Agent lifecycle phases
   | 'created'
+  | 'suspended'
   // Agent activity states
   | 'idle'
   | 'thinking'

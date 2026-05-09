@@ -20,6 +20,7 @@ const (
 	AgentActionStatus            = "status"
 	AgentActionStart             = "start"
 	AgentActionStop              = "stop"
+	AgentActionSuspend           = "suspend"
 	AgentActionRestart           = "restart"
 	AgentActionMessage           = "message"
 	AgentActionMessages          = "messages"
@@ -45,7 +46,7 @@ func RuntimeBrokerAgentActionMethod(action string) (string, bool) {
 	switch action {
 	case AgentActionLogs, AgentActionStats, AgentActionHasPrompt:
 		return http.MethodGet, true
-	case AgentActionStart, AgentActionStop, AgentActionRestart, AgentActionMessage, AgentActionExec, AgentActionFinalizeEnv:
+	case AgentActionStart, AgentActionStop, AgentActionSuspend, AgentActionRestart, AgentActionMessage, AgentActionExec, AgentActionFinalizeEnv:
 		return http.MethodPost, true
 	default:
 		return "", false

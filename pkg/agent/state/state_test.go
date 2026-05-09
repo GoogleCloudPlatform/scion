@@ -24,12 +24,13 @@ func TestPhaseIsValid(t *testing.T) {
 		phase Phase
 		want  bool
 	}{
-		// All 8 valid phases.
+		// All 9 valid phases.
 		{PhaseCreated, true},
 		{PhaseProvisioning, true},
 		{PhaseCloning, true},
 		{PhaseStarting, true},
 		{PhaseRunning, true},
+		{PhaseSuspended, true},
 		{PhaseStopping, true},
 		{PhaseStopped, true},
 		{PhaseError, true},
@@ -215,6 +216,11 @@ func TestDisplayStatus(t *testing.T) {
 			want:  "provisioning",
 		},
 		{
+			name:  "suspended returns phase",
+			state: AgentState{Phase: PhaseSuspended},
+			want:  "suspended",
+		},
+		{
 			name:  "stopped returns phase",
 			state: AgentState{Phase: PhaseStopped},
 			want:  "stopped",
@@ -265,6 +271,16 @@ func TestAgentStateValidate(t *testing.T) {
 			name:    "valid created with no activity",
 			state:   AgentState{Phase: PhaseCreated},
 			wantErr: false,
+		},
+		{
+			name:    "valid suspended with no activity",
+			state:   AgentState{Phase: PhaseSuspended},
+			wantErr: false,
+		},
+		{
+			name:    "invalid: activity with suspended phase",
+			state:   AgentState{Phase: PhaseSuspended, Activity: ActivityIdle},
+			wantErr: true,
 		},
 		{
 			name:    "invalid: activity with non-running phase",
@@ -392,8 +408,8 @@ func TestJSONOmitempty(t *testing.T) {
 
 func TestPhasesEnumeration(t *testing.T) {
 	phases := Phases()
-	if len(phases) != 8 {
-		t.Fatalf("Phases() returned %d items, want 8", len(phases))
+	if len(phases) != 9 {
+		t.Fatalf("Phases() returned %d items, want 9", len(phases))
 	}
 
 	// Verify all returned phases are valid.

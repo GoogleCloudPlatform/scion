@@ -60,6 +60,16 @@ USER root
 COPY --from=builder /usr/local/bin/scion /usr/local/bin/scion
 COPY --from=builder /usr/local/bin/sciontool /usr/local/bin/sciontool
 
+# Set up gh CLI wrapper for GitHub App token injection.
+# Move the real gh binary aside and install a shell wrapper that delegates
+# through sciontool gh-wrapper, which reads the latest token from the
+# refreshable token file before exec-ing the real binary.
+RUN if [ -f /usr/bin/gh ]; then \
+      mv /usr/bin/gh /usr/bin/gh.real && \
+      printf '#!/bin/sh\nexec sciontool gh-wrapper "$@"\n' > /usr/bin/gh && \
+      chmod +x /usr/bin/gh; \
+    fi
+
 # Create dev-override bin directory at highest PATH priority.
 # When SCION_DEV_BINARIES is set, this directory is bind-mounted with
 # locally-built binaries, allowing rapid iteration without image rebuilds.

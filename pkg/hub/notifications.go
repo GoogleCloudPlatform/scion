@@ -351,6 +351,7 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 	)
 	structuredMsg.SenderID = watchedAgentID
 	structuredMsg.RecipientID = subscriber.ID
+	structuredMsg.Status = strings.ToUpper(notif.Status)
 
 	if err := dispatcher.DispatchAgentMessage(ctx, subscriber, notif.Message, false, structuredMsg); err != nil {
 		nd.log.Error("Failed to dispatch notification to agent",
@@ -402,6 +403,7 @@ func (nd *NotificationDispatcher) dispatchToChannels(ctx context.Context, sub *s
 	)
 	structuredMsg.SenderID = watchedAgentID
 	structuredMsg.RecipientID = sub.SubscriberID
+	structuredMsg.Status = strings.ToUpper(notif.Status)
 
 	nd.channelRegistry.Dispatch(ctx, structuredMsg)
 }
@@ -419,6 +421,7 @@ func (nd *NotificationDispatcher) dispatchToBroker(ctx context.Context, sub *sto
 	)
 	structuredMsg.SenderID = watchedAgentID
 	structuredMsg.RecipientID = sub.SubscriberID
+	structuredMsg.Status = strings.ToUpper(notif.Status)
 
 	if err := nd.brokerProxy.PublishUserMessage(ctx, sub.GroveID, sub.SubscriberID, structuredMsg); err != nil {
 		nd.log.Error("Failed to dispatch notification through broker",

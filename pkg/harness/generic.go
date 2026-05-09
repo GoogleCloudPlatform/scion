@@ -51,6 +51,7 @@ func (g *Generic) AdvancedCapabilities() api.HarnessAdvancedCapabilities {
 			AuthFile: api.CapabilityField{Support: api.SupportYes},
 			VertexAI: api.CapabilityField{Support: api.SupportYes},
 		},
+		Resume: api.CapabilityField{Support: api.SupportNo, Reason: "Generic harness does not support session resume"},
 	}
 }
 

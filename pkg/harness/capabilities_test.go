@@ -30,6 +30,7 @@ func TestAdvancedCapabilitiesDefaults(t *testing.T) {
 		expectAuthFile      api.SupportLevel
 		expectVertexAI      api.SupportLevel
 		expectSystemPrompt  api.SupportLevel
+		expectResume        api.SupportLevel
 	}{
 		{
 			name:                "gemini",
@@ -40,6 +41,7 @@ func TestAdvancedCapabilitiesDefaults(t *testing.T) {
 			expectAuthFile:      api.SupportYes,
 			expectVertexAI:      api.SupportYes,
 			expectSystemPrompt:  api.SupportYes,
+			expectResume:        api.SupportYes,
 		},
 		{
 			name:                "claude",
@@ -50,6 +52,7 @@ func TestAdvancedCapabilitiesDefaults(t *testing.T) {
 			expectAuthFile:      api.SupportYes,
 			expectVertexAI:      api.SupportYes,
 			expectSystemPrompt:  api.SupportYes,
+			expectResume:        api.SupportYes,
 		},
 		{
 			name:                "opencode",
@@ -60,6 +63,7 @@ func TestAdvancedCapabilitiesDefaults(t *testing.T) {
 			expectAuthFile:      api.SupportYes,
 			expectVertexAI:      api.SupportNo,
 			expectSystemPrompt:  api.SupportPartial,
+			expectResume:        api.SupportYes,
 		},
 		{
 			name:                "codex",
@@ -70,6 +74,7 @@ func TestAdvancedCapabilitiesDefaults(t *testing.T) {
 			expectAuthFile:      api.SupportYes,
 			expectVertexAI:      api.SupportNo,
 			expectSystemPrompt:  api.SupportNo,
+			expectResume:        api.SupportYes,
 		},
 		{
 			name:                "generic",
@@ -80,6 +85,7 @@ func TestAdvancedCapabilitiesDefaults(t *testing.T) {
 			expectAuthFile:      api.SupportYes,
 			expectVertexAI:      api.SupportYes,
 			expectSystemPrompt:  api.SupportPartial,
+			expectResume:        api.SupportNo,
 		},
 	}
 
@@ -103,6 +109,9 @@ func TestAdvancedCapabilitiesDefaults(t *testing.T) {
 			}
 			if caps.Prompts.SystemPrompt.Support != tc.expectSystemPrompt {
 				t.Fatalf("system_prompt = %q, want %q", caps.Prompts.SystemPrompt.Support, tc.expectSystemPrompt)
+			}
+			if caps.Resume.Support != tc.expectResume {
+				t.Fatalf("resume = %q, want %q", caps.Resume.Support, tc.expectResume)
 			}
 		})
 	}

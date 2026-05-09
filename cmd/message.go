@@ -39,7 +39,7 @@ var msgAt string
 var msgPlain bool
 var msgRaw bool
 var msgAttach []string
-var msgNotify bool
+var msgNoNotify bool
 
 // messageCmd represents the message command
 var messageCmd = &cobra.Command{
@@ -109,11 +109,6 @@ Examples:
 			}
 		}
 
-		// Validate --notify restrictions
-		if msgNotify && (msgBroadcast || msgAll) {
-			return fmt.Errorf("--notify cannot be combined with --broadcast or --all")
-		}
-
 		// Validate user-recipient restrictions
 		if userRecipient != "" {
 			if msgBroadcast || msgAll {
@@ -165,18 +160,13 @@ Examples:
 			return scheduleMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgPlain)
 		}
 
-		// --notify requires Hub mode
-		if msgNotify && hubCtx == nil {
-			return fmt.Errorf("--notify requires Hub mode (use 'scion hub enable' first)")
-		}
-
 		// User-targeted messages: route to outbound-message endpoint
 		if userRecipient != "" {
 			return sendOutboundMessageViaHub(hubCtx, userRecipient, message, msgInterrupt)
 		}
 
 		if hubCtx != nil {
-			return sendMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgBroadcast, msgAll, msgNotify)
+			return sendMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgBroadcast, msgAll, !msgNoNotify)
 		}
 
 		// Local mode — structured messages are only available in Hub mode,
@@ -515,6 +505,6 @@ func init() {
 	messageCmd.Flags().BoolVar(&msgPlain, "plain", false, "Mark for plain-text delivery (message still flows as structured JSON internally)")
 	messageCmd.Flags().BoolVar(&msgRaw, "raw", false, "Send literal bytes via tmux send-keys with no trailing Enter (supports control keys like arrows and Escape)")
 	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable")
-	messageCmd.Flags().BoolVar(&msgNotify, "notify", false, "Subscribe to notifications for the target agent (completed, waiting for input, etc.)")
+	messageCmd.Flags().BoolVar(&msgNoNotify, "no-notify", false, "Do not subscribe to notifications for the target agent")
 	rootCmd.AddCommand(messageCmd)
 }

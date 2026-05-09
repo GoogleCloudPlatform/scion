@@ -91,9 +91,10 @@ func (d *ClaudeDialect) Parse(data map[string]interface{}) (*hooks.Event, error)
 	// Extract file_path from tool_input/tool_response objects
 	extractFilePath(data, &event.Data)
 
-	// For end-of-turn events (Stop / SubagentStop), Claude Code passes
-	// the final assistant text so downstream handlers can surface it as
-	// an outbound agent→user message.
+	// For main-agent end-of-turn events (Stop only — not SubagentStop),
+	// Claude Code passes the final assistant text so downstream handlers
+	// can surface it as an outbound agent→user message. Subagent turns
+	// are internal to the harness and should not drive scion agent state.
 	//
 	// Preferred source: the top-level "last_assistant_message" field,
 	// which Claude Code 2.1+ includes in the Stop hook payload directly.
@@ -231,8 +232,10 @@ func (d *ClaudeDialect) normalizeEventName(name string) string {
 		return hooks.EventToolStart
 	case "PostToolUse":
 		return hooks.EventToolEnd
-	case "Stop", "SubagentStop":
+	case "Stop":
 		return hooks.EventAgentEnd
+	case "SubagentStop":
+		return hooks.EventSubagentEnd
 	case "Notification":
 		return hooks.EventNotification
 	case "BeforeModel", "ModelRequest":

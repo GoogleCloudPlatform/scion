@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -1782,7 +1783,7 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 	switch action {
 	case api.AgentActionStatus:
 		s.updateAgentStatus(w, r, id)
-	case api.AgentActionStart, api.AgentActionStop, api.AgentActionRestart:
+	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend, api.AgentActionRestart:
 		s.handleAgentLifecycle(w, r, id, action)
 	case api.AgentActionMessage:
 		s.handleAgentMessage(w, r, id)
@@ -2575,6 +2576,30 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			s.syncWorkspaceOnStop(ctx, agent)
 			dispatchErr = dispatcher.DispatchAgentStop(ctx, agent)
 		}
+	case api.AgentActionSuspend:
+		// Validate that the agent's harness supports session resume.
+		harnessName := ""
+		if agent.AppliedConfig != nil {
+			harnessName = agent.AppliedConfig.HarnessConfig
+		}
+		if harnessName != "" {
+			h := harness.New(harnessName)
+			caps := h.AdvancedCapabilities()
+			if caps.Resume.Support == api.SupportNo {
+				reason := caps.Resume.Reason
+				if reason == "" {
+					reason = "harness does not support session resume"
+				}
+				writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+					fmt.Sprintf("Cannot suspend agent: %s. Use 'stop' instead.", reason), nil)
+				return
+			}
+		}
+		newPhase = string(state.PhaseSuspended)
+		if dispatcher != nil && agent.RuntimeBrokerID != "" {
+			s.syncWorkspaceOnStop(ctx, agent)
+			dispatchErr = dispatcher.DispatchAgentStop(ctx, agent)
+		}
 	case api.AgentActionRestart:
 		newPhase = string(state.PhaseRunning)
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
@@ -2606,9 +2631,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	statusUpdate := store.AgentStatusUpdate{
 		Phase: newPhase,
 	}
-	// When stopping, also update container status so the hub immediately
+	// When stopping or suspending, also update container status so the hub immediately
 	// reflects the stopped state without waiting for the next heartbeat.
-	if action == api.AgentActionStop {
+	if action == api.AgentActionStop || action == api.AgentActionSuspend {
 		statusUpdate.ContainerStatus = "stopped"
 		statusUpdate.Activity = ""
 	}
@@ -4535,10 +4560,21 @@ func (s *Server) handleGroveAgentAction(w http.ResponseWriter, r *http.Request, 
 
 	// For interactive actions, enforce policy-based authorization (owner or admin only)
 	switch action {
-	case api.AgentActionStart, api.AgentActionStop, api.AgentActionRestart, api.AgentActionMessage, api.AgentActionExec:
+	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend, api.AgentActionRestart, api.AgentActionMessage, api.AgentActionExec:
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 			decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionAttach)
 			if !decision.Allowed {
+				slog.Warn("agent authz check failed",
+					"agent_id", agent.ID,
+					"agent_slug", agent.Slug,
+					"agent_owner_id", agent.OwnerID,
+					"agent_created_by", agent.CreatedBy,
+					"user_id", userIdent.ID(),
+					"user_email", userIdent.Email(),
+					"user_role", userIdent.Role(),
+					"action", action,
+					"decision_reason", decision.Reason,
+				)
 				writeError(w, http.StatusForbidden, ErrCodeForbidden,
 					"Only the agent's creator can interact with it", nil)
 				return
@@ -4549,7 +4585,7 @@ func (s *Server) handleGroveAgentAction(w http.ResponseWriter, r *http.Request, 
 	switch action {
 	case api.AgentActionStatus:
 		s.updateAgentStatus(w, r, agent.ID)
-	case api.AgentActionStart, api.AgentActionStop, api.AgentActionRestart:
+	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend, api.AgentActionRestart:
 		s.handleAgentLifecycle(w, r, agent.ID, action)
 	case api.AgentActionMessage:
 		s.handleAgentMessage(w, r, agent.ID)
@@ -8281,9 +8317,57 @@ func (s *Server) handleExistingAgent(
 	if existingAgent == nil {
 		return existingAgentNone
 	}
+	s.agentLifecycleLog.Info("handleExistingAgent: found existing agent",
+		"slug", existingAgent.Slug,
+		"existing_agent_id", existingAgent.ID,
+		"existing_owner_id", existingAgent.OwnerID,
+		"existing_phase", existingAgent.Phase,
+		"caller_id", createdBy,
+	)
 	cleanupMode := req.CleanupMode
 	if cleanupMode == "" {
 		cleanupMode = "strict"
+	}
+
+	// Suspended agents are restarted in-place (not deleted), preserving harness state.
+	if !req.ProvisionOnly && existingAgent.Phase == string(state.PhaseSuspended) {
+		if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
+			existingAgent.RuntimeBrokerID = runtimeBrokerID
+		}
+
+		dispatcher := s.GetDispatcher()
+		if dispatcher == nil || existingAgent.RuntimeBrokerID == "" {
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				"cannot resume agent: no runtime broker available", nil)
+			return existingAgentErrored
+		}
+
+		if req.Task != "" && existingAgent.AppliedConfig != nil {
+			existingAgent.AppliedConfig.Task = req.Task
+			existingAgent.AppliedConfig.Attach = req.Attach
+		}
+
+		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task); err != nil {
+			RuntimeError(w, "Failed to resume suspended agent: "+err.Error())
+			return existingAgentErrored
+		}
+
+		if existingAgent.Phase == string(state.PhaseSuspended) {
+			existingAgent.Phase = string(state.PhaseRunning)
+		}
+		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
+			s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
+		}
+
+		if req.Notify {
+			s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.GroveID, notifySubscriberType, notifySubscriberID, createdBy)
+		}
+
+		s.enrichAgent(ctx, existingAgent, grove, nil)
+		writeJSON(w, http.StatusOK, CreateAgentResponse{
+			Agent: existingAgent,
+		})
+		return existingAgentStarted
 	}
 
 	// Phase 1: Stale cleanup — agent is running/stopped/error and caller wants a real start.

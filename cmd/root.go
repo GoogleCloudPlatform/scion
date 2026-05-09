@@ -124,6 +124,14 @@ return an error instead of blocking.`,
 			}
 		}
 
+		// Agent mode implies non-interactive: prompts that require stdin
+		// will hang indefinitely inside an unattended agent container.
+		if !nonInteractive && resolveMode() == ModeAgent {
+			nonInteractive = true
+			autoConfirm = true
+			util.Debugf("agent mode detected, non-interactive mode auto-enabled")
+		}
+
 		if outputFormat != "" {
 			if outputFormat != "json" && outputFormat != "plain" {
 				return fmt.Errorf("invalid format: %s (allowed: json, plain)", outputFormat)

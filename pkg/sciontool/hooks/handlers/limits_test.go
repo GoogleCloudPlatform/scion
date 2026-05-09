@@ -180,15 +180,17 @@ func TestLimitsHandler_TurnLimitDetection(t *testing.T) {
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 	statusPath := filepath.Join(tmpDir, "agent-info.json")
+	triggerPath := filepath.Join(tmpDir, "scion-limits-exceeded")
 
 	err := InitLimitsFile(limitsPath, 3, 0)
 	require.NoError(t, err)
 
 	h := &LimitsHandler{
-		maxTurns:      3,
-		maxModelCalls: 0,
-		limitsPath:    limitsPath,
-		statusHandler: &StatusHandler{StatusPath: statusPath},
+		maxTurns:        3,
+		maxModelCalls:   0,
+		limitsPath:      limitsPath,
+		triggerFilePath: triggerPath,
+		statusHandler:   &StatusHandler{StatusPath: statusPath},
 	}
 
 	// Simulate 2 turns (under limit)
@@ -217,15 +219,17 @@ func TestLimitsHandler_ModelCallLimitDetection(t *testing.T) {
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 	statusPath := filepath.Join(tmpDir, "agent-info.json")
+	triggerPath := filepath.Join(tmpDir, "scion-limits-exceeded")
 
 	err := InitLimitsFile(limitsPath, 0, 2)
 	require.NoError(t, err)
 
 	h := &LimitsHandler{
-		maxTurns:      0,
-		maxModelCalls: 2,
-		limitsPath:    limitsPath,
-		statusHandler: &StatusHandler{StatusPath: statusPath},
+		maxTurns:        0,
+		maxModelCalls:   2,
+		limitsPath:      limitsPath,
+		triggerFilePath: triggerPath,
+		statusHandler:   &StatusHandler{StatusPath: statusPath},
 	}
 
 	// First model call - under limit
@@ -377,15 +381,18 @@ func TestLimitsTriggerFileConstant(t *testing.T) {
 }
 
 func TestSignalLimitsExceeded_CreatesTriggerFile(t *testing.T) {
-	// Clean up before and after
-	os.Remove(LimitsTriggerFile)
-	defer os.Remove(LimitsTriggerFile)
+	tmpDir := t.TempDir()
+	triggerPath := filepath.Join(tmpDir, "scion-limits-exceeded")
 
-	err := signalLimitsExceeded()
+	h := &LimitsHandler{
+		triggerFilePath: triggerPath,
+	}
+
+	err := h.signalLimitsExceeded()
 	assert.NoError(t, err)
 
 	// Verify the trigger file was created
-	_, err = os.Stat(LimitsTriggerFile)
+	_, err = os.Stat(triggerPath)
 	assert.NoError(t, err, "trigger file should exist after signalLimitsExceeded")
 }
 

@@ -228,11 +228,19 @@ func (p *MessageBrokerProxy) PublishBroadcast(ctx context.Context, groveID strin
 	return p.broker.Publish(ctx, broker.TopicGroveBroadcast(groveID), msg)
 }
 
-// PublishUserMessage publishes a message to the user-targeted broker topic.
-// This routes an agent-to-human message through the broker so the proxy can
-// deliver it to the SSE event publisher and the message store.
+// PublishUserMessage publishes a message to the user-targeted broker topic and
+// handles local delivery (DB persistence + SSE) directly. The external broker
+// receives the message for chat-app delivery while the hub persists and
+// publishes the SSE event so the web UI is updated immediately.
 func (p *MessageBrokerProxy) PublishUserMessage(ctx context.Context, groveID, userID string, msg *messages.StructuredMessage) error {
 	topic := broker.TopicUserMessages(groveID, userID)
+
+	// Deliver locally: persist to message store and publish SSE event.
+	// This is necessary because the BrokerPluginAdapter does not invoke
+	// local subscription handlers — it only forwards via RPC.
+	p.deliverToUser(ctx, groveID, topic, msg)
+
+	// Publish to external broker for chat-app / external delivery.
 	return p.broker.Publish(ctx, topic, msg)
 }
 

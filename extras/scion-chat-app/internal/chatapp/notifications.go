@@ -121,7 +121,11 @@ func (n *NotificationRelay) handleUserMessage(ctx context.Context, groveID strin
 		return nil
 	}
 
-	if msg.Type != messages.TypeInstruction {
+	if msg.Type == messages.TypeAssistantReply {
+		if len(msg.Msg) > 500 {
+			msg.Msg = msg.Msg[:500] + fmt.Sprintf("\n[%d chars truncated]", len(msg.Msg)-500)
+		}
+	} else if msg.Type != messages.TypeInstruction {
 		n.log.Debug("routing non-instruction user message to notification path",
 			"type", msg.Type,
 			"sender", msg.Sender,
@@ -284,7 +288,12 @@ func notificationStyle(activity string) (string, notificationStyleInfo) {
 
 // extractActivity determines the activity type from a message.
 func extractActivity(msg *messages.StructuredMessage) string {
-	// Try to extract activity from the message content
+	if msg.Status != "" {
+		return strings.ToUpper(msg.Status)
+	}
+
+	// Legacy fallback: infer activity from message content for messages
+	// that pre-date the structured Status field.
 	content := strings.ToUpper(msg.Msg)
 
 	activities := []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR", "DELETED"}
@@ -294,7 +303,6 @@ func extractActivity(msg *messages.StructuredMessage) string {
 		}
 	}
 
-	// Fallback based on message type
 	switch msg.Type {
 	case messages.TypeInputNeeded:
 		return "WAITING_FOR_INPUT"

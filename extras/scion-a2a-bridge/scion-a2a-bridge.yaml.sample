@@ -1,0 +1,107 @@
+# scion-a2a-bridge configuration
+#
+# Environment variables can be referenced as ${VAR_NAME} and will be
+# expanded before parsing.
+
+# A2A protocol server settings.
+bridge:
+  # Address for the A2A HTTP server (JSON-RPC + agent card endpoints).
+  listen_address: ":8443"
+
+  # Public-facing URL where A2A clients reach this bridge. Used to
+  # construct agent card URLs and self-referencing links.
+  external_url: "https://a2a.example.com"
+
+  # Operator identity shown in agent cards.
+  provider:
+    organization: "My Org"
+    url: "https://example.com"
+
+# Scion Hub connection.
+hub:
+  # Hub API endpoint.
+  endpoint: "https://hub.example.com"
+
+  # Hub admin user email. The bridge authenticates to the Hub as this
+  # user for agent operations (list, get, send message).
+  user: "a2a-bridge@example.com"
+
+  # GCP project ID for Secret Manager auto-discovery (optional if
+  # signing_key or signing_key_secret is set explicitly).
+  # project: "my-gcp-project"
+
+  # Path to a file containing the Hub's base64-encoded HS256 signing
+  # key. Exactly one of signing_key or signing_key_secret is required.
+  signing_key: "/path/to/signing-key.b64"
+
+  # Alternatively, a GCP Secret Manager resource name:
+  # signing_key_secret: "projects/my-project/secrets/hub-signing-key"
+
+# Broker plugin RPC server. The Hub connects to this address to push
+# agent messages back to the bridge.
+plugin:
+  listen_address: "localhost:9090"
+
+# External authentication for A2A clients calling the bridge.
+auth:
+  # Supported schemes: "apiKey" (default for MVP), "bearer".
+  scheme: "apiKey"
+
+  # Static API key. Clients pass this in the X-API-Key header.
+  # Use an env var reference for production: "${A2A_API_KEY}"
+  api_key: "${A2A_API_KEY}"
+
+# Groves exposed through the bridge. Each grove maps to a set of
+# Scion agents that become discoverable A2A endpoints.
+groves:
+  - slug: "my-grove"
+
+    # Template used when auto-provisioning new agents for unknown
+    # contextIds. Leave empty to require pre-created agents.
+    default_template: "default"
+
+    # Whether to create agents on demand when a new context arrives.
+    auto_provision: false
+
+    # Explicit allowlist of agents to expose. Empty means all agents
+    # in the grove are accessible.
+    exposed_agents: []
+    # exposed_agents:
+    #   - "research-agent"
+    #   - "coding-agent"
+
+# SQLite state database location.
+state:
+  database: "/var/lib/scion-a2a-bridge/state.db"
+
+# Timeout configuration.
+timeouts:
+  # Maximum wait time for blocking SendMessage before returning a
+  # timeout error to the A2A client.
+  send_message: 120s
+
+  # Interval between SSE keepalive pings for streaming connections.
+  sse_keepalive: 30s
+
+  # Maximum number of retries for push notification webhook delivery.
+  push_retry_max: 3
+
+# Request rate limiting. Limits are applied per API key (or per remote
+# address when no key is provided).
+rate_limit:
+  # Enable or disable rate limiting.
+  enabled: true
+
+  # Sustained requests per second allowed per key.
+  requests_per_sec: 10
+
+  # Maximum burst of requests allowed before throttling kicks in.
+  burst: 20
+
+# Structured logging.
+logging:
+  # Log level: debug, info, warn, error.
+  level: "info"
+
+  # Output format: "json" for structured JSON, "text" for human-readable.
+  format: "json"

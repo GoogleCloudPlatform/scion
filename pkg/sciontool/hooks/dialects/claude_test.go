@@ -140,6 +140,19 @@ func TestClaudeDialect_StopEventFallsBackToTranscript(t *testing.T) {
 	assert.Equal(t, "fallback text", event.Data.AssistantText)
 }
 
+func TestClaudeDialect_SubagentStopDoesNotExtract(t *testing.T) {
+	d := NewClaudeDialect()
+	event, err := d.Parse(map[string]interface{}{
+		"hook_event_name":        "SubagentStop",
+		"last_assistant_message": "subagent output",
+		"transcript_path":        "/does/not/matter",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, hooks.EventSubagentEnd, event.Name)
+	assert.Empty(t, event.Data.AssistantText,
+		"SubagentStop must not extract assistant text — only main agent Stop drives state")
+}
+
 func TestClaudeDialect_NonStopEventDoesNotExtract(t *testing.T) {
 	d := NewClaudeDialect()
 	event, err := d.Parse(map[string]interface{}{
@@ -215,7 +228,7 @@ func TestClaudeDialect_Parse(t *testing.T) {
 			input: map[string]interface{}{
 				"hook_event_name": "SubagentStop",
 			},
-			wantName: hooks.EventAgentEnd,
+			wantName: hooks.EventSubagentEnd,
 		},
 		{
 			name: "Notification event",

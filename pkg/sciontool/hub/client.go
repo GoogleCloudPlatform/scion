@@ -524,6 +524,11 @@ const (
 	EnvGitHubTokenPath = "SCION_GITHUB_TOKEN_PATH"
 	// DefaultGitHubTokenPath is the default path for the GitHub token file.
 	DefaultGitHubTokenPath = "/tmp/.github-token"
+	// EnvUserGitHubToken is set to "true" when the user has explicitly
+	// provided their own GITHUB_TOKEN alongside a GitHub App installation.
+	// When set, the gh CLI wrapper skips token injection so the user's
+	// token takes precedence.
+	EnvUserGitHubToken = "SCION_USER_GITHUB_TOKEN"
 )
 
 // GitHubTokenRefreshResponse is the response from the GitHub token refresh endpoint.

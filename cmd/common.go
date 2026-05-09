@@ -415,6 +415,21 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		}
 	}
 
+	// Determine harness resume behavior from the saved phase.
+	// Suspended agents always get harness resume (--continue/--resume),
+	// even when invoked via 'start' (implicit resume). Stopped agents
+	// always get a fresh session, even when invoked via 'resume'.
+	effectiveResume := resume
+	savedPhase := agent.GetSavedPhase(agentName, grovePath)
+	if savedPhase == string(state.PhaseSuspended) {
+		effectiveResume = true
+		if !resume {
+			statusf("Resuming agent '%s'...\n", agentName)
+		}
+	} else if resume && savedPhase == string(state.PhaseStopped) {
+		effectiveResume = false
+	}
+
 	opts := api.StartOptions{
 		Name:          agentName,
 		Task:          effectiveTask,
@@ -424,7 +439,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		HarnessAuth:   effectiveHarnessAuth,
 		Image:         resolvedImage,
 		GrovePath:     grovePath,
-		Resume:        resume,
+		Resume:        effectiveResume,
 		Detached:      detached,
 		NoAuth:        noAuth,
 		Branch:        effectiveBranch,
@@ -703,6 +718,19 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+
+	// Check if the agent is suspended on the hub; if so, start implicitly
+	// resumes the session. This check is best-effort — if it fails (agent
+	// doesn't exist yet), we fall through to "Starting".
+	if !resume {
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		existing, getErr := hubCtx.Client.GroveAgents(groveID).Get(checkCtx, agentName)
+		checkCancel()
+		if getErr == nil && existing != nil && existing.Phase == string(state.PhaseSuspended) {
+			resume = true
+			req.Resume = true
+		}
+	}
 
 	if !isJSONOutput() {
 		action := "Starting"

@@ -184,6 +184,7 @@ export type AgentPhase =
   | 'running'
   | 'stopping'
   | 'stopped'
+  | 'suspended'
   | 'error';
 
 /**
@@ -355,6 +356,7 @@ export interface HarnessAdvancedCapabilities {
     oauth_token: CapabilityField;
     vertex_ai: CapabilityField;
   };
+  resume?: CapabilityField;
 }
 
 /**

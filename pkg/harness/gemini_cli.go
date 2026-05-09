@@ -55,6 +55,7 @@ func (g *GeminiCLI) AdvancedCapabilities() api.HarnessAdvancedCapabilities {
 			AuthFile: api.CapabilityField{Support: api.SupportYes},
 			VertexAI: api.CapabilityField{Support: api.SupportYes},
 		},
+		Resume: api.CapabilityField{Support: api.SupportYes},
 	}
 }
 

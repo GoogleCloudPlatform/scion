@@ -42,8 +42,8 @@ source <(scion completion bash)
 To load completions for each session, execute once:
 ```bash
 # Linux:
-scion completion bash > /etc/bash_completion.d/scion
+scion completion bash | sudo tee /etc/bash_completion.d/scion
 
 # macOS:
-scion completion bash > /usr/local/etc/bash_completion.d/scion
+scion completion bash | sudo tee /usr/local/etc/bash_completion.d/scion
 ```

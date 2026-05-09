@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -287,6 +288,11 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			repoPath:   mc.RepoPath,
 			repoBranch: mc.RepoBranch,
 		}, nil
+	case "rebuild-container-binaries":
+		log.Debug("Resolved rebuild-container-binaries executor", "repo_path", mc.RepoPath)
+		return &RebuildContainerBinariesExecutor{
+			repoPath: mc.RepoPath,
+		}, nil
 	default:
 		return nil, fmt.Errorf("no executor registered for operation %q", key)
 	}
@@ -469,7 +475,11 @@ func (s *Server) listMaintenanceOperations(w http.ResponseWriter, r *http.Reques
 	var migrations []maintenanceOperationResponse
 	var operations []maintenanceOperationWithLastRunResponse
 
+	devBinaries := os.Getenv("SCION_DEV_BINARIES") != ""
 	for _, op := range ops {
+		if op.Key == "rebuild-container-binaries" && !devBinaries {
+			continue
+		}
 		if op.Category == store.MaintenanceCategoryMigration {
 			migrations = append(migrations, toMaintenanceOperationResponse(op))
 		} else {

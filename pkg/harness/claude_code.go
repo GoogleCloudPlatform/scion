@@ -58,6 +58,7 @@ func (c *ClaudeCode) AdvancedCapabilities() api.HarnessAdvancedCapabilities {
 			OAuthToken: api.CapabilityField{Support: api.SupportYes},
 			VertexAI:   api.CapabilityField{Support: api.SupportYes},
 		},
+		Resume: api.CapabilityField{Support: api.SupportYes},
 	}
 }
 

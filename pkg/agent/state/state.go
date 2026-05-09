@@ -30,6 +30,7 @@ const (
 	PhaseCloning      Phase = "cloning"
 	PhaseStarting     Phase = "starting"
 	PhaseRunning      Phase = "running"
+	PhaseSuspended    Phase = "suspended"
 	PhaseStopping     Phase = "stopping"
 	PhaseStopped      Phase = "stopped"
 	PhaseError        Phase = "error"
@@ -42,6 +43,7 @@ var allPhases = []Phase{
 	PhaseCloning,
 	PhaseStarting,
 	PhaseRunning,
+	PhaseSuspended,
 	PhaseStopping,
 	PhaseStopped,
 	PhaseError,
