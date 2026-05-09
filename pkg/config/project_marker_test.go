@@ -31,7 +31,7 @@ func TestGroveMarker_ShortUUID(t *testing.T) {
 		{"12345678", "12345678"},
 	}
 	for _, tt := range tests {
-		m := GroveMarker{GroveID: tt.groveID, GroveSlug: "test"}
+		m := GroveMarker{ProjectID: tt.groveID, GroveSlug: "test"}
 		if got := m.ShortUUID(); got != tt.want {
 			t.Errorf("ShortUUID(%q) = %q, want %q", tt.groveID, got, tt.want)
 		}
@@ -40,7 +40,7 @@ func TestGroveMarker_ShortUUID(t *testing.T) {
 
 func TestGroveMarker_DirName(t *testing.T) {
 	m := GroveMarker{
-		GroveID:   "550e8400-e29b-41d4-a716-446655440000",
+		ProjectID:   "550e8400-e29b-41d4-a716-446655440000",
 		GroveName: "My Project",
 		GroveSlug: "my-project",
 	}
@@ -55,7 +55,7 @@ func TestGroveMarker_ExternalGrovePath(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 
 	m := GroveMarker{
-		GroveID:   "550e8400-e29b-41d4-a716-446655440000",
+		ProjectID:   "550e8400-e29b-41d4-a716-446655440000",
 		GroveName: "My Project",
 		GroveSlug: "my-project",
 	}
@@ -76,7 +76,7 @@ func TestWriteAndReadGroveMarker(t *testing.T) {
 	markerPath := filepath.Join(tmpDir, ".scion")
 
 	original := &GroveMarker{
-		GroveID:   "550e8400-e29b-41d4-a716-446655440000",
+		ProjectID:   "550e8400-e29b-41d4-a716-446655440000",
 		GroveName: "Test Project",
 		GroveSlug: "test-project",
 	}
@@ -100,8 +100,8 @@ func TestWriteAndReadGroveMarker(t *testing.T) {
 		t.Fatalf("ReadGroveMarker failed: %v", err)
 	}
 
-	if got.GroveID != original.GroveID {
-		t.Errorf("GroveID = %q, want %q", got.GroveID, original.GroveID)
+	if got.ProjectID != original.ProjectID {
+		t.Errorf("ProjectID = %q, want %q", got.ProjectID, original.ProjectID)
 	}
 	if got.GroveName != original.GroveName {
 		t.Errorf("GroveName = %q, want %q", got.GroveName, original.GroveName)
@@ -132,7 +132,7 @@ func TestResolveGroveMarker(t *testing.T) {
 	markerPath := filepath.Join(tmpDir, ".scion")
 
 	marker := &GroveMarker{
-		GroveID:   "abcdef12-3456-7890-abcd-ef1234567890",
+		ProjectID:   "abcdef12-3456-7890-abcd-ef1234567890",
 		GroveName: "My App",
 		GroveSlug: "my-app",
 	}
@@ -155,19 +155,19 @@ func TestIsGroveMarkerFile(t *testing.T) {
 	// File case
 	filePath := filepath.Join(tmpDir, "marker")
 	os.WriteFile(filePath, []byte("test"), 0644)
-	if !IsGroveMarkerFile(filePath) {
+	if !IsProjectMarkerFile(filePath) {
 		t.Error("expected file to be recognized as marker")
 	}
 
 	// Directory case
 	dirPath := filepath.Join(tmpDir, "dir")
 	os.MkdirAll(dirPath, 0755)
-	if IsGroveMarkerFile(dirPath) {
+	if IsProjectMarkerFile(dirPath) {
 		t.Error("expected directory to NOT be recognized as marker")
 	}
 
 	// Non-existent case
-	if IsGroveMarkerFile(filepath.Join(tmpDir, "nonexistent")) {
+	if IsProjectMarkerFile(filepath.Join(tmpDir, "nonexistent")) {
 		t.Error("expected non-existent path to NOT be recognized as marker")
 	}
 }
@@ -237,7 +237,7 @@ func TestFindProjectRoot_MarkerFile(t *testing.T) {
 	// Create a project directory with a .scion marker file
 	projectDir := t.TempDir()
 	marker := &GroveMarker{
-		GroveID:   "550e8400-e29b-41d4-a716-446655440000",
+		ProjectID:   "550e8400-e29b-41d4-a716-446655440000",
 		GroveName: "test-project",
 		GroveSlug: "test-project",
 	}
@@ -271,18 +271,18 @@ func TestWriteAndReadGroveID(t *testing.T) {
 		t.Fatalf("WriteGroveID failed: %v", err)
 	}
 
-	got, err := ReadGroveID(scionDir)
+	got, err := ReadProjectID(scionDir)
 	if err != nil {
-		t.Fatalf("ReadGroveID failed: %v", err)
+		t.Fatalf("ReadProjectID failed: %v", err)
 	}
 	if got != groveID {
-		t.Errorf("ReadGroveID() = %q, want %q", got, groveID)
+		t.Errorf("ReadProjectID() = %q, want %q", got, groveID)
 	}
 }
 
 func TestReadGroveID_NotExist(t *testing.T) {
 	tmpDir := t.TempDir()
-	_, err := ReadGroveID(tmpDir)
+	_, err := ReadProjectID(tmpDir)
 	if err == nil {
 		t.Fatal("expected error for missing grove-id")
 	}
@@ -529,8 +529,8 @@ func TestWriteWorkspaceMarker(t *testing.T) {
 		t.Fatalf("ReadGroveMarker failed: %v", err)
 	}
 
-	if marker.GroveID != "grove-id-123" {
-		t.Errorf("GroveID = %q, want %q", marker.GroveID, "grove-id-123")
+	if marker.ProjectID != "grove-id-123" {
+		t.Errorf("ProjectID = %q, want %q", marker.ProjectID, "grove-id-123")
 	}
 	if marker.GroveName != "my-project" {
 		t.Errorf("GroveName = %q, want %q", marker.GroveName, "my-project")
@@ -557,7 +557,7 @@ func TestWriteWorkspaceMarker_MissingRequiredFields(t *testing.T) {
 }
 
 func TestGetGroveName_ExternalDir(t *testing.T) {
-	// Test that GetGroveName extracts the slug from external directory names
+	// Test that GetProjectName extracts the slug from external directory names
 	tests := []struct {
 		dir  string
 		want string
@@ -567,9 +567,9 @@ func TestGetGroveName_ExternalDir(t *testing.T) {
 		{"/home/user/projects/simple/.scion", "simple"},
 	}
 	for _, tt := range tests {
-		got := GetGroveName(tt.dir)
+		got := GetProjectName(tt.dir)
 		if got != tt.want {
-			t.Errorf("GetGroveName(%q) = %q, want %q", tt.dir, got, tt.want)
+			t.Errorf("GetProjectName(%q) = %q, want %q", tt.dir, got, tt.want)
 		}
 	}
 }

@@ -319,9 +319,9 @@ hub:
 		t.Fatalf("LoadSettingsKoanf failed: %v", err)
 	}
 
-	// The v1 hub.grove_id should be normalized to the top-level GroveID
-	if s.GroveID != "test-grove-uuid-1234" {
-		t.Errorf("expected top-level GroveID 'test-grove-uuid-1234', got '%s'", s.GroveID)
+	// The v1 hub.grove_id should be normalized to the top-level ProjectID
+	if s.ProjectID != "test-grove-uuid-1234" {
+		t.Errorf("expected top-level ProjectID 'test-grove-uuid-1234', got '%s'", s.ProjectID)
 	}
 
 	// Hub should still be populated
@@ -368,8 +368,8 @@ hub:
 	}
 
 	// hub.grove_id (canonical v1 location) should win
-	if s.GroveID != "hub-level-id" {
-		t.Errorf("expected GroveID 'hub-level-id' (from hub.grove_id), got '%s'", s.GroveID)
+	if s.ProjectID != "hub-level-id" {
+		t.Errorf("expected ProjectID 'hub-level-id' (from hub.grove_id), got '%s'", s.ProjectID)
 	}
 }
 
@@ -395,8 +395,8 @@ func TestLoadSettingsKoanfV1GroveIDFromEnv(t *testing.T) {
 		t.Fatalf("LoadSettingsKoanf failed: %v", err)
 	}
 
-	if s.GroveID != "env-grove-uuid" {
-		t.Errorf("expected GroveID 'env-grove-uuid' from env var, got '%s'", s.GroveID)
+	if s.ProjectID != "env-grove-uuid" {
+		t.Errorf("expected ProjectID 'env-grove-uuid' from env var, got '%s'", s.ProjectID)
 	}
 }
 
@@ -576,7 +576,7 @@ workspace_path: /tmp/my-project
 	// Verify the grove_id loads correctly before any updates.
 	s, err := LoadSettingsKoanf(groveDir)
 	require.NoError(t, err)
-	assert.Equal(t, "local-grove-id-12345", s.GroveID, "grove_id should come from local settings, not global")
+	assert.Equal(t, "local-grove-id-12345", s.ProjectID, "grove_id should come from local settings, not global")
 
 	// Simulate what happens when the user runs "scion config set hub.endpoint"
 	// or "scion hub enable" — this calls UpdateSetting which round-trips
@@ -586,7 +586,7 @@ workspace_path: /tmp/my-project
 	// Reload and verify grove_id survived the round-trip.
 	s2, err := LoadSettingsKoanf(groveDir)
 	require.NoError(t, err)
-	assert.Equal(t, "local-grove-id-12345", s2.GroveID, "grove_id must survive UpdateSetting round-trip")
+	assert.Equal(t, "local-grove-id-12345", s2.ProjectID, "grove_id must survive UpdateSetting round-trip")
 	assert.Equal(t, "https://hub.new.example.com", s2.Hub.Endpoint, "hub endpoint should be updated")
 }
 
@@ -641,7 +641,7 @@ active_profile: local
 	require.NoError(t, err)
 
 	// The grove-id file should take precedence over global hub.grove_id
-	assert.Equal(t, "project-grove-id-from-file", s.GroveID,
+	assert.Equal(t, "project-grove-id-from-file", s.ProjectID,
 		"grove_id should come from grove-id file, not global settings")
 }
 
@@ -685,7 +685,7 @@ hub:
 	require.NoError(t, err)
 
 	// Project's hub.grove_id should override global's top-level grove_id
-	assert.Equal(t, "project-grove-id", s.GroveID,
+	assert.Equal(t, "project-grove-id", s.ProjectID,
 		"grove_id should come from project hub.grove_id, not global top-level grove_id")
 }
 
@@ -734,7 +734,7 @@ hub:
 func TestLoadSettingsKoanf_V1HubGroveIDWithMarkerFile(t *testing.T) {
 	// When a git grove has both a grove-id marker file (local deterministic ID)
 	// and hub.grove_id in V1 settings (hub grove ID), the two must be distinct:
-	// - settings.GroveID should be the local ID (from the marker file)
+	// - settings.ProjectID should be the local ID (from the marker file)
 	// - settings.GetHubGroveID() should be the hub ID (from hub.grove_id)
 	tmpDir := t.TempDir()
 
@@ -775,9 +775,9 @@ hub:
 	s, err := LoadSettingsKoanf(groveScionDir)
 	require.NoError(t, err)
 
-	// GroveID should come from the marker file (local deterministic ID)
-	assert.Equal(t, "local-deterministic-id", s.GroveID,
-		"GroveID should come from grove-id marker file")
+	// ProjectID should come from the marker file (local deterministic ID)
+	assert.Equal(t, "local-deterministic-id", s.ProjectID,
+		"ProjectID should come from grove-id marker file")
 
 	// GetHubGroveID() should return the hub grove ID from V1 settings
 	assert.Equal(t, "hub-grove-uuid-different", s.GetHubGroveID(),

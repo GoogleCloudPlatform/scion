@@ -28,14 +28,14 @@ import (
 // When .scion is a file (not a directory), it points to an external
 // grove-config directory under ~/.scion/grove-configs/.
 type GroveMarker struct {
-	GroveID   string `yaml:"grove-id"`
+	ProjectID   string `yaml:"grove-id"`
 	GroveName string `yaml:"grove-name"`
 	GroveSlug string `yaml:"grove-slug"`
 }
 
 // ShortUUID returns a short form of the grove ID for use in directory names.
 func (m GroveMarker) ShortUUID() string {
-	id := strings.ReplaceAll(m.GroveID, "-", "")
+	id := strings.ReplaceAll(m.ProjectID, "-", "")
 	if len(id) > 8 {
 		return id[:8]
 	}
@@ -67,7 +67,7 @@ func ReadGroveMarker(path string) (*GroveMarker, error) {
 	if err := yaml.Unmarshal(data, &marker); err != nil {
 		return nil, fmt.Errorf("invalid grove marker at %s: %w", path, err)
 	}
-	if marker.GroveID == "" || marker.GroveSlug == "" {
+	if marker.ProjectID == "" || marker.GroveSlug == "" {
 		return nil, fmt.Errorf("invalid grove marker at %s: missing grove-id or grove-slug", path)
 	}
 	return &marker, nil
@@ -93,9 +93,9 @@ func ResolveGroveMarker(markerPath string) (string, error) {
 	return marker.ExternalGrovePath()
 }
 
-// IsGroveMarkerFile returns true if the given path is a regular file
+// IsProjectMarkerFile returns true if the given path is a regular file
 // (not a directory) that could be a grove marker. Does not validate content.
-func IsGroveMarkerFile(path string) bool {
+func IsProjectMarkerFile(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
 		return false
@@ -155,7 +155,7 @@ func WriteWorkspaceMarker(workspacePath string, groveID, groveName, groveSlug st
 		return fmt.Errorf("grove-id and grove-slug are required for workspace marker")
 	}
 	marker := &GroveMarker{
-		GroveID:   groveID,
+		ProjectID:   groveID,
 		GroveName: groveName,
 		GroveSlug: groveSlug,
 	}
@@ -171,8 +171,8 @@ func ExtractSlugFromExternalDir(dirName string) string {
 	return ""
 }
 
-// ReadGroveID reads the grove-id file from a git grove's .scion directory.
-func ReadGroveID(projectDir string) (string, error) {
+// ReadProjectID reads the grove-id file from a git grove's .scion directory.
+func ReadProjectID(projectDir string) (string, error) {
 	data, err := os.ReadFile(filepath.Join(projectDir, "grove-id"))
 	if err != nil {
 		return "", err
@@ -190,7 +190,7 @@ func WriteGroveID(projectDir string, groveID string) error {
 // while keeping worktrees in-repo.
 // Returns ("", nil) if the grove-id file does not exist (not yet initialized for split storage).
 func GetGitGroveExternalConfigDir(projectDir string) (string, error) {
-	groveID, err := ReadGroveID(projectDir)
+	groveID, err := ReadProjectID(projectDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", nil
@@ -198,10 +198,10 @@ func GetGitGroveExternalConfigDir(projectDir string) (string, error) {
 		return "", err
 	}
 
-	groveName := GetGroveName(projectDir)
+	groveName := GetProjectName(projectDir)
 	groveSlug := api.Slugify(groveName)
 	marker := &GroveMarker{
-		GroveID:   groveID,
+		ProjectID:   groveID,
 		GroveName: groveName,
 		GroveSlug: groveSlug,
 	}
@@ -218,7 +218,7 @@ func GetGitGroveExternalConfigDir(projectDir string) (string, error) {
 // while keeping worktrees in-repo.
 // Returns ("", nil) if the grove-id file does not exist (not yet initialized for split storage).
 func GetGitGroveExternalAgentsDir(projectDir string) (string, error) {
-	groveID, err := ReadGroveID(projectDir)
+	groveID, err := ReadProjectID(projectDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", nil
@@ -226,10 +226,10 @@ func GetGitGroveExternalAgentsDir(projectDir string) (string, error) {
 		return "", err
 	}
 
-	groveName := GetGroveName(projectDir)
+	groveName := GetProjectName(projectDir)
 	groveSlug := api.Slugify(groveName)
 	marker := &GroveMarker{
-		GroveID:   groveID,
+		ProjectID:   groveID,
 		GroveName: groveName,
 		GroveSlug: groveSlug,
 	}

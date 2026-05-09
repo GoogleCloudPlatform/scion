@@ -126,15 +126,15 @@ func GenerateGroveIDForDir(_ string) string {
 	return uuid.New().String()
 }
 
-// IsInsideGrove returns true if the current working directory or any parent contains a .scion directory.
-func IsInsideGrove() bool {
+// IsInsideProject returns true if the current working directory or any parent contains a .scion directory.
+func IsInsideProject() bool {
 	_, ok := FindProjectRoot()
 	return ok
 }
 
-// GetEnclosingGrovePath returns the path to the enclosing .scion directory if one exists,
+// GetEnclosingProjectPath returns the path to the enclosing .scion directory if one exists,
 // along with the root directory containing it.
-func GetEnclosingGrovePath() (grovePath string, rootDir string, found bool) {
+func GetEnclosingProjectPath() (grovePath string, rootDir string, found bool) {
 	wd, err := os.Getwd()
 	if err != nil {
 		return "", "", false
@@ -296,7 +296,7 @@ func initExternalGrove(projectDir string, opt InitProjectOpts) error {
 	}
 
 	// If a marker file already exists, read it and use the existing external path
-	if IsGroveMarkerFile(markerPath) {
+	if IsProjectMarkerFile(markerPath) {
 		resolved, err := ResolveGroveMarker(markerPath)
 		if err != nil {
 			return fmt.Errorf("existing grove marker is invalid: %w", err)
@@ -311,7 +311,7 @@ func initExternalGrove(projectDir string, opt InitProjectOpts) error {
 	groveSlug := api.Slugify(groveName)
 
 	marker := &GroveMarker{
-		GroveID:   groveID,
+		ProjectID:   groveID,
 		GroveName: groveName,
 		GroveSlug: groveSlug,
 	}
@@ -361,7 +361,7 @@ func initInRepoGrove(projectDir string, opt InitProjectOpts) error {
 	}
 
 	// Ensure grove-id file exists for split storage
-	if _, err := ReadGroveID(projectDir); err != nil {
+	if _, err := ReadProjectID(projectDir); err != nil {
 		if os.IsNotExist(err) {
 			groveID := GenerateGroveIDForDir(filepath.Dir(projectDir))
 			if err := WriteGroveID(projectDir, groveID); err != nil {

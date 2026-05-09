@@ -20,31 +20,31 @@ import (
 	"strings"
 )
 
-// GroveType indicates the kind of grove.
-type GroveType string
+// ProjectType indicates the kind of grove.
+type ProjectType string
 
 const (
-	GroveTypeGlobal   GroveType = "global"
-	GroveTypeGit      GroveType = "git"
-	GroveTypeExternal GroveType = "external"
+	GroveTypeGlobal   ProjectType = "global"
+	GroveTypeGit      ProjectType = "git"
+	GroveTypeExternal ProjectType = "external"
 )
 
-// GroveStatus indicates the health of a grove config.
-type GroveStatus string
+// ProjectStatus indicates the health of a grove config.
+type ProjectStatus string
 
 const (
-	GroveStatusOK       GroveStatus = "ok"
-	GroveStatusOrphaned GroveStatus = "orphaned"
+	GroveStatusOK       ProjectStatus = "ok"
+	GroveStatusOrphaned ProjectStatus = "orphaned"
 )
 
-// GroveInfo describes a discovered grove.
-type GroveInfo struct {
+// ProjectInfo describes a discovered grove.
+type ProjectInfo struct {
 	Name          string      `json:"name"`
-	GroveID       string      `json:"grove_id,omitempty"`
-	Type          GroveType   `json:"type"`
+	ProjectID       string      `json:"grove_id,omitempty"`
+	Type          ProjectType   `json:"type"`
 	ConfigPath    string      `json:"config_path"`
 	WorkspacePath string      `json:"workspace_path,omitempty"`
-	Status        GroveStatus `json:"status"`
+	Status        ProjectStatus `json:"status"`
 	AgentCount    int         `json:"agent_count"`
 	// agentsPath overrides the default agents directory derivation.
 	// Used for legacy git groves where agents are a sibling of .scion/.
@@ -52,28 +52,28 @@ type GroveInfo struct {
 }
 
 // AgentsDir returns the path to the agents directory for this grove.
-func (g GroveInfo) AgentsDir() string {
+func (g ProjectInfo) AgentsDir() string {
 	if g.agentsPath != "" {
 		return g.agentsPath
 	}
 	return filepath.Join(g.ConfigPath, "agents")
 }
 
-// DiscoverGroves scans for all known groves on this machine.
+// DiscoverProjects scans for all known groves on this machine.
 // It checks the global grove, then scans ~/.scion/grove-configs/ for
 // external and git grove configs.
-func DiscoverGroves() ([]GroveInfo, error) {
+func DiscoverProjects() ([]ProjectInfo, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
 	}
 
-	var groves []GroveInfo
+	var groves []ProjectInfo
 
 	// 1. Global grove
 	globalDir := filepath.Join(home, GlobalDir)
 	if info, err := os.Stat(globalDir); err == nil && info.IsDir() {
-		gi := GroveInfo{
+		gi := ProjectInfo{
 			Name:       "global",
 			Type:       GroveTypeGlobal,
 			ConfigPath: globalDir,
@@ -81,7 +81,7 @@ func DiscoverGroves() ([]GroveInfo, error) {
 		}
 		gi.AgentCount = countAgents(filepath.Join(globalDir, "agents"))
 		if settings, err := LoadSettings(globalDir); err == nil {
-			gi.GroveID = settings.GroveID
+			gi.ProjectID = settings.ProjectID
 		}
 		groves = append(groves, gi)
 	}
@@ -115,7 +115,7 @@ func DiscoverGroves() ([]GroveInfo, error) {
 		scionExists := scionErr == nil
 		legacyAgentsExist := legacyAgentsErr == nil
 
-		var gi GroveInfo
+		var gi ProjectInfo
 		switch {
 		case scionExists:
 			// .scion/ exists — distinguish external vs git by checking for
@@ -132,7 +132,7 @@ func DiscoverGroves() ([]GroveInfo, error) {
 			gi = groveInfoFromGitExternal(legacyAgentsSibling, dirName, slug)
 		default:
 			// No .scion and no agents dir — orphaned leftover.
-			gi = GroveInfo{
+			gi = ProjectInfo{
 				Name:       slug,
 				Type:       GroveTypeGit,
 				ConfigPath: filepath.Join(groveConfigsDir, dirName),
@@ -146,9 +146,9 @@ func DiscoverGroves() ([]GroveInfo, error) {
 	return groves, nil
 }
 
-// groveInfoFromExternal builds a GroveInfo for a non-git external grove.
-func groveInfoFromExternal(configPath, dirName, slug string) GroveInfo {
-	gi := GroveInfo{
+// groveInfoFromExternal builds a ProjectInfo for a non-git external grove.
+func groveInfoFromExternal(configPath, dirName, slug string) ProjectInfo {
+	gi := ProjectInfo{
 		Name:       slug,
 		Type:       GroveTypeExternal,
 		ConfigPath: configPath,
@@ -157,7 +157,7 @@ func groveInfoFromExternal(configPath, dirName, slug string) GroveInfo {
 
 	settings, err := LoadSettings(configPath)
 	if err == nil {
-		gi.GroveID = settings.GroveID
+		gi.ProjectID = settings.ProjectID
 		gi.WorkspacePath = settings.WorkspacePath
 	}
 
@@ -165,7 +165,7 @@ func groveInfoFromExternal(configPath, dirName, slug string) GroveInfo {
 
 	// Check if workspace still exists and has a valid marker pointing back here
 	if gi.WorkspacePath != "" {
-		if !isValidWorkspace(gi.WorkspacePath, gi.GroveID, configPath) {
+		if !isValidWorkspace(gi.WorkspacePath, gi.ProjectID, configPath) {
 			gi.Status = GroveStatusOrphaned
 		}
 	} else {
@@ -176,11 +176,11 @@ func groveInfoFromExternal(configPath, dirName, slug string) GroveInfo {
 	return gi
 }
 
-// groveInfoFromGitExternalWithConfig builds a GroveInfo for a git grove that has
+// groveInfoFromGitExternalWithConfig builds a ProjectInfo for a git grove that has
 // an external config dir (.scion/) with agents stored at .scion/agents/.
 // This is the layout produced by initInRepoGrove after the config externalization change.
-func groveInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug string) GroveInfo {
-	gi := GroveInfo{
+func groveInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug string) ProjectInfo {
+	gi := ProjectInfo{
 		Name:       slug,
 		Type:       GroveTypeGit,
 		ConfigPath: configPath,
@@ -188,11 +188,11 @@ func groveInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug str
 	}
 	gi.AgentCount = countAgents(agentsDir)
 	if settings, err := LoadSettings(configPath); err == nil {
-		gi.GroveID = settings.GroveID
+		gi.ProjectID = settings.ProjectID
 	}
-	if gi.GroveID == "" {
+	if gi.ProjectID == "" {
 		if marker, workspacePath, err := readWorkspaceMarkerForSlug(slug); err == nil {
-			gi.GroveID = marker.GroveID
+			gi.ProjectID = marker.ProjectID
 			gi.WorkspacePath = workspacePath
 		}
 	}
@@ -216,11 +216,11 @@ func readWorkspaceMarkerForSlug(slug string) (*GroveMarker, string, error) {
 	return marker, workspacePath, nil
 }
 
-// groveInfoFromGitExternal builds a GroveInfo for a legacy git grove's external agents
+// groveInfoFromGitExternal builds a ProjectInfo for a legacy git grove's external agents
 // directory (no .scion/ subdir). If the agents directory is empty, the grove is marked
 // as orphaned since there is no config to link back to the source project.
-func groveInfoFromGitExternal(agentsDir, dirName, slug string) GroveInfo {
-	gi := GroveInfo{
+func groveInfoFromGitExternal(agentsDir, dirName, slug string) ProjectInfo {
+	gi := ProjectInfo{
 		Name:       slug,
 		Type:       GroveTypeGit,
 		ConfigPath: filepath.Join(filepath.Dir(agentsDir), DotScion),
@@ -256,7 +256,7 @@ func isValidWorkspace(workspacePath, expectedGroveID string, configPath ...strin
 	if info.IsDir() {
 		// Git grove — check grove-id file
 		if expectedGroveID != "" {
-			if id, err := ReadGroveID(markerPath); err == nil {
+			if id, err := ReadProjectID(markerPath); err == nil {
 				return id == expectedGroveID
 			}
 		}
@@ -281,7 +281,7 @@ func isValidWorkspace(workspacePath, expectedGroveID string, configPath ...strin
 	}
 
 	if expectedGroveID != "" {
-		return marker.GroveID == expectedGroveID
+		return marker.ProjectID == expectedGroveID
 	}
 	return true
 }
@@ -308,13 +308,13 @@ func ListAgentNames(agentsDir string) []string {
 
 // FindOrphanedGroveConfigs returns grove configs that are orphaned
 // (their workspace no longer exists or no longer points back to them).
-func FindOrphanedGroveConfigs() ([]GroveInfo, error) {
-	groves, err := DiscoverGroves()
+func FindOrphanedGroveConfigs() ([]ProjectInfo, error) {
+	groves, err := DiscoverProjects()
 	if err != nil {
 		return nil, err
 	}
 
-	var orphaned []GroveInfo
+	var orphaned []ProjectInfo
 	for _, g := range groves {
 		if g.Status == GroveStatusOrphaned {
 			orphaned = append(orphaned, g)

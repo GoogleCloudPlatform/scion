@@ -100,8 +100,8 @@ type HubClientConfig struct {
 	Token string `json:"token,omitempty" yaml:"token,omitempty" koanf:"token"`
 	// APIKey is an API key for authentication (alternative to Token)
 	APIKey string `json:"apiKey,omitempty" yaml:"apiKey,omitempty" koanf:"apiKey"`
-	// GroveID is the unique identifier for the grove when registered with the Hub
-	GroveID string `json:"groveId,omitempty" yaml:"groveId,omitempty" koanf:"groveId"`
+	// ProjectID is the unique identifier for the grove when registered with the Hub
+	ProjectID string `json:"groveId,omitempty" yaml:"groveId,omitempty" koanf:"groveId"`
 	// BrokerID is the unique identifier for this broker when registered with the Hub.
 	// This is a durable UUID that persists across server restarts.
 	BrokerID string `json:"brokerId,omitempty" yaml:"brokerId,omitempty" koanf:"brokerId"`
@@ -130,7 +130,7 @@ type HubConnectionConfig struct {
 }
 
 type Settings struct {
-	GroveID         string                         `json:"grove_id,omitempty" yaml:"grove_id,omitempty" koanf:"grove_id"`
+	ProjectID         string                         `json:"grove_id,omitempty" yaml:"grove_id,omitempty" koanf:"grove_id"`
 	ActiveProfile   string                         `json:"active_profile" yaml:"active_profile" koanf:"active_profile"`
 	DefaultTemplate string                         `json:"default_template,omitempty" yaml:"default_template,omitempty" koanf:"default_template"`
 	WorkspacePath   string                         `json:"workspace_path,omitempty" yaml:"workspace_path,omitempty" koanf:"workspace_path"`
@@ -317,8 +317,8 @@ func MergeSettings(base *Settings, data []byte) error {
 		return err
 	}
 
-	if override.GroveID != "" {
-		base.GroveID = override.GroveID
+	if override.ProjectID != "" {
+		base.ProjectID = override.ProjectID
 	}
 	if override.ActiveProfile != "" {
 		base.ActiveProfile = override.ActiveProfile
@@ -605,7 +605,7 @@ func updateSettingLegacy(dir string, key string, value string) error {
 	// Update the field
 	switch key {
 	case "grove_id":
-		current.GroveID = value
+		current.ProjectID = value
 	case "active_profile":
 		current.ActiveProfile = value
 	case "default_template":
@@ -646,7 +646,7 @@ func updateSettingLegacy(dir string, key string, value string) error {
 		if current.Hub == nil {
 			current.Hub = &HubClientConfig{}
 		}
-		current.Hub.GroveID = value
+		current.Hub.ProjectID = value
 	case "hub.brokerId":
 		if current.Hub == nil {
 			current.Hub = &HubClientConfig{}
@@ -744,7 +744,7 @@ func updateSettingLegacy(dir string, key string, value string) error {
 func GetSettingValue(s *Settings, key string) (string, error) {
 	switch key {
 	case "grove_id":
-		return s.GroveID, nil
+		return s.ProjectID, nil
 	case "active_profile":
 		return s.ActiveProfile, nil
 	case "default_template":
@@ -781,7 +781,7 @@ func GetSettingValue(s *Settings, key string) (string, error) {
 		return "", nil
 	case "hub.groveId":
 		if s.Hub != nil {
-			return s.Hub.GroveID, nil
+			return s.Hub.ProjectID, nil
 		}
 		return "", nil
 	case "hub.brokerId":
@@ -861,7 +861,7 @@ func GetSettingValue(s *Settings, key string) (string, error) {
 
 func GetSettingsMap(s *Settings) map[string]string {
 	m := make(map[string]string)
-	m["grove_id"] = s.GroveID
+	m["grove_id"] = s.ProjectID
 	m["active_profile"] = s.ActiveProfile
 	m["default_template"] = s.DefaultTemplate
 	if s.Bucket != nil {
@@ -899,7 +899,7 @@ func GetSettingsMap(s *Settings) map[string]string {
 		if s.Hub.APIKey != "" {
 			m["hub.apiKey"] = "********" // Mask API key
 		}
-		m["hub.groveId"] = s.Hub.GroveID
+		m["hub.groveId"] = s.Hub.ProjectID
 		m["hub.brokerId"] = s.Hub.BrokerID
 		m["hub.brokerNickname"] = s.Hub.BrokerNickname
 		if s.Hub.BrokerToken != "" {
@@ -939,7 +939,7 @@ func (s *Settings) GetHubEndpoint() string {
 // is a UUID v5 hash of the git remote).
 func (s *Settings) GetHubGroveID() string {
 	if s.Hub != nil {
-		return s.Hub.GroveID
+		return s.Hub.ProjectID
 	}
 	return ""
 }

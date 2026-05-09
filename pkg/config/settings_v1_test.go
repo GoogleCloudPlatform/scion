@@ -40,7 +40,7 @@ func TestVersionedSettings_YAMLRoundTrip(t *testing.T) {
 		Hub: &V1HubClientConfig{
 			Enabled:  boolPtr(true),
 			Endpoint: "https://hub.example.com",
-			GroveID:  "test-grove",
+			ProjectID:  "test-grove",
 		},
 		CLI: &V1CLIConfig{
 			AutoHelp:            &autoHelp,
@@ -86,7 +86,7 @@ func TestVersionedSettings_YAMLRoundTrip(t *testing.T) {
 	assert.Equal(t, vs.ActiveProfile, roundTripped.ActiveProfile)
 	assert.Equal(t, vs.DefaultTemplate, roundTripped.DefaultTemplate)
 	assert.Equal(t, vs.Hub.Endpoint, roundTripped.Hub.Endpoint)
-	assert.Equal(t, vs.Hub.GroveID, roundTripped.Hub.GroveID)
+	assert.Equal(t, vs.Hub.ProjectID, roundTripped.Hub.ProjectID)
 	assert.Equal(t, vs.HarnessConfigs["gemini"].Model, roundTripped.HarnessConfigs["gemini"].Model)
 	assert.Equal(t, vs.HarnessConfigs["gemini"].Args, roundTripped.HarnessConfigs["gemini"].Args)
 	assert.Equal(t, vs.Profiles["local"].DefaultHarnessConfig, roundTripped.Profiles["local"].DefaultHarnessConfig)
@@ -222,7 +222,7 @@ func TestLoadVersionedSettings_HubEnvVars(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NotNil(t, vs.Hub)
-	assert.Equal(t, "my-grove-id", vs.Hub.GroveID)
+	assert.Equal(t, "my-grove-id", vs.Hub.ProjectID)
 }
 
 func TestLoadVersionedSettings_CLIEnvVars(t *testing.T) {
@@ -341,7 +341,7 @@ func TestAdaptLegacySettings_FullMapping(t *testing.T) {
 		Hub: &HubClientConfig{
 			Enabled:  &enabled,
 			Endpoint: "https://hub.example.com",
-			GroveID:  "test-grove",
+			ProjectID:  "test-grove",
 		},
 		CLI: &CLIConfig{
 			AutoHelp: &autoHelp,
@@ -368,7 +368,7 @@ func TestAdaptLegacySettings_FullMapping(t *testing.T) {
 	// Hub mapping
 	require.NotNil(t, vs.Hub)
 	assert.Equal(t, "https://hub.example.com", vs.Hub.Endpoint)
-	assert.Equal(t, "test-grove", vs.Hub.GroveID)
+	assert.Equal(t, "test-grove", vs.Hub.ProjectID)
 	assert.True(t, *vs.Hub.Enabled)
 
 	// CLI mapping
@@ -493,7 +493,7 @@ func TestConvertVersionedToLegacy(t *testing.T) {
 		Hub: &V1HubClientConfig{
 			Enabled:  boolPtr(true),
 			Endpoint: "https://hub.example.com",
-			GroveID:  "test-grove",
+			ProjectID:  "test-grove",
 		},
 		CLI: &V1CLIConfig{
 			AutoHelp:            boolPtr(true),
@@ -535,7 +535,7 @@ func TestConvertVersionedToLegacy(t *testing.T) {
 	// Hub — only v1 fields should be mapped
 	require.NotNil(t, legacy.Hub)
 	assert.Equal(t, "https://hub.example.com", legacy.Hub.Endpoint)
-	assert.Equal(t, "test-grove", legacy.Hub.GroveID)
+	assert.Equal(t, "test-grove", legacy.Hub.ProjectID)
 	assert.True(t, *legacy.Hub.Enabled)
 	assert.Empty(t, legacy.Hub.Token) // Not in v1
 
@@ -2613,7 +2613,7 @@ hub:
 	// Verify the field was updated
 	var vs VersionedSettings
 	require.NoError(t, yaml.Unmarshal(data, &vs))
-	assert.Equal(t, "new-grove-id", vs.Hub.GroveID)
+	assert.Equal(t, "new-grove-id", vs.Hub.ProjectID)
 
 	// Verify other fields are preserved
 	assert.Equal(t, "local", vs.ActiveProfile)
@@ -2789,7 +2789,7 @@ hub:
 	require.NoError(t, yaml.Unmarshal(data, &vs))
 
 	// Verify all updates took effect
-	assert.Equal(t, "new-grove-id", vs.Hub.GroveID)
+	assert.Equal(t, "new-grove-id", vs.Hub.ProjectID)
 	require.NotNil(t, vs.Hub.Enabled)
 	assert.False(t, *vs.Hub.Enabled)
 	assert.Equal(t, "https://hub.example.com", vs.Hub.Endpoint) // preserved
@@ -2858,7 +2858,7 @@ hub:
 	assert.Equal(t, "local", vs.ActiveProfile)
 	require.NotNil(t, vs.Hub)
 	assert.Equal(t, "https://hub.example.com", vs.Hub.Endpoint)
-	assert.Equal(t, "test-grove", vs.Hub.GroveID)
+	assert.Equal(t, "test-grove", vs.Hub.ProjectID)
 }
 
 func TestLoadSingleFileVersioned_NoFile(t *testing.T) {
@@ -3452,7 +3452,7 @@ func TestGetVersionedSettingValue(t *testing.T) {
 			Enabled:   &enabled,
 			Linked:    &linked,
 			Endpoint:  "https://hub.example.com",
-			GroveID:   "grove-123",
+			ProjectID:   "grove-123",
 			LocalOnly: &localOnly,
 		},
 		Server: &V1ServerConfig{

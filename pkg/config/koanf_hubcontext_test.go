@@ -51,7 +51,7 @@ func TestLoadSettings_HubEndpointFromEnvOnly(t *testing.T) {
 		t.Logf("Hub.Endpoint: %q", settings.Hub.Endpoint)
 		t.Logf("Hub.Enabled: %v", settings.Hub.Enabled)
 	}
-	t.Logf("GroveID: %q", settings.GroveID)
+	t.Logf("ProjectID: %q", settings.ProjectID)
 	t.Logf("GetHubEndpoint: %q", settings.GetHubEndpoint())
 
 	if settings.Hub == nil {
@@ -60,8 +60,8 @@ func TestLoadSettings_HubEndpointFromEnvOnly(t *testing.T) {
 	if settings.Hub.Endpoint != "http://hub.test:8080" {
 		t.Errorf("Hub.Endpoint = %q, want %q", settings.Hub.Endpoint, "http://hub.test:8080")
 	}
-	if settings.GroveID != "test-grove-id" {
-		t.Errorf("GroveID = %q, want %q", settings.GroveID, "test-grove-id")
+	if settings.ProjectID != "test-grove-id" {
+		t.Errorf("ProjectID = %q, want %q", settings.ProjectID, "test-grove-id")
 	}
 }
 
@@ -88,7 +88,7 @@ func TestLoadSettings_HubEndpointFromEnvNoSettingsFile(t *testing.T) {
 	if settings.Hub.Endpoint != "http://hub.test:9090" {
 		t.Errorf("Hub.Endpoint = %q, want %q", settings.Hub.Endpoint, "http://hub.test:9090")
 	}
-	if settings.GroveID != "env-grove-id" {
-		t.Errorf("GroveID = %q, want %q", settings.GroveID, "env-grove-id")
+	if settings.ProjectID != "env-grove-id" {
+		t.Errorf("ProjectID = %q, want %q", settings.ProjectID, "env-grove-id")
 	}
 }

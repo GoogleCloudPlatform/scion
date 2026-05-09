@@ -93,7 +93,7 @@ func TestGenerateGroveIDForDir_NoGitRepo(t *testing.T) {
 	}
 }
 
-func TestIsInsideGrove(t *testing.T) {
+func TestIsInsideProject(t *testing.T) {
 	// Create a directory with .scion
 	tmpGrove := t.TempDir()
 	scionDir := filepath.Join(tmpGrove, ".scion")
@@ -114,8 +114,8 @@ func TestIsInsideGrove(t *testing.T) {
 	if err := os.Chdir(tmpGrove); err != nil {
 		t.Fatal(err)
 	}
-	if !IsInsideGrove() {
-		t.Error("expected IsInsideGrove=true when in grove directory")
+	if !IsInsideProject() {
+		t.Error("expected IsInsideProject=true when in grove directory")
 	}
 
 	// When in a subdirectory of the grove
@@ -126,8 +126,8 @@ func TestIsInsideGrove(t *testing.T) {
 	if err := os.Chdir(subDir); err != nil {
 		t.Fatal(err)
 	}
-	if !IsInsideGrove() {
-		t.Error("expected IsInsideGrove=true when in subdirectory of grove")
+	if !IsInsideProject() {
+		t.Error("expected IsInsideProject=true when in subdirectory of grove")
 	}
 
 	// When outside any grove
@@ -135,12 +135,12 @@ func TestIsInsideGrove(t *testing.T) {
 	if err := os.Chdir(outsideDir); err != nil {
 		t.Fatal(err)
 	}
-	if IsInsideGrove() {
-		t.Error("expected IsInsideGrove=false when outside any grove")
+	if IsInsideProject() {
+		t.Error("expected IsInsideProject=false when outside any grove")
 	}
 }
 
-func TestGetEnclosingGrovePath(t *testing.T) {
+func TestGetEnclosingProjectPath(t *testing.T) {
 	// Create a directory with .scion
 	tmpGrove := t.TempDir()
 	scionDir := filepath.Join(tmpGrove, ".scion")
@@ -168,7 +168,7 @@ func TestGetEnclosingGrovePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	grovePath, rootDir, found := GetEnclosingGrovePath()
+	grovePath, rootDir, found := GetEnclosingProjectPath()
 	if !found {
 		t.Fatal("expected to find enclosing grove")
 	}
@@ -203,7 +203,7 @@ func TestGetEnclosingGrovePath_NotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, found := GetEnclosingGrovePath()
+	_, _, found := GetEnclosingProjectPath()
 	if found {
 		t.Error("expected found=false when no enclosing grove")
 	}

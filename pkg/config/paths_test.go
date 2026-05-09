@@ -36,7 +36,7 @@ func TestGetGlobalDir(t *testing.T) {
 	}
 }
 
-func TestGetGroveName(t *testing.T) {
+func TestGetProjectName(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	tests := []struct {
@@ -52,8 +52,8 @@ func TestGetGroveName(t *testing.T) {
 		if err := os.MkdirAll(tt.path, 0755); err != nil {
 			t.Fatal(err)
 		}
-		if got := GetGroveName(tt.path); got != tt.want {
-			t.Errorf("GetGroveName(%q) = %q, want %q", tt.path, got, tt.want)
+		if got := GetProjectName(tt.path); got != tt.want {
+			t.Errorf("GetProjectName(%q) = %q, want %q", tt.path, got, tt.want)
 		}
 	}
 }
@@ -299,7 +299,7 @@ func TestFindProjectRoot_MarkerWithHubFallback(t *testing.T) {
 
 	// Write a valid marker file
 	marker := &GroveMarker{
-		GroveID:   "test-grove-id-1234",
+		ProjectID:   "test-grove-id-1234",
 		GroveName: "test-project",
 		GroveSlug: "test-project",
 	}
@@ -361,7 +361,7 @@ func TestRequireGrovePath_ProjectExists(t *testing.T) {
 
 func TestResolveGrovePath_ExplicitProjectRoot(t *testing.T) {
 	// When passing a project root (not ending in .scion) that contains a .scion dir,
-	// ResolveGrovePath should resolve to the .scion subdirectory.
+	// ResolveProjectPath should resolve to the .scion subdirectory.
 	// This is the -g / --grove flag use case.
 
 	tmpHome := t.TempDir()
@@ -377,16 +377,16 @@ func TestResolveGrovePath_ExplicitProjectRoot(t *testing.T) {
 	}
 
 	// Pass the project root (without .scion) as explicit path
-	got, isGlobal, err := ResolveGrovePath(tmpProject)
+	got, isGlobal, err := ResolveProjectPath(tmpProject)
 	if err != nil {
-		t.Fatalf("ResolveGrovePath(%q) error: %v", tmpProject, err)
+		t.Fatalf("ResolveProjectPath(%q) error: %v", tmpProject, err)
 	}
 
 	evalGot, _ := filepath.EvalSymlinks(got)
 	evalExpected, _ := filepath.EvalSymlinks(projectScion)
 
 	if evalGot != evalExpected {
-		t.Errorf("ResolveGrovePath(%q) = %q, want %q", tmpProject, evalGot, evalExpected)
+		t.Errorf("ResolveProjectPath(%q) = %q, want %q", tmpProject, evalGot, evalExpected)
 	}
 	if isGlobal {
 		t.Error("expected isGlobal=false for project grove")
@@ -407,16 +407,16 @@ func TestResolveGrovePath_ExplicitDotScionPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, _, err := ResolveGrovePath(projectScion)
+	got, _, err := ResolveProjectPath(projectScion)
 	if err != nil {
-		t.Fatalf("ResolveGrovePath(%q) error: %v", projectScion, err)
+		t.Fatalf("ResolveProjectPath(%q) error: %v", projectScion, err)
 	}
 
 	evalGot, _ := filepath.EvalSymlinks(got)
 	evalExpected, _ := filepath.EvalSymlinks(projectScion)
 
 	if evalGot != evalExpected {
-		t.Errorf("ResolveGrovePath(%q) = %q, want %q", projectScion, evalGot, evalExpected)
+		t.Errorf("ResolveProjectPath(%q) = %q, want %q", projectScion, evalGot, evalExpected)
 	}
 }
 
@@ -430,16 +430,16 @@ func TestResolveGrovePath_ExplicitPathNoDotScion(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	got, _, err := ResolveGrovePath(tmpDir)
+	got, _, err := ResolveProjectPath(tmpDir)
 	if err != nil {
-		t.Fatalf("ResolveGrovePath(%q) error: %v", tmpDir, err)
+		t.Fatalf("ResolveProjectPath(%q) error: %v", tmpDir, err)
 	}
 
 	evalGot, _ := filepath.EvalSymlinks(got)
 	evalExpected, _ := filepath.EvalSymlinks(tmpDir)
 
 	if evalGot != evalExpected {
-		t.Errorf("ResolveGrovePath(%q) = %q, want %q", tmpDir, evalGot, evalExpected)
+		t.Errorf("ResolveProjectPath(%q) = %q, want %q", tmpDir, evalGot, evalExpected)
 	}
 }
 
@@ -501,11 +501,11 @@ func TestResolveGrovePath_GlobalViaWalkUp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// ResolveGrovePath should walk up and find ~/.scion,
+	// ResolveProjectPath should walk up and find ~/.scion,
 	// and recognize it as the global grove
-	got, isGlobal, err := ResolveGrovePath("")
+	got, isGlobal, err := ResolveProjectPath("")
 	if err != nil {
-		t.Fatalf("ResolveGrovePath failed: %v", err)
+		t.Fatalf("ResolveProjectPath failed: %v", err)
 	}
 
 	evalGot, _ := filepath.EvalSymlinks(got)
@@ -541,9 +541,9 @@ func TestResolveGrovePath_ProjectNotGlobal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, isGlobal, err := ResolveGrovePath("")
+	got, isGlobal, err := ResolveProjectPath("")
 	if err != nil {
-		t.Fatalf("ResolveGrovePath failed: %v", err)
+		t.Fatalf("ResolveProjectPath failed: %v", err)
 	}
 
 	evalGot, _ := filepath.EvalSymlinks(got)

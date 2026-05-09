@@ -26,7 +26,7 @@ func TestDiscoverGroves_EmptyHome(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", origHome)
 
-	groves, err := DiscoverGroves()
+	groves, err := DiscoverProjects()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestDiscoverGroves_GlobalOnly(t *testing.T) {
 	globalDir := filepath.Join(tmpHome, ".scion")
 	os.MkdirAll(filepath.Join(globalDir, "agents"), 0755)
 
-	groves, err := DiscoverGroves()
+	groves, err := DiscoverProjects()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestDiscoverGroves_ExternalGrove(t *testing.T) {
 
 	// Write marker file
 	marker := &GroveMarker{
-		GroveID:   "abcd1234-0000-0000-0000-000000000000",
+		ProjectID:   "abcd1234-0000-0000-0000-000000000000",
 		GroveName: "myproject",
 		GroveSlug: "myproject",
 	}
@@ -91,7 +91,7 @@ func TestDiscoverGroves_ExternalGrove(t *testing.T) {
 	settingsContent := "workspace_path: " + workspace + "\ngrove_id: abcd1234-0000-0000-0000-000000000000\n"
 	os.WriteFile(filepath.Join(groveConfigDir, "settings.yaml"), []byte(settingsContent), 0644)
 
-	groves, err := DiscoverGroves()
+	groves, err := DiscoverProjects()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -134,13 +134,13 @@ func TestDiscoverGroves_OrphanedExternal(t *testing.T) {
 	settingsContent := "workspace_path: /nonexistent/workspace\n"
 	os.WriteFile(filepath.Join(groveConfigDir, "settings.yaml"), []byte(settingsContent), 0644)
 
-	groves, err := DiscoverGroves()
+	groves, err := DiscoverProjects()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	// Find the external grove
-	var ext *GroveInfo
+	var ext *ProjectInfo
 	for i := range groves {
 		if groves[i].Type == GroveTypeExternal {
 			ext = &groves[i]
@@ -294,12 +294,12 @@ func TestListAgentNames_NonExistentDir(t *testing.T) {
 func TestGroveInfo_AgentsDir(t *testing.T) {
 	tests := []struct {
 		name     string
-		grove    GroveInfo
+		grove    ProjectInfo
 		expected string
 	}{
 		{
 			name: "external grove",
-			grove: GroveInfo{
+			grove: ProjectInfo{
 				Type:       GroveTypeExternal,
 				ConfigPath: "/home/user/.scion/grove-configs/proj__abc123/.scion",
 			},
@@ -307,7 +307,7 @@ func TestGroveInfo_AgentsDir(t *testing.T) {
 		},
 		{
 			name: "git grove",
-			grove: GroveInfo{
+			grove: ProjectInfo{
 				Type:       GroveTypeGit,
 				ConfigPath: "/home/user/.scion/grove-configs/repo__def456/.scion",
 			},
@@ -315,7 +315,7 @@ func TestGroveInfo_AgentsDir(t *testing.T) {
 		},
 		{
 			name: "global grove",
-			grove: GroveInfo{
+			grove: ProjectInfo{
 				Type:       GroveTypeGlobal,
 				ConfigPath: "/home/user/.scion",
 			},
@@ -357,7 +357,7 @@ func TestDiscoverGroves_StaleExternalAfterMarkerRecreate(t *testing.T) {
 
 	// Workspace marker now points to the new grove-config
 	marker := &GroveMarker{
-		GroveID:   "bbbbbbbb-0000-0000-0000-000000000000",
+		ProjectID:   "bbbbbbbb-0000-0000-0000-000000000000",
 		GroveName: "myproject",
 		GroveSlug: "myproject",
 	}
@@ -393,12 +393,12 @@ func TestDiscoverGroves_GitGroveExternal(t *testing.T) {
 	agentsDir := filepath.Join(groveDir, "agents", "worker1", "home")
 	os.MkdirAll(agentsDir, 0755)
 
-	groves, err := DiscoverGroves()
+	groves, err := DiscoverProjects()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	var gitGrove *GroveInfo
+	var gitGrove *ProjectInfo
 	for i := range groves {
 		if groves[i].Type == GroveTypeGit {
 			gitGrove = &groves[i]
@@ -431,12 +431,12 @@ func TestDiscoverGroves_GitGroveExternalEmptyAgents(t *testing.T) {
 	groveDir := filepath.Join(tmpHome, ".scion", "grove-configs", "leftover__deadbeef")
 	os.MkdirAll(filepath.Join(groveDir, "agents"), 0755)
 
-	groves, err := DiscoverGroves()
+	groves, err := DiscoverProjects()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	var gitGrove *GroveInfo
+	var gitGrove *ProjectInfo
 	for i := range groves {
 		if groves[i].Type == GroveTypeGit {
 			gitGrove = &groves[i]
@@ -466,12 +466,12 @@ func TestDiscoverGroves_GitGroveWithExternalConfig(t *testing.T) {
 	os.MkdirAll(scionDir, 0755)
 	os.MkdirAll(agentsDir, 0755)
 
-	groves, err := DiscoverGroves()
+	groves, err := DiscoverProjects()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	var gitGrove *GroveInfo
+	var gitGrove *ProjectInfo
 	for i := range groves {
 		if groves[i].Name == "newrepo" {
 			gitGrove = &groves[i]
@@ -542,12 +542,12 @@ func TestDiscoverGroves_GitGroveWithExternalConfigUsesWorkspaceMarkerGroveID(t *
 		t.Fatalf("WriteWorkspaceMarker failed: %v", err)
 	}
 
-	groves, err := DiscoverGroves()
+	groves, err := DiscoverProjects()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	var gitGrove *GroveInfo
+	var gitGrove *ProjectInfo
 	for i := range groves {
 		if groves[i].Name == "newrepo" {
 			gitGrove = &groves[i]
@@ -557,8 +557,8 @@ func TestDiscoverGroves_GitGroveWithExternalConfigUsesWorkspaceMarkerGroveID(t *
 	if gitGrove == nil {
 		t.Fatal("expected to find git grove with external config")
 	}
-	if gitGrove.GroveID != "3c619ec9-517e-4321-8c6a-4757f6a95607" {
-		t.Fatalf("GroveID = %q, want %q", gitGrove.GroveID, "3c619ec9-517e-4321-8c6a-4757f6a95607")
+	if gitGrove.ProjectID != "3c619ec9-517e-4321-8c6a-4757f6a95607" {
+		t.Fatalf("ProjectID = %q, want %q", gitGrove.ProjectID, "3c619ec9-517e-4321-8c6a-4757f6a95607")
 	}
 	if gitGrove.WorkspacePath != workspaceDir {
 		t.Fatalf("WorkspacePath = %q, want %q", gitGrove.WorkspacePath, workspaceDir)
@@ -577,12 +577,12 @@ func TestDiscoverGroves_GroveConfigNoScionNoAgents(t *testing.T) {
 	groveDir := filepath.Join(tmpHome, ".scion", "grove-configs", "empty-leftover__aabb1122")
 	os.MkdirAll(groveDir, 0755)
 
-	groves, err := DiscoverGroves()
+	groves, err := DiscoverProjects()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	var found *GroveInfo
+	var found *ProjectInfo
 	for i := range groves {
 		if groves[i].Name == "empty-leftover" {
 			found = &groves[i]

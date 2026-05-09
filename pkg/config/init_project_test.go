@@ -141,7 +141,7 @@ func TestInitProject_NonGitCreatesMarkerAndExternalDir(t *testing.T) {
 	if marker.GroveSlug == "" {
 		t.Error("marker should have a grove-slug")
 	}
-	if marker.GroveID == "" {
+	if marker.ProjectID == "" {
 		t.Error("marker should have a grove-id")
 	}
 
@@ -225,8 +225,8 @@ func TestInitProject_NonGitIdempotent(t *testing.T) {
 
 	// Read marker after second init — should be unchanged
 	marker2, _ := ReadGroveMarker(filepath.Join(projectDir, ".scion"))
-	if marker1.GroveID != marker2.GroveID {
-		t.Errorf("grove-id changed between inits: %q → %q", marker1.GroveID, marker2.GroveID)
+	if marker1.ProjectID != marker2.ProjectID {
+		t.Errorf("grove-id changed between inits: %q → %q", marker1.ProjectID, marker2.ProjectID)
 	}
 }
 
@@ -261,9 +261,9 @@ func TestInitProject_GitCreatesGroveIDAndExternalDir(t *testing.T) {
 	}
 
 	// Verify grove-id file was created
-	groveID, err := ReadGroveID(scionDir)
+	groveID, err := ReadProjectID(scionDir)
 	if err != nil {
-		t.Fatalf("ReadGroveID failed: %v", err)
+		t.Fatalf("ReadProjectID failed: %v", err)
 	}
 	if groveID == "" {
 		t.Error("grove-id should not be empty")
@@ -330,13 +330,13 @@ func TestInitProject_GitIdempotentGroveID(t *testing.T) {
 	if err := InitProject(scionDir, GetMockHarnesses()); err != nil {
 		t.Fatalf("first InitProject failed: %v", err)
 	}
-	groveID1, _ := ReadGroveID(scionDir)
+	groveID1, _ := ReadProjectID(scionDir)
 
 	// Second init
 	if err := InitProject(scionDir, GetMockHarnesses()); err != nil {
 		t.Fatalf("second InitProject failed: %v", err)
 	}
-	groveID2, _ := ReadGroveID(scionDir)
+	groveID2, _ := ReadProjectID(scionDir)
 
 	if groveID1 != groveID2 {
 		t.Errorf("grove-id changed between inits: %q → %q", groveID1, groveID2)

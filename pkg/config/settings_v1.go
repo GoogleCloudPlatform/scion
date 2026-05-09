@@ -433,7 +433,7 @@ type V1HubClientConfig struct {
 	Enabled   *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	Linked    *bool  `json:"linked,omitempty" yaml:"linked,omitempty" koanf:"linked"`
 	Endpoint  string `json:"endpoint,omitempty" yaml:"endpoint,omitempty" koanf:"endpoint"`
-	GroveID   string `json:"grove_id,omitempty" yaml:"grove_id,omitempty" koanf:"grove_id"`
+	ProjectID   string `json:"grove_id,omitempty" yaml:"grove_id,omitempty" koanf:"grove_id"`
 	LocalOnly *bool  `json:"local_only,omitempty" yaml:"local_only,omitempty" koanf:"local_only"`
 }
 
@@ -738,7 +738,7 @@ func LoadVersionedSettings(grovePath string) (*VersionedSettings, error) {
 	if grovePath != "" {
 		globalDir, _ := GetGlobalDir()
 		if grovePath != globalDir {
-			if groveID, err := ReadGroveID(grovePath); err == nil && groveID != "" {
+			if groveID, err := ReadProjectID(grovePath); err == nil && groveID != "" {
 				_ = k.Load(confmap.Provider(map[string]interface{}{
 					"hub.grove_id": groveID,
 				}, "."), nil)
@@ -1356,7 +1356,7 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 			Enabled:   legacy.Hub.Enabled,
 			Linked:    legacy.Hub.Linked,
 			Endpoint:  legacy.Hub.Endpoint,
-			GroveID:   legacy.Hub.GroveID,
+			ProjectID:   legacy.Hub.ProjectID,
 			LocalOnly: legacy.Hub.LocalOnly,
 		}
 		if legacy.Hub.Token != "" {
@@ -1477,7 +1477,7 @@ func convertVersionedToLegacy(vs *VersionedSettings) *Settings {
 			Enabled:   vs.Hub.Enabled,
 			Linked:    vs.Hub.Linked,
 			Endpoint:  vs.Hub.Endpoint,
-			GroveID:   vs.Hub.GroveID,
+			ProjectID:   vs.Hub.ProjectID,
 			LocalOnly: vs.Hub.LocalOnly,
 		}
 	}
@@ -1694,7 +1694,7 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 		if vs.Hub == nil {
 			vs.Hub = &V1HubClientConfig{}
 		}
-		vs.Hub.GroveID = value
+		vs.Hub.ProjectID = value
 
 	// --- Hub client settings ---
 	case "hub.enabled":
@@ -1718,7 +1718,7 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 		if vs.Hub == nil {
 			vs.Hub = &V1HubClientConfig{}
 		}
-		vs.Hub.GroveID = value
+		vs.Hub.ProjectID = value
 	case "hub.local_only":
 		if vs.Hub == nil {
 			vs.Hub = &V1HubClientConfig{}
@@ -1797,7 +1797,7 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 		return "", nil
 	case "grove_id":
 		if vs.Hub != nil {
-			return vs.Hub.GroveID, nil
+			return vs.Hub.ProjectID, nil
 		}
 		return "", nil
 	case "hub.enabled":
@@ -1823,7 +1823,7 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 		return "", nil
 	case "hub.groveId":
 		if vs.Hub != nil {
-			return vs.Hub.GroveID, nil
+			return vs.Hub.ProjectID, nil
 		}
 		return "", nil
 	case "hub.local_only":

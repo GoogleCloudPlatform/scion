@@ -87,9 +87,9 @@ func FindProjectRoot() (string, bool) {
 }
 
 // GetResolvedProjectDir returns the active .scion directory based on precedence.
-// This is a convenience wrapper around ResolveGrovePath that discards the isGlobal flag.
+// This is a convenience wrapper around ResolveProjectPath that discards the isGlobal flag.
 func GetResolvedProjectDir(explicitPath string) (string, error) {
-	path, _, err := ResolveGrovePath(explicitPath)
+	path, _, err := ResolveProjectPath(explicitPath)
 	return path, err
 }
 
@@ -107,8 +107,8 @@ func GetProjectDir() (string, error) {
 	return filepath.Join(wd, DotScion), nil
 }
 
-// GetGroveName returns the slugified name of the grove.
-func GetGroveName(projectDir string) string {
+// GetProjectName returns the slugified name of the grove.
+func GetProjectName(projectDir string) string {
 	abs, err := filepath.Abs(projectDir)
 	if err != nil {
 		return "unknown"
@@ -206,11 +206,11 @@ func GetGlobalAgentsDir() (string, error) {
 	return filepath.Join(g, "agents"), nil
 }
 
-// ResolveGrovePath resolves a grove path to an absolute path and indicates if it's the global grove.
+// ResolveProjectPath resolves a grove path to an absolute path and indicates if it's the global grove.
 // If path is empty, it attempts to find the project grove or falls back to global.
 // If path is "global" or "home", it returns the global grove path.
 // Returns the absolute path, whether it's the global grove, and any error.
-func ResolveGrovePath(path string) (string, bool, error) {
+func ResolveProjectPath(path string) (string, bool, error) {
 	if path == "" {
 		// Try to find project grove first
 		if p, ok := FindProjectRoot(); ok {

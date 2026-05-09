@@ -113,7 +113,7 @@ func LoadSettingsKoanf(grovePath string) (*Settings, error) {
 			"grove_id": k.String("hub.grove_id"),
 		}, "."), nil)
 		// Also remap to hub.groveId (camelCase) so the legacy
-		// HubClientConfig.GroveID field (koanf tag "groveId") is populated.
+		// HubClientConfig.ProjectID field (koanf tag "groveId") is populated.
 		// Without this, GetHubGroveID() returns "" for V1 settings, causing
 		// EnsureHubReady to fall back to the local grove_id and loop on
 		// grove registration when the hub grove ID differs from the local ID.
@@ -130,7 +130,7 @@ func LoadSettingsKoanf(grovePath string) (*Settings, error) {
 	// grovePath points to the .scion directory (before resolveEffectiveGrovePath
 	// redirects to the external config dir).
 	if grovePath != "" && grovePath != globalDir {
-		if groveID, err := ReadGroveID(grovePath); err == nil && groveID != "" {
+		if groveID, err := ReadProjectID(grovePath); err == nil && groveID != "" {
 			_ = k.Load(confmap.Provider(map[string]interface{}{
 				"grove_id": groveID,
 			}, "."), nil)
