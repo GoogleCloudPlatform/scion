@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package grovesync implements grove-level workspace synchronization using
+// Package projectsync implements project-level workspace synchronization using
 // rclone's WebDAV backend against the Hub's WebDAV endpoint.
-package grovesync
+package projectsync
 
 import (
 	"context"
@@ -29,21 +29,21 @@ import (
 	"github.com/rclone/rclone/fs/sync"
 )
 
-// Direction represents the sync direction for grove-level sync.
+// Direction represents the sync direction for project-level sync.
 type Direction string
 
 const (
-	// DirPush syncs local grove workspace → hub (local is source of truth).
+	// DirPush syncs local project workspace → hub (local is source of truth).
 	DirPush Direction = "push"
-	// DirPull syncs hub → local grove workspace (hub is source of truth).
+	// DirPull syncs hub → local project workspace (hub is source of truth).
 	DirPull Direction = "pull"
 	// DirBisync performs bidirectional sync (newer file wins).
 	DirBisync Direction = "bisync"
 )
 
-// Options configures a grove sync operation.
+// Options configures a project sync operation.
 type Options struct {
-	// LocalPath is the local grove workspace directory.
+	// LocalPath is the local project workspace directory.
 	LocalPath string
 	// HubEndpoint is the base Hub API URL (e.g. "https://hub.example.com").
 	HubEndpoint string
@@ -61,7 +61,7 @@ type Options struct {
 	Force bool
 }
 
-// DefaultExcludePatterns are always excluded from grove sync.
+// DefaultExcludePatterns are always excluded from project sync.
 // These match the patterns used by the hub's WebDAV endpoint.
 var DefaultExcludePatterns = []string{
 	".git/**",
@@ -78,7 +78,7 @@ type Result struct {
 	DryRun bool
 }
 
-// Sync performs a grove workspace sync operation.
+// Sync performs a project workspace sync operation.
 func Sync(ctx context.Context, opts Options) (*Result, error) {
 	if opts.LocalPath == "" {
 		return nil, fmt.Errorf("local workspace path is required")
@@ -160,7 +160,7 @@ func Sync(ctx context.Context, opts Options) (*Result, error) {
 	}, nil
 }
 
-// buildWebDAVURL constructs the WebDAV endpoint URL for a grove.
+// buildWebDAVURL constructs the WebDAV endpoint URL for a project.
 func buildWebDAVURL(hubEndpoint, groveID string) string {
 	base := strings.TrimRight(hubEndpoint, "/")
 	return fmt.Sprintf("%s/api/v1/groves/%s/dav", base, groveID)

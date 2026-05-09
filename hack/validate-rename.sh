@@ -20,6 +20,7 @@ EXCLUDE_DIRS=(
   ".scratch"
   "changelog"
   "scratchpad" # matches /scion-volumes/scratchpad/
+  ".scion"
 )
 
 # Files to exclude

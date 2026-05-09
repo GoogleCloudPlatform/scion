@@ -52,3 +52,7 @@ Captured on: 2026-05-09
 - The failure in `TestDeleteStopped_RequiresGroveContext` appears to be due to `docker` not being available in the test environment.
 - Many failures seem related to Telemetry settings and Hub synchronization.
 - `pkg/store/sqlite` has a mismatch in the number of seeded maintenance operations (expected 4, found 5).
+
+## Pre-rename Baseline
+
+- **Initial Grove Count**: 22194

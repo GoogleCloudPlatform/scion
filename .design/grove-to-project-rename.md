@@ -107,6 +107,7 @@ web/src/components/pages/grove-create.ts, grove-detail.ts,
 
 ### Phase 1: Internal Go Plumbing (No Wire Changes)
 - **Goal:** Rename Go-internal symbols while maintaining external compatibility.
+- **Detailed Decomposition:** See [.scratch/phase1-decomposition.md](../.scratch/phase1-decomposition.md) for a full sub-task breakdown.
 - **Tasks:**
   - Rename Go types, funcs, vars: `Grove` → `Project`, `GroveID` → `ProjectID`.
   - Rename packages: `pkg/grovesync` → `pkg/projectsync`.

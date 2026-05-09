@@ -19,14 +19,14 @@ import "time"
 // Agent represents an agent from the Hub API.
 type Agent struct {
 	ID                string            `json:"id"`          // Hub UUID (database primary key)
-	Slug              string            `json:"slug"`        // URL-safe slug identifier (unique per grove)
+	Slug              string            `json:"slug"`        // URL-safe slug identifier (unique per project)
 	ContainerID       string            `json:"containerId"` // Runtime container ID (ephemeral)
 	Name              string            `json:"name"`
 	Template          string            `json:"template,omitempty"`
 	HarnessConfig     string            `json:"harnessConfig,omitempty"`
 	HarnessAuth       string            `json:"harnessAuth,omitempty"`
-	GroveID           string            `json:"groveId,omitempty"`
-	Grove             string            `json:"grove,omitempty"`
+	ProjectID         string            `json:"groveId,omitempty"`
+	Project           string            `json:"grove,omitempty"`
 	Labels            map[string]string `json:"labels,omitempty"`
 	Annotations       map[string]string `json:"annotations,omitempty"`
 	Phase             string            `json:"phase,omitempty"`    // Lifecycle phase (created, provisioning, running, stopped, error)
@@ -83,8 +83,8 @@ type KubernetesInfo struct {
 	SyncedAt  string `json:"syncedAt,omitempty"`
 }
 
-// Grove represents a grove from the Hub API.
-type Grove struct {
+// Project represents a project from the Hub API.
+type Project struct {
 	ID                     string            `json:"id"`
 	Name                   string            `json:"name"`
 	Slug                   string            `json:"slug"`
@@ -97,14 +97,14 @@ type Grove struct {
 	Visibility             string            `json:"visibility,omitempty"`
 	Labels                 map[string]string `json:"labels,omitempty"`
 	Annotations            map[string]string `json:"annotations,omitempty"`
-	Providers              []GroveProvider   `json:"providers,omitempty"`
+	Providers              []ProjectProvider `json:"providers,omitempty"`
 	AgentCount             int               `json:"agentCount,omitempty"`
 	ActiveBrokerCount      int               `json:"activeBrokerCount,omitempty"`
-	GroveType              string            `json:"groveType,omitempty"`
+	ProjectType            string            `json:"groveType,omitempty"`
 }
 
-// GroveProvider represents a broker providing runtime services to a grove.
-type GroveProvider struct {
+// ProjectProvider represents a broker providing runtime services to a project.
+type ProjectProvider struct {
 	BrokerID   string    `json:"brokerId"`
 	BrokerName string    `json:"brokerName"`
 	Status     string    `json:"status"`
@@ -114,8 +114,8 @@ type GroveProvider struct {
 	LinkedAt   time.Time `json:"linkedAt,omitempty"` // Timestamp when the link was created
 }
 
-// GroveSettings represents grove configuration settings.
-type GroveSettings struct {
+// ProjectSettings represents project configuration settings.
+type ProjectSettings struct {
 	ActiveProfile        string                 `json:"activeProfile,omitempty"`
 	DefaultTemplate      string                 `json:"defaultTemplate,omitempty"`
 	DefaultHarnessConfig string                 `json:"defaultHarnessConfig,omitempty"`
@@ -126,25 +126,25 @@ type GroveSettings struct {
 	Profiles             map[string]interface{} `json:"profiles,omitempty"`
 
 	// Default agent limits
-	DefaultMaxTurns      int                `json:"defaultMaxTurns,omitempty"`
-	DefaultMaxModelCalls int                `json:"defaultMaxModelCalls,omitempty"`
-	DefaultMaxDuration   string             `json:"defaultMaxDuration,omitempty"`
-	DefaultResources     *GroveResourceSpec `json:"defaultResources,omitempty"`
+	DefaultMaxTurns      int                  `json:"defaultMaxTurns,omitempty"`
+	DefaultMaxModelCalls int                  `json:"defaultMaxModelCalls,omitempty"`
+	DefaultMaxDuration   string               `json:"defaultMaxDuration,omitempty"`
+	DefaultResources     *ProjectResourceSpec `json:"defaultResources,omitempty"`
 
 	// Default GCP identity for new agents
 	DefaultGCPIdentityMode             string `json:"defaultGCPIdentityMode,omitempty"`             // "block", "passthrough", or "assign"
 	DefaultGCPIdentityServiceAccountID string `json:"defaultGCPIdentityServiceAccountID,omitempty"` // Required when mode is "assign"
 }
 
-// GroveResourceSpec defines default resource requirements at the grove level.
-type GroveResourceSpec struct {
-	Requests *GroveResourceList `json:"requests,omitempty"`
-	Limits   *GroveResourceList `json:"limits,omitempty"`
-	Disk     string             `json:"disk,omitempty"`
+// ProjectResourceSpec defines default resource requirements at the project level.
+type ProjectResourceSpec struct {
+	Requests *ProjectResourceList `json:"requests,omitempty"`
+	Limits   *ProjectResourceList `json:"limits,omitempty"`
+	Disk     string               `json:"disk,omitempty"`
 }
 
-// GroveResourceList is a set of resource name/quantity pairs.
-type GroveResourceList struct {
+// ProjectResourceList is a set of resource name/quantity pairs.
+type ProjectResourceList struct {
 	CPU    string `json:"cpu,omitempty"`
 	Memory string `json:"memory,omitempty"`
 }
@@ -170,8 +170,8 @@ type RuntimeBroker struct {
 	Labels          map[string]string   `json:"labels,omitempty"`
 	Annotations     map[string]string   `json:"annotations,omitempty"`
 	Endpoint        string              `json:"endpoint,omitempty"`
-	Groves          []BrokerGroveInfo   `json:"groves,omitempty"`
-	AutoProvide     bool                `json:"autoProvide,omitempty"` // Automatically add as provider for new groves
+	Projects        []BrokerProjectInfo `json:"groves,omitempty"`
+	AutoProvide     bool                `json:"autoProvide,omitempty"` // Automatically add as provider for new projects
 	Created         time.Time           `json:"created"`
 	Updated         time.Time           `json:"updated"`
 	CreatedBy       string              `json:"createdBy,omitempty"` // User ID who registered this broker
@@ -193,13 +193,13 @@ type BrokerProfile struct {
 	Namespace string `json:"namespace,omitempty"`
 }
 
-// BrokerGroveInfo describes a grove from a broker's perspective.
-type BrokerGroveInfo struct {
-	GroveID    string `json:"groveId"`
-	GroveName  string `json:"groveName"`
-	GitRemote  string `json:"gitRemote,omitempty"`
-	AgentCount int    `json:"agentCount"`
-	LocalPath  string `json:"localPath,omitempty"`
+// BrokerProjectInfo describes a project from a broker's perspective.
+type BrokerProjectInfo struct {
+	ProjectID   string `json:"groveId"`
+	ProjectName string `json:"groveName"`
+	GitRemote   string `json:"gitRemote,omitempty"`
+	AgentCount  int    `json:"agentCount"`
+	LocalPath   string `json:"localPath,omitempty"`
 }
 
 // Template represents a template from the Hub API.
@@ -215,7 +215,7 @@ type Template struct {
 	Config        *TemplateConfig `json:"config,omitempty"`
 	Scope         string          `json:"scope"`
 	ScopeID       string          `json:"scopeId,omitempty"`
-	GroveID       string          `json:"groveId,omitempty"` // Deprecated: use ScopeID
+	ProjectID     string          `json:"groveId,omitempty"` // Deprecated: use ScopeID
 	StorageURI    string          `json:"storageUri,omitempty"`
 	StorageBucket string          `json:"storageBucket,omitempty"`
 	StoragePath   string          `json:"storagePath,omitempty"`
@@ -317,6 +317,17 @@ type Secret struct {
 	Updated       time.Time `json:"updated"`
 	CreatedBy     string    `json:"createdBy,omitempty"`
 	UpdatedBy     string    `json:"updatedBy,omitempty"`
+}
+
+// ResolvedSecret represents a secret that has been resolved from the Hub
+// and is ready for projection into an agent container.
+type ResolvedSecret struct {
+	Name   string `json:"name"`          // Secret key name
+	Type   string `json:"type"`          // environment, variable, file
+	Target string `json:"target"`        // Projection target (env var name, json key, or file path)
+	Value  string `json:"value"`         // Decrypted secret value
+	Source string `json:"source"`        // Scope that provided this secret (user, project, runtime_broker)
+	Ref    string `json:"ref,omitempty"` // External secret reference (e.g., "gcpsm:projects/123/secrets/name")
 }
 
 // HarnessConfig represents a harness config from the Hub API.

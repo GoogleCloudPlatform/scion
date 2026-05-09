@@ -718,9 +718,9 @@ const (
 	VisibilityPublic  = "public"  // Anyone can access (read-only)
 )
 
-// GroveInfo contains metadata about a grove (project/agent group).
+// ProjectInfo contains metadata about a project (project/agent group).
 // It supports both local/solo mode and hosted/distributed mode.
-type GroveInfo struct {
+type ProjectInfo struct {
 	// Identity fields
 	ID   string `json:"id,omitempty"` // UUID (hosted) or empty (solo)
 	Name string `json:"name"`         // Human-friendly display name
@@ -730,11 +730,11 @@ type GroveInfo struct {
 	Path string `json:"path,omitempty"` // Filesystem path (solo mode)
 
 	// Timestamps
-	Created time.Time `json:"created,omitempty"` // When the grove was created
+	Created time.Time `json:"created,omitempty"` // When the project was created
 	Updated time.Time `json:"updated,omitempty"` // Last modification timestamp
 
 	// Ownership
-	CreatedBy  string `json:"createdBy,omitempty"`  // User/system that created the grove
+	CreatedBy  string `json:"createdBy,omitempty"`  // User/system that created the project
 	OwnerID    string `json:"ownerId,omitempty"`    // Current owner user ID
 	Visibility string `json:"visibility,omitempty"` // Access level: private, team, public
 
@@ -746,14 +746,14 @@ type GroveInfo struct {
 	HubEndpoint string `json:"hubEndpoint,omitempty"` // Scion Hub URL if registered
 
 	// Statistics (computed, not persisted)
-	AgentCount int `json:"agentCount,omitempty"` // Number of agents in this grove
+	AgentCount int `json:"agentCount,omitempty"` // Number of agents in this project
 }
 
-// GroveID returns the hosted-format grove ID (<uuid>__<slug>) if available,
+// ProjectID returns the hosted-format project ID (<uuid>__<slug>) if available,
 // otherwise returns the Name or Slug as a fallback.
-func (g *GroveInfo) GroveID() string {
+func (g *ProjectInfo) ProjectID() string {
 	if g.ID != "" && g.Slug != "" {
-		return g.ID + GroveIDSeparator + g.Slug
+		return g.ID + ProjectIDSeparator + g.Slug
 	}
 	if g.Slug != "" {
 		return g.Slug

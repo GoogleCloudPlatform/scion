@@ -28,8 +28,8 @@ const (
 	// MaxSlugLength is the maximum length for a slug
 	MaxSlugLength = 63
 
-	// GroveIDSeparator is the separator between UUID and name in hosted grove IDs
-	GroveIDSeparator = "__"
+	// ProjectIDSeparator is the separator between UUID and name in hosted project IDs
+	ProjectIDSeparator = "__"
 )
 
 var (
@@ -133,29 +133,29 @@ func NewShortID() string {
 	return id[:8]
 }
 
-// MakeGroveID creates a hosted-format grove ID from a UUID and name.
+// MakeProjectID creates a hosted-format project ID from a UUID and name.
 // Format: <uuid>__<slugified-name>
-func MakeGroveID(id, name string) string {
+func MakeProjectID(id, name string) string {
 	if id == "" {
 		id = NewUUID()
 	}
 	slug := Slugify(name)
-	return id + GroveIDSeparator + slug
+	return id + ProjectIDSeparator + slug
 }
 
-// ParseGroveID extracts the UUID and name slug from a hosted-format grove ID.
+// ParseProjectID extracts the UUID and name slug from a hosted-format project ID.
 // Returns the ID, slug, and whether the parse was successful.
-func ParseGroveID(groveID string) (id, slug string, ok bool) {
-	parts := strings.SplitN(groveID, GroveIDSeparator, 2)
+func ParseProjectID(projectID string) (id, slug string, ok bool) {
+	parts := strings.SplitN(projectID, ProjectIDSeparator, 2)
 	if len(parts) != 2 {
 		// Not a hosted format - treat entire string as the name/slug
-		return "", groveID, false
+		return "", projectID, false
 	}
 	return parts[0], parts[1], true
 }
 
-// IsHostedGroveID returns true if the grove ID is in hosted format (uuid__name).
-func IsHostedGroveID(groveID string) bool {
-	_, _, ok := ParseGroveID(groveID)
+// IsHostedProjectID returns true if the project ID is in hosted format (uuid__name).
+func IsHostedProjectID(projectID string) bool {
+	_, _, ok := ParseProjectID(projectID)
 	return ok
 }
