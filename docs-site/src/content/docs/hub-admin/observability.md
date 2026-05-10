@@ -89,10 +89,10 @@ Agents use `sciontool` as their init process, which includes an embedded OTLP fo
 
 #### Via Settings File (Recommended)
 
-The preferred approach is to configure telemetry in `settings.yaml`. Settings at the global level apply to all agents; grove-level settings apply to a specific project. Templates and individual agents can further override these via their `scion-agent.yaml`.
+The preferred approach is to configure telemetry in `settings.yaml`. Settings at the global level apply to all agents; project-level settings apply to a specific project. Templates and individual agents can further override these via their `scion-agent.yaml`.
 
 ```yaml
-# In ~/.scion/settings.yaml (global) or .scion/settings.yaml (grove)
+# In ~/.scion/settings.yaml (global) or .scion/settings.yaml (project)
 telemetry:
   enabled: true
   cloud:
@@ -109,7 +109,7 @@ See the [Orchestrator Settings Reference](/scion/reference/orchestrator-settings
 
 #### Via Hub Environment Variables
 
-For hosted deployments, environment variables can be set at the Grove or Broker level on the Hub. These are automatically injected into every agent container.
+For hosted deployments, environment variables can be set at the Project or Broker level on the Hub. These are automatically injected into every agent container.
 
 ```bash
 SCION_OTEL_ENDPOINT="monitoring.googleapis.com:443"
@@ -167,7 +167,7 @@ By default, user prompts (`agent.user.prompt`) are excluded from telemetry to pr
 
 ## HTTP Request Logs
 
-HTTP requests to Hub, Broker, and Web servers are logged as a dedicated structured stream, separate from application logs. Request logs use the `google.logging.type.HttpRequest` format and include grove/agent IDs, a generated request ID, and trace context from incoming headers.
+HTTP requests to Hub, Broker, and Web servers are logged as a dedicated structured stream, separate from application logs. Request logs use the `google.logging.type.HttpRequest` format and include project/agent IDs, a generated request ID, and trace context from incoming headers.
 
 ### Enabling Request Log Output
 
@@ -193,10 +193,10 @@ logName="projects/YOUR_PROJECT/logs/scion_request_log"
 logName="projects/YOUR_PROJECT/logs/scion_request_log"
 httpRequest.latency > "1s"
 
--- Failed requests for a specific grove
+-- Failed requests for a specific project
 logName="projects/YOUR_PROJECT/logs/scion_request_log"
 httpRequest.status >= 400
-labels.grove_id = "my-grove"
+labels.project_id = "my-project"
 
 -- Correlate a request with its application logs
 logName="projects/YOUR_PROJECT/logs/scion" OR logName="projects/YOUR_PROJECT/logs/scion_request_log"
@@ -293,11 +293,11 @@ logName="projects/YOUR_PROJECT/logs/scion"
 jsonPayload.subsystem =~ "\.messages$"
 jsonPayload.sender = "agent-slug"
 
--- Messages to a specific recipient in a grove
+-- Messages to a specific recipient in a project
 logName="projects/YOUR_PROJECT/logs/scion"
 jsonPayload.subsystem =~ "\.messages$"
 jsonPayload.recipient = "target-agent"
-jsonPayload.grove_id = "my-grove-id"
+jsonPayload.project_id = "my-project-id"
 ```
 
 #### Auth and Security Auditing

@@ -113,7 +113,7 @@ export class DebugEventLog extends EventTarget {
     }) as EventListener);
 
     // State change events
-    for (const eventType of ['agents-updated', 'groves-updated', 'brokers-updated'] as const) {
+    for (const eventType of ['agents-updated', 'projects-updated', 'brokers-updated'] as const) {
       stateManager.addEventListener(eventType, () => {
         const snapshot = stateManager.getStateSnapshot();
         this.add('state', eventType, undefined, snapshot);

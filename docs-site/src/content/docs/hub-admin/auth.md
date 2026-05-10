@@ -119,12 +119,12 @@ A shared secret is established during the `scion broker register` flow and is st
 
 ### Provider Authorization
 
-The Hub enforces a "Provider" model for authorization. Even if a broker is authenticated, it will only receive agent dispatch requests for **Groves** that it has been explicitly registered to provide for. This prevents a compromised broker from accessing projects it shouldn't have access to.
+The Hub enforces a "Provider" model for authorization. Even if a broker is authenticated, it will only receive agent dispatch requests for **Projects** that it has been explicitly registered to provide for. This prevents a compromised broker from accessing projects it shouldn't have access to.
 
 ### Secret Management
 
 Brokers never store agent secrets (like API keys) on disk.
-1. The Hub resolves secrets from all applicable scopes (user, grove, broker) via the configured secrets backend (e.g., GCP Secret Manager).
+1. The Hub resolves secrets from all applicable scopes (user, project, broker) via the configured secrets backend (e.g., GCP Secret Manager).
 2. The Hub includes the resolved secrets in the `CreateAgent` command sent to the Broker over the TLS-secured control channel.
 3. The Broker projects secrets into the agent container based on their type (environment variable, JSON file, or filesystem path).
 4. When the agent is deleted, the secrets are purged from the host.
@@ -152,12 +152,12 @@ Administrators can manage available Service Accounts through the **Service Accou
 - **Registration**: Register existing GCP Service Accounts by email.
 - **Hub-Minted Accounts**: The Hub can directly manage and provision (mint) GCP service accounts based on your quota dashboard and capability controls.
 - **Validation**: Scion auto-verifies that the Hub has the necessary permissions to act as the registered Service Account upon registration.
-- **Assignment & Defaults**: Service Accounts can be assigned to agents during the creation flow. Groves also support default GCP identities that are automatically applied in the agent creation form.
+- **Assignment & Defaults**: Service Accounts can be assigned to agents during the creation flow. Projects also support default GCP identities that are automatically applied in the agent creation form.
 
 ### Security & Auditing
 
 - **Iptables Interception**: Scion uses `iptables` (when `NET_ADMIN` capability is available) to redirect traffic from `169.254.169.254:80` to the local sidecar.
-- **Authorization Checks**: Administrative actions for GCP Service Account management require `grove-owner` (`ActionManage`) permissions to enforce strict authorization boundaries.
+- **Authorization Checks**: Administrative actions for GCP Service Account management require `project-owner` (`ActionManage`) permissions to enforce strict authorization boundaries.
 - **Rate Limiting**: Token requests are rate-limited per-agent to prevent abuse.
 - **Audit Logging**: All token issuance events are logged at the Hub level with the requesting `agent_id` and `user_id`.
 
@@ -169,11 +169,11 @@ Scion supports native GitHub App integration for secure, automated agent authent
 - **Native Auth**: Uses JWT-based authentication and automated installation token minting.
 - **Automated Token Refresh**: A background refresh loop ensures long-running agents always have valid git credentials.
 - **Git Credential Helper**: The `sciontool` injects a credential helper into the agent environment, providing fresh tokens to `git` on-demand.
-- **Commit Attribution**: Supports per-grove git identity configuration to ensure commits are authored correctly.
+- **Commit Attribution**: Supports per-project git identity configuration to ensure commits are authored correctly.
 - **Admin Management**: Global monitoring of installations, rate limits, and status via the "GitHub App" tab in the Admin Server Config UI.
 
-### Grove Association
-Groves can be linked to specific GitHub App installations. The system automatically associates GitHub App installations at grove creation time, streamlining the authentication flow for private repositories. Grove settings provide visual indicators and permission badges for real-time feedback on integration health.
+### Project Association
+Projects can be linked to specific GitHub App installations. The system automatically associates GitHub App installations at project creation time, streamlining the authentication flow for private repositories. Project settings provide visual indicators and permission badges for real-time feedback on integration health.
 
 
 ## CLI Authentication
@@ -188,7 +188,7 @@ Users can authenticate the CLI against a Scion Hub using the following flow:
 
 Agents are automatically authenticated. When the Hub dispatches an agent to a Runtime Broker, it includes a one-time-use **Agent Token**.
 - The agent uses this token for all calls back to the Hub (e.g., updating status, streaming logs).
-- Tokens are scoped to the specific agent and its grove.
+- Tokens are scoped to the specific agent and its project.
 - Tokens have a default expiration (typically 24 hours), but Scion implements an automated token refresh mechanism to ensure long-running agents maintain valid authorization throughout extended tasks.
 
 ## Personal Access Tokens

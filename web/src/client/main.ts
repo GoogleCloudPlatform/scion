@@ -128,7 +128,7 @@ const ROUTES: RouteConfig[] = [
   { pattern: /^\/login$/, tag: 'scion-login-page', load: () => import('../components/pages/login.js') },
   { pattern: /^\/invite$/, tag: 'scion-page-invite', load: () => import('../components/pages/invite.js') },
   { pattern: /^\/$/, tag: 'scion-page-home', load: () => import('../components/pages/home.js') },
-  { pattern: /^\/groves$/, tag: 'scion-page-groves', load: () => import('../components/pages/groves.js') },
+  { pattern: /^\/projects$/, tag: 'scion-page-projects', load: () => import('../components/pages/projects.js') },
   { pattern: /^\/agents$/, tag: 'scion-page-agents', load: () => import('../components/pages/agents.js') },
   { pattern: /^\/brokers$/, tag: 'scion-page-brokers', load: () => import('../components/pages/brokers.js') },
   { pattern: /^\/brokers\/[^/]+$/, tag: 'scion-page-broker-detail', load: () => import('../components/pages/broker-detail.js') },
@@ -145,11 +145,11 @@ const ROUTES: RouteConfig[] = [
   { pattern: /^\/profile\/tokens$/, tag: 'scion-page-profile-tokens', load: () => import('../components/pages/profile-tokens.js') },
   { pattern: /^\/profile$/, tag: 'scion-page-profile-env-vars', load: () => import('../components/pages/profile-env-vars.js') },
   { pattern: /^\/github-app\/installed$/, tag: 'scion-page-github-app-setup', load: () => import('../components/pages/github-app-setup.js') },
-  { pattern: /^\/groves\/new$/, tag: 'scion-page-grove-create', load: () => import('../components/pages/grove-create.js') },
-  { pattern: /^\/groves\/[^/]+\/settings$/, tag: 'scion-page-grove-settings', load: () => import('../components/pages/grove-settings.js') },
-  { pattern: /^\/groves\/[^/]+\/templates\/[^/]+$/, tag: 'scion-page-template-detail', load: () => import('../components/pages/template-detail.js') },
-  { pattern: /^\/groves\/[^/]+\/schedules$/, tag: 'scion-page-grove-schedules', load: () => import('../components/pages/grove-schedules.js') },
-  { pattern: /^\/groves\/[^/]+$/, tag: 'scion-page-grove-detail', load: () => import('../components/pages/grove-detail.js') },
+  { pattern: /^\/projects\/new$/, tag: 'scion-page-project-create', load: () => import('../components/pages/project-create.js') },
+  { pattern: /^\/projects\/[^/]+\/settings$/, tag: 'scion-page-project-settings', load: () => import('../components/pages/project-settings.js') },
+  { pattern: /^\/projects\/[^/]+\/templates\/[^/]+$/, tag: 'scion-page-template-detail', load: () => import('../components/pages/template-detail.js') },
+  { pattern: /^\/projects\/[^/]+\/schedules$/, tag: 'scion-page-project-schedules', load: () => import('../components/pages/project-schedules.js') },
+  { pattern: /^\/projects\/[^/]+$/, tag: 'scion-page-project-detail', load: () => import('../components/pages/project-detail.js') },
   { pattern: /^\/agents\/new$/, tag: 'scion-page-agent-create', load: () => import('../components/pages/agent-create.js') },
   { pattern: /^\/agents\/[^/]+\/configure$/, tag: 'scion-page-agent-configure', load: () => import('../components/pages/agent-configure.js') },
   { pattern: /^\/agents\/[^/]+\/terminal$/, tag: 'scion-page-terminal', load: () => import('../components/pages/terminal.js') },
@@ -189,7 +189,7 @@ async function init(): Promise<void> {
     if (initialData.data) {
       const pageDataObj = initialData.data as {
         agents?: import('../shared/types.js').Agent[];
-        groves?: import('../shared/types.js').Grove[];
+        projects?: import('../shared/types.js').Project[];
         _capabilities?: import('../shared/types.js').Capabilities;
       };
       stateManager.hydrate(pageDataObj, pageDataObj._capabilities);

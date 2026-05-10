@@ -19,7 +19,7 @@
  *
  * The StateManager uses view-scoped subscriptions: the subscription scope
  * follows navigation, not individual entities. A paginated list of 200 agents
- * uses one grove-level subscription, not 200 agent-level subscriptions.
+ * uses one project-level subscription, not 200 agent-level subscriptions.
  * Pagination is a rendering concern; the full state map is maintained in memory.
  *
  * See web-frontend-design.md §4.4 and §12.2.
@@ -27,7 +27,7 @@
 
 import { SSEClient } from './sse-client.js';
 import type { SSEUpdateEvent } from './sse-client.js';
-import type { Agent, Grove, RuntimeBroker } from '../shared/types.js';
+import type { Agent, Project, RuntimeBroker } from '../shared/types.js';
 
 /** Activities that should not be overwritten by idle/empty transitions */
 const STICKY_ACTIVITIES = new Set(['waiting_for_input', 'completed', 'limits_exceeded']);
@@ -35,17 +35,17 @@ const STICKY_ACTIVITIES = new Set(['waiting_for_input', 'completed', 'limits_exc
 /** Subscription scope matches view context */
 export type ViewScope =
   | { type: 'dashboard' }
-  | { type: 'grove'; groveId: string }
-  | { type: 'agent-detail'; groveId: string; agentId: string }
+  | { type: 'project'; projectId: string }
+  | { type: 'agent-detail'; projectId: string; agentId: string }
   | { type: 'brokers-list' }
   | { type: 'broker-detail'; brokerId: string };
 
 /** Full in-memory state for the current scope */
 export interface AppState {
   agents: Map<string, Agent>;
-  groves: Map<string, Grove>;
+  projects: Map<string, Project>;
   brokers: Map<string, RuntimeBroker>;
-  deletedGroveIds: Set<string>;
+  deletedProjectIds: Set<string>;
   deletedAgentIds: Set<string>;
   connected: boolean;
   scope: ViewScope | null;
@@ -56,7 +56,7 @@ export interface AppState {
 /** Events dispatched by StateManager */
 export type StateEventType =
   | 'agents-updated'
-  | 'groves-updated'
+  | 'projects-updated'
   | 'brokers-updated'
   | 'connected'
   | 'disconnected'
@@ -67,9 +67,9 @@ export type StateEventType =
 export class StateManager extends EventTarget {
   private state: AppState = {
     agents: new Map(),
-    groves: new Map(),
+    projects: new Map(),
     brokers: new Map(),
-    deletedGroveIds: new Set(),
+    deletedProjectIds: new Set(),
     deletedAgentIds: new Set(),
     connected: false,
     scope: null,
@@ -110,12 +110,12 @@ export class StateManager extends EventTarget {
    * Initialize state from server-rendered data.
    * Called once on page load with the __SCION_DATA__ payload.
    *
-   * @param initialData - Agents and/or groves from the prefetched API response.
+   * @param initialData - Agents and/or projects from the prefetched API response.
    * @param scopeCapabilities - Scope-level capabilities from the API response's
    *   top-level `_capabilities` field (if present).
    */
   hydrate(
-    initialData: { agents?: Agent[]; groves?: Grove[] },
+    initialData: { agents?: Agent[]; projects?: Project[] },
     scopeCapabilities?: import('../shared/types.js').Capabilities,
   ): void {
     if (initialData.agents) {
@@ -124,9 +124,9 @@ export class StateManager extends EventTarget {
       }
     }
 
-    if (initialData.groves) {
-      for (const grove of initialData.groves) {
-        this.state.groves.set(grove.id, grove);
+    if (initialData.projects) {
+      for (const project of initialData.projects) {
+        this.state.projects.set(project.id, project);
       }
     }
 
@@ -150,9 +150,9 @@ export class StateManager extends EventTarget {
 
     // Clear state from previous scope
     this.state.agents.clear();
-    this.state.groves.clear();
+    this.state.projects.clear();
     this.state.brokers.clear();
-    this.state.deletedGroveIds.clear();
+    this.state.deletedProjectIds.clear();
     this.state.deletedAgentIds.clear();
     this.state.scopeCapabilities = undefined;
     this.pendingAgentDeltas.clear();
@@ -175,13 +175,13 @@ export class StateManager extends EventTarget {
   private subjectsForScope(scope: ViewScope): string[] {
     switch (scope.type) {
       case 'dashboard':
-        return ['grove.>', 'notification.>'];
+        return ['project.>', 'notification.>'];
 
-      case 'grove':
-        return [`grove.${scope.groveId}.>`, 'notification.>'];
+      case 'project':
+        return [`project.${scope.projectId}.>`, 'notification.>'];
 
       case 'agent-detail':
-        return [`grove.${scope.groveId}.>`, `agent.${scope.agentId}.>`, 'notification.>'];
+        return [`project.${scope.projectId}.>`, `agent.${scope.agentId}.>`, 'notification.>'];
 
       case 'brokers-list':
         return ['broker.>', 'notification.>'];
@@ -196,9 +196,9 @@ export class StateManager extends EventTarget {
     if (a.type === 'dashboard' && b.type === 'dashboard') return true;
     if (a.type === 'brokers-list' && b.type === 'brokers-list') return true;
     if (a.type === 'broker-detail' && b.type === 'broker-detail') return a.brokerId === b.brokerId;
-    if (a.type === 'grove' && b.type === 'grove') return a.groveId === b.groveId;
+    if (a.type === 'project' && b.type === 'project') return a.projectId === b.projectId;
     if (a.type === 'agent-detail' && b.type === 'agent-detail') {
-      return a.groveId === b.groveId && a.agentId === b.agentId;
+      return a.projectId === b.projectId && a.agentId === b.agentId;
     }
     return false;
   }
@@ -234,11 +234,11 @@ export class StateManager extends EventTarget {
       return;
     }
 
-    // Grove-scoped events
-    if (parts[0] === 'grove' && parts.length >= 3) {
-      const groveId = parts[1];
+    // Project-scoped events
+    if (parts[0] === 'project' && parts.length >= 3) {
+      const projectId = parts[1];
 
-      // Grove agent events: grove.{groveId}.agent.{eventType}
+      // Project agent events: project.{projectId}.agent.{eventType}
       if (parts[2] === 'agent' && parts.length >= 4) {
         const eventType = parts[3];
         const agentData = data as Record<string, unknown>;
@@ -249,20 +249,20 @@ export class StateManager extends EventTarget {
         return;
       }
 
-      // Grove broker events: grove.{groveId}.broker.{eventType}
+      // Project broker events: project.{projectId}.broker.{eventType}
       if (parts[2] === 'broker') {
-        // Broker events don't affect agent/grove state maps currently
+        // Broker events don't affect agent/project state maps currently
         return;
       }
 
-      // User-targeted message events: grove.{groveId}.user.{userId}
+      // User-targeted message events: project.{projectId}.user.{userId}
       if (parts[2] === 'user') {
         this.notify('user-message-created');
         return;
       }
 
-      // Grove metadata events: grove.{groveId}.updated or grove.*.summary
-      this.handleGroveEvent(groveId, parts[2], data);
+      // Project metadata events: project.{projectId}.updated or project.*.summary
+      this.handleProjectEvent(projectId, parts[2], data);
     }
   }
 
@@ -336,32 +336,32 @@ export class StateManager extends EventTarget {
     this.notify('agents-updated');
   }
 
-  private handleGroveEvent(groveId: string, eventType: string, data: unknown): void {
+  private handleProjectEvent(projectId: string, eventType: string, data: unknown): void {
     if (eventType === 'deleted') {
-      this.state.groves.delete(groveId);
-      this.state.deletedGroveIds.add(groveId);
+      this.state.projects.delete(projectId);
+      this.state.deletedProjectIds.add(projectId);
     } else if (eventType === 'summary') {
-      // Dashboard summary event: grove.*.summary
-      const summaryData = data as Partial<Grove> & { groveId?: string };
-      const id = summaryData.groveId || groveId;
-      const existing = this.state.groves.get(id) || ({} as Grove);
+      // Dashboard summary event: project.*.summary
+      const summaryData = data as Partial<Project> & { projectId?: string };
+      const id = summaryData.projectId || projectId;
+      const existing = this.state.projects.get(id) || ({} as Project);
       const updated = { ...existing, ...summaryData, id };
       if (!summaryData._capabilities && existing._capabilities) {
         updated._capabilities = existing._capabilities;
       }
-      this.state.groves.set(id, updated as Grove);
+      this.state.projects.set(id, updated as Project);
     } else {
-      // Grove lifecycle events: created, updated
-      const groveData = data as Partial<Grove> & { groveId?: string };
-      const id = groveData.groveId || groveId;
-      const existing = this.state.groves.get(id) || ({} as Grove);
-      const updated = { ...existing, ...groveData, id };
-      if (!groveData._capabilities && existing._capabilities) {
+      // Project lifecycle events: created, updated
+      const projectData = data as Partial<Project> & { projectId?: string };
+      const id = projectData.projectId || projectId;
+      const existing = this.state.projects.get(id) || ({} as Project);
+      const updated = { ...existing, ...projectData, id };
+      if (!projectData._capabilities && existing._capabilities) {
         updated._capabilities = existing._capabilities;
       }
-      this.state.groves.set(id, updated as Grove);
+      this.state.projects.set(id, updated as Project);
     }
-    this.notify('groves-updated');
+    this.notify('projects-updated');
   }
 
   private handleBrokerEvent(brokerId: string, eventType: string, data: unknown): void {
@@ -396,12 +396,12 @@ export class StateManager extends EventTarget {
   }
 
   /**
-   * Seed the groves map with full objects from a REST API response.
+   * Seed the projects map with full objects from a REST API response.
    * Does not trigger notifications.
    */
-  seedGroves(groves: Grove[]): void {
-    for (const grove of groves) {
-      this.state.groves.set(grove.id, grove);
+  seedProjects(projects: Project[]): void {
+    for (const project of projects) {
+      this.state.projects.set(project.id, project);
     }
   }
 
@@ -436,22 +436,22 @@ export class StateManager extends EventTarget {
   /** Snapshot of current state for debug display */
   getStateSnapshot(): {
     agentCount: number;
-    groveCount: number;
+    projectCount: number;
     brokerCount: number;
     agentIds: string[];
-    groveIds: string[];
+    projectIds: string[];
     brokerIds: string[];
-    deletedGroveIds: string[];
+    deletedProjectIds: string[];
     deletedAgentIds: string[];
   } {
     return {
       agentCount: this.state.agents.size,
-      groveCount: this.state.groves.size,
+      projectCount: this.state.projects.size,
       brokerCount: this.state.brokers.size,
       agentIds: Array.from(this.state.agents.keys()),
-      groveIds: Array.from(this.state.groves.keys()),
+      projectIds: Array.from(this.state.projects.keys()),
       brokerIds: Array.from(this.state.brokers.keys()),
-      deletedGroveIds: Array.from(this.state.deletedGroveIds),
+      deletedProjectIds: Array.from(this.state.deletedProjectIds),
       deletedAgentIds: Array.from(this.state.deletedAgentIds),
     };
   }
@@ -474,12 +474,12 @@ export class StateManager extends EventTarget {
     return this.state.agents.get(id);
   }
 
-  getGroves(): Grove[] {
-    return Array.from(this.state.groves.values());
+  getProjects(): Project[] {
+    return Array.from(this.state.projects.values());
   }
 
-  getGrove(id: string): Grove | undefined {
-    return this.state.groves.get(id);
+  getProject(id: string): Project | undefined {
+    return this.state.projects.get(id);
   }
 
   getBrokers(): RuntimeBroker[] {
@@ -490,8 +490,8 @@ export class StateManager extends EventTarget {
     return this.state.brokers.get(id);
   }
 
-  getDeletedGroveIds(): Set<string> {
-    return this.state.deletedGroveIds;
+  getDeletedProjectIds(): Set<string> {
+    return this.state.deletedProjectIds;
   }
 
   getDeletedAgentIds(): Set<string> {

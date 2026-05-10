@@ -1,15 +1,15 @@
 ---
-title: "Tutorial: Git-Based Groves"
-description: Set up a GitHub repository as a Hub-managed grove and dispatch agents to work on it remotely.
+title: "Tutorial: Git-Based Projects"
+description: Set up a GitHub repository as a Hub-managed project and dispatch agents to work on it remotely.
 ---
 
-**What you will learn**: How to create a grove from a GitHub repository, configure authentication with a GitHub App or Personal Access Token, and start agents that clone and work on your code — all without a local checkout.
+**What you will learn**: How to create a project from a GitHub repository, configure authentication with a GitHub App or Personal Access Token, and start agents that clone and work on your code — all without a local checkout.
 
 ## Local Worktrees vs. Hub Clones
 
 Before diving in, it's important to understand the two workspace models Scion offers for git repositories:
 
-| | Local Worktrees | Hub Clones (Git Groves) |
+| | Local Worktrees | Hub Clones (Git Projects) |
 | :--- | :--- | :--- |
 | **Where code lives** | On your machine, as a git worktree | Inside the agent container, cloned at startup |
 | **Git credentials** | Uses your local git/SSH config | Requires a GitHub App or `GITHUB_TOKEN` secret on the Hub |
@@ -19,7 +19,7 @@ Before diving in, it's important to understand the two workspace models Scion of
 | **Hub required** | No | Yes |
 | **Best for** | Solo development, fast iteration | Team workflows, remote brokers, CI-like dispatch |
 
-**Key takeaway**: When a grove is managed by the Hub — whether created from a URL or linked from a local directory — agents always use **HTTPS clone-based provisioning**. Local worktrees are a local-mode feature only. This is intentional: the Hub enforces a consistent workspace strategy across all brokers and users.
+**Key takeaway**: When a project is managed by the Hub — whether created from a URL or linked from a local directory — agents always use **HTTPS clone-based provisioning**. Local worktrees are a local-mode feature only. This is intentional: the Hub enforces a consistent workspace strategy across all brokers and users.
 
 For the full technical details on workspace strategies, see [About Workspaces](/scion/advanced-local/workspace/).
 
@@ -35,14 +35,14 @@ For the full technical details on workspace strategies, see [About Workspaces](/
 
 ## Step 1: Set Up Authentication
 
-Scion provides two ways to authenticate with GitHub for your groves:
+Scion provides two ways to authenticate with GitHub for your projects:
 
 1. **GitHub App Integration (Recommended)**: An automated, secure way to provide agents with short-lived installation tokens. If your Hub Administrator has configured this, authentication is automatic.
 2. **Personal Access Tokens (PATs)**: Manual token management using a `GITHUB_TOKEN` secret. Use this if the GitHub App is not configured or for repositories outside its scope.
 
 ### Option A: GitHub App Integration
 
-When creating a grove, Scion automatically associates it with the corresponding GitHub App installation. The system maintains a background refresh loop for installation tokens, and the `sciontool` credential helper provides fresh tokens to `git` on-demand inside the agent container. No manual setup is required.
+When creating a project, Scion automatically associates it with the corresponding GitHub App installation. The system maintains a background refresh loop for installation tokens, and the `sciontool` credential helper provides fresh tokens to `git` on-demand inside the agent container. No manual setup is required.
 
 ### Option B: Personal Access Tokens
 
@@ -68,85 +68,85 @@ GitHub only shows the token value once. If you lose it, you'll need to regenerat
 
 ---
 
-## Step 2: Create a Git Grove
+## Step 2: Create a Git Project
 
-Create a grove on the Hub from your repository URL:
+Create a project on the Hub from your repository URL:
 
 ```bash
-scion hub grove create https://github.com/acme/backend.git
+scion hub project create https://github.com/acme/backend.git
 ```
 
 Scion will auto-detect the default branch and derive a slug from the repository name:
 
 ```
-Grove created:
+Project created:
   ID:     a1b2c3d4-e5f6-5789-abcd-ef0123456789
   Slug:   acme-backend
   Remote: github.com/acme/backend
   Branch: main
 ```
 
-:::note[Grove ID Format]
-Git-backed groves use **deterministic UUID v5** identifiers, derived from the namespace and normalized git URL. This ensures the same repository always produces the same grove ID regardless of protocol (`https://` vs `git@`). Hub-native groves (without a git repository) use random UUID v4 identifiers.
+:::note[Project ID Format]
+Git-backed projects use **deterministic UUID v5** identifiers, derived from the namespace and normalized git URL. This ensures the same repository always produces the same project ID regardless of protocol (`https://` vs `git@`). Hub-native projects (without a git repository) use random UUID v4 identifiers.
 :::
 
 ### Optional Flags
 
 ```bash
 # Specify a branch (useful for long-lived feature branches)
-scion hub grove create https://github.com/acme/backend.git --branch develop
+scion hub project create https://github.com/acme/backend.git --branch develop
 
 # Override the auto-generated slug
-scion hub grove create https://github.com/acme/backend.git --slug my-backend
+scion hub project create https://github.com/acme/backend.git --slug my-backend
 ```
 
 :::tip[Idempotent creation]
-Creating a grove from the same git URL twice won't create a duplicate — the grove ID is a deterministic UUID v5 derived from the normalized URL, so the command is idempotent. Git URL user info (e.g., `git@` vs `https://`) is normalized before ID generation, ensuring consistent results across protocols. Additionally, stale grove links are automatically detected and synchronized during hub-link sync operations.
+Creating a project from the same git URL twice won't create a duplicate — the project ID is a deterministic UUID v5 derived from the normalized URL, so the command is idempotent. Git URL user info (e.g., `git@` vs `https://`) is normalized before ID generation, ensuring consistent results across protocols. Additionally, stale project links are automatically detected and synchronized during hub-link sync operations.
 :::
 
 ---
 
-## Step 3: Configure Grove Settings, Templates & Limits
+## Step 3: Configure Project Settings, Templates & Limits
 
-Once your grove is created, you can configure its settings via the Web Dashboard. This allows you to manage templates, set resource limits, and configure runtime brokers.
+Once your project is created, you can configure its settings via the Web Dashboard. This allows you to manage templates, set resource limits, and configure runtime brokers.
 
-1. Navigate to the Web Dashboard and select your newly created grove.
-2. Configure templates by clicking the **Load Templates** button on the grove detail page. This initiates a direct, server-side import of templates from a specified Git repository URL, deep path, or archive. Once imported, you can use the web interface to browse and edit template files.
+1. Navigate to the Web Dashboard and select your newly created project.
+2. Configure templates by clicking the **Load Templates** button on the project detail page. This initiates a direct, server-side import of templates from a specified Git repository URL, deep path, or archive. Once imported, you can use the web interface to browse and edit template files.
 3. Click the **Settings** gear icon to configure:
-   - **General**: Update the grove description or default branch.
+   - **General**: Update the project description or default branch.
    - **Limits**: Set maximum concurrency, maximum execution duration, and workspace storage limits. These limits automatically prepopulate the agent creation form.
-   - **Resources**: Manage runtime brokers and message broker plugins available to agents in this grove.
-   - **Secrets**: Manage grove-scoped secrets, such as API keys and PATs.
+   - **Resources**: Manage runtime brokers and message broker plugins available to agents in this project.
+   - **Secrets**: Manage project-scoped secrets, such as API keys and PATs.
 
 ---
 
 ## Step 4: Upload Your Token as a Secret (PAT only)
 
-If you are using the Personal Access Token method, store your PAT as a grove-scoped secret:
+If you are using the Personal Access Token method, store your PAT as a project-scoped secret:
 
-Store the GitHub PAT as a grove-scoped secret so that all agents in this grove can authenticate:
+Store the GitHub PAT as a project-scoped secret so that all agents in this project can authenticate:
 
 ```bash
-scion hub secret set --grove acme-backend GITHUB_TOKEN github_pat_xxxxxxxx
+scion hub secret set --project acme-backend GITHUB_TOKEN github_pat_xxxxxxxx
 ```
 
 Secrets are **write-only** — the value is encrypted and can never be read back via the CLI or API. It is only decrypted at runtime and injected into the agent container as an environment variable.
 
-### User-Scoped vs. Grove-Scoped
+### User-Scoped vs. Project-Scoped
 
 You can also set `GITHUB_TOKEN` at the **user scope** if your token covers multiple repositories:
 
 ```bash
-# User-scoped: available to all your agents across all groves
+# User-scoped: available to all your agents across all projects
 scion hub secret set GITHUB_TOKEN github_pat_xxxxxxxx
 ```
 
-Grove-scoped secrets take priority over user-scoped ones (see [Secret Management](/scion/hub-user/secrets/) for the full resolution hierarchy).
+Project-scoped secrets take priority over user-scoped ones (see [Secret Management](/scion/hub-user/secrets/) for the full resolution hierarchy).
 
 ### Web Dashboard Alternative
 
 You can also upload secrets through the Web Dashboard:
-1. Navigate to the grove's settings page.
+1. Navigate to the project's settings page.
 2. Open the **Secrets** tab.
 3. Click **Add Secret**, enter `GITHUB_TOKEN` as the key, paste the token value, and save.
 
@@ -154,10 +154,10 @@ You can also upload secrets through the Web Dashboard:
 
 ## Step 5: Start an Agent
 
-With the grove and token in place, start an agent targeting the grove:
+With the project and token in place, start an agent targeting the project:
 
 ```bash
-scion start my-agent --grove acme-backend "add input validation to the /users endpoint"
+scion start my-agent --project acme-backend "add input validation to the /users endpoint"
 ```
 
 You'll see the agent go through the clone-based startup:
@@ -180,17 +180,17 @@ Agent 'my-agent' starting on broker 'us-west-01'...
 4. The agent's harness (Claude, Gemini, etc.) starts with the task prompt
 
 :::note[Provisioning Strategy]
-Hub-linked groves use a robust `git init` + `git fetch` approach rather than a standard `git clone`. This allows provisioning into workspaces that may already contain metadata directories, and properly clears stale artifacts before initialization.
+Hub-linked projects use a robust `git init` + `git fetch` approach rather than a standard `git clone`. This allows provisioning into workspaces that may already contain metadata directories, and properly clears stale artifacts before initialization.
 :::
 
 ### Running multiple agents
 
-Each agent gets its own clone and its own `scion/<agent-name>` branch, so you can run several in parallel on the same grove:
+Each agent gets its own clone and its own `scion/<agent-name>` branch, so you can run several in parallel on the same project:
 
 ```bash
-scion start agent-auth    --grove acme-backend "add OAuth2 support"
-scion start agent-tests   --grove acme-backend "increase test coverage for pkg/api"
-scion start agent-docs    --grove acme-backend "update the API documentation"
+scion start agent-auth    --project acme-backend "add OAuth2 support"
+scion start agent-tests   --project acme-backend "increase test coverage for pkg/api"
+scion start agent-docs    --project acme-backend "update the API documentation"
 ```
 
 ---
@@ -200,7 +200,7 @@ scion start agent-docs    --grove acme-backend "update the API documentation"
 ### Check agent status
 
 ```bash
-scion list --grove acme-backend
+scion list --project acme-backend
 ```
 
 ### Attach to an agent
@@ -208,7 +208,7 @@ scion list --grove acme-backend
 If an agent is waiting for input or you want to observe it:
 
 ```bash
-scion attach my-agent --grove acme-backend
+scion attach my-agent --project acme-backend
 ```
 
 ### Retrieve the code
@@ -224,11 +224,11 @@ Or create a Pull Request directly from the branch on GitHub.
 
 ---
 
-## Linked Groves: When Local Becomes Remote
+## Linked Projects: When Local Becomes Remote
 
 If you already have a local checkout linked to the Hub via `scion hub link`, be aware that **the workspace strategy changes**. Once linked, even if the broker machine has the repository on disk, agents use clone-based provisioning — not local worktrees.
 
-This means you need a `GITHUB_TOKEN` secret set on the grove, just like a grove created from a URL.
+This means you need a `GITHUB_TOKEN` secret set on the project, just like a project created from a URL.
 
 To temporarily fall back to local worktree mode:
 
@@ -246,9 +246,9 @@ scion hub disable
 
 ### Agent fails with "authentication required" or "clone failed"
 
-- Verify a `GITHUB_TOKEN` is set on the grove or at user scope:
+- Verify a `GITHUB_TOKEN` is set on the project or at user scope:
   ```bash
-  scion hub secret get --grove acme-backend
+  scion hub secret get --project acme-backend
   ```
 - Ensure the token has **Contents: Read** permission at minimum.
 - Check that the token has not expired.
@@ -256,10 +256,10 @@ scion hub disable
 
 ### Agent clones the wrong branch
 
-Use the `--branch` flag when creating the grove to set the default:
+Use the `--branch` flag when creating the project to set the default:
 
 ```bash
-scion hub grove create https://github.com/acme/backend.git --branch develop
+scion hub project create https://github.com/acme/backend.git --branch develop
 ```
 
 ### Agent needs full git history

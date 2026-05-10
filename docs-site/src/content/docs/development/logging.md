@@ -281,7 +281,7 @@ Each line is a JSON object:
   "msg": "Request completed",
   "httpRequest": {
     "requestMethod": "GET",
-    "requestUrl": "/api/v1/groves/my-project/agents",
+    "requestUrl": "/api/v1/projects/my-project/agents",
     "status": 200,
     "responseSize": 1234,
     "userAgent": "scion-cli/0.1.0",
@@ -290,7 +290,7 @@ Each line is a JSON object:
     "protocol": "HTTP/1.1"
   },
   "component": "hub",
-  "grove_id": "my-project",
+  "project_id": "my-project",
   "agent_id": "",
   "request_id": "550e8400-e29b-41d4-a716-446655440000"
 }
@@ -309,7 +309,7 @@ Each line is a JSON object:
 | `httpRequest.latency` | Request duration as `"Xs"` (e.g. `"0.045s"`) |
 | `httpRequest.protocol` | HTTP protocol version |
 | `component` | Server component: `hub`, `broker`, or `web` |
-| `grove_id` | Grove ID extracted from the URL path (if applicable) |
+| `project_id` | Project ID extracted from the URL path (if applicable) |
 | `agent_id` | Agent ID extracted from the URL path (if applicable) |
 | `request_id` | Generated UUID for correlating logs within a request |
 | `trace_id` | Trace header value from `X-Cloud-Trace-Context`, `traceparent`, or `X-Trace-ID` (if present) |
@@ -321,10 +321,10 @@ The request logging middleware generates a unique `request_id` (UUID) for every 
 Both `request_id` and `trace_id` are automatically attached to all application logs emitted during the request when using `logging.Logger(ctx)`:
 
 ```go
-// In any handler, Logger(ctx) automatically includes request_id, trace_id, grove_id, agent_id
+// In any handler, Logger(ctx) automatically includes request_id, trace_id, project_id, agent_id
 log := logging.Logger(r.Context())
 log.Info("Processing agent", "name", agentName)
-// Output includes: request_id=..., trace_id=..., grove_id=..., agent_id=...
+// Output includes: request_id=..., trace_id=..., project_id=..., agent_id=...
 ```
 
 ### Cloud Logging Queries
@@ -339,10 +339,10 @@ logName="projects/YOUR_PROJECT/logs/scion_request_log"
 logName="projects/YOUR_PROJECT/logs/scion_request_log"
 httpRequest.latency > "1s"
 
--- Failed requests to a specific grove
+-- Failed requests to a specific project
 logName="projects/YOUR_PROJECT/logs/scion_request_log"
 httpRequest.status >= 400
-labels.grove_id = "my-grove"
+labels.project_id = "my-project"
 
 -- Correlate a request with its application logs
 logName="projects/YOUR_PROJECT/logs/scion-server" OR logName="projects/YOUR_PROJECT/logs/scion_request_log"

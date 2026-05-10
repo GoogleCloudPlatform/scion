@@ -32,9 +32,9 @@ See the full [Installation Guide](https://googlecloudplatform.github.io/scion/ge
 go install github.com/GoogleCloudPlatform/scion/cmd/scion@latest
 ```
 
-### Initialize your machine and a Grove (project)
+### Initialize your machine and a Project (project)
 
-Navigate to your project and create a Scion grove (the `.scion` directory that holds agent config) - use the registry where you built images:
+Navigate to your project and create a Scion project (the `.scion` directory that holds agent config) - use the registry where you built images:
 
 ```bash
 scion init --machine
@@ -82,7 +82,7 @@ scion start debug "Help me debug this error" --attach
 | Concept | Description |
 |---------|-------------|
 | **Agent** | A containerized process running a deep agent harness (Claude Code, Gemini CLI, etc.) |
-| **Grove** | A project namespace and collection of agents, commonly 1:1 with a git repo |
+| **Project** | A project namespace and collection of agents, commonly 1:1 with a git repo |
 | **Template** | An agent blueprint — system prompt plus a collection of skills |
 | **Runtime** | A container runtime: Docker, Podman, Apple Container, or Kubernetes |
 | **Hub** | Optional central control plane for multi-machine orchestration |
@@ -96,7 +96,7 @@ Visit our **[Documentation Site](https://googlecloudplatform.github.io/scion/)**
 
 - **[Overview](https://googlecloudplatform.github.io/scion/overview/)**: Introduction to Scion.
 - **[Installation](https://googlecloudplatform.github.io/scion/getting-started/install/)**: How to get Scion up and running.
-- **[Concepts](https://googlecloudplatform.github.io/scion/concepts/)**: Understanding Agents, Groves, Harnesses, and Runtimes.
+- **[Concepts](https://googlecloudplatform.github.io/scion/concepts/)**: Understanding Agents, Projects, Harnesses, and Runtimes.
 - **[CLI Reference](https://googlecloudplatform.github.io/scion/reference/cli/)**: Comprehensive guide to all Scion commands.
 - **Guides**:
     - [Using Templates](https://googlecloudplatform.github.io/scion/advanced-local/templates/)

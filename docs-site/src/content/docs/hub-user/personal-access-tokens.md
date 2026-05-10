@@ -15,7 +15,7 @@ A Personal Access Token is a long-lived credential linked to your user account. 
 
 Personal Access Tokens support granular scoping. When creating a token, you can:
 - Restrict the token to specific actions (e.g., read-only, agent creation).
-- Limit the token's scope to specific groves rather than global access.
+- Limit the token's scope to specific projects rather than global access.
 
 ## Creating a Personal Access Token
 
@@ -55,7 +55,7 @@ It is crucial to understand the distinction between how users authenticate with 
 :::danger[Privilege Escalation Risk]
 **Never inject a `SCION_HUB_TOKEN` (or a user-level PAT) into an agent container as the `SCION_AUTH_TOKEN`.** 
 
-Injecting a user PAT into an agent means the agent will operate with your full user permissions, rather than its intended, restricted scope. This allows the agent to create other agents, access other groves, or read secrets it shouldn't have access to. The Scion runtime automatically handles agent authentication; you do not need to manually configure agent tokens.
+Injecting a user PAT into an agent means the agent will operate with your full user permissions, rather than its intended, restricted scope. This allows the agent to create other agents, access other projects, or read secrets it shouldn't have access to. The Scion runtime automatically handles agent authentication; you do not need to manually configure agent tokens.
 :::
 
 ## Managing Tokens
@@ -63,7 +63,7 @@ Injecting a user PAT into an agent means the agent will operate with your full u
 Tokens can be managed either via the CLI or the Web UI.
 
 ### Using the Web UI
-The easiest way to administer your tokens is through the **Web UI management interface** available in your user profile. This interface allows you to create, view, and revoke tokens visually, as well as configure specific action permissions and grove-level scopes.
+The easiest way to administer your tokens is through the **Web UI management interface** available in your user profile. This interface allows you to create, view, and revoke tokens visually, as well as configure specific action permissions and project-level scopes.
 
 ### Using the CLI
 If a token is compromised or no longer needed, you can revoke it:

@@ -136,7 +136,7 @@ scion hub secret set --type file \
 
 When an agent creates sub-agents (progeny), Scion enforces strict controls over which secrets those child agents can access. 
 
-By default, child agents operate under a **granular secret access** model. They do not automatically inherit all secrets from the grove or their parent. Instead, they only have access to the credentials necessary to perform their specific tasks, maintaining a least-privilege security boundary across the agent ancestry chain. 
+By default, child agents operate under a **granular secret access** model. They do not automatically inherit all secrets from the project or their parent. Instead, they only have access to the credentials necessary to perform their specific tasks, maintaining a least-privilege security boundary across the agent ancestry chain. 
 
 ---
 
@@ -162,7 +162,7 @@ Scion provides deep integration with GitHub Apps to manage Git credentials autom
 2. **Credential Helper**: Scion injects `sciontool` as a Git credential helper into the agent container (`git config --global credential.helper`).
 3. **On-Demand Tokens**: When the agent executes a `git clone`, `push`, or `pull`, Git asks the credential helper for a password. `sciontool` retrieves the fresh, short-lived token provided by the Hub, ensuring operations never fail due to token expiration—even for long-running agents.
 
-This flow is automatically enabled for any grove linked to a GitHub App installation.
+This flow is automatically enabled for any project linked to a GitHub App installation.
 
 ### Personal Access Tokens (PATs)
 
@@ -172,4 +172,4 @@ If GitHub App integration is not available, you can use a Personal Access Token.
 2. You provide the PAT to the Hub as a secret named `GITHUB_TOKEN`.
 3. Scion injects this token into the agent container as an environment variable (`GITHUB_TOKEN`), which Git uses for HTTPS authentication.
 
-For detailed instructions on setting this up, see [Git-Based Groves](/scion/hub-user/git-groves/).
+For detailed instructions on setting this up, see [Git-Based Projects](/scion/hub-user/git-projects/).

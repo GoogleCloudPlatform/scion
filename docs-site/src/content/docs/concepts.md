@@ -9,22 +9,22 @@ This document defines the core concepts and terminology used in Scion.
 ### Agent
 An **Agent** is an isolated process running an LLM + Harness loop (aka Agent) against a task. It acts as an independent worker with its own identity, credentials, and workspace. An agent is the fundamental unit of execution in Scion.
 
-### Grove
-A **Grove** (or **Group**) is a project workspace where agents live. It corresponds to a `.scion` directory on the filesystem. It can exist at the project level (generally located at the root of a git repository), or globally in the users home folder.
+### Project
+A **Project** (or **Group**) is a project workspace where agents live. It corresponds to a `.scion` directory on the filesystem. It can exist at the project level (generally located at the root of a git repository), or globally in the users home folder.
 
-Every grove has a unique **Grove ID**. Git-backed groves use deterministic **UUID v5** identifiers (derived from the namespace and normalized git URL), ensuring the same repository always maps to the same ID regardless of protocol. Hub-native groves use random **UUID v4** identifiers.
+Every project has a unique **Project ID**. Git-backed projects use deterministic **UUID v5** identifiers (derived from the namespace and normalized git URL), ensuring the same repository always maps to the same ID regardless of protocol. Hub-native projects use random **UUID v4** identifiers.
 
 ### Hub
-The **Hub** is the central control plane of a hosted Scion architecture. It acts as the "brain" of the system, coordinating state across multiple users, groves, and runtime brokers.
+The **Hub** is the central control plane of a hosted Scion architecture. It acts as the "brain" of the system, coordinating state across multiple users, projects, and runtime brokers.
 - **Identity & Auth**: Manages user identities (via OAuth) and issues tokens for brokers and agents.
-- **State Persistence**: Stores the definitive state of agents, groves, and templates in a central database.
+- **State Persistence**: Stores the definitive state of agents, projects, and templates in a central database.
 - **Orchestration**: Dispatches agent lifecycle commands to the appropriate Runtime Brokers.
 - **Collaboration**: Provides a shared view of the system via the Web Dashboard and Hub API.
 
 ### Profile
 A **Profile** defines a complete execution environment by binding a specific **Runtime** to a set of behavior flags and **Harness** configuration overrides.
 - Profiles allow you to switch between different environments (e.g., "Local Docker", "Production Kubernetes") without modifying agent templates.
-- They are defined in the global or grove `settings.yaml`.
+- They are defined in the global or project `settings.yaml`.
 
 ### Harness-Configuration
 A **Harness-config** adapts a specific underlying LLM tool or agent software (like Gemini CLI, Claude Code, or OpenAI Codex) into the Scion ecosystem.
@@ -79,7 +79,7 @@ The `offline` activity status occurs when an agent heartbeat has not been heard 
 
 To support multi-agent workflows, Scion implements **Agent Ancestry Chains**. When an agent spawns a child agent, the system tracks this relationship (`root` → `parent` → `child`). This ancestry chain is critical for **transitive access control**: any principal (user or agent) that exists in an agent's creation chain automatically gains access to manage that descendant agent. 
 
-Furthermore, agent identities are **strictly scoped by their grove** (e.g., `grove--agent`). This naming convention prevents name collisions across different workspaces and ensures agents can only interact with peers and progeny within their designated boundary. Progeny agents also receive granular secret access controls to prevent privilege escalation.
+Furthermore, agent identities are **strictly scoped by their project** (e.g., `project--agent`). This naming convention prevents name collisions across different workspaces and ensures agents can only interact with peers and progeny within their designated boundary. Progeny agents also receive granular secret access controls to prevent privilege escalation.
 
 ### Workspace Strategy
 
@@ -87,29 +87,29 @@ Scion uses one of two strategies to give each agent an isolated git workspace, d
 
 **Local mode — Git Worktrees:**
 When running without a Hub, Scion uses [Git Worktrees](https://git-scm.com/docs/git-worktree) for isolation.
-- A new worktree is created at `../.scion_worktrees/<grove>/<agent>` with a dedicated branch.
+- A new worktree is created at `../.scion_worktrees/<project>/<agent>` with a dedicated branch.
 - The worktree is mounted into the agent's container as `/workspace`.
 - Agents operate on the same repository history but have independent working directories.
 - Work is merged back to the main branch manually (e.g., `git merge <agent-branch>`).
 
 **Hub mode — Git Init + Fetch:**
-When a Hub is enabled, all git-based groves (including locally linked ones) use a robust `git init` + `git fetch` provisioning strategy instead of worktrees.
+When a Hub is enabled, all git-based projects (including locally linked ones) use a robust `git init` + `git fetch` provisioning strategy instead of worktrees.
 - The broker injects `SCION_GIT_CLONE_URL`, `SCION_GIT_BRANCH`, and a `GITHUB_TOKEN` into the container.
 - `sciontool init` inside the container initializes the workspace and fetches the repo over HTTPS, then checks out a `scion/<agent-name>` branch.
 - This approach handles workspaces that already contain `.scion` metadata or `.scion-volumes` directories, clearing stale artifacts before initialization.
 - SSH credentials on the host are not used; a `GITHUB_TOKEN` is required.
 - This strategy is consistent across all broker machines, whether or not the repo exists locally.
 
-This distinction means a grove that was previously used in local mode will switch to clone-based provisioning once it is linked to a Hub. See the [About Workspaces](/scion/advanced-local/workspace/) guide for details.
+This distinction means a project that was previously used in local mode will switch to clone-based provisioning once it is linked to a Hub. See the [About Workspaces](/scion/advanced-local/workspace/) guide for details.
 
 ### Resource Isolation
 Scion enforces strict isolation between agents to prevent interference and cross-contamination of credentials or data.
 - **Filesystem**: Each agent has a dedicated home directory (host path mounted to container) containing its unique history and configuration.
-- **Shadow Mounts (tmpfs)**: Scion uses `tmpfs` shadow mounts to definitively prevent agents from accessing `.scion` configuration data or other agents' workspaces within the same grove.
+- **Shadow Mounts (tmpfs)**: Scion uses `tmpfs` shadow mounts to definitively prevent agents from accessing `.scion` configuration data or other agents' workspaces within the same project.
 - **Environment**: Environment variables are explicitly projected into the container.
 - **Credentials**: Sensitive credentials (like `gcloud` auth) are mounted read-only or injected via environment variables, ensuring they are available only to the specific agent.
-- **Externalized Grove Data**: Non-git grove data and agent home directories are externalized to ensure they cannot be traversed by agents in the workspace.
-- **Shared-Workspace Per-Agent Isolation**: In hub-hosted git groves where multiple agents share a single workspace mount, each agent's per-agent state (its task prompt and resolved configuration) is held outside that shared mount, so sibling agents in the same grove cannot read each other's state through the workspace view.
+- **Externalized Project Data**: Non-git project data and agent home directories are externalized to ensure they cannot be traversed by agents in the workspace.
+- **Shared-Workspace Per-Agent Isolation**: In hub-hosted git projects where multiple agents share a single workspace mount, each agent's per-agent state (its task prompt and resolved configuration) is held outside that shared mount, so sibling agents in the same project cannot read each other's state through the workspace view.
 
 ### Contextual Agent Instructions
 Scion automatically tailors an agent's operational context by appending supplemental instructions based on the workspace environment.
