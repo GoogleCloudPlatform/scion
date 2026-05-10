@@ -17,7 +17,7 @@
 /**
  * GCP Service Account List Component
  *
- * CRUD component for managing GCP service accounts at the grove level.
+ * CRUD component for managing GCP service accounts at the project level.
  * Follows the same patterns as scion-secret-list.
  */
 
@@ -31,7 +31,7 @@ import { resourceStyles } from './resource-styles.js';
 
 @customElement('scion-gcp-service-account-list')
 export class ScionGCPServiceAccountList extends LitElement {
-  @property() groveId = '';
+  @property() projectId = '';
   @property({ type: Boolean }) compact = false;
 
   @state() private accounts: GCPServiceAccount[] = [];
@@ -150,7 +150,7 @@ export class ScionGCPServiceAccountList extends LitElement {
     this.error = null;
 
     try {
-      const response = await apiFetch(`/api/v1/groves/${this.groveId}/gcp-service-accounts`);
+      const response = await apiFetch(`/api/v1/projects/${this.projectId}/gcp-service-accounts`);
 
       if (!response.ok) {
         throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
@@ -204,7 +204,7 @@ export class ScionGCPServiceAccountList extends LitElement {
       if (this.mintDescription.trim()) body.description = this.mintDescription.trim();
 
       const response = await apiFetch(
-        `/api/v1/groves/${this.groveId}/gcp-service-accounts/mint`,
+        `/api/v1/projects/${this.projectId}/gcp-service-accounts/mint`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -230,8 +230,8 @@ export class ScionGCPServiceAccountList extends LitElement {
 
   private isMintDisabled(): boolean {
     if (!this.mintQuota) return false;
-    const { grove_cap, grove_minted, global_cap, global_minted } = this.mintQuota;
-    if (grove_cap > 0 && grove_minted >= grove_cap) return true;
+    const { project_cap, project_minted, global_cap, global_minted } = this.mintQuota;
+    if (project_cap > 0 && project_minted >= project_cap) return true;
     if (global_cap > 0 && global_minted >= global_cap) return true;
     return false;
   }
@@ -271,7 +271,7 @@ export class ScionGCPServiceAccountList extends LitElement {
         body.displayName = this.dialogDisplayName.trim();
       }
 
-      const response = await apiFetch(`/api/v1/groves/${this.groveId}/gcp-service-accounts`, {
+      const response = await apiFetch(`/api/v1/projects/${this.projectId}/gcp-service-accounts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -308,7 +308,7 @@ export class ScionGCPServiceAccountList extends LitElement {
 
     try {
       const response = await apiFetch(
-        `/api/v1/groves/${this.groveId}/gcp-service-accounts/${account.id}/verify`,
+        `/api/v1/projects/${this.projectId}/gcp-service-accounts/${account.id}/verify`,
         { method: 'POST' }
       );
 
@@ -362,7 +362,7 @@ export class ScionGCPServiceAccountList extends LitElement {
 
     try {
       const response = await apiFetch(
-        `/api/v1/groves/${this.groveId}/gcp-service-accounts/${account.id}`,
+        `/api/v1/projects/${this.projectId}/gcp-service-accounts/${account.id}`,
         { method: 'DELETE' }
       );
 
@@ -483,7 +483,7 @@ export class ScionGCPServiceAccountList extends LitElement {
         <div class="section-header">
           <div class="section-header-info">
             <h2>GCP Service Accounts</h2>
-            <p>Manage GCP service accounts for agent identity assignment in this grove.</p>
+            <p>Manage GCP service accounts for agent identity assignment in this project.</p>
           </div>
           ${can(this.listCapabilities, 'create')
             ? html`
@@ -737,11 +737,11 @@ export class ScionGCPServiceAccountList extends LitElement {
 
   private renderQuotaInfo() {
     if (!this.mintQuota) return nothing;
-    const { grove_minted, grove_cap, global_minted, global_cap } = this.mintQuota;
+    const { project_minted, project_cap, global_minted, global_cap } = this.mintQuota;
 
     const parts: string[] = [];
-    if (grove_cap > 0) {
-      parts.push(`Grove: ${grove_minted}/${grove_cap}`);
+    if (project_cap > 0) {
+      parts.push(`Project: ${project_minted}/${project_cap}`);
     }
     if (global_cap > 0) {
       parts.push(`Global: ${global_minted}/${global_cap}`);

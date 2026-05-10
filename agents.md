@@ -29,23 +29,23 @@
 ## Key Concepts
 
 ### Solo/Local Architecture
-- **Grove (Group)**: A grouping construct for a set of agents, represented by a `.scion` directory.
-  - **Resolution**: Active grove is resolved by: 1. `--grove` flag, 2. Project-level `.scion`, 3. Global `.scion` in home directory.
+- **Project (Group)**: A grouping construct for a set of agents, represented by a `.scion` directory.
+  - **Resolution**: Active project is resolved by: 1. `--project` flag, 2. Project-level `.scion`, 3. Global `.scion` in home directory.
   - **Naming**: Slugified version of the parent directory containing the `.scion` directory.
 - **Agent**: An isolated container running an LLM harness (Gemini, Claude, etc.).
   - **Filesystem**: Dedicated home directory (`/home/gemini`) containing unique config and history.
   - **Workspace**: Mounted git worktree at `/workspace`.
 - **Workspace Strategy (Git Worktrees)**:
-  - On start, a new worktree is created at `../.scion_worktrees/<grove>/<agent>` to avoid recursion.
+  - On start, a new worktree is created at `../.scion_worktrees/<project>/<agent>` to avoid recursion.
   - A new feature branch is created for each agent.
 - **Observability & Interactivity**:
   - **Status**: Agents write state to `/home/gemini/.gemini-status.json` (STARTING, THINKING, EXECUTING, WAITING_FOR_INPUT, COMPLETED, ERROR).
   - **Intervention**: When `WAITING_FOR_INPUT`, users can `scion attach <agent>` to provide input or confirmations.
 
 ### Hosted Architecture
-- **Scion Hub (State Server):** Centralized API and database for agent state, groves, templates, and users.
-- **Grove (Project):** The primary unit of registration. Represents a project/repository (identified by Git remote).
-- **Runtime Broker:** A compute node that executes agents. Brokers register the Groves they serve.
+- **Scion Hub (State Server):** Centralized API and database for agent state, projects, templates, and users.
+- **Project (Project):** The primary unit of registration. Represents a project/repository (identified by Git remote).
+- **Runtime Broker:** A compute node that executes agents. Brokers register the Projects they serve.
 - **Templates:** Configuration blueprints for agents. Managed via the Hub, supporting versioning and storage (GCS/Local).
 
 ## Project Structure
@@ -85,9 +85,9 @@ All icons in the web frontend use the Shoelace `<sl-icon>` component (Bootstrap 
 These terms may be used in shorthand with prompts
 
 - **hub-broker, combo server** References running the server command with both the hub function and the broker function running in the same invocation.
-- **hub-native, hub-grove** A special variant of a project/grove space, that is created on a hub server for use by agents dispatched from clients. These live in ~/.scion/groves/<hub-grove-name> on any broker that is a provider to the hub grove. This is in contrast to the arbitrary local path on a broker for a linked grove.
+- **hub-native, hub-project** A special variant of a project/project space, that is created on a hub server for use by agents dispatched from clients. These live in ~/.scion/projects/<hub-project-name> on any broker that is a provider to the hub project. This is in contrast to the arbitrary local path on a broker for a linked project.
 - **agent-home** The directory that gets mounted as the home folder of the container user in the agent container
-- **linked-grove** A grove and project folder that pre-existed on a broker machine, and is linked as a hub resource grove for visibility, metadata, and agent management across other brokers that may have such a linked grove. May be based on name or git-URI
+- **linked-project** A project and project folder that pre-existed on a broker machine, and is linked as a hub resource project for visibility, metadata, and agent management across other brokers that may have such a linked project. May be based on name or git-URI
 
 ## Project use of the scion cli itself
 Do not commit changes in the project's own `.scion` folder to git as part of committing progress on code and docs. These are managed and committed manually when template defaults are intentionally updated.

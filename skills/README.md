@@ -9,4 +9,4 @@ Claude Code skill definitions that enable agents to manage Scion from within a s
 
 ## Usage
 
-Skills are loaded by Claude Code agents to provide them with the ability to orchestrate other Scion agents, manage groves, and interact with running workloads.
+Skills are loaded by Claude Code agents to provide them with the ability to orchestrate other Scion agents, manage projects, and interact with running workloads.

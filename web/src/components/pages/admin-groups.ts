@@ -126,7 +126,7 @@ export class ScionPageAdminGroups extends LitElement {
       color: var(--sl-color-primary-600, #2563eb);
     }
 
-    .group-icon.grove_agents {
+    .group-icon.project_agents {
       background: var(--sl-color-success-100, #dcfce7);
       color: var(--sl-color-success-600, #16a34a);
     }
@@ -171,7 +171,7 @@ export class ScionPageAdminGroups extends LitElement {
       color: var(--sl-color-primary-700, #1d4ed8);
     }
 
-    .type-badge.grove_agents {
+    .type-badge.project_agents {
       background: var(--sl-color-success-100, #dcfce7);
       color: var(--sl-color-success-700, #15803d);
     }
@@ -426,7 +426,7 @@ export class ScionPageAdminGroups extends LitElement {
         <td>
           <div class="group-identity">
             <div class="group-icon ${group.groupType}">
-              <sl-icon name="${group.groupType === 'grove_agents' ? 'cpu' : 'people'}"></sl-icon>
+              <sl-icon name="${group.groupType === 'project_agents' ? 'cpu' : 'people'}"></sl-icon>
             </div>
             <div class="group-info">
               <span class="group-name">${group.name}</span>
@@ -436,7 +436,7 @@ export class ScionPageAdminGroups extends LitElement {
         </td>
         <td>
           <span class="type-badge ${group.groupType}">
-            ${group.groupType === 'grove_agents' ? 'grove agents' : 'explicit'}
+            ${group.groupType === 'project_agents' ? 'project agents' : 'explicit'}
           </span>
         </td>
         <td class="hide-mobile">

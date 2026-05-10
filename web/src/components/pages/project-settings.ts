@@ -15,15 +15,15 @@
  */
 
 /**
- * Grove settings page component
+ * Project settings page component
  *
- * Displays grove-scoped templates, environment variables, secrets, and danger-zone actions (delete).
+ * Displays project-scoped templates, environment variables, secrets, and danger-zone actions (delete).
  */
 
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData, Grove, Template, AdminGroup, GitHubAppGroveStatus, GitHubTokenPermissions, RuntimeBroker, BrokerProfile, GCPServiceAccount } from '../../shared/types.js';
+import type { PageData, Project, Template, AdminGroup, GitHubAppProjectStatus, GitHubTokenPermissions, RuntimeBroker, BrokerProfile, GCPServiceAccount } from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
@@ -37,13 +37,13 @@ import '../shared/subscription-manager.js';
 import '../shared/schedule-list.js';
 
 
-interface GroveResourceSpec {
+interface ProjectResourceSpec {
   requests?: { cpu?: string | undefined; memory?: string | undefined };
   limits?: { cpu?: string | undefined; memory?: string | undefined };
   disk?: string;
 }
 
-interface GroveSettings {
+interface ProjectSettings {
   defaultTemplate?: string | undefined;
   defaultHarnessConfig?: string | undefined;
   telemetryEnabled?: boolean | null | undefined;
@@ -51,7 +51,7 @@ interface GroveSettings {
   defaultMaxTurns?: number | undefined;
   defaultMaxModelCalls?: number | undefined;
   defaultMaxDuration?: string | undefined;
-  defaultResources?: GroveResourceSpec | undefined;
+  defaultResources?: ProjectResourceSpec | undefined;
   defaultGCPIdentityMode?: string | undefined;
   defaultGCPIdentityServiceAccountID?: string | undefined;
 }
@@ -69,25 +69,26 @@ interface RuntimeBrokerWithProvider extends RuntimeBroker {
   localPath?: string;
 }
 
-@customElement('scion-page-grove-settings')
-export class ScionPageGroveSettings extends LitElement {
+@customElement('scion-page-project-settings')
+export class ScionPageProjectSettings extends LitElement {
   @property({ type: Object })
   pageData: PageData | null = null;
 
   @property({ type: String })
-  groveId = '';
+  projectId = '';
 
   @state()
   private loading = true;
 
   @state()
-  private grove: Grove | null = null;
+  private project: Project | null = null;
 
   @state()
   private error: string | null = null;
 
   @state()
   private deleteLoading = false;
+
 
   @state()
   private templates: Template[] = [];
@@ -114,7 +115,7 @@ export class ScionPageGroveSettings extends LitElement {
   private membersGroup: AdminGroup | null = null;
 
   @state()
-  private settings: GroveSettings = {};
+  private settings: ProjectSettings = {};
 
   @state()
   private settingsLoading = true;
@@ -193,7 +194,7 @@ export class ScionPageGroveSettings extends LitElement {
 
   // GitHub App integration
   @state()
-  private githubAppStatus: GitHubAppGroveStatus | null = null;
+  private githubAppStatus: GitHubAppProjectStatus | null = null;
 
   @state()
   private githubAppInstallationId: number | null = null;
@@ -728,13 +729,13 @@ export class ScionPageGroveSettings extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    if (!this.groveId && typeof window !== 'undefined') {
-      const match = window.location.pathname.match(/\/groves\/([^/]+)/);
+    if (!this.projectId && typeof window !== 'undefined') {
+      const match = window.location.pathname.match(/\/projects\/([^/]+)/);
       if (match) {
-        this.groveId = match[1];
+        this.projectId = match[1];
       }
     }
-    void this.loadGrove().then(() => this.loadMembersGroup());
+    void this.loadProject().then(() => this.loadMembersGroup());
     void this.loadTemplates();
     void this.loadDropdownTemplates();
     void this.loadSettings();
@@ -752,35 +753,35 @@ export class ScionPageGroveSettings extends LitElement {
     }
   }
 
-  private async loadGrove(skipGitHubCheck = false): Promise<void> {
+  private async loadProject(skipGitHubCheck = false): Promise<void> {
     this.loading = true;
     this.error = null;
 
     try {
-      const response = await apiFetch(`/api/v1/groves/${this.groveId}`);
+      const response = await apiFetch(`/api/v1/projects/${this.projectId}`);
 
       if (!response.ok) {
         throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
       }
 
-      this.grove = (await response.json()) as Grove;
-      dispatchPageTitle(this, 'Settings', this.grove.name || this.groveId);
-      // Pre-populate template import URL with the grove's git remote when set
-      if (this.grove.gitRemote && !this.syncRepoUrl) {
-        this.syncRepoUrl = this.grove.gitRemote;
+      this.project = (await response.json()) as Project;
+      dispatchPageTitle(this, 'Settings', this.project.name || this.projectId);
+      // Pre-populate template import URL with the project's git remote when set
+      if (this.project.gitRemote && !this.syncRepoUrl) {
+        this.syncRepoUrl = this.project.gitRemote;
       }
-      // Populate GitHub App fields from grove data
-      this.githubAppInstallationId = this.grove.githubInstallationId ?? null;
-      this.githubAppStatus = this.grove.githubAppStatus ?? null;
-      this.githubAppPermissions = this.grove.githubPermissions ?? null;
+      // Populate GitHub App fields from project data
+      this.githubAppInstallationId = this.project.githubInstallationId ?? null;
+      this.githubAppStatus = this.project.githubAppStatus ?? null;
+      this.githubAppPermissions = this.project.githubPermissions ?? null;
 
       // Check if the hub has a GitHub App configured (only on initial load)
-      if (!skipGitHubCheck && this.grove.gitRemote) {
+      if (!skipGitHubCheck && this.project.gitRemote) {
         void this.checkGitHubAppConfigured();
       }
     } catch (err) {
-      console.error('Failed to load grove:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to load grove';
+      console.error('Failed to load project:', err);
+      this.error = err instanceof Error ? err.message : 'Failed to load project';
     } finally {
       this.loading = false;
     }
@@ -795,8 +796,8 @@ export class ScionPageGroveSettings extends LitElement {
         this.githubAppConfigured = data.configured;
         this.githubAppInstallationUrl = data.installation_url || '';
 
-        // Auto-discover if configured and grove has no installation yet
-        if (data.configured && this.githubAppInstallationId == null && this.grove?.gitRemote) {
+        // Auto-discover if configured and project has no installation yet
+        if (data.configured && this.githubAppInstallationId == null && this.project?.gitRemote) {
           await this.discoverGitHubInstallation();
           return; // discoverGitHubInstallation handles githubAppLoading
         }
@@ -812,7 +813,7 @@ export class ScionPageGroveSettings extends LitElement {
     this.templatesLoading = true;
     try {
       const response = await apiFetch(
-        `/api/v1/templates?scope=grove&groveId=${encodeURIComponent(this.groveId)}&status=active`
+        `/api/v1/templates?scope=project&projectId=${encodeURIComponent(this.projectId)}&status=active`
       );
       if (response.ok) {
         const data = (await response.json()) as { templates?: Template[] } | Template[];
@@ -828,7 +829,7 @@ export class ScionPageGroveSettings extends LitElement {
   private async loadDropdownTemplates(): Promise<void> {
     try {
       const response = await apiFetch(
-        `/api/v1/templates?groveId=${encodeURIComponent(this.groveId)}&status=active`
+        `/api/v1/templates?projectId=${encodeURIComponent(this.projectId)}&status=active`
       );
       if (response.ok) {
         const data = (await response.json()) as { templates?: Template[] } | Template[];
@@ -840,42 +841,42 @@ export class ScionPageGroveSettings extends LitElement {
   }
 
   private async loadMembersGroup(): Promise<void> {
-    if (!this.grove) {
-      console.warn('[grove-settings] loadMembersGroup: grove not loaded yet, skipping');
+    if (!this.project) {
+      console.warn('[project-settings] loadMembersGroup: project not loaded yet, skipping');
       return;
     }
-    const groveUUID = this.grove.id;
+    const projectUUID = this.project.id;
     try {
-      const url = `/api/v1/groups?groveId=${encodeURIComponent(groveUUID)}&groupType=explicit&limit=10`;
-      console.debug('[grove-settings] loadMembersGroup:', url);
+      const url = `/api/v1/groups?projectId=${encodeURIComponent(projectUUID)}&groupType=explicit&limit=10`;
+      console.debug('[project-settings] loadMembersGroup:', url);
       const response = await apiFetch(url);
       if (response.ok) {
         const data = (await response.json()) as { groups?: AdminGroup[] } | AdminGroup[];
         const groups = Array.isArray(data) ? data : data.groups || [];
         console.debug(
-          '[grove-settings] groups for grove:',
+          '[project-settings] groups for project:',
           groups.length,
           groups.map((g) => g.slug)
         );
-        // Find the members group (slug pattern: grove:<slug>:members)
+        // Find the members group (slug pattern: project:<slug>:members)
         this.membersGroup = groups.find((g) => g.slug?.endsWith(':members')) || null;
         if (!this.membersGroup) {
-          console.warn('[grove-settings] no :members group found for grove', groveUUID);
+          console.warn('[project-settings] no :members group found for project', projectUUID);
         }
       } else {
-        console.warn('[grove-settings] loadMembersGroup response not ok:', response.status);
+        console.warn('[project-settings] loadMembersGroup response not ok:', response.status);
       }
     } catch (err) {
-      console.error('[grove-settings] Failed to load grove members group:', err);
+      console.error('[project-settings] Failed to load project members group:', err);
     }
   }
 
   private async loadSettings(): Promise<void> {
     this.settingsLoading = true;
     try {
-      const response = await apiFetch(`/api/v1/groves/${this.groveId}/settings`);
+      const response = await apiFetch(`/api/v1/projects/${this.projectId}/settings`);
       if (response.ok) {
-        this.settings = (await response.json()) as GroveSettings;
+        this.settings = (await response.json()) as ProjectSettings;
         this.configDefaultTemplate = this.settings.defaultTemplate || '';
         this.configDefaultHarnessConfig = this.settings.defaultHarnessConfig || '';
         this.configTelemetryEnabled = this.settings.telemetryEnabled ?? null;
@@ -892,7 +893,7 @@ export class ScionPageGroveSettings extends LitElement {
         this.configDefaultGCPIdentitySAID = this.settings.defaultGCPIdentityServiceAccountID || '';
       }
     } catch (err) {
-      console.error('Failed to load grove settings:', err);
+      console.error('Failed to load project settings:', err);
     } finally {
       this.settingsLoading = false;
     }
@@ -913,7 +914,7 @@ export class ScionPageGroveSettings extends LitElement {
   private async loadHarnessConfigs(): Promise<void> {
     try {
       const response = await apiFetch(
-        `/api/v1/harness-configs?status=active&groveId=${encodeURIComponent(this.groveId)}&limit=100`
+        `/api/v1/harness-configs?status=active&projectId=${encodeURIComponent(this.projectId)}&limit=100`
       );
       if (response.ok) {
         const data = (await response.json()) as { harnessConfigs?: HarnessConfigEntry[] };
@@ -927,7 +928,7 @@ export class ScionPageGroveSettings extends LitElement {
   private async loadGCPServiceAccounts(): Promise<void> {
     try {
       const response = await apiFetch(
-        `/api/v1/groves/${this.groveId}/gcp-service-accounts`
+        `/api/v1/projects/${this.projectId}/gcp-service-accounts`
       );
       if (response.ok) {
         const data = (await response.json()) as { items?: GCPServiceAccount[] };
@@ -945,7 +946,7 @@ export class ScionPageGroveSettings extends LitElement {
 
     try {
       // Build default resources if any field is set
-      let defaultResources: GroveResourceSpec | undefined;
+      let defaultResources: ProjectResourceSpec | undefined;
       if (
         this.configDefaultResCpuReq ||
         this.configDefaultResMemReq ||
@@ -971,7 +972,7 @@ export class ScionPageGroveSettings extends LitElement {
         }
       }
 
-      const body: GroveSettings = {
+      const body: ProjectSettings = {
         defaultTemplate: this.configDefaultTemplate || undefined,
         defaultHarnessConfig: this.configDefaultHarnessConfig || undefined,
         telemetryEnabled: this.configTelemetryEnabled,
@@ -986,7 +987,7 @@ export class ScionPageGroveSettings extends LitElement {
             : undefined,
       };
 
-      const response = await apiFetch(`/api/v1/groves/${this.groveId}/settings`, {
+      const response = await apiFetch(`/api/v1/projects/${this.projectId}/settings`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -996,10 +997,10 @@ export class ScionPageGroveSettings extends LitElement {
         throw new Error(await extractApiError(response, `Failed to save: HTTP ${response.status}`));
       }
 
-      this.settings = (await response.json()) as GroveSettings;
+      this.settings = (await response.json()) as ProjectSettings;
       this.settingsSuccess = 'Configuration saved.';
     } catch (err) {
-      console.error('Failed to save grove settings:', err);
+      console.error('Failed to save project settings:', err);
       this.settingsError = err instanceof Error ? err.message : 'Failed to save settings';
     } finally {
       this.settingsSaving = false;
@@ -1016,7 +1017,7 @@ export class ScionPageGroveSettings extends LitElement {
         this.importMode === 'workspace'
           ? { workspacePath: this.syncRepoUrl || '/.scion/templates' }
           : { sourceUrl: this.syncRepoUrl };
-      const response = await apiFetch(`/api/v1/groves/${this.groveId}/import-templates`, {
+      const response = await apiFetch(`/api/v1/projects/${this.projectId}/import-templates`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -1037,13 +1038,13 @@ export class ScionPageGroveSettings extends LitElement {
     }
   }
 
-  private async handleDeleteGrove(event?: MouseEvent): Promise<void> {
-    const groveName = this.grove?.name || this.groveId;
+  private async handleDeleteProject(event?: MouseEvent): Promise<void> {
+    const projectName = this.project?.name || this.projectId;
 
     if (
       !event?.altKey &&
       !confirm(
-        `Are you sure you want to delete "${groveName}"?\n\nAll agents in this grove will be stopped and deleted.\n\nThis action cannot be undone.`
+        `Are you sure you want to delete "${projectName}"?\n\nAll agents in this project will be stopped and deleted.\n\nThis action cannot be undone.`
       )
     ) {
       return;
@@ -1052,20 +1053,20 @@ export class ScionPageGroveSettings extends LitElement {
     this.deleteLoading = true;
 
     try {
-      const response = await apiFetch(`/api/v1/groves/${this.groveId}`, {
+      const response = await apiFetch(`/api/v1/projects/${this.projectId}`, {
         method: 'DELETE',
       });
 
       if (!response.ok && response.status !== 204) {
-        throw new Error(await extractApiError(response, `Failed to delete grove: HTTP ${response.status}`));
+        throw new Error(await extractApiError(response, `Failed to delete project: HTTP ${response.status}`));
       }
 
-      // Navigate back to groves list
-      window.history.pushState({}, '', '/groves');
+      // Navigate back to projects list
+      window.history.pushState({}, '', '/projects');
       window.dispatchEvent(new PopStateEvent('popstate'));
     } catch (err) {
-      console.error('Failed to delete grove:', err);
-      alert(err instanceof Error ? err.message : 'Failed to delete grove');
+      console.error('Failed to delete project:', err);
+      alert(err instanceof Error ? err.message : 'Failed to delete project');
     } finally {
       this.deleteLoading = false;
     }
@@ -1076,19 +1077,19 @@ export class ScionPageGroveSettings extends LitElement {
       return this.renderLoading();
     }
 
-    if (this.error || !this.grove) {
+    if (this.error || !this.project) {
       return this.renderError();
     }
 
     return html`
-      <a href="/groves/${this.groveId}" class="back-link">
+      <a href="/projects/${this.projectId}" class="back-link">
         <sl-icon name="arrow-left"></sl-icon>
-        Back to Grove
+        Back to Project
       </a>
 
       <div class="header">
         <sl-icon name="gear"></sl-icon>
-        <h1>${this.grove.name} Settings</h1>
+        <h1>${this.project.name} Settings</h1>
       </div>
 
       ${this.renderConfigSection()}
@@ -1099,10 +1100,10 @@ export class ScionPageGroveSettings extends LitElement {
         ? html`
             <scion-group-member-editor
               groupId=${this.membersGroup.id}
-              ?readOnly=${!canAny(this.grove._capabilities, 'update', 'manage')}
+              ?readOnly=${!canAny(this.project._capabilities, 'update', 'manage')}
               compact
               sectionTitle="Members"
-              sectionDescription="Users and groups who can create and manage agents in this grove."
+              sectionDescription="Users and groups who can create and manage agents in this project."
             ></scion-group-member-editor>
           `
         : ''}
@@ -1112,7 +1113,7 @@ export class ScionPageGroveSettings extends LitElement {
       ${this.pageData?.user
         ? html`
             <scion-subscription-manager
-              .groveId=${this.grove.id}
+              .projectId=${this.project.id}
               compact
             ></scion-subscription-manager>
           `
@@ -1120,17 +1121,17 @@ export class ScionPageGroveSettings extends LitElement {
 
       ${this.renderSchedulesSection()}
 
-      ${can(this.grove._capabilities, 'delete')
+      ${can(this.project._capabilities, 'delete')
         ? html`
             <div class="section danger-section">
               <h2>Danger Zone</h2>
-              <p>Irreversible actions that affect this grove and its resources.</p>
+              <p>Irreversible actions that affect this project and its resources.</p>
 
               <div class="delete-area">
                 <div class="delete-info">
-                  <h3>Delete this grove</h3>
+                  <h3>Delete this project</h3>
                   <p>
-                    Permanently remove this grove, its configuration, and all agents. All running
+                    Permanently remove this project, its configuration, and all agents. All running
                     agents will be stopped and deleted. This action cannot be undone.
                   </p>
                 </div>
@@ -1140,10 +1141,10 @@ export class ScionPageGroveSettings extends LitElement {
                     size="small"
                     ?loading=${this.deleteLoading}
                     ?disabled=${this.deleteLoading}
-                    @click=${(e: MouseEvent) => this.handleDeleteGrove(e)}
+                    @click=${(e: MouseEvent) => this.handleDeleteProject(e)}
                   >
                     <sl-icon slot="prefix" name="trash"></sl-icon>
-                    Delete Grove
+                    Delete Project
                   </sl-button>
                 </div>
               </div>
@@ -1152,26 +1153,26 @@ export class ScionPageGroveSettings extends LitElement {
         : html`
             <div class="section">
               <h2>Permissions</h2>
-              <p>You don't have permission to modify this grove.</p>
+              <p>You don't have permission to modify this project.</p>
             </div>
           `}
 
       <div class="done-footer">
-        <sl-button variant="default" href="/groves/${this.groveId}">
+        <sl-button variant="default" href="/projects/${this.projectId}">
           <sl-icon slot="prefix" name="arrow-left"></sl-icon>
-          Back to ${this.grove.name}
+          Back to ${this.project.name}
         </sl-button>
       </div>
     `;
   }
 
   private isGitHubRemote(): boolean {
-    const remote = this.grove?.gitRemote || '';
+    const remote = this.project?.gitRemote || '';
     return /github\.com[/:]/.test(remote);
   }
 
   private renderGitHubAppSection() {
-    if (!this.grove?.gitRemote) return '';
+    if (!this.project?.gitRemote) return '';
     if (!this.isGitHubRemote()) return '';
     if (!this.githubAppLoading && !this.githubAppConfigured) return '';
 
@@ -1216,7 +1217,8 @@ export class ScionPageGroveSettings extends LitElement {
               <p>No GitHub App has been configured on this Hub.</p>
               <p class="field-help">Ask your Hub admin to configure the GitHub App integration, then install it on your organization or account.</p>
             ` : html`
-              <p>No GitHub App installation found for this grove's repository.</p>
+              <p>No GitHub App installation found for this project's repository.</p>
+
               ${this.githubAppInstallationUrl ? html`
                 <p class="field-help">
                   <a href=${this.githubAppInstallationUrl} target="_blank" rel="noopener noreferrer">
@@ -1256,7 +1258,7 @@ export class ScionPageGroveSettings extends LitElement {
           ${status?.state === 'error' || status?.state === 'degraded' ? html`
             <div class="status-message ${status.state === 'error' ? 'error' : 'warning'}">
               <strong>${this.formatGitHubErrorCode(status.error_code)}:</strong> ${status.error_message}
-              ${status.state === 'error' && this.grove?.gitRemote ? html`
+              ${status.state === 'error' && this.project?.gitRemote ? html`
                 <br><small>Agents will use PAT fallback if available.</small>
               ` : ''}
             </div>
@@ -1323,13 +1325,13 @@ export class ScionPageGroveSettings extends LitElement {
     this.githubAppLoading = true;
     try {
       // Actively verify the installation by minting a test token
-      const res = await apiFetch(`/api/v1/groves/${this.groveId}/github-status`, { method: 'POST' });
+      const res = await apiFetch(`/api/v1/projects/${this.projectId}/github-status`, { method: 'POST' });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { message?: string };
         throw new Error(data.message || `Check failed (${res.status})`);
       }
       const result = (await res.json()) as {
-        status?: GitHubAppGroveStatus;
+        status?: GitHubAppProjectStatus;
         permissions?: GitHubTokenPermissions;
         installation_id?: number;
       };
@@ -1337,9 +1339,9 @@ export class ScionPageGroveSettings extends LitElement {
       this.githubAppStatus = result.status ?? null;
       this.githubAppPermissions = result.permissions ?? null;
       this.githubAppInstallationId = result.installation_id ?? this.githubAppInstallationId;
-      if (this.grove) {
-        this.grove = {
-          ...this.grove,
+      if (this.project) {
+        this.project = {
+          ...this.project,
           githubAppStatus: result.status,
           githubPermissions: result.permissions,
         };
@@ -1360,7 +1362,7 @@ export class ScionPageGroveSettings extends LitElement {
         const data = (await res.json().catch(() => ({}))) as { message?: string };
         throw new Error(data.message || `Failed to discover installations (${res.status})`);
       }
-      // Refresh just the grove's GitHub App state without a full reload
+      // Refresh just the project's GitHub App state without a full reload
       await this.refreshGitHubAppState();
     } catch (err) {
       this.githubAppError = err instanceof Error ? err.message : 'Discovery failed';
@@ -1370,25 +1372,25 @@ export class ScionPageGroveSettings extends LitElement {
   }
 
   private async refreshGitHubAppState(): Promise<void> {
-    const res = await apiFetch(`/api/v1/groves/${this.groveId}`);
+    const res = await apiFetch(`/api/v1/projects/${this.projectId}`);
     if (res.ok) {
-      const grove = (await res.json()) as Grove;
-      this.githubAppInstallationId = grove.githubInstallationId ?? null;
-      this.githubAppStatus = grove.githubAppStatus ?? null;
-      this.githubAppPermissions = grove.githubPermissions ?? null;
-      // Update the grove object in place so renderGroveIcon and other parts reflect the change
-      if (this.grove) {
-        this.grove = { ...this.grove, githubInstallationId: grove.githubInstallationId, githubAppStatus: grove.githubAppStatus, githubPermissions: grove.githubPermissions };
+      const project = (await res.json()) as Project;
+      this.githubAppInstallationId = project.githubInstallationId ?? null;
+      this.githubAppStatus = project.githubAppStatus ?? null;
+      this.githubAppPermissions = project.githubPermissions ?? null;
+      // Update the project object in place so renderProjectIcon and other parts reflect the change
+      if (this.project) {
+        this.project = { ...this.project, githubInstallationId: project.githubInstallationId, githubAppStatus: project.githubAppStatus, githubPermissions: project.githubPermissions };
       }
     }
   }
 
   private async removeGitHubInstallation(): Promise<void> {
-    if (!confirm('Remove GitHub App installation from this grove? Agents will fall back to PAT authentication.')) return;
+    if (!confirm('Remove GitHub App installation from this project? Agents will fall back to PAT authentication.')) return;
     this.githubAppLoading = true;
     this.githubAppError = null;
     try {
-      const res = await apiFetch(`/api/v1/groves/${this.groveId}/github-installation`, { method: 'DELETE' });
+      const res = await apiFetch(`/api/v1/projects/${this.projectId}/github-installation`, { method: 'DELETE' });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { message?: string };
         throw new Error(data.message || `Failed to remove installation (${res.status})`);
@@ -1396,8 +1398,8 @@ export class ScionPageGroveSettings extends LitElement {
       this.githubAppInstallationId = null;
       this.githubAppStatus = null;
       this.githubAppPermissions = null;
-      if (this.grove) {
-        this.grove = { ...this.grove, githubInstallationId: undefined, githubAppStatus: undefined, githubPermissions: undefined };
+      if (this.project) {
+        this.project = { ...this.project, githubInstallationId: undefined, githubAppStatus: undefined, githubPermissions: undefined };
       }
     } catch (err) {
       this.githubAppError = err instanceof Error ? err.message : 'Remove failed';
@@ -1407,13 +1409,13 @@ export class ScionPageGroveSettings extends LitElement {
   }
 
   private renderConfigSection() {
-    const canEdit = canAny(this.grove!._capabilities, 'update', 'manage');
+    const canEdit = canAny(this.project!._capabilities, 'update', 'manage');
 
     if (this.settingsLoading) {
       return html`
         <div class="section">
           <h2>Configuration</h2>
-          <p>Grove configuration and agent defaults.</p>
+          <p>Project configuration and agent defaults.</p>
           <div style="text-align: center; padding: 1rem;"><sl-spinner></sl-spinner></div>
         </div>
       `;
@@ -1422,7 +1424,7 @@ export class ScionPageGroveSettings extends LitElement {
     return html`
       <div class="section">
         <h2>Configuration</h2>
-        <p>Grove configuration and agent defaults.</p>
+        <p>Project configuration and agent defaults.</p>
 
         <sl-tab-group
           @sl-tab-show=${(e: CustomEvent) => {
@@ -1518,7 +1520,7 @@ export class ScionPageGroveSettings extends LitElement {
                   <sl-option value="disabled">Disabled</sl-option>
                 </sl-select>
                 <span class="field-help"
-                  >Controls telemetry for agents in this grove. "Use hub default" inherits the server-level setting.</span
+                  >Controls telemetry for agents in this project. "Use hub default" inherits the server-level setting.</span
                 >
               </div>
 
@@ -1738,13 +1740,13 @@ export class ScionPageGroveSettings extends LitElement {
   }
 
   private renderResourcesSection() {
-    const canEdit = canAny(this.grove!._capabilities, 'update', 'manage');
+    const canEdit = canAny(this.project!._capabilities, 'update', 'manage');
     if (!canEdit) return '';
 
     return html`
       <div class="section">
         <h2>Resources</h2>
-        <p>Grove-scoped resources available to agents.</p>
+        <p>Project-scoped resources available to agents.</p>
 
         <sl-tab-group
           @sl-tab-show=${(e: CustomEvent) => {
@@ -1759,24 +1761,24 @@ export class ScionPageGroveSettings extends LitElement {
 
           <sl-tab-panel name="env-vars">
             <scion-env-var-list
-              scope="grove"
-              scopeId=${this.groveId}
-              apiBasePath="/api/v1/groves/${this.groveId}"
+              scope="project"
+              scopeId=${this.projectId}
+              apiBasePath="/api/v1/projects/${this.projectId}"
             ></scion-env-var-list>
           </sl-tab-panel>
 
           <sl-tab-panel name="secrets">
             <scion-secret-list
-              scope="grove"
-              scopeId=${this.groveId}
-              apiBasePath="/api/v1/groves/${this.groveId}"
+              scope="project"
+              scopeId=${this.projectId}
+              apiBasePath="/api/v1/projects/${this.projectId}"
             ></scion-secret-list>
           </sl-tab-panel>
 
           <sl-tab-panel name="shared-dirs">
             <scion-shared-dir-list
-              groveId=${this.groveId}
-              apiBasePath="/api/v1/groves/${this.groveId}"
+              projectId=${this.projectId}
+              apiBasePath="/api/v1/projects/${this.projectId}"
             ></scion-shared-dir-list>
           </sl-tab-panel>
 
@@ -1786,7 +1788,7 @@ export class ScionPageGroveSettings extends LitElement {
 
           <sl-tab-panel name="gcp-sa">
             <scion-gcp-service-account-list
-              groveId=${this.groveId}
+              projectId=${this.projectId}
             ></scion-gcp-service-account-list>
           </sl-tab-panel>
         </sl-tab-group>
@@ -1795,11 +1797,11 @@ export class ScionPageGroveSettings extends LitElement {
   }
 
   private renderTemplatesContent() {
-    const canSync = canAny(this.grove!._capabilities, 'update', 'manage');
+    const canSync = canAny(this.project!._capabilities, 'update', 'manage');
     return html`
       <div class="section-header" style="margin-bottom: 1rem;">
         <div class="section-header-text">
-          <p style="margin: 0;">Grove-scoped agent templates imported into the Hub.</p>
+          <p style="margin: 0;">Project-scoped agent templates imported into the Hub.</p>
         </div>
         ${canSync
           ? html`
@@ -1828,8 +1830,8 @@ export class ScionPageGroveSettings extends LitElement {
                   this.syncRepoUrl = '';
                   this.syncError = null;
                   this.syncSuccess = null;
-                  if (this.importMode === 'url' && this.grove?.gitRemote) {
-                    this.syncRepoUrl = this.grove.gitRemote;
+                  if (this.importMode === 'url' && this.project?.gitRemote) {
+                    this.syncRepoUrl = this.project.gitRemote;
                   }
                 }}
               >
@@ -1855,7 +1857,7 @@ export class ScionPageGroveSettings extends LitElement {
               </sl-input>
               <div style="margin-top: 0.25rem; font-size: 0.75rem; color: var(--sl-color-neutral-500);">
                 ${this.importMode === 'workspace'
-                  ? 'Path within the grove workspace — the default will be used if no path is provided'
+                  ? 'Path within the project workspace — the default will be used if no path is provided'
                   : 'GitHub URL to a template or templates directory — supports arbitrary deep paths'}
               </div>
             </div>
@@ -1895,7 +1897,7 @@ export class ScionPageGroveSettings extends LitElement {
               <div class="template-list">
                 ${this.templates.map(
                   (t) => html`
-                    <a href="/groves/${this.groveId}/templates/${t.id}" class="template-item" style="text-decoration: none; color: inherit; cursor: pointer;">
+                    <a href="/projects/${this.projectId}/templates/${t.id}" class="template-item" style="text-decoration: none; color: inherit; cursor: pointer;">
                       <sl-icon name="file-earmark-code"></sl-icon>
                       <div class="template-info">
                         <div class="template-name">${t.displayName || t.name}</div>
@@ -1913,7 +1915,7 @@ export class ScionPageGroveSettings extends LitElement {
           : html`
               <div class="empty-templates">
                 <sl-icon name="file-earmark"></sl-icon>
-                <p>No grove templates imported yet.</p>
+                <p>No project templates imported yet.</p>
                 ${canSync
                   ? html`<p>Enter a source above and click "Import Templates" to import.</p>`
                   : ''}
@@ -1926,7 +1928,7 @@ export class ScionPageGroveSettings extends LitElement {
     return html`
       <div class="section">
         <h2>Schedules</h2>
-        <p>Manage scheduled and recurring events for this grove.</p>
+        <p>Manage scheduled and recurring events for this project.</p>
 
         <sl-tab-group
           @sl-tab-show=${(e: CustomEvent) => {
@@ -1938,13 +1940,13 @@ export class ScionPageGroveSettings extends LitElement {
 
           <sl-tab-panel name="events">
             <scion-scheduled-event-list
-              .groveId=${this.grove!.id}
+              .projectId=${this.project!.id}
             ></scion-scheduled-event-list>
           </sl-tab-panel>
 
           <sl-tab-panel name="recurring">
             <scion-schedule-list
-              .groveId=${this.grove!.id}
+              .projectId=${this.project!.id}
             ></scion-schedule-list>
           </sl-tab-panel>
         </sl-tab-group>
@@ -1956,7 +1958,7 @@ export class ScionPageGroveSettings extends LitElement {
     this.brokersLoading = true;
     this.brokersError = null;
     try {
-      const response = await apiFetch(`/api/v1/runtime-brokers?groveId=${this.groveId}`);
+      const response = await apiFetch(`/api/v1/runtime-brokers?projectId=${this.projectId}`);
       if (!response.ok) {
         throw new Error(await extractApiError(response, 'Failed to load brokers'));
       }
@@ -1977,7 +1979,7 @@ export class ScionPageGroveSettings extends LitElement {
 
   private async handleSetDefaultBroker(brokerId: string): Promise<void> {
     try {
-      const response = await apiFetch(`/api/v1/groves/${this.groveId}`, {
+      const response = await apiFetch(`/api/v1/projects/${this.projectId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ defaultRuntimeBrokerId: brokerId }),
@@ -1985,29 +1987,29 @@ export class ScionPageGroveSettings extends LitElement {
       if (!response.ok) {
         throw new Error(await extractApiError(response, 'Failed to set default broker'));
       }
-      const updated = (await response.json()) as Grove;
-      // Preserve _capabilities from the current grove since PATCH responses may omit them
-      const caps = this.grove?._capabilities || updated._capabilities;
-      this.grove = caps ? { ...updated, _capabilities: caps } : updated;
+      const updated = (await response.json()) as Project;
+      // Preserve _capabilities from the current project since PATCH responses may omit them
+      const caps = this.project?._capabilities || updated._capabilities;
+      this.project = caps ? { ...updated, _capabilities: caps } : updated;
     } catch (err) {
       console.error('Failed to set default broker:', err);
     }
   }
 
   private async handleRemoveBroker(brokerId: string, brokerName: string): Promise<void> {
-    const confirmed = confirm(`Remove broker "${brokerName}" from this grove?`);
+    const confirmed = confirm(`Remove broker "${brokerName}" from this project?`);
     if (!confirmed) return;
 
     try {
-      const response = await apiFetch(`/api/v1/groves/${this.groveId}/providers/${brokerId}`, {
+      const response = await apiFetch(`/api/v1/projects/${this.projectId}/providers/${brokerId}`, {
         method: 'DELETE',
       });
       if (!response.ok && response.status !== 204) {
         throw new Error(await extractApiError(response, 'Failed to remove broker'));
       }
-      // If we removed the default broker, clear it from the grove
-      if (this.grove?.defaultRuntimeBrokerId === brokerId) {
-        this.grove = { ...this.grove, defaultRuntimeBrokerId: '' };
+      // If we removed the default broker, clear it from the project
+      if (this.project?.defaultRuntimeBrokerId === brokerId) {
+        this.project = { ...this.project, defaultRuntimeBrokerId: '' };
       }
       await this.loadBrokers();
     } catch (err) {
@@ -2063,7 +2065,7 @@ export class ScionPageGroveSettings extends LitElement {
         ? html`
             <div class="empty-brokers">
               <sl-icon name="hdd-rack"></sl-icon>
-              <p>No runtime brokers are registered for this grove.</p>
+              <p>No runtime brokers are registered for this project.</p>
             </div>
           `
         : html`
@@ -2075,8 +2077,8 @@ export class ScionPageGroveSettings extends LitElement {
   }
 
   private renderBrokerItem(broker: RuntimeBrokerWithProvider) {
-    const isDefault = this.grove?.defaultRuntimeBrokerId === broker.id;
-    const canEdit = canAny(this.grove!._capabilities, 'update', 'manage');
+    const isDefault = this.project?.defaultRuntimeBrokerId === broker.id;
+    const canEdit = canAny(this.project!._capabilities, 'update', 'manage');
 
     return html`
       <div class="broker-item">
@@ -2152,17 +2154,17 @@ export class ScionPageGroveSettings extends LitElement {
 
   private renderError() {
     return html`
-      <a href="/groves/${this.groveId}" class="back-link">
+      <a href="/projects/${this.projectId}" class="back-link">
         <sl-icon name="arrow-left"></sl-icon>
-        Back to Grove
+        Back to Project
       </a>
 
       <div class="error-state">
         <sl-icon name="exclamation-triangle"></sl-icon>
         <h2>Failed to Load Settings</h2>
-        <p>There was a problem loading this grove.</p>
-        <div class="error-details">${this.error || 'Grove not found'}</div>
-        <sl-button variant="primary" @click=${() => this.loadGrove()}>
+        <p>There was a problem loading this project.</p>
+        <div class="error-details">${this.error || 'Project not found'}</div>
+        <sl-button variant="primary" @click=${() => this.loadProject()}>
           <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
           Retry
         </sl-button>
@@ -2173,6 +2175,6 @@ export class ScionPageGroveSettings extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'scion-page-grove-settings': ScionPageGroveSettings;
+    'scion-page-project-settings': ScionPageProjectSettings;
   }
 }

@@ -18,7 +18,7 @@
  * Dynamic page title management for the SPA.
  *
  * Provides a central function for setting the browser document title with
- * hierarchical context segments (e.g. "my-grove — Groves — Scion").
+ * hierarchical context segments (e.g. "my-project — Projects — Scion").
  * Page components dispatch the custom event to refine the title with entity
  * names once data has loaded.
  */
@@ -27,12 +27,12 @@ const APP_NAME = 'Scion';
 
 /**
  * Custom event name dispatched by page components to refine the document title
- * with entity-specific context (grove name, agent name, etc.).
+ * with entity-specific context (project name, agent name, etc.).
  */
 export const PAGE_TITLE_EVENT = 'scion:page-title';
 
 export interface PageTitleDetail {
-  /** Title segments from most-specific to least-specific, e.g. ['my-agent', 'my-grove'] */
+  /** Title segments from most-specific to least-specific, e.g. ['my-agent', 'my-project'] */
   segments: string[];
 }
 
@@ -44,8 +44,8 @@ export interface PageTitleDetail {
  *
  * Examples:
  *   setDocumentTitle('Dashboard')              → "Dashboard — Scion"
- *   setDocumentTitle('my-grove', 'Groves')     → "my-grove — Groves — Scion"
- *   setDocumentTitle('agent-1', 'my-grove')    → "agent-1 — my-grove — Scion"
+ *   setDocumentTitle('my-project', 'Projects')     → "my-project — Projects — Scion"
+ *   setDocumentTitle('agent-1', 'my-project')    → "agent-1 — my-project — Scion"
  */
 export function setDocumentTitle(...segments: string[]): void {
   if (segments.length === 0) {
@@ -59,7 +59,7 @@ export function setDocumentTitle(...segments: string[]): void {
  * Dispatch a page-title event from a page component so the shell can update
  * both the header and the document title with entity-specific context.
  *
- * Call this after entity data has loaded (e.g. grove name, agent name).
+ * Call this after entity data has loaded (e.g. project name, agent name).
  */
 export function dispatchPageTitle(element: HTMLElement, ...segments: string[]): void {
   element.dispatchEvent(

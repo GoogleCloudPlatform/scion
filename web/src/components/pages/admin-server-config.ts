@@ -376,8 +376,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     gcp_project_id?: string;
     global_minted: number;
     global_cap: number;
-    per_grove_cap: number;
-    groves?: { grove_id: string; grove_name: string; minted: number }[];
+    per_project_cap: number;
+    projects?: { project_id: string; project_name: string; minted: number }[];
   } | null = null;
 
   // Keep raw data for sections we don't fully edit
@@ -1597,7 +1597,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               @sl-change=${(e: Event) => {
                 this.brokerAutoProvide = (e.target as HTMLInputElement).checked;
               }}
-              >Auto-provide to hub groves</sl-switch
+              >Auto-provide to hub projects</sl-switch
             >
           </div>
         </div>
@@ -2000,9 +2000,9 @@ export class ScionPageAdminServerConfig extends LitElement {
           </span>
         </div>
         <div class="form-field">
-          <label>Per-Grove Cap</label>
+          <label>Per-Project Cap</label>
           <span style="font-size: 0.875rem;">
-            ${q.per_grove_cap > 0 ? q.per_grove_cap : 'Unlimited'}
+            ${q.per_project_cap > 0 ? q.per_project_cap : 'Unlimited'}
           </span>
         </div>
         <div class="form-field">
@@ -2013,17 +2013,17 @@ export class ScionPageAdminServerConfig extends LitElement {
         </div>
       </div>
 
-      ${q.groves && q.groves.length > 0 ? html`
-        <h3 class="section-title" style="margin-top: 1.5rem;">Per-Grove Usage</h3>
+      ${q.projects && q.projects.length > 0 ? html`
+        <h3 class="section-title" style="margin-top: 1.5rem;">Per-Project Usage</h3>
         <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-          ${q.groves.map(g => html`
+          ${q.projects.map(p => html`
             <div style="display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; background: var(--scion-bg-subtle, #f8fafc); border: 1px solid var(--scion-border, #e2e8f0); border-radius: var(--scion-radius, 0.5rem);">
               <sl-icon name="folder"></sl-icon>
               <div style="flex: 1;">
-                <strong>${g.grove_name}</strong>
+                <strong>${p.project_name}</strong>
               </div>
               <span style="font-size: 0.875rem; font-weight: 500;">
-                ${g.minted} minted${q.per_grove_cap > 0 ? ` / ${q.per_grove_cap}` : ''}
+                ${p.minted} minted${q.per_project_cap > 0 ? ` / ${q.per_project_cap}` : ''}
               </span>
             </div>
           `)}
@@ -2310,9 +2310,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     try {
       const res = await apiFetch('/api/v1/github-app/sync-permissions', { method: 'POST' });
       if (res.ok) {
-        const data = (await res.json()) as { affected_groves?: number; app_permissions?: Record<string, string> };
+        const data = (await res.json()) as { affected_projects?: number; app_permissions?: Record<string, string> };
         const perms = data.app_permissions ? Object.entries(data.app_permissions).map(([k, v]) => `${k}:${v}`).join(', ') : 'none';
-        this.githubAppSyncResult = `Permissions synced. App permissions: ${perms}. ${data.affected_groves || 0} grove(s) affected.`;
+        this.githubAppSyncResult = `Permissions synced. App permissions: ${perms}. ${data.affected_projects || 0} project(s) affected.`;
       } else {
         const err = (await res.json().catch(() => ({}))) as { message?: string };
         this.githubAppSyncResult = `Sync failed: ${err.message || res.statusText}`;

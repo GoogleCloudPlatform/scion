@@ -203,7 +203,7 @@ export class ScionApp extends LitElement {
 
   /**
    * Handle page-title events from detail page components to refine the
-   * document title with entity-specific context (grove name, agent name, etc.).
+   * document title with entity-specific context (project name, agent name, etc.).
    */
   private handlePageTitle(event: CustomEvent<PageTitleDetail>): void {
     const segments = event.detail?.segments;

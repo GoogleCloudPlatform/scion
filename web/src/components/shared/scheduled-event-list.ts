@@ -17,8 +17,8 @@
 /**
  * Shared Scheduled Event List Component
  *
- * Displays scheduled events for a grove with create and cancel actions.
- * Used by the grove detail page (compact mode) and potentially standalone.
+ * Displays scheduled events for a project with create and cancel actions.
+ * Used by the project detail page (compact mode) and potentially standalone.
  */
 
 import { LitElement, html, nothing } from 'lit';
@@ -29,7 +29,7 @@ import { resourceStyles } from './resource-styles.js';
 
 interface ScheduledEvent {
   id: string;
-  groveId: string;
+  projectId: string;
   eventType: string;
   fireAt: string;
   payload: string;
@@ -48,7 +48,7 @@ interface ListResponse {
 
 @customElement('scion-scheduled-event-list')
 export class ScionScheduledEventList extends LitElement {
-  @property() groveId = '';
+  @property() projectId = '';
   @property({ type: Boolean }) compact = false;
 
   @state() private loading = true;
@@ -77,13 +77,13 @@ export class ScionScheduledEventList extends LitElement {
   }
 
   private async loadEvents(): Promise<void> {
-    if (!this.groveId) return;
+    if (!this.projectId) return;
     this.loading = true;
     this.error = null;
 
     try {
       const response = await apiFetch(
-        `/api/v1/groves/${encodeURIComponent(this.groveId)}/scheduled-events`
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/scheduled-events`
       );
 
       if (!response.ok) {
@@ -138,7 +138,7 @@ export class ScionScheduledEventList extends LitElement {
       }
 
       const response = await apiFetch(
-        `/api/v1/groves/${encodeURIComponent(this.groveId)}/scheduled-events`,
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/scheduled-events`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -164,7 +164,7 @@ export class ScionScheduledEventList extends LitElement {
 
     try {
       const response = await apiFetch(
-        `/api/v1/groves/${encodeURIComponent(this.groveId)}/scheduled-events/${encodeURIComponent(eventId)}`,
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/scheduled-events/${encodeURIComponent(eventId)}`,
         { method: 'DELETE' }
       );
 
@@ -253,7 +253,7 @@ export class ScionScheduledEventList extends LitElement {
         <div class="section-header">
           <div class="section-header-info">
             <h2>Scheduled Events</h2>
-            <p>One-shot timed events for this grove.</p>
+            <p>One-shot timed events for this project.</p>
           </div>
           <sl-button size="small" variant="default" @click=${this.openCreateDialog}>
             <sl-icon slot="prefix" name="plus-lg"></sl-icon>

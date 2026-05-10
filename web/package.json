@@ -1,7 +1,7 @@
 {
   "name": "@scion/web-frontend",
   "version": "0.1.0",
-  "description": "Scion Web Frontend - Browser-based dashboard for managing agents and groves",
+  "description": "Scion Web Frontend - Browser-based dashboard for managing agents and projects",
   "type": "module",
   "engines": {
     "node": ">=20.0.0"

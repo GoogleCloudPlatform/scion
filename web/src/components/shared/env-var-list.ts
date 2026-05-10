@@ -18,10 +18,10 @@
  * Shared Environment Variable List Component
  *
  * Full CRUD component for environment variables. Used by both the profile
- * env vars page (scope=user) and the grove configuration page (scope=grove).
+ * env vars page (scope=user) and the project configuration page (scope=project).
  *
  * In non-compact mode (profile page), renders a table with an add button.
- * In compact mode (grove page), wraps in a section with header/description.
+ * In compact mode (project page), wraps in a section with header/description.
  */
 
 import { LitElement, html, nothing } from 'lit';
@@ -70,7 +70,7 @@ export class ScionEnvVarList extends LitElement {
 
     try {
       const url =
-        this.scope !== 'grove' ? `${this.apiBasePath}/env?scope=${this.scope}` : `${this.apiBasePath}/env`;
+        this.scope !== 'project' ? `${this.apiBasePath}/env?scope=${this.scope}` : `${this.apiBasePath}/env`;
       const response = await apiFetch(url);
 
       if (!response.ok) {
@@ -142,7 +142,7 @@ export class ScionEnvVarList extends LitElement {
         injectionMode: this.dialogInjectionMode,
       };
 
-      if (this.scope === 'grove') {
+      if (this.scope === 'project') {
         body.scopeId = this.scopeId;
       }
 
@@ -175,7 +175,7 @@ export class ScionEnvVarList extends LitElement {
 
     try {
       const deleteUrl =
-        this.scope !== 'grove'
+        this.scope !== 'project'
           ? `${this.apiBasePath}/env/${encodeURIComponent(envVar.key)}?scope=${this.scope}`
           : `${this.apiBasePath}/env/${encodeURIComponent(envVar.key)}`;
       const response = await apiFetch(deleteUrl, { method: 'DELETE' });
@@ -270,7 +270,7 @@ export class ScionEnvVarList extends LitElement {
         <div class="section-header">
           <div class="section-header-info">
             <h2>Environment Variables</h2>
-            <p>Manage environment variables injected into ${this.scope === 'hub' ? 'all agents on this hub' : 'agents in this grove'} at runtime.</p>
+            <p>Manage environment variables injected into ${this.scope === 'hub' ? 'all agents on this hub' : 'agents in this project'} at runtime.</p>
           </div>
           <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
             <sl-icon slot="prefix" name="plus-lg"></sl-icon>
@@ -382,7 +382,7 @@ export class ScionEnvVarList extends LitElement {
         <h3>No Environment Variables</h3>
         <p>
           Add environment variables that will be injected into
-          ${this.compact ? (this.scope === 'hub' ? 'all agents on this hub' : 'agents in this grove') : 'your agents'}.
+          ${this.compact ? (this.scope === 'hub' ? 'all agents on this hub' : 'agents in this project') : 'your agents'}.
         </p>
         <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
           <sl-icon slot="prefix" name="plus-lg"></sl-icon>

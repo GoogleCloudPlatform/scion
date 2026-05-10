@@ -15,9 +15,9 @@
  */
 
 /**
- * Grove creation page component
+ * Project creation page component
  *
- * Form for creating a new grove, supporting both git-backed and hub-native modes.
+ * Form for creating a new project, supporting both git-backed and hub-native modes.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -26,11 +26,11 @@ import { customElement, state } from 'lit/decorators.js';
 import { extractApiError } from '../../client/api.js';
 import '../shared/status-badge.js';
 
-type GroveMode = 'git' | 'hub';
+type ProjectMode = 'git' | 'hub';
 type GitWorkspaceMode = 'per-agent' | 'shared';
 
-@customElement('scion-page-grove-create')
-export class ScionPageGroveCreate extends LitElement {
+@customElement('scion-page-project-create')
+export class ScionPageProjectCreate extends LitElement {
   @state()
   private submitting = false;
 
@@ -38,11 +38,11 @@ export class ScionPageGroveCreate extends LitElement {
   private error: string | null = null;
 
   @state()
-  private existingGroveId: string | null = null;
+  private existingProjectId: string | null = null;
 
-  /** Existing groves sharing the same git remote */
+  /** Existing projects sharing the same git remote */
   @state()
-  private existingGrovesForRemote: Array<{ id: string; name: string; slug: string }> = [];
+  private existingProjectsForRemote: Array<{ id: string; name: string; slug: string }> = [];
 
   /** Form field values */
   @state()
@@ -64,7 +64,7 @@ export class ScionPageGroveCreate extends LitElement {
   private visibility = 'private';
 
   @state()
-  private mode: GroveMode = 'hub';
+  private mode: ProjectMode = 'hub';
 
   @state()
   private gitWorkspaceMode: GitWorkspaceMode = 'per-agent';
@@ -301,7 +301,7 @@ export class ScionPageGroveCreate extends LitElement {
   }
 
   private onModeChange(e: Event): void {
-    this.mode = (e.target as HTMLElement & { value: string }).value as GroveMode;
+    this.mode = (e.target as HTMLElement & { value: string }).value as ProjectMode;
   }
 
   private gitRemoteCheckTimer: ReturnType<typeof setTimeout> | null = null;
@@ -320,47 +320,47 @@ export class ScionPageGroveCreate extends LitElement {
       }
     }
 
-    // Debounced check for existing groves sharing this git remote
+    // Debounced check for existing projects sharing this git remote
     if (this.gitRemoteCheckTimer) {
       clearTimeout(this.gitRemoteCheckTimer);
     }
     const url = this.gitRemote.trim();
     if (url.length > 5) {
-      this.gitRemoteCheckTimer = setTimeout(() => this.checkExistingGroves(url), 500);
+      this.gitRemoteCheckTimer = setTimeout(() => this.checkExistingProjects(url), 500);
     } else {
-      this.existingGrovesForRemote = [];
+      this.existingProjectsForRemote = [];
     }
   }
 
-  private async checkExistingGroves(gitUrl: string): Promise<void> {
+  private async checkExistingProjects(gitUrl: string): Promise<void> {
     try {
       const response = await fetch(
-        `/api/v1/groves?gitRemote=${encodeURIComponent(gitUrl)}`,
+        `/api/v1/projects?gitRemote=${encodeURIComponent(gitUrl)}`,
         { credentials: 'include' },
       );
       if (!response.ok) return;
       const data = (await response.json()) as {
-        groves?: Array<{ id: string; name: string; slug: string }>;
+        projects?: Array<{ id: string; name: string; slug: string }>;
       };
-      this.existingGrovesForRemote = data.groves ?? [];
+      this.existingProjectsForRemote = data.projects ?? [];
     } catch {
       // Best-effort check; ignore errors
     }
   }
 
-  private navigateToGrove(groveId: string): void {
-    window.history.pushState({}, '', `/groves/${groveId}`);
+  private navigateToProject(projectId: string): void {
+    window.history.pushState({}, '', `/projects/${projectId}`);
     window.dispatchEvent(new PopStateEvent('popstate'));
   }
 
   private async handleSubmit(_e: Event): Promise<void> {
     if (!this.name.trim()) {
-      this.error = 'Grove name is required.';
+      this.error = 'Project name is required.';
       return;
     }
 
     if (this.mode === 'git' && !this.gitRemote.trim()) {
-      this.error = 'Git remote URL is required for git-backed groves.';
+      this.error = 'Git remote URL is required for git-backed projects.';
       return;
     }
 
@@ -402,7 +402,7 @@ export class ScionPageGroveCreate extends LitElement {
         }
       }
 
-      const response = await fetch('/api/v1/groves', {
+      const response = await fetch('/api/v1/projects', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -413,24 +413,24 @@ export class ScionPageGroveCreate extends LitElement {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
 
-      const result = (await response.json()) as { grove?: { id: string }; id?: string };
-      const groveId = result.grove?.id || result.id;
+      const result = (await response.json()) as { project?: { id: string }; id?: string };
+      const projectId = result.project?.id || result.id;
 
-      if (!groveId) {
-        throw new Error('No grove ID in response');
+      if (!projectId) {
+        throw new Error('No project ID in response');
       }
 
-      // Backend returns 200 for an existing grove, 201 for newly created
+      // Backend returns 200 for an existing project, 201 for newly created
       if (response.status === 200) {
-        this.existingGroveId = groveId;
+        this.existingProjectId = projectId;
         return;
       }
 
-      // Navigate to the newly created grove
-      this.navigateToGrove(groveId);
+      // Navigate to the newly created project
+      this.navigateToProject(projectId);
     } catch (err) {
-      console.error('Failed to create grove:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to create grove';
+      console.error('Failed to create project:', err);
+      this.error = err instanceof Error ? err.message : 'Failed to create project';
     } finally {
       this.submitting = false;
     }
@@ -438,15 +438,15 @@ export class ScionPageGroveCreate extends LitElement {
 
   override render() {
     return html`
-      <a href="/groves" class="back-link">
+      <a href="/projects" class="back-link">
         <sl-icon name="arrow-left"></sl-icon>
-        Back to Groves
+        Back to Projects
       </a>
 
       <div class="page-header">
         <h1>
           <sl-icon name="folder-plus"></sl-icon>
-          Create Grove
+          Create Project
         </h1>
         <p>Set up a new project workspace for your agents.</p>
       </div>
@@ -519,20 +519,21 @@ export class ScionPageGroveCreate extends LitElement {
                     password-toggle
                   ></sl-input>
                   <div class="hint">
-                    Optional. A personal access token for cloning private repositories. Saved as a grove secret.
+                    Optional. A personal access token for cloning private repositories. Saved as a project secret.
                   </div>
                 </div>
 
-                ${this.existingGrovesForRemote.length > 0
+                ${this.existingProjectsForRemote.length > 0
+
                   ? html`
                       <div class="info-banner">
                         <sl-icon name="info-circle"></sl-icon>
                         <div>
-                          <strong>${this.existingGrovesForRemote.length} existing grove(s)</strong> share this git remote.
-                          A new grove will be created with a unique slug.
+                          <strong>${this.existingProjectsForRemote.length} existing project(s)</strong> share this git remote.
+                          A new project will be created with a unique slug.
                           <ul style="margin: 0.25rem 0 0; padding-left: 1.25rem;">
-                            ${this.existingGrovesForRemote.map(
-                              (g) => html`<li>${g.name} <span style="opacity: 0.7">(${g.slug})</span></li>`,
+                            ${this.existingProjectsForRemote.map(
+                              (p) => html`<li>${p.name} <span style="opacity: 0.7">(${p.slug})</span></li>`,
                             )}
                           </ul>
                         </div>
@@ -554,7 +555,7 @@ export class ScionPageGroveCreate extends LitElement {
                   <div class="hint">
                     ${this.gitWorkspaceMode === 'per-agent'
                       ? 'Each agent gets its own independent clone of the repository.'
-                      : 'A single git clone is shared by all agents in this grove.'}
+                      : 'A single git clone is shared by all agents in this project.'}
                   </div>
                   ${this.gitWorkspaceMode === 'shared'
                     ? html`<div class="workspace-mode-note">
@@ -628,9 +629,9 @@ export class ScionPageGroveCreate extends LitElement {
               @click=${(e: Event) => this.handleSubmit(e)}
             >
               <sl-icon slot="prefix" name="folder-plus"></sl-icon>
-              Create Grove
+              Create Project
             </sl-button>
-            <a href="/groves" style="text-decoration: none;">
+            <a href="/projects" style="text-decoration: none;">
               <sl-button variant="default" ?disabled=${this.submitting}>
                 Cancel
               </sl-button>
@@ -640,19 +641,19 @@ export class ScionPageGroveCreate extends LitElement {
       </div>
 
       <sl-dialog
-        label="Grove Already Exists"
-        ?open=${this.existingGroveId !== null}
-        @sl-after-hide=${() => { this.existingGroveId = null; }}
+        label="Project Already Exists"
+        ?open=${this.existingProjectId !== null}
+        @sl-after-hide=${() => { this.existingProjectId = null; }}
       >
         <div class="exists-dialog-body">
-          A grove with this ID already exists.
+          A project with this ID already exists.
         </div>
         <sl-button
           slot="footer"
           variant="primary"
           @click=${() => {
-            if (this.existingGroveId) {
-              this.navigateToGrove(this.existingGroveId);
+            if (this.existingProjectId) {
+              this.navigateToProject(this.existingProjectId);
             }
           }}
         >
@@ -665,6 +666,6 @@ export class ScionPageGroveCreate extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'scion-page-grove-create': ScionPageGroveCreate;
+    'scion-page-project-create': ScionPageProjectCreate;
   }
 }

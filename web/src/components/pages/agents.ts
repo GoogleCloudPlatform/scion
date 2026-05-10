@@ -17,7 +17,7 @@
 /**
  * Agents list page component
  *
- * Displays all agents across all groves with their status
+ * Displays all agents across all projects with their status
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -84,7 +84,7 @@ export class ScionPageAgents extends LitElement {
   private viewMode: ViewMode = 'grid';
 
   /**
-   * Filter scope: 'all' (no filter), 'mine' (created by me), 'shared' (in shared groves)
+   * Filter scope: 'all' (no filter), 'mine' (created by me), 'shared' (in shared projects)
    */
   @state()
   private agentScope: 'all' | 'mine' | 'shared' = 'all';
@@ -216,12 +216,12 @@ export class ScionPageAgents extends LitElement {
         font-size: 0.875rem;
       }
 
-      .grove-link {
+      .project-link {
         color: inherit;
         text-decoration: none;
       }
 
-      .grove-link:hover {
+      .project-link:hover {
         text-decoration: underline;
       }
     `,
@@ -246,7 +246,7 @@ export class ScionPageAgents extends LitElement {
       }
     }
 
-    // Set SSE scope to dashboard (all grove summaries).
+    // Set SSE scope to dashboard (all project summaries).
     // This must happen before checking hydrated data because setScope clears
     // state maps when the scope changes (e.g. from agent-detail to dashboard).
     stateManager.setScope({ type: 'dashboard' });
@@ -501,7 +501,7 @@ export class ScionPageAgents extends LitElement {
               </button>
               <button
                 class=${this.agentScope === 'shared' ? 'active' : ''}
-                title="Agents in shared groves"
+                title="Agents in shared projects"
                 @click=${() => this.setScope('shared')}
               >
                 <sl-icon name="people"></sl-icon>
@@ -632,7 +632,7 @@ export class ScionPageAgents extends LitElement {
               </a>
             </h3>
             <div class="agent-meta">
-              ${agent.grove ? html`<div><sl-icon name="folder"></sl-icon> <a href="/groves/${agent.groveId}" @click=${(e: MouseEvent) => e.stopPropagation()}>${agent.grove}</a></div>` : ''}
+              ${agent.project ? html`<div><sl-icon name="folder"></sl-icon> <a href="/projects/${agent.projectId}" @click=${(e: MouseEvent) => e.stopPropagation()}>${agent.project}</a></div>` : ''}
               <div><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
               ${agent.runtimeBrokerId
                 ? html`<div>
@@ -744,7 +744,7 @@ export class ScionPageAgents extends LitElement {
           <thead>
             <tr>
               <th>Name</th>
-              <th>Grove</th>
+              <th>Project</th>
               <th class="hide-mobile">Template</th>
               <th class="status-col">Status</th>
               <th class="hide-mobile">Task</th>
@@ -770,7 +770,7 @@ export class ScionPageAgents extends LitElement {
             <a href="/agents/${agent.id}">${agent.name}</a>
           </span>
         </td>
-        <td>${agent.grove ? html`<a href="/groves/${agent.groveId}" class="grove-link">${agent.grove}</a>` : '\u2014'}</td>
+        <td>${agent.project ? html`<a href="/projects/${agent.projectId}" class="project-link">${agent.project}</a>` : '\u2014'}</td>
         <td class="hide-mobile">${agent.template}</td>
         <td>
           <scion-status-badge

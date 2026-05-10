@@ -23,7 +23,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData, Agent, Grove, Capabilities } from '../../shared/types.js';
+import type { PageData, Agent, Project, Capabilities } from '../../shared/types.js';
 import { isAgentRunning } from '../../shared/types.js';
 import '../shared/status-badge.js';
 import { stateManager } from '../../client/state.js';
@@ -56,13 +56,13 @@ export class ScionPageHome extends LitElement {
   private agents: Agent[] = [];
 
   @state()
-  private groves: Grove[] = [];
+  private projects: Project[] = [];
 
   @state()
   private inviteStats: InviteStats | null = null;
 
   private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
-  private boundOnGrovesUpdated = this.onGrovesUpdated.bind(this);
+  private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -70,14 +70,14 @@ export class ScionPageHome extends LitElement {
 
     // Subscribe before snapshot so no deltas are missed between read and listen
     stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
-    stateManager.addEventListener('groves-updated', this.boundOnGrovesUpdated as EventListener);
+    stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
 
     // Use hydrated data if available, avoiding unnecessary fetches on SSR load
     // or when navigating back from a page that already populated the state.
     this.agents = stateManager.getAgents();
-    this.groves = stateManager.getGroves();
+    this.projects = stateManager.getProjects();
 
-    if (this.agents.length === 0 && this.groves.length === 0) {
+    if (this.agents.length === 0 && this.projects.length === 0) {
       void this.loadData();
     }
   }
@@ -85,15 +85,15 @@ export class ScionPageHome extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
-    stateManager.removeEventListener('groves-updated', this.boundOnGrovesUpdated as EventListener);
+    stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
   }
 
   private onAgentsUpdated(): void {
     this.agents = stateManager.getAgents();
   }
 
-  private onGrovesUpdated(): void {
-    this.groves = stateManager.getGroves();
+  private onProjectsUpdated(): void {
+    this.projects = stateManager.getProjects();
   }
 
   private get activeAgentCount(): number {
@@ -103,9 +103,9 @@ export class ScionPageHome extends LitElement {
   private async loadData(): Promise<void> {
     try {
       const isAdmin = this.pageData?.user?.role === 'admin';
-      const [agentsResp, grovesResp, inviteStatsResp] = await Promise.all([
+      const [agentsResp, projectsResp, inviteStatsResp] = await Promise.all([
         apiFetch('/api/v1/agents'),
-        apiFetch('/api/v1/groves'),
+        apiFetch('/api/v1/projects'),
         isAdmin ? apiFetch('/api/v1/admin/invites/stats').catch(() => null) : Promise.resolve(null),
       ]);
 
@@ -119,12 +119,12 @@ export class ScionPageHome extends LitElement {
         stateManager.seedAgents(agents);
       }
 
-      if (grovesResp.ok) {
-        const data = (await grovesResp.json()) as { groves?: Grove[]; _capabilities?: Capabilities } | Grove[];
+      if (projectsResp.ok) {
+        const data = (await projectsResp.json()) as { projects?: Project[]; _capabilities?: Capabilities } | Project[];
         if (!this.isConnected || stateManager.currentScope?.type !== 'dashboard') return;
-        const groves = Array.isArray(data) ? data : data.groves || [];
-        this.groves = groves;
-        stateManager.seedGroves(groves);
+        const projects = Array.isArray(data) ? data : data.projects || [];
+        this.projects = projects;
+        stateManager.seedProjects(projects);
       }
 
       if (inviteStatsResp?.ok) {
@@ -352,8 +352,8 @@ export class ScionPageHome extends LitElement {
           </div>
         </div>
         <div class="stat-card">
-          <h3>Groves</h3>
-          <div class="stat-value">${this.groves.length}</div>
+          <h3>Projects</h3>
+          <div class="stat-value">${this.projects.length}</div>
           <div class="stat-change">Project workspaces</div>
         </div>
         <div class="stat-card">
@@ -379,21 +379,21 @@ export class ScionPageHome extends LitElement {
             <p>Spin up a new AI agent</p>
           </div>
         </a>
-        <a href="/groves/new" class="action-card">
+        <a href="/projects/new" class="action-card">
           <div class="action-icon">
             <sl-icon name="folder-plus"></sl-icon>
           </div>
           <div class="action-text">
-            <h4>Create Grove</h4>
+            <h4>Create Project</h4>
             <p>Add a project workspace</p>
           </div>
         </a>
-        <a href="/groves" class="action-card">
+        <a href="/projects" class="action-card">
           <div class="action-icon">
             <sl-icon name="folder"></sl-icon>
           </div>
           <div class="action-text">
-            <h4>View Groves</h4>
+            <h4>View Projects</h4>
             <p>Browse project workspaces</p>
           </div>
         </a>

@@ -17,8 +17,8 @@
 /**
  * Shared Recurring Schedule List Component
  *
- * Displays recurring schedules for a grove with create, pause/resume, and delete actions.
- * Used by the grove-schedules page and admin-scheduler page.
+ * Displays recurring schedules for a project with create, pause/resume, and delete actions.
+ * Used by the project-schedules page and admin-scheduler page.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -29,7 +29,7 @@ import { resourceStyles } from './resource-styles.js';
 
 interface Schedule {
   id: string;
-  groveId: string;
+  projectId: string;
   name: string;
   cronExpr: string;
   eventType: string;
@@ -53,7 +53,7 @@ interface ListResponse {
 
 @customElement('scion-schedule-list')
 export class ScionScheduleList extends LitElement {
-  @property() groveId = '';
+  @property() projectId = '';
   @property({ type: Boolean }) compact = false;
 
   @state() private loading = true;
@@ -103,13 +103,13 @@ export class ScionScheduleList extends LitElement {
   }
 
   private async loadSchedules(): Promise<void> {
-    if (!this.groveId) return;
+    if (!this.projectId) return;
     this.loading = true;
     this.error = null;
 
     try {
       const response = await apiFetch(
-        `/api/v1/groves/${encodeURIComponent(this.groveId)}/schedules`
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/schedules`
       );
 
       if (!response.ok) {
@@ -168,7 +168,7 @@ export class ScionScheduleList extends LitElement {
       }
 
       const response = await apiFetch(
-        `/api/v1/groves/${encodeURIComponent(this.groveId)}/schedules`,
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/schedules`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -193,7 +193,7 @@ export class ScionScheduleList extends LitElement {
     this.actionId = scheduleId;
     try {
       const response = await apiFetch(
-        `/api/v1/groves/${encodeURIComponent(this.groveId)}/schedules/${encodeURIComponent(scheduleId)}/pause`,
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/schedules/${encodeURIComponent(scheduleId)}/pause`,
         { method: 'POST' }
       );
       if (!response.ok) {
@@ -212,7 +212,7 @@ export class ScionScheduleList extends LitElement {
     this.actionId = scheduleId;
     try {
       const response = await apiFetch(
-        `/api/v1/groves/${encodeURIComponent(this.groveId)}/schedules/${encodeURIComponent(scheduleId)}/resume`,
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/schedules/${encodeURIComponent(scheduleId)}/resume`,
         { method: 'POST' }
       );
       if (!response.ok) {
@@ -231,7 +231,7 @@ export class ScionScheduleList extends LitElement {
     this.actionId = scheduleId;
     try {
       const response = await apiFetch(
-        `/api/v1/groves/${encodeURIComponent(this.groveId)}/schedules/${encodeURIComponent(scheduleId)}`,
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/schedules/${encodeURIComponent(scheduleId)}`,
         { method: 'DELETE' }
       );
       if (!response.ok) {
@@ -341,7 +341,7 @@ export class ScionScheduleList extends LitElement {
         <div class="section-header">
           <div class="section-header-info">
             <h2>Recurring Schedules</h2>
-            <p>Automated recurring tasks for this grove.</p>
+            <p>Automated recurring tasks for this project.</p>
           </div>
           <sl-button size="small" variant="default" @click=${this.openCreateDialog}>
             <sl-icon slot="prefix" name="plus-lg"></sl-icon>

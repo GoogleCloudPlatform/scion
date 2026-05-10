@@ -68,8 +68,8 @@ function encodeFilePath(filePath: string): string {
 export class WorkspaceFileEditorDataSource implements FileEditorDataSource {
   private readonly basePath: string;
 
-  constructor(groveId: string) {
-    this.basePath = `/api/v1/groves/${groveId}/workspace/files`;
+  constructor(projectId: string) {
+    this.basePath = `/api/v1/projects/${projectId}/workspace/files`;
   }
 
   async getFileContent(path: string): Promise<FileContentResponse> {
@@ -96,8 +96,8 @@ export class WorkspaceFileEditorDataSource implements FileEditorDataSource {
 export class SharedDirFileEditorDataSource implements FileEditorDataSource {
   private readonly basePath: string;
 
-  constructor(groveId: string, dirName: string) {
-    this.basePath = `/api/v1/groves/${groveId}/shared-dirs/${encodeURIComponent(dirName)}/files`;
+  constructor(projectId: string, dirName: string) {
+    this.basePath = `/api/v1/projects/${projectId}/shared-dirs/${encodeURIComponent(dirName)}/files`;
   }
 
   async getFileContent(path: string): Promise<FileContentResponse> {

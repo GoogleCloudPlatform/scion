@@ -18,7 +18,7 @@
  * Shared CSS styles for env var and secret list components.
  *
  * Covers table, dialog, badge, empty/loading/error states, and
- * compact section layout used by grove-settings.
+ * compact section layout used by project-settings.
  */
 
 import { css } from 'lit';
@@ -289,7 +289,7 @@ export const resourceStyles = css`
     margin-bottom: 1rem;
   }
 
-  /* ── Compact section layout (grove page) ────────────────────────────── */
+  /* ── Compact section layout (project page) ────────────────────────────── */
 
   .section {
     background: var(--scion-surface, #ffffff);
@@ -460,7 +460,7 @@ export const resourceStyles = css`
 `;
 
 /**
- * Shared CSS styles for resource list pages (groves, agents, brokers).
+ * Shared CSS styles for resource list pages (projects, agents, brokers).
  *
  * Consolidates duplicated header, loading/error/empty state, card grid,
  * table, and stat styles so each page only needs page-specific overrides.

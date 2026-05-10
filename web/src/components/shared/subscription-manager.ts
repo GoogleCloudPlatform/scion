@@ -18,7 +18,7 @@
  * Subscription Manager Component
  *
  * CRUD table + dialog for managing notification subscriptions.
- * Used on the grove detail page in compact mode.
+ * Used on the project detail page in compact mode.
  */
 
 import { LitElement, html, nothing } from 'lit';
@@ -33,7 +33,7 @@ interface SubscriptionTemplate {
   name: string;
   scope: string;
   triggerActivities: string[];
-  groveId: string;
+  projectId: string;
   createdBy: string;
 }
 
@@ -42,7 +42,7 @@ const ALL_TRIGGERS = ['COMPLETED', 'WAITING_FOR_INPUT', 'LIMITS_EXCEEDED', 'STAL
 
 @customElement('scion-subscription-manager')
 export class ScionSubscriptionManager extends LitElement {
-  @property() groveId = '';
+  @property() projectId = '';
   @property() agentId?: string;
   @property({ type: Boolean }) compact = false;
 
@@ -55,7 +55,7 @@ export class ScionSubscriptionManager extends LitElement {
 
   // Create dialog
   @state() private dialogOpen = false;
-  @state() private dialogScope: SubscriptionScope = 'grove';
+  @state() private dialogScope: SubscriptionScope = 'project';
   @state() private dialogAgentId = '';
   @state() private dialogTriggers: Set<string> = new Set(DEFAULT_TRIGGERS);
   @state() private dialogLoading = false;
@@ -84,8 +84,8 @@ export class ScionSubscriptionManager extends LitElement {
     try {
       let url = '/api/v1/notifications/subscriptions';
       const params: string[] = [];
-      if (this.groveId) {
-        params.push(`groveId=${encodeURIComponent(this.groveId)}`);
+      if (this.projectId) {
+        params.push(`projectId=${encodeURIComponent(this.projectId)}`);
       }
       if (this.agentId) {
         params.push(`agentId=${encodeURIComponent(this.agentId)}`);
@@ -116,9 +116,9 @@ export class ScionSubscriptionManager extends LitElement {
   }
 
   private async loadTemplates(): Promise<void> {
-    if (!this.groveId) return;
+    if (!this.projectId) return;
     try {
-      const url = `/api/v1/notifications/templates?groveId=${encodeURIComponent(this.groveId)}`;
+      const url = `/api/v1/notifications/templates?projectId=${encodeURIComponent(this.projectId)}`;
       const response = await apiFetch(url);
       if (response.ok) {
         const data = (await response.json()) as SubscriptionTemplate[] | null;
@@ -135,7 +135,7 @@ export class ScionSubscriptionManager extends LitElement {
   }
 
   private openCreateDialog(): void {
-    this.dialogScope = this.agentId ? 'agent' : 'grove';
+    this.dialogScope = this.agentId ? 'agent' : 'project';
     this.dialogAgentId = this.agentId || '';
     this.dialogTriggers = new Set(DEFAULT_TRIGGERS);
     this.dialogError = null;
@@ -155,7 +155,7 @@ export class ScionSubscriptionManager extends LitElement {
     try {
       const body: Record<string, unknown> = {
         scope: this.dialogScope,
-        groveId: this.groveId,
+        projectId: this.projectId,
         triggerActivities: [...this.dialogTriggers],
       };
 
@@ -287,7 +287,7 @@ export class ScionSubscriptionManager extends LitElement {
             <h2>Your Notification Subscriptions</h2>
             <p>Get notified when agents complete, need input, or encounter issues.</p>
           </div>
-          ${this.groveId
+          ${this.projectId
             ? html`<sl-button size="small" variant="default" @click=${this.openCreateDialog}>
                 <sl-icon slot="prefix" name="bell"></sl-icon>
                 Subscribe
@@ -309,10 +309,10 @@ export class ScionSubscriptionManager extends LitElement {
                   <div class="empty-state">
                     <sl-icon name="bell-slash"></sl-icon>
                     <h3>No Subscriptions</h3>
-                    <p>${this.groveId
-                      ? 'Subscribe to get notified about agent activity in this grove.'
-                      : 'You have no notification subscriptions. Subscribe from a grove or agent page.'}</p>
-                    ${this.groveId
+                    <p>${this.projectId
+                      ? 'Subscribe to get notified about agent activity in this project.'
+                      : 'You have no notification subscriptions. Subscribe from a project or agent page.'}</p>
+                    ${this.projectId
                       ? html`<sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
                           <sl-icon slot="prefix" name="bell"></sl-icon>
                           Subscribe
@@ -398,8 +398,8 @@ export class ScionSubscriptionManager extends LitElement {
     const isDeleting = this.deletingId === sub.id;
     const isEditing = this.editingId === sub.id;
     const target =
-      sub.scope === 'grove' ? '(all agents)' : sub.agentSlug || sub.agentId || '\u2014';
-    const scopeIcon = sub.scope === 'grove' ? 'folder' : 'cpu';
+      sub.scope === 'project' ? '(all agents)' : sub.agentSlug || sub.agentId || '\u2014';
+    const scopeIcon = sub.scope === 'project' ? 'folder' : 'cpu';
     const triggers = sub.triggerActivities?.join(', ') || '\u2014';
 
     return html`
@@ -499,12 +499,12 @@ export class ScionSubscriptionManager extends LitElement {
                     @sl-change=${(e: Event) =>
                       (this.dialogScope = (e.target as HTMLInputElement).value as SubscriptionScope)}
                   >
-                    <sl-radio-button value="grove">Entire Grove</sl-radio-button>
+                    <sl-radio-button value="project">Entire Project</sl-radio-button>
                     <sl-radio-button value="agent">Specific Agent</sl-radio-button>
                   </sl-radio-group>
                   <span class="radio-field-help">
-                    ${this.dialogScope === 'grove'
-                      ? 'Receive notifications for all agents in this grove.'
+                    ${this.dialogScope === 'project'
+                      ? 'Receive notifications for all agents in this project.'
                       : 'Receive notifications for a specific agent only.'}
                   </span>
                 </div>

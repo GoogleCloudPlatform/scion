@@ -15,15 +15,15 @@
  */
 
 /**
- * Grove detail page component
+ * Project detail page component
  *
- * Displays a single grove with its agents and settings
+ * Displays a single project with its agents and settings
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData, Grove, Agent, Capabilities } from '../../shared/types.js';
+import type { PageData, Project, Agent, Capabilities } from '../../shared/types.js';
 import { can, canAny, getAgentDisplayStatus, isAgentRunning, isTerminalAvailable, isSharedWorkspace } from '../../shared/types.js';
 import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
@@ -41,8 +41,8 @@ import type { FileBrowserDataSource } from '../shared/file-browser.js';
 import { WorkspaceFileEditorDataSource, SharedDirFileEditorDataSource } from '../shared/file-editor.js';
 import type { FileEditorDataSource } from '../shared/file-editor.js';
 
-@customElement('scion-page-grove-detail')
-export class ScionPageGroveDetail extends LitElement {
+@customElement('scion-page-project-detail')
+export class ScionPageProjectDetail extends LitElement {
   /**
    * Page data from SSR
    */
@@ -50,10 +50,10 @@ export class ScionPageGroveDetail extends LitElement {
   pageData: PageData | null = null;
 
   /**
-   * Grove ID from URL
+   * Project ID from URL
    */
   @property({ type: String })
-  groveId = '';
+  projectId = '';
 
   /**
    * Loading state
@@ -62,13 +62,13 @@ export class ScionPageGroveDetail extends LitElement {
   private loading = true;
 
   /**
-   * Grove data
+   * Project data
    */
   @state()
-  private grove: Grove | null = null;
+  private project: Project | null = null;
 
   /**
-   * Agents in this grove
+   * Agents in this project
    */
   @state()
   private agents: Agent[] = [];
@@ -591,41 +591,41 @@ export class ScionPageGroveDetail extends LitElement {
   `;
 
   private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
-  private boundOnGrovesUpdated = this.onGrovesUpdated.bind(this);
+  private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
 
   override connectedCallback(): void {
     super.connectedCallback();
-    // SSR property bindings (.groveId=) aren't restored during client-side
+    // SSR property bindings (.projectId=) aren't restored during client-side
     // hydration for top-level page components. Fall back to URL parsing.
-    if (!this.groveId && typeof window !== 'undefined') {
-      const match = window.location.pathname.match(/\/groves\/([^/]+)/);
+    if (!this.projectId && typeof window !== 'undefined') {
+      const match = window.location.pathname.match(/\/projects\/([^/]+)/);
       if (match) {
-        this.groveId = match[1];
+        this.projectId = match[1];
       }
     }
 
     // Read persisted view mode
-    const stored = localStorage.getItem('scion-view-grove-agents') as ViewMode | null;
+    const stored = localStorage.getItem('scion-view-project-agents') as ViewMode | null;
     if (stored === 'grid' || stored === 'list') {
       this.viewMode = stored;
     }
 
     void this.loadData();
 
-    // Set SSE scope to this grove (receives all agent events within grove)
-    if (this.groveId) {
-      stateManager.setScope({ type: 'grove', groveId: this.groveId });
+    // Set SSE scope to this project (receives all agent events within project)
+    if (this.projectId) {
+      stateManager.setScope({ type: 'project', projectId: this.projectId });
     }
 
     // Listen for real-time updates
     stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
-    stateManager.addEventListener('groves-updated', this.boundOnGrovesUpdated as EventListener);
+    stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
-    stateManager.removeEventListener('groves-updated', this.boundOnGrovesUpdated as EventListener);
+    stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
   }
 
   private onAgentsUpdated(): void {
@@ -642,7 +642,7 @@ export class ScionPageGroveDetail extends LitElement {
       }
     }
     for (const agent of updatedAgents) {
-      if (agent.groveId === this.groveId || agentMap.has(agent.id)) {
+      if (agent.projectId === this.projectId || agentMap.has(agent.id)) {
         const existing = agentMap.get(agent.id);
         const merged = { ...existing, ...agent } as Agent;
         // New agents from SSE don't carry per-resource _capabilities.
@@ -665,10 +665,10 @@ export class ScionPageGroveDetail extends LitElement {
     this.agents = Array.from(agentMap.values());
   }
 
-  private onGrovesUpdated(): void {
-    const updatedGrove = stateManager.getGrove(this.groveId);
-    if (updatedGrove && this.grove) {
-      this.grove = { ...this.grove, ...updatedGrove };
+  private onProjectsUpdated(): void {
+    const updatedProject = stateManager.getProject(this.projectId);
+    if (updatedProject && this.project) {
+      this.project = { ...this.project, ...updatedProject };
     }
   }
 
@@ -677,18 +677,18 @@ export class ScionPageGroveDetail extends LitElement {
     this.error = null;
 
     try {
-      // Load grove and agents in parallel
-      const [groveResponse, agentsResponse] = await Promise.all([
-        apiFetch(`/api/v1/groves/${this.groveId}`),
-        apiFetch(`/api/v1/groves/${this.groveId}/agents`),
+      // Load project and agents in parallel
+      const [projectResponse, agentsResponse] = await Promise.all([
+        apiFetch(`/api/v1/projects/${this.projectId}`),
+        apiFetch(`/api/v1/projects/${this.projectId}/agents`),
       ]);
 
-      if (!groveResponse.ok) {
-        throw new Error(await extractApiError(groveResponse, `HTTP ${groveResponse.status}: ${groveResponse.statusText}`));
+      if (!projectResponse.ok) {
+        throw new Error(await extractApiError(projectResponse, `HTTP ${projectResponse.status}: ${projectResponse.statusText}`));
       }
 
-      this.grove = (await groveResponse.json()) as Grove;
-      dispatchPageTitle(this, this.grove.name || this.groveId, 'Groves');
+      this.project = (await projectResponse.json()) as Project;
+      dispatchPageTitle(this, this.project.name || this.projectId, 'Projects');
 
       if (agentsResponse.ok) {
         const agentsData = (await agentsResponse.json()) as
@@ -707,34 +707,34 @@ export class ScionPageGroveDetail extends LitElement {
           this.agentScopeCapabilities = this.agents.find(a => a._capabilities)?._capabilities;
         }
       } else {
-        // Fallback: if grove-scoped agents endpoint fails, try filtering from all agents
+        // Fallback: if project-scoped agents endpoint fails, try filtering from all agents
         this.agents = [];
         this.agentScopeCapabilities = undefined;
       }
 
       // Seed stateManager so SSE delta merging has full baseline data
       stateManager.seedAgents(this.agents);
-      if (this.grove) {
-        stateManager.seedGroves([this.grove]);
+      if (this.project) {
+        stateManager.seedProjects([this.project]);
       }
 
       // Pre-create data sources for file tabs (the component loads files on connect)
-      if (this.grove && (!this.grove.gitRemote || isSharedWorkspace(this.grove))) {
+      if (this.project && (!this.project.gitRemote || isSharedWorkspace(this.project))) {
         this.getTabDataSource('workspace');
       }
-      // For git-based groves (non-shared) with shared dirs, activate the first shared dir
-      if (this.grove && this.grove.gitRemote && !isSharedWorkspace(this.grove) && this.grove.sharedDirs?.length) {
-        this.activeFileTab = this.grove.sharedDirs[0].name;
-        this.getTabDataSource(this.grove.sharedDirs[0].name);
+      // For git-based projects (non-shared) with shared dirs, activate the first shared dir
+      if (this.project && this.project.gitRemote && !isSharedWorkspace(this.project) && this.project.sharedDirs?.length) {
+        this.activeFileTab = this.project.sharedDirs[0].name;
+        this.getTabDataSource(this.project.sharedDirs[0].name);
       }
 
-      // Auto-discover GitHub App installation if grove has a GitHub remote but no installation
-      if (this.grove && this.grove.gitRemote && /github\.com[/:]/.test(this.grove.gitRemote) && this.grove.githubInstallationId == null) {
+      // Auto-discover GitHub App installation if project has a GitHub remote but no installation
+      if (this.project && this.project.gitRemote && /github\.com[/:]/.test(this.project.gitRemote) && this.project.githubInstallationId == null) {
         void this.autoDiscoverGitHubApp();
       }
     } catch (err) {
-      console.error('Failed to load grove:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to load grove';
+      console.error('Failed to load project:', err);
+      this.error = err instanceof Error ? err.message : 'Failed to load project';
     } finally {
       this.loading = false;
     }
@@ -747,7 +747,7 @@ export class ScionPageGroveDetail extends LitElement {
   }
 
   private async fetchAndMergeAgents(): Promise<void> {
-    const response = await apiFetch(`/api/v1/groves/${this.groveId}/agents`);
+    const response = await apiFetch(`/api/v1/projects/${this.projectId}/agents`);
     if (!response.ok) return;
 
     const data = (await response.json()) as
@@ -774,28 +774,28 @@ export class ScionPageGroveDetail extends LitElement {
       const configData = (await configRes.json()) as { configured: boolean };
       if (!configData.configured) return;
 
-      // Trigger discovery — the hub will match installations to this grove's git remote
+      // Trigger discovery — the hub will match installations to this project's git remote
       const discoverRes = await apiFetch('/api/v1/github-app/installations/discover', { method: 'POST' });
       if (!discoverRes.ok) return;
 
-      // Reload grove data to pick up the newly associated installation
-      const groveRes = await apiFetch(`/api/v1/groves/${this.groveId}`);
-      if (groveRes.ok) {
-        this.grove = (await groveRes.json()) as Grove;
-        stateManager.seedGroves([this.grove]);
+      // Reload project data to pick up the newly associated installation
+      const projectRes = await apiFetch(`/api/v1/projects/${this.projectId}`);
+      if (projectRes.ok) {
+        this.project = (await projectRes.json()) as Project;
+        stateManager.seedProjects([this.project]);
       }
     } catch {
-      // Non-critical — grove just won't show GitHub icon until settings page is visited
+      // Non-critical — project just won't show GitHub icon until settings page is visited
     }
   }
 
-  private renderGroveIcon() {
+  private renderProjectIcon() {
     return html`<sl-icon name="folder-fill"></sl-icon>`;
   }
 
   private renderLinkedBadge() {
-    if (!this.grove || this.grove.groveType !== 'linked') return nothing;
-    return html` <sl-tooltip content="Linked grove"><sl-icon name="link-45deg" style="font-size: 0.875rem; vertical-align: middle; opacity: 0.7;"></sl-icon></sl-tooltip>`;
+    if (!this.project || this.project.projectType !== 'linked') return nothing;
+    return html` <sl-tooltip content="Linked project"><sl-icon name="link-45deg" style="font-size: 0.875rem; vertical-align: middle; opacity: 0.7;"></sl-icon></sl-tooltip>`;
   }
 
   private formatDate(dateString: string): string {
@@ -816,9 +816,9 @@ export class ScionPageGroveDetail extends LitElement {
   private getTabDataSource(tabName: string): FileBrowserDataSource {
     if (!this.fileBrowserDataSources[tabName]) {
       if (tabName === 'workspace') {
-        this.fileBrowserDataSources[tabName] = new WorkspaceFileBrowserDataSource(this.groveId);
+        this.fileBrowserDataSources[tabName] = new WorkspaceFileBrowserDataSource(this.projectId);
       } else {
-        this.fileBrowserDataSources[tabName] = new SharedDirFileBrowserDataSource(this.groveId, tabName);
+        this.fileBrowserDataSources[tabName] = new SharedDirFileBrowserDataSource(this.projectId, tabName);
       }
     }
     return this.fileBrowserDataSources[tabName];
@@ -827,9 +827,9 @@ export class ScionPageGroveDetail extends LitElement {
   private getEditorDataSource(tabName: string): FileEditorDataSource {
     if (!this.editorDataSources[tabName]) {
       if (tabName === 'workspace') {
-        this.editorDataSources[tabName] = new WorkspaceFileEditorDataSource(this.groveId);
+        this.editorDataSources[tabName] = new WorkspaceFileEditorDataSource(this.projectId);
       } else {
-        this.editorDataSources[tabName] = new SharedDirFileEditorDataSource(this.groveId, tabName);
+        this.editorDataSources[tabName] = new SharedDirFileEditorDataSource(this.projectId, tabName);
       }
     }
     return this.editorDataSources[tabName];
@@ -940,10 +940,10 @@ export class ScionPageGroveDetail extends LitElement {
   }
 
   private async handleStopAll(): Promise<void> {
-    const isGroveAdmin = can(this.grove?._capabilities, 'manage');
-    const confirmMsg = isGroveAdmin
-      ? 'Are you sure you want to stop all running agents in this grove?'
-      : 'Are you sure you want to stop all of your running agents in this grove?';
+    const isProjectAdmin = can(this.project?._capabilities, 'manage');
+    const confirmMsg = isProjectAdmin
+      ? 'Are you sure you want to stop all running agents in this project?'
+      : 'Are you sure you want to stop all of your running agents in this project?';
     if (!confirm(confirmMsg)) {
       return;
     }
@@ -955,7 +955,7 @@ export class ScionPageGroveDetail extends LitElement {
     this.stopAllLoading = true;
 
     try {
-      const response = await apiFetch(`/api/v1/groves/${this.groveId}/agents/stop-all`, {
+      const response = await apiFetch(`/api/v1/projects/${this.projectId}/agents/stop-all`, {
         method: 'POST',
       });
 
@@ -983,7 +983,7 @@ export class ScionPageGroveDetail extends LitElement {
     this.pullResult = null;
 
     try {
-      const response = await apiFetch(`/api/v1/groves/${this.groveId}/workspace/pull`, {
+      const response = await apiFetch(`/api/v1/projects/${this.projectId}/workspace/pull`, {
         method: 'POST',
       });
 
@@ -1023,28 +1023,28 @@ export class ScionPageGroveDetail extends LitElement {
       return this.renderError();
     }
 
-    if (!this.grove) {
+    if (!this.project) {
       return this.renderError();
     }
 
     return html`
-      <a href="/groves" class="back-link">
+      <a href="/projects" class="back-link">
         <sl-icon name="arrow-left"></sl-icon>
-        Back to Groves
+        Back to Projects
       </a>
 
       <div class="header">
         <div class="header-info">
           <div class="header-title">
-            ${this.renderGroveIcon()}
-            <h1>${this.grove.name}${this.renderLinkedBadge()}</h1>
+            ${this.renderProjectIcon()}
+            <h1>${this.project.name}${this.renderLinkedBadge()}</h1>
           </div>
-          <div class="header-path"><scion-git-remote-display .grove=${this.grove}></scion-git-remote-display></div>
+          <div class="header-path"><scion-git-remote-display .project=${this.project}></scion-git-remote-display></div>
         </div>
         <div class="header-actions">
           ${can(this.agentScopeCapabilities, 'create')
             ? html`
-                <a href="/agents/new?groveId=${this.groveId}" style="text-decoration: none;">
+                <a href="/agents/new?projectId=${this.projectId}" style="text-decoration: none;">
                   <sl-button variant="primary" size="small">
                     <sl-icon slot="prefix" name="plus-lg"></sl-icon>
                     New Agent
@@ -1052,7 +1052,7 @@ export class ScionPageGroveDetail extends LitElement {
                 </a>
               `
             : nothing}
-          ${this.grove && isSharedWorkspace(this.grove) && can(this.grove?._capabilities, 'update')
+          ${this.project && isSharedWorkspace(this.project) && can(this.project?._capabilities, 'update')
             ? html`
                 <sl-button
                   size="small"
@@ -1065,9 +1065,9 @@ export class ScionPageGroveDetail extends LitElement {
                 </sl-button>
               `
             : nothing}
-          ${canAny(this.grove?._capabilities, 'update', 'delete', 'manage')
+          ${canAny(this.project?._capabilities, 'update', 'delete', 'manage')
             ? html`
-                <a href="/groves/${this.groveId}/settings" style="text-decoration: none;">
+                <a href="/projects/${this.projectId}/settings" style="text-decoration: none;">
                   <sl-button size="small">
                     <sl-icon slot="prefix" name="gear"></sl-icon>
                     Settings
@@ -1092,13 +1092,13 @@ export class ScionPageGroveDetail extends LitElement {
         <div class="stat">
           <span class="stat-label">Created</span>
           <span class="stat-value" style="font-size: 1rem; font-weight: 500;">
-            ${this.formatDate(this.grove.createdAt)}
+            ${this.formatDate(this.project.createdAt)}
           </span>
         </div>
         <div class="stat">
           <span class="stat-label">Updated</span>
           <span class="stat-value" style="font-size: 1rem; font-weight: 500;">
-            ${this.formatDate(this.grove.updatedAt)}
+            ${this.formatDate(this.project.updatedAt)}
           </span>
         </div>
       </div>
@@ -1133,7 +1133,7 @@ export class ScionPageGroveDetail extends LitElement {
         <div style="display: flex; align-items: center; gap: 0.75rem;">
           <scion-view-toggle
             .view=${this.viewMode}
-            storageKey="scion-view-grove-agents"
+            storageKey="scion-view-project-agents"
             @view-change=${this.onViewChange}
           ></scion-view-toggle>
           ${can(this.agentScopeCapabilities, 'stop_all') && this.hasRunningAgents() ? html`
@@ -1156,7 +1156,7 @@ export class ScionPageGroveDetail extends LitElement {
         ? this.renderEmptyAgents()
         : this.viewMode === 'grid' ? this.renderAgentGrid() : this.renderAgentTable()}
 
-      ${this.grove?.cloudLogging ? this.renderMessagesSection() : nothing}
+      ${this.project?.cloudLogging ? this.renderMessagesSection() : nothing}
 
       ${this.shouldShowFilesSection() ? this.renderFilesSection() : ''}
     `;
@@ -1194,9 +1194,9 @@ export class ScionPageGroveDetail extends LitElement {
         </div>
         ${this.messagesExpanded ? html`
           <scion-agent-message-viewer
-            logsUrl=${`/api/v1/groves/${this.groveId}/message-logs`}
-            streamUrl=${`/api/v1/groves/${this.groveId}/message-logs/stream`}
-            broadcastUrl=${`/api/v1/groves/${this.groveId}/broadcast`}
+            logsUrl=${`/api/v1/projects/${this.projectId}/message-logs`}
+            streamUrl=${`/api/v1/projects/${this.projectId}/message-logs/stream`}
+            broadcastUrl=${`/api/v1/projects/${this.projectId}/broadcast`}
             ?canSend=${true}
           ></scion-agent-message-viewer>
         ` : nothing}
@@ -1205,21 +1205,21 @@ export class ScionPageGroveDetail extends LitElement {
   }
 
   private shouldShowFilesSection(): boolean {
-    if (!this.grove) return false;
-    // Hub-native groves and shared-workspace git groves always show files
-    if (!this.grove.gitRemote || isSharedWorkspace(this.grove)) return true;
-    // Per-agent git groves show only when shared dirs exist
-    return (this.grove.sharedDirs?.length ?? 0) > 0;
+    if (!this.project) return false;
+    // Hub-native projects and shared-workspace git projects always show files
+    if (!this.project.gitRemote || isSharedWorkspace(this.project)) return true;
+    // Per-agent git projects show only when shared dirs exist
+    return (this.project.sharedDirs?.length ?? 0) > 0;
   }
 
   private getFileTabs(): Array<{ key: string; label: string }> {
     const tabs: Array<{ key: string; label: string }> = [];
-    // Hub-native groves and shared-workspace git groves get a workspace tab
-    if (this.grove && (!this.grove.gitRemote || isSharedWorkspace(this.grove))) {
+    // Hub-native projects and shared-workspace git projects get a workspace tab
+    if (this.project && (!this.project.gitRemote || isSharedWorkspace(this.project))) {
       tabs.push({ key: 'workspace', label: 'workspace' });
     }
     // Add one tab per shared dir
-    for (const dir of this.grove?.sharedDirs ?? []) {
+    for (const dir of this.project?.sharedDirs ?? []) {
       tabs.push({ key: dir.name, label: dir.name });
     }
     return tabs;
@@ -1245,7 +1245,7 @@ export class ScionPageGroveDetail extends LitElement {
 
   private renderFilesSection() {
     const tabs = this.getFileTabs();
-    const isEditable = can(this.grove?._capabilities, 'update');
+    const isEditable = can(this.project?._capabilities, 'update');
     const isEditorOpen = this.editingFilePath !== null;
 
     return html`
@@ -1309,23 +1309,23 @@ export class ScionPageGroveDetail extends LitElement {
     return html`
       <div class="loading-state">
         <sl-spinner></sl-spinner>
-        <p>Loading grove...</p>
+        <p>Loading project...</p>
       </div>
     `;
   }
 
   private renderError() {
     return html`
-      <a href="/groves" class="back-link">
+      <a href="/projects" class="back-link">
         <sl-icon name="arrow-left"></sl-icon>
-        Back to Groves
+        Back to Projects
       </a>
 
       <div class="error-state">
         <sl-icon name="exclamation-triangle"></sl-icon>
-        <h2>Failed to Load Grove</h2>
-        <p>There was a problem loading this grove.</p>
-        <div class="error-details">${this.error || 'Grove not found'}</div>
+        <h2>Failed to Load Project</h2>
+        <p>There was a problem loading this project.</p>
+        <div class="error-details">${this.error || 'Project not found'}</div>
         <sl-button variant="primary" @click=${() => this.loadData()}>
           <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
           Retry
@@ -1340,14 +1340,14 @@ export class ScionPageGroveDetail extends LitElement {
         <sl-icon name="cpu"></sl-icon>
         <h2>No Agents</h2>
         <p>
-          This grove doesn't have any agents
+          This project doesn't have any agents
           yet.${can(this.agentScopeCapabilities, 'create')
             ? ' Create your first agent to get started.'
             : ''}
         </p>
         ${can(this.agentScopeCapabilities, 'create')
           ? html`
-              <a href="/agents/new?groveId=${this.groveId}" style="text-decoration: none;">
+              <a href="/agents/new?projectId=${this.projectId}" style="text-decoration: none;">
                 <sl-button variant="primary">
                   <sl-icon slot="prefix" name="plus-lg"></sl-icon>
                   New Agent
@@ -1629,6 +1629,6 @@ export class ScionPageGroveDetail extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'scion-page-grove-detail': ScionPageGroveDetail;
+    'scion-page-project-detail': ScionPageProjectDetail;
   }
 }

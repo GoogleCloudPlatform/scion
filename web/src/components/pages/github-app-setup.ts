@@ -18,18 +18,18 @@
  * GitHub App post-installation setup page
  *
  * Shown after a user installs the GitHub App. Displays:
- * - A button to create a new git-repository-backed grove
- * - A list of existing groves with GitHub remotes and their installation status
- * - Auto-discovers and associates installations with matching groves
+ * - A button to create a new git-repository-backed project
+ * - A list of existing projects with GitHub remotes and their installation status
+ * - Auto-discovers and associates installations with matching projects
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../client/api.js';
 
-import type { PageData, Grove, GitHubAppGroveStatus } from '../../shared/types.js';
+import type { PageData, Project, GitHubAppProjectStatus } from '../../shared/types.js';
 
-type GitHubGrove = Grove;
+type GitHubProject = Project;
 
 @customElement('scion-page-github-app-setup')
 export class ScionPageGitHubAppSetup extends LitElement {
@@ -43,7 +43,7 @@ export class ScionPageGitHubAppSetup extends LitElement {
   private discovering = false;
 
   @state()
-  private groves: GitHubGrove[] = [];
+  private projects: GitHubProject[] = [];
 
   @state()
   private error: string | null = null;
@@ -52,7 +52,7 @@ export class ScionPageGitHubAppSetup extends LitElement {
   private discoveryResult: { total: number; matched: number } | null = null;
 
   @state()
-  private checkingGroves = new Set<string>();
+  private checkingProjects = new Set<string>();
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -63,10 +63,10 @@ export class ScionPageGitHubAppSetup extends LitElement {
   private async initPage(): Promise<void> {
     this.loading = true;
     try {
-      // Run discovery first to sync installations and auto-match groves,
-      // then load groves to show the updated state.
+      // Run discovery first to sync installations and auto-match projects,
+      // then load projects to show the updated state.
       await this.discoverInstallations();
-      await this.loadGroves();
+      await this.loadProjects();
     } catch (err) {
       console.error('Failed to initialize setup page:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load page data';
@@ -83,34 +83,34 @@ export class ScionPageGitHubAppSetup extends LitElement {
       });
       if (res.ok) {
         const data = (await res.json()) as {
-          installations: Array<{ matched_groves?: string[] }>;
+          installations: Array<{ matched_projects?: string[] }>;
           total: number;
         };
         let matched = 0;
         for (const inst of data.installations) {
-          if (inst.matched_groves?.length) {
-            matched += inst.matched_groves.length;
+          if (inst.matched_projects?.length) {
+            matched += inst.matched_projects.length;
           }
         }
         this.discoveryResult = { total: data.total, matched };
       }
     } catch (err) {
       console.warn('Installation discovery failed:', err);
-      // Non-fatal — continue loading groves
+      // Non-fatal — continue loading projects
     } finally {
       this.discovering = false;
     }
   }
 
-  private async loadGroves(): Promise<void> {
-    const res = await apiFetch('/api/v1/groves?mine=true');
+  private async loadProjects(): Promise<void> {
+    const res = await apiFetch('/api/v1/projects?mine=true');
     if (!res.ok) {
-      throw new Error(`Failed to fetch groves: HTTP ${res.status}`);
+      throw new Error(`Failed to fetch projects: HTTP ${res.status}`);
     }
-    const data = (await res.json()) as { groves: Grove[] };
-    // Filter to groves that have a GitHub remote URL
-    this.groves = (data.groves || []).filter(
-      (g) => g.gitRemote && this.isGitHubUrl(g.gitRemote)
+    const data = (await res.json()) as { projects: Project[] };
+    // Filter to projects that have a GitHub remote URL
+    this.projects = (data.projects || []).filter(
+      (p) => p.gitRemote && this.isGitHubUrl(p.gitRemote)
     );
   }
 
@@ -118,40 +118,40 @@ export class ScionPageGitHubAppSetup extends LitElement {
     return /github\.com/i.test(url);
   }
 
-  private async checkGroveStatus(grove: GitHubGrove): Promise<void> {
-    if (!grove.githubInstallationId) return;
+  private async checkProjectStatus(project: GitHubProject): Promise<void> {
+    if (!project.githubInstallationId) return;
 
-    this.checkingGroves = new Set([...this.checkingGroves, grove.id]);
+    this.checkingProjects = new Set([...this.checkingProjects, project.id]);
     try {
-      const res = await apiFetch(`/api/v1/groves/${grove.id}/github-status`, {
+      const res = await apiFetch(`/api/v1/projects/${project.id}/github-status`, {
         method: 'POST',
       });
       if (res.ok) {
         const data = (await res.json()) as {
-          status?: GitHubAppGroveStatus;
+          status?: GitHubAppProjectStatus;
         };
-        // Update the grove in our list
-        this.groves = this.groves.map((g) =>
-          g.id === grove.id
-            ? { ...g, githubAppStatus: data.status || g.githubAppStatus }
-            : g
+        // Update the project in our list
+        this.projects = this.projects.map((p) =>
+          p.id === project.id
+            ? { ...p, githubAppStatus: data.status || p.githubAppStatus }
+            : p
         );
       }
     } catch (err) {
-      console.error('Failed to check grove status:', err);
+      console.error('Failed to check project status:', err);
     } finally {
-      const next = new Set(this.checkingGroves);
-      next.delete(grove.id);
-      this.checkingGroves = next;
+      const next = new Set(this.checkingProjects);
+      next.delete(project.id);
+      this.checkingProjects = next;
     }
   }
 
-  private async checkAllGroves(): Promise<void> {
-    const grovesWithInstallation = this.groves.filter(
-      (g) => g.githubInstallationId
+  private async checkAllProjects(): Promise<void> {
+    const projectsWithInstallation = this.projects.filter(
+      (p) => p.githubInstallationId
     );
     await Promise.allSettled(
-      grovesWithInstallation.map((g) => this.checkGroveStatus(g))
+      projectsWithInstallation.map((p) => this.checkProjectStatus(p))
     );
   }
 
@@ -160,12 +160,12 @@ export class ScionPageGitHubAppSetup extends LitElement {
     window.dispatchEvent(new PopStateEvent('popstate'));
   }
 
-  private renderStatusBadge(grove: GitHubGrove) {
-    if (!grove.githubInstallationId) {
+  private renderStatusBadge(project: GitHubProject) {
+    if (!project.githubInstallationId) {
       return html`<sl-badge variant="neutral">No Installation</sl-badge>`;
     }
 
-    const status = grove.githubAppStatus;
+    const status = project.githubAppStatus;
     if (!status) {
       return html`<sl-badge variant="neutral">Unchecked</sl-badge>`;
     }
@@ -285,14 +285,14 @@ export class ScionPageGitHubAppSetup extends LitElement {
       margin: 0 0 1rem 0;
     }
 
-    .groves-card {
+    .projects-card {
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: var(--scion-radius-lg, 0.75rem);
       padding: 1.5rem;
     }
 
-    .groves-card h2 {
+    .projects-card h2 {
       font-size: 1rem;
       font-weight: 600;
       color: var(--scion-text, #1e293b);
@@ -302,19 +302,19 @@ export class ScionPageGitHubAppSetup extends LitElement {
       justify-content: space-between;
     }
 
-    .groves-card .subtitle {
+    .projects-card .subtitle {
       color: var(--scion-text-muted, #64748b);
       font-size: 0.875rem;
       margin: 0 0 1rem 0;
     }
 
-    .grove-list {
+    .project-list {
       display: flex;
       flex-direction: column;
       gap: 0.5rem;
     }
 
-    .grove-item {
+    .project-item {
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -324,20 +324,20 @@ export class ScionPageGitHubAppSetup extends LitElement {
       background: var(--scion-bg-subtle, #f8fafc);
     }
 
-    .grove-info {
+    .project-info {
       display: flex;
       flex-direction: column;
       gap: 0.25rem;
       min-width: 0;
     }
 
-    .grove-name {
+    .project-name {
       font-weight: 600;
       color: var(--scion-text, #1e293b);
       font-size: 0.875rem;
     }
 
-    .grove-repo {
+    .project-repo {
       color: var(--scion-text-muted, #64748b);
       font-size: 0.75rem;
       font-family: var(--scion-font-mono, monospace);
@@ -346,13 +346,13 @@ export class ScionPageGitHubAppSetup extends LitElement {
       white-space: nowrap;
     }
 
-    .grove-status {
+    .project-status {
       display: flex;
       align-items: center;
       gap: 0.5rem;
     }
 
-    .grove-actions {
+    .project-actions {
       display: flex;
       align-items: center;
       gap: 0.5rem;
@@ -408,7 +408,7 @@ export class ScionPageGitHubAppSetup extends LitElement {
           <sl-icon name="github"></sl-icon>
           GitHub App Setup
         </h1>
-        <p>Your GitHub App installation has been recorded. Set up groves for your repositories below.</p>
+        <p>Your GitHub App installation has been recorded. Set up projects for your repositories below.</p>
       </div>
 
       ${this.error
@@ -426,7 +426,7 @@ export class ScionPageGitHubAppSetup extends LitElement {
               <sl-icon name="check-circle"></sl-icon>
               <span>
                 Auto-matched ${this.discoveryResult.matched}
-                grove${this.discoveryResult.matched !== 1 ? 's' : ''} with GitHub App
+                project${this.discoveryResult.matched !== 1 ? 's' : ''} with GitHub App
                 installation${this.discoveryResult.total !== 1 ? 's' : ''}.
               </span>
             </div>
@@ -435,26 +435,26 @@ export class ScionPageGitHubAppSetup extends LitElement {
 
       <div class="actions-card">
         <h2>Get Started</h2>
-        <p>Create a new grove linked to a GitHub repository to start running agents.</p>
+        <p>Create a new project linked to a GitHub repository to start running agents.</p>
         <sl-button
           variant="primary"
-          @click=${() => this.navigateTo('/groves/new')}
+          @click=${() => this.navigateTo('/projects/new')}
         >
           <sl-icon slot="prefix" name="folder-plus"></sl-icon>
-          Create New Grove
+          Create New Project
         </sl-button>
       </div>
 
-      <div class="groves-card">
+      <div class="projects-card">
         <h2>
-          <span>GitHub Groves</span>
-          ${this.groves.some((g) => g.githubInstallationId)
+          <span>GitHub Projects</span>
+          ${this.projects.some((p) => p.githubInstallationId)
             ? html`
                 <sl-button
                   size="small"
                   variant="default"
-                  @click=${() => this.checkAllGroves()}
-                  ?disabled=${this.checkingGroves.size > 0}
+                  @click=${() => this.checkAllProjects()}
+                  ?disabled=${this.checkingProjects.size > 0}
                 >
                   <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
                   Check All
@@ -463,50 +463,50 @@ export class ScionPageGitHubAppSetup extends LitElement {
             : nothing}
         </h2>
         <p class="subtitle">
-          Groves linked to GitHub repositories.
-          ${this.groves.length > 0
-            ? 'Verify installations are working or configure them in grove settings.'
+          Projects linked to GitHub repositories.
+          ${this.projects.length > 0
+            ? 'Verify installations are working or configure them in project settings.'
             : ''}
         </p>
 
-        ${this.groves.length > 0
+        ${this.projects.length > 0
           ? html`
-              <div class="grove-list">
-                ${this.groves.map((grove) => this.renderGroveItem(grove))}
+              <div class="project-list">
+                ${this.projects.map((project) => this.renderProjectItem(project))}
               </div>
             `
           : html`
               <div class="empty-state">
                 <sl-icon name="folder-x"></sl-icon>
-                <p>No groves with GitHub repositories found.</p>
-                <p>Create a new grove to get started.</p>
+                <p>No projects with GitHub repositories found.</p>
+                <p>Create a new project to get started.</p>
               </div>
             `}
       </div>
     `;
   }
 
-  private renderGroveItem(grove: GitHubGrove) {
-    const checking = this.checkingGroves.has(grove.id);
+  private renderProjectItem(project: GitHubProject) {
+    const checking = this.checkingProjects.has(project.id);
 
     return html`
-      <div class="grove-item">
-        <div class="grove-info">
-          <span class="grove-name">${grove.name}</span>
-          <span class="grove-repo">${this.extractRepoName(grove.gitRemote || '')}</span>
+      <div class="project-item">
+        <div class="project-info">
+          <span class="project-name">${project.name}</span>
+          <span class="project-repo">${this.extractRepoName(project.gitRemote || '')}</span>
         </div>
-        <div class="grove-actions">
-          <div class="grove-status">
+        <div class="project-actions">
+          <div class="project-status">
             ${checking
               ? html`<sl-spinner style="font-size: 1rem;"></sl-spinner>`
-              : this.renderStatusBadge(grove)}
+              : this.renderStatusBadge(project)}
           </div>
-          ${grove.githubInstallationId && !checking
+          ${project.githubInstallationId && !checking
             ? html`
                 <sl-button
                   size="small"
                   variant="text"
-                  @click=${() => this.checkGroveStatus(grove)}
+                  @click=${() => this.checkProjectStatus(project)}
                   title="Verify installation"
                 >
                   <sl-icon name="arrow-repeat"></sl-icon>
@@ -516,7 +516,7 @@ export class ScionPageGitHubAppSetup extends LitElement {
           <sl-button
             size="small"
             variant="default"
-            @click=${() => this.navigateTo(`/groves/${grove.id}/settings`)}
+            @click=${() => this.navigateTo(`/projects/${project.id}/settings`)}
           >
             <sl-icon slot="prefix" name="gear"></sl-icon>
             Settings

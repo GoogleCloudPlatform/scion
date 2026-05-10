@@ -1,6 +1,6 @@
 # Scion Web Frontend
 
-Browser-based dashboard for managing Scion agents and groves.
+Browser-based dashboard for managing Scion agents and projects.
 
 ## Architecture
 
@@ -172,11 +172,11 @@ The `--session-secret` should be a stable, random 32+ byte hex string. If omitte
 The `/events` endpoint accepts `sub` query parameters with NATS-style subject patterns:
 
 ```bash
-# Subscribe to all events in a grove
-curl -N "http://localhost:8080/events?sub=grove.GROVE_ID.>"
+# Subscribe to all events in a project
+curl -N "http://localhost:8080/events?sub=project.PROJECT_ID.>"
 
 # Subscribe to multiple patterns
-curl -N "http://localhost:8080/events?sub=grove.abc.>&sub=broker.xyz.status"
+curl -N "http://localhost:8080/events?sub=project.abc.>&sub=broker.xyz.status"
 ```
 
 Wildcards: `*` matches a single token, `>` matches the remainder.

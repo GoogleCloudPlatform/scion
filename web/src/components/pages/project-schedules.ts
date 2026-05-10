@@ -15,9 +15,9 @@
  */
 
 /**
- * Grove Schedules page component
+ * Project Schedules page component
  *
- * Displays recurring schedules for a grove with full CRUD management.
+ * Displays recurring schedules for a project with full CRUD management.
  */
 
 import { LitElement, html, css } from 'lit';
@@ -28,19 +28,19 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import '../shared/schedule-list.js';
 
-interface Grove {
+interface Project {
   id: string;
   name: string;
   slug?: string;
 }
 
-@customElement('scion-page-grove-schedules')
-export class ScionPageGroveSchedules extends LitElement {
+@customElement('scion-page-project-schedules')
+export class ScionPageProjectSchedules extends LitElement {
   @property({ type: Object })
   pageData: PageData | null = null;
 
-  @state() private groveId = '';
-  @state() private grove: Grove | null = null;
+  @state() private projectId = '';
+  @state() private project: Project | null = null;
   @state() private loading = true;
   @state() private error: string | null = null;
 
@@ -136,34 +136,34 @@ export class ScionPageGroveSchedules extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    this.extractGroveId();
-    void this.loadGrove();
+    this.extractProjectId();
+    void this.loadProject();
   }
 
-  private extractGroveId(): void {
+  private extractProjectId(): void {
     const path = this.pageData?.path || window.location.pathname;
-    const match = path.match(/\/groves\/([^/]+)\/schedules/);
+    const match = path.match(/\/projects\/([^/]+)\/schedules/);
     if (match) {
-      this.groveId = decodeURIComponent(match[1]);
+      this.projectId = decodeURIComponent(match[1]);
     }
   }
 
-  private async loadGrove(): Promise<void> {
-    if (!this.groveId) {
-      this.error = 'No grove ID found in URL';
+  private async loadProject(): Promise<void> {
+    if (!this.projectId) {
+      this.error = 'No project ID found in URL';
       this.loading = false;
       return;
     }
 
     try {
-      const response = await apiFetch(`/api/v1/groves/${encodeURIComponent(this.groveId)}`);
+      const response = await apiFetch(`/api/v1/projects/${encodeURIComponent(this.projectId)}`);
       if (!response.ok) {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
-      this.grove = (await response.json()) as Grove;
-      dispatchPageTitle(this, 'Schedules', this.grove.name || this.groveId);
+      this.project = (await response.json()) as Project;
+      dispatchPageTitle(this, 'Schedules', this.project.name || this.projectId);
     } catch (err) {
-      this.error = err instanceof Error ? err.message : 'Failed to load grove';
+      this.error = err instanceof Error ? err.message : 'Failed to load project';
     } finally {
       this.loading = false;
     }
@@ -185,7 +185,7 @@ export class ScionPageGroveSchedules extends LitElement {
           <sl-icon name="exclamation-triangle"></sl-icon>
           <h2>Failed to Load</h2>
           <div class="error-details">${this.error}</div>
-          <sl-button variant="primary" @click=${() => this.loadGrove()}>
+          <sl-button variant="primary" @click=${() => this.loadProject()}>
             <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
             Retry
           </sl-button>
@@ -193,26 +193,26 @@ export class ScionPageGroveSchedules extends LitElement {
       `;
     }
 
-    const groveName = this.grove?.name || this.grove?.slug || this.groveId;
+    const projectName = this.project?.name || this.project?.slug || this.projectId;
 
     return html`
-      <a class="back-link" href="/groves/${encodeURIComponent(this.groveId)}">
+      <a class="back-link" href="/projects/${encodeURIComponent(this.projectId)}">
         <sl-icon name="arrow-left"></sl-icon>
-        Back to ${groveName}
+        Back to ${projectName}
       </a>
 
       <div class="header">
         <h1>Recurring Schedules</h1>
       </div>
-      <p class="subtitle">Automated recurring tasks for ${groveName}.</p>
+      <p class="subtitle">Automated recurring tasks for ${projectName}.</p>
 
-      <scion-schedule-list .groveId=${this.groveId}></scion-schedule-list>
+      <scion-schedule-list .projectId=${this.projectId}></scion-schedule-list>
     `;
   }
 }
 
 declare global {
   interface HTMLElementTagNameMap {
-    'scion-page-grove-schedules': ScionPageGroveSchedules;
+    'scion-page-project-schedules': ScionPageProjectSchedules;
   }
 }

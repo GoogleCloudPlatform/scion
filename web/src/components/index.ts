@@ -30,12 +30,14 @@ export type { ViewMode } from './shared/index.js';
 
 // Pages
 export { ScionPageHome } from './pages/home.js';
-export { ScionPageGroves } from './pages/groves.js';
-export { ScionPageGroveDetail } from './pages/grove-detail.js';
+export { ScionPageProjects } from './pages/projects.js';
+export { ScionPageProjectDetail } from './pages/project-detail.js';
 export { ScionPageAgents } from './pages/agents.js';
 export { ScionPageAgentDetail } from './pages/agent-detail.js';
 export { ScionPageAgentCreate } from './pages/agent-create.js';
-export { ScionPageGroveCreate } from './pages/grove-create.js';
+export { ScionPageProjectCreate } from './pages/project-create.js';
+export { ScionPageProjectSettings } from './pages/project-settings.js';
+export { ScionPageProjectSchedules } from './pages/project-schedules.js';
 export { ScionPageBrokers } from './pages/brokers.js';
 export { ScionPageAdminUsers } from './pages/admin-users.js';
 export { ScionPageAdminGroups } from './pages/admin-groups.js';

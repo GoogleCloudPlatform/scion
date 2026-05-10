@@ -18,7 +18,7 @@
  * Shared File Browser Component
  *
  * Reusable file browser that displays a sortable file table with preview,
- * download, delete, upload, and "New File" actions. Consumed by the grove
+ * download, delete, upload, and "New File" actions. Consumed by the project
  * detail page (workspace & shared-dir tabs) and the template editor.
  *
  * Data access is abstracted behind the FileBrowserDataSource interface,
@@ -100,15 +100,15 @@ function encodeFilePath(filePath: string): string {
 
 /**
  * Data source for workspace files.
- * API base: /api/v1/groves/{groveId}/workspace/files
+ * API base: /api/v1/projects/{projectId}/workspace/files
  */
 export class WorkspaceFileBrowserDataSource implements FileBrowserDataSource {
   private readonly basePath: string;
-  private readonly groveId: string;
+  private readonly projectId: string;
 
-  constructor(groveId: string) {
-    this.groveId = groveId;
-    this.basePath = `/api/v1/groves/${groveId}/workspace/files`;
+  constructor(projectId: string) {
+    this.projectId = projectId;
+    this.basePath = `/api/v1/projects/${projectId}/workspace/files`;
   }
 
   async listFiles(opts?: { limit?: number }): Promise<FileListResult> {
@@ -164,19 +164,19 @@ export class WorkspaceFileBrowserDataSource implements FileBrowserDataSource {
   }
 
   getArchiveUrl(): string | null {
-    return `/api/v1/groves/${this.groveId}/workspace/archive`;
+    return `/api/v1/projects/${this.projectId}/workspace/archive`;
   }
 }
 
 /**
  * Data source for shared directory files.
- * API base: /api/v1/groves/{groveId}/shared-dirs/{dirName}/files
+ * API base: /api/v1/projects/{projectId}/shared-dirs/{dirName}/files
  */
 export class SharedDirFileBrowserDataSource implements FileBrowserDataSource {
   private readonly basePath: string;
 
-  constructor(groveId: string, dirName: string) {
-    this.basePath = `/api/v1/groves/${groveId}/shared-dirs/${encodeURIComponent(dirName)}/files`;
+  constructor(projectId: string, dirName: string) {
+    this.basePath = `/api/v1/projects/${projectId}/shared-dirs/${encodeURIComponent(dirName)}/files`;
   }
 
   async listFiles(opts?: { limit?: number }): Promise<FileListResult> {
@@ -1000,7 +1000,7 @@ export class ScionFileBrowser extends LitElement {
             ? html`
                 <div class="provider-warning">
                   <sl-icon name="exclamation-triangle"></sl-icon>
-                  Showing files from this server only — ${this.providerCount} brokers serve this grove
+                  Showing files from this server only — ${this.providerCount} brokers serve this project
                 </div>
               `
             : nothing}

@@ -17,10 +17,10 @@
 /**
  * Shared Directory List Component
  *
- * CRUD component for grove shared directories. Shared dirs provide
- * filesystem-level state sharing between agents in a grove.
+ * CRUD component for project shared directories. Shared dirs provide
+ * filesystem-level state sharing between agents in a project.
  *
- * Displays as a compact section on the grove settings page.
+ * Displays as a compact section on the project settings page.
  */
 
 import { LitElement, html, nothing } from 'lit';
@@ -34,7 +34,7 @@ const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$/;
 
 @customElement('scion-shared-dir-list')
 export class ScionSharedDirList extends LitElement {
-  @property() groveId = '';
+  @property() projectId = '';
   @property() apiBasePath = '';
 
   @state() private loading = true;
@@ -60,7 +60,7 @@ export class ScionSharedDirList extends LitElement {
   }
 
   private get basePath(): string {
-    return this.apiBasePath || `/api/v1/groves/${this.groveId}`;
+    return this.apiBasePath || `/api/v1/projects/${this.projectId}`;
   }
 
   private async loadSharedDirs(): Promise<void> {
@@ -155,7 +155,7 @@ export class ScionSharedDirList extends LitElement {
     if (
       !event?.altKey &&
       !confirm(
-        `Remove shared directory "${dir.name}" from this grove?\n\nThis removes the configuration. Host-side data may still exist.`
+        `Remove shared directory "${dir.name}" from this project?\n\nThis removes the configuration. Host-side data may still exist.`
       )
     ) {
       return;
@@ -191,7 +191,7 @@ export class ScionSharedDirList extends LitElement {
           <div class="section-header-info">
             <h2>Shared Directories</h2>
             <p>
-              Shared directories provide filesystem-level state sharing between agents in this grove.
+              Shared directories provide filesystem-level state sharing between agents in this project.
             </p>
           </div>
           <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>

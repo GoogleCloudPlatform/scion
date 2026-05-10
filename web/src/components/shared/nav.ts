@@ -47,7 +47,7 @@ const NAV_SECTIONS: NavSection[] = [
   {
     title: 'Management',
     items: [
-      { path: '/groves', label: 'Groves', icon: 'folder' },
+      { path: '/projects', label: 'Projects', icon: 'folder' },
       { path: '/agents', label: 'Agents', icon: 'cpu' },
       { path: '/brokers', label: 'Brokers', icon: 'hdd-rack' },
     ],

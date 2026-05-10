@@ -18,7 +18,7 @@
  * Shared Group Member Editor Component
  *
  * Reusable component for viewing and managing group members.
- * Used by both the admin group detail page and the grove settings page.
+ * Used by both the admin group detail page and the project settings page.
  *
  * Supports adding users (by email), groups (by name/slug), and agents.
  * Displays human-friendly names for all member types.
