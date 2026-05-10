@@ -2014,9 +2014,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/projects/", s.handleProjectRoutes)
 
 	// Aliases for /api/v1/groves -> /api/v1/projects (Phase 3)
-	s.mux.HandleFunc("/api/v1/groves", s.handleProjects)
-	s.mux.HandleFunc("/api/v1/groves/register", s.handleProjectRegister)
-	s.mux.HandleFunc("/api/v1/groves/", s.handleProjectRoutes)
+	s.mux.HandleFunc("/api/v1/groves", s.deprecateGroveEndpoint(s.handleProjects))
+	s.mux.HandleFunc("/api/v1/groves/register", s.deprecateGroveEndpoint(s.handleProjectRegister))
+	s.mux.HandleFunc("/api/v1/groves/", s.deprecateGroveEndpoint(s.handleProjectRoutes))
 
 	s.mux.HandleFunc("/api/v1/runtime-brokers", s.handleRuntimeBrokers)
 	s.mux.HandleFunc("/api/v1/runtime-brokers/", s.handleRuntimeBrokerRoutes)
@@ -2330,6 +2330,16 @@ func extractAction(r *http.Request, prefix string) (id, action string) {
 		action = parts[1]
 	}
 	return
+}
+
+// deprecateGroveEndpoint wraps an http.HandlerFunc with deprecation headers.
+func (s *Server) deprecateGroveEndpoint(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Deprecation", "true")
+		w.Header().Set("Sunset", "Sun, 01 Nov 2026 00:00:00 GMT")
+		w.Header().Set("Link", `</api/v1/projects/>; rel="successor-version"`)
+		h(w, r)
+	}
 }
 
 // handleRuntimeBrokerConnect handles WebSocket upgrade for Runtime Broker control channel.

@@ -268,7 +268,9 @@ func (c *client) getWithQuery(ctx context.Context, path string, query url.Values
 	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
 		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
 		resp.Body.Close()
-		return c.transport.GetWithQuery(ctx, legacyPath, query, headers)
+		resp, err = c.transport.GetWithQuery(ctx, legacyPath, query, headers)
+		c.checkForDeprecation(resp)
+		return resp, err
 	}
 	return resp, err
 }
@@ -279,7 +281,9 @@ func (c *client) post(ctx context.Context, path string, body interface{}, header
 	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
 		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
 		resp.Body.Close()
-		return c.transport.Post(ctx, legacyPath, body, headers)
+		resp, err = c.transport.Post(ctx, legacyPath, body, headers)
+		c.checkForDeprecation(resp)
+		return resp, err
 	}
 	return resp, err
 }
@@ -290,7 +294,9 @@ func (c *client) put(ctx context.Context, path string, body interface{}, headers
 	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
 		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
 		resp.Body.Close()
-		return c.transport.Put(ctx, legacyPath, body, headers)
+		resp, err = c.transport.Put(ctx, legacyPath, body, headers)
+		c.checkForDeprecation(resp)
+		return resp, err
 	}
 	return resp, err
 }
@@ -301,7 +307,9 @@ func (c *client) patch(ctx context.Context, path string, body interface{}, heade
 	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
 		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
 		resp.Body.Close()
-		return c.transport.Patch(ctx, legacyPath, body, headers)
+		resp, err = c.transport.Patch(ctx, legacyPath, body, headers)
+		c.checkForDeprecation(resp)
+		return resp, err
 	}
 	return resp, err
 }
@@ -312,9 +320,22 @@ func (c *client) delete(ctx context.Context, path string, headers http.Header) (
 	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
 		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
 		resp.Body.Close()
-		return c.transport.Delete(ctx, legacyPath, headers)
+		resp, err = c.transport.Delete(ctx, legacyPath, headers)
+		c.checkForDeprecation(resp)
+		return resp, err
 	}
 	return resp, err
+}
+
+// checkForDeprecation logs a warning if the response contains a Deprecation header.
+func (c *client) checkForDeprecation(resp *http.Response) {
+	if resp != nil && resp.Header.Get("Deprecation") == "true" {
+		path := ""
+		if resp.Request != nil {
+			path = resp.Request.URL.Path
+		}
+		util.Debugf("WARNING: Calling deprecated endpoint %s. Please update to /projects version.", path)
+	}
 }
 
 // Health checks API availability.
