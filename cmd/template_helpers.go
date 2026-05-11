@@ -32,9 +32,9 @@ import (
 type TemplateLocation string
 
 const (
-	LocationLocalProject  TemplateLocation = "local-grove"
+	LocationLocalProject  TemplateLocation = "local-project"
 	LocationLocalGlobal TemplateLocation = "local-global"
-	LocationHubProject    TemplateLocation = "hub-grove"
+	LocationHubProject    TemplateLocation = "hub-project"
 	LocationHubGlobal   TemplateLocation = "hub-global"
 )
 
@@ -50,11 +50,11 @@ type TemplateMatch struct {
 func (m *TemplateMatch) DisplayLocation() string {
 	switch m.Location {
 	case LocationLocalProject:
-		return fmt.Sprintf("Local Grove    (%s)", m.LocalPath)
+		return fmt.Sprintf("Local Project    (%s)", m.LocalPath)
 	case LocationLocalGlobal:
 		return fmt.Sprintf("Local Global   (%s)", m.LocalPath)
 	case LocationHubProject:
-		return fmt.Sprintf("Hub Grove      (scope=grove, ID: %s)", m.HubTemplate.ID)
+		return fmt.Sprintf("Hub Project      (scope=project, ID: %s)", m.HubTemplate.ID)
 	case LocationHubGlobal:
 		return fmt.Sprintf("Hub Global     (scope=global, ID: %s)", m.HubTemplate.ID)
 	default:
@@ -86,7 +86,7 @@ func (m *TemplateMatch) IsProjectScoped() bool {
 type ResolveOpts struct {
 	LocalOnly   bool // --local flag: only search local filesystem
 	HubOnly     bool // --hub flag: only search Hub
-	GroveOnly   bool // --grove flag: only search grove scope
+	ProjectOnly bool // --project flag: only search project scope
 	GlobalOnly  bool // --global flag: only search global scope
 	AutoConfirm bool // -y flag: use first match or error if multiple
 }
@@ -133,11 +133,11 @@ func findLocalTemplates(name string, opts *ResolveOpts) ([]TemplateMatch, error)
 
 	// Get templates directory paths
 	globalDir, globalErr := config.GetGlobalTemplatesDir()
-	groveDir, groveErr := config.GetProjectTemplatesDir()
+	projectDir, projectErr := config.GetProjectTemplatesDir()
 
-	// Search grove (project) templates unless GlobalOnly is set
-	if !opts.GlobalOnly && groveErr == nil {
-		tpl := config.FindTemplateInScope(name, "grove")
+	// Search project (project) templates unless GlobalOnly is set
+	if !opts.GlobalOnly && projectErr == nil {
+		tpl := config.FindTemplateInScope(name, "project")
 		if tpl != nil {
 			matches = append(matches, TemplateMatch{
 				Name:      tpl.Name,
@@ -147,11 +147,11 @@ func findLocalTemplates(name string, opts *ResolveOpts) ([]TemplateMatch, error)
 		}
 	}
 
-	// Search global templates unless GroveOnly is set
-	if !opts.GroveOnly && globalErr == nil {
+	// Search global templates unless ProjectOnly is set
+	if !opts.ProjectOnly && globalErr == nil {
 		tpl := config.FindTemplateInScope(name, "global")
 		if tpl != nil {
-			// Avoid duplicates if grove and global point to same template
+			// Avoid duplicates if project and global point to same template
 			// (this shouldn't happen, but be safe)
 			isDuplicate := false
 			for _, m := range matches {
@@ -172,7 +172,7 @@ func findLocalTemplates(name string, opts *ResolveOpts) ([]TemplateMatch, error)
 
 	// Suppress unused variable warnings
 	_ = globalDir
-	_ = groveDir
+	_ = projectDir
 
 	return matches, nil
 }
@@ -184,19 +184,19 @@ func findHubTemplates(ctx context.Context, name string, hubCtx *HubContext, opts
 	listCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	// Get grove ID for grove-scoped lookups
+	// Get project ID for project-scoped lookups
 	projectID, _ := GetProjectID(hubCtx)
 
-	// Search grove scope unless GlobalOnly is set
+	// Search project scope unless GlobalOnly is set
 	if !opts.GlobalOnly && projectID != "" {
 		resp, err := hubCtx.Client.Templates().List(listCtx, &hubclient.ListTemplatesOptions{
 			Name:    name,
-			Scope:   "grove",
+			Scope:   "project",
 			ProjectID: projectID,
 			Status:  "active",
 		})
 		if err != nil {
-			return nil, fmt.Errorf("failed to search Hub grove templates: %w", err)
+			return nil, fmt.Errorf("failed to search Hub project templates: %w", err)
 		}
 
 		for i := range resp.Templates {
@@ -211,8 +211,8 @@ func findHubTemplates(ctx context.Context, name string, hubCtx *HubContext, opts
 		}
 	}
 
-	// Search global scope unless GroveOnly is set
-	if !opts.GroveOnly {
+	// Search global scope unless ProjectOnly is set
+	if !opts.ProjectOnly {
 		resp, err := hubCtx.Client.Templates().List(listCtx, &hubclient.ListTemplatesOptions{
 			Name:   name,
 			Scope:  "global",
@@ -250,7 +250,7 @@ func PromptTemplateChoice(matches []TemplateMatch, action string) (*TemplateMatc
 
 	// Check if we're in an interactive terminal
 	if !util.IsTerminal() {
-		return nil, fmt.Errorf("multiple templates found but running non-interactively; use --local, --hub, --grove, or --global flags to specify")
+		return nil, fmt.Errorf("multiple templates found but running non-interactively; use --local, --hub, --project, or --global flags to specify")
 	}
 
 	fmt.Printf("\nTemplate '%s' found in multiple locations:\n", matches[0].Name)
@@ -295,7 +295,7 @@ func PromptTemplateChoiceWithAll(matches []TemplateMatch, action string) ([]Temp
 
 	// Check if we're in an interactive terminal
 	if !util.IsTerminal() {
-		return nil, fmt.Errorf("multiple templates found but running non-interactively; use --local, --hub, --grove, or --global flags to specify")
+		return nil, fmt.Errorf("multiple templates found but running non-interactively; use --local, --hub, --project, or --global flags to specify")
 	}
 
 	fmt.Printf("\nTemplate '%s' found in multiple locations:\n", matches[0].Name)
@@ -355,7 +355,7 @@ func ResolveTemplate(ctx context.Context, name string, hubCtx *HubContext, opts 
 	// Multiple matches found
 	if opts.AutoConfirm {
 		// In auto-confirm mode with multiple matches, we need a deterministic choice.
-		// Use priority: local-grove > local-global > hub-grove > hub-global
+		// Use priority: local-project > local-global > hub-project > hub-global
 		// This matches the existing FindTemplate behavior.
 		for _, loc := range []TemplateLocation{LocationLocalProject, LocationLocalGlobal, LocationHubProject, LocationHubGlobal} {
 			for i := range matches {
@@ -417,15 +417,15 @@ func FilterMatchesBySource(matches []TemplateMatch, localOnly, hubOnly bool) []T
 	return filtered
 }
 
-// FilterMatchesByScope filters matches to only grove or only global scope.
-func FilterMatchesByScope(matches []TemplateMatch, groveOnly, globalOnly bool) []TemplateMatch {
-	if !groveOnly && !globalOnly {
+// FilterMatchesByScope filters matches to only project or only global scope.
+func FilterMatchesByScope(matches []TemplateMatch, projectOnly, globalOnly bool) []TemplateMatch {
+	if !projectOnly && !globalOnly {
 		return matches
 	}
 
 	var filtered []TemplateMatch
 	for _, m := range matches {
-		if groveOnly && m.IsProjectScoped() {
+		if projectOnly && m.IsProjectScoped() {
 			filtered = append(filtered, m)
 		} else if globalOnly && m.IsGlobal() {
 			filtered = append(filtered, m)

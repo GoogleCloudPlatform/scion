@@ -149,7 +149,7 @@ var hubBrokersInfoCmd = &cobra.Command{
 	Long: `Show detailed information about a runtime broker on the Hub.
 
 Displays broker metadata including name, status, version, last heartbeat,
-capabilities, available profiles, and groves it provides for.
+capabilities, available profiles, and projects it provides for.
 
 If no broker name is provided, the current host's broker is used (if registered).
 
@@ -172,7 +172,7 @@ var hubBrokersDeleteCmd = &cobra.Command{
 	Short: "Delete a broker from the Hub",
 	Long: `Delete a runtime broker from the Hub.
 
-This will remove the broker registration and all associated grove provider relationships.
+This will remove the broker registration and all associated project provider relationships.
 
 Examples:
   # Delete a broker by name (with confirmation)
@@ -580,9 +580,9 @@ func getHubClient(settings *config.Settings) (hubclient.Client, error) {
 type hubEnabledScope struct {
 	// Enabled is the effective value of hub.enabled after merging.
 	Enabled bool
-	// Scope is "grove", "global", or "default" indicating where the value originates.
+	// Scope is "project", "global", or "default" indicating where the value originates.
 	Scope string
-	// Inherited is true when a grove-scoped invocation uses a global setting.
+	// Inherited is true when a project-scoped invocation uses a global setting.
 	Inherited bool
 }
 
@@ -897,7 +897,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Scion Version (Server): %s\n", valueOrNone(health.ScionVersion))
 			fmt.Printf("Scion Version (Local):  %s\n", version.Short())
 
-			// Show grove context if we're in a grove
+			// Show project context if we're in a project
 			printProjectContext(client, resolvedPath, isGlobal, settings, authVerified)
 		}
 	}
@@ -1680,10 +1680,10 @@ func runHubBrokers(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	// Resolve grove path to find project settings
+	// Resolve project path to find project settings
 	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -2025,10 +2025,10 @@ func formatRelativeTime(t time.Time) string {
 }
 
 func runHubEnable(cmd *cobra.Command, args []string) error {
-	// Resolve grove path
+	// Resolve project path
 	resolvedPath, isGlobal, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -2069,7 +2069,7 @@ func runHubEnable(cmd *cobra.Command, args []string) error {
 
 	scopeLabel := "global"
 	if !isGlobal {
-		scopeLabel = "project grove"
+		scopeLabel = "project"
 	}
 
 	if isJSONOutput() {
@@ -2096,10 +2096,10 @@ func runHubEnable(cmd *cobra.Command, args []string) error {
 }
 
 func runHubDisable(cmd *cobra.Command, args []string) error {
-	// Resolve grove path
+	// Resolve project path
 	resolvedPath, isGlobal, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -2109,7 +2109,7 @@ func runHubDisable(cmd *cobra.Command, args []string) error {
 
 	scopeLabel := "global"
 	if !isGlobal {
-		scopeLabel = "project grove"
+		scopeLabel = "project"
 	}
 
 	enabledScope := getHubEnabledScope(resolvedPath, isGlobal, settings)
@@ -2117,7 +2117,7 @@ func runHubDisable(cmd *cobra.Command, args []string) error {
 	if !settings.IsHubEnabled() {
 		msg := "Hub integration is already disabled."
 		if enabledScope.Scope == "default" && !isGlobal {
-			msg = "Hub integration is not enabled at the project grove scope (and no global setting found)."
+			msg = "Hub integration is not enabled at the project scope (and no global setting found)."
 		}
 		if isJSONOutput() {
 			return outputJSON(ActionResult{
@@ -2133,15 +2133,15 @@ func runHubDisable(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Warn if hub is enabled globally but user is disabling at grove scope
+	// Warn if hub is enabled globally but user is disabling at project scope
 	if enabledScope.Inherited {
-		// The setting is inherited from global — disabling at grove scope
-		// will write an explicit hub.enabled=false at the grove level
+		// The setting is inherited from global — disabling at project scope
+		// will write an explicit hub.enabled=false at the project level
 		if isJSONOutput() {
-			// Continue to disable at grove scope
+			// Continue to disable at project scope
 		} else {
 			fmt.Printf("Note: Hub is currently enabled via global settings.\n")
-			fmt.Printf("      This will disable it for this grove only.\n\n")
+			fmt.Printf("      This will disable it for this project only.\n\n")
 		}
 	}
 
@@ -2170,7 +2170,7 @@ func runHubDisable(cmd *cobra.Command, args []string) error {
 }
 
 func runHubLink(cmd *cobra.Command, args []string) error {
-	// Resolve grove path
+	// Resolve project path
 	gp := projectPath
 	if gp == "" && globalMode {
 		gp = "global"
@@ -2178,7 +2178,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 
 	resolvedPath, isGlobal, err := config.ResolveProjectPath(gp)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -2191,7 +2191,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("Hub endpoint not configured.\n\nConfigure the Hub endpoint via:\n  - SCION_HUB_ENDPOINT environment variable\n  - hub.endpoint in settings.yaml\n  - --hub flag on any command\n\nExample: scion config set hub.endpoint https://hub.scion.dev --global")
 	}
 
-	// Get grove name for display
+	// Get project name for display
 	var projectName string
 	if isGlobal {
 		projectName = "global"
@@ -2229,18 +2229,18 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("Hub at %s is not responding: %w", endpoint, err)
 	}
 
-	// Ensure grove_id exists
+	// Ensure project_id exists
 	projectID := settings.ProjectID
 	if projectID == "" {
 		projectID = config.GenerateProjectIDForDir(filepath.Dir(resolvedPath))
-		if err := config.UpdateSetting(resolvedPath, "grove_id", projectID, isGlobal); err != nil {
-			return fmt.Errorf("failed to save grove_id: %w", err)
+		if err := config.UpdateSetting(resolvedPath, "project_id", projectID, isGlobal); err != nil {
+			return fmt.Errorf("failed to save project_id: %w", err)
 		}
 	}
 
-	// Check if grove already exists on Hub.
-	// Read this grove's own settings in isolation (without global merge) to
-	// determine whether hub.groveId was explicitly set for THIS grove, rather
+	// Check if project already exists on Hub.
+	// Read this project's own settings in isolation (without global merge) to
+	// determine whether hub.projectId was explicitly set for THIS project, rather
 	// than inherited from global settings via the koanf merge chain.
 	localSettings, _ := config.LoadSettingsFromDir(resolvedPath)
 	localHubProjectID:= ""
@@ -2251,62 +2251,62 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	if hubLookupID == "" {
 		hubLookupID = projectID
 	}
-	hubGrove, err := getLinkedProject(ctx, client, hubLookupID)
+	hubProject, err := getLinkedProject(ctx, client, hubLookupID)
 	if err != nil {
-		util.Debugf("Error checking grove link status: %v", err)
+		util.Debugf("Error checking project link status: %v", err)
 	}
 
-	if hubGrove != nil && hubGrove.Name == projectName {
+	if hubProject != nil && hubProject.Name == projectName {
 		// Already linked — still call register so the server can backfill
 		// the membership group if it was created before group support.
 		if _, err := registerProjectOnHub(ctx, client, hubLookupID, projectName, resolvedPath, isGlobal); err != nil {
 			util.Debugf("Failed to register during re-link (non-fatal): %v", err)
 		}
-		fmt.Printf("Grove '%s' is already linked to the Hub (ID: %s)\n", projectName, projectID)
+		fmt.Printf("Project '%s' is already linked to the Hub (ID: %s)\n", projectName, projectID)
 	} else {
-		if hubGrove != nil && localHubProjectID != "" {
-			// This grove's own hub.groveId points to a different grove on the
-			// Hub — stale link. In V1 settings, hub.grove_id and grove_id share
+		if hubProject != nil && localHubProjectID != "" {
+			// This project's own hub.projectId points to a different project on the
+			// Hub — stale link. In V1 settings, hub.projectId and project_id share
 			// a single field, so a previous link may have overwritten the local
-			// grove_id with the stale hub grove ID. Regenerate from the marker
+			// project_id with the stale hub project ID. Regenerate from the marker
 			// file or directory to get the true local identity before
 			// re-registering.
-			fmt.Printf("Warning: local grove '%s' was linked to hub grove '%s' (ID: %s). Re-linking.\n",
-				projectName, hubGrove.Name, hubLookupID)
+			fmt.Printf("Warning: local project '%s' was linked to hub project '%s' (ID: %s). Re-linking.\n",
+				projectName, hubProject.Name, hubLookupID)
 
-			// Clear the stale hub grove ID
-			if err := config.UpdateSetting(resolvedPath, "hub.groveId", "", isGlobal); err != nil {
-				util.Debugf("Failed to clear stale hub.groveId: %v", err)
+			// Clear the stale hub project ID
+			if err := config.UpdateSetting(resolvedPath, "hub.projectId", "", isGlobal); err != nil {
+				util.Debugf("Failed to clear stale hub.projectId: %v", err)
 			}
 
-			// Regenerate the local grove ID from the marker file or directory
+			// Regenerate the local project ID from the marker file or directory
 			if markerID, err := config.ReadProjectID(resolvedPath); err == nil && markerID != "" {
 				projectID = markerID
 			} else {
 				projectID = config.GenerateProjectIDForDir(filepath.Dir(resolvedPath))
 			}
-			if err := config.UpdateSetting(resolvedPath, "grove_id", projectID, isGlobal); err != nil {
-				return fmt.Errorf("failed to save grove_id: %w", err)
+			if err := config.UpdateSetting(resolvedPath, "project_id", projectID, isGlobal); err != nil {
+				return fmt.Errorf("failed to save project_id: %w", err)
 			}
-		} else if hubGrove != nil {
-			// The lookup ID (either from a deterministic grove_id collision or
-			// an inherited global hub.groveId) matched a different grove on the
-			// Hub. This is not a genuine link for THIS grove — ignore the match
+		} else if hubProject != nil {
+			// The lookup ID (either from a deterministic project_id collision or
+			// an inherited global hub.projectId) matched a different project on the
+			// Hub. This is not a genuine link for THIS project — ignore the match
 			// and proceed to register or link by name.
-			util.Debugf("Grove ID %s matched hub grove '%s' but is not an explicit link for local grove '%s'; ignoring",
-				hubLookupID, hubGrove.Name, projectName)
-			hubGrove = nil
+			util.Debugf("Project ID %s matched hub project '%s' but is not an explicit link for local project '%s'; ignoring",
+				hubLookupID, hubProject.Name, projectName)
+			hubProject = nil
 		}
-		// Check for existing groves with the same name
+		// Check for existing projects with the same name
 		resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{
 			Name: projectName,
 		})
 		if err != nil {
-			return fmt.Errorf("failed to search for matching groves: %w", err)
+			return fmt.Errorf("failed to search for matching projects: %w", err)
 		}
 
 		if len(resp.Projects) > 0 {
-			// Found matching groves - ask user what to do
+			// Found matching projects - ask user what to do
 			matches := make([]hubsync.ProjectMatch, len(resp.Projects))
 			for i, g := range resp.Projects {
 				matches[i] = hubsync.ProjectMatch{
@@ -2324,56 +2324,56 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 			case hubsync.ProjectChoiceCancel:
 				return fmt.Errorf("linking cancelled")
 			case hubsync.ProjectChoiceLink:
-				// Register with the selected grove's ID so the hub creates
+				// Register with the selected project's ID so the hub creates
 				// the membership group (and adds this user as owner) if it
 				// doesn't already exist.
 				if _, err := registerProjectOnHub(ctx, client, selectedID, projectName, resolvedPath, isGlobal); err != nil {
 					util.Debugf("Failed to register during link (non-fatal): %v", err)
 				}
-				// Store the hub grove ID separately — don't overwrite the
-				// deterministic local grove_id (which drives config-dir paths).
-				if err := config.UpdateSetting(resolvedPath, "hub.groveId", selectedID, isGlobal); err != nil {
-					return fmt.Errorf("failed to save hub grove ID: %w", err)
+				// Store the hub project ID separately — don't overwrite the
+				// deterministic local project_id (which drives config-dir paths).
+				if err := config.UpdateSetting(resolvedPath, "hub.projectId", selectedID, isGlobal); err != nil {
+					return fmt.Errorf("failed to save hub project ID: %w", err)
 				}
 				hubLookupID = selectedID
-				fmt.Printf("Linked to existing grove (ID: %s)\n", selectedID)
+				fmt.Printf("Linked to existing project (ID: %s)\n", selectedID)
 			case hubsync.ProjectChoiceRegisterNew:
-				// Register as a new grove on the Hub using the local grove_id.
+				// Register as a new project on the Hub using the local project_id.
 				hubProjectID, err := registerProjectOnHub(ctx, client, projectID, projectName, resolvedPath, isGlobal)
 				if err != nil {
 					return err
 				}
-				// Store the hub grove ID if it differs from the local one
+				// Store the hub project ID if it differs from the local one
 				if hubProjectID != "" && hubProjectID != projectID {
-					if err := config.UpdateSetting(resolvedPath, "hub.groveId", hubProjectID, isGlobal); err != nil {
-						return fmt.Errorf("failed to save hub grove ID: %w", err)
+					if err := config.UpdateSetting(resolvedPath, "hub.projectId", hubProjectID, isGlobal); err != nil {
+						return fmt.Errorf("failed to save hub project ID: %w", err)
 					}
 				}
 				hubLookupID = hubProjectID
 			}
 		} else {
-			// No matching groves - create new one
+			// No matching projects - create new one
 			hubProjectID, err := registerProjectOnHub(ctx, client, projectID, projectName, resolvedPath, isGlobal)
 			if err != nil {
 				return err
 			}
-			// Store the hub grove ID if it differs from the local one
+			// Store the hub project ID if it differs from the local one
 			if hubProjectID != "" && hubProjectID != projectID {
-				if err := config.UpdateSetting(resolvedPath, "hub.groveId", hubProjectID, isGlobal); err != nil {
-					return fmt.Errorf("failed to save hub grove ID: %w", err)
+				if err := config.UpdateSetting(resolvedPath, "hub.projectId", hubProjectID, isGlobal); err != nil {
+					return fmt.Errorf("failed to save hub project ID: %w", err)
 				}
 			}
 			hubLookupID = hubProjectID
 		}
 	}
 
-	// Use the hub grove ID for all hub API calls from here on
+	// Use the hub project ID for all hub API calls from here on
 	effectiveHubProjectID:= hubLookupID
 	if effectiveHubProjectID == "" {
 		effectiveHubProjectID = projectID
 	}
 
-	// If this host is a registered broker, add it as a provider for this grove
+	// If this host is a registered broker, add it as a provider for this project
 	localBrokerID, localBrokerName := getLocalBrokerInfo(settings)
 	if localBrokerID != "" {
 		addReq := &hubclient.AddProviderRequest{
@@ -2383,11 +2383,11 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 		if _, err := client.Projects().AddProvider(ctx, effectiveHubProjectID, addReq); err != nil {
 			util.Debugf("Failed to add broker as provider during link: %v", err)
 		} else {
-			util.Debugf("Registered local broker %s as provider for grove %s", localBrokerName, effectiveHubProjectID)
+			util.Debugf("Registered local broker %s as provider for project %s", localBrokerName, effectiveHubProjectID)
 		}
 	}
 
-	// Enable Hub integration and mark as linked for this grove
+	// Enable Hub integration and mark as linked for this project
 	if err := config.UpdateSetting(resolvedPath, "hub.enabled", "true", isGlobal); err != nil {
 		return fmt.Errorf("failed to enable hub: %w", err)
 	}
@@ -2406,18 +2406,18 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 		return outputJSON(ActionResult{
 			Status:  "success",
 			Command: "hub link",
-			Message: fmt.Sprintf("Grove '%s' is now linked to the Hub.", projectName),
+			Message: fmt.Sprintf("Project '%s' is now linked to the Hub.", projectName),
 			Details: map[string]interface{}{
-				"grove":      projectName,
-				"groveId":    projectID,
-				"hubGroveId": effectiveHubProjectID,
+				"project":      projectName,
+				"projectId":    projectID,
+				"hubProjectId": effectiveHubProjectID,
 				"endpoint":   endpoint,
 			},
 		})
 	}
 
 	fmt.Println()
-	fmt.Printf("Grove '%s' is now linked to the Hub.\n", projectName)
+	fmt.Printf("Project '%s' is now linked to the Hub.\n", projectName)
 
 	// Offer to sync agents
 	if hubsync.ShowSyncAfterLinkPrompt(autoConfirm) {
@@ -2445,39 +2445,39 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Offer to sync grove templates to Hub
+	// Offer to sync project templates to Hub
 	offerTemplateSyncOnLink(resolvedPath, endpoint, projectID)
 
-	// Display available brokers for this grove
+	// Display available brokers for this project
 	listBrokersForProject(ctx, client, projectID)
 
 	return nil
 }
 
-// offerTemplateSyncOnLink detects local grove templates and prompts
-// the user to sync them to the Hub during grove linking.
+// offerTemplateSyncOnLink detects local project templates and prompts
+// the user to sync them to the Hub during project linking.
 func offerTemplateSyncOnLink(projectPath, endpoint, projectID string) {
-	// List grove-scoped templates
-	_, groveTemplates, err := config.ListTemplatesGrouped()
-	if err != nil || len(groveTemplates) == 0 {
+	// List project-scoped templates
+	_, projectTemplates, err := config.ListTemplatesGrouped()
+	if err != nil || len(projectTemplates) == 0 {
 		return
 	}
 
 	if !util.IsTerminal() {
 		fmt.Printf("\nSkipping template sync (non-interactive mode).\n")
-		fmt.Println("Run 'scion templates sync --all' to upload grove templates.")
+		fmt.Println("Run 'scion templates sync --all' to upload project templates.")
 		return
 	}
 
 	// Show discovered templates
-	fmt.Printf("\nFound %d grove template(s) not yet synced to Hub:\n", len(groveTemplates))
-	for _, t := range groveTemplates {
+	fmt.Printf("\nFound %d project template(s) not yet synced to Hub:\n", len(projectTemplates))
+	for _, t := range projectTemplates {
 		fmt.Printf("  - %s\n", t.Name)
 	}
 
 	if !hubsync.ConfirmAction("Sync these templates to the Hub?", true, autoConfirm) {
 		fmt.Println("Skipping template sync.")
-		fmt.Println("Run 'scion templates sync --all' to upload grove templates later.")
+		fmt.Println("Run 'scion templates sync --all' to upload project templates later.")
 		return
 	}
 
@@ -2501,9 +2501,9 @@ func offerTemplateSyncOnLink(projectPath, endpoint, projectID string) {
 		Settings:  settings,
 	}
 
-	fmt.Println("\nSyncing grove templates to Hub...")
+	fmt.Println("\nSyncing project templates to Hub...")
 	var synced int
-	for _, tpl := range groveTemplates {
+	for _, tpl := range projectTemplates {
 		harnessType, err := detectHarnessType(tpl)
 		if err != nil {
 			fmt.Printf("  %s: skipped (failed to detect harness: %v)\n", tpl.Name, err)
@@ -2511,17 +2511,17 @@ func offerTemplateSyncOnLink(projectPath, endpoint, projectID string) {
 		}
 
 		// Use force=false — don't overwrite existing Hub templates
-		err = syncTemplateToHub(hubCtx, tpl.Name, tpl.Path, "grove", harnessType)
+		err = syncTemplateToHub(hubCtx, tpl.Name, tpl.Path, "project", harnessType)
 		if err != nil {
 			fmt.Printf("  %s: failed: %v\n", tpl.Name, err)
 			continue
 		}
 		synced++
 	}
-	fmt.Printf("%d template(s) synced to grove scope.\n", synced)
+	fmt.Printf("%d template(s) synced to project scope.\n", synced)
 }
 
-// registerGroveOnHub registers a new grove on the Hub.
+// registerProjectOnHub registers a new project on the Hub.
 func registerProjectOnHub(ctx context.Context, client hubclient.Client, projectID, projectName, projectPath string, isGlobal bool) (string, error) {
 	var gitRemote string
 	if !isGlobal {
@@ -2537,20 +2537,20 @@ func registerProjectOnHub(ctx context.Context, client hubclient.Client, projectI
 
 	resp, err := client.Projects().Register(ctx, req)
 	if err != nil {
-		return "", fmt.Errorf("failed to register grove: %w", err)
+		return "", fmt.Errorf("failed to register project: %w", err)
 	}
 
 	if resp.Created {
-		fmt.Printf("Created new grove: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
+		fmt.Printf("Created new project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	} else {
-		fmt.Printf("Linked to existing grove: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
+		fmt.Printf("Linked to existing project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	}
 
 	return resp.Project.ID, nil
 }
 
 func runHubUnlink(cmd *cobra.Command, args []string) error {
-	// Resolve grove path
+	// Resolve project path
 	gp := projectPath
 	if gp == "" && globalMode {
 		gp = "global"
@@ -2558,7 +2558,7 @@ func runHubUnlink(cmd *cobra.Command, args []string) error {
 
 	resolvedPath, isGlobal, err := config.ResolveProjectPath(gp)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -2566,13 +2566,13 @@ func runHubUnlink(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	// Check if grove is currently linked
+	// Check if project is currently linked
 	if !settings.IsHubEnabled() {
-		fmt.Println("This grove is not linked to the Hub.")
+		fmt.Println("This project is not linked to the Hub.")
 		return nil
 	}
 
-	// Get grove name for display
+	// Get project name for display
 	var projectName string
 	if isGlobal {
 		projectName = "global"
@@ -2590,33 +2590,33 @@ func runHubUnlink(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unlinking cancelled")
 	}
 
-	// Disable Hub integration, clear linked state and hub grove ID
+	// Disable Hub integration, clear linked state and hub project ID
 	if err := config.UpdateSetting(resolvedPath, "hub.enabled", "false", isGlobal); err != nil {
 		return fmt.Errorf("failed to disable hub: %w", err)
 	}
 	if err := config.UpdateSetting(resolvedPath, "hub.linked", "false", isGlobal); err != nil {
 		util.Debugf("Failed to clear hub.linked: %v", err)
 	}
-	if err := config.UpdateSetting(resolvedPath, "hub.groveId", "", isGlobal); err != nil {
-		util.Debugf("Failed to clear hub.groveId: %v", err)
+	if err := config.UpdateSetting(resolvedPath, "hub.projectId", "", isGlobal); err != nil {
+		util.Debugf("Failed to clear hub.projectId: %v", err)
 	}
 
 	if isJSONOutput() {
 		return outputJSON(ActionResult{
 			Status:  "success",
 			Command: "hub unlink",
-			Message: fmt.Sprintf("Grove '%s' has been unlinked from the Hub.", projectName),
+			Message: fmt.Sprintf("Project '%s' has been unlinked from the Hub.", projectName),
 			Details: map[string]interface{}{
-				"grove": projectName,
+				"project": projectName,
 			},
 		})
 	}
 
 	fmt.Println()
-	fmt.Printf("Grove '%s' has been unlinked from the Hub.\n", projectName)
-	fmt.Println("The grove and its agents remain on the Hub for other brokers.")
-	fmt.Println("Use 'scion hub link' to re-link this local grove to the hub's.")
-	fmt.Printf("Use \"scion hub groves delete '%s'\" to remove grove from hub entirely.", projectName)
+	fmt.Printf("Project '%s' has been unlinked from the Hub.\n", projectName)
+	fmt.Println("The project and its agents remain on the Hub for other brokers.")
+	fmt.Println("Use 'scion hub link' to re-link this local project to the hub's.")
+	fmt.Printf("Use \"scion hub projects delete '%s'\" to remove project from hub entirely.", projectName)
 
 	return nil
 }
@@ -2664,19 +2664,19 @@ func checkLocalBrokerServer(port int) (*BrokerHealthResponse, error) {
 	return &health, nil
 }
 
-// isProjectLinked checks if the grove exists on the Hub.
+// isProjectLinked checks if the project exists on the Hub.
 func isProjectLinked(ctx context.Context, client hubclient.Client, projectID string) (bool, error) {
-	grove, err := getLinkedProject(ctx, client, projectID)
-	return grove != nil, err
+	project, err := getLinkedProject(ctx, client, projectID)
+	return project != nil, err
 }
 
-// getLinkedGrove returns the hub grove for the given ID, or nil if not found.
+// getLinkedProject returns the hub project for the given ID, or nil if not found.
 func getLinkedProject(ctx context.Context, client hubclient.Client, projectID string) (*hubclient.Project, error) {
 	if projectID == "" {
 		return nil, nil
 	}
 
-	grove, err := client.Projects().Get(ctx, projectID)
+	project, err := client.Projects().Get(ctx, projectID)
 	if err != nil {
 		errStr := err.Error()
 		if containsIgnoreCase(errStr, "404") || containsIgnoreCase(errStr, "not found") {
@@ -2685,7 +2685,7 @@ func getLinkedProject(ctx context.Context, client hubclient.Client, projectID st
 		return nil, err
 	}
 
-	return grove, nil
+	return project, nil
 }
 
 // containsIgnoreCase checks if s contains substr (case-insensitive).
@@ -2725,25 +2725,25 @@ func equalFoldSlice(a, b string) bool {
 	return true
 }
 
-// listBrokersForGrove fetches and displays available runtime brokers for a grove.
+// listBrokersForProject fetches and displays available runtime brokers for a project.
 func listBrokersForProject(ctx context.Context, client hubclient.Client, projectID string) {
 	resp, err := client.RuntimeBrokers().List(ctx, &hubclient.ListBrokersOptions{
 		ProjectID: projectID,
 	})
 	if err != nil {
-		util.Debugf("Failed to list brokers for grove: %v", err)
+		util.Debugf("Failed to list brokers for project: %v", err)
 		return
 	}
 
 	if len(resp.Brokers) == 0 {
 		fmt.Println()
-		fmt.Println("Warning: This grove has no active runtime brokers.")
+		fmt.Println("Warning: This project has no active runtime brokers.")
 		fmt.Println("Register one with 'scion broker register'")
 		return
 	}
 
 	fmt.Println()
-	fmt.Println("Runtime brokers available for this grove:")
+	fmt.Println("Runtime brokers available for this project:")
 	for _, b := range resp.Brokers {
 		status := b.Status
 		if status == "" {

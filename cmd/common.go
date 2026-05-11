@@ -183,7 +183,7 @@ func getHubAccessToken(endpoint string) string {
 // by design to ensure users always know which mode they're operating in.
 //
 // This function now performs full Hub sync checks via hubsync.EnsureHubReady:
-// - Verifies grove registration (prompts to register if not)
+// - Verifies project registration (prompts to register if not)
 // - Compares local and Hub agents (prompts to sync if mismatched)
 func CheckHubAvailability(projectPath string) (*HubContext, error) {
 	return CheckHubAvailabilityWithOptions(projectPath, false)
@@ -258,20 +258,20 @@ func wrapHubError(err error) error {
 	return fmt.Errorf("%w\n\nTo use local-only mode, run: scion hub disable", err)
 }
 
-// GetProjectID looks up the grove ID from HubContext or settings.
+// GetProjectID looks up the project ID from HubContext or settings.
 // Priority:
-//  1. GroveID field in HubContext (set by EnsureHubReady)
-//  2. Local grove_id from settings (for non-git groves or explicit configuration)
+//  1. ProjectID field in HubContext (set by EnsureHubReady)
+//  2. Local project_id from settings (for non-git projects or explicit configuration)
 //  3. Git remote lookup via Hub API
 //
-// Returns the grove ID if found, or an error if the grove is not registered.
+// Returns the project ID if found, or an error if the project is not registered.
 func GetProjectID(hubCtx *HubContext) (string, error) {
-	// First, check if GroveID is already set in the context
+	// First, check if ProjectID is already set in the context
 	if hubCtx.ProjectID != "" {
 		return hubCtx.ProjectID, nil
 	}
 
-	// Check if there's a hub grove ID or local grove_id in settings
+	// Check if there's a hub project ID or local project_id in settings
 	if hubCtx.Settings != nil {
 		if hgid := hubCtx.Settings.GetHubProjectID(); hgid != "" {
 			return hgid, nil
@@ -508,7 +508,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		statusf("Attaching to agent '%s'...\n", agentName)
 
 		// Use the container ID for exec/attach operations. Container names are
-		// now grove-scoped (e.g. "scion--agent") but agentName is just the agent
+		// now project-scoped (e.g. "scion--agent") but agentName is just the agent
 		// name. The container ID is the reliable identifier for runtime operations.
 		containerID := info.ContainerID
 		if containerID == "" {
@@ -578,23 +578,23 @@ func waitForTmuxSession(rt runtime.Runtime, agentName string) error {
 func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, inlineCfg *api.ScionConfig) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
-	// Get the grove ID for this project
+	// Get the project ID for this project
 	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
 
-	// Check if this is a git-based grove. When hub is enabled, all git-based
-	// groves use clone-based provisioning (HTTPS + GitHub token) rather than
+	// Check if this is a git-based project. When hub is enabled, all git-based
+	// projects use clone-based provisioning (HTTPS + GitHub token) rather than
 	// local worktrees. Inform the user and validate early.
 	if !isJSONOutput() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		grove, groveErr := hubCtx.Client.Projects().Get(ctx, projectID)
+		project, projectErr := hubCtx.Client.Projects().Get(ctx, projectID)
 		cancel()
-		if groveErr == nil && grove != nil && grove.GitRemote != "" {
-			cloneURL := grove.Labels["scion.dev/clone-url"]
+		if projectErr == nil && project != nil && project.GitRemote != "" {
+			cloneURL := project.Labels["scion.dev/clone-url"]
 			if cloneURL == "" {
-				cloneURL = "https://" + grove.GitRemote + ".git"
+				cloneURL = "https://" + project.GitRemote + ".git"
 			}
 			fmt.Fprintf(os.Stderr, "Using hub, cloning repo %s\n", cloneURL)
 			fmt.Fprintf(os.Stderr, "  (Hub mode uses HTTPS clone with GITHUB_TOKEN; local worktrees are not used)\n")
@@ -696,12 +696,12 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		util.Debugf("[auth]   cloudProject=%q, cloudRegion=%q", localAuth.GoogleCloudProject, localAuth.GoogleCloudRegion)
 	}
 
-	// Detect non-git grove for workspace bootstrap
+	// Detect non-git project for workspace bootstrap
 	var workspaceFiles []transfer.FileInfo
 	if hubCtx.ProjectPath != "" && !hubCtx.IsGlobal {
-		groveDir := filepath.Dir(hubCtx.ProjectPath) // parent of .scion
-		if _, statErr := os.Stat(groveDir); statErr == nil && !util.IsGitRepoDir(groveDir) {
-			files, err := transfer.CollectFiles(groveDir, transfer.DefaultExcludePatterns)
+		projectDir := filepath.Dir(hubCtx.ProjectPath) // parent of .scion
+		if _, statErr := os.Stat(projectDir); statErr == nil && !util.IsGitRepoDir(projectDir) {
+			files, err := transfer.CollectFiles(projectDir, transfer.DefaultExcludePatterns)
 			if err != nil {
 				return fmt.Errorf("failed to collect workspace files: %w", err)
 			}
@@ -1007,7 +1007,7 @@ ready:
 func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, projectID string, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error) {
 	for {
 		if debugMode {
-			util.Debugf("[env-gather] createAgentWithBrokerResolution: sending create request to Hub (grove=%s, agent=%s, broker=%s)", projectID, req.Name, req.RuntimeBrokerID)
+			util.Debugf("[env-gather] createAgentWithBrokerResolution: sending create request to Hub (project=%s, agent=%s, broker=%s)", projectID, req.Name, req.RuntimeBrokerID)
 			if req.Config != nil && len(req.Config.Env) > 0 {
 				for k := range req.Config.Env {
 					util.Debugf("[env-gather]   request env key: %s", k)
@@ -1074,7 +1074,7 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 			req.RuntimeBrokerID, _ = brokerMap["id"].(string)
 		} else {
 			// Multiple brokers - selection prompt
-			fmt.Printf("\nMultiple runtime brokers available for grove:\n")
+			fmt.Printf("\nMultiple runtime brokers available for project:\n")
 			for i, h := range availableBrokers {
 				brokerMap, _ := h.(map[string]interface{})
 				name, _ := brokerMap["name"].(string)
