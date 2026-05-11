@@ -77,7 +77,7 @@ func (r *CreateTokenRequest) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if r.ProjectID == "" && aux.ProjectID != "" {
+	if r.ProjectID == "" && aux.GroveID != "" {
 		r.ProjectID = aux.GroveID
 	}
 	return nil
@@ -126,7 +126,7 @@ func (i *TokenInfo) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if i.ProjectID == "" && aux.ProjectID != "" {
+	if i.ProjectID == "" && aux.GroveID != "" {
 		i.ProjectID = aux.GroveID
 	}
 	return nil

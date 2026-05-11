@@ -104,7 +104,7 @@ type UpdateTemplateRequest struct {
 type CloneTemplateRequest struct {
 	Name      string `json:"name"`
 	Scope     string `json:"scope"`
-	GroveID string `json:"groveId,omitempty"`
+	ProjectID string `json:"projectId"`
 }
 
 // FileUploadRequest describes a file to upload.

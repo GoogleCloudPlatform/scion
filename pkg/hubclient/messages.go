@@ -90,7 +90,7 @@ func (m *AgentMessage) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if m.ProjectID == "" && aux.ProjectID != "" {
+	if m.ProjectID == "" && aux.GroveID != "" {
 		m.ProjectID = aux.GroveID
 	}
 	return nil

@@ -91,7 +91,7 @@ func (e *ScheduledEvent) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if e.ProjectID == "" && aux.ProjectID != "" {
+	if e.ProjectID == "" && aux.GroveID != "" {
 		e.ProjectID = aux.GroveID
 	}
 	return nil

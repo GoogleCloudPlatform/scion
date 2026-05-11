@@ -207,7 +207,7 @@ func (r *CreateAgentRequest) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if r.ProjectID == "" && aux.ProjectID != "" {
+	if r.ProjectID == "" && aux.GroveID != "" {
 		r.ProjectID = aux.GroveID
 	}
 	return nil
