@@ -271,6 +271,11 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 		if err := b.broker.RequestSubscription(pattern); err != nil {
 			b.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
 		}
+		// Subscribe to legacy grove topic as well during transition.
+		grovePattern := fmt.Sprintf("scion.grove.%s.user.%s.messages", agentCtx.ProjectID, b.config.Hub.User)
+		if err := b.broker.RequestSubscription(grovePattern); err != nil {
+			b.log.Warn("failed to request legacy subscription", "pattern", grovePattern, "error", err)
+		}
 	}
 
 	if !blocking {
@@ -937,7 +942,7 @@ func (b *Bridge) removeWaiter(taskID string) {
 // unused — the bridge only subscribes to user-scoped topics.
 func parseTopic(topic string) (projectID, agentSlug string, err error) {
 	parts := strings.Split(topic, ".")
-	if len(parts) < 3 || parts[0] != "scion" || parts[1] != "project" {
+	if len(parts) < 3 || parts[0] != "scion" || (parts[1] != "project" && parts[1] != "grove") {
 		return "", "", fmt.Errorf("malformed topic: %s", topic)
 	}
 	projectID = parts[2]
