@@ -1138,7 +1138,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, groveID s
 	ctx := r.Context()
 
 	mgr := s.resolveManagerForAgent(ctx, id, groveID)
-	if err := mgr.Stop(ctx, id); err != nil {
+	if err := mgr.Stop(ctx, id, ""); err != nil {
 		if isContainerStopTolerable(err) {
 			// Container doesn't exist, is already stopped, or podman/docker can't find it.
 			// Treat as success so the hub can update its state.
@@ -1210,7 +1210,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, groveI
 	// be exited and the subsequent start will handle cleanup.
 	// Use resolveManagerForAgent to find the agent on auxiliary runtimes.
 	stopMgr := s.resolveManagerForAgent(ctx, id, groveID)
-	if err := stopMgr.Stop(ctx, id); err != nil {
+	if err := stopMgr.Stop(ctx, id, ""); err != nil {
 		if isContainerStopTolerable(err) {
 			s.agentLifecycleLog.Warn("Restart: stop target not found or already stopped, proceeding with start", "agent_id", id, "error", err)
 		} else {

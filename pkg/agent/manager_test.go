@@ -39,7 +39,7 @@ func TestStop_ResolvesNameToContainerID(t *testing.T) {
 	}
 
 	mgr := &AgentManager{Runtime: mock}
-	if err := mgr.Stop(context.Background(), "test-agent"); err != nil {
+	if err := mgr.Stop(context.Background(), "test-agent", ""); err != nil {
 		t.Fatalf("Stop returned error: %v", err)
 	}
 
@@ -62,7 +62,7 @@ func TestStop_FallsBackToRawID(t *testing.T) {
 	}
 
 	mgr := &AgentManager{Runtime: mock}
-	if err := mgr.Stop(context.Background(), "unknown-agent"); err != nil {
+	if err := mgr.Stop(context.Background(), "unknown-agent", ""); err != nil {
 		t.Fatalf("Stop returned error: %v", err)
 	}
 
@@ -85,7 +85,7 @@ func TestStop_FallsBackOnListError(t *testing.T) {
 	}
 
 	mgr := &AgentManager{Runtime: mock}
-	if err := mgr.Stop(context.Background(), "my-agent"); err != nil {
+	if err := mgr.Stop(context.Background(), "my-agent", ""); err != nil {
 		t.Fatalf("Stop returned error: %v", err)
 	}
 

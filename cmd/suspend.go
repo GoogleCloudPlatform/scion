@@ -96,7 +96,7 @@ that do not (e.g. generic) will return an error — use 'stop' instead.`,
 		mgr := agent.NewManager(rt)
 
 		statusf("Suspending agent '%s'...\n", agentName)
-		if err := mgr.Stop(context.Background(), agentName); err != nil {
+		if err := mgr.Stop(context.Background(), agentName, grovePath); err != nil {
 			return err
 		}
 
@@ -216,7 +216,7 @@ func suspendAllAgents() error {
 			agentRt := runtime.GetRuntime(projectPath, profile)
 			agentMgr := agent.NewManager(agentRt)
 
-			if err := agentMgr.Stop(context.Background(), name); err != nil {
+			if err := agentMgr.Stop(context.Background(), name, grovePath); err != nil {
 				res.Status = "error"
 				res.Error = err.Error()
 				mu.Lock()

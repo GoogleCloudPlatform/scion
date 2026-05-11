@@ -121,7 +121,7 @@ func (d *agentDispatcherAdapter) DispatchAgentStart(ctx context.Context, hubAgen
 // DispatchAgentStop implements hub.AgentDispatcher.
 // It stops a running agent on the runtime broker.
 func (d *agentDispatcherAdapter) DispatchAgentStop(ctx context.Context, hubAgent *store.Agent) error {
-	if err := d.manager.Stop(ctx, hubAgent.Name); err != nil {
+	if err := d.manager.Stop(ctx, hubAgent.Name, ""); err != nil {
 		return fmt.Errorf("failed to stop agent: %w", err)
 	}
 
@@ -140,7 +140,7 @@ func (d *agentDispatcherAdapter) DispatchAgentStop(ctx context.Context, hubAgent
 // It restarts an agent on the runtime broker.
 func (d *agentDispatcherAdapter) DispatchAgentRestart(ctx context.Context, hubAgent *store.Agent) error {
 	// Stop then start
-	if err := d.manager.Stop(ctx, hubAgent.Name); err != nil {
+	if err := d.manager.Stop(ctx, hubAgent.Name, ""); err != nil {
 		log.Printf("Warning: failed to stop agent during restart: %v", err)
 	}
 
@@ -241,7 +241,7 @@ func (d *agentDispatcherAdapter) DispatchAgentDelete(ctx context.Context, hubAge
 	}
 
 	// Stop the agent first (ignore error if already stopped)
-	_ = d.manager.Stop(ctx, hubAgent.Name)
+	_ = d.manager.Stop(ctx, hubAgent.Name, "")
 
 	// Delete the agent
 	_, err := d.manager.Delete(ctx, hubAgent.Name, deleteFiles, projectPath, removeBranch)

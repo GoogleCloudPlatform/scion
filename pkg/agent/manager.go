@@ -38,7 +38,7 @@ type Manager interface {
 	Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error)
 
 	// Stop terminates an agent
-	Stop(ctx context.Context, agentID string) error
+	Stop(ctx context.Context, agentID string, grovePath string) error
 
 	// Delete terminates and removes an agent
 	Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error)
@@ -91,17 +91,28 @@ func (m *AgentManager) Close() {
 	m.msgBuffer.Close()
 }
 
-func (m *AgentManager) Stop(ctx context.Context, agentID string) error {
+func (m *AgentManager) Stop(ctx context.Context, agentID string, grovePath string) error {
 	// Resolve the agent name to a container ID so that runtimes which do
 	// not support lookup-by-name (e.g. Apple's `container` CLI) receive
 	// the actual container ID.  This mirrors the resolution logic in Delete().
 	slug := api.Slugify(agentID)
 	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
+	// Resolve grove name from grovePath (if provided) to scope the container lookup
+	stopGroveName := ""
+	if grovePath != "" {
+		if resolvedDir, err := config.GetResolvedProjectDir(grovePath); err == nil {
+			stopGroveName = config.GetGroveName(resolvedDir)
+		}
+	}
 	if err == nil {
 		for _, a := range agents {
 			if a.Name == agentID || a.ContainerID == agentID ||
 				strings.TrimPrefix(a.Name, "/") == agentID ||
 				strings.EqualFold(a.Name, agentID) {
+				// If grove info is available, skip containers from a different grove
+				if stopGroveName != "" && !matchAgentGrove(a, stopGroveName, "") {
+					continue
+				}
 				return m.Runtime.Stop(ctx, a.ContainerID)
 			}
 		}
