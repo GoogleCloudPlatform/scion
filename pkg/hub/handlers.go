@@ -6722,7 +6722,7 @@ func secretMetaToEnvVar(m secret.SecretMeta) store.EnvVar {
 		Description:   m.Description,
 		Sensitive:     true,
 		Secret:        true,
-		InjectionMode: store.InjectionModeAsNeeded,
+		InjectionMode: m.InjectionMode,
 		Created:       m.Created,
 		Updated:       m.Updated,
 		CreatedBy:     m.CreatedBy,

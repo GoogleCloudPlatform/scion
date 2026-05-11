@@ -361,11 +361,12 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 	// When --secret flag is set, redirect to the Secret API instead of Env API
 	if envSecret {
 		secretReq := &hubclient.SetSecretRequest{
-			Value:   value,
-			Scope:   scope,
-			ScopeID: scopeID,
-			Type:    "environment",
-			Target:  key,
+			Value:         value,
+			Scope:         scope,
+			ScopeID:       scopeID,
+			InjectionMode: injectionMode,
+			Type:          "environment",
+			Target:        key,
 		}
 
 		secretResp, err := client.Secrets().Set(ctx, key, secretReq)
@@ -377,7 +378,18 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 		if secretResp.Created {
 			action = "Created"
 		}
-		fmt.Printf("%s %s=******** (scope: %s) (secret)\n", action, key, scope)
+
+		// Build annotation string
+		annotations := " (secret)"
+		if secretResp.Secret != nil {
+			if secretResp.Secret.InjectionMode == "always" {
+				annotations += " (always)"
+			} else {
+				annotations += " (as-needed)"
+			}
+		}
+
+		fmt.Printf("%s %s=******** (scope: %s)%s\n", action, key, scope, annotations)
 		return nil
 	}
 

@@ -1363,7 +1363,15 @@ func createHubClient(settings *config.Settings, endpoint string) (hubclient.Clie
 		}
 	}
 
-	// 3. Fallback to auto dev auth
+	// 3. Check for hub-mode token (running inside a container)
+	if !authConfigured {
+		if token := os.Getenv("SCION_HUB_TOKEN"); token != "" {
+			opts = append(opts, hubclient.WithBearerToken(token))
+			authConfigured = true
+		}
+	}
+
+	// 4. Fallback to auto dev auth
 	if !authConfigured {
 		opts = append(opts, hubclient.WithAutoDevAuth())
 	}

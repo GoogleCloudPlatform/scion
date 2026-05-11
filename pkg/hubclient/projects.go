@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"time"
@@ -120,12 +121,27 @@ type BrokerInfo struct {
 
 // RegisterProjectResponse is the response from registering a project.
 type RegisterProjectResponse struct {
-	Project     *Project       `json:"grove"`
+	Project     *Project       `json:"project"`
+	LegacyProject *Project     `json:"grove,omitempty"`      // Legacy alias for compatibility
 	Broker      *RuntimeBroker `json:"broker,omitempty"`      // Populated if brokerId or broker provided
 	Created     bool           `json:"created"`               // True if project was newly created
 	Matches     []ProjectMatch `json:"matches,omitempty"`     // Populated when multiple projects share the same git remote
 	BrokerToken string         `json:"brokerToken,omitempty"` // DEPRECATED: use two-phase registration
 	SecretKey   string         `json:"secretKey,omitempty"`   // DEPRECATED: secrets only from /brokers/join
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy grove field.
+func (r *RegisterProjectResponse) UnmarshalJSON(data []byte) error {
+	type alias RegisterProjectResponse
+	var aux alias
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*r = RegisterProjectResponse(aux)
+	if r.Project == nil && r.LegacyProject != nil {
+		r.Project = r.LegacyProject
+	}
+	return nil
 }
 
 // ProjectMatch holds summary information about a project for disambiguation.
@@ -221,9 +237,10 @@ func (s *projectService) List(ctx context.Context, opts *ListProjectsOptions) (*
 	}
 
 	type listResponse struct {
-		Projects   []Project `json:"groves"`
-		NextCursor string    `json:"nextCursor,omitempty"`
-		TotalCount int       `json:"totalCount,omitempty"`
+		Projects       []Project `json:"projects"`
+		LegacyProjects []Project `json:"groves,omitempty"`
+		NextCursor     string    `json:"nextCursor,omitempty"`
+		TotalCount     int       `json:"totalCount,omitempty"`
 	}
 
 	result, err := apiclient.DecodeResponse[listResponse](resp)
@@ -231,8 +248,13 @@ func (s *projectService) List(ctx context.Context, opts *ListProjectsOptions) (*
 		return nil, err
 	}
 
+	projects := result.Projects
+	if len(projects) == 0 && len(result.LegacyProjects) > 0 {
+		projects = result.LegacyProjects
+	}
+
 	return &ListProjectsResponse{
-		Projects: result.Projects,
+		Projects: projects,
 		Page: apiclient.PageResult{
 			NextCursor: result.NextCursor,
 			TotalCount: result.TotalCount,
