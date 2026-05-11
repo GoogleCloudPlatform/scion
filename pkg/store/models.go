@@ -273,8 +273,8 @@ func (p *Project) UnmarshalJSON(data []byte) error {
 
 // IsSharedWorkspace returns true if this is a git project configured to use a
 // single shared workspace clone instead of per-agent clones.
-func (g *Project) IsSharedWorkspace() bool {
-	return g.GitRemote != "" && g.Labels[LabelWorkspaceMode] == WorkspaceModeShared
+func (p *Project) IsSharedWorkspace() bool {
+	return p.GitRemote != "" && p.Labels[LabelWorkspaceMode] == WorkspaceModeShared
 }
 
 // RuntimeBroker represents a compute node in the Hub database.
