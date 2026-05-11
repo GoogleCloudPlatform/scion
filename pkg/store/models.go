@@ -16,6 +16,7 @@
 package store
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -626,6 +627,36 @@ type NotificationSubscription struct {
 	CreatedBy         string    `json:"createdBy"`
 }
 
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (s NotificationSubscription) MarshalJSON() ([]byte, error) {
+	type Alias NotificationSubscription
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(s),
+		GroveID: s.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (s *NotificationSubscription) UnmarshalJSON(data []byte) error {
+	type Alias NotificationSubscription
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(s),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if s.ProjectID == "" && aux.GroveID != "" {
+		s.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
 // MatchesActivity returns true if the given activity matches any of the subscription's
 // trigger activities. Comparison is case-insensitive.
 func (s *NotificationSubscription) MatchesActivity(activity string) bool {
@@ -662,6 +693,36 @@ type Notification struct {
 	Dispatched     bool      `json:"dispatched"`   // Whether dispatch was attempted
 	Acknowledged   bool      `json:"acknowledged"` // Whether acknowledged (for human targets)
 	CreatedAt      time.Time `json:"createdAt"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (n Notification) MarshalJSON() ([]byte, error) {
+	type Alias Notification
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(n),
+		GroveID: n.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (n *Notification) UnmarshalJSON(data []byte) error {
+	type Alias Notification
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(n),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if n.ProjectID == "" && aux.GroveID != "" {
+		n.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // ListOptions provides pagination and filtering for list operations.
@@ -1391,4 +1452,34 @@ type ProjectSyncState struct {
 	LastCommitSHA string     `json:"lastCommitSha,omitempty"`
 	FileCount     int        `json:"fileCount"`
 	TotalBytes    int64      `json:"totalBytes"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (s ProjectSyncState) MarshalJSON() ([]byte, error) {
+	type Alias ProjectSyncState
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(s),
+		GroveID: s.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (s *ProjectSyncState) UnmarshalJSON(data []byte) error {
+	type Alias ProjectSyncState
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(s),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if s.ProjectID == "" && aux.GroveID != "" {
+		s.ProjectID = aux.GroveID
+	}
+	return nil
 }

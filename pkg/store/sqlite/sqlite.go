@@ -337,7 +337,8 @@ CREATE TABLE IF NOT EXISTS agents (
 	FOREIGN KEY (grove_id) REFERENCES groves(id) ON DELETE CASCADE,
 	FOREIGN KEY (runtime_broker_id) REFERENCES runtime_brokers(id) ON DELETE SET NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_grove_slug ON agents(grove_id, agent_id);
+-- Use (agent_id, grove_id) order to match Ent schema's (slug, project_id)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_grove_slug ON agents(agent_id, grove_id);
 CREATE INDEX IF NOT EXISTS idx_agents_grove ON agents(grove_id);
 CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
 CREATE INDEX IF NOT EXISTS idx_agents_runtime_broker ON agents(runtime_broker_id);
@@ -1219,7 +1220,9 @@ DROP INDEX IF EXISTS idx_groves_default_runtime_broker;
 CREATE INDEX IF NOT EXISTS idx_projects_default_runtime_broker ON projects(default_runtime_broker_id);
 
 DROP INDEX IF EXISTS idx_agents_grove_slug;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_project_slug ON agents(project_id, agent_id);
+DROP INDEX IF EXISTS idx_agents_project_slug;
+-- Use (agent_id, project_id) order to match Ent schema's (slug, project_id)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_project_slug ON agents(agent_id, project_id);
 DROP INDEX IF EXISTS idx_agents_grove;
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id);
 
