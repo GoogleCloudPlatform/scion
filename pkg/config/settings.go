@@ -945,9 +945,9 @@ func (s *Settings) GetHubEndpoint() string {
 	return ""
 }
 
-// GetHubProjectID returns the hub-side grove ID if configured.
-// This is the ID of the grove on the Hub, which may differ from the local
-// deterministic grove_id (especially for git-based groves where grove_id
+// GetHubProjectID returns the hub-side project ID if configured.
+// This is the ID of the project on the Hub, which may differ from the local
+// deterministic project_id (especially for git-based projects where project_id
 // is a UUID v5 hash of the git remote).
 func (s *Settings) GetHubProjectID() string {
 	if s.Hub != nil {

@@ -100,7 +100,7 @@ type ListProjectsResponse struct {
 
 // RegisterProjectRequest is the request for registering a project.
 type RegisterProjectRequest struct {
-	ID        string            `json:"id,omitempty"` // Client-provided project ID (from grove_id setting)
+	ID        string            `json:"id,omitempty"` // Client-provided project ID (from project_id setting)
 	Name      string            `json:"name"`
 	GitRemote string            `json:"gitRemote"`
 	Path      string            `json:"path,omitempty"`
