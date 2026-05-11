@@ -746,6 +746,14 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		}
 	}
 
+	// Remap hub.project_id to hub.grove_id for backward compatibility with V1 structs.
+	// SCION_HUB_PROJECT_ID maps to hub.project_id via versionedEnvKeyMapper.
+	if k.Exists("hub.project_id") && !k.Exists("hub.grove_id") {
+		_ = k.Load(confmap.Provider(map[string]interface{}{
+			"hub.grove_id": k.String("hub.project_id"),
+		}, "."), nil)
+	}
+
 	// Unmarshal into VersionedSettings struct
 	settings := &VersionedSettings{
 		Runtimes:       make(map[string]V1RuntimeConfig),
@@ -1714,7 +1722,7 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 			vs.Hub = &V1HubClientConfig{}
 		}
 		vs.Hub.Endpoint = value
-	case "hub.projectId", "hub.groveId":
+	case "hub.project_id", "hub.grove_id", "hub.projectId", "hub.groveId":
 		if vs.Hub == nil {
 			vs.Hub = &V1HubClientConfig{}
 		}
@@ -1821,7 +1829,7 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 			return vs.Hub.Endpoint, nil
 		}
 		return "", nil
-	case "hub.projectId", "hub.groveId":
+	case "hub.project_id", "hub.grove_id", "hub.projectId", "hub.groveId":
 		if vs.Hub != nil {
 			return vs.Hub.ProjectID, nil
 		}

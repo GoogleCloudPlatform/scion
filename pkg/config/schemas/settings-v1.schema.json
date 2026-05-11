@@ -99,9 +99,15 @@
           "x-env-var": "SCION_HUB_ENDPOINT",
           "x-since": "1"
         },
+        "project_id": {
+          "type": "string",
+          "description": "Project identifier when registered with the Hub. Formerly known as 'grove_id', which is still accepted for backward compatibility.",
+          "x-env-var": "SCION_HUB_PROJECT_ID",
+          "x-since": "1"
+        },
         "grove_id": {
           "type": "string",
-          "description": "Grove identifier when registered with the Hub.",
+          "description": "Deprecated: Use 'project_id' instead.",
           "x-env-var": "SCION_HUB_GROVE_ID",
           "x-since": "1"
         },
