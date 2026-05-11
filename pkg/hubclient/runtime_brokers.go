@@ -94,6 +94,24 @@ func (r ListBrokerProjectsResponse) MarshalJSON() ([]byte, error) {
 	})
 }
 
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (r *ListBrokerProjectsResponse) UnmarshalJSON(data []byte) error {
+	type Alias ListBrokerProjectsResponse
+	aux := &struct {
+		Groves []BrokerProjectInfo `json:"groves,omitempty"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if len(r.Projects) == 0 && len(aux.Groves) > 0 {
+		r.Projects = aux.Groves
+	}
+	return nil
+}
+
 // BrokerHeartbeat is the heartbeat payload.
 type BrokerHeartbeat struct {
 	Status   string             `json:"status"`
