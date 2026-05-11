@@ -438,6 +438,10 @@ func (p *ChannelEventPublisher) PublishNotification(_ context.Context, notif *st
 		CreatedAt: notif.CreatedAt.Format("2006-01-02T15:04:05.000Z"),
 	}
 	p.publish("notification.created", evt)
+	if notif.ProjectID != "" {
+		p.publish("project."+notif.ProjectID+".notification", evt)
+		p.publish("grove."+notif.ProjectID+".notification", evt)
+	}
 }
 
 // PublishAllowListChanged publishes an allow list change event.

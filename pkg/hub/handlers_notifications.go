@@ -248,6 +248,9 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 
 		// Apply optional filters
 		projectID := r.URL.Query().Get("projectId")
+		if projectID == "" {
+			projectID = r.URL.Query().Get("groveId")
+		}
 		agentID := r.URL.Query().Get("agentId")
 		scope := r.URL.Query().Get("scope")
 		if scope == "project" {
@@ -505,6 +508,9 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 	// GET /api/v1/notifications/templates — List
 	case templateID == "" && r.Method == http.MethodGet:
 		projectID := r.URL.Query().Get("projectId")
+		if projectID == "" {
+			projectID = r.URL.Query().Get("groveId")
+		}
 		templates, err := s.store.ListSubscriptionTemplates(ctx, projectID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")

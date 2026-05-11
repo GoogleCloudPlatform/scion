@@ -44,6 +44,36 @@ type ProjectCacheRefreshResponse struct {
 	CachedAt time.Time `json:"cachedAt"`
 }
 
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (r ProjectCacheRefreshResponse) MarshalJSON() ([]byte, error) {
+	type Alias ProjectCacheRefreshResponse
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(r),
+		GroveID: r.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (r *ProjectCacheRefreshResponse) UnmarshalJSON(data []byte) error {
+	type Alias ProjectCacheRefreshResponse
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
 // ProjectCacheStatusResponse is the response for the project cache status endpoint.
 type ProjectCacheStatusResponse struct {
 	// ProjectID is the project identifier.
@@ -58,6 +88,36 @@ type ProjectCacheStatusResponse struct {
 	TotalBytes int64 `json:"totalBytes"`
 	// LastRefresh is when the cache was last refreshed.
 	LastRefresh *time.Time `json:"lastRefresh,omitempty"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (r ProjectCacheStatusResponse) MarshalJSON() ([]byte, error) {
+	type Alias ProjectCacheStatusResponse
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(r),
+		GroveID: r.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (r *ProjectCacheStatusResponse) UnmarshalJSON(data []byte) error {
+	type Alias ProjectCacheStatusResponse
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // RuntimeBrokerProjectUploadRequest is sent to a Runtime Broker to upload a project's

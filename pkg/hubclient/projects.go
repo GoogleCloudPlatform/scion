@@ -428,21 +428,81 @@ func (s *projectService) DeleteAgent(ctx context.Context, projectID, agentID str
 
 // ProjectCacheRefreshResponse is the response for a project cache refresh operation.
 type ProjectCacheRefreshResponse struct {
-	ProjectID  string    `json:"groveId"`
+	ProjectID  string    `json:"projectId"`
 	BrokerID   string    `json:"brokerId"`
 	FileCount  int       `json:"fileCount"`
 	TotalBytes int64     `json:"totalBytes"`
 	CachedAt   time.Time `json:"cachedAt"`
 }
 
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (r ProjectCacheRefreshResponse) MarshalJSON() ([]byte, error) {
+	type Alias ProjectCacheRefreshResponse
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(r),
+		GroveID: r.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (r *ProjectCacheRefreshResponse) UnmarshalJSON(data []byte) error {
+	type Alias ProjectCacheRefreshResponse
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
 // ProjectCacheStatusResponse is the response for project cache status.
 type ProjectCacheStatusResponse struct {
-	ProjectID   string     `json:"groveId"`
+	ProjectID   string     `json:"projectId"`
 	Cached      bool       `json:"cached"`
 	BrokerID    string     `json:"brokerId,omitempty"`
 	FileCount   int        `json:"fileCount"`
 	TotalBytes  int64      `json:"totalBytes"`
 	LastRefresh *time.Time `json:"lastRefresh,omitempty"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (r ProjectCacheStatusResponse) MarshalJSON() ([]byte, error) {
+	type Alias ProjectCacheStatusResponse
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(r),
+		GroveID: r.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (r *ProjectCacheStatusResponse) UnmarshalJSON(data []byte) error {
+	type Alias ProjectCacheStatusResponse
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // RefreshCache triggers a cache refresh for a linked project.
