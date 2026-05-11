@@ -1690,7 +1690,7 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 		vs.CLI.AutoHelp = &autohelp
 
 	// --- grove_id: top-level in legacy, hub.grove_id in v1 ---
-	case "grove_id":
+	case "project_id", "grove_id":
 		if vs.Hub == nil {
 			vs.Hub = &V1HubClientConfig{}
 		}
@@ -1714,7 +1714,7 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 			vs.Hub = &V1HubClientConfig{}
 		}
 		vs.Hub.Endpoint = value
-	case "hub.groveId":
+	case "hub.projectId", "hub.groveId":
 		if vs.Hub == nil {
 			vs.Hub = &V1HubClientConfig{}
 		}
@@ -1795,7 +1795,7 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 			return "false", nil
 		}
 		return "", nil
-	case "grove_id":
+	case "project_id", "grove_id":
 		if vs.Hub != nil {
 			return vs.Hub.ProjectID, nil
 		}
@@ -1821,7 +1821,7 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 			return vs.Hub.Endpoint, nil
 		}
 		return "", nil
-	case "hub.groveId":
+	case "hub.projectId", "hub.groveId":
 		if vs.Hub != nil {
 			return vs.Hub.ProjectID, nil
 		}
