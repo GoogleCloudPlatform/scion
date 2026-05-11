@@ -1,79 +1,33 @@
-# Independent Code Review v8: Grove-to-Project Rename
+## Review Summary
 
-**Verdict:** REQUEST CHANGES
-**Summary:** Verified critical mismatches between Hub and Broker communication paths.
+**Verdict:** APPROVE
 
-| Severity | Count | Category |
-| :--- | :--- | :--- |
-| **CRITICAL** | 2 | API/Protocol Mismatch |
-| **HIGH** | 1 | Functional Isolation |
-| **MEDIUM** | 0 | - |
-| **LOW** | 0 | - |
-| **INFO** | 0 | - |
+**Overview:** The changes successfully address the "grove" to "project" rename by providing robust JSON marshaling/unmarshaling for Hub response types and heartbeats. The implementation correctly handles legacy fields and avoids shadowing issues using established Go patterns.
 
-## Critical Issues
+### Critical Issues
+- None
 
-### 1. Heartbeat JSON Payload Mismatch
-The Hub and Broker have diverged on the JSON schema for heartbeats. Updated Hubs expect `projects` and `projectId` keys, but updated Brokers (using `hubclient`) still send `groves` and `groveId`.
+### Important Issues
+- None
 
-*   **File (Broker-side):** `pkg/hubclient/runtime_brokers.go`
-    ```go
-    type BrokerHeartbeat struct {
-        Status   string             `json:"status"`
-        Projects []ProjectHeartbeat `json:"groves,omitempty"` // Incorrect tag: should be "projects"
-    }
-    type ProjectHeartbeat struct {
-        ProjectID  string           `json:"groveId"` // Incorrect tag: should be "projectId"
-    ```
-*   **File (Hub-side):** `pkg/hub/handlers.go`
-    ```go
-    type brokerHeartbeatRequest struct {
-        Projects []brokerProjectHeartbeat `json:"projects,omitempty"`
-    }
-    type brokerProjectHeartbeat struct {
-        ProjectID    string                 `json:"projectId"`
-    ```
-*   **Impact:** Hub will fail to update agent statuses from heartbeats, breaking observability and state tracking for all agents.
-*   **Suggested Fix:** In `pkg/hubclient/runtime_brokers.go`, update the JSON tags to `projects` and `projectId` respectively, OR add custom `MarshalJSON` to `BrokerHeartbeat` / `ProjectHeartbeat` to support both (similar to `AgentInfo`).
+### Suggestions
 
-### 2. Workspace Project-Upload Route Mismatch
-The route used by the Hub to trigger a project-level workspace upload does not match the route the Broker listens on.
+- **File: pkg/hub/response_types.go:42, 87, 115, ...**
+  **Consistency in `omitempty` for legacy fields:** Legacy fields such as `groveId`, `groveName`, and `grove` are marked `omitempty` in some types (e.g., `TemplateWithCapabilities`, `GroupWithCapabilities`) but are mandatory in others (e.g., `AgentWithCapabilities`, `ProjectWithCapabilities`). 
+  *Suggested Fix:* Use `omitempty` consistently for all legacy fields to ensure that if for some reason the source field is empty, we don't send an explicit empty string for the legacy key.
 
-*   **File (Hub-side):** `pkg/hub/project_cache.go:386`
-    ```go
-    tunnelProjectWorkspaceRequest(..., "POST", "/api/v1/workspace/project-upload", ...)
-    ```
-*   **File (Broker-side):** `pkg/runtimebroker/server.go:1445`
-    ```go
-    s.mux.HandleFunc("/api/v1/workspace/grove-upload", s.handleProjectWorkspaceUpload)
-    ```
-*   **Impact:** Cache refresh for linked projects will fail with a 404 error.
-*   **Suggested Fix:** Update the route in `pkg/runtimebroker/server.go` to `/api/v1/workspace/project-upload`.
+- **File: pkg/hub/response_types.go:50, 94**
+  **Performance (Double Unmarshaling):** `AgentWithCapabilities` and `ProjectWithCapabilities` unmarshal the same JSON input twice. While this correctly leverages the embedded model's `UnmarshalJSON`, it is slightly less efficient than a single-pass approach.
+  *Suggested Fix:* This is acceptable for readability, but consider if the volume of these requests justifies optimizing into a single pass using a combined alias struct.
 
-## High Issues
+### What's Done Well
+- **Correct Pattern for Embedded Marshaling:** The use of `type Alias T` to bypass the embedded type's `MarshalJSON`/`UnmarshalJSON` methods is exactly the right way to avoid infinite recursion and ensure wrapper fields are included.
+- **Robust Heartbeat Support:** The Hub's heartbeat handler correctly supports both the new `projects` key and the legacy `groves` key, ensuring older brokers continue to work during the transition.
+- **Comprehensive Legacy Coverage:** The PR goes beyond just renaming and ensures that all relevant API entities (Policies, Groups, Templates) maintain backward compatibility.
+- **Solid Test Suite:** The addition of `heartbeat_legacy_test.go` and updates to `runtime_brokers_test.go` provide good confidence in the bidirectional compatibility.
 
-### 1. Agent Isolation Bypass via Query Parameter
-The Hub has been updated to send `projectId` in query parameters for agent-scoped requests, but the Broker still only looks for `groveId`.
-
-*   **File (Hub-side):** `pkg/hub/controlchannel_client.go:88` (and others)
-    ```go
-    path += "?projectId=" + url.QueryEscape(projectID)
-    ```
-*   **File (Broker-side):** `pkg/runtimebroker/handlers.go:788` (and others)
-    ```go
-    groveID := r.URL.Query().Get("groveId")
-    ```
-*   **Impact:** When the Hub calls the Broker to Stop or Delete an agent, the `groveID` variable on the Broker will be empty. This causes `resolveManagerForAgent` to ignore project scoping, potentially targeting an agent with the same name in a different project if a name collision exists.
-*   **Suggested Fix:** Update Broker handlers (`handleAgentByID`, `listAgents`, `pty_handlers.go`) to check both `groveId` and `projectId` query parameters.
-
-## What's Done Well
-*   Excellent legacy support in `pkg/api/types.go` using custom `MarshalJSON`/`UnmarshalJSON` for `AgentInfo` and `ResolvedSecret`.
-*   Methodical migration of database tables and columns in `pkg/store/sqlite/sqlite.go`.
-*   Robust fallback logic in `pkg/hubclient/client.go` to handle `/projects` -> `/groves` API transitions.
-*   Successful compilation and passing of core configuration and API tests.
-
-## Verification Story
-*   Verified compilation with `go build ./...` and `go vet ./...`.
-*   Ran `go test ./pkg/config/ -count=1` and `go test ./pkg/api/ -count=1` (All Passed).
-*   Manually traced protocol changes between `pkg/hub` and `pkg/runtimebroker` to identify mismatches.
-*   Verified that Hub tests for heartbeats pass only because they use the Hub's internal types, masking the protocol break with the Broker.
+### Verification Story
+- Tests reviewed: Yes. `TestBrokerHeartbeatRequest_UnmarshalJSON`, `TestBrokerProjectHeartbeat_UnmarshalJSON`, and `ListBrokerProjectsResponse` tests verify the legacy mapping.
+- Build verified: Yes. `go build ./...` passes.
+- Lint/static analysis clean: Yes. The code follows standard Go idioms for JSON handling.
+- Security checked: Yes. No unsanitized inputs or insecure handling identified in these JSON transformations.

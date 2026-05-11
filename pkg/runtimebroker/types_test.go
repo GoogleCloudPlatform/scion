@@ -22,6 +22,52 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
+func TestBrokerInfoResponse_JSON(t *testing.T) {
+	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
+		jsonData := `{
+			"brokerId": "b1",
+			"version": "1.0",
+			"groves": [{"projectId": "p1", "projectName": "Project 1"}]
+		}`
+		var resp BrokerInfoResponse
+		if err := json.Unmarshal([]byte(jsonData), &resp); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if len(resp.Projects) != 1 {
+			t.Fatalf("Expected 1 project, got %d", len(resp.Projects))
+		}
+		if resp.Projects[0].ProjectID != "p1" {
+			t.Errorf("ProjectID = %q, want %q", resp.Projects[0].ProjectID, "p1")
+		}
+	})
+
+	t.Run("marshal dual fields", func(t *testing.T) {
+		resp := BrokerInfoResponse{
+			BrokerID: "b1",
+			Version:  "1.0",
+			Projects: []ProjectInfo{
+				{ProjectID: "p1", ProjectName: "Project 1"},
+			},
+		}
+		data, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("Unmarshal back failed: %v", err)
+		}
+
+		if _, ok := m["projects"]; !ok {
+			t.Errorf("Missing 'projects' field")
+		}
+		if _, ok := m["groves"]; !ok {
+			t.Errorf("Missing 'groves' field")
+		}
+	})
+}
+
 func TestProjectInfo_JSON(t *testing.T) {
 	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
 		jsonData := `{"groveId": "legacy-id", "groveName": "legacy-name"}`
