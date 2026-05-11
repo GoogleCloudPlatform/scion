@@ -678,7 +678,7 @@ func (s ResolvedSecret) MarshalJSON() ([]byte, error) {
 	type Alias ResolvedSecret
 	var grove string
 	if s.Source == "project" {
-		grove = "project"
+		grove = "grove"
 	}
 	return json.Marshal(&struct {
 		Alias
