@@ -2294,19 +2294,27 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		}
 	}
 
-	// Path traversal protection: ensure the resolved path stays inside its base directory.
-	grovesBase := filepath.Dir(grovePath)
+	// Path traversal protection: ensure the resolved path stays inside
+	// one of the two allowed base directories.
+	projectsBase := filepath.Join(globalDir, "projects")
+	grovesBase := filepath.Join(globalDir, "groves")
 	absProject, err := filepath.Abs(grovePath)
 	if err != nil {
 		RuntimeError(w, "Failed to resolve grove path: "+err.Error())
 		return
 	}
-	absBase, err := filepath.Abs(grovesBase)
+	absProjectsBase, err := filepath.Abs(projectsBase)
 	if err != nil {
-		RuntimeError(w, "Failed to resolve groves base path: "+err.Error())
+		RuntimeError(w, "Failed to resolve base path: "+err.Error())
 		return
 	}
-	if !strings.HasPrefix(absProject, absBase+string(filepath.Separator)) {
+	absGrovesBase, err := filepath.Abs(grovesBase)
+	if err != nil {
+		RuntimeError(w, "Failed to resolve base path: "+err.Error())
+		return
+	}
+	if !strings.HasPrefix(absProject, absProjectsBase+string(filepath.Separator)) &&
+		!strings.HasPrefix(absProject, absGrovesBase+string(filepath.Separator)) {
 		s.agentLifecycleLog.Warn("grove cleanup path traversal blocked", "slug", slug, "resolved", absProject)
 		w.WriteHeader(http.StatusBadRequest)
 		return
