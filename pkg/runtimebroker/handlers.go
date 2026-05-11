@@ -391,9 +391,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		projectsPath := filepath.Join(globalDir, "projects", req.ProjectSlug)
-		if _, err := os.Stat(projectsPath); os.IsNotExist(err) {
+		if !hasWorkspaceContent(projectsPath) {
 			grovesPath := filepath.Join(globalDir, "groves", req.ProjectSlug)
-			if _, statErr := os.Stat(grovesPath); statErr == nil {
+			if hasWorkspaceContent(grovesPath) {
 				projectsPath = grovesPath
 			}
 		}
@@ -602,9 +602,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			workspaceDir = filepath.Join(globalDir, "projects", req.ProjectSlug)
-			if _, err := os.Stat(workspaceDir); os.IsNotExist(err) {
+			if !hasWorkspaceContent(workspaceDir) {
 				grovesPath := filepath.Join(globalDir, "groves", req.ProjectSlug)
-				if _, statErr := os.Stat(grovesPath); statErr == nil {
+				if hasWorkspaceContent(grovesPath) {
 					workspaceDir = grovesPath
 				}
 			}
@@ -2287,9 +2287,9 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	}
 
 	grovePath := filepath.Join(globalDir, "projects", slug)
-	if _, err := os.Stat(grovePath); os.IsNotExist(err) {
+	if !hasWorkspaceContent(grovePath) {
 		oldPath := filepath.Join(globalDir, "groves", slug)
-		if _, statErr := os.Stat(oldPath); statErr == nil {
+		if hasWorkspaceContent(oldPath) {
 			grovePath = oldPath
 		}
 	}

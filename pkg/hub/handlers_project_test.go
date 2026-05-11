@@ -48,6 +48,30 @@ func TestHubNativeProjectPath(t *testing.T) {
 	assert.Equal(t, expected, path)
 }
 
+func TestHubNativeProjectPath_EmptyProjectsFallsBackToGroves(t *testing.T) {
+	// Use a temp directory as HOME to avoid polluting real ~/.scion
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	slug := "empty-projects-grove"
+	globalDir := filepath.Join(tmpHome, ".scion")
+
+	// Create projects/{slug} with only infrastructure dirs (no real content)
+	projectsDir := filepath.Join(globalDir, "projects", slug)
+	require.NoError(t, os.MkdirAll(filepath.Join(projectsDir, "shared-dirs"), 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(projectsDir, ".scion"), 0755))
+
+	// Create groves/{slug} with actual workspace content
+	grovesDir := filepath.Join(globalDir, "groves", slug)
+	require.NoError(t, os.MkdirAll(grovesDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(grovesDir, "README.md"), []byte("# workspace"), 0644))
+
+	// hubNativeProjectPath should fall back to groves/ since projects/ has no real content
+	path, err := hubNativeProjectPath(slug)
+	require.NoError(t, err)
+	assert.Equal(t, grovesDir, path, "should fall back to groves path when projects dir only contains infrastructure dirs")
+}
+
 func TestCreateProject_HubNative_NoGitRemote(t *testing.T) {
 	srv, _ := testServer(t)
 

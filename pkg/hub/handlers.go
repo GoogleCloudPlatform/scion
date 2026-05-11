@@ -3446,13 +3446,33 @@ func hubNativeProjectPath(slug string) (string, error) {
 		return "", fmt.Errorf("failed to get global dir: %w", err)
 	}
 	newPath := filepath.Join(globalDir, "projects", slug)
-	if _, err := os.Stat(newPath); os.IsNotExist(err) {
-		oldPath := filepath.Join(globalDir, "groves", slug)
-		if _, err := os.Stat(oldPath); err == nil {
-			return oldPath, nil
+	if hasWorkspaceContent(newPath) {
+		return newPath, nil
+	}
+	oldPath := filepath.Join(globalDir, "groves", slug)
+	if hasWorkspaceContent(oldPath) {
+		return oldPath, nil
+	}
+	// Neither has content — return new path (will be created on demand)
+	return newPath, nil
+}
+
+// hasWorkspaceContent returns true if dir exists and contains meaningful
+// workspace files beyond just infrastructure directories.
+func hasWorkspaceContent(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		switch e.Name() {
+		case "shared-dirs", ".scion":
+			continue
+		default:
+			return true
 		}
 	}
-	return newPath, nil
+	return false
 }
 
 // initHubNativeProject initializes the filesystem workspace for a hub-native project.

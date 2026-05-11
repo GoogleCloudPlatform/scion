@@ -96,9 +96,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			return nil, &startContextError{Status: http.StatusInternalServerError, Message: "Failed to get global dir: " + err.Error()}
 		}
 		projectsPath := filepath.Join(globalDir, "projects", in.ProjectSlug)
-		if _, err := os.Stat(projectsPath); os.IsNotExist(err) {
+		if !hasWorkspaceContent(projectsPath) {
 			grovesPath := filepath.Join(globalDir, "groves", in.ProjectSlug)
-			if _, statErr := os.Stat(grovesPath); statErr == nil {
+			if hasWorkspaceContent(grovesPath) {
 				projectsPath = grovesPath
 			}
 		}
@@ -472,4 +472,22 @@ type startContextError struct {
 
 func (e *startContextError) Error() string {
 	return e.Message
+}
+
+// hasWorkspaceContent returns true if dir exists and contains meaningful
+// workspace files beyond just infrastructure directories.
+func hasWorkspaceContent(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		switch e.Name() {
+		case "shared-dirs", ".scion":
+			continue
+		default:
+			return true
+		}
+	}
+	return false
 }
