@@ -3445,7 +3445,14 @@ func hubNativeProjectPath(slug string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to get global dir: %w", err)
 	}
-	return filepath.Join(globalDir, "projects", slug), nil
+	newPath := filepath.Join(globalDir, "projects", slug)
+	if _, err := os.Stat(newPath); os.IsNotExist(err) {
+		oldPath := filepath.Join(globalDir, "groves", slug)
+		if _, err := os.Stat(oldPath); err == nil {
+			return oldPath, nil
+		}
+	}
+	return newPath, nil
 }
 
 // initHubNativeProject initializes the filesystem workspace for a hub-native project.

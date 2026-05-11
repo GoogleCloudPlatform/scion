@@ -864,12 +864,15 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 	// Collect grove paths to scan
 	var grovePaths []string
 
-	// Hub-native groves: ~/.scion.groves/<slug>/.scion/
+	// Hub-native groves: ~/.scion/{projects,groves}/<slug>/.scion/
 	globalDir, err := config.GetGlobalDir()
 	if err == nil {
-		grovesDir := filepath.Join(globalDir, "projects")
-		entries, err := os.ReadDir(grovesDir)
-		if err == nil {
+		for _, dirName := range []string{"projects", "groves"} {
+			grovesDir := filepath.Join(globalDir, dirName)
+			entries, err := os.ReadDir(grovesDir)
+			if err != nil {
+				continue
+			}
 			for _, e := range entries {
 				if !e.IsDir() {
 					continue

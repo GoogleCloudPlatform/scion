@@ -95,7 +95,14 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		if err != nil {
 			return nil, &startContextError{Status: http.StatusInternalServerError, Message: "Failed to get global dir: " + err.Error()}
 		}
-		in.ProjectPath = filepath.Join(globalDir, "projects", in.ProjectSlug)
+		projectsPath := filepath.Join(globalDir, "projects", in.ProjectSlug)
+		if _, err := os.Stat(projectsPath); os.IsNotExist(err) {
+			grovesPath := filepath.Join(globalDir, "groves", in.ProjectSlug)
+			if _, statErr := os.Stat(grovesPath); statErr == nil {
+				projectsPath = grovesPath
+			}
+		}
+		in.ProjectPath = projectsPath
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("Resolved hub-native grove path from slug",
 				"agent_id", in.AgentID, "slug", in.ProjectSlug, "path", in.ProjectPath)

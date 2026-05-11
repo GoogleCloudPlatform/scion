@@ -390,7 +390,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			RuntimeError(w, "Failed to get global dir: "+err.Error())
 			return
 		}
-		req.ProjectPath = filepath.Join(globalDir, "projects", req.ProjectSlug)
+		projectsPath := filepath.Join(globalDir, "projects", req.ProjectSlug)
+		if _, err := os.Stat(projectsPath); os.IsNotExist(err) {
+			grovesPath := filepath.Join(globalDir, "groves", req.ProjectSlug)
+			if _, statErr := os.Stat(grovesPath); statErr == nil {
+				projectsPath = grovesPath
+			}
+		}
+		req.ProjectPath = projectsPath
 	}
 
 	// Env-gather: if GatherEnv is true, evaluate env completeness before building full context.
@@ -595,6 +602,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			workspaceDir = filepath.Join(globalDir, "projects", req.ProjectSlug)
+			if _, err := os.Stat(workspaceDir); os.IsNotExist(err) {
+				grovesPath := filepath.Join(globalDir, "groves", req.ProjectSlug)
+				if _, statErr := os.Stat(grovesPath); statErr == nil {
+					workspaceDir = grovesPath
+				}
+			}
 		} else {
 			workspaceDir = filepath.Join(s.config.WorktreeBase, req.Name, "workspace")
 		}
@@ -2274,9 +2287,15 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	}
 
 	grovePath := filepath.Join(globalDir, "projects", slug)
+	if _, err := os.Stat(grovePath); os.IsNotExist(err) {
+		oldPath := filepath.Join(globalDir, "groves", slug)
+		if _, statErr := os.Stat(oldPath); statErr == nil {
+			grovePath = oldPath
+		}
+	}
 
-	// Path traversal protection: ensure the resolved path stays inside the groves directory.
-	grovesBase := filepath.Join(globalDir, "projects")
+	// Path traversal protection: ensure the resolved path stays inside its base directory.
+	grovesBase := filepath.Dir(grovePath)
 	absProject, err := filepath.Abs(grovePath)
 	if err != nil {
 		RuntimeError(w, "Failed to resolve grove path: "+err.Error())
@@ -2323,25 +2342,27 @@ func findAgentInHubNativeProjects(agentName string) string {
 	if err != nil {
 		return ""
 	}
-	grovesDir := filepath.Join(globalDir, "projects")
-	entries, err := os.ReadDir(grovesDir)
-	if err != nil {
-		return ""
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
+	for _, dirName := range []string{"projects", "groves"} {
+		grovesDir := filepath.Join(globalDir, dirName)
+		entries, err := os.ReadDir(grovesDir)
+		if err != nil {
 			continue
 		}
-		scionDir := filepath.Join(grovesDir, entry.Name(), ".scion")
-		agentDir := filepath.Join(scionDir, "agents", agentName)
-		if _, err := os.Stat(agentDir); err == nil {
-			return scionDir
-		}
-		// Shared-workspace agents have no in-grove agentDir — probe the
-		// external split-storage path.
-		if extDir, err := config.GetGitProjectExternalAgentsDir(scionDir); err == nil && extDir != "" {
-			if _, err := os.Stat(filepath.Join(extDir, agentName)); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			scionDir := filepath.Join(grovesDir, entry.Name(), ".scion")
+			agentDir := filepath.Join(scionDir, "agents", agentName)
+			if _, err := os.Stat(agentDir); err == nil {
 				return scionDir
+			}
+			// Shared-workspace agents have no in-grove agentDir — probe the
+			// external split-storage path.
+			if extDir, err := config.GetGitProjectExternalAgentsDir(scionDir); err == nil && extDir != "" {
+				if _, err := os.Stat(filepath.Join(extDir, agentName)); err == nil {
+					return scionDir
+				}
 			}
 		}
 	}
