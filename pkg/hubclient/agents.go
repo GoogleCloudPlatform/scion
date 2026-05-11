@@ -291,6 +291,7 @@ func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*List
 	query := url.Values{}
 	if opts != nil {
 		if opts.ProjectID != "" {
+			query.Set("projectId", opts.ProjectID)
 			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.Phase != "" {

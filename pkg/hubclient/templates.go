@@ -176,6 +176,7 @@ func (s *templateService) List(ctx context.Context, opts *ListTemplatesOptions) 
 			query.Set("scope", opts.Scope)
 		}
 		if opts.ProjectID != "" {
+			query.Set("projectId", opts.ProjectID)
 			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.Harness != "" {

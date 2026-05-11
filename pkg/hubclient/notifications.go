@@ -262,6 +262,7 @@ func (s *subscriptionService) List(ctx context.Context, opts *ListSubscriptionsO
 	query := url.Values{}
 	if opts != nil {
 		if opts.ProjectID != "" {
+			query.Set("projectId", opts.ProjectID)
 			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.AgentID != "" {
@@ -368,6 +369,7 @@ func (s *subscriptionTemplateService) Create(ctx context.Context, req *CreateSub
 func (s *subscriptionTemplateService) List(ctx context.Context, projectID string) ([]SubscriptionTemplate, error) {
 	query := url.Values{}
 	if projectID != "" {
+		query.Set("projectId", projectID)
 		query.Set("groveId", projectID)
 	}
 	resp, err := s.c.getWithQuery(ctx, "/api/v1/notifications/templates", query, nil)

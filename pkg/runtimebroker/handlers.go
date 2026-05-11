@@ -782,10 +782,13 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract groveId from query params for grove-scoped agent resolution.
-	// This prevents cross-grove agent collision when two agents with the same
-	// name exist in different groves on the same broker.
-	groveID := r.URL.Query().Get("groveId")
+	// Extract projectId (or legacy groveId) from query params for project-scoped agent resolution.
+	// This prevents cross-project agent collision when two agents with the same
+	// name exist in different projects on the same broker.
+	projectID := r.URL.Query().Get("projectId")
+	if projectID == "" {
+		projectID = r.URL.Query().Get("groveId")
+	}
 
 	// Handle WebSocket attach for PTY
 	if action == "attach" && isPTYWebSocketUpgrade(r) {
@@ -795,15 +798,15 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 
 	// Handle actions
 	if action != "" {
-		s.handleAgentAction(w, r, id, groveID, action)
+		s.handleAgentAction(w, r, id, projectID, action)
 		return
 	}
 
 	switch r.Method {
 	case http.MethodGet:
-		s.getAgent(w, r, id, groveID)
+		s.getAgent(w, r, id, projectID)
 	case http.MethodDelete:
-		s.deleteAgent(w, r, id, groveID)
+		s.deleteAgent(w, r, id, projectID)
 	default:
 		MethodNotAllowed(w)
 	}

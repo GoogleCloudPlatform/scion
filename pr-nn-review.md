@@ -1,76 +1,79 @@
-# Code Review: Grove-to-Project Rename (v3)
-
-## Review Summary
+# Independent Code Review v8: Grove-to-Project Rename
 
 **Verdict:** REQUEST CHANGES
+**Summary:** Verified critical mismatches between Hub and Broker communication paths.
 
-**Overview:** The rename is very comprehensive and well-implemented across the core codebase. Backward compatibility for JSON, REST paths, and events is robust. However, two critical omissions in the database migration and the A2A bridge, along with some missing legacy fields in API responses, must be addressed.
+| Severity | Count | Category |
+| :--- | :--- | :--- |
+| **CRITICAL** | 2 | API/Protocol Mismatch |
+| **HIGH** | 1 | Functional Isolation |
+| **MEDIUM** | 0 | - |
+| **LOW** | 0 | - |
+| **INFO** | 0 | - |
 
-**Findings Count:**
-- CRITICAL: 2
-- HIGH: 1
-- MEDIUM: 2
-- LOW: 2
-- INFO: 1
+## Critical Issues
 
----
+### 1. Heartbeat JSON Payload Mismatch
+The Hub and Broker have diverged on the JSON schema for heartbeats. Updated Hubs expect `projects` and `projectId` keys, but updated Brokers (using `hubclient`) still send `groves` and `groveId`.
 
-### Critical Issues
+*   **File (Broker-side):** `pkg/hubclient/runtime_brokers.go`
+    ```go
+    type BrokerHeartbeat struct {
+        Status   string             `json:"status"`
+        Projects []ProjectHeartbeat `json:"groves,omitempty"` // Incorrect tag: should be "projects"
+    }
+    type ProjectHeartbeat struct {
+        ProjectID  string           `json:"groveId"` // Incorrect tag: should be "projectId"
+    ```
+*   **File (Hub-side):** `pkg/hub/handlers.go`
+    ```go
+    type brokerHeartbeatRequest struct {
+        Projects []brokerProjectHeartbeat `json:"projects,omitempty"`
+    }
+    type brokerProjectHeartbeat struct {
+        ProjectID    string                 `json:"projectId"`
+    ```
+*   **Impact:** Hub will fail to update agent statuses from heartbeats, breaking observability and state tracking for all agents.
+*   **Suggested Fix:** In `pkg/hubclient/runtime_brokers.go`, update the JSON tags to `projects` and `projectId` respectively, OR add custom `MarshalJSON` to `BrokerHeartbeat` / `ProjectHeartbeat` to support both (similar to `AgentInfo`).
 
-- **[pkg/store/sqlite/sqlite.go:1155 (migrationV48)]** The `gcp_service_accounts` table is missing from the column rename list. 
-  - **Issue:** The `grove_id` column is not renamed to `project_id`. However, the Go code in `pkg/store/sqlite/gcp_service_account.go` has been updated to use `project_id` in all queries.
-  - **Impact:** Any operation involving GCP service accounts (creation, listing, deletion) will fail with "no such column: project_id" on upgraded installations.
-  - **Suggested Fix:** Add `ALTER TABLE gcp_service_accounts RENAME COLUMN grove_id TO project_id;` to `migrationV48`. Also, drop and recreate the index: `DROP INDEX IF EXISTS idx_gcp_sa_grove; CREATE INDEX IF NOT EXISTS idx_gcp_sa_project ON gcp_service_accounts(project_id);`
+### 2. Workspace Project-Upload Route Mismatch
+The route used by the Hub to trigger a project-level workspace upload does not match the route the Broker listens on.
 
-- **[extras/scion-a2a-bridge/]** The entire A2A bridge component was missed in the rename.
-  - **Issue:** Files like `internal/state/state.go` still create tables (`tasks`, `contexts`) with `grove_id` columns. Config and logic still use "grove" terminologies and env vars.
-  - **Impact:** Inconsistency across the codebase. If the bridge is part of the Scion ecosystem, it should align with the "project" terminology to avoid confusion and potential integration breakages where IDs are passed.
-  - **Suggested Fix:** Perform a rename pass on the `extras/scion-a2a-bridge` directory, including its internal SQLite schema and configuration structures.
+*   **File (Hub-side):** `pkg/hub/project_cache.go:386`
+    ```go
+    tunnelProjectWorkspaceRequest(..., "POST", "/api/v1/workspace/project-upload", ...)
+    ```
+*   **File (Broker-side):** `pkg/runtimebroker/server.go:1445`
+    ```go
+    s.mux.HandleFunc("/api/v1/workspace/grove-upload", s.handleProjectWorkspaceUpload)
+    ```
+*   **Impact:** Cache refresh for linked projects will fail with a 404 error.
+*   **Suggested Fix:** Update the route in `pkg/runtimebroker/server.go` to `/api/v1/workspace/project-upload`.
 
----
+## High Issues
 
-### High Issues
+### 1. Agent Isolation Bypass via Query Parameter
+The Hub has been updated to send `projectId` in query parameters for agent-scoped requests, but the Broker still only looks for `groveId`.
 
-- **[pkg/hub/handlers.go:2845, 2881]** `ListProjectsResponse` and `RegisterProjectResponse` are missing the legacy `groves` / `grove` fields.
-  - **Issue:** While `hubclient` has been updated to handle both, older clients (or older versions of the library) talking to a newer hub will fail to find the project data because the hub only sends the `projects` or `project` key.
-  - **Suggested Fix:**
-    - Update `ListProjectsResponse` struct to include `LegacyGroves []ProjectWithCapabilities `json:"groves,omitempty"``.
-    - Update `RegisterProjectResponse` struct to include `LegacyProject *store.Project `json:"grove,omitempty"``.
-    - Populate these fields in `listProjects` and `handleProjectRegister` respectively.
+*   **File (Hub-side):** `pkg/hub/controlchannel_client.go:88` (and others)
+    ```go
+    path += "?projectId=" + url.QueryEscape(projectID)
+    ```
+*   **File (Broker-side):** `pkg/runtimebroker/handlers.go:788` (and others)
+    ```go
+    groveID := r.URL.Query().Get("groveId")
+    ```
+*   **Impact:** When the Hub calls the Broker to Stop or Delete an agent, the `groveID` variable on the Broker will be empty. This causes `resolveManagerForAgent` to ignore project scoping, potentially targeting an agent with the same name in a different project if a name collision exists.
+*   **Suggested Fix:** Update Broker handlers (`handleAgentByID`, `listAgents`, `pty_handlers.go`) to check both `groveId` and `projectId` query parameters.
 
----
+## What's Done Well
+*   Excellent legacy support in `pkg/api/types.go` using custom `MarshalJSON`/`UnmarshalJSON` for `AgentInfo` and `ResolvedSecret`.
+*   Methodical migration of database tables and columns in `pkg/store/sqlite/sqlite.go`.
+*   Robust fallback logic in `pkg/hubclient/client.go` to handle `/projects` -> `/groves` API transitions.
+*   Successful compilation and passing of core configuration and API tests.
 
-### Medium Issues
-
-- **[pkg/projectsync/projectsync.go:138]** The WebDAV URL still uses the `/api/v1/groves/` path.
-  - **Issue:** `return fmt.Sprintf("%s/api/v1/groves/%s/dav", base, groveID)`. 
-  - **Impact:** While the hub supports this via an alias, the updated CLI should prefer the new `/projects/` path for consistency.
-  - **Suggested Fix:** Change to `%s/api/v1/projects/%s/dav`.
-
-- **[pkg/api/types.go:375]** `api.ResolvedSecret.UnmarshalJSON` is missing dual-field support for the `source` value.
-  - **Issue:** `UnmarshalJSON` correctly maps `"source": "grove"` to `"project"`, but `MarshalJSON` will only ever send `"project"`.
-  - **Impact:** If an old client strictly checks for `"source": "grove"`, it may break. Given the "dual-field" mandate, we should consider if this value change constitutes a breaking change for subscribers.
-
----
-
-### Low Issues
-
-- **[pkg/hub/project_webdav.go:77]** Typo in comment: `// The full URL path is /api/v1/{projects|projects}/{id}/dav/...`. Should be `{projects|groves}`.
-- **[pkg/projectsync/projectsync.go:68, 86]** Inconsistent naming and error messages. The `Sync` function still refers to "grove ID" in error messages and the parameter name in `buildWebDAVURL` is `groveID`.
-
----
-
-### What's Done Well
-
-- **Comprehensive Fallbacks:** The fallback logic in `pkg/config/project_discovery.go` and `pkg/hubclient/client.go` is excellent and ensures a smooth transition for local files and REST clients.
-- **Dual Event Publishing:** Implementing dual-publishing for SSE events ensures that existing real-time subscribers continue to function.
-- **CLI Aliases:** Adding `grove` as an alias for the `project` command ensures muscle memory and scripts are not broken immediately.
-
----
-
-### Verification Story
-
-- **Tests reviewed:** Yes. `pkg/api/types_test.go` and `pkg/hubclient/projects_test.go` verify the dual-field JSON marshaling.
-- **Build verified:** N/A (Manual review focused on logic and renames).
-- **Security checked:** Yes. Verified that column renames in SQLite migration use the correct `project_id` name that matches the updated Ent schema and hub handlers.
-- **Migration logic:** SQL renames were verified against the table list. The missing `gcp_service_accounts` table was identified by cross-referencing all `CREATE TABLE` statements with `V48`.
+## Verification Story
+*   Verified compilation with `go build ./...` and `go vet ./...`.
+*   Ran `go test ./pkg/config/ -count=1` and `go test ./pkg/api/ -count=1` (All Passed).
+*   Manually traced protocol changes between `pkg/hub` and `pkg/runtimebroker` to identify mismatches.
+*   Verified that Hub tests for heartbeats pass only because they use the Hub's internal types, masking the protocol break with the Broker.

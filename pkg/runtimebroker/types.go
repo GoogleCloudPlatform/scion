@@ -457,14 +457,15 @@ type MessageRequest struct {
 	Interrupt bool `json:"interrupt,omitempty"`
 
 	// ProjectID is the project ID for the target agent (used for message log labels).
-	ProjectID string `json:"project_id,omitempty"`
+	ProjectID string `json:"projectId,omitempty"`
 }
 
 // UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
 func (r *MessageRequest) UnmarshalJSON(data []byte) error {
 	type Alias MessageRequest
 	aux := &struct {
-		GroveID string `json:"grove_id"`
+		GroveID   string `json:"grove_id"`
+		ProjectID string `json:"project_id"`
 		*Alias
 	}{
 		Alias: (*Alias)(r),
@@ -472,8 +473,12 @@ func (r *MessageRequest) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
+	if r.ProjectID == "" {
+		if aux.ProjectID != "" {
+			r.ProjectID = aux.ProjectID
+		} else if aux.GroveID != "" {
+			r.ProjectID = aux.GroveID
+		}
 	}
 	return nil
 }
@@ -483,10 +488,12 @@ func (r MessageRequest) MarshalJSON() ([]byte, error) {
 	type Alias MessageRequest
 	return json.Marshal(&struct {
 		Alias
-		GroveID string `json:"grove_id,omitempty"`
+		GroveID   string `json:"grove_id,omitempty"`
+		ProjectID string `json:"project_id,omitempty"`
 	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
+		Alias:     Alias(r),
+		GroveID:   r.ProjectID,
+		ProjectID: r.ProjectID,
 	})
 }
 

@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"net/url"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -78,20 +79,56 @@ type UpdateBrokerRequest struct {
 
 // ListBrokerProjectsResponse is the response from listing broker projects.
 type ListBrokerProjectsResponse struct {
-	Projects []BrokerProjectInfo `json:"groves"`
+	Projects []BrokerProjectInfo `json:"projects"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (r ListBrokerProjectsResponse) MarshalJSON() ([]byte, error) {
+	type Alias ListBrokerProjectsResponse
+	return json.Marshal(&struct {
+		Alias
+		Groves []BrokerProjectInfo `json:"groves,omitempty"`
+	}{
+		Alias:  Alias(r),
+		Groves: r.Projects,
+	})
 }
 
 // BrokerHeartbeat is the heartbeat payload.
 type BrokerHeartbeat struct {
 	Status   string             `json:"status"`
-	Projects []ProjectHeartbeat `json:"groves,omitempty"`
+	Projects []ProjectHeartbeat `json:"projects,omitempty"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (h BrokerHeartbeat) MarshalJSON() ([]byte, error) {
+	type Alias BrokerHeartbeat
+	return json.Marshal(&struct {
+		Alias
+		Groves []ProjectHeartbeat `json:"groves,omitempty"`
+	}{
+		Alias:  Alias(h),
+		Groves: h.Projects,
+	})
 }
 
 // ProjectHeartbeat is per-project status in a heartbeat.
 type ProjectHeartbeat struct {
-	ProjectID  string           `json:"groveId"`
+	ProjectID  string           `json:"projectId"`
 	AgentCount int              `json:"agentCount"`
 	Agents     []AgentHeartbeat `json:"agents,omitempty"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (h ProjectHeartbeat) MarshalJSON() ([]byte, error) {
+	type Alias ProjectHeartbeat
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(h),
+		GroveID: h.ProjectID,
+	})
 }
 
 // AgentHeartbeat is per-agent status in a heartbeat.
@@ -166,6 +203,7 @@ func (s *runtimeBrokerService) List(ctx context.Context, opts *ListBrokersOption
 			query.Set("status", opts.Status)
 		}
 		if opts.ProjectID != "" {
+			query.Set("projectId", opts.ProjectID)
 			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.Name != "" {
