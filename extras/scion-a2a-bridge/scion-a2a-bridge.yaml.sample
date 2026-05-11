@@ -51,10 +51,10 @@ auth:
   # Use an env var reference for production: "${A2A_API_KEY}"
   api_key: "${A2A_API_KEY}"
 
-# Groves exposed through the bridge. Each grove maps to a set of
+# Groves exposed through the bridge. Each project maps to a set of
 # Scion agents that become discoverable A2A endpoints.
-groves:
-  - slug: "my-grove"
+projects:
+  - slug: "my-project"
 
     # Template used when auto-provisioning new agents for unknown
     # contextIds. Leave empty to require pre-created agents.
@@ -64,7 +64,7 @@ groves:
     auto_provision: false
 
     # Explicit allowlist of agents to expose. Empty means all agents
-    # in the grove are accessible.
+    # in the project are accessible.
     exposed_agents: []
     # exposed_agents:
     #   - "research-agent"

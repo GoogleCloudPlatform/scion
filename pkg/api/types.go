@@ -673,6 +673,22 @@ func (s *ResolvedSecret) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// MarshalJSON implements custom marshaling to support legacy "grove" source.
+func (s ResolvedSecret) MarshalJSON() ([]byte, error) {
+	type Alias ResolvedSecret
+	var grove string
+	if s.Source == "project" {
+		grove = "project"
+	}
+	return json.Marshal(&struct {
+		Alias
+		Grove string `json:"grove,omitempty"`
+	}{
+		Alias: Alias(s),
+		Grove: grove,
+	})
+}
+
 // GitCloneConfig specifies how to clone a git repository into the workspace.
 // When present, the runtime skips local worktree creation and workspace
 // mounting — sciontool clones the repo inside the container at startup.

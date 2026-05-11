@@ -2843,10 +2843,11 @@ func (s *Server) resolveUserProjectRole(ctx context.Context, projectID, userID s
 // ============================================================================
 
 type ListProjectsResponse struct {
-	Projects []ProjectWithCapabilities `json:"projects"`
-	NextCursor   string                  `json:"nextCursor,omitempty"`
-	TotalCount   int                     `json:"totalCount"`
-	Capabilities *Capabilities           `json:"_capabilities,omitempty"`
+	Projects     []ProjectWithCapabilities `json:"projects"`
+	LegacyGroves []ProjectWithCapabilities `json:"groves,omitempty"`
+	NextCursor   string                    `json:"nextCursor,omitempty"`
+	TotalCount   int                       `json:"totalCount"`
+	Capabilities *Capabilities             `json:"_capabilities,omitempty"`
 }
 
 type CreateProjectRequest struct {
@@ -2880,12 +2881,13 @@ type RegisterProjectBrokerInfo struct {
 }
 
 type RegisterProjectResponse struct {
-	Project *store.Project           `json:"project"`
-	Broker      *store.RuntimeBroker   `json:"broker,omitempty"`
-	Created     bool                   `json:"created"`
-	Matches     []hubclient.ProjectMatch `json:"matches,omitempty"`     // Populated when multiple projects share the same git remote
-	BrokerToken string                 `json:"brokerToken,omitempty"` // DEPRECATED: use two-phase registration
-	SecretKey   string                 `json:"secretKey,omitempty"`   // DEPRECATED: secrets only from /brokers/join
+	Project       *store.Project           `json:"project"`
+	LegacyProject *store.Project           `json:"grove,omitempty"`
+	Broker        *store.RuntimeBroker     `json:"broker,omitempty"`
+	Created       bool                     `json:"created"`
+	Matches       []hubclient.ProjectMatch `json:"matches,omitempty"` // Populated when multiple projects share the same git remote
+	BrokerToken   string                   `json:"brokerToken,omitempty"` // DEPRECATED: use two-phase registration
+	SecretKey     string                   `json:"secretKey,omitempty"`   // DEPRECATED: secrets only from /brokers/join
 }
 
 // AddProviderRequest is the request for adding a broker as a project provider.
@@ -3004,7 +3006,8 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, ListProjectsResponse{
-		Projects: projects,
+		Projects:     projects,
+		LegacyGroves: projects,
 		NextCursor:   result.NextCursor,
 		TotalCount:   totalCount,
 		Capabilities: scopeCap,
@@ -3983,12 +3986,13 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, RegisterProjectResponse{
-		Project:     project,
-		Broker:      broker,
-		Created:     created,
-		Matches:     matches,
-		BrokerToken: brokerToken,
-		SecretKey:   secretKey,
+		Project:       project,
+		LegacyProject: project,
+		Broker:        broker,
+		Created:       created,
+		Matches:       matches,
+		BrokerToken:   brokerToken,
+		SecretKey:     secretKey,
 	})
 }
 

@@ -1199,6 +1199,7 @@ ALTER TABLE subscription_templates RENAME COLUMN grove_id TO project_id;
 ALTER TABLE user_access_tokens RENAME COLUMN grove_id TO project_id;
 ALTER TABLE messages RENAME COLUMN grove_id TO project_id;
 ALTER TABLE groups RENAME COLUMN grove_id TO project_id;
+ALTER TABLE gcp_service_accounts RENAME COLUMN grove_id TO project_id;
 
 -- 3. Update Data Values
 UPDATE env_vars SET scope = 'project' WHERE scope = 'grove';
@@ -1249,6 +1250,9 @@ CREATE INDEX IF NOT EXISTS idx_messages_project ON messages(project_id);
 
 DROP INDEX IF EXISTS idx_groups_grove;
 CREATE INDEX IF NOT EXISTS idx_groups_project ON groups(project_id);
+
+DROP INDEX IF EXISTS idx_gcp_sa_grove;
+CREATE INDEX IF NOT EXISTS idx_gcp_sa_project ON gcp_service_accounts(project_id);
 `
 
 // Helper functions for JSON marshaling/unmarshaling

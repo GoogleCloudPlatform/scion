@@ -27,7 +27,7 @@ import (
 type Task struct {
 	ID        string
 	ContextID string
-	GroveID   string
+	ProjectID   string
 	AgentSlug string
 	AgentID   string
 	State     string
@@ -39,7 +39,7 @@ type Task struct {
 // Context maps an A2A contextId to a Scion agent.
 type Context struct {
 	ContextID  string
-	GroveID    string
+	ProjectID    string
 	AgentSlug  string
 	AgentID    string
 	CreatedAt  time.Time
@@ -99,7 +99,7 @@ func (s *Store) migrate() error {
 		`CREATE TABLE IF NOT EXISTS tasks (
 			id TEXT PRIMARY KEY,
 			context_id TEXT NOT NULL,
-			grove_id TEXT NOT NULL,
+			project_id TEXT NOT NULL,
 			agent_slug TEXT NOT NULL,
 			agent_id TEXT NOT NULL DEFAULT '',
 			state TEXT NOT NULL,
@@ -108,11 +108,11 @@ func (s *Store) migrate() error {
 			metadata TEXT NOT NULL DEFAULT '{}'
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_tasks_context ON tasks(context_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(grove_id, agent_slug)`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(project_id, agent_slug)`,
 
 		`CREATE TABLE IF NOT EXISTS contexts (
 			context_id TEXT PRIMARY KEY,
-			grove_id TEXT NOT NULL,
+			project_id TEXT NOT NULL,
 			agent_slug TEXT NOT NULL,
 			agent_id TEXT NOT NULL DEFAULT '',
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -150,9 +150,9 @@ func (s *Store) migrate() error {
 // CreateTask inserts a new task record.
 func (s *Store) CreateTask(t *Task) error {
 	_, err := s.db.Exec(
-		`INSERT INTO tasks (id, context_id, grove_id, agent_slug, agent_id, state, created_at, updated_at, metadata)
+		`INSERT INTO tasks (id, context_id, project_id, agent_slug, agent_id, state, created_at, updated_at, metadata)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.ID, t.ContextID, t.GroveID, t.AgentSlug, t.AgentID, t.State, t.CreatedAt, t.UpdatedAt, t.Metadata,
+		t.ID, t.ContextID, t.ProjectID, t.AgentSlug, t.AgentID, t.State, t.CreatedAt, t.UpdatedAt, t.Metadata,
 	)
 	if err != nil {
 		return fmt.Errorf("create task: %w", err)
@@ -164,9 +164,9 @@ func (s *Store) CreateTask(t *Task) error {
 func (s *Store) GetTask(id string) (*Task, error) {
 	t := &Task{}
 	err := s.db.QueryRow(
-		`SELECT id, context_id, grove_id, agent_slug, agent_id, state, created_at, updated_at, metadata
+		`SELECT id, context_id, project_id, agent_slug, agent_id, state, created_at, updated_at, metadata
 		 FROM tasks WHERE id = ?`, id,
-	).Scan(&t.ID, &t.ContextID, &t.GroveID, &t.AgentSlug, &t.AgentID, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.Metadata)
+	).Scan(&t.ID, &t.ContextID, &t.ProjectID, &t.AgentSlug, &t.AgentID, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.Metadata)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -193,7 +193,7 @@ func (s *Store) UpdateTaskState(id, state string) error {
 // ListTasksByContext returns all tasks for the given context.
 func (s *Store) ListTasksByContext(ctx context.Context, contextID string) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, context_id, grove_id, agent_slug, agent_id, state, created_at, updated_at, metadata
+		`SELECT id, context_id, project_id, agent_slug, agent_id, state, created_at, updated_at, metadata
 		 FROM tasks WHERE context_id = ? ORDER BY created_at DESC`, contextID,
 	)
 	if err != nil {
@@ -204,7 +204,7 @@ func (s *Store) ListTasksByContext(ctx context.Context, contextID string) ([]Tas
 	var tasks []Task
 	for rows.Next() {
 		var t Task
-		if err := rows.Scan(&t.ID, &t.ContextID, &t.GroveID, &t.AgentSlug, &t.AgentID, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.Metadata); err != nil {
+		if err := rows.Scan(&t.ID, &t.ContextID, &t.ProjectID, &t.AgentSlug, &t.AgentID, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.Metadata); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
 		tasks = append(tasks, t)
@@ -212,11 +212,11 @@ func (s *Store) ListTasksByContext(ctx context.Context, contextID string) ([]Tas
 	return tasks, rows.Err()
 }
 
-// ListTasksByAgent returns all tasks for a given grove and agent.
-func (s *Store) ListTasksByAgent(groveID, agentSlug string) ([]Task, error) {
+// ListTasksByAgent returns all tasks for a given project and agent.
+func (s *Store) ListTasksByAgent(projectID, agentSlug string) ([]Task, error) {
 	rows, err := s.db.Query(
-		`SELECT id, context_id, grove_id, agent_slug, agent_id, state, created_at, updated_at, metadata
-		 FROM tasks WHERE grove_id = ? AND agent_slug = ? ORDER BY created_at DESC`, groveID, agentSlug,
+		`SELECT id, context_id, project_id, agent_slug, agent_id, state, created_at, updated_at, metadata
+		 FROM tasks WHERE project_id = ? AND agent_slug = ? ORDER BY created_at DESC`, projectID, agentSlug,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list tasks by agent: %w", err)
@@ -226,7 +226,7 @@ func (s *Store) ListTasksByAgent(groveID, agentSlug string) ([]Task, error) {
 	var tasks []Task
 	for rows.Next() {
 		var t Task
-		if err := rows.Scan(&t.ID, &t.ContextID, &t.GroveID, &t.AgentSlug, &t.AgentID, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.Metadata); err != nil {
+		if err := rows.Scan(&t.ID, &t.ContextID, &t.ProjectID, &t.AgentSlug, &t.AgentID, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.Metadata); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
 		tasks = append(tasks, t)
@@ -239,9 +239,9 @@ func (s *Store) ListTasksByAgent(groveID, agentSlug string) ([]Task, error) {
 // CreateContext inserts a new context mapping.
 func (s *Store) CreateContext(c *Context) error {
 	_, err := s.db.Exec(
-		`INSERT INTO contexts (context_id, grove_id, agent_slug, agent_id, created_at, last_active)
+		`INSERT INTO contexts (context_id, project_id, agent_slug, agent_id, created_at, last_active)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		c.ContextID, c.GroveID, c.AgentSlug, c.AgentID, c.CreatedAt, c.LastActive,
+		c.ContextID, c.ProjectID, c.AgentSlug, c.AgentID, c.CreatedAt, c.LastActive,
 	)
 	if err != nil {
 		return fmt.Errorf("create context: %w", err)
@@ -253,9 +253,9 @@ func (s *Store) CreateContext(c *Context) error {
 func (s *Store) GetContext(contextID string) (*Context, error) {
 	c := &Context{}
 	err := s.db.QueryRow(
-		`SELECT context_id, grove_id, agent_slug, agent_id, created_at, last_active
+		`SELECT context_id, project_id, agent_slug, agent_id, created_at, last_active
 		 FROM contexts WHERE context_id = ?`, contextID,
-	).Scan(&c.ContextID, &c.GroveID, &c.AgentSlug, &c.AgentID, &c.CreatedAt, &c.LastActive)
+	).Scan(&c.ContextID, &c.ProjectID, &c.AgentSlug, &c.AgentID, &c.CreatedAt, &c.LastActive)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

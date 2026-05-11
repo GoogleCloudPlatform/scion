@@ -87,7 +87,7 @@ func Sync(ctx context.Context, opts Options) (*Result, error) {
 		return nil, fmt.Errorf("hub endpoint is required")
 	}
 	if opts.ProjectID == "" {
-		return nil, fmt.Errorf("grove ID is required")
+		return nil, fmt.Errorf("project ID is required")
 	}
 
 	// Build the WebDAV remote URL
@@ -161,7 +161,7 @@ func Sync(ctx context.Context, opts Options) (*Result, error) {
 }
 
 // buildWebDAVURL constructs the WebDAV endpoint URL for a project.
-func buildWebDAVURL(hubEndpoint, groveID string) string {
+func buildWebDAVURL(hubEndpoint, projectID string) string {
 	base := strings.TrimRight(hubEndpoint, "/")
-	return fmt.Sprintf("%s/api/v1/groves/%s/dav", base, groveID)
+	return fmt.Sprintf("%s/api/v1/projects/%s/dav", base, projectID)
 }
