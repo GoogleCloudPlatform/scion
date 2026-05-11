@@ -72,7 +72,7 @@ func (n *Notification) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if n.ProjectID == "" && aux.GroveID != "" {
+	if n.ProjectID == "" && aux.ProjectID != "" {
 		n.ProjectID = aux.GroveID
 	}
 	return nil
@@ -187,7 +187,7 @@ func (r *CreateSubscriptionRequest) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if r.ProjectID == "" && aux.GroveID != "" {
+	if r.ProjectID == "" && aux.ProjectID != "" {
 		r.ProjectID = aux.GroveID
 	}
 	return nil
@@ -230,7 +230,7 @@ func (s *Subscription) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if s.ProjectID == "" && aux.GroveID != "" {
+	if s.ProjectID == "" && aux.ProjectID != "" {
 		s.ProjectID = aux.GroveID
 	}
 	return nil

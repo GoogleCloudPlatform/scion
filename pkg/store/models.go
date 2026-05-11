@@ -118,7 +118,7 @@ func (a *Agent) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if a.ProjectID == "" && aux.GroveID != "" {
+	if a.ProjectID == "" && aux.ProjectID != "" {
 		a.ProjectID = aux.GroveID
 	}
 	return nil
@@ -234,12 +234,12 @@ func (p Project) MarshalJSON() ([]byte, error) {
 	type Alias Project
 	return json.Marshal(&struct {
 		Alias
-		GroveID   string `json:"groveId"`
+		ProjectID   string `json:"groveId"`
 		GroveName string `json:"groveName"`
 		Grove     string `json:"grove"`
 	}{
 		Alias:     Alias(p),
-		GroveID:   p.ID,
+		ProjectID:   p.ID,
 		GroveName: p.Name,
 		Grove:     p.Slug,
 	})
@@ -372,7 +372,7 @@ func (p *ProjectProvider) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if p.ProjectID == "" && aux.GroveID != "" {
+	if p.ProjectID == "" && aux.ProjectID != "" {
 		p.ProjectID = aux.GroveID
 	}
 	return nil
@@ -753,7 +753,7 @@ func (s *NotificationSubscription) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if s.ProjectID == "" && aux.GroveID != "" {
+	if s.ProjectID == "" && aux.ProjectID != "" {
 		s.ProjectID = aux.GroveID
 	}
 	return nil
@@ -821,7 +821,7 @@ func (n *Notification) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if n.ProjectID == "" && aux.GroveID != "" {
+	if n.ProjectID == "" && aux.ProjectID != "" {
 		n.ProjectID = aux.GroveID
 	}
 	return nil
@@ -1130,7 +1130,7 @@ func (t *UserAccessToken) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if t.ProjectID == "" && aux.GroveID != "" {
+	if t.ProjectID == "" && aux.ProjectID != "" {
 		t.ProjectID = aux.GroveID
 	}
 	return nil
@@ -1295,7 +1295,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if m.ProjectID == "" && aux.GroveID != "" {
+	if m.ProjectID == "" && aux.ProjectID != "" {
 		m.ProjectID = aux.GroveID
 	}
 	return nil
@@ -1362,7 +1362,7 @@ func (e *ScheduledEvent) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if e.ProjectID == "" && aux.GroveID != "" {
+	if e.ProjectID == "" && aux.ProjectID != "" {
 		e.ProjectID = aux.GroveID
 	}
 	return nil
@@ -1432,7 +1432,7 @@ func (s *Schedule) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if s.ProjectID == "" && aux.GroveID != "" {
+	if s.ProjectID == "" && aux.ProjectID != "" {
 		s.ProjectID = aux.GroveID
 	}
 	return nil
@@ -1700,7 +1700,7 @@ func (s *ProjectSyncState) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if s.ProjectID == "" && aux.GroveID != "" {
+	if s.ProjectID == "" && aux.ProjectID != "" {
 		s.ProjectID = aux.GroveID
 	}
 	return nil

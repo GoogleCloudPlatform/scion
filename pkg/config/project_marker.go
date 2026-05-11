@@ -42,6 +42,7 @@ func (m *ProjectMarker) UnmarshalYAML(value *yaml.Node) error {
 		GroveSlug string `yaml:"grove-slug"`
 		Alias     Alias  `yaml:",inline"`
 	}
+
 	if err := value.Decode(&aux); err != nil {
 		return err
 	}

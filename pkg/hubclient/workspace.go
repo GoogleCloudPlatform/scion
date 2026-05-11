@@ -89,7 +89,7 @@ type WorkspaceStatusResponse struct {
 	// Slug is the agent's URL-safe identifier.
 	Slug string `json:"slug"`
 	// ProjectID is the project ID.
-	ProjectID string `json:"groveId"`
+	ProjectID string `json:"projectId"`
 	// StorageURI is the GCS URI for the workspace storage.
 	StorageURI string `json:"storageUri"`
 	// LastSync contains information about the last sync operation.

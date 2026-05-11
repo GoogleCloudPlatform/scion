@@ -464,8 +464,8 @@ type MessageRequest struct {
 func (r *MessageRequest) UnmarshalJSON(data []byte) error {
 	type Alias MessageRequest
 	aux := &struct {
-		GroveID   string `json:"grove_id"`
-		ProjectID string `json:"project_id"`
+		GroveID       string `json:"grove_id"`
+		LegacyProjID string `json:"project_id"`
 		*Alias
 	}{
 		Alias: (*Alias)(r),
@@ -474,8 +474,8 @@ func (r *MessageRequest) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	if r.ProjectID == "" {
-		if aux.ProjectID != "" {
-			r.ProjectID = aux.ProjectID
+		if aux.LegacyProjID != "" {
+			r.ProjectID = aux.LegacyProjID
 		} else if aux.GroveID != "" {
 			r.ProjectID = aux.GroveID
 		}
@@ -488,12 +488,12 @@ func (r MessageRequest) MarshalJSON() ([]byte, error) {
 	type Alias MessageRequest
 	return json.Marshal(&struct {
 		Alias
-		GroveID   string `json:"grove_id,omitempty"`
-		ProjectID string `json:"project_id,omitempty"`
+		GroveID      string `json:"grove_id,omitempty"`
+		LegacyProjID string `json:"project_id,omitempty"`
 	}{
-		Alias:     Alias(r),
-		GroveID:   r.ProjectID,
-		ProjectID: r.ProjectID,
+		Alias:        Alias(r),
+		GroveID:      r.ProjectID,
+		LegacyProjID: r.ProjectID,
 	})
 }
 

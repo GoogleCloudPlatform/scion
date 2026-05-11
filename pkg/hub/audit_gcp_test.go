@@ -35,6 +35,10 @@ func (m *mockAuditLogger) LogGCPTokenEvent(_ context.Context, event *GCPTokenEve
 	return nil
 }
 
+func (m *mockAuditLogger) LogInviteAuditEvent(_ context.Context, _ *InviteAuditEvent) error {
+	return nil
+}
+
 func TestLogGCPTokenGeneration_Success(t *testing.T) {
 	mock := &mockAuditLogger{}
 	ctx := context.Background()

@@ -84,7 +84,7 @@ func DiscoverProjects() ([]ProjectInfo, error) {
 		pi.AgentCount = countAgents(filepath.Join(globalDir, "agents"))
 		if settings, err := LoadSettings(globalDir); err == nil {
 			pi.ProjectID = settings.ProjectID
-			pi.GroveID = settings.ProjectID
+			pi.ProjectID = settings.ProjectID
 		}
 		projects = append(projects, pi)
 		seenSlugs["global"] = true
@@ -171,7 +171,7 @@ func projectInfoFromExternal(configPath, dirName, slug string) ProjectInfo {
 	settings, err := LoadSettings(configPath)
 	if err == nil {
 		pi.ProjectID = settings.ProjectID
-		pi.GroveID = settings.ProjectID
+		pi.ProjectID = settings.ProjectID
 		pi.WorkspacePath = settings.WorkspacePath
 	}
 
@@ -203,7 +203,7 @@ func projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug s
 	pi.AgentCount = countAgents(agentsDir)
 	if settings, err := LoadSettings(configPath); err == nil {
 		pi.ProjectID = settings.ProjectID
-		pi.GroveID = settings.ProjectID
+		pi.ProjectID = settings.ProjectID
 	}
 	if pi.ProjectID == "" {
 		if marker, workspacePath, err := readWorkspaceMarkerForSlug(slug); err == nil {

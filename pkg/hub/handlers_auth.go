@@ -174,10 +174,10 @@ func (t TokenResponse) MarshalJSON() ([]byte, error) {
 	type Alias TokenResponse
 	return json.Marshal(&struct {
 		Alias
-		GroveID string `json:"groveId"`
+		ProjectID string `json:"groveId"`
 	}{
 		Alias:   Alias(t),
-		GroveID: t.ProjectID,
+		ProjectID: t.ProjectID,
 	})
 }
 

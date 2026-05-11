@@ -1177,6 +1177,7 @@ CREATE TABLE IF NOT EXISTS invite_codes (
     created DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_invite_codes_expires ON invite_codes(expires_at);
+`
 
 // Migration V50: Rename 'grove' entities to 'project'.
 // This is Phase 4 of the grove-to-project rename strategy.

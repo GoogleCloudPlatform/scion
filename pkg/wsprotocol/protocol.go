@@ -168,7 +168,6 @@ func (m *StreamOpenMessage) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal((*Alias)(&copy))
 }
-
 // UnmarshalJSON implements custom unmarshaling for StreamOpenMessage to handle dual fields.
 func (m *StreamOpenMessage) UnmarshalJSON(data []byte) error {
 	type Alias StreamOpenMessage
@@ -177,6 +176,7 @@ func (m *StreamOpenMessage) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*m = StreamOpenMessage(aux)
+
 	if m.ProjectID == "" && m.GroveID != "" {
 		m.ProjectID = m.GroveID
 	} else if m.GroveID == "" && m.ProjectID != "" {
@@ -184,6 +184,7 @@ func (m *StreamOpenMessage) UnmarshalJSON(data []byte) error {
 	}
 	return nil
 }
+
 
 // StreamFrame carries data for a multiplexed stream.
 type StreamFrame struct {
@@ -335,14 +336,14 @@ func NewResponseEnvelope(requestID string, statusCode int, headers map[string]st
 }
 
 // NewStreamOpenMessage creates a stream open request.
-func NewStreamOpenMessage(streamID, streamType, slug, groveID string, cols, rows int) *StreamOpenMessage {
+func NewStreamOpenMessage(streamID, streamType, slug, projectID string, cols, rows int) *StreamOpenMessage {
 	return &StreamOpenMessage{
 		Type:       TypeStreamOpen,
 		StreamID:   streamID,
 		StreamType: streamType,
 		Slug:       slug,
-		GroveID:    groveID,
-		ProjectID:  groveID,
+		GroveID:    projectID,
+		ProjectID:  projectID,
 		Cols:       cols,
 		Rows:       rows,
 	}

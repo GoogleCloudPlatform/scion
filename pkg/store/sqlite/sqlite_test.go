@@ -2724,17 +2724,17 @@ func TestUpdateAgentStatus_ProtectsTerminalActivity(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	grove := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Terminal Guard Grove",
 		Slug:       "terminal-guard-grove",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, grove))
 
 	agent := &store.Agent{
 		ID: api.NewUUID(), Slug: "terminal-guard", Name: "Terminal Guard",
-		Template: "claude", GroveID: grove.ID, Phase: string(state.PhaseStopped),
+		Template: "claude", ProjectID: grove.ID, Phase: string(state.PhaseStopped),
 		Activity:   string(state.ActivityCrashed),
 		Visibility: store.VisibilityPrivate,
 	}
