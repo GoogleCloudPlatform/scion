@@ -47,7 +47,7 @@ var (
 var scheduleCmd = &cobra.Command{
 	Use:   "schedule",
 	Short: "Manage scheduled events",
-	Long:  `List, inspect, create, and cancel scheduled events for the current grove.`,
+	Long:  `List, inspect, create, and cancel scheduled events for the current project.`,
 }
 
 // scheduleListCmd lists scheduled events for the current grove.

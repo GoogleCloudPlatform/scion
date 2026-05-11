@@ -76,7 +76,7 @@ var logsCmd = &cobra.Command{
 
 		a := agents[0]
 		if a.ProjectPath == "" {
-			return fmt.Errorf("agent %s has no grove path configured", agentName)
+			return fmt.Errorf("agent %s has no project path configured", agentName)
 		}
 
 		agentLogPath := filepath.Join(a.ProjectPath, "agents", agentName, "home", "agent.log")

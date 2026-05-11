@@ -171,7 +171,7 @@ func installToHub(hubCtx *HubContext, name, localPath, harnessType string) error
 	} else {
 		projectID, err := GetProjectID(hubCtx)
 		if err != nil {
-			return fmt.Errorf("failed to resolve grove for Hub install: %w", err)
+			return fmt.Errorf("failed to resolve project for Hub install: %w", err)
 		}
 		scopeID = projectID
 	}

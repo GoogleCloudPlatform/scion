@@ -27,17 +27,17 @@ import (
 var sharedDirCmd = &cobra.Command{
 	Use:     "shared-dir",
 	Aliases: []string{"sd"},
-	Short:   "Manage grove shared directories",
-	Long:    `Shared directories provide filesystem-level state sharing between agents in a grove.`,
+	Short:   "Manage project shared directories",
+	Long:    `Shared directories provide filesystem-level state sharing between agents in a project.`,
 }
 
 var sharedDirListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List shared directories for the current grove",
+	Short: "List shared directories for the current project",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err != nil {
-			return fmt.Errorf("failed to resolve grove: %w", err)
+			return fmt.Errorf("failed to resolve project: %w", err)
 		}
 
 		settings, _, err := config.LoadEffectiveSettings(projectDir)
@@ -97,7 +97,7 @@ var sharedDirCreateCmd = &cobra.Command{
 
 		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err != nil {
-			return fmt.Errorf("failed to resolve grove: %w", err)
+			return fmt.Errorf("failed to resolve project: %w", err)
 		}
 
 		// Load current settings to check for duplicates
@@ -158,7 +158,7 @@ var sharedDirRemoveCmd = &cobra.Command{
 
 		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err != nil {
-			return fmt.Errorf("failed to resolve grove: %w", err)
+			return fmt.Errorf("failed to resolve project: %w", err)
 		}
 
 		vs, err := config.LoadSingleFileVersioned(projectDir)
@@ -221,7 +221,7 @@ var sharedDirInfoCmd = &cobra.Command{
 
 		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err != nil {
-			return fmt.Errorf("failed to resolve grove: %w", err)
+			return fmt.Errorf("failed to resolve project: %w", err)
 		}
 
 		settings, _, err := config.LoadEffectiveSettings(projectDir)

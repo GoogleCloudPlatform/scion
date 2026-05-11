@@ -164,6 +164,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /projects/{projectSlug}/agents/{agentSlug}/.well-known/agent-card.json", s.handleAgentCard)
 	mux.HandleFunc("POST /projects/{projectSlug}/agents/{agentSlug}/jsonrpc", s.handleJSONRPC)
 
+	// Legacy per-agent routes (backward compatibility for "grove" naming).
+	mux.HandleFunc("GET /groves/{projectSlug}/agents/{agentSlug}/.well-known/agent-card.json", s.handleAgentCard)
+	mux.HandleFunc("POST /groves/{projectSlug}/agents/{agentSlug}/jsonrpc", s.handleJSONRPC)
+
 	// Health, readiness, and metrics.
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
@@ -767,8 +771,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		// Per-agent card: exactly /projects/{slug}/agents/{slug}/.well-known/agent-card.json
+		// or legacy /groves/{slug}/agents/{slug}/.well-known/agent-card.json
 		segments := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
-		if len(segments) == 6 && segments[0] == "projects" && segments[2] == "agents" && segments[4] == ".well-known" && segments[5] == "agent-card.json" {
+		if len(segments) == 6 && (segments[0] == "projects" || segments[0] == "groves") && segments[2] == "agents" && segments[4] == ".well-known" && segments[5] == "agent-card.json" {
 			next.ServeHTTP(w, r)
 			return
 		}

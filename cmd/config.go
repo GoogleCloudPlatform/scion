@@ -32,7 +32,7 @@ var configGlobal bool
 var configCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Manage scion configuration settings",
-	Long:  `View and modify settings for scion-agent. Settings are resolved from grove (.scion/settings.json) and global (~/.scion/settings.json) locations.`,
+	Long:  `View and modify settings for scion-agent. Settings are resolved from project (.scion/settings.json) and global (~/.scion/settings.json) locations.`,
 }
 
 var configListCmd = &cobra.Command{
@@ -98,7 +98,7 @@ var configSetCmd = &cobra.Command{
 		if !configGlobal {
 			projectDir, err := config.GetResolvedProjectDir(projectPath)
 			if err != nil {
-				return fmt.Errorf("cannot set local setting: not inside a grove or grove path invalid: %w", err)
+				return fmt.Errorf("cannot set local setting: not inside a project or project path invalid: %w", err)
 			}
 			targetPath = projectDir
 		}
@@ -458,7 +458,7 @@ func runSettingsMigration() error {
 
 var configDirCmd = &cobra.Command{
 	Use:   "dir",
-	Short: "Print the path to the grove config directory",
+	Short: "Print the path to the project config directory",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err != nil {
@@ -474,7 +474,7 @@ var configDirCmd = &cobra.Command{
 
 var configCdConfigCmd = &cobra.Command{
 	Use:   "cd-config",
-	Short: "Open a shell in the grove config directory",
+	Short: "Open a shell in the project config directory",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err != nil {
@@ -485,8 +485,9 @@ var configCdConfigCmd = &cobra.Command{
 }
 
 var configCdProjectCmd = &cobra.Command{
-	Use:   "cd-project",
-	Short: "Open a shell in the project workspace directory",
+	Use:     "cd-project",
+	Aliases: []string{"cd-grove"},
+	Short:   "Open a shell in the project workspace directory",
 	Long: `Open a shell in the project workspace directory.
 
 For external projects (non-git), navigates to the workspace path stored in settings.

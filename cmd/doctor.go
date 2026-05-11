@@ -58,7 +58,7 @@ func runDoctor() error {
 
 	resolved, err := resolveActiveProjectPath()
 	if err != nil {
-		printCheck("grove", "warn", "No grove found — skipping runtime checks", "Run 'scion init' to create a grove.")
+		printCheck("project", "warn", "No project found — skipping runtime checks", "Run 'scion init' to create a project.")
 		if outputFormat == "json" {
 			return outputDoctorJSON(nil)
 		}
