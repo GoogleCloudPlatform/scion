@@ -3,6 +3,8 @@
 ## Overview
 > **Note**: This project is currently in a pre-release/alpha stage.
 
+> **Important Terminology Change**: The concept previously called "grove" has been renamed to "project" throughout the product. You will encounter "grove" in existing code, database schemas, API endpoints, issues, and documentation — treat "grove" and "project" as synonymous. New code should prefer "project" where feasible, but the rename is ongoing and many internal references still use "grove".
+
 `scion` is a container-based orchestration platform designed to manage concurrent LLM-based code agents. It supports both a standalone local CLI mode and a distributed "Hosted" architecture where state is centralized in a Hub and agents execute on disparate Runtime Brokers (local Docker, remote servers, or Kubernetes clusters).
 
 ## System Goals
