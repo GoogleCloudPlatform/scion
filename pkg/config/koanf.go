@@ -79,14 +79,18 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 		if strings.HasPrefix(key, "bucket_") {
 			return "bucket." + strings.TrimPrefix(key, "bucket_")
 		}
+		// Handle legacy grove_id
+		if key == "grove_id" {
+			return "project_id"
+		}
 		// Handle nested hub keys
 		if strings.HasPrefix(key, "hub_") {
 			subkey := strings.TrimPrefix(key, "hub_")
 			// Convert snake_case to camelCase for specific keys
 			switch subkey {
-			case "grove_id":
-				// SCION_HUB_GROVE_ID maps to top-level grove_id, not hub.grove_id
-				return "grove_id"
+			case "grove_id", "project_id":
+				// SCION_HUB_GROVE_ID or SCION_HUB_PROJECT_ID maps to top-level project_id, not hub.projectId
+				return "project_id"
 			case "api_key":
 				return "hub.apiKey"
 			case "broker_id":
@@ -102,24 +106,32 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 
 	// Normalize v1 settings keys to legacy keyspace.
 	// In v1 format, project_id (legacy grove_id) is stored as hub.grove_id (snake_case),
-	// but the legacy Settings struct expects it at the top level (grove_id). The
-	// HubClientConfig struct uses koanf tag "groveId" (camelCase), so the
+	// but the legacy Settings struct expects it at the top level (project_id). The
+	// HubClientConfig struct uses koanf tag "projectId" (camelCase), so the
 	// v1 key hub.grove_id doesn't match either location without remapping.
 	// Always remap (unconditionally) because after the koanf merge chain,
 	// hub.grove_id reflects the most specific (project-level) value and must
-	// take precedence over any top-level grove_id inherited from global.
-	if k.Exists("hub.grove_id") {
+	// take precedence over any top-level project_id inherited from global.
+	// Support both hub.grove_id and hub.project_id from v1 settings.
+	hubProjectID := ""
+	if k.Exists("hub.project_id") {
+		hubProjectID = k.String("hub.project_id")
+	} else if k.Exists("hub.grove_id") {
+		hubProjectID = k.String("hub.grove_id")
+	}
+
+	if hubProjectID != "" {
 		_ = k.Load(confmap.Provider(map[string]interface{}{
-			"grove_id": k.String("hub.grove_id"),
+			"project_id": hubProjectID,
 		}, "."), nil)
-		// Also remap to hub.groveId (camelCase) so the legacy
-		// HubClientConfig.ProjectID field (koanf tag "groveId") is populated.
+		// Also remap to hub.projectId (camelCase) so the legacy
+		// HubClientConfig.ProjectID field (koanf tag "projectId") is populated.
 		// Without this, GetHubProjectID() returns "" for V1 settings, causing
 		// EnsureHubReady to fall back to the local project_id and loop on
 		// project registration when the hub project ID differs from the local ID.
-		if !k.Exists("hub.groveId") {
+		if !k.Exists("hub.projectId") {
 			_ = k.Load(confmap.Provider(map[string]interface{}{
-				"hub.groveId": k.String("hub.grove_id"),
+				"hub.projectId": hubProjectID,
 			}, "."), nil)
 		}
 	}
@@ -132,7 +144,7 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 	if projectPath != "" && projectPath != globalDir {
 		if projectID, err := ReadProjectID(projectPath); err == nil && projectID != "" {
 			_ = k.Load(confmap.Provider(map[string]interface{}{
-				"grove_id": projectID,
+				"project_id": projectID,
 			}, "."), nil)
 		}
 	}

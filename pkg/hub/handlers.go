@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -2870,6 +2871,29 @@ type RegisterProjectRequest struct {
 	Broker    *RegisterProjectBrokerInfo `json:"broker,omitempty"`   // DEPRECATED: Use BrokerID with two-phase registration
 	Profiles  []string            `json:"profiles,omitempty"`
 	Labels    map[string]string   `json:"labels,omitempty"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId keys.
+func (r *RegisterProjectRequest) UnmarshalJSON(data []byte) error {
+	type Alias RegisterProjectRequest
+	aux := &struct {
+		GroveID  string `json:"groveId"`
+		Grove_ID string `json:"grove_id"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ID == "" {
+		if aux.Grove_ID != "" {
+			r.ID = aux.Grove_ID
+		} else if aux.GroveID != "" {
+			r.ID = aux.GroveID
+		}
+	}
+	return nil
 }
 
 type RegisterProjectBrokerInfo struct {

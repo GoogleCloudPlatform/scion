@@ -94,6 +94,36 @@ type Agent struct {
 	StateVersion int64 `json:"stateVersion"`
 }
 
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (a Agent) MarshalJSON() ([]byte, error) {
+	type Alias Agent
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(a),
+		GroveID: a.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (a *Agent) UnmarshalJSON(data []byte) error {
+	type Alias Agent
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(a),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if a.ProjectID == "" && aux.GroveID != "" {
+		a.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
 // AgentAppliedConfig stores the effective configuration of an agent.
 type AgentAppliedConfig struct {
 	Image         string              `json:"image,omitempty"`
@@ -199,6 +229,48 @@ type Project struct {
 	OwnerName         string `json:"ownerName,omitempty"`   // Enriched: resolved from OwnerID
 }
 
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (p Project) MarshalJSON() ([]byte, error) {
+	type Alias Project
+	return json.Marshal(&struct {
+		Alias
+		GroveID   string `json:"groveId"`
+		GroveName string `json:"groveName"`
+		Grove     string `json:"grove"`
+	}{
+		Alias:     Alias(p),
+		GroveID:   p.ID,
+		GroveName: p.Name,
+		Grove:     p.Slug,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (p *Project) UnmarshalJSON(data []byte) error {
+	type Alias Project
+	aux := &struct {
+		GroveID   string `json:"groveId"`
+		GroveName string `json:"groveName"`
+		Grove     string `json:"grove"`
+		*Alias
+	}{
+		Alias: (*Alias)(p),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if p.ID == "" && aux.GroveID != "" {
+		p.ID = aux.GroveID
+	}
+	if p.Name == "" && aux.GroveName != "" {
+		p.Name = aux.GroveName
+	}
+	if p.Slug == "" && aux.Grove != "" {
+		p.Slug = aux.Grove
+	}
+	return nil
+}
+
 // IsSharedWorkspace returns true if this is a git project configured to use a
 // single shared workspace clone instead of per-agent clones.
 func (g *Project) IsSharedWorkspace() bool {
@@ -274,6 +346,36 @@ type ProjectProvider struct {
 	// Ownership - tracks who linked this broker to the project
 	LinkedBy string    `json:"linkedBy,omitempty"` // User ID who performed the link
 	LinkedAt time.Time `json:"linkedAt,omitempty"` // Timestamp when the link was created
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (p ProjectProvider) MarshalJSON() ([]byte, error) {
+	type Alias ProjectProvider
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(p),
+		GroveID: p.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (p *ProjectProvider) UnmarshalJSON(data []byte) error {
+	type Alias ProjectProvider
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(p),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if p.ProjectID == "" && aux.GroveID != "" {
+		p.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // Template represents an agent template in the Hub database.
