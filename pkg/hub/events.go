@@ -83,7 +83,8 @@ type AgentDetail struct {
 // AgentStatusEvent is published when an agent's status changes.
 type AgentStatusEvent struct {
 	AgentID         string       `json:"agentId"`
-	ProjectID         string       `json:"projectId"`
+	ProjectID       string       `json:"projectId"`
+	GroveID         string       `json:"groveId"`
 	Phase           string       `json:"phase,omitempty"`
 	Activity        string       `json:"activity,omitempty"`
 	Detail          *AgentDetail `json:"detail,omitempty"`
@@ -95,7 +96,8 @@ type AgentStatusEvent struct {
 // subscribers can render a complete row without an extra REST fetch.
 type AgentCreatedEvent struct {
 	AgentID         string `json:"agentId"`
-	ProjectID         string `json:"projectId"`
+	ProjectID       string `json:"projectId"`
+	GroveID         string `json:"groveId"`
 	Name            string `json:"name"`
 	Slug            string `json:"slug"`
 	Template        string `json:"template,omitempty"`
@@ -113,13 +115,15 @@ type AgentCreatedEvent struct {
 
 // AgentDeletedEvent is published when an agent is deleted.
 type AgentDeletedEvent struct {
-	AgentID string `json:"agentId"`
+	AgentID   string `json:"agentId"`
 	ProjectID string `json:"projectId"`
+	GroveID   string `json:"groveId"`
 }
 
 // ProjectCreatedEvent is published when a project is created.
 type ProjectCreatedEvent struct {
 	ProjectID string `json:"projectId"`
+	GroveID   string `json:"groveId"`
 	Name      string `json:"name"`
 	Slug      string `json:"slug"`
 }
@@ -127,12 +131,14 @@ type ProjectCreatedEvent struct {
 // ProjectUpdatedEvent is published when a project is updated.
 type ProjectUpdatedEvent struct {
 	ProjectID string `json:"projectId"`
+	GroveID   string `json:"groveId"`
 	Name      string `json:"name"`
 }
 
 // ProjectDeletedEvent is published when a project is deleted.
 type ProjectDeletedEvent struct {
 	ProjectID string `json:"projectId"`
+	GroveID   string `json:"groveId"`
 }
 
 // BrokerProjectEvent is published when a broker connects or disconnects,
@@ -141,6 +147,7 @@ type BrokerProjectEvent struct {
 	BrokerID   string `json:"brokerId"`
 	BrokerName string `json:"brokerName,omitempty"`
 	ProjectID  string `json:"projectId"`
+	GroveID    string `json:"groveId"`
 	Status     string `json:"status"` // "online" or "offline"
 }
 
@@ -154,7 +161,8 @@ type BrokerStatusEvent struct {
 // persisted — either an agent→user reply or a user→agent instruction.
 type UserMessageEvent struct {
 	ID          string `json:"id"`
-	ProjectID     string `json:"projectId"`
+	ProjectID   string `json:"projectId"`
+	GroveID     string `json:"groveId"`
 	Sender      string `json:"sender"`
 	SenderID    string `json:"senderId"`
 	Recipient   string `json:"recipient"`
@@ -171,7 +179,8 @@ type UserMessageEvent struct {
 type NotificationCreatedEvent struct {
 	ID        string `json:"id"`
 	AgentID   string `json:"agentId"`
-	ProjectID   string `json:"projectId"`
+	ProjectID string `json:"projectId"`
+	GroveID   string `json:"groveId"`
 	Status    string `json:"status"`
 	Message   string `json:"message"`
 	CreatedAt string `json:"createdAt"`
@@ -292,7 +301,8 @@ func (p *ChannelEventPublisher) Close() {
 func (p *ChannelEventPublisher) PublishAgentStatus(_ context.Context, agent *store.Agent) {
 	evt := AgentStatusEvent{
 		AgentID:         agent.ID,
-		ProjectID:         agent.ProjectID,
+		ProjectID:       agent.ProjectID,
+		GroveID:         agent.ProjectID,
 		Phase:           agent.Phase,
 		Activity:        agent.Activity,
 		ContainerStatus: agent.ContainerStatus,
@@ -323,7 +333,8 @@ func (p *ChannelEventPublisher) PublishAgentStatus(_ context.Context, agent *sto
 func (p *ChannelEventPublisher) PublishAgentCreated(_ context.Context, agent *store.Agent) {
 	evt := AgentCreatedEvent{
 		AgentID:         agent.ID,
-		ProjectID:         agent.ProjectID,
+		ProjectID:       agent.ProjectID,
+		GroveID:         agent.ProjectID,
 		Name:            agent.Name,
 		Slug:            agent.Slug,
 		Template:        agent.Template,
@@ -351,8 +362,9 @@ func (p *ChannelEventPublisher) PublishAgentCreated(_ context.Context, agent *st
 // and project-scoped subjects (dual-publish pattern).
 func (p *ChannelEventPublisher) PublishAgentDeleted(_ context.Context, agentID, projectID string) {
 	evt := AgentDeletedEvent{
-		AgentID: agentID,
+		AgentID:   agentID,
 		ProjectID: projectID,
+		GroveID:   projectID,
 	}
 	p.publish("agent."+agentID+".deleted", evt)
 	if projectID != "" {
@@ -365,6 +377,7 @@ func (p *ChannelEventPublisher) PublishAgentDeleted(_ context.Context, agentID, 
 func (p *ChannelEventPublisher) PublishProjectCreated(_ context.Context, project *store.Project) {
 	evt := ProjectCreatedEvent{
 		ProjectID: project.ID,
+		GroveID:   project.ID,
 		Name:      project.Name,
 		Slug:      project.Slug,
 	}
@@ -376,6 +389,7 @@ func (p *ChannelEventPublisher) PublishProjectCreated(_ context.Context, project
 func (p *ChannelEventPublisher) PublishProjectUpdated(_ context.Context, project *store.Project) {
 	evt := ProjectUpdatedEvent{
 		ProjectID: project.ID,
+		GroveID:   project.ID,
 		Name:      project.Name,
 	}
 	p.publish("project."+project.ID+".updated", evt)
@@ -386,6 +400,7 @@ func (p *ChannelEventPublisher) PublishProjectUpdated(_ context.Context, project
 func (p *ChannelEventPublisher) PublishProjectDeleted(_ context.Context, projectID string) {
 	evt := ProjectDeletedEvent{
 		ProjectID: projectID,
+		GroveID:   projectID,
 	}
 	p.publish("project."+projectID+".deleted", evt)
 	p.publish("grove."+projectID+".deleted", evt)
@@ -398,6 +413,7 @@ func (p *ChannelEventPublisher) PublishBrokerConnected(_ context.Context, broker
 			BrokerID:   brokerID,
 			BrokerName: brokerName,
 			ProjectID:  gid,
+			GroveID:    gid,
 			Status:     "online",
 		}
 		p.publish("project."+gid+".broker.status", evt)
@@ -411,6 +427,7 @@ func (p *ChannelEventPublisher) PublishBrokerDisconnected(_ context.Context, bro
 		evt := BrokerProjectEvent{
 			BrokerID:  brokerID,
 			ProjectID: gid,
+			GroveID:   gid,
 			Status:    "offline",
 		}
 		p.publish("project."+gid+".broker.status", evt)
@@ -432,7 +449,8 @@ func (p *ChannelEventPublisher) PublishNotification(_ context.Context, notif *st
 	evt := NotificationCreatedEvent{
 		ID:        notif.ID,
 		AgentID:   notif.AgentID,
-		ProjectID:   notif.ProjectID,
+		ProjectID: notif.ProjectID,
+		GroveID:   notif.ProjectID,
 		Status:    notif.Status,
 		Message:   notif.Message,
 		CreatedAt: notif.CreatedAt.Format("2006-01-02T15:04:05.000Z"),
@@ -478,7 +496,8 @@ func (p *ChannelEventPublisher) PublishInviteChanged(_ context.Context, action, 
 func (p *ChannelEventPublisher) PublishUserMessage(_ context.Context, msg *store.Message) {
 	evt := UserMessageEvent{
 		ID:          msg.ID,
-		ProjectID:     msg.ProjectID,
+		ProjectID:   msg.ProjectID,
+		GroveID:     msg.ProjectID,
 		Sender:      msg.Sender,
 		SenderID:    msg.SenderID,
 		Recipient:   msg.Recipient,

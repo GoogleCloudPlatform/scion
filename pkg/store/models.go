@@ -1004,6 +1004,36 @@ type UserAccessToken struct {
 	Created   time.Time  `json:"created"`
 }
 
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (t UserAccessToken) MarshalJSON() ([]byte, error) {
+	type Alias UserAccessToken
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(t),
+		GroveID: t.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (t *UserAccessToken) UnmarshalJSON(data []byte) error {
+	type Alias UserAccessToken
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(t),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if t.ProjectID == "" && aux.GroveID != "" {
+		t.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
 // UATPrefix is the token prefix that distinguishes UATs from other token types.
 const UATPrefix = "scion_pat_"
 
@@ -1139,6 +1169,36 @@ type Message struct {
 	CreatedAt   time.Time `json:"createdAt"`
 }
 
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (m Message) MarshalJSON() ([]byte, error) {
+	type Alias Message
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(m),
+		GroveID: m.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (m *Message) UnmarshalJSON(data []byte) error {
+	type Alias Message
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(m),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if m.ProjectID == "" && aux.GroveID != "" {
+		m.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
 // MessageFilter defines query parameters for listing messages.
 type MessageFilter struct {
 	ProjectID   string // Filter by project
@@ -1174,6 +1234,36 @@ type ScheduledEvent struct {
 	FiredAt    *time.Time `json:"firedAt,omitempty"`
 	Error      string     `json:"error,omitempty"`
 	ScheduleID string     `json:"scheduleId,omitempty"` // FK to schedules.id for recurring schedule fires
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (e ScheduledEvent) MarshalJSON() ([]byte, error) {
+	type Alias ScheduledEvent
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(e),
+		GroveID: e.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (e *ScheduledEvent) UnmarshalJSON(data []byte) error {
+	type Alias ScheduledEvent
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(e),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if e.ProjectID == "" && aux.GroveID != "" {
+		e.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // ScheduledEventStatus constants
@@ -1214,6 +1304,36 @@ type Schedule struct {
 	CreatedAt     time.Time  `json:"createdAt"`
 	CreatedBy     string     `json:"createdBy,omitempty"`
 	UpdatedAt     time.Time  `json:"updatedAt"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (s Schedule) MarshalJSON() ([]byte, error) {
+	type Alias Schedule
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(s),
+		GroveID: s.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (s *Schedule) UnmarshalJSON(data []byte) error {
+	type Alias Schedule
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(s),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if s.ProjectID == "" && aux.GroveID != "" {
+		s.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // ScheduleStatus constants

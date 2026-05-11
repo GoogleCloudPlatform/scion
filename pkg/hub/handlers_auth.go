@@ -161,12 +161,24 @@ type TokenResponse struct {
 	ID        string     `json:"id"`
 	Name      string     `json:"name"`
 	Prefix    string     `json:"prefix"`
-	ProjectID   string     `json:"projectId"`
+	ProjectID string     `json:"projectId"`
 	Scopes    []string   `json:"scopes"`
 	Revoked   bool       `json:"revoked"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 	LastUsed  *time.Time `json:"lastUsed,omitempty"`
 	Created   time.Time  `json:"created"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (t TokenResponse) MarshalJSON() ([]byte, error) {
+	type Alias TokenResponse
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(t),
+		GroveID: t.ProjectID,
+	})
 }
 
 // handleAuth routes auth-related requests.
