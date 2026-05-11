@@ -547,21 +547,21 @@ func TestGroupMembersAddAgent(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a grove for the agent
-	grove := &store.Grove{
-		ID:   "grove_agent_test",
-		Name: "Test Grove",
-		Slug: "test-grove-agent",
+	// Create a project for the agent
+	project := &store.Project{
+		ID:   "project_agent_test",
+		Name: "Test Project",
+		Slug: "test-project-agent",
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	// Create the agent
 	agent := &store.Agent{
 		ID:      "agent_abc123",
 		Name:    "Test Agent",
-		GroveID: grove.ID,
+		ProjectID: project.ID,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -667,17 +667,17 @@ func TestGroupCreateWithGroupType(t *testing.T) {
 	}
 }
 
-func TestGroupCreateGroveAgentsRejected(t *testing.T) {
+func TestGroupCreateProjectAgentsRejected(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := CreateGroupRequest{
-		Name:      "Grove Group",
-		Slug:      "grove-group",
-		GroupType: "grove_agents",
+		Name:      "Project Group",
+		Slug:      "project-group",
+		GroupType: "project_agents",
 	}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groups", body)
 	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected status 400 for grove_agents creation, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("expected status 400 for project_agents creation, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -738,7 +738,7 @@ func TestGroupListWithGroupTypeFilter(t *testing.T) {
 	}
 }
 
-func TestGroupDeleteGroveAgentsRejected(t *testing.T) {
+func TestGroupDeleteProjectAgentsRejected(t *testing.T) {
 	// This test requires the Ent-backed store to persist GroupType.
 	// The legacy SQLite store has no group_type column, so GroupType
 	// always defaults to "explicit" on read. This test validates the
@@ -1107,7 +1107,7 @@ func TestPolicyList(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	// 3 test policies + 2 seeded policies (hub-member-read-all, hub-member-create-groves) = 5
+	// 3 test policies + 2 seeded policies (hub-member-read-all, hub-member-create-projects) = 5
 	if len(resp.Policies) != 5 {
 		t.Errorf("expected 5 policies (3 test + 2 seeded), got %d", len(resp.Policies))
 	}

@@ -53,7 +53,7 @@ export interface AdminUser {
 /**
  * Group type enumeration
  */
-export type GroupType = 'explicit' | 'grove_agents';
+export type GroupType = 'explicit' | 'project_agents';
 
 /**
  * Group information from the Hub API (GET /api/v1/groups)
@@ -64,7 +64,7 @@ export interface AdminGroup {
   slug: string;
   description?: string;
   groupType: GroupType;
-  groveId?: string;
+  projectId?: string;
   parentId?: string;
   labels?: Record<string, string>;
   annotations?: Record<string, string>;
@@ -112,19 +112,19 @@ export interface RouteConfig {
 }
 
 /**
- * Grove status enumeration
+ * Project status enumeration
  */
-export type GroveStatus = 'active' | 'inactive' | 'error';
+export type ProjectStatus = 'active' | 'inactive' | 'error';
 
 /**
- * Grove information from the Hub API
+ * Project information from the Hub API
  */
 /**
- * Grove type enumeration
+ * Project type enumeration
  */
-export type GroveType = 'linked' | 'hub-native';
+export type ProjectType = 'linked' | 'hub-native';
 
-export interface GitHubAppGroveStatus {
+export interface GitHubAppProjectStatus {
   state: 'ok' | 'degraded' | 'error' | 'unchecked';
   error_code?: string;
   error_message?: string;
@@ -142,14 +142,14 @@ export interface GitHubTokenPermissions {
   actions?: string;
 }
 
-export interface Grove {
+export interface Project {
   id: string;
   name: string;
   slug?: string;
   path: string;
   gitRemote?: string;
-  groveType?: GroveType;
-  status: GroveStatus;
+  projectType?: ProjectType;
+  status: ProjectStatus;
   visibility?: string;
   labels?: Record<string, string>;
   defaultRuntimeBrokerId?: string;
@@ -162,15 +162,15 @@ export interface Grove {
   sharedDirs?: SharedDir[];
   githubInstallationId?: number | undefined;
   githubPermissions?: GitHubTokenPermissions | undefined;
-  githubAppStatus?: GitHubAppGroveStatus | undefined;
+  githubAppStatus?: GitHubAppProjectStatus | undefined;
   cloudLogging?: boolean;
 }
 
 /**
- * Check whether a grove is a shared-workspace git grove.
+ * Check whether a project is a shared-workspace git project.
  */
-export function isSharedWorkspace(grove: Grove): boolean {
-  return !!grove.gitRemote && grove.labels?.['scion.dev/workspace-mode'] === 'shared';
+export function isSharedWorkspace(project: Project): boolean {
+  return !!project.gitRemote && project.labels?.['scion.dev/workspace-mode'] === 'shared';
 }
 
 /**
@@ -384,8 +384,8 @@ export interface AgentAppliedConfig {
 export interface Agent {
   id: string;
   name: string;
-  groveId: string;
-  grove?: string;
+  projectId: string;
+  project?: string;
   template: string;
   phase: AgentPhase;
   activity?: AgentActivity;
@@ -459,7 +459,7 @@ export interface TemplateFileInfo {
 /**
  * Scope for environment variables and secrets
  */
-export type ResourceScope = 'user' | 'grove' | 'runtime_broker' | 'hub';
+export type ResourceScope = 'user' | 'project' | 'runtime_broker' | 'hub';
 
 /**
  * Injection mode for environment variables
@@ -512,7 +512,7 @@ export interface Secret {
 }
 
 /**
- * Shared directory for a grove (grove-level shared filesystem between agents)
+ * Shared directory for a project (project-level shared filesystem between agents)
  */
 export interface SharedDir {
   name: string;
@@ -571,7 +571,7 @@ export interface RuntimeBroker {
  */
 export interface Message {
   id: string;
-  groveId: string;
+  projectId: string;
   sender: string;
   senderId: string;
   recipient: string;
@@ -596,7 +596,7 @@ export interface Notification {
   id: string;
   subscriptionId: string;
   agentId: string;
-  groveId: string;
+  projectId: string;
   subscriberType: string;
   subscriberId: string;
   status: string;
@@ -611,9 +611,9 @@ export interface Notification {
 // ---------------------------------------------------------------------------
 
 /**
- * Subscription scope — watch a single agent or an entire grove.
+ * Subscription scope — watch a single agent or an entire project.
  */
-export type SubscriptionScope = 'agent' | 'grove';
+export type SubscriptionScope = 'agent' | 'project';
 
 /**
  * Notification subscription from the Hub API
@@ -626,7 +626,7 @@ export interface Subscription {
   agentSlug?: string;
   subscriberType: string;
   subscriberId: string;
-  groveId: string;
+  projectId: string;
   triggerActivities: string[];
   createdAt: string;
   createdBy: string;
@@ -667,7 +667,7 @@ export function canAny(capabilities: Capabilities | undefined, ...actions: strin
  * Generic wrapper for paginated list responses from the Hub API.
  *
  * Note: The Hub API returns list responses with named keys (e.g., `agents`,
- * `groves`) rather than a generic `items` key. This type is provided as a
+ * `projects`) rather than a generic `items` key. This type is provided as a
  * convenience for new code. Existing components that parse `data.agents` etc.
  * continue to work — the important part is that each item now carries
  * `_capabilities` and the response includes scope-level capabilities.
@@ -705,8 +705,8 @@ export interface GCPServiceAccount {
 }
 
 export interface GCPMintQuotaInfo {
-  grove_minted: number;
-  grove_cap: number;
+  project_minted: number;
+  project_cap: number;
   global_minted: number;
   global_cap: number;
 }

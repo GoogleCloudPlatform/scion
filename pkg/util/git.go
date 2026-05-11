@@ -806,13 +806,13 @@ func sanitizeGitOutput(output, token string) string {
 // scionNamespace is a fixed UUID v5 namespace for deriving deterministic grove IDs.
 var scionNamespace = uuid.MustParse("a1b8e4f0-7c3d-4a1e-9f2b-6d5c8e7a0b1f")
 
-// HashGroveID computes a deterministic ID from a normalized identity string.
+// HashProjectID computes a deterministic ID from a normalized identity string.
 // It uses UUID v5 (SHA-1 based) with a fixed Scion namespace to produce a valid
 // UUID that is deterministic for a given input.
 //
 // NOTE: This function is no longer used for grove ID generation (grove IDs are
 // now random UUIDs). It is retained for other deterministic identifier needs
 // such as cache keys.
-func HashGroveID(normalized string) string {
+func HashProjectID(normalized string) string {
 	return uuid.NewSHA1(scionNamespace, []byte(normalized)).String()
 }

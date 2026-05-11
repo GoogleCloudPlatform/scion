@@ -466,7 +466,7 @@ export class ScionDebugPanel extends LitElement {
     stateManager.addEventListener('disconnected', this.stateUpdateHandler);
     stateManager.addEventListener('scope-changed', this.stateUpdateHandler);
     stateManager.addEventListener('agents-updated', this.stateUpdateHandler);
-    stateManager.addEventListener('groves-updated', this.stateUpdateHandler);
+    stateManager.addEventListener('projects-updated', this.stateUpdateHandler);
     stateManager.addEventListener('brokers-updated', this.stateUpdateHandler);
     this.logEntries = [...debugLog.log];
   }
@@ -478,7 +478,7 @@ export class ScionDebugPanel extends LitElement {
     stateManager.removeEventListener('disconnected', this.stateUpdateHandler);
     stateManager.removeEventListener('scope-changed', this.stateUpdateHandler);
     stateManager.removeEventListener('agents-updated', this.stateUpdateHandler);
-    stateManager.removeEventListener('groves-updated', this.stateUpdateHandler);
+    stateManager.removeEventListener('projects-updated', this.stateUpdateHandler);
     stateManager.removeEventListener('brokers-updated', this.stateUpdateHandler);
   }
 
@@ -677,7 +677,7 @@ export class ScionDebugPanel extends LitElement {
     }
 
     let detail = scope.type;
-    if ('groveId' in scope) detail += ` | groveId: ${scope.groveId}`;
+    if ('projectId' in scope) detail += ` | projectId: ${scope.projectId}`;
     if ('agentId' in scope) detail += ` | agentId: ${scope.agentId}`;
     if ('brokerId' in scope) detail += ` | brokerId: ${scope.brokerId}`;
 
@@ -722,17 +722,17 @@ export class ScionDebugPanel extends LitElement {
           <span class="info-value">${snap.agentCount}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">Groves</span>
-          <span class="info-value">${snap.groveCount}</span>
+          <span class="info-label">Projects</span>
+          <span class="info-value">${snap.projectCount}</span>
         </div>
         <div class="info-row">
           <span class="info-label">Brokers</span>
           <span class="info-value">${snap.brokerCount}</span>
         </div>
-        ${snap.deletedGroveIds.length > 0 ? html`
+        ${snap.deletedProjectIds.length > 0 ? html`
           <div class="info-row">
-            <span class="info-label">Deleted Groves</span>
-            <span class="info-value warning">${snap.deletedGroveIds.length}</span>
+            <span class="info-label">Deleted Projects</span>
+            <span class="info-value warning">${snap.deletedProjectIds.length}</span>
           </div>
         ` : nothing}
         ${this.stateIdsExpanded ? html`
@@ -740,17 +740,17 @@ export class ScionDebugPanel extends LitElement {
             <div class="info-label" style="margin-top: 0.4rem;">Agent IDs:</div>
             <ul class="id-list">${snap.agentIds.map(id => html`<li>${id}</li>`)}</ul>
           ` : nothing}
-          ${snap.groveIds.length > 0 ? html`
-            <div class="info-label" style="margin-top: 0.4rem;">Grove IDs:</div>
-            <ul class="id-list">${snap.groveIds.map(id => html`<li>${id}</li>`)}</ul>
+          ${snap.projectIds.length > 0 ? html`
+            <div class="info-label" style="margin-top: 0.4rem;">Project IDs:</div>
+            <ul class="id-list">${snap.projectIds.map(id => html`<li>${id}</li>`)}</ul>
           ` : nothing}
           ${snap.brokerIds.length > 0 ? html`
             <div class="info-label" style="margin-top: 0.4rem;">Broker IDs:</div>
             <ul class="id-list">${snap.brokerIds.map(id => html`<li>${id}</li>`)}</ul>
           ` : nothing}
-          ${snap.deletedGroveIds.length > 0 ? html`
-            <div class="info-label" style="margin-top: 0.4rem;">Deleted Grove IDs:</div>
-            <ul class="id-list">${snap.deletedGroveIds.map(id => html`<li>${id}</li>`)}</ul>
+          ${snap.deletedProjectIds.length > 0 ? html`
+            <div class="info-label" style="margin-top: 0.4rem;">Deleted Project IDs:</div>
+            <ul class="id-list">${snap.deletedProjectIds.map(id => html`<li>${id}</li>`)}</ul>
           ` : nothing}
         ` : nothing}
       </div>

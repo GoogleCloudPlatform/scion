@@ -59,7 +59,7 @@ var deleteCmd = &cobra.Command{
 			args[i] = api.Slugify(a)
 		}
 
-		projectDir, _ := config.GetResolvedProjectDir(grovePath)
+		projectDir, _ := config.GetResolvedProjectDir(projectPath)
 		if preserveBranch && !util.IsGitRepoDir(projectDir) {
 			fmt.Println("Warning: --preserve-branch used outside a git repository; this flag has no effect.")
 		}
@@ -69,7 +69,7 @@ var deleteCmd = &cobra.Command{
 		if !deleteStopped {
 			excludedAgents = args
 		}
-		hubCtx, err := CheckHubAvailabilityForAgents(grovePath, excludedAgents, false)
+		hubCtx, err := CheckHubAvailabilityForAgents(projectPath, excludedAgents, false)
 		if err != nil {
 			return err
 		}
@@ -80,18 +80,18 @@ var deleteCmd = &cobra.Command{
 			}
 
 			// Require an explicit grove context — error if not in a grove (unless --global)
-			resolvedGrove, _, err := config.RequireGrovePath(grovePath)
+			resolvedGrove, _, err := config.RequireProjectPath(projectPath)
 			if err != nil {
 				return err
 			}
 
-			rt := runtime.GetRuntime(grovePath, profile)
+			rt := runtime.GetRuntime(projectPath, profile)
 			mgr := agent.NewManager(rt)
 
 			filters := map[string]string{
-				"scion.agent":      "true",
-				"scion.grove_path": resolvedGrove,
-				"scion.grove":      config.GetGroveName(resolvedGrove),
+				"scion.agent":        "true",
+				"scion.project_path": resolvedGrove,
+				"scion.project":      config.GetProjectName(resolvedGrove),
 			}
 
 			agents, err := mgr.List(context.Background(), filters)
@@ -122,12 +122,12 @@ var deleteCmd = &cobra.Command{
 
 				statusf("Deleting stopped agent '%s' (status: %s)...\n", agentName, a.ContainerStatus)
 
-				targetGrovePath := a.GrovePath
-				if targetGrovePath == "" {
-					targetGrovePath = resolvedGrove
+				targetProjectPath:= a.ProjectPath
+				if targetProjectPath == "" {
+					targetProjectPath = resolvedGrove
 				}
 
-				branchDeleted, err := mgr.Delete(context.Background(), agentName, true, targetGrovePath, !preserveBranch)
+				branchDeleted, err := mgr.Delete(context.Background(), agentName, true, targetProjectPath, !preserveBranch)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Failed to delete agent '%s': %v\n", agentName, err)
 					continue
@@ -207,7 +207,7 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 
 		// Use grove-scoped client which supports agent lookup by name/slug
-		if err := hubCtx.Client.GroveAgents(hubCtx.GroveID).Delete(ctx, agentName, opts); err != nil {
+		if err := hubCtx.Client.ProjectAgents(hubCtx.ProjectID).Delete(ctx, agentName, opts); err != nil {
 			cancel()
 			errs = append(errs, fmt.Sprintf("%s: %v", agentName, wrapHubError(err)))
 			if isJSONOutput() {
@@ -224,7 +224,7 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 		// Also clean up local agent files (worktree, agent directory).
 		// The Hub dispatches container cleanup to the runtime broker, but local
 		// filesystem artifacts must be removed by the CLI to avoid orphaned agents.
-		branchDeleted, err := agent.DeleteAgentFiles(agentName, grovePath, !preserveBranch)
+		branchDeleted, err := agent.DeleteAgentFiles(agentName, projectPath, !preserveBranch)
 		if err != nil {
 			statusf("Warning: Hub record deleted but local cleanup failed for '%s': %v\n", agentName, err)
 			statusf("Run 'scion --no-hub delete %s' to retry targeted cleanup, or 'scion clean' to reset the grove.\n", agentName)
@@ -232,9 +232,9 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 
 		// Keep sync watermark current after a successful Hub delete. If hub server
 		// time is unavailable in this flow, UpdateLastSyncedAt falls back to local UTC.
-		if hubCtx != nil && hubCtx.GrovePath != "" {
-			hubsync.UpdateLastSyncedAt(hubCtx.GrovePath, time.Time{}, hubCtx.IsGlobal)
-			hubsync.RemoveSyncedAgent(hubCtx.GrovePath, agentName)
+		if hubCtx != nil && hubCtx.ProjectPath != "" {
+			hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, time.Time{}, hubCtx.IsGlobal)
+			hubsync.RemoveSyncedAgent(hubCtx.ProjectPath, agentName)
 		}
 		if branchDeleted {
 			statusf("Git branch associated with agent '%s' deleted.\n", agentName)
@@ -274,7 +274,7 @@ func deleteStoppedViaHub(hubCtx *HubContext) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	agentSvc := hubCtx.Client.GroveAgents(hubCtx.GroveID)
+	agentSvc := hubCtx.Client.ProjectAgents(hubCtx.ProjectID)
 	resp, err := agentSvc.List(ctx, &hubclient.ListAgentsOptions{Phase: "stopped"})
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to list agents via Hub: %w", err))
@@ -294,7 +294,7 @@ func deleteStoppedViaHub(hubCtx *HubContext) error {
 }
 
 func deleteAgentLocal(agentName string) error {
-	rt := runtime.GetRuntime(grovePath, profile)
+	rt := runtime.GetRuntime(projectPath, profile)
 	mgr := agent.NewManager(rt)
 
 	fmt.Printf("Deleting agent '%s'...\n", agentName)
@@ -315,7 +315,7 @@ func deleteAgentLocal(agentName string) error {
 	if !containerFound {
 		// Check if agent definition exists on the filesystem
 		agentDirExists := false
-		if projectDir, err := config.GetResolvedProjectDir(grovePath); err == nil {
+		if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
 			if _, err := os.Stat(filepath.Join(projectDir, "agents", agentName)); err == nil {
 				agentDirExists = true
 			}
@@ -333,7 +333,7 @@ func deleteAgentLocal(agentName string) error {
 		fmt.Println("No container found, removing agent definition...")
 	}
 
-	branchDeleted, err := mgr.Delete(context.Background(), agentName, true, grovePath, !preserveBranch)
+	branchDeleted, err := mgr.Delete(context.Background(), agentName, true, projectPath, !preserveBranch)
 	if err != nil {
 		return err
 	}

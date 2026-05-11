@@ -419,7 +419,7 @@ func (s *PolicyStore) GetPoliciesForPrincipal(ctx context.Context, principalType
 }
 
 // GetPoliciesForPrincipals returns all policies bound to any of the given principals.
-// Results are ordered by scope_type (hub < grove < resource) then priority ASC.
+// Results are ordered by scope_type (hub < project < resource) then priority ASC.
 func (s *PolicyStore) GetPoliciesForPrincipals(ctx context.Context, principals []store.PrincipalRef) ([]store.Policy, error) {
 	if len(principals) == 0 {
 		return nil, nil

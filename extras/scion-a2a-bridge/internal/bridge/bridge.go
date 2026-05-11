@@ -40,7 +40,7 @@ var (
 type waiter struct {
 	ch        chan *messages.StructuredMessage
 	agentSlug string
-	groveID   string
+	projectID   string
 }
 
 // Bridge is the core bridge logic that ties together state management,
@@ -64,7 +64,7 @@ type Bridge struct {
 	tasksMu     sync.RWMutex
 	activeTasks map[string]activeTaskEntry
 
-	// agentTasks maps agentKey (groveID:agentSlug) to active task IDs,
+	// agentTasks maps agentKey (projectID:agentSlug) to active task IDs,
 	// used for reverse lookup when broker messages arrive.
 	agentTasks map[string][]string
 
@@ -227,16 +227,16 @@ func (b *Bridge) SetBroker(broker *BrokerServer) {
 	b.broker = broker
 }
 
-// agentKey returns a composite key for grove-scoped agent isolation.
-func agentKey(groveID, agentSlug string) string {
-	return groveID + ":" + agentSlug
+// agentKey returns a composite key for project-scoped agent isolation.
+func agentKey(projectID, agentSlug string) string {
+	return projectID + ":" + agentSlug
 }
 
 // SendMessage handles an A2A SendMessage. When blocking is true (the default),
 // it waits for the agent response. When blocking is false, it returns immediately
 // after submitting the message and the client can poll via GetTask or subscribe.
-func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextID string, parts []Part, blocking bool) (*TaskResult, error) {
-	agentCtx, err := b.resolveContext(ctx, groveSlug, agentSlug, contextID)
+func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contextID string, parts []Part, blocking bool) (*TaskResult, error) {
+	agentCtx, err := b.resolveContext(ctx, projectSlug, agentSlug, contextID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve context: %w", err)
 	}
@@ -246,7 +246,7 @@ func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextI
 	task := &state.Task{
 		ID:        taskID,
 		ContextID: agentCtx.ContextID,
-		GroveID:   agentCtx.GroveID,
+		ProjectID:   agentCtx.ProjectID,
 		AgentSlug: agentCtx.AgentSlug,
 		AgentID:   agentCtx.AgentID,
 		State:     TaskStateSubmitted,
@@ -258,7 +258,7 @@ func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextI
 		return nil, fmt.Errorf("create task: %w", err)
 	}
 	if b.metrics != nil {
-		b.metrics.TasksCreated.WithLabelValues(agentCtx.GroveID).Inc()
+		b.metrics.TasksCreated.WithLabelValues(agentCtx.ProjectID).Inc()
 	}
 
 	scionMsg := TranslateA2AToScion(parts)
@@ -267,14 +267,19 @@ func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextI
 	scionMsg.Metadata = map[string]string{"a2aTaskId": taskID}
 
 	if b.broker != nil {
-		pattern := fmt.Sprintf("scion.grove.%s.user.%s.messages", agentCtx.GroveID, b.config.Hub.User)
+		pattern := fmt.Sprintf("scion.project.%s.user.%s.messages", agentCtx.ProjectID, b.config.Hub.User)
 		if err := b.broker.RequestSubscription(pattern); err != nil {
 			b.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
+		}
+		// Subscribe to legacy grove topic as well during transition.
+		grovePattern := fmt.Sprintf("scion.grove.%s.user.%s.messages", agentCtx.ProjectID, b.config.Hub.User)
+		if err := b.broker.RequestSubscription(grovePattern); err != nil {
+			b.log.Warn("failed to request legacy subscription", "pattern", grovePattern, "error", err)
 		}
 	}
 
 	if !blocking {
-		aKey := agentKey(agentCtx.GroveID, agentCtx.AgentSlug)
+		aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
 		b.registerActiveTask(taskID, aKey)
 		b.wg.Add(1)
 		go func() {
@@ -304,13 +309,13 @@ func (b *Bridge) SendMessage(ctx context.Context, groveSlug, agentSlug, contextI
 	// Blocking mode: set up per-task waiter.
 	// Also register in agentTasks so the slug-based fallback correlation works
 	// when broker messages arrive without a2aTaskId metadata.
-	aKey := agentKey(agentCtx.GroveID, agentCtx.AgentSlug)
+	aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
 	b.registerActiveTask(taskID, aKey)
 	responseCh := make(chan *messages.StructuredMessage, 1)
 	b.addWaiter(taskID, &waiter{
 		ch:        responseCh,
 		agentSlug: agentCtx.AgentSlug,
-		groveID:   agentCtx.GroveID,
+		projectID:   agentCtx.ProjectID,
 	})
 	defer b.removeWaiter(taskID)
 	defer b.unregisterActiveTask(taskID, aKey)
@@ -418,13 +423,13 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 
 	// Unregister before updating state so concurrent broker messages cannot
 	// overwrite the canceled state via dispatchToActiveTask.
-	aKey := agentKey(task.GroveID, task.AgentSlug)
+	aKey := agentKey(task.ProjectID, task.AgentSlug)
 	b.unregisterActiveTask(taskID, aKey)
 
 	// Send interrupt to the agent via Hub, re-resolving if the stored AgentID is stale.
 	if b.hubClient != nil && task.AgentID != "" {
 		targetAgentID := task.AgentID
-		if agent := b.lookupAgent(ctx, task.GroveID, task.AgentSlug); agent != nil {
+		if agent := b.lookupAgent(ctx, task.ProjectID, task.AgentSlug); agent != nil {
 			targetAgentID = agent.ID
 		}
 		interruptMsg := &messages.StructuredMessage{
@@ -509,9 +514,9 @@ func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMes
 		return
 	}
 
-	groveID := extractGroveIDFromTopic(topic)
-	if groveID == "" {
-		b.log.Warn("dropping message with unparseable grove ID", "topic", topic)
+	projectID := extractProjectIDFromTopic(topic)
+	if projectID == "" {
+		b.log.Warn("dropping message with unparseable project ID", "topic", topic)
 		return
 	}
 
@@ -547,19 +552,19 @@ func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMes
 	// SendOutboundMessage) does not carry metadata from the original inbound
 	// message, so a2aTaskId is lost in the round-trip. Fall back to agent-slug
 	// correlation using the agentTasks reverse map.
-	aKey := agentKey(groveID, agentSlug)
+	aKey := agentKey(projectID, agentSlug)
 	b.tasksMu.RLock()
 	taskIDs := append([]string(nil), b.agentTasks[aKey]...)
 	b.tasksMu.RUnlock()
 
 	if len(taskIDs) == 0 {
 		b.log.Warn("dropping broker message: no a2aTaskId and no active tasks for agent",
-			"topic", topic, "sender", msg.Sender, "grove", groveID, "agent", agentSlug)
+			"topic", topic, "sender", msg.Sender, "project", projectID, "agent", agentSlug)
 		return
 	}
 
 	b.log.Debug("correlating broker message by agent slug (no a2aTaskId)",
-		"agent", agentSlug, "grove", groveID, "active_tasks", len(taskIDs))
+		"agent", agentSlug, "project", projectID, "active_tasks", len(taskIDs))
 	for _, taskID := range taskIDs {
 		if b.dispatchToWaiter(taskID, msg) {
 			continue
@@ -677,17 +682,17 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// GenerateAgentCard builds an agent card for the given grove and agent,
+// GenerateAgentCard builds an agent card for the given project and agent,
 // enriching it with metadata from the Hub API when available.
-func (b *Bridge) GenerateAgentCard(ctx context.Context, groveSlug, agentSlug string) map[string]interface{} {
+func (b *Bridge) GenerateAgentCard(ctx context.Context, projectSlug, agentSlug string) map[string]interface{} {
 	baseURL := strings.TrimRight(b.config.Bridge.ExternalURL, "/")
-	agentURL := fmt.Sprintf("%s/groves/%s/agents/%s", baseURL, groveSlug, agentSlug)
+	agentURL := fmt.Sprintf("%s/projects/%s/agents/%s", baseURL, projectSlug, agentSlug)
 
 	name := agentSlug
-	description := fmt.Sprintf("Scion agent %s in grove %s", agentSlug, groveSlug)
+	description := fmt.Sprintf("Scion agent %s in project %s", agentSlug, projectSlug)
 	var skills []map[string]interface{}
 
-	if agent := b.lookupAgent(ctx, groveSlug, agentSlug); agent != nil {
+	if agent := b.lookupAgent(ctx, projectSlug, agentSlug); agent != nil {
 		if agent.Name != "" {
 			name = agent.Name
 		}
@@ -745,8 +750,8 @@ func (b *Bridge) GenerateAgentCard(ctx context.Context, groveSlug, agentSlug str
 
 // lookupAgent fetches agent metadata from the Hub API, returning nil on failure.
 // Results are cached for agentCacheTTL to avoid listing all agents on every call.
-func (b *Bridge) lookupAgent(ctx context.Context, groveSlug, agentSlug string) *hubclient.Agent {
-	cacheKey := groveSlug + ":" + agentSlug
+func (b *Bridge) lookupAgent(ctx context.Context, projectSlug, agentSlug string) *hubclient.Agent {
+	cacheKey := projectSlug + ":" + agentSlug
 
 	b.agentCacheMu.RLock()
 	if entry, ok := b.agentCache[cacheKey]; ok && time.Since(entry.cachedAt) < agentCacheTTL {
@@ -762,7 +767,7 @@ func (b *Bridge) lookupAgent(ctx context.Context, groveSlug, agentSlug string) *
 	if agentSvc == nil {
 		return nil
 	}
-	agents, err := agentSvc.List(ctx, &hubclient.ListAgentsOptions{GroveID: groveSlug})
+	agents, err := agentSvc.List(ctx, &hubclient.ListAgentsOptions{ProjectID: projectSlug})
 	if err != nil {
 		b.log.Debug("failed to list agents for card enrichment", "error", err)
 		return nil
@@ -795,12 +800,12 @@ func (b *Bridge) evictStaleAgentCache() {
 	b.agentCacheMu.Unlock()
 }
 
-// GetGroveConfig returns the configuration for a grove slug, or nil if not configured.
+// GetProjectConfig returns the configuration for a project slug, or nil if not configured.
 // Returns a pointer to a copy to avoid aliasing the live config slice.
-func (b *Bridge) GetGroveConfig(groveSlug string) *GroveConfig {
-	for i := range b.config.Groves {
-		if b.config.Groves[i].Slug == groveSlug {
-			cfg := b.config.Groves[i]
+func (b *Bridge) GetProjectConfig(projectSlug string) *ProjectConfig {
+	for i := range b.config.Projects {
+		if b.config.Projects[i].Slug == projectSlug {
+			cfg := b.config.Projects[i]
 			return &cfg
 		}
 	}
@@ -808,15 +813,15 @@ func (b *Bridge) GetGroveConfig(groveSlug string) *GroveConfig {
 }
 
 // resolveContext maps an A2A context to a Scion agent, creating a new context if needed.
-func (b *Bridge) resolveContext(ctx context.Context, groveSlug, agentSlug, contextID string) (*state.Context, error) {
+func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, contextID string) (*state.Context, error) {
 	if contextID != "" {
 		existing, err := b.store.GetContext(contextID)
 		if err != nil {
 			return nil, fmt.Errorf("get context: %w", err)
 		}
 		if existing != nil {
-			if existing.GroveID != groveSlug || existing.AgentSlug != agentSlug {
-				return nil, fmt.Errorf("%w: context does not belong to %s/%s", ErrContextUnknown, groveSlug, agentSlug)
+			if existing.ProjectID != projectSlug || existing.AgentSlug != agentSlug {
+				return nil, fmt.Errorf("%w: context does not belong to %s/%s", ErrContextUnknown, projectSlug, agentSlug)
 			}
 			if err := b.store.TouchContext(contextID); err != nil {
 				b.log.Error("failed to touch context", "context_id", contextID, "error", err)
@@ -826,35 +831,35 @@ func (b *Bridge) resolveContext(ctx context.Context, groveSlug, agentSlug, conte
 		return nil, fmt.Errorf("%w: %s", ErrContextUnknown, contextID)
 	}
 
-	agents, err := b.hubClient.Agents().List(ctx, &hubclient.ListAgentsOptions{GroveID: groveSlug})
+	agents, err := b.hubClient.Agents().List(ctx, &hubclient.ListAgentsOptions{ProjectID: projectSlug})
 	if err != nil {
 		return nil, fmt.Errorf("list agents: %w", err)
 	}
 
-	var agentID, groveID string
+	var agentID, projectID string
 	for _, a := range agents.Agents {
 		if a.Name == agentSlug || a.Slug == agentSlug {
 			agentID = a.ID
-			groveID = a.GroveID
+			projectID = a.ProjectID
 			break
 		}
 	}
 	if agentID == "" {
-		groveCfg := b.GetGroveConfig(groveSlug)
-		if groveCfg == nil || !groveCfg.AutoProvision || groveCfg.DefaultTemplate == "" {
+		projectCfg := b.GetProjectConfig(projectSlug)
+		if projectCfg == nil || !projectCfg.AutoProvision || projectCfg.DefaultTemplate == "" {
 			return nil, fmt.Errorf("%w: %q", ErrAgentNotFound, agentSlug)
 		}
 
-		b.log.Info("auto-provisioning agent", "slug", agentSlug, "grove", groveSlug, "template", groveCfg.DefaultTemplate)
+		b.log.Info("auto-provisioning agent", "slug", agentSlug, "project", projectSlug, "template", projectCfg.DefaultTemplate)
 		created, err := b.hubClient.Agents().Create(ctx, &hubclient.CreateAgentRequest{
 			Name:     agentSlug,
-			GroveID:  groveSlug,
-			Template: groveCfg.DefaultTemplate,
+			ProjectID:  projectSlug,
+			Template: projectCfg.DefaultTemplate,
 			Labels:   map[string]string{"a2a-bridge/auto-provisioned": "true"},
 		})
 		if err != nil {
 			// Concurrent create may have succeeded; re-list to find the agent.
-			retryAgents, retryErr := b.hubClient.Agents().List(ctx, &hubclient.ListAgentsOptions{GroveID: groveSlug})
+			retryAgents, retryErr := b.hubClient.Agents().List(ctx, &hubclient.ListAgentsOptions{ProjectID: projectSlug})
 			if retryErr != nil {
 				return nil, fmt.Errorf("auto-provision agent %q: %w", agentSlug, err)
 			}
@@ -862,7 +867,7 @@ func (b *Bridge) resolveContext(ctx context.Context, groveSlug, agentSlug, conte
 			for _, a := range retryAgents.Agents {
 				if a.Name == agentSlug || a.Slug == agentSlug {
 					agentID = a.ID
-					groveID = a.GroveID
+					projectID = a.ProjectID
 					found = true
 					break
 				}
@@ -872,18 +877,18 @@ func (b *Bridge) resolveContext(ctx context.Context, groveSlug, agentSlug, conte
 			}
 		} else {
 			agentID = created.Agent.ID
-			groveID = created.Agent.GroveID
+			projectID = created.Agent.ProjectID
 		}
 	}
-	if groveID == "" {
-		groveID = groveSlug
+	if projectID == "" {
+		projectID = projectSlug
 	}
 
 	newContextID := uuid.New().String()
 	now := time.Now()
 	agentCtx := &state.Context{
 		ContextID:  newContextID,
-		GroveID:    groveID,
+		ProjectID:    projectID,
 		AgentSlug:  agentSlug,
 		AgentID:    agentID,
 		CreatedAt:  now,
@@ -931,32 +936,32 @@ func (b *Bridge) removeWaiter(taskID string) {
 	delete(b.waiters, taskID)
 }
 
-// parseTopic extracts grove and agent identifiers from a broker topic string.
-// Expected format: scion.grove.<groveID>.user.<user>.messages (6 segments).
-// The 5-segment agent form (scion.grove.<g>.agent.<a>) is parsed but currently
+// parseTopic extracts project and agent identifiers from a broker topic string.
+// Expected format: scion.project.<projectID>.user.<user>.messages (6 segments).
+// The 5-segment agent form (scion.project.<g>.agent.<a>) is parsed but currently
 // unused — the bridge only subscribes to user-scoped topics.
-func parseTopic(topic string) (groveID, agentSlug string, err error) {
+func parseTopic(topic string) (projectID, agentSlug string, err error) {
 	parts := strings.Split(topic, ".")
-	if len(parts) < 3 || parts[0] != "scion" || parts[1] != "grove" {
+	if len(parts) < 3 || parts[0] != "scion" || (parts[1] != "project" && parts[1] != "grove") {
 		return "", "", fmt.Errorf("malformed topic: %s", topic)
 	}
-	groveID = parts[2]
+	projectID = parts[2]
 	if len(parts) >= 5 && parts[3] == "agent" {
 		agentSlug = parts[4]
 	}
-	return groveID, agentSlug, nil
+	return projectID, agentSlug, nil
 }
 
-func extractGroveIDFromTopic(topic string) string {
-	groveID, _, _ := parseTopic(topic)
-	return groveID
+func extractProjectIDFromTopic(topic string) string {
+	projectID, _, _ := parseTopic(topic)
+	return projectID
 }
 
-// AuthorizeExposed returns nil if the grove is configured and the agent
+// AuthorizeExposed returns nil if the project is configured and the agent
 // is exposed (or no allowlist is set). Returns ErrAgentNotFound to avoid
-// leaking grove existence.
-func (b *Bridge) AuthorizeExposed(groveSlug, agentSlug string) error {
-	g := b.GetGroveConfig(groveSlug)
+// leaking project existence.
+func (b *Bridge) AuthorizeExposed(projectSlug, agentSlug string) error {
+	g := b.GetProjectConfig(projectSlug)
 	if g == nil {
 		return ErrAgentNotFound
 	}
@@ -971,24 +976,24 @@ func (b *Bridge) AuthorizeExposed(groveSlug, agentSlug string) error {
 	return ErrAgentNotFound
 }
 
-// AuthorizeTask verifies a task belongs to the given grove and agent.
+// AuthorizeTask verifies a task belongs to the given project and agent.
 // Returns nil (not an error) if the task doesn't exist or doesn't match,
 // so callers can return "not found" without leaking existence.
-func (b *Bridge) AuthorizeTask(taskID, groveSlug, agentSlug string) (*state.Task, error) {
+func (b *Bridge) AuthorizeTask(taskID, projectSlug, agentSlug string) (*state.Task, error) {
 	task, err := b.store.GetTask(taskID)
 	if err != nil {
 		return nil, fmt.Errorf("get task: %w", err)
 	}
-	if task == nil || task.GroveID != groveSlug || task.AgentSlug != agentSlug {
+	if task == nil || task.ProjectID != projectSlug || task.AgentSlug != agentSlug {
 		return nil, nil
 	}
 	return task, nil
 }
 
-// AuthorizeContext verifies a context belongs to the given grove and agent.
+// AuthorizeContext verifies a context belongs to the given project and agent.
 // Returns (true, nil) on success, (false, nil) when the context doesn't exist
 // or doesn't match, and (false, err) on database errors.
-func (b *Bridge) AuthorizeContext(contextID, groveSlug, agentSlug string) (bool, error) {
+func (b *Bridge) AuthorizeContext(contextID, projectSlug, agentSlug string) (bool, error) {
 	ctx, err := b.store.GetContext(contextID)
 	if err != nil {
 		return false, fmt.Errorf("get context: %w", err)
@@ -996,7 +1001,7 @@ func (b *Bridge) AuthorizeContext(contextID, groveSlug, agentSlug string) (bool,
 	if ctx == nil {
 		return false, nil
 	}
-	return ctx.GroveID == groveSlug && ctx.AgentSlug == agentSlug, nil
+	return ctx.ProjectID == projectSlug && ctx.AgentSlug == agentSlug, nil
 }
 
 // extractAgentIDFromSender extracts agent identity from sender field.

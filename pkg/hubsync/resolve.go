@@ -28,66 +28,66 @@ import (
 	"github.com/google/uuid"
 )
 
-// IsHubGroveRef returns true if the given grove path value looks like a hub
-// grove reference (slug, name, UUID, or git URL) rather than a filesystem path.
-// It is used to decide whether to resolve the grove via the hub API instead of
+// IsHubProjectRef returns true if the given project path value looks like a hub
+// project reference (slug, name, UUID, or git URL) rather than a filesystem path.
+// It is used to decide whether to resolve the project via the hub API instead of
 // the local filesystem.
-func IsHubGroveRef(grovePath string) bool {
-	if grovePath == "" {
+func IsHubProjectRef(projectPath string) bool {
+	if projectPath == "" {
 		return false
 	}
 
 	// "global" and "home" are special filesystem-like values
-	if grovePath == "global" || grovePath == "home" {
+	if projectPath == "global" || projectPath == "home" {
 		return false
 	}
 
 	// Git URLs are always hub references
-	if util.IsGitURL(grovePath) {
+	if util.IsGitURL(projectPath) {
 		return true
 	}
 
 	// Absolute or explicitly relative paths are filesystem references
-	if strings.HasPrefix(grovePath, "/") || strings.HasPrefix(grovePath, "./") || strings.HasPrefix(grovePath, "../") {
+	if strings.HasPrefix(projectPath, "/") || strings.HasPrefix(projectPath, "./") || strings.HasPrefix(projectPath, "../") {
 		return false
 	}
 
 	// Contains path separators → filesystem path
-	if strings.Contains(grovePath, string(os.PathSeparator)) {
+	if strings.Contains(projectPath, string(os.PathSeparator)) {
 		return false
 	}
 
 	// Could be a slug or a relative directory name. Check the filesystem:
 	// if the path exists as a directory or contains a .scion subdirectory,
 	// treat it as a local path.
-	if info, err := os.Stat(grovePath); err == nil && info.IsDir() {
+	if info, err := os.Stat(projectPath); err == nil && info.IsDir() {
 		return false
 	}
-	if info, err := os.Stat(grovePath + "/.scion"); err == nil && info.IsDir() {
+	if info, err := os.Stat(projectPath + "/.scion"); err == nil && info.IsDir() {
 		return false
 	}
 
 	return true
 }
 
-// resolveHubGroveRef resolves a hub grove reference (slug, name, UUID, or git
-// URL) by loading hub settings from a fallback grove and querying the hub API.
-func resolveHubGroveRef(ref string, opts EnsureHubReadyOptions) (*HubContext, error) {
-	debugf("resolveHubGroveRef: ref=%s", ref)
+// resolveHubProjectRef resolves a hub project reference (slug, name, UUID, or git
+// URL) by loading hub settings from a fallback project and querying the hub API.
+func resolveHubProjectRef(ref string, opts EnsureHubReadyOptions) (*HubContext, error) {
+	debugf("resolveHubProjectRef: ref=%s", ref)
 
-	// Load hub settings from the fallback grove (current project or global)
-	fallbackPath, isGlobal, err := config.ResolveGrovePath("")
+	// Load hub settings from the fallback project (current project or global)
+	fallbackPath, isGlobal, err := config.ResolveProjectPath("")
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve fallback grove for hub settings: %w", err)
+		return nil, fmt.Errorf("failed to resolve fallback project for hub settings: %w", err)
 	}
-	debugf("resolveHubGroveRef: fallbackPath=%s, isGlobal=%v", fallbackPath, isGlobal)
+	debugf("resolveHubProjectRef: fallbackPath=%s, isGlobal=%v", fallbackPath, isGlobal)
 
 	settings, err := config.LoadSettings(fallbackPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load settings from fallback grove: %w", err)
+		return nil, fmt.Errorf("failed to load settings from fallback project: %w", err)
 	}
 
-	debugf("resolveHubGroveRef: hub=%v, hubConfigured=%v, hubEnabled=%v, hubExplicitlyDisabled=%v",
+	debugf("resolveHubProjectRef: hub=%v, hubConfigured=%v, hubEnabled=%v, hubExplicitlyDisabled=%v",
 		settings.Hub != nil, settings.IsHubConfigured(), settings.IsHubEnabled(), settings.IsHubExplicitlyDisabled())
 	if settings.Hub != nil {
 		hasToken := settings.Hub.Token != ""
@@ -97,12 +97,12 @@ func resolveHubGroveRef(ref string, opts EnsureHubReadyOptions) (*HubContext, er
 		if settings.Hub.Enabled != nil {
 			enabledPtr = fmt.Sprintf("%v", *settings.Hub.Enabled)
 		}
-		debugf("resolveHubGroveRef: hub.enabled=%s, hub.endpoint=%v, hub.hasToken=%v, hub.hasAPIKey=%v",
+		debugf("resolveHubProjectRef: hub.enabled=%s, hub.endpoint=%v, hub.hasToken=%v, hub.hasAPIKey=%v",
 			enabledPtr, hasEndpoint, hasToken, hasAPIKey)
 	}
 
 	if !settings.IsHubEnabled() {
-		return nil, fmt.Errorf("hub grove references (slugs, names, git URLs) require hub mode to be enabled\n\n" +
+		return nil, fmt.Errorf("hub project references (slugs, names, git URLs) require hub mode to be enabled\n\n" +
 			"Enable with: scion config set hub.enabled true")
 	}
 
@@ -127,8 +127,8 @@ func resolveHubGroveRef(ref string, opts EnsureHubReadyOptions) (*HubContext, er
 		return nil, wrapHubError(fmt.Errorf("hub at %s is not responding: %w", endpoint, err))
 	}
 
-	// Resolve the grove on the hub
-	grove, err := resolveGroveOnHub(ctx, client, ref)
+	// Resolve the project on the hub
+	project, err := resolveProjectOnHub(ctx, client, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -142,74 +142,74 @@ func resolveHubGroveRef(ref string, opts EnsureHubReadyOptions) (*HubContext, er
 		Client:   client,
 		Endpoint: endpoint,
 		Settings: settings,
-		GroveID:  grove.ID,
+		ProjectID:  project.ID,
 		BrokerID: brokerID,
-		// Use the fallback grove path for settings access, not the target grove
-		GrovePath: fallbackPath,
+		// Use the fallback project path for settings access, not the target project
+		ProjectPath: fallbackPath,
 		IsGlobal:  isGlobal,
 	}
 
-	debugf("resolveHubGroveRef: resolved grove %s (ID: %s) via hub", grove.Name, grove.ID)
+	debugf("resolveHubProjectRef: resolved project %s (ID: %s) via hub", project.Name, project.ID)
 	return hubCtx, nil
 }
 
-// resolveGroveOnHub resolves a grove reference on the hub, trying multiple
+// resolveProjectOnHub resolves a project reference on the hub, trying multiple
 // strategies in order: UUID, git URL, slug, name.
-func resolveGroveOnHub(ctx context.Context, client hubclient.Client, ref string) (*hubclient.Grove, error) {
+func resolveProjectOnHub(ctx context.Context, client hubclient.Client, ref string) (*hubclient.Project, error) {
 	// 1. Try as UUID
 	if _, err := uuid.Parse(ref); err == nil {
-		grove, err := client.Groves().Get(ctx, ref)
+		project, err := client.Projects().Get(ctx, ref)
 		if err == nil {
-			return grove, nil
+			return project, nil
 		}
 		if !apiclient.IsNotFoundError(err) {
-			return nil, fmt.Errorf("failed to get grove by ID: %w", err)
+			return nil, fmt.Errorf("failed to get project by ID: %w", err)
 		}
 		// UUID format but not found — fall through to other strategies
 	}
 
 	// 2. Try as git URL
 	if util.IsGitURL(ref) {
-		resp, err := client.Groves().List(ctx, &hubclient.ListGrovesOptions{
+		resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{
 			GitRemote: util.NormalizeGitRemote(ref),
 		})
 		if err != nil {
-			return nil, fmt.Errorf("failed to search for grove by git URL: %w", err)
+			return nil, fmt.Errorf("failed to search for project by git URL: %w", err)
 		}
-		switch len(resp.Groves) {
+		switch len(resp.Projects) {
 		case 0:
-			return nil, fmt.Errorf("no grove found for git URL '%s'", ref)
+			return nil, fmt.Errorf("no project found for git URL '%s'", ref)
 		case 1:
-			return &resp.Groves[0], nil
+			return &resp.Projects[0], nil
 		default:
-			return nil, fmt.Errorf("multiple groves found for git URL '%s' — please use a grove ID or slug instead", ref)
+			return nil, fmt.Errorf("multiple projects found for git URL '%s' — please use a project ID or slug instead", ref)
 		}
 	}
 
 	// 3. Try as slug
-	resp, err := client.Groves().List(ctx, &hubclient.ListGrovesOptions{
+	resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{
 		Slug: ref,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to search for grove by slug: %w", err)
+		return nil, fmt.Errorf("failed to search for project by slug: %w", err)
 	}
-	if len(resp.Groves) == 1 {
-		return &resp.Groves[0], nil
+	if len(resp.Projects) == 1 {
+		return &resp.Projects[0], nil
 	}
 
 	// 4. Try as name
-	resp, err = client.Groves().List(ctx, &hubclient.ListGrovesOptions{
+	resp, err = client.Projects().List(ctx, &hubclient.ListProjectsOptions{
 		Name: ref,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to search for grove by name: %w", err)
+		return nil, fmt.Errorf("failed to search for project by name: %w", err)
 	}
-	switch len(resp.Groves) {
+	switch len(resp.Projects) {
 	case 0:
-		return nil, fmt.Errorf("grove '%s' not found on hub", ref)
+		return nil, fmt.Errorf("project '%s' not found on hub", ref)
 	case 1:
-		return &resp.Groves[0], nil
+		return &resp.Projects[0], nil
 	default:
-		return nil, fmt.Errorf("multiple groves found with name '%s' — please use a grove ID or slug instead", ref)
+		return nil, fmt.Errorf("multiple projects found with name '%s' — please use a project ID or slug instead", ref)
 	}
 }

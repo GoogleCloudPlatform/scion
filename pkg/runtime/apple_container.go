@@ -207,9 +207,9 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 			Template:        c.Configuration.Labels["scion.template"],
 			HarnessConfig:   c.Configuration.Labels["scion.harness_config"],
 			HarnessAuth:     c.Configuration.Labels["scion.harness_auth"],
-			Grove:           c.Configuration.Labels["scion.grove"],
-			GroveID:         c.Configuration.Labels["scion.grove_id"],
-			GrovePath:       c.Configuration.Labels["scion.grove_path"],
+			Project:         c.Configuration.Labels["scion.grove"],
+			ProjectID:       c.Configuration.Labels["scion.grove_id"],
+			ProjectPath:     c.Configuration.Labels["scion.grove_path"],
 			Labels:          c.Configuration.Labels,
 			Annotations:     c.Configuration.Labels,
 			ContainerStatus: c.Status,
@@ -327,14 +327,14 @@ func (r *AppleContainerRuntime) GetWorkspacePath(ctx context.Context, id string)
 			if workspacePath, ok := agent.Labels["scion.workspace_path"]; ok && workspacePath != "" {
 				return workspacePath, nil
 			}
-			// Fall back to grove path worktree pattern
-			if agent.GrovePath != "" && agent.Name != "" {
-				// Worktrees are typically at: {parent}/.scion_worktrees/{grove}/{agent}
-				groveName := agent.Grove
-				if groveName == "" {
-					groveName = "default"
+			// Fall back to project path worktree pattern
+			if agent.ProjectPath != "" && agent.Name != "" {
+				// Worktrees are typically at: {parent}/.scion_worktrees/{project}/{agent}
+				projectName := agent.Project
+				if projectName == "" {
+					projectName = "default"
 				}
-				return fmt.Sprintf("%s/../.scion_worktrees/%s/%s", agent.GrovePath, groveName, agent.Name), nil
+				return fmt.Sprintf("%s/../.scion_worktrees/%s/%s", agent.ProjectPath, projectName, agent.Name), nil
 			}
 			break
 		}

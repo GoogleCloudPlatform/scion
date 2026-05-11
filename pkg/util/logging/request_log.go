@@ -55,7 +55,7 @@ type HttpRequest struct {
 // RequestMeta holds mutable request-scoped metadata that handlers can enrich.
 type RequestMeta struct {
 	mu        sync.Mutex
-	GroveID   string
+	ProjectID   string
 	AgentID   string
 	BrokerID  string
 	RequestID string
@@ -130,11 +130,11 @@ func RequestMetaFromContext(ctx context.Context) *RequestMeta {
 	return meta
 }
 
-// SetRequestGroveID sets the grove ID on the request metadata in context.
-func SetRequestGroveID(ctx context.Context, groveID string) {
+// SetRequestProjectID sets the grove ID on the request metadata in context.
+func SetRequestProjectID(ctx context.Context, groveID string) {
 	if meta := RequestMetaFromContext(ctx); meta != nil {
 		meta.mu.Lock()
-		meta.GroveID = groveID
+		meta.ProjectID = groveID
 		meta.mu.Unlock()
 	}
 }
@@ -238,6 +238,7 @@ type PathPattern struct {
 // HubPathPatterns returns the URL patterns for the Hub API.
 func HubPathPatterns() []PathPattern {
 	return []PathPattern{
+		{Prefix: "/api/v1/projects/", GroveIdx: 0, AgentIdx: -1},
 		{Prefix: "/api/v1/groves/", GroveIdx: 0, AgentIdx: -1},
 		{Prefix: "/api/v1/agents/", GroveIdx: -1, AgentIdx: 0},
 	}
@@ -246,6 +247,7 @@ func HubPathPatterns() []PathPattern {
 // BrokerPathPatterns returns the URL patterns for the Broker API.
 func BrokerPathPatterns() []PathPattern {
 	return []PathPattern{
+		{Prefix: "/api/v1/projects/", GroveIdx: 0, AgentIdx: -1},
 		{Prefix: "/api/v1/groves/", GroveIdx: 0, AgentIdx: -1},
 		{Prefix: "/api/v1/agents/", GroveIdx: -1, AgentIdx: 0},
 	}
@@ -290,7 +292,7 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 
 			// Create request metadata and store in context
 			meta := &RequestMeta{
-				GroveID:   groveID,
+				ProjectID:   groveID,
 				AgentID:   agentID,
 				RequestID: requestID,
 				TraceID:   traceID,
@@ -312,7 +314,7 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 
 			// Read final metadata (handlers may have enriched it)
 			meta.mu.Lock()
-			finalGroveID := meta.GroveID
+			finalProjectID := meta.ProjectID
 			finalAgentID := meta.AgentID
 			finalBrokerID := meta.BrokerID
 			meta.mu.Unlock()
@@ -368,7 +370,7 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 					slog.String("protocol", httpReq.Protocol),
 				),
 				slog.String(AttrComponent, component),
-				slog.String(AttrGroveID, finalGroveID),
+				slog.String(AttrProjectID, finalProjectID),
 				slog.String(AttrAgentID, finalAgentID),
 				slog.String(AttrBrokerID, finalBrokerID),
 				slog.String(AttrAuthType, finalAuthType),

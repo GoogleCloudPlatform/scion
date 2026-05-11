@@ -58,8 +58,8 @@ func runHarnessConfigInstall(cmd *cobra.Command, args []string) error {
 	force, _ := cmd.Flags().GetBool("force")
 
 	var gp string
-	if grovePath != "" {
-		resolved, err := config.GetResolvedProjectDir(grovePath)
+	if projectPath != "" {
+		resolved, err := config.GetResolvedProjectDir(projectPath)
 		if err == nil {
 			gp = resolved
 		}
@@ -169,17 +169,17 @@ func installToHub(hubCtx *HubContext, name, localPath, harnessType string) error
 	if globalMode {
 		scope = "global"
 	} else {
-		groveID, err := GetGroveID(hubCtx)
+		projectID, err := GetProjectID(hubCtx)
 		if err != nil {
-			return fmt.Errorf("failed to resolve grove for Hub install: %w", err)
+			return fmt.Errorf("failed to resolve project for Hub install: %w", err)
 		}
-		scopeID = groveID
+		scopeID = projectID
 	}
 
 	return syncHarnessConfigToHub(hubCtx, name, localPath, scope, scopeID, harnessType)
 }
 
-func installLocally(name, sourcePath, grovePath string, force bool, harnessType string) error {
+func installLocally(name, sourcePath, projectPath string, force bool, harnessType string) error {
 	var destDir string
 	if globalMode {
 		globalDir, err := config.GetGlobalDir()
@@ -187,8 +187,8 @@ func installLocally(name, sourcePath, grovePath string, force bool, harnessType 
 			return fmt.Errorf("failed to resolve global directory: %w", err)
 		}
 		destDir = filepath.Join(globalDir, "harness-configs", name)
-	} else if grovePath != "" {
-		destDir = filepath.Join(grovePath, "harness-configs", name)
+	} else if projectPath != "" {
+		destDir = filepath.Join(projectPath, "harness-configs", name)
 	} else {
 		globalDir, err := config.GetGlobalDir()
 		if err != nil {

@@ -120,17 +120,17 @@ func TestSubscriptionsListEndToEnd(t *testing.T) {
 			AgentID:           "agent-1",
 			SubscriberType:    store.SubscriberTypeUser,
 			SubscriberID:      "user-1",
-			GroveID:           "grove-1",
+			ProjectID:           "grove-1",
 			TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT"},
 			CreatedAt:         time.Date(2026, 3, 18, 0, 0, 0, 0, time.UTC),
 			CreatedBy:         "user-1",
 		},
 		{
 			ID:                "sub-2",
-			Scope:             store.SubscriptionScopeGrove,
+			Scope:             store.SubscriptionScopeProject,
 			SubscriberType:    store.SubscriberTypeUser,
 			SubscriberID:      "user-1",
-			GroveID:           "grove-1",
+			ProjectID:           "grove-1",
 			TriggerActivities: []string{"COMPLETED"},
 			CreatedAt:         time.Date(2026, 3, 17, 0, 0, 0, 0, time.UTC),
 			CreatedBy:         "user-1",
@@ -153,7 +153,7 @@ func TestSubscriptionsListEndToEnd(t *testing.T) {
 	}
 
 	result, err := client.Subscriptions().List(context.Background(), &hubclient.ListSubscriptionsOptions{
-		GroveID: "grove-1",
+		ProjectID: "grove-1",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -166,8 +166,8 @@ func TestSubscriptionsListEndToEnd(t *testing.T) {
 	if result[0].Scope != store.SubscriptionScopeAgent {
 		t.Errorf("first subscription scope = %q, want %q", result[0].Scope, store.SubscriptionScopeAgent)
 	}
-	if result[1].Scope != store.SubscriptionScopeGrove {
-		t.Errorf("second subscription scope = %q, want %q", result[1].Scope, store.SubscriptionScopeGrove)
+	if result[1].Scope != store.SubscriptionScopeProject {
+		t.Errorf("second subscription scope = %q, want %q", result[1].Scope, store.SubscriptionScopeProject)
 	}
 }
 
@@ -180,11 +180,11 @@ func TestSubscriptionCreateEndToEnd(t *testing.T) {
 				return
 			}
 
-			if req.Scope != store.SubscriptionScopeGrove {
-				t.Errorf("expected scope %q, got %q", store.SubscriptionScopeGrove, req.Scope)
+			if req.Scope != store.SubscriptionScopeProject {
+				t.Errorf("expected scope %q, got %q", store.SubscriptionScopeProject, req.Scope)
 			}
-			if req.GroveID != "grove-1" {
-				t.Errorf("expected groveId %q, got %q", "grove-1", req.GroveID)
+			if req.ProjectID != "grove-1" {
+				t.Errorf("expected groveId %q, got %q", "grove-1", req.ProjectID)
 			}
 			if req.AgentID != "" {
 				t.Errorf("expected empty agentId for grove scope, got %q", req.AgentID)
@@ -195,7 +195,7 @@ func TestSubscriptionCreateEndToEnd(t *testing.T) {
 			json.NewEncoder(w).Encode(hubclient.Subscription{
 				ID:                "new-sub-id",
 				Scope:             req.Scope,
-				GroveID:           req.GroveID,
+				ProjectID:           req.ProjectID,
 				SubscriberType:    store.SubscriberTypeUser,
 				SubscriberID:      "user-1",
 				TriggerActivities: req.TriggerActivities,
@@ -214,8 +214,8 @@ func TestSubscriptionCreateEndToEnd(t *testing.T) {
 	}
 
 	sub, err := client.Subscriptions().Create(context.Background(), &hubclient.CreateSubscriptionRequest{
-		Scope:             store.SubscriptionScopeGrove,
-		GroveID:           "grove-1",
+		Scope:             store.SubscriptionScopeProject,
+		ProjectID:           "grove-1",
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT"},
 	})
 	if err != nil {
@@ -225,8 +225,8 @@ func TestSubscriptionCreateEndToEnd(t *testing.T) {
 	if sub.ID != "new-sub-id" {
 		t.Errorf("subscription ID = %q, want %q", sub.ID, "new-sub-id")
 	}
-	if sub.Scope != store.SubscriptionScopeGrove {
-		t.Errorf("subscription scope = %q, want %q", sub.Scope, store.SubscriptionScopeGrove)
+	if sub.Scope != store.SubscriptionScopeProject {
+		t.Errorf("subscription scope = %q, want %q", sub.Scope, store.SubscriptionScopeProject)
 	}
 }
 

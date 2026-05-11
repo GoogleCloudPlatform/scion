@@ -32,7 +32,7 @@ var configGlobal bool
 var configCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Manage scion configuration settings",
-	Long:  `View and modify settings for scion-agent. Settings are resolved from grove (.scion/settings.json) and global (~/.scion/settings.json) locations.`,
+	Long:  `View and modify settings for scion-agent. Settings are resolved from project (.scion/settings.json) and global (~/.scion/settings.json) locations.`,
 }
 
 var configListCmd = &cobra.Command{
@@ -40,10 +40,10 @@ var configListCmd = &cobra.Command{
 	Short: "List all effective settings",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Resolve grove path
-		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		// If we are not in a grove, we might only show global settings or defaults
 		// We handle the case where grove resolution fails gracefully for global listing?
-		// But LoadSettings expects grovePath. If empty, it loads Global + Defaults.
+		// But LoadSettings expects projectPath. If empty, it loads Global + Defaults.
 
 		var effective *config.Settings
 		if err == nil {
@@ -96,9 +96,9 @@ var configSetCmd = &cobra.Command{
 
 		targetPath := ""
 		if !configGlobal {
-			projectDir, err := config.GetResolvedProjectDir(grovePath)
+			projectDir, err := config.GetResolvedProjectDir(projectPath)
 			if err != nil {
-				return fmt.Errorf("cannot set local setting: not inside a grove or grove path invalid: %w", err)
+				return fmt.Errorf("cannot set local setting: not inside a project or project path invalid: %w", err)
 			}
 			targetPath = projectDir
 		}
@@ -137,7 +137,7 @@ var configGetCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		key := args[0]
 
-		projectDir, _ := config.GetResolvedProjectDir(grovePath)
+		projectDir, _ := config.GetResolvedProjectDir(projectPath)
 		// Even if error, we can try loading defaults/global
 
 		// Try versioned settings first (supports all v1 keys like image_registry)
@@ -201,7 +201,7 @@ against the schema — they use the pre-versioned format.`,
 			}{globalDir, "global"})
 		}
 
-		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err == nil && projectDir != "" && projectDir != globalDir {
 			filePaths = append(filePaths, struct {
 				dir   string
@@ -360,7 +360,7 @@ func runSettingsMigration() error {
 
 	// Include grove dir if applicable and --global was not specified
 	if !configMigrateGlobal {
-		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err == nil && projectDir != "" && projectDir != globalDir {
 			dirs = append(dirs, dirEntry{dir: projectDir, label: "grove"})
 		}
@@ -458,9 +458,9 @@ func runSettingsMigration() error {
 
 var configDirCmd = &cobra.Command{
 	Use:   "dir",
-	Short: "Print the path to the grove config directory",
+	Short: "Print the path to the project config directory",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err != nil {
 			return err
 		}
@@ -474,9 +474,9 @@ var configDirCmd = &cobra.Command{
 
 var configCdConfigCmd = &cobra.Command{
 	Use:   "cd-config",
-	Short: "Open a shell in the grove config directory",
+	Short: "Open a shell in the project config directory",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err != nil {
 			return err
 		}
@@ -484,20 +484,21 @@ var configCdConfigCmd = &cobra.Command{
 	},
 }
 
-var configCdGroveCmd = &cobra.Command{
-	Use:   "cd-grove",
-	Short: "Open a shell in the grove workspace directory",
-	Long: `Open a shell in the grove workspace directory.
+var configCdProjectCmd = &cobra.Command{
+	Use:     "cd-project",
+	Aliases: []string{"cd-grove"},
+	Short:   "Open a shell in the project workspace directory",
+	Long: `Open a shell in the project workspace directory.
 
-For external groves (non-git), navigates to the workspace path stored in settings.
-For git groves, navigates to the project root (parent of the .scion directory).`,
+For external projects (non-git), navigates to the workspace path stored in settings.
+For git projects, navigates to the project root (parent of the .scion directory).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err != nil {
 			return err
 		}
 
-		workspacePath, err := resolveGroveWorkspace(projectDir)
+		workspacePath, err := resolveProjectWorkspace(projectDir)
 		if err != nil {
 			return err
 		}
@@ -506,24 +507,24 @@ For git groves, navigates to the project root (parent of the .scion directory).`
 	},
 }
 
-// resolveGroveWorkspace returns the workspace path for a grove given its config dir.
-// For external groves (under ~/.scion/grove-configs/), the workspace path is read from settings.
-// For git groves, the workspace is the parent directory of the .scion config dir.
-func resolveGroveWorkspace(configDir string) (string, error) {
+// resolveProjectWorkspace returns the workspace path for a project given its config dir.
+// For external projects (under ~/.scion/project-configs/), the workspace path is read from settings.
+// For git projects, the workspace is the parent directory of the .scion config dir.
+func resolveProjectWorkspace(configDir string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	groveConfigsDir := filepath.Join(home, config.GlobalDir, "grove-configs")
+	projectConfigsDir := filepath.Join(home, config.GlobalDir, "project-configs")
 
-	if strings.HasPrefix(configDir, groveConfigsDir) {
-		// External grove — workspace path is recorded in settings
+	if strings.HasPrefix(configDir, projectConfigsDir) {
+		// External project — workspace path is recorded in settings
 		settings, err := config.LoadSettings(configDir)
 		if err != nil {
-			return "", fmt.Errorf("failed to load grove settings: %w", err)
+			return "", fmt.Errorf("failed to load project settings: %w", err)
 		}
 		if settings.WorkspacePath == "" {
-			return "", fmt.Errorf("no workspace path found in grove settings; the grove may be orphaned")
+			return "", fmt.Errorf("no workspace path found in project settings; the project may be orphaned")
 		}
 		if _, err := os.Stat(settings.WorkspacePath); err != nil {
 			return "", fmt.Errorf("workspace path does not exist: %s", settings.WorkspacePath)
@@ -531,10 +532,10 @@ func resolveGroveWorkspace(configDir string) (string, error) {
 		return settings.WorkspacePath, nil
 	}
 
-	// Git grove — workspace is the project root (parent of .scion dir)
+	// Git project — workspace is the project root (parent of .scion dir)
 	parent := filepath.Dir(configDir)
 	if _, err := os.Stat(parent); err != nil {
-		return "", fmt.Errorf("grove workspace does not exist: %s", parent)
+		return "", fmt.Errorf("project workspace does not exist: %s", parent)
 	}
 	return parent, nil
 }
@@ -574,7 +575,7 @@ func init() {
 	configCmd.AddCommand(configMigrateCmd)
 	configCmd.AddCommand(configDirCmd)
 	configCmd.AddCommand(configCdConfigCmd)
-	configCmd.AddCommand(configCdGroveCmd)
+	configCmd.AddCommand(configCdProjectCmd)
 
 	configSetCmd.Flags().BoolVar(&configGlobal, "global", false, "Set configuration globally (~/.scion/settings.json)")
 	configMigrateCmd.Flags().BoolVar(&configMigrateDryRun, "dry-run", false, "Preview changes without writing files")

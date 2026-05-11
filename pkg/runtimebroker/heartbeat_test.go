@@ -63,7 +63,7 @@ func (m *mockRuntimeBrokerService) Delete(ctx context.Context, brokerID string) 
 	return nil
 }
 
-func (m *mockRuntimeBrokerService) ListGroves(ctx context.Context, brokerID string) (*hubclient.ListBrokerGrovesResponse, error) {
+func (m *mockRuntimeBrokerService) ListProjects(ctx context.Context, brokerID string) (*hubclient.ListBrokerProjectsResponse, error) {
 	return nil, nil
 }
 
@@ -102,7 +102,7 @@ func (m *heartbeatMockManager) Stop(ctx context.Context, agentID string) error {
 	return nil
 }
 
-func (m *heartbeatMockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, grovePath string, removeBranch bool) (bool, error) {
+func (m *heartbeatMockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return false, nil
 }
 
@@ -110,11 +110,11 @@ func (m *heartbeatMockManager) List(ctx context.Context, filter map[string]strin
 	return m.agents, m.err
 }
 
-func (m *heartbeatMockManager) Message(ctx context.Context, agentID, groveID string, message string, interrupt bool) error {
+func (m *heartbeatMockManager) Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
 	return nil
 }
 
-func (m *heartbeatMockManager) MessageRaw(ctx context.Context, agentID, groveID string, keys string) error {
+func (m *heartbeatMockManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
 	return nil
 }
 
@@ -211,9 +211,9 @@ func TestHeartbeatService_IncludesAgentInfo(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	manager := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "agent-1", GroveID: "grove-1", Phase: "running", Activity: "thinking"},
-			{Name: "agent-2", GroveID: "grove-1", Phase: "running", Activity: "waiting_for_input"},
-			{Name: "agent-3", Grove: "grove-2", Phase: "running", Activity: "completed"},
+			{Name: "agent-1", ProjectID: "grove-1", Phase: "running", Activity: "thinking"},
+			{Name: "agent-2", ProjectID: "grove-1", Phase: "running", Activity: "waiting_for_input"},
+			{Name: "agent-3", Project: "grove-2", Phase: "running", Activity: "completed"},
 		},
 	}
 
@@ -229,14 +229,14 @@ func TestHeartbeatService_IncludesAgentInfo(t *testing.T) {
 	}
 
 	heartbeat := calls[0].Heartbeat
-	if len(heartbeat.Groves) != 2 {
-		t.Errorf("Expected 2 groves in heartbeat, got %d", len(heartbeat.Groves))
+	if len(heartbeat.Projects) != 2 {
+		t.Errorf("Expected 2 groves in heartbeat, got %d", len(heartbeat.Projects))
 	}
 
 	// Check grove counts
 	groveCounts := make(map[string]int)
-	for _, g := range heartbeat.Groves {
-		groveCounts[g.GroveID] = g.AgentCount
+	for _, g := range heartbeat.Projects {
+		groveCounts[g.ProjectID] = g.AgentCount
 	}
 
 	if groveCounts["grove-1"] != 2 {
@@ -253,19 +253,19 @@ func TestHeartbeatService_IncludesPhaseActivity(t *testing.T) {
 		agents: []api.AgentInfo{
 			{
 				Name:     "agent-structured",
-				GroveID:  "grove-1",
+				ProjectID:  "grove-1",
 				Phase:    "running",
 				Activity: "thinking",
 			},
 			{
 				Name:     "agent-waiting",
-				GroveID:  "grove-1",
+				ProjectID:  "grove-1",
 				Phase:    "running",
 				Activity: "waiting_for_input",
 			},
 			{
 				Name:    "agent-stopped",
-				GroveID: "grove-1",
+				ProjectID: "grove-1",
 				Phase:   "stopped",
 			},
 		},
@@ -283,11 +283,11 @@ func TestHeartbeatService_IncludesPhaseActivity(t *testing.T) {
 	}
 
 	heartbeat := calls[0].Heartbeat
-	if len(heartbeat.Groves) != 1 {
-		t.Fatalf("Expected 1 grove in heartbeat, got %d", len(heartbeat.Groves))
+	if len(heartbeat.Projects) != 1 {
+		t.Fatalf("Expected 1 grove in heartbeat, got %d", len(heartbeat.Projects))
 	}
 
-	grove := heartbeat.Groves[0]
+	grove := heartbeat.Projects[0]
 	if len(grove.Agents) != 3 {
 		t.Fatalf("Expected 3 agents, got %d", len(grove.Agents))
 	}
@@ -407,14 +407,14 @@ func TestHeartbeatService_IncludesAuxiliaryRuntimes(t *testing.T) {
 	// Default manager has docker agents
 	defaultMgr := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "docker-agent", GroveID: "grove-1", Phase: "running"},
+			{Name: "docker-agent", ProjectID: "grove-1", Phase: "running"},
 		},
 	}
 
 	// Auxiliary manager has K8s agents
 	auxMgr := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "k8s-agent", GroveID: "grove-1", Phase: "running", Activity: "thinking"},
+			{Name: "k8s-agent", ProjectID: "grove-1", Phase: "running", Activity: "thinking"},
 		},
 	}
 
@@ -432,11 +432,11 @@ func TestHeartbeatService_IncludesAuxiliaryRuntimes(t *testing.T) {
 	}
 
 	heartbeat := calls[0].Heartbeat
-	if len(heartbeat.Groves) != 1 {
-		t.Fatalf("Expected 1 grove, got %d", len(heartbeat.Groves))
+	if len(heartbeat.Projects) != 1 {
+		t.Fatalf("Expected 1 grove, got %d", len(heartbeat.Projects))
 	}
 
-	grove := heartbeat.Groves[0]
+	grove := heartbeat.Projects[0]
 	if grove.AgentCount != 2 {
 		t.Errorf("Expected 2 agents (docker + k8s), got %d", grove.AgentCount)
 	}

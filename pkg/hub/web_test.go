@@ -102,7 +102,7 @@ func TestSPACatchAll(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 
 	// Various SPA routes should all return the SPA shell
-	paths := []string{"/", "/groves", "/agents", "/groves/abc123", "/settings", "/not-a-real-page"}
+	paths := []string{"/", "/projects", "/agents", "/projects/abc123", "/settings", "/not-a-real-page"}
 	for _, path := range paths {
 		t.Run(path, func(t *testing.T) {
 			req := httptest.NewRequest("GET", path, nil)
@@ -218,7 +218,7 @@ func TestSPAHandler_NoAssets_ServesErrorPage(t *testing.T) {
 
 	handler := ws.Handler()
 
-	paths := []string{"/", "/groves", "/agents", "/settings"}
+	paths := []string{"/", "/projects", "/agents", "/settings"}
 	for _, path := range paths {
 		t.Run(path, func(t *testing.T) {
 			req := httptest.NewRequest("GET", path, nil)
@@ -272,7 +272,7 @@ func TestSPAHandler_NoAssets_APIStillWorks(t *testing.T) {
 	})
 	ws.MountHubAPI(mockHub, func(ctx context.Context) error { return nil })
 
-	req := httptest.NewRequest("GET", "/api/v1/groves", nil)
+	req := httptest.NewRequest("GET", "/api/v1/projects", nil)
 	rec := httptest.NewRecorder()
 	ws.Handler().ServeHTTP(rec, req)
 
@@ -466,7 +466,7 @@ func TestWebHealthz_CompositeMode(t *testing.T) {
 			ScionVersion: "abc1234",
 			Uptime:       "5m0s",
 			Checks:       map[string]string{"database": "healthy"},
-			Stats:        &HealthStats{ConnectedBrokers: 1, ActiveAgents: 2, Groves: 3},
+			Stats:        &HealthStats{ConnectedBrokers: 1, ActiveAgents: 2, Projects: 3},
 		}
 	})
 
@@ -645,7 +645,7 @@ func TestSessionMiddleware_ProtectedRedirect(t *testing.T) {
 	// Unauthenticated browser request to a protected route should redirect
 	ws := newTestWebServer(t, WebServerConfig{})
 
-	req := httptest.NewRequest("GET", "/groves", nil)
+	req := httptest.NewRequest("GET", "/projects", nil)
 	req.Header.Set("Accept", "text/html")
 	rec := httptest.NewRecorder()
 
@@ -690,8 +690,8 @@ func TestMountHubAPI_RoutesToHub(t *testing.T) {
 
 	handler := ws.Handler()
 
-	// /api/v1/groves should reach the Hub handler
-	req := httptest.NewRequest("GET", "/api/v1/groves", nil)
+	// /api/v1/projects should reach the Hub handler
+	req := httptest.NewRequest("GET", "/api/v1/projects", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -703,7 +703,7 @@ func TestMountHubAPI_RoutesToHub(t *testing.T) {
 	var result map[string]string
 	require.NoError(t, json.Unmarshal(body, &result))
 	assert.Equal(t, "hub", result["source"])
-	assert.Equal(t, "/api/v1/groves", result["path"])
+	assert.Equal(t, "/api/v1/projects", result["path"])
 
 	// /api/v1/agents should also reach the Hub handler
 	req2 := httptest.NewRequest("GET", "/api/v1/agents", nil)
@@ -732,7 +732,7 @@ func TestSessionToBearerMiddleware(t *testing.T) {
 	handler := ws.Handler()
 
 	// First request: auto-login via dev-auth (establishes session with JWT)
-	req1 := httptest.NewRequest("GET", "/api/v1/groves", nil)
+	req1 := httptest.NewRequest("GET", "/api/v1/projects", nil)
 	rec1 := httptest.NewRecorder()
 	handler.ServeHTTP(rec1, req1)
 	assert.Equal(t, http.StatusOK, rec1.Result().StatusCode)
@@ -753,7 +753,7 @@ func TestSessionToBearerMiddleware_NoToken(t *testing.T) {
 
 	handler := ws.Handler()
 
-	req := httptest.NewRequest("GET", "/api/v1/groves", nil)
+	req := httptest.NewRequest("GET", "/api/v1/projects", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -819,7 +819,7 @@ func TestSessionToBearerMiddleware_SigningKeyRotation(t *testing.T) {
 	handler := ws.Handler()
 
 	// Step 1: Establish a session with tokens signed by the old key.
-	req1 := httptest.NewRequest("GET", "/api/v1/groves", nil)
+	req1 := httptest.NewRequest("GET", "/api/v1/projects", nil)
 	rec1 := httptest.NewRecorder()
 	handler.ServeHTTP(rec1, req1)
 	require.Equal(t, http.StatusOK, rec1.Result().StatusCode)
@@ -837,7 +837,7 @@ func TestSessionToBearerMiddleware_SigningKeyRotation(t *testing.T) {
 
 	// Step 3: Make an API request with the old session cookie.
 	capturedAuthHeader = ""
-	req2 := httptest.NewRequest("GET", "/api/v1/groves", nil)
+	req2 := httptest.NewRequest("GET", "/api/v1/projects", nil)
 	req2.Header.Set("Accept", "text/html,application/xhtml+xml") // browser request
 	for _, c := range sessionCookies {
 		req2.AddCookie(c)
@@ -1229,11 +1229,11 @@ func TestIsPublicRoute(t *testing.T) {
 		{"/favicon.ico", true},
 		{"/scion-notification-icon.png", true},
 		{"/robots.txt", true},
-		{"/api/v1/groves", true},
+		{"/api/v1/projects", true},
 		{"/api/v1/agents", true},
 		{"/api/v1/auth/login", true},
 		{"/", false},
-		{"/groves", false},
+		{"/projects", false},
 		{"/agents", false},
 		{"/settings", false},
 	}
@@ -1367,7 +1367,7 @@ func TestSSEHandler_NoPublisher(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 	// Don't set publisher — events field remains nil
 
-	req := httptest.NewRequest("GET", "/events?sub=grove.test.>", nil)
+	req := httptest.NewRequest("GET", "/events?sub=project.test.>", nil)
 	rec := httptest.NewRecorder()
 	ws.Handler().ServeHTTP(rec, req)
 
@@ -1389,7 +1389,7 @@ func TestSSEHandler_Headers(t *testing.T) {
 	defer ts.Close()
 
 	// Make a request that will establish the SSE connection
-	resp, err := http.Get(ts.URL + "/events?sub=grove.test.>")
+	resp, err := http.Get(ts.URL + "/events?sub=project.test.>")
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -1409,7 +1409,7 @@ func TestSSEHandler_EventDelivery(t *testing.T) {
 	defer ts.Close()
 
 	// Start SSE connection in background
-	resp, err := http.Get(ts.URL + "/events?sub=grove.test123.>")
+	resp, err := http.Get(ts.URL + "/events?sub=project.test123.>")
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -1425,9 +1425,9 @@ func TestSSEHandler_EventDelivery(t *testing.T) {
 		for {
 			select {
 			case <-ticker.C:
-				pub.publish("grove.test123.agent.status", AgentStatusEvent{
+				pub.publish("project.test123.agent.status", AgentStatusEvent{
 					AgentID: "agent-1",
-					GroveID: "test123",
+					ProjectID: "test123",
 					Phase:   "running",
 				})
 			case <-stop:
@@ -1460,7 +1460,7 @@ func TestSSEHandler_EventDelivery(t *testing.T) {
 	// Verify SSE frame format: event type is "update", subject is wrapped in data
 	assert.Contains(t, frame, "event: update\n")
 	assert.Contains(t, frame, "data: ")
-	assert.Contains(t, frame, `"subject":"grove.test123.agent.status"`)
+	assert.Contains(t, frame, `"subject":"project.test123.agent.status"`)
 	assert.Contains(t, frame, `"agentId":"agent-1"`)
 	assert.Contains(t, frame, `"phase":"running"`)
 }
@@ -1471,18 +1471,18 @@ func TestSSEHandler_SubjectValidation(t *testing.T) {
 		subject string
 		valid   bool
 	}{
-		{"simple subject", "grove.abc.status", true},
-		{"wildcard star", "grove.*.status", true},
-		{"wildcard gt", "grove.abc.>", true},
-		{"single token", "grove", true},
-		{"with hyphens", "grove.my-grove.status", true},
-		{"with underscores", "grove.my_grove.status", true},
+		{"simple subject", "project.abc.status", true},
+		{"wildcard star", "project.*.status", true},
+		{"wildcard gt", "project.abc.>", true},
+		{"single token", "project", true},
+		{"with hyphens", "project.my-project.status", true},
+		{"with underscores", "project.my_project.status", true},
 		{"empty", "", false},
-		{"empty token", "grove..status", false},
-		{"gt not last", "grove.>.status", false},
-		{"star mixed", "grove.foo*bar.status", false},
-		{"invalid char space", "grove.foo bar", false},
-		{"invalid char slash", "grove/bar", false},
+		{"empty token", "project..status", false},
+		{"gt not last", "project.>.status", false},
+		{"star mixed", "project.foo*bar.status", false},
+		{"invalid char space", "project.foo bar", false},
+		{"invalid char slash", "project/bar", false},
 		{"too long", strings.Repeat("a", 257), false},
 	}
 
@@ -1506,7 +1506,7 @@ func TestSSEHandler_RequiresAuth(t *testing.T) {
 	t.Cleanup(func() { pub.Close() })
 
 	// API-style request (no Accept: text/html) should get 401
-	req := httptest.NewRequest("GET", "/events?sub=grove.test.>", nil)
+	req := httptest.NewRequest("GET", "/events?sub=project.test.>", nil)
 	req.Header.Set("Accept", "application/json")
 	rec := httptest.NewRecorder()
 	ws.Handler().ServeHTTP(rec, req)
@@ -1673,16 +1673,16 @@ func TestResolveAPIPath(t *testing.T) {
 	}{
 		{"/agents", "/api/v1/agents"},
 		{"/agents/", "/api/v1/agents"},
-		{"/groves", "/api/v1/groves"},
-		{"/groves/", "/api/v1/groves"},
+		{"/projects", "/api/v1/projects"},
+		{"/projects/", "/api/v1/projects"},
 		{"/agents/abc123", "/api/v1/agents/abc123"},
-		{"/groves/my-grove", "/api/v1/groves/my-grove"},
+		{"/projects/my-project", "/api/v1/projects/my-project"},
 		{"/", ""},
 		{"/login", ""},
 		{"/settings", ""},
 		{"/admin/users", ""},
 		{"/agents/abc/terminal", ""}, // too many segments
-		{"/groves/abc/settings", ""}, // too many segments
+		{"/projects/abc/settings", ""}, // too many segments
 	}
 
 	for _, tt := range tests {

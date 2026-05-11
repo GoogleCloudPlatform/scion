@@ -39,24 +39,24 @@ func TestResolveSecrets(t *testing.T) {
 		Scope:          store.ScopeUser,
 		ScopeID:        "user-1",
 	}
-	groveSecret := &store.Secret{
+	projectSecret := &store.Secret{
 		ID:             "s2",
 		Key:            "DB_PASS",
-		EncryptedValue: "grove-db-pass",
+		EncryptedValue: "project-db-pass",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "DATABASE_PASSWORD",
-		Scope:          store.ScopeGrove,
-		ScopeID:        "grove-1",
+		Scope:          store.ScopeProject,
+		ScopeID:        "project-1",
 	}
-	// Grove-level override of user API_KEY
-	groveOverride := &store.Secret{
+	// Project-level override of user API_KEY
+	projectOverride := &store.Secret{
 		ID:             "s3",
 		Key:            "API_KEY",
-		EncryptedValue: "grove-api-key",
+		EncryptedValue: "project-api-key",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "API_KEY",
-		Scope:          store.ScopeGrove,
-		ScopeID:        "grove-1",
+		Scope:          store.ScopeProject,
+		ScopeID:        "project-1",
 	}
 	fileSecret := &store.Secret{
 		ID:             "s4",
@@ -77,7 +77,7 @@ func TestResolveSecrets(t *testing.T) {
 		ScopeID:        "user-1",
 	}
 
-	for _, s := range []*store.Secret{userSecret, groveSecret, groveOverride, fileSecret, varSecret} {
+	for _, s := range []*store.Secret{userSecret, projectSecret, projectOverride, fileSecret, varSecret} {
 		if err := memStore.CreateSecret(ctx, s); err != nil {
 			t.Fatalf("failed to create test secret %s: %v", s.Key, err)
 		}
@@ -93,7 +93,7 @@ func TestResolveSecrets(t *testing.T) {
 		ID:      "agent-1",
 		Name:    "test-agent",
 		OwnerID: "user-1",
-		GroveID: "grove-1",
+		ProjectID: "project-1",
 	}
 
 	resolved, err := dispatcher.resolveSecrets(ctx, agent)
@@ -107,25 +107,25 @@ func TestResolveSecrets(t *testing.T) {
 		byName[rs.Name] = rs
 	}
 
-	// API_KEY should be overridden by grove scope
+	// API_KEY should be overridden by project scope
 	apiKey, ok := byName["API_KEY"]
 	if !ok {
 		t.Fatal("expected API_KEY in resolved secrets")
 	}
-	if apiKey.Value != "grove-api-key" {
-		t.Errorf("expected API_KEY value from grove scope %q, got %q", "grove-api-key", apiKey.Value)
+	if apiKey.Value != "project-api-key" {
+		t.Errorf("expected API_KEY value from project scope %q, got %q", "project-api-key", apiKey.Value)
 	}
-	if apiKey.Source != store.ScopeGrove {
-		t.Errorf("expected API_KEY source %q, got %q", store.ScopeGrove, apiKey.Source)
+	if apiKey.Source != store.ScopeProject {
+		t.Errorf("expected API_KEY source %q, got %q", store.ScopeProject, apiKey.Source)
 	}
 
-	// DB_PASS should come from grove scope
+	// DB_PASS should come from project scope
 	dbPass, ok := byName["DB_PASS"]
 	if !ok {
 		t.Fatal("expected DB_PASS in resolved secrets")
 	}
-	if dbPass.Value != "grove-db-pass" {
-		t.Errorf("expected DB_PASS value %q, got %q", "grove-db-pass", dbPass.Value)
+	if dbPass.Value != "project-db-pass" {
+		t.Errorf("expected DB_PASS value %q, got %q", "project-db-pass", dbPass.Value)
 	}
 	if dbPass.Target != "DATABASE_PASSWORD" {
 		t.Errorf("expected DB_PASS target %q, got %q", "DATABASE_PASSWORD", dbPass.Target)
@@ -176,11 +176,11 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 		{
 			ID:             "s2",
 			Key:            "API_KEY",
-			EncryptedValue: "grove-api-key",
+			EncryptedValue: "project-api-key",
 			SecretType:     store.SecretTypeEnvironment,
 			Target:         "API_KEY",
-			Scope:          store.ScopeGrove,
-			ScopeID:        "grove-1",
+			Scope:          store.ScopeProject,
+			ScopeID:        "project-1",
 		},
 		{
 			ID:             "s3",
@@ -188,8 +188,8 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 			EncryptedValue: "db-password",
 			SecretType:     store.SecretTypeEnvironment,
 			Target:         "DATABASE_PASSWORD",
-			Scope:          store.ScopeGrove,
-			ScopeID:        "grove-1",
+			Scope:          store.ScopeProject,
+			ScopeID:        "project-1",
 		},
 	} {
 		if err := memStore.CreateSecret(ctx, s); err != nil {
@@ -207,7 +207,7 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 		ID:      "agent-1",
 		Name:    "test-agent",
 		OwnerID: "user-1",
-		GroveID: "grove-1",
+		ProjectID: "project-1",
 	}
 
 	resolved, err := dispatcher.resolveSecrets(ctx, agent)
@@ -220,16 +220,16 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 		byName[rs.Name] = rs
 	}
 
-	// API_KEY should be overridden by grove scope
+	// API_KEY should be overridden by project scope
 	apiKey, ok := byName["API_KEY"]
 	if !ok {
 		t.Fatal("expected API_KEY in resolved secrets")
 	}
-	if apiKey.Value != "grove-api-key" {
-		t.Errorf("expected API_KEY value %q, got %q", "grove-api-key", apiKey.Value)
+	if apiKey.Value != "project-api-key" {
+		t.Errorf("expected API_KEY value %q, got %q", "project-api-key", apiKey.Value)
 	}
-	if apiKey.Source != store.ScopeGrove {
-		t.Errorf("expected API_KEY source %q, got %q", store.ScopeGrove, apiKey.Source)
+	if apiKey.Source != store.ScopeProject {
+		t.Errorf("expected API_KEY source %q, got %q", store.ScopeProject, apiKey.Source)
 	}
 
 	// DB_PASS target should be preserved
@@ -304,8 +304,8 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 		Scope:          store.ScopeUser,
 		ScopeID:        "user-1",
 	}
-	// Create a hub secret overridden by grove scope
-	hubGroveOverridden := &store.Secret{
+	// Create a hub secret overridden by project scope
+	hubProjectOverridden := &store.Secret{
 		ID:             "sh3",
 		Key:            "DB_PASS",
 		EncryptedValue: "hub-default-db-pass",
@@ -314,17 +314,17 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 		Scope:          store.ScopeHub,
 		ScopeID:        "test-hub-id",
 	}
-	groveSecret := &store.Secret{
+	projectSecret := &store.Secret{
 		ID:             "sg1",
 		Key:            "DB_PASS",
-		EncryptedValue: "grove-db-pass",
+		EncryptedValue: "project-db-pass",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "DB_PASS",
-		Scope:          store.ScopeGrove,
-		ScopeID:        "grove-1",
+		Scope:          store.ScopeProject,
+		ScopeID:        "project-1",
 	}
 
-	for _, s := range []*store.Secret{hubSecret, hubOverridden, userSecret, hubGroveOverridden, groveSecret} {
+	for _, s := range []*store.Secret{hubSecret, hubOverridden, userSecret, hubProjectOverridden, projectSecret} {
 		if err := memStore.CreateSecret(ctx, s); err != nil {
 			t.Fatalf("failed to create test secret %s (scope=%s): %v", s.Key, s.Scope, err)
 		}
@@ -339,7 +339,7 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 		ID:      "agent-hub-1",
 		Name:    "hub-test-agent",
 		OwnerID: "user-1",
-		GroveID: "grove-1",
+		ProjectID: "project-1",
 	}
 
 	resolved, err := dispatcher.resolveSecrets(ctx, agent)
@@ -376,16 +376,16 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 		t.Errorf("expected API_KEY source %q, got %q", store.ScopeUser, apiKey.Source)
 	}
 
-	// DB_PASS should be overridden by grove scope
+	// DB_PASS should be overridden by project scope
 	dbPass, ok := byName["DB_PASS"]
 	if !ok {
 		t.Fatal("expected DB_PASS in resolved secrets")
 	}
-	if dbPass.Value != "grove-db-pass" {
-		t.Errorf("expected DB_PASS value %q, got %q", "grove-db-pass", dbPass.Value)
+	if dbPass.Value != "project-db-pass" {
+		t.Errorf("expected DB_PASS value %q, got %q", "project-db-pass", dbPass.Value)
 	}
-	if dbPass.Source != store.ScopeGrove {
-		t.Errorf("expected DB_PASS source %q, got %q", store.ScopeGrove, dbPass.Source)
+	if dbPass.Source != store.ScopeProject {
+		t.Errorf("expected DB_PASS source %q, got %q", store.ScopeProject, dbPass.Source)
 	}
 
 	// Total: ORG_API_KEY, API_KEY, DB_PASS = 3
@@ -406,7 +406,7 @@ func TestResolveSecrets_NoBackend(t *testing.T) {
 		ID:      "agent-1",
 		Name:    "test-agent",
 		OwnerID: "user-1",
-		GroveID: "grove-1",
+		ProjectID: "project-1",
 	}
 
 	resolved, err := dispatcher.resolveSecrets(ctx, agent)

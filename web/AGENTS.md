@@ -86,8 +86,8 @@ web/
 │   │       ├── login.ts         # OAuth login page
 │   │       ├── agents.ts       # Agents list page
 │   │       ├── agent-detail.ts # Agent details page
-│   │       ├── groves.ts       # Groves list page
-│   │       ├── grove-detail.ts # Grove details page
+│   │       ├── projects.ts       # Projects list page
+│   │       ├── project-detail.ts # Project details page
 │   │       ├── terminal.ts     # Terminal/session page (xterm.js)
 │   │       ├── unauthorized.ts # 401/403 page
 │   │       └── not-found.ts    # 404 page
@@ -95,7 +95,7 @@ web/
 │   │   ├── theme.css        # CSS custom properties, light/dark mode
 │   │   └── utilities.css    # Utility classes
 │   └── shared/              # Shared types between components
-│       └── types.ts         # Type definitions (User, Grove, Agent, etc.)
+│       └── types.ts         # Type definitions (User, Project, Agent, etc.)
 ├── public/                  # Static assets
 │   └── assets/              # Built client assets (CSS, JS)
 ├── dist/                    # Build output (gitignored)
@@ -124,20 +124,20 @@ All icons use the Shoelace `<sl-icon>` component, which provides [Bootstrap Icon
 | Resource Type | Icon Name | Usage |
 |---------------|-----------|-------|
 | **Agents** | `cpu` | Agent lists, detail pages, breadcrumbs, group members |
-| **Groves** | `folder` | Navigation, dashboard, breadcrumbs |
+| **Projects** | `folder` | Navigation, dashboard, breadcrumbs |
 | **Brokers** | `hdd-rack` | Navigation, broker lists, broker detail |
 | **Users** | `people` | Navigation, user lists, user groups |
 | **Groups** | `diagram-3` | Navigation, group lists, group detail |
-| **Settings** | `gear` | Navigation, grove settings |
+| **Settings** | `gear` | Navigation, project settings |
 | **Dashboard** | `house` | Navigation |
 
-### Grove Variant Icons
+### Project Variant Icons
 
 | Variant | Icon Name | Usage |
 |---------|-----------|-------|
-| **Git-backed grove** | `diagram-3` | Grove lists, grove detail header |
-| **Hub workspace** | `folder-fill` | Grove lists, grove detail header |
-| **Empty state** | `folder2-open` | No-groves placeholder |
+| **Git-backed project** | `diagram-3` | Project lists, project detail header |
+| **Hub workspace** | `folder-fill` | Project lists, project detail header |
+| **Empty state** | `folder2-open` | No-projects placeholder |
 
 ### Profile & Config Icons
 
@@ -159,7 +159,7 @@ All icons use the Shoelace `<sl-icon>` component, which provides [Bootstrap Icon
 | Action | Icon Name | Usage |
 |--------|-----------|-------|
 | **Create/Add** | `plus-lg` | Create agent, add items |
-| **Create grove** | `folder-plus` | Create grove action |
+| **Create project** | `folder-plus` | Create project action |
 | **Back/Return** | `arrow-left-circle` | Return links |
 | **Recent activity** | `clock-history` | Dashboard activity section |
 
@@ -233,13 +233,13 @@ Test scripts for validating real-time event delivery are in `web/test-scripts/`.
 ### Quick SSE smoke test (no browser needed)
 
 ```bash
-TOKEN=<dev-token> GROVE_ID=<uuid> ./web/test-scripts/sse-curl-test.sh
+TOKEN=<dev-token> PROJECT_ID=<uuid> ./web/test-scripts/sse-curl-test.sh
 ```
 
 ### Full browser lifecycle test
 
 ```bash
-GROVE_ID=<uuid> TOKEN=<dev-token> node web/test-scripts/realtime-lifecycle-test.js
+PROJECT_ID=<uuid> TOKEN=<dev-token> node web/test-scripts/realtime-lifecycle-test.js
 ```
 
 ## Containerized / Sandboxed Environments
@@ -264,7 +264,7 @@ These tips were collected during validation work and are useful for agents debug
 ### Server startup
 
 - **Combined mode** runs the Hub API on the web port (default 8080). When `--enable-hub` and `--enable-web` are both set, there is no separate listener on port 9810. All API routes are at `http://localhost:8080/api/v1/`.
-- **Runtime broker** must be enabled (`--enable-runtime-broker`) and linked to the grove as a provider before agents can be created. With the co-located broker, use `POST /api/v1/groves/{id}/providers` with `{"brokerId":"<id>"}` to link.
+- **Runtime broker** must be enabled (`--enable-runtime-broker`) and linked to the project as a provider before agents can be created. With the co-located broker, use `POST /api/v1/projects/{id}/providers` with `{"brokerId":"<id>"}` to link.
 - **Dev token** is printed in the server startup logs. Use it as `Authorization: Bearer scion_dev_...` for API calls.
 - **`--web-assets-dir`** loads assets from disk so you can rebuild the frontend (`npm run build`) and refresh the browser without restarting the Go server.
 
@@ -272,7 +272,7 @@ These tips were collected during validation work and are useful for agents debug
 
 - **Agent status updates** use `POST /api/v1/agents/{id}/status`, not `PATCH`. The handler only accepts POST.
 - **Agent creation response** wraps the agent under an `"agent"` key: `{ "agent": { "id": "...", ... }, "warnings": [...] }`.
-- **SSE endpoint** (`/events?sub=...`) requires a session cookie, not a Bearer token. To get a session cookie via curl: `curl -c - -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/groves` then pass the `scion_sess` cookie with `-b`.
+- **SSE endpoint** (`/events?sub=...`) requires a session cookie, not a Bearer token. To get a session cookie via curl: `curl -c - -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/projects` then pass the `scion_sess` cookie with `-b`.
 
 ### SSE event format
 
@@ -280,7 +280,7 @@ The SSE stream uses a single event type `update` with the subject embedded in th
 
 ```
 event: update
-data: {"subject":"grove.xxx.agent.created","data":{"agentId":"...","groveId":"..."}}
+data: {"subject":"project.xxx.agent.created","data":{"agentId":"...","projectId":"..."}}
 ```
 
 The client `SSEClient` listens for `event: update` and the `StateManager` parses the `subject` field to route events. If the event type is changed or the subject is used as the SSE event type directly, the client will silently drop events.
@@ -296,7 +296,7 @@ The client `SSEClient` listens for `event: update` and the `StateManager` parses
 
 - **Blank page**: Check that web assets are built (`npm run build`) and the `--web-assets-dir` flag points to `web/dist/client`. Use `screenshot-debug.js` to see console errors and 404s.
 - **SSE events not updating UI**: Check the SSE event type. The client only listens for `event: update`. If the server sends events with the subject as the type, they are silently dropped.
-- **Agent delete not reflected**: The `onAgentsUpdated()` handler in `grove-detail.ts` must run even when the state manager's agent map is empty (after the last agent is deleted).
+- **Agent delete not reflected**: The `onAgentsUpdated()` handler in `project-detail.ts` must run even when the state manager's agent map is empty (after the last agent is deleted).
 
 ## Browser-Based QA with Chrome DevTools MCP
 

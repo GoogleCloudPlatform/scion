@@ -59,7 +59,7 @@ var stopCmd = &cobra.Command{
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if stopAll {
-			hubCtx, err := CheckHubAvailability(grovePath)
+			hubCtx, err := CheckHubAvailability(projectPath)
 			if err != nil {
 				return err
 			}
@@ -72,7 +72,7 @@ var stopCmd = &cobra.Command{
 		agentName := api.Slugify(args[0])
 
 		// Check if Hub should be used, excluding the target agent from sync requirements.
-		hubCtx, err := CheckHubAvailabilityForAgent(grovePath, agentName, false)
+		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, false)
 		if err != nil {
 			return err
 		}
@@ -82,7 +82,7 @@ var stopCmd = &cobra.Command{
 		}
 
 		// Local mode
-		rt := runtime.GetRuntime(grovePath, profile)
+		rt := runtime.GetRuntime(projectPath, profile)
 		mgr := agent.NewManager(rt)
 
 		statusf("Stopping agent '%s'...\n", agentName)
@@ -90,10 +90,10 @@ var stopCmd = &cobra.Command{
 			return err
 		}
 
-		_ = agent.UpdateAgentConfig(agentName, grovePath, "stopped", "", "")
+		_ = agent.UpdateAgentConfig(agentName, projectPath, "stopped", "", "")
 
 		if stopRm {
-			if _, err := mgr.Delete(context.Background(), agentName, true, grovePath, false); err != nil {
+			if _, err := mgr.Delete(context.Background(), agentName, true, projectPath, false); err != nil {
 				return err
 			}
 			if isJSONOutput() {
@@ -124,17 +124,17 @@ var stopCmd = &cobra.Command{
 
 // stopAllAgents stops all running agents in the current grove using the local runtime.
 func stopAllAgents() error {
-	rt := runtime.GetRuntime(grovePath, profile)
+	rt := runtime.GetRuntime(projectPath, profile)
 	mgr := agent.NewManager(rt)
 
 	filters := map[string]string{
 		"scion.agent": "true",
 	}
 
-	projectDir, _ := config.GetResolvedProjectDir(grovePath)
+	projectDir, _ := config.GetResolvedProjectDir(projectPath)
 	if projectDir != "" {
-		filters["scion.grove_path"] = projectDir
-		filters["scion.grove"] = config.GetGroveName(projectDir)
+		filters["scion.project_path"] = projectDir
+		filters["scion.project"] = config.GetProjectName(projectDir)
 	}
 
 	agents, err := mgr.List(context.Background(), filters)
@@ -208,7 +208,7 @@ func stopAllAgents() error {
 
 			res := agentResult{Name: name, Status: "success"}
 
-			agentRt := runtime.GetRuntime(grovePath, profile)
+			agentRt := runtime.GetRuntime(projectPath, profile)
 			agentMgr := agent.NewManager(agentRt)
 
 			if err := agentMgr.Stop(context.Background(), name); err != nil {
@@ -220,10 +220,10 @@ func stopAllAgents() error {
 				return
 			}
 
-			_ = agent.UpdateAgentConfig(name, grovePath, "stopped", "", "")
+			_ = agent.UpdateAgentConfig(name, projectPath, "stopped", "", "")
 
 			if stopRm {
-				if _, err := agentMgr.Delete(context.Background(), name, true, grovePath, false); err != nil {
+				if _, err := agentMgr.Delete(context.Background(), name, true, projectPath, false); err != nil {
 					res.Status = "error"
 					res.Error = fmt.Sprintf("stopped but failed to remove: %v", err)
 					mu.Lock()
@@ -292,7 +292,7 @@ func stopAllAgents() error {
 func stopAllAgentsViaHub(hubCtx *HubContext) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -300,7 +300,7 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	agentSvc := hubCtx.Client.GroveAgents(groveID)
+	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 	resp, err := agentSvc.List(ctx, &hubclient.ListAgentsOptions{})
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to list agents via Hub: %w", err))
@@ -396,7 +396,7 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 
 	wg.Wait()
 
-	if stopRm && hubCtx.GrovePath != "" {
+	if stopRm && hubCtx.ProjectPath != "" {
 		removedAny := false
 		for _, r := range results {
 			if r.Removed && r.Error == "" {
@@ -406,10 +406,10 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 		}
 		if removedAny {
 			// Keep sync watermark current after hub-side delete operations.
-			hubsync.UpdateLastSyncedAt(hubCtx.GrovePath, time.Time{}, hubCtx.IsGlobal)
+			hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, time.Time{}, hubCtx.IsGlobal)
 			for _, r := range results {
 				if r.Removed && r.Error == "" {
-					hubsync.RemoveSyncedAgent(hubCtx.GrovePath, r.Name)
+					hubsync.RemoveSyncedAgent(hubCtx.ProjectPath, r.Name)
 				}
 			}
 		}
@@ -469,13 +469,13 @@ func stopAgentViaHub(hubCtx *HubContext, agentName string) error {
 	defer cancel()
 
 	// Get the grove ID for this project
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
 
 	// Use grove-scoped client to allow lookup by name/slug
-	agentSvc := hubCtx.Client.GroveAgents(groveID)
+	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
 	if err := agentSvc.Stop(ctx, agentName); err != nil {
 		return wrapHubError(fmt.Errorf("failed to stop agent via Hub: %w", err))
@@ -489,10 +489,10 @@ func stopAgentViaHub(hubCtx *HubContext, agentName string) error {
 		if err := agentSvc.Delete(ctx, agentName, opts); err != nil {
 			return wrapHubError(fmt.Errorf("agent stopped but failed to delete via Hub: %w", err))
 		}
-		if hubCtx.GrovePath != "" {
+		if hubCtx.ProjectPath != "" {
 			// Keep sync watermark current after hub-side delete operations.
-			hubsync.UpdateLastSyncedAt(hubCtx.GrovePath, time.Time{}, hubCtx.IsGlobal)
-			hubsync.RemoveSyncedAgent(hubCtx.GrovePath, agentName)
+			hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, time.Time{}, hubCtx.IsGlobal)
+			hubsync.RemoveSyncedAgent(hubCtx.ProjectPath, agentName)
 		}
 		if isJSONOutput() {
 			return outputJSON(ActionResult{

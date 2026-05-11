@@ -25,7 +25,7 @@ const (
 	AttrComponent = "component"
 	AttrSubsystem = "subsystem"
 	AttrTraceID   = "trace_id"
-	AttrGroveID   = "grove_id"
+	AttrProjectID   = "grove_id"
 	AttrAgentID   = "agent_id"
 	AttrBrokerID  = "broker_id"
 	AttrRequestID = "request_id"
@@ -85,8 +85,8 @@ func Logger(ctx context.Context) *slog.Logger {
 		if meta.TraceID != "" {
 			attrs = append(attrs, slog.String(AttrTraceID, meta.TraceID))
 		}
-		if meta.GroveID != "" {
-			attrs = append(attrs, slog.String(AttrGroveID, meta.GroveID))
+		if meta.ProjectID != "" {
+			attrs = append(attrs, slog.String(AttrProjectID, meta.ProjectID))
 		}
 		if meta.AgentID != "" {
 			attrs = append(attrs, slog.String(AttrAgentID, meta.AgentID))

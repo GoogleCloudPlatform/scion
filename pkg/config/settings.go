@@ -84,15 +84,15 @@ type HubClientConfig struct {
 	// Enabled indicates whether Hub integration is enabled.
 	// When enabled and configured, agent operations are routed through the Hub.
 	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
-	// Linked indicates whether this grove has been explicitly linked to the Hub
-	// via 'scion hub link'. This is separate from Enabled: a grove can have hub
+	// Linked indicates whether this project has been explicitly linked to the Hub
+	// via 'scion hub link'. This is separate from Enabled: a project can have hub
 	// enabled for routing without being linked (status should not report linked
 	// until the user explicitly runs 'hub link').
 	Linked *bool `json:"linked,omitempty" yaml:"linked,omitempty" koanf:"linked"`
-	// LocalOnly indicates that this grove should operate in local-only mode.
+	// LocalOnly indicates that this project should operate in local-only mode.
 	// When set to true, Hub sync checks will error with guidance to use --no-hub.
 	// This is different from Enabled=false: LocalOnly=true means Hub IS configured
-	// but the user has explicitly opted out of sync requirements for this grove.
+	// but the user has explicitly opted out of sync requirements for this project.
 	LocalOnly *bool `json:"local_only,omitempty" yaml:"local_only,omitempty" koanf:"local_only"`
 	// Endpoint is the Hub API endpoint URL
 	Endpoint string `json:"endpoint,omitempty" yaml:"endpoint,omitempty" koanf:"endpoint"`
@@ -100,8 +100,8 @@ type HubClientConfig struct {
 	Token string `json:"token,omitempty" yaml:"token,omitempty" koanf:"token"`
 	// APIKey is an API key for authentication (alternative to Token)
 	APIKey string `json:"apiKey,omitempty" yaml:"apiKey,omitempty" koanf:"apiKey"`
-	// GroveID is the unique identifier for the grove when registered with the Hub
-	GroveID string `json:"groveId,omitempty" yaml:"groveId,omitempty" koanf:"groveId"`
+	// ProjectID is the unique identifier for the project when registered with the Hub
+	ProjectID string `json:"projectId,omitempty" yaml:"projectId,omitempty" koanf:"projectId"`
 	// BrokerID is the unique identifier for this broker when registered with the Hub.
 	// This is a durable UUID that persists across server restarts.
 	BrokerID string `json:"brokerId,omitempty" yaml:"brokerId,omitempty" koanf:"brokerId"`
@@ -130,7 +130,7 @@ type HubConnectionConfig struct {
 }
 
 type Settings struct {
-	GroveID         string                         `json:"grove_id,omitempty" yaml:"grove_id,omitempty" koanf:"grove_id"`
+	ProjectID         string                         `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
 	ActiveProfile   string                         `json:"active_profile" yaml:"active_profile" koanf:"active_profile"`
 	DefaultTemplate string                         `json:"default_template,omitempty" yaml:"default_template,omitempty" koanf:"default_template"`
 	WorkspacePath   string                         `json:"workspace_path,omitempty" yaml:"workspace_path,omitempty" koanf:"workspace_path"`
@@ -317,8 +317,8 @@ func MergeSettings(base *Settings, data []byte) error {
 		return err
 	}
 
-	if override.GroveID != "" {
-		base.GroveID = override.GroveID
+	if override.ProjectID != "" {
+		base.ProjectID = override.ProjectID
 	}
 	if override.ActiveProfile != "" {
 		base.ActiveProfile = override.ActiveProfile
@@ -544,10 +544,22 @@ func UpdateSetting(grovePath string, key string, value string, global bool) erro
 		if grovePath == "" {
 			return fmt.Errorf("grove path required for local settings")
 		}
-		// Resolve through GetGroveConfigDir so that git groves with split
-		// storage write to the external config dir (~/.scion/grove-configs/…)
+		// Resolve through GetProjectConfigDir so that git groves with split
+		// storage write to the external config dir (~/.scion/project-configs/…)
 		// — the same location LoadSettingsKoanf reads from.
-		dir = GetGroveConfigDir(grovePath)
+		dir = GetProjectConfigDir(grovePath)
+
+		// Phase 5: Migrate .scion/grove-id to project-id if it exists.
+		// This ensures that subsequent reads prefer the new filename.
+		if grovePath != "" {
+			groveIDFile := filepath.Join(grovePath, "grove-id")
+			projectIDFile := filepath.Join(grovePath, "project-id")
+			if _, err := os.Stat(groveIDFile); err == nil {
+				if _, err := os.Stat(projectIDFile); os.IsNotExist(err) {
+					_ = os.Rename(groveIDFile, projectIDFile)
+				}
+			}
+		}
 	}
 
 	// Find existing settings file (YAML or JSON)
@@ -604,8 +616,8 @@ func updateSettingLegacy(dir string, key string, value string) error {
 
 	// Update the field
 	switch key {
-	case "grove_id":
-		current.GroveID = value
+	case "project_id", "grove_id":
+		current.ProjectID = value
 	case "active_profile":
 		current.ActiveProfile = value
 	case "default_template":
@@ -642,11 +654,11 @@ func updateSettingLegacy(dir string, key string, value string) error {
 			current.Hub = &HubClientConfig{}
 		}
 		current.Hub.APIKey = value
-	case "hub.groveId":
+	case "hub.projectId", "hub.groveId":
 		if current.Hub == nil {
 			current.Hub = &HubClientConfig{}
 		}
-		current.Hub.GroveID = value
+		current.Hub.ProjectID = value
 	case "hub.brokerId":
 		if current.Hub == nil {
 			current.Hub = &HubClientConfig{}
@@ -743,8 +755,8 @@ func updateSettingLegacy(dir string, key string, value string) error {
 
 func GetSettingValue(s *Settings, key string) (string, error) {
 	switch key {
-	case "grove_id":
-		return s.GroveID, nil
+	case "project_id", "grove_id":
+		return s.ProjectID, nil
 	case "active_profile":
 		return s.ActiveProfile, nil
 	case "default_template":
@@ -779,9 +791,9 @@ func GetSettingValue(s *Settings, key string) (string, error) {
 			return s.Hub.APIKey, nil
 		}
 		return "", nil
-	case "hub.groveId":
+	case "hub.projectId", "hub.groveId":
 		if s.Hub != nil {
-			return s.Hub.GroveID, nil
+			return s.Hub.ProjectID, nil
 		}
 		return "", nil
 	case "hub.brokerId":
@@ -861,7 +873,7 @@ func GetSettingValue(s *Settings, key string) (string, error) {
 
 func GetSettingsMap(s *Settings) map[string]string {
 	m := make(map[string]string)
-	m["grove_id"] = s.GroveID
+	m["project_id"] = s.ProjectID
 	m["active_profile"] = s.ActiveProfile
 	m["default_template"] = s.DefaultTemplate
 	if s.Bucket != nil {
@@ -899,7 +911,7 @@ func GetSettingsMap(s *Settings) map[string]string {
 		if s.Hub.APIKey != "" {
 			m["hub.apiKey"] = "********" // Mask API key
 		}
-		m["hub.groveId"] = s.Hub.GroveID
+		m["hub.projectId"] = s.Hub.ProjectID
 		m["hub.brokerId"] = s.Hub.BrokerID
 		m["hub.brokerNickname"] = s.Hub.BrokerNickname
 		if s.Hub.BrokerToken != "" {
@@ -933,13 +945,13 @@ func (s *Settings) GetHubEndpoint() string {
 	return ""
 }
 
-// GetHubGroveID returns the hub-side grove ID if configured.
-// This is the ID of the grove on the Hub, which may differ from the local
-// deterministic grove_id (especially for git-based groves where grove_id
+// GetHubProjectID returns the hub-side project ID if configured.
+// This is the ID of the project on the Hub, which may differ from the local
+// deterministic project_id (especially for git-based projects where project_id
 // is a UUID v5 hash of the git remote).
-func (s *Settings) GetHubGroveID() string {
+func (s *Settings) GetHubProjectID() string {
 	if s.Hub != nil {
-		return s.Hub.GroveID
+		return s.Hub.ProjectID
 	}
 	return ""
 }
@@ -1003,10 +1015,10 @@ func DeleteHubConnection(grovePath string, name string, global bool) error {
 		if grovePath == "" {
 			return fmt.Errorf("grove path required for local settings")
 		}
-		// Resolve through GetGroveConfigDir so that git groves with split
-		// storage write to the external config dir (~/.scion/grove-configs/…)
+		// Resolve through GetProjectConfigDir so that git groves with split
+		// storage write to the external config dir (~/.scion/project-configs/…)
 		// — the same location LoadSettingsKoanf reads from.
-		dir = GetGroveConfigDir(grovePath)
+		dir = GetProjectConfigDir(grovePath)
 	}
 
 	existingPath := GetSettingsPath(dir)

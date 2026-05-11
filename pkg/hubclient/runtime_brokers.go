@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"net/url"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -40,11 +41,11 @@ type RuntimeBrokerService interface {
 	// Update updates broker metadata.
 	Update(ctx context.Context, brokerID string, req *UpdateBrokerRequest) (*RuntimeBroker, error)
 
-	// Delete removes a broker from all groves.
+	// Delete removes a broker from all projects.
 	Delete(ctx context.Context, brokerID string) error
 
-	// ListGroves returns groves this broker contributes to.
-	ListGroves(ctx context.Context, brokerID string) (*ListBrokerGrovesResponse, error)
+	// ListProjects returns projects this broker contributes to.
+	ListProjects(ctx context.Context, brokerID string) (*ListBrokerProjectsResponse, error)
 
 	// Heartbeat sends a heartbeat for a broker.
 	Heartbeat(ctx context.Context, brokerID string, status *BrokerHeartbeat) error
@@ -57,10 +58,10 @@ type runtimeBrokerService struct {
 
 // ListBrokersOptions configures runtime broker list filtering.
 type ListBrokersOptions struct {
-	Status  string // Filter by status (online, offline)
-	GroveID string // Filter by grove contribution
-	Name    string // Exact match on broker name (case-insensitive)
-	Page    apiclient.PageOptions
+	Status    string // Filter by status (online, offline)
+	ProjectID string // Filter by project contribution
+	Name      string // Exact match on broker name (case-insensitive)
+	Page      apiclient.PageOptions
 }
 
 // ListBrokersResponse is the response from listing runtime brokers.
@@ -76,22 +77,76 @@ type UpdateBrokerRequest struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
-// ListBrokerGrovesResponse is the response from listing broker groves.
-type ListBrokerGrovesResponse struct {
-	Groves []BrokerGroveInfo `json:"groves"`
+// ListBrokerProjectsResponse is the response from listing broker projects.
+type ListBrokerProjectsResponse struct {
+	Projects []BrokerProjectInfo `json:"projects"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (r ListBrokerProjectsResponse) MarshalJSON() ([]byte, error) {
+	type Alias ListBrokerProjectsResponse
+	return json.Marshal(&struct {
+		Alias
+		Groves []BrokerProjectInfo `json:"groves,omitempty"`
+	}{
+		Alias:  Alias(r),
+		Groves: r.Projects,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (r *ListBrokerProjectsResponse) UnmarshalJSON(data []byte) error {
+	type Alias ListBrokerProjectsResponse
+	aux := &struct {
+		Groves []BrokerProjectInfo `json:"groves,omitempty"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if len(r.Projects) == 0 && len(aux.Groves) > 0 {
+		r.Projects = aux.Groves
+	}
+	return nil
 }
 
 // BrokerHeartbeat is the heartbeat payload.
 type BrokerHeartbeat struct {
-	Status string           `json:"status"`
-	Groves []GroveHeartbeat `json:"groves,omitempty"`
+	Status   string             `json:"status"`
+	Projects []ProjectHeartbeat `json:"projects,omitempty"`
 }
 
-// GroveHeartbeat is per-grove status in a heartbeat.
-type GroveHeartbeat struct {
-	GroveID    string           `json:"groveId"`
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (h BrokerHeartbeat) MarshalJSON() ([]byte, error) {
+	type Alias BrokerHeartbeat
+	return json.Marshal(&struct {
+		Alias
+		Groves []ProjectHeartbeat `json:"groves,omitempty"`
+	}{
+		Alias:  Alias(h),
+		Groves: h.Projects,
+	})
+}
+
+// ProjectHeartbeat is per-project status in a heartbeat.
+type ProjectHeartbeat struct {
+	ProjectID  string           `json:"projectId"`
 	AgentCount int              `json:"agentCount"`
 	Agents     []AgentHeartbeat `json:"agents,omitempty"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (h ProjectHeartbeat) MarshalJSON() ([]byte, error) {
+	type Alias ProjectHeartbeat
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(h),
+		GroveID: h.ProjectID,
+	})
 }
 
 // AgentHeartbeat is per-agent status in a heartbeat.
@@ -112,7 +167,7 @@ type CreateBrokerRequest struct {
 	Name         string            `json:"name"`
 	Capabilities []string          `json:"capabilities,omitempty"`
 	Labels       map[string]string `json:"labels,omitempty"`
-	AutoProvide  bool              `json:"autoProvide,omitempty"` // Automatically add as provider for new groves
+	AutoProvide  bool              `json:"autoProvide,omitempty"` // Automatically add as provider for new projects
 }
 
 // CreateBrokerResponse is returned when creating a new broker.
@@ -142,7 +197,7 @@ type JoinBrokerResponse struct {
 
 // Create creates a new broker registration and returns a join token.
 func (s *runtimeBrokerService) Create(ctx context.Context, req *CreateBrokerRequest) (*CreateBrokerResponse, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/brokers", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/brokers", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +206,7 @@ func (s *runtimeBrokerService) Create(ctx context.Context, req *CreateBrokerRequ
 
 // Join completes broker registration using a join token.
 func (s *runtimeBrokerService) Join(ctx context.Context, req *JoinBrokerRequest) (*JoinBrokerResponse, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/brokers/join", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/brokers/join", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -165,8 +220,9 @@ func (s *runtimeBrokerService) List(ctx context.Context, opts *ListBrokersOption
 		if opts.Status != "" {
 			query.Set("status", opts.Status)
 		}
-		if opts.GroveID != "" {
-			query.Set("groveId", opts.GroveID)
+		if opts.ProjectID != "" {
+			query.Set("projectId", opts.ProjectID)
+			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.Name != "" {
 			query.Set("name", opts.Name)
@@ -174,7 +230,7 @@ func (s *runtimeBrokerService) List(ctx context.Context, opts *ListBrokersOption
 		opts.Page.ToQuery(query)
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/runtime-brokers", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/runtime-brokers", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +257,7 @@ func (s *runtimeBrokerService) List(ctx context.Context, opts *ListBrokersOption
 
 // Get returns a single runtime broker by ID.
 func (s *runtimeBrokerService) Get(ctx context.Context, brokerID string) (*RuntimeBroker, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/runtime-brokers/"+brokerID, nil)
+	resp, err := s.c.get(ctx, "/api/v1/runtime-brokers/"+brokerID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -210,34 +266,34 @@ func (s *runtimeBrokerService) Get(ctx context.Context, brokerID string) (*Runti
 
 // Update updates broker metadata.
 func (s *runtimeBrokerService) Update(ctx context.Context, brokerID string, req *UpdateBrokerRequest) (*RuntimeBroker, error) {
-	resp, err := s.c.transport.Patch(ctx, "/api/v1/runtime-brokers/"+brokerID, req, nil)
+	resp, err := s.c.patch(ctx, "/api/v1/runtime-brokers/"+brokerID, req, nil)
 	if err != nil {
 		return nil, err
 	}
 	return apiclient.DecodeResponse[RuntimeBroker](resp)
 }
 
-// Delete removes a broker from all groves.
+// Delete removes a broker from all projects.
 func (s *runtimeBrokerService) Delete(ctx context.Context, brokerID string) error {
-	resp, err := s.c.transport.Delete(ctx, "/api/v1/runtime-brokers/"+brokerID, nil)
+	resp, err := s.c.delete(ctx, "/api/v1/runtime-brokers/"+brokerID, nil)
 	if err != nil {
 		return err
 	}
 	return apiclient.CheckResponse(resp)
 }
 
-// ListGroves returns groves this broker contributes to.
-func (s *runtimeBrokerService) ListGroves(ctx context.Context, brokerID string) (*ListBrokerGrovesResponse, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/runtime-brokers/"+brokerID+"/groves", nil)
+// ListProjects returns projects this broker contributes to.
+func (s *runtimeBrokerService) ListProjects(ctx context.Context, brokerID string) (*ListBrokerProjectsResponse, error) {
+	resp, err := s.c.get(ctx, "/api/v1/runtime-brokers/"+brokerID+"/projects", nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ListBrokerGrovesResponse](resp)
+	return apiclient.DecodeResponse[ListBrokerProjectsResponse](resp)
 }
 
 // Heartbeat sends a heartbeat for a broker.
 func (s *runtimeBrokerService) Heartbeat(ctx context.Context, brokerID string, status *BrokerHeartbeat) error {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/runtime-brokers/"+brokerID+"/heartbeat", status, nil)
+	resp, err := s.c.post(ctx, "/api/v1/runtime-brokers/"+brokerID+"/heartbeat", status, nil)
 	if err != nil {
 		return err
 	}

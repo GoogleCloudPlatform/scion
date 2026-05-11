@@ -69,7 +69,7 @@ type AgentService interface {
 	// If notify is true, the sender subscribes to status notifications for the target agent.
 	SendStructuredMessage(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt bool, notify bool) error
 
-	// BroadcastMessage broadcasts a structured message to all running agents in the grove.
+	// BroadcastMessage broadcasts a structured message to all running agents in the project.
 	// Uses the Hub's broadcast endpoint which routes through the message broker (if available)
 	// or performs direct fan-out as a fallback.
 	BroadcastMessage(ctx context.Context, msg *messages.StructuredMessage, interrupt bool) error
@@ -101,27 +101,27 @@ type AgentService interface {
 
 // agentService is the implementation of AgentService.
 type agentService struct {
-	c       *client
-	groveID string
+	c         *client
+	projectID string
 }
 
 func (s *agentService) agentPath(agentID string) string {
-	if s.groveID != "" {
-		return "/api/v1/groves/" + s.groveID + "/agents/" + agentID
+	if s.projectID != "" {
+		return "/api/v1/projects/" + s.projectID + "/agents/" + agentID
 	}
 	return "/api/v1/agents/" + agentID
 }
 
 func (s *agentService) agentsPath() string {
-	if s.groveID != "" {
-		return "/api/v1/groves/" + s.groveID + "/agents"
+	if s.projectID != "" {
+		return "/api/v1/projects/" + s.projectID + "/agents"
 	}
 	return "/api/v1/agents"
 }
 
 // ListAgentsOptions configures agent list filtering.
 type ListAgentsOptions struct {
-	GroveID         string            // Filter by grove
+	ProjectID       string            // Filter by project
 	Phase           string            // Filter by lifecycle phase (created, running, stopped, error, etc.)
 	RuntimeBrokerID string            // Filter by runtime broker
 	Labels          map[string]string // Label selector
@@ -155,7 +155,7 @@ type StopAllResponse struct {
 // CreateAgentRequest is the request body for creating an agent.
 type CreateAgentRequest struct {
 	Name            string            `json:"name"`
-	GroveID         string            `json:"groveId"`
+	ProjectID       string            `json:"projectId"`
 	Template        string            `json:"template,omitempty"`
 	HarnessConfig   string            `json:"harnessConfig,omitempty"` // Explicit harness config name (used during sync when template may not be on Hub)
 	HarnessAuth     string            `json:"harnessAuth,omitempty"`   // Late-binding override for auth_selected_type
@@ -183,11 +183,41 @@ type CreateAgentRequest struct {
 	Notify bool `json:"notify,omitempty"`
 }
 
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (r CreateAgentRequest) MarshalJSON() ([]byte, error) {
+	type Alias CreateAgentRequest
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(r),
+		GroveID: r.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (r *CreateAgentRequest) UnmarshalJSON(data []byte) error {
+	type Alias CreateAgentRequest
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
 // CreateAgentResponse is the response from creating an agent.
 type CreateAgentResponse struct {
 	Agent    *Agent   `json:"agent"`
 	Warnings []string `json:"warnings,omitempty"`
-	// UploadURLs is populated during workspace bootstrap (non-git groves).
+	// UploadURLs is populated during workspace bootstrap (non-git projects).
 	UploadURLs []transfer.UploadURLInfo `json:"uploadUrls,omitempty"`
 	// Expires indicates when the upload URLs expire.
 	Expires *time.Time `json:"expires,omitempty"`
@@ -260,8 +290,9 @@ type ExecResponse struct {
 func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*ListAgentsResponse, error) {
 	query := url.Values{}
 	if opts != nil {
-		if opts.GroveID != "" {
-			query.Set("groveId", opts.GroveID)
+		if opts.ProjectID != "" {
+			query.Set("projectId", opts.ProjectID)
+			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.Phase != "" {
 			query.Set("phase", opts.Phase)
@@ -278,7 +309,7 @@ func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*List
 		opts.Page.ToQuery(query)
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, s.agentsPath(), query, nil)
+	resp, err := s.c.getWithQuery(ctx, s.agentsPath(), query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -307,7 +338,7 @@ func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*List
 
 // Get returns a single agent by ID.
 func (s *agentService) Get(ctx context.Context, agentID string) (*Agent, error) {
-	resp, err := s.c.transport.Get(ctx, s.agentPath(agentID), nil)
+	resp, err := s.c.get(ctx, s.agentPath(agentID), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -316,7 +347,7 @@ func (s *agentService) Get(ctx context.Context, agentID string) (*Agent, error) 
 
 // Create creates a new agent.
 func (s *agentService) Create(ctx context.Context, req *CreateAgentRequest) (*CreateAgentResponse, error) {
-	resp, err := s.c.transport.Post(ctx, s.agentsPath(), req, nil)
+	resp, err := s.c.post(ctx, s.agentsPath(), req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -325,7 +356,7 @@ func (s *agentService) Create(ctx context.Context, req *CreateAgentRequest) (*Cr
 
 // SubmitEnv submits gathered environment variables for an agent after a 202 env-gather response.
 func (s *agentService) SubmitEnv(ctx context.Context, agentID string, req *SubmitEnvRequest) (*CreateAgentResponse, error) {
-	resp, err := s.c.transport.Post(ctx, s.agentPath(agentID)+"/env", req, nil)
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/env", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -334,7 +365,7 @@ func (s *agentService) SubmitEnv(ctx context.Context, agentID string, req *Submi
 
 // Update updates an agent's metadata.
 func (s *agentService) Update(ctx context.Context, agentID string, req *UpdateAgentRequest) (*Agent, error) {
-	resp, err := s.c.transport.Patch(ctx, s.agentPath(agentID), req, nil)
+	resp, err := s.c.patch(ctx, s.agentPath(agentID), req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -362,7 +393,7 @@ func (s *agentService) Delete(ctx context.Context, agentID string, opts *DeleteA
 		}
 	}
 
-	resp, err := s.c.transport.Delete(ctx, path, nil)
+	resp, err := s.c.delete(ctx, path, nil)
 	if err != nil {
 		return err
 	}
@@ -371,7 +402,7 @@ func (s *agentService) Delete(ctx context.Context, agentID string, opts *DeleteA
 
 // Start starts a stopped agent.
 func (s *agentService) Start(ctx context.Context, agentID string) error {
-	resp, err := s.c.transport.Post(ctx, s.agentPath(agentID)+"/start", nil, nil)
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/start", nil, nil)
 	if err != nil {
 		return err
 	}
@@ -380,7 +411,7 @@ func (s *agentService) Start(ctx context.Context, agentID string) error {
 
 // Stop stops a running agent.
 func (s *agentService) Stop(ctx context.Context, agentID string) error {
-	resp, err := s.c.transport.Post(ctx, s.agentPath(agentID)+"/stop", nil, nil)
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/stop", nil, nil)
 	if err != nil {
 		return err
 	}
@@ -389,7 +420,7 @@ func (s *agentService) Stop(ctx context.Context, agentID string) error {
 
 // Suspend pauses a running agent, preserving state for later resume.
 func (s *agentService) Suspend(ctx context.Context, agentID string) error {
-	resp, err := s.c.transport.Post(ctx, s.agentPath(agentID)+"/suspend", nil, nil)
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/suspend", nil, nil)
 	if err != nil {
 		return err
 	}
@@ -398,7 +429,7 @@ func (s *agentService) Suspend(ctx context.Context, agentID string) error {
 
 // Restart restarts an agent.
 func (s *agentService) Restart(ctx context.Context, agentID string) error {
-	resp, err := s.c.transport.Post(ctx, s.agentPath(agentID)+"/restart", nil, nil)
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/restart", nil, nil)
 	if err != nil {
 		return err
 	}
@@ -407,7 +438,7 @@ func (s *agentService) Restart(ctx context.Context, agentID string) error {
 
 // StopAll stops all running agents in scope.
 func (s *agentService) StopAll(ctx context.Context) (*StopAllResponse, error) {
-	resp, err := s.c.transport.Post(ctx, s.agentsPath()+"/stop-all", nil, nil)
+	resp, err := s.c.post(ctx, s.agentsPath()+"/stop-all", nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -416,7 +447,7 @@ func (s *agentService) StopAll(ctx context.Context) (*StopAllResponse, error) {
 
 // Restore restores a soft-deleted agent.
 func (s *agentService) Restore(ctx context.Context, agentID string) (*Agent, error) {
-	resp, err := s.c.transport.Post(ctx, s.agentPath(agentID)+"/restore", nil, nil)
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/restore", nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -432,7 +463,7 @@ func (s *agentService) SendMessage(ctx context.Context, agentID string, message 
 		Message:   message,
 		Interrupt: interrupt,
 	}
-	resp, err := s.c.transport.Post(ctx, s.agentPath(agentID)+"/message", body, nil)
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/message", body, nil)
 	if err != nil {
 		return err
 	}
@@ -451,7 +482,7 @@ func (s *agentService) SendStructuredMessage(ctx context.Context, agentID string
 		Interrupt:         interrupt,
 		Notify:            notify,
 	}
-	resp, err := s.c.transport.Post(ctx, s.agentPath(agentID)+"/message", body, nil)
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/message", body, nil)
 	if err != nil {
 		return err
 	}
@@ -469,17 +500,17 @@ type OutboundMessageRequest struct {
 
 // SendOutboundMessage sends a message from an agent to a human inbox.
 func (s *agentService) SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) error {
-	resp, err := s.c.transport.Post(ctx, s.agentPath(agentID)+"/outbound-message", msg, nil)
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/outbound-message", msg, nil)
 	if err != nil {
 		return err
 	}
 	return apiclient.CheckResponse(resp)
 }
 
-// BroadcastMessage broadcasts a structured message to all running agents in the grove.
+// BroadcastMessage broadcasts a structured message to all running agents in the project.
 func (s *agentService) BroadcastMessage(ctx context.Context, msg *messages.StructuredMessage, interrupt bool) error {
-	if s.groveID == "" {
-		return fmt.Errorf("broadcast requires a grove-scoped agent service")
+	if s.projectID == "" {
+		return fmt.Errorf("broadcast requires a project-scoped agent service")
 	}
 	body := struct {
 		StructuredMessage *messages.StructuredMessage `json:"structured_message"`
@@ -488,7 +519,7 @@ func (s *agentService) BroadcastMessage(ctx context.Context, msg *messages.Struc
 		StructuredMessage: msg,
 		Interrupt:         interrupt,
 	}
-	resp, err := s.c.transport.Post(ctx, "/api/v1/groves/"+s.groveID+"/broadcast", body, nil)
+	resp, err := s.c.post(ctx, "/api/v1/projects/"+s.projectID+"/broadcast", body, nil)
 	if err != nil {
 		return err
 	}
@@ -504,7 +535,7 @@ func (s *agentService) Exec(ctx context.Context, agentID string, command []strin
 		Command: command,
 		Timeout: timeout,
 	}
-	resp, err := s.c.transport.Post(ctx, s.agentPath(agentID)+"/exec", body, nil)
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/exec", body, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -523,7 +554,7 @@ func (s *agentService) GetLogs(ctx context.Context, agentID string, opts *GetLog
 		}
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, s.agentPath(agentID)+"/logs", query, nil)
+	resp, err := s.c.getWithQuery(ctx, s.agentPath(agentID)+"/logs", query, nil)
 	if err != nil {
 		return "", err
 	}
@@ -595,7 +626,7 @@ func (s *agentService) GetCloudLogs(ctx context.Context, agentID string, opts *G
 		}
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, s.agentPath(agentID)+"/cloud-logs", query, nil)
+	resp, err := s.c.getWithQuery(ctx, s.agentPath(agentID)+"/cloud-logs", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -618,7 +649,7 @@ func (s *agentService) StreamCloudLogs(ctx context.Context, agentID string, opts
 	headers := http.Header{}
 	headers.Set("Accept", "text/event-stream")
 
-	resp, err := s.c.transport.GetWithQuery(ctx, s.agentPath(agentID)+"/cloud-logs/stream", query, headers)
+	resp, err := s.c.getWithQuery(ctx, s.agentPath(agentID)+"/cloud-logs/stream", query, headers)
 	if err != nil {
 		return err
 	}

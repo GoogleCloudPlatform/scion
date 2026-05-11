@@ -126,7 +126,7 @@ gemini:
 
 ### Telemetry (`telemetry`)
 
-Override telemetry settings for this template or agent. These merge on top of any telemetry configuration defined in `settings.yaml` (global or grove scope), using last-write-wins semantics.
+Override telemetry settings for this template or agent. These merge on top of any telemetry configuration defined in `settings.yaml` (global or project scope), using last-write-wins semantics.
 
 ```yaml
 telemetry:

@@ -19,7 +19,7 @@
  *
  * Thin wrapper around the shared <scion-token-list> component,
  * providing the page header and description. When the hub has a
- * GitHub App configured and the current user owns groves that have
+ * GitHub App configured and the current user owns projects that have
  * an active GitHub App installation, a link to manage the GitHub App
  * installation is shown below the header.
  */
@@ -28,7 +28,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { apiFetch } from '../../client/api.js';
 
-import type { Grove } from '../../shared/types.js';
+import type { Project } from '../../shared/types.js';
 
 import '../shared/token-list.js';
 
@@ -97,30 +97,29 @@ export class ScionPageProfileTokens extends LitElement {
     super.connectedCallback();
     this.checkGitHubApp();
   }
+private async checkGitHubApp(): Promise<void> {
+  try {
+    const [appRes, projectsRes] = await Promise.all([
+      apiFetch('/api/v1/github-app'),
+      apiFetch('/api/v1/projects?mine=true'),
+    ]);
 
-  private async checkGitHubApp(): Promise<void> {
-    try {
-      const [appRes, grovesRes] = await Promise.all([
-        apiFetch('/api/v1/github-app'),
-        apiFetch('/api/v1/groves?mine=true'),
-      ]);
+    if (!appRes.ok || !projectsRes.ok) return;
 
-      if (!appRes.ok || !grovesRes.ok) return;
+    const appData = (await appRes.json()) as GitHubAppInfo;
+    if (!appData.configured || !appData.installation_url) return;
 
-      const appData = (await appRes.json()) as GitHubAppInfo;
-      if (!appData.configured || !appData.installation_url) return;
-
-      const grovesData = (await grovesRes.json()) as { groves: Grove[] };
-      const hasInstallation = (grovesData.groves || []).some(
-        (g) => g.githubInstallationId
-      );
-      if (hasInstallation) {
-        this.githubAppLink = appData.installation_url;
-      }
-    } catch {
-      // Non-fatal — the link is a convenience feature
+    const projectsData = (await projectsRes.json()) as { projects: Project[] };
+    const hasInstallation = (projectsData.projects || []).some(
+      (p) => p.githubInstallationId
+    );
+    if (hasInstallation) {
+      this.githubAppLink = appData.installation_url;
     }
+  } catch {
+    // Non-fatal — the link is a convenience feature
   }
+}
 
   override render() {
     return html`
@@ -129,7 +128,7 @@ export class ScionPageProfileTokens extends LitElement {
           <h1>Access Tokens</h1>
           <p>
             Create and manage personal access tokens for CI/CD pipelines and automation.
-            Tokens are scoped to a specific grove with limited permissions.
+            Tokens are scoped to a specific project with limited permissions.
           </p>
         </div>
       </div>

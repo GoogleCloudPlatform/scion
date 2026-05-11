@@ -30,14 +30,14 @@ import (
 func TestScheduleCRUD(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID := createTestGrove(t, s)
+	projectID := createTestProject(t, s)
 
 	scheduleID := api.NewUUID()
 	nextRun := time.Now().Add(1 * time.Hour).UTC().Truncate(time.Second)
 
 	sched := &store.Schedule{
 		ID:        scheduleID,
-		GroveID:   groveID,
+		ProjectID: projectID,
 		Name:      "daily-standup",
 		CronExpr:  "0 9 * * 1-5",
 		EventType: "message",
@@ -56,7 +56,7 @@ func TestScheduleCRUD(t *testing.T) {
 	got, err := s.GetSchedule(ctx, scheduleID)
 	require.NoError(t, err)
 	assert.Equal(t, scheduleID, got.ID)
-	assert.Equal(t, groveID, got.GroveID)
+	assert.Equal(t, projectID, got.ProjectID)
 	assert.Equal(t, "daily-standup", got.Name)
 	assert.Equal(t, "0 9 * * 1-5", got.CronExpr)
 	assert.Equal(t, "message", got.EventType)
@@ -96,11 +96,11 @@ func TestScheduleCRUD(t *testing.T) {
 func TestSchedule_DuplicateName(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID := createTestGrove(t, s)
+	projectID := createTestProject(t, s)
 
 	sched1 := &store.Schedule{
 		ID:        api.NewUUID(),
-		GroveID:   groveID,
+		ProjectID: projectID,
 		Name:      "duplicate-name",
 		CronExpr:  "0 * * * *",
 		EventType: "message",
@@ -110,7 +110,7 @@ func TestSchedule_DuplicateName(t *testing.T) {
 
 	sched2 := &store.Schedule{
 		ID:        api.NewUUID(),
-		GroveID:   groveID,
+		ProjectID: projectID,
 		Name:      "duplicate-name",
 		CronExpr:  "0 * * * *",
 		EventType: "message",
@@ -123,7 +123,7 @@ func TestSchedule_DuplicateName(t *testing.T) {
 func TestSchedule_List(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID := createTestGrove(t, s)
+	projectID := createTestProject(t, s)
 
 	// Create 3 schedules
 	for i, name := range []string{"sched-a", "sched-b", "sched-c"} {
@@ -133,7 +133,7 @@ func TestSchedule_List(t *testing.T) {
 		}
 		sched := &store.Schedule{
 			ID:        api.NewUUID(),
-			GroveID:   groveID,
+			ProjectID: projectID,
 			Name:      name,
 			CronExpr:  "0 * * * *",
 			EventType: "message",
@@ -144,17 +144,17 @@ func TestSchedule_List(t *testing.T) {
 	}
 
 	// List all (excludes deleted)
-	result, err := s.ListSchedules(ctx, store.ScheduleFilter{GroveID: groveID}, store.ListOptions{})
+	result, err := s.ListSchedules(ctx, store.ScheduleFilter{ProjectID: projectID}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 3, result.TotalCount)
 	assert.Len(t, result.Items, 3)
 
 	// Filter by status
-	result, err = s.ListSchedules(ctx, store.ScheduleFilter{GroveID: groveID, Status: store.ScheduleStatusActive}, store.ListOptions{})
+	result, err = s.ListSchedules(ctx, store.ScheduleFilter{ProjectID: projectID, Status: store.ScheduleStatusActive}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 2, result.TotalCount)
 
-	result, err = s.ListSchedules(ctx, store.ScheduleFilter{GroveID: groveID, Status: store.ScheduleStatusPaused}, store.ListOptions{})
+	result, err = s.ListSchedules(ctx, store.ScheduleFilter{ProjectID: projectID, Status: store.ScheduleStatusPaused}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.TotalCount)
 }
@@ -162,12 +162,12 @@ func TestSchedule_List(t *testing.T) {
 func TestSchedule_UpdateAfterRun(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID := createTestGrove(t, s)
+	projectID := createTestProject(t, s)
 
 	nextRun := time.Now().Add(-1 * time.Minute).UTC().Truncate(time.Second)
 	sched := &store.Schedule{
 		ID:        api.NewUUID(),
-		GroveID:   groveID,
+		ProjectID: projectID,
 		Name:      "run-test",
 		CronExpr:  "0 * * * *",
 		EventType: "message",
@@ -206,7 +206,7 @@ func TestSchedule_UpdateAfterRun(t *testing.T) {
 func TestSchedule_ListDue(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID := createTestGrove(t, s)
+	projectID := createTestProject(t, s)
 
 	now := time.Now().UTC()
 
@@ -214,7 +214,7 @@ func TestSchedule_ListDue(t *testing.T) {
 	pastRun := now.Add(-5 * time.Minute)
 	dueSchedule := &store.Schedule{
 		ID:        api.NewUUID(),
-		GroveID:   groveID,
+		ProjectID: projectID,
 		Name:      "due-schedule",
 		CronExpr:  "0 * * * *",
 		EventType: "message",
@@ -227,7 +227,7 @@ func TestSchedule_ListDue(t *testing.T) {
 	futureRun := now.Add(1 * time.Hour)
 	futureSchedule := &store.Schedule{
 		ID:        api.NewUUID(),
-		GroveID:   groveID,
+		ProjectID: projectID,
 		Name:      "future-schedule",
 		CronExpr:  "0 * * * *",
 		EventType: "message",
@@ -239,7 +239,7 @@ func TestSchedule_ListDue(t *testing.T) {
 	// Create a paused schedule (should not be listed even if due)
 	pausedSchedule := &store.Schedule{
 		ID:        api.NewUUID(),
-		GroveID:   groveID,
+		ProjectID: projectID,
 		Name:      "paused-schedule",
 		CronExpr:  "0 * * * *",
 		EventType: "message",
@@ -259,14 +259,14 @@ func TestSchedule_ListDue(t *testing.T) {
 func TestScheduledEvent_WithScheduleID(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID := createTestGrove(t, s)
+	projectID := createTestProject(t, s)
 
 	scheduleID := api.NewUUID()
 	eventID := api.NewUUID()
 
 	evt := &store.ScheduledEvent{
 		ID:         eventID,
-		GroveID:    groveID,
+		ProjectID:  projectID,
 		EventType:  "message",
 		FireAt:     time.Now().UTC(),
 		Payload:    `{"message":"test"}`,
@@ -281,7 +281,7 @@ func TestScheduledEvent_WithScheduleID(t *testing.T) {
 
 	// Filter by schedule_id
 	result, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{
-		GroveID:    groveID,
+		ProjectID:  projectID,
 		ScheduleID: scheduleID,
 	}, store.ListOptions{})
 	require.NoError(t, err)

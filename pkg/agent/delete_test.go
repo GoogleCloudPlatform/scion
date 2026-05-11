@@ -126,7 +126,7 @@ func TestDeleteAgentFiles_CleansStaleWorktree(t *testing.T) {
 // TestDeleteAgentFiles_CleansSharedWorkspaceExternalState verifies that for
 // shared-workspace git groves (whose per-agent state lives outside the grove
 // tree per .design/hub-shared-workspace-isolation.md), DeleteAgentFiles
-// removes the external <grove-configs>/<slug>__<uuid>/.scion/agents/<name>
+// removes the external <project-configs>/<slug>__<uuid>/.scion/agents/<name>
 // directory in addition to any in-grove residue.
 func TestDeleteAgentFiles_CleansSharedWorkspaceExternalState(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
@@ -147,16 +147,16 @@ func TestDeleteAgentFiles_CleansSharedWorkspaceExternalState(t *testing.T) {
 
 	scionDir := filepath.Join(projectDir, ".scion")
 	os.MkdirAll(scionDir, 0755)
-	if err := config.WriteGroveID(scionDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
-		t.Fatalf("WriteGroveID failed: %v", err)
+	if err := config.WriteProjectID(scionDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
+		t.Fatalf("WriteProjectID failed: %v", err)
 	}
 
 	agentName := "shared-agent"
 
 	// Resolve the external dir the same way production code does.
-	extAgentsDir, err := config.GetGitGroveExternalAgentsDir(scionDir)
+	extAgentsDir, err := config.GetGitProjectExternalAgentsDir(scionDir)
 	if err != nil || extAgentsDir == "" {
-		t.Fatalf("GetGitGroveExternalAgentsDir: dir=%q err=%v", extAgentsDir, err)
+		t.Fatalf("GetGitProjectExternalAgentsDir: dir=%q err=%v", extAgentsDir, err)
 	}
 	extAgentDir := filepath.Join(extAgentsDir, agentName)
 	if err := os.MkdirAll(extAgentDir, 0755); err != nil {
@@ -173,7 +173,7 @@ func TestDeleteAgentFiles_CleansSharedWorkspaceExternalState(t *testing.T) {
 		t.Fatalf("mkdir home: %v", err)
 	}
 
-	// DeleteAgentFiles takes grovePath; pass scionDir like real callers do.
+	// DeleteAgentFiles takes projectPath; pass scionDir like real callers do.
 	if _, err := DeleteAgentFiles(agentName, scionDir, false); err != nil {
 		t.Fatalf("DeleteAgentFiles failed: %v", err)
 	}

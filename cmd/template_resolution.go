@@ -63,17 +63,17 @@ func ResolveTemplateForHub(ctx context.Context, hubCtx *HubContext, templateName
 		return nil, fmt.Errorf("template name is required")
 	}
 
-	// Parse scope prefix if present (e.g., "global:claude", "grove:custom")
+	// Parse scope prefix if present (e.g., "global:claude", "project:custom")
 	scope, name := parseTemplateScope(templateName)
 
-	// Get grove ID for grove-scoped lookups
-	groveID, err := GetGroveID(hubCtx)
-	if err != nil && scope == "grove" {
-		return nil, fmt.Errorf("failed to determine grove ID for template resolution: %w", err)
+	// Get project ID for project-scoped lookups
+	projectID, err := GetProjectID(hubCtx)
+	if err != nil && (scope == "grove" || scope == "project") {
+		return nil, fmt.Errorf("failed to determine project ID for template resolution: %w", err)
 	}
 
 	// Step 1: Check if template exists on Hub
-	hubTemplate, err := findTemplateOnHub(ctx, hubCtx, name, scope, groveID)
+	hubTemplate, err := findTemplateOnHub(ctx, hubCtx, name, scope, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search Hub for template: %w", err)
 	}
@@ -85,7 +85,7 @@ func ResolveTemplateForHub(ctx context.Context, hubCtx *HubContext, templateName
 	if hubTemplate != nil {
 		// If also exists locally, check if content matches
 		if localTemplate != nil {
-			return handleHubAndLocalTemplate(ctx, hubCtx, hubTemplate, localTemplate, groveID)
+			return handleHubAndLocalTemplate(ctx, hubCtx, hubTemplate, localTemplate, projectID)
 		}
 		// Only on Hub, use it
 		return &TemplateResolutionResult{
@@ -96,11 +96,11 @@ func ResolveTemplateForHub(ctx context.Context, hubCtx *HubContext, templateName
 
 	// Case 2: Template NOT on Hub, but exists locally
 	if localTemplate != nil {
-		return handleLocalOnlyTemplate(ctx, hubCtx, localTemplate, scope, groveID)
+		return handleLocalOnlyTemplate(ctx, hubCtx, localTemplate, scope, projectID)
 	}
 
 	// Case 3: Template not found anywhere
-	return nil, formatTemplateNotFoundError(name, hubCtx.GrovePath)
+	return nil, formatTemplateNotFoundError(name, hubCtx.ProjectPath)
 }
 
 // parseTemplateScope extracts scope prefix from template name.
@@ -110,7 +110,10 @@ func parseTemplateScope(templateName string) (scope, name string) {
 		prefix := templateName[:idx]
 		// Check if it's a known scope prefix
 		switch prefix {
-		case "global", "grove", "user":
+		case "global", "grove", "project", "user":
+			if prefix == "project" {
+				return "grove", templateName[idx+1:]
+			}
 			return prefix, templateName[idx+1:]
 		}
 	}
@@ -119,22 +122,27 @@ func parseTemplateScope(templateName string) (scope, name string) {
 
 // findTemplateOnHub searches for a template on the Hub.
 // It implements the resolution order from Section 3.2 of the design doc:
-// 1. Grove scope (if applicable)
+// 1. Project scope (if applicable)
 // 2. User scope
 // 3. Global scope
-func findTemplateOnHub(ctx context.Context, hubCtx *HubContext, name, scope, groveID string) (*hubclient.Template, error) {
+func findTemplateOnHub(ctx context.Context, hubCtx *HubContext, name, scope, projectID string) (*hubclient.Template, error) {
 	listCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	// If explicit scope is provided, search only that scope
 	if scope != "" {
+		effectiveScope := scope
+		if effectiveScope == "project" {
+			effectiveScope = "grove"
+		}
+
 		opts := &hubclient.ListTemplatesOptions{
 			Name:   name,
-			Scope:  scope,
+			Scope:  effectiveScope,
 			Status: "active",
 		}
-		if scope == "grove" && groveID != "" {
-			opts.GroveID = groveID
+		if effectiveScope == "grove" && projectID != "" {
+			opts.ProjectID = projectID
 		}
 
 		resp, err := hubCtx.Client.Templates().List(listCtx, opts)
@@ -152,13 +160,13 @@ func findTemplateOnHub(ctx context.Context, hubCtx *HubContext, name, scope, gro
 		return nil, nil
 	}
 
-	// No explicit scope - follow resolution order: grove -> user -> global
-	// First, check grove scope if we have a grove ID
-	if groveID != "" {
+	// No explicit scope - follow resolution order: project -> user -> global
+	// First, check project scope if we have a project ID
+	if projectID != "" {
 		opts := &hubclient.ListTemplatesOptions{
 			Name:    name,
 			Scope:   "grove",
-			GroveID: groveID,
+			ProjectID: projectID,
 			Status:  "active",
 		}
 
@@ -198,7 +206,7 @@ func findTemplateOnHub(ctx context.Context, hubCtx *HubContext, name, scope, gro
 }
 
 // handleHubAndLocalTemplate handles the case where template exists on both Hub and locally.
-func handleHubAndLocalTemplate(ctx context.Context, hubCtx *HubContext, hubTemplate *hubclient.Template, localTemplate *config.Template, groveID string) (*TemplateResolutionResult, error) {
+func handleHubAndLocalTemplate(ctx context.Context, hubCtx *HubContext, hubTemplate *hubclient.Template, localTemplate *config.Template, projectID string) (*TemplateResolutionResult, error) {
 	// Compute local content hash
 	files, err := hubclient.CollectFiles(localTemplate.Path, nil)
 	if err != nil {
@@ -230,18 +238,18 @@ func handleHubAndLocalTemplate(ctx context.Context, hubCtx *HubContext, hubTempl
 
 	if uploadTemplate || autoConfirm {
 		// Auto-update Hub with local version
-		return updateHubTemplate(ctx, hubCtx, hubTemplate, localTemplate, files, groveID)
+		return updateHubTemplate(ctx, hubCtx, hubTemplate, localTemplate, files, projectID)
 	}
 
 	// Interactive prompt
-	return promptForTemplateHashMismatch(ctx, hubCtx, hubTemplate, localTemplate, files, localHash, groveID)
+	return promptForTemplateHashMismatch(ctx, hubCtx, hubTemplate, localTemplate, files, localHash, projectID)
 }
 
 // handleLocalOnlyTemplate handles the case where template exists only locally.
-func handleLocalOnlyTemplate(ctx context.Context, hubCtx *HubContext, localTemplate *config.Template, scope, groveID string) (*TemplateResolutionResult, error) {
-	// Check if the target broker has local filesystem access to the grove.
+func handleLocalOnlyTemplate(ctx context.Context, hubCtx *HubContext, localTemplate *config.Template, scope, projectID string) (*TemplateResolutionResult, error) {
+	// Check if the target broker has local filesystem access to the project.
 	// If so, the broker can resolve the template locally — no upload needed.
-	if brokerHasLocalAccess(ctx, hubCtx, groveID) {
+	if brokerHasLocalAccess(ctx, hubCtx, projectID) {
 		return &TemplateResolutionResult{
 			TemplateName: localTemplate.Name,
 		}, nil
@@ -266,22 +274,22 @@ func handleLocalOnlyTemplate(ctx context.Context, hubCtx *HubContext, localTempl
 
 	if uploadTemplate || autoConfirm {
 		// Auto-upload
-		return uploadLocalTemplate(ctx, hubCtx, localTemplate, scope, groveID, harnessType)
+		return uploadLocalTemplate(ctx, hubCtx, localTemplate, scope, projectID, harnessType)
 	}
 
 	// Interactive prompt
-	return promptForLocalTemplateUpload(ctx, hubCtx, localTemplate, scope, groveID, harnessType)
+	return promptForLocalTemplateUpload(ctx, hubCtx, localTemplate, scope, projectID, harnessType)
 }
 
 // brokerHasLocalAccess checks whether the target broker has local filesystem
-// access to the grove. If so, the broker can resolve templates locally without
+// access to the project. If so, the broker can resolve templates locally without
 // requiring them to be uploaded to the Hub.
-func brokerHasLocalAccess(ctx context.Context, hubCtx *HubContext, groveID string) bool {
-	if hubCtx.BrokerID == "" || groveID == "" {
+func brokerHasLocalAccess(ctx context.Context, hubCtx *HubContext, projectID string) bool {
+	if hubCtx.BrokerID == "" || projectID == "" {
 		return false
 	}
 
-	providers, err := hubCtx.Client.Groves().ListProviders(ctx, groveID)
+	providers, err := hubCtx.Client.Projects().ListProviders(ctx, projectID)
 	if err != nil || providers == nil {
 		return false
 	}
@@ -296,7 +304,7 @@ func brokerHasLocalAccess(ctx context.Context, hubCtx *HubContext, groveID strin
 }
 
 // promptForLocalTemplateUpload prompts the user to upload a local-only template.
-func promptForLocalTemplateUpload(ctx context.Context, hubCtx *HubContext, localTemplate *config.Template, scope, groveID, harnessType string) (*TemplateResolutionResult, error) {
+func promptForLocalTemplateUpload(ctx context.Context, hubCtx *HubContext, localTemplate *config.Template, scope, projectID, harnessType string) (*TemplateResolutionResult, error) {
 	effectiveScope := scope
 	if effectiveScope == "" {
 		effectiveScope = templateScope
@@ -321,11 +329,11 @@ func promptForLocalTemplateUpload(ctx context.Context, hubCtx *HubContext, local
 		return nil, fmt.Errorf("agent creation cancelled by user")
 	}
 
-	return uploadLocalTemplate(ctx, hubCtx, localTemplate, effectiveScope, groveID, harnessType)
+	return uploadLocalTemplate(ctx, hubCtx, localTemplate, effectiveScope, projectID, harnessType)
 }
 
 // promptForTemplateHashMismatch prompts when local and Hub templates differ.
-func promptForTemplateHashMismatch(ctx context.Context, hubCtx *HubContext, hubTemplate *hubclient.Template, localTemplate *config.Template, files []hubclient.FileInfo, localHash, groveID string) (*TemplateResolutionResult, error) {
+func promptForTemplateHashMismatch(ctx context.Context, hubCtx *HubContext, hubTemplate *hubclient.Template, localTemplate *config.Template, files []hubclient.FileInfo, localHash, projectID string) (*TemplateResolutionResult, error) {
 	fmt.Printf("\nTemplate '%s' exists on Hub but local version differs:\n", localTemplate.Name)
 	fmt.Printf("  Hub hash:   %s\n", truncateHash(hubTemplate.ContentHash))
 	fmt.Printf("  Local hash: %s\n\n", truncateHash(localHash))
@@ -342,7 +350,7 @@ func promptForTemplateHashMismatch(ctx context.Context, hubCtx *HubContext, hubT
 
 	switch strings.ToUpper(choice) {
 	case "U":
-		return updateHubTemplate(ctx, hubCtx, hubTemplate, localTemplate, files, groveID)
+		return updateHubTemplate(ctx, hubCtx, hubTemplate, localTemplate, files, projectID)
 	case "H":
 		return &TemplateResolutionResult{
 			TemplateID:   hubTemplate.ID,
@@ -354,12 +362,15 @@ func promptForTemplateHashMismatch(ctx context.Context, hubCtx *HubContext, hubT
 }
 
 // uploadLocalTemplate uploads a local template to the Hub.
-func uploadLocalTemplate(ctx context.Context, hubCtx *HubContext, localTemplate *config.Template, scope, groveID, harnessType string) (*TemplateResolutionResult, error) {
+func uploadLocalTemplate(ctx context.Context, hubCtx *HubContext, localTemplate *config.Template, scope, projectID, harnessType string) (*TemplateResolutionResult, error) {
 	effectiveScope := scope
 	if effectiveScope == "" {
 		effectiveScope = templateScope
 	}
 	if effectiveScope == "" {
+		effectiveScope = "grove"
+	}
+	if effectiveScope == "project" {
 		effectiveScope = "grove"
 	}
 
@@ -372,7 +383,7 @@ func uploadLocalTemplate(ctx context.Context, hubCtx *HubContext, localTemplate 
 	}
 
 	// Now find the template on Hub to get its ID
-	hubTemplate, err := findTemplateOnHub(ctx, hubCtx, localTemplate.Name, effectiveScope, groveID)
+	hubTemplate, err := findTemplateOnHub(ctx, hubCtx, localTemplate.Name, effectiveScope, projectID)
 	if err != nil || hubTemplate == nil {
 		return nil, fmt.Errorf("template was uploaded but could not be found on Hub")
 	}
@@ -385,7 +396,7 @@ func uploadLocalTemplate(ctx context.Context, hubCtx *HubContext, localTemplate 
 }
 
 // updateHubTemplate updates an existing Hub template with local files.
-func updateHubTemplate(ctx context.Context, hubCtx *HubContext, hubTemplate *hubclient.Template, localTemplate *config.Template, files []hubclient.FileInfo, groveID string) (*TemplateResolutionResult, error) {
+func updateHubTemplate(ctx context.Context, hubCtx *HubContext, hubTemplate *hubclient.Template, localTemplate *config.Template, files []hubclient.FileInfo, projectID string) (*TemplateResolutionResult, error) {
 	fmt.Printf("Updating Hub template '%s' with local version...\n", hubTemplate.Name)
 
 	// Build file upload request
@@ -562,12 +573,12 @@ func promptChoice(prompt, defaultChoice string, validChoices []string) (string, 
 }
 
 // formatTemplateNotFoundError creates a helpful error message when template is not found.
-func formatTemplateNotFoundError(name, grovePath string) error {
+func formatTemplateNotFoundError(name, projectPath string) error {
 	var locations []string
 
-	// Check grove-specific locations
-	if grovePath != "" {
-		locations = append(locations, "  - Hub (grove scope) - not found")
+	// Check project-specific locations
+	if projectPath != "" {
+		locations = append(locations, "  - Hub (project scope) - not found")
 	}
 	locations = append(locations, "  - Hub (global) - not found")
 

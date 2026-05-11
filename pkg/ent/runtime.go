@@ -9,8 +9,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/grove"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/google/uuid"
@@ -114,34 +114,6 @@ func init() {
 	groupmembershipDescID := groupmembershipFields[0].Descriptor()
 	// groupmembership.DefaultID holds the default value on creation for the id field.
 	groupmembership.DefaultID = groupmembershipDescID.Default.(func() uuid.UUID)
-	groveFields := schema.Grove{}.Fields()
-	_ = groveFields
-	// groveDescName is the schema descriptor for name field.
-	groveDescName := groveFields[1].Descriptor()
-	// grove.NameValidator is a validator for the "name" field. It is called by the builders before save.
-	grove.NameValidator = groveDescName.Validators[0].(func(string) error)
-	// groveDescSlug is the schema descriptor for slug field.
-	groveDescSlug := groveFields[2].Descriptor()
-	// grove.SlugValidator is a validator for the "slug" field. It is called by the builders before save.
-	grove.SlugValidator = groveDescSlug.Validators[0].(func(string) error)
-	// groveDescCreated is the schema descriptor for created field.
-	groveDescCreated := groveFields[6].Descriptor()
-	// grove.DefaultCreated holds the default value on creation for the created field.
-	grove.DefaultCreated = groveDescCreated.Default.(func() time.Time)
-	// groveDescUpdated is the schema descriptor for updated field.
-	groveDescUpdated := groveFields[7].Descriptor()
-	// grove.DefaultUpdated holds the default value on creation for the updated field.
-	grove.DefaultUpdated = groveDescUpdated.Default.(func() time.Time)
-	// grove.UpdateDefaultUpdated holds the default value on update for the updated field.
-	grove.UpdateDefaultUpdated = groveDescUpdated.UpdateDefault.(func() time.Time)
-	// groveDescVisibility is the schema descriptor for visibility field.
-	groveDescVisibility := groveFields[10].Descriptor()
-	// grove.DefaultVisibility holds the default value on creation for the visibility field.
-	grove.DefaultVisibility = groveDescVisibility.Default.(string)
-	// groveDescID is the schema descriptor for id field.
-	groveDescID := groveFields[0].Descriptor()
-	// grove.DefaultID holds the default value on creation for the id field.
-	grove.DefaultID = groveDescID.Default.(func() uuid.UUID)
 	policybindingFields := schema.PolicyBinding{}.Fields()
 	_ = policybindingFields
 	// policybindingDescCreated is the schema descriptor for created field.
@@ -152,6 +124,34 @@ func init() {
 	policybindingDescID := policybindingFields[0].Descriptor()
 	// policybinding.DefaultID holds the default value on creation for the id field.
 	policybinding.DefaultID = policybindingDescID.Default.(func() uuid.UUID)
+	projectFields := schema.Project{}.Fields()
+	_ = projectFields
+	// projectDescName is the schema descriptor for name field.
+	projectDescName := projectFields[1].Descriptor()
+	// project.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	project.NameValidator = projectDescName.Validators[0].(func(string) error)
+	// projectDescSlug is the schema descriptor for slug field.
+	projectDescSlug := projectFields[2].Descriptor()
+	// project.SlugValidator is a validator for the "slug" field. It is called by the builders before save.
+	project.SlugValidator = projectDescSlug.Validators[0].(func(string) error)
+	// projectDescCreated is the schema descriptor for created field.
+	projectDescCreated := projectFields[6].Descriptor()
+	// project.DefaultCreated holds the default value on creation for the created field.
+	project.DefaultCreated = projectDescCreated.Default.(func() time.Time)
+	// projectDescUpdated is the schema descriptor for updated field.
+	projectDescUpdated := projectFields[7].Descriptor()
+	// project.DefaultUpdated holds the default value on creation for the updated field.
+	project.DefaultUpdated = projectDescUpdated.Default.(func() time.Time)
+	// project.UpdateDefaultUpdated holds the default value on update for the updated field.
+	project.UpdateDefaultUpdated = projectDescUpdated.UpdateDefault.(func() time.Time)
+	// projectDescVisibility is the schema descriptor for visibility field.
+	projectDescVisibility := projectFields[10].Descriptor()
+	// project.DefaultVisibility holds the default value on creation for the visibility field.
+	project.DefaultVisibility = projectDescVisibility.Default.(string)
+	// projectDescID is the schema descriptor for id field.
+	projectDescID := projectFields[0].Descriptor()
+	// project.DefaultID holds the default value on creation for the id field.
+	project.DefaultID = projectDescID.Default.(func() uuid.UUID)
 	userFields := schema.User{}.Fields()
 	_ = userFields
 	// userDescEmail is the schema descriptor for email field.

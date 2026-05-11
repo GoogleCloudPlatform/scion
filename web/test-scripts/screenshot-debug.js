@@ -26,7 +26,7 @@
  *
  * Examples:
  *   node screenshot-debug.js http://localhost:8080/ /tmp/debug.png
- *   node screenshot-debug.js http://localhost:8080/groves/abc123 /tmp/grove.png
+ *   node screenshot-debug.js http://localhost:8080/projects/abc123 /tmp/project.png
  *
  * Prerequisites:
  *   - Playwright + Chromium: cd /tmp && npm install playwright

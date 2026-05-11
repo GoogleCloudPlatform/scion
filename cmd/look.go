@@ -64,7 +64,7 @@ var lookCmd = &cobra.Command{
 		execCmd := buildLookCmd(lookPlain, lookFull, lookNumLines)
 
 		// Check if Hub is enabled
-		hubCtx, err := CheckHubAvailabilityForAgent(grovePath, agentName, false)
+		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, false)
 		if err != nil {
 			return err
 		}
@@ -73,7 +73,7 @@ var lookCmd = &cobra.Command{
 			return lookViaHub(hubCtx, agentName, execCmd)
 		}
 
-		rt := runtime.GetRuntime(grovePath, profile)
+		rt := runtime.GetRuntime(projectPath, profile)
 
 		output, err := rt.Exec(context.Background(), agentName, execCmd)
 		if err != nil {
@@ -115,7 +115,7 @@ func printLookOutput(output string) {
 func lookViaHub(hubCtx *HubContext, agentName string, execCmd []string) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -123,7 +123,7 @@ func lookViaHub(hubCtx *HubContext, agentName string, execCmd []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resp, err := hubCtx.Client.GroveAgents(groveID).Exec(ctx, agentName, execCmd, 10)
+	resp, err := hubCtx.Client.ProjectAgents(projectID).Exec(ctx, agentName, execCmd, 10)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to capture terminal output for agent '%s': %w", agentName, err))
 	}

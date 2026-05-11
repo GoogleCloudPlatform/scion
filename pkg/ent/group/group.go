@@ -24,8 +24,8 @@ const (
 	FieldDescription = "description"
 	// FieldGroupType holds the string denoting the group_type field in the database.
 	FieldGroupType = "group_type"
-	// FieldGroveID holds the string denoting the grove_id field in the database.
-	FieldGroveID = "grove_id"
+	// FieldProjectID holds the string denoting the project_id field in the database.
+	FieldProjectID = "project_id"
 	// FieldLabels holds the string denoting the labels field in the database.
 	FieldLabels = "labels"
 	// FieldAnnotations holds the string denoting the annotations field in the database.
@@ -84,7 +84,7 @@ var Columns = []string{
 	FieldSlug,
 	FieldDescription,
 	FieldGroupType,
-	FieldGroveID,
+	FieldProjectID,
 	FieldLabels,
 	FieldAnnotations,
 	FieldCreated,
@@ -135,8 +135,8 @@ const DefaultGroupType = GroupTypeExplicit
 
 // GroupType values.
 const (
-	GroupTypeExplicit    GroupType = "explicit"
-	GroupTypeGroveAgents GroupType = "grove_agents"
+	GroupTypeExplicit      GroupType = "explicit"
+	GroupTypeProjectAgents GroupType = "project_agents"
 )
 
 func (gt GroupType) String() string {
@@ -146,7 +146,7 @@ func (gt GroupType) String() string {
 // GroupTypeValidator is a validator for the "group_type" field enum values. It is called by the builders before save.
 func GroupTypeValidator(gt GroupType) error {
 	switch gt {
-	case GroupTypeExplicit, GroupTypeGroveAgents:
+	case GroupTypeExplicit, GroupTypeProjectAgents:
 		return nil
 	default:
 		return fmt.Errorf("group: invalid enum value for group_type field: %q", gt)
@@ -181,9 +181,9 @@ func ByGroupType(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldGroupType, opts...).ToFunc()
 }
 
-// ByGroveID orders the results by the grove_id field.
-func ByGroveID(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldGroveID, opts...).ToFunc()
+// ByProjectID orders the results by the project_id field.
+func ByProjectID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldProjectID, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

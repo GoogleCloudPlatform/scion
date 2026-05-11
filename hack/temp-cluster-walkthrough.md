@@ -77,15 +77,15 @@ Apply it:
 kubectl apply -f scion-template.yaml
 ```
 
-## Step 4: Initialize Scion Grove and Build
-Before running agents, you need to initialize the scion grove to seed the templates.
+## Step 4: Initialize Scion Project and Build
+Before running agents, you need to initialize the scion project to seed the templates.
 
 ```bash
 # Build the scion binary
 go build -o scion ./cmd/scion
 
-# Initialize the grove (creates .scion directory)
-./scion grove init
+# Initialize the project (creates .scion directory)
+./scion project init
 ```
 
 

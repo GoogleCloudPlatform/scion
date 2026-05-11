@@ -441,8 +441,8 @@ func (s *Server) handleGitHubAppInstallationByID(w http.ResponseWriter, r *http.
 	}
 }
 
-// handleGroveGitHubInstallation handles PUT and DELETE /api/v1/groves/{id}/github-installation.
-func (s *Server) handleGroveGitHubInstallation(w http.ResponseWriter, r *http.Request, groveID string) {
+// handleProjectGitHubInstallation handles PUT and DELETE /api/v1/projects/{id}/github-installation.
+func (s *Server) handleProjectGitHubInstallation(w http.ResponseWriter, r *http.Request, projectID string) {
 	switch r.Method {
 	case http.MethodPut:
 		var req struct {
@@ -467,53 +467,53 @@ func (s *Server) handleGroveGitHubInstallation(w http.ResponseWriter, r *http.Re
 			return
 		}
 
-		grove, err := s.store.GetGrove(r.Context(), groveID)
+		project, err := s.store.GetProject(r.Context(), projectID)
 		if err != nil {
 			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
+				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
 				return
 			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get grove", nil)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
 			return
 		}
 
-		grove.GitHubInstallationID = &req.InstallationID
-		grove.GitHubAppStatus = &store.GitHubAppGroveStatus{
+		project.GitHubInstallationID = &req.InstallationID
+		project.GitHubAppStatus = &store.GitHubAppProjectStatus{
 			State:       store.GitHubAppStateUnchecked,
 			LastChecked: timeNow(),
 		}
 
-		if err := s.store.UpdateGrove(r.Context(), grove); err != nil {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update grove", nil)
+		if err := s.store.UpdateProject(r.Context(), project); err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
 			return
 		}
-		s.events.PublishGroveUpdated(r.Context(), grove)
+		s.events.PublishProjectUpdated(r.Context(), project)
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"grove_id":        groveID,
+			"project_id":        projectID,
 			"installation_id": req.InstallationID,
 			"status":          "associated",
 		})
 
 	case http.MethodDelete:
-		grove, err := s.store.GetGrove(r.Context(), groveID)
+		project, err := s.store.GetProject(r.Context(), projectID)
 		if err != nil {
 			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
+				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
 				return
 			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get grove", nil)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
 			return
 		}
 
-		grove.GitHubInstallationID = nil
-		grove.GitHubAppStatus = nil
+		project.GitHubInstallationID = nil
+		project.GitHubAppStatus = nil
 
-		if err := s.store.UpdateGrove(r.Context(), grove); err != nil {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update grove", nil)
+		if err := s.store.UpdateProject(r.Context(), project); err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
 			return
 		}
-		s.events.PublishGroveUpdated(r.Context(), grove)
+		s.events.PublishProjectUpdated(r.Context(), project)
 
 		w.WriteHeader(http.StatusNoContent)
 
@@ -522,77 +522,77 @@ func (s *Server) handleGroveGitHubInstallation(w http.ResponseWriter, r *http.Re
 	}
 }
 
-// handleGroveGitHubStatus handles GET and POST /api/v1/groves/{id}/github-status.
+// handleProjectGitHubStatus handles GET and POST /api/v1/projects/{id}/github-status.
 // GET returns the current status. POST actively verifies the installation by
 // checking with GitHub and attempting a token mint, then returns the updated status.
-func (s *Server) handleGroveGitHubStatus(w http.ResponseWriter, r *http.Request, groveID string) {
+func (s *Server) handleProjectGitHubStatus(w http.ResponseWriter, r *http.Request, projectID string) {
 	switch r.Method {
 	case http.MethodGet:
-		s.handleGetGroveGitHubStatus(w, r, groveID)
+		s.handleGetProjectGitHubStatus(w, r, projectID)
 	case http.MethodPost:
-		s.handleCheckGroveGitHubStatus(w, r, groveID)
+		s.handleCheckProjectGitHubStatus(w, r, projectID)
 	default:
 		MethodNotAllowed(w)
 	}
 }
 
-func (s *Server) handleGetGroveGitHubStatus(w http.ResponseWriter, r *http.Request, groveID string) {
-	grove, err := s.store.GetGrove(r.Context(), groveID)
+func (s *Server) handleGetProjectGitHubStatus(w http.ResponseWriter, r *http.Request, projectID string) {
+	project, err := s.store.GetProject(r.Context(), projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
-			writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get grove", nil)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
 		return
 	}
 
 	resp := map[string]interface{}{
-		"grove_id":        groveID,
-		"installation_id": grove.GitHubInstallationID,
-		"status":          grove.GitHubAppStatus,
+		"project_id":        projectID,
+		"installation_id": project.GitHubInstallationID,
+		"status":          project.GitHubAppStatus,
 	}
 
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleCheckGroveGitHubStatus actively verifies the grove's GitHub App
+// handleCheckProjectGitHubStatus actively verifies the project's GitHub App
 // installation by checking the installation on GitHub and attempting to mint
-// a token. The grove's status is updated to reflect the result.
-func (s *Server) handleCheckGroveGitHubStatus(w http.ResponseWriter, r *http.Request, groveID string) {
+// a token. The project's status is updated to reflect the result.
+func (s *Server) handleCheckProjectGitHubStatus(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
 
-	grove, err := s.store.GetGrove(ctx, groveID)
+	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
-			writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get grove", nil)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
 		return
 	}
 
-	if grove.GitHubInstallationID == nil {
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError, "grove has no GitHub App installation", nil)
+	if project.GitHubInstallationID == nil {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError, "project has no GitHub App installation", nil)
 		return
 	}
 
 	// Try minting a token — this validates the installation, permissions, and
-	// repo access in one shot, and updates the grove's status accordingly.
-	_, _, mintErr := s.mintGitHubAppToken(ctx, grove)
+	// repo access in one shot, and updates the project's status accordingly.
+	_, _, mintErr := s.mintGitHubAppToken(ctx, project)
 
-	// Re-read the grove to get the updated status (mintGitHubAppToken updates it)
-	grove, err = s.store.GetGrove(ctx, groveID)
+	// Re-read the project to get the updated status (mintGitHubAppToken updates it)
+	project, err = s.store.GetProject(ctx, projectID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to re-read grove after check", nil)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to re-read project after check", nil)
 		return
 	}
 
 	resp := map[string]interface{}{
-		"grove_id":        groveID,
-		"installation_id": grove.GitHubInstallationID,
-		"status":          grove.GitHubAppStatus,
-		"permissions":     grove.GitHubPermissions,
+		"project_id":      projectID,
+		"installation_id": project.GitHubInstallationID,
+		"status":          project.GitHubAppStatus,
+		"permissions":     project.GitHubPermissions,
 	}
 	if mintErr != nil {
 		resp["check_error"] = mintErr.Error()
@@ -601,21 +601,21 @@ func (s *Server) handleCheckGroveGitHubStatus(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleGroveGitHubPermissions handles GET, PUT, DELETE /api/v1/groves/{id}/github-permissions.
-func (s *Server) handleGroveGitHubPermissions(w http.ResponseWriter, r *http.Request, groveID string) {
+// handleProjectGitHubPermissions handles GET, PUT, DELETE /api/v1/projects/{id}/github-permissions.
+func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.Request, projectID string) {
 	switch r.Method {
 	case http.MethodGet:
-		grove, err := s.store.GetGrove(r.Context(), groveID)
+		project, err := s.store.GetProject(r.Context(), projectID)
 		if err != nil {
 			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
+				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
 				return
 			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get grove", nil)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
 			return
 		}
 
-		perms := grove.GitHubPermissions
+		perms := project.GitHubPermissions
 		if perms == nil {
 			// Return defaults
 			perms = &store.GitHubTokenPermissions{
@@ -633,38 +633,38 @@ func (s *Server) handleGroveGitHubPermissions(w http.ResponseWriter, r *http.Req
 			return
 		}
 
-		grove, err := s.store.GetGrove(r.Context(), groveID)
+		project, err := s.store.GetProject(r.Context(), projectID)
 		if err != nil {
 			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
+				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
 				return
 			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get grove", nil)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
 			return
 		}
 
-		grove.GitHubPermissions = &perms
-		if err := s.store.UpdateGrove(r.Context(), grove); err != nil {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update grove", nil)
+		project.GitHubPermissions = &perms
+		if err := s.store.UpdateProject(r.Context(), project); err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
 			return
 		}
 
 		writeJSON(w, http.StatusOK, perms)
 
 	case http.MethodDelete:
-		grove, err := s.store.GetGrove(r.Context(), groveID)
+		project, err := s.store.GetProject(r.Context(), projectID)
 		if err != nil {
 			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
+				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
 				return
 			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get grove", nil)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
 			return
 		}
 
-		grove.GitHubPermissions = nil
-		if err := s.store.UpdateGrove(r.Context(), grove); err != nil {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update grove", nil)
+		project.GitHubPermissions = nil
+		if err := s.store.UpdateProject(r.Context(), project); err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
 			return
 		}
 
@@ -675,20 +675,20 @@ func (s *Server) handleGroveGitHubPermissions(w http.ResponseWriter, r *http.Req
 	}
 }
 
-// handleGroveGitIdentity handles GET, PUT, DELETE /api/v1/groves/{id}/git-identity.
-func (s *Server) handleGroveGitIdentity(w http.ResponseWriter, r *http.Request, groveID string) {
+// handleProjectGitIdentity handles GET, PUT, DELETE /api/v1/projects/{id}/git-identity.
+func (s *Server) handleProjectGitIdentity(w http.ResponseWriter, r *http.Request, projectID string) {
 	switch r.Method {
 	case http.MethodGet:
-		grove, err := s.store.GetGrove(r.Context(), groveID)
+		project, err := s.store.GetProject(r.Context(), projectID)
 		if err != nil {
 			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
+				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
 				return
 			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get grove", nil)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
 			return
 		}
-		identity := grove.GitIdentity
+		identity := project.GitIdentity
 		if identity == nil {
 			identity = &store.GitIdentityConfig{Mode: "bot"}
 		}
@@ -710,35 +710,35 @@ func (s *Server) handleGroveGitIdentity(w http.ResponseWriter, r *http.Request, 
 			writeError(w, http.StatusBadRequest, ErrCodeValidationError, "name and email are required when mode is 'custom'", nil)
 			return
 		}
-		grove, err := s.store.GetGrove(r.Context(), groveID)
+		project, err := s.store.GetProject(r.Context(), projectID)
 		if err != nil {
 			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
+				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
 				return
 			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get grove", nil)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
 			return
 		}
-		grove.GitIdentity = &identity
-		if err := s.store.UpdateGrove(r.Context(), grove); err != nil {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update grove", nil)
+		project.GitIdentity = &identity
+		if err := s.store.UpdateProject(r.Context(), project); err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
 			return
 		}
 		writeJSON(w, http.StatusOK, identity)
 
 	case http.MethodDelete:
-		grove, err := s.store.GetGrove(r.Context(), groveID)
+		project, err := s.store.GetProject(r.Context(), projectID)
 		if err != nil {
 			if err == store.ErrNotFound {
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "grove not found", nil)
+				writeError(w, http.StatusNotFound, ErrCodeNotFound, "project not found", nil)
 				return
 			}
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get grove", nil)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to get project", nil)
 			return
 		}
-		grove.GitIdentity = nil
-		if err := s.store.UpdateGrove(r.Context(), grove); err != nil {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update grove", nil)
+		project.GitIdentity = nil
+		if err := s.store.UpdateProject(r.Context(), project); err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -753,7 +753,7 @@ var timeNow = func() time.Time { return time.Now() }
 
 // handleGitHubAppSyncPermissions handles POST /api/v1/github-app/sync-permissions.
 // It fetches the GitHub App's current permissions and compares them against each
-// grove's requested permissions, marking groves as degraded if they request
+// project's requested permissions, marking projects as degraded if they request
 // permissions the app no longer has.
 func (s *Server) handleGitHubAppSyncPermissions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -763,7 +763,7 @@ func (s *Server) handleGitHubAppSyncPermissions(w http.ResponseWriter, r *http.R
 
 	ctx := r.Context()
 
-	appPermissions, affectedGroves, err := s.syncAppPermissions(ctx)
+	appPermissions, affectedProjects, err := s.syncAppPermissions(ctx)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, ErrCodeInternalError, err.Error(), nil)
 		return
@@ -771,15 +771,15 @@ func (s *Server) handleGitHubAppSyncPermissions(w http.ResponseWriter, r *http.R
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"app_permissions": appPermissions,
-		"affected_groves": affectedGroves,
-		"affected_count":  len(affectedGroves),
+		"affected_projects": affectedProjects,
+		"affected_count":  len(affectedProjects),
 	})
 }
 
 // syncAppPermissions fetches the GitHub App's current permissions from the API
-// and compares them against each grove's requested permissions. Groves requesting
+// and compares them against each project's requested permissions. Projects requesting
 // permissions the app no longer has are set to degraded state.
-// Returns the app's current permissions and a list of affected groves.
+// Returns the app's current permissions and a list of affected projects.
 func (s *Server) syncAppPermissions(ctx context.Context) (map[string]string, []map[string]interface{}, error) {
 	client, err := s.getGitHubAppClient()
 	if err != nil {
@@ -807,30 +807,30 @@ func (s *Server) syncAppPermissions(ctx context.Context) (map[string]string, []m
 		"permission_count", len(appPermissions),
 	)
 
-	// List all groves and check their requested permissions against the app's permissions
-	groves, err := s.store.ListGroves(ctx, store.GroveFilter{}, store.ListOptions{Limit: 10000})
+	// List all projects and check their requested permissions against the app's permissions
+	projects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 10000})
 	if err != nil {
-		return appPermissions, nil, fmt.Errorf("failed to list groves: %v", err)
+		return appPermissions, nil, fmt.Errorf("failed to list projects: %v", err)
 	}
 
-	var affectedGroves []map[string]interface{}
+	var affectedProjects []map[string]interface{}
 	now := timeNow()
 
-	for _, grove := range groves.Items {
-		if grove.GitHubInstallationID == nil || grove.GitHubPermissions == nil {
+	for _, project := range projects.Items {
+		if project.GitHubInstallationID == nil || project.GitHubPermissions == nil {
 			continue
 		}
 
-		// Compare each grove's requested permissions against the app's permissions
-		missingPerms := comparePermissions(grove.GitHubPermissions, appPermissions)
+		// Compare each project's requested permissions against the app's permissions
+		missingPerms := comparePermissions(project.GitHubPermissions, appPermissions)
 		if len(missingPerms) == 0 {
 			continue
 		}
 
-		// Grove requests permissions the app doesn't have — mark as degraded
-		msg := fmt.Sprintf("App is missing permissions requested by this grove: %s. Update the GitHub App's permissions in the app settings.", strings.Join(missingPerms, ", "))
+		// Project requests permissions the app doesn't have — mark as degraded
+		msg := fmt.Sprintf("App is missing permissions requested by this project: %s. Update the GitHub App's permissions in the app settings.", strings.Join(missingPerms, ", "))
 
-		grove.GitHubAppStatus = &store.GitHubAppGroveStatus{
+		project.GitHubAppStatus = &store.GitHubAppProjectStatus{
 			State:        store.GitHubAppStateDegraded,
 			ErrorCode:    githubapp.ErrCodePermissionDenied,
 			ErrorMessage: msg,
@@ -838,44 +838,44 @@ func (s *Server) syncAppPermissions(ctx context.Context) (map[string]string, []m
 			LastError:    &now,
 		}
 
-		if err := s.store.UpdateGrove(ctx, &grove); err != nil {
-			slog.Error("Failed to update grove after permission sync",
-				"grove_id", grove.ID, "error", err)
+		if err := s.store.UpdateProject(ctx, &project); err != nil {
+			slog.Error("Failed to update project after permission sync",
+				"project_id", project.ID, "error", err)
 			continue
 		}
 
-		affectedGroves = append(affectedGroves, map[string]interface{}{
-			"grove_id":            grove.ID,
-			"grove_name":          grove.Name,
+		affectedProjects = append(affectedProjects, map[string]interface{}{
+			"project_id":            project.ID,
+			"project_name":          project.Name,
 			"missing_permissions": missingPerms,
 		})
 
-		slog.Warn("Grove marked as degraded due to missing app permissions",
-			"grove_id", grove.ID, "grove_name", grove.Name,
+		slog.Warn("Project marked as degraded due to missing app permissions",
+			"project_id", project.ID, "project_name", project.Name,
 			"missing_permissions", missingPerms,
 		)
 	}
 
-	return appPermissions, affectedGroves, nil
+	return appPermissions, affectedProjects, nil
 }
 
-// comparePermissions checks each non-empty permission in the grove's requested
+// comparePermissions checks each non-empty permission in the project's requested
 // permissions against the app's available permissions. Returns a list of
-// permission names that the grove requests but the app does not have (or has
+// permission names that the project requests but the app does not have (or has
 // at a lower level).
-func comparePermissions(grovePerms *store.GitHubTokenPermissions, appPerms map[string]string) []string {
+func comparePermissions(projectPerms *store.GitHubTokenPermissions, appPerms map[string]string) []string {
 	var missing []string
 
 	checks := []struct {
 		name  string
 		level string
 	}{
-		{"contents", grovePerms.Contents},
-		{"pull_requests", grovePerms.PullRequests},
-		{"issues", grovePerms.Issues},
-		{"metadata", grovePerms.Metadata},
-		{"checks", grovePerms.Checks},
-		{"actions", grovePerms.Actions},
+		{"contents", projectPerms.Contents},
+		{"pull_requests", projectPerms.PullRequests},
+		{"issues", projectPerms.Issues},
+		{"metadata", projectPerms.Metadata},
+		{"checks", projectPerms.Checks},
+		{"actions", projectPerms.Actions},
 	}
 
 	for _, check := range checks {
@@ -936,7 +936,7 @@ func (s *Server) githubAppHealthCheckHandler() func(ctx context.Context) {
 							slog.Error("GitHub App health check: failed to mark installation as deleted",
 								"installation_id", inst.InstallationID, "error", updateErr)
 						}
-						s.updateGrovesForInstallation(ctx, inst.InstallationID, store.GitHubAppStateError,
+						s.updateProjectsForInstallation(ctx, inst.InstallationID, store.GitHubAppStateError,
 							githubapp.ErrCodeInstallationRevoked,
 							"Installation was revoked on GitHub. Reinstall the GitHub App for this org/account.")
 						deleted++
@@ -951,7 +951,7 @@ func (s *Server) githubAppHealthCheckHandler() func(ctx context.Context) {
 							slog.Error("GitHub App health check: failed to mark installation as suspended",
 								"installation_id", inst.InstallationID, "error", updateErr)
 						}
-						s.updateGrovesForInstallation(ctx, inst.InstallationID, store.GitHubAppStateError,
+						s.updateProjectsForInstallation(ctx, inst.InstallationID, store.GitHubAppStateError,
 							githubapp.ErrCodeInstallationSuspended,
 							"Installation is suspended. Contact org admin to unsuspend.")
 						suspended++
@@ -982,7 +982,7 @@ func (s *Server) githubAppHealthCheckHandler() func(ctx context.Context) {
 					slog.Error("GitHub App health check: failed to update suspended installation",
 						"installation_id", inst.InstallationID, "error", updateErr)
 				}
-				s.updateGrovesForInstallation(ctx, inst.InstallationID, store.GitHubAppStateError,
+				s.updateProjectsForInstallation(ctx, inst.InstallationID, store.GitHubAppStateError,
 					githubapp.ErrCodeInstallationSuspended,
 					"Installation is suspended. Contact org admin to unsuspend.")
 				suspended++
@@ -996,7 +996,7 @@ func (s *Server) githubAppHealthCheckHandler() func(ctx context.Context) {
 		)
 
 		// Step 2: Sync app-level permissions
-		_, affectedGroves, err := s.syncAppPermissions(ctx)
+		_, affectedProjects, err := s.syncAppPermissions(ctx)
 		if err != nil {
 			slog.Error("GitHub App health check: permission sync failed", "error", err)
 			return
@@ -1006,7 +1006,7 @@ func (s *Server) githubAppHealthCheckHandler() func(ctx context.Context) {
 			"installations_checked", checked+deleted+suspended,
 			"installations_deleted", deleted,
 			"installations_suspended", suspended,
-			"permission_affected_groves", len(affectedGroves),
+			"permission_affected_projects", len(affectedProjects),
 		)
 	}
 }

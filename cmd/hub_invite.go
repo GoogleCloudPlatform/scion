@@ -114,9 +114,9 @@ func init() {
 }
 
 func getInviteClient() (hubclient.Client, error) {
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve grove path: %w", err)
+		return nil, fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)

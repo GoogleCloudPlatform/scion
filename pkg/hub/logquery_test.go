@@ -88,12 +88,12 @@ func TestBuildLogFilter(t *testing.T) {
 			expected: `labels.agent_id = "agent-123" AND labels.broker_id = "broker-east-1" AND timestamp >= "2026-03-07T10:00:00Z" AND severity >= ERROR`,
 		},
 		{
-			name: "grove ID filter",
+			name: "project ID filter",
 			opts: LogQueryOptions{
 				AgentID: "agent-123",
-				GroveID: "grove-abc",
+				ProjectID: "project-abc",
 			},
-			expected: `labels.agent_id = "agent-123" AND labels.grove_id = "grove-abc"`,
+			expected: `labels.agent_id = "agent-123" AND labels.project_id = "project-abc"`,
 		},
 	}
 
@@ -150,14 +150,14 @@ func TestBuildLogFilter_LogID(t *testing.T) {
 			expected:  `logName = "projects/my-project/logs/scion-messages" AND (labels.recipient_id = "agent-123" OR labels.sender_id = "agent-123")`,
 		},
 		{
-			name: "message log with grove_id filter",
+			name: "message log with project_id filter",
 			opts: LogQueryOptions{
 				AgentID: "agent-123",
-				GroveID: "grove-abc",
+				ProjectID: "project-abc",
 				LogID:   "scion-messages",
 			},
 			projectID: "my-project",
-			expected:  `logName = "projects/my-project/logs/scion-messages" AND (labels.recipient_id = "agent-123" OR labels.sender_id = "agent-123") AND labels.grove_id = "grove-abc"`,
+			expected:  `logName = "projects/my-project/logs/scion-messages" AND (labels.recipient_id = "agent-123" OR labels.sender_id = "agent-123") AND labels.project_id = "project-abc"`,
 		},
 	}
 
@@ -180,7 +180,7 @@ func TestConvertLogEntry(t *testing.T) {
 			Payload:   "Agent started processing task",
 			Labels: map[string]string{
 				"agent_id": "abc123",
-				"grove_id": "my-grove",
+				"project_id": "my-project",
 			},
 			InsertID: "insert-1",
 		}

@@ -163,7 +163,7 @@ func (s *harnessConfigService) List(ctx context.Context, opts *ListHarnessConfig
 		opts.Page.ToQuery(query)
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/harness-configs", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/harness-configs", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +190,7 @@ func (s *harnessConfigService) List(ctx context.Context, opts *ListHarnessConfig
 
 // Get returns a single harness config by ID.
 func (s *harnessConfigService) Get(ctx context.Context, id string) (*HarnessConfig, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/harness-configs/"+id, nil)
+	resp, err := s.c.get(ctx, "/api/v1/harness-configs/"+id, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +199,7 @@ func (s *harnessConfigService) Get(ctx context.Context, id string) (*HarnessConf
 
 // Create creates a new harness config.
 func (s *harnessConfigService) Create(ctx context.Context, req *CreateHarnessConfigRequest) (*CreateHarnessConfigResponse, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/harness-configs", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/harness-configs", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +208,7 @@ func (s *harnessConfigService) Create(ctx context.Context, req *CreateHarnessCon
 
 // Update updates a harness config.
 func (s *harnessConfigService) Update(ctx context.Context, id string, req *UpdateHarnessConfigRequest) (*HarnessConfig, error) {
-	resp, err := s.c.transport.Patch(ctx, "/api/v1/harness-configs/"+id, req, nil)
+	resp, err := s.c.patch(ctx, "/api/v1/harness-configs/"+id, req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +217,7 @@ func (s *harnessConfigService) Update(ctx context.Context, id string, req *Updat
 
 // Delete removes a harness config.
 func (s *harnessConfigService) Delete(ctx context.Context, id string) error {
-	resp, err := s.c.transport.Delete(ctx, "/api/v1/harness-configs/"+id, nil)
+	resp, err := s.c.delete(ctx, "/api/v1/harness-configs/"+id, nil)
 	if err != nil {
 		return err
 	}
@@ -231,7 +231,7 @@ func (s *harnessConfigService) RequestUploadURLs(ctx context.Context, id string,
 	}{
 		Files: files,
 	}
-	resp, err := s.c.transport.Post(ctx, "/api/v1/harness-configs/"+id+"/upload", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/harness-configs/"+id+"/upload", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +243,7 @@ func (s *harnessConfigService) Finalize(ctx context.Context, id string, manifest
 	req := HarnessConfigFinalizeRequest{
 		Manifest: manifest,
 	}
-	resp, err := s.c.transport.Post(ctx, "/api/v1/harness-configs/"+id+"/finalize", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/harness-configs/"+id+"/finalize", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +252,7 @@ func (s *harnessConfigService) Finalize(ctx context.Context, id string, manifest
 
 // RequestDownloadURLs requests signed URLs for downloading harness config files.
 func (s *harnessConfigService) RequestDownloadURLs(ctx context.Context, id string) (*DownloadResponse, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/harness-configs/"+id+"/download", nil)
+	resp, err := s.c.get(ctx, "/api/v1/harness-configs/"+id+"/download", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +303,7 @@ func (s *harnessConfigService) UploadFilesMultipart(ctx context.Context, id stri
 // ReadFile reads a harness config file through the Hub API.
 func (s *harnessConfigService) ReadFile(ctx context.Context, id, filePath string) ([]byte, error) {
 	endpoint := "/api/v1/harness-configs/" + id + "/files/" + escapePathSegments(filePath)
-	resp, err := s.c.transport.Get(ctx, endpoint, nil)
+	resp, err := s.c.get(ctx, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}

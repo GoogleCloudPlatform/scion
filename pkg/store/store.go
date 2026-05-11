@@ -43,8 +43,8 @@ type Store interface {
 	// Agent operations
 	AgentStore
 
-	// Grove operations
-	GroveStore
+	// Project operations
+	ProjectStore
 
 	// RuntimeBroker operations
 	RuntimeBrokerStore
@@ -58,8 +58,8 @@ type Store interface {
 	// User operations
 	UserStore
 
-	// GroveProvider operations
-	GroveProviderStore
+	// ProjectProvider operations
+	ProjectProviderStore
 
 	// EnvVar operations
 	EnvVarStore
@@ -100,14 +100,15 @@ type Store interface {
 	// Maintenance operations (Admin Maintenance Panel)
 	MaintenanceStore
 
-	// Grove Sync State operations (Workspace Sync Metadata)
-	GroveSyncStateStore
+	// Project Sync State operations (Workspace Sync Metadata)
+	ProjectSyncStateStore
 
 	// Allow List operations (User Access Control)
 	AllowListStore
 
 	// Invite Code operations (User Invitation System)
 	InviteCodeStore
+
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -120,9 +121,9 @@ type AgentStore interface {
 	// Returns ErrNotFound if the agent doesn't exist.
 	GetAgent(ctx context.Context, id string) (*Agent, error)
 
-	// GetAgentBySlug retrieves an agent by its slug within a grove.
+	// GetAgentBySlug retrieves an agent by its slug within a project.
 	// Returns ErrNotFound if the agent doesn't exist.
-	GetAgentBySlug(ctx context.Context, groveID, slug string) (*Agent, error)
+	GetAgentBySlug(ctx context.Context, projectID, slug string) (*Agent, error)
 
 	// UpdateAgent updates an existing agent.
 	// Uses optimistic locking via StateVersion.
@@ -161,25 +162,25 @@ type AgentStore interface {
 
 // AgentFilter defines criteria for filtering agents.
 type AgentFilter struct {
-	GroveID         string
+	ProjectID       string
 	RuntimeBrokerID string
 	Phase           string
 	OwnerID         string
 	IncludeDeleted  bool // If true, include soft-deleted agents in results
 
-	// MemberOrOwnerGroveIDs, when non-empty, restricts results to agents
-	// whose grove_id is in this set OR whose owner_id matches OwnerID.
+	// MemberOrOwnerProjectIDs, when non-empty, restricts results to agents
+	// whose project_id is in this set OR whose owner_id matches OwnerID.
 	// OwnerID and this field are combined with OR (not AND) when both are set.
-	MemberOrOwnerGroveIDs []string
+	MemberOrOwnerProjectIDs []string
 
-	// MemberGroveIDs, when non-empty, restricts results to agents whose
-	// grove_id is in this set. Unlike MemberOrOwnerGroveIDs, this is NOT
-	// combined with OwnerID — it filters strictly by grove ID membership.
-	MemberGroveIDs []string
+	// MemberProjectIDs, when non-empty, restricts results to agents whose
+	// project_id is in this set. Unlike MemberOrOwnerProjectIDs, this is NOT
+	// combined with OwnerID — it filters strictly by project ID membership.
+	MemberProjectIDs []string
 
 	// ExcludeOwnerID, when non-empty, excludes agents whose owner_id matches
-	// this value. Used with MemberGroveIDs to return "shared" agents (in a
-	// member grove but not personally created).
+	// this value. Used with MemberProjectIDs to return "shared" agents (in a
+	// member project but not personally created).
 	ExcludeOwnerID string
 
 	// AncestorID, when non-empty, restricts results to agents whose ancestry
@@ -209,48 +210,48 @@ type AgentStatusUpdate struct {
 	ExitCode *int `json:"exitCode,omitempty"`
 }
 
-// GroveStore defines grove-related persistence operations.
-type GroveStore interface {
-	// CreateGrove creates a new grove record.
-	// Returns ErrAlreadyExists if a grove with the same slug exists.
-	CreateGrove(ctx context.Context, grove *Grove) error
+// ProjectStore defines project-related persistence operations.
+type ProjectStore interface {
+	// CreateProject creates a new project record.
+	// Returns ErrAlreadyExists if a project with the same slug exists.
+	CreateProject(ctx context.Context, project *Project) error
 
-	// GetGrove retrieves a grove by ID.
-	// Returns ErrNotFound if the grove doesn't exist.
-	GetGrove(ctx context.Context, id string) (*Grove, error)
+	// GetProject retrieves a project by ID.
+	// Returns ErrNotFound if the project doesn't exist.
+	GetProject(ctx context.Context, id string) (*Project, error)
 
-	// GetGroveBySlug retrieves a grove by its slug.
-	// Returns ErrNotFound if the grove doesn't exist.
-	GetGroveBySlug(ctx context.Context, slug string) (*Grove, error)
+	// GetProjectBySlug retrieves a project by its slug.
+	// Returns ErrNotFound if the project doesn't exist.
+	GetProjectBySlug(ctx context.Context, slug string) (*Project, error)
 
-	// GetGroveBySlugCaseInsensitive retrieves a grove by its slug, ignoring case.
-	// This is useful for matching groves without git remotes (like global groves).
-	// Returns ErrNotFound if the grove doesn't exist.
-	GetGroveBySlugCaseInsensitive(ctx context.Context, slug string) (*Grove, error)
+	// GetProjectBySlugCaseInsensitive retrieves a project by its slug, ignoring case.
+	// This is useful for matching projects without git remotes (like global projects).
+	// Returns ErrNotFound if the project doesn't exist.
+	GetProjectBySlugCaseInsensitive(ctx context.Context, slug string) (*Project, error)
 
-	// GetGrovesByGitRemote returns all groves matching the normalized git remote URL.
+	// GetProjectsByGitRemote returns all projects matching the normalized git remote URL.
 	// Returns an empty slice (not error) if none found.
-	GetGrovesByGitRemote(ctx context.Context, gitRemote string) ([]*Grove, error)
+	GetProjectsByGitRemote(ctx context.Context, gitRemote string) ([]*Project, error)
 
 	// NextAvailableSlug returns the next available slug given a base slug.
 	// If baseSlug is available, it is returned as-is. Otherwise, serial
 	// suffixes are tried: baseSlug-1, baseSlug-2, etc.
 	NextAvailableSlug(ctx context.Context, baseSlug string) (string, error)
 
-	// UpdateGrove updates an existing grove.
-	// Returns ErrNotFound if the grove doesn't exist.
-	UpdateGrove(ctx context.Context, grove *Grove) error
+	// UpdateProject updates an existing project.
+	// Returns ErrNotFound if the project doesn't exist.
+	UpdateProject(ctx context.Context, project *Project) error
 
-	// DeleteGrove removes a grove by ID.
-	// Returns ErrNotFound if the grove doesn't exist.
-	DeleteGrove(ctx context.Context, id string) error
+	// DeleteProject removes a project by ID.
+	// Returns ErrNotFound if the project doesn't exist.
+	DeleteProject(ctx context.Context, id string) error
 
-	// ListGroves returns groves matching the filter criteria.
-	ListGroves(ctx context.Context, filter GroveFilter, opts ListOptions) (*ListResult[Grove], error)
+	// ListProjects returns projects matching the filter criteria.
+	ListProjects(ctx context.Context, filter ProjectFilter, opts ListOptions) (*ListResult[Project], error)
 }
 
-// GroveFilter defines criteria for filtering groves.
-type GroveFilter struct {
+// ProjectFilter defines criteria for filtering projects.
+type ProjectFilter struct {
 	OwnerID         string
 	Visibility      string
 	GitRemotePrefix string
@@ -259,18 +260,18 @@ type GroveFilter struct {
 	Name            string // Filter by exact name (case-insensitive)
 	Slug            string // Filter by exact slug (case-insensitive)
 
-	// MemberOrOwnerIDs, when non-empty, restricts results to groves whose ID
+	// MemberOrOwnerIDs, when non-empty, restricts results to projects whose ID
 	// is in this set OR whose owner_id matches OwnerID. OwnerID and this
 	// field are combined with OR (not AND) when both are set.
 	MemberOrOwnerIDs []string
 
-	// MemberGroveIDs, when non-empty, restricts results to groves whose ID
+	// MemberProjectIDs, when non-empty, restricts results to projects whose ID
 	// is in this set. Unlike MemberOrOwnerIDs, this is NOT combined with
-	// OwnerID — it filters strictly by grove ID membership.
-	MemberGroveIDs []string
+	// OwnerID — it filters strictly by project ID membership.
+	MemberProjectIDs []string
 
-	// ExcludeOwnerID, when non-empty, excludes groves whose owner_id matches
-	// this value. Used with MemberGroveIDs to return "shared" groves (member
+	// ExcludeOwnerID, when non-empty, excludes projects whose owner_id matches
+	// this value. Used with MemberProjectIDs to return "shared" projects (member
 	// but not owner).
 	ExcludeOwnerID string
 }
@@ -307,7 +308,7 @@ type RuntimeBrokerStore interface {
 // RuntimeBrokerFilter defines criteria for filtering runtime brokers.
 type RuntimeBrokerFilter struct {
 	Status      string
-	GroveID     string
+	ProjectID   string
 	Name        string // Exact match on broker name (case-insensitive)
 	AutoProvide *bool  // Filter by auto-provide flag (nil = no filter)
 }
@@ -323,7 +324,7 @@ type TemplateStore interface {
 
 	// GetTemplateBySlug retrieves a template by its slug and scope.
 	// Returns ErrNotFound if the template doesn't exist.
-	GetTemplateBySlug(ctx context.Context, slug, scope, groveID string) (*Template, error)
+	GetTemplateBySlug(ctx context.Context, slug, scope, projectID string) (*Template, error)
 
 	// UpdateTemplate updates an existing template.
 	// Returns ErrNotFound if the template doesn't exist.
@@ -343,14 +344,14 @@ type TemplateStore interface {
 
 // TemplateFilter defines criteria for filtering templates.
 type TemplateFilter struct {
-	Name    string // Exact match on template name
-	Scope   string
-	ScopeID string
-	GroveID string // When set without Scope, returns global + grove-scoped templates for this grove
-	Harness string
-	OwnerID string
-	Status  string
-	Search  string // Full-text search on name/description
+	Name      string // Exact match on template name
+	Scope     string
+	ScopeID   string
+	ProjectID string // When set without Scope, returns global + project-scoped templates for this project
+	Harness   string
+	OwnerID   string
+	Status    string
+	Search    string // Full-text search on name/description
 }
 
 // HarnessConfigStore defines harness config persistence operations.
@@ -384,14 +385,14 @@ type HarnessConfigStore interface {
 
 // HarnessConfigFilter defines criteria for filtering harness configs.
 type HarnessConfigFilter struct {
-	Name    string // Exact match on name
-	Scope   string
-	ScopeID string
-	GroveID string // When set without Scope, returns global + grove-scoped configs for this grove
-	Harness string
-	OwnerID string
-	Status  string
-	Search  string // Full-text search on name/description
+	Name      string // Exact match on name
+	Scope     string
+	ScopeID   string
+	ProjectID string // When set without Scope, returns global + project-scoped configs for this project
+	Harness   string
+	OwnerID   string
+	Status    string
+	Search    string // Full-text search on name/description
 }
 
 // UserStore defines user persistence operations.
@@ -452,26 +453,27 @@ type InviteCodeStore interface {
 	GetInviteStats(ctx context.Context) (*InviteStats, error)
 }
 
-// GroveProviderStore defines grove-broker relationship operations.
-type GroveProviderStore interface {
-	// AddGroveProvider adds a broker as a provider to a grove.
-	AddGroveProvider(ctx context.Context, provider *GroveProvider) error
+// ProjectProviderStore defines project-broker relationship operations.
+type ProjectProviderStore interface {
+	// AddProjectProvider adds a broker as a provider to a project.
+	AddProjectProvider(ctx context.Context, provider *ProjectProvider) error
 
-	// RemoveGroveProvider removes a broker from a grove's providers.
-	RemoveGroveProvider(ctx context.Context, groveID, brokerID string) error
 
-	// GetGroveProvider returns a specific provider by grove and broker ID.
+	// RemoveProjectProvider removes a broker from a project's providers.
+	RemoveProjectProvider(ctx context.Context, projectID, brokerID string) error
+
+	// GetProjectProvider returns a specific provider by project and broker ID.
 	// Returns ErrNotFound if the provider relationship doesn't exist.
-	GetGroveProvider(ctx context.Context, groveID, brokerID string) (*GroveProvider, error)
+	GetProjectProvider(ctx context.Context, projectID, brokerID string) (*ProjectProvider, error)
 
-	// GetGroveProviders returns all providers to a grove.
-	GetGroveProviders(ctx context.Context, groveID string) ([]GroveProvider, error)
+	// GetProjectProviders returns all providers to a project.
+	GetProjectProviders(ctx context.Context, projectID string) ([]ProjectProvider, error)
 
-	// GetBrokerGroves returns all groves a broker provides for.
-	GetBrokerGroves(ctx context.Context, brokerID string) ([]GroveProvider, error)
+	// GetBrokerProjects returns all projects a broker provides for.
+	GetBrokerProjects(ctx context.Context, brokerID string) ([]ProjectProvider, error)
 
 	// UpdateProviderStatus updates a provider's status and last seen time.
-	UpdateProviderStatus(ctx context.Context, groveID, brokerID, status string) error
+	UpdateProviderStatus(ctx context.Context, projectID, brokerID, status string) error
 }
 
 // EnvVarStore defines environment variable persistence operations.
@@ -506,7 +508,7 @@ type EnvVarStore interface {
 
 // EnvVarFilter defines criteria for filtering environment variables.
 type EnvVarFilter struct {
-	Scope   string // Required: user, grove, runtime_broker
+	Scope   string // Required: user, project, runtime_broker
 	ScopeID string // Required: ID of the scoped entity
 	Key     string // Optional: filter by specific key
 }
@@ -556,7 +558,7 @@ type SecretStore interface {
 
 // SecretFilter defines criteria for filtering secrets.
 type SecretFilter struct {
-	Scope   string // Required: user, grove, runtime_broker
+	Scope   string // Required: user, project, runtime_broker
 	ScopeID string // Required: ID of the scoped entity
 	Key     string // Optional: filter by specific key
 	Type    string // Optional: filter by secret type (environment, variable, file)
@@ -618,16 +620,16 @@ type GroupStore interface {
 	// Returns true if a cycle would be created.
 	WouldCreateCycle(ctx context.Context, groupID, memberGroupID string) (bool, error)
 
-	// GetGroupByGroveID retrieves the grove_agents group associated with a grove.
-	// Returns ErrNotFound if no grove group exists for this grove.
-	GetGroupByGroveID(ctx context.Context, groveID string) (*Group, error)
+	// GetGroupByProjectID retrieves the project_agents group associated with a project.
+	// Returns ErrNotFound if no project group exists for this project.
+	GetGroupByProjectID(ctx context.Context, projectID string) (*Group, error)
 
 	// GetEffectiveGroups returns all groups a user belongs to, including
 	// transitive memberships through nested groups.
 	GetEffectiveGroups(ctx context.Context, userID string) ([]string, error)
 
 	// GetEffectiveGroupsForAgent returns all groups an agent belongs to,
-	// including the implicit grove_agents group and transitive parent groups.
+	// including the implicit project_agents group and transitive parent groups.
 	GetEffectiveGroupsForAgent(ctx context.Context, agentID string) ([]string, error)
 
 	// CheckDelegatedAccess checks whether an agent's delegation relationship
@@ -647,8 +649,8 @@ type GroupStore interface {
 type GroupFilter struct {
 	OwnerID   string // Filter by owner
 	ParentID  string // Filter by parent group
-	GroupType string // Filter by group type ("explicit" or "grove_agents")
-	GroveID   string // Filter by grove ID (for grove_agents groups)
+	GroupType string // Filter by group type ("explicit" or "project_agents")
+	ProjectID string // Filter by project ID (for project_agents groups)
 }
 
 // PrincipalRef identifies a principal by type and ID.
@@ -701,7 +703,7 @@ type PolicyStore interface {
 // PolicyFilter defines criteria for filtering policies.
 type PolicyFilter struct {
 	Name         string // Filter by policy name
-	ScopeType    string // Filter by scope type (hub, grove, resource)
+	ScopeType    string // Filter by scope type (hub, project, resource)
 	ScopeID      string // Filter by scope ID
 	ResourceType string // Filter by resource type
 	Effect       string // Filter by effect (allow, deny)
@@ -805,12 +807,12 @@ type NotificationStore interface {
 	// GetNotificationSubscriptions returns all agent-scoped subscriptions for a watched agent.
 	GetNotificationSubscriptions(ctx context.Context, agentID string) ([]NotificationSubscription, error)
 
-	// GetNotificationSubscriptionsByGrove returns all subscriptions within a grove (any scope).
-	GetNotificationSubscriptionsByGrove(ctx context.Context, groveID string) ([]NotificationSubscription, error)
+	// GetNotificationSubscriptionsByProject returns all subscriptions within a project (any scope).
+	GetNotificationSubscriptionsByProject(ctx context.Context, projectID string) ([]NotificationSubscription, error)
 
-	// GetNotificationSubscriptionsByGroveScope returns grove-scoped subscriptions
-	// (scope='grove') for a given grove.
-	GetNotificationSubscriptionsByGroveScope(ctx context.Context, groveID string) ([]NotificationSubscription, error)
+	// GetNotificationSubscriptionsByProjectScope returns project-scoped subscriptions
+	// (scope='project') for a given project.
+	GetNotificationSubscriptionsByProjectScope(ctx context.Context, projectID string) ([]NotificationSubscription, error)
 
 	// GetSubscriptionsForSubscriber returns all subscriptions owned by a subscriber.
 	GetSubscriptionsForSubscriber(ctx context.Context, subscriberType, subscriberID string) ([]NotificationSubscription, error)
@@ -863,10 +865,10 @@ type NotificationStore interface {
 	// Returns ErrNotFound if the template doesn't exist.
 	GetSubscriptionTemplate(ctx context.Context, id string) (*SubscriptionTemplate, error)
 
-	// ListSubscriptionTemplates returns all templates, optionally filtered by grove.
-	// Pass empty groveID to include global templates only, or a specific groveID
-	// to include both global and grove-specific templates.
-	ListSubscriptionTemplates(ctx context.Context, groveID string) ([]SubscriptionTemplate, error)
+	// ListSubscriptionTemplates returns all templates, optionally filtered by project.
+	// Pass empty projectID to include global templates only, or a specific projectID
+	// to include both global and project-specific templates.
+	ListSubscriptionTemplates(ctx context.Context, projectID string) ([]SubscriptionTemplate, error)
 
 	// DeleteSubscriptionTemplate deletes a template by ID.
 	// Returns ErrNotFound if the template doesn't exist.
@@ -911,7 +913,7 @@ type ScheduledEventStore interface {
 // ScheduleStore manages user-defined recurring schedules.
 type ScheduleStore interface {
 	// CreateSchedule creates a new recurring schedule.
-	// Returns ErrAlreadyExists if a schedule with the same grove_id+name exists.
+	// Returns ErrAlreadyExists if a schedule with the same project_id+name exists.
 	CreateSchedule(ctx context.Context, schedule *Schedule) error
 
 	// GetSchedule retrieves a schedule by ID.
@@ -972,7 +974,7 @@ type GCPServiceAccountStore interface {
 
 // GCPServiceAccountFilter defines criteria for filtering GCP service accounts.
 type GCPServiceAccountFilter struct {
-	Scope   string // Filter by scope (hub, grove, user)
+	Scope   string // Filter by scope (hub, project, user)
 	ScopeID string // Filter by scope ID
 	Email   string // Filter by SA email
 	Managed *bool  // Filter by managed status (nil = no filter)
@@ -1079,23 +1081,23 @@ type MaintenanceStore interface {
 }
 
 // =============================================================================
-// Grove Sync State (Workspace Sync Metadata)
+// Project Sync State (Workspace Sync Metadata)
 // =============================================================================
 
-// GroveSyncStateStore manages sync metadata for grove workspace synchronization.
-type GroveSyncStateStore interface {
-	// UpsertGroveSyncState creates or updates sync state for a grove (optionally per broker).
-	UpsertGroveSyncState(ctx context.Context, state *GroveSyncState) error
+// ProjectSyncStateStore manages sync metadata for project workspace synchronization.
+type ProjectSyncStateStore interface {
+	// UpsertProjectSyncState creates or updates sync state for a project (optionally per broker).
+	UpsertProjectSyncState(ctx context.Context, state *ProjectSyncState) error
 
-	// GetGroveSyncState retrieves sync state for a grove and optional broker.
-	// Pass empty brokerID for hub-native grove state.
+	// GetProjectSyncState retrieves sync state for a project and optional broker.
+	// Pass empty brokerID for hub-native project state.
 	// Returns ErrNotFound if no sync state exists.
-	GetGroveSyncState(ctx context.Context, groveID, brokerID string) (*GroveSyncState, error)
+	GetProjectSyncState(ctx context.Context, projectID, brokerID string) (*ProjectSyncState, error)
 
-	// ListGroveSyncStates returns all sync states for a grove (across all brokers).
-	ListGroveSyncStates(ctx context.Context, groveID string) ([]GroveSyncState, error)
+	// ListProjectSyncStates returns all sync states for a project (across all brokers).
+	ListProjectSyncStates(ctx context.Context, projectID string) ([]ProjectSyncState, error)
 
-	// DeleteGroveSyncState removes sync state for a grove and optional broker.
+	// DeleteProjectSyncState removes sync state for a project and optional broker.
 	// Returns ErrNotFound if the state doesn't exist.
-	DeleteGroveSyncState(ctx context.Context, groveID, brokerID string) error
+	DeleteProjectSyncState(ctx context.Context, projectID, brokerID string) error
 }

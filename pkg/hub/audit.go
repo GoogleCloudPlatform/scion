@@ -40,9 +40,9 @@ const (
 	BrokerAuthEventRotate BrokerAuthEventType = "rotate"
 	// BrokerAuthEventRevoke is logged when a broker secret is revoked.
 	BrokerAuthEventRevoke BrokerAuthEventType = "revoke"
-	// BrokerAuthEventLink is logged when a broker is linked to a grove.
+	// BrokerAuthEventLink is logged when a broker is linked to a project.
 	BrokerAuthEventLink BrokerAuthEventType = "link"
-	// BrokerAuthEventUnlink is logged when a broker is unlinked from a grove.
+	// BrokerAuthEventUnlink is logged when a broker is unlinked from a project.
 	BrokerAuthEventUnlink BrokerAuthEventType = "unlink"
 )
 
@@ -59,7 +59,7 @@ const (
 type GCPTokenEvent struct {
 	EventType           GCPTokenEventType `json:"eventType"`
 	AgentID             string            `json:"agentId"`
-	GroveID             string            `json:"groveId"`
+	ProjectID             string            `json:"projectId"`
 	ServiceAccountEmail string            `json:"serviceAccountEmail"`
 	ServiceAccountID    string            `json:"serviceAccountId"`
 	Success             bool              `json:"success"`
@@ -192,7 +192,7 @@ func (l *LogAuditLogger) LogGCPTokenEvent(ctx context.Context, event *GCPTokenEv
 		slog.String("event_type", string(event.EventType)),
 		slog.Bool("success", event.Success),
 		slog.String("agent_id", event.AgentID),
-		slog.String("grove_id", event.GroveID),
+		slog.String("project_id", event.ProjectID),
 		slog.String("sa_email", event.ServiceAccountEmail),
 	}
 
@@ -361,8 +361,8 @@ func LogDeregisterEvent(ctx context.Context, logger AuditLogger, brokerID, broke
 	_ = logger.LogBrokerAuthEvent(ctx, event)
 }
 
-// LogLinkEvent logs a grove link event (broker linked to grove).
-func LogLinkEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName, groveID, actorID, ipAddress string) {
+// LogLinkEvent logs a project link event (broker linked to project).
+func LogLinkEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName, projectID, actorID, ipAddress string) {
 	if logger == nil {
 		return
 	}
@@ -377,15 +377,15 @@ func LogLinkEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName,
 		ActorType:  "user",
 		Timestamp:  time.Now(),
 		Details: map[string]string{
-			"groveId": groveID,
+			"projectId": projectID,
 		},
 	}
 
 	_ = logger.LogBrokerAuthEvent(ctx, event)
 }
 
-// LogUnlinkEvent logs a grove unlink event (broker unlinked from grove).
-func LogUnlinkEvent(ctx context.Context, logger AuditLogger, brokerID, groveID, actorID, ipAddress string) {
+// LogUnlinkEvent logs a project unlink event (broker unlinked from project).
+func LogUnlinkEvent(ctx context.Context, logger AuditLogger, brokerID, projectID, actorID, ipAddress string) {
 	if logger == nil {
 		return
 	}
@@ -399,7 +399,7 @@ func LogUnlinkEvent(ctx context.Context, logger AuditLogger, brokerID, groveID, 
 		ActorType: "user",
 		Timestamp: time.Now(),
 		Details: map[string]string{
-			"groveId": groveID,
+			"projectId": projectID,
 		},
 	}
 
@@ -407,7 +407,7 @@ func LogUnlinkEvent(ctx context.Context, logger AuditLogger, brokerID, groveID, 
 }
 
 // LogGCPTokenGeneration logs a GCP token generation event.
-func LogGCPTokenGeneration(ctx context.Context, logger AuditLogger, eventType GCPTokenEventType, agentID, groveID, saEmail, saID string, success bool, failReason string) {
+func LogGCPTokenGeneration(ctx context.Context, logger AuditLogger, eventType GCPTokenEventType, agentID, projectID, saEmail, saID string, success bool, failReason string) {
 	if logger == nil {
 		return
 	}
@@ -415,7 +415,7 @@ func LogGCPTokenGeneration(ctx context.Context, logger AuditLogger, eventType GC
 	event := &GCPTokenEvent{
 		EventType:           eventType,
 		AgentID:             agentID,
-		GroveID:             groveID,
+		ProjectID:             projectID,
 		ServiceAccountEmail: saEmail,
 		ServiceAccountID:    saID,
 		Success:             success,

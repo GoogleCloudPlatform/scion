@@ -27,33 +27,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// createTestGrove creates a grove for scheduled event tests.
-func createTestGrove(t *testing.T, s *SQLiteStore) string {
+// createTestProject creates a project for scheduled event tests.
+func createTestProject(t *testing.T, s *SQLiteStore) string {
 	t.Helper()
 	ctx := context.Background()
 
-	groveID := api.NewUUID()
-	grove := &store.Grove{
-		ID:         groveID,
-		Name:       "Scheduled Event Test Grove",
-		Slug:       "sched-grove-" + groveID[:8],
+	projectID := api.NewUUID()
+	project := &store.Project{
+		ID:         projectID,
+		Name:       "Scheduled Event Test Project",
+		Slug:       "sched-project-" + projectID[:8],
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
-	return groveID
+	require.NoError(t, s.CreateProject(ctx, project))
+	return projectID
 }
 
 func TestScheduledEventCRUD(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID := createTestGrove(t, s)
+	projectID := createTestProject(t, s)
 
 	eventID := api.NewUUID()
 	fireAt := time.Now().Add(1 * time.Hour).UTC().Truncate(time.Second)
 
 	evt := &store.ScheduledEvent{
 		ID:        eventID,
-		GroveID:   groveID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    fireAt,
 		Payload:   `{"text":"hello"}`,
@@ -70,7 +70,7 @@ func TestScheduledEventCRUD(t *testing.T) {
 	got, err := s.GetScheduledEvent(ctx, eventID)
 	require.NoError(t, err)
 	assert.Equal(t, eventID, got.ID)
-	assert.Equal(t, groveID, got.GroveID)
+	assert.Equal(t, projectID, got.ProjectID)
 	assert.Equal(t, "message", got.EventType)
 	assert.Equal(t, fireAt, got.FireAt.UTC().Truncate(time.Second))
 	assert.Equal(t, `{"text":"hello"}`, got.Payload)
@@ -90,12 +90,12 @@ func TestScheduledEventCreateValidation(t *testing.T) {
 
 	// Missing ID
 	err := s.CreateScheduledEvent(ctx, &store.ScheduledEvent{
-		GroveID:   "grove-1",
+		ProjectID: "project-1",
 		EventType: "message",
 	})
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 
-	// Missing GroveID
+	// Missing ProjectID
 	err = s.CreateScheduledEvent(ctx, &store.ScheduledEvent{
 		ID:        api.NewUUID(),
 		EventType: "message",
@@ -104,15 +104,15 @@ func TestScheduledEventCreateValidation(t *testing.T) {
 
 	// Missing EventType
 	err = s.CreateScheduledEvent(ctx, &store.ScheduledEvent{
-		ID:      api.NewUUID(),
-		GroveID: "grove-1",
+		ID:        api.NewUUID(),
+		ProjectID: "project-1",
 	})
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 
-	// Non-existent grove (FK constraint)
+	// Non-existent project (FK constraint)
 	err = s.CreateScheduledEvent(ctx, &store.ScheduledEvent{
 		ID:        api.NewUUID(),
-		GroveID:   "nonexistent-grove",
+		ProjectID: "nonexistent-project",
 		EventType: "message",
 		Payload:   "{}",
 	})
@@ -122,12 +122,12 @@ func TestScheduledEventCreateValidation(t *testing.T) {
 func TestScheduledEventListPending(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID := createTestGrove(t, s)
+	projectID := createTestProject(t, s)
 
 	// Create events with different statuses
 	pending1 := &store.ScheduledEvent{
 		ID:        api.NewUUID(),
-		GroveID:   groveID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(2 * time.Hour),
 		Payload:   "{}",
@@ -135,7 +135,7 @@ func TestScheduledEventListPending(t *testing.T) {
 	}
 	pending2 := &store.ScheduledEvent{
 		ID:        api.NewUUID(),
-		GroveID:   groveID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour), // Fires sooner
 		Payload:   "{}",
@@ -158,19 +158,19 @@ func TestScheduledEventListPending(t *testing.T) {
 func TestScheduledEventListPendingOrderByFireAt(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID := createTestGrove(t, s)
+	projectID := createTestProject(t, s)
 
 	// Create events in reverse fire_at order
 	later := &store.ScheduledEvent{
 		ID:        api.NewUUID(),
-		GroveID:   groveID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(3 * time.Hour),
 		Payload:   "{}",
 	}
 	sooner := &store.ScheduledEvent{
 		ID:        api.NewUUID(),
-		GroveID:   groveID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour),
 		Payload:   "{}",
@@ -189,12 +189,12 @@ func TestScheduledEventListPendingOrderByFireAt(t *testing.T) {
 func TestScheduledEventUpdateStatus(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID := createTestGrove(t, s)
+	projectID := createTestProject(t, s)
 
 	eventID := api.NewUUID()
 	evt := &store.ScheduledEvent{
 		ID:        eventID,
-		GroveID:   groveID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour),
 		Payload:   "{}",
@@ -226,12 +226,12 @@ func TestScheduledEventUpdateStatus(t *testing.T) {
 func TestScheduledEventCancel(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID := createTestGrove(t, s)
+	projectID := createTestProject(t, s)
 
 	eventID := api.NewUUID()
 	evt := &store.ScheduledEvent{
 		ID:        eventID,
-		GroveID:   groveID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour),
 		Payload:   "{}",
@@ -258,21 +258,21 @@ func TestScheduledEventCancel(t *testing.T) {
 func TestScheduledEventListWithFilter(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID1 := createTestGrove(t, s)
-	groveID2 := createTestGrove(t, s)
+	projectID1 := createTestProject(t, s)
+	projectID2 := createTestProject(t, s)
 
-	// Create events across groves and types
+	// Create events across projects and types
 	events := []*store.ScheduledEvent{
-		{ID: api.NewUUID(), GroveID: groveID1, EventType: "message", FireAt: time.Now().Add(1 * time.Hour), Payload: "{}"},
-		{ID: api.NewUUID(), GroveID: groveID1, EventType: "status_update", FireAt: time.Now().Add(2 * time.Hour), Payload: "{}"},
-		{ID: api.NewUUID(), GroveID: groveID2, EventType: "message", FireAt: time.Now().Add(3 * time.Hour), Payload: "{}"},
+		{ID: api.NewUUID(), ProjectID: projectID1, EventType: "message", FireAt: time.Now().Add(1 * time.Hour), Payload: "{}"},
+		{ID: api.NewUUID(), ProjectID: projectID1, EventType: "status_update", FireAt: time.Now().Add(2 * time.Hour), Payload: "{}"},
+		{ID: api.NewUUID(), ProjectID: projectID2, EventType: "message", FireAt: time.Now().Add(3 * time.Hour), Payload: "{}"},
 	}
 	for _, evt := range events {
 		require.NoError(t, s.CreateScheduledEvent(ctx, evt))
 	}
 
-	// Filter by grove
-	result, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{GroveID: groveID1}, store.ListOptions{})
+	// Filter by project
+	result, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectID1}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Len(t, result.Items, 2)
 	assert.Equal(t, 2, result.TotalCount)
@@ -296,25 +296,25 @@ func TestScheduledEventListWithFilter(t *testing.T) {
 func TestScheduledEventPurge(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID := createTestGrove(t, s)
+	projectID := createTestProject(t, s)
 
 	// Create events: one pending, one fired (old), one cancelled (old), one fired (recent)
 	pendingEvt := &store.ScheduledEvent{
-		ID: api.NewUUID(), GroveID: groveID, EventType: "message",
+		ID: api.NewUUID(), ProjectID: projectID, EventType: "message",
 		FireAt: time.Now().Add(1 * time.Hour), Payload: "{}",
 	}
 	firedOldEvt := &store.ScheduledEvent{
-		ID: api.NewUUID(), GroveID: groveID, EventType: "message",
+		ID: api.NewUUID(), ProjectID: projectID, EventType: "message",
 		FireAt: time.Now().Add(-48 * time.Hour), Payload: "{}",
 		CreatedAt: time.Now().Add(-48 * time.Hour),
 	}
 	cancelledOldEvt := &store.ScheduledEvent{
-		ID: api.NewUUID(), GroveID: groveID, EventType: "message",
+		ID: api.NewUUID(), ProjectID: projectID, EventType: "message",
 		FireAt: time.Now().Add(-48 * time.Hour), Payload: "{}",
 		CreatedAt: time.Now().Add(-48 * time.Hour),
 	}
 	firedRecentEvt := &store.ScheduledEvent{
-		ID: api.NewUUID(), GroveID: groveID, EventType: "message",
+		ID: api.NewUUID(), ProjectID: projectID, EventType: "message",
 		FireAt: time.Now().Add(-1 * time.Hour), Payload: "{}",
 	}
 
@@ -354,11 +354,11 @@ func TestScheduledEventPurge(t *testing.T) {
 func TestScheduledEventOptionalCreatedBy(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID := createTestGrove(t, s)
+	projectID := createTestProject(t, s)
 
 	evt := &store.ScheduledEvent{
 		ID:        api.NewUUID(),
-		GroveID:   groveID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour),
 		Payload:   "{}",

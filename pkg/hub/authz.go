@@ -49,10 +49,10 @@ const (
 
 // Resource represents the target of an authorization check.
 type Resource struct {
-	Type       string            // e.g. "agent", "grove", "policy", "group"
+	Type       string            // e.g. "agent", "project", "policy", "group"
 	ID         string            // Resource ID
 	OwnerID    string            // Owner user ID
-	ParentType string            // e.g. "grove" for an agent
+	ParentType string            // e.g. "project" for an agent
 	ParentID   string            // Parent resource ID
 	Labels     map[string]string // Resource labels for condition matching
 	Ancestry   []string          // Ordered ancestor chain [root, ..., parent] for transitive access
@@ -64,7 +64,7 @@ type Decision struct {
 	Reason     string // Human-readable explanation
 	PolicyID   string // ID of the matched policy (if any)
 	PolicyName string // Name of the matched policy (if any)
-	Scope      string // Scope level that decided (hub, grove, resource)
+	Scope      string // Scope level that decided (hub, project, resource)
 }
 
 // EvaluationDetail provides detailed info for the evaluate endpoint.
@@ -110,7 +110,7 @@ func (a *AuthzService) CheckAccess(ctx context.Context, identity Identity, resou
 
 // checkAccessForUser evaluates access for a user principal.
 func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity, resource Resource, action Action) Decision {
-	// 0. If the identity is scoped (UAT), enforce grove + scope constraints first.
+	// 0. If the identity is scoped (UAT), enforce project + scope constraints first.
 	if scoped, ok := user.(*ScopedUserIdentity); ok {
 		if denied := a.enforceUATConstraints(scoped, resource, action); denied != nil {
 			return *denied
@@ -141,15 +141,15 @@ func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity
 		}
 	}
 
-	// 2.6. Grove owner/admin bypass: any user with role=owner or role=admin
-	// in the grove's members group has the same access as the grove's
-	// creator-owner. This applies to the grove resource itself and to all
-	// resources scoped to the grove (agents, members group, etc.).
-	if groveID := groveIDForResource(resource); groveID != "" {
-		if a.isGroveOwnerOrAdmin(ctx, user.ID(), groveID) {
+	// 2.6. Project owner/admin bypass: any user with role=owner or role=admin
+	// in the project's members group has the same access as the project's
+	// creator-owner. This applies to the project resource itself and to all
+	// resources scoped to the project (agents, members group, etc.).
+	if projectID := projectIDForResource(resource); projectID != "" {
+		if a.isProjectOwnerOrAdmin(ctx, user.ID(), projectID) {
 			return Decision{
 				Allowed: true,
-				Reason:  "grove owner/admin",
+				Reason:  "project owner/admin",
 			}
 		}
 	}
@@ -313,7 +313,7 @@ func (a *AuthzService) evaluatePolicies(policies []store.Policy, resource Resour
 			continue
 		}
 
-		// Compare scope levels: resource > grove > hub
+		// Compare scope levels: resource > project > hub
 		matchedLevel := scopeLevel(matched.Scope)
 		newLevel := scopeLevel(d.Scope)
 
@@ -338,7 +338,7 @@ func scopeLevel(scope string) int {
 	switch scope {
 	case "hub":
 		return 0
-	case "grove":
+	case "project":
 		return 1
 	case "resource":
 		return 2
@@ -372,9 +372,9 @@ func matchesResource(policy store.Policy, resource Resource) bool {
 
 	// Scope matching
 	switch policy.ScopeType {
-	case "grove":
-		// Policy scoped to a grove — resource must be in that grove
-		if policy.ScopeID != "" && resource.ParentType == "grove" && resource.ParentID != policy.ScopeID {
+	case "project":
+		// Policy scoped to a project — resource must be in that project
+		if policy.ScopeID != "" && resource.ParentType == "project" && resource.ParentID != policy.ScopeID {
 			return false
 		}
 	case "resource":
@@ -410,18 +410,18 @@ func evaluateConditions(policy store.Policy, resource Resource) bool {
 	return true
 }
 
-// enforceUATConstraints checks the grove and scope restrictions carried by a
+// enforceUATConstraints checks the project and scope restrictions carried by a
 // ScopedUserIdentity (produced from a UAT). Returns a deny Decision if the
-// request falls outside the token's allowed grove or scopes, nil otherwise.
+// request falls outside the token's allowed project or scopes, nil otherwise.
 func (a *AuthzService) enforceUATConstraints(scoped *ScopedUserIdentity, resource Resource, action Action) *Decision {
-	// Enforce grove constraint: the resource must belong to the token's grove.
-	groveID := scoped.ScopedGroveID()
-	if resource.Type == "grove" {
-		if resource.ID != groveID {
-			return &Decision{Allowed: false, Reason: "token not scoped for this grove"}
+	// Enforce project constraint: the resource must belong to the token's project.
+	projectID := scoped.ScopedProjectID()
+	if resource.Type == "project" {
+		if resource.ID != projectID {
+			return &Decision{Allowed: false, Reason: "token not scoped for this project"}
 		}
-	} else if resource.ParentType == "grove" && resource.ParentID != groveID {
-		return &Decision{Allowed: false, Reason: "token not scoped for this grove"}
+	} else if resource.ParentType == "project" && resource.ParentID != projectID {
+		return &Decision{Allowed: false, Reason: "token not scoped for this project"}
 	}
 
 	// Enforce scope constraint: the resource:action must be in the token's scopes.
@@ -445,29 +445,29 @@ func canAccessAsAncestor(principalID string, resource Resource) bool {
 	return false
 }
 
-// groveIDForResource returns the grove ID a resource belongs to, or "" if the
-// resource is not grove-scoped. A grove resource maps to its own ID; any
-// resource with ParentType="grove" maps to its ParentID.
-func groveIDForResource(r Resource) string {
-	if r.Type == "grove" {
+// projectIDForResource returns the project ID a resource belongs to, or "" if the
+// resource is not project-scoped. A project resource maps to its own ID; any
+// resource with ParentType="project" maps to its ParentID.
+func projectIDForResource(r Resource) string {
+	if r.Type == "project" {
 		return r.ID
 	}
-	if r.ParentType == "grove" {
+	if r.ParentType == "project" {
 		return r.ParentID
 	}
 	return ""
 }
 
-// isGroveOwnerOrAdmin reports whether the user is recorded with role=owner
-// or role=admin in any explicit group that belongs to the grove (typically
-// the "grove:<slug>:members" group). These users get the same access as the
-// grove's creator-owner.
-func (a *AuthzService) isGroveOwnerOrAdmin(ctx context.Context, userID, groveID string) bool {
-	if userID == "" || groveID == "" {
+// isProjectOwnerOrAdmin reports whether the user is recorded with role=owner
+// or role=admin in any explicit group that belongs to the project (typically
+// the "project:<slug>:members" group). These users get the same access as the
+// project's creator-owner.
+func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projectID string) bool {
+	if userID == "" || projectID == "" {
 		return false
 	}
 	groups, err := a.store.ListGroups(ctx, store.GroupFilter{
-		GroveID:   groveID,
+		ProjectID:   projectID,
 		GroupType: store.GroupTypeExplicit,
 	}, store.ListOptions{Limit: 10})
 	if err != nil || len(groups.Items) == 0 {

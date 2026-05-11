@@ -321,20 +321,20 @@ func TestMultiKeyBrokerAuth_ExpiredTimestamp(t *testing.T) {
 	}
 }
 
-func TestHeartbeatService_GroveFilter(t *testing.T) {
+func TestHeartbeatService_ProjectFilter(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	manager := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "agent-1", GroveID: "grove-hub1", Phase: "running"},
-			{Name: "agent-2", GroveID: "grove-hub1", Phase: "running"},
-			{Name: "agent-3", GroveID: "grove-hub2", Phase: "running"},
-			{Name: "agent-4", GroveID: "grove-shared", Phase: "running"},
+			{Name: "agent-1", ProjectID: "grove-hub1", Phase: "running"},
+			{Name: "agent-2", ProjectID: "grove-hub1", Phase: "running"},
+			{Name: "agent-3", ProjectID: "grove-hub2", Phase: "running"},
+			{Name: "agent-4", ProjectID: "grove-shared", Phase: "running"},
 		},
 	}
 
 	// Filter: only include grove-hub1 groves
-	groveFilter := func(groveID string) bool {
-		return groveID == "grove-hub1"
+	groveFilter := func(projectID string) bool {
+		return projectID == "grove-hub1"
 	}
 
 	svc := NewHeartbeatService(client, "test-host", time.Hour, manager, groveFilter, slog.Default())
@@ -351,25 +351,25 @@ func TestHeartbeatService_GroveFilter(t *testing.T) {
 	heartbeat := calls[0].Heartbeat
 
 	// Should only include grove-hub1 (2 agents), not grove-hub2 or grove-shared
-	if len(heartbeat.Groves) != 1 {
-		t.Errorf("Expected 1 grove in heartbeat (filtered), got %d", len(heartbeat.Groves))
+	if len(heartbeat.Projects) != 1 {
+		t.Errorf("Expected 1 grove in heartbeat (filtered), got %d", len(heartbeat.Projects))
 	}
 
-	if len(heartbeat.Groves) > 0 && heartbeat.Groves[0].GroveID != "grove-hub1" {
-		t.Errorf("Expected grove-hub1, got %q", heartbeat.Groves[0].GroveID)
+	if len(heartbeat.Projects) > 0 && heartbeat.Projects[0].ProjectID != "grove-hub1" {
+		t.Errorf("Expected grove-hub1, got %q", heartbeat.Projects[0].ProjectID)
 	}
 
-	if len(heartbeat.Groves) > 0 && heartbeat.Groves[0].AgentCount != 2 {
-		t.Errorf("Expected 2 agents in grove-hub1, got %d", heartbeat.Groves[0].AgentCount)
+	if len(heartbeat.Projects) > 0 && heartbeat.Projects[0].AgentCount != 2 {
+		t.Errorf("Expected 2 agents in grove-hub1, got %d", heartbeat.Projects[0].AgentCount)
 	}
 }
 
-func TestHeartbeatService_NilGroveFilter(t *testing.T) {
+func TestHeartbeatService_NilProjectFilter(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	manager := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "agent-1", GroveID: "grove-1", Phase: "running"},
-			{Name: "agent-2", GroveID: "grove-2", Phase: "running"},
+			{Name: "agent-1", ProjectID: "grove-1", Phase: "running"},
+			{Name: "agent-2", ProjectID: "grove-2", Phase: "running"},
 		},
 	}
 
@@ -386,8 +386,8 @@ func TestHeartbeatService_NilGroveFilter(t *testing.T) {
 	}
 
 	heartbeat := calls[0].Heartbeat
-	if len(heartbeat.Groves) != 2 {
-		t.Errorf("Expected 2 groves with nil filter, got %d", len(heartbeat.Groves))
+	if len(heartbeat.Projects) != 2 {
+		t.Errorf("Expected 2 groves with nil filter, got %d", len(heartbeat.Projects))
 	}
 }
 
@@ -452,7 +452,7 @@ func TestResolveHydrator_UnknownConnection(t *testing.T) {
 	}
 }
 
-func TestGlobalGroveRejection_MultiHub(t *testing.T) {
+func TestGlobalProjectRejection_MultiHub(t *testing.T) {
 	// Create a server with two connections to simulate multi-hub mode
 	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
 	srv := newTestServerWithInMemoryCreds(creds)
@@ -471,7 +471,7 @@ func TestGlobalGroveRejection_MultiHub(t *testing.T) {
 		t.Fatal("expected multi-hub mode with 2 connections")
 	}
 
-	// Try to create an agent with empty groveID (global grove)
+	// Try to create an agent with empty projectID (global grove)
 	body := `{"name": "global-agent", "config": {"template": "claude"}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -499,7 +499,7 @@ func TestGlobalGroveRejection_MultiHub(t *testing.T) {
 	}
 }
 
-func TestGlobalGroveRejection_SingleHub_Allowed(t *testing.T) {
+func TestGlobalProjectRejection_SingleHub_Allowed(t *testing.T) {
 	// Single-hub mode: global grove should be allowed
 	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
 	srv := newTestServerWithInMemoryCreds(creds)
@@ -515,14 +515,14 @@ func TestGlobalGroveRejection_SingleHub_Allowed(t *testing.T) {
 
 	srv.Handler().ServeHTTP(w, req)
 
-	// In single-hub mode, empty groveID should NOT be rejected
+	// In single-hub mode, empty projectID should NOT be rejected
 	if w.Code == http.StatusConflict {
 		t.Error("single-hub mode should not reject global grove agents")
 	}
 }
 
-func TestGlobalGroveRejection_WithGroveID_MultiHub(t *testing.T) {
-	// Multi-hub mode: agents with a specific groveID should be allowed
+func TestGlobalProjectRejection_WithProjectID_MultiHub(t *testing.T) {
+	// Multi-hub mode: agents with a specific projectID should be allowed
 	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
 	srv := newTestServerWithInMemoryCreds(creds)
 
@@ -544,16 +544,16 @@ func TestGlobalGroveRejection_WithGroveID_MultiHub(t *testing.T) {
 
 	srv.Handler().ServeHTTP(w, req)
 
-	// Should NOT be rejected (has explicit groveID and grovePath)
+	// Should NOT be rejected (has explicit projectID and projectPath)
 	if w.Code == http.StatusConflict {
 		t.Errorf("expected non-global grove to be allowed in multi-hub mode, got %d: %s",
 			w.Code, w.Body.String())
 	}
 }
 
-func TestGlobalGroveRejection_GitGroveWithGroveID_NoPath_MultiHub(t *testing.T) {
-	// Multi-hub mode: a git-based grove has a groveID but no grovePath or
-	// groveSlug (the broker resolves workspace from the git remote). This
+func TestGlobalProjectRejection_GitProjectWithProjectID_NoPath_MultiHub(t *testing.T) {
+	// Multi-hub mode: a git-based grove has a projectID but no projectPath or
+	// projectSlug (the broker resolves workspace from the git remote). This
 	// should NOT be treated as the global grove.
 	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
 	srv := newTestServerWithInMemoryCreds(creds)
@@ -575,9 +575,9 @@ func TestGlobalGroveRejection_GitGroveWithGroveID_NoPath_MultiHub(t *testing.T) 
 
 	srv.Handler().ServeHTTP(w, req)
 
-	// Should NOT be rejected — groveID is set, so this is not the global grove
+	// Should NOT be rejected — projectID is set, so this is not the global grove
 	if w.Code == http.StatusConflict {
-		t.Errorf("expected git-based grove (groveID set, no path) to be allowed in multi-hub mode, got %d: %s",
+		t.Errorf("expected git-based grove (projectID set, no path) to be allowed in multi-hub mode, got %d: %s",
 			w.Code, w.Body.String())
 	}
 }
@@ -609,29 +609,29 @@ func TestIsMultiHubMode(t *testing.T) {
 	}
 }
 
-func TestIsGlobalGrove(t *testing.T) {
+func TestIsGlobalProject(t *testing.T) {
 	srv := newTestServer(t)
 
 	tests := []struct {
 		name      string
-		groveID   string
-		grovePath string
+		projectID   string
+		projectPath string
 		expected  bool
 	}{
 		{"empty both", "", "", true},
 		{"global id", "global", "/some/path", true},
 		{"global id empty path", "global", "", true},
 		{"empty id with path", "", "/some/path", false},
-		{"groveID set empty path", "my-project", "", false},
+		{"projectID set empty path", "my-project", "", false},
 		{"both set", "my-project", "/some/path", false},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := srv.isGlobalGrove(tc.groveID, tc.grovePath)
+			result := srv.isGlobalProject(tc.projectID, tc.projectPath)
 			if result != tc.expected {
-				t.Errorf("isGlobalGrove(%q, %q) = %v, expected %v",
-					tc.groveID, tc.grovePath, result, tc.expected)
+				t.Errorf("isGlobalProject(%q, %q) = %v, expected %v",
+					tc.projectID, tc.projectPath, result, tc.expected)
 			}
 		})
 	}
@@ -1251,7 +1251,7 @@ func TestColocated_CredentialWatcher_AddRemoteAlongsideLocal(t *testing.T) {
 	}
 }
 
-func TestColocated_GlobalGroveRejection_ComboMode(t *testing.T) {
+func TestColocated_GlobalProjectRejection_ComboMode(t *testing.T) {
 	// In combo mode with local + remote, multi-hub mode should reject global grove.
 	localCreds := makeTestCreds("local", "broker-1", "http://localhost:8080")
 	srv := newTestServerWithInMemoryCreds(localCreds)

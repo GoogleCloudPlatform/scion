@@ -60,7 +60,7 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 		// Check if Hub should be used, excluding the target agent from sync requirements.
 		// This allows creating an agent even if it already exists on Hub (recreate scenario)
 		// or if other agents are out of sync.
-		hubCtx, err := CheckHubAvailabilityForAgent(grovePath, agentName, false)
+		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, false)
 		if err != nil {
 			return err
 		}
@@ -84,7 +84,7 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 		}
 
 		// Local mode
-		rt := runtime.GetRuntime(grovePath, profile)
+		rt := runtime.GetRuntime(projectPath, profile)
 		mgr := agent.NewManager(rt)
 
 		// Apply inline config overrides to CLI options
@@ -115,14 +115,14 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 			Profile:       profile,
 			HarnessConfig: effectiveHarnessConfig,
 			Image:         effectiveImage,
-			GrovePath:     grovePath,
+			ProjectPath:     projectPath,
 			Branch:        effectiveBranch,
 			Workspace:     workspace,
 			InlineConfig:  inlineCfg,
 		}
 
 		// Check if agent already exists (directory on disk or running container)
-		projectDir, err := config.GetResolvedProjectDir(grovePath)
+		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err != nil {
 			return err
 		}
@@ -152,8 +152,8 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
-	// Get the grove ID for this project
-	groveID, err := GetGroveID(hubCtx)
+	// Get the project ID for this project
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -180,7 +180,7 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 	// Build create request — always provision-only (create does not start the agent)
 	req := &hubclient.CreateAgentRequest{
 		Name:            agentName,
-		GroveID:         groveID,
+		ProjectID:         projectID,
 		Template:        resolvedTemplate,
 		HarnessConfig:   harnessConfigFlag,
 		HarnessAuth:     harnessAuthFlag,
@@ -204,7 +204,7 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	resp, err := createAgentWithBrokerResolution(ctx, hubCtx, groveID, req)
+	resp, err := createAgentWithBrokerResolution(ctx, hubCtx, projectID, req)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to create agent via Hub: %w", err))
 	}
@@ -212,8 +212,8 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 	// Advance watermark to the hub-assigned creation time so this agent
 	// won't trigger a sync warning on the next 'scion ls'.
 	if resp.Agent != nil && !resp.Agent.Created.IsZero() {
-		hubsync.UpdateLastSyncedAt(hubCtx.GrovePath, resp.Agent.Created, hubCtx.IsGlobal)
-		hubsync.AddSyncedAgent(hubCtx.GrovePath, agentName)
+		hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, resp.Agent.Created, hubCtx.IsGlobal)
+		hubsync.AddSyncedAgent(hubCtx.ProjectPath, agentName)
 	}
 
 	// Print info line when broker was auto-resolved (not explicitly specified)
@@ -258,8 +258,8 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 		statusf("Phase: %s\n", phase)
 
 		// For local broker, print the agent directory path so the user can inspect/tweak files
-		if hubCtx.BrokerID != "" && hubCtx.GrovePath != "" {
-			agentDir := filepath.Join(hubCtx.GrovePath, "agents", agentName)
+		if hubCtx.BrokerID != "" && hubCtx.ProjectPath != "" {
+			agentDir := filepath.Join(hubCtx.ProjectPath, "agents", agentName)
 			statusf("Agent directory: %s\n", agentDir)
 		}
 	} else {
@@ -287,7 +287,8 @@ func init() {
 	// Template resolution flags for Hub mode (Section 9.4)
 	createCmd.Flags().BoolVar(&uploadTemplate, "upload-template", false, "Automatically upload local template to Hub if not found")
 	createCmd.Flags().BoolVar(&noUpload, "no-upload", false, "Fail if template requires upload (never prompt)")
-	createCmd.Flags().StringVar(&templateScope, "template-scope", "grove", "Scope for uploaded template (global, grove, user)")
+	createCmd.Flags().StringVar(&templateScope, "template-scope", "project", "Scope for uploaded template (global, project, user)")
+
 
 	// Inline config flag
 	createCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")

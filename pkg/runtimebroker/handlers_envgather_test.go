@@ -27,9 +27,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
-// newTestServerWithGrovePath creates a test server with a temporary grove path
+// newTestServerWithProjectPath creates a test server with a temporary grove path
 // that has versioned settings with declared env vars.
-func newTestServerWithGrovePath(t *testing.T, settingsYAML string) (*Server, *envCapturingManager, string) {
+func newTestServerWithProjectPath(t *testing.T, settingsYAML string) (*Server, *envCapturingManager, string) {
 	t.Helper()
 
 	// Isolate HOME so LoadEffectiveSettings does not merge the developer's
@@ -45,7 +45,7 @@ func newTestServerWithGrovePath(t *testing.T, settingsYAML string) (*Server, *en
 		t.Fatal(err)
 	}
 
-	// Create template directories so FindTemplateInGrovePath can resolve them.
+	// Create template directories so FindTemplateInProjectPath can resolve them.
 	// Each template needs a scion-agent.yaml that sets harness_config so that
 	// provisioning doesn't fall back to the embedded default (gemini).
 	for _, tpl := range []string{"claude", "gemini", "default"} {
@@ -101,7 +101,7 @@ profiles:
   default:
     runtime: mock
 `
-	srv, mgr, groveDir := newTestServerWithGrovePath(t, settings)
+	srv, mgr, groveDir := newTestServerWithProjectPath(t, settings)
 
 	body := `{
 		"name": "test-agent",
@@ -145,7 +145,7 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithGrovePath(t, settings)
+	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
 
 	body := `{
 		"name": "test-agent-gather",
@@ -214,7 +214,7 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithGrovePath(t, settings)
+	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
 
 	// Set the keys in the broker's own environment — these should NOT be used
 	t.Setenv("BROKER_LOCAL_KEY", "broker-value")
@@ -275,7 +275,7 @@ profiles:
   default:
     runtime: mock
 `
-	srv, mgr, groveDir := newTestServerWithGrovePath(t, settings)
+	srv, mgr, groveDir := newTestServerWithProjectPath(t, settings)
 
 	// Phase 1: Create agent with gather — should get 202
 	createBody := `{
@@ -334,7 +334,7 @@ profiles:
   default:
     runtime: mock
 `
-	srv, mgr, groveDir := newTestServerWithGrovePath(t, settings)
+	srv, mgr, groveDir := newTestServerWithProjectPath(t, settings)
 	mgr.startErr = os.ErrPermission
 
 	createBody := `{
@@ -762,7 +762,7 @@ profiles:
   default:
     runtime: mock
 `
-	srv, mgr, groveDir := newTestServerWithGrovePath(t, settings)
+	srv, mgr, groveDir := newTestServerWithProjectPath(t, settings)
 
 	body := `{
 		"name": "test-agent-no-gather",
@@ -804,7 +804,7 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithGrovePath(t, settings)
+	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
 
 	body := `{
 		"name": "test-agent-secret-upgrade",
@@ -846,7 +846,7 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithGrovePath(t, settings)
+	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
 
 	body := `{
 		"name": "test-agent-partial-secret",
@@ -921,7 +921,7 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithGrovePath(t, settings)
+	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
 
 	body := `{
 		"name": "test-agent-harness-secrets",
@@ -989,7 +989,7 @@ profiles:
       - key: PROFILE_SECRET
         description: "Secret required by this profile"
 `
-	srv, _, groveDir := newTestServerWithGrovePath(t, settings)
+	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
 
 	// Satisfy harness key via broker env
 	t.Setenv("ANTHROPIC_API_KEY", "broker-ant-key")
@@ -1041,7 +1041,7 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithGrovePath(t, settings)
+	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
 
 	// Satisfy harness key via broker env
 	t.Setenv("ANTHROPIC_API_KEY", "broker-ant-key")
@@ -1116,7 +1116,7 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithGrovePath(t, settings)
+	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
 
 	// Satisfy harness key and SATISFIED_KEY via resolved secrets
 	body := `{
@@ -1180,7 +1180,7 @@ profiles:
         description: "Profile token"
         type: variable
 `
-	srv, _, groveDir := newTestServerWithGrovePath(t, settings)
+	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
 
 	// Satisfy harness key via broker env
 	t.Setenv("ANTHROPIC_API_KEY", "broker-ant-key")
@@ -1255,7 +1255,7 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithGrovePath(t, settings)
+	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
 
 	// Satisfy harness key via broker env
 	t.Setenv("ANTHROPIC_API_KEY", "broker-ant-key")
@@ -1326,7 +1326,7 @@ profiles:
       - key: SHARED_KEY
         description: "From profile"
 `
-	srv, _, groveDir := newTestServerWithGrovePath(t, settings)
+	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
 
 	// Satisfy harness key via broker env
 	t.Setenv("ANTHROPIC_API_KEY", "broker-ant-key")
@@ -1474,7 +1474,7 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithGrovePath(t, settings)
+	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
 
 	body := `{
 		"name": "test-agent-harness-config",
@@ -1527,7 +1527,7 @@ profiles:
   default:
     runtime: mock
 `
-	srv, mgr, groveDir := newTestServerWithGrovePath(t, settings)
+	srv, mgr, groveDir := newTestServerWithProjectPath(t, settings)
 
 	// Phase 1: Create agent with gatherEnv and explicit harnessConfig — should get 202
 	createBody := `{
@@ -2009,10 +2009,10 @@ profiles:
 // TestEnvGather_HarnessAuthOverrideVertexAI tests that --harness-auth vertex-ai
 // overrides auto-detect and requires vertex-ai credentials even when an API key
 // would otherwise be detected as sufficient.
-// TestEnvGather_NoGrovePath_GlobalFallback tests that when grovePath is empty
+// TestEnvGather_NoProjectPath_GlobalFallback tests that when projectPath is empty
 // (e.g. hub-only git groves), the broker falls back to the global ~/.scion
 // directory for settings resolution, so auth env keys are still detected.
-func TestEnvGather_NoGrovePath_GlobalFallback(t *testing.T) {
+func TestEnvGather_NoProjectPath_GlobalFallback(t *testing.T) {
 	// Set up a fake HOME with global .scion settings
 	fakeHome := t.TempDir()
 	globalDir := filepath.Join(fakeHome, ".scion")
@@ -2059,7 +2059,7 @@ profiles:
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
 
-	// Send create request with NO grovePath — simulates hub-only git grove
+	// Send create request with NO projectPath — simulates hub-only git grove
 	body := `{
 		"name": "test-agent-no-grove",
 		"id": "agent-uuid-no-grove",
@@ -2074,7 +2074,7 @@ profiles:
 
 	// Should return 202 because GEMINI_API_KEY (or GOOGLE_API_KEY) is missing
 	if w.Code != http.StatusAccepted {
-		t.Fatalf("expected 202 (missing GEMINI_API_KEY with no grovePath), got %d: %s", w.Code, w.Body.String())
+		t.Fatalf("expected 202 (missing GEMINI_API_KEY with no projectPath), got %d: %s", w.Code, w.Body.String())
 	}
 
 	var envReqs EnvRequirementsResponse
@@ -2091,7 +2091,7 @@ profiles:
 		}
 	}
 	if !found {
-		t.Errorf("expected GEMINI_API_KEY in needs when no grovePath set, got needs=%v required=%v", envReqs.Needs, envReqs.Required)
+		t.Errorf("expected GEMINI_API_KEY in needs when no projectPath set, got needs=%v required=%v", envReqs.Needs, envReqs.Required)
 	}
 }
 
@@ -2109,7 +2109,7 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithGrovePath(t, settings)
+	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
 
 	// Send a request with a resolved secret that has Name but no Target
 	body := `{

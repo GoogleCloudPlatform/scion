@@ -31,7 +31,7 @@ import (
 
 // CreateScheduledEvent creates a new scheduled event.
 func (s *SQLiteStore) CreateScheduledEvent(ctx context.Context, event *store.ScheduledEvent) error {
-	if event.ID == "" || event.GroveID == "" || event.EventType == "" {
+	if event.ID == "" || event.ProjectID == "" || event.EventType == "" {
 		return store.ErrInvalidInput
 	}
 
@@ -45,11 +45,11 @@ func (s *SQLiteStore) CreateScheduledEvent(ctx context.Context, event *store.Sch
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO scheduled_events (
-			id, grove_id, event_type, fire_at, payload, status,
+			id, project_id, event_type, fire_at, payload, status,
 			created_at, created_by, fired_at, error, schedule_id
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		event.ID, event.GroveID, event.EventType, event.FireAt, event.Payload, event.Status,
+		event.ID, event.ProjectID, event.EventType, event.FireAt, event.Payload, event.Status,
 		event.CreatedAt, nullableString(event.CreatedBy), nullableTime(timeFromPtr(event.FiredAt)), nullableString(event.Error),
 		nullableString(event.ScheduleID),
 	)
@@ -58,7 +58,7 @@ func (s *SQLiteStore) CreateScheduledEvent(ctx context.Context, event *store.Sch
 			return store.ErrAlreadyExists
 		}
 		if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
-			return fmt.Errorf("grove %s does not exist: %w", event.GroveID, store.ErrInvalidInput)
+			return fmt.Errorf("project %s does not exist: %w", event.ProjectID, store.ErrInvalidInput)
 		}
 		return err
 	}
@@ -74,11 +74,11 @@ func (s *SQLiteStore) GetScheduledEvent(ctx context.Context, id string) (*store.
 	var scheduleID sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, grove_id, event_type, fire_at, payload, status,
+		SELECT id, project_id, event_type, fire_at, payload, status,
 			created_at, created_by, fired_at, error, schedule_id
 		FROM scheduled_events WHERE id = ?
 	`, id).Scan(
-		&event.ID, &event.GroveID, &event.EventType, &event.FireAt, &event.Payload, &event.Status,
+		&event.ID, &event.ProjectID, &event.EventType, &event.FireAt, &event.Payload, &event.Status,
 		&event.CreatedAt, &createdBy, &firedAt, &errMsg, &scheduleID,
 	)
 	if err != nil {
@@ -108,7 +108,7 @@ func (s *SQLiteStore) GetScheduledEvent(ctx context.Context, id string) (*store.
 // ordered by fire_at ASC.
 func (s *SQLiteStore) ListPendingScheduledEvents(ctx context.Context) ([]store.ScheduledEvent, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, grove_id, event_type, fire_at, payload, status,
+		SELECT id, project_id, event_type, fire_at, payload, status,
 			created_at, created_by, fired_at, error, schedule_id
 		FROM scheduled_events
 		WHERE status = ?
@@ -157,9 +157,9 @@ func (s *SQLiteStore) ListScheduledEvents(ctx context.Context, filter store.Sche
 	var conditions []string
 	var args []interface{}
 
-	if filter.GroveID != "" {
-		conditions = append(conditions, "grove_id = ?")
-		args = append(args, filter.GroveID)
+	if filter.ProjectID != "" {
+		conditions = append(conditions, "project_id = ?")
+		args = append(args, filter.ProjectID)
 	}
 	if filter.EventType != "" {
 		conditions = append(conditions, "event_type = ?")
@@ -196,7 +196,7 @@ func (s *SQLiteStore) ListScheduledEvents(ctx context.Context, filter store.Sche
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, grove_id, event_type, fire_at, payload, status,
+		SELECT id, project_id, event_type, fire_at, payload, status,
 			created_at, created_by, fired_at, error, schedule_id
 		FROM scheduled_events %s
 		ORDER BY created_at DESC
@@ -207,7 +207,7 @@ func (s *SQLiteStore) ListScheduledEvents(ctx context.Context, filter store.Sche
 
 	if opts.Cursor != "" {
 		query = fmt.Sprintf(`
-			SELECT id, grove_id, event_type, fire_at, payload, status,
+			SELECT id, project_id, event_type, fire_at, payload, status,
 				created_at, created_by, fired_at, error, schedule_id
 			FROM scheduled_events %s AND id < ?
 			ORDER BY created_at DESC
@@ -215,7 +215,7 @@ func (s *SQLiteStore) ListScheduledEvents(ctx context.Context, filter store.Sche
 		`, whereClause)
 		if whereClause == "" {
 			query = `
-				SELECT id, grove_id, event_type, fire_at, payload, status,
+				SELECT id, project_id, event_type, fire_at, payload, status,
 					created_at, created_by, fired_at, error, schedule_id
 				FROM scheduled_events WHERE id < ?
 				ORDER BY created_at DESC
@@ -289,7 +289,7 @@ func scanScheduledEvents(rows *sql.Rows) ([]store.ScheduledEvent, error) {
 		var scheduleID sql.NullString
 
 		if err := rows.Scan(
-			&event.ID, &event.GroveID, &event.EventType, &event.FireAt, &event.Payload, &event.Status,
+			&event.ID, &event.ProjectID, &event.EventType, &event.FireAt, &event.Payload, &event.Status,
 			&event.CreatedAt, &createdBy, &firedAt, &errMsg, &scheduleID,
 		); err != nil {
 			return nil, err

@@ -38,18 +38,18 @@ func setupScheduledEventTest(t *testing.T) (*Server, store.Store, string) {
 	srv.scheduler = NewScheduler(s, slog.Default())
 	srv.scheduler.RegisterEventHandler("message", srv.messageEventHandler())
 
-	grove := &store.Grove{
-		ID:   "grove-sched-test",
-		Name: "Scheduler Test Grove",
-		Slug: "sched-test-grove",
+	project := &store.Project{
+		ID:   "project-sched-test",
+		Name: "Scheduler Test Project",
+		Slug: "sched-test-project",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
-	return srv, s, grove.ID
+	return srv, s, project.ID
 }
 
 func TestScheduledEvent_Create(t *testing.T) {
-	srv, _, groveID := setupScheduledEventTest(t)
+	srv, _, projectID := setupScheduledEventTest(t)
 
 	req := CreateScheduledEventRequest{
 		EventType: "message",
@@ -58,14 +58,14 @@ func TestScheduledEvent_Create(t *testing.T) {
 		Message:   "Hello from scheduler",
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+groveID+"/scheduled-events", req)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", req)
 	assert.Equal(t, http.StatusCreated, rec.Code)
 
 	var evt store.ScheduledEvent
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&evt))
 
 	assert.NotEmpty(t, evt.ID)
-	assert.Equal(t, groveID, evt.GroveID)
+	assert.Equal(t, projectID, evt.ProjectID)
 	assert.Equal(t, "message", evt.EventType)
 	assert.Equal(t, store.ScheduledEventPending, evt.Status)
 	assert.NotEmpty(t, evt.Payload)
@@ -76,7 +76,7 @@ func TestScheduledEvent_Create(t *testing.T) {
 }
 
 func TestScheduledEvent_CreateWithFireAt(t *testing.T) {
-	srv, _, groveID := setupScheduledEventTest(t)
+	srv, _, projectID := setupScheduledEventTest(t)
 
 	futureTime := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
 
@@ -87,7 +87,7 @@ func TestScheduledEvent_CreateWithFireAt(t *testing.T) {
 		Message:   "Scheduled for later",
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+groveID+"/scheduled-events", req)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", req)
 	assert.Equal(t, http.StatusCreated, rec.Code)
 
 	var evt store.ScheduledEvent
@@ -97,7 +97,7 @@ func TestScheduledEvent_CreateWithFireAt(t *testing.T) {
 }
 
 func TestScheduledEvent_CreateWithPlainFlag(t *testing.T) {
-	srv, _, groveID := setupScheduledEventTest(t)
+	srv, _, projectID := setupScheduledEventTest(t)
 
 	req := CreateScheduledEventRequest{
 		EventType: "message",
@@ -107,7 +107,7 @@ func TestScheduledEvent_CreateWithPlainFlag(t *testing.T) {
 		Plain:     true,
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+groveID+"/scheduled-events", req)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", req)
 	assert.Equal(t, http.StatusCreated, rec.Code)
 
 	var evt store.ScheduledEvent
@@ -121,8 +121,8 @@ func TestScheduledEvent_CreateWithPlainFlag(t *testing.T) {
 }
 
 func TestScheduledEvent_CreateValidation(t *testing.T) {
-	srv, _, groveID := setupScheduledEventTest(t)
-	basePath := "/api/v1/groves/" + groveID + "/scheduled-events"
+	srv, _, projectID := setupScheduledEventTest(t)
+	basePath := "/api/v1/projects/" + projectID + "/scheduled-events"
 
 	tests := []struct {
 		name string
@@ -194,14 +194,14 @@ func TestScheduledEvent_CreateValidation(t *testing.T) {
 }
 
 func TestScheduledEvent_List(t *testing.T) {
-	srv, s, groveID := setupScheduledEventTest(t)
+	srv, s, projectID := setupScheduledEventTest(t)
 	ctx := context.Background()
 
 	// Create a couple of events directly in the store
 	for i, status := range []string{store.ScheduledEventPending, store.ScheduledEventFired} {
 		evt := &store.ScheduledEvent{
 			ID:        "list-evt-" + string(rune('a'+i)),
-			GroveID:   groveID,
+			ProjectID:   projectID,
 			EventType: "message",
 			FireAt:    time.Now().Add(time.Duration(i+1) * time.Hour),
 			Payload:   `{"message":"test"}`,
@@ -212,7 +212,7 @@ func TestScheduledEvent_List(t *testing.T) {
 	}
 
 	// List all events
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/groves/"+groveID+"/scheduled-events", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events", nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var resp ListScheduledEventsResponse
@@ -221,7 +221,7 @@ func TestScheduledEvent_List(t *testing.T) {
 	assert.False(t, resp.ServerTime.IsZero())
 
 	// Filter by status
-	rec = doRequest(t, srv, http.MethodGet, "/api/v1/groves/"+groveID+"/scheduled-events?status=pending", nil)
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events?status=pending", nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
@@ -230,12 +230,12 @@ func TestScheduledEvent_List(t *testing.T) {
 }
 
 func TestScheduledEvent_Get(t *testing.T) {
-	srv, s, groveID := setupScheduledEventTest(t)
+	srv, s, projectID := setupScheduledEventTest(t)
 	ctx := context.Background()
 
 	evt := &store.ScheduledEvent{
 		ID:        "get-evt-1",
-		GroveID:   groveID,
+		ProjectID:   projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour),
 		Payload:   `{"message":"get me"}`,
@@ -244,7 +244,7 @@ func TestScheduledEvent_Get(t *testing.T) {
 	}
 	require.NoError(t, s.CreateScheduledEvent(ctx, evt))
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/groves/"+groveID+"/scheduled-events/get-evt-1", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events/get-evt-1", nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var got store.ScheduledEvent
@@ -254,28 +254,28 @@ func TestScheduledEvent_Get(t *testing.T) {
 }
 
 func TestScheduledEvent_GetNotFound(t *testing.T) {
-	srv, _, groveID := setupScheduledEventTest(t)
+	srv, _, projectID := setupScheduledEventTest(t)
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/groves/"+groveID+"/scheduled-events/nonexistent", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events/nonexistent", nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-func TestScheduledEvent_GetWrongGrove(t *testing.T) {
-	srv, s, groveID := setupScheduledEventTest(t)
+func TestScheduledEvent_GetWrongProject(t *testing.T) {
+	srv, s, projectID := setupScheduledEventTest(t)
 	ctx := context.Background()
 
-	// Create a second grove
-	grove2 := &store.Grove{
-		ID:   "grove-sched-other",
-		Name: "Other Grove",
-		Slug: "other-grove",
+	// Create a second project
+	project2 := &store.Project{
+		ID:   "project-sched-other",
+		Name: "Other Project",
+		Slug: "other-project",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove2))
+	require.NoError(t, s.CreateProject(ctx, project2))
 
-	// Create event in first grove
+	// Create event in first project
 	evt := &store.ScheduledEvent{
-		ID:        "wrong-grove-evt",
-		GroveID:   groveID,
+		ID:        "wrong-project-evt",
+		ProjectID:   projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour),
 		Payload:   `{}`,
@@ -284,18 +284,18 @@ func TestScheduledEvent_GetWrongGrove(t *testing.T) {
 	}
 	require.NoError(t, s.CreateScheduledEvent(ctx, evt))
 
-	// Try to get it from the other grove
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/groves/"+grove2.ID+"/scheduled-events/wrong-grove-evt", nil)
+	// Try to get it from the other project
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project2.ID+"/scheduled-events/wrong-project-evt", nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestScheduledEvent_Cancel(t *testing.T) {
-	srv, s, groveID := setupScheduledEventTest(t)
+	srv, s, projectID := setupScheduledEventTest(t)
 	ctx := context.Background()
 
 	evt := &store.ScheduledEvent{
 		ID:        "cancel-evt-1",
-		GroveID:   groveID,
+		ProjectID:   projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour),
 		Payload:   `{"message":"cancel me"}`,
@@ -304,7 +304,7 @@ func TestScheduledEvent_Cancel(t *testing.T) {
 	}
 	require.NoError(t, s.CreateScheduledEvent(ctx, evt))
 
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/groves/"+groveID+"/scheduled-events/cancel-evt-1", nil)
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+projectID+"/scheduled-events/cancel-evt-1", nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Verify it was cancelled in the store
@@ -314,27 +314,27 @@ func TestScheduledEvent_Cancel(t *testing.T) {
 }
 
 func TestScheduledEvent_CancelNotFound(t *testing.T) {
-	srv, _, groveID := setupScheduledEventTest(t)
+	srv, _, projectID := setupScheduledEventTest(t)
 
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/groves/"+groveID+"/scheduled-events/nonexistent", nil)
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+projectID+"/scheduled-events/nonexistent", nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestScheduledEvent_Unauthenticated(t *testing.T) {
-	srv, _, groveID := setupScheduledEventTest(t)
+	srv, _, projectID := setupScheduledEventTest(t)
 
-	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/groves/"+groveID+"/scheduled-events", nil)
+	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events", nil)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
 func TestScheduledEvent_MethodNotAllowed(t *testing.T) {
-	srv, _, groveID := setupScheduledEventTest(t)
+	srv, _, projectID := setupScheduledEventTest(t)
 
 	// PATCH on collection
-	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/groves/"+groveID+"/scheduled-events", nil)
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/projects/"+projectID+"/scheduled-events", nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 
 	// POST on individual event
-	rec = doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+groveID+"/scheduled-events/some-id", nil)
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events/some-id", nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 }

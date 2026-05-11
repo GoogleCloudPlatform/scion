@@ -17,7 +17,7 @@ import (
 )
 
 var (
-	grovePath      string
+	projectPath      string
 	globalMode     bool
 	profile        string
 	outputFormat   string
@@ -61,8 +61,8 @@ return an error instead of blocking.`,
 			return err
 		}
 
-		if globalMode && grovePath == "" {
-			grovePath = "global"
+		if globalMode && projectPath == "" {
+			projectPath = "global"
 		}
 
 		if util.IsGitRepo() {
@@ -71,53 +71,53 @@ return an error instead of blocking.`,
 			}
 		}
 
-		// Determine if this command requires explicit grove context
-		// Commands that don't require grove context:
+		// Determine if this command requires explicit project context
+		// Commands that don't require project context:
 		// - help, version, completion (built-in or explicit)
-		// - init, grove init (creates grove)
-		// - server (runs hub server, doesn't need local grove)
+		// - init, project init (creates project)
+		// - server (runs hub server, doesn't need local project)
 		cmdName := cmd.Name()
 		parentName := ""
 		if cmd.Parent() != nil {
 			parentName = cmd.Parent().Name()
 		}
 
-		requiresGrove := true
+		requiresProject := true
 		switch cmdName {
 		case "help", "version", "completion", "doctor", "whoami":
-			requiresGrove = false
+			requiresProject = false
 		case "init":
-			// Both top-level init and grove init don't require existing grove
-			requiresGrove = false
+			// Both top-level init and project init don't require existing project
+			requiresProject = false
 		case "scion":
-			// Root command itself doesn't require grove
-			requiresGrove = false
+			// Root command itself doesn't require project
+			requiresProject = false
 		}
-		// Server subcommands run the hub server and don't need a local grove
+		// Server subcommands run the hub server and don't need a local project
 		if commandInSubtree(cmd, "server") {
-			requiresGrove = false
+			requiresProject = false
 		}
-		// Grove subcommands operate on all groves, not just the current one
-		if parentName == "grove" {
-			requiresGrove = false
+		// Project subcommands operate on all projects, not just the current one
+		if parentName == "project" || parentName == "grove" {
+			requiresProject = false
 		}
 
-		// For commands that require grove context, use RequireGrovePath
+		// For commands that require project context, use RequireProjectPath
 		// to error if no project found and --global not specified
-		if requiresGrove && grovePath == "" {
-			if _, _, err := config.RequireGrovePath(grovePath); err != nil {
+		if requiresProject && projectPath == "" {
+			if _, _, err := config.RequireProjectPath(projectPath); err != nil {
 				return err
 			}
 		}
 
 		// Load settings to get cli.autohelp
-		settings, err := config.LoadSettings(grovePath)
+		settings, err := config.LoadSettings(projectPath)
 		if err == nil && settings.CLI != nil && settings.CLI.AutoHelp != nil {
 			autoHelp = *settings.CLI.AutoHelp
 		}
 
 		// Check versioned settings for cli.interactive_disabled
-		if vs, _, vsErr := config.LoadEffectiveSettings(grovePath); vsErr == nil && vs != nil {
+		if vs, _, vsErr := config.LoadEffectiveSettings(projectPath); vsErr == nil && vs != nil {
 			if vs.CLI != nil && vs.CLI.InteractiveDisabled != nil && *vs.CLI.InteractiveDisabled {
 				nonInteractive = true
 				autoConfirm = true
@@ -152,7 +152,7 @@ return an error instead of blocking.`,
 		// Skip for config commands (users need those to set the registry).
 		// Skip in hub context (inside a container, the agent is already
 		// running — image_registry is not needed).
-		requiresRegistry := requiresGrove
+		requiresRegistry := requiresProject
 		if commandInSubtree(cmd, "config") {
 			requiresRegistry = false
 		}
@@ -163,13 +163,13 @@ return an error instead of blocking.`,
 			requiresRegistry = false
 		}
 		if requiresRegistry {
-			if err := config.RequireImageRegistry(grovePath, profile); err != nil {
+			if err := config.RequireImageRegistry(projectPath, profile); err != nil {
 				return err
 			}
 		}
 
 		// Check for dev auth usage and warn if Hub is enabled
-		printDevAuthWarningIfNeeded(grovePath)
+		printDevAuthWarningIfNeeded(projectPath)
 
 		return nil
 	},
@@ -180,21 +180,23 @@ return an error instead of blocking.`,
 func Execute() {
 	// Early settings load to determine autoHelp behavior
 	// This handles cases where ExecuteC fails during flag parsing or unknown commands
-	tempGrovePath := ""
+	tempProjectPath:= ""
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
-		if arg == "--grove" || arg == "-g" {
+		if arg == "--project" || arg == "--grove" || arg == "-g" {
 			if i+1 < len(os.Args) {
-				tempGrovePath = os.Args[i+1]
+				tempProjectPath = os.Args[i+1]
 				i++
 			}
+		} else if strings.HasPrefix(arg, "--project=") {
+			tempProjectPath = strings.TrimPrefix(arg, "--project=")
 		} else if strings.HasPrefix(arg, "--grove=") {
-			tempGrovePath = strings.TrimPrefix(arg, "--grove=")
+			tempProjectPath = strings.TrimPrefix(arg, "--grove=")
 		} else if arg == "--global" {
-			tempGrovePath = "global"
+			tempProjectPath = "global"
 		}
 	}
-	settings, _ := config.LoadSettings(tempGrovePath)
+	settings, _ := config.LoadSettings(tempProjectPath)
 	if settings != nil && settings.CLI != nil && settings.CLI.AutoHelp != nil {
 		autoHelp = *settings.CLI.AutoHelp
 	}
@@ -222,8 +224,12 @@ func commandInSubtree(cmd *cobra.Command, name string) bool {
 
 func init() {
 	rootCmd.Long = util.GetBanner() + "\n" + rootCmd.Long
-	rootCmd.PersistentFlags().StringVarP(&grovePath, "grove", "g", "", "Grove identifier: path, slug (with Hub), or git URL (with Hub)")
-	rootCmd.PersistentFlags().BoolVar(&globalMode, "global", false, "Use the global grove (equivalent to --grove global)")
+	rootCmd.PersistentFlags().StringVarP(&projectPath, "project", "g", "", "Project identifier: path, slug (with Hub), or git URL (with Hub)")
+	rootCmd.PersistentFlags().StringVar(&projectPath, "grove", "", "Deprecated alias for --project")
+	_ = rootCmd.PersistentFlags().MarkDeprecated("grove", "use --project instead")
+	_ = rootCmd.PersistentFlags().MarkHidden("grove")
+
+	rootCmd.PersistentFlags().BoolVar(&globalMode, "global", false, "Use the global project (equivalent to --project global)")
 	rootCmd.PersistentFlags().StringVarP(&profile, "profile", "p", "", "Configuration profile to use")
 	rootCmd.PersistentFlags().StringVar(&outputFormat, "format", "", "Output format (e.g., json)")
 
@@ -256,7 +262,7 @@ func GetHubEndpoint(settings interface{ GetHubEndpoint() string }) string {
 	}
 	// Fall back to env vars — covers the case where settings loading didn't
 	// populate the Hub struct (e.g., inside a hub-connected container where
-	// the grove path resolves to a synthetic/empty directory).
+	// the project path resolves to a synthetic/empty directory).
 	if ep := os.Getenv("SCION_HUB_ENDPOINT"); ep != "" {
 		return ep
 	}
@@ -290,14 +296,14 @@ func IsNonInteractive() bool {
 
 // printDevAuthWarningIfNeeded checks if dev auth is being used with Hub and prints a warning.
 // This function is called on every command invocation via PersistentPreRunE.
-func printDevAuthWarningIfNeeded(grovePath string) {
+func printDevAuthWarningIfNeeded(projectPath string) {
 	// Skip if --no-hub flag is set
 	if noHub {
 		return
 	}
 
 	// Try to load settings to check if Hub is enabled
-	settings, err := config.LoadSettings(grovePath)
+	settings, err := config.LoadSettings(projectPath)
 	if err != nil {
 		// If we can't load settings, skip the warning
 		return
@@ -348,7 +354,7 @@ func printDevAuthWarningIfNeeded(grovePath string) {
 
 // checkAgentContainerContext detects when the CLI is running inside an agent
 // container (SCION_HOST_UID is set) but has no reachable Hub endpoint. In that
-// scenario the CLI cannot manage agents, groves, or any other resources, so we
+// scenario the CLI cannot manage agents, projects, or any other resources, so we
 // print a prominent banner and return an error to prevent confusion.
 // A small set of informational commands (version, help, completion, doctor,
 // config) are exempted so the agent can still inspect its environment.

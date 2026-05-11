@@ -70,7 +70,7 @@ type agentService struct {
 
 // ListAgentsOptions configures agent list filtering.
 type ListAgentsOptions struct {
-	GroveID string
+	ProjectID string
 	Status  string
 	Page    apiclient.PageOptions
 }
@@ -93,8 +93,8 @@ type GetLogsOptions struct {
 func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*runtimebroker.ListAgentsResponse, error) {
 	query := url.Values{}
 	if opts != nil {
-		if opts.GroveID != "" {
-			query.Set("groveId", opts.GroveID)
+		if opts.ProjectID != "" {
+			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.Status != "" {
 			query.Set("status", opts.Status)

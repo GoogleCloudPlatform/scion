@@ -40,7 +40,7 @@ func TestVersionedSettings_YAMLRoundTrip(t *testing.T) {
 		Hub: &V1HubClientConfig{
 			Enabled:  boolPtr(true),
 			Endpoint: "https://hub.example.com",
-			GroveID:  "test-grove",
+			ProjectID:  "test-grove",
 		},
 		CLI: &V1CLIConfig{
 			AutoHelp:            &autoHelp,
@@ -86,7 +86,7 @@ func TestVersionedSettings_YAMLRoundTrip(t *testing.T) {
 	assert.Equal(t, vs.ActiveProfile, roundTripped.ActiveProfile)
 	assert.Equal(t, vs.DefaultTemplate, roundTripped.DefaultTemplate)
 	assert.Equal(t, vs.Hub.Endpoint, roundTripped.Hub.Endpoint)
-	assert.Equal(t, vs.Hub.GroveID, roundTripped.Hub.GroveID)
+	assert.Equal(t, vs.Hub.ProjectID, roundTripped.Hub.ProjectID)
 	assert.Equal(t, vs.HarnessConfigs["gemini"].Model, roundTripped.HarnessConfigs["gemini"].Model)
 	assert.Equal(t, vs.HarnessConfigs["gemini"].Args, roundTripped.HarnessConfigs["gemini"].Args)
 	assert.Equal(t, vs.Profiles["local"].DefaultHarnessConfig, roundTripped.Profiles["local"].DefaultHarnessConfig)
@@ -222,7 +222,7 @@ func TestLoadVersionedSettings_HubEnvVars(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NotNil(t, vs.Hub)
-	assert.Equal(t, "my-grove-id", vs.Hub.GroveID)
+	assert.Equal(t, "my-grove-id", vs.Hub.ProjectID)
 }
 
 func TestLoadVersionedSettings_CLIEnvVars(t *testing.T) {
@@ -341,7 +341,7 @@ func TestAdaptLegacySettings_FullMapping(t *testing.T) {
 		Hub: &HubClientConfig{
 			Enabled:  &enabled,
 			Endpoint: "https://hub.example.com",
-			GroveID:  "test-grove",
+			ProjectID:  "test-grove",
 		},
 		CLI: &CLIConfig{
 			AutoHelp: &autoHelp,
@@ -368,7 +368,7 @@ func TestAdaptLegacySettings_FullMapping(t *testing.T) {
 	// Hub mapping
 	require.NotNil(t, vs.Hub)
 	assert.Equal(t, "https://hub.example.com", vs.Hub.Endpoint)
-	assert.Equal(t, "test-grove", vs.Hub.GroveID)
+	assert.Equal(t, "test-grove", vs.Hub.ProjectID)
 	assert.True(t, *vs.Hub.Enabled)
 
 	// CLI mapping
@@ -493,7 +493,7 @@ func TestConvertVersionedToLegacy(t *testing.T) {
 		Hub: &V1HubClientConfig{
 			Enabled:  boolPtr(true),
 			Endpoint: "https://hub.example.com",
-			GroveID:  "test-grove",
+			ProjectID:  "test-grove",
 		},
 		CLI: &V1CLIConfig{
 			AutoHelp:            boolPtr(true),
@@ -535,7 +535,7 @@ func TestConvertVersionedToLegacy(t *testing.T) {
 	// Hub — only v1 fields should be mapped
 	require.NotNil(t, legacy.Hub)
 	assert.Equal(t, "https://hub.example.com", legacy.Hub.Endpoint)
-	assert.Equal(t, "test-grove", legacy.Hub.GroveID)
+	assert.Equal(t, "test-grove", legacy.Hub.ProjectID)
 	assert.True(t, *legacy.Hub.Enabled)
 	assert.Empty(t, legacy.Hub.Token) // Not in v1
 
@@ -771,34 +771,34 @@ func TestAdapterRoundTripConsistency(t *testing.T) {
 	}
 }
 
-// --- resolveEffectiveGrovePath tests ---
+// --- resolveEffectiveProjectPath tests ---
 
-func TestResolveEffectiveGrovePath_Global(t *testing.T) {
-	result := resolveEffectiveGrovePath("global")
+func TestResolveEffectiveProjectPath_Global(t *testing.T) {
+	result := resolveEffectiveProjectPath("global")
 	assert.Equal(t, "", result, "global should resolve to empty (already loaded)")
 
-	result = resolveEffectiveGrovePath("home")
+	result = resolveEffectiveProjectPath("home")
 	assert.Equal(t, "", result, "home should resolve to empty (already loaded)")
 }
 
-func TestResolveEffectiveGrovePath_Explicit(t *testing.T) {
+func TestResolveEffectiveProjectPath_Explicit(t *testing.T) {
 	// A plain .scion path with no grove-id → returned as-is (non-git grove)
-	result := resolveEffectiveGrovePath("/some/path/.scion")
+	result := resolveEffectiveProjectPath("/some/path/.scion")
 	assert.Equal(t, "/some/path/.scion", result)
 }
 
-func TestResolveEffectiveGrovePath_GitGrove(t *testing.T) {
+func TestResolveEffectiveProjectPath_GitProject(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
 	// Simulate a git grove with grove-id → should redirect to external config dir
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	os.MkdirAll(projectDir, 0755)
-	WriteGroveID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
+	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
-	result := resolveEffectiveGrovePath(projectDir)
+	result := resolveEffectiveProjectPath(projectDir)
 
-	want := filepath.Join(tmpHome, ".scion", "grove-configs", "my-repo__550e8400", ".scion")
+	want := filepath.Join(tmpHome, ".scion", "project-configs", "my-repo__550e8400", ".scion")
 	assert.Equal(t, want, result)
 }
 
@@ -2065,7 +2065,7 @@ profiles:
 	assert.True(t, result.StateMigrated)
 
 	// Verify state.yaml was created with the timestamp
-	state, err := LoadGroveState(tmpDir)
+	state, err := LoadProjectState(tmpDir)
 	require.NoError(t, err)
 	assert.Equal(t, "2024-06-15T10:30:00Z", state.LastSyncedAt)
 }
@@ -2613,7 +2613,7 @@ hub:
 	// Verify the field was updated
 	var vs VersionedSettings
 	require.NoError(t, yaml.Unmarshal(data, &vs))
-	assert.Equal(t, "new-grove-id", vs.Hub.GroveID)
+	assert.Equal(t, "new-grove-id", vs.Hub.ProjectID)
 
 	// Verify other fields are preserved
 	assert.Equal(t, "local", vs.ActiveProfile)
@@ -2789,7 +2789,7 @@ hub:
 	require.NoError(t, yaml.Unmarshal(data, &vs))
 
 	// Verify all updates took effect
-	assert.Equal(t, "new-grove-id", vs.Hub.GroveID)
+	assert.Equal(t, "new-grove-id", vs.Hub.ProjectID)
 	require.NotNil(t, vs.Hub.Enabled)
 	assert.False(t, *vs.Hub.Enabled)
 	assert.Equal(t, "https://hub.example.com", vs.Hub.Endpoint) // preserved
@@ -2858,7 +2858,7 @@ hub:
 	assert.Equal(t, "local", vs.ActiveProfile)
 	require.NotNil(t, vs.Hub)
 	assert.Equal(t, "https://hub.example.com", vs.Hub.Endpoint)
-	assert.Equal(t, "test-grove", vs.Hub.GroveID)
+	assert.Equal(t, "test-grove", vs.Hub.ProjectID)
 }
 
 func TestLoadSingleFileVersioned_NoFile(t *testing.T) {
@@ -3057,6 +3057,16 @@ telemetry:
 }
 
 func TestLoadVersionedSettings_TelemetryHierarchyMerge(t *testing.T) {
+	// Unset all SCION_ environment variables to avoid pollution
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "SCION_") {
+			key := strings.SplitN(e, "=", 2)[0]
+			val := os.Getenv(key)
+			os.Unsetenv(key)
+			defer os.Setenv(key, val)
+		}
+	}
+
 	// Test that telemetry settings merge across global → grove (last write wins).
 	tmpDir := t.TempDir()
 
@@ -3164,6 +3174,16 @@ func TestVersionedEnvKeyMapper_Telemetry(t *testing.T) {
 }
 
 func TestLoadVersionedSettings_TelemetryEnvOverride(t *testing.T) {
+	// Unset all SCION_ environment variables to avoid pollution
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "SCION_") {
+			key := strings.SplitN(e, "=", 2)[0]
+			val := os.Getenv(key)
+			os.Unsetenv(key)
+			defer os.Setenv(key, val)
+		}
+	}
+
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
@@ -3452,7 +3472,7 @@ func TestGetVersionedSettingValue(t *testing.T) {
 			Enabled:   &enabled,
 			Linked:    &linked,
 			Endpoint:  "https://hub.example.com",
-			GroveID:   "grove-123",
+			ProjectID:   "grove-123",
 			LocalOnly: &localOnly,
 		},
 		Server: &V1ServerConfig{

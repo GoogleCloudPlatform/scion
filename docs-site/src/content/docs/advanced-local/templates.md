@@ -184,14 +184,14 @@ Scion includes a specialized built-in skill called `team-creation`. This skill i
 
 ## Template Importing (Hub Integration)
 
-When connected to a Hub, you can import templates into your groves. This process is now a direct, high-performance server-side operation that provides immediate feedback, replacing the older container-based sync mechanism.
+When connected to a Hub, you can import templates into your projects. This process is now a direct, high-performance server-side operation that provides immediate feedback, replacing the older container-based sync mechanism.
 
 ### Direct Server-Side Import
 
-You can initiate a template import directly from the Web UI using the **Load Templates** button on the grove details page, or programmatically via the Hub API:
+You can initiate a template import directly from the Web UI using the **Load Templates** button on the project details page, or programmatically via the Hub API:
 
 ```
-POST /api/v1/groves/{groveId}/import-templates
+POST /api/v1/projects/{projectId}/import-templates
 ```
 
 *(Note: The legacy `sync-templates` endpoint has been removed.)*

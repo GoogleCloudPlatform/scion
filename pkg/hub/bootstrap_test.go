@@ -217,8 +217,8 @@ func doBootstrapRequest(t *testing.T, srv *Server, method, path string, body int
 	return rec
 }
 
-// setupGroveAndBroker creates a grove and broker for agent creation tests.
-func setupGroveAndBroker(t *testing.T, s store.Store) (string, string) {
+// setupProjectAndBroker creates a project and broker for agent creation tests.
+func setupProjectAndBroker(t *testing.T, s store.Store) (string, string) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -232,30 +232,30 @@ func setupGroveAndBroker(t *testing.T, s store.Store) (string, string) {
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	grove := &store.Grove{
-		ID:                     "grove_bootstrap_test",
-		Slug:                   "bootstrap-grove",
-		Name:                   "Bootstrap Grove",
+	project := &store.Project{
+		ID:                     "project_bootstrap_test",
+		Slug:                   "bootstrap-project",
+		Name:                   "Bootstrap Project",
 		GitRemote:              "https://github.com/test/bootstrap",
 		DefaultRuntimeBrokerID: broker.ID,
 		Created:                time.Now(),
 		Updated:                time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
-	provider := &store.GroveProvider{
-		GroveID:    grove.ID,
+	provider := &store.ProjectProvider{
+		ProjectID:    project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := s.AddGroveProvider(ctx, provider); err != nil {
-		t.Fatalf("failed to add grove provider: %v", err)
+	if err := s.AddProjectProvider(ctx, provider); err != nil {
+		t.Fatalf("failed to add project provider: %v", err)
 	}
 
-	return grove.ID, broker.ID
+	return project.ID, broker.ID
 }
 
 // ============================================================================
@@ -264,12 +264,12 @@ func setupGroveAndBroker(t *testing.T, s store.Store) (string, string) {
 
 func TestCreateAgentWithWorkspaceBootstrap(t *testing.T) {
 	srv, s, _, _ := testBootstrapServer(t)
-	groveID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 
 	// Create an agent with workspace files and a task
 	body := CreateAgentRequest{
 		Name:    "bootstrap-agent",
-		GroveID: groveID,
+		ProjectID: projectID,
 		Task:    "do something",
 		WorkspaceFiles: []transfer.FileInfo{
 			{Path: "main.go", Size: 100, Hash: "sha256:abc123"},
@@ -329,7 +329,7 @@ func TestCreateAgentWithWorkspaceBootstrap(t *testing.T) {
 
 func TestCreateAgentWithWorkspaceBootstrap_ExistingFiles(t *testing.T) {
 	srv, s, stor, _ := testBootstrapServer(t)
-	groveID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 
 	// Pre-populate one file in storage with matching hash
 	// The agent ID is generated, so we can't predict the exact path.
@@ -339,7 +339,7 @@ func TestCreateAgentWithWorkspaceBootstrap_ExistingFiles(t *testing.T) {
 	// Create a first agent to get its ID, then test with pre-existing storage
 	body := CreateAgentRequest{
 		Name:    "bootstrap-existing",
-		GroveID: groveID,
+		ProjectID: projectID,
 		Task:    "do something",
 		WorkspaceFiles: []transfer.FileInfo{
 			{Path: "main.go", Size: 100, Hash: "sha256:abc123"},
@@ -359,7 +359,7 @@ func TestCreateAgentWithWorkspaceBootstrap_ExistingFiles(t *testing.T) {
 
 	// Store one of the files in mock storage with matching hash
 	agentID := resp.Agent.ID
-	storagePath := "workspaces/" + groveID + "/" + agentID
+	storagePath := "workspaces/" + projectID + "/" + agentID
 	stor.objects[storagePath+"/files/main.go"] = &storage.Object{
 		Name:     storagePath + "/files/main.go",
 		Metadata: map[string]string{"sha256": "sha256:abc123"},
@@ -368,7 +368,7 @@ func TestCreateAgentWithWorkspaceBootstrap_ExistingFiles(t *testing.T) {
 	// Create second agent - different name to avoid conflicts
 	body2 := CreateAgentRequest{
 		Name:    "bootstrap-existing-2",
-		GroveID: groveID,
+		ProjectID: projectID,
 		Task:    "do something",
 		WorkspaceFiles: []transfer.FileInfo{
 			{Path: "main.go", Size: 100, Hash: "sha256:abc123"},
@@ -410,11 +410,11 @@ func TestCreateAgentWithWorkspaceBootstrap_NoStorage(t *testing.T) {
 	}
 	// No storage set
 
-	groveID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 
 	body := CreateAgentRequest{
 		Name:    "bootstrap-no-storage",
-		GroveID: groveID,
+		ProjectID: projectID,
 		Task:    "do something",
 		WorkspaceFiles: []transfer.FileInfo{
 			{Path: "main.go", Size: 100, Hash: "sha256:abc123"},
@@ -431,14 +431,14 @@ func TestCreateAgentWithWorkspaceBootstrap_NoStorage(t *testing.T) {
 
 func TestCreateAgentWithWorkspaceBootstrap_NoTask(t *testing.T) {
 	srv, s, _, _ := testBootstrapServer(t)
-	groveID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 
 	// WorkspaceFiles without a task should NOT trigger bootstrap upload —
 	// since ProvisionOnly is not set, the agent is dispatched via DispatchAgentCreate.
 	// Without a broker-reported status, it falls back to "provisioning".
 	body := CreateAgentRequest{
 		Name:    "bootstrap-no-task",
-		GroveID: groveID,
+		ProjectID: projectID,
 		WorkspaceFiles: []transfer.FileInfo{
 			{Path: "main.go", Size: 100, Hash: "sha256:abc123"},
 		},
@@ -471,7 +471,7 @@ func TestCreateAgentWithWorkspaceBootstrap_LocalProvider(t *testing.T) {
 	srv, s, _, disp := testBootstrapServer(t)
 	ctx := context.Background()
 
-	// Create broker and grove
+	// Create broker and project
 	broker := &store.RuntimeBroker{
 		ID:     "broker_local_path_test",
 		Slug:   "local-path-host",
@@ -482,35 +482,35 @@ func TestCreateAgentWithWorkspaceBootstrap_LocalProvider(t *testing.T) {
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	grove := &store.Grove{
-		ID:                     "grove_local_path_test",
-		Slug:                   "local-path-grove",
-		Name:                   "Local Path Grove",
+	project := &store.Project{
+		ID:                     "project_local_path_test",
+		Slug:                   "local-path-project",
+		Name:                   "Local Path Project",
 		GitRemote:              "https://github.com/test/local-path",
 		DefaultRuntimeBrokerID: broker.ID,
 		Created:                time.Now(),
 		Updated:                time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
-	// Add grove provider WITH a LocalPath — this is the key difference
-	provider := &store.GroveProvider{
-		GroveID:    grove.ID,
+	// Add project provider WITH a LocalPath — this is the key difference
+	provider := &store.ProjectProvider{
+		ProjectID:    project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		LocalPath:  "/home/user/project/.scion",
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := s.AddGroveProvider(ctx, provider); err != nil {
-		t.Fatalf("failed to add grove provider: %v", err)
+	if err := s.AddProjectProvider(ctx, provider); err != nil {
+		t.Fatalf("failed to add project provider: %v", err)
 	}
 
 	// Create an agent with workspace files and a task
 	body := CreateAgentRequest{
 		Name:    "local-workspace-agent",
-		GroveID: grove.ID,
+		ProjectID: project.ID,
 		Task:    "do something locally",
 		WorkspaceFiles: []transfer.FileInfo{
 			{Path: "main.go", Size: 100, Hash: "sha256:abc123"},
@@ -560,12 +560,12 @@ func TestCreateAgentWithWorkspaceBootstrap_LocalProvider(t *testing.T) {
 
 func TestCreateAgentWithoutBootstrap(t *testing.T) {
 	srv, s, _, _ := testBootstrapServer(t)
-	groveID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 
 	// Normal create without workspace files - should use normal dispatch path
 	body := CreateAgentRequest{
 		Name:    "normal-agent",
-		GroveID: groveID,
+		ProjectID: projectID,
 		Task:    "do something",
 	}
 
@@ -600,12 +600,12 @@ func TestCreateAgentWithoutBootstrap(t *testing.T) {
 
 func TestCreateThenStartWithTask(t *testing.T) {
 	srv, s, _, disp := testBootstrapServer(t)
-	groveID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 
 	// Step 1: Create the agent (provision-only)
 	createBody := CreateAgentRequest{
 		Name:          "staged-agent",
-		GroveID:       groveID,
+		ProjectID:       projectID,
 		ProvisionOnly: true,
 	}
 	rec := doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents", createBody)
@@ -624,7 +624,7 @@ func TestCreateThenStartWithTask(t *testing.T) {
 	// Step 2: Start the agent with a task (this previously returned 409)
 	startBody := CreateAgentRequest{
 		Name:    "staged-agent",
-		GroveID: groveID,
+		ProjectID: projectID,
 		Task:    "hello world",
 	}
 	rec = doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents", startBody)
@@ -656,12 +656,12 @@ func TestCreateThenStartWithTask(t *testing.T) {
 
 func TestCreateThenStartWithoutTask(t *testing.T) {
 	srv, s, _, disp := testBootstrapServer(t)
-	groveID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 
 	// Step 1: Create the agent with a task (provision-only, task written to prompt.md)
 	createBody := CreateAgentRequest{
 		Name:          "staged-agent-2",
-		GroveID:       groveID,
+		ProjectID:       projectID,
 		Task:          "saved task",
 		ProvisionOnly: true,
 	}
@@ -673,7 +673,7 @@ func TestCreateThenStartWithoutTask(t *testing.T) {
 	// Step 2: Start the agent without a task — task is optional
 	startBody := CreateAgentRequest{
 		Name:    "staged-agent-2",
-		GroveID: groveID,
+		ProjectID: projectID,
 	}
 	rec = doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents", startBody)
 	if rec.Code != http.StatusOK {
@@ -700,7 +700,7 @@ func TestCreateThenStartWithoutTask(t *testing.T) {
 
 func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 	srv, s, stor, disp := testBootstrapServer(t)
-	groveID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 	ctx := context.Background()
 
 	// Create an agent in provisioning status (simulating post-bootstrap-create)
@@ -708,7 +708,7 @@ func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 		ID:              "agent_bootstrap_finalize",
 		Slug:            "bootstrap-finalize",
 		Name:            "Bootstrap Finalize",
-		GroveID:         groveID,
+		ProjectID:         projectID,
 		RuntimeBrokerID: "broker_bootstrap_test",
 		Phase:           string(state.PhaseProvisioning),
 		Visibility:      store.VisibilityPrivate,
@@ -721,7 +721,7 @@ func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 	}
 
 	// Pre-populate the files in mock storage
-	storagePath := "workspaces/" + groveID + "/agent_bootstrap_finalize"
+	storagePath := "workspaces/" + projectID + "/agent_bootstrap_finalize"
 	stor.objects[storagePath+"/files/main.go"] = &storage.Object{
 		Name: storagePath + "/files/main.go",
 	}
@@ -786,7 +786,7 @@ func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 
 func TestSyncToFinalize_BootstrapMode_MissingFile(t *testing.T) {
 	srv, s, stor, _ := testBootstrapServer(t)
-	groveID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 	ctx := context.Background()
 
 	// Create an agent in provisioning status
@@ -794,7 +794,7 @@ func TestSyncToFinalize_BootstrapMode_MissingFile(t *testing.T) {
 		ID:              "agent_bootstrap_missing",
 		Slug:            "bootstrap-missing",
 		Name:            "Bootstrap Missing",
-		GroveID:         groveID,
+		ProjectID:         projectID,
 		RuntimeBrokerID: "broker_bootstrap_test",
 		Phase:           string(state.PhaseProvisioning),
 		Visibility:      store.VisibilityPrivate,
@@ -804,7 +804,7 @@ func TestSyncToFinalize_BootstrapMode_MissingFile(t *testing.T) {
 	}
 
 	// Only put one file in storage
-	storagePath := "workspaces/" + groveID + "/agent_bootstrap_missing"
+	storagePath := "workspaces/" + projectID + "/agent_bootstrap_missing"
 	stor.objects[storagePath+"/files/main.go"] = &storage.Object{
 		Name: storagePath + "/files/main.go",
 	}
@@ -830,7 +830,7 @@ func TestSyncToFinalize_BootstrapMode_MissingFile(t *testing.T) {
 
 func TestSyncToFinalize_RejectsStoppedAgent(t *testing.T) {
 	srv, s, _, _ := testBootstrapServer(t)
-	groveID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 	ctx := context.Background()
 
 	// Create an agent in stopped status
@@ -838,7 +838,7 @@ func TestSyncToFinalize_RejectsStoppedAgent(t *testing.T) {
 		ID:              "agent_bootstrap_stopped",
 		Slug:            "bootstrap-stopped",
 		Name:            "Bootstrap Stopped",
-		GroveID:         groveID,
+		ProjectID:         projectID,
 		RuntimeBrokerID: "broker_bootstrap_test",
 		Phase:           string(state.PhaseStopped),
 		Visibility:      store.VisibilityPrivate,
@@ -881,14 +881,14 @@ func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 	srv.SetStorage(stor)
 	// No dispatcher set
 
-	groveID, _ := setupGroveAndBroker(t, s)
+	projectID, _ := setupProjectAndBroker(t, s)
 	ctx := context.Background()
 
 	agent := &store.Agent{
 		ID:              "agent_bootstrap_nodisp",
 		Slug:            "bootstrap-nodisp",
 		Name:            "Bootstrap No Dispatcher",
-		GroveID:         groveID,
+		ProjectID:         projectID,
 		RuntimeBrokerID: "broker_bootstrap_test",
 		Phase:           string(state.PhaseProvisioning),
 		Visibility:      store.VisibilityPrivate,
@@ -897,7 +897,7 @@ func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	storagePath := "workspaces/" + groveID + "/agent_bootstrap_nodisp"
+	storagePath := "workspaces/" + projectID + "/agent_bootstrap_nodisp"
 	stor.objects[storagePath+"/files/main.go"] = &storage.Object{
 		Name: storagePath + "/files/main.go",
 	}
@@ -926,12 +926,12 @@ func TestDispatcherPassesWorkspaceStoragePath(t *testing.T) {
 		ID:              "agent_with_storage_path",
 		Slug:            "storage-path-agent",
 		Name:            "Storage Path Agent",
-		GroveID:         "grove_test",
+		ProjectID:         "project_test",
 		RuntimeBrokerID: "broker_test",
 		Phase:           string(state.PhaseProvisioning),
 		AppliedConfig: &store.AgentAppliedConfig{
 			Task:                 "test task",
-			WorkspaceStoragePath: "workspaces/grove_test/agent_with_storage_path",
+			WorkspaceStoragePath: "workspaces/project_test/agent_with_storage_path",
 		},
 	}
 
@@ -939,7 +939,7 @@ func TestDispatcherPassesWorkspaceStoragePath(t *testing.T) {
 	if agent.AppliedConfig.WorkspaceStoragePath == "" {
 		t.Error("expected WorkspaceStoragePath to be set")
 	}
-	if agent.AppliedConfig.WorkspaceStoragePath != "workspaces/grove_test/agent_with_storage_path" {
+	if agent.AppliedConfig.WorkspaceStoragePath != "workspaces/project_test/agent_with_storage_path" {
 		t.Errorf("unexpected WorkspaceStoragePath: %q", agent.AppliedConfig.WorkspaceStoragePath)
 	}
 }
@@ -1064,13 +1064,13 @@ func TestBrokerCreateAgentRequest_WorkspaceStoragePath(t *testing.T) {
 	// in the broker's CreateAgentRequest
 	reqJSON := `{
 		"name": "test-agent",
-		"grovePath": "/path/to/grove",
-		"workspaceStoragePath": "workspaces/grove1/agent1"
+		"projectPath": "/path/to/project",
+		"workspaceStoragePath": "workspaces/project1/agent1"
 	}`
 
 	var req struct {
 		Name                 string `json:"name"`
-		GrovePath            string `json:"grovePath"`
+		ProjectPath            string `json:"projectPath"`
 		WorkspaceStoragePath string `json:"workspaceStoragePath"`
 	}
 
@@ -1078,11 +1078,11 @@ func TestBrokerCreateAgentRequest_WorkspaceStoragePath(t *testing.T) {
 		t.Fatalf("failed to unmarshal: %v", err)
 	}
 
-	if req.WorkspaceStoragePath != "workspaces/grove1/agent1" {
-		t.Errorf("expected WorkspaceStoragePath 'workspaces/grove1/agent1', got %q", req.WorkspaceStoragePath)
+	if req.WorkspaceStoragePath != "workspaces/project1/agent1" {
+		t.Errorf("expected WorkspaceStoragePath 'workspaces/project1/agent1', got %q", req.WorkspaceStoragePath)
 	}
-	if req.GrovePath != "/path/to/grove" {
-		t.Errorf("expected GrovePath '/path/to/grove', got %q", req.GrovePath)
+	if req.ProjectPath != "/path/to/project" {
+		t.Errorf("expected ProjectPath '/path/to/project', got %q", req.ProjectPath)
 	}
 }
 
@@ -1094,7 +1094,7 @@ func TestAgentAppliedConfig_WorkspaceStoragePath(t *testing.T) {
 	// Test that WorkspaceStoragePath is properly serialized in AgentAppliedConfig
 	config := &store.AgentAppliedConfig{
 		Task:                 "test task",
-		WorkspaceStoragePath: "workspaces/grove1/agent1",
+		WorkspaceStoragePath: "workspaces/project1/agent1",
 	}
 
 	data, err := json.Marshal(config)
@@ -1107,8 +1107,8 @@ func TestAgentAppliedConfig_WorkspaceStoragePath(t *testing.T) {
 		t.Fatalf("failed to unmarshal: %v", err)
 	}
 
-	if decoded.WorkspaceStoragePath != "workspaces/grove1/agent1" {
-		t.Errorf("expected WorkspaceStoragePath 'workspaces/grove1/agent1', got %q", decoded.WorkspaceStoragePath)
+	if decoded.WorkspaceStoragePath != "workspaces/project1/agent1" {
+		t.Errorf("expected WorkspaceStoragePath 'workspaces/project1/agent1', got %q", decoded.WorkspaceStoragePath)
 	}
 	if decoded.Task != "test task" {
 		t.Errorf("expected Task 'test task', got %q", decoded.Task)

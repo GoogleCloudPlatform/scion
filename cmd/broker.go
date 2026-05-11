@@ -58,9 +58,9 @@ var (
 	brokerRestartDebug       bool
 
 	// broker provide/withdraw flags
-	brokerGroveID     string
+	brokerProjectID     string
 	brokerBrokerID    string // --broker flag for remote broker operations
-	brokerMakeDefault bool   // --make-default flag to set broker as grove default
+	brokerMakeDefault bool   // --make-default flag to set broker as project default
 	brokerHubFlag     string // --hub flag to target a specific hub connection
 
 	// broker hubs flags
@@ -74,18 +74,18 @@ var brokerCmd = &cobra.Command{
 	Long: `Commands for managing this host as a Runtime Broker.
 
 A Runtime Broker is a compute node that executes agents on behalf of the Hub.
-Brokers register with the Hub and can be added as providers for groves.
+Brokers register with the Hub and can be added as providers for projects.
 
 Commands:
-  status       Show broker status (server, registration, groves)
+  status       Show broker status (server, registration, projects)
   start        Start the broker server (as daemon by default)
   stop         Stop the broker daemon
   restart      Stop and restart the broker daemon
   register     Register this host as a Runtime Broker with the Hub
   deregister   Remove this broker from the Hub
   hubs         List hub connections
-  provide      Add this broker as a provider for a grove
-  withdraw     Remove this broker as a provider from a grove`,
+  provide      Add this broker as a provider for a project
+  withdraw     Remove this broker as a provider from a project`,
 }
 
 // brokerRegisterCmd registers this broker with the Hub
@@ -128,10 +128,10 @@ var brokerDeregisterCmd = &cobra.Command{
 	Long: `Remove this broker from the Hub.
 
 This command will:
-1. Remove this broker from all groves it provides for
+1. Remove this broker from all projects it provides for
 2. Clear the stored broker token
 
-Use --broker-only to only remove the broker record without affecting grove providers.`,
+Use --broker-only to only remove the broker record without affecting project providers.`,
 	RunE: runBrokerDeregister,
 }
 
@@ -162,61 +162,61 @@ Examples:
 	RunE: runBrokerStart,
 }
 
-// brokerProvideCmd adds this broker as a provider for a grove
+// brokerProvideCmd adds this broker as a provider for a project
 var brokerProvideCmd = &cobra.Command{
 	Use:   "provide",
-	Short: "Add a broker as a provider for a grove",
-	Long: `Add a broker as a provider for a grove.
+	Short: "Add a broker as a provider for a project",
+	Long: `Add a broker as a provider for a project.
 
-When a broker is a provider for a grove, it can execute agents
-for that grove. The Hub will dispatch agent operations to the
-broker when agents are created in the grove.
+When a broker is a provider for a project, it can execute agents
+for that project. The Hub will dispatch agent operations to the
+broker when agents are created in the project.
 
-If --grove is not specified, uses the current local grove.
+If --project is not specified, uses the current local project.
 If --broker is not specified, uses the local broker registration.
 
-Use --make-default to set the broker as the default for the grove. If the
-grove already has a different default broker, you will be prompted to confirm
+Use --make-default to set the broker as the default for the project. If the
+project already has a different default broker, you will be prompted to confirm
 the change.
 
 Examples:
-  # Add local broker as provider for current grove
+  # Add local broker as provider for current project
   scion broker provide
 
-  # Add local broker as provider for a specific grove
-  scion broker provide --grove <grove-id>
+  # Add local broker as provider for a specific project
+  scion broker provide --project <project-id>
 
-  # Add a remote broker as provider for a grove (admin only)
-  scion broker provide --broker <broker-id> --grove <grove-id>
+  # Add a remote broker as provider for a project (admin only)
+  scion broker provide --broker <broker-id> --project <project-id>
 
   # Add broker as provider and set as default
   scion broker provide --make-default`,
 	RunE: runBrokerProvide,
 }
 
-// brokerWithdrawCmd removes this broker as a provider from a grove
+// brokerWithdrawCmd removes this broker as a provider from a project
 var brokerWithdrawCmd = &cobra.Command{
 	Use:   "withdraw",
-	Short: "Remove a broker as a provider from a grove",
-	Long: `Remove a broker as a provider from a grove.
+	Short: "Remove a broker as a provider from a project",
+	Long: `Remove a broker as a provider from a project.
 
 After withdrawing, the broker will no longer receive agent dispatch
-requests for the grove. Existing agents on the broker will continue
+requests for the project. Existing agents on the broker will continue
 running but cannot be managed through the Hub until the broker is
 re-added as a provider.
 
-If --grove is not specified, uses the current local grove.
+If --project is not specified, uses the current local project.
 If --broker is not specified, uses the local broker registration.
 
 Examples:
-  # Remove local broker as provider from current grove
+  # Remove local broker as provider from current project
   scion broker withdraw
 
-  # Remove local broker as provider from a specific grove
-  scion broker withdraw --grove <grove-id>
+  # Remove local broker as provider from a specific project
+  scion broker withdraw --project <project-id>
 
-  # Remove a remote broker as provider from a grove (admin only)
-  scion broker withdraw --broker <broker-id> --grove <grove-id>`,
+  # Remove a remote broker as provider from a project (admin only)
+  scion broker withdraw --broker <broker-id> --project <project-id>`,
 	RunE: runBrokerWithdraw,
 }
 
@@ -247,7 +247,7 @@ var brokerStatusCmd = &cobra.Command{
 This command displays:
 - Whether the broker server is running (daemon or foreground)
 - Hub registration status
-- Groves this broker provides for
+- Projects this broker provides for
 - Connection status to the Hub
 
 If --broker is not specified, shows the local broker status.
@@ -320,7 +320,7 @@ func init() {
 
 	// Restart flags
 	brokerRestartCmd.Flags().IntVar(&brokerRestartPort, "port", DefaultBrokerPort, "Runtime Broker API port")
-	brokerRestartCmd.Flags().BoolVar(&brokerRestartAutoProvide, "auto-provide", false, "Automatically add as provider for new groves")
+	brokerRestartCmd.Flags().BoolVar(&brokerRestartAutoProvide, "auto-provide", false, "Automatically add as provider for new projects")
 	brokerRestartCmd.Flags().BoolVar(&brokerRestartDebug, "debug", false, "Enable debug logging (verbose output)")
 
 	// Status flags
@@ -329,11 +329,11 @@ func init() {
 
 	// Register flags
 	brokerRegisterCmd.Flags().BoolVar(&brokerForceRegister, "force", false, "Force re-registration even if already registered")
-	brokerRegisterCmd.Flags().BoolVar(&brokerAutoProvide, "auto-provide", false, "Automatically add as provider for new groves")
+	brokerRegisterCmd.Flags().BoolVar(&brokerAutoProvide, "auto-provide", false, "Automatically add as provider for new projects")
 	brokerRegisterCmd.Flags().StringVar(&brokerHubName, "name", "", "Name for this hub connection (derived from endpoint if not specified)")
 
 	// Deregister flags
-	brokerDeregisterCmd.Flags().BoolVar(&brokerDeregisterBrokerOnly, "broker-only", false, "Only remove broker record, not grove providers")
+	brokerDeregisterCmd.Flags().BoolVar(&brokerDeregisterBrokerOnly, "broker-only", false, "Only remove broker record, not project providers")
 	brokerDeregisterCmd.Flags().StringVar(&brokerDeregisterName, "name", "", "Name of the hub connection to deregister")
 
 	// Hubs flags
@@ -342,29 +342,38 @@ func init() {
 	// Start flags
 	brokerStartCmd.Flags().BoolVar(&brokerStartForeground, "foreground", false, "Run in foreground instead of as daemon")
 	brokerStartCmd.Flags().IntVar(&brokerStartPort, "port", DefaultBrokerPort, "Runtime Broker API port")
-	brokerStartCmd.Flags().BoolVar(&brokerStartAutoProvide, "auto-provide", false, "Automatically add as provider for new groves")
+	brokerStartCmd.Flags().BoolVar(&brokerStartAutoProvide, "auto-provide", false, "Automatically add as provider for new projects")
 	brokerStartCmd.Flags().BoolVar(&brokerStartDebug, "debug", false, "Enable debug logging (verbose output)")
 
 	// Provide/withdraw flags
-	brokerProvideCmd.Flags().StringVar(&brokerGroveID, "grove", "", "Grove name or ID to add as provider for")
+	brokerProvideCmd.Flags().StringVar(&brokerProjectID, "project", "", "Project name or ID to add as provider for")
+	brokerProvideCmd.Flags().StringVar(&brokerProjectID, "grove", "", "Deprecated alias for --project")
+	_ = brokerProvideCmd.Flags().MarkDeprecated("grove", "use --project instead")
+	_ = brokerProvideCmd.Flags().MarkHidden("grove")
+
 	brokerProvideCmd.Flags().StringVar(&brokerBrokerID, "broker", "", "Broker name or ID to use (for remote broker operations)")
-	brokerProvideCmd.Flags().BoolVar(&brokerMakeDefault, "make-default", false, "Set this broker as the default for the grove")
+	brokerProvideCmd.Flags().BoolVar(&brokerMakeDefault, "make-default", false, "Set this broker as the default for the project")
 	brokerProvideCmd.Flags().StringVar(&brokerHubFlag, "hub", "", "Hub connection name (from 'scion broker hubs')")
-	brokerWithdrawCmd.Flags().StringVar(&brokerGroveID, "grove", "", "Grove name or ID to remove as provider from")
+
+	brokerWithdrawCmd.Flags().StringVar(&brokerProjectID, "project", "", "Project name or ID to remove as provider from")
+	brokerWithdrawCmd.Flags().StringVar(&brokerProjectID, "grove", "", "Deprecated alias for --project")
+	_ = brokerWithdrawCmd.Flags().MarkDeprecated("grove", "use --project instead")
+	_ = brokerWithdrawCmd.Flags().MarkHidden("grove")
+
 	brokerWithdrawCmd.Flags().StringVar(&brokerBrokerID, "broker", "", "Broker name or ID to use (for remote broker operations)")
 	brokerWithdrawCmd.Flags().StringVar(&brokerHubFlag, "hub", "", "Hub connection name (from 'scion broker hubs')")
 }
 
 func runBrokerRegister(cmd *cobra.Command, args []string) error {
-	// Resolve grove path to find project settings (needed for Hub endpoint config)
-	gp := grovePath
+	// Resolve project path to find project settings (needed for Hub endpoint config)
+	gp := projectPath
 	if gp == "" && globalMode {
 		gp = "global"
 	}
 
-	resolvedPath, isGlobal, err := config.ResolveGrovePath(gp)
+	resolvedPath, isGlobal, err := config.ResolveProjectPath(gp)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -384,7 +393,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("Broker server is running (status: %s, version: %s)\n", health.Status, health.Version)
 
-	// Step 2: Check if grove is linked to Hub
+	// Step 2: Check if project is linked to Hub
 	client, err := getHubClient(settings)
 	if err != nil {
 		return err
@@ -398,44 +407,44 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("Hub at %s is not responding: %w", endpoint, err)
 	}
 
-	// Get grove name for display
-	var groveName string
+	// Get project name for display
+	var projectName string
 	if isGlobal {
-		groveName = "global"
+		projectName = "global"
 	} else {
 		gitRemote := util.GetGitRemote()
 		if gitRemote != "" {
-			groveName = util.ExtractRepoName(gitRemote)
+			projectName = util.ExtractRepoName(gitRemote)
 		} else {
-			groveName = config.GetGroveName(resolvedPath)
+			projectName = config.GetProjectName(resolvedPath)
 		}
 	}
 
-	// Check if grove is linked — prefer hub.groveId over grove_id
-	groveID := settings.GetHubGroveID()
-	if groveID == "" {
-		groveID = settings.GroveID
+	// Check if project is linked — prefer hub.projectId over project_id
+	projectID := settings.GetHubProjectID()
+	if projectID == "" {
+		projectID = settings.ProjectID
 	}
-	groveLinked := false
-	if groveID != "" {
-		groveLinked, _ = isGroveLinked(ctx, client, groveID)
+	projectLinked := false
+	if projectID != "" {
+		projectLinked, _ = isProjectLinked(ctx, client, projectID)
 	}
 
-	if !groveLinked && !settings.IsHubEnabled() {
-		// Grove not linked - offer to link first
-		if hubsync.ShowLinkBeforeRegisterPrompt(groveName, autoConfirm) {
+	if !projectLinked && !settings.IsHubEnabled() {
+		// Project not linked - offer to link first
+		if hubsync.ShowLinkBeforeRegisterPrompt(projectName, autoConfirm) {
 			// Run the link flow
 			if err := runHubLink(cmd, args); err != nil {
-				return fmt.Errorf("failed to link grove: %w", err)
+				return fmt.Errorf("failed to link project: %w", err)
 			}
 			// Reload settings after linking
 			settings, err = config.LoadSettings(resolvedPath)
 			if err != nil {
 				return fmt.Errorf("failed to reload settings: %w", err)
 			}
-			groveID = settings.GetHubGroveID()
-			if groveID == "" {
-				groveID = settings.GroveID
+			projectID = settings.GetHubProjectID()
+			if projectID == "" {
+				projectID = settings.ProjectID
 			}
 		}
 	}
@@ -592,12 +601,12 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// If grove is linked, offer to add this broker as a provider
-	if groveID != "" && settings.IsHubEnabled() {
-		if hubsync.ShowGroveProviderPrompt(groveName, autoConfirm) {
-			req := &hubclient.RegisterGroveRequest{
-				ID:       groveID,
-				Name:     groveName,
+	// If project is linked, offer to add this broker as a provider
+	if projectID != "" && settings.IsHubEnabled() {
+		if hubsync.ShowProjectProviderPrompt(projectName, autoConfirm) {
+			req := &hubclient.RegisterProjectRequest{
+				ID:       projectID,
+				Name:     projectName,
 				Path:     resolvedPath,
 				BrokerID: brokerID,
 			}
@@ -605,11 +614,11 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 				req.GitRemote = util.NormalizeGitRemote(util.GetGitRemote())
 			}
 
-			resp, err := client.Groves().Register(ctx, req)
+			resp, err := client.Projects().Register(ctx, req)
 			if err != nil {
-				fmt.Printf("Warning: failed to add broker to grove: %v\n", err)
+				fmt.Printf("Warning: failed to add broker to project: %v\n", err)
 			} else {
-				fmt.Printf("Broker added as provider to grove '%s'\n", resp.Grove.Name)
+				fmt.Printf("Broker added as provider to project '%s'\n", resp.Project.Name)
 			}
 		}
 	}
@@ -617,7 +626,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Printf("Broker '%s' registered successfully (ID: %s)\n", brokerName, brokerID)
 	if brokerAutoProvide {
-		fmt.Println("Auto-provide is enabled - broker will be added to new groves automatically.")
+		fmt.Println("Auto-provide is enabled - broker will be added to new projects automatically.")
 	}
 	fmt.Println("\nThe broker server will automatically connect to the Hub.")
 	fmt.Println("Use 'scion hub status' to check the connection status.")
@@ -687,9 +696,9 @@ func runBrokerDeregister(cmd *cobra.Command, args []string) error {
 	}
 
 	// Load settings for Hub client
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -713,19 +722,19 @@ func runBrokerDeregister(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Broker server is running (status: %s)\n", health.Status)
 	}
 
-	// Fetch list of groves this broker provides for
-	var groveNames []string
-	grovesResp, err := client.RuntimeBrokers().ListGroves(ctx, brokerID)
+	// Fetch list of projects this broker provides for
+	var projectNames []string
+	projectsResp, err := client.RuntimeBrokers().ListProjects(ctx, brokerID)
 	if err != nil {
-		util.Debugf("Warning: failed to list broker groves: %v", err)
-	} else if grovesResp != nil {
-		for _, g := range grovesResp.Groves {
-			groveNames = append(groveNames, g.GroveName)
+		util.Debugf("Warning: failed to list broker projects: %v", err)
+	} else if projectsResp != nil {
+		for _, g := range projectsResp.Projects {
+			projectNames = append(projectNames, g.ProjectName)
 		}
 	}
 
-	// Show confirmation prompt with grove list
-	if !hubsync.ShowBrokerDeregistrationPrompt(brokerID, groveNames, autoConfirm) {
+	// Show confirmation prompt with project list
+	if !hubsync.ShowBrokerDeregistrationPrompt(brokerID, projectNames, autoConfirm) {
 		return fmt.Errorf("deregistration cancelled")
 	}
 
@@ -759,8 +768,8 @@ func runBrokerDeregister(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Printf("Broker '%s' has been deregistered from the Hub.\n", brokerID)
 	fmt.Println("Local broker credentials have been cleared.")
-	if len(groveNames) > 0 {
-		fmt.Printf("The broker has been removed from %d grove(s).\n", len(groveNames))
+	if len(projectNames) > 0 {
+		fmt.Printf("The broker has been removed from %d project(s).\n", len(projectNames))
 	}
 
 	return nil
@@ -1013,49 +1022,49 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Resolve grove ID
-	var groveID string
-	var groveName string
-	var localGrovePath string // Local path to the grove's .scion directory on this broker
+	// Resolve project ID
+	var projectID string
+	var projectName string
+	var localProjectPath string // Local path to the project's .scion directory on this broker
 
-	if brokerGroveID != "" {
-		groveID = brokerGroveID
-		groveName = groveID // Will be updated after fetching
+	if brokerProjectID != "" {
+		projectID = brokerProjectID
+		projectName = projectID // Will be updated after fetching
 	} else {
-		// Use current grove
-		resolvedPath, isGlobal, err := config.ResolveGrovePath(grovePath)
+		// Use current project
+		resolvedPath, isGlobal, err := config.ResolveProjectPath(projectPath)
 		if err != nil {
-			return fmt.Errorf("failed to resolve grove path: %w\n\nSpecify a grove with --grove <name-or-id>", err)
+			return fmt.Errorf("failed to resolve project path: %w\n\nSpecify a project with --project <name-or-id>", err)
 		}
-		localGrovePath = resolvedPath
+		localProjectPath = resolvedPath
 
 		settings, err := config.LoadSettings(resolvedPath)
 		if err != nil {
 			return fmt.Errorf("failed to load settings: %w", err)
 		}
 
-		groveID = settings.GetHubGroveID()
-		if groveID == "" {
-			groveID = settings.GroveID
+		projectID = settings.GetHubProjectID()
+		if projectID == "" {
+			projectID = settings.ProjectID
 		}
-		if groveID == "" {
-			return fmt.Errorf("current grove is not linked to the Hub.\n\nLink it first with: scion hub link\nOr specify a grove with --grove <name-or-id>")
+		if projectID == "" {
+			return fmt.Errorf("current project is not linked to the Hub.\n\nLink it first with: scion hub link\nOr specify a project with --project <name-or-id>")
 		}
 
-		// Get grove name for display
+		// Get project name for display
 		if isGlobal {
-			groveName = "global"
+			projectName = "global"
 		} else {
 			gitRemote := util.GetGitRemote()
 			if gitRemote != "" {
-				groveName = util.ExtractRepoName(gitRemote)
+				projectName = util.ExtractRepoName(gitRemote)
 			} else {
-				groveName = config.GetGroveName(resolvedPath)
+				projectName = config.GetProjectName(resolvedPath)
 			}
 		}
 	}
 
-	// Load Hub client: use --hub flag if specified, otherwise fall back to grove settings
+	// Load Hub client: use --hub flag if specified, otherwise fall back to project settings
 	var client hubclient.Client
 	if brokerHubFlag != "" {
 		var err error
@@ -1063,19 +1072,19 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		// Try to resolve local grove path when using --hub flag with --grove
-		if localGrovePath == "" {
-			if rp, _, err := config.ResolveGrovePath(grovePath); err == nil {
-				localGrovePath = rp
+		// Try to resolve local project path when using --hub flag with --project
+		if localProjectPath == "" {
+			if rp, _, err := config.ResolveProjectPath(projectPath); err == nil {
+				localProjectPath = rp
 			}
 		}
 	} else {
-		resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+		resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 		if err != nil {
-			return fmt.Errorf("failed to resolve grove path: %w", err)
+			return fmt.Errorf("failed to resolve project path: %w", err)
 		}
-		if localGrovePath == "" {
-			localGrovePath = resolvedPath
+		if localProjectPath == "" {
+			localProjectPath = resolvedPath
 		}
 
 		settings, err := config.LoadSettings(resolvedPath)
@@ -1092,14 +1101,14 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// If we used --grove flag, resolve grove by name or ID
-	if brokerGroveID != "" {
-		grove, err := resolveGroveByNameOrID(ctx, client, brokerGroveID)
+	// If we used --project flag, resolve project by name or ID
+	if brokerProjectID != "" {
+		project, err := resolveProjectByNameOrID(ctx, client, brokerProjectID)
 		if err != nil {
-			return fmt.Errorf("failed to find grove '%s': %w", brokerGroveID, err)
+			return fmt.Errorf("failed to find project '%s': %w", brokerProjectID, err)
 		}
-		groveID = grove.ID
-		groveName = grove.Name
+		projectID = project.ID
+		projectName = project.Name
 	}
 
 	// If we used --broker flag, resolve broker by name or ID
@@ -1116,43 +1125,43 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	}
 
 	// Show confirmation prompt
-	if !hubsync.ShowProvidePrompt(groveName, brokerName, autoConfirm) {
+	if !hubsync.ShowProvidePrompt(projectName, brokerName, autoConfirm) {
 		return fmt.Errorf("operation cancelled")
 	}
 
 	// Add broker as provider
-	req := &hubclient.RegisterGroveRequest{
-		ID:       groveID,
-		Name:     groveName,
+	req := &hubclient.RegisterProjectRequest{
+		ID:       projectID,
+		Name:     projectName,
 		BrokerID: brokerID,
-		Path:     localGrovePath,
+		Path:     localProjectPath,
 	}
 
-	resp, err := client.Groves().Register(ctx, req)
+	resp, err := client.Projects().Register(ctx, req)
 	if err != nil {
 		return fmt.Errorf("failed to add broker as provider: %w", err)
 	}
 
 	fmt.Println()
-	fmt.Printf("Broker '%s' added as provider for grove '%s'\n", brokerName, resp.Grove.Name)
+	fmt.Printf("Broker '%s' added as provider for project '%s'\n", brokerName, resp.Project.Name)
 
 	// Handle --make-default flag
 	if brokerMakeDefault {
-		currentDefault := resp.Grove.DefaultRuntimeBrokerID
+		currentDefault := resp.Project.DefaultRuntimeBrokerID
 
 		if currentDefault == brokerID {
 			// Already the default, nothing to do
-			fmt.Printf("Broker '%s' is already the default for grove '%s'\n", brokerName, resp.Grove.Name)
+			fmt.Printf("Broker '%s' is already the default for project '%s'\n", brokerName, resp.Project.Name)
 		} else if currentDefault == "" {
 			// No default set - the server should have auto-set it during provide,
 			// but set it explicitly to be sure
-			_, err := client.Groves().Update(ctx, resp.Grove.ID, &hubclient.UpdateGroveRequest{
+			_, err := client.Projects().Update(ctx, resp.Project.ID, &hubclient.UpdateProjectRequest{
 				DefaultRuntimeBrokerID: brokerID,
 			})
 			if err != nil {
 				return fmt.Errorf("failed to set default broker: %w", err)
 			}
-			fmt.Printf("Broker '%s' set as default for grove '%s'\n", brokerName, resp.Grove.Name)
+			fmt.Printf("Broker '%s' set as default for project '%s'\n", brokerName, resp.Project.Name)
 		} else {
 			// Different default already set - resolve its name and confirm
 			currentDefaultName := currentDefault[:8] // fallback to truncated ID
@@ -1161,16 +1170,16 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 				currentDefaultName = currentBroker.Name
 			}
 
-			if !hubsync.ShowChangeDefaultBrokerPrompt(resp.Grove.Name, currentDefaultName, brokerName, autoConfirm) {
+			if !hubsync.ShowChangeDefaultBrokerPrompt(resp.Project.Name, currentDefaultName, brokerName, autoConfirm) {
 				fmt.Println("Default broker not changed.")
 			} else {
-				_, err := client.Groves().Update(ctx, resp.Grove.ID, &hubclient.UpdateGroveRequest{
+				_, err := client.Projects().Update(ctx, resp.Project.ID, &hubclient.UpdateProjectRequest{
 					DefaultRuntimeBrokerID: brokerID,
 				})
 				if err != nil {
 					return fmt.Errorf("failed to update default broker: %w", err)
 				}
-				fmt.Printf("Default broker for grove '%s' changed from '%s' to '%s'\n", resp.Grove.Name, currentDefaultName, brokerName)
+				fmt.Printf("Default broker for project '%s' changed from '%s' to '%s'\n", resp.Project.Name, currentDefaultName, brokerName)
 			}
 		}
 	}
@@ -1202,18 +1211,18 @@ func runBrokerWithdraw(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Resolve grove ID
-	var groveID string
-	var groveName string
+	// Resolve project ID
+	var projectID string
+	var projectName string
 
-	if brokerGroveID != "" {
-		groveID = brokerGroveID
-		groveName = groveID // Will be updated after fetching
+	if brokerProjectID != "" {
+		projectID = brokerProjectID
+		projectName = projectID // Will be updated after fetching
 	} else {
-		// Use current grove
-		resolvedPath, isGlobal, err := config.ResolveGrovePath(grovePath)
+		// Use current project
+		resolvedPath, isGlobal, err := config.ResolveProjectPath(projectPath)
 		if err != nil {
-			return fmt.Errorf("failed to resolve grove path: %w\n\nSpecify a grove with --grove <name-or-id>", err)
+			return fmt.Errorf("failed to resolve project path: %w\n\nSpecify a project with --project <name-or-id>", err)
 		}
 
 		settings, err := config.LoadSettings(resolvedPath)
@@ -1221,28 +1230,28 @@ func runBrokerWithdraw(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to load settings: %w", err)
 		}
 
-		groveID = settings.GetHubGroveID()
-		if groveID == "" {
-			groveID = settings.GroveID
+		projectID = settings.GetHubProjectID()
+		if projectID == "" {
+			projectID = settings.ProjectID
 		}
-		if groveID == "" {
-			return fmt.Errorf("current grove is not linked to the Hub.\n\nSpecify a grove with --grove <name-or-id>")
+		if projectID == "" {
+			return fmt.Errorf("current project is not linked to the Hub.\n\nSpecify a project with --project <name-or-id>")
 		}
 
-		// Get grove name for display
+		// Get project name for display
 		if isGlobal {
-			groveName = "global"
+			projectName = "global"
 		} else {
 			gitRemote := util.GetGitRemote()
 			if gitRemote != "" {
-				groveName = util.ExtractRepoName(gitRemote)
+				projectName = util.ExtractRepoName(gitRemote)
 			} else {
-				groveName = config.GetGroveName(resolvedPath)
+				projectName = config.GetProjectName(resolvedPath)
 			}
 		}
 	}
 
-	// Load Hub client: use --hub flag if specified, otherwise fall back to grove settings
+	// Load Hub client: use --hub flag if specified, otherwise fall back to project settings
 	var client hubclient.Client
 	if brokerHubFlag != "" {
 		var err error
@@ -1251,9 +1260,9 @@ func runBrokerWithdraw(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	} else {
-		resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+		resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 		if err != nil {
-			return fmt.Errorf("failed to resolve grove path: %w", err)
+			return fmt.Errorf("failed to resolve project path: %w", err)
 		}
 
 		settings, err := config.LoadSettings(resolvedPath)
@@ -1270,14 +1279,14 @@ func runBrokerWithdraw(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// If we used --grove flag, resolve grove by name or ID
-	if brokerGroveID != "" {
-		grove, err := resolveGroveByNameOrID(ctx, client, brokerGroveID)
+	// If we used --project flag, resolve project by name or ID
+	if brokerProjectID != "" {
+		project, err := resolveProjectByNameOrID(ctx, client, brokerProjectID)
 		if err != nil {
-			return fmt.Errorf("failed to find grove '%s': %w", brokerGroveID, err)
+			return fmt.Errorf("failed to find project '%s': %w", brokerProjectID, err)
 		}
-		groveID = grove.ID
-		groveName = grove.Name
+		projectID = project.ID
+		projectName = project.Name
 	}
 
 	// If we used --broker flag, resolve broker by name or ID
@@ -1294,20 +1303,21 @@ func runBrokerWithdraw(cmd *cobra.Command, args []string) error {
 	}
 
 	// Show confirmation prompt
-	if !hubsync.ShowWithdrawPrompt(groveName, brokerName, autoConfirm) {
+	if !hubsync.ShowWithdrawPrompt(projectName, brokerName, autoConfirm) {
 		return fmt.Errorf("operation cancelled")
 	}
 
 	// Remove broker as provider
-	if err := client.Groves().RemoveProvider(ctx, groveID, brokerID); err != nil {
+	if err := client.Projects().RemoveProvider(ctx, projectID, brokerID); err != nil {
 		return fmt.Errorf("failed to remove broker as provider: %w", err)
 	}
 
 	fmt.Println()
-	fmt.Printf("Broker '%s' removed as provider from grove '%s'\n", brokerName, groveName)
+	fmt.Printf("Broker '%s' removed as provider from project '%s'\n", brokerName, projectName)
 
 	return nil
-}
+	}
+
 
 func runBrokerStatus(cmd *cobra.Command, args []string) error {
 	// Bridge --json flag to global --format
@@ -1400,9 +1410,9 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 	// Get broker name
 	status.Hostname, _ = os.Hostname()
 
-	// If registered, try to get Hub status and grove list
+	// If registered, try to get Hub status and project list
 	if status.Registered && status.HubEndpoint != "" {
-		resolvedPath, _, _ := config.ResolveGrovePath(grovePath)
+		resolvedPath, _, _ := config.ResolveProjectPath(projectPath)
 		settings, err := config.LoadSettings(resolvedPath)
 		if err == nil {
 			client, err := getHubClient(settings)
@@ -1430,14 +1440,14 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 						status.Registered = false
 					}
 
-					// Get groves this broker provides for (only if still registered)
+					// Get projects this broker provides for (only if still registered)
 					if status.Registered {
-						grovesResp, err := client.RuntimeBrokers().ListGroves(ctx, status.BrokerID)
-						if err == nil && grovesResp != nil {
-							for _, g := range grovesResp.Groves {
-								status.Groves = append(status.Groves, brokerGroveStatus{
-									ID:   g.GroveID,
-									Name: g.GroveName,
+						projectsResp, err := client.RuntimeBrokers().ListProjects(ctx, status.BrokerID)
+						if err == nil && projectsResp != nil {
+							for _, g := range projectsResp.Projects {
+								status.Projects = append(status.Projects, brokerProjectStatus{
+									ID:   g.ProjectID,
+									Name: g.ProjectName,
 								})
 							}
 						}
@@ -1554,22 +1564,23 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 
-	// Groves
-	if len(status.Groves) > 0 {
-		fmt.Println("Groves (Provider)")
+	// Projects
+	if len(status.Projects) > 0 {
+		fmt.Println("Projects (Provider)")
 		fmt.Println("-----------------")
-		for _, g := range status.Groves {
+		for _, g := range status.Projects {
 			fmt.Printf("  - %s (ID: %s)\n", g.Name, g.ID)
 		}
 	} else if status.Registered {
-		fmt.Println("Groves (Provider)")
+		fmt.Println("Projects (Provider)")
 		fmt.Println("-----------------")
 		fmt.Printf("  (none)\n")
-		fmt.Printf("\n  Run 'scion broker provide' to add this broker as a provider for a grove.\n")
+		fmt.Printf("\n  Run 'scion broker provide' to add this broker as a provider for a project.\n")
 	}
 
 	return nil
-}
+	}
+
 
 func runBrokerHubs(cmd *cobra.Command, args []string) error {
 	// Bridge --json flag to global --format
@@ -1648,9 +1659,9 @@ func runBrokerHubs(cmd *cobra.Command, args []string) error {
 // runRemoteBrokerStatus fetches and displays status for a remote broker from the Hub
 func runRemoteBrokerStatus(brokerID string) error {
 	// Load settings for Hub client
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -1686,13 +1697,13 @@ func runRemoteBrokerStatus(brokerID string) error {
 		HubConnected:  true, // We just connected successfully
 	}
 
-	// Get groves this broker provides for
-	grovesResp, err := client.RuntimeBrokers().ListGroves(ctx, brokerID)
-	if err == nil && grovesResp != nil {
-		for _, g := range grovesResp.Groves {
-			status.Groves = append(status.Groves, brokerGroveStatus{
-				ID:   g.GroveID,
-				Name: g.GroveName,
+	// Get projects this broker provides for
+	projectsResp, err := client.RuntimeBrokers().ListProjects(ctx, brokerID)
+	if err == nil && projectsResp != nil {
+		for _, g := range projectsResp.Projects {
+			status.Projects = append(status.Projects, brokerProjectStatus{
+				ID:   g.ProjectID,
+				Name: g.ProjectName,
 			})
 		}
 	}
@@ -1721,15 +1732,15 @@ func runRemoteBrokerStatus(brokerID string) error {
 	fmt.Printf("  Hub:         %s\n", status.HubEndpoint)
 	fmt.Println()
 
-	// Groves
-	if len(status.Groves) > 0 {
-		fmt.Println("Groves (Provider)")
+	// Projects
+	if len(status.Projects) > 0 {
+		fmt.Println("Projects (Provider)")
 		fmt.Println("-----------------")
-		for _, g := range status.Groves {
+		for _, g := range status.Projects {
 			fmt.Printf("  - %s (ID: %s)\n", g.Name, g.ID)
 		}
 	} else {
-		fmt.Println("Groves (Provider)")
+		fmt.Println("Projects (Provider)")
 		fmt.Println("-----------------")
 		fmt.Printf("  (none)\n")
 	}
@@ -1770,8 +1781,8 @@ type brokerStatusInfo struct {
 	// Hub connections
 	HubConnections []brokerHubConnectionStatus `json:"hubConnections,omitempty"`
 
-	// Groves
-	Groves []brokerGroveStatus `json:"groves,omitempty"`
+	// Projects
+	Projects []brokerProjectStatus `json:"projects,omitempty"`
 }
 
 // brokerHubConnectionStatus holds status for a single hub connection.
@@ -1783,20 +1794,20 @@ type brokerHubConnectionStatus struct {
 	BrokerID     string    `json:"brokerId"`
 }
 
-// brokerGroveStatus holds grove info for status output
-type brokerGroveStatus struct {
+// brokerProjectStatus holds project info for status output
+type brokerProjectStatus struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 }
 
-// resolveGroveByNameOrID resolves a grove identifier (name, slug, or ID) to a grove.
+// resolveProjectByNameOrID resolves a project identifier (name, slug, or ID) to a project.
 // It tries multiple strategies in order: direct ID lookup, slug, then name.
-// Returns the grove if found, or an error if not found or multiple matches.
-func resolveGroveByNameOrID(ctx context.Context, client hubclient.Client, nameOrID string) (*hubclient.Grove, error) {
+// Returns the project if found, or an error if not found or multiple matches.
+func resolveProjectByNameOrID(ctx context.Context, client hubclient.Client, nameOrID string) (*hubclient.Project, error) {
 	// First try to fetch by ID directly
-	grove, err := client.Groves().Get(ctx, nameOrID)
+	project, err := client.Projects().Get(ctx, nameOrID)
 	if err == nil {
-		return grove, nil
+		return project, nil
 	}
 
 	// If not a 404, return the error
@@ -1805,31 +1816,31 @@ func resolveGroveByNameOrID(ctx context.Context, client hubclient.Client, nameOr
 	}
 
 	// Try by slug
-	resp, err := client.Groves().List(ctx, &hubclient.ListGrovesOptions{
+	resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{
 		Slug: nameOrID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to search for grove: %w", err)
+		return nil, fmt.Errorf("failed to search for project: %w", err)
 	}
-	if len(resp.Groves) == 1 {
-		return &resp.Groves[0], nil
+	if len(resp.Projects) == 1 {
+		return &resp.Projects[0], nil
 	}
 
 	// Try by name
-	resp, err = client.Groves().List(ctx, &hubclient.ListGrovesOptions{
+	resp, err = client.Projects().List(ctx, &hubclient.ListProjectsOptions{
 		Name: nameOrID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to search for grove by name: %w", err)
+		return nil, fmt.Errorf("failed to search for project by name: %w", err)
 	}
 
-	switch len(resp.Groves) {
+	switch len(resp.Projects) {
 	case 0:
-		return nil, fmt.Errorf("grove '%s' not found", nameOrID)
+		return nil, fmt.Errorf("project '%s' not found", nameOrID)
 	case 1:
-		return &resp.Groves[0], nil
+		return &resp.Projects[0], nil
 	default:
-		return nil, fmt.Errorf("multiple groves found with name '%s' - please use the grove ID instead", nameOrID)
+		return nil, fmt.Errorf("multiple projects found with name '%s' - please use the project ID instead", nameOrID)
 	}
 }
 

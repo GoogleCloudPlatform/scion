@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -48,7 +49,37 @@ type BrokerInfoResponse struct {
 	Version      string              `json:"version"`
 	Capabilities *BrokerCapabilities `json:"capabilities,omitempty"`
 	Profiles     []BrokerProfile     `json:"profiles,omitempty"`
-	Groves       []GroveInfo         `json:"groves,omitempty"`
+	Projects     []ProjectInfo       `json:"projects,omitempty"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (r *BrokerInfoResponse) UnmarshalJSON(data []byte) error {
+	type Alias BrokerInfoResponse
+	aux := &struct {
+		Groves []ProjectInfo `json:"groves"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if len(r.Projects) == 0 && len(aux.Groves) > 0 {
+		r.Projects = aux.Groves
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (r BrokerInfoResponse) MarshalJSON() ([]byte, error) {
+	type Alias BrokerInfoResponse
+	return json.Marshal(&struct {
+		Alias
+		Groves []ProjectInfo `json:"groves,omitempty"`
+	}{
+		Alias:  Alias(r),
+		Groves: r.Projects,
+	})
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -68,12 +99,48 @@ type BrokerCapabilities struct {
 	Exec   bool `json:"exec"`
 }
 
-// GroveInfo is a summary of a grove registered on this broker.
-type GroveInfo struct {
-	GroveID    string `json:"groveId"`
-	GroveName  string `json:"groveName"`
-	GitRemote  string `json:"gitRemote,omitempty"`
-	AgentCount int    `json:"agentCount"`
+// ProjectInfo is a summary of a project registered on this broker.
+type ProjectInfo struct {
+	ProjectID   string `json:"projectId"`
+	ProjectName string `json:"projectName"`
+	GitRemote   string `json:"gitRemote,omitempty"`
+	AgentCount  int    `json:"agentCount"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (i *ProjectInfo) UnmarshalJSON(data []byte) error {
+	type Alias ProjectInfo
+	aux := &struct {
+		GroveID   string `json:"groveId"`
+		GroveName string `json:"groveName"`
+		*Alias
+	}{
+		Alias: (*Alias)(i),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if i.ProjectID == "" && aux.GroveID != "" {
+		i.ProjectID = aux.GroveID
+	}
+	if i.ProjectName == "" && aux.GroveName != "" {
+		i.ProjectName = aux.GroveName
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (i ProjectInfo) MarshalJSON() ([]byte, error) {
+	type Alias ProjectInfo
+	return json.Marshal(&struct {
+		Alias
+		GroveID   string `json:"groveId,omitempty"`
+		GroveName string `json:"groveName,omitempty"`
+	}{
+		Alias:     Alias(i),
+		GroveID:   i.ProjectID,
+		GroveName: i.ProjectName,
+	})
 }
 
 // ============================================================================
@@ -118,7 +185,7 @@ type AgentResponse struct {
 	Image                 string            `json:"image,omitempty"`       // Resolved container image
 	RuntimeType           string            `json:"runtime,omitempty"`     // Runtime type (docker, kubernetes, apple)
 	Profile               string            `json:"profile,omitempty"`     // Settings profile used
-	GroveID               string            `json:"groveId,omitempty"`
+	ProjectID             string            `json:"projectId,omitempty"`
 	UserID                string            `json:"userId,omitempty"`
 	Status                string            `json:"status"`
 	Phase                 string            `json:"phase,omitempty"`
@@ -131,6 +198,36 @@ type AgentResponse struct {
 	Labels                map[string]string `json:"labels,omitempty"`
 	CreatedAt             time.Time         `json:"createdAt,omitempty"`
 	UpdatedAt             time.Time         `json:"updatedAt,omitempty"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (r *AgentResponse) UnmarshalJSON(data []byte) error {
+	type Alias AgentResponse
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (r AgentResponse) MarshalJSON() ([]byte, error) {
+	type Alias AgentResponse
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(r),
+		GroveID: r.ProjectID,
+	})
 }
 
 // AgentConfig contains agent configuration details.
@@ -168,14 +265,14 @@ type CreateAgentRequest struct {
 	ID          string             `json:"id,omitempty"`   // Hub UUID for status reporting
 	Slug        string             `json:"slug,omitempty"` // URL-safe identifier
 	Name        string             `json:"name"`
-	GroveID     string             `json:"groveId,omitempty"`
+	ProjectID   string             `json:"projectId,omitempty"`
 	UserID      string             `json:"userId,omitempty"`
 	Config      *CreateAgentConfig `json:"config,omitempty"`
 	HubEndpoint string             `json:"hubEndpoint,omitempty"`
 	AgentToken  string             `json:"agentToken,omitempty"`
 
 	// ResolvedEnv contains the fully merged environment variables and secrets
-	// from all applicable scopes (user, grove, runtime broker). These are resolved
+	// from all applicable scopes (user, project, runtime broker). These are resolved
 	// by the Hub before dispatching the agent creation request.
 	// The Runtime Broker should merge these with config.Env, with config.Env
 	// taking precedence over ResolvedEnv.
@@ -194,17 +291,17 @@ type CreateAgentRequest struct {
 	// ProvisionOnly indicates the agent should be provisioned (dirs, worktree, templates)
 	// but not started. The container will not be launched.
 	ProvisionOnly bool `json:"provisionOnly,omitempty"`
-	// GrovePath is the local filesystem path to the grove on this runtime broker.
-	// This is provided by the Hub from the grove provider record.
-	GrovePath string `json:"grovePath,omitempty"`
+	// ProjectPath is the local filesystem path to the project on this runtime broker.
+	// This is provided by the Hub from the project provider record.
+	ProjectPath string `json:"projectPath,omitempty"`
 	// WorkspaceStoragePath is the GCS storage path for bootstrapped workspaces.
-	// When set, the broker downloads the workspace from GCS instead of using GrovePath.
+	// When set, the broker downloads the workspace from GCS instead of using ProjectPath.
 	WorkspaceStoragePath string `json:"workspaceStoragePath,omitempty"`
 
-	// GroveSlug is the grove slug for hub-native groves.
-	// When set, the broker creates the workspace at ~/.scion/groves/<slug>/
+	// ProjectSlug is the project slug for hub-native projects.
+	// When set, the broker creates the workspace at ~/.scion.projects/<slug>/
 	// instead of the default worktree-based path.
-	GroveSlug string `json:"groveSlug,omitempty"`
+	ProjectSlug string `json:"projectSlug,omitempty"`
 
 	// GatherEnv indicates the broker should evaluate env completeness before starting.
 	// If required keys are missing, the broker returns HTTP 202 with EnvRequirementsResponse
@@ -220,10 +317,52 @@ type CreateAgentRequest struct {
 	// inline configuration without pre-existing templates on the broker.
 	InlineConfig *api.ScionConfig `json:"inlineConfig,omitempty"`
 
-	// SharedDirs contains grove-level shared directory declarations.
-	// Resolved by the Hub from the grove record and passed to the broker
+	// SharedDirs contains project-level shared directory declarations.
+	// Resolved by the Hub from the project record and passed to the broker
 	// so it can provision host-side directories and inject volume mounts.
 	SharedDirs []api.SharedDir `json:"sharedDirs,omitempty"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (r *CreateAgentRequest) UnmarshalJSON(data []byte) error {
+	type Alias CreateAgentRequest
+	aux := &struct {
+		GroveID   string `json:"groveId"`
+		GrovePath string `json:"grovePath"`
+		GroveSlug string `json:"groveSlug"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	if r.ProjectPath == "" && aux.GrovePath != "" {
+		r.ProjectPath = aux.GrovePath
+	}
+	if r.ProjectSlug == "" && aux.GroveSlug != "" {
+		r.ProjectSlug = aux.GroveSlug
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (r CreateAgentRequest) MarshalJSON() ([]byte, error) {
+	type Alias CreateAgentRequest
+	return json.Marshal(&struct {
+		Alias
+		GroveID   string `json:"groveId,omitempty"`
+		GrovePath string `json:"grovePath,omitempty"`
+		GroveSlug string `json:"groveSlug,omitempty"`
+	}{
+		Alias:     Alias(r),
+		GroveID:   r.ProjectID,
+		GrovePath: r.ProjectPath,
+		GroveSlug: r.ProjectSlug,
+	})
 }
 
 // CreateAgentConfig contains configuration for agent creation.
@@ -317,8 +456,45 @@ type MessageRequest struct {
 	// Interrupt the harness before sending.
 	Interrupt bool `json:"interrupt,omitempty"`
 
-	// GroveID is the grove ID for the target agent (used for message log labels).
-	GroveID string `json:"grove_id,omitempty"`
+	// ProjectID is the project ID for the target agent (used for message log labels).
+	ProjectID string `json:"projectId,omitempty"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (r *MessageRequest) UnmarshalJSON(data []byte) error {
+	type Alias MessageRequest
+	aux := &struct {
+		GroveID       string `json:"grove_id"`
+		LegacyProjID string `json:"project_id"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" {
+		if aux.LegacyProjID != "" {
+			r.ProjectID = aux.LegacyProjID
+		} else if aux.GroveID != "" {
+			r.ProjectID = aux.GroveID
+		}
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (r MessageRequest) MarshalJSON() ([]byte, error) {
+	type Alias MessageRequest
+	return json.Marshal(&struct {
+		Alias
+		GroveID      string `json:"grove_id,omitempty"`
+		LegacyProjID string `json:"project_id,omitempty"`
+	}{
+		Alias:        Alias(r),
+		GroveID:      r.ProjectID,
+		LegacyProjID: r.ProjectID,
+	})
 }
 
 // ExecRequest is the request body for executing a command in an agent.
@@ -397,7 +573,7 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		Image:                 info.Image,
 		RuntimeType:           info.Runtime,
 		Profile:               info.Profile,
-		GroveID:               info.GroveID,
+		ProjectID:               info.ProjectID,
 		Status:                status,
 		Phase:                 phase,
 		Activity:              activity,

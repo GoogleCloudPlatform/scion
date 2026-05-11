@@ -39,13 +39,13 @@ const (
 // Scope constants define the visibility of a secret.
 const (
 	ScopeUser          = "user"
-	ScopeGrove         = "grove"
+	ScopeProject       = "grove"
 	ScopeRuntimeBroker = "runtime_broker"
 )
 
 // Filter specifies criteria for listing secrets.
 type Filter struct {
-	Scope   string // Required: user, grove, runtime_broker
+	Scope   string // Required: user, project, runtime_broker
 	ScopeID string // Required: ID of the scoped entity
 	Type    string // Optional: filter by secret type (environment, variable, file)
 	Name    string // Optional: filter by specific key name
@@ -57,7 +57,7 @@ type SecretMeta struct {
 	Name          string    `json:"name"`    // Secret key name (e.g., "API_KEY")
 	SecretType    string    `json:"type"`    // environment, variable, file
 	Target        string    `json:"target"`  // Projection target
-	Scope         string    `json:"scope"`   // user, grove, runtime_broker
+	Scope         string    `json:"scope"`   // user, project, runtime_broker
 	ScopeID       string    `json:"scopeId"` // ID of the scoped entity
 	Description   string    `json:"description,omitempty"`
 	InjectionMode string    `json:"injectionMode,omitempty"` // "always" or "as_needed"
@@ -124,11 +124,11 @@ type SecretBackend interface {
 	GetMeta(ctx context.Context, name, scope, scopeID string) (*SecretMeta, error)
 
 	// Resolve collects and merges secrets from all applicable scopes for an agent.
-	// Scopes are resolved in order: user < grove < runtime_broker (later overrides earlier).
+	// Scopes are resolved in order: user < project < runtime_broker (later overrides earlier).
 	// The opts parameter is optional; pass nil for the current behavior.
 	// When opts.AgentAncestry is present, user-scoped secrets marked allowProgeny
 	// whose creator appears in the ancestry chain are included in the result.
-	Resolve(ctx context.Context, userID, groveID, brokerID string, opts *ResolveOpts) ([]SecretWithValue, error)
+	Resolve(ctx context.Context, userID, projectID, brokerID string, opts *ResolveOpts) ([]SecretWithValue, error)
 
 	// HubID returns the hub instance ID used for hub-scoped secret namespacing.
 	HubID() string
@@ -142,7 +142,7 @@ func scopePrecedence(scope string) int {
 		return 1
 	case ScopeUser:
 		return 2
-	case ScopeGrove:
+	case ScopeProject:
 		return 3
 	case ScopeRuntimeBroker:
 		return 4

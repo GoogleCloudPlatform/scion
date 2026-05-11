@@ -46,8 +46,8 @@ type secretService struct {
 
 // ListSecretOptions configures secret listing.
 type ListSecretOptions struct {
-	Scope   string // user, grove, runtime_broker (default: user)
-	ScopeID string // ID of the scoped entity (required for grove/runtime_broker)
+	Scope   string // user, project, runtime_broker (default: user)
+	ScopeID string // ID of the scoped entity (required for project/runtime_broker)
 	Type    string // Optional: filter by secret type (environment, variable, file)
 }
 
@@ -60,15 +60,15 @@ type ListSecretResponse struct {
 
 // SecretScopeOptions specifies the scope for get/delete operations.
 type SecretScopeOptions struct {
-	Scope   string // user, grove, runtime_broker (default: user)
-	ScopeID string // ID of the scoped entity (required for grove/runtime_broker)
+	Scope   string // user, project, runtime_broker (default: user)
+	ScopeID string // ID of the scoped entity (required for project/runtime_broker)
 }
 
 // SetSecretRequest is the request for setting a secret.
 type SetSecretRequest struct {
 	Value         string `json:"value"`                   // Required: secret value (write-only)
 	Scope         string `json:"scope,omitempty"`         // Scope type (default: user)
-	ScopeID       string `json:"scopeId,omitempty"`       // Required for grove/runtime_broker scope
+	ScopeID       string `json:"scopeId,omitempty"`       // Required for project/runtime_broker scope
 	Description   string `json:"description,omitempty"`   // Optional description
 	InjectionMode string `json:"injectionMode,omitempty"` // "always" or "as_needed" (default: as_needed)
 	Type          string `json:"type,omitempty"`          // Secret type: environment (default), variable, file
@@ -97,7 +97,7 @@ func (s *secretService) List(ctx context.Context, opts *ListSecretOptions) (*Lis
 		}
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/secrets", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/secrets", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +116,7 @@ func (s *secretService) Get(ctx context.Context, key string, opts *SecretScopeOp
 		}
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/secrets/"+url.PathEscape(key), query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/secrets/"+url.PathEscape(key), query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +125,7 @@ func (s *secretService) Get(ctx context.Context, key string, opts *SecretScopeOp
 
 // Set creates or updates a secret.
 func (s *secretService) Set(ctx context.Context, key string, req *SetSecretRequest) (*SetSecretResponse, error) {
-	resp, err := s.c.transport.Put(ctx, "/api/v1/secrets/"+url.PathEscape(key), req, nil)
+	resp, err := s.c.put(ctx, "/api/v1/secrets/"+url.PathEscape(key), req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +149,7 @@ func (s *secretService) Delete(ctx context.Context, key string, opts *SecretScop
 		path += "?" + query.Encode()
 	}
 
-	resp, err := s.c.transport.Delete(ctx, path, nil)
+	resp, err := s.c.delete(ctx, path, nil)
 	if err != nil {
 		return err
 	}

@@ -57,10 +57,10 @@ func doRequestAsUser(t *testing.T, srv *Server, user *store.User, method, path s
 	return rec
 }
 
-// setupDemoPolicyTest creates a test server with two users and a grove.
-// User "alice" is a grove member (grove creator); user "bob" is not.
-// Both are hub-members. Returns the server, store, users, and grove.
-func setupDemoPolicyTest(t *testing.T) (*Server, store.Store, *store.User, *store.User, *store.Grove) {
+// setupDemoPolicyTest creates a test server with two users and a project.
+// User "alice" is a project member (project creator); user "bob" is not.
+// Both are hub-members. Returns the server, store, users, and project.
+func setupDemoPolicyTest(t *testing.T) (*Server, store.Store, *store.User, *store.User, *store.Project) {
 	t.Helper()
 
 	srv, s := testServer(t)
@@ -91,59 +91,59 @@ func setupDemoPolicyTest(t *testing.T) (*Server, store.Store, *store.User, *stor
 	ensureHubMembership(ctx, s, alice.ID)
 	ensureHubMembership(ctx, s, bob.ID)
 
-	// Create a grove owned by alice
-	grove := &store.Grove{
-		ID:        "grove-demo",
-		Name:      "Demo Grove",
-		Slug:      "demo-grove",
+	// Create a project owned by alice
+	project := &store.Project{
+		ID:        "project-demo",
+		Name:      "Demo Project",
+		Slug:      "demo-project",
 		OwnerID:   alice.ID,
 		CreatedBy: alice.ID,
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
-	// Create grove members group and policy (simulates what grove creation handler does)
-	srv.createGroveMembersGroupAndPolicy(ctx, grove)
+	// Create project members group and policy (simulates what project creation handler does)
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
 
-	return srv, s, alice, bob, grove
+	return srv, s, alice, bob, project
 }
 
 // ============================================================================
 // Agent Creation Authorization Tests (Step 4)
 // ============================================================================
 
-func TestDemoPolicy_AgentCreate_GroveMemberAllowed(t *testing.T) {
-	srv, _, alice, _, grove := setupDemoPolicyTest(t)
+func TestDemoPolicy_AgentCreate_ProjectMemberAllowed(t *testing.T) {
+	srv, _, alice, _, project := setupDemoPolicyTest(t)
 
-	// Alice is a grove member — should pass authorization.
+	// Alice is a project member — should pass authorization.
 	// Request will fail downstream (no broker/template), but NOT with 403.
 	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "test-agent",
-		GroveID: grove.ID,
+		ProjectID: project.ID,
 	})
 	// Should not be 403 — alice has permission
 	assert.NotEqual(t, http.StatusForbidden, rec.Code,
-		"grove member should not get 403; got: %s", rec.Body.String())
+		"project member should not get 403; got: %s", rec.Body.String())
 }
 
 func TestDemoPolicy_AgentCreate_NonMemberDenied(t *testing.T) {
-	srv, _, _, bob, grove := setupDemoPolicyTest(t)
+	srv, _, _, bob, project := setupDemoPolicyTest(t)
 
-	// Bob is NOT a grove member — should be denied with 403
+	// Bob is NOT a project member — should be denied with 403
 	rec := doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "test-agent",
-		GroveID: grove.ID,
+		ProjectID: project.ID,
 	})
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"non-member should get 403; got: %s", rec.Body.String())
 }
 
 func TestDemoPolicy_AgentCreate_AdminBypass(t *testing.T) {
-	srv, s, _, _, grove := setupDemoPolicyTest(t)
+	srv, s, _, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
-	// Create an admin user (not a grove member)
+	// Create an admin user (not a project member)
 	admin := &store.User{
 		ID:          "user-admin",
 		Email:       "admin@test.com",
@@ -154,10 +154,10 @@ func TestDemoPolicy_AgentCreate_AdminBypass(t *testing.T) {
 	}
 	require.NoError(t, s.CreateUser(ctx, admin))
 
-	// Admin should bypass authorization even without grove membership
+	// Admin should bypass authorization even without project membership
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "admin-agent",
-		GroveID: grove.ID,
+		ProjectID: project.ID,
 	})
 	assert.NotEqual(t, http.StatusForbidden, rec.Code,
 		"admin should not get 403; got: %s", rec.Body.String())
@@ -168,7 +168,7 @@ func TestDemoPolicy_AgentCreate_AdminBypass(t *testing.T) {
 // ============================================================================
 
 func TestDemoPolicy_AgentDelete_OwnerAllowed(t *testing.T) {
-	srv, s, alice, _, grove := setupDemoPolicyTest(t)
+	srv, s, alice, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
 	// Create an agent owned by alice
@@ -176,7 +176,7 @@ func TestDemoPolicy_AgentDelete_OwnerAllowed(t *testing.T) {
 		ID:           "agent-del-owner",
 		Slug:         "agent-del-owner",
 		Name:         "Agent to Delete",
-		GroveID:      grove.ID,
+		ProjectID:      project.ID,
 		OwnerID:      alice.ID,
 		CreatedBy:    alice.ID,
 		Phase:        string(state.PhaseStopped),
@@ -188,13 +188,13 @@ func TestDemoPolicy_AgentDelete_OwnerAllowed(t *testing.T) {
 
 	// Alice (owner) should be able to delete
 	rec := doRequestAsUser(t, srv, alice, http.MethodDelete,
-		"/api/v1/groves/"+grove.ID+"/agents/"+agent.ID, nil)
+		"/api/v1/projects/"+project.ID+"/agents/"+agent.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code,
 		"owner should be able to delete agent; got: %s", rec.Body.String())
 }
 
 func TestDemoPolicy_AgentDelete_NonOwnerDenied(t *testing.T) {
-	srv, s, alice, bob, grove := setupDemoPolicyTest(t)
+	srv, s, alice, bob, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
 	// Create an agent owned by alice
@@ -202,7 +202,7 @@ func TestDemoPolicy_AgentDelete_NonOwnerDenied(t *testing.T) {
 		ID:           "agent-del-nonowner",
 		Slug:         "agent-del-nonowner",
 		Name:         "Agent to Delete",
-		GroveID:      grove.ID,
+		ProjectID:      project.ID,
 		OwnerID:      alice.ID,
 		CreatedBy:    alice.ID,
 		Phase:        string(state.PhaseStopped),
@@ -214,13 +214,13 @@ func TestDemoPolicy_AgentDelete_NonOwnerDenied(t *testing.T) {
 
 	// Bob (not the owner) should be denied
 	rec := doRequestAsUser(t, srv, bob, http.MethodDelete,
-		"/api/v1/groves/"+grove.ID+"/agents/"+agent.ID, nil)
+		"/api/v1/projects/"+project.ID+"/agents/"+agent.ID, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"non-owner should get 403; got: %s", rec.Body.String())
 }
 
 func TestDemoPolicy_AgentDelete_AdminBypass(t *testing.T) {
-	srv, s, alice, _, grove := setupDemoPolicyTest(t)
+	srv, s, alice, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
 	admin := &store.User{
@@ -237,7 +237,7 @@ func TestDemoPolicy_AgentDelete_AdminBypass(t *testing.T) {
 		ID:           "agent-del-admin",
 		Slug:         "agent-del-admin",
 		Name:         "Agent for Admin Delete",
-		GroveID:      grove.ID,
+		ProjectID:      project.ID,
 		OwnerID:      alice.ID,
 		CreatedBy:    alice.ID,
 		Phase:        string(state.PhaseStopped),
@@ -249,20 +249,20 @@ func TestDemoPolicy_AgentDelete_AdminBypass(t *testing.T) {
 
 	// Admin (not the owner) should bypass and be able to delete
 	rec := doRequestAsUser(t, srv, admin, http.MethodDelete,
-		"/api/v1/groves/"+grove.ID+"/agents/"+agent.ID, nil)
+		"/api/v1/projects/"+project.ID+"/agents/"+agent.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code,
 		"admin should be able to delete agent; got: %s", rec.Body.String())
 }
 
 func TestDemoPolicy_AgentDelete_DirectPath_NonOwnerDenied(t *testing.T) {
-	srv, s, alice, bob, grove := setupDemoPolicyTest(t)
+	srv, s, alice, bob, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
 	agent := &store.Agent{
 		ID:           "agent-del-direct",
 		Slug:         "agent-del-direct",
 		Name:         "Agent Direct Delete",
-		GroveID:      grove.ID,
+		ProjectID:      project.ID,
 		OwnerID:      alice.ID,
 		CreatedBy:    alice.ID,
 		Phase:        string(state.PhaseStopped),
@@ -272,7 +272,7 @@ func TestDemoPolicy_AgentDelete_DirectPath_NonOwnerDenied(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	// Bob via the non-grove-scoped /api/v1/agents/{id} path
+	// Bob via the non-project-scoped /api/v1/agents/{id} path
 	rec := doRequestAsUser(t, srv, bob, http.MethodDelete,
 		"/api/v1/agents/"+agent.ID, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code,
@@ -284,14 +284,14 @@ func TestDemoPolicy_AgentDelete_DirectPath_NonOwnerDenied(t *testing.T) {
 // ============================================================================
 
 func TestDemoPolicy_AgentAction_OwnerAllowed(t *testing.T) {
-	srv, s, alice, _, grove := setupDemoPolicyTest(t)
+	srv, s, alice, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
 	agent := &store.Agent{
 		ID:           "agent-action-owner",
 		Slug:         "agent-action-owner",
 		Name:         "Agent Action Test",
-		GroveID:      grove.ID,
+		ProjectID:      project.ID,
 		OwnerID:      alice.ID,
 		CreatedBy:    alice.ID,
 		Phase:        string(state.PhaseRunning),
@@ -306,7 +306,7 @@ func TestDemoPolicy_AgentAction_OwnerAllowed(t *testing.T) {
 	for _, action := range []string{"start", "stop", "restart"} {
 		t.Run(action, func(t *testing.T) {
 			rec := doRequestAsUser(t, srv, alice, http.MethodPost,
-				"/api/v1/groves/"+grove.ID+"/agents/"+agent.ID+"/"+action, nil)
+				"/api/v1/projects/"+project.ID+"/agents/"+agent.ID+"/"+action, nil)
 			assert.NotEqual(t, http.StatusForbidden, rec.Code,
 				"owner should not get 403 for %s; got: %s", action, rec.Body.String())
 		})
@@ -314,14 +314,14 @@ func TestDemoPolicy_AgentAction_OwnerAllowed(t *testing.T) {
 }
 
 func TestDemoPolicy_AgentAction_NonOwnerDenied(t *testing.T) {
-	srv, s, alice, bob, grove := setupDemoPolicyTest(t)
+	srv, s, alice, bob, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
 	agent := &store.Agent{
 		ID:           "agent-action-nonowner",
 		Slug:         "agent-action-nonowner",
 		Name:         "Agent Action Test",
-		GroveID:      grove.ID,
+		ProjectID:      project.ID,
 		OwnerID:      alice.ID,
 		CreatedBy:    alice.ID,
 		Phase:        string(state.PhaseRunning),
@@ -335,7 +335,7 @@ func TestDemoPolicy_AgentAction_NonOwnerDenied(t *testing.T) {
 	for _, action := range []string{"start", "stop", "restart", "message"} {
 		t.Run(action, func(t *testing.T) {
 			rec := doRequestAsUser(t, srv, bob, http.MethodPost,
-				"/api/v1/groves/"+grove.ID+"/agents/"+agent.ID+"/"+action, nil)
+				"/api/v1/projects/"+project.ID+"/agents/"+agent.ID+"/"+action, nil)
 			assert.Equal(t, http.StatusForbidden, rec.Code,
 				"non-owner should get 403 for %s; got: %s", action, rec.Body.String())
 		})
@@ -343,7 +343,7 @@ func TestDemoPolicy_AgentAction_NonOwnerDenied(t *testing.T) {
 }
 
 func TestDemoPolicy_AgentAction_AdminBypass(t *testing.T) {
-	srv, s, alice, _, grove := setupDemoPolicyTest(t)
+	srv, s, alice, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
 	admin := &store.User{
@@ -360,7 +360,7 @@ func TestDemoPolicy_AgentAction_AdminBypass(t *testing.T) {
 		ID:           "agent-action-admin",
 		Slug:         "agent-action-admin",
 		Name:         "Agent Admin Action",
-		GroveID:      grove.ID,
+		ProjectID:      project.ID,
 		OwnerID:      alice.ID,
 		CreatedBy:    alice.ID,
 		Phase:        string(state.PhaseRunning),
@@ -372,20 +372,20 @@ func TestDemoPolicy_AgentAction_AdminBypass(t *testing.T) {
 
 	// Admin should bypass authorization for all actions
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost,
-		"/api/v1/groves/"+grove.ID+"/agents/"+agent.ID+"/stop", nil)
+		"/api/v1/projects/"+project.ID+"/agents/"+agent.ID+"/stop", nil)
 	assert.NotEqual(t, http.StatusForbidden, rec.Code,
 		"admin should not get 403; got: %s", rec.Body.String())
 }
 
 func TestDemoPolicy_AgentAction_DirectPath_NonOwnerDenied(t *testing.T) {
-	srv, s, alice, bob, grove := setupDemoPolicyTest(t)
+	srv, s, alice, bob, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
 	agent := &store.Agent{
 		ID:           "agent-action-direct",
 		Slug:         "agent-action-direct",
 		Name:         "Agent Direct Action",
-		GroveID:      grove.ID,
+		ProjectID:      project.ID,
 		OwnerID:      alice.ID,
 		CreatedBy:    alice.ID,
 		Phase:        string(state.PhaseRunning),
@@ -395,7 +395,7 @@ func TestDemoPolicy_AgentAction_DirectPath_NonOwnerDenied(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	// Bob via the non-grove-scoped /api/v1/agents/{id}/{action} path
+	// Bob via the non-project-scoped /api/v1/agents/{id}/{action} path
 	rec := doRequestAsUser(t, srv, bob, http.MethodPost,
 		"/api/v1/agents/"+agent.ID+"/start", nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code,
@@ -421,46 +421,46 @@ func TestDemoPolicy_SeedGroupsAndPolicies(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, policies.TotalCount, "hub-member-read-all policy should exist")
 
-	policies, err = s.ListPolicies(ctx, store.PolicyFilter{Name: "hub-member-create-groves"}, store.ListOptions{Limit: 1})
+	policies, err = s.ListPolicies(ctx, store.PolicyFilter{Name: "hub-member-create-projects"}, store.ListOptions{Limit: 1})
 	require.NoError(t, err)
-	assert.Equal(t, 1, policies.TotalCount, "hub-member-create-groves policy should exist")
+	assert.Equal(t, 1, policies.TotalCount, "hub-member-create-projects policy should exist")
 }
 
-func TestDemoPolicy_GroveCreationSetsUpMembersGroupAndPolicy(t *testing.T) {
+func TestDemoPolicy_ProjectCreationSetsUpMembersGroupAndPolicy(t *testing.T) {
 	srv, s, alice, _, _ := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
-	// Create a new grove as alice to trigger the full handler flow
-	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/groves", map[string]string{
-		"name":      "New Test Grove",
-		"gitRemote": "https://github.com/test/new-grove",
+	// Create a new project as alice to trigger the full handler flow
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/projects", map[string]string{
+		"name":      "New Test Project",
+		"gitRemote": "https://github.com/test/new-project",
 	})
-	require.Equal(t, http.StatusCreated, rec.Code, "grove creation should succeed; got: %s", rec.Body.String())
+	require.Equal(t, http.StatusCreated, rec.Code, "project creation should succeed; got: %s", rec.Body.String())
 
-	var createdGrove store.Grove
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&createdGrove))
+	var createdProject store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&createdProject))
 
-	// Verify grove members group was created
-	membersGroup, err := s.GetGroupBySlug(ctx, "grove:"+createdGrove.Slug+":members")
-	require.NoError(t, err, "grove members group should exist")
-	assert.Equal(t, createdGrove.Name+" Members", membersGroup.Name)
+	// Verify project members group was created
+	membersGroup, err := s.GetGroupBySlug(ctx, "project:"+createdProject.Slug+":members")
+	require.NoError(t, err, "project members group should exist")
+	assert.Equal(t, createdProject.Name+" Members", membersGroup.Name)
 
-	// Verify alice is a member of the grove members group
+	// Verify alice is a member of the project members group
 	_, err = s.GetGroupMembership(ctx, membersGroup.ID, store.GroupMemberTypeUser, alice.ID)
-	assert.NoError(t, err, "grove creator should be a member of the grove members group")
+	assert.NoError(t, err, "project creator should be a member of the project members group")
 
-	// Verify grove-level agent creation policy was created
+	// Verify project-level agent creation policy was created
 	policies, err := s.ListPolicies(ctx,
-		store.PolicyFilter{Name: "grove:" + createdGrove.Slug + ":member-create-agents"},
+		store.PolicyFilter{Name: "project:" + createdProject.Slug + ":member-create-agents"},
 		store.ListOptions{Limit: 1})
 	require.NoError(t, err)
-	assert.Equal(t, 1, policies.TotalCount, "grove member-create-agents policy should exist")
+	assert.Equal(t, 1, policies.TotalCount, "project member-create-agents policy should exist")
 }
 
-// TestDemoPolicy_EndToEnd_GroveCreatorCanCreateAgent tests the complete flow:
-// a non-admin user creates a grove via the HTTP API and then creates an agent
-// in that grove. This exercises the full handler chain including authorization.
-func TestDemoPolicy_EndToEnd_GroveCreatorCanCreateAgent(t *testing.T) {
+// TestDemoPolicy_EndToEnd_ProjectCreatorCanCreateAgent tests the complete flow:
+// a non-admin user creates a project via the HTTP API and then creates an agent
+// in that project. This exercises the full handler chain including authorization.
+func TestDemoPolicy_EndToEnd_ProjectCreatorCanCreateAgent(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -476,26 +476,26 @@ func TestDemoPolicy_EndToEnd_GroveCreatorCanCreateAgent(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, alice))
 	ensureHubMembership(ctx, s, alice.ID)
 
-	// Step 1: Create a grove via the HTTP handler (as alice)
-	groveRec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/groves", CreateGroveRequest{
-		Name: "E2E Test Grove",
+	// Step 1: Create a project via the HTTP handler (as alice)
+	projectRec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+		Name: "E2E Test Project",
 	})
-	require.Equal(t, http.StatusCreated, groveRec.Code,
-		"grove creation should succeed; got: %s", groveRec.Body.String())
+	require.Equal(t, http.StatusCreated, projectRec.Code,
+		"project creation should succeed; got: %s", projectRec.Body.String())
 
-	var grove store.Grove
-	require.NoError(t, json.NewDecoder(groveRec.Body).Decode(&grove))
+	var project store.Project
+	require.NoError(t, json.NewDecoder(projectRec.Body).Decode(&project))
 
-	// Step 2: Create an agent in the grove via the HTTP handler (as alice)
+	// Step 2: Create an agent in the project via the HTTP handler (as alice)
 	agentRec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "e2e-test-agent",
-		GroveID: grove.ID,
+		ProjectID: project.ID,
 	})
 
 	// The agent creation may fail downstream (no broker/template), but should
-	// NOT fail with 403 — the grove creator must have permission.
+	// NOT fail with 403 — the project creator must have permission.
 	assert.NotEqual(t, http.StatusForbidden, agentRec.Code,
-		"grove creator should not get 403 when creating agent in own grove; got: %s", agentRec.Body.String())
+		"project creator should not get 403 when creating agent in own project; got: %s", agentRec.Body.String())
 }
 
 func TestDemoPolicy_HubMembershipOnLogin(t *testing.T) {
@@ -525,12 +525,12 @@ func TestDemoPolicy_HubMembershipOnLogin(t *testing.T) {
 	ensureHubMembership(ctx, s, user.ID)
 }
 
-// TestDemoPolicy_GroveRecreation_CreatorCanCreateAgent tests that when a grove
+// TestDemoPolicy_ProjectRecreation_CreatorCanCreateAgent tests that when a project
 // is deleted and recreated with the same slug, the new creator still gets
 // permission to create agents. This was a bug where the members group from the
-// old grove persisted, causing an "already exists" error that prevented the new
+// old project persisted, causing an "already exists" error that prevented the new
 // creator from being added to the group.
-func TestDemoPolicy_GroveRecreation_CreatorCanCreateAgent(t *testing.T) {
+func TestDemoPolicy_ProjectRecreation_CreatorCanCreateAgent(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -545,50 +545,50 @@ func TestDemoPolicy_GroveRecreation_CreatorCanCreateAgent(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, alice))
 	ensureHubMembership(ctx, s, alice.ID)
 
-	// Step 1: Create a grove
-	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/groves", CreateGroveRequest{
-		Name: "Recreatable Grove",
+	// Step 1: Create a project
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+		Name: "Recreatable Project",
 	})
-	require.Equal(t, http.StatusCreated, rec.Code, "first grove creation should succeed")
+	require.Equal(t, http.StatusCreated, rec.Code, "first project creation should succeed")
 
-	var grove1 store.Grove
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove1))
+	var project1 store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project1))
 
 	// Verify alice can create agents
 	agentRec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "agent-before-delete",
-		GroveID: grove1.ID,
+		ProjectID: project1.ID,
 	})
 	assert.NotEqual(t, http.StatusForbidden, agentRec.Code,
-		"creator should not get 403 in first grove; got: %s", agentRec.Body.String())
+		"creator should not get 403 in first project; got: %s", agentRec.Body.String())
 
-	// Step 2: Delete the grove
-	delRec := doRequestAsUser(t, srv, alice, http.MethodDelete, "/api/v1/groves/"+grove1.ID, nil)
-	require.Equal(t, http.StatusNoContent, delRec.Code, "grove deletion should succeed")
+	// Step 2: Delete the project
+	delRec := doRequestAsUser(t, srv, alice, http.MethodDelete, "/api/v1/projects/"+project1.ID, nil)
+	require.Equal(t, http.StatusNoContent, delRec.Code, "project deletion should succeed")
 
-	// Step 3: Recreate the grove with the same name (same slug)
-	rec2 := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/groves", CreateGroveRequest{
-		Name: "Recreatable Grove",
+	// Step 3: Recreate the project with the same name (same slug)
+	rec2 := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+		Name: "Recreatable Project",
 	})
 	require.Equal(t, http.StatusCreated, rec2.Code,
-		"recreated grove should succeed; got: %s", rec2.Body.String())
+		"recreated project should succeed; got: %s", rec2.Body.String())
 
-	var grove2 store.Grove
-	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&grove2))
+	var project2 store.Project
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&project2))
 
-	// Step 4: Verify alice can still create agents in the recreated grove
+	// Step 4: Verify alice can still create agents in the recreated project
 	agentRec2 := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "agent-after-recreate",
-		GroveID: grove2.ID,
+		ProjectID: project2.ID,
 	})
 	assert.NotEqual(t, http.StatusForbidden, agentRec2.Code,
-		"creator should not get 403 in recreated grove; got: %s", agentRec2.Body.String())
+		"creator should not get 403 in recreated project; got: %s", agentRec2.Body.String())
 }
 
-// TestDemoPolicy_GroveMembersGroupIdempotent tests that calling
-// createGroveMembersGroupAndPolicy twice for the same grove is safe — the
+// TestDemoPolicy_ProjectMembersGroupIdempotent tests that calling
+// createProjectMembersGroupAndPolicy twice for the same project is safe — the
 // second call should still ensure the creator is a member.
-func TestDemoPolicy_GroveMembersGroupIdempotent(t *testing.T) {
+func TestDemoPolicy_ProjectMembersGroupIdempotent(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -603,24 +603,24 @@ func TestDemoPolicy_GroveMembersGroupIdempotent(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, alice))
 	ensureHubMembership(ctx, s, alice.ID)
 
-	grove := &store.Grove{
-		ID:        "grove-idempotent",
-		Name:      "Idempotent Grove",
-		Slug:      "idempotent-grove",
+	project := &store.Project{
+		ID:        "project-idempotent",
+		Name:      "Idempotent Project",
+		Slug:      "idempotent-project",
 		OwnerID:   alice.ID,
 		CreatedBy: alice.ID,
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Call twice — second call should not fail or skip adding the user
-	srv.createGroveMembersGroupAndPolicy(ctx, grove)
-	srv.createGroveMembersGroupAndPolicy(ctx, grove)
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
 
-	// Verify alice is still a member of the grove members group
-	membersGroup, err := s.GetGroupBySlug(ctx, "grove:"+grove.Slug+":members")
-	require.NoError(t, err, "grove members group should exist")
+	// Verify alice is still a member of the project members group
+	membersGroup, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
+	require.NoError(t, err, "project members group should exist")
 
 	_, err = s.GetGroupMembership(ctx, membersGroup.ID, store.GroupMemberTypeUser, alice.ID)
 	assert.NoError(t, err, "alice should be in the members group after idempotent calls")
@@ -628,15 +628,15 @@ func TestDemoPolicy_GroveMembersGroupIdempotent(t *testing.T) {
 	// Verify alice can create agents
 	agentRec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "agent-idempotent",
-		GroveID: grove.ID,
+		ProjectID: project.ID,
 	})
 	assert.NotEqual(t, http.StatusForbidden, agentRec.Code,
-		"grove member should not get 403 after idempotent group creation; got: %s", agentRec.Body.String())
+		"project member should not get 403 after idempotent group creation; got: %s", agentRec.Body.String())
 }
 
-// TestDemoPolicy_GroveDeleteCleansUpGroupsAndPolicies verifies that deleting
-// a grove removes associated groups and policies so they don't leak.
-func TestDemoPolicy_GroveDeleteCleansUpGroupsAndPolicies(t *testing.T) {
+// TestDemoPolicy_ProjectDeleteCleansUpGroupsAndPolicies verifies that deleting
+// a project removes associated groups and policies so they don't leak.
+func TestDemoPolicy_ProjectDeleteCleansUpGroupsAndPolicies(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -651,37 +651,37 @@ func TestDemoPolicy_GroveDeleteCleansUpGroupsAndPolicies(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, alice))
 	ensureHubMembership(ctx, s, alice.ID)
 
-	// Create grove
-	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/groves", CreateGroveRequest{
-		Name: "Cleanup Grove",
+	// Create project
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+		Name: "Cleanup Project",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
-	var grove store.Grove
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove))
+	var project store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
 	// Verify groups and policy exist
-	_, err := s.GetGroupBySlug(ctx, "grove:"+grove.Slug+":members")
+	_, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
 	require.NoError(t, err, "members group should exist before deletion")
 
 	policies, err := s.ListPolicies(ctx,
-		store.PolicyFilter{Name: "grove:" + grove.Slug + ":member-create-agents"},
+		store.PolicyFilter{Name: "project:" + project.Slug + ":member-create-agents"},
 		store.ListOptions{Limit: 1})
 	require.NoError(t, err)
 	assert.Equal(t, 1, policies.TotalCount, "policy should exist before deletion")
 
-	// Delete grove
-	delRec := doRequestAsUser(t, srv, alice, http.MethodDelete, "/api/v1/groves/"+grove.ID, nil)
+	// Delete project
+	delRec := doRequestAsUser(t, srv, alice, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
 	require.Equal(t, http.StatusNoContent, delRec.Code)
 
 	// Verify groups are cleaned up
-	_, err = s.GetGroupBySlug(ctx, "grove:"+grove.Slug+":members")
-	assert.Error(t, err, "members group should be deleted after grove deletion")
+	_, err = s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
+	assert.Error(t, err, "members group should be deleted after project deletion")
 
 	// Verify policy is cleaned up
 	policies, err = s.ListPolicies(ctx,
-		store.PolicyFilter{Name: "grove:" + grove.Slug + ":member-create-agents"},
+		store.PolicyFilter{Name: "project:" + project.Slug + ":member-create-agents"},
 		store.ListOptions{Limit: 1})
 	require.NoError(t, err)
-	assert.Equal(t, 0, policies.TotalCount, "policy should be deleted after grove deletion")
+	assert.Equal(t, 0, policies.TotalCount, "policy should be deleted after project deletion")
 }

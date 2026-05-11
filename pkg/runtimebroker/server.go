@@ -864,10 +864,10 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 	// Collect grove paths to scan
 	var grovePaths []string
 
-	// Hub-native groves: ~/.scion/groves/<slug>/.scion/
+	// Hub-native groves: ~/.scion.groves/<slug>/.scion/
 	globalDir, err := config.GetGlobalDir()
 	if err == nil {
-		grovesDir := filepath.Join(globalDir, "groves")
+		grovesDir := filepath.Join(globalDir, "projects")
 		entries, err := os.ReadDir(grovesDir)
 		if err == nil {
 			for _, e := range entries {
@@ -1245,10 +1245,10 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 	return nil
 }
 
-// buildGroveFilterForHub builds a grove filter function for a specific hub endpoint.
+// buildProjectFilterForHub builds a grove filter function for a specific hub endpoint.
 // In multi-hub mode, each heartbeat should only report groves that belong to its hub.
 // In single-hub mode or when only one connection exists, no filtering is applied.
-func (s *Server) buildGroveFilterForHub(hubEndpoint string) func(string) bool {
+func (s *Server) buildProjectFilterForHub(hubEndpoint string) func(string) bool {
 	s.hubMu.RLock()
 	connCount := len(s.hubConnections)
 	s.hubMu.RUnlock()
@@ -1274,20 +1274,20 @@ func (s *Server) buildGroveFilterForHub(hubEndpoint string) func(string) bool {
 		}
 
 		for _, ag := range agents {
-			agGroveID := ag.GroveID
-			if agGroveID == "" {
-				agGroveID = ag.Grove
+			agProjectID := ag.ProjectID
+			if agProjectID == "" {
+				agProjectID = ag.Project
 			}
-			if agGroveID != groveID {
+			if agProjectID != groveID {
 				continue
 			}
 
 			// Found an agent in this grove, check its grove path settings
-			if ag.GrovePath == "" {
+			if ag.ProjectPath == "" {
 				continue
 			}
 
-			groveSettings, err := config.LoadSettingsFromDir(ag.GrovePath)
+			groveSettings, err := config.LoadSettingsFromDir(ag.ProjectPath)
 			if err != nil {
 				continue
 			}
@@ -1310,11 +1310,11 @@ func (s *Server) isMultiHubMode() bool {
 	return len(s.hubConnections) > 1
 }
 
-// isGlobalGrove returns true if the grove is the global grove.
-// A request with a specific (non-empty, non-"global") GroveID is never the
+// isGlobalProject returns true if the grove is the global grove.
+// A request with a specific (non-empty, non-"global") ProjectID is never the
 // global grove, even when grovePath is empty (e.g. git-based groves where the
 // broker resolves the workspace from a git remote rather than a local path).
-func (s *Server) isGlobalGrove(groveID, grovePath string) bool {
+func (s *Server) isGlobalProject(groveID, grovePath string) bool {
 	return groveID == "global" || (groveID == "" && grovePath == "")
 }
 
@@ -1440,13 +1440,14 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/agents", s.handleAgents)
 	s.mux.HandleFunc("/api/v1/agents/", s.handleAgentByID)
 
-	// Grove routes
-	s.mux.HandleFunc("/api/v1/groves/", s.handleGroveBySlug)
+	// Project routes
+	s.mux.HandleFunc("/api/v1/projects/", s.handleProjectBySlug)
 
 	// Workspace sync routes (for Hub-initiated sync via control channel)
 	s.mux.HandleFunc("/api/v1/workspace/upload", s.handleWorkspaceUpload)
 	s.mux.HandleFunc("/api/v1/workspace/apply", s.handleWorkspaceApply)
-	s.mux.HandleFunc("/api/v1/workspace/grove-upload", s.handleGroveWorkspaceUpload)
+	s.mux.HandleFunc("/api/v1/workspace/grove-upload", s.handleProjectWorkspaceUpload)
+	s.mux.HandleFunc("/api/v1/workspace/project-upload", s.handleProjectWorkspaceUpload)
 }
 
 // applyMiddleware wraps the handler with middleware.

@@ -33,9 +33,9 @@ import (
 //   - bob: member, non-owner
 //   - admin: admin user
 //
-// It also creates a grove (owned by alice) and a broker (owned by alice) directly
-// in the store, and links the broker as a provider to the grove.
-func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob, admin *store.User, grove *store.Grove, broker *store.RuntimeBroker) {
+// It also creates a project (owned by alice) and a broker (owned by alice) directly
+// in the store, and links the broker as a provider to the project.
+func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob, admin *store.User, project *store.Project, broker *store.RuntimeBroker) {
 	t.Helper()
 
 	srv, s = testServer(t)
@@ -75,21 +75,21 @@ func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob,
 	ensureHubMembership(ctx, s, alice.ID)
 	ensureHubMembership(ctx, s, bob.ID)
 
-	// Create a grove owned by alice
-	grove = &store.Grove{
-		ID:        "grove-broker-test",
-		Name:      "Broker Test Grove",
-		Slug:      "broker-test-grove",
+	// Create a project owned by alice
+	project = &store.Project{
+		ID:        "project-broker-test",
+		Name:      "Broker Test Project",
+		Slug:      "broker-test-project",
 		OwnerID:   alice.ID,
 		CreatedBy: alice.ID,
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
-	srv.createGroveMembersGroupAndPolicy(ctx, grove)
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
 
-	// Add bob as a grove member so he can create agents (grove-level authz)
-	membersGroup, err := s.GetGroupBySlug(ctx, "grove:"+grove.Slug+":members")
+	// Add bob as a project member so he can create agents (project-level authz)
+	membersGroup, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
 	require.NoError(t, err)
 	_ = s.AddGroupMember(ctx, &store.GroupMember{
 		GroupID:    membersGroup.ID,
@@ -110,15 +110,15 @@ func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	// Link broker as a provider to the grove and set as default
-	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID:    grove.ID,
+	// Link broker as a provider to the project and set as default
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:    project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     broker.Status,
 	}))
-	grove.DefaultRuntimeBrokerID = broker.ID
-	require.NoError(t, s.UpdateGrove(ctx, grove))
+	project.DefaultRuntimeBrokerID = broker.ID
+	require.NoError(t, s.UpdateProject(ctx, project))
 
 	return
 }
@@ -158,27 +158,27 @@ func TestBrokerAuthz_Registration_UnauthenticatedDenied(t *testing.T) {
 // ============================================================================
 
 func TestBrokerAuthz_Dispatch_OwnerAllowed(t *testing.T) {
-	srv, _, alice, _, _, grove, _ := setupBrokerAuthzTest(t)
+	srv, _, alice, _, _, project, _ := setupBrokerAuthzTest(t)
 
 	// Alice (broker owner) should pass dispatch authorization.
 	// The request may fail downstream (no dispatcher), but NOT with 403.
 	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "dispatch-owner-test",
-		GroveID: grove.ID,
+		ProjectID: project.ID,
 	})
 	assert.NotEqual(t, http.StatusForbidden, rec.Code,
 		"broker owner should not get 403; got: %s", rec.Body.String())
 }
 
 func TestBrokerAuthz_Dispatch_NonOwnerDenied(t *testing.T) {
-	srv, _, _, bob, _, grove, _ := setupBrokerAuthzTest(t)
+	srv, _, _, bob, _, project, _ := setupBrokerAuthzTest(t)
 
 	// Bob (not the broker owner) should be denied dispatch.
 	// The default broker is owned by alice so resolveRuntimeBroker will skip it,
 	// resulting in a "no broker available" error rather than 403.
 	rec := doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "dispatch-nonowner-test",
-		GroveID: grove.ID,
+		ProjectID: project.ID,
 	})
 	// Bob should not succeed — he can't dispatch to alice's broker
 	assert.NotEqual(t, http.StatusOK, rec.Code)
@@ -186,7 +186,7 @@ func TestBrokerAuthz_Dispatch_NonOwnerDenied(t *testing.T) {
 }
 
 func TestBrokerAuthz_Dispatch_AutoProvide_NonOwnerAllowed(t *testing.T) {
-	srv, s, _, bob, _, grove, broker := setupBrokerAuthzTest(t)
+	srv, s, _, bob, _, project, broker := setupBrokerAuthzTest(t)
 	ctx := context.Background()
 
 	// Mark the broker as auto-provide — shared infrastructure available to all users
@@ -197,7 +197,7 @@ func TestBrokerAuthz_Dispatch_AutoProvide_NonOwnerAllowed(t *testing.T) {
 	// The request may fail downstream (no dispatcher), but NOT with 403 or "no broker available".
 	rec := doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "dispatch-autoprovide-test",
-		GroveID: grove.ID,
+		ProjectID: project.ID,
 	})
 	assert.NotEqual(t, http.StatusForbidden, rec.Code,
 		"non-owner should not get 403 on auto-provide broker; got: %s", rec.Body.String())
@@ -207,13 +207,13 @@ func TestBrokerAuthz_Dispatch_AutoProvide_NonOwnerAllowed(t *testing.T) {
 }
 
 func TestBrokerAuthz_Dispatch_AdminBypass(t *testing.T) {
-	srv, _, _, _, admin, grove, _ := setupBrokerAuthzTest(t)
+	srv, _, _, _, admin, project, _ := setupBrokerAuthzTest(t)
 
 	// Admin should bypass broker dispatch authorization.
 	// The request may fail downstream (no dispatcher), but NOT with 403.
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "dispatch-admin-test",
-		GroveID: grove.ID,
+		ProjectID: project.ID,
 	})
 	assert.NotEqual(t, http.StatusForbidden, rec.Code,
 		"admin should not get 403; got: %s", rec.Body.String())
@@ -368,29 +368,29 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	// Create a grove
-	grove := &store.Grove{
-		ID:      "grove_1",
-		Slug:    "test-grove",
-		Name:    "Test Grove",
+	// Create a project
+	project := &store.Project{
+		ID:      "project_1",
+		Slug:    "test-project",
+		Name:    "Test Project",
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Register broker as provider
-	provider := &store.GroveProvider{
-		GroveID:    grove.ID,
+	provider := &store.ProjectProvider{
+		ProjectID:    project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}
-	require.NoError(t, s.AddGroveProvider(ctx, provider))
+	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	t.Run("Resolve by ID", func(t *testing.T) {
 		body := map[string]interface{}{
 			"name":            "Agent ID",
-			"groveId":         grove.ID,
+			"projectId":         project.ID,
 			"runtimeBrokerId": "broker_id_123",
 		}
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
@@ -404,7 +404,7 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 	t.Run("Resolve by Name", func(t *testing.T) {
 		body := map[string]interface{}{
 			"name":            "Agent Name",
-			"groveId":         grove.ID,
+			"projectId":         project.ID,
 			"runtimeBrokerId": "My Laptop",
 		}
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
@@ -418,7 +418,7 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 	t.Run("Resolve by Slug", func(t *testing.T) {
 		body := map[string]interface{}{
 			"name":            "Agent Slug",
-			"groveId":         grove.ID,
+			"projectId":         project.ID,
 			"runtimeBrokerId": "my-laptop",
 		}
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
@@ -432,7 +432,7 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 	t.Run("Invalid broker", func(t *testing.T) {
 		body := map[string]interface{}{
 			"name":            "Agent Invalid",
-			"groveId":         grove.ID,
+			"projectId":         project.ID,
 			"runtimeBrokerId": "non-existent",
 		}
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)

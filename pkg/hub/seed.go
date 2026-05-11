@@ -58,13 +58,13 @@ func seedDefaultPoliciesAndGroups(ctx context.Context, s store.Store) {
 		Effect:       "allow",
 	})
 
-	// 3. Seed hub-member-create-groves policy
+	// 3. Seed hub-member-create-projects policy
 	seedPolicy(ctx, s, group.ID, &store.Policy{
 		ID:           api.NewUUID(),
-		Name:         "hub-member-create-groves",
-		Description:  "Allow hub members to create groves",
+		Name:         "hub-member-create-projects",
+		Description:  "Allow hub members to create projects",
 		ScopeType:    "hub",
-		ResourceType: "grove",
+		ResourceType: "project",
 		Actions:      []string{"create"},
 		Effect:       "allow",
 	})
@@ -103,7 +103,7 @@ func seedPolicy(ctx context.Context, s store.Store, groupID string, policy *stor
 
 // seedDevUser ensures the development pseudo-user exists in the store.
 // This is needed because Ent enforces foreign key constraints on owner_id,
-// and the dev user must exist as a User record for grove group creation to
+// and the dev user must exist as a User record for project group creation to
 // succeed in workstation/dev-auth mode.
 func seedDevUser(ctx context.Context, s store.Store) {
 	_, err := s.GetUser(ctx, DevUserID)

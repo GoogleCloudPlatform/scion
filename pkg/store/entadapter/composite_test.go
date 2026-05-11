@@ -147,12 +147,12 @@ func TestCompositeStore_AddGroupMember_AgentShadowRecord(t *testing.T) {
 	cs := newTestCompositeStore(t)
 	ctx := context.Background()
 
-	// Create a grove in the base store
-	groveID := uuid.New().String()
-	err := cs.Store.CreateGrove(ctx, &store.Grove{
-		ID:      groveID,
-		Name:    "Test Grove",
-		Slug:    "test-grove",
+	// Create a project in the base store
+	projectID := uuid.New().String()
+	err := cs.Store.CreateProject(ctx, &store.Project{
+		ID:      projectID,
+		Name:    "Test Project",
+		Slug:    "test-project",
 		Created: time.Now(),
 		Updated: time.Now(),
 	})
@@ -164,7 +164,7 @@ func TestCompositeStore_AddGroupMember_AgentShadowRecord(t *testing.T) {
 		ID:           agentID,
 		Name:         "Test Agent",
 		Slug:         "test-agent",
-		GroveID:      groveID,
+		ProjectID:    projectID,
 		Phase:        string(state.PhaseStopped),
 		StateVersion: 1,
 		Created:      time.Now(),
@@ -182,7 +182,7 @@ func TestCompositeStore_AddGroupMember_AgentShadowRecord(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Add the agent as a member — should create shadow agent and grove records
+	// Add the agent as a member — should create shadow agent and project records
 	err = cs.AddGroupMember(ctx, &store.GroupMember{
 		GroupID:    groupID,
 		MemberType: store.GroupMemberTypeAgent,
@@ -236,57 +236,57 @@ func TestCompositeStore_AddGroupMember_Idempotent(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrAlreadyExists)
 }
 
-// TestCompositeStore_CreateGroup_WithGroveID tests that creating a group with a
-// grove ID succeeds even though the grove only exists in the base (SQLite) store.
-// The CompositeStore should create a shadow grove record in the Ent database to
+// TestCompositeStore_CreateGroup_WithProjectID tests that creating a group with a
+// project ID succeeds even though the project only exists in the base (SQLite) store.
+// The CompositeStore should create a shadow project record in the Ent database to
 // satisfy the foreign key constraint.
-func TestCompositeStore_CreateGroup_WithGroveID(t *testing.T) {
+func TestCompositeStore_CreateGroup_WithProjectID(t *testing.T) {
 	cs := newTestCompositeStore(t)
 	ctx := context.Background()
 
-	// Create a grove in the base store only (not in Ent)
-	groveID := uuid.New().String()
-	err := cs.Store.CreateGrove(ctx, &store.Grove{
-		ID:      groveID,
-		Name:    "Shadow Grove",
-		Slug:    "shadow-grove",
+	// Create a project in the base store only (not in Ent)
+	projectID := uuid.New().String()
+	err := cs.Store.CreateProject(ctx, &store.Project{
+		ID:      projectID,
+		Name:    "Shadow Project",
+		Slug:    "shadow-project",
 		Created: time.Now(),
 		Updated: time.Now(),
 	})
 	require.NoError(t, err)
 
-	// Create a group with grove_id — this should succeed because the
-	// CompositeStore creates a shadow grove record in Ent before creating
+	// Create a group with project_id — this should succeed because the
+	// CompositeStore creates a shadow project record in Ent before creating
 	// the group.
 	groupID := uuid.New().String()
 	err = cs.CreateGroup(ctx, &store.Group{
 		ID:        groupID,
-		Name:      "Shadow Grove Agents",
-		Slug:      "grove:shadow-grove:agents",
-		GroupType: store.GroupTypeGroveAgents,
-		GroveID:   groveID,
+		Name:      "Shadow Project Agents",
+		Slug:      "project:shadow-project:agents",
+		GroupType: store.GroupTypeProjectAgents,
+		ProjectID: projectID,
 	})
-	require.NoError(t, err, "CreateGroup should succeed for grove that exists only in base store")
+	require.NoError(t, err, "CreateGroup should succeed for project that exists only in base store")
 
-	// Verify the group was created with the correct grove ID
+	// Verify the group was created with the correct project ID
 	group, err := cs.GetGroup(ctx, groupID)
 	require.NoError(t, err)
-	assert.Equal(t, groveID, group.GroveID)
-	assert.Equal(t, "grove:shadow-grove:agents", group.Slug)
+	assert.Equal(t, projectID, group.ProjectID)
+	assert.Equal(t, "project:shadow-project:agents", group.Slug)
 }
 
-// TestCompositeStore_CreateGroup_MultipleGroupsPerGrove verifies that multiple
-// groups (agents + members) can reference the same grove. The grove_id FK must
+// TestCompositeStore_CreateGroup_MultipleGroupsPerProject verifies that multiple
+// groups (agents + members) can reference the same project. The project_id FK must
 // NOT have a unique constraint.
-func TestCompositeStore_CreateGroup_MultipleGroupsPerGrove(t *testing.T) {
+func TestCompositeStore_CreateGroup_MultipleGroupsPerProject(t *testing.T) {
 	cs := newTestCompositeStore(t)
 	ctx := context.Background()
 
-	groveID := uuid.New().String()
-	err := cs.Store.CreateGrove(ctx, &store.Grove{
-		ID:      groveID,
-		Name:    "Multi-Group Grove",
-		Slug:    "multi-group-grove",
+	projectID := uuid.New().String()
+	err := cs.Store.CreateProject(ctx, &store.Project{
+		ID:      projectID,
+		Name:    "Multi-Group Project",
+		Slug:    "multi-group-project",
 		Created: time.Now(),
 		Updated: time.Now(),
 	})
@@ -296,30 +296,30 @@ func TestCompositeStore_CreateGroup_MultipleGroupsPerGrove(t *testing.T) {
 	agentsGroupID := uuid.New().String()
 	err = cs.CreateGroup(ctx, &store.Group{
 		ID:        agentsGroupID,
-		Name:      "Multi-Group Grove Agents",
-		Slug:      "grove:multi-group-grove:agents",
-		GroupType: store.GroupTypeGroveAgents,
-		GroveID:   groveID,
+		Name:      "Multi-Group Project Agents",
+		Slug:      "project:multi-group-project:agents",
+		GroupType: store.GroupTypeProjectAgents,
+		ProjectID: projectID,
 	})
 	require.NoError(t, err, "agents group creation should succeed")
 
-	// Create members group for the same grove — this must NOT fail
+	// Create members group for the same project — this must NOT fail
 	membersGroupID := uuid.New().String()
 	err = cs.CreateGroup(ctx, &store.Group{
 		ID:        membersGroupID,
-		Name:      "Multi-Group Grove Members",
-		Slug:      "grove:multi-group-grove:members",
+		Name:      "Multi-Group Project Members",
+		Slug:      "project:multi-group-project:members",
 		GroupType: store.GroupTypeExplicit,
-		GroveID:   groveID,
+		ProjectID: projectID,
 	})
-	require.NoError(t, err, "members group creation should succeed for same grove")
+	require.NoError(t, err, "members group creation should succeed for same project")
 
-	// Verify both groups exist with the correct grove ID
+	// Verify both groups exist with the correct project ID
 	agents, err := cs.GetGroup(ctx, agentsGroupID)
 	require.NoError(t, err)
-	assert.Equal(t, groveID, agents.GroveID)
+	assert.Equal(t, projectID, agents.ProjectID)
 
 	members, err := cs.GetGroup(ctx, membersGroupID)
 	require.NoError(t, err)
-	assert.Equal(t, groveID, members.GroveID)
+	assert.Equal(t, projectID, members.ProjectID)
 }

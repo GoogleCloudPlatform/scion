@@ -179,25 +179,25 @@ func TestHandleGitHubAppInstallations_ValidationErrors(t *testing.T) {
 }
 
 // ============================================================================
-// Grove GitHub Installation Association
+// Project GitHub Installation Association
 // ============================================================================
 
-func TestHandleGroveGitHubInstallation(t *testing.T) {
+func TestHandleProjectGitHubInstallation(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a grove
-	grove := &store.Grove{
-		ID:         "grove_gh_test",
-		Slug:       "gh-test-grove",
-		Name:       "GH Test Grove",
+	// Create a project
+	project := &store.Project{
+		ID:         "project_gh_test",
+		Slug:       "gh-test-project",
+		Name:       "GH Test Project",
 		GitRemote:  "https://github.com/acme/widgets",
 		Created:    time.Now(),
 		Updated:    time.Now(),
 		Visibility: "private",
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	// Create an installation
@@ -212,73 +212,73 @@ func TestHandleGroveGitHubInstallation(t *testing.T) {
 		t.Fatalf("failed to create installation: %v", err)
 	}
 
-	// Associate grove with installation
-	rec := doRequest(t, srv, http.MethodPut, "/api/v1/groves/grove_gh_test/github-installation", map[string]interface{}{
+	// Associate project with installation
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/project_gh_test/github-installation", map[string]interface{}{
 		"installation_id": 54321,
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Verify grove has installation ID
-	updatedGrove, err := s.GetGrove(ctx, "grove_gh_test")
+	// Verify project has installation ID
+	updatedProject, err := s.GetProject(ctx, "project_gh_test")
 	if err != nil {
-		t.Fatalf("failed to get grove: %v", err)
+		t.Fatalf("failed to get project: %v", err)
 	}
-	if updatedGrove.GitHubInstallationID == nil || *updatedGrove.GitHubInstallationID != 54321 {
-		t.Errorf("expected installation_id 54321, got %v", updatedGrove.GitHubInstallationID)
+	if updatedProject.GitHubInstallationID == nil || *updatedProject.GitHubInstallationID != 54321 {
+		t.Errorf("expected installation_id 54321, got %v", updatedProject.GitHubInstallationID)
 	}
-	if updatedGrove.GitHubAppStatus == nil || updatedGrove.GitHubAppStatus.State != store.GitHubAppStateUnchecked {
+	if updatedProject.GitHubAppStatus == nil || updatedProject.GitHubAppStatus.State != store.GitHubAppStateUnchecked {
 		t.Error("expected unchecked status after association")
 	}
 
 	// Get status
-	rec = doRequest(t, srv, http.MethodGet, "/api/v1/groves/grove_gh_test/github-status", nil)
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/project_gh_test/github-status", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// Remove association
-	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/groves/grove_gh_test/github-installation", nil)
+	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/projects/project_gh_test/github-installation", nil)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// Verify removed
-	clearedGrove, err := s.GetGrove(ctx, "grove_gh_test")
+	clearedProject, err := s.GetProject(ctx, "project_gh_test")
 	if err != nil {
-		t.Fatalf("failed to get grove: %v", err)
+		t.Fatalf("failed to get project: %v", err)
 	}
-	if clearedGrove.GitHubInstallationID != nil {
+	if clearedProject.GitHubInstallationID != nil {
 		t.Error("expected nil installation_id after removal")
 	}
 }
 
-func TestHandleGroveGitHubStatus_PostNoInstallation(t *testing.T) {
+func TestHandleProjectGitHubStatus_PostNoInstallation(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_gh_status_check", Slug: "gh-status-check", Name: "GH Status Check",
+	project := &store.Project{
+		ID: "project_gh_status_check", Slug: "gh-status-check", Name: "GH Status Check",
 		GitRemote: "https://github.com/acme/widgets",
 		Created:   time.Now(), Updated: time.Now(), Visibility: "private",
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	// POST without installation should return 400
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/grove_gh_status_check/github-status", nil)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/project_gh_status_check/github-status", nil)
 	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for grove without installation, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("expected 400 for project without installation, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestHandleGroveGitHubStatus_PostWithInstallation(t *testing.T) {
+func TestHandleProjectGitHubStatus_PostWithInstallation(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create the installation record first (grove has FK to installation)
+	// Create the installation record first (project has FK to installation)
 	instID := int64(77777)
 	inst := &store.GitHubInstallation{
 		InstallationID: instID,
@@ -291,24 +291,24 @@ func TestHandleGroveGitHubStatus_PostWithInstallation(t *testing.T) {
 		t.Fatalf("failed to create installation: %v", err)
 	}
 
-	grove := &store.Grove{
-		ID: "grove_gh_status_check2", Slug: "gh-status-check2", Name: "GH Status Check 2",
+	project := &store.Project{
+		ID: "project_gh_status_check2", Slug: "gh-status-check2", Name: "GH Status Check 2",
 		GitRemote: "https://github.com/acme/widgets",
 		Created:   time.Now(), Updated: time.Now(), Visibility: "private",
 	}
-	grove.GitHubInstallationID = &instID
-	grove.GitHubAppStatus = &store.GitHubAppGroveStatus{
+	project.GitHubInstallationID = &instID
+	project.GitHubAppStatus = &store.GitHubAppProjectStatus{
 		State:       store.GitHubAppStateUnchecked,
 		LastChecked: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	// POST should succeed (though minting will fail because no GitHub App
 	// is configured — the endpoint should still return 200 with the error
-	// captured in the response and grove status updated to error)
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/grove_gh_status_check2/github-status", nil)
+	// captured in the response and project status updated to error)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/project_gh_status_check2/github-status", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -323,7 +323,7 @@ func TestHandleGroveGitHubStatus_PostWithInstallation(t *testing.T) {
 		t.Error("expected check_error in response since GitHub App is not configured")
 	}
 
-	// Grove status should now be updated (to error since minting failed)
+	// Project status should now be updated (to error since minting failed)
 	statusMap, ok := resp["status"].(map[string]interface{})
 	if !ok {
 		t.Fatal("expected status object in response")
@@ -333,19 +333,19 @@ func TestHandleGroveGitHubStatus_PostWithInstallation(t *testing.T) {
 	}
 }
 
-func TestHandleGroveGitHubInstallation_NotFoundInstallation(t *testing.T) {
+func TestHandleProjectGitHubInstallation_NotFoundInstallation(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_gh_notfound", Slug: "gh-nf", Name: "GH NF",
+	project := &store.Project{
+		ID: "project_gh_notfound", Slug: "gh-nf", Name: "GH NF",
 		Created: time.Now(), Updated: time.Now(), Visibility: "private",
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodPut, "/api/v1/groves/grove_gh_notfound/github-installation", map[string]interface{}{
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/project_gh_notfound/github-installation", map[string]interface{}{
 		"installation_id": 99999,
 	})
 	if rec.Code != http.StatusNotFound {
@@ -354,23 +354,23 @@ func TestHandleGroveGitHubInstallation_NotFoundInstallation(t *testing.T) {
 }
 
 // ============================================================================
-// Grove GitHub Permissions
+// Project GitHub Permissions
 // ============================================================================
 
-func TestHandleGroveGitHubPermissions(t *testing.T) {
+func TestHandleProjectGitHubPermissions(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_gh_perms", Slug: "gh-perms", Name: "GH Perms",
+	project := &store.Project{
+		ID: "project_gh_perms", Slug: "gh-perms", Name: "GH Perms",
 		Created: time.Now(), Updated: time.Now(), Visibility: "private",
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	// Get defaults
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/groves/grove_gh_perms/github-permissions", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/project_gh_perms/github-permissions", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
@@ -384,7 +384,7 @@ func TestHandleGroveGitHubPermissions(t *testing.T) {
 	}
 
 	// Set custom permissions
-	rec = doRequest(t, srv, http.MethodPut, "/api/v1/groves/grove_gh_perms/github-permissions", map[string]interface{}{
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/project_gh_perms/github-permissions", map[string]interface{}{
 		"contents": "read",
 		"metadata": "read",
 	})
@@ -393,25 +393,25 @@ func TestHandleGroveGitHubPermissions(t *testing.T) {
 	}
 
 	// Verify stored
-	updatedGrove, err := s.GetGrove(ctx, "grove_gh_perms")
+	updatedProject, err := s.GetProject(ctx, "project_gh_perms")
 	if err != nil {
-		t.Fatalf("failed to get grove: %v", err)
+		t.Fatalf("failed to get project: %v", err)
 	}
-	if updatedGrove.GitHubPermissions == nil || updatedGrove.GitHubPermissions.Contents != "read" {
+	if updatedProject.GitHubPermissions == nil || updatedProject.GitHubPermissions.Contents != "read" {
 		t.Error("expected custom contents:read permission")
 	}
 
 	// Reset to defaults
-	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/groves/grove_gh_perms/github-permissions", nil)
+	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/projects/project_gh_perms/github-permissions", nil)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", rec.Code)
 	}
 
-	clearedGrove, err := s.GetGrove(ctx, "grove_gh_perms")
+	clearedProject, err := s.GetProject(ctx, "project_gh_perms")
 	if err != nil {
-		t.Fatalf("failed to get grove: %v", err)
+		t.Fatalf("failed to get project: %v", err)
 	}
-	if clearedGrove.GitHubPermissions != nil {
+	if clearedProject.GitHubPermissions != nil {
 		t.Error("expected nil permissions after reset")
 	}
 }
@@ -447,21 +447,21 @@ func TestHandleAgentGitHubTokenRefresh_NoAuth(t *testing.T) {
 	srv, _ := testServer(t)
 	ctx := context.Background()
 
-	// Create a grove and agent
-	grove := &store.Grove{
-		ID:   "grove_gh_refresh",
-		Name: "Test Grove",
-		Slug: "test-grove",
+	// Create a project and agent
+	project := &store.Project{
+		ID:   "project_gh_refresh",
+		Name: "Test Project",
+		Slug: "test-project",
 	}
-	if err := srv.store.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := srv.store.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	agent := &store.Agent{
 		ID:      "agent_gh_refresh",
 		Name:    "test-agent",
 		Slug:    "test-agent",
-		GroveID: grove.ID,
+		ProjectID: project.ID,
 	}
 	if err := srv.store.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -479,21 +479,21 @@ func TestHandleAgentGitHubTokenRefresh_DevAuth(t *testing.T) {
 	srv, _ := testServer(t)
 	ctx := context.Background()
 
-	// Create a grove and agent
-	grove := &store.Grove{
-		ID:   "grove_gh_refresh2",
-		Name: "Test Grove 2",
-		Slug: "test-grove-2",
+	// Create a project and agent
+	project := &store.Project{
+		ID:   "project_gh_refresh2",
+		Name: "Test Project 2",
+		Slug: "test-project-2",
 	}
-	if err := srv.store.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := srv.store.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	agent := &store.Agent{
 		ID:      "agent_gh_refresh2",
 		Name:    "test-agent-2",
 		Slug:    "test-agent-2",
-		GroveID: grove.ID,
+		ProjectID: project.ID,
 	}
 	if err := srv.store.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -511,21 +511,21 @@ func TestHandleAgentGitHubTokenRefresh_SelfAccess(t *testing.T) {
 	srv, _ := testServer(t)
 	ctx := context.Background()
 
-	// Create a grove and agent
-	grove := &store.Grove{
-		ID:   "grove_gh_refresh3",
-		Name: "Test Grove 3",
-		Slug: "test-grove-3",
+	// Create a project and agent
+	project := &store.Project{
+		ID:   "project_gh_refresh3",
+		Name: "Test Project 3",
+		Slug: "test-project-3",
 	}
-	if err := srv.store.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := srv.store.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	agent := &store.Agent{
 		ID:      "agent_gh_refresh3",
 		Name:    "test-agent-3",
 		Slug:    "test-agent-3",
-		GroveID: grove.ID,
+		ProjectID: project.ID,
 	}
 	if err := srv.store.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -537,7 +537,7 @@ func TestHandleAgentGitHubTokenRefresh_SelfAccess(t *testing.T) {
 
 	// Generate an agent token with refresh scope
 	agentToken, err := srv.agentTokenService.GenerateAgentToken(
-		"agent_gh_refresh3", grove.ID,
+		"agent_gh_refresh3", project.ID,
 		[]AgentTokenScope{ScopeAgentTokenRefresh}, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
@@ -555,21 +555,21 @@ func TestHandleAgentGitHubTokenRefresh_NoInstallation(t *testing.T) {
 	srv, _ := testServer(t)
 	ctx := context.Background()
 
-	// Create a grove WITHOUT a GitHub App installation
-	grove := &store.Grove{
-		ID:   "grove_gh_refresh4",
-		Name: "Test Grove 4",
-		Slug: "test-grove-4",
+	// Create a project WITHOUT a GitHub App installation
+	project := &store.Project{
+		ID:   "project_gh_refresh4",
+		Name: "Test Project 4",
+		Slug: "test-project-4",
 	}
-	if err := srv.store.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := srv.store.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	agent := &store.Agent{
 		ID:      "agent_gh_refresh4",
 		Name:    "test-agent-4",
 		Slug:    "test-agent-4",
-		GroveID: grove.ID,
+		ProjectID: project.ID,
 	}
 	if err := srv.store.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -580,13 +580,13 @@ func TestHandleAgentGitHubTokenRefresh_NoInstallation(t *testing.T) {
 	}
 
 	agentToken, err := srv.agentTokenService.GenerateAgentToken(
-		"agent_gh_refresh4", grove.ID,
+		"agent_gh_refresh4", project.ID,
 		[]AgentTokenScope{ScopeAgentTokenRefresh}, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
 
-	// Request should fail because grove has no GitHub App installation
+	// Request should fail because project has no GitHub App installation
 	rec := doRequestWithAgentTokenGH(t, srv, http.MethodPost,
 		fmt.Sprintf("/api/v1/agents/%s/refresh-token", agent.ID), nil, agentToken)
 	if rec.Code != http.StatusBadRequest {

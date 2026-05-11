@@ -440,7 +440,7 @@ func TestRuntimeCommand_DefaultFallback(t *testing.T) {
 	}
 }
 
-func TestLookupContainerID_GroveScopedDisambiguation(t *testing.T) {
+func TestLookupContainerID_ProjectScopedDisambiguation(t *testing.T) {
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{
 		{
@@ -475,7 +475,7 @@ func TestLookupContainerID_GroveScopedDisambiguation(t *testing.T) {
 	}
 }
 
-func TestLookupAgent_GroveScopedDisambiguation(t *testing.T) {
+func TestLookupAgent_ProjectScopedDisambiguation(t *testing.T) {
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{
 		{
@@ -501,7 +501,7 @@ func TestLookupAgent_GroveScopedDisambiguation(t *testing.T) {
 	}
 }
 
-func TestLookupAgent_GroveFallbackForLegacyContainers(t *testing.T) {
+func TestLookupAgent_ProjectFallbackForLegacyContainers(t *testing.T) {
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{
 		{

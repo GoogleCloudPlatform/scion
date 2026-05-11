@@ -53,6 +53,12 @@ func TestParseTemplateScope(t *testing.T) {
 			expectedName:  "custom-template",
 		},
 		{
+			name:          "project scope prefix (synonym for grove)",
+			input:         "project:custom-template",
+			expectedScope: "grove",
+			expectedName:  "custom-template",
+		},
+		{
 			name:          "user scope prefix",
 			input:         "user:my-template",
 			expectedScope: "user",
@@ -126,7 +132,7 @@ func TestTruncateHash(t *testing.T) {
 
 func TestFormatTemplateNotFoundError(t *testing.T) {
 	// Test that the error message is formatted correctly
-	err := formatTemplateNotFoundError("test-template", "/some/grove/path")
+	err := formatTemplateNotFoundError("test-template", "/some/project/path")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -140,13 +146,16 @@ func TestFormatTemplateNotFoundError(t *testing.T) {
 	if !contains(errMsg, "not found") {
 		t.Error("error message should indicate template not found")
 	}
+	if !contains(errMsg, "project scope") {
+		t.Error("error message should mention project scope")
+	}
 	if !contains(errMsg, "scion template sync") {
 		t.Error("error message should provide guidance on how to create template")
 	}
 }
 
-func TestFormatTemplateNotFoundErrorNoGrove(t *testing.T) {
-	// Test with empty grove path
+func TestFormatTemplateNotFoundErrorNoProject(t *testing.T) {
+	// Test with empty project path
 	err := formatTemplateNotFoundError("test-template", "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -154,9 +163,9 @@ func TestFormatTemplateNotFoundErrorNoGrove(t *testing.T) {
 
 	errMsg := err.Error()
 
-	// Should not have grove scope line when no grove path
-	if contains(errMsg, "grove scope") {
-		t.Error("error message should not mention grove scope when no grove path")
+	// Should not have project scope line when no project path
+	if contains(errMsg, "project scope") {
+		t.Error("error message should not mention project scope when no project path")
 	}
 }
 
@@ -300,13 +309,13 @@ func TestDetectHarnessType(t *testing.T) {
 }
 
 func TestBrokerHasLocalAccess(t *testing.T) {
-	const groveID = "grove-123"
+	const projectID = "grove-123"
 	const brokerID = "broker-456"
 
 	t.Run("returns true when broker has local path", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			if r.URL.Path == "/api/v1/groves/"+groveID+"/providers" && r.Method == http.MethodGet {
+			if r.URL.Path == "/api/v1/groves/"+projectID+"/providers" && r.Method == http.MethodGet {
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"providers": []map[string]interface{}{
 						{
@@ -333,7 +342,7 @@ func TestBrokerHasLocalAccess(t *testing.T) {
 			BrokerID: brokerID,
 		}
 
-		if !brokerHasLocalAccess(context.Background(), hubCtx, groveID) {
+		if !brokerHasLocalAccess(context.Background(), hubCtx, projectID) {
 			t.Error("expected brokerHasLocalAccess to return true for broker with local path")
 		}
 	})
@@ -341,7 +350,7 @@ func TestBrokerHasLocalAccess(t *testing.T) {
 	t.Run("returns false when broker has no local path", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			if r.URL.Path == "/api/v1/groves/"+groveID+"/providers" && r.Method == http.MethodGet {
+			if r.URL.Path == "/api/v1/groves/"+projectID+"/providers" && r.Method == http.MethodGet {
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"providers": []map[string]interface{}{
 						{
@@ -367,7 +376,7 @@ func TestBrokerHasLocalAccess(t *testing.T) {
 			BrokerID: brokerID,
 		}
 
-		if brokerHasLocalAccess(context.Background(), hubCtx, groveID) {
+		if brokerHasLocalAccess(context.Background(), hubCtx, projectID) {
 			t.Error("expected brokerHasLocalAccess to return false for broker without local path")
 		}
 	})
@@ -375,7 +384,7 @@ func TestBrokerHasLocalAccess(t *testing.T) {
 	t.Run("returns false when broker ID does not match", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			if r.URL.Path == "/api/v1/groves/"+groveID+"/providers" && r.Method == http.MethodGet {
+			if r.URL.Path == "/api/v1/groves/"+projectID+"/providers" && r.Method == http.MethodGet {
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"providers": []map[string]interface{}{
 						{
@@ -402,7 +411,7 @@ func TestBrokerHasLocalAccess(t *testing.T) {
 			BrokerID: brokerID,
 		}
 
-		if brokerHasLocalAccess(context.Background(), hubCtx, groveID) {
+		if brokerHasLocalAccess(context.Background(), hubCtx, projectID) {
 			t.Error("expected brokerHasLocalAccess to return false when broker ID doesn't match")
 		}
 	})
@@ -412,7 +421,7 @@ func TestBrokerHasLocalAccess(t *testing.T) {
 			BrokerID: "",
 		}
 
-		if brokerHasLocalAccess(context.Background(), hubCtx, groveID) {
+		if brokerHasLocalAccess(context.Background(), hubCtx, projectID) {
 			t.Error("expected brokerHasLocalAccess to return false when no broker ID is set")
 		}
 	})
@@ -443,7 +452,7 @@ func TestBrokerHasLocalAccess(t *testing.T) {
 			BrokerID: brokerID,
 		}
 
-		if brokerHasLocalAccess(context.Background(), hubCtx, groveID) {
+		if brokerHasLocalAccess(context.Background(), hubCtx, projectID) {
 			t.Error("expected brokerHasLocalAccess to return false when API returns error")
 		}
 	})

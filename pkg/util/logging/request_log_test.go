@@ -141,15 +141,15 @@ func TestRequestMetaContext(t *testing.T) {
 	}
 }
 
-func TestSetRequestGroveID_AgentID(t *testing.T) {
+func TestSetRequestProjectID_AgentID(t *testing.T) {
 	meta := &RequestMeta{}
 	ctx := ContextWithRequestMeta(context.Background(), meta)
 
-	SetRequestGroveID(ctx, "my-grove")
+	SetRequestProjectID(ctx, "my-grove")
 	SetRequestAgentID(ctx, "agent-42")
 
-	if meta.GroveID != "my-grove" {
-		t.Errorf("expected GroveID=my-grove, got %s", meta.GroveID)
+	if meta.ProjectID != "my-grove" {
+		t.Errorf("expected ProjectID=my-grove, got %s", meta.ProjectID)
 	}
 	if meta.AgentID != "agent-42" {
 		t.Errorf("expected AgentID=agent-42, got %s", meta.AgentID)
@@ -167,10 +167,10 @@ func TestSetRequestBrokerID(t *testing.T) {
 	}
 }
 
-func TestSetRequestGroveID_NilContext(t *testing.T) {
+func TestSetRequestProjectID_NilContext(t *testing.T) {
 	// Should not panic when no meta in context
 	ctx := context.Background()
-	SetRequestGroveID(ctx, "test")
+	SetRequestProjectID(ctx, "test")
 	SetRequestAgentID(ctx, "test")
 	SetRequestBrokerID(ctx, "test")
 }
@@ -180,7 +180,7 @@ func TestExtractIDsFromPath(t *testing.T) {
 
 	tests := []struct {
 		path    string
-		groveID string
+		projectID string
 		agentID string
 	}{
 		{"/api/v1/groves/my-project/agents", "my-project", ""},
@@ -194,9 +194,9 @@ func TestExtractIDsFromPath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
-			groveID, agentID := extractIDsFromPath(tt.path, patterns)
-			if groveID != tt.groveID {
-				t.Errorf("groveID: expected %q, got %q", tt.groveID, groveID)
+			projectID, agentID := extractIDsFromPath(tt.path, patterns)
+			if projectID != tt.projectID {
+				t.Errorf("projectID: expected %q, got %q", tt.projectID, projectID)
 			}
 			if agentID != tt.agentID {
 				t.Errorf("agentID: expected %q, got %q", tt.agentID, agentID)
@@ -339,7 +339,7 @@ func TestRequestLogMiddleware_HandlerEnrichment(t *testing.T) {
 	handler := RequestLogMiddleware(logger, "hub", nil)(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Handler enriches metadata after middleware parsed the URL
-			SetRequestGroveID(r.Context(), "enriched-grove")
+			SetRequestProjectID(r.Context(), "enriched-grove")
 			SetRequestAgentID(r.Context(), "enriched-agent")
 			w.WriteHeader(http.StatusOK)
 		}),
@@ -477,7 +477,7 @@ func TestLoggerContextEnrichment(t *testing.T) {
 	meta := &RequestMeta{
 		RequestID: "req-enriched",
 		TraceID:   "trace-enriched",
-		GroveID:   "grove-enriched",
+		ProjectID:   "grove-enriched",
 		AgentID:   "agent-enriched",
 	}
 	ctx := ContextWithRequestMeta(context.Background(), meta)

@@ -43,8 +43,8 @@ type ControlChannelConfig struct {
 	SecretKey []byte
 	// Version is the runtime broker version string.
 	Version string
-	// Groves is a list of grove IDs this broker serves.
-	Groves []string
+	// Projects is a list of grove IDs this broker serves.
+	Projects []string
 
 	// ReconnectBackoff configuration
 	ReconnectInitial    time.Duration
@@ -129,7 +129,7 @@ type StreamHandler struct {
 	streamID   string
 	streamType string
 	slug       string
-	groveID    string
+	projectID  string
 	dataCh     chan []byte
 	resizeCh   chan [2]int // [cols, rows]
 	closeCh    chan struct{}
@@ -245,7 +245,7 @@ func (c *ControlChannelClient) doConnect() error {
 	c.mu.Unlock()
 
 	// Send connect message
-	connectMsg := wsprotocol.NewConnectMessage(c.config.BrokerID, c.config.Version, c.config.Groves)
+	connectMsg := wsprotocol.NewConnectMessage(c.config.BrokerID, c.config.Version, c.config.Projects)
 	if err := conn.WriteJSON(connectMsg); err != nil {
 		c.conn.Close()
 		return fmt.Errorf("failed to send connect message: %w", err)
@@ -534,12 +534,12 @@ func (c *ControlChannelClient) handleStreamOpen(data []byte) error {
 		)
 	}
 
-	// Create stream handler
+		// Create stream handler
 	handler := &StreamHandler{
 		streamID:   open.StreamID,
 		streamType: open.StreamType,
 		slug:       open.Slug,
-		groveID:    open.GroveID,
+		projectID:  open.ProjectID,
 		dataCh:     make(chan []byte, 256),
 		resizeCh:   make(chan [2]int, 8),
 		closeCh:    make(chan struct{}),
@@ -662,7 +662,7 @@ func (c *ControlChannelClient) handlePTYStream(handler *StreamHandler, cols, row
 		return
 	}
 
-	result, err := c.agentLookup.LookupAgent(c.ctx, handler.slug, handler.groveID)
+	result, err := c.agentLookup.LookupAgent(c.ctx, handler.slug, handler.projectID)
 	if err != nil {
 		c.log.Error("PTY stream failed: agent lookup error", "slug", handler.slug, "error", err)
 		c.CloseStream(handler.streamID, fmt.Sprintf("agent lookup failed: %v", err), 404)

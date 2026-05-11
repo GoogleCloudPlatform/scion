@@ -18,7 +18,7 @@
  * Template detail page component
  *
  * Displays a template's metadata and file browser with inline editing.
- * Route: /groves/{groveId}/templates/{templateId}
+ * Route: /projects/{projectId}/templates/{templateId}
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -42,7 +42,7 @@ export class ScionPageTemplateDetail extends LitElement {
   pageData: PageData | null = null;
 
   @property({ type: String })
-  groveId = '';
+  projectId = '';
 
   @property({ type: String })
   templateId = '';
@@ -163,9 +163,9 @@ export class ScionPageTemplateDetail extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     if (typeof window !== 'undefined') {
-      const match = window.location.pathname.match(/\/groves\/([^/]+)\/templates\/([^/]+)/);
+      const match = window.location.pathname.match(/\/projects\/([^/]+)\/templates\/([^/]+)/);
       if (match) {
-        this.groveId = match[1];
+        this.projectId = match[1];
         this.templateId = match[2];
       }
     }
@@ -196,7 +196,7 @@ export class ScionPageTemplateDetail extends LitElement {
     }
   }
 
-  // ── File editing event handlers (mirror grove-detail pattern) ──
+  // ── File editing event handlers (mirror project-detail pattern) ──
 
   private handleFileEditRequested(e: CustomEvent<{ path: string }>): void {
     this.editingFilePath = e.detail.path;
@@ -247,9 +247,9 @@ export class ScionPageTemplateDetail extends LitElement {
     if (!this.template) return nothing;
 
     return html`
-      <a href="/groves/${this.groveId}/settings" class="back-link">
+      <a href="/projects/${this.projectId}/settings" class="back-link">
         <sl-icon name="arrow-left"></sl-icon>
-        Grove Settings
+        Project Settings
       </a>
 
       ${this.renderHeader()}

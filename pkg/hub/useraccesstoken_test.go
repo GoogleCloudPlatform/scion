@@ -154,34 +154,34 @@ func (m *mockUserStore) ListUsers(context.Context, store.UserFilter, store.ListO
 func (m *mockUserStore) DeleteUser(context.Context, string) error                    { return nil }
 func (m *mockUserStore) UpdateUserLastSeen(context.Context, string, time.Time) error { return nil }
 
-// mockGroveStore implements store.GroveStore for testing (minimal).
-type mockGroveStore struct {
-	groves map[string]*store.Grove
+// mockProjectStore implements store.ProjectStore for testing (minimal).
+type mockProjectStore struct {
+	projects map[string]*store.Project
 }
 
-func (m *mockGroveStore) GetGrove(_ context.Context, id string) (*store.Grove, error) {
-	g, ok := m.groves[id]
+func (m *mockProjectStore) GetProject(_ context.Context, id string) (*store.Project, error) {
+	g, ok := m.projects[id]
 	if !ok {
 		return nil, store.ErrNotFound
 	}
 	return g, nil
 }
-func (m *mockGroveStore) CreateGrove(context.Context, *store.Grove) error { return nil }
-func (m *mockGroveStore) UpdateGrove(context.Context, *store.Grove) error { return nil }
-func (m *mockGroveStore) DeleteGrove(context.Context, string) error       { return nil }
-func (m *mockGroveStore) GetGroveBySlug(context.Context, string) (*store.Grove, error) {
+func (m *mockProjectStore) CreateProject(context.Context, *store.Project) error { return nil }
+func (m *mockProjectStore) UpdateProject(context.Context, *store.Project) error { return nil }
+func (m *mockProjectStore) DeleteProject(context.Context, string) error       { return nil }
+func (m *mockProjectStore) GetProjectBySlug(context.Context, string) (*store.Project, error) {
 	return nil, store.ErrNotFound
 }
-func (m *mockGroveStore) GetGroveBySlugCaseInsensitive(context.Context, string) (*store.Grove, error) {
+func (m *mockProjectStore) GetProjectBySlugCaseInsensitive(context.Context, string) (*store.Project, error) {
 	return nil, store.ErrNotFound
 }
-func (m *mockGroveStore) GetGrovesByGitRemote(context.Context, string) ([]*store.Grove, error) {
-	return []*store.Grove{}, nil
+func (m *mockProjectStore) GetProjectsByGitRemote(context.Context, string) ([]*store.Project, error) {
+	return []*store.Project{}, nil
 }
-func (m *mockGroveStore) NextAvailableSlug(_ context.Context, baseSlug string) (string, error) {
+func (m *mockProjectStore) NextAvailableSlug(_ context.Context, baseSlug string) (string, error) {
 	return baseSlug, nil
 }
-func (m *mockGroveStore) ListGroves(context.Context, store.GroveFilter, store.ListOptions) (*store.ListResult[store.Grove], error) {
+func (m *mockProjectStore) ListProjects(context.Context, store.ProjectFilter, store.ListOptions) (*store.ListResult[store.Project], error) {
 	return nil, nil
 }
 
@@ -192,12 +192,12 @@ func newTestUATService() (*UserAccessTokenService, *mockUATStore, *mockUserStore
 			"user-1": {ID: "user-1", Email: "test@example.com", DisplayName: "Test User", Role: "member"},
 		},
 	}
-	groveStore := &mockGroveStore{
-		groves: map[string]*store.Grove{
-			"grove-1": {ID: "grove-1", Name: "test-grove"},
+	projectStore := &mockProjectStore{
+		projects: map[string]*store.Project{
+			"project-1": {ID: "project-1", Name: "test-project"},
 		},
 	}
-	svc := NewUserAccessTokenService(tokenStore, userStore, groveStore)
+	svc := NewUserAccessTokenService(tokenStore, userStore, projectStore)
 	return svc, tokenStore, userStore
 }
 
@@ -206,7 +206,7 @@ func TestCreateToken(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("basic creation", func(t *testing.T) {
-		key, token, err := svc.CreateToken(ctx, "user-1", "ci-token", "grove-1",
+		key, token, err := svc.CreateToken(ctx, "user-1", "ci-token", "project-1",
 			[]string{"agent:dispatch", "agent:read"}, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -217,8 +217,8 @@ func TestCreateToken(t *testing.T) {
 		if token.Name != "ci-token" {
 			t.Errorf("expected name 'ci-token', got %q", token.Name)
 		}
-		if token.GroveID != "grove-1" {
-			t.Errorf("expected groveID 'grove-1', got %q", token.GroveID)
+		if token.ProjectID != "project-1" {
+			t.Errorf("expected projectID 'project-1', got %q", token.ProjectID)
 		}
 		if len(token.Scopes) != 2 {
 			t.Errorf("expected 2 scopes, got %d", len(token.Scopes))
@@ -229,7 +229,7 @@ func TestCreateToken(t *testing.T) {
 	})
 
 	t.Run("expands agent:manage", func(t *testing.T) {
-		_, token, err := svc.CreateToken(ctx, "user-1", "manage-token", "grove-1",
+		_, token, err := svc.CreateToken(ctx, "user-1", "manage-token", "project-1",
 			[]string{"agent:manage"}, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -240,24 +240,24 @@ func TestCreateToken(t *testing.T) {
 	})
 
 	t.Run("rejects invalid scope", func(t *testing.T) {
-		_, _, err := svc.CreateToken(ctx, "user-1", "bad-token", "grove-1",
+		_, _, err := svc.CreateToken(ctx, "user-1", "bad-token", "project-1",
 			[]string{"invalid:scope"}, nil)
 		if !errors.Is(err, ErrInvalidUATScope) {
 			t.Errorf("expected ErrInvalidUATScope, got %v", err)
 		}
 	})
 
-	t.Run("rejects missing grove", func(t *testing.T) {
+	t.Run("rejects missing project", func(t *testing.T) {
 		_, _, err := svc.CreateToken(ctx, "user-1", "bad-token", "nonexistent",
 			[]string{"agent:read"}, nil)
 		if err == nil {
-			t.Error("expected error for nonexistent grove")
+			t.Error("expected error for nonexistent project")
 		}
 	})
 
 	t.Run("rejects expiry too long", func(t *testing.T) {
 		tooFar := time.Now().Add(400 * 24 * time.Hour)
-		_, _, err := svc.CreateToken(ctx, "user-1", "bad-token", "grove-1",
+		_, _, err := svc.CreateToken(ctx, "user-1", "bad-token", "project-1",
 			[]string{"agent:read"}, &tooFar)
 		if !errors.Is(err, ErrUATExpiryTooLong) {
 			t.Errorf("expected ErrUATExpiryTooLong, got %v", err)
@@ -265,7 +265,7 @@ func TestCreateToken(t *testing.T) {
 	})
 
 	t.Run("rejects empty scopes", func(t *testing.T) {
-		_, _, err := svc.CreateToken(ctx, "user-1", "bad-token", "grove-1",
+		_, _, err := svc.CreateToken(ctx, "user-1", "bad-token", "project-1",
 			[]string{}, nil)
 		if err == nil {
 			t.Error("expected error for empty scopes")
@@ -277,7 +277,7 @@ func TestValidateToken(t *testing.T) {
 	svc, _, _ := newTestUATService()
 	ctx := context.Background()
 
-	key, _, err := svc.CreateToken(ctx, "user-1", "test-token", "grove-1",
+	key, _, err := svc.CreateToken(ctx, "user-1", "test-token", "project-1",
 		[]string{"agent:dispatch", "agent:read"}, nil)
 	if err != nil {
 		t.Fatalf("failed to create token: %v", err)
@@ -291,8 +291,8 @@ func TestValidateToken(t *testing.T) {
 		if identity.ID() != "user-1" {
 			t.Errorf("expected user ID 'user-1', got %q", identity.ID())
 		}
-		if identity.ScopedGroveID() != "grove-1" {
-			t.Errorf("expected grove 'grove-1', got %q", identity.ScopedGroveID())
+		if identity.ScopedProjectID() != "project-1" {
+			t.Errorf("expected project 'project-1', got %q", identity.ScopedProjectID())
 		}
 		if !identity.HasScope("agent:dispatch") {
 			t.Error("expected identity to have scope agent:dispatch")
@@ -321,7 +321,7 @@ func TestRevokeToken(t *testing.T) {
 	svc, _, _ := newTestUATService()
 	ctx := context.Background()
 
-	key, token, err := svc.CreateToken(ctx, "user-1", "test-token", "grove-1",
+	key, token, err := svc.CreateToken(ctx, "user-1", "test-token", "project-1",
 		[]string{"agent:read"}, nil)
 	if err != nil {
 		t.Fatalf("failed to create token: %v", err)
@@ -348,7 +348,7 @@ func TestDeleteToken(t *testing.T) {
 	svc, _, _ := newTestUATService()
 	ctx := context.Background()
 
-	key, token, err := svc.CreateToken(ctx, "user-1", "test-token", "grove-1",
+	key, token, err := svc.CreateToken(ctx, "user-1", "test-token", "project-1",
 		[]string{"agent:read"}, nil)
 	if err != nil {
 		t.Fatalf("failed to create token: %v", err)
@@ -371,7 +371,7 @@ func TestTokenLimit(t *testing.T) {
 
 	// Create max tokens
 	for i := 0; i < store.UATMaxPerUser; i++ {
-		_, _, err := svc.CreateToken(ctx, "user-1", "token-"+string(rune('a'+i%26))+string(rune('0'+i/26)), "grove-1",
+		_, _, err := svc.CreateToken(ctx, "user-1", "token-"+string(rune('a'+i%26))+string(rune('0'+i/26)), "project-1",
 			[]string{"agent:read"}, nil)
 		if err != nil {
 			t.Fatalf("failed to create token %d: %v", i, err)
@@ -379,7 +379,7 @@ func TestTokenLimit(t *testing.T) {
 	}
 
 	// Next one should fail
-	_, _, err := svc.CreateToken(ctx, "user-1", "one-too-many", "grove-1",
+	_, _, err := svc.CreateToken(ctx, "user-1", "one-too-many", "project-1",
 		[]string{"agent:read"}, nil)
 	if !errors.Is(err, ErrUATLimitExceeded) {
 		t.Errorf("expected ErrUATLimitExceeded, got %v", err)
@@ -392,7 +392,7 @@ func TestListTokens(t *testing.T) {
 
 	// Create 3 tokens
 	for i := 0; i < 3; i++ {
-		_, _, err := svc.CreateToken(ctx, "user-1", "token-"+string(rune('a'+i)), "grove-1",
+		_, _, err := svc.CreateToken(ctx, "user-1", "token-"+string(rune('a'+i)), "project-1",
 			[]string{"agent:read"}, nil)
 		if err != nil {
 			t.Fatalf("failed to create token: %v", err)
@@ -425,7 +425,7 @@ func TestExpandScopes(t *testing.T) {
 	}{
 		{"single scope", []string{"agent:read"}, 1},
 		{"manage alias", []string{"agent:manage"}, len(store.UATManageScopes)},
-		{"manage with extra", []string{"agent:manage", "grove:read"}, len(store.UATManageScopes) + 1},
+		{"manage with extra", []string{"agent:manage", "project:read"}, len(store.UATManageScopes) + 1},
 		{"dedup", []string{"agent:read", "agent:read"}, 1},
 		{"manage dedup with explicit", []string{"agent:manage", "agent:read"}, len(store.UATManageScopes)},
 	}
@@ -442,7 +442,7 @@ func TestExpandScopes(t *testing.T) {
 
 func TestScopedUserIdentity(t *testing.T) {
 	base := NewAuthenticatedUser("user-1", "test@example.com", "Test", "member", "api")
-	scoped := NewScopedUserIdentity(base, "grove-1", []string{"agent:dispatch", "agent:read"})
+	scoped := NewScopedUserIdentity(base, "project-1", []string{"agent:dispatch", "agent:read"})
 
 	if scoped.ID() != "user-1" {
 		t.Errorf("expected ID 'user-1', got %q", scoped.ID())
@@ -450,8 +450,8 @@ func TestScopedUserIdentity(t *testing.T) {
 	if scoped.Email() != "test@example.com" {
 		t.Errorf("expected email 'test@example.com', got %q", scoped.Email())
 	}
-	if scoped.ScopedGroveID() != "grove-1" {
-		t.Errorf("expected grove 'grove-1', got %q", scoped.ScopedGroveID())
+	if scoped.ScopedProjectID() != "project-1" {
+		t.Errorf("expected project 'project-1', got %q", scoped.ScopedProjectID())
 	}
 	if !scoped.HasScope("agent:dispatch") {
 		t.Error("expected HasScope('agent:dispatch') to be true")

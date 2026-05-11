@@ -56,12 +56,12 @@ func (c *CompositeStore) Close() error {
 // GroupStore method overrides — delegate to Ent-backed GroupStore.
 
 func (c *CompositeStore) CreateGroup(ctx context.Context, group *store.Group) error {
-	// Ensure the grove exists in the Ent database before creating the group,
-	// since groves are stored in the base (SQLite) store but groups are in Ent
-	// which has a foreign key constraint on grove_id.
-	if group.GroveID != "" {
-		if err := c.ensureEntGrove(ctx, group.GroveID); err != nil {
-			return fmt.Errorf("ensuring grove in ent store: %w", err)
+	// Ensure the project exists in the Ent database before creating the group,
+	// since projects are stored in the base (SQLite) store but groups are in Ent
+	// which has a foreign key constraint on project_id.
+	if group.ProjectID != "" {
+		if err := c.ensureEntProject(ctx, group.ProjectID); err != nil {
+			return fmt.Errorf("ensuring project in ent store: %w", err)
 		}
 	}
 	return c.groups.CreateGroup(ctx, group)
@@ -145,7 +145,7 @@ func (c *CompositeStore) ensureEntUser(ctx context.Context, userID string) error
 }
 
 // ensureEntAgent checks if an agent exists in the Ent database and, if not,
-// creates a minimal shadow record from the base store. The agent's grove is
+// creates a minimal shadow record from the base store. The agent.s project is
 // also ensured to exist in Ent since it is a required FK.
 func (c *CompositeStore) ensureEntAgent(ctx context.Context, agentID string) error {
 	uid, err := parseUUID(agentID)
@@ -168,12 +168,12 @@ func (c *CompositeStore) ensureEntAgent(ctx context.Context, agentID string) err
 		return fmt.Errorf("fetching agent from base store: %w", err)
 	}
 
-	// Ensure the grove exists in Ent first (required FK)
-	if err := c.ensureEntGrove(ctx, a.GroveID); err != nil {
-		return fmt.Errorf("ensuring grove in ent store: %w", err)
+	// Ensure the project exists in Ent first (required FK)
+	if err := c.ensureEntProject(ctx, a.ProjectID); err != nil {
+		return fmt.Errorf("ensuring project in ent store: %w", err)
 	}
 
-	groveUID, err := parseUUID(a.GroveID)
+	projectUID, err := parseUUID(a.ProjectID)
 	if err != nil {
 		return err
 	}
@@ -183,7 +183,7 @@ func (c *CompositeStore) ensureEntAgent(ctx context.Context, agentID string) err
 		SetID(uid).
 		SetName(a.Name).
 		SetSlug(a.Slug).
-		SetGroveID(groveUID).
+		SetProjectID(projectUID).
 		Save(ctx)
 	if err != nil {
 		if ent.IsConstraintError(err) {
@@ -195,28 +195,28 @@ func (c *CompositeStore) ensureEntAgent(ctx context.Context, agentID string) err
 	return nil
 }
 
-// ensureEntGrove checks if a grove exists in the Ent database and, if not,
+// ensureEntProject checks if a project exists in the Ent database and, if not,
 // creates a minimal shadow record from the base store.
-func (c *CompositeStore) ensureEntGrove(ctx context.Context, groveID string) error {
-	uid, err := parseUUID(groveID)
+func (c *CompositeStore) ensureEntProject(ctx context.Context, projectID string) error {
+	uid, err := parseUUID(projectID)
 	if err != nil {
 		return err
 	}
 
-	_, getErr := c.client.Grove.Get(ctx, uid)
+	_, getErr := c.client.Project.Get(ctx, uid)
 	if getErr == nil {
 		return nil
 	}
 	if !ent.IsNotFound(getErr) {
-		return fmt.Errorf("checking ent grove existence: %w", getErr)
+		return fmt.Errorf("checking ent project existence: %w", getErr)
 	}
 
-	g, err := c.Store.GetGrove(ctx, groveID)
+	g, err := c.Store.GetProject(ctx, projectID)
 	if err != nil {
-		return fmt.Errorf("fetching grove from base store: %w", err)
+		return fmt.Errorf("fetching project from base store: %w", err)
 	}
 
-	_, err = c.client.Grove.Create().
+	_, err = c.client.Project.Create().
 		SetID(uid).
 		SetName(g.Name).
 		SetSlug(g.Slug).
@@ -225,7 +225,7 @@ func (c *CompositeStore) ensureEntGrove(ctx context.Context, groveID string) err
 		if ent.IsConstraintError(err) {
 			return nil
 		}
-		return fmt.Errorf("creating shadow grove in ent: %w", err)
+		return fmt.Errorf("creating shadow project in ent: %w", err)
 	}
 
 	return nil
@@ -259,8 +259,8 @@ func (c *CompositeStore) GetEffectiveGroups(ctx context.Context, userID string) 
 	return c.groups.GetEffectiveGroups(ctx, userID)
 }
 
-func (c *CompositeStore) GetGroupByGroveID(ctx context.Context, groveID string) (*store.Group, error) {
-	return c.groups.GetGroupByGroveID(ctx, groveID)
+func (c *CompositeStore) GetGroupByProjectID(ctx context.Context, projectID string) (*store.Group, error) {
+	return c.groups.GetGroupByProjectID(ctx, projectID)
 }
 
 func (c *CompositeStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID string) ([]string, error) {

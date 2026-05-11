@@ -33,13 +33,13 @@ func TestStopAllAgents_Global(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a grove
-	grove := &store.Grove{
-		ID:   "grove-1",
-		Name: "Test Grove",
-		Slug: "test-grove",
+	// Create a project
+	project := &store.Project{
+		ID:   "project-1",
+		Name: "Test Project",
+		Slug: "test-project",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create running agents
 	for i, name := range []string{"agent-1", "agent-2", "agent-3"} {
@@ -47,7 +47,7 @@ func TestStopAllAgents_Global(t *testing.T) {
 			ID:      name,
 			Slug:    name,
 			Name:    name,
-			GroveID: grove.ID,
+			ProjectID: project.ID,
 			Phase:   string(state.PhaseRunning),
 		}
 		if i == 2 {
@@ -97,32 +97,32 @@ func TestStopAllAgents_Global(t *testing.T) {
 	})
 }
 
-func TestStopAllAgents_GroveScoped(t *testing.T) {
+func TestStopAllAgents_ProjectScoped(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create two groves
-	grove1 := &store.Grove{ID: "grove-1", Name: "Grove 1", Slug: "grove-1"}
-	grove2 := &store.Grove{ID: "grove-2", Name: "Grove 2", Slug: "grove-2"}
-	require.NoError(t, s.CreateGrove(ctx, grove1))
-	require.NoError(t, s.CreateGrove(ctx, grove2))
+	// Create two projects
+	project1 := &store.Project{ID: "project-1", Name: "Project 1", Slug: "project-1"}
+	project2 := &store.Project{ID: "project-2", Name: "Project 2", Slug: "project-2"}
+	require.NoError(t, s.CreateProject(ctx, project1))
+	require.NoError(t, s.CreateProject(ctx, project2))
 
-	// Create running agents in both groves
+	// Create running agents in both projects
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "g1-agent-1", Slug: "g1-agent-1", Name: "G1 Agent 1",
-		GroveID: grove1.ID, Phase: string(state.PhaseRunning),
+		ProjectID: project1.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "g1-agent-2", Slug: "g1-agent-2", Name: "G1 Agent 2",
-		GroveID: grove1.ID, Phase: string(state.PhaseRunning),
+		ProjectID: project1.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "g2-agent-1", Slug: "g2-agent-1", Name: "G2 Agent 1",
-		GroveID: grove2.ID, Phase: string(state.PhaseRunning),
+		ProjectID: project2.ID, Phase: string(state.PhaseRunning),
 	}))
 
-	t.Run("stops only agents in scoped grove", func(t *testing.T) {
-		rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/grove-1/agents/stop-all", nil)
+	t.Run("stops only agents in scoped project", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/project-1/agents/stop-all", nil)
 		assert.Equal(t, http.StatusOK, rec.Code)
 
 		var resp StopAllAgentsResponse
@@ -132,11 +132,11 @@ func TestStopAllAgents_GroveScoped(t *testing.T) {
 		assert.Equal(t, 0, resp.Failed)
 		assert.Equal(t, 2, resp.Total)
 
-		// Verify grove-1 agents are stopped
+		// Verify project-1 agents are stopped
 		a1, _ := s.GetAgent(ctx, "g1-agent-1")
 		assert.Equal(t, string(state.PhaseStopped), a1.Phase)
 
-		// Verify grove-2 agent is still running
+		// Verify project-2 agent is still running
 		a2, _ := s.GetAgent(ctx, "g2-agent-1")
 		assert.Equal(t, string(state.PhaseRunning), a2.Phase)
 	})
@@ -161,23 +161,23 @@ func TestStopAllAgents_ScopeCapabilities(t *testing.T) {
 // Role-Based Stop-All Tests
 // ============================================================================
 
-func TestStopAllAgents_GroveOwner_StopsAllAgents(t *testing.T) {
-	srv, s, alice, _, grove := setupDemoPolicyTest(t)
+func TestStopAllAgents_ProjectOwner_StopsAllAgents(t *testing.T) {
+	srv, s, alice, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
 	// Create running agents owned by different users
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "alice-agent", Slug: "alice-agent", Name: "Alice Agent",
-		GroveID: grove.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
+		ProjectID: project.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "other-agent", Slug: "other-agent", Name: "Other Agent",
-		GroveID: grove.ID, OwnerID: "user-other", Phase: string(state.PhaseRunning),
+		ProjectID: project.ID, OwnerID: "user-other", Phase: string(state.PhaseRunning),
 	}))
 
-	// Alice is grove owner — should stop ALL agents, scope = "all"
+	// Alice is project owner — should stop ALL agents, scope = "all"
 	rec := doRequestAsUser(t, srv, alice, http.MethodPost,
-		"/api/v1/groves/"+grove.ID+"/agents/stop-all", nil)
+		"/api/v1/projects/"+project.ID+"/agents/stop-all", nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var resp StopAllAgentsResponse
@@ -194,11 +194,11 @@ func TestStopAllAgents_GroveOwner_StopsAllAgents(t *testing.T) {
 	assert.Equal(t, string(state.PhaseStopped), a2.Phase)
 }
 
-func TestStopAllAgents_GroveMember_StopsOnlyOwnAgents(t *testing.T) {
-	srv, s, _, _, grove := setupDemoPolicyTest(t)
+func TestStopAllAgents_ProjectMember_StopsOnlyOwnAgents(t *testing.T) {
+	srv, s, _, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
-	// Create a third user "carol" as a regular grove member
+	// Create a third user "carol" as a regular project member
 	carol := &store.User{
 		ID:          "user-carol",
 		Email:       "carol@test.com",
@@ -210,8 +210,8 @@ func TestStopAllAgents_GroveMember_StopsOnlyOwnAgents(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, carol))
 	ensureHubMembership(ctx, s, carol.ID)
 
-	// Add carol as a regular member of the grove's members group
-	membersGroup, err := s.GetGroupBySlug(ctx, "grove:"+grove.Slug+":members")
+	// Add carol as a regular member of the project's members group
+	membersGroup, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
 	require.NoError(t, err)
 	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
 		GroupID:    membersGroup.ID,
@@ -223,20 +223,20 @@ func TestStopAllAgents_GroveMember_StopsOnlyOwnAgents(t *testing.T) {
 	// Create agents owned by carol and by alice
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "carol-agent-1", Slug: "carol-agent-1", Name: "Carol Agent 1",
-		GroveID: grove.ID, OwnerID: carol.ID, Phase: string(state.PhaseRunning),
+		ProjectID: project.ID, OwnerID: carol.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "carol-agent-2", Slug: "carol-agent-2", Name: "Carol Agent 2",
-		GroveID: grove.ID, OwnerID: carol.ID, Phase: string(state.PhaseRunning),
+		ProjectID: project.ID, OwnerID: carol.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "alice-agent", Slug: "alice-agent", Name: "Alice Agent",
-		GroveID: grove.ID, OwnerID: "user-alice", Phase: string(state.PhaseRunning),
+		ProjectID: project.ID, OwnerID: "user-alice", Phase: string(state.PhaseRunning),
 	}))
 
 	// Carol (regular member) should only stop her own agents, scope = "own"
 	rec := doRequestAsUser(t, srv, carol, http.MethodPost,
-		"/api/v1/groves/"+grove.ID+"/agents/stop-all", nil)
+		"/api/v1/projects/"+project.ID+"/agents/stop-all", nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var resp StopAllAgentsResponse
@@ -258,18 +258,18 @@ func TestStopAllAgents_GroveMember_StopsOnlyOwnAgents(t *testing.T) {
 }
 
 func TestStopAllAgents_NonMember_Forbidden(t *testing.T) {
-	srv, s, _, bob, grove := setupDemoPolicyTest(t)
+	srv, s, _, bob, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
-	// Create a running agent in the grove
+	// Create a running agent in the project
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: "agent-1", Slug: "agent-1", Name: "Agent 1",
-		GroveID: grove.ID, Phase: string(state.PhaseRunning),
+		ProjectID: project.ID, Phase: string(state.PhaseRunning),
 	}))
 
-	// Bob is NOT a grove member — should get 403
+	// Bob is NOT a project member — should get 403
 	rec := doRequestAsUser(t, srv, bob, http.MethodPost,
-		"/api/v1/groves/"+grove.ID+"/agents/stop-all", nil)
+		"/api/v1/projects/"+project.ID+"/agents/stop-all", nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 
 	// Agent should still be running
@@ -285,12 +285,12 @@ func TestStopAllAgents_Global_NonAdmin_Forbidden(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
-func TestStopAllAgents_ScopeCapabilities_GroveMember(t *testing.T) {
-	srv, _, alice, bob, grove := setupDemoPolicyTest(t)
+func TestStopAllAgents_ScopeCapabilities_ProjectMember(t *testing.T) {
+	srv, _, alice, bob, project := setupDemoPolicyTest(t)
 
-	// Alice (grove member) should see stop_all in grove-scoped capabilities
+	// Alice (project member) should see stop_all in project-scoped capabilities
 	rec := doRequestAsUser(t, srv, alice, http.MethodGet,
-		"/api/v1/groves/"+grove.ID+"/agents", nil)
+		"/api/v1/projects/"+project.ID+"/agents", nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var resp struct {
@@ -299,11 +299,11 @@ func TestStopAllAgents_ScopeCapabilities_GroveMember(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.NotNil(t, resp.Capabilities)
 	assert.Contains(t, resp.Capabilities.Actions, "stop_all",
-		"grove member should have stop_all in scope capabilities")
+		"project member should have stop_all in scope capabilities")
 
-	// Bob (non-member) should NOT see stop_all in grove-scoped capabilities
+	// Bob (non-member) should NOT see stop_all in project-scoped capabilities
 	rec = doRequestAsUser(t, srv, bob, http.MethodGet,
-		"/api/v1/groves/"+grove.ID+"/agents", nil)
+		"/api/v1/projects/"+project.ID+"/agents", nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var resp2 struct {

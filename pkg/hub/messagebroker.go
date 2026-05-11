@@ -44,9 +44,9 @@ type MessageBrokerProxy struct {
 	messageLog    *slog.Logger
 
 	mu                  sync.Mutex
-	subscriptions       map[string][]broker.Subscription // groveID -> active subscriptions
+	subscriptions       map[string][]broker.Subscription // projectID -> active subscriptions
 	pluginSubscriptions map[string]broker.Subscription   // pattern -> plugin-initiated subscription
-	subscribedTopics    map[string]bool                  // dedup guard for grove-level subscriptions
+	subscribedTopics    map[string]bool                  // dedup guard for project-level subscriptions
 	stopCh              chan struct{}
 	stopOnce            sync.Once
 	wg                  sync.WaitGroup
@@ -78,9 +78,9 @@ func NewMessageBrokerProxy(
 func (p *MessageBrokerProxy) Start() {
 	// Listen for agent lifecycle events to manage broker subscriptions dynamically
 	ch, unsubscribe := p.events.Subscribe(
-		"grove.>.agent.created",
-		"grove.>.agent.status",
-		"grove.>.agent.deleted",
+		"project.>.agent.created",
+		"project.>.agent.status",
+		"project.>.agent.deleted",
 	)
 
 	p.wg.Add(1)
@@ -103,17 +103,17 @@ func (p *MessageBrokerProxy) Start() {
 	// Subscribe to global broadcasts
 	p.subscribeGlobalBroadcast()
 
-	// Bootstrap subscriptions for groves that already have running agents.
+	// Bootstrap subscriptions for projects that already have running agents.
 	// Without this, messages published before the next agent.created lifecycle
 	// event would be silently dropped by the broker.
-	p.bootstrapExistingGroves()
+	p.bootstrapExistingProjects()
 
 	p.log.Info("Message broker proxy started")
 }
 
-// bootstrapExistingGroves sets up broker subscriptions for all groves that
+// bootstrapExistingProjects sets up broker subscriptions for all projects that
 // already have running agents at startup time.
-func (p *MessageBrokerProxy) bootstrapExistingGroves() {
+func (p *MessageBrokerProxy) bootstrapExistingProjects() {
 	ctx := context.Background()
 	result, err := p.store.ListAgents(ctx, store.AgentFilter{
 		Phase: "running",
@@ -123,19 +123,19 @@ func (p *MessageBrokerProxy) bootstrapExistingGroves() {
 		return
 	}
 
-	groves := make(map[string]bool)
+	projects := make(map[string]bool)
 	for _, agent := range result.Items {
-		if !groves[agent.GroveID] {
-			groves[agent.GroveID] = true
-			if err := p.EnsureGroveSubscriptions(ctx, agent.GroveID); err != nil {
-				p.log.Error("Failed to bootstrap grove subscriptions",
-					"grove_id", agent.GroveID, "error", err)
+		if !projects[agent.ProjectID] {
+			projects[agent.ProjectID] = true
+			if err := p.EnsureProjectSubscriptions(ctx, agent.ProjectID); err != nil {
+				p.log.Error("Failed to bootstrap project subscriptions",
+					"project_id", agent.ProjectID, "error", err)
 			}
 		}
 	}
 
-	if len(groves) > 0 {
-		p.log.Info("Bootstrapped broker subscriptions for existing groves", "count", len(groves))
+	if len(projects) > 0 {
+		p.log.Info("Bootstrapped broker subscriptions for existing projects", "count", len(projects))
 	}
 }
 
@@ -147,11 +147,11 @@ func (p *MessageBrokerProxy) Stop() {
 
 		// Unsubscribe all broker subscriptions
 		p.mu.Lock()
-		for groveID, subs := range p.subscriptions {
+		for projectID, subs := range p.subscriptions {
 			for _, sub := range subs {
 				sub.Unsubscribe()
 			}
-			delete(p.subscriptions, groveID)
+			delete(p.subscriptions, projectID)
 		}
 		for pattern, sub := range p.pluginSubscriptions {
 			sub.Unsubscribe()
@@ -215,40 +215,40 @@ func (p *MessageBrokerProxy) CancelSubscription(pattern string) error {
 // PublishMessage publishes a message to the appropriate broker topic based on
 // the message's recipient. This is the entry point for Hub handlers to route
 // messages through the broker instead of direct dispatch.
-func (p *MessageBrokerProxy) PublishMessage(ctx context.Context, groveID string, msg *messages.StructuredMessage) error {
-	topic := broker.TopicAgentMessages(groveID, recipientSlug(msg.Recipient))
+func (p *MessageBrokerProxy) PublishMessage(ctx context.Context, projectID string, msg *messages.StructuredMessage) error {
+	topic := broker.TopicAgentMessages(projectID, recipientSlug(msg.Recipient))
 	return p.broker.Publish(ctx, topic, msg)
 }
 
-// PublishBroadcast publishes a broadcast message to the grove or global broadcast topic.
-func (p *MessageBrokerProxy) PublishBroadcast(ctx context.Context, groveID string, msg *messages.StructuredMessage) error {
-	if groveID == "" {
+// PublishBroadcast publishes a broadcast message to the project or global broadcast topic.
+func (p *MessageBrokerProxy) PublishBroadcast(ctx context.Context, projectID string, msg *messages.StructuredMessage) error {
+	if projectID == "" {
 		return p.broker.Publish(ctx, broker.TopicGlobalBroadcast(), msg)
 	}
-	return p.broker.Publish(ctx, broker.TopicGroveBroadcast(groveID), msg)
+	return p.broker.Publish(ctx, broker.TopicProjectBroadcast(projectID), msg)
 }
 
 // PublishUserMessage publishes a message to the user-targeted broker topic and
 // handles local delivery (DB persistence + SSE) directly. The external broker
 // receives the message for chat-app delivery while the hub persists and
 // publishes the SSE event so the web UI is updated immediately.
-func (p *MessageBrokerProxy) PublishUserMessage(ctx context.Context, groveID, userID string, msg *messages.StructuredMessage) error {
-	topic := broker.TopicUserMessages(groveID, userID)
+func (p *MessageBrokerProxy) PublishUserMessage(ctx context.Context, projectID, userID string, msg *messages.StructuredMessage) error {
+	topic := broker.TopicUserMessages(projectID, userID)
 
 	// Deliver locally: persist to message store and publish SSE event.
 	// This is necessary because the BrokerPluginAdapter does not invoke
 	// local subscription handlers — it only forwards via RPC.
-	p.deliverToUser(ctx, groveID, topic, msg)
+	p.deliverToUser(ctx, projectID, topic, msg)
 
 	// Publish to external broker for chat-app / external delivery.
 	return p.broker.Publish(ctx, topic, msg)
 }
 
-// EnsureGroveSubscriptions sets up broker subscriptions for all running agents
-// in the specified grove. Called when a grove becomes active or a broker reconnects.
-func (p *MessageBrokerProxy) EnsureGroveSubscriptions(ctx context.Context, groveID string) error {
+// EnsureProjectSubscriptions sets up broker subscriptions for all running agents
+// in the specified project. Called when a project becomes active or a broker reconnects.
+func (p *MessageBrokerProxy) EnsureProjectSubscriptions(ctx context.Context, projectID string) error {
 	result, err := p.store.ListAgents(ctx, store.AgentFilter{
-		GroveID: groveID,
+		ProjectID: projectID,
 		Phase:   "running",
 	}, store.ListOptions{})
 	if err != nil {
@@ -256,12 +256,12 @@ func (p *MessageBrokerProxy) EnsureGroveSubscriptions(ctx context.Context, grove
 	}
 
 	for _, agent := range result.Items {
-		p.subscribeAgent(groveID, agent.Slug)
+		p.subscribeAgent(projectID, agent.Slug)
 	}
 
-	// Also subscribe to grove broadcast and user messages
-	p.subscribeGroveBroadcast(groveID)
-	p.subscribeGroveUserMessages(groveID)
+	// Also subscribe to project broadcast and user messages
+	p.subscribeProjectBroadcast(projectID)
+	p.subscribeProjectUserMessages(projectID)
 
 	return nil
 }
@@ -275,9 +275,9 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 			p.log.Error("Failed to unmarshal agent created event", "error", err)
 			return
 		}
-		p.subscribeAgent(created.GroveID, created.Slug)
-		p.subscribeGroveBroadcast(created.GroveID)
-		p.subscribeGroveUserMessages(created.GroveID)
+		p.subscribeAgent(created.ProjectID, created.Slug)
+		p.subscribeProjectBroadcast(created.ProjectID)
+		p.subscribeProjectUserMessages(created.ProjectID)
 
 	case containsSuffix(evt.Subject, ".agent.status"):
 		var status AgentStatusEvent
@@ -295,17 +295,17 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 			p.log.Error("Failed to unmarshal agent deleted event", "error", err)
 			return
 		}
-		// Agent subscriptions are cleaned up when the grove's subscriptions
+		// Agent subscriptions are cleaned up when the project's subscriptions
 		// are rebuilt. Individual cleanup is handled by the broker's
 		// Unsubscribe mechanism if needed.
-		p.log.Debug("Agent deleted, broker subscriptions will be cleaned on next grove rebuild",
-			"agent_id", deleted.AgentID, "grove_id", deleted.GroveID)
+		p.log.Debug("Agent deleted, broker subscriptions will be cleaned on next project rebuild",
+			"agent_id", deleted.AgentID, "project_id", deleted.ProjectID)
 	}
 }
 
 // subscribeAgent creates a broker subscription for an individual agent's message topic.
-func (p *MessageBrokerProxy) subscribeAgent(groveID, agentSlug string) {
-	topic := broker.TopicAgentMessages(groveID, agentSlug)
+func (p *MessageBrokerProxy) subscribeAgent(projectID, agentSlug string) {
+	topic := broker.TopicAgentMessages(projectID, agentSlug)
 
 	p.mu.Lock()
 	if p.subscribedTopics[topic] {
@@ -316,25 +316,25 @@ func (p *MessageBrokerProxy) subscribeAgent(groveID, agentSlug string) {
 	p.mu.Unlock()
 
 	sub, err := p.broker.Subscribe(topic, func(ctx context.Context, t string, msg *messages.StructuredMessage) {
-		p.deliverToAgent(ctx, groveID, agentSlug, msg)
+		p.deliverToAgent(ctx, projectID, agentSlug, msg)
 	})
 	if err != nil {
 		p.log.Error("Failed to subscribe for agent messages",
-			"groveID", groveID, "agentSlug", agentSlug, "error", err)
+			"projectID", projectID, "agentSlug", agentSlug, "error", err)
 		return
 	}
 
 	p.mu.Lock()
-	p.subscriptions[groveID] = append(p.subscriptions[groveID], sub)
+	p.subscriptions[projectID] = append(p.subscriptions[projectID], sub)
 	p.mu.Unlock()
 
 	p.log.Debug("Subscribed to agent messages", "topic", topic, "agentSlug", agentSlug)
 }
 
-// subscribeGroveBroadcast creates a broker subscription for grove-wide broadcasts
-// that fans out to all running agents in the grove.
-func (p *MessageBrokerProxy) subscribeGroveBroadcast(groveID string) {
-	topic := broker.TopicGroveBroadcast(groveID)
+// subscribeProjectBroadcast creates a broker subscription for project-wide broadcasts
+// that fans out to all running agents in the project.
+func (p *MessageBrokerProxy) subscribeProjectBroadcast(projectID string) {
+	topic := broker.TopicProjectBroadcast(projectID)
 
 	p.mu.Lock()
 	if p.subscribedTopics[topic] {
@@ -345,27 +345,27 @@ func (p *MessageBrokerProxy) subscribeGroveBroadcast(groveID string) {
 	p.mu.Unlock()
 
 	sub, err := p.broker.Subscribe(topic, func(ctx context.Context, t string, msg *messages.StructuredMessage) {
-		p.fanOutToGrove(ctx, groveID, msg)
+		p.fanOutToProject(ctx, projectID, msg)
 	})
 	if err != nil {
-		p.log.Error("Failed to subscribe for grove broadcast",
-			"groveID", groveID, "error", err)
+		p.log.Error("Failed to subscribe for project broadcast",
+			"projectID", projectID, "error", err)
 		return
 	}
 
 	p.mu.Lock()
-	p.subscriptions[groveID] = append(p.subscriptions[groveID], sub)
+	p.subscriptions[projectID] = append(p.subscriptions[projectID], sub)
 	p.mu.Unlock()
 
-	p.log.Debug("Subscribed to grove broadcast", "topic", topic)
+	p.log.Debug("Subscribed to project broadcast", "topic", topic)
 }
 
-// subscribeGroveUserMessages creates a broker subscription for all user-targeted
-// messages in a grove. When a message arrives, it is persisted to the message
+// subscribeProjectUserMessages creates a broker subscription for all user-targeted
+// messages in a project. When a message arrives, it is persisted to the message
 // store and published as a user.message SSE event for connected browser clients.
-// The subscription uses a wildcard to cover all users in the grove.
-func (p *MessageBrokerProxy) subscribeGroveUserMessages(groveID string) {
-	topic := broker.TopicAllUserMessages(groveID)
+// The subscription uses a wildcard to cover all users in the project.
+func (p *MessageBrokerProxy) subscribeProjectUserMessages(projectID string) {
+	topic := broker.TopicAllUserMessages(projectID)
 
 	p.mu.Lock()
 	if p.subscribedTopics[topic] {
@@ -376,24 +376,24 @@ func (p *MessageBrokerProxy) subscribeGroveUserMessages(groveID string) {
 	p.mu.Unlock()
 
 	sub, err := p.broker.Subscribe(topic, func(ctx context.Context, t string, msg *messages.StructuredMessage) {
-		p.deliverToUser(ctx, groveID, t, msg)
+		p.deliverToUser(ctx, projectID, t, msg)
 	})
 	if err != nil {
-		p.log.Error("Failed to subscribe for grove user messages",
-			"groveID", groveID, "error", err)
+		p.log.Error("Failed to subscribe for project user messages",
+			"projectID", projectID, "error", err)
 		return
 	}
 
 	p.mu.Lock()
-	p.subscriptions[groveID] = append(p.subscriptions[groveID], sub)
+	p.subscriptions[projectID] = append(p.subscriptions[projectID], sub)
 	p.mu.Unlock()
 
-	p.log.Debug("Subscribed to grove user messages", "topic", topic)
+	p.log.Debug("Subscribed to project user messages", "topic", topic)
 }
 
 // deliverToUser handles a broker message addressed to a human user by persisting
 // it to the message store and publishing a user.message SSE event.
-func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, groveID, topic string, msg *messages.StructuredMessage) {
+func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic string, msg *messages.StructuredMessage) {
 	// Persist to message store (write-through; non-fatal if store fails).
 	// AgentID is the sender's agent ID when an agent sends to a user.
 	agentID := ""
@@ -403,7 +403,7 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, groveID, topic s
 
 	storeMsg := &store.Message{
 		ID:          api.NewUUID(),
-		GroveID:     groveID,
+		ProjectID:     projectID,
 		Sender:      msg.Sender,
 		SenderID:    msg.SenderID,
 		Recipient:   msg.Recipient,
@@ -425,7 +425,7 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, groveID, topic s
 	// Log to dedicated message audit log
 	if p.messageLog != nil {
 		logAttrs := []any{
-			"grove_id", groveID,
+			"project_id", projectID,
 			"topic", topic,
 			"source", "broker",
 		}
@@ -448,7 +448,7 @@ func (p *MessageBrokerProxy) subscribeGlobalBroadcast() {
 
 // deliverToAgent dispatches a message to a specific agent via the existing
 // DispatchAgentMessage path.
-func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, groveID, agentSlug string, msg *messages.StructuredMessage) {
+func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agentSlug string, msg *messages.StructuredMessage) {
 	dispatcher := p.getDispatcher()
 	if dispatcher == nil {
 		p.log.Warn("No dispatcher available, cannot deliver broker message",
@@ -456,10 +456,10 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, groveID, agentS
 		return
 	}
 
-	agent, err := p.store.GetAgentBySlug(ctx, groveID, agentSlug)
+	agent, err := p.store.GetAgentBySlug(ctx, projectID, agentSlug)
 	if err != nil {
 		p.log.Error("Failed to find agent for broker message delivery",
-			"agentSlug", agentSlug, "groveID", groveID, "error", err)
+			"agentSlug", agentSlug, "projectID", projectID, "error", err)
 		return
 	}
 
@@ -478,7 +478,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, groveID, agentS
 	// Persist to message store (write-through; non-fatal if store fails).
 	storeMsg := &store.Message{
 		ID:          api.NewUUID(),
-		GroveID:     groveID,
+		ProjectID:     projectID,
 		Sender:      msg.Sender,
 		SenderID:    msg.SenderID,
 		Recipient:   msg.Recipient,
@@ -499,7 +499,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, groveID, agentS
 		logAttrs := []any{
 			"agent_id", agent.ID,
 			"agent_name", agent.Name,
-			"grove_id", agent.GroveID,
+			"project_id", agent.ProjectID,
 			"source", "broker",
 		}
 		logAttrs = append(logAttrs, msg.LogAttrs()...)
@@ -507,33 +507,33 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, groveID, agentS
 	}
 }
 
-// fanOutToGrove dispatches a broadcast message to all running agents in a grove.
-func (p *MessageBrokerProxy) fanOutToGrove(ctx context.Context, groveID string, msg *messages.StructuredMessage) {
+// fanOutToProject dispatches a broadcast message to all running agents in a project.
+func (p *MessageBrokerProxy) fanOutToProject(ctx context.Context, projectID string, msg *messages.StructuredMessage) {
 	result, err := p.store.ListAgents(ctx, store.AgentFilter{
-		GroveID: groveID,
+		ProjectID: projectID,
 		Phase:   "running",
 	}, store.ListOptions{})
 	if err != nil {
-		p.log.Error("Failed to list agents for grove broadcast fan-out",
-			"groveID", groveID, "error", err)
+		p.log.Error("Failed to list agents for project broadcast fan-out",
+			"projectID", projectID, "error", err)
 		return
 	}
 
-	p.log.Debug("Broadcasting to grove agents", "grove_id", groveID, "count", len(result.Items))
+	p.log.Debug("Broadcasting to project agents", "project_id", projectID, "count", len(result.Items))
 
 	for _, agent := range result.Items {
-		// Skip the sender if it's an agent in this grove
+		// Skip the sender if it's an agent in this project
 		if msg.Sender == "agent:"+agent.Slug {
 			continue
 		}
 		agentMsg := *msg // copy to set per-agent recipient
 		agentMsg.Recipient = "agent:" + agent.Slug
 		agentMsg.RecipientID = agent.ID
-		p.deliverToAgent(ctx, groveID, agent.Slug, &agentMsg)
+		p.deliverToAgent(ctx, projectID, agent.Slug, &agentMsg)
 	}
 }
 
-// fanOutGlobal dispatches a global broadcast to all running agents across all groves.
+// fanOutGlobal dispatches a global broadcast to all running agents across all projects.
 func (p *MessageBrokerProxy) fanOutGlobal(ctx context.Context, msg *messages.StructuredMessage) {
 	result, err := p.store.ListAgents(ctx, store.AgentFilter{
 		Phase: "running",
@@ -552,7 +552,7 @@ func (p *MessageBrokerProxy) fanOutGlobal(ctx context.Context, msg *messages.Str
 		agentMsg := *msg
 		agentMsg.Recipient = "agent:" + agent.Slug
 		agentMsg.RecipientID = agent.ID
-		p.deliverToAgent(ctx, agent.GroveID, agent.Slug, &agentMsg)
+		p.deliverToAgent(ctx, agent.ProjectID, agent.Slug, &agentMsg)
 	}
 }
 

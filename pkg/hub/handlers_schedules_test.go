@@ -36,18 +36,18 @@ func setupScheduleTest(t *testing.T) (*Server, store.Store, string) {
 	srv.scheduler = NewScheduler(s, slog.Default())
 	srv.scheduler.RegisterEventHandler("message", srv.messageEventHandler())
 
-	grove := &store.Grove{
-		ID:   "grove-sched-recurring",
-		Name: "Schedule Test Grove",
-		Slug: "schedule-test-grove",
+	project := &store.Project{
+		ID:   "project-sched-recurring",
+		Name: "Schedule Test Project",
+		Slug: "schedule-test-project",
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
-	return srv, s, grove.ID
+	return srv, s, project.ID
 }
 
 func TestSchedule_Create(t *testing.T) {
-	srv, _, groveID := setupScheduleTest(t)
+	srv, _, projectID := setupScheduleTest(t)
 
 	req := CreateScheduleRequest{
 		Name:      "daily-standup",
@@ -57,14 +57,14 @@ func TestSchedule_Create(t *testing.T) {
 		Message:   "Good morning! Status update please.",
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+groveID+"/schedules", req)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", req)
 	assert.Equal(t, http.StatusCreated, rec.Code)
 
 	var sched store.Schedule
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sched))
 
 	assert.NotEmpty(t, sched.ID)
-	assert.Equal(t, groveID, sched.GroveID)
+	assert.Equal(t, projectID, sched.ProjectID)
 	assert.Equal(t, "daily-standup", sched.Name)
 	assert.Equal(t, "0 9 * * 1-5", sched.CronExpr)
 	assert.Equal(t, "message", sched.EventType)
@@ -74,7 +74,7 @@ func TestSchedule_Create(t *testing.T) {
 }
 
 func TestSchedule_CreateInvalidCron(t *testing.T) {
-	srv, _, groveID := setupScheduleTest(t)
+	srv, _, projectID := setupScheduleTest(t)
 
 	req := CreateScheduleRequest{
 		Name:      "bad-cron",
@@ -84,30 +84,30 @@ func TestSchedule_CreateInvalidCron(t *testing.T) {
 		Message:   "test",
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+groveID+"/schedules", req)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestSchedule_CreateMissingFields(t *testing.T) {
-	srv, _, groveID := setupScheduleTest(t)
+	srv, _, projectID := setupScheduleTest(t)
 
 	// Missing name
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+groveID+"/schedules",
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules",
 		CreateScheduleRequest{CronExpr: "0 * * * *", EventType: "message", AgentName: "a", Message: "m"})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
 	// Missing cron
-	rec = doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+groveID+"/schedules",
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules",
 		CreateScheduleRequest{Name: "test", EventType: "message", AgentName: "a", Message: "m"})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestSchedule_List(t *testing.T) {
-	srv, _, groveID := setupScheduleTest(t)
+	srv, _, projectID := setupScheduleTest(t)
 
 	// Create two schedules
 	for _, name := range []string{"sched-1", "sched-2"} {
-		rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+groveID+"/schedules",
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules",
 			CreateScheduleRequest{
 				Name: name, CronExpr: "0 * * * *", EventType: "message",
 				AgentName: "worker", Message: "hello",
@@ -116,7 +116,7 @@ func TestSchedule_List(t *testing.T) {
 	}
 
 	// List
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/groves/"+groveID+"/schedules", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/schedules", nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var resp ListSchedulesResponse
@@ -126,10 +126,10 @@ func TestSchedule_List(t *testing.T) {
 }
 
 func TestSchedule_Get(t *testing.T) {
-	srv, _, groveID := setupScheduleTest(t)
+	srv, _, projectID := setupScheduleTest(t)
 
 	// Create
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+groveID+"/schedules",
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules",
 		CreateScheduleRequest{
 			Name: "get-test", CronExpr: "30 8 * * *", EventType: "message",
 			AgentName: "worker", Message: "hello",
@@ -140,7 +140,7 @@ func TestSchedule_Get(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
 
 	// Get
-	rec = doRequest(t, srv, http.MethodGet, "/api/v1/groves/"+groveID+"/schedules/"+created.ID, nil)
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/schedules/"+created.ID, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var got store.Schedule
@@ -150,10 +150,10 @@ func TestSchedule_Get(t *testing.T) {
 }
 
 func TestSchedule_PauseResume(t *testing.T) {
-	srv, _, groveID := setupScheduleTest(t)
+	srv, _, projectID := setupScheduleTest(t)
 
 	// Create
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+groveID+"/schedules",
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules",
 		CreateScheduleRequest{
 			Name: "pause-test", CronExpr: "0 * * * *", EventType: "message",
 			AgentName: "worker", Message: "hello",
@@ -164,7 +164,7 @@ func TestSchedule_PauseResume(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
 
 	// Pause
-	rec = doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+groveID+"/schedules/"+created.ID+"/pause", nil)
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules/"+created.ID+"/pause", nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var paused store.Schedule
@@ -172,11 +172,11 @@ func TestSchedule_PauseResume(t *testing.T) {
 	assert.Equal(t, store.ScheduleStatusPaused, paused.Status)
 
 	// Pause again should fail
-	rec = doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+groveID+"/schedules/"+created.ID+"/pause", nil)
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules/"+created.ID+"/pause", nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
 	// Resume
-	rec = doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+groveID+"/schedules/"+created.ID+"/resume", nil)
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules/"+created.ID+"/resume", nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var resumed store.Schedule
@@ -186,10 +186,10 @@ func TestSchedule_PauseResume(t *testing.T) {
 }
 
 func TestSchedule_Delete(t *testing.T) {
-	srv, _, groveID := setupScheduleTest(t)
+	srv, _, projectID := setupScheduleTest(t)
 
 	// Create
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+groveID+"/schedules",
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules",
 		CreateScheduleRequest{
 			Name: "delete-test", CronExpr: "0 * * * *", EventType: "message",
 			AgentName: "worker", Message: "hello",
@@ -200,19 +200,19 @@ func TestSchedule_Delete(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
 
 	// Delete
-	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/groves/"+groveID+"/schedules/"+created.ID, nil)
+	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+projectID+"/schedules/"+created.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Get should fail
-	rec = doRequest(t, srv, http.MethodGet, "/api/v1/groves/"+groveID+"/schedules/"+created.ID, nil)
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/schedules/"+created.ID, nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestSchedule_Update(t *testing.T) {
-	srv, _, groveID := setupScheduleTest(t)
+	srv, _, projectID := setupScheduleTest(t)
 
 	// Create
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+groveID+"/schedules",
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules",
 		CreateScheduleRequest{
 			Name: "update-test", CronExpr: "0 * * * *", EventType: "message",
 			AgentName: "worker", Message: "hello",
@@ -223,7 +223,7 @@ func TestSchedule_Update(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
 
 	// Update
-	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/groves/"+groveID+"/schedules/"+created.ID,
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/projects/"+projectID+"/schedules/"+created.ID,
 		UpdateScheduleRequest{Name: "updated-name", CronExpr: "30 9 * * *"})
 	assert.Equal(t, http.StatusOK, rec.Code)
 
@@ -234,11 +234,11 @@ func TestSchedule_Update(t *testing.T) {
 }
 
 func TestSchedule_History(t *testing.T) {
-	srv, s, groveID := setupScheduleTest(t)
+	srv, s, projectID := setupScheduleTest(t)
 	ctx := context.Background()
 
 	// Create a schedule
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+groveID+"/schedules",
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules",
 		CreateScheduleRequest{
 			Name: "history-test", CronExpr: "0 * * * *", EventType: "message",
 			AgentName: "worker", Message: "hello",
@@ -252,7 +252,7 @@ func TestSchedule_History(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		evt := &store.ScheduledEvent{
 			ID:         "hist-evt-" + string(rune('a'+i)),
-			GroveID:    groveID,
+			ProjectID:    projectID,
 			EventType:  "message",
 			FireAt:     created.CreatedAt,
 			Payload:    created.Payload,
@@ -262,7 +262,7 @@ func TestSchedule_History(t *testing.T) {
 	}
 
 	// Get history
-	rec = doRequest(t, srv, http.MethodGet, "/api/v1/groves/"+groveID+"/schedules/"+created.ID+"/history", nil)
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/schedules/"+created.ID+"/history", nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var resp ListScheduledEventsResponse
@@ -270,20 +270,20 @@ func TestSchedule_History(t *testing.T) {
 	assert.Equal(t, 3, resp.TotalCount)
 }
 
-func TestSchedule_GroveIsolation(t *testing.T) {
-	srv, _, groveID := setupScheduleTest(t)
+func TestSchedule_ProjectIsolation(t *testing.T) {
+	srv, _, projectID := setupScheduleTest(t)
 	ctx := context.Background()
 
-	// Create another grove
-	otherGrove := &store.Grove{
-		ID:   "grove-other-sched",
-		Name: "Other Grove",
-		Slug: "other-grove-sched",
+	// Create another project
+	otherProject := &store.Project{
+		ID:   "project-other-sched",
+		Name: "Other Project",
+		Slug: "other-project-sched",
 	}
-	require.NoError(t, srv.store.CreateGrove(ctx, otherGrove))
+	require.NoError(t, srv.store.CreateProject(ctx, otherProject))
 
-	// Create schedule in first grove
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves/"+groveID+"/schedules",
+	// Create schedule in first project
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules",
 		CreateScheduleRequest{
 			Name: "isolated", CronExpr: "0 * * * *", EventType: "message",
 			AgentName: "worker", Message: "hello",
@@ -293,7 +293,7 @@ func TestSchedule_GroveIsolation(t *testing.T) {
 	var created store.Schedule
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
 
-	// Try to access from another grove
-	rec = doRequest(t, srv, http.MethodGet, "/api/v1/groves/"+otherGrove.ID+"/schedules/"+created.ID, nil)
+	// Try to access from another project
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+otherProject.ID+"/schedules/"+created.ID, nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }

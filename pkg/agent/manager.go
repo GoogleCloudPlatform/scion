@@ -41,21 +41,21 @@ type Manager interface {
 	Stop(ctx context.Context, agentID string) error
 
 	// Delete terminates and removes an agent
-	Delete(ctx context.Context, agentID string, deleteFiles bool, grovePath string, removeBranch bool) (bool, error)
+	Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error)
 
 	// List returns active agents
 	List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error)
 
 	// Message sends a message to an agent's harness via tmux.
-	// groveID scopes delivery to a specific grove, preventing cross-grove
+	// projectID scopes delivery to a specific grove, preventing cross-grove
 	// collision when agents share the same slug.
-	Message(ctx context.Context, agentID, groveID string, message string, interrupt bool) error
+	Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error
 
 	// MessageRaw sends literal bytes to an agent's tmux session via send-keys
 	// with no trailing Enter keypresses, allowing control sequences like
 	// arrow keys and Escape to be used directly.
-	// groveID scopes delivery to a specific grove.
-	MessageRaw(ctx context.Context, agentID, groveID string, keys string) error
+	// projectID scopes delivery to a specific grove.
+	MessageRaw(ctx context.Context, agentID, projectID string, keys string) error
 
 	// Watch returns a channel of status updates for an agent
 	Watch(ctx context.Context, agentID string) (<-chan api.StatusEvent, error)
@@ -81,8 +81,8 @@ func NewManager(rt runtime.Runtime) Manager {
 	// Initialize the message buffer with a debounce delay. The buffer's
 	// delivery function calls back into deliverImmediate to perform the
 	// actual tmux send-keys when the debounce window expires.
-	mgr.msgBuffer = NewMessageBuffer(defaultBufferDelay, func(agentID, groveID string, message string, interrupt bool) error {
-		return mgr.deliverImmediate(context.Background(), agentID, groveID, message, interrupt)
+	mgr.msgBuffer = NewMessageBuffer(defaultBufferDelay, func(agentID, projectID string, message string, interrupt bool) error {
+		return mgr.deliverImmediate(context.Background(), agentID, projectID, message, interrupt)
 	})
 	return mgr
 }
@@ -111,7 +111,7 @@ func (m *AgentManager) Stop(ctx context.Context, agentID string) error {
 	return m.Runtime.Stop(ctx, agentID)
 }
 
-func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles bool, grovePath string, removeBranch bool) (bool, error) {
+func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	// 1. Check if container exists
 	// We use name filter if possible, but runtime.List might take map[string]string
 	util.Debugf("delete: listing containers in mgr.Delete for %s", agentID)
@@ -121,18 +121,18 @@ func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles b
 	util.Debugf("delete: mgr.Delete container list completed in %v", time.Since(listStart))
 	containerExists := false
 	var targetID string
-	// Resolve grove name from grovePath (if provided) to scope the container lookup
+	// Resolve grove name from projectPath (if provided) to scope the container lookup
 	deletionGroveName := ""
-	if grovePath != "" {
-		if resolvedDir, err := config.GetResolvedProjectDir(grovePath); err == nil {
-			deletionGroveName = config.GetGroveName(resolvedDir)
+	if projectPath != "" {
+		if resolvedDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
+			deletionGroveName = config.GetProjectName(resolvedDir)
 		}
 	}
 	if err == nil {
 		for _, a := range agents {
 			if a.Name == agentID || a.ContainerID == agentID || strings.TrimPrefix(a.Name, "/") == agentID || strings.EqualFold(a.Name, agentID) {
 				// If grove info is available, skip containers from a different grove
-				if deletionGroveName != "" && !matchAgentGrove(a, deletionGroveName, "") {
+				if deletionGroveName != "" && !matchAgentProject(a, deletionGroveName, "") {
 					continue
 				}
 				containerExists = true
@@ -164,7 +164,7 @@ func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles b
 
 	if deleteFiles {
 		util.Debugf("delete: starting filesystem cleanup for agent %s", agentID)
-		branchDeleted, err := DeleteAgentFiles(agentID, grovePath, removeBranch)
+		branchDeleted, err := DeleteAgentFiles(agentID, projectPath, removeBranch)
 		util.Debugf("delete: filesystem cleanup completed for agent %s", agentID)
 		return branchDeleted, err
 	}
@@ -175,19 +175,19 @@ func (m *AgentManager) Watch(ctx context.Context, agentID string) (<-chan api.St
 	return nil, fmt.Errorf("Watch not implemented")
 }
 
-func (m *AgentManager) Message(ctx context.Context, agentID, groveID string, message string, interrupt bool) error {
+func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
 	// Interrupt messages bypass the buffer entirely — they need to send
 	// Ctrl+C immediately to get the agent's attention, and the accompanying
 	// message (if any) should follow without delay.
 	if interrupt {
-		return m.deliverImmediate(ctx, agentID, groveID, message, interrupt)
+		return m.deliverImmediate(ctx, agentID, projectID, message, interrupt)
 	}
 
 	// Non-interrupt messages go through the debounce buffer. This ensures
 	// that a rapid burst of messages (e.g. from multiple senders or broadcast
 	// fan-out) is coalesced into a single delivery, avoiding contention on
 	// the agent's tmux input.
-	m.msgBuffer.Send(agentID, groveID, message)
+	m.msgBuffer.Send(agentID, projectID, message)
 	return nil
 }
 
@@ -195,10 +195,10 @@ func (m *AgentManager) Message(ctx context.Context, agentID, groveID string, mes
 // with no trailing Enter keypresses. This bypasses the paste buffer and
 // debounce buffer, sending directly via tmux send-keys so that control
 // sequences (arrow keys, Escape, etc.) are interpreted by the terminal.
-func (m *AgentManager) MessageRaw(ctx context.Context, agentID, groveID string, keys string) error {
+func (m *AgentManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
 	filter := map[string]string{"scion.name": strings.ToLower(agentID)}
-	if groveID != "" {
-		filter["scion.grove_id"] = groveID
+	if projectID != "" {
+		filter["scion.project_id"] = projectID
 	}
 	agents, err := m.List(ctx, filter)
 	if err != nil {
@@ -229,11 +229,11 @@ func (m *AgentManager) MessageRaw(ctx context.Context, agentID, groveID string, 
 // bypassing the message buffer. This is the low-level delivery mechanism
 // used both for interrupt messages (called directly) and for buffered
 // messages (called by the MessageBuffer when the debounce timer fires).
-func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, groveID string, message string, interrupt bool) error {
+func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
 	// 1. Find the agent, scoped to grove to prevent cross-grove delivery
 	filter := map[string]string{"scion.name": strings.ToLower(agentID)}
-	if groveID != "" {
-		filter["scion.grove_id"] = groveID
+	if projectID != "" {
+		filter["scion.project_id"] = projectID
 	}
 	agents, err := m.List(ctx, filter)
 	if err != nil {
@@ -256,10 +256,10 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, groveID st
 	// per .design/hub-shared-workspace-isolation.md) since the mode isn't
 	// passed through this lookup path.
 	harnessName := "generic"
-	if agent.GrovePath != "" {
-		projectDir, _ := config.GetResolvedProjectDir(agent.GrovePath)
+	if agent.ProjectPath != "" {
+		projectDir, _ := config.GetResolvedProjectDir(agent.ProjectPath)
 		if projectDir == "" {
-			projectDir = agent.GrovePath
+			projectDir = agent.ProjectPath
 		}
 		scionJSON := filepath.Join(config.ResolveAgentDir(projectDir, agent.Name), "scion-agent.json")
 		if data, err := os.ReadFile(scionJSON); err == nil {

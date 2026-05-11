@@ -33,7 +33,7 @@ func TestMaintenanceOperationsSeeded(t *testing.T) {
 
 	ops, err := s.ListMaintenanceOperations(ctx)
 	require.NoError(t, err)
-	require.Len(t, ops, 4, "expected 4 seeded operations (1 migration + 3 operations)")
+	require.Len(t, ops, 5, "expected 5 seeded operations (1 migration + 4 operations)")
 
 	// Verify categories
 	var migrations, operations int
@@ -46,7 +46,7 @@ func TestMaintenanceOperationsSeeded(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, migrations, "expected 1 migration")
-	assert.Equal(t, 3, operations, "expected 3 operations")
+	assert.Equal(t, 4, operations, "expected 4 operations")
 }
 
 func TestMaintenanceGetOperationByKey(t *testing.T) {

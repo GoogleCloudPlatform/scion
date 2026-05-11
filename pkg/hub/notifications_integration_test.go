@@ -41,7 +41,7 @@ type integrationTestEnv struct {
 	pub      *ChannelEventPublisher
 	recorder *recordingDispatcher
 	nd       *NotificationDispatcher
-	grove    *store.Grove
+	project    *store.Project
 	broker   *store.RuntimeBroker
 	tokenSvc *AgentTokenService
 }
@@ -52,7 +52,7 @@ type integrationTestEnv struct {
 // - A ChannelEventPublisher wired into the server
 // - A recordingDispatcher wired into the server AND the notification dispatcher
 // - A NotificationDispatcher started and listening for events
-// - A grove and broker provisioned for agent creation
+// - A project and broker provisioned for agent creation
 func setupIntegrationTest(t *testing.T) *integrationTestEnv {
 	t.Helper()
 
@@ -66,13 +66,13 @@ func setupIntegrationTest(t *testing.T) *integrationTestEnv {
 	recorder := &recordingDispatcher{}
 	srv.SetDispatcher(recorder)
 
-	grove := &store.Grove{
-		ID:         "grove-integ",
-		Name:       "Integration Grove",
-		Slug:       "integration-grove",
+	project := &store.Project{
+		ID:         "project-integ",
+		Name:       "Integration Project",
+		Slug:       "integration-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	broker := &store.RuntimeBroker{
 		ID:     "broker-integ",
@@ -81,14 +81,14 @@ func setupIntegrationTest(t *testing.T) *integrationTestEnv {
 		Status: store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID:    grove.ID,
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:    project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 	}))
-	grove.DefaultRuntimeBrokerID = broker.ID
-	require.NoError(t, s.UpdateGrove(ctx, grove))
+	project.DefaultRuntimeBrokerID = broker.ID
+	require.NoError(t, s.UpdateProject(ctx, project))
 
 	// Create and start the notification dispatcher
 	nd := NewNotificationDispatcher(s, pub, func() AgentDispatcher { return recorder }, slog.Default())
@@ -104,7 +104,7 @@ func setupIntegrationTest(t *testing.T) *integrationTestEnv {
 		pub:      pub,
 		recorder: recorder,
 		nd:       nd,
-		grove:    grove,
+		project:    project,
 		broker:   broker,
 		tokenSvc: tokenSvc,
 	}
@@ -115,7 +115,7 @@ func setupIntegrationTest(t *testing.T) *integrationTestEnv {
 func (env *integrationTestEnv) createAgentWithNotify(t *testing.T, callingAgent *store.Agent, subAgentName string) *store.Agent {
 	t.Helper()
 
-	token, err := env.tokenSvc.GenerateAgentToken(callingAgent.ID, env.grove.ID, []AgentTokenScope{
+	token, err := env.tokenSvc.GenerateAgentToken(callingAgent.ID, env.project.ID, []AgentTokenScope{
 		ScopeAgentStatusUpdate,
 		ScopeAgentCreate,
 		ScopeAgentNotify,
@@ -124,7 +124,7 @@ func (env *integrationTestEnv) createAgentWithNotify(t *testing.T, callingAgent 
 
 	body, _ := json.Marshal(CreateAgentRequest{
 		Name:    subAgentName,
-		GroveID: env.grove.ID,
+		ProjectID: env.project.ID,
 		Task:    "do work",
 		Notify:  true,
 	})
@@ -148,7 +148,7 @@ func (env *integrationTestEnv) createAgentWithNotify(t *testing.T, callingAgent 
 func (env *integrationTestEnv) updateStatusViaAPI(t *testing.T, agentID, status, message, taskSummary string) {
 	t.Helper()
 
-	token, err := env.tokenSvc.GenerateAgentToken(agentID, env.grove.ID, []AgentTokenScope{
+	token, err := env.tokenSvc.GenerateAgentToken(agentID, env.project.ID, []AgentTokenScope{
 		ScopeAgentStatusUpdate,
 	}, nil)
 	require.NoError(t, err)
@@ -189,7 +189,7 @@ func TestIntegration_AgentCreatesAgentWithNotify_FullFlow(t *testing.T) {
 		ID:              "agent-parent",
 		Slug:            "parent-agent",
 		Name:            "Parent Agent",
-		GroveID:         env.grove.ID,
+		ProjectID:         env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -245,7 +245,7 @@ func TestIntegration_AgentCreatesAgentWithNotify_WaitingForInput(t *testing.T) {
 		ID:              "agent-parent-wfi",
 		Slug:            "parent-agent-wfi",
 		Name:            "Parent Agent WFI",
-		GroveID:         env.grove.ID,
+		ProjectID:         env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -293,7 +293,7 @@ func TestIntegration_AgentCreatesAgentWithNotify_MultipleStatusChanges(t *testin
 		ID:              "agent-parent-multi",
 		Slug:            "parent-multi",
 		Name:            "Parent Multi",
-		GroveID:         env.grove.ID,
+		ProjectID:         env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -351,7 +351,7 @@ func TestIntegration_StatusNormalization_LowercaseEventMatchesUppercaseTrigger(t
 		ID:              "agent-parent-case",
 		Slug:            "parent-case",
 		Name:            "Parent Case",
-		GroveID:         env.grove.ID,
+		ProjectID:         env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -388,7 +388,7 @@ func TestIntegration_StatusNormalization_DedupAcrossCaseBoundaries(t *testing.T)
 		ID:              "agent-parent-dedup",
 		Slug:            "parent-dedup",
 		Name:            "Parent Dedup",
-		GroveID:         env.grove.ID,
+		ProjectID:         env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -429,7 +429,7 @@ func TestIntegration_StatusNormalization_NonTriggerStatusNoNotification(t *testi
 		ID:              "agent-parent-nontrig",
 		Slug:            "parent-nontrig",
 		Name:            "Parent NonTrig",
-		GroveID:         env.grove.ID,
+		ProjectID:         env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -479,7 +479,7 @@ func TestIntegration_SubscriptionCleanup_HardDeleteCascades(t *testing.T) {
 		ID:              "agent-parent-hdel",
 		Slug:            "parent-hdel",
 		Name:            "Parent Hard Delete",
-		GroveID:         env.grove.ID,
+		ProjectID:         env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -531,7 +531,7 @@ func TestIntegration_SubscriptionCleanup_SoftDeleteRetainsSubscriptions(t *testi
 		ID:              "agent-parent-sdel",
 		Slug:            "parent-sdel",
 		Name:            "Parent Soft Delete",
-		GroveID:         env.grove.ID,
+		ProjectID:         env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -579,7 +579,7 @@ func TestIntegration_HumanNotification_FullLifecycle(t *testing.T) {
 	// User creates agent with notify=true via the dev auth token
 	rec := doRequest(t, env.srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "User Watched Agent",
-		GroveID: env.grove.ID,
+		ProjectID: env.project.ID,
 		Task:    "run analysis",
 		Notify:  true,
 	})
@@ -645,7 +645,7 @@ func TestIntegration_HumanNotification_AckAll(t *testing.T) {
 	for _, name := range []string{"Ack All Agent One", "Ack All Agent Two"} {
 		rec := doRequest(t, env.srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 			Name:    name,
-			GroveID: env.grove.ID,
+			ProjectID: env.project.ID,
 			Task:    "work",
 			Notify:  true,
 		})
@@ -688,7 +688,7 @@ func TestIntegration_HumanNotification_MultipleStatusTransitions(t *testing.T) {
 	// User creates agent with notify
 	rec := doRequest(t, env.srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:    "Multi Status Agent",
-		GroveID: env.grove.ID,
+		ProjectID: env.project.ID,
 		Task:    "complex work",
 		Notify:  true,
 	})
@@ -744,7 +744,7 @@ func TestIntegration_MultipleSubscribers_AgentAndUser(t *testing.T) {
 		ID:              "agent-parent-multi-sub",
 		Slug:            "parent-multi-sub",
 		Name:            "Parent Multi Sub",
-		GroveID:         env.grove.ID,
+		ProjectID:         env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -760,7 +760,7 @@ func TestIntegration_MultipleSubscribers_AgentAndUser(t *testing.T) {
 		AgentID:           child.ID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      DevUserID,
-		GroveID:           env.grove.ID,
+		ProjectID:           env.project.ID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedAt:         time.Now(),
 		CreatedBy:         DevUserID,
@@ -805,7 +805,7 @@ func TestIntegration_NoNotifyFlag_NoSubscription(t *testing.T) {
 		ID:              "agent-parent-no-notify",
 		Slug:            "parent-no-notify",
 		Name:            "Parent No Notify",
-		GroveID:         env.grove.ID,
+		ProjectID:         env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -813,7 +813,7 @@ func TestIntegration_NoNotifyFlag_NoSubscription(t *testing.T) {
 	require.NoError(t, env.store.CreateAgent(ctx, parent))
 
 	// Create sub-agent WITHOUT notify
-	token, err := env.tokenSvc.GenerateAgentToken(parent.ID, env.grove.ID, []AgentTokenScope{
+	token, err := env.tokenSvc.GenerateAgentToken(parent.ID, env.project.ID, []AgentTokenScope{
 		ScopeAgentStatusUpdate,
 		ScopeAgentCreate,
 	}, nil)
@@ -821,7 +821,7 @@ func TestIntegration_NoNotifyFlag_NoSubscription(t *testing.T) {
 
 	body, _ := json.Marshal(CreateAgentRequest{
 		Name:    "Child No Notify",
-		GroveID: env.grove.ID,
+		ProjectID: env.project.ID,
 		Task:    "do work",
 		Notify:  false,
 	})
@@ -861,10 +861,10 @@ func TestIntegration_PATCHSubscriptionTriggers(t *testing.T) {
 	// Create a subscription via store (SubscriberID must match DevUserID)
 	sub := &store.NotificationSubscription{
 		ID:                "sub-patch-test",
-		Scope:             store.SubscriptionScopeGrove,
+		Scope:             store.SubscriptionScopeProject,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      DevUserID,
-		GroveID:           env.grove.ID,
+		ProjectID:           env.project.ID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedAt:         time.Now(),
 		CreatedBy:         DevUserID,
@@ -898,13 +898,13 @@ func TestIntegration_BulkCreateSubscriptions(t *testing.T) {
 
 	reqs := []createSubscriptionRequest{
 		{
-			Scope:             store.SubscriptionScopeGrove,
-			GroveID:           env.grove.ID,
+			Scope:             store.SubscriptionScopeProject,
+			ProjectID:           env.project.ID,
 			TriggerActivities: []string{"COMPLETED"},
 		},
 		{
-			Scope:             store.SubscriptionScopeGrove,
-			GroveID:           env.grove.ID,
+			Scope:             store.SubscriptionScopeProject,
+			ProjectID:           env.project.ID,
 			TriggerActivities: []string{"ERROR"},
 		},
 	}
@@ -929,9 +929,9 @@ func TestIntegration_SubscriptionTemplates_CRUD(t *testing.T) {
 	// Create template
 	createBody, _ := json.Marshal(createTemplateRequest{
 		Name:              "All Events",
-		Scope:             store.SubscriptionScopeGrove,
+		Scope:             store.SubscriptionScopeProject,
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "DELETED", "ERROR"},
-		GroveID:           env.grove.ID,
+		ProjectID:           env.project.ID,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/templates", bytes.NewReader(createBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -947,7 +947,7 @@ func TestIntegration_SubscriptionTemplates_CRUD(t *testing.T) {
 	assert.Len(t, created.TriggerActivities, 5)
 
 	// List templates
-	req = httptest.NewRequest(http.MethodGet, "/api/v1/notifications/templates?groveId="+env.grove.ID, nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/notifications/templates?projectId="+env.project.ID, nil)
 	req.Header.Set("Authorization", "Bearer "+testDevToken)
 
 	rec = httptest.NewRecorder()

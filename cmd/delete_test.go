@@ -34,7 +34,7 @@ import (
 // deleteTestState captures and restores package-level vars for test isolation.
 type deleteTestState struct {
 	home           string
-	grovePath      string
+	projectPath      string
 	preserveBranch bool
 	noHub          bool
 	autoConfirm    bool
@@ -44,7 +44,7 @@ type deleteTestState struct {
 func saveDeleteTestState() deleteTestState {
 	return deleteTestState{
 		home:           os.Getenv("HOME"),
-		grovePath:      grovePath,
+		projectPath:      projectPath,
 		preserveBranch: preserveBranch,
 		noHub:          noHub,
 		autoConfirm:    autoConfirm,
@@ -54,7 +54,7 @@ func saveDeleteTestState() deleteTestState {
 
 func (s deleteTestState) restore() {
 	os.Setenv("HOME", s.home)
-	grovePath = s.grovePath
+	projectPath = s.projectPath
 	preserveBranch = s.preserveBranch
 	noHub = s.noHub
 	autoConfirm = s.autoConfirm
@@ -79,7 +79,7 @@ func createAgentDir(t *testing.T, groveDir, name string) string {
 // newDeleteMockHubServer creates a mock Hub server that handles grove-scoped
 // agent DELETE requests. Returns the server and a pointer to a slice that
 // records which agent names were deleted.
-func newDeleteMockHubServer(t *testing.T, groveID string) (*httptest.Server, *[]string) {
+func newDeleteMockHubServer(t *testing.T, projectID string) (*httptest.Server, *[]string) {
 	t.Helper()
 	var deletedAgents []string
 
@@ -91,8 +91,8 @@ func newDeleteMockHubServer(t *testing.T, groveID string) (*httptest.Server, *[]
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
 		case r.Method == http.MethodDelete:
-			// Extract agent name from path: /api/v1/groves/<groveID>/agents/<agentName>
-			prefix := "/api/v1/groves/" + groveID + "/agents/"
+			// Extract agent name from path: /api/v1/groves/<projectID>/agents/<agentName>
+			prefix := "/api/v1/groves/" + projectID + "/agents/"
 			agentName := r.URL.Path[len(prefix):]
 			deletedAgents = append(deletedAgents, agentName)
 			w.WriteHeader(http.StatusNoContent)
@@ -116,7 +116,7 @@ func TestDeleteAgentLocal_NonExistentAgentReturnsError(t *testing.T) {
 	// Set up grove directory without any agent
 	groveDir := filepath.Join(tmpHome, "project", ".scion")
 	require.NoError(t, os.MkdirAll(filepath.Join(groveDir, "agents"), 0755))
-	grovePath = groveDir
+	projectPath = groveDir
 
 	err := deleteAgentLocal("does-not-exist")
 	require.Error(t, err)
@@ -135,7 +135,7 @@ func TestDeleteAgentLocal_ExistingAgentSucceeds(t *testing.T) {
 	// Set up grove directory with an agent
 	groveDir := filepath.Join(tmpHome, "project", ".scion")
 	require.NoError(t, os.MkdirAll(filepath.Join(groveDir, "agents"), 0755))
-	grovePath = groveDir
+	projectPath = groveDir
 
 	agentDir := createAgentDir(t, groveDir, "real-agent")
 
@@ -159,14 +159,14 @@ func TestDeleteAgentsViaHub_CleansUpLocalFiles(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	preserveBranch = true // skip branch operations since there's no real git repo
 
-	groveID := "grove-del-123"
-	server, deletedAgents := newDeleteMockHubServer(t, groveID)
+	projectID := "grove-del-123"
+	server, deletedAgents := newDeleteMockHubServer(t, projectID)
 	defer server.Close()
 
 	// Set up grove directory with an agent
 	groveDir := filepath.Join(tmpHome, "project", ".scion")
 	require.NoError(t, os.MkdirAll(groveDir, 0755))
-	grovePath = groveDir
+	projectPath = groveDir
 
 	agentDir := createAgentDir(t, groveDir, "test-agent")
 
@@ -181,7 +181,7 @@ func TestDeleteAgentsViaHub_CleansUpLocalFiles(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:   client,
 		Endpoint: server.URL,
-		GroveID:  groveID,
+		ProjectID:  projectID,
 	}
 
 	// Run the function under test
@@ -205,13 +205,13 @@ func TestDeleteAgentsViaHub_MultipleAgents(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	preserveBranch = true
 
-	groveID := "grove-multi-456"
-	server, deletedAgents := newDeleteMockHubServer(t, groveID)
+	projectID := "grove-multi-456"
+	server, deletedAgents := newDeleteMockHubServer(t, projectID)
 	defer server.Close()
 
 	groveDir := filepath.Join(tmpHome, "project", ".scion")
 	require.NoError(t, os.MkdirAll(groveDir, 0755))
-	grovePath = groveDir
+	projectPath = groveDir
 
 	agent1Dir := createAgentDir(t, groveDir, "agent-one")
 	agent2Dir := createAgentDir(t, groveDir, "agent-two")
@@ -222,7 +222,7 @@ func TestDeleteAgentsViaHub_MultipleAgents(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:   client,
 		Endpoint: server.URL,
-		GroveID:  groveID,
+		ProjectID:  projectID,
 	}
 
 	err = deleteAgentsViaHub(hubCtx, []string{"agent-one", "agent-two"})
@@ -246,7 +246,7 @@ func TestDeleteAgentsViaHub_HubFailsSkipsLocalCleanup(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	preserveBranch = true
 
-	groveID := "grove-fail-789"
+	projectID := "grove-fail-789"
 
 	// Server that returns 404 for all agent deletes
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -267,7 +267,7 @@ func TestDeleteAgentsViaHub_HubFailsSkipsLocalCleanup(t *testing.T) {
 
 	groveDir := filepath.Join(tmpHome, "project", ".scion")
 	require.NoError(t, os.MkdirAll(groveDir, 0755))
-	grovePath = groveDir
+	projectPath = groveDir
 
 	agentDir := createAgentDir(t, groveDir, "missing-agent")
 
@@ -277,7 +277,7 @@ func TestDeleteAgentsViaHub_HubFailsSkipsLocalCleanup(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:   client,
 		Endpoint: server.URL,
-		GroveID:  groveID,
+		ProjectID:  projectID,
 	}
 
 	err = deleteAgentsViaHub(hubCtx, []string{"missing-agent"})
@@ -296,13 +296,13 @@ func TestDeleteAgentsViaHub_NoLocalFiles(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	preserveBranch = true
 
-	groveID := "grove-nolocal-101"
-	server, deletedAgents := newDeleteMockHubServer(t, groveID)
+	projectID := "grove-nolocal-101"
+	server, deletedAgents := newDeleteMockHubServer(t, projectID)
 	defer server.Close()
 
 	groveDir := filepath.Join(tmpHome, "project", ".scion")
 	require.NoError(t, os.MkdirAll(filepath.Join(groveDir, "agents"), 0755))
-	grovePath = groveDir
+	projectPath = groveDir
 
 	// Don't create any agent directory - simulates agent existing only on Hub
 
@@ -312,7 +312,7 @@ func TestDeleteAgentsViaHub_NoLocalFiles(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:   client,
 		Endpoint: server.URL,
-		GroveID:  groveID,
+		ProjectID:  projectID,
 	}
 
 	// Should succeed without error even when no local files exist
@@ -331,15 +331,15 @@ func TestDeleteAgentsViaHub_LocalCleanupFailureCreatesStaleLocalNotToRegister(t 
 	os.Setenv("HOME", tmpHome)
 	preserveBranch = true
 
-	groveID := "grove-stale-202"
+	projectID := "grove-stale-202"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/groves/"+groveID+"/agents/stale-agent":
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/groves/"+projectID+"/agents/stale-agent":
 			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/groves/"+groveID+"/agents":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/groves/"+projectID+"/agents":
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents":     []interface{}{},
 				"serverTime": time.Now().UTC().Format(time.RFC3339Nano),
@@ -356,8 +356,8 @@ func TestDeleteAgentsViaHub_LocalCleanupFailureCreatesStaleLocalNotToRegister(t 
 	require.NoError(t, os.MkdirAll(groveDir, 0755))
 	createAgentDir(t, groveDir, "stale-agent")
 
-	// Force local cleanup to fail while keeping hubCtx.GrovePath valid for state checkpointing.
-	grovePath = filepath.Join(tmpHome, "nonexistent-grove-path")
+	// Force local cleanup to fail while keeping hubCtx.ProjectPath valid for state checkpointing.
+	projectPath = filepath.Join(tmpHome, "nonexistent-grove-path")
 
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
@@ -365,23 +365,23 @@ func TestDeleteAgentsViaHub_LocalCleanupFailureCreatesStaleLocalNotToRegister(t 
 	hubCtx := &HubContext{
 		Client:    client,
 		Endpoint:  server.URL,
-		GroveID:   groveID,
-		GrovePath: groveDir,
+		ProjectID:   projectID,
+		ProjectPath: groveDir,
 		IsGlobal:  false,
 	}
 
 	err = deleteAgentsViaHub(hubCtx, []string{"stale-agent"})
 	require.NoError(t, err)
 
-	state, err := config.LoadGroveState(groveDir)
+	state, err := config.LoadProjectState(groveDir)
 	require.NoError(t, err)
 	require.NotEmpty(t, state.LastSyncedAt, "expected watermark checkpoint after hub delete")
 
 	syncCtx := &hubsync.HubContext{
 		Client:    client,
-		GroveID:   groveID,
+		ProjectID:   projectID,
 		BrokerID:  "",
-		GrovePath: groveDir,
+		ProjectPath: groveDir,
 		IsGlobal:  false,
 		Settings:  &config.Settings{},
 	}
@@ -393,6 +393,14 @@ func TestDeleteAgentsViaHub_LocalCleanupFailureCreatesStaleLocalNotToRegister(t 
 }
 
 func TestDeleteStopped_RequiresGroveContext(t *testing.T) {
+	// Unset Hub context to avoid synthetic project root detection
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID"} {
+		if val, ok := os.LookupEnv(e); ok {
+			os.Unsetenv(e)
+			defer os.Setenv(e, val)
+		}
+	}
+
 	orig := saveDeleteTestState()
 	defer orig.restore()
 
@@ -406,7 +414,7 @@ func TestDeleteStopped_RequiresGroveContext(t *testing.T) {
 	os.Chdir(tmpDir)
 
 	noHub = true
-	grovePath = ""
+	projectPath = ""
 	deleteStopped = true
 
 	// Running delete --stopped outside a grove should error
@@ -432,11 +440,11 @@ func TestDeleteStopped_AcceptsGlobalFlag(t *testing.T) {
 	defer os.Chdir(oldWd)
 	os.Chdir(tmpDir)
 
-	// Verify that RequireGrovePath("global") resolves correctly even outside a grove.
+	// Verify that RequireProjectPath("global") resolves correctly even outside a grove.
 	// The full command flow requires Docker for runtime.List, so we test the grove
 	// resolution layer directly rather than the entire RunE.
-	resolvedGrove, isGlobal, err := config.RequireGrovePath("global")
+	resolvedProject, isGlobal, err := config.RequireProjectPath("global")
 	require.NoError(t, err)
 	assert.True(t, isGlobal, "should resolve as global grove")
-	assert.Equal(t, globalDir, resolvedGrove)
+	assert.Equal(t, globalDir, resolvedProject)
 }

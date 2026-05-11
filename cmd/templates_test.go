@@ -34,7 +34,7 @@ type templateTestState struct {
 	globalMode  bool
 	noHub       bool
 	autoConfirm bool
-	grovePath   string
+	projectPath   string
 }
 
 func saveTemplateTestState() templateTestState {
@@ -43,7 +43,7 @@ func saveTemplateTestState() templateTestState {
 		globalMode:  globalMode,
 		noHub:       noHub,
 		autoConfirm: autoConfirm,
-		grovePath:   grovePath,
+		projectPath:   projectPath,
 	}
 }
 
@@ -52,7 +52,7 @@ func (s templateTestState) restore() {
 	globalMode = s.globalMode
 	noHub = s.noHub
 	autoConfirm = s.autoConfirm
-	grovePath = s.grovePath
+	projectPath = s.projectPath
 }
 
 // createTestTemplate creates a template directory at $HOME/.scion/templates/<name>.
@@ -129,9 +129,9 @@ func TestRunTemplateDelete_ProtectedTemplate(t *testing.T) {
 
 // newMockHubServer creates a mock Hub server that handles the endpoints
 // required by CheckHubAvailabilityWithOptions and template operations.
-// groveID is the grove ID to recognize. templates is the list of templates to return.
+// projectID is the grove ID to recognize. templates is the list of templates to return.
 // Returns the server and a pointer to a bool that tracks if delete was called.
-func newMockHubServer(t *testing.T, groveID string, templates []map[string]interface{}) (*httptest.Server, *bool) {
+func newMockHubServer(t *testing.T, projectID string, templates []map[string]interface{}) (*httptest.Server, *bool) {
 	t.Helper()
 	deleteCalled := false
 
@@ -143,10 +143,10 @@ func newMockHubServer(t *testing.T, groveID string, templates []map[string]inter
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
-		// Grove lookup (for isGroveRegistered)
+		// Project lookup (for isGroveRegistered)
 		case strings.HasPrefix(r.URL.Path, "/api/v1/groves/") && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"id":   groveID,
+				"id":   projectID,
 				"name": "test-grove",
 			})
 
@@ -170,14 +170,14 @@ func newMockHubServer(t *testing.T, groveID string, templates []map[string]inter
 	return server, &deleteCalled
 }
 
-// setupHubGrove creates a grove directory with settings pointing to the given hub endpoint.
-func setupHubGrove(t *testing.T, home, endpoint, groveID string) string {
+// setupHubProject creates a grove directory with settings pointing to the given hub endpoint.
+func setupHubProject(t *testing.T, home, endpoint, projectID string) string {
 	t.Helper()
 	groveDir := filepath.Join(home, "project", ".scion")
 	require.NoError(t, os.MkdirAll(groveDir, 0755))
 
 	settings := map[string]interface{}{
-		"grove_id": groveID,
+		"grove_id": projectID,
 		"hub": map[string]interface{}{
 			"enabled":  true,
 			"endpoint": endpoint,
@@ -208,10 +208,10 @@ func TestRunTemplateDelete_HubOnly_AutoConfirm(t *testing.T) {
 	// Create empty local templates so FindTemplate doesn't find anything
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpHome, ".scion", "templates"), 0755))
 
-	groveID := "grove-test-123"
+	projectID := "grove-test-123"
 	templateID := "hub-tpl-456"
 
-	server, deleteCalled := newMockHubServer(t, groveID, []map[string]interface{}{
+	server, deleteCalled := newMockHubServer(t, projectID, []map[string]interface{}{
 		{
 			"id":     templateID,
 			"name":   "hub-only-tpl",
@@ -222,7 +222,7 @@ func TestRunTemplateDelete_HubOnly_AutoConfirm(t *testing.T) {
 	})
 	defer server.Close()
 
-	grovePath = setupHubGrove(t, tmpHome, server.URL, groveID)
+	projectPath = setupHubProject(t, tmpHome, server.URL, projectID)
 
 	err := runTemplateDelete(nil, []string{"hub-only-tpl"})
 	require.NoError(t, err)
@@ -245,10 +245,10 @@ func TestRunTemplateDelete_Both_AutoConfirm(t *testing.T) {
 
 	templateDir := createTestTemplate(t, tmpHome, "both-tpl")
 
-	groveID := "grove-test-789"
+	projectID := "grove-test-789"
 	templateID := "hub-both-456"
 
-	server, deleteCalled := newMockHubServer(t, groveID, []map[string]interface{}{
+	server, deleteCalled := newMockHubServer(t, projectID, []map[string]interface{}{
 		{
 			"id":     templateID,
 			"name":   "both-tpl",
@@ -259,7 +259,7 @@ func TestRunTemplateDelete_Both_AutoConfirm(t *testing.T) {
 	})
 	defer server.Close()
 
-	grovePath = setupHubGrove(t, tmpHome, server.URL, groveID)
+	projectPath = setupHubProject(t, tmpHome, server.URL, projectID)
 
 	err := runTemplateDelete(nil, []string{"both-tpl"})
 	require.NoError(t, err)
@@ -323,7 +323,7 @@ func TestRunTemplateSync_AllAndNameConflict(t *testing.T) {
 
 // newMockHubServerForSync creates a mock Hub server that supports template
 // list, create, upload, and finalize operations for testing sync.
-func newMockHubServerForSync(t *testing.T, groveID string, existingTemplates []map[string]interface{}) *httptest.Server {
+func newMockHubServerForSync(t *testing.T, projectID string, existingTemplates []map[string]interface{}) *httptest.Server {
 	t.Helper()
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -335,7 +335,7 @@ func newMockHubServerForSync(t *testing.T, groveID string, existingTemplates []m
 
 		case strings.HasPrefix(r.URL.Path, "/api/v1/groves/") && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"id":   groveID,
+				"id":   projectID,
 				"name": "test-grove",
 			})
 
@@ -398,10 +398,10 @@ func TestRunTemplateSync_UpdatesExistingTemplate(t *testing.T) {
 	// Create a local template
 	createTestTemplate(t, tmpHome, "update-tpl")
 
-	groveID := "grove-update-123"
+	projectID := "grove-update-123"
 
 	// Hub server returns an existing template with a different hash
-	server := newMockHubServerForSync(t, groveID, []map[string]interface{}{
+	server := newMockHubServerForSync(t, projectID, []map[string]interface{}{
 		{
 			"id":          "existing-tpl-id",
 			"name":        "update-tpl",
@@ -413,7 +413,7 @@ func TestRunTemplateSync_UpdatesExistingTemplate(t *testing.T) {
 	})
 	defer server.Close()
 
-	grovePath = setupHubGrove(t, tmpHome, server.URL, groveID)
+	projectPath = setupHubProject(t, tmpHome, server.URL, projectID)
 
 	// Sync should succeed without --force when content differs
 	cmd := &cobra.Command{}

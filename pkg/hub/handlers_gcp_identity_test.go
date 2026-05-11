@@ -29,20 +29,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func createTestGroveForSA(t *testing.T, srv *Server, s store.Store) string {
+func createTestProjectForSA(t *testing.T, srv *Server, s store.Store) string {
 	t.Helper()
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", map[string]string{
-		"name": "test-grove-sa",
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", map[string]string{
+		"name": "test-project-sa",
 	})
-	require.Equal(t, http.StatusCreated, rec.Code, "create grove: %s", rec.Body.String())
-	var grove store.Grove
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove))
-	return grove.ID
+	require.Equal(t, http.StatusCreated, rec.Code, "create project: %s", rec.Body.String())
+	var project store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
+	return project.ID
 }
 
 func TestCreateGCPServiceAccount_Success(t *testing.T) {
 	srv, s := testServer(t)
-	groveID := createTestGroveForSA(t, srv, s)
+	projectID := createTestProjectForSA(t, srv, s)
 
 	body := map[string]string{
 		"email":     "agent@my-project.iam.gserviceaccount.com",
@@ -50,7 +50,7 @@ func TestCreateGCPServiceAccount_Success(t *testing.T) {
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", groveID), body)
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID), body)
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
 	var sa store.GCPServiceAccount
@@ -62,14 +62,14 @@ func TestCreateGCPServiceAccount_Success(t *testing.T) {
 
 func TestCreateGCPServiceAccount_MissingEmail(t *testing.T) {
 	srv, s := testServer(t)
-	groveID := createTestGroveForSA(t, srv, s)
+	projectID := createTestProjectForSA(t, srv, s)
 
 	body := map[string]string{
 		"projectId": "my-project",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", groveID), body)
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID), body)
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 
 	var errResp ErrorResponse
@@ -80,15 +80,17 @@ func TestCreateGCPServiceAccount_MissingEmail(t *testing.T) {
 
 func TestCreateGCPServiceAccount_InferProjectIDFromEmail(t *testing.T) {
 	srv, s := testServer(t)
-	groveID := createTestGroveForSA(t, srv, s)
+	projectID := createTestProjectForSA(t, srv, s)
 
 	body := map[string]string{
 		"email": "agent@my-project.iam.gserviceaccount.com",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", groveID), body)
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID), body)
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+
 
 	var sa store.GCPServiceAccount
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sa))
@@ -97,14 +99,15 @@ func TestCreateGCPServiceAccount_InferProjectIDFromEmail(t *testing.T) {
 
 func TestCreateGCPServiceAccount_CannotInferProjectID(t *testing.T) {
 	srv, s := testServer(t)
-	groveID := createTestGroveForSA(t, srv, s)
+	projectID := createTestProjectForSA(t, srv, s)
 
 	body := map[string]string{
 		"email": "agent@example.com",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", groveID), body)
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID), body)
+
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 
 	var errResp ErrorResponse
@@ -115,10 +118,10 @@ func TestCreateGCPServiceAccount_CannotInferProjectID(t *testing.T) {
 
 func TestCreateGCPServiceAccount_InvalidJSON(t *testing.T) {
 	srv, s := testServer(t)
-	groveID := createTestGroveForSA(t, srv, s)
+	projectID := createTestProjectForSA(t, srv, s)
 
 	rec := doRequestRaw(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", groveID),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID),
 		[]byte("not-json"), "application/json")
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 
@@ -128,7 +131,7 @@ func TestCreateGCPServiceAccount_InvalidJSON(t *testing.T) {
 	assert.Contains(t, errResp.Error.Message, "invalid request body")
 }
 
-func TestCreateGCPServiceAccount_GroveNotFound(t *testing.T) {
+func TestCreateGCPServiceAccount_ProjectNotFound(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := map[string]string{
@@ -137,13 +140,13 @@ func TestCreateGCPServiceAccount_GroveNotFound(t *testing.T) {
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
-		"/api/v1/groves/nonexistent-grove-id/gcp-service-accounts", body)
+		"/api/v1/projects/nonexistent-project-id/gcp-service-accounts", body)
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestCreateGCPServiceAccount_Duplicate(t *testing.T) {
 	srv, s := testServer(t)
-	groveID := createTestGroveForSA(t, srv, s)
+	projectID := createTestProjectForSA(t, srv, s)
 
 	body := map[string]string{
 		"email":     "agent@my-project.iam.gserviceaccount.com",
@@ -152,12 +155,12 @@ func TestCreateGCPServiceAccount_Duplicate(t *testing.T) {
 
 	// First create should succeed
 	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", groveID), body)
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID), body)
 	require.Equal(t, http.StatusCreated, rec.Code, "first create: %s", rec.Body.String())
 
 	// Second create with same email should conflict
 	rec = doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", groveID), body)
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID), body)
 	require.Equal(t, http.StatusConflict, rec.Code)
 
 	var errResp ErrorResponse
@@ -225,10 +228,10 @@ func (m *mockGCPTokenGenerator) ServiceAccountEmail() string {
 
 func TestMintGCPServiceAccount_Success(t *testing.T) {
 	srv, _, mock := testServerWithMinting(t)
-	groveID := createTestGroveForSA(t, srv, nil)
+	projectID := createTestProjectForSA(t, srv, nil)
 
 	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/mint", groveID),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
 		map[string]string{})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
@@ -244,10 +247,10 @@ func TestMintGCPServiceAccount_Success(t *testing.T) {
 
 func TestMintGCPServiceAccount_CustomAccountID(t *testing.T) {
 	srv, _, mock := testServerWithMinting(t)
-	groveID := createTestGroveForSA(t, srv, nil)
+	projectID := createTestProjectForSA(t, srv, nil)
 
 	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/mint", groveID),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
 		map[string]string{
 			"account_id":   "my-pipeline",
 			"display_name": "My Pipeline SA",
@@ -264,10 +267,10 @@ func TestMintGCPServiceAccount_CustomAccountID(t *testing.T) {
 
 func TestMintGCPServiceAccount_AccountIDTooLong(t *testing.T) {
 	srv, _, _ := testServerWithMinting(t)
-	groveID := createTestGroveForSA(t, srv, nil)
+	projectID := createTestProjectForSA(t, srv, nil)
 
 	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/mint", groveID),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
 		map[string]string{
 			"account_id": "this-is-a-very-long-account-id-that-exceeds",
 		})
@@ -280,89 +283,89 @@ func TestMintGCPServiceAccount_AccountIDTooLong(t *testing.T) {
 
 func TestMintGCPServiceAccount_NotConfigured(t *testing.T) {
 	srv, _ := testServer(t) // No minting configured
-	groveID := createTestGroveForSA(t, srv, nil)
+	projectID := createTestProjectForSA(t, srv, nil)
 
 	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/mint", groveID),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
 		map[string]string{})
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
 
-func TestMintGCPServiceAccount_GroveNotFound(t *testing.T) {
+func TestMintGCPServiceAccount_ProjectNotFound(t *testing.T) {
 	srv, _, _ := testServerWithMinting(t)
 
 	rec := doRequest(t, srv, http.MethodPost,
-		"/api/v1/groves/nonexistent-grove-id/gcp-service-accounts/mint",
+		"/api/v1/projects/nonexistent-project-id/gcp-service-accounts/mint",
 		map[string]string{})
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestMintGCPServiceAccount_NoAuth(t *testing.T) {
 	srv, _, _ := testServerWithMinting(t)
-	groveID := createTestGroveForSA(t, srv, nil)
+	projectID := createTestProjectForSA(t, srv, nil)
 
 	rec := doRequestNoAuth(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/mint", groveID),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
 		map[string]string{})
 	// Should be forbidden without auth
 	assert.True(t, rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden,
 		"expected 401 or 403, got %d", rec.Code)
 }
 
-func TestMintGCPServiceAccount_PerGroveCap(t *testing.T) {
+func TestMintGCPServiceAccount_PerProjectCap(t *testing.T) {
 	srv, _, _ := testServerWithMinting(t)
-	srv.config.GCPMintCapPerGrove = 2
-	groveID := createTestGroveForSA(t, srv, nil)
+	srv.config.GCPMintCapPerProject = 2
+	projectID := createTestProjectForSA(t, srv, nil)
 
 	// Mint first two — should succeed
 	for i := 0; i < 2; i++ {
 		rec := doRequest(t, srv, http.MethodPost,
-			fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/mint", groveID),
+			fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
 			map[string]string{})
 		require.Equal(t, http.StatusCreated, rec.Code, "mint %d: %s", i+1, rec.Body.String())
 	}
 
 	// Third mint should be rejected
 	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/mint", groveID),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
 		map[string]string{})
 	require.Equal(t, http.StatusConflict, rec.Code, "expected cap enforcement: %s", rec.Body.String())
 
 	var errResp ErrorResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
-	assert.Contains(t, errResp.Error.Message, "per-grove mint limit")
+	assert.Contains(t, errResp.Error.Message, "per-project mint limit")
 }
 
 func TestMintGCPServiceAccount_GlobalCap(t *testing.T) {
 	srv, _, _ := testServerWithMinting(t)
 	srv.config.GCPMintCapGlobal = 3
 
-	// Create two groves and mint in each
-	groveID1 := createTestGroveForSA(t, srv, nil)
+	// Create two projects and mint in each
+	projectID1 := createTestProjectForSA(t, srv, nil)
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", map[string]string{
-		"name": "test-grove-sa-2",
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", map[string]string{
+		"name": "test-project-sa-2",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
-	var grove2 struct{ ID string }
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove2))
-	groveID2 := grove2.ID
+	var project2 struct{ ID string }
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project2))
+	projectID2 := project2.ID
 
-	// Mint 2 in grove 1, 1 in grove 2 (total 3)
+	// Mint 2 in project 1, 1 in project 2 (total 3)
 	for i := 0; i < 2; i++ {
 		rec := doRequest(t, srv, http.MethodPost,
-			fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/mint", groveID1),
+			fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID1),
 			map[string]string{})
 		require.Equal(t, http.StatusCreated, rec.Code)
 	}
 	rec = doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/mint", groveID2),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID2),
 		map[string]string{})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
-	// Fourth mint (in either grove) should be rejected
+	// Fourth mint (in either project) should be rejected
 	rec = doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/mint", groveID2),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID2),
 		map[string]string{})
 	require.Equal(t, http.StatusConflict, rec.Code)
 
@@ -373,44 +376,44 @@ func TestMintGCPServiceAccount_GlobalCap(t *testing.T) {
 
 func TestListGCPServiceAccounts_IncludesMintQuota(t *testing.T) {
 	srv, _, _ := testServerWithMinting(t)
-	srv.config.GCPMintCapPerGrove = 5
+	srv.config.GCPMintCapPerProject = 5
 	srv.config.GCPMintCapGlobal = 10
-	groveID := createTestGroveForSA(t, srv, nil)
+	projectID := createTestProjectForSA(t, srv, nil)
 
 	// Mint one SA
 	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/mint", groveID),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
 		map[string]string{})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
 	// List should include quota info
 	rec = doRequest(t, srv, http.MethodGet,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", groveID), nil)
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID), nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var resp struct {
 		Items     []json.RawMessage `json:"items"`
 		MintQuota *struct {
-			GroveMinted  int `json:"grove_minted"`
-			GroveCap     int `json:"grove_cap"`
-			GlobalMinted int `json:"global_minted"`
-			GlobalCap    int `json:"global_cap"`
+			ProjectMinted int `json:"project_minted"`
+			ProjectCap    int `json:"project_cap"`
+			GlobalMinted  int `json:"global_minted"`
+			GlobalCap     int `json:"global_cap"`
 		} `json:"mint_quota"`
 	}
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	require.NotNil(t, resp.MintQuota, "mint_quota should be present")
-	assert.Equal(t, 1, resp.MintQuota.GroveMinted)
-	assert.Equal(t, 5, resp.MintQuota.GroveCap)
+	assert.Equal(t, 1, resp.MintQuota.ProjectMinted)
+	assert.Equal(t, 5, resp.MintQuota.ProjectCap)
 	assert.Equal(t, 1, resp.MintQuota.GlobalMinted)
 	assert.Equal(t, 10, resp.MintQuota.GlobalCap)
 }
 
 func TestMintGCPServiceAccount_ManagedFlagSet(t *testing.T) {
 	srv, _, _ := testServerWithMinting(t)
-	groveID := createTestGroveForSA(t, srv, nil)
+	projectID := createTestProjectForSA(t, srv, nil)
 
 	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/mint", groveID),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
 		map[string]string{})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
@@ -424,7 +427,7 @@ func TestMintGCPServiceAccount_ManagedFlagSet(t *testing.T) {
 
 func TestCreateGCPServiceAccount_AutoVerifySuccess(t *testing.T) {
 	srv, s := testServer(t)
-	groveID := createTestGroveForSA(t, srv, s)
+	projectID := createTestProjectForSA(t, srv, s)
 
 	// Set a mock token generator that always succeeds
 	srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: "hub@test.iam.gserviceaccount.com"})
@@ -435,7 +438,7 @@ func TestCreateGCPServiceAccount_AutoVerifySuccess(t *testing.T) {
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", groveID), body)
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID), body)
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
 	var resp struct {
@@ -455,7 +458,7 @@ func TestCreateGCPServiceAccount_AutoVerifySuccess(t *testing.T) {
 
 func TestCreateGCPServiceAccount_AutoVerifyFailure(t *testing.T) {
 	srv, s := testServer(t)
-	groveID := createTestGroveForSA(t, srv, s)
+	projectID := createTestProjectForSA(t, srv, s)
 
 	// Set a mock token generator that always fails verification
 	srv.SetGCPTokenGenerator(&mockGCPTokenGeneratorVerifyFail{
@@ -469,7 +472,7 @@ func TestCreateGCPServiceAccount_AutoVerifyFailure(t *testing.T) {
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", groveID), body)
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID), body)
 	// SA is still created successfully
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
@@ -512,34 +515,34 @@ func (m *mockGCPTokenGeneratorVerifyFail) ServiceAccountEmail() string {
 	return m.email
 }
 
-func TestMintGCPServiceAccount_PerGroveCap_DifferentGroves(t *testing.T) {
+func TestMintGCPServiceAccount_PerProjectCap_DifferentProjects(t *testing.T) {
 	srv, _, _ := testServerWithMinting(t)
-	srv.config.GCPMintCapPerGrove = 1
+	srv.config.GCPMintCapPerProject = 1
 
-	groveID1 := createTestGroveForSA(t, srv, nil)
+	projectID1 := createTestProjectForSA(t, srv, nil)
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groves", map[string]string{
-		"name": "test-grove-sa-3",
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", map[string]string{
+		"name": "test-project-sa-3",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
-	var grove2 struct{ ID string }
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grove2))
+	var project2 struct{ ID string }
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project2))
 
-	// Mint in grove 1 — should succeed
+	// Mint in project 1 — should succeed
 	rec = doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/mint", groveID1),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID1),
 		map[string]string{})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
-	// Mint in grove 2 — should also succeed (different grove)
+	// Mint in project 2 — should also succeed (different project)
 	rec = doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/mint", grove2.ID),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", project2.ID),
 		map[string]string{})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
-	// Second mint in grove 1 — should be rejected
+	// Second mint in project 1 — should be rejected
 	rec = doRequest(t, srv, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/mint", groveID1),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID1),
 		map[string]string{})
 	require.Equal(t, http.StatusConflict, rec.Code)
 }
@@ -548,13 +551,13 @@ func TestMintGCPServiceAccount_PerGroveCap_DifferentGroves(t *testing.T) {
 // GCP Service Account Authorization Tests
 // ============================================================================
 
-// setupGCPAuthzTest creates a test server with three users and a grove:
-//   - owner: grove owner (non-admin member), in grove members group
-//   - member: grove member (non-admin), in grove members group
-//   - outsider: hub member but NOT in grove members group
+// setupGCPAuthzTest creates a test server with three users and a project:
+//   - owner: project owner (non-admin member), in project members group
+//   - member: project member (non-admin), in project members group
+//   - outsider: hub member but NOT in project members group
 //
-// Returns the server, store, users, and grove.
-func setupGCPAuthzTest(t *testing.T) (*Server, store.Store, *store.User, *store.User, *store.User, *store.Grove) {
+// Returns the server, store, users, and project.
+func setupGCPAuthzTest(t *testing.T) (*Server, store.Store, *store.User, *store.User, *store.User, *store.Project) {
 	t.Helper()
 
 	srv, s := testServer(t)
@@ -589,22 +592,22 @@ func setupGCPAuthzTest(t *testing.T) (*Server, store.Store, *store.User, *store.
 		ensureHubMembership(ctx, s, u.ID)
 	}
 
-	grove := &store.Grove{
-		ID:        "grove-gcp-authz",
-		Name:      "GCP Authz Grove",
-		Slug:      "gcp-authz-grove",
+	project := &store.Project{
+		ID:        "project-gcp-authz",
+		Name:      "GCP Authz Project",
+		Slug:      "gcp-authz-project",
 		OwnerID:   owner.ID,
 		CreatedBy: owner.ID,
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
-	// Create grove members group and policies (simulates grove creation handler)
-	srv.createGroveMembersGroupAndPolicy(ctx, grove)
+	// Create project members group and policies (simulates project creation handler)
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
 
-	// Add member to grove members group
-	membersGroup, err := s.GetGroupBySlug(ctx, "grove:gcp-authz-grove:members")
+	// Add member to project members group
+	membersGroup, err := s.GetGroupBySlug(ctx, "project:gcp-authz-project:members")
 	require.NoError(t, err)
 	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
 		GroupID:    membersGroup.ID,
@@ -613,47 +616,47 @@ func setupGCPAuthzTest(t *testing.T) (*Server, store.Store, *store.User, *store.
 		Role:       store.GroupMemberRoleMember,
 	}))
 
-	return srv, s, owner, member, outsider, grove
+	return srv, s, owner, member, outsider, project
 }
 
-func TestGCPSA_Create_GroveOwnerAllowed(t *testing.T) {
-	srv, _, owner, _, _, grove := setupGCPAuthzTest(t)
+func TestGCPSA_Create_ProjectOwnerAllowed(t *testing.T) {
+	srv, _, owner, _, _, project := setupGCPAuthzTest(t)
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", grove.ID),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", project.ID),
 		map[string]string{"email": "sa@proj.iam.gserviceaccount.com", "projectId": "proj"})
 	require.Equal(t, http.StatusCreated, rec.Code,
-		"grove owner should be able to create SA; got: %s", rec.Body.String())
+		"project owner should be able to create SA; got: %s", rec.Body.String())
 }
 
 func TestGCPSA_Create_MemberDenied(t *testing.T) {
-	srv, _, _, member, _, grove := setupGCPAuthzTest(t)
+	srv, _, _, member, _, project := setupGCPAuthzTest(t)
 
 	rec := doRequestAsUser(t, srv, member, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", grove.ID),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", project.ID),
 		map[string]string{"email": "sa@proj.iam.gserviceaccount.com", "projectId": "proj"})
 	require.Equal(t, http.StatusForbidden, rec.Code,
-		"grove member should not be able to create SA; got: %s", rec.Body.String())
+		"project member should not be able to create SA; got: %s", rec.Body.String())
 }
 
 func TestGCPSA_Create_OutsiderDenied(t *testing.T) {
-	srv, _, _, _, outsider, grove := setupGCPAuthzTest(t)
+	srv, _, _, _, outsider, project := setupGCPAuthzTest(t)
 
 	rec := doRequestAsUser(t, srv, outsider, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", grove.ID),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", project.ID),
 		map[string]string{"email": "sa@proj.iam.gserviceaccount.com", "projectId": "proj"})
 	require.Equal(t, http.StatusForbidden, rec.Code,
 		"outsider should not be able to create SA; got: %s", rec.Body.String())
 }
 
-func TestGCPSA_Delete_GroveOwnerAllowed(t *testing.T) {
-	srv, s, owner, _, _, grove := setupGCPAuthzTest(t)
+func TestGCPSA_Delete_ProjectOwnerAllowed(t *testing.T) {
+	srv, s, owner, _, _, project := setupGCPAuthzTest(t)
 	ctx := context.Background()
 
 	sa := &store.GCPServiceAccount{
 		ID:        "sa-del-owner",
-		Scope:     store.ScopeGrove,
-		ScopeID:   grove.ID,
+		Scope:     store.ScopeProject,
+		ScopeID:   project.ID,
 		Email:     "del-owner@proj.iam.gserviceaccount.com",
 		ProjectID: "proj",
 		CreatedBy: owner.ID,
@@ -662,19 +665,19 @@ func TestGCPSA_Delete_GroveOwnerAllowed(t *testing.T) {
 	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodDelete,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/%s", grove.ID, sa.ID), nil)
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s", project.ID, sa.ID), nil)
 	require.Equal(t, http.StatusNoContent, rec.Code,
-		"grove owner should be able to delete SA; got: %s", rec.Body.String())
+		"project owner should be able to delete SA; got: %s", rec.Body.String())
 }
 
 func TestGCPSA_Delete_MemberDenied(t *testing.T) {
-	srv, s, owner, member, _, grove := setupGCPAuthzTest(t)
+	srv, s, owner, member, _, project := setupGCPAuthzTest(t)
 	ctx := context.Background()
 
 	sa := &store.GCPServiceAccount{
 		ID:        "sa-del-member",
-		Scope:     store.ScopeGrove,
-		ScopeID:   grove.ID,
+		Scope:     store.ScopeProject,
+		ScopeID:   project.ID,
 		Email:     "del-member@proj.iam.gserviceaccount.com",
 		ProjectID: "proj",
 		CreatedBy: owner.ID,
@@ -683,13 +686,13 @@ func TestGCPSA_Delete_MemberDenied(t *testing.T) {
 	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
 
 	rec := doRequestAsUser(t, srv, member, http.MethodDelete,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/%s", grove.ID, sa.ID), nil)
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s", project.ID, sa.ID), nil)
 	require.Equal(t, http.StatusForbidden, rec.Code,
-		"grove member should not be able to delete SA; got: %s", rec.Body.String())
+		"project member should not be able to delete SA; got: %s", rec.Body.String())
 }
 
-func TestGCPSA_Mint_GroveOwnerAllowed(t *testing.T) {
-	srv, _, owner, _, _, grove := setupGCPAuthzTest(t)
+func TestGCPSA_Mint_ProjectOwnerAllowed(t *testing.T) {
+	srv, _, owner, _, _, project := setupGCPAuthzTest(t)
 
 	mock := &mockGCPServiceAccountAdmin{}
 	srv.SetGCPServiceAccountAdmin(mock)
@@ -697,14 +700,14 @@ func TestGCPSA_Mint_GroveOwnerAllowed(t *testing.T) {
 	srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: "hub-sa@test-hub-project.iam.gserviceaccount.com"})
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/mint", grove.ID),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", project.ID),
 		map[string]string{})
 	require.Equal(t, http.StatusCreated, rec.Code,
-		"grove owner should be able to mint SA; got: %s", rec.Body.String())
+		"project owner should be able to mint SA; got: %s", rec.Body.String())
 }
 
 func TestGCPSA_Mint_MemberDenied(t *testing.T) {
-	srv, _, _, member, _, grove := setupGCPAuthzTest(t)
+	srv, _, _, member, _, project := setupGCPAuthzTest(t)
 
 	mock := &mockGCPServiceAccountAdmin{}
 	srv.SetGCPServiceAccountAdmin(mock)
@@ -712,20 +715,20 @@ func TestGCPSA_Mint_MemberDenied(t *testing.T) {
 	srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: "hub-sa@test-hub-project.iam.gserviceaccount.com"})
 
 	rec := doRequestAsUser(t, srv, member, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/mint", grove.ID),
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", project.ID),
 		map[string]string{})
 	require.Equal(t, http.StatusForbidden, rec.Code,
-		"grove member should not be able to mint SA; got: %s", rec.Body.String())
+		"project member should not be able to mint SA; got: %s", rec.Body.String())
 }
 
-func TestGCPSA_Verify_GroveOwnerAllowed(t *testing.T) {
-	srv, s, owner, _, _, grove := setupGCPAuthzTest(t)
+func TestGCPSA_Verify_ProjectOwnerAllowed(t *testing.T) {
+	srv, s, owner, _, _, project := setupGCPAuthzTest(t)
 	ctx := context.Background()
 
 	sa := &store.GCPServiceAccount{
 		ID:        "sa-verify-owner",
-		Scope:     store.ScopeGrove,
-		ScopeID:   grove.ID,
+		Scope:     store.ScopeProject,
+		ScopeID:   project.ID,
 		Email:     "verify@proj.iam.gserviceaccount.com",
 		ProjectID: "proj",
 		CreatedBy: owner.ID,
@@ -734,20 +737,20 @@ func TestGCPSA_Verify_GroveOwnerAllowed(t *testing.T) {
 	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/%s/verify", grove.ID, sa.ID), nil)
-	// Should not be 403 — grove owner has manage permission
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s/verify", project.ID, sa.ID), nil)
+	// Should not be 403 — project owner has manage permission
 	assert.NotEqual(t, http.StatusForbidden, rec.Code,
-		"grove owner should not get 403 for verify; got: %s", rec.Body.String())
+		"project owner should not get 403 for verify; got: %s", rec.Body.String())
 }
 
 func TestGCPSA_Verify_MemberDenied(t *testing.T) {
-	srv, s, owner, member, _, grove := setupGCPAuthzTest(t)
+	srv, s, owner, member, _, project := setupGCPAuthzTest(t)
 	ctx := context.Background()
 
 	sa := &store.GCPServiceAccount{
 		ID:        "sa-verify-member",
-		Scope:     store.ScopeGrove,
-		ScopeID:   grove.ID,
+		Scope:     store.ScopeProject,
+		ScopeID:   project.ID,
 		Email:     "verify-m@proj.iam.gserviceaccount.com",
 		ProjectID: "proj",
 		CreatedBy: owner.ID,
@@ -756,21 +759,21 @@ func TestGCPSA_Verify_MemberDenied(t *testing.T) {
 	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
 
 	rec := doRequestAsUser(t, srv, member, http.MethodPost,
-		fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts/%s/verify", grove.ID, sa.ID), nil)
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s/verify", project.ID, sa.ID), nil)
 	require.Equal(t, http.StatusForbidden, rec.Code,
-		"grove member should not be able to verify SA; got: %s", rec.Body.String())
+		"project member should not be able to verify SA; got: %s", rec.Body.String())
 }
 
-// TestGCPSA_GroveOwnerCanAddMembers verifies that grove owners can add members
-// to the grove's members group (regression test for missing OwnerID on group).
-func TestGCPSA_GroveOwnerCanAddMembers(t *testing.T) {
-	srv, s, owner, _, outsider, grove := setupGCPAuthzTest(t)
+// TestGCPSA_ProjectOwnerCanAddMembers verifies that project owners can add members
+// to the project's members group (regression test for missing OwnerID on group).
+func TestGCPSA_ProjectOwnerCanAddMembers(t *testing.T) {
+	srv, s, owner, _, outsider, project := setupGCPAuthzTest(t)
 	ctx := context.Background()
 
-	membersGroup, err := s.GetGroupBySlug(ctx, "grove:"+grove.Slug+":members")
+	membersGroup, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
 	require.NoError(t, err)
 
-	// Grove owner should be able to add outsider as a member
+	// Project owner should be able to add outsider as a member
 	body := AddGroupMemberRequest{
 		MemberType: "user",
 		MemberID:   outsider.ID,
@@ -779,7 +782,7 @@ func TestGCPSA_GroveOwnerCanAddMembers(t *testing.T) {
 	rec := doRequestAsUser(t, srv, owner, http.MethodPost,
 		fmt.Sprintf("/api/v1/groups/%s/members", membersGroup.ID), body)
 	require.Equal(t, http.StatusCreated, rec.Code,
-		"grove owner should be able to add members to grove group; got: %s", rec.Body.String())
+		"project owner should be able to add members to project group; got: %s", rec.Body.String())
 }
 
 func TestProjectIDFromServiceAccountEmail(t *testing.T) {

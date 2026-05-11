@@ -66,7 +66,7 @@ that do not (e.g. generic) will return an error — use 'stop' instead.`,
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if suspendAll {
-			hubCtx, err := CheckHubAvailability(grovePath)
+			hubCtx, err := CheckHubAvailability(projectPath)
 			if err != nil {
 				return err
 			}
@@ -78,7 +78,7 @@ that do not (e.g. generic) will return an error — use 'stop' instead.`,
 
 		agentName := api.Slugify(args[0])
 
-		hubCtx, err := CheckHubAvailabilityForAgent(grovePath, agentName, false)
+		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, false)
 		if err != nil {
 			return err
 		}
@@ -88,11 +88,11 @@ that do not (e.g. generic) will return an error — use 'stop' instead.`,
 		}
 
 		// Local mode — verify the harness supports resume before suspending.
-		if err := checkHarnessResumeSupport(agentName, grovePath); err != nil {
+		if err := checkHarnessResumeSupport(agentName, projectPath); err != nil {
 			return err
 		}
 
-		rt := runtime.GetRuntime(grovePath, profile)
+		rt := runtime.GetRuntime(projectPath, profile)
 		mgr := agent.NewManager(rt)
 
 		statusf("Suspending agent '%s'...\n", agentName)
@@ -100,7 +100,7 @@ that do not (e.g. generic) will return an error — use 'stop' instead.`,
 			return err
 		}
 
-		_ = agent.UpdateAgentConfig(agentName, grovePath, "suspended", "", "")
+		_ = agent.UpdateAgentConfig(agentName, projectPath, "suspended", "", "")
 
 		if isJSONOutput() {
 			return outputJSON(ActionResult{
@@ -117,8 +117,8 @@ that do not (e.g. generic) will return an error — use 'stop' instead.`,
 
 // checkHarnessResumeSupport resolves the agent's harness and returns an error
 // if the harness does not support session resume.
-func checkHarnessResumeSupport(agentName, grovePath string) error {
-	harnessConfigName := agent.GetSavedHarnessConfig(agentName, grovePath)
+func checkHarnessResumeSupport(agentName, projectPath string) error {
+	harnessConfigName := agent.GetSavedHarnessConfig(agentName, projectPath)
 	if harnessConfigName == "" {
 		return nil
 	}
@@ -135,17 +135,17 @@ func checkHarnessResumeSupport(agentName, grovePath string) error {
 }
 
 func suspendAllAgents() error {
-	rt := runtime.GetRuntime(grovePath, profile)
+	rt := runtime.GetRuntime(projectPath, profile)
 	mgr := agent.NewManager(rt)
 
 	filters := map[string]string{
 		"scion.agent": "true",
 	}
 
-	projectDir, _ := config.GetResolvedProjectDir(grovePath)
+	projectDir, _ := config.GetResolvedProjectDir(projectPath)
 	if projectDir != "" {
-		filters["scion.grove_path"] = projectDir
-		filters["scion.grove"] = config.GetGroveName(projectDir)
+		filters["scion.project_path"] = projectDir
+		filters["scion.project"] = config.GetProjectName(projectDir)
 	}
 
 	agents, err := mgr.List(context.Background(), filters)
@@ -204,7 +204,7 @@ func suspendAllAgents() error {
 
 			res := agentResult{Name: name, Status: "success"}
 
-			if err := checkHarnessResumeSupport(name, grovePath); err != nil {
+			if err := checkHarnessResumeSupport(name, projectPath); err != nil {
 				res.Status = "skipped"
 				res.Error = err.Error()
 				mu.Lock()
@@ -213,7 +213,7 @@ func suspendAllAgents() error {
 				return
 			}
 
-			agentRt := runtime.GetRuntime(grovePath, profile)
+			agentRt := runtime.GetRuntime(projectPath, profile)
 			agentMgr := agent.NewManager(agentRt)
 
 			if err := agentMgr.Stop(context.Background(), name); err != nil {
@@ -225,7 +225,7 @@ func suspendAllAgents() error {
 				return
 			}
 
-			_ = agent.UpdateAgentConfig(name, grovePath, "suspended", "", "")
+			_ = agent.UpdateAgentConfig(name, projectPath, "suspended", "", "")
 
 			mu.Lock()
 			results = append(results, res)
@@ -282,7 +282,7 @@ func suspendAllAgents() error {
 func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -290,7 +290,7 @@ func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	agentSvc := hubCtx.Client.GroveAgents(groveID)
+	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 	resp, err := agentSvc.List(ctx, &hubclient.ListAgentsOptions{})
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to list agents via Hub: %w", err))
@@ -405,12 +405,12 @@ func suspendAgentViaHub(hubCtx *HubContext, agentName string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
 
-	agentSvc := hubCtx.Client.GroveAgents(groveID)
+	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
 	if err := agentSvc.Suspend(ctx, agentName); err != nil {
 		return wrapHubError(fmt.Errorf("failed to suspend agent via Hub: %w", err))

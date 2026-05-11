@@ -153,13 +153,13 @@ func resolveInlineConfigContent(cfg *api.ScionConfig, configDir string) error {
 
 // HubContext holds the context for Hub operations.
 type HubContext struct {
-	Client    hubclient.Client
-	Endpoint  string
-	Settings  *config.Settings
-	GroveID   string
-	BrokerID  string
-	GrovePath string
-	IsGlobal  bool
+	Client      hubclient.Client
+	Endpoint    string
+	Settings    *config.Settings
+	ProjectID   string
+	BrokerID    string
+	ProjectPath string
+	IsGlobal    bool
 }
 
 // getHubAccessToken returns an access token for authenticating to the Hub.
@@ -183,29 +183,29 @@ func getHubAccessToken(endpoint string) string {
 // by design to ensure users always know which mode they're operating in.
 //
 // This function now performs full Hub sync checks via hubsync.EnsureHubReady:
-// - Verifies grove registration (prompts to register if not)
+// - Verifies project registration (prompts to register if not)
 // - Compares local and Hub agents (prompts to sync if mismatched)
-func CheckHubAvailability(grovePath string) (*HubContext, error) {
-	return CheckHubAvailabilityWithOptions(grovePath, false)
+func CheckHubAvailability(projectPath string) (*HubContext, error) {
+	return CheckHubAvailabilityWithOptions(projectPath, false)
 }
 
 // CheckHubAvailabilityWithOptions is like CheckHubAvailability but allows skipping sync.
-func CheckHubAvailabilityWithOptions(grovePath string, skipSync bool) (*HubContext, error) {
-	return CheckHubAvailabilityForAgents(grovePath, nil, skipSync)
+func CheckHubAvailabilityWithOptions(projectPath string, skipSync bool) (*HubContext, error) {
+	return CheckHubAvailabilityForAgents(projectPath, nil, skipSync)
 }
 
 // CheckHubAvailabilityForAgent checks Hub availability for an operation on a specific agent.
 // The targetAgent parameter specifies the agent being operated on, which will be excluded
 // from sync requirements. This allows operations like delete to proceed without first
 // syncing the target agent (e.g., deleting a local-only agent without registering it).
-func CheckHubAvailabilityForAgent(grovePath, targetAgent string, skipSync bool) (*HubContext, error) {
-	return CheckHubAvailabilityForAgents(grovePath, []string{targetAgent}, skipSync)
+func CheckHubAvailabilityForAgent(projectPath, targetAgent string, skipSync bool) (*HubContext, error) {
+	return CheckHubAvailabilityForAgents(projectPath, []string{targetAgent}, skipSync)
 }
 
 // CheckHubAvailabilityForAgents checks Hub availability for operations on one or more agents.
 // All target agents are excluded from sync requirements so batch operations are not blocked
 // by sync drift on the exact agents being modified.
-func CheckHubAvailabilityForAgents(grovePath string, excludedAgents []string, skipSync bool) (*HubContext, error) {
+func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, skipSync bool) (*HubContext, error) {
 	targetAgent := ""
 	if len(excludedAgents) > 0 {
 		targetAgent = excludedAgents[0] // compatibility field for older internals
@@ -220,7 +220,7 @@ func CheckHubAvailabilityForAgents(grovePath string, excludedAgents []string, sk
 		ExcludedAgents:   excludedAgents,
 	}
 
-	hubCtx, err := hubsync.EnsureHubReady(grovePath, opts)
+	hubCtx, err := hubsync.EnsureHubReady(projectPath, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -234,9 +234,9 @@ func CheckHubAvailabilityForAgents(grovePath string, excludedAgents []string, sk
 		Client:    hubCtx.Client,
 		Endpoint:  hubCtx.Endpoint,
 		Settings:  hubCtx.Settings,
-		GroveID:   hubCtx.GroveID,
+		ProjectID:   hubCtx.ProjectID,
 		BrokerID:  hubCtx.BrokerID,
-		GrovePath: hubCtx.GrovePath,
+		ProjectPath: hubCtx.ProjectPath,
 		IsGlobal:  hubCtx.IsGlobal,
 	}, nil
 }
@@ -258,52 +258,52 @@ func wrapHubError(err error) error {
 	return fmt.Errorf("%w\n\nTo use local-only mode, run: scion hub disable", err)
 }
 
-// GetGroveID looks up the grove ID from HubContext or settings.
+// GetProjectID looks up the project ID from HubContext or settings.
 // Priority:
-//  1. GroveID field in HubContext (set by EnsureHubReady)
-//  2. Local grove_id from settings (for non-git groves or explicit configuration)
+//  1. ProjectID field in HubContext (set by EnsureHubReady)
+//  2. Local project_id from settings (for non-git projects or explicit configuration)
 //  3. Git remote lookup via Hub API
 //
-// Returns the grove ID if found, or an error if the grove is not registered.
-func GetGroveID(hubCtx *HubContext) (string, error) {
-	// First, check if GroveID is already set in the context
-	if hubCtx.GroveID != "" {
-		return hubCtx.GroveID, nil
+// Returns the project ID if found, or an error if the project is not registered.
+func GetProjectID(hubCtx *HubContext) (string, error) {
+	// First, check if ProjectID is already set in the context
+	if hubCtx.ProjectID != "" {
+		return hubCtx.ProjectID, nil
 	}
 
-	// Check if there's a hub grove ID or local grove_id in settings
+	// Check if there's a hub project ID or local project_id in settings
 	if hubCtx.Settings != nil {
-		if hgid := hubCtx.Settings.GetHubGroveID(); hgid != "" {
+		if hgid := hubCtx.Settings.GetHubProjectID(); hgid != "" {
 			return hgid, nil
 		}
-		if hubCtx.Settings.GroveID != "" {
-			return hubCtx.Settings.GroveID, nil
+		if hubCtx.Settings.ProjectID != "" {
+			return hubCtx.Settings.ProjectID, nil
 		}
 	}
 
 	// Fall back to git remote lookup
 	gitRemote := util.GetGitRemote()
 	if gitRemote == "" {
-		return "", fmt.Errorf("no git origin remote found for this project.\n\nThe Hub uses the origin remote URL to identify groves.\nRun 'scion hub link' to link this grove with the Hub, or use --no-hub for local-only mode")
+		return "", fmt.Errorf("no git origin remote found for this project.\n\nThe Hub uses the origin remote URL to identify projects.\nRun 'scion hub link' to link this project with the Hub, or use --no-hub for local-only mode")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Look up groves by git remote
-	resp, err := hubCtx.Client.Groves().List(ctx, &hubclient.ListGrovesOptions{
+	// Look up projects by git remote
+	resp, err := hubCtx.Client.Projects().List(ctx, &hubclient.ListProjectsOptions{
 		GitRemote: util.NormalizeGitRemote(gitRemote),
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to look up grove by git remote: %w", err)
+		return "", fmt.Errorf("failed to look up project by git remote: %w", err)
 	}
 
-	if len(resp.Groves) == 0 {
-		return "", fmt.Errorf("no grove found for git remote: %s\n\nRun 'scion hub link' to link this grove with the Hub", gitRemote)
+	if len(resp.Projects) == 0 {
+		return "", fmt.Errorf("no project found for git remote: %s\n\nRun 'scion hub link' to link this project with the Hub", gitRemote)
 	}
 
-	// Return the first matching grove
-	return resp.Groves[0].ID, nil
+	// Return the first matching project
+	return resp.Projects[0].ID, nil
 }
 
 func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
@@ -348,7 +348,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 
 	// This allows starting/resuming an agent even if it exists on Hub but not locally
 	// (will be created via Hub) or if other agents are out of sync.
-	hubCtx, err := CheckHubAvailabilityForAgent(grovePath, agentName, false)
+	hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, false)
 	if err != nil {
 		return err
 	}
@@ -358,7 +358,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	}
 
 	// Local mode
-	rt := runtime.GetRuntime(grovePath, profile)
+	rt := runtime.GetRuntime(projectPath, profile)
 	mgr := agent.NewManager(rt)
 
 	// Check if already running and we want to attach
@@ -416,7 +416,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	// even when invoked via 'start' (implicit resume). Stopped agents
 	// always get a fresh session, even when invoked via 'resume'.
 	effectiveResume := resume
-	savedPhase := agent.GetSavedPhase(agentName, grovePath)
+	savedPhase := agent.GetSavedPhase(agentName, projectPath)
 	if savedPhase == string(state.PhaseSuspended) {
 		effectiveResume = true
 		if !resume {
@@ -434,7 +434,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		HarnessConfig: effectiveHarnessConfig,
 		HarnessAuth:   effectiveHarnessAuth,
 		Image:         resolvedImage,
-		GrovePath:     grovePath,
+		ProjectPath:     projectPath,
 		Resume:        effectiveResume,
 		Detached:      detached,
 		NoAuth:        noAuth,
@@ -464,7 +464,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	// var are resolved here; the agent's scion-agent.yaml can override
 	// inside Start() via hub.endpoint or env.SCION_HUB_ENDPOINT.
 	if IsHubEnabled() {
-		if cliSettings, err := config.LoadSettings(grovePath); err == nil {
+		if cliSettings, err := config.LoadSettings(projectPath); err == nil {
 			if !cliSettings.IsHubExplicitlyDisabled() {
 				if ep := GetHubEndpoint(cliSettings); ep != "" {
 					if opts.Env == nil {
@@ -508,7 +508,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		statusf("Attaching to agent '%s'...\n", agentName)
 
 		// Use the container ID for exec/attach operations. Container names are
-		// now grove-scoped (e.g. "scion--agent") but agentName is just the agent
+		// now project-scoped (e.g. "scion--agent") but agentName is just the agent
 		// name. The container ID is the reliable identifier for runtime operations.
 		containerID := info.ContainerID
 		if containerID == "" {
@@ -578,23 +578,23 @@ func waitForTmuxSession(rt runtime.Runtime, agentName string) error {
 func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, inlineCfg *api.ScionConfig) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
-	// Get the grove ID for this project
-	groveID, err := GetGroveID(hubCtx)
+	// Get the project ID for this project
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
 
-	// Check if this is a git-based grove. When hub is enabled, all git-based
-	// groves use clone-based provisioning (HTTPS + GitHub token) rather than
+	// Check if this is a git-based project. When hub is enabled, all git-based
+	// projects use clone-based provisioning (HTTPS + GitHub token) rather than
 	// local worktrees. Inform the user and validate early.
 	if !isJSONOutput() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		grove, groveErr := hubCtx.Client.Groves().Get(ctx, groveID)
+		project, projectErr := hubCtx.Client.Projects().Get(ctx, projectID)
 		cancel()
-		if groveErr == nil && grove != nil && grove.GitRemote != "" {
-			cloneURL := grove.Labels["scion.dev/clone-url"]
+		if projectErr == nil && project != nil && project.GitRemote != "" {
+			cloneURL := project.Labels["scion.dev/clone-url"]
 			if cloneURL == "" {
-				cloneURL = "https://" + grove.GitRemote + ".git"
+				cloneURL = "https://" + project.GitRemote + ".git"
 			}
 			fmt.Fprintf(os.Stderr, "Using hub, cloning repo %s\n", cloneURL)
 			fmt.Fprintf(os.Stderr, "  (Hub mode uses HTTPS clone with GITHUB_TOKEN; local worktrees are not used)\n")
@@ -623,7 +623,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	// Build create request (Hub creates and starts in one operation)
 	req := &hubclient.CreateAgentRequest{
 		Name:            agentName,
-		GroveID:         groveID,
+		ProjectID:         projectID,
 		Template:        resolvedTemplate,
 		HarnessConfig:   harnessConfigFlag,
 		HarnessAuth:     harnessAuthFlag,
@@ -696,12 +696,12 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		util.Debugf("[auth]   cloudProject=%q, cloudRegion=%q", localAuth.GoogleCloudProject, localAuth.GoogleCloudRegion)
 	}
 
-	// Detect non-git grove for workspace bootstrap
+	// Detect non-git project for workspace bootstrap
 	var workspaceFiles []transfer.FileInfo
-	if hubCtx.GrovePath != "" && !hubCtx.IsGlobal {
-		groveDir := filepath.Dir(hubCtx.GrovePath) // parent of .scion
-		if _, statErr := os.Stat(groveDir); statErr == nil && !util.IsGitRepoDir(groveDir) {
-			files, err := transfer.CollectFiles(groveDir, transfer.DefaultExcludePatterns)
+	if hubCtx.ProjectPath != "" && !hubCtx.IsGlobal {
+		projectDir := filepath.Dir(hubCtx.ProjectPath) // parent of .scion
+		if _, statErr := os.Stat(projectDir); statErr == nil && !util.IsGitRepoDir(projectDir) {
+			files, err := transfer.CollectFiles(projectDir, transfer.DefaultExcludePatterns)
 			if err != nil {
 				return fmt.Errorf("failed to collect workspace files: %w", err)
 			}
@@ -720,7 +720,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	// doesn't exist yet), we fall through to "Starting".
 	if !resume {
 		checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		existing, getErr := hubCtx.Client.GroveAgents(groveID).Get(checkCtx, agentName)
+		existing, getErr := hubCtx.Client.ProjectAgents(projectID).Get(checkCtx, agentName)
 		checkCancel()
 		if getErr == nil && existing != nil && existing.Phase == string(state.PhaseSuspended) {
 			resume = true
@@ -736,7 +736,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		fmt.Printf("%s agent '%s'...\n", action, agentName)
 	}
 
-	resp, err := createAgentWithBrokerResolution(ctx, hubCtx, groveID, req)
+	resp, err := createAgentWithBrokerResolution(ctx, hubCtx, projectID, req)
 	if err != nil {
 		if debugMode {
 			util.Debugf("[env-gather] startAgentViaHub: create request failed: %v", err)
@@ -782,7 +782,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 			}
 			delCtx, delCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer delCancel()
-			delErr := hubCtx.Client.GroveAgents(groveID).Delete(delCtx, envGatherAgentID, &hubclient.DeleteAgentOptions{
+			delErr := hubCtx.Client.ProjectAgents(projectID).Delete(delCtx, envGatherAgentID, &hubclient.DeleteAgentOptions{
 				DeleteFiles: true,
 			})
 			if delErr != nil {
@@ -810,7 +810,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 			}
 		}()
 
-		submitResp, err := gatherAndSubmitEnv(ctx, hubCtx, groveID, resp)
+		submitResp, err := gatherAndSubmitEnv(ctx, hubCtx, projectID, resp)
 
 		// Stop the signal handler and goroutine now that env-gather is done.
 		signal.Stop(sigCh)
@@ -827,8 +827,8 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	// Advance watermark to the hub-assigned creation time so this agent
 	// won't trigger a sync warning on the next 'scion ls'.
 	if resp.Agent != nil && !resp.Agent.Created.IsZero() {
-		hubsync.UpdateLastSyncedAt(hubCtx.GrovePath, resp.Agent.Created, hubCtx.IsGlobal)
-		hubsync.AddSyncedAgent(hubCtx.GrovePath, agentName)
+		hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, resp.Agent.Created, hubCtx.IsGlobal)
+		hubsync.AddSyncedAgent(hubCtx.ProjectPath, agentName)
 	}
 
 	// Print info line when broker was auto-resolved (not explicitly specified)
@@ -878,7 +878,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 			case <-pollCtx.Done():
 				return fmt.Errorf("timed out waiting for agent '%s' to start", agentName)
 			case <-ticker.C:
-				agent, err := hubCtx.Client.GroveAgents(groveID).Get(pollCtx, agentName)
+				agent, err := hubCtx.Client.ProjectAgents(projectID).Get(pollCtx, agentName)
 				if err != nil {
 					continue
 				}
@@ -971,7 +971,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		case <-pollCtx.Done():
 			return fmt.Errorf("timed out waiting for agent '%s' to become ready", agentName)
 		case <-ticker.C:
-			agent, err := hubCtx.Client.GroveAgents(groveID).Get(pollCtx, agentName)
+			agent, err := hubCtx.Client.ProjectAgents(projectID).Get(pollCtx, agentName)
 			if err != nil {
 				continue // Retry on transient errors
 			}
@@ -1004,10 +1004,10 @@ ready:
 	return wsclient.AttachToAgent(context.Background(), hubCtx.Endpoint, token, agentID)
 }
 
-func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, groveID string, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error) {
+func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, projectID string, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error) {
 	for {
 		if debugMode {
-			util.Debugf("[env-gather] createAgentWithBrokerResolution: sending create request to Hub (grove=%s, agent=%s, broker=%s)", groveID, req.Name, req.RuntimeBrokerID)
+			util.Debugf("[env-gather] createAgentWithBrokerResolution: sending create request to Hub (project=%s, agent=%s, broker=%s)", projectID, req.Name, req.RuntimeBrokerID)
 			if req.Config != nil && len(req.Config.Env) > 0 {
 				for k := range req.Config.Env {
 					util.Debugf("[env-gather]   request env key: %s", k)
@@ -1015,7 +1015,7 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, gr
 			}
 		}
 
-		resp, err := hubCtx.Client.GroveAgents(groveID).Create(ctx, req)
+		resp, err := hubCtx.Client.ProjectAgents(projectID).Create(ctx, req)
 		if err == nil {
 			if debugMode {
 				if resp.EnvGather != nil {
@@ -1074,7 +1074,7 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, gr
 			req.RuntimeBrokerID, _ = brokerMap["id"].(string)
 		} else {
 			// Multiple brokers - selection prompt
-			fmt.Printf("\nMultiple runtime brokers available for grove:\n")
+			fmt.Printf("\nMultiple runtime brokers available for project:\n")
 			for i, h := range availableBrokers {
 				brokerMap, _ := h.(map[string]interface{})
 				name, _ := brokerMap["name"].(string)
@@ -1117,7 +1117,7 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, gr
 
 // gatherAndSubmitEnv handles the env-gather flow: checks the local environment
 // for missing keys and submits gathered values back to the Hub.
-func gatherAndSubmitEnv(ctx context.Context, hubCtx *HubContext, groveID string, resp *hubclient.CreateAgentResponse) (*hubclient.CreateAgentResponse, error) {
+func gatherAndSubmitEnv(ctx context.Context, hubCtx *HubContext, projectID string, resp *hubclient.CreateAgentResponse) (*hubclient.CreateAgentResponse, error) {
 	gather := resp.EnvGather
 	agentID := gather.AgentID
 	if agentID == "" && resp.Agent != nil {
@@ -1281,7 +1281,7 @@ func gatherAndSubmitEnv(ctx context.Context, hubCtx *HubContext, groveID string,
 	statusf("Submitting %d gathered environment variable(s)...\n", len(gatheredEnv))
 
 	// Submit gathered env to Hub
-	submitResp, err := hubCtx.Client.GroveAgents(groveID).SubmitEnv(ctx, agentID, &hubclient.SubmitEnvRequest{
+	submitResp, err := hubCtx.Client.ProjectAgents(projectID).SubmitEnv(ctx, agentID, &hubclient.SubmitEnvRequest{
 		Env: gatheredEnv,
 	})
 	if err != nil {

@@ -12,8 +12,8 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/grove"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/google/uuid"
 )
@@ -51,9 +51,9 @@ func (_c *AgentCreate) SetNillableTemplate(v *string) *AgentCreate {
 	return _c
 }
 
-// SetGroveID sets the "grove_id" field.
-func (_c *AgentCreate) SetGroveID(v uuid.UUID) *AgentCreate {
-	_c.mutation.SetGroveID(v)
+// SetProjectID sets the "project_id" field.
+func (_c *AgentCreate) SetProjectID(v uuid.UUID) *AgentCreate {
+	_c.mutation.SetProjectID(v)
 	return _c
 }
 
@@ -169,9 +169,9 @@ func (_c *AgentCreate) SetNillableID(v *uuid.UUID) *AgentCreate {
 	return _c
 }
 
-// SetGrove sets the "grove" edge to the Grove entity.
-func (_c *AgentCreate) SetGrove(v *Grove) *AgentCreate {
-	return _c.SetGroveID(v.ID)
+// SetProject sets the "project" edge to the Project entity.
+func (_c *AgentCreate) SetProject(v *Project) *AgentCreate {
+	return _c.SetProjectID(v.ID)
 }
 
 // SetCreatorID sets the "creator" edge to the User entity by ID.
@@ -307,8 +307,8 @@ func (_c *AgentCreate) check() error {
 			return &ValidationError{Name: "name", err: fmt.Errorf(`ent: validator failed for field "Agent.name": %w`, err)}
 		}
 	}
-	if _, ok := _c.mutation.GroveID(); !ok {
-		return &ValidationError{Name: "grove_id", err: errors.New(`ent: missing required field "Agent.grove_id"`)}
+	if _, ok := _c.mutation.ProjectID(); !ok {
+		return &ValidationError{Name: "project_id", err: errors.New(`ent: missing required field "Agent.project_id"`)}
 	}
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "Agent.status"`)}
@@ -330,8 +330,8 @@ func (_c *AgentCreate) check() error {
 	if _, ok := _c.mutation.Updated(); !ok {
 		return &ValidationError{Name: "updated", err: errors.New(`ent: missing required field "Agent.updated"`)}
 	}
-	if len(_c.mutation.GroveIDs()) == 0 {
-		return &ValidationError{Name: "grove", err: errors.New(`ent: missing required edge "Agent.grove"`)}
+	if len(_c.mutation.ProjectIDs()) == 0 {
+		return &ValidationError{Name: "project", err: errors.New(`ent: missing required edge "Agent.project"`)}
 	}
 	return nil
 }
@@ -400,21 +400,21 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldUpdated, field.TypeTime, value)
 		_node.Updated = value
 	}
-	if nodes := _c.mutation.GroveIDs(); len(nodes) > 0 {
+	if nodes := _c.mutation.ProjectIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.M2O,
 			Inverse: true,
-			Table:   agent.GroveTable,
-			Columns: []string{agent.GroveColumn},
+			Table:   agent.ProjectTable,
+			Columns: []string{agent.ProjectColumn},
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
-				IDSpec: sqlgraph.NewFieldSpec(grove.FieldID, field.TypeUUID),
+				IDSpec: sqlgraph.NewFieldSpec(project.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {
 			edge.Target.Nodes = append(edge.Target.Nodes, k)
 		}
-		_node.GroveID = nodes[0]
+		_node.ProjectID = nodes[0]
 		_spec.Edges = append(_spec.Edges, edge)
 	}
 	if nodes := _c.mutation.CreatorIDs(); len(nodes) > 0 {

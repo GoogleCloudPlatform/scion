@@ -502,7 +502,7 @@ func TestNormalizeGitRemote(t *testing.T) {
 
 func TestNormalizeGitRemote_CrossProtocolConsistency(t *testing.T) {
 	// All of these refer to the same repository and must produce the same normalized form.
-	// (HashGroveID is no longer used for grove IDs, but is retained for deterministic identifiers.)
+	// (HashProjectID is no longer used for grove IDs, but is retained for deterministic identifiers.)
 	variants := []string{
 		"git@github.com:ptone/gamegame.git",
 		"https://github.com/ptone/gamegame.git",
@@ -524,39 +524,39 @@ func TestNormalizeGitRemote_CrossProtocolConsistency(t *testing.T) {
 	// All should produce the same deterministic hash
 	ids := make(map[string]bool)
 	for _, url := range variants {
-		ids[HashGroveID(NormalizeGitRemote(url))] = true
+		ids[HashProjectID(NormalizeGitRemote(url))] = true
 	}
 	if len(ids) != 1 {
 		t.Errorf("expected all URL variants to produce the same deterministic hash, got %d distinct IDs", len(ids))
 	}
 }
 
-func TestHashGroveID(t *testing.T) {
+func TestHashProjectID(t *testing.T) {
 	// Determinism: same input → same output
-	id1 := HashGroveID("github.com/acme/widgets")
-	id2 := HashGroveID("github.com/acme/widgets")
+	id1 := HashProjectID("github.com/acme/widgets")
+	id2 := HashProjectID("github.com/acme/widgets")
 	if id1 != id2 {
-		t.Errorf("HashGroveID not deterministic: %q != %q", id1, id2)
+		t.Errorf("HashProjectID not deterministic: %q != %q", id1, id2)
 	}
 
 	// Must be a valid UUID (36 chars, parseable)
 	if len(id1) != 36 {
-		t.Errorf("HashGroveID length = %d, want 36 (UUID format)", len(id1))
+		t.Errorf("HashProjectID length = %d, want 36 (UUID format)", len(id1))
 	}
 	if _, err := uuid.Parse(id1); err != nil {
-		t.Errorf("HashGroveID produced invalid UUID %q: %v", id1, err)
+		t.Errorf("HashProjectID produced invalid UUID %q: %v", id1, err)
 	}
 
 	// Different inputs → different outputs
-	id3 := HashGroveID("github.com/acme/gadgets")
+	id3 := HashProjectID("github.com/acme/gadgets")
 	if id1 == id3 {
-		t.Errorf("HashGroveID collision: %q == %q for different inputs", id1, id3)
+		t.Errorf("HashProjectID collision: %q == %q for different inputs", id1, id3)
 	}
 
 	// Branch qualifier produces different ID
-	id4 := HashGroveID("github.com/acme/widgets@release/v2")
+	id4 := HashProjectID("github.com/acme/widgets@release/v2")
 	if id1 == id4 {
-		t.Errorf("HashGroveID collision with branch qualifier: %q == %q", id1, id4)
+		t.Errorf("HashProjectID collision with branch qualifier: %q == %q", id1, id4)
 	}
 }
 

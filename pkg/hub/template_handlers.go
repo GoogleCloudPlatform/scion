@@ -40,7 +40,7 @@ type CreateTemplateRequest struct {
 	Harness      string                `json:"harness,omitempty"`
 	Scope        string                `json:"scope"`
 	ScopeID      string                `json:"scopeId,omitempty"`
-	GroveID      string                `json:"groveId,omitempty"` // Deprecated: use ScopeID
+	ProjectID      string                `json:"projectId,omitempty"` // Deprecated: use ScopeID
 	Config       *store.TemplateConfig `json:"config,omitempty"`
 	BaseTemplate string                `json:"baseTemplate,omitempty"`
 	Visibility   string                `json:"visibility,omitempty"`
@@ -112,7 +112,7 @@ type CloneTemplateRequest struct {
 	Name       string `json:"name"`
 	Scope      string `json:"scope"`
 	ScopeID    string `json:"scopeId,omitempty"`
-	GroveID    string `json:"groveId,omitempty"` // Deprecated
+	ProjectID    string `json:"projectId,omitempty"` // Deprecated
 	Visibility string `json:"visibility,omitempty"`
 }
 
@@ -137,7 +137,7 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 		Name:    query.Get("name"),
 		Scope:   query.Get("scope"),
 		ScopeID: query.Get("scopeId"),
-		GroveID: query.Get("groveId"), // Backwards compat
+		ProjectID: query.Get("projectId"), // Backwards compat
 		Harness: query.Get("harness"),
 		Status:  query.Get("status"),
 		Search:  query.Get("search"),
@@ -212,8 +212,8 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 	}
 	// Resolve scope ID
 	scopeID := req.ScopeID
-	if scopeID == "" && req.GroveID != "" {
-		scopeID = req.GroveID
+	if scopeID == "" && req.ProjectID != "" {
+		scopeID = req.ProjectID
 	}
 
 	// Generate slug from request or name
@@ -233,7 +233,7 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		Config:       req.Config,
 		Scope:        req.Scope,
 		ScopeID:      scopeID,
-		GroveID:      scopeID, // Keep for backwards compat
+		ProjectID:      scopeID, // Keep for backwards compat
 		BaseTemplate: req.BaseTemplate,
 		Visibility:   req.Visibility,
 		Status:       store.TemplateStatusPending, // Start as pending until files uploaded
@@ -684,8 +684,8 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 
 	// Resolve scope ID
 	scopeID := req.ScopeID
-	if scopeID == "" && req.GroveID != "" {
-		scopeID = req.GroveID
+	if scopeID == "" && req.ProjectID != "" {
+		scopeID = req.ProjectID
 	}
 
 	// Create new template based on source
@@ -700,14 +700,14 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		Config:       source.Config,
 		Scope:        req.Scope,
 		ScopeID:      scopeID,
-		GroveID:      scopeID,
+		ProjectID:      scopeID,
 		BaseTemplate: source.ID, // Track the source template
 		Visibility:   req.Visibility,
 		Status:       store.TemplateStatusPending,
 	}
 
 	if clone.Scope == "" {
-		clone.Scope = store.TemplateScopeGrove
+		clone.Scope = store.TemplateScopeProject
 	}
 	if clone.Visibility == "" {
 		clone.Visibility = source.Visibility

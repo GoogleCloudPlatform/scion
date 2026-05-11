@@ -47,7 +47,7 @@ func (m *mockAgentManager) Stop(ctx context.Context, name string) error {
 	return nil
 }
 
-func (m *mockAgentManager) Delete(ctx context.Context, name string, deleteFiles bool, grovePath string, removeBranch bool) (bool, error) {
+func (m *mockAgentManager) Delete(ctx context.Context, name string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return true, nil
 }
 
@@ -55,11 +55,11 @@ func (m *mockAgentManager) List(ctx context.Context, filter map[string]string) (
 	return m.agents, nil
 }
 
-func (m *mockAgentManager) Message(ctx context.Context, name, groveID, message string, interrupt bool) error {
+func (m *mockAgentManager) Message(ctx context.Context, name, projectID, message string, interrupt bool) error {
 	return nil
 }
 
-func (m *mockAgentManager) MessageRaw(ctx context.Context, name, groveID string, keys string) error {
+func (m *mockAgentManager) MessageRaw(ctx context.Context, name, projectID string, keys string) error {
 	return nil
 }
 
@@ -885,83 +885,83 @@ func TestCountWorkspaceFiles_NestedDirectories(t *testing.T) {
 }
 
 // ============================================================================
-// Grove Workspace Upload Handler Tests (Phase 3: Linked Grove Relay)
+// Project Workspace Upload Handler Tests (Phase 3: Linked Project Relay)
 // ============================================================================
 
-func TestGroveWorkspaceUpload_MissingGroveID(t *testing.T) {
+func TestProjectWorkspaceUpload_MissingProjectID(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
 
-	body := GroveWorkspaceUploadRequest{
+	body := ProjectWorkspaceUploadRequest{
 		StoragePath:   "workspaces/test/grove-workspace",
 		WorkspacePath: "/tmp/test",
 	}
 
-	rec := doGroveUploadRequest(t, srv, body)
+	rec := doProjectUploadRequest(t, srv, body)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestGroveWorkspaceUpload_MissingStoragePath(t *testing.T) {
+func TestProjectWorkspaceUpload_MissingStoragePath(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
 
-	body := GroveWorkspaceUploadRequest{
-		GroveID:       "grove-123",
+	body := ProjectWorkspaceUploadRequest{
+		ProjectID:       "grove-123",
 		WorkspacePath: "/tmp/test",
 	}
 
-	rec := doGroveUploadRequest(t, srv, body)
+	rec := doProjectUploadRequest(t, srv, body)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestGroveWorkspaceUpload_MissingWorkspacePath(t *testing.T) {
+func TestProjectWorkspaceUpload_MissingWorkspacePath(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
 
-	body := GroveWorkspaceUploadRequest{
-		GroveID:     "grove-123",
+	body := ProjectWorkspaceUploadRequest{
+		ProjectID:     "grove-123",
 		StoragePath: "workspaces/test/grove-workspace",
 	}
 
-	rec := doGroveUploadRequest(t, srv, body)
+	rec := doProjectUploadRequest(t, srv, body)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestGroveWorkspaceUpload_NoBucket(t *testing.T) {
+func TestProjectWorkspaceUpload_NoBucket(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	mgr := &mockAgentManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
 
-	body := GroveWorkspaceUploadRequest{
-		GroveID:       "grove-123",
+	body := ProjectWorkspaceUploadRequest{
+		ProjectID:       "grove-123",
 		StoragePath:   "workspaces/test/grove-workspace",
 		WorkspacePath: "/tmp/test",
 	}
 
-	rec := doGroveUploadRequest(t, srv, body)
+	rec := doProjectUploadRequest(t, srv, body)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestGroveWorkspaceUpload_NonExistentPath(t *testing.T) {
+func TestProjectWorkspaceUpload_NonExistentPath(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	cfg.StorageBucket = "test-bucket"
@@ -969,19 +969,19 @@ func TestGroveWorkspaceUpload_NonExistentPath(t *testing.T) {
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
 
-	body := GroveWorkspaceUploadRequest{
-		GroveID:       "grove-123",
+	body := ProjectWorkspaceUploadRequest{
+		ProjectID:       "grove-123",
 		StoragePath:   "workspaces/test/grove-workspace",
 		WorkspacePath: "/nonexistent/path/12345",
 	}
 
-	rec := doGroveUploadRequest(t, srv, body)
+	rec := doProjectUploadRequest(t, srv, body)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestGroveWorkspaceUpload_MethodNotAllowed(t *testing.T) {
+func TestProjectWorkspaceUpload_MethodNotAllowed(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	mgr := &mockAgentManager{}
@@ -990,14 +990,14 @@ func TestGroveWorkspaceUpload_MethodNotAllowed(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/workspace/grove-upload", nil)
 	rec := httptest.NewRecorder()
-	srv.handleGroveWorkspaceUpload(rec, req)
+	srv.handleProjectWorkspaceUpload(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405, got %d", rec.Code)
 	}
 }
 
-func doGroveUploadRequest(t *testing.T, srv *Server, body GroveWorkspaceUploadRequest) *httptest.ResponseRecorder {
+func doProjectUploadRequest(t *testing.T, srv *Server, body ProjectWorkspaceUploadRequest) *httptest.ResponseRecorder {
 	t.Helper()
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
@@ -1007,6 +1007,6 @@ func doGroveUploadRequest(t *testing.T, srv *Server, body GroveWorkspaceUploadRe
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/grove-upload", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	srv.handleGroveWorkspaceUpload(rec, req)
+	srv.handleProjectWorkspaceUpload(rec, req)
 	return rec
 }

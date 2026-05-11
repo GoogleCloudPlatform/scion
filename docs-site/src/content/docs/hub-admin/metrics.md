@@ -16,14 +16,14 @@ Scion provides built-in telemetry collection via `sciontool`, which runs as the 
 
 ## Configuration
 
-Telemetry is configured through `settings.yaml` (for global and grove-level defaults) and `scion-agent.yaml` (for per-template and per-agent overrides). Environment variables provide the highest-priority override.
+Telemetry is configured through `settings.yaml` (for global and project-level defaults) and `scion-agent.yaml` (for per-template and per-agent overrides). Environment variables provide the highest-priority override.
 
 ### Configuration Hierarchy
 
 Telemetry settings resolve across scopes using **last-write-wins** semantics:
 
 1.  **Global settings** (`~/.scion/settings.yaml`) — Organization-wide defaults.
-2.  **Grove settings** (`.scion/settings.yaml`) — Project-level overrides.
+2.  **Project settings** (`.scion/settings.yaml`) — Project-level overrides.
 3.  **Template config** (`scion-agent.yaml` in template) — Role-specific overrides.
 4.  **Agent config** (`scion-agent.yaml` in agent home) — Per-agent overrides.
 5.  **Environment variables** (`SCION_TELEMETRY_*`, `SCION_OTEL_*`) — Highest priority.
@@ -32,7 +32,7 @@ At each scope, only the fields you specify are overridden; unset fields inherit 
 
 ### Settings File Configuration
 
-The `telemetry` block can appear in any `settings.yaml` (global or grove) or `scion-agent.yaml` (template or agent):
+The `telemetry` block can appear in any `settings.yaml` (global or project) or `scion-agent.yaml` (template or agent):
 
 ```yaml
 # In settings.yaml or scion-agent.yaml
@@ -117,7 +117,7 @@ When deploying on Google Cloud, `sciontool` can forward directly to Cloud Trace 
 
 ### 1. Configure the Forwarder
 
-Set these environment variables in your Hub settings (Grove or Broker level):
+Set these environment variables in your Hub settings (Project or Broker level):
 
 ```bash
 # Direct OTLP ingestion for Google Cloud
@@ -187,7 +187,7 @@ All metrics and traces emitted by Scion are enriched with context-aware OpenTele
 - `scion.harness`: The type of harness running the agent (e.g., `gemini`, `claude`, `codex`).
 - `scion.model`: The specific LLM model being used.
 - `scion.broker`: The ID of the Runtime Broker executing the agent.
-- `grove_id`: The ID of the agent's parent grove.
+- `project_id`: The ID of the agent's parent project.
 
 ### Automated Metrics Collection
 

@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -47,9 +48,39 @@ type tokenService struct {
 // CreateTokenRequest is the request for creating a user access token.
 type CreateTokenRequest struct {
 	Name      string     `json:"name"`
-	GroveID   string     `json:"groveId"`
+	ProjectID string     `json:"projectId"`
 	Scopes    []string   `json:"scopes"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (r CreateTokenRequest) MarshalJSON() ([]byte, error) {
+	type Alias CreateTokenRequest
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(r),
+		GroveID: r.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (r *CreateTokenRequest) UnmarshalJSON(data []byte) error {
+	type Alias CreateTokenRequest
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // CreateTokenResponse is the response from creating a user access token.
@@ -63,12 +94,42 @@ type TokenInfo struct {
 	ID        string     `json:"id"`
 	Name      string     `json:"name"`
 	Prefix    string     `json:"prefix"`
-	GroveID   string     `json:"groveId"`
+	ProjectID string     `json:"projectId"`
 	Scopes    []string   `json:"scopes"`
 	Revoked   bool       `json:"revoked"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 	LastUsed  *time.Time `json:"lastUsed,omitempty"`
 	Created   time.Time  `json:"created"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (i TokenInfo) MarshalJSON() ([]byte, error) {
+	type Alias TokenInfo
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(i),
+		GroveID: i.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (i *TokenInfo) UnmarshalJSON(data []byte) error {
+	type Alias TokenInfo
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(i),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if i.ProjectID == "" && aux.GroveID != "" {
+		i.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // ListTokensResponse is the response from listing user access tokens.
@@ -78,7 +139,7 @@ type ListTokensResponse struct {
 
 // Create creates a new user access token.
 func (s *tokenService) Create(ctx context.Context, req *CreateTokenRequest) (*CreateTokenResponse, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/auth/tokens", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/auth/tokens", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +148,7 @@ func (s *tokenService) Create(ctx context.Context, req *CreateTokenRequest) (*Cr
 
 // List returns all tokens for the authenticated user.
 func (s *tokenService) List(ctx context.Context) (*ListTokensResponse, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/auth/tokens", nil)
+	resp, err := s.c.get(ctx, "/api/v1/auth/tokens", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +157,7 @@ func (s *tokenService) List(ctx context.Context) (*ListTokensResponse, error) {
 
 // Get returns details for a specific token.
 func (s *tokenService) Get(ctx context.Context, id string) (*TokenInfo, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/auth/tokens/"+id, nil)
+	resp, err := s.c.get(ctx, "/api/v1/auth/tokens/"+id, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +166,7 @@ func (s *tokenService) Get(ctx context.Context, id string) (*TokenInfo, error) {
 
 // Revoke soft-revokes a token.
 func (s *tokenService) Revoke(ctx context.Context, id string) error {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/auth/tokens/"+id+"/revoke", nil, nil)
+	resp, err := s.c.post(ctx, "/api/v1/auth/tokens/"+id+"/revoke", nil, nil)
 	if err != nil {
 		return err
 	}
@@ -114,7 +175,7 @@ func (s *tokenService) Revoke(ctx context.Context, id string) error {
 
 // Delete permanently removes a token.
 func (s *tokenService) Delete(ctx context.Context, id string) error {
-	resp, err := s.c.transport.Delete(ctx, "/api/v1/auth/tokens/"+id, nil)
+	resp, err := s.c.delete(ctx, "/api/v1/auth/tokens/"+id, nil)
 	if err != nil {
 		return err
 	}

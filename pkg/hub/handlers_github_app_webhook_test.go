@@ -150,17 +150,17 @@ func TestHandleGitHubWebhook_InstallationCreated(t *testing.T) {
 	srv, s := webhookTestServer(t)
 	ctx := context.Background()
 
-	// Create a grove with a matching git remote
-	grove := &store.Grove{
-		ID:        "grove-1",
-		Name:      "Test Grove",
-		Slug:      "test-grove",
+	// Create a project with a matching git remote
+	project := &store.Project{
+		ID:        "project-1",
+		Name:      "Test Project",
+		Slug:      "test-project",
 		GitRemote: "https://github.com/acme/widgets.git",
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	payload := mustJSON(t, map[string]interface{}{
@@ -204,22 +204,22 @@ func TestHandleGitHubWebhook_InstallationCreated(t *testing.T) {
 		t.Errorf("expected active status, got %s", installation.Status)
 	}
 
-	// Verify grove was auto-associated
-	updatedGrove, err := s.GetGrove(ctx, "grove-1")
+	// Verify project was auto-associated
+	updatedProject, err := s.GetProject(ctx, "project-1")
 	if err != nil {
-		t.Fatalf("failed to get grove: %v", err)
+		t.Fatalf("failed to get project: %v", err)
 	}
-	if updatedGrove.GitHubInstallationID == nil {
-		t.Fatal("expected grove to be associated with installation")
+	if updatedProject.GitHubInstallationID == nil {
+		t.Fatal("expected project to be associated with installation")
 	}
-	if *updatedGrove.GitHubInstallationID != 12345 {
-		t.Errorf("expected installation ID 12345, got %d", *updatedGrove.GitHubInstallationID)
+	if *updatedProject.GitHubInstallationID != 12345 {
+		t.Errorf("expected installation ID 12345, got %d", *updatedProject.GitHubInstallationID)
 	}
-	if updatedGrove.GitHubAppStatus == nil {
-		t.Fatal("expected grove to have GitHub App status")
+	if updatedProject.GitHubAppStatus == nil {
+		t.Fatal("expected project to have GitHub App status")
 	}
-	if updatedGrove.GitHubAppStatus.State != store.GitHubAppStateUnchecked {
-		t.Errorf("expected unchecked state, got %s", updatedGrove.GitHubAppStatus.State)
+	if updatedProject.GitHubAppStatus.State != store.GitHubAppStateUnchecked {
+		t.Errorf("expected unchecked state, got %s", updatedProject.GitHubAppStatus.State)
 	}
 }
 
@@ -240,19 +240,19 @@ func TestHandleGitHubWebhook_InstallationDeleted(t *testing.T) {
 		t.Fatalf("failed to create installation: %v", err)
 	}
 
-	// Create a grove associated with the installation
-	grove := &store.Grove{
-		ID:                   "grove-1",
-		Name:                 "Test Grove",
-		Slug:                 "test-grove",
+	// Create a project associated with the installation
+	project := &store.Project{
+		ID:                   "project-1",
+		Name:                 "Test Project",
+		Slug:                 "test-project",
 		GitRemote:            "https://github.com/acme/widgets.git",
 		GitHubInstallationID: &installationID,
-		GitHubAppStatus:      &store.GitHubAppGroveStatus{State: store.GitHubAppStateOK, LastChecked: time.Now()},
+		GitHubAppStatus:      &store.GitHubAppProjectStatus{State: store.GitHubAppStateOK, LastChecked: time.Now()},
 		Created:              time.Now(),
 		Updated:              time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	payload := mustJSON(t, map[string]interface{}{
@@ -285,10 +285,10 @@ func TestHandleGitHubWebhook_InstallationDeleted(t *testing.T) {
 		t.Errorf("expected deleted status, got %s", updated.Status)
 	}
 
-	// Verify grove was set to error state
-	updatedGrove, _ := s.GetGrove(ctx, "grove-1")
-	if updatedGrove.GitHubAppStatus == nil || updatedGrove.GitHubAppStatus.State != store.GitHubAppStateError {
-		t.Errorf("expected grove error state, got %v", updatedGrove.GitHubAppStatus)
+	// Verify project was set to error state
+	updatedProject, _ := s.GetProject(ctx, "project-1")
+	if updatedProject.GitHubAppStatus == nil || updatedProject.GitHubAppStatus.State != store.GitHubAppStateError {
+		t.Errorf("expected project error state, got %v", updatedProject.GitHubAppStatus)
 	}
 }
 
@@ -309,18 +309,18 @@ func TestHandleGitHubWebhook_InstallationReposRemoved(t *testing.T) {
 		t.Fatalf("failed to create installation: %v", err)
 	}
 
-	grove := &store.Grove{
-		ID:                   "grove-1",
-		Name:                 "Test Grove",
-		Slug:                 "test-grove",
+	project := &store.Project{
+		ID:                   "project-1",
+		Name:                 "Test Project",
+		Slug:                 "test-project",
 		GitRemote:            "https://github.com/acme/widgets.git",
 		GitHubInstallationID: &installationID,
-		GitHubAppStatus:      &store.GitHubAppGroveStatus{State: store.GitHubAppStateOK, LastChecked: time.Now()},
+		GitHubAppStatus:      &store.GitHubAppProjectStatus{State: store.GitHubAppStateOK, LastChecked: time.Now()},
 		Created:              time.Now(),
 		Updated:              time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	payload := mustJSON(t, map[string]interface{}{
@@ -350,13 +350,13 @@ func TestHandleGitHubWebhook_InstallationReposRemoved(t *testing.T) {
 		t.Errorf("expected [acme/api], got %v", updated.Repositories)
 	}
 
-	// Verify grove was set to error
-	updatedGrove, _ := s.GetGrove(ctx, "grove-1")
-	if updatedGrove.GitHubAppStatus == nil || updatedGrove.GitHubAppStatus.State != store.GitHubAppStateError {
-		t.Errorf("expected error state, got %v", updatedGrove.GitHubAppStatus)
+	// Verify project was set to error
+	updatedProject, _ := s.GetProject(ctx, "project-1")
+	if updatedProject.GitHubAppStatus == nil || updatedProject.GitHubAppStatus.State != store.GitHubAppStateError {
+		t.Errorf("expected error state, got %v", updatedProject.GitHubAppStatus)
 	}
-	if updatedGrove.GitHubAppStatus.ErrorCode != "repo_not_accessible" {
-		t.Errorf("expected repo_not_accessible error code, got %s", updatedGrove.GitHubAppStatus.ErrorCode)
+	if updatedProject.GitHubAppStatus.ErrorCode != "repo_not_accessible" {
+		t.Errorf("expected repo_not_accessible error code, got %s", updatedProject.GitHubAppStatus.ErrorCode)
 	}
 }
 
@@ -384,21 +384,21 @@ func TestHandleGitHubWebhook_IgnoredEvent(t *testing.T) {
 	}
 }
 
-func TestMatchGrovesToInstallation(t *testing.T) {
+func TestMatchProjectsToInstallation(t *testing.T) {
 	srv, s := webhookTestServer(t)
 	ctx := context.Background()
 
-	// Create groves with different git remotes
-	groves := []*store.Grove{
+	// Create projects with different git remotes
+	projects := []*store.Project{
 		{ID: "g1", Name: "G1", Slug: "g1", GitRemote: "https://github.com/acme/widgets.git", Created: time.Now(), Updated: time.Now()},
 		{ID: "g2", Name: "G2", Slug: "g2", GitRemote: "https://github.com/acme/api.git", Created: time.Now(), Updated: time.Now()},
 		{ID: "g3", Name: "G3", Slug: "g3", GitRemote: "https://github.com/other/repo.git", Created: time.Now(), Updated: time.Now()},
 		{ID: "g4", Name: "G4", Slug: "g4", Created: time.Now(), Updated: time.Now()}, // No git remote
 	}
 
-	for _, g := range groves {
-		if err := s.CreateGrove(ctx, g); err != nil {
-			t.Fatalf("failed to create grove %s: %v", g.ID, err)
+	for _, g := range projects {
+		if err := s.CreateProject(ctx, g); err != nil {
+			t.Fatalf("failed to create project %s: %v", g.ID, err)
 		}
 	}
 
@@ -411,42 +411,42 @@ func TestMatchGrovesToInstallation(t *testing.T) {
 		t.Fatalf("failed to create installation: %v", err)
 	}
 
-	matched := srv.matchGrovesToInstallation(ctx, installation)
+	matched := srv.matchProjectsToInstallation(ctx, installation)
 
 	if len(matched) != 2 {
-		t.Fatalf("expected 2 matched groves, got %d: %v", len(matched), matched)
+		t.Fatalf("expected 2 matched projects, got %d: %v", len(matched), matched)
 	}
 
-	// Verify both matching groves were associated
+	// Verify both matching projects were associated
 	for _, gID := range []string{"g1", "g2"} {
-		grove, _ := s.GetGrove(ctx, gID)
-		if grove.GitHubInstallationID == nil {
-			t.Errorf("grove %s should be associated with installation", gID)
-		} else if *grove.GitHubInstallationID != 12345 {
-			t.Errorf("grove %s has wrong installation ID: %d", gID, *grove.GitHubInstallationID)
+		project, _ := s.GetProject(ctx, gID)
+		if project.GitHubInstallationID == nil {
+			t.Errorf("project %s should be associated with installation", gID)
+		} else if *project.GitHubInstallationID != 12345 {
+			t.Errorf("project %s has wrong installation ID: %d", gID, *project.GitHubInstallationID)
 		}
 	}
 
-	// Verify non-matching grove was NOT associated
-	g3, _ := s.GetGrove(ctx, "g3")
+	// Verify non-matching project was NOT associated
+	g3, _ := s.GetProject(ctx, "g3")
 	if g3.GitHubInstallationID != nil {
-		t.Error("grove g3 should not be associated")
+		t.Error("project g3 should not be associated")
 	}
 
-	// Verify no-remote grove was NOT associated
-	g4, _ := s.GetGrove(ctx, "g4")
+	// Verify no-remote project was NOT associated
+	g4, _ := s.GetProject(ctx, "g4")
 	if g4.GitHubInstallationID != nil {
-		t.Error("grove g4 should not be associated")
+		t.Error("project g4 should not be associated")
 	}
 }
 
-func TestMatchGrovesToInstallation_SkipsAlreadyAssociated(t *testing.T) {
+func TestMatchProjectsToInstallation_SkipsAlreadyAssociated(t *testing.T) {
 	srv, s := webhookTestServer(t)
 	ctx := context.Background()
 
 	otherInstallation := int64(99999)
 
-	// Create the referenced installation so the grove FK is satisfied
+	// Create the referenced installation so the project FK is satisfied
 	if err := s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
 		InstallationID: otherInstallation,
 		AccountLogin:   "other-org",
@@ -455,7 +455,7 @@ func TestMatchGrovesToInstallation_SkipsAlreadyAssociated(t *testing.T) {
 		t.Fatalf("failed to create installation: %v", err)
 	}
 
-	grove := &store.Grove{
+	project := &store.Project{
 		ID:                   "g1",
 		Name:                 "G1",
 		Slug:                 "g1",
@@ -464,8 +464,8 @@ func TestMatchGrovesToInstallation_SkipsAlreadyAssociated(t *testing.T) {
 		Created:              time.Now(),
 		Updated:              time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	installation := &store.GitHubInstallation{
@@ -473,15 +473,15 @@ func TestMatchGrovesToInstallation_SkipsAlreadyAssociated(t *testing.T) {
 		Repositories:   []string{"acme/widgets"},
 	}
 
-	matched := srv.matchGrovesToInstallation(ctx, installation)
+	matched := srv.matchProjectsToInstallation(ctx, installation)
 	if len(matched) != 0 {
-		t.Errorf("expected 0 matched groves (already associated), got %d", len(matched))
+		t.Errorf("expected 0 matched projects (already associated), got %d", len(matched))
 	}
 
-	// Verify grove still has the original installation
-	updatedGrove, _ := s.GetGrove(ctx, "g1")
-	if *updatedGrove.GitHubInstallationID != 99999 {
-		t.Errorf("grove should still have original installation")
+	// Verify project still has the original installation
+	updatedProject, _ := s.GetProject(ctx, "g1")
+	if *updatedProject.GitHubInstallationID != 99999 {
+		t.Errorf("project should still have original installation")
 	}
 }
 
@@ -549,28 +549,28 @@ func TestHandleGitHubWebhook_InstallationCreatedIdempotent(t *testing.T) {
 	}
 }
 
-// recordingEventPublisher records calls to PublishGroveUpdated for test assertions.
+// recordingEventPublisher records calls to PublishProjectUpdated for test assertions.
 type recordingEventPublisher struct {
 	noopEventPublisher
 	mu           sync.Mutex
-	groveUpdates []*store.Grove
+	projectUpdates []*store.Project
 }
 
-func (r *recordingEventPublisher) PublishGroveUpdated(_ context.Context, grove *store.Grove) {
+func (r *recordingEventPublisher) PublishProjectUpdated(_ context.Context, project *store.Project) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.groveUpdates = append(r.groveUpdates, grove)
+	r.projectUpdates = append(r.projectUpdates, project)
 }
 
-func (r *recordingEventPublisher) getGroveUpdates() []*store.Grove {
+func (r *recordingEventPublisher) getProjectUpdates() []*store.Project {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	result := make([]*store.Grove, len(r.groveUpdates))
-	copy(result, r.groveUpdates)
+	result := make([]*store.Project, len(r.projectUpdates))
+	copy(result, r.projectUpdates)
 	return result
 }
 
-func TestWebhook_PublishesGroveUpdatedOnInstallationDeleted(t *testing.T) {
+func TestWebhook_PublishesProjectUpdatedOnInstallationDeleted(t *testing.T) {
 	srv, s := webhookTestServer(t)
 	ctx := context.Background()
 
@@ -591,19 +591,19 @@ func TestWebhook_PublishesGroveUpdatedOnInstallationDeleted(t *testing.T) {
 		t.Fatalf("failed to create installation: %v", err)
 	}
 
-	// Create a grove associated with the installation
-	grove := &store.Grove{
-		ID:                   "grove-event-1",
-		Name:                 "Event Test Grove",
-		Slug:                 "event-test-grove",
+	// Create a project associated with the installation
+	project := &store.Project{
+		ID:                   "project-event-1",
+		Name:                 "Event Test Project",
+		Slug:                 "event-test-project",
 		GitRemote:            "https://github.com/acme/widgets.git",
 		GitHubInstallationID: &installationID,
-		GitHubAppStatus:      &store.GitHubAppGroveStatus{State: store.GitHubAppStateOK, LastChecked: time.Now()},
+		GitHubAppStatus:      &store.GitHubAppProjectStatus{State: store.GitHubAppStateOK, LastChecked: time.Now()},
 		Created:              time.Now(),
 		Updated:              time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	payload := mustJSON(t, map[string]interface{}{
@@ -630,20 +630,20 @@ func TestWebhook_PublishesGroveUpdatedOnInstallationDeleted(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 
-	// Verify PublishGroveUpdated was called
-	updates := recorder.getGroveUpdates()
+	// Verify PublishProjectUpdated was called
+	updates := recorder.getProjectUpdates()
 	if len(updates) != 1 {
-		t.Fatalf("expected 1 grove updated event, got %d", len(updates))
+		t.Fatalf("expected 1 project updated event, got %d", len(updates))
 	}
-	if updates[0].ID != "grove-event-1" {
-		t.Errorf("expected grove ID grove-event-1, got %s", updates[0].ID)
+	if updates[0].ID != "project-event-1" {
+		t.Errorf("expected project ID project-event-1, got %s", updates[0].ID)
 	}
 	if updates[0].GitHubAppStatus == nil || updates[0].GitHubAppStatus.State != store.GitHubAppStateError {
 		t.Errorf("expected error state in published event, got %v", updates[0].GitHubAppStatus)
 	}
 }
 
-func TestWebhook_PublishesGroveUpdatedOnRepoRemoved(t *testing.T) {
+func TestWebhook_PublishesProjectUpdatedOnRepoRemoved(t *testing.T) {
 	srv, s := webhookTestServer(t)
 	ctx := context.Background()
 
@@ -663,18 +663,18 @@ func TestWebhook_PublishesGroveUpdatedOnRepoRemoved(t *testing.T) {
 		t.Fatalf("failed to create installation: %v", err)
 	}
 
-	grove := &store.Grove{
-		ID:                   "grove-event-2",
-		Name:                 "Event Test Grove 2",
-		Slug:                 "event-test-grove-2",
+	project := &store.Project{
+		ID:                   "project-event-2",
+		Name:                 "Event Test Project 2",
+		Slug:                 "event-test-project-2",
 		GitRemote:            "https://github.com/acme/widgets.git",
 		GitHubInstallationID: &installationID,
-		GitHubAppStatus:      &store.GitHubAppGroveStatus{State: store.GitHubAppStateOK, LastChecked: time.Now()},
+		GitHubAppStatus:      &store.GitHubAppProjectStatus{State: store.GitHubAppStateOK, LastChecked: time.Now()},
 		Created:              time.Now(),
 		Updated:              time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	payload := mustJSON(t, map[string]interface{}{
@@ -698,36 +698,36 @@ func TestWebhook_PublishesGroveUpdatedOnRepoRemoved(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 
-	updates := recorder.getGroveUpdates()
+	updates := recorder.getProjectUpdates()
 	if len(updates) != 1 {
-		t.Fatalf("expected 1 grove updated event, got %d", len(updates))
+		t.Fatalf("expected 1 project updated event, got %d", len(updates))
 	}
-	if updates[0].ID != "grove-event-2" {
-		t.Errorf("expected grove ID grove-event-2, got %s", updates[0].ID)
+	if updates[0].ID != "project-event-2" {
+		t.Errorf("expected project ID project-event-2, got %s", updates[0].ID)
 	}
 	if updates[0].GitHubAppStatus == nil || updates[0].GitHubAppStatus.State != store.GitHubAppStateError {
 		t.Errorf("expected error state in published event, got %v", updates[0].GitHubAppStatus)
 	}
 }
 
-func TestWebhook_PublishesGroveUpdatedOnAutoMatch(t *testing.T) {
+func TestWebhook_PublishesProjectUpdatedOnAutoMatch(t *testing.T) {
 	srv, s := webhookTestServer(t)
 	ctx := context.Background()
 
 	recorder := &recordingEventPublisher{}
 	srv.events = recorder
 
-	// Create a grove with a matching git remote but no installation yet
-	grove := &store.Grove{
-		ID:        "grove-event-3",
-		Name:      "Event Test Grove 3",
-		Slug:      "event-test-grove-3",
+	// Create a project with a matching git remote but no installation yet
+	project := &store.Project{
+		ID:        "project-event-3",
+		Name:      "Event Test Project 3",
+		Slug:      "event-test-project-3",
 		GitRemote: "https://github.com/acme/widgets.git",
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	payload := mustJSON(t, map[string]interface{}{
@@ -758,15 +758,15 @@ func TestWebhook_PublishesGroveUpdatedOnAutoMatch(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 
-	updates := recorder.getGroveUpdates()
+	updates := recorder.getProjectUpdates()
 	if len(updates) != 1 {
-		t.Fatalf("expected 1 grove updated event from auto-match, got %d", len(updates))
+		t.Fatalf("expected 1 project updated event from auto-match, got %d", len(updates))
 	}
-	if updates[0].ID != "grove-event-3" {
-		t.Errorf("expected grove ID grove-event-3, got %s", updates[0].ID)
+	if updates[0].ID != "project-event-3" {
+		t.Errorf("expected project ID project-event-3, got %s", updates[0].ID)
 	}
 	if updates[0].GitHubInstallationID == nil || *updates[0].GitHubInstallationID != 12345 {
-		t.Error("expected grove to be associated with installation 12345")
+		t.Error("expected project to be associated with installation 12345")
 	}
 }
 

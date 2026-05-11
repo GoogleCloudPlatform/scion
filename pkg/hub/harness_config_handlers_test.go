@@ -61,7 +61,7 @@ func TestHarnessConfigList(t *testing.T) {
 	}
 }
 
-func TestHarnessConfigListByGroveID(t *testing.T) {
+func TestHarnessConfigListByProjectID(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	now := time.Now()
@@ -76,24 +76,24 @@ func TestHarnessConfigListByGroveID(t *testing.T) {
 		t.Fatalf("failed to create global harness config: %v", err)
 	}
 
-	// Create a grove-scoped harness config for grove "grove_abc"
+	// Create a project-scoped harness config for project "project_abc"
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
-		ID: "hc_grove1", Slug: "grove-hc", Name: "Grove HC",
-		Harness: "gemini", Scope: "grove", ScopeID: "grove_abc",
+		ID: "hc_project1", Slug: "project-hc", Name: "Project HC",
+		Harness: "gemini", Scope: "project", ScopeID: "project_abc",
 		Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
 	}); err != nil {
-		t.Fatalf("failed to create grove harness config: %v", err)
+		t.Fatalf("failed to create project harness config: %v", err)
 	}
 
-	// Create a grove-scoped harness config for a different grove
+	// Create a project-scoped harness config for a different project
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
-		ID: "hc_grove2", Slug: "other-grove-hc", Name: "Other Grove HC",
-		Harness: "claude", Scope: "grove", ScopeID: "grove_xyz",
+		ID: "hc_project2", Slug: "other-project-hc", Name: "Other Project HC",
+		Harness: "claude", Scope: "project", ScopeID: "project_xyz",
 		Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
 	}); err != nil {
-		t.Fatalf("failed to create other grove harness config: %v", err)
+		t.Fatalf("failed to create other project harness config: %v", err)
 	}
 
 	// Create a user-scoped harness config
@@ -106,8 +106,8 @@ func TestHarnessConfigListByGroveID(t *testing.T) {
 		t.Fatalf("failed to create user harness config: %v", err)
 	}
 
-	// Query with groveId=grove_abc should return global + grove_abc configs only
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs?groveId=grove_abc", nil)
+	// Query with projectId=project_abc should return global + project_abc configs only
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs?projectId=project_abc", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -118,7 +118,7 @@ func TestHarnessConfigListByGroveID(t *testing.T) {
 	}
 
 	if resp.TotalCount != 2 {
-		t.Errorf("expected 2 harness configs (global + grove_abc), got %d", resp.TotalCount)
+		t.Errorf("expected 2 harness configs (global + project_abc), got %d", resp.TotalCount)
 	}
 
 	// Verify we got the right configs
@@ -129,11 +129,11 @@ func TestHarnessConfigListByGroveID(t *testing.T) {
 	if !ids["hc_global1"] {
 		t.Error("expected global harness config in results")
 	}
-	if !ids["hc_grove1"] {
-		t.Error("expected grove_abc harness config in results")
+	if !ids["hc_project1"] {
+		t.Error("expected project_abc harness config in results")
 	}
-	if ids["hc_grove2"] {
-		t.Error("did not expect grove_xyz harness config in results")
+	if ids["hc_project2"] {
+		t.Error("did not expect project_xyz harness config in results")
 	}
 	if ids["hc_user1"] {
 		t.Error("did not expect user harness config in results")

@@ -82,7 +82,7 @@ func TestLoadSettings(t *testing.T) {
 		t.Errorf("expected global override runtime namespace 'scion-global', got '%s'", s.Runtimes["kubernetes"].Namespace)
 	}
 
-	// 3. Test Grove overrides
+	// 3. Test Project overrides
 	groveSettings := `{
 		"active_profile": "local-dev",
 		"profiles": {
@@ -870,7 +870,7 @@ func TestDeleteHubConnection(t *testing.T) {
 
 func TestUpdateSetting_SplitStorageWritesToExternalDir(t *testing.T) {
 	// When a grove has split storage (grove-id file), UpdateSetting should
-	// write to the external config dir (~/.scion/grove-configs/…), not the
+	// write to the external config dir (~/.scion/project-configs/…), not the
 	// local .scion/ directory, so that LoadSettingsKoanf reads the same values.
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
@@ -884,16 +884,16 @@ func TestUpdateSetting_SplitStorageWritesToExternalDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	groveID := "abcd1234-5678-9abc-def0-123456789abc"
-	if err := WriteGroveID(scionDir, groveID); err != nil {
+	projectID := "abcd1234-5678-9abc-def0-123456789abc"
+	if err := WriteProjectID(scionDir, projectID); err != nil {
 		t.Fatal(err)
 	}
 
 	// Compute expected external config dir
-	groveSlug := api.Slugify("my-project")
-	shortUUID := strings.ReplaceAll(groveID, "-", "")[:8]
-	externalDir := filepath.Join(tmpHome, ".scion", "grove-configs",
-		groveSlug+"__"+shortUUID, ".scion")
+	projectSlug := api.Slugify("my-project")
+	shortUUID := strings.ReplaceAll(projectID, "-", "")[:8]
+	externalDir := filepath.Join(tmpHome, ".scion", "project-configs",
+		projectSlug+"__"+shortUUID, ".scion")
 	if err := os.MkdirAll(externalDir, 0755); err != nil {
 		t.Fatal(err)
 	}

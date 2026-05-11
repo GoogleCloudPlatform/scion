@@ -14,7 +14,7 @@ Scion is a container-based orchestration platform for managing concurrent LLM-ba
 - **Solo Mode** &mdash; A local-only, zero-config experience where the CLI manages agents directly via a local container runtime.
 - **Hosted Mode** &mdash; A distributed architecture where a centralized **Hub** coordinates state and dispatches work to one or more **Runtime Brokers** that execute agents on remote or local compute.
 
-Both modes share the same core abstractions (Groves, Agents, Templates, Harnesses, Runtimes) but differ in where state is persisted and how lifecycle operations are routed.
+Both modes share the same core abstractions (Projects, Agents, Templates, Harnesses, Runtimes) but differ in where state is persisted and how lifecycle operations are routed.
 
 ---
 
@@ -59,21 +59,21 @@ hosted: Hosted Mode {
 
 ## Core Abstractions
 
-### Grove
+### Project
 
-A **Grove** is the top-level grouping construct for agents. In Solo mode it is represented by a `.scion` directory on the filesystem; in Hosted mode it is a database record identified by its git remote URL.
+A **Project** is the top-level grouping construct for agents. In Solo mode it is represented by a `.scion` directory on the filesystem; in Hosted mode it is a database record identified by its git remote URL.
 
 **Resolution order (Solo):**
-1. Explicit `--grove` flag
+1. Explicit `--project` flag
 2. Project-level `.scion` directory (walking up from cwd)
 3. Global `~/.scion` directory
 
 **Key properties:**
 - **Name**: Slugified from the parent directory containing `.scion`.
-- **Git remote** (Hosted): Normalized remote URL used as a unique identifier for cross-broker grove identity.
+- **Git remote** (Hosted): Normalized remote URL used as a unique identifier for cross-broker project identity.
 - **Default Runtime Broker** (Hosted): The broker used when creating agents without an explicit target.
 
-Groves contain an `agents/` subdirectory (gitignored) that holds per-agent state, and a `templates/` directory for grove-scoped template definitions.
+Projects contain an `agents/` subdirectory (gitignored) that holds per-agent state, and a `templates/` directory for project-scoped template definitions.
 
 ### Agent
 
@@ -93,7 +93,7 @@ Agent identity varies by mode:
 | `Name` | User-provided or auto-generated | User-provided or auto-generated |
 | `ContainerID` | Assigned by the container runtime | Assigned by the container runtime |
 | `ID` | Not used | UUID primary key in the Hub database |
-| `Slug` | Not used | URL-safe identifier (unique per grove) |
+| `Slug` | Not used | URL-safe identifier (unique per project) |
 
 ### Template
 
@@ -104,7 +104,7 @@ Templates are configuration blueprints for agents. They define:
 
 **Template chain**: Templates support inheritance via a `base` field. When resolving a template, Scion walks the chain and merges configurations bottom-up (base first, then overrides).
 
-**Scopes (Hosted):** Templates can be scoped as `global`, `grove`, or `user`, with visibility controls (`private`, `grove`, `public`).
+**Scopes (Hosted):** Templates can be scoped as `global`, `project`, or `user`, with visibility controls (`private`, `project`, `public`).
 
 ### Harness
 
@@ -260,8 +260,8 @@ Hub and Runtime Broker servers have their own entry points but reuse the same `a
 scion start <name> --task "..." [--template claude] [--profile docker-local]
 ```
 
-1. **Grove resolution**: `config.GetResolvedProjectDir()` locates the `.scion` directory.
-2. **Settings loading**: `config.LoadSettings()` reads `settings.yaml` from the grove, merging with environment variable overrides.
+1. **Project resolution**: `config.GetResolvedProjectDir()` locates the `.scion` directory.
+2. **Settings loading**: `config.LoadSettings()` reads `settings.yaml` from the project, merging with environment variable overrides.
 3. **Provisioning** (`agent.ProvisionAgent`):
    a. Creates `agents/<name>/home/` and `agents/<name>/workspace/` directories.
    b. Resolves the template chain and copies home directory contents.
@@ -283,10 +283,10 @@ scion start <name> --task "..." [--template claude] [--profile docker-local]
 scion start <name> --task "..." --hub
 ```
 
-1. **Hub sync**: The CLI registers/syncs the grove with the Hub if not already registered.
-2. **API call**: The CLI sends a `POST /api/v1/groves/{groveId}/agents` request to the Hub.
-3. **Broker selection**: The Hub selects a Runtime Broker (explicit or grove default).
-4. **Environment resolution**: The Hub merges environment variables and secrets from all applicable scopes (user → grove → broker).
+1. **Hub sync**: The CLI registers/syncs the project with the Hub if not already registered.
+2. **API call**: The CLI sends a `POST /api/v1/projects/{projectId}/agents` request to the Hub.
+3. **Broker selection**: The Hub selects a Runtime Broker (explicit or project default).
+4. **Environment resolution**: The Hub merges environment variables and secrets from all applicable scopes (user → project → broker).
 5. **Template hydration**: The Hub resolves the template, attaches its content hash for broker-side caching.
 6. **Dispatch**: The Hub dispatches the creation request to the selected Runtime Broker via:
    - **Direct HTTP** if the broker has a reachable endpoint.
@@ -318,7 +318,7 @@ The Hub exposes a RESTful API under `/api/v1/`:
 | Resource | Endpoints |
 | :--- | :--- |
 | **Agents** | `GET/POST /agents`, `GET/PUT/DELETE /agents/{id}`, `POST /agents/{id}/{action}` |
-| **Groves** | `GET/POST /groves`, `POST /groves/register`, `GET/PUT/DELETE /groves/{id}`, nested agent/env/secret routes |
+| **Projects** | `GET/POST /projects`, `POST /projects/register`, `GET/PUT/DELETE /projects/{id}`, nested agent/env/secret routes |
 | **Runtime Brokers** | `GET/POST /runtime-brokers`, `GET/PUT/DELETE /runtime-brokers/{id}`, heartbeat, control channel |
 | **Templates** | `GET/POST /templates`, `GET/PUT/DELETE /templates/{id}` |
 | **Users** | `GET/POST /users`, `GET/PUT/DELETE /users/{id}` |
@@ -344,11 +344,11 @@ The Hub supports multiple authentication methods:
 The `Store` interface (`pkg/store/store.go`) defines a comprehensive persistence contract composed of sub-interfaces:
 
 - `AgentStore` &mdash; CRUD + status updates with optimistic locking (`StateVersion`)
-- `GroveStore` &mdash; CRUD + lookup by slug, git remote
+- `ProjectStore` &mdash; CRUD + lookup by slug, git remote
 - `RuntimeBrokerStore` &mdash; CRUD + heartbeat updates
 - `TemplateStore` &mdash; CRUD with scope and harness filtering
 - `UserStore` &mdash; CRUD with role and status filtering
-- `GroveProviderStore` &mdash; Grove-to-broker relationship management
+- `ProjectProviderStore` &mdash; Project-to-broker relationship management
 - `EnvVarStore` / `SecretStore` &mdash; Scoped key-value storage (encrypted for secrets)
 - `GroupStore` / `PolicyStore` &mdash; RBAC with nested group support and policy bindings
 - `APIKeyStore` / `BrokerSecretStore` &mdash; Authentication credential management
@@ -422,7 +422,7 @@ default_template: claude
 hub:
   enabled: true
   endpoint: https://hub.example.com
-  groveId: "uuid__slug"
+  projectId: "uuid__slug"
 
 runtimes:
   docker:
@@ -497,7 +497,7 @@ The server layer (enabled via `--enable-web`) provides:
 Each agent runs in its own container with:
 - A dedicated home directory (no shared state between agents).
 - An isolated git worktree (no merge conflicts).
-- Environment variables injected at container creation time (credentials are not written to disk in the grove).
+- Environment variables injected at container creation time (credentials are not written to disk in the project).
 
 ### Credential Flow
 
@@ -517,15 +517,15 @@ harness -> container: Injected as env vars\nat launch time
 ```
 
 In Hosted mode, credentials can also be:
-- Stored as encrypted **secrets** in the Hub (scoped to user, grove, or broker).
+- Stored as encrypted **secrets** in the Hub (scoped to user, project, or broker).
 - Resolved and injected by the Hub at dispatch time (`ResolvedEnv` in the create request).
 
-### Grove Security
+### Project Security
 
-When a grove lives inside a git repository, Scion **requires** that `agents/` is listed in `.gitignore` to prevent accidental credential or state leakage:
+When a project lives inside a git repository, Scion **requires** that `agents/` is listed in `.gitignore` to prevent accidental credential or state leakage:
 
 ```
-security error: '<path>/agents/' must be in .gitignore when using a project-local grove
+security error: '<path>/agents/' must be in .gitignore when using a project-local project
 ```
 
 ### Hub Authentication Architecture
@@ -549,7 +549,7 @@ CLI: CLI
 Hub: Hub
 Broker: Runtime Broker
 
-CLI -> Hub: "POST /groves/{id}/agents"
+CLI -> Hub: "POST /projects/{id}/agents"
 Hub -> Hub: 1. Validate auth\n2. Resolve template\n3. Select broker\n4. Resolve env/secrets\n5. Create agent record (provisioning)
 Hub -> Broker: POST /api/v1/agents\n(HTTP or via WS tunnel)
 Broker -> Broker: 6. Hydrate template\n7. ProvisionAgent()\n8. Runtime.Run()
@@ -581,7 +581,7 @@ Agents write status to a file inside the container (e.g., `/home/<user>/.gemini-
 The Hub exposes a `/metrics` endpoint with runtime statistics:
 - Connected broker count
 - Active agent count
-- Grove count
+- Project count
 
 ### Logging
 

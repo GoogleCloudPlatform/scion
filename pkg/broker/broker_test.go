@@ -277,7 +277,7 @@ func TestTopicHelpers(t *testing.T) {
 		expected string
 	}{
 		{"agent messages", TopicAgentMessages("g1", "myagent"), "scion.grove.g1.agent.myagent.messages"},
-		{"grove broadcast", TopicGroveBroadcast("g1"), "scion.grove.g1.broadcast"},
+		{"grove broadcast", TopicProjectBroadcast("g1"), "scion.grove.g1.broadcast"},
 		{"global broadcast", TopicGlobalBroadcast(), "scion.global.broadcast"},
 		{"all agent messages", TopicAllAgentMessages("g1"), "scion.grove.g1.agent.*.messages"},
 	}

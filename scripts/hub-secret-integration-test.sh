@@ -259,7 +259,7 @@ start_hub_server() {
 
     mkdir -p "$TEST_DIR"
 
-    local cmd=("$SCION" "server" "start"
+    local cmd=("$SCION" "server" "start" "--foreground" "--production"
         "--enable-hub"
         "--dev-auth"
         "--port" "$HUB_PORT"
@@ -610,12 +610,12 @@ test_phase3_grove_scope() {
     json_output=$($SCION hub secret get --grove="$GROVE_ID" --json GROVE_SECRET 2>/dev/null) || true
     local json_scope=""
     json_scope=$(echo "$json_output" | jq -r '.scope // empty' 2>/dev/null) || true
-    if [[ "$json_scope" == "grove" ]]; then
-        log_success "3.10 JSON output shows scope=grove"
+    if [[ "$json_scope" == "project" ]]; then
+        log_success "3.10 JSON output shows scope=project"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
-        log_error "3.10 JSON output shows scope=grove"
-        log_error "  expected scope='grove', got: $json_output"
+        log_error "3.10 JSON output shows scope=project"
+        log_error "  expected scope='project', got: $json_output"
         TESTS_FAILED=$((TESTS_FAILED + 1))
     fi
 

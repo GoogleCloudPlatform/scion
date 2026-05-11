@@ -15,10 +15,108 @@
 package api
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestAgentInfo_JSON(t *testing.T) {
+	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
+		jsonData := `{
+			"id": "agent-1",
+			"grove": "legacy-grove",
+			"groveId": "legacy-id",
+			"grovePath": "/legacy/path"
+		}`
+		var info AgentInfo
+		if err := json.Unmarshal([]byte(jsonData), &info); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if info.Project != "legacy-grove" {
+			t.Errorf("Project = %q, want %q", info.Project, "legacy-grove")
+		}
+		if info.ProjectID != "legacy-id" {
+			t.Errorf("ProjectID = %q, want %q", info.ProjectID, "legacy-id")
+		}
+		if info.ProjectPath != "/legacy/path" {
+			t.Errorf("ProjectPath = %q, want %q", info.ProjectPath, "/legacy/path")
+		}
+	})
+
+	t.Run("unmarshal project priority", func(t *testing.T) {
+		jsonData := `{
+			"project": "new-project",
+			"grove": "old-grove"
+		}`
+		var info AgentInfo
+		if err := json.Unmarshal([]byte(jsonData), &info); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if info.Project != "new-project" {
+			t.Errorf("Project = %q, want %q (project should win)", info.Project, "new-project")
+		}
+	})
+
+	t.Run("marshal dual fields", func(t *testing.T) {
+		info := AgentInfo{
+			Project:     "my-project",
+			ProjectID:   "my-id",
+			ProjectPath: "/my/path",
+		}
+		data, err := json.Marshal(info)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("Unmarshal back failed: %v", err)
+		}
+
+		expected := map[string]string{
+			"project":     "my-project",
+			"grove":       "my-project",
+			"projectId":   "my-id",
+			"groveId":     "my-id",
+			"projectPath": "/my/path",
+			"grovePath":   "/my/path",
+		}
+
+		for k, v := range expected {
+			if m[k] != v {
+				t.Errorf("Field %q = %v, want %v", k, m[k], v)
+			}
+		}
+	})
+}
+
+func TestResolvedSecret_JSON(t *testing.T) {
+	t.Run("unmarshal legacy grove source", func(t *testing.T) {
+		jsonData := `{"name": "MY_SECRET", "source": "grove"}`
+		var secret ResolvedSecret
+		if err := json.Unmarshal([]byte(jsonData), &secret); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if secret.Source != "project" {
+			t.Errorf("Source = %q, want %q", secret.Source, "project")
+		}
+	})
+
+	t.Run("marshal project source", func(t *testing.T) {
+		secret := ResolvedSecret{
+			Name:   "MY_SECRET",
+			Source: "project",
+		}
+		data, err := json.Marshal(secret)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+		if !strings.Contains(string(data), `"source":"project"`) {
+			t.Errorf("Marshal output missing source:project: %s", string(data))
+		}
+	})
+}
 
 func TestVolumeMountValidate(t *testing.T) {
 	tests := []struct {

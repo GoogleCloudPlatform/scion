@@ -50,7 +50,7 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server, *state.Store) {
 			Scheme: "apiKey",
 			APIKey: "test-api-key",
 		},
-		Groves: []GroveConfig{
+		Projects: []GroveConfig{
 			{
 				Slug:          "test-grove",
 				ExposedAgents: []string{"test-agent"},
@@ -167,7 +167,7 @@ func TestWellKnownAgentCard(t *testing.T) {
 func TestPerAgentCard(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
-	resp, err := http.Get(ts.URL + "/groves/test-grove/agents/test-agent/.well-known/agent-card.json")
+	resp, err := http.Get(ts.URL + "/projects/test-grove/agents/test-agent/.well-known/agent-card.json")
 	if err != nil {
 		t.Fatalf("GET agent card: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestPerAgentCard(t *testing.T) {
 		t.Errorf("name = %q, want %q", card["name"], "test-agent")
 	}
 
-	expectedURL := "https://a2a.test.example.com/groves/test-grove/agents/test-agent"
+	expectedURL := "https://a2a.test.example.com/projects/test-grove/agents/test-agent"
 	if card["url"] != expectedURL {
 		t.Errorf("url = %q, want %q", card["url"], expectedURL)
 	}
@@ -193,7 +193,7 @@ func TestPerAgentCard(t *testing.T) {
 func TestPerAgentCardNotExposed(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
-	resp, err := http.Get(ts.URL + "/groves/test-grove/agents/hidden-agent/.well-known/agent-card.json")
+	resp, err := http.Get(ts.URL + "/projects/test-grove/agents/hidden-agent/.well-known/agent-card.json")
 	if err != nil {
 		t.Fatalf("GET agent card: %v", err)
 	}
@@ -204,10 +204,10 @@ func TestPerAgentCardNotExposed(t *testing.T) {
 	}
 }
 
-func TestPerAgentCardUnknownGrove(t *testing.T) {
+func TestPerAgentCardUnknownProject(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
-	resp, err := http.Get(ts.URL + "/groves/unknown-grove/agents/test-agent/.well-known/agent-card.json")
+	resp, err := http.Get(ts.URL + "/projects/unknown-grove/agents/test-agent/.well-known/agent-card.json")
 	if err != nil {
 		t.Fatalf("GET agent card: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestAuthMiddleware(t *testing.T) {
 
 	// JSON-RPC without auth should be rejected.
 	rpcReq, _ := json.Marshal(JSONRPCRequest{JSONRPC: "2.0", ID: 1, Method: "tasks/get", Params: json.RawMessage(`{"id":"x"}`)})
-	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/groves/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(rpcReq))
+	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/projects/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(rpcReq))
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err = http.DefaultClient.Do(httpReq)
@@ -246,7 +246,7 @@ func TestAuthMiddleware(t *testing.T) {
 	}
 
 	// With correct API key should succeed.
-	httpReq, _ = http.NewRequest(http.MethodPost, ts.URL+"/groves/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(rpcReq))
+	httpReq, _ = http.NewRequest(http.MethodPost, ts.URL+"/projects/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(rpcReq))
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-API-Key", "test-api-key")
 
@@ -263,7 +263,7 @@ func TestAuthMiddleware(t *testing.T) {
 func TestGetTaskNotFound(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
-	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
+	rpcResp := doRPC(t, ts, "/projects/test-grove/agents/test-agent/jsonrpc",
 		"tasks/get", TaskQueryParams{ID: "nonexistent-task"}, "test-api-key")
 
 	if rpcResp.Error == nil {
@@ -277,7 +277,7 @@ func TestGetTaskNotFound(t *testing.T) {
 func TestListTasksRequiresContextID(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
-	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
+	rpcResp := doRPC(t, ts, "/projects/test-grove/agents/test-agent/jsonrpc",
 		"tasks/list", TaskQueryParams{}, "test-api-key")
 
 	if rpcResp.Error == nil {
@@ -291,7 +291,7 @@ func TestListTasksRequiresContextID(t *testing.T) {
 func TestUnknownMethod(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
-	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
+	rpcResp := doRPC(t, ts, "/projects/test-grove/agents/test-agent/jsonrpc",
 		"unknown/method", map[string]string{}, "test-api-key")
 
 	if rpcResp.Error == nil {
@@ -316,7 +316,7 @@ func TestCancelTaskSuccess(t *testing.T) {
 			Provider:    ProviderConfig{Organization: "Test Org", URL: "https://test.example.com"},
 		},
 		Auth: AuthConfig{Scheme: "apiKey", APIKey: "test-api-key"},
-		Groves: []GroveConfig{
+		Projects: []GroveConfig{
 			{Slug: "test-grove", ExposedAgents: []string{"test-agent"}},
 		},
 	}
@@ -329,11 +329,11 @@ func TestCancelTaskSuccess(t *testing.T) {
 
 	now := time.Now()
 	store.CreateTask(&state.Task{
-		ID: "cancel-me", ContextID: "ctx-1", GroveID: "test-grove", AgentSlug: "test-agent",
+		ID: "cancel-me", ContextID: "ctx-1", ProjectID: "test-grove", AgentSlug: "test-agent",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
-	rpcResp := doRPC(t, ts2, "/groves/test-grove/agents/test-agent/jsonrpc",
+	rpcResp := doRPC(t, ts2, "/projects/test-grove/agents/test-agent/jsonrpc",
 		"tasks/cancel", map[string]string{"id": "cancel-me"}, "test-api-key")
 
 	if rpcResp.Error != nil {
@@ -367,7 +367,7 @@ func TestCancelTaskAlreadyTerminal(t *testing.T) {
 	cfg := &Config{
 		Bridge: BridgeConfig{ExternalURL: "https://a2a.test.example.com"},
 		Auth:   AuthConfig{Scheme: "apiKey", APIKey: "test-api-key"},
-		Groves: []GroveConfig{{Slug: "test-grove", ExposedAgents: []string{"test-agent"}}},
+		Projects: []GroveConfig{{Slug: "test-grove", ExposedAgents: []string{"test-agent"}}},
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -378,11 +378,11 @@ func TestCancelTaskAlreadyTerminal(t *testing.T) {
 
 	now := time.Now()
 	store.CreateTask(&state.Task{
-		ID: "done-task", ContextID: "ctx-1", GroveID: "test-grove", AgentSlug: "test-agent",
+		ID: "done-task", ContextID: "ctx-1", ProjectID: "test-grove", AgentSlug: "test-agent",
 		State: TaskStateCompleted, CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
-	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
+	rpcResp := doRPC(t, ts, "/projects/test-grove/agents/test-agent/jsonrpc",
 		"tasks/cancel", map[string]string{"id": "done-task"}, "test-api-key")
 
 	if rpcResp.Error == nil {
@@ -396,7 +396,7 @@ func TestCancelTaskAlreadyTerminal(t *testing.T) {
 func TestCancelTaskNotFound(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
-	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
+	rpcResp := doRPC(t, ts, "/projects/test-grove/agents/test-agent/jsonrpc",
 		"tasks/cancel", map[string]string{"id": "nonexistent-task"}, "test-api-key")
 
 	if rpcResp.Error == nil {
@@ -417,7 +417,7 @@ func TestInvalidJSONRPC(t *testing.T) {
 		"method":  "tasks/get",
 		"params":  map[string]string{"id": "x"},
 	})
-	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/groves/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(rpcReq))
+	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/projects/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(rpcReq))
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-API-Key", "test-api-key")
 
@@ -441,7 +441,7 @@ func TestInvalidJSONRPC(t *testing.T) {
 func TestMalformedJSON(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
-	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/groves/test-grove/agents/test-agent/jsonrpc",
+	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/projects/test-grove/agents/test-agent/jsonrpc",
 		bytes.NewReader([]byte(`{not valid json`)))
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-API-Key", "test-api-key")
@@ -469,7 +469,7 @@ func TestPushNotificationSetGetDelete(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
 	// Create a task first (needed for push config FK).
-	rpcPath := "/groves/test-grove/agents/test-agent/jsonrpc"
+	rpcPath := "/projects/test-grove/agents/test-agent/jsonrpc"
 
 	// Create a task directly in the store via the test bridge.
 	// We access it indirectly by creating it in the store.
@@ -482,7 +482,7 @@ func TestPushNotificationSetGetDelete(t *testing.T) {
 
 	now := time.Now()
 	store.CreateTask(&state.Task{
-		ID: "push-task-1", ContextID: "ctx-1", GroveID: "test-grove", AgentSlug: "test-agent",
+		ID: "push-task-1", ContextID: "ctx-1", ProjectID: "test-grove", AgentSlug: "test-agent",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
@@ -507,11 +507,11 @@ func TestPushNotificationSetGetDelete(t *testing.T) {
 
 func TestPushNotificationSetRejectsPrivateIP(t *testing.T) {
 	_, ts, store := newTestServer(t)
-	rpcPath := "/groves/test-grove/agents/test-agent/jsonrpc"
+	rpcPath := "/projects/test-grove/agents/test-agent/jsonrpc"
 
 	now := time.Now()
 	store.CreateTask(&state.Task{
-		ID: "push-priv-task", ContextID: "ctx-1", GroveID: "test-grove", AgentSlug: "test-agent",
+		ID: "push-priv-task", ContextID: "ctx-1", ProjectID: "test-grove", AgentSlug: "test-agent",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
@@ -554,11 +554,11 @@ func TestPushNotificationGetReturnsEmpty(t *testing.T) {
 
 	now := time.Now()
 	store.CreateTask(&state.Task{
-		ID: "push-get-task", ContextID: "ctx-1", GroveID: "test-grove", AgentSlug: "test-agent",
+		ID: "push-get-task", ContextID: "ctx-1", ProjectID: "test-grove", AgentSlug: "test-agent",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
-	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
+	rpcResp := doRPC(t, ts, "/projects/test-grove/agents/test-agent/jsonrpc",
 		"tasks/pushNotification/get",
 		PushNotificationParams{TaskID: "push-get-task"},
 		"test-api-key",
@@ -575,11 +575,11 @@ func TestPushNotificationDeleteNonexistent(t *testing.T) {
 
 	now := time.Now()
 	store.CreateTask(&state.Task{
-		ID: "push-del-task", ContextID: "ctx-1", GroveID: "test-grove", AgentSlug: "test-agent",
+		ID: "push-del-task", ContextID: "ctx-1", ProjectID: "test-grove", AgentSlug: "test-agent",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
-	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
+	rpcResp := doRPC(t, ts, "/projects/test-grove/agents/test-agent/jsonrpc",
 		"tasks/pushNotification/delete",
 		PushNotificationParams{TaskID: "push-del-task", ID: "nonexistent-push-id"},
 		"test-api-key",
@@ -605,7 +605,7 @@ func TestStreamMethodInvalidParams(t *testing.T) {
 	}
 	body, _ := json.Marshal(rpcReq)
 	httpReq, _ := http.NewRequest(http.MethodPost,
-		ts.URL+"/groves/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(body))
+		ts.URL+"/projects/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(body))
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-API-Key", "test-api-key")
 
@@ -629,7 +629,7 @@ func TestStreamMethodInvalidParams(t *testing.T) {
 func TestResubscribeTaskNotFound(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
-	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
+	rpcResp := doRPC(t, ts, "/projects/test-grove/agents/test-agent/jsonrpc",
 		"tasks/resubscribe",
 		TaskQueryParams{ID: "nonexistent-task"},
 		"test-api-key",
@@ -643,7 +643,7 @@ func TestResubscribeTaskNotFound(t *testing.T) {
 func TestResubscribeRequiresID(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
-	rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
+	rpcResp := doRPC(t, ts, "/projects/test-grove/agents/test-agent/jsonrpc",
 		"tasks/resubscribe",
 		TaskQueryParams{},
 		"test-api-key",
@@ -677,7 +677,7 @@ func TestAuthorizeTaskReturnsNilNil(t *testing.T) {
 	_ = store // use the outer store for unrelated setup
 
 	s.CreateTask(&state.Task{
-		ID: "owned-task", ContextID: "ctx-1", GroveID: "grove-a", AgentSlug: "agent-x",
+		ID: "owned-task", ContextID: "ctx-1", ProjectID: "grove-a", AgentSlug: "agent-x",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
@@ -725,7 +725,7 @@ func TestJSONRPCDeniesNonExposedAgent(t *testing.T) {
 
 	for _, method := range methods {
 		t.Run("hidden-agent/"+method, func(t *testing.T) {
-			rpcResp := doRPC(t, ts, "/groves/test-grove/agents/hidden-agent/jsonrpc",
+			rpcResp := doRPC(t, ts, "/projects/test-grove/agents/hidden-agent/jsonrpc",
 				method, map[string]string{"id": "x"}, "test-api-key")
 
 			if rpcResp.Error == nil {
@@ -740,7 +740,7 @@ func TestJSONRPCDeniesNonExposedAgent(t *testing.T) {
 		})
 
 		t.Run("unknown-grove/"+method, func(t *testing.T) {
-			rpcResp := doRPC(t, ts, "/groves/unknown-grove/agents/test-agent/jsonrpc",
+			rpcResp := doRPC(t, ts, "/projects/unknown-grove/agents/test-agent/jsonrpc",
 				method, map[string]string{"id": "x"}, "test-api-key")
 
 			if rpcResp.Error == nil {
@@ -768,7 +768,7 @@ func TestNewRPCMethods(t *testing.T) {
 
 	for _, method := range methods {
 		t.Run(method, func(t *testing.T) {
-			rpcResp := doRPC(t, ts, "/groves/test-grove/agents/test-agent/jsonrpc",
+			rpcResp := doRPC(t, ts, "/projects/test-grove/agents/test-agent/jsonrpc",
 				method,
 				map[string]string{},
 				"test-api-key",
@@ -778,5 +778,37 @@ func TestNewRPCMethods(t *testing.T) {
 				t.Errorf("method %q should be registered but got method not found", method)
 			}
 		})
+	}
+}
+
+func TestLegacyGrovePath(t *testing.T) {
+	_, ts, _ := newTestServer(t)
+
+	// Test legacy .well-known path (public access)
+	resp, err := http.Get(ts.URL + "/groves/test-grove/agents/test-agent/.well-known/agent-card.json")
+	if err != nil {
+		t.Fatalf("GET legacy agent card: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+
+	// Test legacy JSON-RPC path (requires auth)
+	rpcReq, _ := json.Marshal(JSONRPCRequest{JSONRPC: "2.0", ID: 1, Method: "tasks/get", Params: json.RawMessage(`{"id":"x"}`)})
+	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/groves/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(rpcReq))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-API-Key", "test-api-key")
+
+	resp, err = http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Should be 200 OK (the actual RPC might fail with "task not found" but the route should be authorized)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("legacy RPC: status = %d, want 200", resp.StatusCode)
 	}
 }

@@ -38,25 +38,33 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 	}
 
 	// Also find "created" agents that don't have a container yet
-	// We need to know which groves to scan.
-	// If filter has scion.grove, we scan that one.
-	// Otherwise, we scan current and global?
+	// We need to know which projects to scan.
+	// Preference is given to scion.project, then scion.grove.
+	var projectName string
+	if pn, ok := filter["scion.project"]; ok {
+		projectName = pn
+	} else if pn, ok := filter["scion.grove"]; ok {
+		projectName = pn
+	}
 
 	var grovesToScan []string
-	if groveName, ok := filter["scion.grove"]; ok {
-		_ = groveName
-		// We need to resolve groveName to a path. This is currently not easy without searching.
-		// For now, if scion.grove is provided, we assume we only care about running ones
-		// OR we need to be passed a grove path.
+	if projectName != "" {
+		_ = projectName
+		// We need to resolve projectName to a path. This is currently not easy without searching.
+		// For now, if scion.project/grove is provided, we assume we only care about running ones
+		// OR we need to be passed a project path.
 	}
 
 	// This logic is a bit tied to how CLI uses it.
-	// Let's at least support scanning a specific grove if provided in filter?
-	// Or maybe Add a special filter key for GrovePath.
+	// Let's at least support scanning a specific project if provided in filter?
+	// Or maybe Add a special filter key for ProjectPath.
 
-	grovePath := filter["scion.grove_path"]
-	if grovePath != "" {
-		grovesToScan = append(grovesToScan, grovePath)
+	projectPath := filter["scion.project_path"]
+	if projectPath == "" {
+		projectPath = filter["scion.grove_path"]
+	}
+	if projectPath != "" {
+		grovesToScan = append(grovesToScan, projectPath)
 	} else if len(filter) == 0 || (len(filter) == 1 && filter["scion.agent"] == "true") {
 		// Default: scan current resolved project dir and global dir
 		pd, _ := config.GetResolvedProjectDir("")
@@ -72,13 +80,13 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 	runningNames := make(map[string]bool)
 	for i := range agents {
 		runningNames[agents[i].Name] = true
-		if agents[i].GrovePath != "" {
+		if agents[i].ProjectPath != "" {
 			// ResolveAgentDir probes both worktree and shared-workspace
 			// layouts (see .design/hub-shared-workspace-isolation.md) since
 			// the runtime label set doesn't carry the workspace mode.
-			agentDir := config.ResolveAgentDir(agents[i].GrovePath, agents[i].Name)
+			agentDir := config.ResolveAgentDir(agents[i].ProjectPath, agents[i].Name)
 			scionJSON := filepath.Join(agentDir, "scion-agent.json")
-			agentHome := config.GetAgentHomePath(agents[i].GrovePath, agents[i].Name)
+			agentHome := config.GetAgentHomePath(agents[i].ProjectPath, agents[i].Name)
 			agentInfoJSON := filepath.Join(agentHome, "agent-info.json")
 			terminalPhase := terminalRuntimePhase(agents[i])
 
@@ -182,10 +190,10 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 		// .design/hub-shared-workspace-isolation.md).
 		seenNames := make(map[string]bool)
 		dirsToScan := []string{filepath.Join(gp, "agents")}
-		if extDir, err := config.GetGitGroveExternalAgentsDir(gp); err == nil && extDir != "" {
+		if extDir, err := config.GetGitProjectExternalAgentsDir(gp); err == nil && extDir != "" {
 			dirsToScan = append(dirsToScan, extDir)
 		}
-		groveName := config.GetGroveName(gp)
+		projectName := config.GetProjectName(gp)
 		for _, agentsDir := range dirsToScan {
 			entries, err := os.ReadDir(agentsDir)
 			if err != nil {
@@ -234,7 +242,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 						// Maybe report minimal info?
 						info = &api.AgentInfo{
 							Name:  e.Name(),
-							Grove: groveName,
+							Project: projectName,
 							Phase: "unknown",
 						}
 					} else {
@@ -246,8 +254,8 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 					Name:            e.Name(),
 					Template:        info.Template,
 					HarnessConfig:   info.HarnessConfig,
-					Grove:           groveName,
-					GrovePath:       gp,
+					Project:           projectName,
+					ProjectPath:       gp,
 					ContainerStatus: "created",
 					Image:           info.Image,
 					Phase:           info.Phase,

@@ -5,11 +5,11 @@ description: Installation and configuration of the Scion Hub (State Server).
 
 **What you will learn**: How to deploy, secure, and operate the Scion Hub infrastructure, including setting up persistence, configuring runtime brokers, and managing user access.
 
-The **Scion Hub** is the central brain of a hosted Scion architecture. It maintains the state of all agents, groves, and runtime brokers, and provides the API used by the CLI and Web Dashboard.
+The **Scion Hub** is the central brain of a hosted Scion architecture. It maintains the state of all agents, projects, and runtime brokers, and provides the API used by the CLI and Web Dashboard.
 
 ## Core Responsibilities
 
-- **Central Registry**: Maintains a record of all Groves (projects), Runtime Brokers, and Templates.
+- **Central Registry**: Maintains a record of all Projects (projects), Runtime Brokers, and Templates.
 - **Identity Provider**: Manages user authentication (OAuth) and issues scoped JWTs for Agents and Brokers.
 - **State Store**: Tracks the lifecycle, status, and metadata of all agents.
 - **Task Dispatcher**: Routes agent commands from the CLI or Dashboard to the correct Runtime Broker via persistent WebSocket tunnels.
@@ -102,36 +102,36 @@ Administrators can configure Service Accounts via the Web Dashboard:
 2. View the service account quota dashboard and configure minting capability controls.
 3. Register existing GCP Service Accounts by email, or configure the Hub to mint new ones dynamically.
 
-### Default Grove Identities
+### Default Project Identities
 
-Groves can be configured with default GCP identities that are automatically verified upon registration and automatically applied in the agent creation form. 
+Projects can be configured with default GCP identities that are automatically verified upon registration and automatically applied in the agent creation form. 
 
 ### Security & Authorization
 
-Administrative actions for GCP Service Account management require `grove-owner` (`ActionManage`) permissions to enforce strict security boundaries. Direct API access to Hub secrets from agents is explicitly blocked to prevent credential leakage.
+Administrative actions for GCP Service Account management require `project-owner` (`ActionManage`) permissions to enforce strict security boundaries. Direct API access to Hub secrets from agents is explicitly blocked to prevent credential leakage.
 
 For more details on how agents assume these identities via metadata server emulation, see the [Authentication Guide](/scion/hub-admin/auth/#gcp-identity--metadata-emulation).
 
-## Grove Settings & Agent Limits
+## Project Settings & Agent Limits
 
-The Hub provides a comprehensive UI for configuring grove-level settings, ensuring administrators have control over resource allocation and project configurations. Access these settings via the Web Dashboard for any grove you manage.
+The Hub provides a comprehensive UI for configuring project-level settings, ensuring administrators have control over resource allocation and project configurations. Access these settings via the Web Dashboard for any project you manage.
 
 ### Configuration Tabs
 
-The Grove Settings UI is organized into three primary tabs:
+The Project Settings UI is organized into three primary tabs:
 
-- **General**: Configure the grove's display name, description, and template sync settings. For git-backed groves, you can specify default branches. For hub-native groves, you can configure external git repositories to load templates from.
+- **General**: Configure the project's display name, description, and template sync settings. For git-backed projects, you can specify default branches. For hub-native projects, you can configure external git repositories to load templates from.
 - **Limits**: Define constraints on agent execution to prevent resource exhaustion.
-  - **Hub-level Defaults**: Administrators can configure global default limits that apply to all groves.
-  - **Grove-level Limits**: Overrides can be set per-grove.
+  - **Hub-level Defaults**: Administrators can configure global default limits that apply to all projects.
+  - **Project-level Limits**: Overrides can be set per-project.
   - Limits automatically pre-populate the agent creation form and restrict maximum concurrency, runtime duration, and storage.
-- **Resources**: Manage the compute and plugin environments available to the grove.
-  - **Runtime Brokers**: Link and manage the auxiliary runtimes (e.g., specific Kubernetes clusters or remote Docker hosts) authorized to execute agents for this grove.
-  - **Plugins**: Enable and configure message broker plugins or other extensions for agents running within the grove.
+- **Resources**: Manage the compute and plugin environments available to the project.
+  - **Runtime Brokers**: Link and manage the auxiliary runtimes (e.g., specific Kubernetes clusters or remote Docker hosts) authorized to execute agents for this project.
+  - **Plugins**: Enable and configure message broker plugins or other extensions for agents running within the project.
 
 ### Template Synchronization
 
-Groves support loading templates from external Git repositories, which is especially useful for non-Git-backed (hub-native) groves. The UI accepts bare host/org/repo URLs (e.g., `github.com/org/repo`) and automatically normalizes them, appending `/.scion/templates/` unless a deeper path is specified. This synchronization can be manually triggered via the UI to immediately pull the latest templates.
+Projects support loading templates from external Git repositories, which is especially useful for non-Git-backed (hub-native) projects. The UI accepts bare host/org/repo URLs (e.g., `github.com/org/repo`) and automatically normalizes them, appending `/.scion/templates/` unless a deeper path is specified. This synchronization can be manually triggered via the UI to immediately pull the latest templates.
 
 ## Server Maintenance & Updates
 
@@ -155,7 +155,7 @@ All maintenance tasks executed through the panel are tracked. The maintenance in
 
 ### WebDAV Synchronization
 
-The Hub provides robust WebDAV endpoints for transparent file access across native, shared, and remote linked groves.
+The Hub provides robust WebDAV endpoints for transparent file access across native, shared, and remote linked projects.
 - WebDAV synchronization utilizes checksum comparisons for reliable file transfers.
 - A local storage HTTP proxy facilitates efficient remote file synchronization.
 

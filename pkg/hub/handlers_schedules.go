@@ -62,8 +62,8 @@ type ListSchedulesResponse struct {
 	ServerTime time.Time        `json:"serverTime"`
 }
 
-// handleSchedules routes requests under /api/v1/groves/{groveId}/schedules[/{id}[/{action}]]
-func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, groveID, schedulePath string) {
+// handleSchedules routes requests under /api/v1/projects/{projectId}/schedules[/{id}[/{action}]]
+func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, projectID, schedulePath string) {
 	// Require authentication
 	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
@@ -71,9 +71,9 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, groveID
 		return
 	}
 
-	// For agent identities, enforce grove isolation
+	// For agent identities, enforce project isolation
 	if agentIdentity := GetAgentIdentityFromContext(r.Context()); agentIdentity != nil {
-		if agentIdentity.GroveID() != groveID {
+		if agentIdentity.ProjectID() != projectID {
 			Forbidden(w)
 			return
 		}
@@ -83,9 +83,9 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, groveID
 		// Collection endpoint
 		switch r.Method {
 		case http.MethodGet:
-			s.listSchedules(w, r, groveID)
+			s.listSchedules(w, r, projectID)
 		case http.MethodPost:
-			s.createSchedule(w, r, groveID)
+			s.createSchedule(w, r, projectID)
 		default:
 			MethodNotAllowed(w)
 		}
@@ -105,11 +105,11 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, groveID
 		// Individual schedule endpoint
 		switch r.Method {
 		case http.MethodGet:
-			s.getSchedule(w, r, groveID, scheduleID)
+			s.getSchedule(w, r, projectID, scheduleID)
 		case http.MethodPatch:
-			s.updateSchedule(w, r, groveID, scheduleID)
+			s.updateSchedule(w, r, projectID, scheduleID)
 		case http.MethodDelete:
-			s.deleteSchedule(w, r, groveID, scheduleID)
+			s.deleteSchedule(w, r, projectID, scheduleID)
 		default:
 			MethodNotAllowed(w)
 		}
@@ -118,26 +118,26 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, groveID
 			MethodNotAllowed(w)
 			return
 		}
-		s.pauseSchedule(w, r, groveID, scheduleID)
+		s.pauseSchedule(w, r, projectID, scheduleID)
 	case "resume":
 		if r.Method != http.MethodPost {
 			MethodNotAllowed(w)
 			return
 		}
-		s.resumeSchedule(w, r, groveID, scheduleID)
+		s.resumeSchedule(w, r, projectID, scheduleID)
 	case "history":
 		if r.Method != http.MethodGet {
 			MethodNotAllowed(w)
 			return
 		}
-		s.getScheduleHistory(w, r, groveID, scheduleID)
+		s.getScheduleHistory(w, r, projectID, scheduleID)
 	default:
 		NotFound(w, "Schedule action")
 	}
 }
 
-// createSchedule handles POST /api/v1/groves/{groveId}/schedules
-func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, groveID string) {
+// createSchedule handles POST /api/v1/projects/{projectId}/schedules
+func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectID string) {
 	var req CreateScheduleRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -223,7 +223,7 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, groveID 
 
 	schedule := store.Schedule{
 		ID:        api.NewUUID(),
-		GroveID:   groveID,
+		ProjectID:   projectID,
 		Name:      req.Name,
 		CronExpr:  req.CronExpr,
 		EventType: req.EventType,
@@ -248,12 +248,12 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, groveID 
 	writeJSON(w, http.StatusCreated, created)
 }
 
-// listSchedules handles GET /api/v1/groves/{groveId}/schedules
-func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, groveID string) {
+// listSchedules handles GET /api/v1/projects/{projectId}/schedules
+func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, projectID string) {
 	query := r.URL.Query()
 
 	filter := store.ScheduleFilter{
-		GroveID: groveID,
+		ProjectID: projectID,
 		Status:  query.Get("status"),
 		Name:    query.Get("name"),
 	}
@@ -282,15 +282,15 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, groveID s
 	})
 }
 
-// getSchedule handles GET /api/v1/groves/{groveId}/schedules/{id}
-func (s *Server) getSchedule(w http.ResponseWriter, r *http.Request, groveID, scheduleID string) {
+// getSchedule handles GET /api/v1/projects/{projectId}/schedules/{id}
+func (s *Server) getSchedule(w http.ResponseWriter, r *http.Request, projectID, scheduleID string) {
 	schedule, err := s.store.GetSchedule(r.Context(), scheduleID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	if schedule.GroveID != groveID {
+	if schedule.ProjectID != projectID {
 		NotFound(w, "Schedule")
 		return
 	}
@@ -298,14 +298,14 @@ func (s *Server) getSchedule(w http.ResponseWriter, r *http.Request, groveID, sc
 	writeJSON(w, http.StatusOK, schedule)
 }
 
-// updateSchedule handles PATCH /api/v1/groves/{groveId}/schedules/{id}
-func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, groveID, scheduleID string) {
+// updateSchedule handles PATCH /api/v1/projects/{projectId}/schedules/{id}
+func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectID, scheduleID string) {
 	schedule, err := s.store.GetSchedule(r.Context(), scheduleID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	if schedule.GroveID != groveID {
+	if schedule.ProjectID != projectID {
 		NotFound(w, "Schedule")
 		return
 	}
@@ -349,14 +349,14 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, groveID,
 	writeJSON(w, http.StatusOK, schedule)
 }
 
-// deleteSchedule handles DELETE /api/v1/groves/{groveId}/schedules/{id}
-func (s *Server) deleteSchedule(w http.ResponseWriter, r *http.Request, groveID, scheduleID string) {
+// deleteSchedule handles DELETE /api/v1/projects/{projectId}/schedules/{id}
+func (s *Server) deleteSchedule(w http.ResponseWriter, r *http.Request, projectID, scheduleID string) {
 	schedule, err := s.store.GetSchedule(r.Context(), scheduleID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	if schedule.GroveID != groveID {
+	if schedule.ProjectID != projectID {
 		NotFound(w, "Schedule")
 		return
 	}
@@ -369,14 +369,14 @@ func (s *Server) deleteSchedule(w http.ResponseWriter, r *http.Request, groveID,
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// pauseSchedule handles POST /api/v1/groves/{groveId}/schedules/{id}/pause
-func (s *Server) pauseSchedule(w http.ResponseWriter, r *http.Request, groveID, scheduleID string) {
+// pauseSchedule handles POST /api/v1/projects/{projectId}/schedules/{id}/pause
+func (s *Server) pauseSchedule(w http.ResponseWriter, r *http.Request, projectID, scheduleID string) {
 	schedule, err := s.store.GetSchedule(r.Context(), scheduleID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	if schedule.GroveID != groveID {
+	if schedule.ProjectID != projectID {
 		NotFound(w, "Schedule")
 		return
 	}
@@ -394,14 +394,14 @@ func (s *Server) pauseSchedule(w http.ResponseWriter, r *http.Request, groveID, 
 	writeJSON(w, http.StatusOK, schedule)
 }
 
-// resumeSchedule handles POST /api/v1/groves/{groveId}/schedules/{id}/resume
-func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, groveID, scheduleID string) {
+// resumeSchedule handles POST /api/v1/projects/{projectId}/schedules/{id}/resume
+func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectID, scheduleID string) {
 	schedule, err := s.store.GetSchedule(r.Context(), scheduleID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	if schedule.GroveID != groveID {
+	if schedule.ProjectID != projectID {
 		NotFound(w, "Schedule")
 		return
 	}
@@ -436,14 +436,14 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, groveID,
 	writeJSON(w, http.StatusOK, schedule)
 }
 
-// getScheduleHistory handles GET /api/v1/groves/{groveId}/schedules/{id}/history
-func (s *Server) getScheduleHistory(w http.ResponseWriter, r *http.Request, groveID, scheduleID string) {
+// getScheduleHistory handles GET /api/v1/projects/{projectId}/schedules/{id}/history
+func (s *Server) getScheduleHistory(w http.ResponseWriter, r *http.Request, projectID, scheduleID string) {
 	schedule, err := s.store.GetSchedule(r.Context(), scheduleID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	if schedule.GroveID != groveID {
+	if schedule.ProjectID != projectID {
 		NotFound(w, "Schedule")
 		return
 	}
@@ -458,7 +458,7 @@ func (s *Server) getScheduleHistory(w http.ResponseWriter, r *http.Request, grov
 
 	// List events generated by this schedule
 	result, err := s.store.ListScheduledEvents(r.Context(), store.ScheduledEventFilter{
-		GroveID:    groveID,
+		ProjectID:    projectID,
 		ScheduleID: scheduleID,
 	}, store.ListOptions{
 		Limit:  limit,

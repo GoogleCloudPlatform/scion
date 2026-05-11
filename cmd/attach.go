@@ -41,7 +41,7 @@ If the agent was started with tmux support, this will attach to the tmux session
 		agentName := api.Slugify(args[0])
 
 		// Check if Hub is enabled
-		hubCtx, err := CheckHubAvailabilityForAgent(grovePath, agentName, false)
+		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, false)
 		if err != nil {
 			return err
 		}
@@ -51,9 +51,9 @@ If the agent was started with tmux support, this will attach to the tmux session
 		}
 
 		// Try to resolve grove info for better error messages
-		projectDir, _ := config.GetResolvedProjectDir(grovePath)
-		groveName := config.GetGroveName(projectDir)
-		targetGrovePath := grovePath
+		projectDir, _ := config.GetResolvedProjectDir(projectPath)
+		projectName := config.GetProjectName(projectDir)
+		targetProjectPath:= projectPath
 
 		// Verify agent exists
 		found := false
@@ -66,44 +66,44 @@ If the agent was started with tmux support, this will attach to the tmux session
 
 		if !found {
 			// If user didn't specify a grove, try global fallback
-			if grovePath == "" {
+			if projectPath == "" {
 				globalDir, _ := config.GetGlobalDir()
 				if globalDir != "" && globalDir != projectDir {
 					globalAgentDir := filepath.Join(globalDir, "agents", agentName)
 					if _, err := os.Stat(filepath.Join(globalAgentDir, "scion-agent.json")); err == nil {
 						found = true
-						targetGrovePath = globalDir
+						targetProjectPath = globalDir
 						// Update display info
 						projectDir = globalDir
-						groveName = "global"
-						fmt.Printf("Agent '%s' not found in local grove, using global agent.\n", agentName)
+						projectName = "global"
+						fmt.Printf("Agent '%s' not found in local project, using global agent.\n", agentName)
 					}
 				}
 			}
 		}
 
 		if !found {
-			return fmt.Errorf("agent '%s' not found in grove '%s'", agentName, groveName)
+			return fmt.Errorf("agent '%s' not found in project '%s'", agentName, projectName)
 		}
 
-		rt := runtime.GetRuntime(targetGrovePath, profile)
+		rt := runtime.GetRuntime(targetProjectPath, profile)
 
 		// Use grove-scoped lookup to find the exact container,
 		// preventing cross-grove collision when agents share a name.
-		filter := map[string]string{"scion.name": agentName, "scion.grove": groveName}
+		filter := map[string]string{"scion.name": agentName, "scion.project": projectName}
 		agents, listErr := rt.List(context.Background(), filter)
 		attachID := agentName
 		if listErr == nil && len(agents) > 0 {
 			attachID = agents[0].ContainerID
 		}
 
-		fmt.Printf("Attaching to agent '%s' (grove: %s)...\n", agentName, groveName)
+		fmt.Printf("Attaching to agent '%s' (project: %s)...\n", agentName, projectName)
 		err = rt.Attach(context.Background(), attachID)
 		if err != nil {
 			// If the error is "not found", we can augment it with grove info
 			if err.Error() == fmt.Sprintf("agent '%s' not found", attachID) ||
 				err.Error() == fmt.Sprintf("agent '%s' container not found. It may have exited and been removed.", attachID) {
-				return fmt.Errorf("agent '%s' not found in grove '%s'", agentName, groveName)
+				return fmt.Errorf("agent '%s' not found in project '%s'", agentName, projectName)
 			}
 			return err
 		}
@@ -120,7 +120,7 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
 	// Get the grove ID for this project
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -129,7 +129,7 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	agent, err := hubCtx.Client.GroveAgents(groveID).Get(ctx, agentName)
+	agent, err := hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to get agent '%s': %w", agentName, err))
 	}

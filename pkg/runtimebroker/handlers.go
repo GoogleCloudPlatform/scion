@@ -48,12 +48,12 @@ func matchesAgent(a api.AgentInfo, id, groveID string) bool {
 	if groveID == "" {
 		return true
 	}
-	// Check grove_id label first (authoritative), then GroveID field
-	if labelGroveID := a.Labels["scion.grove_id"]; labelGroveID != "" {
-		return labelGroveID == groveID
+	// Check grove_id label first (authoritative), then ProjectID field
+	if labelProjectID := a.Labels["scion.grove_id"]; labelProjectID != "" {
+		return labelProjectID == groveID
 	}
-	if a.GroveID != "" {
-		return a.GroveID == groveID
+	if a.ProjectID != "" {
+		return a.ProjectID == groveID
 	}
 	// No grove_id on container — match anyway for backward compatibility
 	// with containers created before grove_id labeling was added.
@@ -215,7 +215,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	// Add optional filters
 	if groveID := query.Get("groveId"); groveID != "" {
-		filter["scion.grove"] = groveID
+		filter["scion.project_id"] = groveID
 	}
 	if status := query.Get("status"); status != "" {
 		filter["status"] = status
@@ -235,14 +235,17 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	s.auxiliaryRuntimesMu.RUnlock()
 
-	// Dedup by name+groveID to prevent collision across groves while still
+	// Dedup by name+projectID to prevent collision across projects while still
 	// deduplicating the same agent found on multiple runtimes.
 	agentKey := func(a api.AgentInfo) string {
-		gid := a.GroveID
-		if gid == "" {
-			gid = a.Labels["scion.grove_id"]
+		pid := a.ProjectID
+		if pid == "" {
+			pid = a.Labels["scion.project_id"]
 		}
-		return a.Name + "\x00" + gid
+		if pid == "" {
+			pid = a.Labels["scion.grove_id"]
+		}
+		return a.Name + "\x00" + pid
 	}
 	seen := make(map[string]bool)
 	for _, ag := range agents {
@@ -360,10 +363,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Debug log incoming request
 	if s.config.Debug {
-		s.agentLifecycleLog.Debug("Creating agent", "agent_id", req.ID, "grove_id", req.GroveID, "name", req.Name, "slug", req.Slug)
+		s.agentLifecycleLog.Debug("Creating agent", "agent_id", req.ID, "grove_id", req.ProjectID, "name", req.Name, "slug", req.Slug)
 		s.agentLifecycleLog.Debug("Hub credentials",
 			"agent_id", req.ID,
-			"grove_id", req.GroveID,
+			"grove_id", req.ProjectID,
 			"hubEndpoint", req.HubEndpoint,
 			"hasToken", req.AgentToken != "",
 			"slug", req.Slug,
@@ -371,7 +374,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		if req.Config != nil {
 			s.agentLifecycleLog.Debug("Agent configuration",
 				"agent_id", req.ID,
-				"grove_id", req.GroveID,
+				"grove_id", req.ProjectID,
 				"template", req.Config.Template,
 				"image", req.Config.Image,
 				"templateID", req.Config.TemplateID,
@@ -380,14 +383,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve grove path early for env-gather (needs settings access before buildStartContext)
-	if req.GroveSlug != "" && req.GrovePath == "" {
+	if req.ProjectSlug != "" && req.ProjectPath == "" {
 		globalDir, err := config.GetGlobalDir()
 		if err != nil {
 			markAttemptFailed(http.StatusInternalServerError, "failed to resolve global dir")
 			RuntimeError(w, "Failed to get global dir: "+err.Error())
 			return
 		}
-		req.GrovePath = filepath.Join(globalDir, "groves", req.GroveSlug)
+		req.ProjectPath = filepath.Join(globalDir, "projects", req.ProjectSlug)
 	}
 
 	// Env-gather: if GatherEnv is true, evaluate env completeness before building full context.
@@ -411,7 +414,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		if s.config.Debug {
 			s.envSecretLog.Debug("Env-gather: evaluating env completeness",
 				"gatherEnv", req.GatherEnv,
-				"grovePath", req.GrovePath,
+				"grovePath", req.ProjectPath,
 				"requiredKeys", len(required),
 				"required", required,
 			)
@@ -518,12 +521,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Debug log grove path
-	if s.config.Debug && req.GrovePath != "" {
-		s.agentLifecycleLog.Debug("Using grove path from Hub", "agent_id", req.ID, "path", req.GrovePath)
+	if s.config.Debug && req.ProjectPath != "" {
+		s.agentLifecycleLog.Debug("Using grove path from Hub", "agent_id", req.ID, "path", req.ProjectPath)
 	}
 
 	// Reject global groves in multi-hub mode
-	if s.isMultiHubMode() && s.isGlobalGrove(req.GroveID, req.GrovePath) {
+	if s.isMultiHubMode() && s.isGlobalProject(req.ProjectID, req.ProjectPath) {
 		writeJSON(w, http.StatusConflict, map[string]interface{}{
 			"error": map[string]string{
 				"code":    "global_grove_disabled",
@@ -550,9 +553,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		Name:            req.Name,
 		AgentID:         req.ID,
 		Slug:            req.Slug,
-		GrovePath:       req.GrovePath,
-		GroveSlug:       req.GroveSlug,
-		GroveID:         req.GroveID,
+		ProjectPath:       req.ProjectPath,
+		ProjectSlug:       req.ProjectSlug,
+		ProjectID:         req.ProjectID,
 		Config:          req.Config,
 		InlineConfig:    req.InlineConfig,
 		SharedDirs:      req.SharedDirs,
@@ -581,17 +584,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// If WorkspaceStoragePath is set, download workspace from GCS (non-git bootstrap)
 	if req.WorkspaceStoragePath != "" {
-		// For hub-native groves (GroveSlug set), use the conventional path
-		// ~/.scion/groves/<slug>/ instead of the worktree-based path.
+		// For hub-native groves (ProjectSlug set), use the conventional path
+		// ~/.scion.groves/<slug>/ instead of the worktree-based path.
 		var workspaceDir string
-		if req.GroveSlug != "" {
+		if req.ProjectSlug != "" {
 			globalDir, err := config.GetGlobalDir()
 			if err != nil {
 				markAttemptFailed(http.StatusInternalServerError, "failed to resolve global dir")
 				RuntimeError(w, "Failed to get global dir: "+err.Error())
 				return
 			}
-			workspaceDir = filepath.Join(globalDir, "groves", req.GroveSlug)
+			workspaceDir = filepath.Join(globalDir, "projects", req.ProjectSlug)
 		} else {
 			workspaceDir = filepath.Join(s.config.WorktreeBase, req.Name, "workspace")
 		}
@@ -613,7 +616,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				"bucket", bucket,
 				"storagePath", req.WorkspaceStoragePath+"/files",
 				"workspaceDir", workspaceDir,
-				"groveSlug", req.GroveSlug,
+				"groveSlug", req.ProjectSlug,
 			)
 		}
 
@@ -624,15 +627,15 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 
 		opts.Workspace = workspaceDir
-		// Keep opts.GrovePath so that ProvisionAgent resolves the correct
+		// Keep opts.ProjectPath so that ProvisionAgent resolves the correct
 		// agent directory. The explicit workspace takes precedence over the
 		// worktree logic in ProvisionAgent, so no worktree will be created.
 
-		// Write a .scion grove marker into the workspace so in-container CLI
+		// Write a .scion.grove marker into the workspace so in-container CLI
 		// can discover the grove context and use the Hub API.
-		if req.GroveID != "" && req.GroveSlug != "" {
-			if writeErr := config.WriteWorkspaceMarker(workspaceDir, req.GroveID, req.GroveSlug, req.GroveSlug); writeErr != nil {
-				s.agentLifecycleLog.Warn("Failed to write workspace marker", "agent_id", req.ID, "grove_id", req.GroveID, "error", writeErr)
+		if req.ProjectID != "" && req.ProjectSlug != "" {
+			if writeErr := config.WriteWorkspaceMarker(workspaceDir, req.ProjectID, req.ProjectSlug, req.ProjectSlug); writeErr != nil {
+				s.agentLifecycleLog.Warn("Failed to write workspace marker", "agent_id", req.ID, "grove_id", req.ProjectID, "error", writeErr)
 			}
 		}
 	}
@@ -648,7 +651,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.agentLifecycleLog.Info("Agent provisioned",
-			"agent_id", req.ID, "grove_id", req.GroveID,
+			"agent_id", req.ID, "grove_id", req.ProjectID,
 			"name", req.Name, "slug", req.Slug,
 			"phase", string(state.PhaseCreated))
 
@@ -687,18 +690,18 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
 
 		s.agentLifecycleLog.Error("Agent create failed",
-			"agent_id", req.ID, "grove_id", req.GroveID,
+			"agent_id", req.ID, "grove_id", req.ProjectID,
 			"name", req.Name, "slug", req.Slug,
 			"error", err)
 
 		// Clean up provisioned agent files so they don't become orphans.
-		if opts.GrovePath != "" {
-			if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.GrovePath, true); cleanupErr != nil {
+		if opts.ProjectPath != "" {
+			if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil {
 				s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",
-					"agent_id", req.ID, "grove_id", req.GroveID, "agent", opts.Name, "error", cleanupErr)
+					"agent_id", req.ID, "grove_id", req.ProjectID, "agent", opts.Name, "error", cleanupErr)
 			} else {
 				s.agentLifecycleLog.Info("Cleaned up provisioned agent files after start failure",
-					"agent_id", req.ID, "grove_id", req.GroveID, "agent", opts.Name)
+					"agent_id", req.ID, "grove_id", req.ProjectID, "agent", opts.Name)
 			}
 		}
 		RuntimeError(w, "Failed to create agent: "+err.Error())
@@ -706,7 +709,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.agentLifecycleLog.Info("Agent created",
-		"agent_id", req.ID, "grove_id", req.GroveID,
+		"agent_id", req.ID, "grove_id", req.ProjectID,
 		"name", req.Name, "slug", req.Slug,
 		"phase", string(state.PhaseRunning),
 		"container_status", agentInfo.ContainerStatus)
@@ -714,7 +717,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// Log auth resolution info visible in broker logs
 	for _, w := range agentInfo.Warnings {
 		if strings.HasPrefix(w, "Auth:") {
-			s.agentLifecycleLog.Info("Agent auth resolution", "agent_id", req.ID, "grove_id", req.GroveID, "agent", req.Name, "result", w)
+			s.agentLifecycleLog.Info("Agent auth resolution", "agent_id", req.ID, "grove_id", req.ProjectID, "agent", req.Name, "result", w)
 		}
 	}
 
@@ -779,10 +782,13 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract groveId from query params for grove-scoped agent resolution.
-	// This prevents cross-grove agent collision when two agents with the same
-	// name exist in different groves on the same broker.
-	groveID := r.URL.Query().Get("groveId")
+	// Extract projectId (or legacy groveId) from query params for project-scoped agent resolution.
+	// This prevents cross-project agent collision when two agents with the same
+	// name exist in different projects on the same broker.
+	projectID := r.URL.Query().Get("projectId")
+	if projectID == "" {
+		projectID = r.URL.Query().Get("groveId")
+	}
 
 	// Handle WebSocket attach for PTY
 	if action == "attach" && isPTYWebSocketUpgrade(r) {
@@ -792,15 +798,15 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 
 	// Handle actions
 	if action != "" {
-		s.handleAgentAction(w, r, id, groveID, action)
+		s.handleAgentAction(w, r, id, projectID, action)
 		return
 	}
 
 	switch r.Method {
 	case http.MethodGet:
-		s.getAgent(w, r, id, groveID)
+		s.getAgent(w, r, id, projectID)
 	case http.MethodDelete:
-		s.deleteAgent(w, r, id, groveID)
+		s.deleteAgent(w, r, id, projectID)
 	default:
 		MethodNotAllowed(w)
 	}
@@ -840,15 +846,15 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, groveID
 	mgr := s.resolveManagerForAgent(ctx, id, groveID)
 
 	// Get the agent's grove path and grove ID before stopping (needed for file deletion and logging)
-	var grovePath, agentGroveID string
+	var grovePath, agentProjectID string
 	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"})
 	if err == nil {
 		for _, a := range agents {
 			if matchesAgent(a, id, groveID) {
-				grovePath = a.GrovePath
-				agentGroveID = a.GroveID
-				if agentGroveID == "" {
-					agentGroveID = a.Grove
+				grovePath = a.ProjectPath
+				agentProjectID = a.ProjectID
+				if agentProjectID == "" {
+					agentProjectID = a.Project
 				}
 				break
 			}
@@ -857,11 +863,11 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, groveID
 
 	// If no grove path was found (container missing or no annotation), check
 	// hub-native grove directories for the agent's files. Without this,
-	// agents in hub-native groves (~/.scion/groves/<slug>/) are silently
+	// agents in hub-native groves (~/.scion.groves/<slug>/) are silently
 	// skipped during file cleanup because the default filesystem scan only
 	// checks the CWD-resolved project dir and global ~/.scion.
 	if grovePath == "" && deleteFiles {
-		if resolved := findAgentInHubNativeGroves(id); resolved != "" {
+		if resolved := findAgentInHubNativeProjects(id); resolved != "" {
 			grovePath = resolved
 			s.agentLifecycleLog.Debug("Resolved agent grove path from hub-native groves",
 				"agent_id", id, "path", grovePath)
@@ -895,11 +901,11 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, groveID
 
 	if softDelete {
 		s.agentLifecycleLog.Info("Agent soft-deleted",
-			"agent_id", id, "grove_id", agentGroveID,
+			"agent_id", id, "grove_id", agentProjectID,
 			"delete_files", deleteFiles, "remove_branch", removeBranch)
 	} else {
 		s.agentLifecycleLog.Info("Agent deleted",
-			"agent_id", id, "grove_id", agentGroveID,
+			"agent_id", id, "grove_id", agentProjectID,
 			"delete_files", deleteFiles, "remove_branch", removeBranch)
 	}
 
@@ -947,8 +953,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 	// Read optional task, grovePath, groveSlug, harnessConfig, and resolvedEnv from request body
 	var startReq struct {
 		Task            string               `json:"task"`
-		GrovePath       string               `json:"grovePath"`
-		GroveSlug       string               `json:"groveSlug"`
+		ProjectPath       string               `json:"grovePath"`
+		ProjectSlug       string               `json:"groveSlug"`
 		HarnessConfig   string               `json:"harnessConfig"`
 		ResolvedEnv     map[string]string    `json:"resolvedEnv"`
 		ResolvedSecrets []api.ResolvedSecret `json:"resolvedSecrets,omitempty"`
@@ -965,7 +971,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 		}
 	}
 
-	s.agentLifecycleLog.Debug("startAgent called", "agent_id", id, "task", startReq.Task, "grovePath", startReq.GrovePath, "groveSlug", startReq.GroveSlug, "harnessConfig", startReq.HarnessConfig, "resolvedEnvCount", len(startReq.ResolvedEnv))
+	s.agentLifecycleLog.Debug("startAgent called", "agent_id", id, "task", startReq.Task, "grovePath", startReq.ProjectPath, "groveSlug", startReq.ProjectSlug, "harnessConfig", startReq.HarnessConfig, "resolvedEnvCount", len(startReq.ResolvedEnv))
 
 	// Build config for buildStartContext (startAgent uses a subset of CreateAgentConfig)
 	var cfg *CreateAgentConfig
@@ -980,8 +986,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:            id,
-		GrovePath:       startReq.GrovePath,
-		GroveSlug:       startReq.GroveSlug,
+		ProjectPath:       startReq.ProjectPath,
+		ProjectSlug:       startReq.ProjectSlug,
 		Config:          cfg,
 		ResolvedEnv:     startReq.ResolvedEnv,
 		ResolvedSecrets: startReq.ResolvedSecrets,
@@ -995,7 +1001,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 	opts := sc.Opts
 
 	// If grove path wasn't in the request, fall back to looking up from an existing container
-	if startReq.GrovePath == "" && startReq.GroveSlug == "" && opts.GrovePath == "" {
+	if startReq.ProjectPath == "" && startReq.ProjectSlug == "" && opts.ProjectPath == "" {
 		agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
 		if err != nil {
 			RuntimeError(w, "Failed to list agents: "+err.Error())
@@ -1003,8 +1009,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 		}
 		for i := range agents {
 			if matchesAgent(agents[i], id, groveID) {
-				if agents[i].GrovePath != "" {
-					opts.GrovePath = agents[i].GrovePath
+				if agents[i].ProjectPath != "" {
+					opts.ProjectPath = agents[i].ProjectPath
 				}
 				break
 			}
@@ -1012,18 +1018,18 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 	}
 
 	// Apply updated InlineConfig to scion-agent.json before starting.
-	if startReq.InlineConfig != nil && opts.GrovePath != "" {
-		s.applyInlineConfigUpdate(id, opts.GrovePath, startReq.InlineConfig, startReq.SharedWorkspace)
+	if startReq.InlineConfig != nil && opts.ProjectPath != "" {
+		s.applyInlineConfigUpdate(id, opts.ProjectPath, startReq.InlineConfig, startReq.SharedWorkspace)
 	}
 
 	// Resolve saved profile for runtime selection
-	if opts.GrovePath != "" {
-		opts.Profile = agent.GetSavedProfile(id, opts.GrovePath)
+	if opts.ProjectPath != "" {
+		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
 	}
 
 	// If the agent was suspended, resume with harness session preservation.
-	if opts.GrovePath != "" {
-		savedPhase := agent.GetSavedPhase(id, opts.GrovePath)
+	if opts.ProjectPath != "" {
+		savedPhase := agent.GetSavedPhase(id, opts.ProjectPath)
 		if savedPhase == string(state.PhaseSuspended) {
 			opts.Resume = true
 		}
@@ -1040,7 +1046,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 	}
 
 	s.agentLifecycleLog.Info("Agent started",
-		"agent_id", id, "grove_id", agentInfo.GroveID,
+		"agent_id", id, "grove_id", agentInfo.ProjectID,
 		"name", agentInfo.Name, "slug", agentInfo.Slug,
 		"phase", string(state.PhaseRunning),
 		"container_status", agentInfo.ContainerStatus)
@@ -1060,7 +1066,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 // set in the web configure form) are applied before the agent starts.
 //
 // sharedWorkspace branches the path: shared-workspace agents store
-// scion-agent.json externally (~/.scion/grove-configs/<slug>__<uuid>/.scion/
+// scion-agent.json externally (~/.scion.project-configs/<slug>__<uuid>/.scion/
 // agents/<name>/) so siblings cannot read it via /workspace.
 func (s *Server) applyInlineConfigUpdate(agentName, grovePath string, inlineConfig *api.ScionConfig, sharedWorkspace bool) {
 	projectDir, err := config.GetResolvedProjectDir(grovePath)
@@ -1165,7 +1171,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, groveI
 		for i := range agents {
 			if matchesAgent(agents[i], id, groveID) {
 				agentName = agents[i].Name
-				grovePath = agents[i].GrovePath
+				grovePath = agents[i].ProjectPath
 				break
 			}
 		}
@@ -1173,7 +1179,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, groveI
 
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:        agentName,
-		GrovePath:   grovePath,
+		ProjectPath:   grovePath,
 		ResolvedEnv: restartReq.ResolvedEnv,
 		HTTPRequest: r,
 	})
@@ -1183,8 +1189,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, groveI
 	}
 	opts := sc.Opts
 
-	if opts.GrovePath != "" {
-		opts.Profile = agent.GetSavedProfile(id, opts.GrovePath)
+	if opts.ProjectPath != "" {
+		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
 	}
 
 	// Stop then start — tolerate stop errors since the container may already
@@ -1214,7 +1220,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, groveI
 	}
 
 	s.agentLifecycleLog.Info("Agent restarted",
-		"agent_id", id, "grove_id", agentInfo.GroveID,
+		"agent_id", id, "grove_id", agentInfo.ProjectID,
 		"name", agentInfo.Name, "slug", agentInfo.Slug,
 		"phase", string(state.PhaseRunning),
 		"container_status", agentInfo.ContainerStatus)
@@ -1284,8 +1290,8 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, groveID
 		logMsg = "message delivered (interrupt, unbuffered)"
 	}
 	logAttrs := []any{"agent_id", id}
-	if req.GroveID != "" {
-		logAttrs = append(logAttrs, "grove_id", req.GroveID)
+	if req.ProjectID != "" {
+		logAttrs = append(logAttrs, "grove_id", req.ProjectID)
 	}
 	if req.StructuredMessage != nil {
 		logAttrs = append(logAttrs, req.StructuredMessage.LogAttrs()...)
@@ -1366,13 +1372,13 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, groveID str
 		return
 	}
 
-	if found.GrovePath != "" {
+	if found.ProjectPath != "" {
 		agentSlug := found.Slug
 		if agentSlug == "" {
 			agentSlug = found.Name
 		}
 		agentLogPath := filepath.Join(config.GetAgentHomePath(
-			found.GrovePath, agentSlug,
+			found.ProjectPath, agentSlug,
 		), "agent.log")
 		if data, err := os.ReadFile(agentLogPath); err == nil {
 			w.Header().Set("Content-Type", "text/plain")
@@ -1437,7 +1443,7 @@ func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, gr
 		return
 	}
 
-	if agent.GrovePath == "" {
+	if agent.ProjectPath == "" {
 		// No grove path means we can't check prompt.md
 		writeJSON(w, http.StatusOK, HasPromptResponse{HasPrompt: false})
 		return
@@ -1446,9 +1452,9 @@ func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, gr
 	// Check if prompt.md exists and has content. The mode (worktree vs
 	// shared-workspace) isn't carried on the request, so probe both
 	// locations via ResolveAgentDir.
-	projectDir, _ := config.GetResolvedProjectDir(agent.GrovePath)
+	projectDir, _ := config.GetResolvedProjectDir(agent.ProjectPath)
 	if projectDir == "" {
-		projectDir = agent.GrovePath
+		projectDir = agent.ProjectPath
 	}
 	promptPath := filepath.Join(config.ResolveAgentDir(projectDir, agent.Name), "prompt.md")
 	content, err := os.ReadFile(promptPath)
@@ -1483,7 +1489,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 	required := make(map[string]struct{})
 
 	var settings *config.VersionedSettings
-	settingsPath := req.GrovePath
+	settingsPath := req.ProjectPath
 	if settingsPath == "" {
 		// Fall back to the broker's global .scion directory for settings
 		// resolution. This matches what agent.Start → GetResolvedProjectDir("")
@@ -1533,7 +1539,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 		s.envSecretLog.Debug("extractRequiredEnvKeys: harness resolution",
 			"harnessConfigName", harnessConfigName,
 			"hasSettings", settings != nil,
-			"grovePath", req.GrovePath,
+			"grovePath", req.ProjectPath,
 		)
 	}
 	if harnessConfigName != "" {
@@ -1546,7 +1552,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 
 		// Try on-disk harness-config directory first (check grovePath,
 		// then fall back to global dir for hub-dispatched agents without a local grove)
-		harnessConfigSearchPath := req.GrovePath
+		harnessConfigSearchPath := req.ProjectPath
 		if harnessConfigSearchPath == "" {
 			harnessConfigSearchPath = settingsPath
 		}
@@ -1587,8 +1593,8 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 		}
 
 		// Template-level auth_selectedType takes high precedence
-		if req.Config != nil && req.Config.Template != "" && req.GrovePath != "" {
-			if tmpl, err := config.FindTemplateInGrovePath(req.Config.Template, req.GrovePath); err == nil {
+		if req.Config != nil && req.Config.Template != "" && req.ProjectPath != "" {
+			if tmpl, err := config.FindTemplateInProjectPath(req.Config.Template, req.ProjectPath); err == nil {
 				if cfg, err := tmpl.LoadConfig(); err == nil && cfg != nil && cfg.AuthSelectedType != "" {
 					authType = cfg.AuthSelectedType
 				}
@@ -1836,8 +1842,8 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 		}
 	}
 	// Also try loading local template config
-	if req.Config != nil && req.Config.Template != "" && req.GrovePath != "" {
-		if tmpl, err := config.FindTemplateInGrovePath(req.Config.Template, req.GrovePath); err == nil {
+	if req.Config != nil && req.Config.Template != "" && req.ProjectPath != "" {
+		if tmpl, err := config.FindTemplateInProjectPath(req.Config.Template, req.ProjectPath); err == nil {
 			if cfg, err := tmpl.LoadConfig(); err == nil && cfg != nil {
 				for _, sec := range cfg.Secrets {
 					required[sec.Key] = struct{}{}
@@ -1874,8 +1880,8 @@ func (s *Server) resolveHarnessConfigForEnvGather(req CreateAgentRequest, settin
 	}
 	if cliFlag == "" && req.Config != nil && req.Config.Template != "" {
 		tpl := req.Config.Template
-		if req.GrovePath != "" {
-			if _, err := config.FindHarnessConfigDir(tpl, req.GrovePath); err == nil {
+		if req.ProjectPath != "" {
+			if _, err := config.FindHarnessConfigDir(tpl, req.ProjectPath); err == nil {
 				cliFlag = tpl
 			}
 		}
@@ -1953,9 +1959,9 @@ func (s *Server) finalizeEnv(w http.ResponseWriter, r *http.Request, id string) 
 		Name:            origReq.Name,
 		AgentID:         origReq.ID,
 		Slug:            origReq.Slug,
-		GrovePath:       origReq.GrovePath,
-		GroveSlug:       origReq.GroveSlug,
-		GroveID:         origReq.GroveID,
+		ProjectPath:       origReq.ProjectPath,
+		ProjectSlug:       origReq.ProjectSlug,
+		ProjectID:         origReq.ProjectID,
 		Config:          origReq.Config,
 		InlineConfig:    origReq.InlineConfig,
 		SharedDirs:      origReq.SharedDirs,
@@ -1976,7 +1982,7 @@ func (s *Server) finalizeEnv(w http.ResponseWriter, r *http.Request, id string) 
 	if s.config.Debug {
 		s.envSecretLog.Debug("Finalize-env: StartOptions built from pending request",
 			"name", opts.Name,
-			"grovePath", opts.GrovePath,
+			"grovePath", opts.ProjectPath,
 			"template", opts.Template,
 			"image", opts.Image,
 			"profile", opts.Profile,
@@ -2005,7 +2011,7 @@ func (s *Server) finalizeEnv(w http.ResponseWriter, r *http.Request, id string) 
 	s.pendingEnvGatherMu.Unlock()
 
 	s.agentLifecycleLog.Info("Agent created (finalize-env)",
-		"agent_id", origReq.ID, "grove_id", origReq.GroveID,
+		"agent_id", origReq.ID, "grove_id", origReq.ProjectID,
 		"name", origReq.Name, "slug", origReq.Slug,
 		"phase", string(state.PhaseRunning),
 		"container_status", agentInfo.ContainerStatus)
@@ -2028,7 +2034,7 @@ func (s *Server) resolveManagerForAgent(ctx context.Context, id, groveID string)
 	slug := strings.ToLower(id)
 	filter := map[string]string{"scion.name": slug}
 	if groveID != "" {
-		filter["scion.grove_id"] = groveID
+		filter["scion.project_id"] = groveID
 	}
 
 	// Try the default manager first
@@ -2083,7 +2089,7 @@ func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, groveID string)
 	slug := strings.ToLower(id)
 	filter := map[string]string{"scion.name": slug}
 	if groveID != "" {
-		filter["scion.grove_id"] = groveID
+		filter["scion.project_id"] = groveID
 	}
 
 	// Try the default manager first
@@ -2150,7 +2156,7 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) agent.Manager {
 
 	// Load settings to check if the profile/active-profile specifies a
 	// different runtime than the broker's auto-detected default.
-	projectDir, _ := config.GetResolvedProjectDir(opts.GrovePath)
+	projectDir, _ := config.GetResolvedProjectDir(opts.ProjectPath)
 	vs, _, _ := config.LoadEffectiveSettings(projectDir)
 	if vs == nil {
 		return s.manager
@@ -2174,7 +2180,7 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) agent.Manager {
 	// Use opts.Profile for ResolveRuntime so it picks up the same profile
 	// that was just checked. When empty, GetRuntime falls back to settings
 	// the same way ResolveRuntime does.
-	resolved := agent.ResolveRuntime(opts.GrovePath, opts.Name, opts.Profile)
+	resolved := agent.ResolveRuntime(opts.ProjectPath, opts.Name, opts.Profile)
 
 	if s.config.Debug {
 		s.agentLifecycleLog.Debug("Settings resolved to different runtime",
@@ -2198,11 +2204,11 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) agent.Manager {
 
 // Helper functions
 
-// resolveGroveSettingsDir returns the directory containing settings.yaml for a grove.
+// resolveProjectSettingsDir returns the directory containing settings.yaml for a grove.
 // For linked groves, grovePath already points to the .scion directory.
 // For hub-native groves, grovePath is the workspace parent, so settings
 // live in the .scion subdirectory.
-func resolveGroveSettingsDir(grovePath string) string {
+func resolveProjectSettingsDir(grovePath string) string {
 	if config.GetSettingsPath(grovePath) != "" {
 		return grovePath
 	}
@@ -2239,12 +2245,12 @@ func agentInfoPtr(a AgentResponse) *AgentResponse {
 }
 
 // ============================================================================
-// Grove Endpoints
+// Project Endpoints
 // ============================================================================
 
-// handleGroveBySlug routes requests to /api/v1/groves/{slug}.
-func (s *Server) handleGroveBySlug(w http.ResponseWriter, r *http.Request) {
-	slug := extractID(r, "/api/v1/groves")
+// handleProjectBySlug routes requests to /api/v1/projects/{slug}.
+func (s *Server) handleProjectBySlug(w http.ResponseWriter, r *http.Request) {
+	slug := extractID(r, "/api/v1/projects")
 	if slug == "" {
 		NotFound(w, "grove")
 		return
@@ -2252,26 +2258,26 @@ func (s *Server) handleGroveBySlug(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodDelete:
-		s.deleteGrove(w, r, slug)
+		s.deleteProject(w, r, slug)
 	default:
 		MethodNotAllowed(w)
 	}
 }
 
-// deleteGrove removes the local hub-native grove directory for the given slug.
+// deleteProject removes the local hub-native grove directory for the given slug.
 // Returns 204 on success (including when the directory doesn't exist).
-func (s *Server) deleteGrove(w http.ResponseWriter, r *http.Request, slug string) {
+func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug string) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		RuntimeError(w, "Failed to get global dir: "+err.Error())
 		return
 	}
 
-	grovePath := filepath.Join(globalDir, "groves", slug)
+	grovePath := filepath.Join(globalDir, "projects", slug)
 
 	// Path traversal protection: ensure the resolved path stays inside the groves directory.
-	grovesBase := filepath.Join(globalDir, "groves")
-	absGrove, err := filepath.Abs(grovePath)
+	grovesBase := filepath.Join(globalDir, "projects")
+	absProject, err := filepath.Abs(grovePath)
 	if err != nil {
 		RuntimeError(w, "Failed to resolve grove path: "+err.Error())
 		return
@@ -2281,8 +2287,8 @@ func (s *Server) deleteGrove(w http.ResponseWriter, r *http.Request, slug string
 		RuntimeError(w, "Failed to resolve groves base path: "+err.Error())
 		return
 	}
-	if !strings.HasPrefix(absGrove, absBase+string(filepath.Separator)) {
-		s.agentLifecycleLog.Warn("grove cleanup path traversal blocked", "slug", slug, "resolved", absGrove)
+	if !strings.HasPrefix(absProject, absBase+string(filepath.Separator)) {
+		s.agentLifecycleLog.Warn("grove cleanup path traversal blocked", "slug", slug, "resolved", absProject)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -2303,21 +2309,21 @@ func (s *Server) deleteGrove(w http.ResponseWriter, r *http.Request, slug string
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// findAgentInHubNativeGroves scans hub-native grove directories
-// (~/.scion/groves/<slug>/.scion/) for an agent directory matching the given
-// name. Returns the .scion project dir path if found, or empty string.
+// findAgentInHubNativeProjects scans hub-native grove directories
+// (~/.scion.groves/<slug>/.scion/) for an agent directory matching the given
+// name. Returns the .scion.grove dir path if found, or empty string.
 // This is used as a fallback when the container is missing and the agent's
 // grove path can't be determined from container labels.
 //
 // Probes both the in-grove location (worktree-mode agents) and the external
-// per-agent state dir under ~/.scion/grove-configs/ (shared-workspace agents,
+// per-agent state dir under ~/.scion.project-configs/ (shared-workspace agents,
 // whose state lives external to the shared checkout).
-func findAgentInHubNativeGroves(agentName string) string {
+func findAgentInHubNativeProjects(agentName string) string {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		return ""
 	}
-	grovesDir := filepath.Join(globalDir, "groves")
+	grovesDir := filepath.Join(globalDir, "projects")
 	entries, err := os.ReadDir(grovesDir)
 	if err != nil {
 		return ""
@@ -2333,7 +2339,7 @@ func findAgentInHubNativeGroves(agentName string) string {
 		}
 		// Shared-workspace agents have no in-grove agentDir — probe the
 		// external split-storage path.
-		if extDir, err := config.GetGitGroveExternalAgentsDir(scionDir); err == nil && extDir != "" {
+		if extDir, err := config.GetGitProjectExternalAgentsDir(scionDir); err == nil && extDir != "" {
 			if _, err := os.Stat(filepath.Join(extDir, agentName)); err == nil {
 				return scionDir
 			}

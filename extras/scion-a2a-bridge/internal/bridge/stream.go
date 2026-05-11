@@ -171,8 +171,8 @@ func (sm *StreamManager) CloseAll(taskID string) {
 
 // SendStreamingMessage creates a task, sends the message to the agent, and
 // returns a channel that will receive SSE events as the agent processes the request.
-func (b *Bridge) SendStreamingMessage(ctx context.Context, groveSlug, agentSlug, contextID string, parts []Part) (string, <-chan StreamEvent, func(), error) {
-	agentCtx, err := b.resolveContext(ctx, groveSlug, agentSlug, contextID)
+func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlug, contextID string, parts []Part) (string, <-chan StreamEvent, func(), error) {
+	agentCtx, err := b.resolveContext(ctx, projectSlug, agentSlug, contextID)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("resolve context: %w", err)
 	}
@@ -182,7 +182,7 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, groveSlug, agentSlug,
 	task := &state.Task{
 		ID:        taskID,
 		ContextID: agentCtx.ContextID,
-		GroveID:   agentCtx.GroveID,
+		ProjectID:   agentCtx.ProjectID,
 		AgentSlug: agentCtx.AgentSlug,
 		AgentID:   agentCtx.AgentID,
 		State:     TaskStateSubmitted,
@@ -194,10 +194,10 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, groveSlug, agentSlug,
 		return "", nil, nil, fmt.Errorf("create task: %w", err)
 	}
 	if b.metrics != nil {
-		b.metrics.TasksCreated.WithLabelValues(agentCtx.GroveID).Inc()
+		b.metrics.TasksCreated.WithLabelValues(agentCtx.ProjectID).Inc()
 	}
 
-	aKey := agentKey(agentCtx.GroveID, agentCtx.AgentSlug)
+	aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
 	b.registerActiveTask(taskID, aKey)
 
 	events, cleanup, err := b.streams.Subscribe(taskID)
@@ -220,7 +220,7 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, groveSlug, agentSlug,
 	scionMsg.Metadata = map[string]string{"a2aTaskId": taskID}
 
 	if b.broker != nil {
-		pattern := fmt.Sprintf("scion.grove.%s.user.%s.messages", agentCtx.GroveID, b.config.Hub.User)
+		pattern := fmt.Sprintf("scion.project.%s.user.%s.messages", agentCtx.ProjectID, b.config.Hub.User)
 		if err := b.broker.RequestSubscription(pattern); err != nil {
 			b.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
 		}

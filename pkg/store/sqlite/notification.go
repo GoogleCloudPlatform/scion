@@ -32,7 +32,7 @@ import (
 
 // CreateNotificationSubscription creates a new notification subscription.
 func (s *SQLiteStore) CreateNotificationSubscription(ctx context.Context, sub *store.NotificationSubscription) error {
-	if sub.ID == "" || sub.SubscriberID == "" || sub.GroveID == "" {
+	if sub.ID == "" || sub.SubscriberID == "" || sub.ProjectID == "" {
 		return store.ErrInvalidInput
 	}
 
@@ -47,8 +47,8 @@ func (s *SQLiteStore) CreateNotificationSubscription(ctx context.Context, sub *s
 		if sub.AgentID == "" {
 			return store.ErrInvalidInput
 		}
-	case store.SubscriptionScopeGrove:
-		sub.AgentID = "" // Ensure no agent_id for grove-scoped
+	case store.SubscriptionScopeProject:
+		sub.AgentID = "" // Ensure no agent_id for project-scoped
 	default:
 		return fmt.Errorf("invalid scope %q: %w", sub.Scope, store.ErrInvalidInput)
 	}
@@ -60,11 +60,11 @@ func (s *SQLiteStore) CreateNotificationSubscription(ctx context.Context, sub *s
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO notification_subscriptions (
-			id, scope, agent_id, subscriber_type, subscriber_id, grove_id,
+			id, scope, agent_id, subscriber_type, subscriber_id, project_id,
 			trigger_activities, created_at, created_by
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		sub.ID, sub.Scope, nullableString(sub.AgentID), sub.SubscriberType, sub.SubscriberID, sub.GroveID,
+		sub.ID, sub.Scope, nullableString(sub.AgentID), sub.SubscriberType, sub.SubscriberID, sub.ProjectID,
 		marshalJSON(sub.TriggerActivities), sub.CreatedAt, sub.CreatedBy,
 	)
 	if err != nil {
@@ -82,7 +82,7 @@ func (s *SQLiteStore) CreateNotificationSubscription(ctx context.Context, sub *s
 // GetNotificationSubscription returns a single subscription by ID.
 func (s *SQLiteStore) GetNotificationSubscription(ctx context.Context, id string) (*store.NotificationSubscription, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, scope, agent_id, subscriber_type, subscriber_id, grove_id,
+		SELECT id, scope, agent_id, subscriber_type, subscriber_id, project_id,
 			trigger_activities, created_at, created_by
 		FROM notification_subscriptions
 		WHERE id = ?
@@ -93,7 +93,7 @@ func (s *SQLiteStore) GetNotificationSubscription(ctx context.Context, id string
 	var triggerActivitiesJSON string
 
 	if err := row.Scan(
-		&sub.ID, &sub.Scope, &agentID, &sub.SubscriberType, &sub.SubscriberID, &sub.GroveID,
+		&sub.ID, &sub.Scope, &agentID, &sub.SubscriberType, &sub.SubscriberID, &sub.ProjectID,
 		&triggerActivitiesJSON, &sub.CreatedAt, &sub.CreatedBy,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -112,7 +112,7 @@ func (s *SQLiteStore) GetNotificationSubscription(ctx context.Context, id string
 // GetNotificationSubscriptions returns all agent-scoped subscriptions for a watched agent.
 func (s *SQLiteStore) GetNotificationSubscriptions(ctx context.Context, agentID string) ([]store.NotificationSubscription, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, scope, agent_id, subscriber_type, subscriber_id, grove_id,
+		SELECT id, scope, agent_id, subscriber_type, subscriber_id, project_id,
 			trigger_activities, created_at, created_by
 		FROM notification_subscriptions
 		WHERE agent_id = ?
@@ -126,15 +126,15 @@ func (s *SQLiteStore) GetNotificationSubscriptions(ctx context.Context, agentID 
 	return scanSubscriptions(rows)
 }
 
-// GetNotificationSubscriptionsByGrove returns all subscriptions within a grove (any scope).
-func (s *SQLiteStore) GetNotificationSubscriptionsByGrove(ctx context.Context, groveID string) ([]store.NotificationSubscription, error) {
+// GetNotificationSubscriptionsByProject returns all subscriptions within a project (any scope).
+func (s *SQLiteStore) GetNotificationSubscriptionsByProject(ctx context.Context, projectID string) ([]store.NotificationSubscription, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, scope, agent_id, subscriber_type, subscriber_id, grove_id,
+		SELECT id, scope, agent_id, subscriber_type, subscriber_id, project_id,
 			trigger_activities, created_at, created_by
 		FROM notification_subscriptions
-		WHERE grove_id = ?
+		WHERE project_id = ?
 		ORDER BY created_at ASC
-	`, groveID)
+	`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -143,16 +143,16 @@ func (s *SQLiteStore) GetNotificationSubscriptionsByGrove(ctx context.Context, g
 	return scanSubscriptions(rows)
 }
 
-// GetNotificationSubscriptionsByGroveScope returns grove-scoped subscriptions
-// (scope='grove') for a given grove.
-func (s *SQLiteStore) GetNotificationSubscriptionsByGroveScope(ctx context.Context, groveID string) ([]store.NotificationSubscription, error) {
+// GetNotificationSubscriptionsByProjectScope returns project-scoped subscriptions
+// (scope='project') for a given project.
+func (s *SQLiteStore) GetNotificationSubscriptionsByProjectScope(ctx context.Context, projectID string) ([]store.NotificationSubscription, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, scope, agent_id, subscriber_type, subscriber_id, grove_id,
+		SELECT id, scope, agent_id, subscriber_type, subscriber_id, project_id,
 			trigger_activities, created_at, created_by
 		FROM notification_subscriptions
-		WHERE grove_id = ? AND scope = 'grove'
+		WHERE project_id = ? AND scope = 'project'
 		ORDER BY created_at ASC
-	`, groveID)
+	`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +164,7 @@ func (s *SQLiteStore) GetNotificationSubscriptionsByGroveScope(ctx context.Conte
 // GetSubscriptionsForSubscriber returns all subscriptions owned by a subscriber.
 func (s *SQLiteStore) GetSubscriptionsForSubscriber(ctx context.Context, subscriberType, subscriberID string) ([]store.NotificationSubscription, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, scope, agent_id, subscriber_type, subscriber_id, grove_id,
+		SELECT id, scope, agent_id, subscriber_type, subscriber_id, project_id,
 			trigger_activities, created_at, created_by
 		FROM notification_subscriptions
 		WHERE subscriber_type = ? AND subscriber_id = ?
@@ -246,12 +246,12 @@ func (s *SQLiteStore) CreateNotification(ctx context.Context, notif *store.Notif
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO notifications (
-			id, subscription_id, agent_id, grove_id,
+			id, subscription_id, agent_id, project_id,
 			subscriber_type, subscriber_id,
 			status, message, dispatched, acknowledged, created_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		notif.ID, notif.SubscriptionID, notif.AgentID, notif.GroveID,
+		notif.ID, notif.SubscriptionID, notif.AgentID, notif.ProjectID,
 		notif.SubscriberType, notif.SubscriberID,
 		notif.Status, notif.Message,
 		boolToInt(notif.Dispatched), boolToInt(notif.Acknowledged),
@@ -271,7 +271,7 @@ func (s *SQLiteStore) CreateNotification(ctx context.Context, notif *store.Notif
 // Results are ordered by created_at DESC.
 func (s *SQLiteStore) GetNotifications(ctx context.Context, subscriberType, subscriberID string, onlyUnacknowledged bool) ([]store.Notification, error) {
 	query := `
-		SELECT id, subscription_id, agent_id, grove_id,
+		SELECT id, subscription_id, agent_id, project_id,
 			subscriber_type, subscriber_id,
 			status, message, dispatched, acknowledged, created_at
 		FROM notifications
@@ -299,7 +299,7 @@ func (s *SQLiteStore) GetNotifications(ctx context.Context, subscriberType, subs
 // Results are ordered by created_at DESC.
 func (s *SQLiteStore) GetNotificationsByAgent(ctx context.Context, agentID, subscriberType, subscriberID string, onlyUnacknowledged bool) ([]store.Notification, error) {
 	query := `
-		SELECT id, subscription_id, agent_id, grove_id,
+		SELECT id, subscription_id, agent_id, project_id,
 			subscriber_type, subscriber_id,
 			status, message, dispatched, acknowledged, created_at
 		FROM notifications
@@ -400,9 +400,9 @@ func (s *SQLiteStore) CreateSubscriptionTemplate(ctx context.Context, tmpl *stor
 	}
 
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO subscription_templates (id, name, scope, trigger_activities, grove_id, created_by)
+		INSERT INTO subscription_templates (id, name, scope, trigger_activities, project_id, created_by)
 		VALUES (?, ?, ?, ?, ?, ?)
-	`, tmpl.ID, tmpl.Name, tmpl.Scope, marshalJSON(tmpl.TriggerActivities), tmpl.GroveID, tmpl.CreatedBy)
+	`, tmpl.ID, tmpl.Name, tmpl.Scope, marshalJSON(tmpl.TriggerActivities), tmpl.ProjectID, tmpl.CreatedBy)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return store.ErrAlreadyExists
@@ -415,13 +415,13 @@ func (s *SQLiteStore) CreateSubscriptionTemplate(ctx context.Context, tmpl *stor
 // GetSubscriptionTemplate returns a template by ID.
 func (s *SQLiteStore) GetSubscriptionTemplate(ctx context.Context, id string) (*store.SubscriptionTemplate, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, name, scope, trigger_activities, grove_id, created_by
+		SELECT id, name, scope, trigger_activities, project_id, created_by
 		FROM subscription_templates WHERE id = ?
 	`, id)
 
 	var tmpl store.SubscriptionTemplate
 	var triggersJSON string
-	if err := row.Scan(&tmpl.ID, &tmpl.Name, &tmpl.Scope, &triggersJSON, &tmpl.GroveID, &tmpl.CreatedBy); err != nil {
+	if err := row.Scan(&tmpl.ID, &tmpl.Name, &tmpl.Scope, &triggersJSON, &tmpl.ProjectID, &tmpl.CreatedBy); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, store.ErrNotFound
 		}
@@ -431,24 +431,24 @@ func (s *SQLiteStore) GetSubscriptionTemplate(ctx context.Context, id string) (*
 	return &tmpl, nil
 }
 
-// ListSubscriptionTemplates returns all templates. If groveID is non-empty,
-// returns both global templates and grove-specific templates.
-func (s *SQLiteStore) ListSubscriptionTemplates(ctx context.Context, groveID string) ([]store.SubscriptionTemplate, error) {
+// ListSubscriptionTemplates returns all templates. If projectID is non-empty,
+// returns both global templates and project-specific templates.
+func (s *SQLiteStore) ListSubscriptionTemplates(ctx context.Context, projectID string) ([]store.SubscriptionTemplate, error) {
 	var rows *sql.Rows
 	var err error
 
-	if groveID != "" {
+	if projectID != "" {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT id, name, scope, trigger_activities, grove_id, created_by
+			SELECT id, name, scope, trigger_activities, project_id, created_by
 			FROM subscription_templates
-			WHERE grove_id = '' OR grove_id = ?
-			ORDER BY grove_id ASC, name ASC
-		`, groveID)
+			WHERE project_id = '' OR project_id = ?
+			ORDER BY project_id ASC, name ASC
+		`, projectID)
 	} else {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT id, name, scope, trigger_activities, grove_id, created_by
+			SELECT id, name, scope, trigger_activities, project_id, created_by
 			FROM subscription_templates
-			WHERE grove_id = ''
+			WHERE project_id = ''
 			ORDER BY name ASC
 		`)
 	}
@@ -461,7 +461,7 @@ func (s *SQLiteStore) ListSubscriptionTemplates(ctx context.Context, groveID str
 	for rows.Next() {
 		var tmpl store.SubscriptionTemplate
 		var triggersJSON string
-		if err := rows.Scan(&tmpl.ID, &tmpl.Name, &tmpl.Scope, &triggersJSON, &tmpl.GroveID, &tmpl.CreatedBy); err != nil {
+		if err := rows.Scan(&tmpl.ID, &tmpl.Name, &tmpl.Scope, &triggersJSON, &tmpl.ProjectID, &tmpl.CreatedBy); err != nil {
 			return nil, err
 		}
 		unmarshalJSON(triggersJSON, &tmpl.TriggerActivities)
@@ -509,7 +509,7 @@ func scanSubscriptions(rows *sql.Rows) ([]store.NotificationSubscription, error)
 		var triggerActivitiesJSON string
 
 		if err := rows.Scan(
-			&sub.ID, &sub.Scope, &agentID, &sub.SubscriberType, &sub.SubscriberID, &sub.GroveID,
+			&sub.ID, &sub.Scope, &agentID, &sub.SubscriberType, &sub.SubscriberID, &sub.ProjectID,
 			&triggerActivitiesJSON, &sub.CreatedAt, &sub.CreatedBy,
 		); err != nil {
 			return nil, err
@@ -535,7 +535,7 @@ func scanNotifications(rows *sql.Rows) ([]store.Notification, error) {
 		var dispatched, acknowledged int
 
 		if err := rows.Scan(
-			&notif.ID, &notif.SubscriptionID, &notif.AgentID, &notif.GroveID,
+			&notif.ID, &notif.SubscriptionID, &notif.AgentID, &notif.ProjectID,
 			&notif.SubscriberType, &notif.SubscriberID,
 			&notif.Status, &notif.Message, &dispatched, &acknowledged, &notif.CreatedAt,
 		); err != nil {

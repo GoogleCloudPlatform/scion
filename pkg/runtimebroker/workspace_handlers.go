@@ -297,7 +297,7 @@ func (s *Server) getAgentWorkspacePath(ctx context.Context, agentID string) (str
 	for _, agent := range agents {
 		if agent.Name == agentID || agent.ContainerID == agentID || agent.Slug == agentID || strings.EqualFold(agent.Name, agentID) {
 			containerID = agent.ContainerID
-			grovePath = agent.GrovePath
+			grovePath = agent.ProjectPath
 			agentName = agent.Name
 			break
 		}
@@ -442,19 +442,19 @@ func (s *Server) countWorkspaceFiles(workspacePath string) (int, int64) {
 }
 
 // ============================================================================
-// Grove-Level Workspace Upload (Phase 3: Linked Grove Relay)
+// Project-Level Workspace Upload (Phase 3: Linked Project Relay)
 // ============================================================================
 
-// GroveWorkspaceUploadRequest is the request body for uploading a grove's
+// ProjectWorkspaceUploadRequest is the request body for uploading a project's
 // workspace (not an individual agent's workspace) to GCS.
-// This is used by the hub to populate its cached copy of a linked grove.
-type GroveWorkspaceUploadRequest struct {
-	// GroveID is the grove identifier.
-	GroveID string `json:"groveId"`
+// This is used by the hub to populate its cached copy of a linked project.
+type ProjectWorkspaceUploadRequest struct {
+	// ProjectID is the project identifier.
+	ProjectID string `json:"projectId"`
 	// StoragePath is the path within the bucket where files should be uploaded.
 	StoragePath string `json:"storagePath"`
-	// WorkspacePath is the local filesystem path to the grove workspace on this broker.
-	// Provided by the hub from the GroveProvider.LocalPath.
+	// WorkspacePath is the local filesystem path to the project workspace on this broker.
+	// Provided by the hub from the ProjectProvider.LocalPath.
 	WorkspacePath string `json:"workspacePath"`
 	// Bucket is the GCS bucket name for storage.
 	Bucket string `json:"bucket,omitempty"`
@@ -462,8 +462,38 @@ type GroveWorkspaceUploadRequest struct {
 	ExcludePatterns []string `json:"excludePatterns,omitempty"`
 }
 
-// GroveWorkspaceUploadResponse is the response after uploading a grove workspace.
-type GroveWorkspaceUploadResponse struct {
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (r *ProjectWorkspaceUploadRequest) UnmarshalJSON(data []byte) error {
+	type Alias ProjectWorkspaceUploadRequest
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (r ProjectWorkspaceUploadRequest) MarshalJSON() ([]byte, error) {
+	type Alias ProjectWorkspaceUploadRequest
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(r),
+		GroveID: r.ProjectID,
+	})
+}
+
+// ProjectWorkspaceUploadResponse is the response after uploading a project workspace.
+type ProjectWorkspaceUploadResponse struct {
 	// Manifest contains the list of files uploaded with their hashes.
 	Manifest *transfer.Manifest `json:"manifest"`
 	// UploadedFiles is the number of files uploaded.
@@ -472,9 +502,9 @@ type GroveWorkspaceUploadResponse struct {
 	UploadedBytes int64 `json:"uploadedBytes"`
 }
 
-// handleGroveWorkspaceUpload handles POST /api/v1/workspace/grove-upload
-// It uploads the grove's workspace directory to GCS so the hub can cache it.
-func (s *Server) handleGroveWorkspaceUpload(w http.ResponseWriter, r *http.Request) {
+// handleProjectWorkspaceUpload handles POST /api/v1/workspace/project-upload (and legacy grove-upload)
+// It uploads the project's workspace directory to GCS so the hub can cache it.
+func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
 		return
@@ -482,15 +512,15 @@ func (s *Server) handleGroveWorkspaceUpload(w http.ResponseWriter, r *http.Reque
 
 	ctx := r.Context()
 
-	var req GroveWorkspaceUploadRequest
+	var req ProjectWorkspaceUploadRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
 
 	// Validate required fields
-	if req.GroveID == "" {
-		ValidationError(w, "groveId is required", nil)
+	if req.ProjectID == "" {
+		ValidationError(w, "projectId is required", nil)
 		return
 	}
 	if req.StoragePath == "" {
@@ -515,7 +545,7 @@ func (s *Server) handleGroveWorkspaceUpload(w http.ResponseWriter, r *http.Reque
 	// Verify workspace path exists
 	if _, err := os.Stat(req.WorkspacePath); err != nil {
 		if os.IsNotExist(err) {
-			NotFound(w, "Grove workspace path")
+			NotFound(w, "Project workspace path")
 			return
 		}
 		RuntimeError(w, "Failed to access workspace path: "+err.Error())
@@ -523,8 +553,8 @@ func (s *Server) handleGroveWorkspaceUpload(w http.ResponseWriter, r *http.Reque
 	}
 
 	if s.config.Debug {
-		slog.Debug("Grove workspace upload requested",
-			"groveId", req.GroveID,
+		slog.Debug("Project workspace upload requested",
+			"groveId", req.ProjectID,
 			"bucket", bucket,
 			"storagePath", req.StoragePath,
 			"workspacePath", req.WorkspacePath,
@@ -557,15 +587,15 @@ func (s *Server) handleGroveWorkspaceUpload(w http.ResponseWriter, r *http.Reque
 		totalBytes += f.Size
 	}
 
-	resp := GroveWorkspaceUploadResponse{
+	resp := ProjectWorkspaceUploadResponse{
 		Manifest:      manifest,
 		UploadedFiles: len(manifest.Files),
 		UploadedBytes: totalBytes,
 	}
 
 	if s.config.Debug {
-		slog.Debug("Grove workspace upload complete",
-			"groveId", req.GroveID,
+		slog.Debug("Project workspace upload complete",
+			"groveId", req.ProjectID,
 			"files", resp.UploadedFiles,
 			"bytes", resp.UploadedBytes,
 		)

@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"net/url"
 	"strconv"
 	"time"
@@ -48,7 +49,7 @@ type messageService struct {
 type ListMessagesOptions struct {
 	OnlyUnread bool
 	AgentID    string
-	GroveID    string
+	ProjectID  string
 	Type       string
 	Limit      int
 	Cursor     string
@@ -63,7 +64,7 @@ type MessageListResult = store.ListResult[store.Message]
 // AgentMessage is a lightweight view of a message used in agent-scoped listings.
 type AgentMessage struct {
 	ID          string    `json:"id"`
-	GroveID     string    `json:"groveId"`
+	ProjectID   string    `json:"projectId"`
 	Sender      string    `json:"sender"`
 	SenderID    string    `json:"senderId"`
 	Recipient   string    `json:"recipient"`
@@ -77,6 +78,36 @@ type AgentMessage struct {
 	CreatedAt   time.Time `json:"createdAt"`
 }
 
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (m *AgentMessage) UnmarshalJSON(data []byte) error {
+	type Alias AgentMessage
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(m),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if m.ProjectID == "" && aux.GroveID != "" {
+		m.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (m AgentMessage) MarshalJSON() ([]byte, error) {
+	type Alias AgentMessage
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(m),
+		GroveID: m.ProjectID,
+	})
+}
+
 // List returns messages for the authenticated user.
 func (s *messageService) List(ctx context.Context, opts *ListMessagesOptions) (*store.ListResult[store.Message], error) {
 	query := url.Values{}
@@ -87,8 +118,8 @@ func (s *messageService) List(ctx context.Context, opts *ListMessagesOptions) (*
 		if opts.AgentID != "" {
 			query.Set("agent", opts.AgentID)
 		}
-		if opts.GroveID != "" {
-			query.Set("grove", opts.GroveID)
+		if opts.ProjectID != "" {
+			query.Set("grove", opts.ProjectID)
 		}
 		if opts.Type != "" {
 			query.Set("type", opts.Type)
@@ -101,7 +132,7 @@ func (s *messageService) List(ctx context.Context, opts *ListMessagesOptions) (*
 		}
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/messages", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/messages", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +151,7 @@ func (s *messageService) List(ctx context.Context, opts *ListMessagesOptions) (*
 
 // Get returns a single message by ID.
 func (s *messageService) Get(ctx context.Context, id string) (*store.Message, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/messages/"+url.PathEscape(id), nil)
+	resp, err := s.c.get(ctx, "/api/v1/messages/"+url.PathEscape(id), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +160,7 @@ func (s *messageService) Get(ctx context.Context, id string) (*store.Message, er
 
 // MarkRead marks a message as read.
 func (s *messageService) MarkRead(ctx context.Context, id string) error {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/messages/"+url.PathEscape(id)+"/read", nil, nil)
+	resp, err := s.c.post(ctx, "/api/v1/messages/"+url.PathEscape(id)+"/read", nil, nil)
 	if err != nil {
 		return err
 	}
@@ -138,7 +169,7 @@ func (s *messageService) MarkRead(ctx context.Context, id string) error {
 
 // MarkAllRead marks all messages as read.
 func (s *messageService) MarkAllRead(ctx context.Context) error {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/messages/read-all", nil, nil)
+	resp, err := s.c.post(ctx, "/api/v1/messages/read-all", nil, nil)
 	if err != nil {
 		return err
 	}

@@ -284,7 +284,7 @@ func addAttrToMap(m map[string]any, a slog.Attr) {
 // promoteAttrToLabels checks if a slog.Attr should be promoted to a GCP label.
 func promoteAttrToLabels(labels map[string]string, a slog.Attr) {
 	switch a.Key {
-	case AttrAgentID, AttrGroveID, AttrBrokerID:
+	case AttrAgentID, AttrProjectID, AttrBrokerID:
 		if v := a.Value.String(); v != "" {
 			labels[a.Key] = v
 		}

@@ -33,16 +33,16 @@ var (
 	notificationsAckAll  bool
 
 	subscribeAgent    string
-	subscribeGrove    string
+	subscribeProject  string
 	subscribeTriggers string
 
-	unsubscribeAll   bool
-	unsubscribeGrove string
+	unsubscribeAll     bool
+	unsubscribeProject string
 
 	updateTriggers string
 
-	subscriptionsGrove string
-	subscriptionsJSON  bool
+	subscriptionsProject string
+	subscriptionsJSON    bool
 )
 
 // Default trigger activities for subscriptions.
@@ -86,20 +86,20 @@ Examples:
 var notificationsSubscribeCmd = &cobra.Command{
 	Use:   "subscribe",
 	Short: "Create a notification subscription",
-	Long: `Subscribe to notifications for a specific agent or all agents in a grove.
+	Long: `Subscribe to notifications for a specific agent or all agents in a project.
 
 If --agent is provided, creates an agent-scoped subscription.
-If only --grove is provided, creates a grove-scoped subscription.
+If only --project is provided, creates a project-scoped subscription.
 
-The --grove flag can be omitted if the current directory is within a grove
+The --project flag can be omitted if the current directory is within a project
 that is linked to the Hub.
 
 Examples:
   # Subscribe to a specific agent
   scion notifications subscribe --agent my-agent
 
-  # Subscribe to all agents in a grove
-  scion notifications subscribe --grove my-project
+  # Subscribe to all agents in a project
+  scion notifications subscribe --project my-project
 
   # Subscribe with specific triggers
   scion notifications subscribe --agent my-agent --triggers COMPLETED,WAITING_FOR_INPUT`,
@@ -110,11 +110,11 @@ Examples:
 var notificationsUnsubscribeCmd = &cobra.Command{
 	Use:   "unsubscribe [subscription-id]",
 	Short: "Remove a notification subscription",
-	Long: `Remove a notification subscription by ID, or remove all subscriptions in a grove.
+	Long: `Remove a notification subscription by ID, or remove all subscriptions in a project.
 
 Examples:
   scion notifications unsubscribe a1b2c3d4
-  scion notifications unsubscribe --grove my-project --all`,
+  scion notifications unsubscribe --project my-project --all`,
 	RunE: runNotificationsUnsubscribe,
 }
 
@@ -139,7 +139,7 @@ var notificationsSubscriptionsCmd = &cobra.Command{
 
 Examples:
   scion notifications subscriptions
-  scion notifications subscriptions --grove my-project
+  scion notifications subscriptions --project my-project
   scion notifications subscriptions --json`,
 	RunE: runNotificationsSubscriptions,
 }
@@ -161,27 +161,36 @@ func init() {
 
 	// Subscribe flags
 	notificationsSubscribeCmd.Flags().StringVar(&subscribeAgent, "agent", "", "Agent name or ID to subscribe to")
-	notificationsSubscribeCmd.Flags().StringVar(&subscribeGrove, "grove", "", "Grove to subscribe in (inferred from context if omitted)")
+	notificationsSubscribeCmd.Flags().StringVar(&subscribeProject, "project", "", "Project to subscribe in (inferred from context if omitted)")
+	notificationsSubscribeCmd.Flags().StringVar(&subscribeProject, "grove", "", "Deprecated alias for --project")
+	_ = notificationsSubscribeCmd.Flags().MarkDeprecated("grove", "use --project instead")
+	_ = notificationsSubscribeCmd.Flags().MarkHidden("grove")
 	notificationsSubscribeCmd.Flags().StringVar(&subscribeTriggers, "triggers", "", "Comma-separated trigger activities (default: COMPLETED,WAITING_FOR_INPUT,LIMITS_EXCEEDED)")
 
 	// Unsubscribe flags
-	notificationsUnsubscribeCmd.Flags().BoolVar(&unsubscribeAll, "all", false, "Remove all subscriptions in the grove")
-	notificationsUnsubscribeCmd.Flags().StringVar(&unsubscribeGrove, "grove", "", "Grove to unsubscribe from (used with --all)")
+	notificationsUnsubscribeCmd.Flags().BoolVar(&unsubscribeAll, "all", false, "Remove all subscriptions in the project")
+	notificationsUnsubscribeCmd.Flags().StringVar(&unsubscribeProject, "project", "", "Project to unsubscribe from (used with --all)")
+	notificationsUnsubscribeCmd.Flags().StringVar(&unsubscribeProject, "grove", "", "Deprecated alias for --project")
+	_ = notificationsUnsubscribeCmd.Flags().MarkDeprecated("grove", "use --project instead")
+	_ = notificationsUnsubscribeCmd.Flags().MarkHidden("grove")
 
 	// Update flags
 	notificationsUpdateCmd.Flags().StringVar(&updateTriggers, "triggers", "", "Comma-separated trigger activities (required)")
 	notificationsUpdateCmd.MarkFlagRequired("triggers")
 
 	// Subscriptions list flags
-	notificationsSubscriptionsCmd.Flags().StringVar(&subscriptionsGrove, "grove", "", "Filter by grove")
+	notificationsSubscriptionsCmd.Flags().StringVar(&subscriptionsProject, "project", "", "Filter by project")
+	notificationsSubscriptionsCmd.Flags().StringVar(&subscriptionsProject, "grove", "", "Deprecated alias for --project")
+	_ = notificationsSubscriptionsCmd.Flags().MarkDeprecated("grove", "use --project instead")
+	_ = notificationsSubscriptionsCmd.Flags().MarkHidden("grove")
 	notificationsSubscriptionsCmd.Flags().BoolVar(&subscriptionsJSON, "json", false, "Output in JSON format")
 }
 
 // requireHubClient resolves settings and returns a hub client, or errors if hub is not enabled.
 func requireHubClient() (*config.Settings, hubclient.Client, error) {
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to resolve grove path: %w", err)
+		return nil, nil, fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -201,27 +210,27 @@ func requireHubClient() (*config.Settings, hubclient.Client, error) {
 	return settings, client, nil
 }
 
-// resolveGroveID resolves the grove ID from flag, settings, or current context.
-func resolveGroveID(settings *config.Settings, groveFlag string) (string, error) {
-	if groveFlag != "" {
-		return groveFlag, nil
+// resolveProjectID resolves the project ID from flag, settings, or current context.
+func resolveProjectID(settings *config.Settings, projectFlag string) (string, error) {
+	if projectFlag != "" {
+		return projectFlag, nil
 	}
 
-	// Try hub grove ID first, then local grove ID
-	groveID := settings.GetHubGroveID()
-	if groveID == "" {
-		groveID = settings.GroveID
+	// Try hub project ID first, then local project ID
+	projectID := settings.GetHubProjectID()
+	if projectID == "" {
+		projectID = settings.ProjectID
 	}
-	if groveID == "" {
-		return "", fmt.Errorf("cannot determine grove ID. Use --grove flag or link this grove with 'scion hub link'")
+	if projectID == "" {
+		return "", fmt.Errorf("cannot determine project ID. Use --project flag or link this project with 'scion hub link'")
 	}
-	return groveID, nil
+	return projectID, nil
 }
 
-// resolveAgentIDForSubscription looks up an agent by name/slug in the grove and returns its ID.
-func resolveAgentIDForSubscription(ctx context.Context, client hubclient.Client, groveID, agentRef string) (string, error) {
+// resolveAgentIDForSubscription looks up an agent by name/slug in the project and returns its ID.
+func resolveAgentIDForSubscription(ctx context.Context, client hubclient.Client, projectID, agentRef string) (string, error) {
 	slug := api.Slugify(agentRef)
-	resp, err := client.GroveAgents(groveID).List(ctx, nil)
+	resp, err := client.ProjectAgents(projectID).List(ctx, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to look up agents: %w", err)
 	}
@@ -231,7 +240,7 @@ func resolveAgentIDForSubscription(ctx context.Context, client hubclient.Client,
 			return agent.ID, nil
 		}
 	}
-	return "", fmt.Errorf("agent '%s' not found in grove", agentRef)
+	return "", fmt.Errorf("agent '%s' not found in project", agentRef)
 }
 
 func runNotificationsList(cmd *cobra.Command, args []string) error {
@@ -327,7 +336,7 @@ func runNotificationsSubscribe(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	groveID, err := resolveGroveID(settings, subscribeGrove)
+	projectID, err := resolveProjectID(settings, subscribeProject)
 	if err != nil {
 		return err
 	}
@@ -336,11 +345,11 @@ func runNotificationsSubscribe(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	// Determine scope
-	scope := store.SubscriptionScopeGrove
+	scope := store.SubscriptionScopeProject
 	var agentID string
 	if subscribeAgent != "" {
 		scope = store.SubscriptionScopeAgent
-		agentID, err = resolveAgentIDForSubscription(ctx, client, groveID, subscribeAgent)
+		agentID, err = resolveAgentIDForSubscription(ctx, client, projectID, subscribeAgent)
 		if err != nil {
 			return err
 		}
@@ -358,7 +367,7 @@ func runNotificationsSubscribe(cmd *cobra.Command, args []string) error {
 	req := &hubclient.CreateSubscriptionRequest{
 		Scope:             scope,
 		AgentID:           agentID,
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: triggers,
 	}
 
@@ -375,7 +384,7 @@ func runNotificationsSubscribe(cmd *cobra.Command, args []string) error {
 	if sub.Scope == store.SubscriptionScopeAgent {
 		target = subscribeAgent
 	}
-	fmt.Printf("Subscribed to %s in grove %s\n", target, groveID)
+	fmt.Printf("Subscribed to %s in project %s\n", target, projectID)
 	fmt.Printf("  ID:       %s\n", sub.ID)
 	fmt.Printf("  Scope:    %s\n", sub.Scope)
 	fmt.Printf("  Triggers: %s\n", strings.Join(sub.TriggerActivities, ", "))
@@ -424,7 +433,7 @@ func runNotificationsUnsubscribe(cmd *cobra.Command, args []string) error {
 	hasID := len(args) > 0
 
 	if !hasID && !unsubscribeAll {
-		return fmt.Errorf("provide a subscription ID or use --all with --grove to remove all subscriptions")
+		return fmt.Errorf("provide a subscription ID or use --all with --project to remove all subscriptions")
 	}
 	if hasID && unsubscribeAll {
 		return fmt.Errorf("provide either a subscription ID or --all, not both")
@@ -439,21 +448,21 @@ func runNotificationsUnsubscribe(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	if unsubscribeAll {
-		groveID, err := resolveGroveID(settings, unsubscribeGrove)
+		projectID, err := resolveProjectID(settings, unsubscribeProject)
 		if err != nil {
-			return fmt.Errorf("--grove is required with --all: %w", err)
+			return fmt.Errorf("--project is required with --all: %w", err)
 		}
 
-		// List all subscriptions in the grove, then delete each
+		// List all subscriptions in the project, then delete each
 		subs, err := client.Subscriptions().List(ctx, &hubclient.ListSubscriptionsOptions{
-			GroveID: groveID,
+			ProjectID: projectID,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to list subscriptions: %w", err)
 		}
 
 		if len(subs) == 0 {
-			fmt.Println("No subscriptions found in grove.")
+			fmt.Println("No subscriptions found in project.")
 			return nil
 		}
 
@@ -462,7 +471,7 @@ func runNotificationsUnsubscribe(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("failed to delete subscription %s: %w", sub.ID, err)
 			}
 		}
-		fmt.Printf("Removed %d subscription(s) from grove.\n", len(subs))
+		fmt.Printf("Removed %d subscription(s) from project.\n", len(subs))
 		return nil
 	}
 
@@ -488,16 +497,16 @@ func runNotificationsSubscriptions(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	opts := &hubclient.ListSubscriptionsOptions{}
-	if subscriptionsGrove != "" {
-		opts.GroveID = subscriptionsGrove
+	if subscriptionsProject != "" {
+		opts.ProjectID = subscriptionsProject
 	} else {
-		// Default to current grove if available
-		groveID := settings.GetHubGroveID()
-		if groveID == "" {
-			groveID = settings.GroveID
+		// Default to current project if available
+		projectID := settings.GetHubProjectID()
+		if projectID == "" {
+			projectID = settings.ProjectID
 		}
-		if groveID != "" {
-			opts.GroveID = groveID
+		if projectID != "" {
+			opts.ProjectID = projectID
 		}
 	}
 
@@ -515,7 +524,7 @@ func runNotificationsSubscriptions(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Printf("%-12s  %-6s  %-16s  %-16s  %-40s  %s\n", "ID", "SCOPE", "TARGET", "GROVE", "TRIGGERS", "CREATED")
+	fmt.Printf("%-12s  %-6s  %-16s  %-16s  %-40s  %s\n", "ID", "SCOPE", "TARGET", "PROJECT", "TRIGGERS", "CREATED")
 	fmt.Printf("%-12s  %-6s  %-16s  %-16s  %-40s  %s\n", "------------", "------", "----------------", "----------------", "----------------------------------------", "----------")
 	for _, s := range subs {
 		shortID := s.ID
@@ -529,16 +538,16 @@ func runNotificationsSubscriptions(cmd *cobra.Command, args []string) error {
 				target = target[:13] + "..."
 			}
 		}
-		groveDisplay := s.GroveID
-		if len(groveDisplay) > 16 {
-			groveDisplay = groveDisplay[:13] + "..."
+		projectDisplay := s.ProjectID
+		if len(projectDisplay) > 16 {
+			projectDisplay = projectDisplay[:13] + "..."
 		}
 		triggersStr := strings.Join(s.TriggerActivities, ",")
 		if len(triggersStr) > 40 {
 			triggersStr = triggersStr[:37] + "..."
 		}
 		dateStr := s.CreatedAt.Format("2006-01-02")
-		fmt.Printf("%-12s  %-6s  %-16s  %-16s  %-40s  %s\n", shortID, s.Scope, target, groveDisplay, triggersStr, dateStr)
+		fmt.Printf("%-12s  %-6s  %-16s  %-16s  %-40s  %s\n", shortID, s.Scope, target, projectDisplay, triggersStr, dateStr)
 	}
 
 	return nil

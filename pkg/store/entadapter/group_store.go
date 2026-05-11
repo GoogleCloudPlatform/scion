@@ -75,8 +75,8 @@ func entGroupToStore(g *ent.Group) *store.Group {
 		Updated:     g.Updated,
 		CreatedBy:   g.CreatedBy,
 	}
-	if g.GroveID != nil {
-		sg.GroveID = g.GroveID.String()
+	if g.ProjectID != nil {
+		sg.ProjectID = g.ProjectID.String()
 	}
 	if g.OwnerID != nil {
 		sg.OwnerID = g.OwnerID.String()
@@ -121,12 +121,12 @@ func (s *GroupStore) CreateGroup(ctx context.Context, g *store.Group) error {
 		SetGroupType(group.GroupType(g.GroupType)).
 		SetCreatedBy(g.CreatedBy)
 
-	if g.GroveID != "" {
-		groveUID, err := parseUUID(g.GroveID)
+	if g.ProjectID != "" {
+		projectUID, err := parseUUID(g.ProjectID)
 		if err != nil {
 			return err
 		}
-		create.SetGroveID(groveUID)
+		create.SetProjectID(projectUID)
 	}
 	if g.Labels != nil {
 		create.SetLabels(g.Labels)
@@ -221,14 +221,14 @@ func (s *GroupStore) UpdateGroup(ctx context.Context, g *store.Group) error {
 	} else {
 		update.ClearOwnerID()
 	}
-	if g.GroveID != "" {
-		groveUID, err := parseUUID(g.GroveID)
+	if g.ProjectID != "" {
+		projectUID, err := parseUUID(g.ProjectID)
 		if err != nil {
 			return err
 		}
-		update.SetGroveID(groveUID)
+		update.SetProjectID(projectUID)
 	} else {
-		update.ClearGroveID()
+		update.ClearProjectID()
 	}
 
 	updated, err := update.Save(ctx)
@@ -280,12 +280,12 @@ func (s *GroupStore) ListGroups(ctx context.Context, filter store.GroupFilter, o
 		}
 		query.Where(group.HasParentGroupsWith(group.IDEQ(parentUID)))
 	}
-	if filter.GroveID != "" {
-		groveUID, err := parseUUID(filter.GroveID)
+	if filter.ProjectID != "" {
+		projectUID, err := parseUUID(filter.ProjectID)
 		if err != nil {
 			return nil, err
 		}
-		query.Where(group.GroveIDEQ(groveUID))
+		query.Where(group.ProjectIDEQ(projectUID))
 	}
 
 	// Get total count before pagination
@@ -330,13 +330,13 @@ func (s *GroupStore) AddGroupMember(ctx context.Context, member *store.GroupMemb
 		return err
 	}
 
-	// Guard against modifying grove_agents groups
+	// Guard against modifying project_agents groups
 	g, err := s.client.Group.Get(ctx, groupUID)
 	if err != nil {
 		return mapError(err)
 	}
-	if g.GroupType == group.GroupTypeGroveAgents {
-		return fmt.Errorf("%w: cannot manually modify members of grove_agents groups", store.ErrInvalidInput)
+	if g.GroupType == group.GroupTypeProjectAgents {
+		return fmt.Errorf("%w: cannot manually modify members of project_agents groups", store.ErrInvalidInput)
 	}
 
 	switch member.MemberType {
@@ -397,13 +397,13 @@ func (s *GroupStore) RemoveGroupMember(ctx context.Context, groupID, memberType,
 		return err
 	}
 
-	// Guard against modifying grove_agents groups
+	// Guard against modifying project_agents groups
 	g, err := s.client.Group.Get(ctx, groupUID)
 	if err != nil {
 		return mapError(err)
 	}
-	if g.GroupType == group.GroupTypeGroveAgents {
-		return fmt.Errorf("%w: cannot manually modify members of grove_agents groups", store.ErrInvalidInput)
+	if g.GroupType == group.GroupTypeProjectAgents {
+		return fmt.Errorf("%w: cannot manually modify members of project_agents groups", store.ErrInvalidInput)
 	}
 
 	switch memberType {
@@ -500,24 +500,24 @@ func (s *GroupStore) UpdateGroupMemberRole(ctx context.Context, groupID, memberT
 }
 
 // GetGroupMembers returns all members of a group.
-// For grove_agents groups, membership is resolved at query time by finding
-// all agents that belong to the same grove.
+// For project_agents groups, membership is resolved at query time by finding
+// all agents that belong to the same project.
 func (s *GroupStore) GetGroupMembers(ctx context.Context, groupID string) ([]store.GroupMember, error) {
 	groupUID, err := parseUUID(groupID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Check if this is a grove_agents group — use query-time resolution
+	// Check if this is a project_agents group — use query-time resolution
 	g, err := s.client.Group.Get(ctx, groupUID)
 	if err != nil {
 		return nil, mapError(err)
 	}
 
-	if g.GroupType == group.GroupTypeGroveAgents && g.GroveID != nil {
-		// Query-time resolution: find all agents in this grove
+	if g.GroupType == group.GroupTypeProjectAgents && g.ProjectID != nil {
+		// Query-time resolution: find all agents in this project
 		agents, err := s.client.Agent.Query().
-			Where(agent.GroveIDEQ(*g.GroveID)).
+			Where(agent.ProjectIDEQ(*g.ProjectID)).
 			All(ctx)
 		if err != nil {
 			return nil, err
@@ -762,17 +762,17 @@ func (s *GroupStore) GetEffectiveGroups(ctx context.Context, userID string) ([]s
 	return result, nil
 }
 
-// GetGroupByGroveID retrieves the grove_agents group associated with a grove.
-func (s *GroupStore) GetGroupByGroveID(ctx context.Context, groveID string) (*store.Group, error) {
-	uid, err := parseUUID(groveID)
+// GetGroupByProjectID retrieves the project_agents group associated with a project.
+func (s *GroupStore) GetGroupByProjectID(ctx context.Context, projectID string) (*store.Group, error) {
+	uid, err := parseUUID(projectID)
 	if err != nil {
 		return nil, err
 	}
 
 	g, err := s.client.Group.Query().
 		Where(
-			group.GroupTypeEQ(group.GroupTypeGroveAgents),
-			group.GroveIDEQ(uid),
+			group.GroupTypeEQ(group.GroupTypeProjectAgents),
+			group.ProjectIDEQ(uid),
 		).
 		Only(ctx)
 	if err != nil {
@@ -783,20 +783,20 @@ func (s *GroupStore) GetGroupByGroveID(ctx context.Context, groveID string) (*st
 }
 
 // GetEffectiveGroupsForAgent returns all groups an agent belongs to,
-// including the implicit grove_agents group and transitive parent groups.
+// including the implicit project_agents group and transitive parent groups.
 func (s *GroupStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID string) ([]string, error) {
 	uid, err := parseUUID(agentID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Get the agent to find its grove_id
+	// Get the agent to find its project_id
 	a, err := s.client.Agent.Get(ctx, uid)
 	if err != nil {
 		return nil, mapError(err)
 	}
 
-	// Collect direct group IDs: explicit memberships + implicit grove group
+	// Collect direct group IDs: explicit memberships + implicit project group
 	visited := make(map[uuid.UUID]bool)
 	queue := make([]uuid.UUID, 0)
 
@@ -811,17 +811,17 @@ func (s *GroupStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID str
 		queue = append(queue, m.GroupID)
 	}
 
-	// 2. Find the implicit grove_agents group for this agent's grove
-	groveGroup, err := s.client.Group.Query().
+	// 2. Find the implicit project_agents group for this agent's project
+	projectGroup, err := s.client.Group.Query().
 		Where(
-			group.GroupTypeEQ(group.GroupTypeGroveAgents),
-			group.GroveIDEQ(a.GroveID),
+			group.GroupTypeEQ(group.GroupTypeProjectAgents),
+			group.ProjectIDEQ(a.ProjectID),
 		).
 		Only(ctx)
 	if err == nil {
-		queue = append(queue, groveGroup.ID)
+		queue = append(queue, projectGroup.ID)
 	}
-	// If no grove group exists, that's fine — just skip it
+	// If no project group exists, that's fine — just skip it
 
 	// 3. BFS upward through parent_groups (reuse same logic as GetEffectiveGroups)
 	var result []string

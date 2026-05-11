@@ -31,7 +31,7 @@ import type {
   AgentInlineConfig,
   TelemetryConfig,
   GCPIdentityConfig,
-  Grove,
+  Project,
   Notification,
   Subscription,
 } from '../../shared/types.js';
@@ -113,7 +113,7 @@ export class ScionPageAgentDetail extends LitElement {
   private agent: Agent | null = null;
 
   @state()
-  private grove: Grove | null = null;
+  private project: Project | null = null;
 
   @state()
   private error: string | null = null;
@@ -198,7 +198,7 @@ export class ScionPageAgentDetail extends LitElement {
       font-size: 0.875rem;
       color: var(--scion-text-muted, #64748b);
     }
-    .grove-link,
+    .project-link,
     .broker-link {
       display: inline-flex;
       align-items: center;
@@ -207,7 +207,7 @@ export class ScionPageAgentDetail extends LitElement {
       text-decoration: none;
       font-size: 0.875rem;
     }
-    .grove-link:hover,
+    .project-link:hover,
     .broker-link:hover {
       color: var(--scion-primary, #3b82f6);
     }
@@ -565,7 +565,7 @@ export class ScionPageAgentDetail extends LitElement {
   `;
 
   private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
-  private boundOnGrovesUpdated = this.onGrovesUpdated.bind(this);
+  private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
   private relativeTimeInterval: ReturnType<typeof setInterval> | null = null;
 
   override connectedCallback(): void {
@@ -579,7 +579,7 @@ export class ScionPageAgentDetail extends LitElement {
     void this.loadData();
 
     stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
-    stateManager.addEventListener('groves-updated', this.boundOnGrovesUpdated as EventListener);
+    stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
 
     this.relativeTimeInterval = setInterval(() => this.requestUpdate(), 15000);
   }
@@ -587,7 +587,7 @@ export class ScionPageAgentDetail extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
-    stateManager.removeEventListener('groves-updated', this.boundOnGrovesUpdated as EventListener);
+    stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
     if (this.relativeTimeInterval) {
       clearInterval(this.relativeTimeInterval);
       this.relativeTimeInterval = null;
@@ -601,11 +601,11 @@ export class ScionPageAgentDetail extends LitElement {
     }
   }
 
-  private onGrovesUpdated(): void {
-    if (this.agent?.groveId) {
-      const updatedGrove = stateManager.getGrove(this.agent.groveId);
-      if (updatedGrove && this.grove) {
-        this.grove = { ...this.grove, ...updatedGrove };
+  private onProjectsUpdated(): void {
+    if (this.agent?.projectId) {
+      const updatedProject = stateManager.getProject(this.agent.projectId);
+      if (updatedProject && this.project) {
+        this.project = { ...this.project, ...updatedProject };
       }
     }
   }
@@ -629,28 +629,28 @@ export class ScionPageAgentDetail extends LitElement {
         this.agent = (await agentResponse.json()) as Agent;
       }
 
-      if (this.agent.groveId) {
+      if (this.agent.projectId) {
         stateManager.setScope({
           type: 'agent-detail',
-          groveId: this.agent.groveId,
+          projectId: this.agent.projectId,
           agentId: this.agentId,
         });
       }
 
-      // Fetch grove and notifications in parallel — they are independent.
+      // Fetch project and notifications in parallel — they are independent.
       const parallel: Promise<void>[] = [];
 
-      if (this.agent.groveId) {
-        const groveId = this.agent.groveId;
+      if (this.agent.projectId) {
+        const projectId = this.agent.projectId;
         parallel.push(
-          apiFetch(`/api/v1/groves/${groveId}`)
-            .then(async (groveResponse) => {
-              if (groveResponse.ok) {
-                this.grove = (await groveResponse.json()) as Grove;
+          apiFetch(`/api/v1/projects/${projectId}`)
+            .then(async (projectResponse) => {
+              if (projectResponse.ok) {
+                this.project = (await projectResponse.json()) as Project;
               }
             })
             .catch(() => {
-              // Grove loading is optional
+              // Project loading is optional
             })
         );
       }
@@ -693,9 +693,9 @@ export class ScionPageAgentDetail extends LitElement {
       await Promise.all(parallel);
 
       stateManager.seedAgents([this.agent]);
-      if (this.grove) {
-        stateManager.seedGroves([this.grove]);
-        dispatchPageTitle(this, this.agent.name, this.grove.name || this.agent.groveId);
+      if (this.project) {
+        stateManager.seedProjects([this.project]);
+        dispatchPageTitle(this, this.agent.name, this.project.name || this.agent.projectId);
       } else {
         dispatchPageTitle(this, this.agent.name, 'Agents');
       }
@@ -776,7 +776,7 @@ export class ScionPageAgentDetail extends LitElement {
           throw new Error(await extractApiError(response, 'Failed to delete agent'));
         }
 
-        window.location.href = this.grove ? `/groves/${this.grove.id}` : '/agents';
+        window.location.href = this.project ? `/projects/${this.project.id}` : '/agents';
       } catch (err) {
         console.error('Failed to delete agent:', err);
         alert(err instanceof Error ? err.message : 'Failed to delete agent');
@@ -840,7 +840,7 @@ export class ScionPageAgentDetail extends LitElement {
           body: JSON.stringify({
             scope: 'agent',
             agentId: this.agentId,
-            groveId: this.agent.groveId,
+            projectId: this.agent.projectId,
             triggerActivities: ['COMPLETED', 'WAITING_FOR_INPUT', 'LIMITS_EXCEEDED'],
           }),
         });
@@ -900,9 +900,9 @@ export class ScionPageAgentDetail extends LitElement {
     }
 
     return html`
-      <a href="${this.grove ? `/groves/${this.grove.id}` : '/agents'}" class="back-link">
+      <a href="${this.project ? `/projects/${this.project.id}` : '/agents'}" class="back-link">
         <sl-icon name="arrow-left"></sl-icon>
-        ${this.grove ? `To ${this.grove.name}` : 'Back to Agents'}
+        ${this.project ? `To ${this.project.name}` : 'Back to Agents'}
       </a>
 
       ${this.renderHeader()}
@@ -975,11 +975,11 @@ export class ScionPageAgentDetail extends LitElement {
               <sl-icon name="code-square"></sl-icon>
               ${agent.template}
             </span>
-            ${this.grove
+            ${this.project
               ? html`
-                  <a href="/groves/${this.grove.id}" class="grove-link">
+                  <a href="/projects/${this.project.id}" class="project-link">
                     <sl-icon name="folder"></sl-icon>
-                    ${this.grove.name}
+                    ${this.project.name}
                   </a>
                 `
               : ''}
@@ -1854,9 +1854,9 @@ export class ScionPageAgentDetail extends LitElement {
 
   private renderError() {
     return html`
-      <a href="${this.grove ? `/groves/${this.grove.id}` : '/agents'}" class="back-link">
+      <a href="${this.project ? `/projects/${this.project.id}` : '/agents'}" class="back-link">
         <sl-icon name="arrow-left"></sl-icon>
-        ${this.grove ? `To ${this.grove.name}` : 'Back to Agents'}
+        ${this.project ? `To ${this.project.name}` : 'Back to Agents'}
       </a>
 
       <div class="error-state">

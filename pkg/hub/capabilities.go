@@ -29,7 +29,7 @@ type Capabilities struct {
 // ResourceActions maps resource types to the actions applicable to individual resources.
 var ResourceActions = map[string][]Action{
 	"agent":               {ActionRead, ActionUpdate, ActionDelete, ActionStart, ActionStop, ActionMessage, ActionAttach},
-	"grove":               {ActionRead, ActionUpdate, ActionDelete, ActionManage, ActionRegister},
+	"project":               {ActionRead, ActionUpdate, ActionDelete, ActionManage, ActionRegister},
 	"template":            {ActionRead, ActionUpdate, ActionDelete},
 	"group":               {ActionRead, ActionUpdate, ActionDelete, ActionAddMember, ActionRemoveMember},
 	"user":                {ActionRead, ActionUpdate},
@@ -41,7 +41,7 @@ var ResourceActions = map[string][]Action{
 // ScopeActions maps resource types to scope-level actions (e.g., create, list).
 var ScopeActions = map[string][]Action{
 	"agent":               {ActionCreate, ActionList, ActionStopAll},
-	"grove":               {ActionCreate, ActionList},
+	"project":               {ActionCreate, ActionList},
 	"template":            {ActionCreate, ActionList},
 	"group":               {ActionCreate, ActionList},
 	"policy":              {ActionCreate, ActionList},
@@ -55,17 +55,17 @@ func agentResource(a *store.Agent) Resource {
 		Type:       "agent",
 		ID:         a.ID,
 		OwnerID:    a.OwnerID,
-		ParentType: "grove",
-		ParentID:   a.GroveID,
+		ParentType: "project",
+		ParentID:   a.ProjectID,
 		Labels:     a.Labels,
 		Ancestry:   a.Ancestry,
 	}
 }
 
-// groveResource constructs a Resource from a store.Grove for capability computation.
-func groveResource(g *store.Grove) Resource {
+// projectResource constructs a Resource from a store.Project for capability computation.
+func projectResource(g *store.Project) Resource {
 	return Resource{
-		Type:    "grove",
+		Type:    "project",
 		ID:      g.ID,
 		OwnerID: g.OwnerID,
 		Labels:  g.Labels,
@@ -89,11 +89,11 @@ func groupResource(g *store.Group) Resource {
 		OwnerID: g.OwnerID,
 		Labels:  g.Labels,
 	}
-	// Grove-scoped groups (e.g. "grove:<slug>:members") are children of the
-	// grove. Setting the parent lets grove owner/admin bypass apply.
-	if g.GroveID != "" {
-		r.ParentType = "grove"
-		r.ParentID = g.GroveID
+	// Project-scoped groups (e.g. "project:<slug>:members") are children of the
+	// project. Setting the parent lets project owner/admin bypass apply.
+	if g.ProjectID != "" {
+		r.ParentType = "project"
+		r.ParentID = g.ProjectID
 	}
 	return r
 }
@@ -113,9 +113,9 @@ func policyResource(p *store.Policy) Resource {
 		ID:     p.ID,
 		Labels: p.Labels,
 	}
-	// Grove-scoped policies are children of the grove for authz purposes.
-	if p.ScopeType == "grove" && p.ScopeID != "" {
-		r.ParentType = "grove"
+	// Project-scoped policies are children of the project for authz purposes.
+	if p.ScopeType == "project" && p.ScopeID != "" {
+		r.ParentType = "project"
 		r.ParentID = p.ScopeID
 	}
 	return r
@@ -136,7 +136,7 @@ func gcpServiceAccountResource(sa *store.GCPServiceAccount) Resource {
 		Type:       "gcp_service_account",
 		ID:         sa.ID,
 		OwnerID:    sa.CreatedBy,
-		ParentType: "grove",
+		ParentType: "project",
 		ParentID:   sa.ScopeID,
 	}
 }
@@ -153,12 +153,12 @@ func (a *AuthzService) ComputeCapabilities(ctx context.Context, identity Identit
 		return allActions(actions)
 	}
 
-	// Grove owner/admin short-circuit: full access on grove and grove-scoped
+	// Project owner/admin short-circuit: full access on project and project-scoped
 	// resources. Mirrors the bypass in checkAccessForUser so capability lists
 	// match what the user can actually do.
 	if user, ok := identity.(UserIdentity); ok {
-		if groveID := groveIDForResource(resource); groveID != "" {
-			if a.isGroveOwnerOrAdmin(ctx, user.ID(), groveID) {
+		if projectID := projectIDForResource(resource); projectID != "" {
+			if a.isProjectOwnerOrAdmin(ctx, user.ID(), projectID) {
 				return allActions(actions)
 			}
 		}
@@ -195,10 +195,10 @@ func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Id
 		ParentID:   scopeID,
 	}
 
-	// Grove owner/admin short-circuit at scope level (e.g. agent:create
-	// inside a grove the user owns).
-	if user, ok := identity.(UserIdentity); ok && scopeType == "grove" && scopeID != "" {
-		if a.isGroveOwnerOrAdmin(ctx, user.ID(), scopeID) {
+	// Project owner/admin short-circuit at scope level (e.g. agent:create
+	// inside a project the user owns).
+	if user, ok := identity.(UserIdentity); ok && scopeType == "project" && scopeID != "" {
+		if a.isProjectOwnerOrAdmin(ctx, user.ID(), scopeID) {
 			return allActions(actions)
 		}
 	}
@@ -241,22 +241,22 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 	// Pre-fetch principals and policies once for the identity
 	principals, policies := a.precomputeForIdentity(ctx, identity)
 
-	// Per-batch grove ownership cache. Most batches list resources from a
-	// single grove, so this collapses to one lookup per grove.
-	groveOwnerCache := map[string]bool{}
-	isGroveOwner := func(groveID string) bool {
-		if groveID == "" {
+	// Per-batch project ownership cache. Most batches list resources from a
+	// single project, so this collapses to one lookup per project.
+	projectOwnerCache := map[string]bool{}
+	isProjectOwner := func(projectID string) bool {
+		if projectID == "" {
 			return false
 		}
 		user, ok := identity.(UserIdentity)
 		if !ok {
 			return false
 		}
-		if cached, ok := groveOwnerCache[groveID]; ok {
+		if cached, ok := projectOwnerCache[projectID]; ok {
 			return cached
 		}
-		v := a.isGroveOwnerOrAdmin(ctx, user.ID(), groveID)
-		groveOwnerCache[groveID] = v
+		v := a.isProjectOwnerOrAdmin(ctx, user.ID(), projectID)
+		projectOwnerCache[projectID] = v
 		return v
 	}
 
@@ -272,8 +272,8 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 			caps[i] = allActions(actions)
 			continue
 		}
-		// Grove owner/admin short-circuit
-		if isGroveOwner(groveIDForResource(resource)) {
+		// Project owner/admin short-circuit
+		if isProjectOwner(projectIDForResource(resource)) {
 			caps[i] = allActions(actions)
 			continue
 		}

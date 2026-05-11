@@ -38,13 +38,13 @@ var hubTokenCmd = &cobra.Command{
 	Long: `Manage user access tokens for CI/CD and automation.
 
 User access tokens (UATs) are scoped, revocable bearer tokens for
-non-interactive authentication. Each token is scoped to a single grove
+non-interactive authentication. Each token is scoped to a single project
 and carries a set of action permissions.
 
 Examples:
   # Create a token for CI that can dispatch and monitor agents
   scion hub token create \
-    --grove my-project \
+    --project my-project \
     --name "github-actions" \
     --scopes agent:dispatch,agent:read,agent:stop \
     --expires 90d
@@ -60,18 +60,18 @@ Examples:
 
   # Use the token in CI
   export SCION_HUB_TOKEN=scion_pat_...
-  scion hub agent dispatch --grove my-project --template default --task "Run tests"`,
+  scion hub agent dispatch --project my-project --template default --task "Run tests"`,
 }
 
 var hubTokenCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a new access token",
-	Long: `Create a new user access token scoped to a grove.
+	Long: `Create a new user access token scoped to a project.
 
 The token value is displayed only once on creation. Store it securely.
 
 Available scopes:
-  grove:read        Read grove metadata
+  project:read      Read project metadata
   agent:create      Create agents
   agent:read        Read agent status/metadata
   agent:list        List agents
@@ -88,8 +88,8 @@ RFC 3339 date (e.g., 2026-12-31T00:00:00Z). Default: 90 days.
 Maximum: 1 year.
 
 Examples:
-  scion hub token create --grove my-project --name ci-token --scopes agent:dispatch,agent:read
-  scion hub token create --grove my-project --name deploy --scopes agent:manage --expires 30d`,
+  scion hub token create --project my-project --name ci-token --scopes agent:dispatch,agent:read
+  scion hub token create --project my-project --name deploy --scopes agent:manage --expires 30d`,
 	Args: cobra.NoArgs,
 	RunE: runTokenCreate,
 }
@@ -102,7 +102,7 @@ var hubTokenListCmd = &cobra.Command{
 Examples:
   scion hub token list
   scion hub token list --json
-  scion hub token list --grove my-project`,
+  scion hub token list --project my-project`,
 	Args: cobra.NoArgs,
 	RunE: runTokenList,
 }
@@ -132,10 +132,10 @@ Examples:
 
 var (
 	tokenCreateName    string
-	tokenCreateGrove   string
+	tokenCreateProject string
 	tokenCreateScopes  string
 	tokenCreateExpires string
-	tokenListGrove     string
+	tokenListProject   string
 )
 
 func init() {
@@ -146,22 +146,29 @@ func init() {
 	hubTokenCmd.AddCommand(hubTokenDeleteCmd)
 
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateName, "name", "", "Token name/label (required)")
-	hubTokenCreateCmd.Flags().StringVar(&tokenCreateGrove, "grove", "", "Grove name or ID to scope the token to (required)")
+	hubTokenCreateCmd.Flags().StringVar(&tokenCreateProject, "project", "", "Project name or ID to scope the token to (required)")
+	hubTokenCreateCmd.Flags().StringVar(&tokenCreateProject, "grove", "", "Deprecated alias for --project")
+	_ = hubTokenCreateCmd.Flags().MarkDeprecated("grove", "use --project instead")
+	_ = hubTokenCreateCmd.Flags().MarkHidden("grove")
+
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateScopes, "scopes", "", "Comma-separated list of scopes (required)")
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateExpires, "expires", "", "Expiry duration (e.g., 30d, 90d, 1y) or RFC 3339 date (default: 90d)")
 
 	_ = hubTokenCreateCmd.MarkFlagRequired("name")
-	_ = hubTokenCreateCmd.MarkFlagRequired("grove")
+	_ = hubTokenCreateCmd.MarkFlagRequired("project")
 	_ = hubTokenCreateCmd.MarkFlagRequired("scopes")
 
 	hubTokenListCmd.Flags().BoolVar(&tokenOutputJSON, "json", false, "Output in JSON format")
-	hubTokenListCmd.Flags().StringVar(&tokenListGrove, "grove", "", "Filter tokens by grove name or ID")
+	hubTokenListCmd.Flags().StringVar(&tokenListProject, "project", "", "Filter tokens by project name or ID")
+	hubTokenListCmd.Flags().StringVar(&tokenListProject, "grove", "", "Deprecated alias for --project")
+	_ = hubTokenListCmd.Flags().MarkDeprecated("grove", "use --project instead")
+	_ = hubTokenListCmd.Flags().MarkHidden("grove")
 }
 
 func runTokenCreate(cmd *cobra.Command, args []string) error {
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -177,10 +184,10 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Resolve grove name/slug to ID
-	grove, err := resolveGroveByNameOrID(ctx, client, tokenCreateGrove)
+	// Resolve project name/slug to ID
+	project, err := resolveProjectByNameOrID(ctx, client, tokenCreateProject)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove %q: %w", tokenCreateGrove, err)
+		return fmt.Errorf("failed to resolve project %q: %w", tokenCreateProject, err)
 	}
 
 	scopes := strings.Split(tokenCreateScopes, ",")
@@ -199,7 +206,7 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 
 	req := &hubclient.CreateTokenRequest{
 		Name:      tokenCreateName,
-		GroveID:   grove.ID,
+		ProjectID:   project.ID,
 		Scopes:    scopes,
 		ExpiresAt: expiresAt,
 	}
@@ -217,7 +224,7 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Created access token: %s\n", resp.AccessToken.Name)
 	fmt.Printf("  ID:      %s\n", resp.AccessToken.ID)
-	fmt.Printf("  Grove:   %s (%s)\n", grove.Name, grove.ID)
+	fmt.Printf("  Project:   %s (%s)\n", project.Name, project.ID)
 	fmt.Printf("  Scopes:  %s\n", strings.Join(resp.AccessToken.Scopes, ", "))
 	if resp.AccessToken.ExpiresAt != nil {
 		fmt.Printf("  Expires: %s\n", resp.AccessToken.ExpiresAt.Format(time.RFC3339))
@@ -231,9 +238,9 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 }
 
 func runTokenList(cmd *cobra.Command, args []string) error {
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -254,21 +261,21 @@ func runTokenList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to list tokens: %w", err)
 	}
 
-	// Optionally filter by grove
-	var groveID string
-	if tokenListGrove != "" {
-		grove, err := resolveGroveByNameOrID(ctx, client, tokenListGrove)
+	// Optionally filter by project
+	var projectID string
+	if tokenListProject != "" {
+		project, err := resolveProjectByNameOrID(ctx, client, tokenListProject)
 		if err != nil {
-			return fmt.Errorf("failed to resolve grove %q: %w", tokenListGrove, err)
+			return fmt.Errorf("failed to resolve project %q: %w", tokenListProject, err)
 		}
-		groveID = grove.ID
+		projectID = project.ID
 	}
 
 	items := resp.Items
-	if groveID != "" {
+	if projectID != "" {
 		var filtered []hubclient.TokenInfo
 		for _, t := range items {
-			if t.GroveID == groveID {
+			if t.ProjectID == projectID {
 				filtered = append(filtered, t)
 			}
 		}
@@ -318,9 +325,9 @@ func runTokenList(cmd *cobra.Command, args []string) error {
 func runTokenRevoke(cmd *cobra.Command, args []string) error {
 	tokenID := args[0]
 
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -347,9 +354,9 @@ func runTokenRevoke(cmd *cobra.Command, args []string) error {
 func runTokenDelete(cmd *cobra.Command, args []string) error {
 	tokenID := args[0]
 
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)

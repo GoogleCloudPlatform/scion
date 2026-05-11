@@ -14,19 +14,22 @@
 
 package hubclient
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Agent represents an agent from the Hub API.
 type Agent struct {
 	ID                string            `json:"id"`          // Hub UUID (database primary key)
-	Slug              string            `json:"slug"`        // URL-safe slug identifier (unique per grove)
+	Slug              string            `json:"slug"`        // URL-safe slug identifier (unique per project)
 	ContainerID       string            `json:"containerId"` // Runtime container ID (ephemeral)
 	Name              string            `json:"name"`
 	Template          string            `json:"template,omitempty"`
 	HarnessConfig     string            `json:"harnessConfig,omitempty"`
 	HarnessAuth       string            `json:"harnessAuth,omitempty"`
-	GroveID           string            `json:"groveId,omitempty"`
-	Grove             string            `json:"grove,omitempty"`
+	ProjectID         string            `json:"projectId,omitempty"`
+	Project           string            `json:"project,omitempty"`
 	Labels            map[string]string `json:"labels,omitempty"`
 	Annotations       map[string]string `json:"annotations,omitempty"`
 	Phase             string            `json:"phase,omitempty"`    // Lifecycle phase (created, provisioning, running, stopped, error)
@@ -56,6 +59,42 @@ type Agent struct {
 	StateVersion      int64             `json:"stateVersion,omitempty"`
 }
 
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (a *Agent) UnmarshalJSON(data []byte) error {
+	type Alias Agent
+	aux := &struct {
+		Grove   string `json:"grove"`
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(a),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if a.Project == "" && aux.Grove != "" {
+		a.Project = aux.Grove
+	}
+	if a.ProjectID == "" && aux.GroveID != "" {
+		a.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (a Agent) MarshalJSON() ([]byte, error) {
+	type Alias Agent
+	return json.Marshal(&struct {
+		Alias
+		Grove   string `json:"grove,omitempty"`
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(a),
+		Grove:   a.Project,
+		GroveID: a.ProjectID,
+	})
+}
+
 // AgentConfig represents agent configuration.
 type AgentConfig struct {
 	Image         string            `json:"image,omitempty"`
@@ -83,8 +122,8 @@ type KubernetesInfo struct {
 	SyncedAt  string `json:"syncedAt,omitempty"`
 }
 
-// Grove represents a grove from the Hub API.
-type Grove struct {
+// Project represents a project from the Hub API.
+type Project struct {
 	ID                     string            `json:"id"`
 	Name                   string            `json:"name"`
 	Slug                   string            `json:"slug"`
@@ -97,14 +136,58 @@ type Grove struct {
 	Visibility             string            `json:"visibility,omitempty"`
 	Labels                 map[string]string `json:"labels,omitempty"`
 	Annotations            map[string]string `json:"annotations,omitempty"`
-	Providers              []GroveProvider   `json:"providers,omitempty"`
+	Providers              []ProjectProvider `json:"providers,omitempty"`
 	AgentCount             int               `json:"agentCount,omitempty"`
 	ActiveBrokerCount      int               `json:"activeBrokerCount,omitempty"`
-	GroveType              string            `json:"groveType,omitempty"`
+	ProjectType            string            `json:"projectType,omitempty"`
 }
 
-// GroveProvider represents a broker providing runtime services to a grove.
-type GroveProvider struct {
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (p *Project) UnmarshalJSON(data []byte) error {
+	type Alias Project
+	aux := &struct {
+		GroveID   string `json:"groveId"`
+		GroveName string `json:"groveName"`
+		GroveType string `json:"groveType"`
+		*Alias
+	}{
+		Alias: (*Alias)(p),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if p.ID == "" && aux.GroveID != "" {
+		p.ID = aux.GroveID
+	}
+	if p.Name == "" && aux.GroveName != "" {
+		p.Name = aux.GroveName
+	}
+	if p.ProjectType == "" && aux.GroveType != "" {
+		p.ProjectType = aux.GroveType
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (p Project) MarshalJSON() ([]byte, error) {
+	type Alias Project
+	return json.Marshal(&struct {
+		Alias
+		ProjectID string `json:"projectId,omitempty"`
+		GroveID   string `json:"groveId,omitempty"`
+		GroveName string `json:"groveName,omitempty"`
+		GroveType string `json:"groveType,omitempty"`
+	}{
+		Alias:     Alias(p),
+		ProjectID: p.ID,
+		GroveID:   p.ID,
+		GroveName: p.Name,
+		GroveType: p.ProjectType,
+	})
+}
+
+// ProjectProvider represents a broker providing runtime services to a project.
+type ProjectProvider struct {
 	BrokerID   string    `json:"brokerId"`
 	BrokerName string    `json:"brokerName"`
 	Status     string    `json:"status"`
@@ -114,8 +197,8 @@ type GroveProvider struct {
 	LinkedAt   time.Time `json:"linkedAt,omitempty"` // Timestamp when the link was created
 }
 
-// GroveSettings represents grove configuration settings.
-type GroveSettings struct {
+// ProjectSettings represents project configuration settings.
+type ProjectSettings struct {
 	ActiveProfile        string                 `json:"activeProfile,omitempty"`
 	DefaultTemplate      string                 `json:"defaultTemplate,omitempty"`
 	DefaultHarnessConfig string                 `json:"defaultHarnessConfig,omitempty"`
@@ -126,25 +209,25 @@ type GroveSettings struct {
 	Profiles             map[string]interface{} `json:"profiles,omitempty"`
 
 	// Default agent limits
-	DefaultMaxTurns      int                `json:"defaultMaxTurns,omitempty"`
-	DefaultMaxModelCalls int                `json:"defaultMaxModelCalls,omitempty"`
-	DefaultMaxDuration   string             `json:"defaultMaxDuration,omitempty"`
-	DefaultResources     *GroveResourceSpec `json:"defaultResources,omitempty"`
+	DefaultMaxTurns      int                  `json:"defaultMaxTurns,omitempty"`
+	DefaultMaxModelCalls int                  `json:"defaultMaxModelCalls,omitempty"`
+	DefaultMaxDuration   string               `json:"defaultMaxDuration,omitempty"`
+	DefaultResources     *ProjectResourceSpec `json:"defaultResources,omitempty"`
 
 	// Default GCP identity for new agents
 	DefaultGCPIdentityMode             string `json:"defaultGCPIdentityMode,omitempty"`             // "block", "passthrough", or "assign"
 	DefaultGCPIdentityServiceAccountID string `json:"defaultGCPIdentityServiceAccountID,omitempty"` // Required when mode is "assign"
 }
 
-// GroveResourceSpec defines default resource requirements at the grove level.
-type GroveResourceSpec struct {
-	Requests *GroveResourceList `json:"requests,omitempty"`
-	Limits   *GroveResourceList `json:"limits,omitempty"`
-	Disk     string             `json:"disk,omitempty"`
+// ProjectResourceSpec defines default resource requirements at the project level.
+type ProjectResourceSpec struct {
+	Requests *ProjectResourceList `json:"requests,omitempty"`
+	Limits   *ProjectResourceList `json:"limits,omitempty"`
+	Disk     string               `json:"disk,omitempty"`
 }
 
-// GroveResourceList is a set of resource name/quantity pairs.
-type GroveResourceList struct {
+// ProjectResourceList is a set of resource name/quantity pairs.
+type ProjectResourceList struct {
 	CPU    string `json:"cpu,omitempty"`
 	Memory string `json:"memory,omitempty"`
 }
@@ -170,11 +253,41 @@ type RuntimeBroker struct {
 	Labels          map[string]string   `json:"labels,omitempty"`
 	Annotations     map[string]string   `json:"annotations,omitempty"`
 	Endpoint        string              `json:"endpoint,omitempty"`
-	Groves          []BrokerGroveInfo   `json:"groves,omitempty"`
-	AutoProvide     bool                `json:"autoProvide,omitempty"` // Automatically add as provider for new groves
+	Projects        []BrokerProjectInfo `json:"projects,omitempty"`
+	AutoProvide     bool                `json:"autoProvide,omitempty"` // Automatically add as provider for new projects
 	Created         time.Time           `json:"created"`
 	Updated         time.Time           `json:"updated"`
 	CreatedBy       string              `json:"createdBy,omitempty"` // User ID who registered this broker
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (b *RuntimeBroker) UnmarshalJSON(data []byte) error {
+	type Alias RuntimeBroker
+	aux := &struct {
+		Groves []BrokerProjectInfo `json:"groves"`
+		*Alias
+	}{
+		Alias: (*Alias)(b),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if len(b.Projects) == 0 && len(aux.Groves) > 0 {
+		b.Projects = aux.Groves
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (b RuntimeBroker) MarshalJSON() ([]byte, error) {
+	type Alias RuntimeBroker
+	return json.Marshal(&struct {
+		Alias
+		Groves []BrokerProjectInfo `json:"groves,omitempty"`
+	}{
+		Alias:  Alias(b),
+		Groves: b.Projects,
+	})
 }
 
 // BrokerCapabilities describes runtime broker capabilities.
@@ -193,13 +306,49 @@ type BrokerProfile struct {
 	Namespace string `json:"namespace,omitempty"`
 }
 
-// BrokerGroveInfo describes a grove from a broker's perspective.
-type BrokerGroveInfo struct {
-	GroveID    string `json:"groveId"`
-	GroveName  string `json:"groveName"`
-	GitRemote  string `json:"gitRemote,omitempty"`
-	AgentCount int    `json:"agentCount"`
-	LocalPath  string `json:"localPath,omitempty"`
+// BrokerProjectInfo describes a project from a broker's perspective.
+type BrokerProjectInfo struct {
+	ProjectID   string `json:"projectId"`
+	ProjectName string `json:"projectName"`
+	GitRemote   string `json:"gitRemote,omitempty"`
+	AgentCount  int    `json:"agentCount"`
+	LocalPath   string `json:"localPath,omitempty"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (i *BrokerProjectInfo) UnmarshalJSON(data []byte) error {
+	type Alias BrokerProjectInfo
+	aux := &struct {
+		GroveID   string `json:"groveId"`
+		GroveName string `json:"groveName"`
+		*Alias
+	}{
+		Alias: (*Alias)(i),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if i.ProjectID == "" && aux.GroveID != "" {
+		i.ProjectID = aux.GroveID
+	}
+	if i.ProjectName == "" && aux.GroveName != "" {
+		i.ProjectName = aux.GroveName
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (i BrokerProjectInfo) MarshalJSON() ([]byte, error) {
+	type Alias BrokerProjectInfo
+	return json.Marshal(&struct {
+		Alias
+		GroveID   string `json:"groveId,omitempty"`
+		GroveName string `json:"groveName,omitempty"`
+	}{
+		Alias:     Alias(i),
+		GroveID:   i.ProjectID,
+		GroveName: i.ProjectName,
+	})
 }
 
 // Template represents a template from the Hub API.
@@ -215,7 +364,7 @@ type Template struct {
 	Config        *TemplateConfig `json:"config,omitempty"`
 	Scope         string          `json:"scope"`
 	ScopeID       string          `json:"scopeId,omitempty"`
-	GroveID       string          `json:"groveId,omitempty"` // Deprecated: use ScopeID
+	ProjectID     string          `json:"projectId,omitempty"` // Deprecated: use ScopeID
 	StorageURI    string          `json:"storageUri,omitempty"`
 	StorageBucket string          `json:"storageBucket,omitempty"`
 	StoragePath   string          `json:"storagePath,omitempty"`
@@ -229,6 +378,36 @@ type Template struct {
 	Visibility    string          `json:"visibility,omitempty"`
 	Created       time.Time       `json:"created"`
 	Updated       time.Time       `json:"updated"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (t *Template) UnmarshalJSON(data []byte) error {
+	type Alias Template
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(t),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if t.ProjectID == "" && aux.GroveID != "" {
+		t.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (t Template) MarshalJSON() ([]byte, error) {
+	type Alias Template
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(t),
+		GroveID: t.ProjectID,
+	})
 }
 
 // TemplateFile represents a file within a template.
@@ -317,6 +496,30 @@ type Secret struct {
 	Updated       time.Time `json:"updated"`
 	CreatedBy     string    `json:"createdBy,omitempty"`
 	UpdatedBy     string    `json:"updatedBy,omitempty"`
+}
+
+// ResolvedSecret represents a secret that has been resolved from the Hub
+// and is ready for projection into an agent container.
+type ResolvedSecret struct {
+	Name   string `json:"name"`          // Secret key name
+	Type   string `json:"type"`          // environment, variable, file
+	Target string `json:"target"`        // Projection target (env var name, json key, or file path)
+	Value  string `json:"value"`         // Decrypted secret value
+	Source string `json:"source"`        // Scope that provided this secret (user, project, runtime_broker)
+	Ref    string `json:"ref,omitempty"` // External secret reference (e.g., "gcpsm:projects/123/secrets/name")
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy "grove" source.
+func (s *ResolvedSecret) UnmarshalJSON(data []byte) error {
+	type Alias ResolvedSecret
+	aux := (*Alias)(s)
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if s.Source == "grove" {
+		s.Source = "project"
+	}
+	return nil
 }
 
 // HarnessConfig represents a harness config from the Hub API.

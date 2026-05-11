@@ -18,7 +18,7 @@ Most endpoints require a `Bearer` token in the `Authorization` header.
 ### Core Resources
 
 #### Agents (`/api/v1/agents`)
-- `GET /`: List agents (filterable by grove, user, phase).
+- `GET /`: List agents (filterable by project, user, phase).
 - `POST /`: Dispatch a new agent.
 - `GET /:id`: Get detailed agent state (phase, activity, detail).
 - `DELETE /:id`: Stop and remove an agent.
@@ -29,11 +29,11 @@ Agent state uses a layered model:
 - **Activity**: Runtime activity within the `running` phase (`idle`, `thinking`, `executing`, `waiting_for_input`, `completed`, `limits_exceeded`, `offline`). Note: `offline` occurs when an agent heartbeat has not been heard for some time, often due to an expired auth token that the agent failed to refresh.
 - **Detail**: Freeform context (tool name, message, task summary).
 
-#### Groves (`/api/v1/groves`)
-- `GET /`: List groves you have access to.
+#### Projects (`/api/v1/projects`)
+- `GET /`: List projects you have access to.
 - `POST /register`: Register or link a project repository.
-- `GET /:id`: Get grove metadata and statistics.
-- `GET /:id/secrets`: Manage environment secrets for the grove.
+- `GET /:id`: Get project metadata and statistics.
+- `GET /:id/secrets`: Manage environment secrets for the project.
 
 #### Runtime Brokers (`/api/v1/brokers`)
 - `GET /`: List registered runtime brokers.

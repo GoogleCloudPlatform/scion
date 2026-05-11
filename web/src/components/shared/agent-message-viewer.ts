@@ -99,13 +99,13 @@ export class ScionAgentMessageViewer extends LitElement {
 
   /**
    * Label shown for the "self" side of messages when no agentId is set
-   * (e.g. grove-level view). When agentId is present, agentName is used.
+   * (e.g. project-level view). When agentId is present, agentName is used.
    */
   @property()
   contextLabel = '';
 
   /**
-   * URL for broadcasting a message to all running agents in a grove.
+   * URL for broadcasting a message to all running agents in a project.
    * When set, the compose box uses the broadcast API instead of the
    * agent-scoped message endpoint.
    */
@@ -503,7 +503,7 @@ export class ScionAgentMessageViewer extends LitElement {
     // Determine direction relative to this agent using unique IDs.
     // Check sender_id and recipient_id labels first (UUID-based, unambiguous).
     // Fall back to agent_id label for older log entries.
-    // When no agentId is set (grove-level view), always show as 'sent'
+    // When no agentId is set (project-level view), always show as 'sent'
     // (sender → recipient) since there's no "self" agent.
     let direction: 'sent' | 'received';
     if (!this.agentId) {
@@ -721,7 +721,7 @@ export class ScionAgentMessageViewer extends LitElement {
   private renderCompose() {
     const isBroadcast = !!this.broadcastUrl;
     const placeholder = isBroadcast
-      ? 'Broadcast message to all running agents in grove...'
+      ? 'Broadcast message to all running agents in project...'
       : 'Send a message to this agent...';
     const buttonLabel = isBroadcast ? 'Broadcast' : 'Send';
 
@@ -730,7 +730,7 @@ export class ScionAgentMessageViewer extends LitElement {
         ${isBroadcast ? html`
           <div class="compose-label">
             <sl-icon name="broadcast-pin" style="font-size: 0.875rem;"></sl-icon>
-            Broadcast to all running agents in this grove
+            Broadcast to all running agents in this project
           </div>
         ` : nothing}
         <div class="compose-row">
@@ -862,7 +862,7 @@ export class ScionAgentMessageViewer extends LitElement {
       const dirIcon = msg.direction === 'sent' ? 'box-arrow-up-right' : 'box-arrow-in-down-left';
 
       // In agent-scoped view, show the current agent first with direction arrow.
-      // In grove-scoped view (no agentId), always show sender → recipient.
+      // In project-scoped view (no agentId), always show sender → recipient.
       const fromLabel = this.agentId
         ? (this.agentName || this.agentId)
         : (msg.sender || 'unknown');

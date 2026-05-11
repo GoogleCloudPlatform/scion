@@ -48,7 +48,8 @@ func init() {
 	// Template resolution flags for Hub mode (Section 9.4)
 	resumeCmd.Flags().BoolVar(&uploadTemplate, "upload-template", false, "Automatically upload local template to Hub if not found")
 	resumeCmd.Flags().BoolVar(&noUpload, "no-upload", false, "Fail if template requires upload (never prompt)")
-	resumeCmd.Flags().StringVar(&templateScope, "template-scope", "grove", "Scope for uploaded template (global, grove, user)")
+	resumeCmd.Flags().StringVar(&templateScope, "template-scope", "project", "Scope for uploaded template (global, project, user)")
+
 
 	// Telemetry override flags
 	resumeCmd.Flags().BoolVar(&enableTelemetry, "enable-telemetry", false, "Explicitly enable telemetry for this agent")

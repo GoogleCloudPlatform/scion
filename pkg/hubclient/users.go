@@ -53,7 +53,7 @@ type UpdateUserRequest struct {
 func (s *userService) List(ctx context.Context, opts *apiclient.PageOptions) (*ListUsersResponse, error) {
 	query := opts.ToQuery(nil)
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/users", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/users", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +80,7 @@ func (s *userService) List(ctx context.Context, opts *apiclient.PageOptions) (*L
 
 // Get returns a user by ID.
 func (s *userService) Get(ctx context.Context, userID string) (*User, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/users/"+userID, nil)
+	resp, err := s.c.get(ctx, "/api/v1/users/"+userID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +89,7 @@ func (s *userService) Get(ctx context.Context, userID string) (*User, error) {
 
 // Update updates a user.
 func (s *userService) Update(ctx context.Context, userID string, req *UpdateUserRequest) (*User, error) {
-	resp, err := s.c.transport.Patch(ctx, "/api/v1/users/"+userID, req, nil)
+	resp, err := s.c.patch(ctx, "/api/v1/users/"+userID, req, nil)
 	if err != nil {
 		return nil, err
 	}

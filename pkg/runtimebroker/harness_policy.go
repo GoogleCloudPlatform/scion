@@ -29,7 +29,7 @@ import (
 // short-circuits the policy check (no policy applies).
 func (s *Server) lookupHarnessConfigForPolicy(req CreateAgentRequest) (string, config.HarnessConfigEntry, bool) {
 	var settings *config.VersionedSettings
-	settingsPath := req.GrovePath
+	settingsPath := req.ProjectPath
 	if settingsPath == "" {
 		if globalDir, err := config.GetGlobalDir(); err == nil {
 			settingsPath = globalDir
@@ -46,7 +46,7 @@ func (s *Server) lookupHarnessConfigForPolicy(req CreateAgentRequest) (string, c
 		return "", config.HarnessConfigEntry{}, false
 	}
 
-	searchPath := req.GrovePath
+	searchPath := req.ProjectPath
 	if searchPath == "" {
 		searchPath = settingsPath
 	}

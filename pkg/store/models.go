@@ -16,6 +16,7 @@
 package store
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -27,12 +28,12 @@ import (
 type Agent struct {
 	// Identity
 	ID       string `json:"id"`       // UUID primary key
-	Slug     string `json:"slug"`     // URL-safe slug identifier (unique per grove)
+	Slug     string `json:"slug"`     // URL-safe slug identifier (unique per project)
 	Name     string `json:"name"`     // Human-friendly display name
 	Template string `json:"template"` // Template used to create this agent
 
-	// Grove association
-	GroveID string `json:"groveId"` // FK to Grove.ID
+	// Project association
+	ProjectID string `json:"projectId"` // FK to Project.ID
 
 	// Metadata (stored as JSON)
 	Labels      map[string]string `json:"labels,omitempty"`
@@ -64,7 +65,7 @@ type Agent struct {
 	Message         string `json:"message,omitempty"`
 
 	// Enriched fields (populated by Hub when returning data, not persisted)
-	Grove             string `json:"grove,omitempty"`             // Grove name (resolved from GroveID)
+	Project           string `json:"project,omitempty"`           // Project name (resolved from ProjectID)
 	RuntimeBrokerName string `json:"runtimeBrokerName,omitempty"` // Broker name (resolved from RuntimeBrokerID)
 	HarnessConfig     string `json:"harnessConfig,omitempty"`     // Harness config name (resolved from AppliedConfig.HarnessConfig)
 	HarnessAuth       string `json:"harnessAuth,omitempty"`       // Harness auth method (resolved from AppliedConfig.HarnessAuth)
@@ -93,6 +94,36 @@ type Agent struct {
 	StateVersion int64 `json:"stateVersion"`
 }
 
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (a Agent) MarshalJSON() ([]byte, error) {
+	type Alias Agent
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(a),
+		GroveID: a.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (a *Agent) UnmarshalJSON(data []byte) error {
+	type Alias Agent
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(a),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if a.ProjectID == "" && aux.GroveID != "" {
+		a.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
 // AgentAppliedConfig stores the effective configuration of an agent.
 type AgentAppliedConfig struct {
 	Image         string              `json:"image,omitempty"`
@@ -104,7 +135,7 @@ type AgentAppliedConfig struct {
 	Task          string              `json:"task,omitempty"`      // Initial task/prompt for the agent
 	Attach        bool                `json:"attach,omitempty"`    // If true, signals interactive attach mode to the broker/harness
 	Branch        string              `json:"branch,omitempty"`    // Git branch name (defaults to agent slug if empty)
-	Workspace     string              `json:"workspace,omitempty"` // Host path to mount as /workspace (overrides default grove root)
+	Workspace     string              `json:"workspace,omitempty"` // Host path to mount as /workspace (overrides default project root)
 	GitClone      *api.GitCloneConfig `json:"gitClone,omitempty"`
 
 	// Template info for Runtime Broker hydration
@@ -120,7 +151,7 @@ type AgentAppliedConfig struct {
 	HubAccessScopes []string `json:"hubAccessScopes,omitempty"`
 
 	// WorkspaceStoragePath is the GCS storage path for bootstrapped workspaces.
-	// Set during workspace bootstrap for non-git groves.
+	// Set during workspace bootstrap for non-git projects.
 	WorkspaceStoragePath string `json:"workspaceStoragePath,omitempty"`
 
 	// InlineConfig holds the full ScionConfig provided via the --config flag
@@ -132,19 +163,19 @@ type AgentAppliedConfig struct {
 	GCPIdentity *GCPIdentityConfig `json:"gcpIdentity,omitempty"`
 }
 
-// Grove type constants.
-// Type reflects how the grove was established on the Hub:
-//   - "linked": A pre-existing local grove linked to the Hub
+// Project type constants.
+// Type reflects how the project was established on the Hub:
+//   - "linked": A pre-existing local project linked to the Hub
 //   - "hub-native": Created via the Hub (web UI or API)
 //
-// Whether a grove is git-backed is orthogonal and indicated by the GitRemote field.
+// Whether a project is git-backed is orthogonal and indicated by the GitRemote field.
 const (
-	GroveTypeLinked    = "linked"     // Broker-linked grove (local project linked to hub)
-	GroveTypeHubNative = "hub-native" // Hub-native workspace
+	ProjectTypeLinked    = "linked"     // Broker-linked project (local project linked to hub)
+	ProjectTypeHubNative = "hub-native" // Hub-native workspace
 )
 
-// Workspace mode constants for git groves.
-// When a git grove has the workspace mode label set to "shared", it uses a
+// Workspace mode constants for git projects.
+// When a git project has the workspace mode label set to "shared", it uses a
 // single shared clone mounted by all agents instead of per-agent clones.
 const (
 	LabelWorkspaceMode    = "scion.dev/workspace-mode"
@@ -152,19 +183,19 @@ const (
 	WorkspaceModePerAgent = "per-agent"
 )
 
-// Grove represents a project/agent group in the Hub database.
-type Grove struct {
+// Project represents a project/agent group in the Hub database.
+type Project struct {
 	// Identity
 	ID   string `json:"id"`   // UUID primary key
 	Name string `json:"name"` // Human-friendly display name
 	Slug string `json:"slug"` // URL-safe identifier
 
 	// Git integration
-	GitRemote string `json:"gitRemote,omitempty"` // Normalized git remote URL (multiple groves may share the same remote)
+	GitRemote string `json:"gitRemote,omitempty"` // Normalized git remote URL (multiple projects may share the same remote)
 
 	// Runtime broker configuration
 	// DefaultRuntimeBrokerID is the runtime broker used when creating agents without
-	// an explicit runtimeBrokerId. Set to the first broker that registers with this grove.
+	// an explicit runtimeBrokerId. Set to the first broker that registers with this project.
 	DefaultRuntimeBrokerID string `json:"defaultRuntimeBrokerId,omitempty"`
 
 	// Metadata (stored as JSON)
@@ -186,7 +217,7 @@ type Grove struct {
 	// GitHub App integration
 	GitHubInstallationID *int64                  `json:"githubInstallationId,omitempty"`
 	GitHubPermissions    *GitHubTokenPermissions `json:"githubPermissions,omitempty"`
-	GitHubAppStatus      *GitHubAppGroveStatus   `json:"githubAppStatus,omitempty"`
+	GitHubAppStatus      *GitHubAppProjectStatus `json:"githubAppStatus,omitempty"`
 
 	// Git commit attribution (used when GitHub App generates commits)
 	GitIdentity *GitIdentityConfig `json:"gitIdentity,omitempty"`
@@ -194,14 +225,56 @@ type Grove struct {
 	// Computed fields (not stored, populated on read)
 	AgentCount        int    `json:"agentCount,omitempty"`
 	ActiveBrokerCount int    `json:"activeBrokerCount,omitempty"`
-	GroveType         string `json:"groveType,omitempty"` // "git", "linked", or "hub-native"
-	OwnerName         string `json:"ownerName,omitempty"` // Enriched: resolved from OwnerID
+	ProjectType       string `json:"projectType,omitempty"` // "git", "linked", or "hub-native"
+	OwnerName         string `json:"ownerName,omitempty"`   // Enriched: resolved from OwnerID
 }
 
-// IsSharedWorkspace returns true if this is a git grove configured to use a
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (p Project) MarshalJSON() ([]byte, error) {
+	type Alias Project
+	return json.Marshal(&struct {
+		Alias
+		ProjectID   string `json:"groveId"`
+		GroveName string `json:"groveName"`
+		Grove     string `json:"grove"`
+	}{
+		Alias:     Alias(p),
+		ProjectID:   p.ID,
+		GroveName: p.Name,
+		Grove:     p.Slug,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (p *Project) UnmarshalJSON(data []byte) error {
+	type Alias Project
+	aux := &struct {
+		GroveID   string `json:"groveId"`
+		GroveName string `json:"groveName"`
+		Grove     string `json:"grove"`
+		*Alias
+	}{
+		Alias: (*Alias)(p),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if p.ID == "" && aux.GroveID != "" {
+		p.ID = aux.GroveID
+	}
+	if p.Name == "" && aux.GroveName != "" {
+		p.Name = aux.GroveName
+	}
+	if p.Slug == "" && aux.Grove != "" {
+		p.Slug = aux.Grove
+	}
+	return nil
+}
+
+// IsSharedWorkspace returns true if this is a git project configured to use a
 // single shared workspace clone instead of per-agent clones.
-func (g *Grove) IsSharedWorkspace() bool {
-	return g.GitRemote != "" && g.Labels[LabelWorkspaceMode] == WorkspaceModeShared
+func (p *Project) IsSharedWorkspace() bool {
+	return p.GitRemote != "" && p.Labels[LabelWorkspaceMode] == WorkspaceModeShared
 }
 
 // RuntimeBroker represents a compute node in the Hub database.
@@ -233,7 +306,7 @@ type RuntimeBroker struct {
 	Endpoint string `json:"endpoint,omitempty"`
 
 	// Auto-provide configuration
-	// When true, this broker is automatically added as a provider for new groves
+	// When true, this broker is automatically added as a provider for new projects
 	AutoProvide bool `json:"autoProvide,omitempty"`
 
 	// Timestamps
@@ -261,18 +334,48 @@ type BrokerProfile struct {
 	Namespace string `json:"namespace,omitempty"` // K8s namespace
 }
 
-// GroveProvider links a runtime broker to a grove.
-type GroveProvider struct {
-	GroveID    string    `json:"groveId"`
+// ProjectProvider links a runtime broker to a project.
+type ProjectProvider struct {
+	ProjectID  string    `json:"projectId"`
 	BrokerID   string    `json:"brokerId"`
 	BrokerName string    `json:"brokerName"`
-	LocalPath  string    `json:"localPath,omitempty"` // Filesystem path to the grove on this broker (e.g., ~/.scion or /path/to/project/.scion)
+	LocalPath  string    `json:"localPath,omitempty"` // Filesystem path to the project on this broker (e.g., ~/.scion or /path/to/project/.scion)
 	Status     string    `json:"status"`              // online, offline
 	LastSeen   time.Time `json:"lastSeen,omitempty"`
 
-	// Ownership - tracks who linked this broker to the grove
+	// Ownership - tracks who linked this broker to the project
 	LinkedBy string    `json:"linkedBy,omitempty"` // User ID who performed the link
 	LinkedAt time.Time `json:"linkedAt,omitempty"` // Timestamp when the link was created
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (p ProjectProvider) MarshalJSON() ([]byte, error) {
+	type Alias ProjectProvider
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(p),
+		GroveID: p.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (p *ProjectProvider) UnmarshalJSON(data []byte) error {
+	type Alias ProjectProvider
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(p),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if p.ProjectID == "" && aux.GroveID != "" {
+		p.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // Template represents an agent template in the Hub database.
@@ -294,9 +397,9 @@ type Template struct {
 	ContentHash string `json:"contentHash,omitempty"` // SHA-256 hash of template contents
 
 	// Scope
-	Scope   string `json:"scope"`             // global, grove, user
-	ScopeID string `json:"scopeId,omitempty"` // groveId or userId (null for global)
-	GroveID string `json:"groveId,omitempty"` // Grove association (if scope=grove) - deprecated, use ScopeID
+	Scope     string `json:"scope"`               // global, project, user
+	ScopeID   string `json:"scopeId,omitempty"`   // projectId or userId (null for global)
+	ProjectID string `json:"projectId,omitempty"` // Project association (if scope=project) - deprecated, use ScopeID
 
 	// Storage
 	StorageURI    string `json:"storageUri,omitempty"`    // Full bucket URI (e.g., "gs://bucket/templates/path/")
@@ -317,7 +420,7 @@ type Template struct {
 	OwnerID    string `json:"ownerId,omitempty"`
 	CreatedBy  string `json:"createdBy,omitempty"`
 	UpdatedBy  string `json:"updatedBy,omitempty"`
-	Visibility string `json:"visibility"` // private, grove, public
+	Visibility string `json:"visibility"` // private, project, public
 
 	// Timestamps
 	Created time.Time `json:"created"`
@@ -341,9 +444,9 @@ const (
 
 // TemplateScope constants
 const (
-	TemplateScopeGlobal = "global"
-	TemplateScopeGrove  = "grove"
-	TemplateScopeUser   = "user"
+	TemplateScopeGlobal  = "global"
+	TemplateScopeProject = "project"
+	TemplateScopeUser    = "user"
 )
 
 // HarnessConfig represents a harness configuration in the Hub database.
@@ -363,8 +466,8 @@ type HarnessConfig struct {
 	ContentHash string `json:"contentHash,omitempty"` // SHA-256 hash of harness config contents
 
 	// Scope
-	Scope   string `json:"scope"`             // global, grove, user
-	ScopeID string `json:"scopeId,omitempty"` // groveId or userId (null for global)
+	Scope   string `json:"scope"`             // global, project, user
+	ScopeID string `json:"scopeId,omitempty"` // projectId or userId (null for global)
 
 	// Storage
 	StorageURI    string `json:"storageUri,omitempty"`    // Full bucket URI (e.g., "gs://bucket/harness-configs/path/")
@@ -382,7 +485,7 @@ type HarnessConfig struct {
 	OwnerID    string `json:"ownerId,omitempty"`
 	CreatedBy  string `json:"createdBy,omitempty"`
 	UpdatedBy  string `json:"updatedBy,omitempty"`
-	Visibility string `json:"visibility"` // private, grove, public
+	Visibility string `json:"visibility"` // private, project, public
 
 	// Timestamps
 	Created time.Time `json:"created"`
@@ -410,9 +513,9 @@ const (
 
 // HarnessConfigScope constants
 const (
-	HarnessConfigScopeGlobal = "global"
-	HarnessConfigScopeGrove  = "grove"
-	HarnessConfigScopeUser   = "user"
+	HarnessConfigScopeGlobal  = "global"
+	HarnessConfigScopeProject = "project"
+	HarnessConfigScopeUser    = "user"
 )
 
 // TemplateConfig holds template configuration details.
@@ -608,22 +711,52 @@ const (
 
 // SubscriptionScope constants define what a subscription targets.
 const (
-	SubscriptionScopeAgent = "agent" // Watch a specific agent
-	SubscriptionScopeGrove = "grove" // Watch all agents in a grove
+	SubscriptionScopeAgent   = "agent"   // Watch a specific agent
+	SubscriptionScopeProject = "project" // Watch all agents in a project
 )
 
 // NotificationSubscription represents a subscription to agent activity changes.
 type NotificationSubscription struct {
 	ID                string    `json:"id"`                  // UUID primary key
-	Scope             string    `json:"scope"`               // "agent" or "grove"
-	AgentID           string    `json:"agentId,omitempty"`   // Required when Scope="agent", empty when Scope="grove"
+	Scope             string    `json:"scope"`               // "agent" or "project"
+	AgentID           string    `json:"agentId,omitempty"`   // Required when Scope="agent", empty when Scope="project"
 	AgentSlug         string    `json:"agentSlug,omitempty"` // Display-only: resolved agent slug (not persisted)
 	SubscriberType    string    `json:"subscriberType"`      // "agent" or "user"
 	SubscriberID      string    `json:"subscriberId"`        // Slug or ID of the subscriber
-	GroveID           string    `json:"groveId"`             // Always required (grove context)
+	ProjectID         string    `json:"projectId"`           // Always required (project context)
 	TriggerActivities []string  `json:"triggerActivities"`   // e.g. ["COMPLETED", "WAITING_FOR_INPUT"]
 	CreatedAt         time.Time `json:"createdAt"`
 	CreatedBy         string    `json:"createdBy"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (s NotificationSubscription) MarshalJSON() ([]byte, error) {
+	type Alias NotificationSubscription
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(s),
+		GroveID: s.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (s *NotificationSubscription) UnmarshalJSON(data []byte) error {
+	type Alias NotificationSubscription
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(s),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if s.ProjectID == "" && aux.GroveID != "" {
+		s.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // MatchesActivity returns true if the given activity matches any of the subscription's
@@ -643,9 +776,9 @@ func (s *NotificationSubscription) MatchesActivity(activity string) bool {
 type SubscriptionTemplate struct {
 	ID                string   `json:"id"`                // UUID primary key
 	Name              string   `json:"name"`              // Display name (e.g., "All Events", "Critical Only")
-	Scope             string   `json:"scope"`             // Default scope: "agent" or "grove"
+	Scope             string   `json:"scope"`             // Default scope: "agent" or "project"
 	TriggerActivities []string `json:"triggerActivities"` // Pre-configured trigger set
-	GroveID           string   `json:"groveId"`           // Grove scope (empty = global)
+	ProjectID         string   `json:"projectId"`         // Project scope (empty = global)
 	CreatedBy         string   `json:"createdBy"`
 }
 
@@ -654,7 +787,7 @@ type Notification struct {
 	ID             string    `json:"id"`             // UUID primary key
 	SubscriptionID string    `json:"subscriptionId"` // FK to NotificationSubscription
 	AgentID        string    `json:"agentId"`        // Agent that triggered the notification
-	GroveID        string    `json:"groveId"`
+	ProjectID      string    `json:"projectId"`
 	SubscriberType string    `json:"subscriberType"` // "agent" or "user"
 	SubscriberID   string    `json:"subscriberId"`
 	Status         string    `json:"status"` // Trigger status (UPPER CASE)
@@ -662,6 +795,36 @@ type Notification struct {
 	Dispatched     bool      `json:"dispatched"`   // Whether dispatch was attempted
 	Acknowledged   bool      `json:"acknowledged"` // Whether acknowledged (for human targets)
 	CreatedAt      time.Time `json:"createdAt"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (n Notification) MarshalJSON() ([]byte, error) {
+	type Alias Notification
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(n),
+		GroveID: n.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (n *Notification) UnmarshalJSON(data []byte) error {
+	type Alias Notification
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(n),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if n.ProjectID == "" && aux.GroveID != "" {
+		n.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // ListOptions provides pagination and filtering for list operations.
@@ -681,7 +844,7 @@ type ListResult[T any] struct {
 }
 
 // EnvVar represents an environment variable stored in the Hub database.
-// Environment variables are scoped to users, groves, or runtime brokers.
+// Environment variables are scoped to users, projects, or runtime brokers.
 type EnvVar struct {
 	// Identity
 	ID  string `json:"id"`  // UUID primary key
@@ -691,7 +854,7 @@ type EnvVar struct {
 	Value string `json:"value"` // Variable value
 
 	// Scope
-	Scope   string `json:"scope"`   // user, grove, runtime_broker
+	Scope   string `json:"scope"`   // user, project, runtime_broker
 	ScopeID string `json:"scopeId"` // ID of the scoped entity
 
 	// Metadata
@@ -726,7 +889,7 @@ type Secret struct {
 	Target     string `json:"target,omitempty"` // Projection target: env var name, json key, or file path
 
 	// Scope
-	Scope   string `json:"scope"`   // user, grove, runtime_broker
+	Scope   string `json:"scope"`   // user, project, runtime_broker
 	ScopeID string `json:"scopeId"` // ID of the scoped entity
 
 	// Metadata
@@ -756,7 +919,7 @@ const (
 const (
 	ScopeHub           = "hub"
 	ScopeUser          = "user"
-	ScopeGrove         = "grove"
+	ScopeProject       = "project"
 	ScopeRuntimeBroker = "runtime_broker"
 )
 
@@ -783,8 +946,8 @@ type Group struct {
 	Name        string `json:"name"` // Human-friendly display name
 	Slug        string `json:"slug"` // URL-safe identifier
 	Description string `json:"description,omitempty"`
-	GroupType   string `json:"groupType,omitempty"` // "explicit" or "grove_agents"
-	GroveID     string `json:"groveId,omitempty"`   // FK to Grove.ID (for grove_agents groups)
+	GroupType   string `json:"groupType,omitempty"` // "explicit" or "project_agents"
+	ProjectID   string `json:"projectId,omitempty"` // FK to Project.ID (for project_agents groups)
 
 	// Hierarchy
 	ParentID string `json:"parentId,omitempty"` // Optional parent group for hierarchy
@@ -822,8 +985,8 @@ const (
 
 // GroupType constants
 const (
-	GroupTypeExplicit    = "explicit"
-	GroupTypeGroveAgents = "grove_agents"
+	GroupTypeExplicit      = "explicit"
+	GroupTypeProjectAgents = "project_agents" // Watch all agents in a project
 )
 
 // PolicyPrincipalType agent constant
@@ -847,11 +1010,11 @@ type Policy struct {
 	Description string `json:"description,omitempty"` // Detailed description
 
 	// Scope
-	ScopeType string `json:"scopeType"` // "hub", "grove", "resource"
+	ScopeType string `json:"scopeType"` // "hub", "project", "resource"
 	ScopeID   string `json:"scopeId"`   // ID of the scoped entity (empty for hub scope)
 
 	// Resource targeting
-	ResourceType string `json:"resourceType"`         // "*" for all, or specific type (agent, grove, etc.)
+	ResourceType string `json:"resourceType"`         // "*" for all, or specific type (agent, project, etc.)
 	ResourceID   string `json:"resourceId,omitempty"` // Specific resource ID (optional)
 
 	// Permissions
@@ -902,7 +1065,7 @@ const (
 // PolicyScopeType constants
 const (
 	PolicyScopeHub      = "hub"
-	PolicyScopeGrove    = "grove"
+	PolicyScopeProject  = "project"
 	PolicyScopeResource = "resource"
 )
 
@@ -924,7 +1087,7 @@ const (
 // =============================================================================
 
 // UserAccessToken represents a scoped personal access token.
-// UATs are opaque bearer tokens that carry grove-scoped, action-limited permissions.
+// UATs are opaque bearer tokens that carry project-scoped, action-limited permissions.
 type UserAccessToken struct {
 	ID      string `json:"id"`     // UUID
 	UserID  string `json:"userId"` // FK to User.ID
@@ -933,8 +1096,8 @@ type UserAccessToken struct {
 	KeyHash string `json:"-"`      // SHA-256 hash (never exposed)
 
 	// Scoping
-	GroveID string   `json:"groveId"` // Required: grove this token is scoped to
-	Scopes  []string `json:"scopes"`  // Action scopes (resource:action pairs)
+	ProjectID string   `json:"projectId"` // Required: project this token is scoped to
+	Scopes    []string `json:"scopes"`    // Action scopes (resource:action pairs)
 
 	// Lifecycle
 	Revoked   bool       `json:"revoked"`
@@ -943,12 +1106,42 @@ type UserAccessToken struct {
 	Created   time.Time  `json:"created"`
 }
 
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (t UserAccessToken) MarshalJSON() ([]byte, error) {
+	type Alias UserAccessToken
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(t),
+		GroveID: t.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (t *UserAccessToken) UnmarshalJSON(data []byte) error {
+	type Alias UserAccessToken
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(t),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if t.ProjectID == "" && aux.GroveID != "" {
+		t.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
 // UATPrefix is the token prefix that distinguishes UATs from other token types.
 const UATPrefix = "scion_pat_"
 
 // UAT scope constants define the allowed capability scopes.
 const (
-	UATScopeGroveRead     = "grove:read"
+	UATScopeProjectRead   = "project:read"
 	UATScopeAgentCreate   = "agent:create"
 	UATScopeAgentRead     = "agent:read"
 	UATScopeAgentList     = "agent:list"
@@ -963,7 +1156,7 @@ const (
 
 // UATValidScopes is the set of all valid UAT scope strings.
 var UATValidScopes = map[string]bool{
-	UATScopeGroveRead:     true,
+	UATScopeProjectRead:   true,
 	UATScopeAgentCreate:   true,
 	UATScopeAgentRead:     true,
 	UATScopeAgentList:     true,
@@ -1014,8 +1207,8 @@ const UATDefaultExpiry = 90 * 24 * time.Hour
 // token-generation time via the IAM Credentials API.
 type GCPServiceAccount struct {
 	ID                 string    `json:"id"`                      // UUID
-	Scope              string    `json:"scope"`                   // "hub", "grove", "user"
-	ScopeID            string    `json:"scopeId"`                 // ID of the hub/grove/user
+	Scope              string    `json:"scope"`                   // "hub", "project", "user"
+	ScopeID            string    `json:"scopeId"`                 // ID of the hub/project/user
 	Email              string    `json:"email"`                   // e.g. "agent-worker@project.iam.gserviceaccount.com"
 	ProjectID          string    `json:"projectId"`               // GCP project containing the SA
 	DisplayName        string    `json:"displayName"`             // Human-friendly label
@@ -1051,7 +1244,7 @@ const (
 // These functions convert persistence models to API models for external use.
 // Key ID semantics:
 //   - store.Agent.ID   = UUID (database primary key, globally unique)
-//   - store.Agent.Slug = URL-safe identifier (unique per grove)
+//   - store.Agent.Slug = URL-safe identifier (unique per project)
 //   - api.AgentInfo.ID   = Hub UUID (same as store.Agent.ID)
 //   - api.AgentInfo.Slug = URL-safe identifier (same as store.Agent.Slug)
 //   - api.AgentInfo.ContainerID = Runtime container ID (ephemeral, runtime-assigned)
@@ -1064,7 +1257,7 @@ const (
 // Message represents a persisted structured message between agents and humans.
 type Message struct {
 	ID          string    `json:"id"`
-	GroveID     string    `json:"groveId"`
+	ProjectID   string    `json:"projectId"`
 	Sender      string    `json:"sender"`    // "user:alice", "agent:code-reviewer"
 	SenderID    string    `json:"senderId"`  // UUID or identity key
 	Recipient   string    `json:"recipient"` // "user:alice", "agent:code-reviewer"
@@ -1078,9 +1271,39 @@ type Message struct {
 	CreatedAt   time.Time `json:"createdAt"`
 }
 
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (m Message) MarshalJSON() ([]byte, error) {
+	type Alias Message
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(m),
+		GroveID: m.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (m *Message) UnmarshalJSON(data []byte) error {
+	type Alias Message
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(m),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if m.ProjectID == "" && aux.GroveID != "" {
+		m.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
 // MessageFilter defines query parameters for listing messages.
 type MessageFilter struct {
-	GroveID     string // Filter by grove
+	ProjectID   string // Filter by project
 	AgentID     string // Filter by involved agent
 	RecipientID string // Filter by recipient
 	SenderID    string // Filter by sender
@@ -1103,7 +1326,7 @@ type MessageFilter struct {
 // ScheduledEvent represents a one-shot timer persisted in the database.
 type ScheduledEvent struct {
 	ID         string     `json:"id"`
-	GroveID    string     `json:"groveId"`
+	ProjectID  string     `json:"projectId"`
 	EventType  string     `json:"eventType"` // "message", "status_update"
 	FireAt     time.Time  `json:"fireAt"`    // When to fire (UTC)
 	Payload    string     `json:"payload"`   // JSON blob (handler-specific)
@@ -1113,6 +1336,36 @@ type ScheduledEvent struct {
 	FiredAt    *time.Time `json:"firedAt,omitempty"`
 	Error      string     `json:"error,omitempty"`
 	ScheduleID string     `json:"scheduleId,omitempty"` // FK to schedules.id for recurring schedule fires
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (e ScheduledEvent) MarshalJSON() ([]byte, error) {
+	type Alias ScheduledEvent
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(e),
+		GroveID: e.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (e *ScheduledEvent) UnmarshalJSON(data []byte) error {
+	type Alias ScheduledEvent
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(e),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if e.ProjectID == "" && aux.GroveID != "" {
+		e.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // ScheduledEventStatus constants
@@ -1125,7 +1378,7 @@ const (
 
 // ScheduledEventFilter for listing events.
 type ScheduledEventFilter struct {
-	GroveID    string
+	ProjectID  string
 	EventType  string
 	Status     string
 	ScheduleID string // Filter events generated by a specific recurring schedule
@@ -1138,7 +1391,7 @@ type ScheduledEventFilter struct {
 // Schedule represents a user-defined recurring schedule backed by a cron expression.
 type Schedule struct {
 	ID            string     `json:"id"`
-	GroveID       string     `json:"groveId"`
+	ProjectID     string     `json:"projectId"`
 	Name          string     `json:"name"`
 	CronExpr      string     `json:"cronExpr"`  // Standard 5-field cron expression (UTC)
 	EventType     string     `json:"eventType"` // "message" (future: "dispatch_agent")
@@ -1153,6 +1406,36 @@ type Schedule struct {
 	CreatedAt     time.Time  `json:"createdAt"`
 	CreatedBy     string     `json:"createdBy,omitempty"`
 	UpdatedAt     time.Time  `json:"updatedAt"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (s Schedule) MarshalJSON() ([]byte, error) {
+	type Alias Schedule
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(s),
+		GroveID: s.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (s *Schedule) UnmarshalJSON(data []byte) error {
+	type Alias Schedule
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(s),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if s.ProjectID == "" && aux.GroveID != "" {
+		s.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // ScheduleStatus constants
@@ -1170,9 +1453,9 @@ const (
 
 // ScheduleFilter for listing schedules.
 type ScheduleFilter struct {
-	GroveID string
-	Status  string
-	Name    string
+	ProjectID string
+	Status    string
+	Name      string
 }
 
 // ToAPI converts a store.Agent to an api.AgentInfo for external consumption.
@@ -1184,8 +1467,8 @@ func (a *Agent) ToAPI() *api.AgentInfo {
 		Name:     a.Name,
 		Template: a.Template,
 
-		// Grove association - use the hosted format (uuid__slug)
-		GroveID: a.GroveID,
+		// Project association - use the hosted format (uuid__slug)
+		ProjectID: a.ProjectID,
 
 		// Metadata
 		Labels:      a.Labels,
@@ -1246,9 +1529,9 @@ func (a *Agent) ToAPI() *api.AgentInfo {
 	return info
 }
 
-// ToAPI converts a store.Grove to an api.GroveInfo for external consumption.
-func (g *Grove) ToAPI() *api.GroveInfo {
-	return &api.GroveInfo{
+// ToAPI converts a store.Project to an api.ProjectInfo for external consumption.
+func (g *Project) ToAPI() *api.ProjectInfo {
+	return &api.ProjectInfo{
 		ID:   g.ID,
 		Name: g.Name,
 		Slug: g.Slug,
@@ -1294,8 +1577,8 @@ const (
 	GitHubInstallationStatusDeleted   = "deleted"
 )
 
-// GitHubAppGroveStatus represents the health of the GitHub App integration for a grove.
-type GitHubAppGroveStatus struct {
+// GitHubAppProjectStatus represents the health of the GitHub App integration for a project.
+type GitHubAppProjectStatus struct {
 	State         string     `json:"state"`
 	ErrorCode     string     `json:"error_code,omitempty"`
 	ErrorMessage  string     `json:"error_message,omitempty"`
@@ -1313,7 +1596,7 @@ const (
 )
 
 // GitHubTokenPermissions specifies the permissions to request when minting
-// installation tokens for a grove.
+// installation tokens for a project.
 type GitHubTokenPermissions struct {
 	Contents     string `json:"contents,omitempty"`
 	PullRequests string `json:"pull_requests,omitempty"`
@@ -1380,15 +1663,45 @@ const (
 )
 
 // =============================================================================
-// Grove Sync State (Workspace Sync Metadata)
+// Project Sync State (Workspace Sync Metadata)
 // =============================================================================
 
-// GroveSyncState tracks sync metadata per grove (and optionally per broker).
-type GroveSyncState struct {
-	GroveID       string     `json:"groveId"`
+// ProjectSyncState tracks sync metadata per project (and optionally per broker).
+type ProjectSyncState struct {
+	ProjectID     string     `json:"projectId"`
 	BrokerID      string     `json:"brokerId,omitempty"`
 	LastSyncTime  *time.Time `json:"lastSyncTime,omitempty"`
 	LastCommitSHA string     `json:"lastCommitSha,omitempty"`
 	FileCount     int        `json:"fileCount"`
 	TotalBytes    int64      `json:"totalBytes"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (s ProjectSyncState) MarshalJSON() ([]byte, error) {
+	type Alias ProjectSyncState
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(s),
+		GroveID: s.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (s *ProjectSyncState) UnmarshalJSON(data []byte) error {
+	type Alias ProjectSyncState
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(s),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if s.ProjectID == "" && aux.GroveID != "" {
+		s.ProjectID = aux.GroveID
+	}
+	return nil
 }

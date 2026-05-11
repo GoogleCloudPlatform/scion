@@ -24,7 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/grovesync"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -39,13 +39,13 @@ var (
 )
 
 // syncCmd represents the sync command.
-// When invoked bare (no subcommand, no agent), it performs bidirectional grove-level sync.
+// When invoked bare (no subcommand, no agent), it performs bidirectional project-level sync.
 var syncCmd = &cobra.Command{
 	Use:   "sync [push|pull|to|from] [agent-name]",
-	Short: "Sync grove or agent workspace",
-	Long: `Synchronizes the workspace for a grove or a specific agent.
+	Short: "Sync project or agent workspace",
+	Long: `Synchronizes the workspace for a project or a specific agent.
 
-Grove-level sync (requires Hub):
+Project-level sync (requires Hub):
   scion sync                   Bidirectional sync (newer file wins)
   scion sync push              Push local workspace to hub
   scion sync pull              Pull hub workspace to local
@@ -60,20 +60,20 @@ Options:
   --force                      Bypass safety checks (bisync max-delete)
 
 Examples:
-  # Bidirectional grove sync against hub
+  # Bidirectional project sync against hub
   scion sync
 
-  # Push local grove workspace to hub
+  # Push local project workspace to hub
   scion sync push
 
   # Pull hub workspace to local
   scion sync pull
 
-  # Preview grove sync
+  # Preview project sync
   scion sync --dry-run
 
-  # Sync with specific grove
-  scion sync -g /path/to/grove push
+  # Sync with specific project
+  scion sync -g /path/to/project push
 
   # Agent-level sync (unchanged)
   scion sync from my-agent
@@ -92,24 +92,24 @@ func init() {
 func runSync(cmd *cobra.Command, args []string) error {
 	// Parse arguments to determine scope and direction
 	if len(args) == 0 {
-		// Bare `scion sync` → grove-level bidirectional
-		return runGroveSync(grovesync.DirBisync)
+		// Bare `scion sync` → project-level bidirectional
+		return runProjectSync(projectsync.DirBisync)
 	}
 
 	direction := args[0]
 
-	// Grove-level subcommands: push, pull
+	// Project-level subcommands: push, pull
 	switch direction {
 	case "push":
 		if len(args) > 1 {
 			return fmt.Errorf("'push' does not take an agent name; use 'scion sync to <agent>' for agent-level sync")
 		}
-		return runGroveSync(grovesync.DirPush)
+		return runProjectSync(projectsync.DirPush)
 	case "pull":
 		if len(args) > 1 {
 			return fmt.Errorf("'pull' does not take an agent name; use 'scion sync from <agent>' for agent-level sync")
 		}
-		return runGroveSync(grovesync.DirPull)
+		return runProjectSync(projectsync.DirPull)
 	}
 
 	// Agent-level subcommands: to, from
@@ -124,27 +124,27 @@ func runSync(cmd *cobra.Command, args []string) error {
 	return runAgentSync(args)
 }
 
-// runGroveSync performs grove-level workspace sync against the Hub's WebDAV endpoint.
-func runGroveSync(direction grovesync.Direction) error {
-	// Check Hub availability (grove-level sync requires a hub)
-	hubCtx, err := CheckHubAvailabilityWithOptions(grovePath, true)
+// runProjectSync performs project-level workspace sync against the Hub's WebDAV endpoint.
+func runProjectSync(direction projectsync.Direction) error {
+	// Check Hub availability (project-level sync requires a hub)
+	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
 	if err != nil {
 		return err
 	}
 	if hubCtx == nil {
-		return fmt.Errorf("grove-level sync requires a Hub connection.\nUse 'scion sync to/from <agent>' for agent-level sync in solo mode")
+		return fmt.Errorf("project-level sync requires a Hub connection.\nUse 'scion sync to/from <agent>' for agent-level sync in solo mode")
 	}
 
 	PrintUsingHub(hubCtx.Endpoint)
 
-	// Get the grove ID
-	groveID, err := GetGroveID(hubCtx)
+	// Get the project ID
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
 
 	// Resolve local workspace path
-	workspacePath, err := resolveGroveWorkspacePath()
+	workspacePath, err := resolveProjectWorkspacePath()
 	if err != nil {
 		return err
 	}
@@ -156,18 +156,18 @@ func runGroveSync(direction grovesync.Direction) error {
 	}
 
 	dirLabel := string(direction)
-	if direction == grovesync.DirBisync {
+	if direction == projectsync.DirBisync {
 		dirLabel = "bidirectional sync"
 	}
-	statusf("Starting grove %s: %s ↔ hub\n", dirLabel, workspacePath)
+	statusf("Starting project %s: %s ↔ hub\n", dirLabel, workspacePath)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	result, err := grovesync.Sync(ctx, grovesync.Options{
+	result, err := projectsync.Sync(ctx, projectsync.Options{
 		LocalPath:       workspacePath,
 		HubEndpoint:     hubCtx.Endpoint,
-		GroveID:         groveID,
+		ProjectID:         projectID,
 		AuthToken:       authToken,
 		Direction:       direction,
 		DryRun:          syncDryRun,
@@ -175,16 +175,16 @@ func runGroveSync(direction grovesync.Direction) error {
 		Force:           syncForce,
 	})
 	if err != nil {
-		return fmt.Errorf("grove sync failed: %w", err)
+		return fmt.Errorf("project sync failed: %w", err)
 	}
 
 	if isJSONOutput() {
 		return outputJSON(map[string]interface{}{
 			"status":    "success",
 			"command":   "sync",
-			"scope":     "grove",
+			"scope":     "project",
 			"direction": string(result.Direction),
-			"groveId":   groveID,
+			"projectId":   projectID,
 			"dryRun":    result.DryRun,
 		})
 	}
@@ -192,23 +192,23 @@ func runGroveSync(direction grovesync.Direction) error {
 	if result.DryRun {
 		statusln("Dry run complete.")
 	} else {
-		statusln("Grove sync complete.")
+		statusln("Project sync complete.")
 	}
 
 	return nil
 }
 
-// resolveGroveWorkspacePath resolves the local workspace path for grove-level sync.
+// resolveProjectWorkspacePath resolves the local workspace path for project-level sync.
 // It finds the project root directory containing .scion/.
-func resolveGroveWorkspacePath() (string, error) {
-	if grovePath != "" {
-		resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+func resolveProjectWorkspacePath() (string, error) {
+	if projectPath != "" {
+		resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 		if err != nil {
-			return "", fmt.Errorf("failed to resolve grove path: %w", err)
+			return "", fmt.Errorf("failed to resolve project path: %w", err)
 		}
-		// The workspace is the parent of the .scion directory (for project groves)
-		// or a recorded path (for external groves)
-		return resolveGroveWorkspace(resolvedPath)
+		// The workspace is the parent of the .scion directory (for project projects)
+		// or a recorded path (for external projects)
+		return resolveProjectWorkspace(resolvedPath)
 	}
 
 	// Use current directory — find the project root
@@ -242,7 +242,7 @@ func runAgentSync(args []string) error {
 	}
 
 	// Check if Hub should be used
-	hubCtx, err := CheckHubAvailability(grovePath)
+	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
 		return err
 	}
@@ -256,7 +256,7 @@ func runAgentSync(args []string) error {
 	}
 
 	// Solo mode: use existing local sync
-	rt := runtime.GetRuntime(grovePath, profile)
+	rt := runtime.GetRuntime(projectPath, profile)
 
 	return rt.Sync(context.Background(), agentName, direction)
 }
@@ -265,8 +265,8 @@ func runAgentSync(args []string) error {
 func syncViaHub(hubCtx *HubContext, agentName string, direction runtime.SyncDirection) error {
 	PrintUsingHub(hubCtx.Endpoint) // writes to stderr
 
-	// Get the grove ID
-	groveID, err := GetGroveID(hubCtx)
+	// Get the project ID
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -275,7 +275,7 @@ func syncViaHub(hubCtx *HubContext, agentName string, direction runtime.SyncDire
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	agentID, err := resolveAgentID(ctx, hubCtx.Client, groveID, agentName)
+	agentID, err := resolveAgentID(ctx, hubCtx.Client, projectID, agentName)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -528,9 +528,9 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 }
 
 // resolveAgentID resolves an agent name to an agent ID.
-func resolveAgentID(ctx context.Context, client hubclient.Client, groveID, agentName string) (string, error) {
-	// List agents in the grove and find by name
-	resp, err := client.GroveAgents(groveID).List(ctx, nil)
+func resolveAgentID(ctx context.Context, client hubclient.Client, projectID, agentName string) (string, error) {
+	// List agents in the project and find by name
+	resp, err := client.ProjectAgents(projectID).List(ctx, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to look up agent: %w", err)
 	}
@@ -547,30 +547,30 @@ func resolveAgentID(ctx context.Context, client hubclient.Client, groveID, agent
 		}
 	}
 
-	return "", fmt.Errorf("agent '%s' not found in grove", agentName)
+	return "", fmt.Errorf("agent '%s' not found in project", agentName)
 }
 
 // resolveLocalWorkspacePath resolves the local workspace path for an agent.
 func resolveLocalWorkspacePath(agentName string) (string, error) {
-	// Resolve grove path
-	var groveDir string
-	if grovePath != "" {
-		groveDir = grovePath
+	// Resolve project path
+	var projectDir string
+	if projectPath != "" {
+		projectDir = projectPath
 	} else {
 		// Use current directory
 		cwd, err := filepath.Abs(".")
 		if err != nil {
 			return ".", nil
 		}
-		groveDir = cwd
+		projectDir = cwd
 	}
 
-	// Get grove name from the directory
-	groveName := filepath.Base(groveDir)
+	// Get project name from the directory
+	projectName := filepath.Base(projectDir)
 
-	// Check for standard worktree location: {parent}/.scion_worktrees/{grove}/{agent}
-	groveParent := filepath.Dir(groveDir)
-	worktreePath := filepath.Join(groveParent, ".scion_worktrees", groveName, agentName)
+	// Check for standard worktree location: {parent}/.scion_worktrees/{project}/{agent}
+	projectParent := filepath.Dir(projectDir)
+	worktreePath := filepath.Join(projectParent, ".scion_worktrees", projectName, agentName)
 
 	// If the worktree exists, use it
 	if info, err := os.Stat(worktreePath); err == nil && info.IsDir() {

@@ -34,8 +34,8 @@ func TestNew(t *testing.T) {
 	if client.Agents() == nil {
 		t.Error("expected non-nil agents service")
 	}
-	if client.Groves() == nil {
-		t.Error("expected non-nil groves service")
+	if client.Projects() == nil {
+		t.Error("expected non-nil projects service")
 	}
 	if client.RuntimeBrokers() == nil {
 		t.Error("expected non-nil runtime brokers service")
@@ -127,7 +127,7 @@ func TestAgentsList(t *testing.T) {
 
 	client, _ := New(server.URL)
 	resp, err := client.Agents().List(context.Background(), &ListAgentsOptions{
-		GroveID: "grove-123",
+		ProjectID: "grove-123",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -183,19 +183,19 @@ func TestAgentsCreate(t *testing.T) {
 		if req.Name != "new-agent" {
 			t.Errorf("expected name 'new-agent', got %q", req.Name)
 		}
-		if req.GroveID != "grove-123" {
-			t.Errorf("expected groveId 'grove-123', got %q", req.GroveID)
+		if req.ProjectID != "grove-123" {
+			t.Errorf("expected groveId 'grove-123', got %q", req.ProjectID)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(CreateAgentResponse{
 			Agent: &Agent{
-				ID:      "uuid-new",
-				Slug:    "new-agent",
-				Name:    "new-agent",
-				GroveID: "grove-123",
-				Status:  "provisioning",
+				ID:        "uuid-new",
+				Slug:      "new-agent",
+				Name:      "new-agent",
+				ProjectID: "grove-123",
+				Status:    "provisioning",
 			},
 		})
 	}))
@@ -203,8 +203,8 @@ func TestAgentsCreate(t *testing.T) {
 
 	client, _ := New(server.URL)
 	resp, err := client.Agents().Create(context.Background(), &CreateAgentRequest{
-		Name:    "new-agent",
-		GroveID: "grove-123",
+		Name:      "new-agent",
+		ProjectID: "grove-123",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -272,25 +272,25 @@ func TestAgentsDelete_PreserveFiles(t *testing.T) {
 	}
 }
 
-func TestGrovesRegister(t *testing.T) {
+func TestProjectsRegister(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
-		if r.URL.Path != "/api/v1/groves/register" {
-			t.Errorf("expected path /api/v1/groves/register, got %s", r.URL.Path)
+		if r.URL.Path != "/api/v1/projects/register" {
+			t.Errorf("expected path /api/v1/projects/register, got %s", r.URL.Path)
 		}
 
-		var req RegisterGroveRequest
+		var req RegisterProjectRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Errorf("failed to decode request: %v", err)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(RegisterGroveResponse{
-			Grove: &Grove{
-				ID:        "grove-uuid",
+		json.NewEncoder(w).Encode(RegisterProjectResponse{
+			Project: &Project{
+				ID:        "project-uuid",
 				Name:      req.Name,
 				GitRemote: req.GitRemote,
 			},
@@ -305,7 +305,7 @@ func TestGrovesRegister(t *testing.T) {
 	defer server.Close()
 
 	client, _ := New(server.URL)
-	resp, err := client.Groves().Register(context.Background(), &RegisterGroveRequest{
+	resp, err := client.Projects().Register(context.Background(), &RegisterProjectRequest{
 		Name:      "my-project",
 		GitRemote: "git@github.com:org/repo.git",
 		Path:      "/path/to/.scion",
@@ -322,6 +322,44 @@ func TestGrovesRegister(t *testing.T) {
 	}
 	if resp.BrokerToken != "secret-host-token" {
 		t.Errorf("expected brokerToken 'secret-host-token', got %q", resp.BrokerToken)
+	}
+}
+
+func TestFallback(t *testing.T) {
+	var attempts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts = append(attempts, r.URL.Path)
+		if r.URL.Path == "/api/v1/projects/my-project" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.URL.Path == "/api/v1/groves/my-project" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(Project{ID: "my-project", Name: "My Project"})
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client, _ := New(server.URL)
+	project, err := client.Projects().Get(context.Background(), "my-project")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if project.Name != "My Project" {
+		t.Errorf("expected 'My Project', got %q", project.Name)
+	}
+
+	if len(attempts) != 2 {
+		t.Errorf("expected 2 attempts, got %d", len(attempts))
+	}
+	if attempts[0] != "/api/v1/projects/my-project" {
+		t.Errorf("expected first attempt to /api/v1/projects/my-project, got %s", attempts[0])
+	}
+	if attempts[1] != "/api/v1/groves/my-project" {
+		t.Errorf("expected second attempt to /api/v1/groves/my-project, got %s", attempts[1])
 	}
 }
 
@@ -379,8 +417,8 @@ func TestEnvList(t *testing.T) {
 		if r.URL.Path != "/api/v1/env" {
 			t.Errorf("expected path /api/v1/env, got %s", r.URL.Path)
 		}
-		if r.URL.Query().Get("scope") != "grove" {
-			t.Errorf("expected scope=grove, got %s", r.URL.Query().Get("scope"))
+		if r.URL.Query().Get("scope") != "project" {
+			t.Errorf("expected scope=project, got %s", r.URL.Query().Get("scope"))
 		}
 		if r.URL.Query().Get("scopeId") != "grove-123" {
 			t.Errorf("expected scopeId=grove-123, got %s", r.URL.Query().Get("scopeId"))
@@ -389,10 +427,10 @@ func TestEnvList(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ListEnvResponse{
 			EnvVars: []EnvVar{
-				{ID: "1", Key: "API_URL", Value: "https://api.example.com", Scope: "grove", ScopeID: "grove-123"},
-				{ID: "2", Key: "LOG_LEVEL", Value: "debug", Scope: "grove", ScopeID: "grove-123"},
+				{ID: "1", Key: "API_URL", Value: "https://api.example.com", Scope: "project", ScopeID: "grove-123"},
+				{ID: "2", Key: "LOG_LEVEL", Value: "debug", Scope: "project", ScopeID: "grove-123"},
 			},
-			Scope:   "grove",
+			Scope:   "project",
 			ScopeID: "grove-123",
 		})
 	}))
@@ -400,7 +438,7 @@ func TestEnvList(t *testing.T) {
 
 	client, _ := New(server.URL)
 	resp, err := client.Env().List(context.Background(), &ListEnvOptions{
-		Scope:   "grove",
+		Scope:   "project",
 		ScopeID: "grove-123",
 	})
 	if err != nil {
@@ -460,8 +498,8 @@ func TestEnvSet(t *testing.T) {
 		if req.Value != "debug" {
 			t.Errorf("expected value 'debug', got %q", req.Value)
 		}
-		if req.Scope != "grove" {
-			t.Errorf("expected scope 'grove', got %q", req.Scope)
+		if req.Scope != "project" {
+			t.Errorf("expected scope 'project', got %q", req.Scope)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -470,7 +508,7 @@ func TestEnvSet(t *testing.T) {
 				ID:      "uuid-new",
 				Key:     "LOG_LEVEL",
 				Value:   "debug",
-				Scope:   "grove",
+				Scope:   "project",
 				ScopeID: "grove-123",
 			},
 			Created: true,
@@ -481,7 +519,7 @@ func TestEnvSet(t *testing.T) {
 	client, _ := New(server.URL)
 	resp, err := client.Env().Set(context.Background(), "LOG_LEVEL", &SetEnvRequest{
 		Value:   "debug",
-		Scope:   "grove",
+		Scope:   "project",
 		ScopeID: "grove-123",
 	})
 	if err != nil {
@@ -720,8 +758,8 @@ func TestTokenCreate(t *testing.T) {
 		if req.Name != "ci-token" {
 			t.Errorf("expected name 'ci-token', got %q", req.Name)
 		}
-		if req.GroveID != "grove-123" {
-			t.Errorf("expected groveId 'grove-123', got %q", req.GroveID)
+		if req.ProjectID != "grove-123" {
+			t.Errorf("expected groveId 'grove-123', got %q", req.ProjectID)
 		}
 		if len(req.Scopes) != 2 {
 			t.Errorf("expected 2 scopes, got %d", len(req.Scopes))
@@ -735,7 +773,7 @@ func TestTokenCreate(t *testing.T) {
 				ID:        "token-uuid",
 				Name:      "ci-token",
 				Prefix:    "scion_pat_abc1",
-				GroveID:   "grove-123",
+				ProjectID: "grove-123",
 				Scopes:    []string{"agent:dispatch", "agent:read"},
 				ExpiresAt: &expires,
 				Created:   time.Now(),
@@ -747,7 +785,7 @@ func TestTokenCreate(t *testing.T) {
 	client, _ := New(server.URL)
 	resp, err := client.Tokens().Create(context.Background(), &CreateTokenRequest{
 		Name:      "ci-token",
-		GroveID:   "grove-123",
+		ProjectID: "grove-123",
 		Scopes:    []string{"agent:dispatch", "agent:read"},
 		ExpiresAt: &expires,
 	})
@@ -760,8 +798,8 @@ func TestTokenCreate(t *testing.T) {
 	if resp.AccessToken.Name != "ci-token" {
 		t.Errorf("expected name 'ci-token', got %q", resp.AccessToken.Name)
 	}
-	if resp.AccessToken.GroveID != "grove-123" {
-		t.Errorf("expected groveId 'grove-123', got %q", resp.AccessToken.GroveID)
+	if resp.AccessToken.ProjectID != "grove-123" {
+		t.Errorf("expected groveId 'grove-123', got %q", resp.AccessToken.ProjectID)
 	}
 }
 
@@ -777,8 +815,8 @@ func TestTokenList(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ListTokensResponse{
 			Items: []TokenInfo{
-				{ID: "t1", Name: "ci-token", Prefix: "scion_pat_abc1", GroveID: "grove-1", Scopes: []string{"agent:dispatch"}},
-				{ID: "t2", Name: "deploy", Prefix: "scion_pat_def2", GroveID: "grove-2", Scopes: []string{"agent:manage"}},
+				{ID: "t1", Name: "ci-token", Prefix: "scion_pat_abc1", ProjectID: "grove-1", Scopes: []string{"agent:dispatch"}},
+				{ID: "t2", Name: "deploy", Prefix: "scion_pat_def2", ProjectID: "grove-2", Scopes: []string{"agent:manage"}},
 			},
 		})
 	}))
@@ -805,12 +843,12 @@ func TestTokenGet(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(TokenInfo{
-			ID:      "token-123",
-			Name:    "ci-token",
-			Prefix:  "scion_pat_abc1",
-			GroveID: "grove-1",
-			Scopes:  []string{"agent:dispatch"},
-			Created: time.Now(),
+			ID:        "token-123",
+			Name:      "ci-token",
+			Prefix:    "scion_pat_abc1",
+			ProjectID: "grove-1",
+			Scopes:    []string{"agent:dispatch"},
+			Created:   time.Now(),
 		})
 	}))
 	defer server.Close()

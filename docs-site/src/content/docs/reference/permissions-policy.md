@@ -32,7 +32,7 @@ The agent identity token contains standard JWT claims alongside Scion-specific m
   "iat": 1615985870,
   "exp": 1616072270,
   "scion_claims": {
-    "grove_id": "grove:12345",
+    "project_id": "project:12345",
     "creator_user_id": "user:jane.doe@example.com",
     "template_id": "template:security-auditor:v2",
     "broker_id": "broker:aws-us-east-1",
@@ -49,7 +49,7 @@ Crucially, the identity token includes **provenance claims** that attest to the 
 | :--- | :--- | :--- |
 | `creator_user_id` | The ID of the user who requested the agent's creation. | Restrict agent access to resources owned by the creator. |
 | `template_id` | The ID and version of the template used. | Enforce least-privilege based on the agent's role (e.g., QA vs. Dev). |
-| `grove_id` | The project workspace the agent belongs to. | Isolate agents to their specific project scope. |
+| `project_id` | The project workspace the agent belongs to. | Isolate agents to their specific project scope. |
 | `broker_id` | The identity of the Runtime Broker executing the agent. | Restrict sensitive tasks to trusted hardware/locations. |
 
 ## Policy Language
@@ -64,8 +64,8 @@ kind: Policy
 metadata:
   name: "limit-auditor-agents"
 spec:
-  # The scope of the policy (e.g., global, grove-specific)
-  scope: "grove:12345"
+  # The scope of the policy (e.g., global, project-specific)
+  scope: "project:12345"
   
   # Who is being regulated?
   principal:
@@ -86,7 +86,7 @@ spec:
 ### Evaluation Logic
 
 1.  **Authentication**: The request is validated. If the requester is an Agent, its JWT is verified and unpacked.
-2.  **Policy Matching**: The Hub retrieves all active policies relevant to the request's Scope (Global + Grove).
+2.  **Policy Matching**: The Hub retrieves all active policies relevant to the request's Scope (Global + Project).
 3.  **Condition Check**: For each matching policy, the `condition` expression is evaluated against the request context.
 4.  **Decision**:
     *   **Deny Override**: If *any* matching policy explicitly denies the action, the request is rejected.

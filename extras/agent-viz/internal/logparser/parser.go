@@ -279,7 +279,7 @@ func extractTimeRange(entries []GCPLogEntry) TimeRange {
 	}
 }
 
-func extractGroveInfo(entries []GCPLogEntry) (string, string) {
+func extractProjectInfo(entries []GCPLogEntry) (string, string) {
 	for _, e := range entries {
 		if gid, ok := e.Labels["grove_id"]; ok {
 			// Try to find grove name from server logs

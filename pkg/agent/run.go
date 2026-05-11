@@ -58,17 +58,20 @@ func isTmuxShellNotFoundError(err error) bool {
 
 func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	// Resolve grove name early so we can scope the container lookup below.
-	projectDir, err := config.GetResolvedProjectDir(opts.GrovePath)
+	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
 	if err != nil {
 		return nil, err
 	}
-	groveName := config.GetGroveName(projectDir)
+	projectName := config.GetProjectName(projectDir)
 
 	// Determine the grove ID for label-based filtering. In broker/hosted mode
 	// this comes from the SCION_GROVE_ID env var injected by the hub dispatcher.
-	groveID := ""
+	projectID := ""
 	if opts.Env != nil {
-		groveID = opts.Env["SCION_GROVE_ID"]
+		projectID = opts.Env["SCION_GROVE_ID"]
+		if projectID == "" {
+			projectID = opts.Env["SCION_PROJECT_ID"]
+		}
 	}
 
 	// 0. Check if container already exists (scoped to this grove)
@@ -77,7 +80,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if err == nil {
 		for _, a := range agents {
 			// Skip agents from a different grove
-			if !matchAgentGrove(a, groveName, groveID) {
+			if !matchAgentProject(a, projectName, projectID) {
 				continue
 			}
 			status := strings.ToLower(a.ContainerStatus)
@@ -133,9 +136,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		startInlineConfig.AuthSelectedType = opts.HarnessAuth
 	}
 
-	util.Debugf("Start: calling GetAgent name=%s template=%q image=%q harnessConfig=%q grovePath=%q profile=%q",
-		opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.GrovePath, opts.Profile)
-	agentDir, agentHome, agentWorkspace, finalScionCfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.GrovePath, opts.Profile, "", opts.Branch, opts.Workspace, startInlineConfig)
+	util.Debugf("Start: calling GetAgent name=%s template=%q image=%q harnessConfig=%q projectPath=%q profile=%q",
+		opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile)
+	agentDir, agentHome, agentWorkspace, finalScionCfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "", opts.Branch, opts.Workspace, startInlineConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -171,6 +174,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		util.Debugf("Start: LoadEffectiveSettings(%s) error: %v", projectDir, err)
 	}
 	config.PrintDeprecationWarnings(settingsWarnings)
+
+	// Phase 5: Resolve project ID from settings if not already provided via env
+	if projectID == "" && settings != nil && settings.Hub != nil {
+		projectID = settings.Hub.ProjectID
+	}
 
 	harnessName := ""
 	if finalScionCfg != nil {
@@ -222,7 +230,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			templateName = opts.Template
 		}
 		if templateName != "" {
-			if chain, err := config.GetTemplateChainInGrove(templateName, opts.GrovePath); err == nil {
+			if chain, err := config.GetTemplateChainInProject(templateName, opts.ProjectPath); err == nil {
 				for _, tpl := range chain {
 					templatePaths = append(templatePaths, tpl.Path)
 				}
@@ -336,7 +344,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			if !filepath.IsAbs(tplName) && finalScionCfg != nil && finalScionCfg.Info != nil && finalScionCfg.Info.Template != "" {
 				tplName = finalScionCfg.Info.Template
 			}
-			if chain, err := config.GetTemplateChainInGrove(tplName, opts.GrovePath); err == nil {
+			if chain, err := config.GetTemplateChainInProject(tplName, opts.ProjectPath); err == nil {
 				for _, tpl := range chain {
 					resolveTemplatePaths = append(resolveTemplatePaths, tpl.Path)
 				}
@@ -344,7 +352,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 		resolved, err := harness.Resolve(ctx, harness.ResolveOptions{
 			Name:          harnessConfigName,
-			GrovePath:     projectDir,
+			ProjectPath:     projectDir,
 			TemplatePaths: resolveTemplatePaths,
 			ProfileName:   profileName,
 			Settings:      settings,
@@ -526,7 +534,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		opts.Env = make(map[string]string)
 	}
 	opts.Env["SCION_AGENT_NAME"] = opts.Name
-	opts.Env["SCION_GROVE"] = groveName
+	opts.Env["SCION_GROVE"] = projectName
+	opts.Env["SCION_PROJECT"] = projectName
 	if template != "" {
 		opts.Env["SCION_TEMPLATE_NAME"] = template
 	} else {
@@ -582,9 +591,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// check grove settings so locally-started agents in hub-connected
 	// groves also get hub connectivity.
 	if _, hubSet := opts.Env["SCION_HUB_ENDPOINT"]; !hubSet {
-		if groveSettings, err := config.LoadSettings(projectDir); err == nil {
-			if groveSettings.IsHubEnabled() {
-				if ep := groveSettings.GetHubEndpoint(); ep != "" {
+		if projectSettings, err := config.LoadSettings(projectDir); err == nil {
+			if projectSettings.IsHubEnabled() {
+				if ep := projectSettings.GetHubEndpoint(); ep != "" {
 					opts.Env["SCION_HUB_ENDPOINT"] = ep
 					opts.Env["SCION_HUB_URL"] = ep
 				}
@@ -805,7 +814,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	runCfg := runtime.RunConfig{
-		Name:               containerName(groveName, opts.Name),
+		Name:               containerName(projectName, opts.Name),
 		Template:           template,
 		UnixUsername:       unixUsername,
 		Image:              resolvedImage,
@@ -815,6 +824,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		ContainerWorkspace: containerWorkspace,
 		ResolvedAuth:       resolvedAuth,
 		Harness:            h,
+		Project:            projectName,
+		ProjectID:          projectID,
 		TelemetryEnabled:   telemetryEnabled,
 		Task: func() string {
 			// When task_flag is set, task is delivered via CommandArgs instead
@@ -880,21 +891,27 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			l := map[string]string{
 				"scion.agent":          "true",
 				"scion.name":           api.Slugify(opts.Name),
-				"scion.grove":          groveName,
+				"scion.project":        projectName,
+				"scion.grove":          projectName,
 				"scion.template":       template,
 				"scion.harness_config": harnessConfigName,
 				"scion.harness_auth":   opts.HarnessAuth,
 			}
-			// Add grove_id label for grove-scoped agent isolation.
-			// In broker/hosted mode this comes from the SCION_GROVE_ID env var
-			// injected by the hub dispatcher.
-			if groveID := opts.Env["SCION_GROVE_ID"]; groveID != "" {
-				l["scion.grove_id"] = groveID
+			// Add project_id/grove_id label for project-scoped agent isolation.
+			// In broker/hosted mode this comes from the SCION_GROVE_ID or
+			// SCION_PROJECT_ID env var injected by the hub dispatcher.
+			if projectID := opts.Env["SCION_GROVE_ID"]; projectID != "" {
+				l["scion.project_id"] = projectID
+				l["scion.grove_id"] = projectID
+			} else if projectID := opts.Env["SCION_PROJECT_ID"]; projectID != "" {
+				l["scion.project_id"] = projectID
+				l["scion.grove_id"] = projectID
 			}
 			return l
 		}(),
 		Annotations: map[string]string{
-			"scion.grove_path": projectDir,
+			"scion.project_path": projectDir,
+			"scion.grove_path":   projectDir,
 		},
 	}
 	id, err := m.Runtime.Run(ctx, runCfg)
@@ -903,7 +920,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// runtime launch. If the launch itself fails, keep the provisioned
 		// workspace but flip the local state to "error" so list/status do not
 		// report a phantom created agent forever.
-		if updateErr := UpdateAgentConfig(opts.Name, opts.GrovePath, "error", m.Runtime.Name(), profileName); updateErr != nil {
+		if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, "error", m.Runtime.Name(), profileName); updateErr != nil {
 			util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
 		}
 		return nil, classifyLaunchRuntimeError(err, resolvedImage)
@@ -913,7 +930,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if opts.Resume {
 		status = "resumed"
 	}
-	if updateErr := UpdateAgentConfig(opts.Name, opts.GrovePath, status, m.Runtime.Name(), profileName); updateErr != nil {
+	if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, status, m.Runtime.Name(), profileName); updateErr != nil {
 		util.Debugf("Start: failed to update local agent status to %q: %v", status, updateErr)
 	}
 
@@ -981,37 +998,43 @@ func filterWorkspaceVolume(volumes []api.VolumeMount) []api.VolumeMount {
 	return filtered
 }
 
-// matchAgentGrove returns true if the agent belongs to the given grove.
-// It checks the grove_id label first (authoritative in hosted mode), then
-// falls back to the grove name label.
-func matchAgentGrove(a api.AgentInfo, groveName, groveID string) bool {
-	// If we have a groveID, check the grove_id label (authoritative)
-	if groveID != "" {
-		if labelGroveID := a.Labels["scion.grove_id"]; labelGroveID != "" {
-			return labelGroveID == groveID
+// matchAgentProject returns true if the agent belongs to the given project.
+// It checks the project_id label first (authoritative in hosted mode), then
+// falls back to the project name label.
+func matchAgentProject(a api.AgentInfo, projectName, projectID string) bool {
+	// If we have a projectID, check the scion.project_id or scion.grove_id label (authoritative)
+	if projectID != "" {
+		if labelProjectID := a.Labels["scion.project_id"]; labelProjectID != "" {
+			return labelProjectID == projectID
 		}
-		if a.GroveID != "" {
-			return a.GroveID == groveID
+		if labelProjectID := a.Labels["scion.grove_id"]; labelProjectID != "" {
+			return labelProjectID == projectID
 		}
-	}
-	// Fall back to grove name matching
-	if groveName != "" {
-		if labelGrove := a.Labels["scion.grove"]; labelGrove != "" {
-			return labelGrove == groveName
-		}
-		if a.Grove != "" {
-			return a.Grove == groveName
+		if a.ProjectID != "" {
+			return a.ProjectID == projectID
 		}
 	}
-	// No grove info on either side — match for backward compatibility
+	// Fall back to project name matching
+	if projectName != "" {
+		if labelProject := a.Labels["scion.project"]; labelProject != "" {
+			return labelProject == projectName
+		}
+		if labelProject := a.Labels["scion.grove"]; labelProject != "" {
+			return labelProject == projectName
+		}
+		if a.Project != "" {
+			return a.Project == projectName
+		}
+	}
+	// No project info on either side — match for backward compatibility
 	return true
 }
 
-// containerName returns a grove-scoped container name to prevent Docker name
+// containerName returns a project-scoped container name to prevent Docker name
 // collisions when agents with the same name exist in different groves.
-func containerName(groveName, agentName string) string {
-	if groveName != "" {
-		return groveName + "--" + agentName
+func containerName(projectName, agentName string) string {
+	if projectName != "" {
+		return projectName + "--" + agentName
 	}
 	return agentName
 }

@@ -195,7 +195,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				ctx = contextWithIdentity(ctx, scopedUser)
 				ctx = contextWithAuthType(ctx, AuthTypeUAT)
 				if cfg.Debug {
-					log.Debug("UAT authenticated", "email", scopedUser.Email(), "grove_id", scopedUser.ScopedGroveID())
+					log.Debug("UAT authenticated", "email", scopedUser.Email(), "project_id", scopedUser.ScopedProjectID())
 				}
 
 			case tokenTypeUser:

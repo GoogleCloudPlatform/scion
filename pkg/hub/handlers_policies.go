@@ -40,7 +40,7 @@ type ListPoliciesResponse struct {
 type CreatePolicyRequest struct {
 	Name         string                  `json:"name"`
 	Description  string                  `json:"description,omitempty"`
-	ScopeType    string                  `json:"scopeType"` // "hub", "grove", "resource"
+	ScopeType    string                  `json:"scopeType"` // "hub", "project", "resource"
 	ScopeID      string                  `json:"scopeId,omitempty"`
 	ResourceType string                  `json:"resourceType"` // "*" for all
 	ResourceID   string                  `json:"resourceId,omitempty"`
@@ -184,12 +184,12 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, "scopeType is required", nil)
 		return
 	}
-	if req.ScopeType != store.PolicyScopeHub && req.ScopeType != store.PolicyScopeGrove && req.ScopeType != store.PolicyScopeResource {
-		ValidationError(w, "scopeType must be 'hub', 'grove', or 'resource'", nil)
+	if req.ScopeType != store.PolicyScopeHub && req.ScopeType != store.PolicyScopeProject && req.ScopeType != store.PolicyScopeResource {
+		ValidationError(w, "scopeType must be 'hub', 'project', or 'resource'", nil)
 		return
 	}
 	if req.ScopeType != store.PolicyScopeHub && req.ScopeID == "" {
-		ValidationError(w, "scopeId is required for grove and resource scopes", nil)
+		ValidationError(w, "scopeId is required for project and resource scopes", nil)
 		return
 	}
 	if len(req.Actions) == 0 {
@@ -576,7 +576,7 @@ func (s *Server) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request) {
 		}
 		evalIdentity = &evaluateAgentIdentity{
 			id:      agent.ID,
-			groveID: agent.GroveID,
+			projectID: agent.ProjectID,
 		}
 		groupIDs, _ := s.store.GetEffectiveGroupsForAgent(ctx, agent.ID)
 		effectiveGroups = groupIDs
@@ -600,12 +600,12 @@ func (s *Server) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request) {
 // evaluateAgentIdentity is a minimal AgentIdentity for evaluation purposes.
 type evaluateAgentIdentity struct {
 	id      string
-	groveID string
+	projectID string
 }
 
 func (e *evaluateAgentIdentity) ID() string                    { return e.id }
 func (e *evaluateAgentIdentity) Type() string                  { return "agent" }
-func (e *evaluateAgentIdentity) GroveID() string               { return e.groveID }
+func (e *evaluateAgentIdentity) ProjectID() string               { return e.projectID }
 func (e *evaluateAgentIdentity) Scopes() []AgentTokenScope     { return nil }
 func (e *evaluateAgentIdentity) HasScope(AgentTokenScope) bool { return true }
 func (e *evaluateAgentIdentity) Ancestry() []string            { return nil }
@@ -618,13 +618,13 @@ func populateResourceContext(ctx context.Context, s *Server, resource *Resource,
 		agent, err := s.store.GetAgent(ctx, resourceID)
 		if err == nil {
 			resource.OwnerID = agent.OwnerID
-			resource.ParentType = "grove"
-			resource.ParentID = agent.GroveID
+			resource.ParentType = "project"
+			resource.ParentID = agent.ProjectID
 		}
-	case "grove":
-		grove, err := s.store.GetGrove(ctx, resourceID)
+	case "project":
+		project, err := s.store.GetProject(ctx, resourceID)
 		if err == nil {
-			resource.OwnerID = grove.OwnerID
+			resource.OwnerID = project.OwnerID
 		}
 	}
 }

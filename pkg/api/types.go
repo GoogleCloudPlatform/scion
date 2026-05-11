@@ -16,6 +16,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -201,7 +202,7 @@ type AgentK8sMetadata struct {
 	SyncedAt  string `json:"syncedAt,omitempty"`
 }
 
-// SharedDir defines a grove-level shared directory available to all agents.
+// SharedDir defines a project-level shared directory available to all agents.
 type SharedDir struct {
 	Name        string `json:"name" yaml:"name"`
 	ReadOnly    bool   `json:"read_only,omitempty" yaml:"read_only,omitempty"`
@@ -330,7 +331,7 @@ type ResourceList struct {
 
 // AgentHubConfig holds hub connection settings that can be specified per-agent
 // or per-template in scion-agent.yaml. When set, these take highest priority
-// for the agent's hub endpoint, overriding grove settings and server config.
+// for the agent's hub endpoint, overriding project settings and server config.
 type AgentHubConfig struct {
 	Endpoint string `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
 }
@@ -515,7 +516,7 @@ type FileMapping struct {
 type AgentInfo struct {
 	// Identity fields
 	ID            string `json:"id,omitempty"`          // Hub UUID (database primary key, globally unique)
-	Slug          string `json:"slug,omitempty"`        // URL-safe slug identifier (unique per grove)
+	Slug          string `json:"slug,omitempty"`        // URL-safe slug identifier (unique per project)
 	ContainerID   string `json:"containerId,omitempty"` // Runtime container ID (ephemeral, runtime-assigned)
 	Name          string `json:"name"`                  // Human-friendly display name
 	Template      string `json:"template"`
@@ -529,10 +530,10 @@ type AgentInfo struct {
 	HarnessConfigRevision string `json:"harnessConfigRevision,omitempty"`
 	HarnessAuth           string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
 
-	// Grove association
-	Grove     string `json:"grove"`               // Grove name (legacy, simple string)
-	GroveID   string `json:"groveId,omitempty"`   // Hosted format: <uuid>__<name>
-	GrovePath string `json:"grovePath,omitempty"` // Filesystem path (solo mode)
+	// Project association
+	Project     string `json:"project"`               // Project name (standard field)
+	ProjectID   string `json:"projectId,omitempty"`   // Hosted format: <uuid>__<name>
+	ProjectPath string `json:"projectPath,omitempty"` // Filesystem path (solo mode)
 
 	// Metadata
 	Labels      map[string]string `json:"labels,omitempty"`
@@ -577,6 +578,49 @@ type AgentInfo struct {
 	StateVersion int64 `json:"stateVersion,omitempty"` // Version for concurrent update detection
 }
 
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (a *AgentInfo) UnmarshalJSON(data []byte) error {
+	type Alias AgentInfo
+	aux := &struct {
+		Grove     string `json:"grove"`
+		GroveID   string `json:"groveId"`
+		GrovePath string `json:"grovePath"`
+		*Alias
+	}{
+		Alias: (*Alias)(a),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if a.Project == "" && aux.Grove != "" {
+		a.Project = aux.Grove
+	}
+	if a.ProjectID == "" && aux.GroveID != "" {
+		a.ProjectID = aux.GroveID
+	}
+	if a.ProjectPath == "" && aux.GrovePath != "" {
+		a.ProjectPath = aux.GrovePath
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy grove fields.
+func (a AgentInfo) MarshalJSON() ([]byte, error) {
+	type Alias AgentInfo
+	return json.Marshal(&struct {
+		Alias
+		Grove     string `json:"grove,omitempty"`
+		GroveID   string `json:"groveId,omitempty"`
+		GrovePath string `json:"grovePath,omitempty"`
+	}{
+		Alias:     Alias(a),
+		Grove:     a.Project,
+		GroveID:   a.ProjectID,
+		GrovePath: a.ProjectPath,
+	})
+}
+
+
 // AgentDetail provides freeform context about the current activity.
 type AgentDetail struct {
 	ToolName    string `json:"toolName,omitempty"`
@@ -613,8 +657,37 @@ type ResolvedSecret struct {
 	Type   string `json:"type"`          // environment, variable, file
 	Target string `json:"target"`        // Projection target (env var name, json key, or file path)
 	Value  string `json:"value"`         // Decrypted secret value
-	Source string `json:"source"`        // Scope that provided this secret (user, grove, runtime_broker)
+	Source string `json:"source"`        // Scope that provided this secret (user, project, runtime_broker)
 	Ref    string `json:"ref,omitempty"` // External secret reference (e.g., "gcpsm:projects/123/secrets/name")
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy "grove" source.
+func (s *ResolvedSecret) UnmarshalJSON(data []byte) error {
+	type Alias ResolvedSecret
+	aux := (*Alias)(s)
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if s.Source == "grove" {
+		s.Source = "project"
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy "grove" source.
+func (s ResolvedSecret) MarshalJSON() ([]byte, error) {
+	type Alias ResolvedSecret
+	var grove string
+	if s.Source == "project" {
+		grove = "grove"
+	}
+	return json.Marshal(&struct {
+		Alias
+		Grove string `json:"grove,omitempty"`
+	}{
+		Alias: Alias(s),
+		Grove: grove,
+	})
 }
 
 // GitCloneConfig specifies how to clone a git repository into the workspace.
@@ -687,7 +760,7 @@ type StartOptions struct {
 	HarnessConfig     string
 	HarnessAuth       string // Late-binding override for auth_selected_type (api-key, oauth-token, auth-file, vertex-ai)
 	Image             string
-	GrovePath         string
+	ProjectPath       string
 	Env               map[string]string
 	ResolvedSecrets   []ResolvedSecret
 	BrokerMode        bool // When true, auth gathering skips local sources (broker env + filesystem)
@@ -700,7 +773,7 @@ type StartOptions struct {
 	SharedWorkspace   bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper
 	TelemetryOverride *bool           // Explicit telemetry override from CLI flags (--enable-telemetry / --disable-telemetry)
 	InlineConfig      *ScionConfig    // Inline config from --config flag, merged over template config
-	SharedDirs        []SharedDir     // Grove-level shared directories (from Hub, merged with settings)
+	SharedDirs        []SharedDir     // Project-level shared directories (from Hub, merged with settings)
 	ExtraHosts        []string        // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
 }
 
@@ -711,16 +784,16 @@ type StatusEvent struct {
 	Timestamp string `json:"timestamp"`
 }
 
-// Visibility constants for agent and grove access control.
+// Visibility constants for agent and project access control.
 const (
 	VisibilityPrivate = "private" // Only the owner can access
 	VisibilityTeam    = "team"    // Team members can access
 	VisibilityPublic  = "public"  // Anyone can access (read-only)
 )
 
-// GroveInfo contains metadata about a grove (project/agent group).
+// ProjectInfo contains metadata about a project (project/agent group).
 // It supports both local/solo mode and hosted/distributed mode.
-type GroveInfo struct {
+type ProjectInfo struct {
 	// Identity fields
 	ID   string `json:"id,omitempty"` // UUID (hosted) or empty (solo)
 	Name string `json:"name"`         // Human-friendly display name
@@ -730,11 +803,11 @@ type GroveInfo struct {
 	Path string `json:"path,omitempty"` // Filesystem path (solo mode)
 
 	// Timestamps
-	Created time.Time `json:"created,omitempty"` // When the grove was created
+	Created time.Time `json:"created,omitempty"` // When the project was created
 	Updated time.Time `json:"updated,omitempty"` // Last modification timestamp
 
 	// Ownership
-	CreatedBy  string `json:"createdBy,omitempty"`  // User/system that created the grove
+	CreatedBy  string `json:"createdBy,omitempty"`  // User/system that created the project
 	OwnerID    string `json:"ownerId,omitempty"`    // Current owner user ID
 	Visibility string `json:"visibility,omitempty"` // Access level: private, team, public
 
@@ -746,14 +819,14 @@ type GroveInfo struct {
 	HubEndpoint string `json:"hubEndpoint,omitempty"` // Scion Hub URL if registered
 
 	// Statistics (computed, not persisted)
-	AgentCount int `json:"agentCount,omitempty"` // Number of agents in this grove
+	AgentCount int `json:"agentCount,omitempty"` // Number of agents in this project
 }
 
-// GroveID returns the hosted-format grove ID (<uuid>__<slug>) if available,
+// ProjectID returns the hosted-format project ID (<uuid>__<slug>) if available,
 // otherwise returns the Name or Slug as a fallback.
-func (g *GroveInfo) GroveID() string {
+func (g *ProjectInfo) ProjectID() string {
 	if g.ID != "" && g.Slug != "" {
-		return g.ID + GroveIDSeparator + g.Slug
+		return g.ID + ProjectIDSeparator + g.Slug
 	}
 	if g.Slug != "" {
 		return g.Slug

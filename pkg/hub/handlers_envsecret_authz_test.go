@@ -222,48 +222,48 @@ func TestEnvVar_UserScope_MemberIsolation(t *testing.T) {
 }
 
 // ============================================================================
-// Grove-Scoped Env Var Authorization Tests
+// Project-Scoped Env Var Authorization Tests
 // ============================================================================
 
-func TestEnvVar_GroveScope_OwnerAccess(t *testing.T) {
+func TestEnvVar_ProjectScope_OwnerAccess(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
 	owner := &store.User{
-		ID: "grove-owner-1", Email: "owner@example.com", DisplayName: "Owner",
+		ID: "project-owner-1", Email: "owner@example.com", DisplayName: "Owner",
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 	}
 	if err := s.CreateUser(ctx, owner); err != nil {
 		t.Fatalf("failed to create user: %v", err)
 	}
 
-	grove := &store.Grove{
-		ID:      "grove_env_owner",
-		Name:    "Owner Test Grove",
-		Slug:    "owner-test-grove",
-		OwnerID: "grove-owner-1",
+	project := &store.Project{
+		ID:      "project_env_owner",
+		Name:    "Owner Test Project",
+		Slug:    "owner-test-project",
+		OwnerID: "project-owner-1",
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
-	// Owner should be able to list grove env vars
-	rec := doRequestAsUser(t, srv, owner, http.MethodGet, "/api/v1/groves/"+grove.ID+"/env", nil)
+	// Owner should be able to list project env vars
+	rec := doRequestAsUser(t, srv, owner, http.MethodGet, "/api/v1/projects/"+project.ID+"/env", nil)
 	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 for grove owner, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("expected 200 for project owner, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Owner should be able to set grove env vars
-	body := SetEnvVarRequest{Value: "grove-val"}
-	rec2 := doRequestAsUser(t, srv, owner, http.MethodPut, "/api/v1/groves/"+grove.ID+"/env/GROVE_VAR", body)
+	// Owner should be able to set project env vars
+	body := SetEnvVarRequest{Value: "project-val"}
+	rec2 := doRequestAsUser(t, srv, owner, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/GROVE_VAR", body)
 	if rec2.Code != http.StatusOK {
-		t.Errorf("expected 200 for grove owner write, got %d: %s", rec2.Code, rec2.Body.String())
+		t.Errorf("expected 200 for project owner write, got %d: %s", rec2.Code, rec2.Body.String())
 	}
 }
 
-func TestEnvVar_GroveScope_NonOwnerDenied(t *testing.T) {
+func TestEnvVar_ProjectScope_NonOwnerDenied(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -275,68 +275,68 @@ func TestEnvVar_GroveScope_NonOwnerDenied(t *testing.T) {
 		t.Fatalf("failed to create user: %v", err)
 	}
 
-	grove := &store.Grove{
-		ID:      "grove_env_notown",
-		Name:    "Not Owned Grove",
-		Slug:    "not-owned-grove",
+	project := &store.Project{
+		ID:      "project_env_notown",
+		Name:    "Not Owned Project",
+		Slug:    "not-owned-project",
 		OwnerID: "someone-else",
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	// Non-owner without policy should be denied
-	rec := doRequestAsUser(t, srv, nonOwner, http.MethodGet, "/api/v1/groves/"+grove.ID+"/env", nil)
+	rec := doRequestAsUser(t, srv, nonOwner, http.MethodGet, "/api/v1/projects/"+project.ID+"/env", nil)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("expected 403 for non-owner, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestEnvVar_GroveScope_AdminAccess(t *testing.T) {
+func TestEnvVar_ProjectScope_AdminAccess(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID:      "grove_env_admin",
-		Name:    "Admin Test Grove",
-		Slug:    "admin-test-grove",
+	project := &store.Project{
+		ID:      "project_env_admin",
+		Name:    "Admin Test Project",
+		Slug:    "admin-test-project",
 		OwnerID: "someone-else",
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
-	// Admin (dev-user) should be able to access any grove
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/groves/"+grove.ID+"/env", nil)
+	// Admin (dev-user) should be able to access any project
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/env", nil)
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200 for admin, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestEnvVar_GroveScope_AgentReadOwnGrove(t *testing.T) {
+func TestEnvVar_ProjectScope_AgentReadOwnProject(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID:      "grove_agent_env",
-		Name:    "Agent Grove",
-		Slug:    "agent-grove",
+	project := &store.Project{
+		ID:      "project_agent_env",
+		Name:    "Agent Project",
+		Slug:    "agent-project",
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	agent := &store.Agent{
 		ID:           "agent_env_test",
 		Slug:         "env-test-agent",
 		Name:         "Env Test Agent",
-		GroveID:      grove.ID,
+		ProjectID:      project.ID,
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      time.Now(),
@@ -346,87 +346,87 @@ func TestEnvVar_GroveScope_AgentReadOwnGrove(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, grove.ID, nil, nil)
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
 
-	// Agent should be able to read own grove env vars
-	rec := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/groves/"+grove.ID+"/env", nil, agentToken)
+	// Agent should be able to read own project env vars
+	rec := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/env", nil, agentToken)
 	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 for agent reading own grove, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("expected 200 for agent reading own project, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestEnvVar_GroveScope_AgentOtherGroveDenied(t *testing.T) {
+func TestEnvVar_ProjectScope_AgentOtherProjectDenied(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove1 := &store.Grove{
-		ID: "grove_agent_own", Name: "Agent's Grove", Slug: "agents-grove",
+	project1 := &store.Project{
+		ID: "project_agent_own", Name: "Agent's Project", Slug: "agents-project",
 		Created: time.Now(), Updated: time.Now(),
 	}
-	grove2 := &store.Grove{
-		ID: "grove_agent_other", Name: "Other Grove", Slug: "other-grove",
+	project2 := &store.Project{
+		ID: "project_agent_other", Name: "Other Project", Slug: "other-project",
 		Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove1); err != nil {
-		t.Fatalf("failed to create grove1: %v", err)
+	if err := s.CreateProject(ctx, project1); err != nil {
+		t.Fatalf("failed to create project1: %v", err)
 	}
-	if err := s.CreateGrove(ctx, grove2); err != nil {
-		t.Fatalf("failed to create grove2: %v", err)
+	if err := s.CreateProject(ctx, project2); err != nil {
+		t.Fatalf("failed to create project2: %v", err)
 	}
 
 	agent := &store.Agent{
-		ID: "agent_other_grove", Slug: "other-grove-agent", Name: "Other Grove Agent",
-		GroveID: grove1.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
+		ID: "agent_other_project", Slug: "other-project-agent", Name: "Other Project Agent",
+		ProjectID: project1.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
 		Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, grove1.ID, nil, nil)
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project1.ID, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
 
-	// Agent should NOT be able to read other grove env vars
-	rec := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/groves/"+grove2.ID+"/env", nil, agentToken)
+	// Agent should NOT be able to read other project env vars
+	rec := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/projects/"+project2.ID+"/env", nil, agentToken)
 	if rec.Code != http.StatusForbidden {
-		t.Errorf("expected 403 for agent reading other grove, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("expected 403 for agent reading other project, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestEnvVar_GroveScope_AgentWriteDenied(t *testing.T) {
+func TestEnvVar_ProjectScope_AgentWriteDenied(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_agent_nowrite", Name: "Agent No Write Grove", Slug: "agent-nowrite-grove",
+	project := &store.Project{
+		ID: "project_agent_nowrite", Name: "Agent No Write Project", Slug: "agent-nowrite-project",
 		Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	agent := &store.Agent{
 		ID: "agent_nowrite", Slug: "nowrite-agent", Name: "No Write Agent",
-		GroveID: grove.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
+		ProjectID: project.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
 		Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, grove.ID, nil, nil)
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
 
-	// Agent should NOT be able to write grove env vars
+	// Agent should NOT be able to write project env vars
 	body := SetEnvVarRequest{Value: "agent-val"}
-	rec := doRequestWithAgentToken(t, srv, http.MethodPut, "/api/v1/groves/"+grove.ID+"/env/AGENT_VAR", body, agentToken)
+	rec := doRequestWithAgentToken(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/AGENT_VAR", body, agentToken)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("expected 403 for agent write, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -581,37 +581,37 @@ func TestSecret_UserScope_WriteAuthWorks(t *testing.T) {
 }
 
 // ============================================================================
-// Grove-Scoped Secrets Authorization Tests
+// Project-Scoped Secrets Authorization Tests
 // ============================================================================
 
-func TestSecret_GroveScope_OwnerAccess(t *testing.T) {
+func TestSecret_ProjectScope_OwnerAccess(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
 	ctx := context.Background()
 
 	owner := &store.User{
-		ID: "grove-sec-owner", Email: "secowner@example.com", DisplayName: "Owner",
+		ID: "project-sec-owner", Email: "secowner@example.com", DisplayName: "Owner",
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 	}
 	if err := s.CreateUser(ctx, owner); err != nil {
 		t.Fatalf("failed to create user: %v", err)
 	}
 
-	grove := &store.Grove{
-		ID: "grove_sec_owner", Name: "Secret Owner Grove", Slug: "secret-owner-grove",
-		OwnerID: "grove-sec-owner", Created: time.Now(), Updated: time.Now(),
+	project := &store.Project{
+		ID: "project_sec_owner", Name: "Secret Owner Project", Slug: "secret-owner-project",
+		OwnerID: "project-sec-owner", Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
-	rec := doRequestAsUser(t, srv, owner, http.MethodGet, "/api/v1/groves/"+grove.ID+"/secrets", nil)
+	rec := doRequestAsUser(t, srv, owner, http.MethodGet, "/api/v1/projects/"+project.ID+"/secrets", nil)
 	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 for grove owner, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("expected 200 for project owner, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestSecret_GroveScope_NonOwnerDenied(t *testing.T) {
+func TestSecret_ProjectScope_NonOwnerDenied(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
 	ctx := context.Background()
@@ -624,111 +624,111 @@ func TestSecret_GroveScope_NonOwnerDenied(t *testing.T) {
 		t.Fatalf("failed to create user: %v", err)
 	}
 
-	grove := &store.Grove{
-		ID: "grove_sec_notown", Name: "Not Owned Secret Grove", Slug: "not-owned-secret-grove",
+	project := &store.Project{
+		ID: "project_sec_notown", Name: "Not Owned Secret Project", Slug: "not-owned-secret-project",
 		OwnerID: "someone-else", Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
-	rec := doRequestAsUser(t, srv, nonOwner, http.MethodGet, "/api/v1/groves/"+grove.ID+"/secrets", nil)
+	rec := doRequestAsUser(t, srv, nonOwner, http.MethodGet, "/api/v1/projects/"+project.ID+"/secrets", nil)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("expected 403 for non-owner, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestSecret_GroveScope_AgentReadOwnGrove(t *testing.T) {
+func TestSecret_ProjectScope_AgentReadOwnProject(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_agent_sec", Name: "Agent Secret Grove", Slug: "agent-secret-grove",
+	project := &store.Project{
+		ID: "project_agent_sec", Name: "Agent Secret Project", Slug: "agent-secret-project",
 		Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	agent := &store.Agent{
 		ID: "agent_sec_test", Slug: "sec-test-agent", Name: "Secret Test Agent",
-		GroveID: grove.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
+		ProjectID: project.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
 		Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, grove.ID, nil, nil)
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
 
-	rec := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/groves/"+grove.ID+"/secrets", nil, agentToken)
+	rec := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/secrets", nil, agentToken)
 	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 for agent reading own grove secrets, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("expected 200 for agent reading own project secrets, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestSecret_GroveScope_AgentWriteDenied(t *testing.T) {
+func TestSecret_ProjectScope_AgentWriteDenied(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_agent_sec_nowrite", Name: "Agent Secret No Write", Slug: "agent-sec-nowrite-grove",
+	project := &store.Project{
+		ID: "project_agent_sec_nowrite", Name: "Agent Secret No Write", Slug: "agent-sec-nowrite-project",
 		Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	agent := &store.Agent{
 		ID: "agent_sec_nowrite", Slug: "sec-nowrite-agent", Name: "Secret No Write Agent",
-		GroveID: grove.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
+		ProjectID: project.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
 		Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, grove.ID, nil, nil)
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
 
 	body := SetSecretRequest{Value: "agent-secret"}
-	rec := doRequestWithAgentToken(t, srv, http.MethodPut, "/api/v1/groves/"+grove.ID+"/secrets/AGENT_SECRET", body, agentToken)
+	rec := doRequestWithAgentToken(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/secrets/AGENT_SECRET", body, agentToken)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("expected 403 for agent secret write, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
 // ============================================================================
-// Hub-Level Env Var with Grove/Broker Scope via Query Params
+// Hub-Level Env Var with Project/Broker Scope via Query Params
 // ============================================================================
 
-func TestEnvVar_HubEndpoint_GroveScope_Authorized(t *testing.T) {
+func TestEnvVar_HubEndpoint_ProjectScope_Authorized(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_hub_env", Name: "Hub Env Grove", Slug: "hub-env-grove",
+	project := &store.Project{
+		ID: "project_hub_env", Name: "Hub Env Project", Slug: "hub-env-project",
 		Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
-	// Admin should be able to list via hub endpoint with grove scope
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/env?scope=grove&scopeId="+grove.ID, nil)
+	// Admin should be able to list via hub endpoint with project scope
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/env?scope=project&scopeId="+project.ID, nil)
 	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 for admin grove scope, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("expected 200 for admin project scope, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestEnvVar_HubEndpoint_GroveScope_NonOwnerDenied(t *testing.T) {
+func TestEnvVar_HubEndpoint_ProjectScope_NonOwnerDenied(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -740,15 +740,15 @@ func TestEnvVar_HubEndpoint_GroveScope_NonOwnerDenied(t *testing.T) {
 		t.Fatalf("failed to create user: %v", err)
 	}
 
-	grove := &store.Grove{
-		ID: "grove_hub_env_deny", Name: "Hub Env Deny Grove", Slug: "hub-env-deny-grove",
+	project := &store.Project{
+		ID: "project_hub_env_deny", Name: "Hub Env Deny Project", Slug: "hub-env-deny-project",
 		OwnerID: "someone-else", Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
-	rec := doRequestAsUser(t, srv, member, http.MethodGet, "/api/v1/env?scope=grove&scopeId="+grove.ID, nil)
+	rec := doRequestAsUser(t, srv, member, http.MethodGet, "/api/v1/env?scope=project&scopeId="+project.ID, nil)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("expected 403 for non-owner via hub endpoint, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1037,61 +1037,61 @@ func TestEnvVar_NonEnvironmentSecrets_NotMerged(t *testing.T) {
 	}
 }
 
-func TestEnvVar_GroveScope_SecretPromotion_Succeeds(t *testing.T) {
+func TestEnvVar_ProjectScope_SecretPromotion_Succeeds(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_promo_test", Name: "Promo Grove", Slug: "promo-grove",
+	project := &store.Project{
+		ID: "project_promo_test", Name: "Promo Project", Slug: "promo-project",
 		OwnerID: DevUserID, Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	body := SetEnvVarRequest{Value: "secret-val", Secret: true}
-	rec := doRequest(t, srv, http.MethodPut, "/api/v1/groves/"+grove.ID+"/env/GROVE_SECRET", body)
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/GROVE_SECRET", body)
 	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 for grove secret promotion with LocalBackend, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("expected 200 for project secret promotion with LocalBackend, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestEnvVar_GroveScope_UnifiedList(t *testing.T) {
+func TestEnvVar_ProjectScope_UnifiedList(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_unified_list", Name: "Unified Grove", Slug: "unified-grove",
+	project := &store.Project{
+		ID: "project_unified_list", Name: "Unified Project", Slug: "unified-project",
 		OwnerID: DevUserID, Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
-	// Create a plain grove env var
-	plainBody := SetEnvVarRequest{Value: "grove-plain"}
-	rec := doRequest(t, srv, http.MethodPut, "/api/v1/groves/"+grove.ID+"/env/GROVE_PLAIN", plainBody)
+	// Create a plain project env var
+	plainBody := SetEnvVarRequest{Value: "project-plain"}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/GROVE_PLAIN", plainBody)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("failed to create grove env var: %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("failed to create project env var: %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Create an environment secret in the grove scope directly
+	// Create an environment secret in the project scope directly
 	if err := s.CreateSecret(ctx, &store.Secret{
-		ID:             "sec-grove-env-1",
+		ID:             "sec-project-env-1",
 		Key:            "GROVE_SECRET_VAR",
-		EncryptedValue: "grove-secret-val",
+		EncryptedValue: "project-secret-val",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "GROVE_SECRET_VAR",
-		Scope:          store.ScopeGrove,
-		ScopeID:        grove.ID,
+		Scope:          store.ScopeProject,
+		ScopeID:        project.ID,
 	}); err != nil {
-		t.Fatalf("failed to create grove secret: %v", err)
+		t.Fatalf("failed to create project secret: %v", err)
 	}
 
-	// List grove env vars — should include both
-	rec2 := doRequest(t, srv, http.MethodGet, "/api/v1/groves/"+grove.ID+"/env", nil)
+	// List project env vars — should include both
+	rec2 := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/env", nil)
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec2.Code, rec2.Body.String())
 	}
@@ -1100,7 +1100,7 @@ func TestEnvVar_GroveScope_UnifiedList(t *testing.T) {
 	json.NewDecoder(rec2.Body).Decode(&resp)
 
 	if len(resp.EnvVars) != 2 {
-		t.Errorf("expected 2 env vars in grove unified list, got %d", len(resp.EnvVars))
+		t.Errorf("expected 2 env vars in project unified list, got %d", len(resp.EnvVars))
 	}
 
 	var foundSecret bool
@@ -1113,38 +1113,38 @@ func TestEnvVar_GroveScope_UnifiedList(t *testing.T) {
 		}
 	}
 	if !foundSecret {
-		t.Error("GROVE_SECRET_VAR not found in grove unified list")
+		t.Error("GROVE_SECRET_VAR not found in project unified list")
 	}
 }
 
-func TestEnvVar_GroveScope_FallbackGet(t *testing.T) {
+func TestEnvVar_ProjectScope_FallbackGet(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_fallback_get", Name: "Fallback Get Grove", Slug: "fallback-get-grove",
+	project := &store.Project{
+		ID: "project_fallback_get", Name: "Fallback Get Project", Slug: "fallback-get-project",
 		OwnerID: DevUserID, Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	if err := s.CreateSecret(ctx, &store.Secret{
-		ID:             "sec-grove-fb-1",
+		ID:             "sec-project-fb-1",
 		Key:            "GROVE_ONLY_SEC",
 		EncryptedValue: "secret-val",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "GROVE_ONLY_SEC",
-		Scope:          store.ScopeGrove,
-		ScopeID:        grove.ID,
+		Scope:          store.ScopeProject,
+		ScopeID:        project.ID,
 	}); err != nil {
 		t.Fatalf("failed to create secret: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/groves/"+grove.ID+"/env/GROVE_ONLY_SEC", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/env/GROVE_ONLY_SEC", nil)
 	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 for grove fallback get, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("expected 200 for project fallback get, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	var envVar store.EnvVar
@@ -1154,34 +1154,34 @@ func TestEnvVar_GroveScope_FallbackGet(t *testing.T) {
 	}
 }
 
-func TestEnvVar_GroveScope_FallbackDelete(t *testing.T) {
+func TestEnvVar_ProjectScope_FallbackDelete(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_fallback_del", Name: "Fallback Del Grove", Slug: "fallback-del-grove",
+	project := &store.Project{
+		ID: "project_fallback_del", Name: "Fallback Del Project", Slug: "fallback-del-project",
 		OwnerID: DevUserID, Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	if err := s.CreateSecret(ctx, &store.Secret{
-		ID:             "sec-grove-del-1",
+		ID:             "sec-project-del-1",
 		Key:            "GROVE_DEL_SEC",
 		EncryptedValue: "secret-val",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "GROVE_DEL_SEC",
-		Scope:          store.ScopeGrove,
-		ScopeID:        grove.ID,
+		Scope:          store.ScopeProject,
+		ScopeID:        project.ID,
 	}); err != nil {
 		t.Fatalf("failed to create secret: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/groves/"+grove.ID+"/env/GROVE_DEL_SEC", nil)
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID+"/env/GROVE_DEL_SEC", nil)
 	if rec.Code != http.StatusNoContent {
-		t.Errorf("expected 204 for grove fallback delete, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("expected 204 for project fallback delete, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1331,24 +1331,24 @@ func TestEnvVar_HubScope_AgentCanRead(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
-		ID: "grove_hub_agent", Name: "Hub Agent Grove", Slug: "hub-agent-grove",
+	project := &store.Project{
+		ID: "project_hub_agent", Name: "Hub Agent Project", Slug: "hub-agent-project",
 		Created: time.Now(), Updated: time.Now(),
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	agent := &store.Agent{
 		ID: "agent_hub_read", Slug: "hub-read-agent", Name: "Hub Read Agent",
-		GroveID: grove.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
+		ProjectID: project.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
 		Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, grove.ID, nil, nil)
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}

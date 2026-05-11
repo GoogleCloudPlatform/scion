@@ -14,9 +14,9 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/grove"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/google/uuid"
 )
@@ -28,7 +28,7 @@ type AgentQuery struct {
 	order              []agent.OrderOption
 	inters             []Interceptor
 	predicates         []predicate.Agent
-	withGrove          *GroveQuery
+	withProject        *ProjectQuery
 	withCreator        *UserQuery
 	withOwner          *UserQuery
 	withMemberships    *GroupMembershipQuery
@@ -69,9 +69,9 @@ func (_q *AgentQuery) Order(o ...agent.OrderOption) *AgentQuery {
 	return _q
 }
 
-// QueryGrove chains the current query on the "grove" edge.
-func (_q *AgentQuery) QueryGrove() *GroveQuery {
-	query := (&GroveClient{config: _q.config}).Query()
+// QueryProject chains the current query on the "project" edge.
+func (_q *AgentQuery) QueryProject() *ProjectQuery {
+	query := (&ProjectClient{config: _q.config}).Query()
 	query.path = func(ctx context.Context) (fromU *sql.Selector, err error) {
 		if err := _q.prepareQuery(ctx); err != nil {
 			return nil, err
@@ -82,8 +82,8 @@ func (_q *AgentQuery) QueryGrove() *GroveQuery {
 		}
 		step := sqlgraph.NewStep(
 			sqlgraph.From(agent.Table, agent.FieldID, selector),
-			sqlgraph.To(grove.Table, grove.FieldID),
-			sqlgraph.Edge(sqlgraph.M2O, true, agent.GroveTable, agent.GroveColumn),
+			sqlgraph.To(project.Table, project.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, true, agent.ProjectTable, agent.ProjectColumn),
 		)
 		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
 		return fromU, nil
@@ -371,7 +371,7 @@ func (_q *AgentQuery) Clone() *AgentQuery {
 		order:              append([]agent.OrderOption{}, _q.order...),
 		inters:             append([]Interceptor{}, _q.inters...),
 		predicates:         append([]predicate.Agent{}, _q.predicates...),
-		withGrove:          _q.withGrove.Clone(),
+		withProject:        _q.withProject.Clone(),
 		withCreator:        _q.withCreator.Clone(),
 		withOwner:          _q.withOwner.Clone(),
 		withMemberships:    _q.withMemberships.Clone(),
@@ -382,14 +382,14 @@ func (_q *AgentQuery) Clone() *AgentQuery {
 	}
 }
 
-// WithGrove tells the query-builder to eager-load the nodes that are connected to
-// the "grove" edge. The optional arguments are used to configure the query builder of the edge.
-func (_q *AgentQuery) WithGrove(opts ...func(*GroveQuery)) *AgentQuery {
-	query := (&GroveClient{config: _q.config}).Query()
+// WithProject tells the query-builder to eager-load the nodes that are connected to
+// the "project" edge. The optional arguments are used to configure the query builder of the edge.
+func (_q *AgentQuery) WithProject(opts ...func(*ProjectQuery)) *AgentQuery {
+	query := (&ProjectClient{config: _q.config}).Query()
 	for _, opt := range opts {
 		opt(query)
 	}
-	_q.withGrove = query
+	_q.withProject = query
 	return _q
 }
 
@@ -516,7 +516,7 @@ func (_q *AgentQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*Agent,
 		nodes       = []*Agent{}
 		_spec       = _q.querySpec()
 		loadedTypes = [5]bool{
-			_q.withGrove != nil,
+			_q.withProject != nil,
 			_q.withCreator != nil,
 			_q.withOwner != nil,
 			_q.withMemberships != nil,
@@ -541,9 +541,9 @@ func (_q *AgentQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*Agent,
 	if len(nodes) == 0 {
 		return nodes, nil
 	}
-	if query := _q.withGrove; query != nil {
-		if err := _q.loadGrove(ctx, query, nodes, nil,
-			func(n *Agent, e *Grove) { n.Edges.Grove = e }); err != nil {
+	if query := _q.withProject; query != nil {
+		if err := _q.loadProject(ctx, query, nodes, nil,
+			func(n *Agent, e *Project) { n.Edges.Project = e }); err != nil {
 			return nil, err
 		}
 	}
@@ -576,11 +576,11 @@ func (_q *AgentQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*Agent,
 	return nodes, nil
 }
 
-func (_q *AgentQuery) loadGrove(ctx context.Context, query *GroveQuery, nodes []*Agent, init func(*Agent), assign func(*Agent, *Grove)) error {
+func (_q *AgentQuery) loadProject(ctx context.Context, query *ProjectQuery, nodes []*Agent, init func(*Agent), assign func(*Agent, *Project)) error {
 	ids := make([]uuid.UUID, 0, len(nodes))
 	nodeids := make(map[uuid.UUID][]*Agent)
 	for i := range nodes {
-		fk := nodes[i].GroveID
+		fk := nodes[i].ProjectID
 		if _, ok := nodeids[fk]; !ok {
 			ids = append(ids, fk)
 		}
@@ -589,7 +589,7 @@ func (_q *AgentQuery) loadGrove(ctx context.Context, query *GroveQuery, nodes []
 	if len(ids) == 0 {
 		return nil
 	}
-	query.Where(grove.IDIn(ids...))
+	query.Where(project.IDIn(ids...))
 	neighbors, err := query.All(ctx)
 	if err != nil {
 		return err
@@ -597,7 +597,7 @@ func (_q *AgentQuery) loadGrove(ctx context.Context, query *GroveQuery, nodes []
 	for _, n := range neighbors {
 		nodes, ok := nodeids[n.ID]
 		if !ok {
-			return fmt.Errorf(`unexpected foreign-key "grove_id" returned %v`, n.ID)
+			return fmt.Errorf(`unexpected foreign-key "project_id" returned %v`, n.ID)
 		}
 		for i := range nodes {
 			assign(nodes[i], n)
@@ -761,8 +761,8 @@ func (_q *AgentQuery) querySpec() *sqlgraph.QuerySpec {
 				_spec.Node.Columns = append(_spec.Node.Columns, fields[i])
 			}
 		}
-		if _q.withGrove != nil {
-			_spec.Node.AddColumnOnce(agent.FieldGroveID)
+		if _q.withProject != nil {
+			_spec.Node.AddColumnOnce(agent.FieldProjectID)
 		}
 		if _q.withCreator != nil {
 			_spec.Node.AddColumnOnce(agent.FieldCreatedBy)

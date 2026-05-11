@@ -238,7 +238,7 @@ func TestProvisionWritesTaskToPromptMd(t *testing.T) {
 			Name:      "agent-with-task",
 			Task:      "implement feature X",
 			Template:  "default",
-			GrovePath: projectScionDir,
+			ProjectPath: projectScionDir,
 		}
 
 		_, err := mgr.Provision(context.Background(), opts)
@@ -260,7 +260,7 @@ func TestProvisionWritesTaskToPromptMd(t *testing.T) {
 		opts := api.StartOptions{
 			Name:      "agent-no-task",
 			Template:  "default",
-			GrovePath: projectScionDir,
+			ProjectPath: projectScionDir,
 		}
 
 		_, err := mgr.Provision(context.Background(), opts)
@@ -574,7 +574,7 @@ auth_selectedType: vertex-ai
 	}
 }
 
-func TestProvisionAgentUsesGroveTemplate(t *testing.T) {
+func TestProvisionAgentUsesProjectTemplate(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Move to tmpDir — this is NOT the grove's directory,
@@ -602,18 +602,18 @@ func TestProvisionAgentUsesGroveTemplate(t *testing.T) {
 
 	// Create a grove with its own version of the same template
 	projectDir := filepath.Join(tmpDir, "project")
-	grovePath := filepath.Join(projectDir, ".scion")
-	groveTplDir := filepath.Join(grovePath, "templates", "my-tpl")
+	projectPath := filepath.Join(projectDir, ".scion")
+	groveTplDir := filepath.Join(projectPath, "templates", "my-tpl")
 	os.MkdirAll(groveTplDir, 0755)
 	os.WriteFile(filepath.Join(groveTplDir, "scion-agent.json"), []byte(`{
 		"default_harness_config": "grove-harness",
 		"env": {"SOURCE": "grove"}
 	}`), 0644)
 
-	// Provision agent using grovePath — the grove template should be used
+	// Provision agent using projectPath — the grove template should be used
 	// even though CWD has no .scion directory.
 	agentName := "grove-tpl-agent"
-	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "my-tpl", "", "", grovePath, "", "", "", "")
+	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "my-tpl", "", "", projectPath, "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -1126,7 +1126,7 @@ func TestGetAgentGitClone_ClearsExistingWorkspace(t *testing.T) {
 
 // TestProvisionAgent_SharedWorkspaceRelocatesAgentState verifies that when
 // SharedWorkspace context is set, the agent's prompt.md and scion-agent.json
-// land at the external grove-configs path rather than inside the grove tree.
+// land at the external project-configs path rather than inside the grove tree.
 // This is the structural fix from .design/hub-shared-workspace-isolation.md
 // — sibling agents must not see each other's state via /workspace.
 func TestProvisionAgent_SharedWorkspaceRelocatesAgentState(t *testing.T) {
@@ -1151,8 +1151,8 @@ func TestProvisionAgent_SharedWorkspaceRelocatesAgentState(t *testing.T) {
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	os.MkdirAll(projectScionDir, 0755)
-	if err := config.WriteGroveID(projectScionDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
-		t.Fatalf("WriteGroveID failed: %v", err)
+	if err := config.WriteProjectID(projectScionDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
+		t.Fatalf("WriteProjectID failed: %v", err)
 	}
 
 	sharedWorkspace := filepath.Join(tmpDir, "shared-ws")
@@ -1166,7 +1166,7 @@ func TestProvisionAgent_SharedWorkspaceRelocatesAgentState(t *testing.T) {
 		Name:            "shared-agent",
 		Task:            "do the thing",
 		Template:        "gemini",
-		GrovePath:       projectScionDir,
+		ProjectPath:       projectScionDir,
 		Workspace:       sharedWorkspace,
 		SharedWorkspace: true,
 	}
@@ -1175,7 +1175,7 @@ func TestProvisionAgent_SharedWorkspaceRelocatesAgentState(t *testing.T) {
 	}
 
 	// External per-agent dir must contain prompt.md and scion-agent.json.
-	extAgentDir := filepath.Join(tmpDir, ".scion", "grove-configs", "project__550e8400", ".scion", "agents", "shared-agent")
+	extAgentDir := filepath.Join(tmpDir, ".scion", "project-configs", "project__550e8400", ".scion", "agents", "shared-agent")
 	if _, err := os.Stat(filepath.Join(extAgentDir, "prompt.md")); err != nil {
 		t.Errorf("expected prompt.md at external path %s: %v", extAgentDir, err)
 	}
@@ -1220,8 +1220,8 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	os.MkdirAll(projectScionDir, 0755)
-	if err := config.WriteGroveID(projectScionDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
-		t.Fatalf("WriteGroveID failed: %v", err)
+	if err := config.WriteProjectID(projectScionDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
+		t.Fatalf("WriteProjectID failed: %v", err)
 	}
 
 	// Seed legacy in-grove state from a pre-isolation provisioning.
@@ -1245,7 +1245,7 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	opts := api.StartOptions{
 		Name:            "legacy-agent",
 		Template:        "gemini",
-		GrovePath:       projectScionDir,
+		ProjectPath:       projectScionDir,
 		Workspace:       sharedWorkspace,
 		SharedWorkspace: true,
 	}
@@ -1262,7 +1262,7 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	}
 
 	// External path must contain the migrated content.
-	extAgentDir := filepath.Join(tmpDir, ".scion", "grove-configs", "project__550e8400", ".scion", "agents", "legacy-agent")
+	extAgentDir := filepath.Join(tmpDir, ".scion", "project-configs", "project__550e8400", ".scion", "agents", "legacy-agent")
 	data, err := os.ReadFile(filepath.Join(extAgentDir, "prompt.md"))
 	if err != nil {
 		t.Fatalf("expected prompt.md at external path: %v", err)

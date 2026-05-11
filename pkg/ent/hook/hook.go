@@ -57,18 +57,6 @@ func (f GroupMembershipFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Va
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.GroupMembershipMutation", m)
 }
 
-// The GroveFunc type is an adapter to allow the use of ordinary
-// function as Grove mutator.
-type GroveFunc func(context.Context, *ent.GroveMutation) (ent.Value, error)
-
-// Mutate calls f(ctx, m).
-func (f GroveFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
-	if mv, ok := m.(*ent.GroveMutation); ok {
-		return f(ctx, mv)
-	}
-	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.GroveMutation", m)
-}
-
 // The PolicyBindingFunc type is an adapter to allow the use of ordinary
 // function as PolicyBinding mutator.
 type PolicyBindingFunc func(context.Context, *ent.PolicyBindingMutation) (ent.Value, error)
@@ -79,6 +67,18 @@ func (f PolicyBindingFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Valu
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.PolicyBindingMutation", m)
+}
+
+// The ProjectFunc type is an adapter to allow the use of ordinary
+// function as Project mutator.
+type ProjectFunc func(context.Context, *ent.ProjectMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f ProjectFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.ProjectMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ProjectMutation", m)
 }
 
 // The UserFunc type is an adapter to allow the use of ordinary

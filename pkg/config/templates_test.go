@@ -457,7 +457,7 @@ func TestLoadConfigInvalidVolumes(t *testing.T) {
 	})
 }
 
-func TestFindTemplateInGrovePath(t *testing.T) {
+func TestFindTemplateInProjectPath(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "scion-test-grove-path-*")
 	if err != nil {
 		t.Fatal(err)
@@ -482,17 +482,17 @@ func TestFindTemplateInGrovePath(t *testing.T) {
 	}
 
 	// Create a grove with its own template
-	grovePath := filepath.Join(tmpDir, "some-project", DotScion)
-	groveTemplatesDir := filepath.Join(grovePath, "templates")
+	projectPath := filepath.Join(tmpDir, "some-project", DotScion)
+	groveTemplatesDir := filepath.Join(projectPath, "templates")
 	groveTplDir := filepath.Join(groveTemplatesDir, "my-tpl")
 	if err := os.MkdirAll(groveTplDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	t.Run("grove template found when grovePath is provided", func(t *testing.T) {
-		tpl, err := FindTemplateInGrovePath("my-tpl", grovePath)
+	t.Run("grove template found when projectPath is provided", func(t *testing.T) {
+		tpl, err := FindTemplateInProjectPath("my-tpl", projectPath)
 		if err != nil {
-			t.Fatalf("FindTemplateInGrovePath failed: %v", err)
+			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
 		if tpl.Path != groveTplDir {
 			t.Errorf("expected path %q, got %q", groveTplDir, tpl.Path)
@@ -503,9 +503,9 @@ func TestFindTemplateInGrovePath(t *testing.T) {
 	})
 
 	t.Run("falls back to global when grove has no template", func(t *testing.T) {
-		tpl, err := FindTemplateInGrovePath("my-tpl", filepath.Join(tmpDir, "empty-grove"))
+		tpl, err := FindTemplateInProjectPath("my-tpl", filepath.Join(tmpDir, "empty-grove"))
 		if err != nil {
-			t.Fatalf("FindTemplateInGrovePath failed: %v", err)
+			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
 		if tpl.Path != globalTplDir {
 			t.Errorf("expected path %q, got %q", globalTplDir, tpl.Path)
@@ -515,11 +515,11 @@ func TestFindTemplateInGrovePath(t *testing.T) {
 		}
 	})
 
-	t.Run("falls back to FindTemplate when grovePath is empty", func(t *testing.T) {
-		// With empty grovePath and CWD having no .scion, should fall back to global
-		tpl, err := FindTemplateInGrovePath("my-tpl", "")
+	t.Run("falls back to FindTemplate when projectPath is empty", func(t *testing.T) {
+		// With empty projectPath and CWD having no .scion, should fall back to global
+		tpl, err := FindTemplateInProjectPath("my-tpl", "")
 		if err != nil {
-			t.Fatalf("FindTemplateInGrovePath failed: %v", err)
+			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
 		if tpl.Path != globalTplDir {
 			t.Errorf("expected path %q, got %q", globalTplDir, tpl.Path)
@@ -527,7 +527,7 @@ func TestFindTemplateInGrovePath(t *testing.T) {
 	})
 
 	t.Run("returns error when template not found anywhere", func(t *testing.T) {
-		_, err := FindTemplateInGrovePath("nonexistent", grovePath)
+		_, err := FindTemplateInProjectPath("nonexistent", projectPath)
 		if err == nil {
 			t.Fatal("expected error for nonexistent template, got nil")
 		}
@@ -537,9 +537,9 @@ func TestFindTemplateInGrovePath(t *testing.T) {
 	})
 
 	t.Run("absolute path bypasses grove resolution", func(t *testing.T) {
-		tpl, err := FindTemplateInGrovePath(globalTplDir, grovePath)
+		tpl, err := FindTemplateInProjectPath(globalTplDir, projectPath)
 		if err != nil {
-			t.Fatalf("FindTemplateInGrovePath failed: %v", err)
+			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
 		if tpl.Path != globalTplDir {
 			t.Errorf("expected path %q, got %q", globalTplDir, tpl.Path)
@@ -547,7 +547,7 @@ func TestFindTemplateInGrovePath(t *testing.T) {
 	})
 }
 
-func TestFindTemplateInGrovePath_GitGroveInRepoTemplates(t *testing.T) {
+func TestFindTemplateInProjectPath_GitGroveInRepoTemplates(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
@@ -555,7 +555,7 @@ func TestFindTemplateInGrovePath_GitGroveInRepoTemplates(t *testing.T) {
 	// Templates live in-repo so they can be committed to the repository.
 	projectDir := filepath.Join(t.TempDir(), "my-git-project", ".scion")
 	os.MkdirAll(projectDir, 0755)
-	if err := WriteGroveID(projectDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
+	if err := WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -565,9 +565,9 @@ func TestFindTemplateInGrovePath_GitGroveInRepoTemplates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tpl, err := FindTemplateInGrovePath("my-tpl", projectDir)
+	tpl, err := FindTemplateInProjectPath("my-tpl", projectDir)
 	if err != nil {
-		t.Fatalf("FindTemplateInGrovePath failed: %v", err)
+		t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 	}
 	if tpl.Path != inRepoTplDir {
 		t.Errorf("expected template path %q, got %q", inRepoTplDir, tpl.Path)
@@ -577,7 +577,7 @@ func TestFindTemplateInGrovePath_GitGroveInRepoTemplates(t *testing.T) {
 	}
 }
 
-func TestGetTemplateChainInGrove(t *testing.T) {
+func TestGetTemplateChainInProject(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "scion-test-chain-grove-*")
 	if err != nil {
 		t.Fatal(err)
@@ -593,15 +593,15 @@ func TestGetTemplateChainInGrove(t *testing.T) {
 	os.Chdir(tmpDir)
 
 	// Create grove template
-	grovePath := filepath.Join(tmpDir, "project", DotScion)
-	groveTplDir := filepath.Join(grovePath, "templates", "test-tpl")
+	projectPath := filepath.Join(tmpDir, "project", DotScion)
+	groveTplDir := filepath.Join(projectPath, "templates", "test-tpl")
 	if err := os.MkdirAll(groveTplDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	chain, err := GetTemplateChainInGrove("test-tpl", grovePath)
+	chain, err := GetTemplateChainInProject("test-tpl", projectPath)
 	if err != nil {
-		t.Fatalf("GetTemplateChainInGrove failed: %v", err)
+		t.Fatalf("GetTemplateChainInProject failed: %v", err)
 	}
 	if len(chain) != 1 {
 		t.Fatalf("expected chain length 1, got %d", len(chain))
@@ -611,7 +611,7 @@ func TestGetTemplateChainInGrove(t *testing.T) {
 	}
 }
 
-func TestGetTemplateChainInGroveWithDefault(t *testing.T) {
+func TestGetTemplateChainInProjectWithDefault(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "scion-test-chain-default-*")
 	if err != nil {
 		t.Fatal(err)
@@ -626,11 +626,11 @@ func TestGetTemplateChainInGroveWithDefault(t *testing.T) {
 	defer os.Chdir(origWd)
 	os.Chdir(tmpDir)
 
-	grovePath := filepath.Join(tmpDir, "project", DotScion)
+	projectPath := filepath.Join(tmpDir, "project", DotScion)
 
 	// Create both default and custom templates in the grove
-	defaultTplDir := filepath.Join(grovePath, "templates", "default")
-	customTplDir := filepath.Join(grovePath, "templates", "custom")
+	defaultTplDir := filepath.Join(projectPath, "templates", "default")
+	customTplDir := filepath.Join(projectPath, "templates", "custom")
 	if err := os.MkdirAll(defaultTplDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -639,9 +639,9 @@ func TestGetTemplateChainInGroveWithDefault(t *testing.T) {
 	}
 
 	// Non-default template should produce a 2-link chain: [default, custom]
-	chain, err := GetTemplateChainInGrove("custom", grovePath)
+	chain, err := GetTemplateChainInProject("custom", projectPath)
 	if err != nil {
-		t.Fatalf("GetTemplateChainInGrove failed: %v", err)
+		t.Fatalf("GetTemplateChainInProject failed: %v", err)
 	}
 	if len(chain) != 2 {
 		t.Fatalf("expected chain length 2, got %d", len(chain))
@@ -654,9 +654,9 @@ func TestGetTemplateChainInGroveWithDefault(t *testing.T) {
 	}
 
 	// Default template itself should produce a 1-link chain: [default]
-	chain, err = GetTemplateChainInGrove("default", grovePath)
+	chain, err = GetTemplateChainInProject("default", projectPath)
 	if err != nil {
-		t.Fatalf("GetTemplateChainInGrove for default failed: %v", err)
+		t.Fatalf("GetTemplateChainInProject for default failed: %v", err)
 	}
 	if len(chain) != 1 {
 		t.Fatalf("expected chain length 1 for default, got %d", len(chain))

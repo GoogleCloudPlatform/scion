@@ -145,7 +145,7 @@ type CLIAuthTokenResponse struct {
 // TokenCreateRequest is the request body for creating a user access token.
 type TokenCreateRequest struct {
 	Name      string     `json:"name"`
-	GroveID   string     `json:"groveId"`
+	ProjectID   string     `json:"projectId"`
 	Scopes    []string   `json:"scopes"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
@@ -161,12 +161,24 @@ type TokenResponse struct {
 	ID        string     `json:"id"`
 	Name      string     `json:"name"`
 	Prefix    string     `json:"prefix"`
-	GroveID   string     `json:"groveId"`
+	ProjectID string     `json:"projectId"`
 	Scopes    []string   `json:"scopes"`
 	Revoked   bool       `json:"revoked"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 	LastUsed  *time.Time `json:"lastUsed,omitempty"`
 	Created   time.Time  `json:"created"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (t TokenResponse) MarshalJSON() ([]byte, error) {
+	type Alias TokenResponse
+	return json.Marshal(&struct {
+		Alias
+		ProjectID string `json:"groveId"`
+	}{
+		Alias:   Alias(t),
+		ProjectID: t.ProjectID,
+	})
 }
 
 // handleAuth routes auth-related requests.
@@ -657,7 +669,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key, token, err := s.uatService.CreateToken(r.Context(), user.ID(), req.Name, req.GroveID, req.Scopes, req.ExpiresAt)
+	key, token, err := s.uatService.CreateToken(r.Context(), user.ID(), req.Name, req.ProjectID, req.Scopes, req.ExpiresAt)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrUATLimitExceeded):
@@ -668,7 +680,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 			ValidationError(w, err.Error(), nil)
 		case strings.Contains(err.Error(), "required"):
 			ValidationError(w, err.Error(), nil)
-		case strings.Contains(err.Error(), "grove not found"):
+		case strings.Contains(err.Error(), "project not found"):
 			ValidationError(w, err.Error(), nil)
 		default:
 			InternalError(w)
@@ -737,7 +749,7 @@ func tokenToResponse(t store.UserAccessToken) TokenResponse {
 		ID:        t.ID,
 		Name:      t.Name,
 		Prefix:    t.Prefix,
-		GroveID:   t.GroveID,
+		ProjectID:   t.ProjectID,
 		Scopes:    t.Scopes,
 		Revoked:   t.Revoked,
 		ExpiresAt: t.ExpiresAt,

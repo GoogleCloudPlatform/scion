@@ -40,18 +40,18 @@ func testServerNoCloudLogs(t *testing.T) (*Server, store.Store) {
 func createTestAgent(t *testing.T, s store.Store) *store.Agent {
 	t.Helper()
 	ctx := context.Background()
-	grove := &store.Grove{
+	project := &store.Project{
 		ID:   api.NewUUID(),
-		Name: "test-grove-" + api.NewUUID()[:8],
+		Name: "test-project-" + api.NewUUID()[:8],
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("CreateGrove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("CreateProject: %v", err)
 	}
 
 	agent := &store.Agent{
 		ID:      api.NewUUID(),
 		Name:    "test-agent-" + api.NewUUID()[:8],
-		GroveID: grove.ID,
+		ProjectID: project.ID,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)

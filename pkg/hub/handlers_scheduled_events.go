@@ -58,8 +58,8 @@ type ListScheduledEventsResponse struct {
 	ServerTime time.Time              `json:"serverTime"`
 }
 
-// handleScheduledEvents routes requests under /api/v1/groves/{groveId}/scheduled-events[/{id}]
-func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, groveID, eventPath string) {
+// handleScheduledEvents routes requests under /api/v1/projects/{projectId}/scheduled-events[/{id}]
+func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, projectID, eventPath string) {
 	// Require authentication
 	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
@@ -67,9 +67,9 @@ func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, g
 		return
 	}
 
-	// For agent identities, enforce grove isolation
+	// For agent identities, enforce project isolation
 	if agentIdentity := GetAgentIdentityFromContext(r.Context()); agentIdentity != nil {
-		if agentIdentity.GroveID() != groveID {
+		if agentIdentity.ProjectID() != projectID {
 			Forbidden(w)
 			return
 		}
@@ -79,9 +79,9 @@ func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, g
 		// Collection endpoint
 		switch r.Method {
 		case http.MethodGet:
-			s.listScheduledEvents(w, r, groveID)
+			s.listScheduledEvents(w, r, projectID)
 		case http.MethodPost:
-			s.createScheduledEvent(w, r, groveID)
+			s.createScheduledEvent(w, r, projectID)
 		default:
 			MethodNotAllowed(w)
 		}
@@ -92,16 +92,16 @@ func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, g
 	eventID := eventPath
 	switch r.Method {
 	case http.MethodGet:
-		s.getScheduledEvent(w, r, groveID, eventID)
+		s.getScheduledEvent(w, r, projectID, eventID)
 	case http.MethodDelete:
-		s.cancelScheduledEvent(w, r, groveID, eventID)
+		s.cancelScheduledEvent(w, r, projectID, eventID)
 	default:
 		MethodNotAllowed(w)
 	}
 }
 
-// createScheduledEvent handles POST /api/v1/groves/{groveId}/scheduled-events
-func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, groveID string) {
+// createScheduledEvent handles POST /api/v1/projects/{projectId}/scheduled-events
+func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, projectID string) {
 	var req CreateScheduledEventRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -206,7 +206,7 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, gr
 
 	evt := store.ScheduledEvent{
 		ID:        api.NewUUID(),
-		GroveID:   groveID,
+		ProjectID:   projectID,
 		EventType: req.EventType,
 		FireAt:    fireAt,
 		Payload:   payload,
@@ -230,12 +230,12 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, gr
 	writeJSON(w, http.StatusCreated, created)
 }
 
-// listScheduledEvents handles GET /api/v1/groves/{groveId}/scheduled-events
-func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, groveID string) {
+// listScheduledEvents handles GET /api/v1/projects/{projectId}/scheduled-events
+func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, projectID string) {
 	query := r.URL.Query()
 
 	filter := store.ScheduledEventFilter{
-		GroveID:   groveID,
+		ProjectID:   projectID,
 		EventType: query.Get("eventType"),
 		Status:    query.Get("status"),
 	}
@@ -264,16 +264,16 @@ func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, gro
 	})
 }
 
-// getScheduledEvent handles GET /api/v1/groves/{groveId}/scheduled-events/{id}
-func (s *Server) getScheduledEvent(w http.ResponseWriter, r *http.Request, groveID, eventID string) {
+// getScheduledEvent handles GET /api/v1/projects/{projectId}/scheduled-events/{id}
+func (s *Server) getScheduledEvent(w http.ResponseWriter, r *http.Request, projectID, eventID string) {
 	evt, err := s.store.GetScheduledEvent(r.Context(), eventID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	// Verify the event belongs to the requested grove
-	if evt.GroveID != groveID {
+	// Verify the event belongs to the requested project
+	if evt.ProjectID != projectID {
 		NotFound(w, "Scheduled event")
 		return
 	}
@@ -281,15 +281,15 @@ func (s *Server) getScheduledEvent(w http.ResponseWriter, r *http.Request, grove
 	writeJSON(w, http.StatusOK, evt)
 }
 
-// cancelScheduledEvent handles DELETE /api/v1/groves/{groveId}/scheduled-events/{id}
-func (s *Server) cancelScheduledEvent(w http.ResponseWriter, r *http.Request, groveID, eventID string) {
-	// Verify event exists and belongs to the grove
+// cancelScheduledEvent handles DELETE /api/v1/projects/{projectId}/scheduled-events/{id}
+func (s *Server) cancelScheduledEvent(w http.ResponseWriter, r *http.Request, projectID, eventID string) {
+	// Verify event exists and belongs to the project
 	evt, err := s.store.GetScheduledEvent(r.Context(), eventID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	if evt.GroveID != groveID {
+	if evt.ProjectID != projectID {
 		NotFound(w, "Scheduled event")
 		return
 	}

@@ -633,28 +633,28 @@ func TestDetectHarnessFromConfig_CustomDefaultHarnessConfig(t *testing.T) {
 	}
 }
 
-// setupWorkspaceGrove creates a server, store, grove, and workspace temp dir
-// linked via an embedded broker provider. Returns the server, store, grove,
+// setupWorkspaceProject creates a server, store, project, and workspace temp dir
+// linked via an embedded broker provider. Returns the server, store, project,
 // and the workspace root path. Templates should be placed under the returned
 // workspace root.
-func setupWorkspaceGrove(t *testing.T, groveName string) (*Server, store.Store, *store.Grove, string) {
+func setupWorkspaceProject(t *testing.T, projectName string) (*Server, store.Store, *store.Project, string) {
 	t.Helper()
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 
 	workspaceRoot := t.TempDir()
 
-	grove := &store.Grove{
-		ID:        "grove-ws-" + groveName,
-		Name:      groveName,
-		Slug:      groveName,
-		GitRemote: "https://github.com/test/" + groveName,
+	project := &store.Project{
+		ID:        "project-ws-" + projectName,
+		Name:      projectName,
+		Slug:      projectName,
+		GitRemote: "https://github.com/test/" + projectName,
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
-	brokerID := "broker-ws-" + groveName
+	brokerID := "broker-ws-" + projectName
 	broker := &store.RuntimeBroker{
 		ID:       brokerID,
 		Name:     "ws-broker",
@@ -665,24 +665,24 @@ func setupWorkspaceGrove(t *testing.T, groveName string) (*Server, store.Store, 
 		t.Fatalf("failed to create broker: %v", err)
 	}
 
-	if err := s.AddGroveProvider(ctx, &store.GroveProvider{
-		GroveID:    grove.ID,
+	if err := s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:    project.ID,
 		BrokerID:   brokerID,
 		BrokerName: broker.Name,
 		LocalPath:  workspaceRoot,
 		Status:     "online",
 		LastSeen:   time.Now(),
 	}); err != nil {
-		t.Fatalf("failed to add grove provider: %v", err)
+		t.Fatalf("failed to add project provider: %v", err)
 	}
 
 	srv.SetEmbeddedBrokerID(brokerID)
 
-	return srv, s, grove, workspaceRoot
+	return srv, s, project, workspaceRoot
 }
 
 func TestImportTemplatesFromWorkspace_ImportsTemplates(t *testing.T) {
-	srv, s, grove, wsRoot := setupWorkspaceGrove(t, "ws-import")
+	srv, s, project, wsRoot := setupWorkspaceProject(t, "ws-import")
 	ctx := context.Background()
 
 	// Create a templates directory with one valid scion template
@@ -697,7 +697,7 @@ func TestImportTemplatesFromWorkspace_ImportsTemplates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	imported, err := srv.importTemplatesFromWorkspace(ctx, grove, "/.scion/templates")
+	imported, err := srv.importTemplatesFromWorkspace(ctx, project, "/.scion/templates")
 	if err != nil {
 		t.Fatalf("import failed: %v", err)
 	}
@@ -706,22 +706,22 @@ func TestImportTemplatesFromWorkspace_ImportsTemplates(t *testing.T) {
 	}
 
 	result, err := s.ListTemplates(ctx, store.TemplateFilter{
-		Scope:   string(store.TemplateScopeGrove),
-		GroveID: grove.ID,
+		Scope:   string(store.TemplateScopeProject),
+		ProjectID: project.ID,
 	}, store.ListOptions{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.TotalCount != 1 {
-		t.Fatalf("expected 1 grove-scoped template, got %d", result.TotalCount)
+		t.Fatalf("expected 1 project-scoped template, got %d", result.TotalCount)
 	}
-	if result.Items[0].Scope != store.TemplateScopeGrove {
-		t.Errorf("expected grove scope, got %q", result.Items[0].Scope)
+	if result.Items[0].Scope != store.TemplateScopeProject {
+		t.Errorf("expected project scope, got %q", result.Items[0].Scope)
 	}
 }
 
 func TestImportTemplatesFromWorkspace_DefaultPath(t *testing.T) {
-	srv, s, grove, wsRoot := setupWorkspaceGrove(t, "ws-default")
+	srv, s, project, wsRoot := setupWorkspaceProject(t, "ws-default")
 	ctx := context.Background()
 
 	// Create a template at the default /.scion/templates path
@@ -734,7 +734,7 @@ func TestImportTemplatesFromWorkspace_DefaultPath(t *testing.T) {
 	}
 
 	// Pass default path
-	imported, err := srv.importTemplatesFromWorkspace(ctx, grove, "/.scion/templates")
+	imported, err := srv.importTemplatesFromWorkspace(ctx, project, "/.scion/templates")
 	if err != nil {
 		t.Fatalf("import failed: %v", err)
 	}
@@ -742,7 +742,7 @@ func TestImportTemplatesFromWorkspace_DefaultPath(t *testing.T) {
 		t.Fatalf("expected 1 template, got %d", len(imported))
 	}
 
-	result, err := s.ListTemplates(ctx, store.TemplateFilter{GroveID: grove.ID}, store.ListOptions{Limit: 10})
+	result, err := s.ListTemplates(ctx, store.TemplateFilter{ProjectID: project.ID}, store.ListOptions{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -752,17 +752,17 @@ func TestImportTemplatesFromWorkspace_DefaultPath(t *testing.T) {
 }
 
 func TestImportTemplatesFromWorkspace_NonexistentPath(t *testing.T) {
-	srv, _, grove, _ := setupWorkspaceGrove(t, "ws-nopath")
+	srv, _, project, _ := setupWorkspaceProject(t, "ws-nopath")
 	ctx := context.Background()
 
-	_, err := srv.importTemplatesFromWorkspace(ctx, grove, "/does/not/exist")
+	_, err := srv.importTemplatesFromWorkspace(ctx, project, "/does/not/exist")
 	if err == nil {
 		t.Fatal("expected error for nonexistent path")
 	}
 }
 
 func TestImportTemplatesFromWorkspace_NoTemplatesFound(t *testing.T) {
-	srv, _, grove, wsRoot := setupWorkspaceGrove(t, "ws-empty")
+	srv, _, project, wsRoot := setupWorkspaceProject(t, "ws-empty")
 	ctx := context.Background()
 
 	// Create the directory but with no valid templates
@@ -771,7 +771,7 @@ func TestImportTemplatesFromWorkspace_NoTemplatesFound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := srv.importTemplatesFromWorkspace(ctx, grove, "/empty-templates")
+	_, err := srv.importTemplatesFromWorkspace(ctx, project, "/empty-templates")
 	if err == nil {
 		t.Fatal("expected error for directory with no templates")
 	}
@@ -781,11 +781,11 @@ func TestImportTemplatesFromWorkspace_NoTemplatesFound(t *testing.T) {
 }
 
 func TestImportTemplatesFromWorkspace_PathTraversal(t *testing.T) {
-	srv, _, grove, _ := setupWorkspaceGrove(t, "ws-traversal")
+	srv, _, project, _ := setupWorkspaceProject(t, "ws-traversal")
 	ctx := context.Background()
 
-	// A relative path with .. escapes the grove root
-	_, err := srv.importTemplatesFromWorkspace(ctx, grove, "../../../etc")
+	// A relative path with .. escapes the project root
+	_, err := srv.importTemplatesFromWorkspace(ctx, project, "../../../etc")
 	if err == nil {
 		t.Fatal("expected error for path traversal attempt")
 	}
@@ -795,7 +795,7 @@ func TestImportTemplatesFromWorkspace_PathTraversal(t *testing.T) {
 }
 
 func TestImportTemplatesFromWorkspace_MultipleTemplates(t *testing.T) {
-	srv, s, grove, wsRoot := setupWorkspaceGrove(t, "ws-multi")
+	srv, s, project, wsRoot := setupWorkspaceProject(t, "ws-multi")
 	ctx := context.Background()
 
 	// Create two valid templates
@@ -809,7 +809,7 @@ func TestImportTemplatesFromWorkspace_MultipleTemplates(t *testing.T) {
 		}
 	}
 
-	imported, err := srv.importTemplatesFromWorkspace(ctx, grove, "/templates")
+	imported, err := srv.importTemplatesFromWorkspace(ctx, project, "/templates")
 	if err != nil {
 		t.Fatalf("import failed: %v", err)
 	}
@@ -817,7 +817,7 @@ func TestImportTemplatesFromWorkspace_MultipleTemplates(t *testing.T) {
 		t.Fatalf("expected 2 templates, got %d: %v", len(imported), imported)
 	}
 
-	result, err := s.ListTemplates(ctx, store.TemplateFilter{GroveID: grove.ID}, store.ListOptions{Limit: 10})
+	result, err := s.ListTemplates(ctx, store.TemplateFilter{ProjectID: project.ID}, store.ListOptions{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}

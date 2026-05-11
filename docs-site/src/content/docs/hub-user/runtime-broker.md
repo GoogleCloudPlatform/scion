@@ -45,9 +45,9 @@ scion broker register
 
 This command will securely exchange credentials with the Hub, linking your machine's broker to your Hub user account.
 
-### 3. Provide Compute for a Grove
+### 3. Provide Compute for a Project
 
-Even after registration, your broker will not accept arbitrary agents. It only executes agents for specific **Groves** (projects) that you explicitly authorize it to serve.
+Even after registration, your broker will not accept arbitrary agents. It only executes agents for specific **Projects** (projects) that you explicitly authorize it to serve.
 
 Navigate to the directory of a project that is connected to the Hub, and run:
 
@@ -55,9 +55,9 @@ Navigate to the directory of a project that is connected to the Hub, and run:
 scion broker provide
 ```
 
-This tells the Hub: *"My local broker is now a provider for this specific Grove."* When anyone on your team starts an agent in this Grove and targets your broker, the agent will execute on your machine.
+This tells the Hub: *"My local broker is now a provider for this specific Project."* When anyone on your team starts an agent in this Project and targets your broker, the agent will execute on your machine.
 
-To verify which groves your broker is currently serving:
+To verify which projects your broker is currently serving:
 
 ```bash
 scion broker status
@@ -66,7 +66,7 @@ scion broker status
 ## Security & Isolation
 
 When you register your machine as a broker:
-*   **Isolation**: Every agent runs in its own isolated container. In local mode each agent gets a dedicated git worktree (`.scion_worktrees/`); in hub-hosted git groves agents share a single workspace checkout, but each agent's per-agent state (task prompt, resolved config) lives outside that shared mount so sibling agents cannot read it.
+*   **Isolation**: Every agent runs in its own isolated container. In local mode each agent gets a dedicated git worktree (`.scion_worktrees/`); in hub-hosted git projects agents share a single workspace checkout, but each agent's per-agent state (task prompt, resolved config) lives outside that shared mount so sibling agents cannot read it.
 *   **No Source Code Sharing**: The Hub does not store your source code. The broker simply creates local branches and commits.
 *   **Safe Secrets**: Sensitive API keys and environment variables managed in the Hub are injected directly into the agent container's memory at runtime. They are not saved to your local disk.
 *   **Mutual Authentication**: All communication over the Control Channel uses HMAC-SHA256 signatures, ensuring that only the authorized Hub can send commands to your machine.

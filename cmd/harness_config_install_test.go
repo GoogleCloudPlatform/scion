@@ -192,13 +192,13 @@ func TestInstallLocally_GroveScope(t *testing.T) {
 	srcDir := filepath.Join(tmpDir, "source", "test-hc")
 	createTestHarnessConfig(t, srcDir)
 
-	grovePath := filepath.Join(tmpDir, "my-project", ".scion")
-	require.NoError(t, os.MkdirAll(grovePath, 0755))
+	projectPath := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectPath, 0755))
 
-	err := installLocally("test-hc", srcDir, grovePath, false, "claude")
+	err := installLocally("test-hc", srcDir, projectPath, false, "claude")
 	require.NoError(t, err)
 
-	destDir := filepath.Join(grovePath, "harness-configs", "test-hc")
+	destDir := filepath.Join(projectPath, "harness-configs", "test-hc")
 	assert.DirExists(t, destDir)
 	assert.FileExists(t, filepath.Join(destDir, "config.yaml"))
 }

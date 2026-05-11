@@ -32,11 +32,11 @@ For both Web and CLI access, Scion relies on standard OAuth 2.0 providers (Googl
 Agents running inside containers must report status back to the Hub without possessing user-level credentials.
 
 - **Hub-Issued JWT**: During provisioning, the Hub generates a short-lived JWT scoped specifically to that agent instance.
-- **Claims**: The token includes the `agent_id` (sub) and `grove_id`.
+- **Claims**: The token includes the `agent_id` (sub) and `project_id`.
 - **Scopes**: Standardized scopes include:
     - `agent:status:update`: Allows reporting progress and heartbeats.
     - `agent:log:append`: Allows streaming logs back to the Hub.
-    - `grove:secret:read`: Allows the agent to retrieve grove-scoped secrets.
+    - `project:secret:read`: Allows the agent to retrieve project-scoped secrets.
 - **Transmission**: The token is injected into the container via the `SCION_HUB_TOKEN` environment variable and is used by `sciontool` for all API calls.
 
 ### 1.4 Runtime Broker Authentication (HMAC)
@@ -75,8 +75,8 @@ A comprehensive, hierarchical RBAC (Role-Based Access Control) system is current
 
 - **Principal-Based**: Permissions are granted to **Users** and **Groups**.
 - **Hierarchical Groups**: Groups can contain other groups, allowing for complex team structures.
-- **Resource Scopes**: Policies are attached to scopes (Hub, Grove, or specific Resource) and follow a containment hierarchy.
-- **Override Model**: Lower-level policies (e.g., at the Agent level) override higher-level ones (e.g., at the Grove level), allowing for granular delegation of authority.
+- **Resource Scopes**: Policies are attached to scopes (Hub, Project, or specific Resource) and follow a containment hierarchy.
+- **Override Model**: Lower-level policies (e.g., at the Agent level) override higher-level ones (e.g., at the Project level), allowing for granular delegation of authority.
 - **Actions**: Standardized CRUD actions (`create`, `read`, `update`, `delete`, `list`) plus resource-specific actions (`start`, `stop`, `attach`, `message`).
 
 ## 4. Secret Management
@@ -105,7 +105,7 @@ Secrets are scoped and resolved hierarchically when an agent starts. The followi
 
 1. **Hub scope** (lowest priority): Global defaults.
 2. **User scope**: Personal secrets for the agent's owner.
-3. **Grove scope**: Project-level secrets.
+3. **Project scope**: Project-level secrets.
 4. **Runtime Broker scope** (highest priority): Infrastructure-level overrides.
 
 This produces a merged set of secrets for each agent, where more specific scopes override broader ones.
@@ -123,7 +123,7 @@ Secrets are typed to control how they reach the agent container:
 For headless environments (CI/CD, automation), Scion supports **Personal Access Tokens**.
 - Tokens are prefixed with `scion_pat_`.
 - Only the SHA-256 hash of the token is stored in the database; the original value is never persisted.
-- Tokens can be scoped to specific permissions and groves, and revoked instantly via the dashboard or CLI.
+- Tokens can be scoped to specific permissions and projects, and revoked instantly via the dashboard or CLI.
 
 ### 4.5 Credentials Propagation
 
@@ -131,8 +131,8 @@ Scion ensures that sensitive credentials (GCP Service Accounts, API keys for LLM
 - **Docker / Podman**: Injected via environment variables or read-only bind mounts for file-type secrets. File secrets are written to a temporary directory and mounted into the container at the target path.
 - **Kubernetes**: Propagated via Kubernetes Secrets or Secret Manager CSI drivers (e.g., GCP Secret Manager).
 - **Broker Mode Isolation**: When agents are dispatched via the Hub, the credential pipeline only uses hub-resolved secrets and environment variables. The broker operator's host environment and filesystem are never scanned, preventing credential leakage into hub-dispatched agents.
-- **Isolation**: Agent home directories and non-git grove data are isolated on the host filesystem and externalized from the workspace to prevent cross-agent data leakage and unauthorized traversal.
-- **Shadow Mounts**: Scion uses `tmpfs` shadow mounts to definitively block agents from accessing `.scion` configuration data or other agents' workspaces within the same grove.
+- **Isolation**: Agent home directories and non-git project data are isolated on the host filesystem and externalized from the workspace to prevent cross-agent data leakage and unauthorized traversal.
+- **Shadow Mounts**: Scion uses `tmpfs` shadow mounts to definitively block agents from accessing `.scion` configuration data or other agents' workspaces within the same project.
 - **Lifecycle**: Secrets exist only in the agent container's memory or transient mounts. When an agent is deleted, all projected secrets and transient volumes are purged.
 
 ### 4.6 Hub-Internal Keys

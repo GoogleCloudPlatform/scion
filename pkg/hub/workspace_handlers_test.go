@@ -56,20 +56,20 @@ func testWorkspaceServer(t *testing.T) (*Server, store.Store) {
 	return srv, s
 }
 
-// createTestGrove creates a grove for tests that need to create agents.
-// It uses groveID to generate unique slug and git remote to avoid unique constraint violations.
-func createTestGrove(t *testing.T, s store.Store, groveID string) {
+// createTestProject creates a project for tests that need to create agents.
+// It uses projectID to generate unique slug and git remote to avoid unique constraint violations.
+func createTestProject(t *testing.T, s store.Store, projectID string) {
 	t.Helper()
-	grove := &store.Grove{
-		ID:        groveID,
-		Slug:      groveID, // Use groveID as slug to ensure uniqueness
-		Name:      "Test Grove " + groveID,
-		GitRemote: "https://github.com/test/" + groveID, // Unique git remote per grove
+	project := &store.Project{
+		ID:        projectID,
+		Slug:      projectID, // Use projectID as slug to ensure uniqueness
+		Name:      "Test Project " + projectID,
+		GitRemote: "https://github.com/test/" + projectID, // Unique git remote per project
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	if err := s.CreateGrove(context.Background(), grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(context.Background(), project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 }
 
@@ -127,15 +127,15 @@ func TestWorkspaceStatusHandler(t *testing.T) {
 
 	now := time.Now()
 
-	// Create the grove first (foreign key dependency)
-	createTestGrove(t, s, "grove_test_1")
+	// Create the project first (foreign key dependency)
+	createTestProject(t, s, "project_test_1")
 
 	// Create a test agent
 	agent := &store.Agent{
 		ID:           "agent_workspace_test_1",
 		Slug:         "workspace-test-agent",
 		Name:         "test-agent",
-		GroveID:      "grove_test_1",
+		ProjectID:      "project_test_1",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -164,8 +164,8 @@ func TestWorkspaceStatusHandler(t *testing.T) {
 	if resp.Slug != "agent_workspace_test_1" {
 		t.Errorf("response AgentID = %q, want %q", resp.Slug, "agent_workspace_test_1")
 	}
-	if resp.GroveID != "grove_test_1" {
-		t.Errorf("response GroveID = %q, want %q", resp.GroveID, "grove_test_1")
+	if resp.ProjectID != "project_test_1" {
+		t.Errorf("response ProjectID = %q, want %q", resp.ProjectID, "project_test_1")
 	}
 }
 
@@ -188,15 +188,15 @@ func TestWorkspaceSyncFromHandler_AgentNotRunning(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	// Create the grove first
-	createTestGrove(t, s, "grove_test")
+	// Create the project first
+	createTestProject(t, s, "project_test")
 
 	// Create a stopped agent
 	agent := &store.Agent{
 		ID:           "agent_stopped_1",
 		Slug:         "stopped-agent",
 		Name:         "stopped-agent",
-		GroveID:      "grove_test",
+		ProjectID:      "project_test",
 		Phase:        string(state.PhaseStopped),
 		StateVersion: 1,
 		Created:      now,
@@ -223,14 +223,14 @@ func TestWorkspaceSyncToHandler_EmptyFiles(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	// Create the grove first
-	createTestGrove(t, s, "grove_syncto")
+	// Create the project first
+	createTestProject(t, s, "project_syncto")
 
 	agent := &store.Agent{
 		ID:           "agent_syncto_test",
 		Slug:         "sync-to-test-agent",
 		Name:         "test-agent",
-		GroveID:      "grove_syncto",
+		ProjectID:      "project_syncto",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -260,14 +260,14 @@ func TestWorkspaceSyncToFinalizeHandler_MissingManifest(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	// Create the grove first
-	createTestGrove(t, s, "grove_finalize")
+	// Create the project first
+	createTestProject(t, s, "project_finalize")
 
 	agent := &store.Agent{
 		ID:           "agent_finalize_test",
 		Slug:         "finalize-test-agent",
 		Name:         "test-agent",
-		GroveID:      "grove_finalize",
+		ProjectID:      "project_finalize",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -297,14 +297,14 @@ func TestWorkspaceRoutesRequireAuth(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	// Create the grove first
-	createTestGrove(t, s, "grove_auth")
+	// Create the project first
+	createTestProject(t, s, "project_auth")
 
 	agent := &store.Agent{
 		ID:           "agent_auth_test",
 		Slug:         "auth-test-agent",
 		Name:         "test-agent",
-		GroveID:      "grove_auth",
+		ProjectID:      "project_auth",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -414,18 +414,18 @@ func TestWorkspaceSyncFromHandler_StorageNotConfigured(t *testing.T) {
 	now := time.Now()
 
 	// Use unique IDs for this test
-	groveID := "grove_nostor_syncfrom"
+	projectID := "project_nostor_syncfrom"
 	agentID := "agent_nostor_syncfrom"
 
-	// Create the grove first
-	createTestGrove(t, s, groveID)
+	// Create the project first
+	createTestProject(t, s, projectID)
 
 	// Create a running agent (no RuntimeBrokerID to avoid FK constraint)
 	agent := &store.Agent{
 		ID:           agentID,
 		Slug:         "no-storage-agent",
 		Name:         "test-agent",
-		GroveID:      groveID,
+		ProjectID:      projectID,
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -459,14 +459,14 @@ func TestWorkspaceSyncToHandler_StorageNotConfigured(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	// Create the grove first
-	createTestGrove(t, s, "grove_syncto_no_storage")
+	// Create the project first
+	createTestProject(t, s, "project_syncto_no_storage")
 
 	agent := &store.Agent{
 		ID:           "agent_syncto_no_storage",
 		Slug:         "sync-to-no-storage-agent",
 		Name:         "test-agent",
-		GroveID:      "grove_syncto_no_storage",
+		ProjectID:      "project_syncto_no_storage",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -496,14 +496,14 @@ func TestWorkspaceSyncToFinalizeHandler_StorageNotConfigured(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	// Create the grove first
-	createTestGrove(t, s, "grove_finalize_no_storage")
+	// Create the project first
+	createTestProject(t, s, "project_finalize_no_storage")
 
 	agent := &store.Agent{
 		ID:           "agent_finalize_no_storage",
 		Slug:         "finalize-no-storage-agent",
 		Name:         "test-agent",
-		GroveID:      "grove_finalize_no_storage",
+		ProjectID:      "project_finalize_no_storage",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -533,15 +533,15 @@ func TestWorkspaceSyncToFinalizeHandler_AgentNotRunning(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	// Create the grove first
-	createTestGrove(t, s, "grove_finalize_stopped")
+	// Create the project first
+	createTestProject(t, s, "project_finalize_stopped")
 
 	// Create a stopped agent
 	agent := &store.Agent{
 		ID:           "agent_finalize_stopped",
 		Slug:         "finalize-stopped-agent",
 		Name:         "stopped-agent",
-		GroveID:      "grove_finalize_stopped",
+		ProjectID:      "project_finalize_stopped",
 		Phase:        string(state.PhaseStopped),
 		StateVersion: 1,
 		Created:      now,
@@ -570,14 +570,14 @@ func TestWorkspaceMethodNotAllowed(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	// Create the grove first
-	createTestGrove(t, s, "grove_method")
+	// Create the project first
+	createTestProject(t, s, "project_method")
 
 	agent := &store.Agent{
 		ID:           "agent_method_test",
 		Slug:         "method-test-agent",
 		Name:         "test-agent",
-		GroveID:      "grove_method",
+		ProjectID:      "project_method",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -634,14 +634,14 @@ func TestWorkspaceSyncToHandler_InvalidJSON(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	// Create the grove first
-	createTestGrove(t, s, "grove_invalid_json")
+	// Create the project first
+	createTestProject(t, s, "project_invalid_json")
 
 	agent := &store.Agent{
 		ID:           "agent_invalid_json",
 		Slug:         "invalid-json-agent",
 		Name:         "test-agent",
-		GroveID:      "grove_invalid_json",
+		ProjectID:      "project_invalid_json",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -671,14 +671,14 @@ func TestWorkspaceSyncToFinalizeHandler_InvalidJSON(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	// Create the grove first
-	createTestGrove(t, s, "grove_finalize_invalid")
+	// Create the project first
+	createTestProject(t, s, "project_finalize_invalid")
 
 	agent := &store.Agent{
 		ID:           "agent_finalize_invalid",
 		Slug:         "finalize-invalid-agent",
 		Name:         "test-agent",
-		GroveID:      "grove_finalize_invalid",
+		ProjectID:      "project_finalize_invalid",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -739,8 +739,8 @@ func TestWorkspaceStatusResponse_JSONSerialization(t *testing.T) {
 	now := time.Now()
 	resp := WorkspaceStatusResponse{
 		Slug:       "agent-123",
-		GroveID:    "grove-456",
-		StorageURI: "gs://bucket/workspaces/grove-456/agent-123/",
+		ProjectID:    "project-456",
+		StorageURI: "gs://bucket/workspaces/project-456/agent-123/",
 		LastSync: &WorkspaceSyncInfo{
 			Direction:   "from",
 			Timestamp:   now,
@@ -763,11 +763,11 @@ func TestWorkspaceStatusResponse_JSONSerialization(t *testing.T) {
 	if parsed.Slug != "agent-123" {
 		t.Errorf("agent ID = %q, want %q", parsed.Slug, "agent-123")
 	}
-	if parsed.GroveID != "grove-456" {
-		t.Errorf("grove ID = %q, want %q", parsed.GroveID, "grove-456")
+	if parsed.ProjectID != "project-456" {
+		t.Errorf("project ID = %q, want %q", parsed.ProjectID, "project-456")
 	}
-	if parsed.StorageURI != "gs://bucket/workspaces/grove-456/agent-123/" {
-		t.Errorf("storage URI = %q, want %q", parsed.StorageURI, "gs://bucket/workspaces/grove-456/agent-123/")
+	if parsed.StorageURI != "gs://bucket/workspaces/project-456/agent-123/" {
+		t.Errorf("storage URI = %q, want %q", parsed.StorageURI, "gs://bucket/workspaces/project-456/agent-123/")
 	}
 	if parsed.LastSync == nil {
 		t.Fatal("expected non-nil LastSync")
@@ -785,14 +785,14 @@ func TestWorkspaceUnknownAction(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	// Create the grove first
-	createTestGrove(t, s, "grove_unknown")
+	// Create the project first
+	createTestProject(t, s, "project_unknown")
 
 	agent := &store.Agent{
 		ID:           "agent_unknown_action",
 		Slug:         "unknown-action-agent",
 		Name:         "test-agent",
-		GroveID:      "grove_unknown",
+		ProjectID:      "project_unknown",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -880,28 +880,28 @@ func TestErrRuntimeBrokerError(t *testing.T) {
 	}
 }
 
-func TestSyncHubNativeWorkspaceBack_SkipsGitGrove(t *testing.T) {
+func TestSyncHubNativeWorkspaceBack_SkipsGitProject(t *testing.T) {
 	srv, st := testWorkspaceServer(t)
 	ctx := context.Background()
 
-	// Create a git-backed grove (has GitRemote)
-	grove := &store.Grove{
-		ID:        "grove-git-sync",
-		Slug:      "grove-git-sync",
-		Name:      "Git Grove",
+	// Create a git-backed project (has GitRemote)
+	project := &store.Project{
+		ID:        "project-git-sync",
+		Slug:      "project-git-sync",
+		Name:      "Git Project",
 		GitRemote: "github.com/test/repo",
 	}
-	if err := st.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := st.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	agent := &store.Agent{
 		ID:      "agent-sync-1",
-		GroveID: "grove-git-sync",
+		ProjectID: "project-git-sync",
 	}
 
-	// This should return without doing anything for git-backed groves
-	srv.syncHubNativeWorkspaceBack(ctx, agent, "workspaces/grove-git-sync/agent-sync-1")
+	// This should return without doing anything for git-backed projects
+	srv.syncHubNativeWorkspaceBack(ctx, agent, "workspaces/project-git-sync/agent-sync-1")
 	// No panic/error = success
 }
 
@@ -909,15 +909,15 @@ func TestSyncHubNativeWorkspaceBack_SkipsColocatedBroker(t *testing.T) {
 	srv, st := testWorkspaceServer(t)
 	ctx := context.Background()
 
-	// Create a hub-native grove
-	grove := &store.Grove{
-		ID:   "grove-colo-sync",
-		Slug: "grove-colo-sync",
+	// Create a hub-native project
+	project := &store.Project{
+		ID:   "project-colo-sync",
+		Slug: "project-colo-sync",
 		Name: "Hub Native Colo",
 		// No GitRemote = hub-native
 	}
-	if err := st.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := st.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	// Create a broker with local path (colocated)
@@ -931,35 +931,35 @@ func TestSyncHubNativeWorkspaceBack_SkipsColocatedBroker(t *testing.T) {
 	if err := st.CreateRuntimeBroker(ctx, broker); err != nil {
 		t.Fatalf("failed to create broker: %v", err)
 	}
-	provider := &store.GroveProvider{
-		GroveID:    "grove-colo-sync",
+	provider := &store.ProjectProvider{
+		ProjectID:    "project-colo-sync",
 		BrokerID:   "broker-colo",
 		BrokerName: "colo-broker",
 		LocalPath:  "/home/user/.scion",
 		Status:     store.BrokerStatusOnline,
 	}
-	if err := st.AddGroveProvider(ctx, provider); err != nil {
+	if err := st.AddProjectProvider(ctx, provider); err != nil {
 		t.Fatalf("failed to add provider: %v", err)
 	}
 
 	agent := &store.Agent{
 		ID:              "agent-colo-sync",
-		GroveID:         "grove-colo-sync",
+		ProjectID:         "project-colo-sync",
 		RuntimeBrokerID: "broker-colo",
 	}
 
 	// Should skip sync because broker has local path
-	srv.syncHubNativeWorkspaceBack(ctx, agent, "workspaces/grove-colo-sync/grove-workspace")
+	srv.syncHubNativeWorkspaceBack(ctx, agent, "workspaces/project-colo-sync/project-workspace")
 	// No panic/error = success
 }
 
-func TestSyncHubNativeWorkspaceBack_NoGroveID(t *testing.T) {
+func TestSyncHubNativeWorkspaceBack_NoProjectID(t *testing.T) {
 	srv, _ := testWorkspaceServer(t)
 	ctx := context.Background()
 
 	agent := &store.Agent{
-		ID:      "agent-no-grove",
-		GroveID: "", // No grove ID
+		ID:      "agent-no-project",
+		ProjectID: "", // No project ID
 	}
 
 	// Should return immediately

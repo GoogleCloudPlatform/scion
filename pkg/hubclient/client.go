@@ -19,6 +19,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -31,11 +33,11 @@ type Client interface {
 	// Agents returns the agent operations interface.
 	Agents() AgentService
 
-	// GroveAgents returns the agent operations interface scoped to a specific grove.
-	GroveAgents(groveID string) AgentService
+	// ProjectAgents returns the agent operations interface scoped to a specific project.
+	ProjectAgents(projectID string) AgentService
 
-	// Groves returns the grove operations interface.
-	Groves() GroveService
+	// Projects returns the project operations interface.
+	Projects() ProjectService
 
 	// RuntimeBrokers returns the runtime broker operations interface.
 	RuntimeBrokers() RuntimeBrokerService
@@ -73,14 +75,14 @@ type Client interface {
 	// SubscriptionTemplates returns the subscription template operations interface.
 	SubscriptionTemplates() SubscriptionTemplateService
 
-	// ScheduledEvents returns the scheduled event operations interface scoped to a grove.
-	ScheduledEvents(groveID string) ScheduledEventService
+	// ScheduledEvents returns the scheduled event operations interface scoped to a project.
+	ScheduledEvents(projectID string) ScheduledEventService
 
-	// Schedules returns the recurring schedule operations interface scoped to a grove.
-	Schedules(groveID string) ScheduleService
+	// Schedules returns the recurring schedule operations interface scoped to a project.
+	Schedules(projectID string) ScheduleService
 
-	// GCPServiceAccounts returns the GCP service account operations interface scoped to a grove.
-	GCPServiceAccounts(groveID string) GCPServiceAccountService
+	// GCPServiceAccounts returns the GCP service account operations interface scoped to a project.
+	GCPServiceAccounts(projectID string) GCPServiceAccountService
 
 	// Messages returns the user message inbox operations interface.
 	Messages() MessageService
@@ -100,7 +102,7 @@ type client struct {
 	transport *apiclient.Transport
 
 	agents                *agentService
-	groves                *groveService
+	projects              *projectService
 	runtimeBrokers        *runtimeBrokerService
 	templates             *templateService
 	harnessConfigs        *harnessConfigService
@@ -130,7 +132,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 
 	// Initialize service implementations
 	c.agents = &agentService{c: c}
-	c.groves = &groveService{c: c}
+	c.projects = &projectService{c: c}
 	c.runtimeBrokers = &runtimeBrokerService{c: c}
 	c.templates = &templateService{c: c}
 	c.harnessConfigs = &harnessConfigService{c: c}
@@ -155,14 +157,14 @@ func (c *client) Agents() AgentService {
 	return c.agents
 }
 
-// GroveAgents returns the agent operations interface scoped to a specific grove.
-func (c *client) GroveAgents(groveID string) AgentService {
-	return &agentService{c: c, groveID: groveID}
+// ProjectAgents returns the agent operations interface scoped to a specific project.
+func (c *client) ProjectAgents(projectID string) AgentService {
+	return &agentService{c: c, projectID: projectID}
 }
 
-// Groves returns the grove operations interface.
-func (c *client) Groves() GroveService {
-	return c.groves
+// Projects returns the project operations interface.
+func (c *client) Projects() ProjectService {
+	return c.projects
 }
 
 // RuntimeBrokers returns the runtime broker operations interface.
@@ -225,19 +227,19 @@ func (c *client) SubscriptionTemplates() SubscriptionTemplateService {
 	return c.subscriptionTemplates
 }
 
-// ScheduledEvents returns the scheduled event operations interface scoped to a grove.
-func (c *client) ScheduledEvents(groveID string) ScheduledEventService {
-	return &scheduledEventService{c: c, groveID: groveID}
+// ScheduledEvents returns the scheduled event operations interface scoped to a project.
+func (c *client) ScheduledEvents(projectID string) ScheduledEventService {
+	return &scheduledEventService{c: c, projectID: projectID}
 }
 
-// Schedules returns the recurring schedule operations interface scoped to a grove.
-func (c *client) Schedules(groveID string) ScheduleService {
-	return &scheduleService{c: c, groveID: groveID}
+// Schedules returns the recurring schedule operations interface scoped to a project.
+func (c *client) Schedules(projectID string) ScheduleService {
+	return &scheduleService{c: c, projectID: projectID}
 }
 
-// GCPServiceAccounts returns the GCP service account operations interface scoped to a grove.
-func (c *client) GCPServiceAccounts(groveID string) GCPServiceAccountService {
-	return &gcpServiceAccountService{c: c, groveID: groveID}
+// GCPServiceAccounts returns the GCP service account operations interface scoped to a project.
+func (c *client) GCPServiceAccounts(projectID string) GCPServiceAccountService {
+	return &gcpServiceAccountService{c: c, projectID: projectID}
 }
 
 // Messages returns the user message inbox operations interface.
@@ -255,9 +257,90 @@ func (c *client) Invites() InviteService {
 	return c.invites
 }
 
+// get performs an HTTP GET request with fallback.
+func (c *client) get(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
+	return c.getWithQuery(ctx, path, nil, headers)
+}
+
+// getWithQuery performs an HTTP GET request with query parameters and fallback.
+func (c *client) getWithQuery(ctx context.Context, path string, query url.Values, headers http.Header) (*http.Response, error) {
+	resp, err := c.transport.GetWithQuery(ctx, path, query, headers)
+	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
+		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
+		resp.Body.Close()
+		resp, err = c.transport.GetWithQuery(ctx, legacyPath, query, headers)
+		c.checkForDeprecation(resp)
+		return resp, err
+	}
+	return resp, err
+}
+
+// post performs an HTTP POST request with fallback.
+func (c *client) post(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
+	resp, err := c.transport.Post(ctx, path, body, headers)
+	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
+		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
+		resp.Body.Close()
+		resp, err = c.transport.Post(ctx, legacyPath, body, headers)
+		c.checkForDeprecation(resp)
+		return resp, err
+	}
+	return resp, err
+}
+
+// put performs an HTTP PUT request with fallback.
+func (c *client) put(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
+	resp, err := c.transport.Put(ctx, path, body, headers)
+	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
+		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
+		resp.Body.Close()
+		resp, err = c.transport.Put(ctx, legacyPath, body, headers)
+		c.checkForDeprecation(resp)
+		return resp, err
+	}
+	return resp, err
+}
+
+// patch performs an HTTP PATCH request with fallback.
+func (c *client) patch(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
+	resp, err := c.transport.Patch(ctx, path, body, headers)
+	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
+		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
+		resp.Body.Close()
+		resp, err = c.transport.Patch(ctx, legacyPath, body, headers)
+		c.checkForDeprecation(resp)
+		return resp, err
+	}
+	return resp, err
+}
+
+// delete performs an HTTP DELETE request with fallback.
+func (c *client) delete(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
+	resp, err := c.transport.Delete(ctx, path, headers)
+	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
+		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
+		resp.Body.Close()
+		resp, err = c.transport.Delete(ctx, legacyPath, headers)
+		c.checkForDeprecation(resp)
+		return resp, err
+	}
+	return resp, err
+}
+
+// checkForDeprecation logs a warning if the response contains a Deprecation header.
+func (c *client) checkForDeprecation(resp *http.Response) {
+	if resp != nil && resp.Header.Get("Deprecation") == "true" {
+		path := ""
+		if resp.Request != nil {
+			path = resp.Request.URL.Path
+		}
+		util.Debugf("WARNING: Calling deprecated endpoint %s. Please update to /projects version.", path)
+	}
+}
+
 // Health checks API availability.
 func (c *client) Health(ctx context.Context) (*HealthResponse, error) {
-	resp, err := c.transport.Get(ctx, "/healthz", nil)
+	resp, err := c.get(ctx, "/healthz", nil)
 	if err != nil {
 		return nil, err
 	}

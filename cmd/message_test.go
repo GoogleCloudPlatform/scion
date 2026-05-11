@@ -29,19 +29,19 @@ import (
 
 // messageTestState captures and restores package-level vars for test isolation.
 type messageTestState struct {
-	grovePath string
+	projectPath string
 	noHub     bool
 }
 
 func saveMessageTestState() messageTestState {
 	return messageTestState{
-		grovePath: grovePath,
+		projectPath: projectPath,
 		noHub:     noHub,
 	}
 }
 
 func (s messageTestState) restore() {
-	grovePath = s.grovePath
+	projectPath = s.projectPath
 	noHub = s.noHub
 }
 
@@ -57,7 +57,7 @@ type sentMessage struct {
 	StructuredMsg *messages.StructuredMessage
 }
 
-func newMessageMockHubServer(t *testing.T, groveID string, runningAgents []hubclient.Agent) (*httptest.Server, *[]sentMessage) {
+func newMessageMockHubServer(t *testing.T, projectID string, runningAgents []hubclient.Agent) (*httptest.Server, *[]sentMessage) {
 	t.Helper()
 	var sent []sentMessage
 	var mu sync.Mutex
@@ -69,17 +69,17 @@ func newMessageMockHubServer(t *testing.T, groveID string, runningAgents []hubcl
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
-		case r.Method == http.MethodGet && (r.URL.Path == "/api/v1/groves/"+groveID+"/agents" || r.URL.Path == "/api/v1/agents"):
+		case r.Method == http.MethodGet && (r.URL.Path == "/api/v1/groves/"+projectID+"/agents" || r.URL.Path == "/api/v1/agents"):
 			// List agents endpoint
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": runningAgents,
 			})
 
 		case r.Method == http.MethodPost:
-			// Extract agent name from path: /api/v1/groves/<groveID>/agents/<name>/message
+			// Extract agent name from path: /api/v1/groves/<projectID>/agents/<name>/message
 			// or /api/v1/agents/<name>/message
 			var agentName string
-			grovePrefix := "/api/v1/groves/" + groveID + "/agents/"
+			grovePrefix := "/api/v1/groves/" + projectID + "/agents/"
 			globalPrefix := "/api/v1/agents/"
 			path := r.URL.Path
 			if len(path) > len(grovePrefix) && path[:len(grovePrefix)] == grovePrefix {
@@ -128,8 +128,8 @@ func TestSendMessageViaHub_SingleAgent(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-single"
-	server, sent := newMessageMockHubServer(t, groveID, nil)
+	projectID := "grove-msg-single"
+	server, sent := newMessageMockHubServer(t, projectID, nil)
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
@@ -138,7 +138,7 @@ func TestSendMessageViaHub_SingleAgent(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:   client,
 		Endpoint: server.URL,
-		GroveID:  groveID,
+		ProjectID:  projectID,
 	}
 
 	err = sendMessageViaHub(hubCtx, "my-agent", "hello world", false, false, false, false)
@@ -158,8 +158,8 @@ func TestSendMessageViaHub_SingleAgentInterrupt(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-int"
-	server, sent := newMessageMockHubServer(t, groveID, nil)
+	projectID := "grove-msg-int"
+	server, sent := newMessageMockHubServer(t, projectID, nil)
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
@@ -168,7 +168,7 @@ func TestSendMessageViaHub_SingleAgentInterrupt(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:   client,
 		Endpoint: server.URL,
-		GroveID:  groveID,
+		ProjectID:  projectID,
 	}
 
 	// Set interrupt flag for this test
@@ -191,13 +191,13 @@ func TestSendMessageViaHub_Broadcast(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-broadcast"
+	projectID := "grove-msg-broadcast"
 	agents := []hubclient.Agent{
 		{Name: "agent-1", Status: "running"},
 		{Name: "agent-2", Status: "running"},
 		{Name: "agent-3", Status: "running"},
 	}
-	server, sent := newMessageMockHubServer(t, groveID, agents)
+	server, sent := newMessageMockHubServer(t, projectID, agents)
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
@@ -206,7 +206,7 @@ func TestSendMessageViaHub_Broadcast(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:   client,
 		Endpoint: server.URL,
-		GroveID:  groveID,
+		ProjectID:  projectID,
 	}
 
 	// Set broadcast flag for structured message construction
@@ -233,8 +233,8 @@ func TestSendMessageViaHub_BroadcastNoAgents(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-empty"
-	server, sent := newMessageMockHubServer(t, groveID, []hubclient.Agent{})
+	projectID := "grove-msg-empty"
+	server, sent := newMessageMockHubServer(t, projectID, []hubclient.Agent{})
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
@@ -243,7 +243,7 @@ func TestSendMessageViaHub_BroadcastNoAgents(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:   client,
 		Endpoint: server.URL,
-		GroveID:  groveID,
+		ProjectID:  projectID,
 	}
 
 	err = sendMessageViaHub(hubCtx, "", "hello", false, true, false, false)
@@ -257,12 +257,12 @@ func TestSendMessageViaHub_All(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-all"
+	projectID := "grove-msg-all"
 	agents := []hubclient.Agent{
-		{Name: "grove1-agent", Status: "running", GroveID: "grove-a"},
-		{Name: "grove2-agent", Status: "running", GroveID: "grove-b"},
+		{Name: "grove1-agent", Status: "running", ProjectID: "grove-a"},
+		{Name: "grove2-agent", Status: "running", ProjectID: "grove-b"},
 	}
-	server, sent := newMessageMockHubServer(t, groveID, agents)
+	server, sent := newMessageMockHubServer(t, projectID, agents)
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
@@ -287,7 +287,7 @@ func TestSendMessageViaHub_SingleAgentError(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-err"
+	projectID := "grove-msg-err"
 
 	// Server that returns 500 for message requests
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -312,7 +312,7 @@ func TestSendMessageViaHub_SingleAgentError(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:   client,
 		Endpoint: server.URL,
-		GroveID:  groveID,
+		ProjectID:  projectID,
 	}
 
 	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false, false)
@@ -382,7 +382,7 @@ func TestSendMessageViaHub_BroadcastPartialFailure(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-partial"
+	projectID := "grove-msg-partial"
 	agents := []hubclient.Agent{
 		{Name: "good-agent", Status: "running"},
 		{Name: "bad-agent", Status: "running"},
@@ -400,7 +400,7 @@ func TestSendMessageViaHub_BroadcastPartialFailure(t *testing.T) {
 		case r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{"agents": agents})
 		case r.Method == http.MethodPost:
-			prefix := "/api/v1/groves/" + groveID + "/agents/"
+			prefix := "/api/v1/groves/" + projectID + "/agents/"
 			rest := r.URL.Path[len(prefix):]
 			agentName := rest[:len(rest)-len("/message")]
 
@@ -440,7 +440,7 @@ func TestSendMessageViaHub_BroadcastPartialFailure(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:   client,
 		Endpoint: server.URL,
-		GroveID:  groveID,
+		ProjectID:  projectID,
 	}
 
 	// Broadcast should not return an error on partial failure
@@ -511,7 +511,7 @@ func TestSendMessageViaHub_NotifyFlag(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-notify"
+	projectID := "grove-msg-notify"
 
 	var notifyReceived bool
 	var mu sync.Mutex
@@ -544,14 +544,64 @@ func TestSendMessageViaHub_NotifyFlag(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:   client,
 		Endpoint: server.URL,
-		GroveID:  groveID,
+		ProjectID:  projectID,
 	}
 
 	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false, true)
 	require.NoError(t, err)
 
 	mu.Lock()
-	assert.True(t, notifyReceived, "notify flag should be sent in request body")
+	assert.True(t, notifyReceived, "notify should be true by default")
+	mu.Unlock()
+}
+
+func TestSendMessageViaHub_NoNotifyFlag(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "grove-msg-no-notify"
+
+	var notifyReceived bool
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost:
+			var body struct {
+				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
+				Interrupt         bool                        `json:"interrupt"`
+				Notify            bool                        `json:"notify"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			notifyReceived = body.Notify
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:   client,
+		Endpoint: server.URL,
+		ProjectID:  projectID,
+	}
+
+	// Explicit --no-notify: notify should be false
+	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false, false)
+	require.NoError(t, err)
+
+	mu.Lock()
+	assert.False(t, notifyReceived, "notify should be false when --no-notify is used")
+
 	mu.Unlock()
 }
 
@@ -559,7 +609,7 @@ func TestSendOutboundMessageViaHub(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-outbound"
+	projectID := "grove-msg-outbound"
 
 	var receivedMsg *hubclient.OutboundMessageRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -567,7 +617,7 @@ func TestSendOutboundMessageViaHub(t *testing.T) {
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/groves/"+groveID+"/agents/my-agent/outbound-message":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/groves/"+projectID+"/agents/my-agent/outbound-message":
 			var msg hubclient.OutboundMessageRequest
 			json.NewDecoder(r.Body).Decode(&msg)
 			receivedMsg = &msg
@@ -584,7 +634,7 @@ func TestSendOutboundMessageViaHub(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:   client,
 		Endpoint: server.URL,
-		GroveID:  groveID,
+		ProjectID:  projectID,
 	}
 
 	t.Setenv("SCION_AGENT_NAME", "my-agent")
@@ -615,7 +665,7 @@ func TestSendOutboundMessageViaHub_RequiresAgentContext(t *testing.T) {
 	hubCtx := &HubContext{
 		Client:   client,
 		Endpoint: server.URL,
-		GroveID:  "grove-test",
+		ProjectID:  "grove-test",
 	}
 
 	t.Setenv("SCION_AGENT_NAME", "")

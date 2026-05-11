@@ -234,7 +234,7 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 
 	// TODO: Future enhancement - when operating with a remote hub system,
 	// simple template names could also be resolved to remote storage locations:
-	// <bucket-name>/<scion-prefix>/<grove-id>/templates/<template-name>
+	// <bucket-name>/<scion-prefix>/<project-id>/templates/<template-name>
 	// This would enable shared templates across teams/organizations.
 
 	return nil, fmt.Errorf("template %s not found", name)
@@ -351,15 +351,15 @@ func GetTemplateChain(name string) ([]*Template, error) {
 	return chain, nil
 }
 
-// FindTemplateInGrovePath finds a template by name, using a specific grove path
-// for grove-scoped template resolution instead of relying on CWD.
-// When grovePath is empty, it falls back to FindTemplate (CWD-based resolution).
-func FindTemplateInGrovePath(name, grovePath string) (*Template, error) {
-	if grovePath == "" {
+// FindTemplateInProjectPath finds a template by name, using a specific project path
+// for project-scoped template resolution instead of relying on CWD.
+// When projectPath is empty, it falls back to FindTemplate (CWD-based resolution).
+func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
+	if projectPath == "" {
 		return FindTemplate(name)
 	}
 
-	// Remote URIs and absolute paths bypass grove resolution
+	// Remote URIs and absolute paths bypass project resolution
 	if IsRemoteURI(name) {
 		return FindTemplateWithContext(context.Background(), name)
 	}
@@ -370,9 +370,9 @@ func FindTemplateInGrovePath(name, grovePath string) (*Template, error) {
 		return nil, fmt.Errorf("template path %s not found or not a directory", name)
 	}
 
-	// Check grove-specific templates directory (in-repo .scion/templates/ for git groves)
-	groveTemplatesDir := filepath.Join(grovePath, "templates")
-	path := filepath.Join(groveTemplatesDir, name)
+	// Check project-specific templates directory (in-repo .scion/templates/ for git projects)
+	projectTemplatesDir := filepath.Join(projectPath, "templates")
+	path := filepath.Join(projectTemplatesDir, name)
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
 		return &Template{Name: name, Path: path, Scope: "grove"}, nil
 	}
@@ -389,23 +389,23 @@ func FindTemplateInGrovePath(name, grovePath string) (*Template, error) {
 	return nil, fmt.Errorf("template %s not found", name)
 }
 
-// GetTemplateChainInGrove returns a list of templates in inheritance order,
-// using a specific grove path for template resolution instead of CWD.
+// GetTemplateChainInProject returns a list of templates in inheritance order,
+// using a specific project path for template resolution instead of CWD.
 // For non-default templates, the default template is automatically prepended
 // to the chain so that common home files and config are inherited.
-func GetTemplateChainInGrove(name, grovePath string) ([]*Template, error) {
+func GetTemplateChainInProject(name, projectPath string) ([]*Template, error) {
 	var chain []*Template
 
 	// For non-default templates, prepend the default template as a base layer
 	if name != "default" {
-		defaultTpl, err := FindTemplateInGrovePath("default", grovePath)
+		defaultTpl, err := FindTemplateInProjectPath("default", projectPath)
 		if err == nil {
 			chain = append(chain, defaultTpl)
 		}
 		// If default template is not found, proceed without it
 	}
 
-	tpl, err := FindTemplateInGrovePath(name, grovePath)
+	tpl, err := FindTemplateInProjectPath(name, projectPath)
 	if err != nil {
 		return nil, err
 	}
@@ -531,9 +531,9 @@ func DeleteTemplate(name string, global bool) error {
 	return os.RemoveAll(templateDir)
 }
 
-// ListTemplatesGrouped returns templates grouped by scope (global and grove).
+// ListTemplatesGrouped returns templates grouped by scope (global and project).
 // Unlike ListTemplates, this preserves the scope information and does not merge duplicates.
-func ListTemplatesGrouped() (global []*Template, grove []*Template, err error) {
+func ListTemplatesGrouped() (global []*Template, project []*Template, err error) {
 	// Helper to scan a directory for templates
 	scan := func(dir string, scope string) []*Template {
 		var templates []*Template
@@ -558,9 +558,9 @@ func ListTemplatesGrouped() (global []*Template, grove []*Template, err error) {
 		global = scan(globalDir, "global")
 	}
 
-	// Scan grove (project) templates
+	// Scan project templates
 	if projectDir, err := GetProjectTemplatesDir(); err == nil {
-		grove = scan(projectDir, "grove")
+		project = scan(projectDir, "grove")
 	}
 
 	// Sort both lists by name for consistent output
@@ -570,9 +570,9 @@ func ListTemplatesGrouped() (global []*Template, grove []*Template, err error) {
 		})
 	}
 	sortTemplates(global)
-	sortTemplates(grove)
+	sortTemplates(project)
 
-	return global, grove, nil
+	return global, project, nil
 }
 
 func ListTemplates() ([]*Template, error) {
@@ -747,11 +747,11 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 			if override.Info.Template != "" {
 				infoCopy.Template = override.Info.Template
 			}
-			if override.Info.Grove != "" {
-				infoCopy.Grove = override.Info.Grove
+			if override.Info.Project != "" {
+				infoCopy.Project = override.Info.Project
 			}
-			if override.Info.GrovePath != "" {
-				infoCopy.GrovePath = override.Info.GrovePath
+			if override.Info.ProjectPath != "" {
+				infoCopy.ProjectPath = override.Info.ProjectPath
 			}
 			if override.Info.ContainerStatus != "" {
 				infoCopy.ContainerStatus = override.Info.ContainerStatus

@@ -118,7 +118,7 @@ func TestAuthenticatedBrokerClient_CreateAgent(t *testing.T) {
 	req := &RemoteCreateAgentRequest{
 		Slug:    "agent-1",
 		Name:    "test-agent",
-		GroveID: "grove-1",
+		ProjectID: "project-1",
 	}
 
 	resp, err := client.CreateAgent(context.Background(), brokerID, server.URL, req)
@@ -276,7 +276,7 @@ func TestAuthenticatedBrokerClient_MissingSecretFailsClosed(t *testing.T) {
 	req := &RemoteCreateAgentRequest{
 		Slug:    "agent-1",
 		Name:    "test-agent",
-		GroveID: "grove-1",
+		ProjectID: "project-1",
 	}
 
 	_, err = client.CreateAgent(context.Background(), brokerID, server.URL, req)
@@ -347,7 +347,7 @@ func TestAuthenticatedBrokerClient_ExpiredSecretFailsClosed(t *testing.T) {
 	req := &RemoteCreateAgentRequest{
 		Slug:    "agent-1",
 		Name:    "test-agent",
-		GroveID: "grove-1",
+		ProjectID: "project-1",
 	}
 
 	_, err = client.CreateAgent(context.Background(), brokerID, server.URL, req)

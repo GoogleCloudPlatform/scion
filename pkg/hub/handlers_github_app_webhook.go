@@ -126,7 +126,7 @@ func (s *Server) handleInstallationWebhook(w http.ResponseWriter, r *http.Reques
 
 	switch event.Action {
 	case "created":
-		// Record the installation and match to groves
+		// Record the installation and match to projects
 		repos := make([]string, len(event.Repositories))
 		for i, r := range event.Repositories {
 			repos[i] = r.FullName
@@ -146,11 +146,11 @@ func (s *Server) handleInstallationWebhook(w http.ResponseWriter, r *http.Reques
 			slog.Info("Installation already exists (idempotent)", "installation_id", installationID)
 		}
 
-		// Auto-match groves by repo
-		s.matchGrovesToInstallation(ctx, installation)
+		// Auto-match projects by repo
+		s.matchProjectsToInstallation(ctx, installation)
 
 	case "deleted":
-		// Mark installation as deleted, update affected groves
+		// Mark installation as deleted, update affected projects
 		existing, err := s.store.GetGitHubInstallation(ctx, installationID)
 		if err != nil {
 			slog.Warn("Installation not found for deletion webhook", "installation_id", installationID)
@@ -163,8 +163,8 @@ func (s *Server) handleInstallationWebhook(w http.ResponseWriter, r *http.Reques
 			slog.Error("Failed to update installation status", "error", err)
 		}
 
-		// Set affected groves to error state
-		s.updateGrovesForInstallation(ctx, installationID, store.GitHubAppStateError,
+		// Set affected projects to error state
+		s.updateProjectsForInstallation(ctx, installationID, store.GitHubAppStateError,
 			githubapp.ErrCodeInstallationRevoked, "Installation was revoked on GitHub. Reinstall the GitHub App for this org/account.")
 
 	case "suspend":
@@ -180,7 +180,7 @@ func (s *Server) handleInstallationWebhook(w http.ResponseWriter, r *http.Reques
 			slog.Error("Failed to update installation status", "error", err)
 		}
 
-		s.updateGrovesForInstallation(ctx, installationID, store.GitHubAppStateError,
+		s.updateProjectsForInstallation(ctx, installationID, store.GitHubAppStateError,
 			githubapp.ErrCodeInstallationSuspended, "Installation is suspended. Contact org admin to unsuspend.")
 
 	case "unsuspend":
@@ -197,7 +197,7 @@ func (s *Server) handleInstallationWebhook(w http.ResponseWriter, r *http.Reques
 		}
 
 		// Clear error state — will be validated on next token mint
-		s.updateGrovesForInstallation(ctx, installationID, store.GitHubAppStateUnchecked, "", "")
+		s.updateProjectsForInstallation(ctx, installationID, store.GitHubAppStateUnchecked, "", "")
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -258,8 +258,8 @@ func (s *Server) handleInstallationRepositoriesWebhook(w http.ResponseWriter, r 
 			slog.Error("Failed to update installation repos", "error", err)
 		}
 
-		// Check if any existing groves now match newly added repos
-		s.matchGrovesToInstallation(ctx, existing)
+		// Check if any existing projects now match newly added repos
+		s.matchProjectsToInstallation(ctx, existing)
 
 	case "removed":
 		// Remove repos from the installation's repo list
@@ -279,8 +279,8 @@ func (s *Server) handleInstallationRepositoriesWebhook(w http.ResponseWriter, r 
 			slog.Error("Failed to update installation repos", "error", err)
 		}
 
-		// Check if any groves using this installation lost their repo
-		s.checkGrovesForRemovedRepos(ctx, installationID, removedSet)
+		// Check if any projects using this installation lost their repo
+		s.checkProjectsForRemovedRepos(ctx, installationID, removedSet)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -371,20 +371,20 @@ func (s *Server) handleGitHubAppSetup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Auto-match groves
-	matchedGroves := s.matchGrovesToInstallation(ctx, installation)
+	// Auto-match projects
+	matchedProjects := s.matchProjectsToInstallation(ctx, installation)
 
-	// Redirect to the GitHub App setup page so the user can see their groves
+	// Redirect to the GitHub App setup page so the user can see their projects
 	// and configure installations. Pass the installation ID for context.
 	redirectURL := fmt.Sprintf("/github-app/installed?installation_id=%d", installationID)
 	http.Redirect(w, r, redirectURL, http.StatusFound)
 
-	_ = matchedGroves // consumed by matchGrovesToInstallation side effects
+	_ = matchedProjects // consumed by matchProjectsToInstallation side effects
 }
 
 // handleGitHubAppDiscover handles POST /api/v1/github-app/installations/discover.
 // It queries the GitHub API for all installations and syncs them to the store,
-// then auto-matches installations to groves.
+// then auto-matches installations to projects.
 func (s *Server) handleGitHubAppDiscover(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
@@ -443,13 +443,13 @@ func (s *Server) handleGitHubAppDiscover(w http.ResponseWriter, r *http.Request)
 			}
 		}
 
-		matchedGroves := s.matchGrovesToInstallation(ctx, installation)
+		matchedProjects := s.matchProjectsToInstallation(ctx, installation)
 
 		discovered = append(discovered, map[string]interface{}{
 			"installation_id": ghInst.ID,
 			"account":         ghInst.Account.Login,
 			"repositories":    repoNames,
-			"matched_groves":  matchedGroves,
+			"matched_projects": matchedProjects,
 		})
 	}
 
@@ -459,9 +459,9 @@ func (s *Server) handleGitHubAppDiscover(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// matchGrovesToInstallation finds groves whose git remote matches repos in the
-// installation and auto-associates them. Returns the list of matched grove IDs.
-func (s *Server) matchGrovesToInstallation(ctx context.Context, installation *store.GitHubInstallation) []string {
+// matchProjectsToInstallation finds projects whose git remote matches repos in the
+// installation and auto-associates them. Returns the list of matched project IDs.
+func (s *Server) matchProjectsToInstallation(ctx context.Context, installation *store.GitHubInstallation) []string {
 	if len(installation.Repositories) == 0 {
 		return nil
 	}
@@ -472,21 +472,21 @@ func (s *Server) matchGrovesToInstallation(ctx context.Context, installation *st
 		repoSet[strings.ToLower(r)] = true
 	}
 
-	// List all groves and check their git remote against the installation repos
-	groves, err := s.store.ListGroves(ctx, store.GroveFilter{}, store.ListOptions{Limit: 10000})
+	// List all projects and check their git remote against the installation repos
+	projects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 10000})
 	if err != nil {
-		slog.Error("Failed to list groves for matching", "error", err)
+		slog.Error("Failed to list projects for matching", "error", err)
 		return nil
 	}
 
 	var matched []string
-	for _, grove := range groves.Items {
-		if grove.GitRemote == "" {
+	for _, project := range projects.Items {
+		if project.GitRemote == "" {
 			continue
 		}
 
 		// Extract owner/repo from the git remote URL
-		ownerRepo := extractOwnerRepo(grove.GitRemote)
+		ownerRepo := extractOwnerRepo(project.GitRemote)
 		if ownerRepo == "" {
 			continue
 		}
@@ -495,56 +495,56 @@ func (s *Server) matchGrovesToInstallation(ctx context.Context, installation *st
 			continue
 		}
 
-		// Only auto-associate if the grove doesn't already have an installation
-		if grove.GitHubInstallationID != nil {
+		// Only auto-associate if the project doesn't already have an installation
+		if project.GitHubInstallationID != nil {
 			continue
 		}
 
-		// Associate the grove with this installation
-		grove.GitHubInstallationID = &installation.InstallationID
-		grove.GitHubAppStatus = &store.GitHubAppGroveStatus{
+		// Associate the project with this installation
+		project.GitHubInstallationID = &installation.InstallationID
+		project.GitHubAppStatus = &store.GitHubAppProjectStatus{
 			State:       store.GitHubAppStateUnchecked,
 			LastChecked: timeNow(),
 		}
 
-		if err := s.store.UpdateGrove(ctx, &grove); err != nil {
-			slog.Error("Failed to associate grove with installation",
-				"grove_id", grove.ID, "installation_id", installation.InstallationID, "error", err)
+		if err := s.store.UpdateProject(ctx, &project); err != nil {
+			slog.Error("Failed to associate project with installation",
+				"project_id", project.ID, "installation_id", installation.InstallationID, "error", err)
 			continue
 		}
-		s.events.PublishGroveUpdated(ctx, &grove)
+		s.events.PublishProjectUpdated(ctx, &project)
 
-		slog.Info("Auto-associated grove with GitHub App installation",
-			"grove_id", grove.ID, "grove_name", grove.Name,
+		slog.Info("Auto-associated project with GitHub App installation",
+			"project_id", project.ID, "project_name", project.Name,
 			"installation_id", installation.InstallationID, "account", installation.AccountLogin)
-		matched = append(matched, grove.ID)
+		matched = append(matched, project.ID)
 	}
 
 	return matched
 }
 
-// updateGrovesForInstallation updates the GitHub App status for all groves
+// updateProjectsForInstallation updates the GitHub App status for all projects
 // associated with the given installation.
-func (s *Server) updateGrovesForInstallation(ctx context.Context, installationID int64, state, errorCode, errorMessage string) {
-	groves, err := s.store.ListGroves(ctx, store.GroveFilter{}, store.ListOptions{Limit: 10000})
+func (s *Server) updateProjectsForInstallation(ctx context.Context, installationID int64, state, errorCode, errorMessage string) {
+	projects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 10000})
 	if err != nil {
-		slog.Error("Failed to list groves for status update", "error", err)
+		slog.Error("Failed to list projects for status update", "error", err)
 		return
 	}
 
 	now := timeNow()
-	for _, grove := range groves.Items {
-		if grove.GitHubInstallationID == nil || *grove.GitHubInstallationID != installationID {
+	for _, project := range projects.Items {
+		if project.GitHubInstallationID == nil || *project.GitHubInstallationID != installationID {
 			continue
 		}
 
 		// Preserve the existing LastTokenMint before overwriting
 		var lastTokenMint *time.Time
-		if grove.GitHubAppStatus != nil {
-			lastTokenMint = grove.GitHubAppStatus.LastTokenMint
+		if project.GitHubAppStatus != nil {
+			lastTokenMint = project.GitHubAppStatus.LastTokenMint
 		}
 
-		grove.GitHubAppStatus = &store.GitHubAppGroveStatus{
+		project.GitHubAppStatus = &store.GitHubAppProjectStatus{
 			State:         state,
 			ErrorCode:     errorCode,
 			ErrorMessage:  errorMessage,
@@ -552,43 +552,43 @@ func (s *Server) updateGrovesForInstallation(ctx context.Context, installationID
 			LastTokenMint: lastTokenMint,
 		}
 		if state == store.GitHubAppStateError {
-			grove.GitHubAppStatus.LastError = &now
+			project.GitHubAppStatus.LastError = &now
 		}
 
-		if err := s.store.UpdateGrove(ctx, &grove); err != nil {
-			slog.Error("Failed to update grove GitHub App status",
-				"grove_id", grove.ID, "error", err)
+		if err := s.store.UpdateProject(ctx, &project); err != nil {
+			slog.Error("Failed to update project GitHub App status",
+				"project_id", project.ID, "error", err)
 		} else {
-			s.events.PublishGroveUpdated(ctx, &grove)
+			s.events.PublishProjectUpdated(ctx, &project)
 		}
 	}
 }
 
-// checkGrovesForRemovedRepos checks if any groves using the given installation
+// checkProjectsForRemovedRepos checks if any projects using the given installation
 // have lost access to their repository.
-func (s *Server) checkGrovesForRemovedRepos(ctx context.Context, installationID int64, removedRepos map[string]bool) {
-	groves, err := s.store.ListGroves(ctx, store.GroveFilter{}, store.ListOptions{Limit: 10000})
+func (s *Server) checkProjectsForRemovedRepos(ctx context.Context, installationID int64, removedRepos map[string]bool) {
+	projects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 10000})
 	if err != nil {
-		slog.Error("Failed to list groves for repo removal check", "error", err)
+		slog.Error("Failed to list projects for repo removal check", "error", err)
 		return
 	}
 
 	now := timeNow()
-	for _, grove := range groves.Items {
-		if grove.GitHubInstallationID == nil || *grove.GitHubInstallationID != installationID {
+	for _, project := range projects.Items {
+		if project.GitHubInstallationID == nil || *project.GitHubInstallationID != installationID {
 			continue
 		}
 
-		if grove.GitRemote == "" {
+		if project.GitRemote == "" {
 			continue
 		}
 
-		ownerRepo := extractOwnerRepo(grove.GitRemote)
+		ownerRepo := extractOwnerRepo(project.GitRemote)
 		if ownerRepo == "" || !removedRepos[ownerRepo] {
 			continue
 		}
 
-		grove.GitHubAppStatus = &store.GitHubAppGroveStatus{
+		project.GitHubAppStatus = &store.GitHubAppProjectStatus{
 			State:        store.GitHubAppStateError,
 			ErrorCode:    githubapp.ErrCodeRepoNotAccessible,
 			ErrorMessage: "Target repo was removed from the GitHub App installation. Add the repo back to the installation on GitHub.",
@@ -596,11 +596,11 @@ func (s *Server) checkGrovesForRemovedRepos(ctx context.Context, installationID 
 			LastError:    &now,
 		}
 
-		if err := s.store.UpdateGrove(ctx, &grove); err != nil {
-			slog.Error("Failed to update grove after repo removal",
-				"grove_id", grove.ID, "error", err)
+		if err := s.store.UpdateProject(ctx, &project); err != nil {
+			slog.Error("Failed to update project after repo removal",
+				"project_id", project.ID, "error", err)
 		} else {
-			s.events.PublishGroveUpdated(ctx, &grove)
+			s.events.PublishProjectUpdated(ctx, &project)
 		}
 	}
 }
@@ -698,12 +698,12 @@ func (s *Server) getGitHubAppClient() (*githubapp.Client, error) {
 	}, keyData)
 }
 
-// mintGitHubAppToken mints a GitHub App installation token for a grove.
-// It handles error classification and updates the grove's GitHub App status.
+// mintGitHubAppToken mints a GitHub App installation token for a project.
+// It handles error classification and updates the project's GitHub App status.
 // Returns the token string and expiry, or an error.
-func (s *Server) mintGitHubAppToken(ctx context.Context, grove *store.Grove) (string, string, error) {
-	if grove.GitHubInstallationID == nil {
-		return "", "", fmt.Errorf("grove has no GitHub App installation")
+func (s *Server) mintGitHubAppToken(ctx context.Context, project *store.Project) (string, string, error) {
+	if project.GitHubInstallationID == nil {
+		return "", "", fmt.Errorf("project has no GitHub App installation")
 	}
 
 	client, err := s.getGitHubAppClient()
@@ -716,30 +716,30 @@ func (s *Server) mintGitHubAppToken(ctx context.Context, grove *store.Grove) (st
 		} else if strings.Contains(err.Error(), "private key") || strings.Contains(err.Error(), "PEM") {
 			errorCode = githubapp.ErrCodePrivateKeyInvalid
 		}
-		s.updateGroveGitHubAppStatus(ctx, grove, store.GitHubAppStateError,
+		s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
 			errorCode, err.Error())
 		return "", "", err
 	}
 
-	installationID := *grove.GitHubInstallationID
+	installationID := *project.GitHubInstallationID
 
 	// Determine permissions to request
 	perms := githubapp.DefaultTokenPermissions()
-	if grove.GitHubPermissions != nil {
+	if project.GitHubPermissions != nil {
 		perms = githubapp.TokenPermissions{
-			Contents:     grove.GitHubPermissions.Contents,
-			PullRequests: grove.GitHubPermissions.PullRequests,
-			Issues:       grove.GitHubPermissions.Issues,
-			Metadata:     grove.GitHubPermissions.Metadata,
-			Checks:       grove.GitHubPermissions.Checks,
-			Actions:      grove.GitHubPermissions.Actions,
+			Contents:     project.GitHubPermissions.Contents,
+			PullRequests: project.GitHubPermissions.PullRequests,
+			Issues:       project.GitHubPermissions.Issues,
+			Metadata:     project.GitHubPermissions.Metadata,
+			Checks:       project.GitHubPermissions.Checks,
+			Actions:      project.GitHubPermissions.Actions,
 		}
 	}
 
 	// Extract repo name from git remote (just the repo name, not owner/repo)
 	var repos []string
-	if grove.GitRemote != "" {
-		ownerRepo := extractOwnerRepo(grove.GitRemote)
+	if project.GitRemote != "" {
+		ownerRepo := extractOwnerRepo(project.GitRemote)
 		if ownerRepo != "" {
 			// GitHub API expects just the repo name, not owner/repo
 			parts := strings.SplitN(ownerRepo, "/", 2)
@@ -751,7 +751,7 @@ func (s *Server) mintGitHubAppToken(ctx context.Context, grove *store.Grove) (st
 
 	token, err := client.MintInstallationToken(ctx, installationID, repos, perms)
 	if err != nil {
-		// Classify the error and update grove status
+		// Classify the error and update project status
 		var mintErr *githubapp.TokenMintError
 		errorCode := githubapp.ErrCodeTokenMintFailed
 		errorMessage := err.Error()
@@ -765,7 +765,7 @@ func (s *Server) mintGitHubAppToken(ctx context.Context, grove *store.Grove) (st
 			state = store.GitHubAppStateDegraded
 		}
 
-		s.updateGroveGitHubAppStatus(ctx, grove, state, errorCode, errorMessage)
+		s.updateProjectGitHubAppStatus(ctx, project, state, errorCode, errorMessage)
 		return "", "", err
 	}
 
@@ -776,36 +776,36 @@ func (s *Server) mintGitHubAppToken(ctx context.Context, grove *store.Grove) (st
 		s.mu.Unlock()
 	}
 
-	// Success — update grove status
+	// Success — update project status
 	now := timeNow()
-	grove.GitHubAppStatus = &store.GitHubAppGroveStatus{
+	project.GitHubAppStatus = &store.GitHubAppProjectStatus{
 		State:         store.GitHubAppStateOK,
 		LastTokenMint: &now,
 		LastChecked:   now,
 	}
-	if err := s.store.UpdateGrove(ctx, grove); err != nil {
-		slog.Warn("Failed to update grove status after successful token mint", "error", err)
+	if err := s.store.UpdateProject(ctx, project); err != nil {
+		slog.Warn("Failed to update project status after successful token mint", "error", err)
 	} else {
-		s.events.PublishGroveUpdated(ctx, grove)
+		s.events.PublishProjectUpdated(ctx, project)
 	}
 
 	return token.Token, token.ExpiresAt.Format("2006-01-02T15:04:05Z"), nil
 }
 
-// updateGroveGitHubAppStatus is a helper to update a grove's GitHub App status.
-func (s *Server) updateGroveGitHubAppStatus(ctx context.Context, grove *store.Grove, state, errorCode, errorMessage string) {
+// updateProjectGitHubAppStatus is a helper to update a project's GitHub App status.
+func (s *Server) updateProjectGitHubAppStatus(ctx context.Context, project *store.Project, state, errorCode, errorMessage string) {
 	now := timeNow()
-	grove.GitHubAppStatus = &store.GitHubAppGroveStatus{
+	project.GitHubAppStatus = &store.GitHubAppProjectStatus{
 		State:        state,
 		ErrorCode:    errorCode,
 		ErrorMessage: errorMessage,
 		LastChecked:  now,
 		LastError:    &now,
 	}
-	if err := s.store.UpdateGrove(ctx, grove); err != nil {
-		slog.Warn("Failed to update grove GitHub App status", "grove_id", grove.ID, "error", err)
+	if err := s.store.UpdateProject(ctx, project); err != nil {
+		slog.Warn("Failed to update project GitHub App status", "project_id", project.ID, "error", err)
 	} else {
-		s.events.PublishGroveUpdated(ctx, grove)
+		s.events.PublishProjectUpdated(ctx, project)
 	}
 }
 
@@ -818,10 +818,10 @@ func isTokenMintError(err error, target **githubapp.TokenMintError) bool {
 	return false
 }
 
-// MintGitHubAppTokenForGrove implements GitHubAppTokenMinter.
-// It mints a GitHub App installation token for the given grove.
-func (s *Server) MintGitHubAppTokenForGrove(ctx context.Context, grove *store.Grove) (string, string, error) {
-	if grove.GitHubInstallationID == nil {
+// MintGitHubAppTokenForProject implements GitHubAppTokenMinter.
+// It mints a GitHub App installation token for the given project.
+func (s *Server) MintGitHubAppTokenForProject(ctx context.Context, project *store.Project) (string, string, error) {
+	if project.GitHubInstallationID == nil {
 		return "", "", nil
 	}
 
@@ -834,5 +834,5 @@ func (s *Server) MintGitHubAppTokenForGrove(ctx context.Context, grove *store.Gr
 		return "", "", nil
 	}
 
-	return s.mintGitHubAppToken(ctx, grove)
+	return s.mintGitHubAppToken(ctx, project)
 }

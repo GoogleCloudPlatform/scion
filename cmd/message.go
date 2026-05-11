@@ -137,16 +137,16 @@ Examples:
 		var err error
 		if userRecipient != "" {
 			// User recipient: skip sync (no agent involved)
-			hubCtx, err = CheckHubAvailabilityWithOptions(grovePath, true)
+			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
 		} else if msgAll {
 			// Cross-grove operation: skip sync
-			hubCtx, err = CheckHubAvailabilityWithOptions(grovePath, true)
+			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
 		} else if msgBroadcast {
 			// Grove-scoped broadcast: no specific agent
-			hubCtx, err = CheckHubAvailability(grovePath)
+			hubCtx, err = CheckHubAvailability(projectPath)
 		} else {
 			// Single agent: exclude target from sync requirements
-			hubCtx, err = CheckHubAvailabilityForAgent(grovePath, agentName, false)
+			hubCtx, err = CheckHubAvailabilityForAgent(projectPath, agentName, false)
 		}
 		if err != nil {
 			return err
@@ -183,7 +183,7 @@ Examples:
 		// so local mode continues to use plain text delivery.
 		ctx := context.Background()
 
-		rt := runtime.GetRuntime(grovePath, profile)
+		rt := runtime.GetRuntime(projectPath, profile)
 		mgr := agent.NewManager(rt)
 		defer mgr.Close()
 
@@ -200,10 +200,10 @@ Examples:
 			}
 
 			if !msgAll {
-				projectDir, _ := config.GetResolvedProjectDir(grovePath)
+				projectDir, _ := config.GetResolvedProjectDir(projectPath)
 				if projectDir != "" {
-					filters["scion.grove_path"] = projectDir
-					filters["scion.grove"] = config.GetGroveName(projectDir)
+					filters["scion.project_path"] = projectDir
+					filters["scion.project"] = config.GetProjectName(projectDir)
 				}
 			}
 
@@ -311,11 +311,11 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 
 	// Grove-scoped broadcast: list running agents, then fan-out individually.
 	if broadcast && !all {
-		groveID, err := GetGroveID(hubCtx)
+		projectID, err := GetProjectID(hubCtx)
 		if err != nil {
 			return wrapHubError(err)
 		}
-		agentSvc := hubCtx.Client.GroveAgents(groveID)
+		agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -402,11 +402,11 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	}
 
 	// Single agent: direct message
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
-	agentSvc := hubCtx.Client.GroveAgents(groveID)
+	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
 	if !isJSONOutput() {
 		fmt.Printf("Sending message to agent '%s'...\n", agentName)
@@ -441,11 +441,11 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		return fmt.Errorf("sending messages to users is only supported from within an agent container (SCION_AGENT_NAME not set)")
 	}
 
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
-	agentSvc := hubCtx.Client.GroveAgents(groveID)
+	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -472,7 +472,7 @@ func scheduleMessageViaHub(hubCtx *HubContext, agentName string, message string,
 		PrintUsingHub(hubCtx.Endpoint)
 	}
 
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -494,7 +494,7 @@ func scheduleMessageViaHub(hubCtx *HubContext, agentName string, message string,
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	evt, err := hubCtx.Client.ScheduledEvents(groveID).Create(ctx, req)
+	evt, err := hubCtx.Client.ScheduledEvents(projectID).Create(ctx, req)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to schedule message: %w", err))
 	}

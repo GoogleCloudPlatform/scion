@@ -30,7 +30,7 @@ type PrincipalInfo struct {
 	Type        string `json:"type"`
 	ID          string `json:"id"`
 	DisplayName string `json:"displayName,omitempty"`
-	GroveID     string `json:"groveId,omitempty"`
+	ProjectID     string `json:"projectId,omitempty"`
 }
 
 // PrincipalResolutionResponse is the response for principal resolution.
@@ -195,7 +195,7 @@ func (s *Server) handlePrincipalRoutes(w http.ResponseWriter, r *http.Request) {
 				Type:        "agent",
 				ID:          a.ID,
 				DisplayName: a.Name,
-				GroveID:     a.GroveID,
+				ProjectID:     a.ProjectID,
 			},
 			DirectGroups:    effectiveGroupIDs,
 			EffectiveGroups: effectiveGroupIDs,

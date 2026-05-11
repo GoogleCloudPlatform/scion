@@ -71,9 +71,9 @@ func Description(v string) predicate.Group {
 	return predicate.Group(sql.FieldEQ(FieldDescription, v))
 }
 
-// GroveID applies equality check predicate on the "grove_id" field. It's identical to GroveIDEQ.
-func GroveID(v uuid.UUID) predicate.Group {
-	return predicate.Group(sql.FieldEQ(FieldGroveID, v))
+// ProjectID applies equality check predicate on the "project_id" field. It's identical to ProjectIDEQ.
+func ProjectID(v uuid.UUID) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldProjectID, v))
 }
 
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
@@ -321,54 +321,54 @@ func GroupTypeNotIn(vs ...GroupType) predicate.Group {
 	return predicate.Group(sql.FieldNotIn(FieldGroupType, vs...))
 }
 
-// GroveIDEQ applies the EQ predicate on the "grove_id" field.
-func GroveIDEQ(v uuid.UUID) predicate.Group {
-	return predicate.Group(sql.FieldEQ(FieldGroveID, v))
+// ProjectIDEQ applies the EQ predicate on the "project_id" field.
+func ProjectIDEQ(v uuid.UUID) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldProjectID, v))
 }
 
-// GroveIDNEQ applies the NEQ predicate on the "grove_id" field.
-func GroveIDNEQ(v uuid.UUID) predicate.Group {
-	return predicate.Group(sql.FieldNEQ(FieldGroveID, v))
+// ProjectIDNEQ applies the NEQ predicate on the "project_id" field.
+func ProjectIDNEQ(v uuid.UUID) predicate.Group {
+	return predicate.Group(sql.FieldNEQ(FieldProjectID, v))
 }
 
-// GroveIDIn applies the In predicate on the "grove_id" field.
-func GroveIDIn(vs ...uuid.UUID) predicate.Group {
-	return predicate.Group(sql.FieldIn(FieldGroveID, vs...))
+// ProjectIDIn applies the In predicate on the "project_id" field.
+func ProjectIDIn(vs ...uuid.UUID) predicate.Group {
+	return predicate.Group(sql.FieldIn(FieldProjectID, vs...))
 }
 
-// GroveIDNotIn applies the NotIn predicate on the "grove_id" field.
-func GroveIDNotIn(vs ...uuid.UUID) predicate.Group {
-	return predicate.Group(sql.FieldNotIn(FieldGroveID, vs...))
+// ProjectIDNotIn applies the NotIn predicate on the "project_id" field.
+func ProjectIDNotIn(vs ...uuid.UUID) predicate.Group {
+	return predicate.Group(sql.FieldNotIn(FieldProjectID, vs...))
 }
 
-// GroveIDGT applies the GT predicate on the "grove_id" field.
-func GroveIDGT(v uuid.UUID) predicate.Group {
-	return predicate.Group(sql.FieldGT(FieldGroveID, v))
+// ProjectIDGT applies the GT predicate on the "project_id" field.
+func ProjectIDGT(v uuid.UUID) predicate.Group {
+	return predicate.Group(sql.FieldGT(FieldProjectID, v))
 }
 
-// GroveIDGTE applies the GTE predicate on the "grove_id" field.
-func GroveIDGTE(v uuid.UUID) predicate.Group {
-	return predicate.Group(sql.FieldGTE(FieldGroveID, v))
+// ProjectIDGTE applies the GTE predicate on the "project_id" field.
+func ProjectIDGTE(v uuid.UUID) predicate.Group {
+	return predicate.Group(sql.FieldGTE(FieldProjectID, v))
 }
 
-// GroveIDLT applies the LT predicate on the "grove_id" field.
-func GroveIDLT(v uuid.UUID) predicate.Group {
-	return predicate.Group(sql.FieldLT(FieldGroveID, v))
+// ProjectIDLT applies the LT predicate on the "project_id" field.
+func ProjectIDLT(v uuid.UUID) predicate.Group {
+	return predicate.Group(sql.FieldLT(FieldProjectID, v))
 }
 
-// GroveIDLTE applies the LTE predicate on the "grove_id" field.
-func GroveIDLTE(v uuid.UUID) predicate.Group {
-	return predicate.Group(sql.FieldLTE(FieldGroveID, v))
+// ProjectIDLTE applies the LTE predicate on the "project_id" field.
+func ProjectIDLTE(v uuid.UUID) predicate.Group {
+	return predicate.Group(sql.FieldLTE(FieldProjectID, v))
 }
 
-// GroveIDIsNil applies the IsNil predicate on the "grove_id" field.
-func GroveIDIsNil() predicate.Group {
-	return predicate.Group(sql.FieldIsNull(FieldGroveID))
+// ProjectIDIsNil applies the IsNil predicate on the "project_id" field.
+func ProjectIDIsNil() predicate.Group {
+	return predicate.Group(sql.FieldIsNull(FieldProjectID))
 }
 
-// GroveIDNotNil applies the NotNil predicate on the "grove_id" field.
-func GroveIDNotNil() predicate.Group {
-	return predicate.Group(sql.FieldNotNull(FieldGroveID))
+// ProjectIDNotNil applies the NotNil predicate on the "project_id" field.
+func ProjectIDNotNil() predicate.Group {
+	return predicate.Group(sql.FieldNotNull(FieldProjectID))
 }
 
 // LabelsIsNil applies the IsNil predicate on the "labels" field.

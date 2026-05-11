@@ -45,25 +45,25 @@ const (
 	ScopeAgentStatusUpdate AgentTokenScope = "agent:status:update"
 	// ScopeAgentLogAppend allows the agent to append logs.
 	ScopeAgentLogAppend AgentTokenScope = "agent:log:append"
-	// ScopeGroveSecretRead allows the agent to read grove secrets.
-	ScopeGroveSecretRead AgentTokenScope = "grove:secret:read"
-	// ScopeAgentCreate allows the agent to create sub-agents within the same grove.
-	ScopeAgentCreate AgentTokenScope = "grove:agent:create"
-	// ScopeAgentLifecycle allows the agent to start/stop/restart agents within the same grove.
-	ScopeAgentLifecycle AgentTokenScope = "grove:agent:lifecycle"
-	// ScopeAgentNotify allows the agent to create notification subscriptions within the same grove.
-	ScopeAgentNotify AgentTokenScope = "grove:agent:notify"
+	// ScopeProjectSecretRead allows the agent to read project secrets.
+	ScopeProjectSecretRead AgentTokenScope = "project:secret:read"
+	// ScopeAgentCreate allows the agent to create sub-agents within the same project.
+	ScopeAgentCreate AgentTokenScope = "project:agent:create"
+	// ScopeAgentLifecycle allows the agent to start/stop/restart agents within the same project.
+	ScopeAgentLifecycle AgentTokenScope = "project:agent:lifecycle"
+	// ScopeAgentNotify allows the agent to create notification subscriptions within the same project.
+	ScopeAgentNotify AgentTokenScope = "project:agent:notify"
 	// ScopeAgentTokenRefresh allows the agent to refresh its own token before expiry.
 	ScopeAgentTokenRefresh AgentTokenScope = "agent:token:refresh"
 	// ScopeGCPTokenPrefix is the prefix for GCP token scopes.
-	// Full scope format: "grove:gcp:token:<sa-id>"
-	ScopeGCPTokenPrefix = "grove:gcp:token:"
+	// Full scope format: "project:gcp:token:<sa-id>"
+	ScopeGCPTokenPrefix = "project:gcp:token:"
 )
 
 // AgentTokenClaims represents the custom claims in an agent JWT.
 type AgentTokenClaims struct {
 	jwt.Claims
-	GroveID  string            `json:"grove_id,omitempty"`
+	ProjectID  string            `json:"project_id,omitempty"`
 	Scopes   []AgentTokenScope `json:"scopes,omitempty"`
 	Ancestry []string          `json:"ancestry,omitempty"` // [root_user, ..., parent_agent]
 }
@@ -115,7 +115,7 @@ func NewAgentTokenService(config AgentTokenConfig) (*AgentTokenService, error) {
 }
 
 // GenerateAgentToken generates a JWT for an agent with the specified scopes.
-func (s *AgentTokenService) GenerateAgentToken(agentID, groveID string, scopes []AgentTokenScope, ancestry []string) (string, error) {
+func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes []AgentTokenScope, ancestry []string) (string, error) {
 	now := time.Now()
 
 	// Default to status update scope if none provided
@@ -133,7 +133,7 @@ func (s *AgentTokenService) GenerateAgentToken(agentID, groveID string, scopes [
 			NotBefore: jwt.NewNumericDate(now),
 			ID:        generateTokenID(),
 		},
-		GroveID:  groveID,
+		ProjectID:  projectID,
 		Scopes:   scopes,
 		Ancestry: ancestry,
 	}
@@ -181,12 +181,12 @@ func (s *AgentTokenService) RefreshAgentToken(tokenString string) (string, time.
 		return "", time.Time{}, fmt.Errorf("cannot refresh invalid token: %w", err)
 	}
 
-	return s.GenerateAgentTokenWithExpiry(claims.Subject, claims.GroveID, claims.Scopes, claims.Ancestry)
+	return s.GenerateAgentTokenWithExpiry(claims.Subject, claims.ProjectID, claims.Scopes, claims.Ancestry)
 }
 
 // GenerateAgentTokenWithExpiry generates a JWT for an agent and also returns
 // the expiry time of the new token.
-func (s *AgentTokenService) GenerateAgentTokenWithExpiry(agentID, groveID string, scopes []AgentTokenScope, ancestry []string) (string, time.Time, error) {
+func (s *AgentTokenService) GenerateAgentTokenWithExpiry(agentID, projectID string, scopes []AgentTokenScope, ancestry []string) (string, time.Time, error) {
 	now := time.Now()
 
 	if len(scopes) == 0 {
@@ -204,7 +204,7 @@ func (s *AgentTokenService) GenerateAgentTokenWithExpiry(agentID, groveID string
 			NotBefore: jwt.NewNumericDate(now),
 			ID:        generateTokenID(),
 		},
-		GroveID:  groveID,
+		ProjectID:  projectID,
 		Scopes:   scopes,
 		Ancestry: ancestry,
 	}

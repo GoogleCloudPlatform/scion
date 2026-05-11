@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"time"
@@ -23,7 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
-// ScheduleService handles recurring schedule operations scoped to a grove.
+// ScheduleService handles recurring schedule operations scoped to a project.
 type ScheduleService interface {
 	// Create creates a new recurring schedule.
 	Create(ctx context.Context, req *CreateScheduleRequest) (*Schedule, error)
@@ -52,12 +53,12 @@ type ScheduleService interface {
 
 // scheduleService is the implementation of ScheduleService.
 type scheduleService struct {
-	c       *client
-	groveID string
+	c         *client
+	projectID string
 }
 
 func (s *scheduleService) basePath() string {
-	return fmt.Sprintf("/api/v1/groves/%s/schedules", url.PathEscape(s.groveID))
+	return fmt.Sprintf("/api/v1/projects/%s/schedules", url.PathEscape(s.projectID))
 }
 
 // CreateScheduleRequest is the client-side request for creating a recurring schedule.
@@ -82,11 +83,10 @@ type UpdateScheduleRequest struct {
 	Payload   string `json:"payload,omitempty"`
 	Status    string `json:"status,omitempty"`
 }
-
 // Schedule represents a recurring schedule returned by the Hub API.
 type Schedule struct {
 	ID            string     `json:"id"`
-	GroveID       string     `json:"groveId"`
+	ProjectID     string     `json:"projectId"`
 	Name          string     `json:"name"`
 	CronExpr      string     `json:"cronExpr"`
 	EventType     string     `json:"eventType"`
@@ -99,8 +99,39 @@ type Schedule struct {
 	RunCount      int        `json:"runCount"`
 	ErrorCount    int        `json:"errorCount"`
 	CreatedAt     time.Time  `json:"createdAt"`
-	CreatedBy     string     `json:"createdBy,omitempty"`
+	CreatedBy     string     `json:"createdBy"`
 	UpdatedAt     time.Time  `json:"updatedAt"`
+	UpdatedBy     string     `json:"updatedBy,omitempty"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (s *Schedule) UnmarshalJSON(data []byte) error {
+	type Alias Schedule
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(s),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if s.ProjectID == "" && aux.GroveID != "" {
+		s.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (s Schedule) MarshalJSON() ([]byte, error) {
+	type Alias Schedule
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(s),
+		GroveID: s.ProjectID,
+	})
 }
 
 // ListSchedulesOptions configures schedule listing.
@@ -120,7 +151,7 @@ type ListSchedulesResponse struct {
 
 // Create creates a new recurring schedule.
 func (s *scheduleService) Create(ctx context.Context, req *CreateScheduleRequest) (*Schedule, error) {
-	resp, err := s.c.transport.Post(ctx, s.basePath(), req, nil)
+	resp, err := s.c.post(ctx, s.basePath(), req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +160,7 @@ func (s *scheduleService) Create(ctx context.Context, req *CreateScheduleRequest
 
 // Get retrieves a schedule by ID.
 func (s *scheduleService) Get(ctx context.Context, id string) (*Schedule, error) {
-	resp, err := s.c.transport.Get(ctx, s.basePath()+"/"+url.PathEscape(id), nil)
+	resp, err := s.c.get(ctx, s.basePath()+"/"+url.PathEscape(id), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +180,7 @@ func (s *scheduleService) List(ctx context.Context, opts *ListSchedulesOptions) 
 		opts.Page.ToQuery(query)
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, s.basePath(), query, nil)
+	resp, err := s.c.getWithQuery(ctx, s.basePath(), query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +189,7 @@ func (s *scheduleService) List(ctx context.Context, opts *ListSchedulesOptions) 
 
 // Update updates a schedule.
 func (s *scheduleService) Update(ctx context.Context, id string, req *UpdateScheduleRequest) (*Schedule, error) {
-	resp, err := s.c.transport.Patch(ctx, s.basePath()+"/"+url.PathEscape(id), req, nil)
+	resp, err := s.c.patch(ctx, s.basePath()+"/"+url.PathEscape(id), req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +198,7 @@ func (s *scheduleService) Update(ctx context.Context, id string, req *UpdateSche
 
 // Delete deletes a schedule.
 func (s *scheduleService) Delete(ctx context.Context, id string) error {
-	resp, err := s.c.transport.Delete(ctx, s.basePath()+"/"+url.PathEscape(id), nil)
+	resp, err := s.c.delete(ctx, s.basePath()+"/"+url.PathEscape(id), nil)
 	if err != nil {
 		return err
 	}
@@ -176,7 +207,7 @@ func (s *scheduleService) Delete(ctx context.Context, id string) error {
 
 // Pause pauses an active schedule.
 func (s *scheduleService) Pause(ctx context.Context, id string) (*Schedule, error) {
-	resp, err := s.c.transport.Post(ctx, s.basePath()+"/"+url.PathEscape(id)+"/pause", nil, nil)
+	resp, err := s.c.post(ctx, s.basePath()+"/"+url.PathEscape(id)+"/pause", nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +216,7 @@ func (s *scheduleService) Pause(ctx context.Context, id string) (*Schedule, erro
 
 // Resume resumes a paused schedule.
 func (s *scheduleService) Resume(ctx context.Context, id string) (*Schedule, error) {
-	resp, err := s.c.transport.Post(ctx, s.basePath()+"/"+url.PathEscape(id)+"/resume", nil, nil)
+	resp, err := s.c.post(ctx, s.basePath()+"/"+url.PathEscape(id)+"/resume", nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +230,7 @@ func (s *scheduleService) History(ctx context.Context, id string, opts *ListSche
 		opts.Page.ToQuery(query)
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, s.basePath()+"/"+url.PathEscape(id)+"/history", query, nil)
+	resp, err := s.c.getWithQuery(ctx, s.basePath()+"/"+url.PathEscape(id)+"/history", query, nil)
 	if err != nil {
 		return nil, err
 	}

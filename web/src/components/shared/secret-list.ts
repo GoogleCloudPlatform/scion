@@ -18,10 +18,10 @@
  * Shared Secret List Component
  *
  * Full CRUD component for secrets. Used by both the profile secrets page
- * (scope=user) and the grove configuration page (scope=grove).
+ * (scope=user) and the project configuration page (scope=project).
  *
  * In non-compact mode (profile page), renders a table with an add button.
- * In compact mode (grove page), wraps in a section with header/description.
+ * In compact mode (project page), wraps in a section with header/description.
  */
 
 import { LitElement, html, nothing } from 'lit';
@@ -74,7 +74,7 @@ export class ScionSecretList extends LitElement {
 
     try {
       const url =
-        this.scope !== 'grove'
+        this.scope !== 'project'
           ? `${this.apiBasePath}/secrets?scope=${this.scope}`
           : `${this.apiBasePath}/secrets`;
       const response = await apiFetch(url);
@@ -151,7 +151,7 @@ export class ScionSecretList extends LitElement {
         allowProgeny: this.scope === 'user' ? this.dialogAllowProgeny : undefined,
       };
 
-      if (this.scope === 'grove') {
+      if (this.scope === 'project') {
         body.scopeId = this.scopeId;
       }
 
@@ -184,7 +184,7 @@ export class ScionSecretList extends LitElement {
 
     try {
       const deleteUrl =
-        this.scope !== 'grove'
+        this.scope !== 'project'
           ? `${this.apiBasePath}/secrets/${encodeURIComponent(secret.key)}?scope=${this.scope}`
           : `${this.apiBasePath}/secrets/${encodeURIComponent(secret.key)}`;
       const response = await apiFetch(deleteUrl, { method: 'DELETE' });
@@ -293,7 +293,7 @@ export class ScionSecretList extends LitElement {
           <div class="section-header-info">
             <h2>Secrets</h2>
             <p>
-              Manage encrypted secrets for ${this.scope === 'hub' ? 'all agents on this hub' : 'agents in this grove'}. Values are write-only and cannot be
+              Manage encrypted secrets for ${this.scope === 'hub' ? 'all agents on this hub' : 'agents in this project'}. Values are write-only and cannot be
               retrieved after saving.
             </p>
           </div>
@@ -409,7 +409,7 @@ export class ScionSecretList extends LitElement {
         <h3>No Secrets</h3>
         <p>
           Add encrypted secrets that will be securely injected into
-          ${this.compact ? (this.scope === 'hub' ? 'all agents on this hub' : 'agents in this grove') : 'your agents'}.
+          ${this.compact ? (this.scope === 'hub' ? 'all agents on this hub' : 'agents in this project') : 'your agents'}.
         </p>
         <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
           <sl-icon slot="prefix" name="plus-lg"></sl-icon>

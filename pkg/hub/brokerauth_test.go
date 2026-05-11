@@ -614,7 +614,7 @@ func TestSlugify(t *testing.T) {
 	}
 }
 
-// TestGenerateAndStoreSecret tests the simplified secret generation for grove registration.
+// TestGenerateAndStoreSecret tests the simplified secret generation for project registration.
 func TestGenerateAndStoreSecret(t *testing.T) {
 	svc, s := setupTestBrokerAuthService(t)
 	ctx := context.Background()

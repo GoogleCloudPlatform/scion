@@ -32,19 +32,19 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
-func DeleteAgentFiles(agentName string, grovePath string, removeBranch bool) (bool, error) {
+func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (bool, error) {
 	var agentsDirs []string
 	branchDeleted := false
 	var repoRoot string
 	var externalAgentDir string
-	if projectDir, err := config.GetResolvedProjectDir(grovePath); err == nil {
+	if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
 		agentsDirs = append(agentsDirs, filepath.Join(projectDir, "agents"))
 		// Determine repo root for worktree pruning and branch cleanup
 		if root, err := util.RepoRootDir(filepath.Dir(projectDir)); err == nil {
 			repoRoot = root
 		}
 		// Check for external agent home (git grove split storage)
-		if extDir, err := config.GetGitGroveExternalAgentsDir(projectDir); err == nil && extDir != "" {
+		if extDir, err := config.GetGitProjectExternalAgentsDir(projectDir); err == nil && extDir != "" {
 			externalAgentDir = filepath.Join(extDir, agentName)
 		}
 	}
@@ -181,16 +181,16 @@ func migrateLegacyAgentState(legacyDir, externalDir string) {
 	_ = os.Remove(legacyDir)
 }
 
-// StopGroveContainers finds and removes containers belonging to the given grove
-// that match the provided agent names. This is used during grove pruning to
-// clean up containers before removing the grove config directory.
-func StopGroveContainers(ctx context.Context, mgr Manager, groveName string, agentNames []string) []string {
+// StopProjectContainers finds and removes containers belonging to the given project
+// that match the provided agent names. This is used during project pruning to
+// clean up containers before removing the project config directory.
+func StopProjectContainers(ctx context.Context, mgr Manager, projectName string, agentNames []string) []string {
 	containers, err := mgr.List(ctx, map[string]string{
 		"scion.agent": "true",
-		"scion.grove": groveName,
+		"scion.grove": projectName,
 	})
 	if err != nil {
-		util.Debugf("StopGroveContainers: failed to list containers for grove %s: %v", groveName, err)
+		util.Debugf("StopProjectContainers: failed to list containers for project %s: %v", projectName, err)
 		return nil
 	}
 
@@ -208,11 +208,11 @@ func StopGroveContainers(ctx context.Context, mgr Manager, groveName string, age
 		if !nameSet[agentName] || c.ContainerID == "" {
 			continue
 		}
-		util.Debugf("StopGroveContainers: removing container %s (agent %s, grove %s)", c.ContainerID, agentName, groveName)
+		util.Debugf("StopProjectContainers: removing container %s (agent %s, project %s)", c.ContainerID, agentName, projectName)
 		// Use Delete with deleteFiles=false — we only want to remove the container,
-		// not the filesystem artifacts (those will be removed by RemoveGroveConfig).
+		// not the filesystem artifacts (those will be removed by RemoveProjectConfig).
 		if _, err := mgr.Delete(ctx, c.ContainerID, false, "", false); err != nil {
-			util.Debugf("StopGroveContainers: failed to remove container for agent %s: %v", agentName, err)
+			util.Debugf("StopProjectContainers: failed to remove container for agent %s: %v", agentName, err)
 		} else {
 			stopped = append(stopped, agentName)
 		}
@@ -240,9 +240,9 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 		}
 		inlineCfg.AuthSelectedType = opts.HarnessAuth
 	}
-	agentDir, _, _, cfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.GrovePath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
+	agentDir, _, _, cfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
 	if err == nil {
-		_ = UpdateAgentConfig(opts.Name, opts.GrovePath, "created", m.Runtime.Name(), opts.Profile)
+		_ = UpdateAgentConfig(opts.Name, opts.ProjectPath, "created", m.Runtime.Name(), opts.Profile)
 	}
 	if err != nil {
 		return cfg, err
@@ -270,9 +270,9 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 	return cfg, nil
 }
 
-func ProvisionAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, grovePath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, *api.ScionConfig, error) {
+func ProvisionAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, *api.ScionConfig, error) {
 	// 1. Prepare agent directories
-	projectDir, err := config.GetResolvedProjectDir(grovePath)
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -283,7 +283,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		profileName = settings.ActiveProfile
 	}
 
-	groveName := config.GetGroveName(projectDir)
+	projectName := config.GetProjectName(projectDir)
 	isGit := util.IsGitRepoDir(projectDir)
 	if isGit && os.Getenv("SCION_HOST_UID") != "" {
 		// Inside an agent container: treat as non-git to prevent worktree
@@ -420,7 +420,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	} else {
 		// Case 3: Non-Git Repository (and no explicit workspace)
-		if groveName == "global" {
+		if projectName == "global" {
 			workspaceSource, _ = os.Getwd()
 		} else if settings != nil && settings.WorkspacePath != "" {
 			// Externalized grove: use workspace-path from settings
@@ -459,16 +459,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		// can discover the grove context. Worktrees don't contain .scion
 		// (it's gitignored), so without this marker the CLI would report
 		// "not in a scion project" inside the container.
-		if groveID, err := config.ReadGroveID(projectDir); err == nil && groveID != "" {
-			groveSlug := api.Slugify(groveName)
-			if writeErr := config.WriteWorkspaceMarker(agentWorkspace, groveID, groveName, groveSlug); writeErr != nil {
+		if projectID, err := config.ReadProjectID(projectDir); err == nil && projectID != "" {
+			groveSlug := api.Slugify(projectName)
+			if writeErr := config.WriteWorkspaceMarker(agentWorkspace, projectID, projectName, groveSlug); writeErr != nil {
 				util.Debugf("provision: failed to write workspace marker: %v", writeErr)
 			}
 		}
 	}
 
 	// 2. Load templates and merge configs (no home copy yet)
-	chain, err := config.GetTemplateChainInGrove(templateName, grovePath)
+	chain, err := config.GetTemplateChainInProject(templateName, projectPath)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to load template: %w", err)
 	}
@@ -514,7 +514,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	for _, tpl := range chain {
 		templatePaths = append(templatePaths, tpl.Path)
 	}
-	hcDir, err := config.FindHarnessConfigDir(harnessConfigName, grovePath, templatePaths...)
+	hcDir, err := config.FindHarnessConfigDir(harnessConfigName, projectPath, templatePaths...)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to find harness-config %q: %w", harnessConfigName, err)
 	}
@@ -575,7 +575,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Step 3: Copy skills directories into harness-specific location
 	resolved, err := harness.Resolve(ctx, harness.ResolveOptions{
 		Name:          harnessConfigName,
-		GrovePath:     grovePath,
+		ProjectPath:     projectPath,
 		TemplatePaths: templatePaths,
 		ProfileName:   profileName,
 		Settings:      settings,
@@ -804,8 +804,11 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if len(chain) > 0 {
 		displayTemplateName = chain[len(chain)-1].Name
 	}
+	projectID, _ := config.ReadProjectID(projectDir)
 	info := &api.AgentInfo{
-		Grove:                 groveName,
+		Project:               projectName,
+		ProjectID:             projectID,
+		ProjectPath:           projectDir,
 		Name:                  agentName,
 		Template:              displayTemplateName,
 		HarnessConfig:         harnessConfigName,
@@ -916,8 +919,8 @@ func appendExtraInstructions(ctx context.Context, content []byte, isGit bool, se
 	return content
 }
 
-func GetSavedProfile(agentName string, grovePath string) string {
-	projectDir, err := config.GetResolvedProjectDir(grovePath)
+func GetSavedProfile(agentName string, projectPath string) string {
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
 		return ""
 	}
@@ -934,8 +937,8 @@ func GetSavedProfile(agentName string, grovePath string) string {
 	return ""
 }
 
-func GetSavedRuntime(agentName string, grovePath string) string {
-	projectDir, err := config.GetResolvedProjectDir(grovePath)
+func GetSavedRuntime(agentName string, projectPath string) string {
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
 		return ""
 	}
@@ -952,8 +955,8 @@ func GetSavedRuntime(agentName string, grovePath string) string {
 	return ""
 }
 
-func GetSavedHarnessConfig(agentName string, grovePath string) string {
-	projectDir, err := config.GetResolvedProjectDir(grovePath)
+func GetSavedHarnessConfig(agentName string, projectPath string) string {
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
 		return ""
 	}
@@ -970,8 +973,8 @@ func GetSavedHarnessConfig(agentName string, grovePath string) string {
 	return ""
 }
 
-func GetSavedPhase(agentName string, grovePath string) string {
-	projectDir, err := config.GetResolvedProjectDir(grovePath)
+func GetSavedPhase(agentName string, projectPath string) string {
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
 		return ""
 	}
@@ -988,8 +991,8 @@ func GetSavedPhase(agentName string, grovePath string) string {
 	return ""
 }
 
-func UpdateAgentConfig(agentName string, grovePath string, status string, runtime string, profile string) error {
-	projectDir, err := config.GetResolvedProjectDir(grovePath)
+func UpdateAgentConfig(agentName string, projectPath string, status string, runtime string, profile string) error {
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
 		return err
 	}
@@ -1035,8 +1038,8 @@ func UpdateAgentConfig(agentName string, grovePath string, status string, runtim
 }
 
 // UpdateAgentDeletedAt writes the deletedAt timestamp to agent-info.json.
-func UpdateAgentDeletedAt(agentName string, grovePath string, deletedAt time.Time) error {
-	projectDir, err := config.GetResolvedProjectDir(grovePath)
+func UpdateAgentDeletedAt(agentName string, projectPath string, deletedAt time.Time) error {
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
 		return err
 	}
@@ -1066,14 +1069,14 @@ func UpdateAgentDeletedAt(agentName string, grovePath string, deletedAt time.Tim
 	return os.WriteFile(agentInfoPath, newData, 0644)
 }
 
-func GetAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, grovePath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, string, *api.ScionConfig, error) {
-	projectDir, err := config.GetResolvedProjectDir(grovePath)
+func GetAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, string, *api.ScionConfig, error) {
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
 		return "", "", "", nil, err
 	}
 
-	util.Debugf("GetAgent: agentName=%s templateName=%q harnessConfig=%q grovePath=%q projectDir=%s",
-		agentName, templateName, harnessConfig, grovePath, projectDir)
+	util.Debugf("GetAgent: agentName=%s templateName=%q harnessConfig=%q projectPath=%q projectDir=%s",
+		agentName, templateName, harnessConfig, projectPath, projectDir)
 
 	sharedWorkspace := api.IsSharedWorkspaceFromContext(ctx)
 	agentDir := config.GetAgentDir(projectDir, agentName, sharedWorkspace)
@@ -1146,7 +1149,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		if len(inlineConfig) > 0 {
 			ic = inlineConfig[0]
 		}
-		home, ws, cfg, err := ProvisionAgent(ctx, agentName, templateName, agentImage, harnessConfig, grovePath, profileName, optionalStatus, branch, workspace, ic)
+		home, ws, cfg, err := ProvisionAgent(ctx, agentName, templateName, agentImage, harnessConfig, projectPath, profileName, optionalStatus, branch, workspace, ic)
 		if err != nil {
 			util.Debugf("GetAgent: ProvisionAgent failed: %v", err)
 		} else {
@@ -1199,7 +1202,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		return agentDir, agentHome, agentWorkspace, nil, fmt.Errorf("failed to load agent config: %w", err)
 	}
 
-	chain, err := config.GetTemplateChainInGrove(effectiveTemplate, grovePath)
+	chain, err := config.GetTemplateChainInProject(effectiveTemplate, projectPath)
 	if err != nil {
 		util.Debugf("GetAgent: template chain for %q not found: %v, returning agentCfg only (harness=%q image=%q)",
 			effectiveTemplate, err, agentCfg.Harness, agentCfg.Image)

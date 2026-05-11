@@ -3,14 +3,14 @@ title: Web Dashboard
 description: Using the Scion Web Dashboard for visualization and control.
 ---
 
-The Scion Web Dashboard provides a visual interface for managing your agents, groves, and runtime brokers. It complements the CLI by providing real-time status updates and easier management of complex environments.
+The Scion Web Dashboard provides a visual interface for managing your agents, projects, and runtime brokers. It complements the CLI by providing real-time status updates and easier management of complex environments.
 
 ## Overview
 
 The dashboard is organized into several key areas:
 
 ### Dashboard Home
-The landing page provides an overview of your active agents across all groves and the status of your runtime brokers.
+The landing page provides an overview of your active agents across all projects and the status of your runtime brokers.
 
 ### Notifications & Alerts
 The dashboard features an integrated notification framework with real-time SSE delivery. 
@@ -18,14 +18,14 @@ The dashboard features an integrated notification framework with real-time SSE d
 - **Notification Tray**: Provides agent-scoped filtering for status events, accessible directly from the top navigation.
 - **Browser Push Notifications**: Opt-in native browser push notifications ensure you receive alerts even when the dashboard is in the background. Default triggers include `stalled` and `error` states, as well as requests for user input.
 
-### Groves
-View and manage your registered groves.
-- **Create/Register Grove**: Create a Hub-Native workspace directly on the Hub, or connect a new remote Git repository. Includes a confirmation dialog when creating a grove for an existing git repository.
-- **Grove Settings**: Centralized configuration interface for managing grove-scoped environment variables and secrets, including "Injection Mode" controls (Always vs. As-Needed). The settings page features a streamlined flow with a "Done" button and hides unnecessary registration options for git-backed groves.
-- **Workspace & File Management**: Access the comprehensive **inline file editor** to view and modify files directly in the browser, featuring integrated Markdown preview capabilities. The file browser supports **fuzzy and regex-based filtering** for fast navigation. You can also download individual workspace files or generate ZIP archives of entire groves directly from the UI.
+### Projects
+View and manage your registered projects.
+- **Create/Register Project**: Create a Hub-Native workspace directly on the Hub, or connect a new remote Git repository. Includes a confirmation dialog when creating a project for an existing git repository.
+- **Project Settings**: Centralized configuration interface for managing project-scoped environment variables and secrets, including "Injection Mode" controls (Always vs. As-Needed). The settings page features a streamlined flow with a "Done" button and hides unnecessary registration options for git-backed projects.
+- **Workspace & File Management**: Access the comprehensive **inline file editor** to view and modify files directly in the browser, featuring integrated Markdown preview capabilities. The file browser supports **fuzzy and regex-based filtering** for fast navigation. You can also download individual workspace files or generate ZIP archives of entire projects directly from the UI.
 - **Template Management**: Direct server-side importing of templates with immediate UI feedback. Includes full template file browsing, editing, and upload capabilities directly within the dashboard.
-- **Shared Directory Management**: View and manage grove shared directories directly from the Web UI (see [Grove Shared Directories](/scion/advanced-local/workspace/#5-grove-shared-directories)).
-- **Agent List**: See all agents belonging to the grove, with card/list view toggle for flexible display.
+- **Shared Directory Management**: View and manage project shared directories directly from the Web UI (see [Project Shared Directories](/scion/advanced-local/workspace/#5-project-shared-directories)).
+- **Agent List**: See all agents belonging to the project, with card/list view toggle for flexible display.
 
 ### Agents
 Detailed view for individual agents, featuring a high-density tabbed layout and improved breadcrumb navigation with a dedicated back button.
@@ -37,7 +37,7 @@ Detailed view for individual agents, featuring a high-density tabbed layout and 
 - **Debug Panel**: A full-height panel providing a real-time stream of SSE events and internal state transitions for advanced troubleshooting and observability.
 - **Terminal**: Interactive terminal access to the agent's workspace, featuring full Tmux support. Includes a dedicated terminal toolbar, seamless window switching (agent/shell), automatic window size adjustment, extended key sequence support (like `Shift+Enter`), and modifier-based text selection (`Shift`-drag or `Option`-drag on macOS). For detailed configuration, see [Interactive Sessions with Tmux](/scion/advanced-local/tmux/).
 - **Workspace Content Previews**: Content preview capabilities for workspace files directly within the UI, allowing you to quickly inspect agent output and project data.
-- **Lifecycle Control**: Start, stop, restart, or delete agents from the UI. Includes bulk operations like the "Stop All" button for efficient bulk shutdown of all agents within a grove.
+- **Lifecycle Control**: Start, stop, restart, or delete agents from the UI. Includes bulk operations like the "Stop All" button for efficient bulk shutdown of all agents within a project.
 
 ### Runtime Brokers
 Monitor the infrastructure nodes where your agents are executing.
@@ -49,7 +49,7 @@ Centralized views for managing the Scion infrastructure and access control (avai
 - **Users**: View and manage user accounts and roles.
 - **Groups**: Create and manage organizational groups for policy-based authorization.
 - **Service Accounts**: Manage and validate registered Google Service Accounts for use with the metadata emulation pipeline.
-- **Brokers**: Comprehensive broker detail pages providing a grouped view of all active agents by their respective groves.
+- **Brokers**: Comprehensive broker detail pages providing a grouped view of all active agents by their respective projects.
 - **Maintenance Mode**: Toggle maintenance mode for the Hub and Web servers to facilitate safe infrastructure updates.
 
 ## Authentication

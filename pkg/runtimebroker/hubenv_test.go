@@ -67,7 +67,7 @@ func TestResolveHubEndpointForStartPrecedence(t *testing.T) {
 		name                 string
 		broker               string
 		resolved             map[string]string
-		grovePath            string
+		projectPath            string
 		containerHubEndpoint string
 		want                 string
 	}{
@@ -75,26 +75,26 @@ func TestResolveHubEndpointForStartPrecedence(t *testing.T) {
 			name:      "resolved env wins over broker",
 			broker:    "https://broker.example.com",
 			resolved:  map[string]string{"SCION_HUB_ENDPOINT": "https://resolved.example.com"},
-			grovePath: groveDir,
+			projectPath: groveDir,
 			want:      "https://resolved.example.com",
 		},
 		{
 			name:      "broker fallback when resolved env absent",
 			broker:    "https://broker.example.com",
 			resolved:  map[string]string{"UNRELATED": "x"},
-			grovePath: groveDir,
+			projectPath: groveDir,
 			want:      "https://broker.example.com",
 		},
 		{
 			name:      "resolved env wins over settings",
 			resolved:  map[string]string{"SCION_HUB_URL": "https://resolved-legacy.example.com"},
-			grovePath: groveDir,
+			projectPath: groveDir,
 			want:      "https://resolved-legacy.example.com",
 		},
 		{
 			name:      "settings fallback when others absent",
 			resolved:  map[string]string{"UNRELATED": "x"},
-			grovePath: groveDir,
+			projectPath: groveDir,
 			want:      "https://settings.example.com",
 		},
 		{
@@ -108,7 +108,7 @@ func TestResolveHubEndpointForStartPrecedence(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveHubEndpointForStart(tt.broker, tt.resolved, tt.grovePath, tt.containerHubEndpoint, "docker")
+			got := resolveHubEndpointForStart(tt.broker, tt.resolved, tt.projectPath, tt.containerHubEndpoint, "docker")
 			if got != tt.want {
 				t.Fatalf("resolveHubEndpointForStart() = %q, want %q", got, tt.want)
 			}
@@ -128,7 +128,7 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 		connection           string
 		broker               string
 		resolved             map[string]string
-		grovePath            string
+		projectPath            string
 		containerHubEndpoint string
 		runtimeName          string
 		want                 string
@@ -154,12 +154,12 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 		{
 			name:      "resolved env fallback",
 			resolved:  map[string]string{"SCION_HUB_ENDPOINT": "https://resolved.example.com"},
-			grovePath: groveDir,
+			projectPath: groveDir,
 			want:      "https://resolved.example.com",
 		},
 		{
 			name:      "settings fallback when others absent",
-			grovePath: groveDir,
+			projectPath: groveDir,
 			want:      "https://settings.example.com",
 		},
 		{
@@ -210,7 +210,7 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			if rn == "" {
 				rn = "docker"
 			}
-			got := resolveHubEndpointForCreate(tt.req, tt.connection, tt.broker, tt.resolved, tt.grovePath, tt.containerHubEndpoint, rn)
+			got := resolveHubEndpointForCreate(tt.req, tt.connection, tt.broker, tt.resolved, tt.projectPath, tt.containerHubEndpoint, rn)
 			if got != tt.want {
 				t.Fatalf("resolveHubEndpointForCreate() = %q, want %q", got, tt.want)
 			}

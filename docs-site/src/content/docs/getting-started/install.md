@@ -101,7 +101,7 @@ This creates a directory at `~/.scion`
 
 You will be prompted for the image registry where you have built and deployed the images in the previous step.
 
-### 2. Initialize a Grove
+### 2. Initialize a Project
 Navigate to the root of a project where you want to use Scion and run:
 
 ```bash

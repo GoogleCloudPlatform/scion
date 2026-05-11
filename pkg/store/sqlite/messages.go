@@ -32,7 +32,7 @@ import (
 
 // CreateMessage persists a new message.
 func (s *SQLiteStore) CreateMessage(ctx context.Context, msg *store.Message) error {
-	if msg.ID == "" || msg.GroveID == "" || msg.Msg == "" {
+	if msg.ID == "" || msg.ProjectID == "" || msg.Msg == "" {
 		return store.ErrInvalidInput
 	}
 	if msg.CreatedAt.IsZero() {
@@ -41,11 +41,11 @@ func (s *SQLiteStore) CreateMessage(ctx context.Context, msg *store.Message) err
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO messages (
-			id, grove_id, sender, sender_id, recipient, recipient_id,
+			id, project_id, sender, sender_id, recipient, recipient_id,
 			msg, type, urgent, broadcasted, read, agent_id, created_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		msg.ID, msg.GroveID, msg.Sender, msg.SenderID, msg.Recipient, msg.RecipientID,
+		msg.ID, msg.ProjectID, msg.Sender, msg.SenderID, msg.Recipient, msg.RecipientID,
 		msg.Msg, msg.Type,
 		boolToInt(msg.Urgent), boolToInt(msg.Broadcasted), boolToInt(msg.Read),
 		msg.AgentID, msg.CreatedAt,
@@ -62,7 +62,7 @@ func (s *SQLiteStore) CreateMessage(ctx context.Context, msg *store.Message) err
 // GetMessage returns a single message by ID.
 func (s *SQLiteStore) GetMessage(ctx context.Context, id string) (*store.Message, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, grove_id, sender, sender_id, recipient, recipient_id,
+		SELECT id, project_id, sender, sender_id, recipient, recipient_id,
 			msg, type, urgent, broadcasted, read, agent_id, created_at
 		FROM messages
 		WHERE id = ?
@@ -71,7 +71,7 @@ func (s *SQLiteStore) GetMessage(ctx context.Context, id string) (*store.Message
 	var msg store.Message
 	var urgent, broadcasted, read int
 	if err := row.Scan(
-		&msg.ID, &msg.GroveID, &msg.Sender, &msg.SenderID, &msg.Recipient, &msg.RecipientID,
+		&msg.ID, &msg.ProjectID, &msg.Sender, &msg.SenderID, &msg.Recipient, &msg.RecipientID,
 		&msg.Msg, &msg.Type, &urgent, &broadcasted, &read,
 		&msg.AgentID, &msg.CreatedAt,
 	); err != nil {
@@ -91,9 +91,9 @@ func (s *SQLiteStore) ListMessages(ctx context.Context, filter store.MessageFilt
 	var conditions []string
 	var args []interface{}
 
-	if filter.GroveID != "" {
-		conditions = append(conditions, "grove_id = ?")
-		args = append(args, filter.GroveID)
+	if filter.ProjectID != "" {
+		conditions = append(conditions, "project_id = ?")
+		args = append(args, filter.ProjectID)
 	}
 	if filter.AgentID != "" {
 		conditions = append(conditions, "agent_id = ?")
@@ -139,7 +139,7 @@ func (s *SQLiteStore) ListMessages(ctx context.Context, filter store.MessageFilt
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, grove_id, sender, sender_id, recipient, recipient_id,
+		SELECT id, project_id, sender, sender_id, recipient, recipient_id,
 			msg, type, urgent, broadcasted, read, agent_id, created_at
 		FROM messages %s ORDER BY created_at DESC LIMIT ?
 	`, whereClause)
@@ -156,7 +156,7 @@ func (s *SQLiteStore) ListMessages(ctx context.Context, filter store.MessageFilt
 		var msg store.Message
 		var urgent, broadcasted, read int
 		if err := rows.Scan(
-			&msg.ID, &msg.GroveID, &msg.Sender, &msg.SenderID, &msg.Recipient, &msg.RecipientID,
+			&msg.ID, &msg.ProjectID, &msg.Sender, &msg.SenderID, &msg.Recipient, &msg.RecipientID,
 			&msg.Msg, &msg.Type, &urgent, &broadcasted, &read,
 			&msg.AgentID, &msg.CreatedAt,
 		); err != nil {

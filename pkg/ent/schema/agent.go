@@ -44,7 +44,8 @@ func (Agent) Fields() []ent.Field {
 			NotEmpty(),
 		field.String("template").
 			Optional(),
-		field.UUID("grove_id", uuid.UUID{}),
+		field.UUID("project_id", uuid.UUID{}).
+			StorageKey("project_id"),
 		field.Enum("status").
 			Values("created", "provisioning", "cloning", "starting", "running", "suspended", "stopping", "stopped", "error").
 			Default("created"),
@@ -70,9 +71,9 @@ func (Agent) Fields() []ent.Field {
 // Edges of the Agent.
 func (Agent) Edges() []ent.Edge {
 	return []ent.Edge{
-		edge.From("grove", Grove.Type).
+		edge.From("project", Project.Type).
 			Ref("agents").
-			Field("grove_id").
+			Field("project_id").
 			Required().
 			Unique(),
 		edge.From("creator", User.Type).
@@ -93,7 +94,7 @@ func (Agent) Edges() []ent.Edge {
 // Indexes of the Agent.
 func (Agent) Indexes() []ent.Index {
 	return []ent.Index{
-		index.Fields("slug", "grove_id").
+		index.Fields("slug", "project_id").
 			Unique(),
 	}
 }

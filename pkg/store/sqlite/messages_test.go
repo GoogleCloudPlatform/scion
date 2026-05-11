@@ -27,10 +27,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newTestMessage(groveID, agentID string) *store.Message {
+func newTestMessage(projectID, agentID string) *store.Message {
 	return &store.Message{
 		ID:          api.NewUUID(),
-		GroveID:     groveID,
+		ProjectID:   projectID,
 		Sender:      "user:alice",
 		SenderID:    "user-uuid-alice",
 		Recipient:   "agent:coder",
@@ -46,8 +46,8 @@ func TestMessageCRUD(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	groveID, agentID := createTestGroveAndAgent(t, s)
-	msg := newTestMessage(groveID, agentID)
+	projectID, agentID := createTestProjectAndAgent(t, s)
+	msg := newTestMessage(projectID, agentID)
 
 	// Create
 	require.NoError(t, s.CreateMessage(ctx, msg))
@@ -56,7 +56,7 @@ func TestMessageCRUD(t *testing.T) {
 	got, err := s.GetMessage(ctx, msg.ID)
 	require.NoError(t, err)
 	assert.Equal(t, msg.ID, got.ID)
-	assert.Equal(t, msg.GroveID, got.GroveID)
+	assert.Equal(t, msg.ProjectID, got.ProjectID)
 	assert.Equal(t, msg.Sender, got.Sender)
 	assert.Equal(t, msg.Recipient, got.Recipient)
 	assert.Equal(t, msg.Msg, got.Msg)
@@ -77,8 +77,8 @@ func TestMessageMarkRead(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	groveID, agentID := createTestGroveAndAgent(t, s)
-	msg := newTestMessage(groveID, agentID)
+	projectID, agentID := createTestProjectAndAgent(t, s)
+	msg := newTestMessage(projectID, agentID)
 	require.NoError(t, s.CreateMessage(ctx, msg))
 
 	// Mark single message as read
@@ -95,13 +95,13 @@ func TestMessageMarkAllRead(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	groveID, agentID := createTestGroveAndAgent(t, s)
+	projectID, agentID := createTestProjectAndAgent(t, s)
 
 	// Create two messages for the same recipient
 	recipientID := agentID
-	msg1 := newTestMessage(groveID, agentID)
+	msg1 := newTestMessage(projectID, agentID)
 	msg1.RecipientID = recipientID
-	msg2 := newTestMessage(groveID, agentID)
+	msg2 := newTestMessage(projectID, agentID)
 	msg2.ID = api.NewUUID()
 	msg2.RecipientID = recipientID
 	require.NoError(t, s.CreateMessage(ctx, msg1))
@@ -122,26 +122,26 @@ func TestListMessages(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	groveID, agentID := createTestGroveAndAgent(t, s)
+	projectID, agentID := createTestProjectAndAgent(t, s)
 
 	// Create unread message
-	unread := newTestMessage(groveID, agentID)
+	unread := newTestMessage(projectID, agentID)
 	require.NoError(t, s.CreateMessage(ctx, unread))
 
 	// Create read message
-	read := newTestMessage(groveID, agentID)
+	read := newTestMessage(projectID, agentID)
 	read.ID = api.NewUUID()
 	require.NoError(t, s.CreateMessage(ctx, read))
 	require.NoError(t, s.MarkMessageRead(ctx, read.ID))
 
 	// List all
-	result, err := s.ListMessages(ctx, store.MessageFilter{GroveID: groveID}, store.ListOptions{})
+	result, err := s.ListMessages(ctx, store.MessageFilter{ProjectID: projectID}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 2, result.TotalCount)
 	assert.Len(t, result.Items, 2)
 
 	// List unread only
-	result, err = s.ListMessages(ctx, store.MessageFilter{GroveID: groveID, OnlyUnread: true}, store.ListOptions{})
+	result, err = s.ListMessages(ctx, store.MessageFilter{ProjectID: projectID, OnlyUnread: true}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.TotalCount)
 	assert.Len(t, result.Items, 1)
@@ -166,11 +166,11 @@ func TestListMessages_ParticipantID(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	groveID, agentID := createTestGroveAndAgent(t, s)
+	projectID, agentID := createTestProjectAndAgent(t, s)
 	userID := "user-uuid-alice"
 
 	// Inbound: user → agent. Sender=user, recipient=agent.
-	inbound := newTestMessage(groveID, agentID)
+	inbound := newTestMessage(projectID, agentID)
 	inbound.SenderID = userID
 	inbound.RecipientID = agentID
 	require.NoError(t, s.CreateMessage(ctx, inbound))
@@ -178,7 +178,7 @@ func TestListMessages_ParticipantID(t *testing.T) {
 	// Outbound: agent → user. Sender=agent, recipient=user.
 	outbound := &store.Message{
 		ID:          api.NewUUID(),
-		GroveID:     groveID,
+		ProjectID:   projectID,
 		Sender:      "agent:coder",
 		SenderID:    agentID,
 		Recipient:   "user:alice",
@@ -190,10 +190,10 @@ func TestListMessages_ParticipantID(t *testing.T) {
 	}
 	require.NoError(t, s.CreateMessage(ctx, outbound))
 
-	// Unrelated message in the same grove/agent with a different user.
+	// Unrelated message in the same project/agent with a different user.
 	other := &store.Message{
 		ID:          api.NewUUID(),
-		GroveID:     groveID,
+		ProjectID:   projectID,
 		Sender:      "user:bob",
 		SenderID:    "user-uuid-bob",
 		Recipient:   "agent:coder",
@@ -226,14 +226,14 @@ func TestPurgeOldMessages(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	groveID, agentID := createTestGroveAndAgent(t, s)
+	projectID, agentID := createTestProjectAndAgent(t, s)
 
-	old := newTestMessage(groveID, agentID)
+	old := newTestMessage(projectID, agentID)
 	old.CreatedAt = time.Now().Add(-40 * 24 * time.Hour)
 	require.NoError(t, s.CreateMessage(ctx, old))
 	require.NoError(t, s.MarkMessageRead(ctx, old.ID))
 
-	recent := newTestMessage(groveID, agentID)
+	recent := newTestMessage(projectID, agentID)
 	recent.ID = api.NewUUID()
 	require.NoError(t, s.CreateMessage(ctx, recent))
 

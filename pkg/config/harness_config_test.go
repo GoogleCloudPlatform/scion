@@ -139,8 +139,8 @@ func TestFindHarnessConfigDir(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Setup grove-level harness-config
-	grovePath := filepath.Join(tmpDir, "grove")
-	groveHCDir := filepath.Join(grovePath, harnessConfigsDirName, "claude")
+	projectPath := filepath.Join(tmpDir, "grove")
+	groveHCDir := filepath.Join(projectPath, harnessConfigsDirName, "claude")
 	if err := os.MkdirAll(groveHCDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ user: scion
 	defer os.Setenv("HOME", origHome)
 
 	// Test: grove-level takes precedence
-	hc, err := FindHarnessConfigDir("claude", grovePath)
+	hc, err := FindHarnessConfigDir("claude", projectPath)
 	if err != nil {
 		t.Fatalf("FindHarnessConfigDir failed: %v", err)
 	}
@@ -189,13 +189,13 @@ user: scion
 	}
 
 	// Test: not found
-	_, err = FindHarnessConfigDir("nonexistent", grovePath)
+	_, err = FindHarnessConfigDir("nonexistent", projectPath)
 	if err == nil {
 		t.Fatal("expected error for nonexistent harness-config")
 	}
 
 	// Test: "generic" returns a synthetic entry even with no on-disk directory
-	hc, err = FindHarnessConfigDir("generic", grovePath)
+	hc, err = FindHarnessConfigDir("generic", projectPath)
 	if err != nil {
 		t.Fatalf("FindHarnessConfigDir for generic should succeed: %v", err)
 	}
@@ -263,8 +263,8 @@ user: scion
 	}
 
 	// Test: template harness-config takes precedence over grove-level too
-	grovePath := filepath.Join(tmpDir, "grove")
-	groveHCDir := filepath.Join(grovePath, harnessConfigsDirName, "claude-web")
+	projectPath := filepath.Join(tmpDir, "grove")
+	groveHCDir := filepath.Join(projectPath, harnessConfigsDirName, "claude-web")
 	if err := os.MkdirAll(groveHCDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ user: scion
 		t.Fatal(err)
 	}
 
-	hc, err = FindHarnessConfigDir("claude-web", grovePath, templateDir)
+	hc, err = FindHarnessConfigDir("claude-web", projectPath, templateDir)
 	if err != nil {
 		t.Fatalf("FindHarnessConfigDir with template+grove+global failed: %v", err)
 	}
@@ -285,7 +285,7 @@ user: scion
 	}
 
 	// Test: without template paths, falls back to grove then global
-	hc, err = FindHarnessConfigDir("claude-web", grovePath)
+	hc, err = FindHarnessConfigDir("claude-web", projectPath)
 	if err != nil {
 		t.Fatalf("FindHarnessConfigDir without template path failed: %v", err)
 	}
@@ -327,15 +327,15 @@ func TestFindHarnessConfigDir_FallsThrough_BrokenDirectory(t *testing.T) {
 		t.Errorf("expected global image, got %q", hc.Config.Image)
 	}
 
-	// Grove has harness-configs/opencode/ directory but NO config.yaml
-	grovePath := filepath.Join(tmpDir, "grove")
-	brokenGroveHCDir := filepath.Join(grovePath, harnessConfigsDirName, "opencode")
+	// Project has harness-configs/opencode/ directory but NO config.yaml
+	projectPath := filepath.Join(tmpDir, "grove")
+	brokenGroveHCDir := filepath.Join(projectPath, harnessConfigsDirName, "opencode")
 	if err := os.MkdirAll(brokenGroveHCDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	// Should fall through broken grove dir to global
-	hc, err = FindHarnessConfigDir("opencode", grovePath)
+	hc, err = FindHarnessConfigDir("opencode", projectPath)
 	if err != nil {
 		t.Fatalf("expected fallthrough from broken grove to global, got error: %v", err)
 	}
@@ -361,15 +361,15 @@ func TestListHarnessConfigDirs(t *testing.T) {
 	}
 
 	// Setup grove-level harness-config (overrides global claude, adds codex)
-	grovePath := filepath.Join(tmpDir, "grove")
-	groveBase := filepath.Join(grovePath, harnessConfigsDirName)
+	projectPath := filepath.Join(tmpDir, "grove")
+	groveBase := filepath.Join(projectPath, harnessConfigsDirName)
 	for _, name := range []string{"claude", "codex"} {
 		dir := filepath.Join(groveBase, name)
 		os.MkdirAll(dir, 0755)
 		os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("harness: "+name+"\nimage: grove-"+name+"\n"), 0644)
 	}
 
-	configs, err := ListHarnessConfigDirs(grovePath)
+	configs, err := ListHarnessConfigDirs(projectPath)
 	if err != nil {
 		t.Fatalf("ListHarnessConfigDirs failed: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestListHarnessConfigDirs(t *testing.T) {
 		}
 	}
 
-	// Grove claude should override global claude
+	// Project claude should override global claude
 	for _, c := range configs {
 		if c.Name == "claude" && c.Config.Image != "grove-claude" {
 			t.Errorf("expected grove-level claude image, got %q", c.Config.Image)

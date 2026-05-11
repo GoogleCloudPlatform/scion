@@ -48,12 +48,12 @@ var listCmd = &cobra.Command{
 	Short:   "List running scion agents",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Check if Hub should be used
-		hubCtx, err := CheckHubAvailability(grovePath)
+		hubCtx, err := CheckHubAvailability(projectPath)
 		if err != nil {
 			// Check if this is because Hub is enabled but grove not linked
-			if handleUnlinkedGrovePrompt(cmd, args) {
+			if handleUnlinkedProjectPrompt(cmd, args) {
 				// User chose to link or disable - retry
-				hubCtx, err = CheckHubAvailability(grovePath)
+				hubCtx, err = CheckHubAvailability(projectPath)
 				if err != nil {
 					return err
 				}
@@ -73,7 +73,7 @@ var listCmd = &cobra.Command{
 
 // listAgentsLocal lists agents using the local runtime
 func listAgentsLocal() error {
-	rt := runtime.GetRuntime(grovePath, profile)
+	rt := runtime.GetRuntime(projectPath, profile)
 	mgr := agent.NewManager(rt)
 
 	filters := map[string]string{
@@ -84,10 +84,10 @@ func listAgentsLocal() error {
 		// Cross-grove listing might need a way to find all groves.
 		// For now, mgr.List handles current grove and what's provided in filters.
 	} else {
-		projectDir, _ := config.GetResolvedProjectDir(grovePath)
+		projectDir, _ := config.GetResolvedProjectDir(projectPath)
 		if projectDir != "" {
-			filters["scion.grove_path"] = projectDir
-			filters["scion.grove"] = config.GetGroveName(projectDir)
+			filters["scion.project_path"] = projectDir
+			filters["scion.project"] = config.GetProjectName(projectDir)
 		}
 	}
 
@@ -113,12 +113,12 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 
 	if !listAll {
 		// Get the grove ID for the current project
-		groveID, err := GetGroveID(hubCtx)
+		projectID, err := GetProjectID(hubCtx)
 		if err != nil {
 			return wrapHubError(err)
 		}
-		opts.GroveID = groveID
-		agentSvc = hubCtx.Client.GroveAgents(groveID)
+		opts.ProjectID = projectID
+		agentSvc = hubCtx.Client.ProjectAgents(projectID)
 	}
 
 	resp, err := agentSvc.List(ctx, opts)
@@ -146,13 +146,13 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 func enrichAgentsClientSide(ctx context.Context, client hubclient.Client, agents []api.AgentInfo) {
 	// Collect unique IDs that need enrichment
 	brokerIDs := make(map[string]struct{})
-	groveIDs := make(map[string]struct{})
+	projectIDs := make(map[string]struct{})
 	for _, a := range agents {
 		if a.RuntimeBrokerName == "" && a.RuntimeBrokerID != "" {
 			brokerIDs[a.RuntimeBrokerID] = struct{}{}
 		}
-		if a.Grove == "" && a.GroveID != "" {
-			groveIDs[a.GroveID] = struct{}{}
+		if a.Project == "" && a.ProjectID != "" {
+			projectIDs[a.ProjectID] = struct{}{}
 		}
 	}
 
@@ -165,10 +165,10 @@ func enrichAgentsClientSide(ctx context.Context, client hubclient.Client, agents
 	}
 
 	// Fetch grove names
-	groveNames := make(map[string]string)
-	for id := range groveIDs {
-		if grove, err := client.Groves().Get(ctx, id); err == nil {
-			groveNames[id] = grove.Name
+	projectNames := make(map[string]string)
+	for id := range projectIDs {
+		if grove, err := client.Projects().Get(ctx, id); err == nil {
+			projectNames[id] = grove.Name
 		}
 	}
 
@@ -179,9 +179,9 @@ func enrichAgentsClientSide(ctx context.Context, client hubclient.Client, agents
 				agents[i].RuntimeBrokerName = name
 			}
 		}
-		if agents[i].Grove == "" {
-			if name, ok := groveNames[agents[i].GroveID]; ok {
-				agents[i].Grove = name
+		if agents[i].Project == "" {
+			if name, ok := projectNames[agents[i].ProjectID]; ok {
+				agents[i].Project = name
 			}
 		}
 	}
@@ -206,8 +206,8 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 		Template:          a.Template,
 		HarnessConfig:     a.HarnessConfig,
 		HarnessAuth:       a.HarnessAuth,
-		Grove:             a.Grove,
-		GroveID:           a.GroveID,
+		Project:             a.Project,
+		ProjectID:           a.ProjectID,
 		Labels:            a.Labels,
 		Annotations:       a.Annotations,
 		Phase:             phase,
@@ -307,9 +307,9 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	if hubMode {
-		fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tGROVE\tBROKER\tPHASE\tCONTAINER\tLAST ACTIVITY")
+		fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tPROJECT\tBROKER\tPHASE\tCONTAINER\tLAST ACTIVITY")
 	} else {
-		fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tGROVE\tPHASE\tCONTAINER\tLAST ACTIVITY")
+		fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tPROJECT\tPHASE\tCONTAINER\tLAST ACTIVITY")
 	}
 	for _, a := range agents {
 		phase := a.Phase
@@ -334,9 +334,9 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 			broker = a.RuntimeBrokerID
 		}
 		if hubMode {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Grove, broker, phase, containerStatus, lastActivity)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Project, broker, phase, containerStatus, lastActivity)
 		} else {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Grove, phase, containerStatus, lastActivity)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Project, phase, containerStatus, lastActivity)
 		}
 	}
 	w.Flush()
@@ -394,11 +394,11 @@ func formatLastActivity(status string, t time.Time) string {
 	return fmt.Sprintf("%s, %s", status, timePart)
 }
 
-// handleUnlinkedGrovePrompt checks if the error is due to an unlinked grove and prompts the user.
+// handleUnlinkedProjectPrompt checks if the error is due to an unlinked grove and prompts the user.
 // Returns true if the user made a choice that might resolve the issue (link or disable).
-func handleUnlinkedGrovePrompt(cmd *cobra.Command, args []string) bool {
+func handleUnlinkedProjectPrompt(cmd *cobra.Command, args []string) bool {
 	// Resolve grove path to check settings
-	resolvedPath, isGlobal, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, isGlobal, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return false
 	}
@@ -433,29 +433,29 @@ func handleUnlinkedGrovePrompt(cmd *cobra.Command, args []string) bool {
 	}
 
 	// Check if grove is registered — prefer hub.groveId over grove_id
-	groveID := settings.GetHubGroveID()
-	if groveID == "" {
-		groveID = settings.GroveID
+	projectID := settings.GetHubProjectID()
+	if projectID == "" {
+		projectID = settings.ProjectID
 	}
-	if groveID == "" {
-		groveID = config.GenerateGroveIDForDir(resolvedPath)
+	if projectID == "" {
+		projectID = config.GenerateProjectIDForDir(resolvedPath)
 	}
 
-	linked, err := isGroveLinkedToHub(ctx, client, groveID)
+	linked, err := isProjectLinkedToHub(ctx, client, projectID)
 	if err != nil || linked {
 		return false // Error checking or grove is already linked
 	}
 
 	// Get grove name for display
-	var groveName string
+	var projectName string
 	if isGlobal {
-		groveName = "global"
+		projectName = "global"
 	} else {
-		groveName = config.GetGroveName(resolvedPath)
+		projectName = config.GetProjectName(resolvedPath)
 	}
 
 	// Show prompt
-	choice := hubsync.ShowLinkOrDisablePrompt(groveName, autoConfirm)
+	choice := hubsync.ShowProjectLinkOrDisablePrompt(projectName, autoConfirm)
 
 	switch choice {
 	case hubsync.LinkOrDisableLink:
@@ -478,13 +478,13 @@ func handleUnlinkedGrovePrompt(cmd *cobra.Command, args []string) bool {
 	}
 }
 
-// isGroveLinkedToHub checks if a grove is linked to the Hub.
-func isGroveLinkedToHub(ctx context.Context, client hubclient.Client, groveID string) (bool, error) {
-	if groveID == "" {
+// isProjectLinkedToHub checks if a grove is linked to the Hub.
+func isProjectLinkedToHub(ctx context.Context, client hubclient.Client, projectID string) (bool, error) {
+	if projectID == "" {
 		return false, nil
 	}
 
-	_, err := client.Groves().Get(ctx, groveID)
+	_, err := client.Projects().Get(ctx, projectID)
 	if err != nil {
 		errStr := err.Error()
 		if containsStr(errStr, "404") || containsStr(errStr, "not found") {
@@ -557,7 +557,7 @@ func updateAgentNameCache(agents []hubclient.Agent) {
 	}
 
 	// Generate cache key for the current grove path
-	resolvedPath, _ := config.GetResolvedProjectDir(grovePath)
+	resolvedPath, _ := config.GetResolvedProjectDir(projectPath)
 	if resolvedPath == "" {
 		return
 	}

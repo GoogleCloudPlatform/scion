@@ -25,7 +25,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../client/api.js';
 
-import type { User, Grove } from '../../shared/types.js';
+import type { User, Project } from '../../shared/types.js';
 
 interface NavItem {
   path: string;
@@ -296,17 +296,17 @@ export class ScionProfileNav extends LitElement {
 
   private async checkGitHubApp(): Promise<void> {
     try {
-      const [appRes, grovesRes] = await Promise.all([
+      const [appRes, projectsRes] = await Promise.all([
         apiFetch('/api/v1/github-app'),
-        apiFetch('/api/v1/groves?mine=true'),
+        apiFetch('/api/v1/projects?mine=true'),
       ]);
-      if (!appRes.ok || !grovesRes.ok) return;
+      if (!appRes.ok || !projectsRes.ok) return;
 
       const appData = (await appRes.json()) as { configured: boolean; installation_url?: string };
       if (!appData.configured || !appData.installation_url) return;
 
-      const grovesData = (await grovesRes.json()) as { groves: Grove[] };
-      const hasInstallation = (grovesData.groves || []).some((g) => g.githubInstallationId);
+      const projectsData = (await projectsRes.json()) as { projects: Project[] };
+      const hasInstallation = (projectsData.projects || []).some((p) => p.githubInstallationId);
       if (hasInstallation) {
         this.githubAppUrl = appData.installation_url;
       }

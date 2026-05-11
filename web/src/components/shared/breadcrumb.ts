@@ -28,7 +28,7 @@ import { customElement, property } from 'lit/decorators.js';
  */
 const ROUTE_LABELS: Record<string, string> = {
   '/': 'Dashboard',
-  '/groves': 'Groves',
+  '/projects': 'Projects',
   '/agents': 'Agents',
   '/settings': 'Settings',
 };

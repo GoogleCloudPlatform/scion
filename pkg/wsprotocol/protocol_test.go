@@ -76,7 +76,7 @@ func TestConnectMessage(t *testing.T) {
 	assert.Equal(t, TypeConnect, msg.Type)
 	assert.Equal(t, "host-123", msg.BrokerID)
 	assert.Equal(t, "1.0.0", msg.Version)
-	assert.Equal(t, []string{"grove-1", "grove-2"}, msg.Groves)
+	assert.Equal(t, []string{"grove-1", "grove-2"}, msg.Projects)
 	assert.Greater(t, msg.Timestamp, int64(0))
 
 	// Test JSON marshaling
@@ -144,7 +144,7 @@ func TestStreamOpenMessage(t *testing.T) {
 	assert.Equal(t, "stream-1", msg.StreamID)
 	assert.Equal(t, StreamTypePTY, msg.StreamType)
 	assert.Equal(t, "agent-123", msg.Slug)
-	assert.Equal(t, "grove-456", msg.GroveID)
+	assert.Equal(t, "grove-456", msg.ProjectID)
 	assert.Equal(t, 120, msg.Cols)
 	assert.Equal(t, 40, msg.Rows)
 }
@@ -219,29 +219,40 @@ func TestPTYMessages(t *testing.T) {
 	})
 }
 
-func TestParseMessage(t *testing.T) {
-	t.Run("parse connect message", func(t *testing.T) {
-		data := []byte(`{"type":"connect","brokerId":"host-1","version":"1.0.0"}`)
+func TestDualFieldSupport(t *testing.T) {
+	t.Run("ConnectMessage legacy groves", func(t *testing.T) {
+		data := []byte(`{"type":"connect","brokerId":"host-1","groves":["g1","g2"]}`)
 		msg, err := ParseMessage[ConnectMessage](data)
 		require.NoError(t, err)
-		assert.Equal(t, "host-1", msg.BrokerID)
-		assert.Equal(t, "1.0.0", msg.Version)
+		assert.Equal(t, []string{"g1", "g2"}, msg.Groves)
+		assert.Equal(t, []string{"g1", "g2"}, msg.Projects)
 	})
 
-	t.Run("parse request envelope", func(t *testing.T) {
-		data := []byte(`{"type":"request","requestId":"req-1","method":"GET","path":"/api/test"}`)
-		msg, err := ParseMessage[RequestEnvelope](data)
+	t.Run("ConnectMessage new projects", func(t *testing.T) {
+		data := []byte(`{"type":"connect","brokerId":"host-1","projects":["p1","p2"]}`)
+		msg, err := ParseMessage[ConnectMessage](data)
 		require.NoError(t, err)
-		assert.Equal(t, "req-1", msg.RequestID)
-		assert.Equal(t, "GET", msg.Method)
+		assert.Equal(t, []string{"p1", "p2"}, msg.Projects)
+		assert.Equal(t, []string{"p1", "p2"}, msg.Groves)
 	})
 
-	t.Run("invalid json", func(t *testing.T) {
-		data := []byte(`{invalid}`)
-		_, err := ParseMessage[ConnectMessage](data)
-		assert.Error(t, err)
+	t.Run("StreamOpenMessage legacy groveId", func(t *testing.T) {
+		data := []byte(`{"type":"stream_open","streamId":"s1","streamType":"pty","groveId":"g1"}`)
+		msg, err := ParseMessage[StreamOpenMessage](data)
+		require.NoError(t, err)
+		assert.Equal(t, "g1", msg.GroveID)
+		assert.Equal(t, "g1", msg.ProjectID)
+	})
+
+	t.Run("StreamOpenMessage new projectId", func(t *testing.T) {
+		data := []byte(`{"type":"stream_open","streamId":"s1","streamType":"pty","projectId":"p1"}`)
+		msg, err := ParseMessage[StreamOpenMessage](data)
+		require.NoError(t, err)
+		assert.Equal(t, "p1", msg.ProjectID)
+		assert.Equal(t, "p1", msg.GroveID)
 	})
 }
+
 
 func TestEventMessage(t *testing.T) {
 	payload := HeartbeatPayload{

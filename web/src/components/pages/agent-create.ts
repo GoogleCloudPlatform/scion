@@ -25,7 +25,7 @@ import { customElement, state } from 'lit/decorators.js';
 
 import type {
   Agent,
-  Grove,
+  Project,
   RuntimeBroker,
   Template,
   GCPServiceAccount,
@@ -46,7 +46,7 @@ import '../shared/status-badge.js';
 @customElement('scion-page-agent-create')
 export class ScionPageAgentCreate extends LitElement {
   @state()
-  private groves: Grove[] = [];
+  private projects: Project[] = [];
 
   @state()
   private brokers: RuntimeBroker[] = [];
@@ -74,7 +74,7 @@ export class ScionPageAgentCreate extends LitElement {
   private name = '';
 
   @state()
-  private groveId = '';
+  private projectId = '';
 
   @state()
   private templateId = '';
@@ -121,11 +121,11 @@ export class ScionPageAgentCreate extends LitElement {
   /** ID of an existing agent we're editing (came back from configure page) */
   private editingAgentId: string | null = null;
 
-  /** Whether the groveId was explicitly passed via URL query param (user navigated from grove page) */
-  private groveFromUrl = false;
+  /** Whether the projectId was explicitly passed via URL query param (user navigated from project page) */
+  private projectFromUrl = false;
 
-  /** Cached grove settings keyed by groveId */
-  private groveSettingsCache: Map<
+  /** Cached project settings keyed by projectId */
+  private projectSettingsCache: Map<
     string,
     {
       defaultTemplate?: string;
@@ -346,11 +346,11 @@ export class ScionPageAgentCreate extends LitElement {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
 
-      // Pre-select groveId from URL query param if present
-      const groveParam = params.get('groveId');
-      if (groveParam) {
-        this.groveId = groveParam;
-        this.groveFromUrl = true;
+      // Pre-select projectId from URL query param if present
+      const projectParam = params.get('projectId');
+      if (projectParam) {
+        this.projectId = projectParam;
+        this.projectFromUrl = true;
       }
 
       // Check if returning from configure page with an existing agent
@@ -363,15 +363,15 @@ export class ScionPageAgentCreate extends LitElement {
     void this.loadFormData();
   }
 
-  /** The currently selected grove */
-  private get selectedGrove(): Grove | undefined {
-    return this.groves.find((g) => g.id === this.groveId);
+  /** The currently selected project */
+  private get selectedProject(): Project | undefined {
+    return this.projects.find((p) => p.id === this.projectId);
   }
 
-  /** The grove matching the URL-provided groveId, used for back-navigation */
-  private get sourceGrove(): Grove | undefined {
-    if (!this.groveFromUrl) return undefined;
-    return this.groves.find((g) => g.id === this.groveId);
+  /** The project matching the URL-provided projectId, used for back-navigation */
+  private get sourceProject(): Project | undefined {
+    if (!this.projectFromUrl) return undefined;
+    return this.projects.find((p) => p.id === this.projectId);
   }
 
   private async loadFormData(): Promise<void> {
@@ -379,19 +379,19 @@ export class ScionPageAgentCreate extends LitElement {
     this.error = null;
 
     try {
-      const [grovesRes, brokersRes, templatesRes, settingsRes, harnessConfigsRes] =
+      const [projectsRes, brokersRes, templatesRes, settingsRes, harnessConfigsRes] =
         await Promise.all([
-          fetch('/api/v1/groves?mine=true&limit=200', { credentials: 'include' }),
+          fetch('/api/v1/projects?mine=true&limit=200', { credentials: 'include' }),
           fetch('/api/v1/runtime-brokers?limit=200', { credentials: 'include' }),
           fetch('/api/v1/templates?status=active&limit=200', { credentials: 'include' }),
           fetch('/api/v1/settings/public', { credentials: 'include' }),
           fetch('/api/v1/harness-configs?status=active&limit=100', { credentials: 'include' }),
         ]);
 
-      if (grovesRes.ok) {
-        const data = (await grovesRes.json()) as { groves?: Grove[] } | Grove[];
-        const groves = Array.isArray(data) ? data : data.groves || [];
-        this.groves = groves.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+      if (projectsRes.ok) {
+        const data = (await projectsRes.json()) as { projects?: Project[] } | Project[];
+        const projects = Array.isArray(data) ? data : data.projects || [];
+        this.projects = projects.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
       }
 
       if (brokersRes.ok) {
@@ -420,29 +420,29 @@ export class ScionPageAgentCreate extends LitElement {
       if (this.editingAgentId) {
         await this.populateFromAgent(this.editingAgentId);
       } else {
-        // Auto-select first grove if none selected
-        if (!this.groveId && this.groves.length > 0) {
-          this.groveId = this.groves[0].id;
+        // Auto-select first project if none selected
+        if (!this.projectId && this.projects.length > 0) {
+          this.projectId = this.projects[0].id;
         }
 
-        // Auto-select broker based on grove's default
-        this.selectBrokerForGrove();
+        // Auto-select broker based on project's default
+        this.selectBrokerForProject();
 
-        // Auto-select template based on grove settings, then fallback
+        // Auto-select template based on project settings, then fallback
         if (!this.templateId) {
           await this.selectDefaultTemplate();
         }
 
-        // Load GCP service accounts for selected grove
-        if (this.groveId) {
+        // Load GCP service accounts for selected project
+        if (this.projectId) {
           await this.loadGCPServiceAccounts();
         }
       }
 
-      // Reload harness configs scoped to the selected grove (the initial
-      // fetch above has no groveId filter and returns configs from all
-      // groves, which causes duplicates in the dropdown).
-      if (this.groveId) {
+      // Reload harness configs scoped to the selected project (the initial
+      // fetch above has no projectId filter and returns configs from all
+      // projects, which causes duplicates in the dropdown).
+      if (this.projectId) {
         await this.loadHarnessConfigs();
       }
     } catch (err) {
@@ -459,8 +459,8 @@ export class ScionPageAgentCreate extends LitElement {
       this.error = 'Agent name is required.';
       return;
     }
-    if (!this.groveId) {
-      this.error = 'Please select a grove.';
+    if (!this.projectId) {
+      this.error = 'Please select a project.';
       return;
     }
 
@@ -477,7 +477,7 @@ export class ScionPageAgentCreate extends LitElement {
 
       const body: Record<string, unknown> = {
         name: this.slugify(this.name),
-        groveId: this.groveId,
+        projectId: this.projectId,
         harnessConfig: this.resolvedHarness,
         notify: this.notify,
       };
@@ -543,7 +543,7 @@ export class ScionPageAgentCreate extends LitElement {
         const apiErr = await parseApiError(response, `HTTP ${response.status}`);
         if (apiErr.code === 'missing_env_vars') {
           this.errorLinks = [
-            ...(this.groveId ? [{ label: 'Grove Settings', href: `/groves/${this.groveId}/settings` }] : []),
+            ...(this.projectId ? [{ label: 'Project Settings', href: `/projects/${this.projectId}/settings` }] : []),
             { label: 'Profile Secrets', href: '/profile/secrets' },
           ];
         }
@@ -590,8 +590,8 @@ export class ScionPageAgentCreate extends LitElement {
       this.error = 'Agent name is required.';
       return;
     }
-    if (!this.groveId) {
-      this.error = 'Please select a grove.';
+    if (!this.projectId) {
+      this.error = 'Please select a project.';
       return;
     }
 
@@ -608,7 +608,7 @@ export class ScionPageAgentCreate extends LitElement {
 
       const body: Record<string, unknown> = {
         name: this.slugify(this.name),
-        groveId: this.groveId,
+        projectId: this.projectId,
         harnessConfig: this.resolvedHarness,
         notify: this.notify,
         provisionOnly: true,
@@ -667,7 +667,7 @@ export class ScionPageAgentCreate extends LitElement {
         const apiErr = await parseApiError(response, `HTTP ${response.status}`);
         if (apiErr.code === 'missing_env_vars') {
           this.errorLinks = [
-            ...(this.groveId ? [{ label: 'Grove Settings', href: `/groves/${this.groveId}/settings` }] : []),
+            ...(this.projectId ? [{ label: 'Project Settings', href: `/projects/${this.projectId}/settings` }] : []),
             { label: 'Profile Secrets', href: '/profile/secrets' },
           ];
         }
@@ -694,22 +694,22 @@ export class ScionPageAgentCreate extends LitElement {
       this.submittingEdit = false;
     }
   }
-
-  /**
-   * Select the best broker for the currently selected grove.
-   * Prefers the grove's default broker; falls back to first online broker.
-   */
-  private selectBrokerForGrove(): void {
-    const grove = this.groves.find((g) => g.id === this.groveId);
-    if (grove?.defaultRuntimeBrokerId) {
-      const defaultBroker = this.brokers.find((b) => b.id === grove.defaultRuntimeBrokerId);
-      if (defaultBroker) {
-        this.brokerId = defaultBroker.id;
-        this.autoSelectProfile();
-        return;
-      }
+/**
+ * Select the best broker for the currently selected project.
+ * Prefers the project's default broker; falls back to first online broker.
+ */
+private selectBrokerForProject(): void {
+  const project = this.projects.find((p) => p.id === this.projectId);
+  if (project?.defaultRuntimeBrokerId) {
+    const defaultBroker = this.brokers.find((b) => b.id === project.defaultRuntimeBrokerId);
+    if (defaultBroker) {
+      this.brokerId = defaultBroker.id;
+      this.autoSelectProfile();
+      return;
     }
-    // Fallback: first online broker, then first broker
+  }
+
+  // Fallback: first online broker, then first broker
     const onlineBroker = this.brokers.find((b) => b.status === 'online');
     if (onlineBroker) {
       this.brokerId = onlineBroker.id;
@@ -717,38 +717,38 @@ export class ScionPageAgentCreate extends LitElement {
       this.brokerId = this.brokers[0].id;
     }
     this.autoSelectProfile();
-  }
+    }
 
   /**
-   * Returns templates visible to the selected grove: grove-scoped templates
-   * for the current grove plus global templates.
+   * Returns templates visible to the selected project: project-scoped templates
+   * for the current project plus global templates.
    */
   private get filteredTemplates(): Template[] {
-    if (!this.groveId) return this.templates;
+    if (!this.projectId) return this.templates;
     return this.templates.filter(
       (t) =>
         t.scope === 'global' ||
         t.scope === 'user' ||
-        (t.scope === 'grove' && t.scopeId === this.groveId)
+        (t.scope === 'project' && t.scopeId === this.projectId)
     );
   }
 
   /**
-   * Select the default template and harness config for the current grove using grove settings.
+   * Select the default template and harness config for the current project using project settings.
    * Falls back to a template named "default", then the first available template.
-   * The harness config is determined by: template defaultHarnessConfig > template harness > grove default > 'gemini'.
+   * The harness config is determined by: template defaultHarnessConfig > template harness > project default > 'gemini'.
    */
   private async selectDefaultTemplate(): Promise<void> {
     const visible = this.filteredTemplates;
 
-    // Fetch grove settings (used for both template and harness defaults)
-    const settings = this.groveId ? await this.fetchGroveSettings(this.groveId) : null;
+    // Fetch project settings (used for both template and harness defaults)
+    const settings = this.projectId ? await this.fetchProjectSettings(this.projectId) : null;
     const harnessDefault = settings?.defaultHarnessConfig || 'gemini';
 
     const harnessFor = (t: { defaultHarnessConfig?: string; harness?: string }) =>
       t.defaultHarnessConfig || t.harness || harnessDefault;
 
-    // Try grove settings default template first
+    // Try project settings default template first
     if (settings?.defaultTemplate) {
       const match = visible.find(
         (t) => t.name === settings.defaultTemplate || t.slug === settings.defaultTemplate
@@ -809,7 +809,7 @@ export class ScionPageAgentCreate extends LitElement {
       const agent: Agent = 'agent' in data && data.agent ? data.agent : (data as Agent);
 
       this.name = agent.name || '';
-      this.groveId = agent.groveId || '';
+      this.projectId = agent.projectId || '';
       if (agent.harnessConfig) this.setHarnessFromValue(agent.harnessConfig);
       if (agent.harnessAuth) this.harnessAuth = agent.harnessAuth;
       if (agent.template) this.templateId = agent.template;
@@ -835,8 +835,8 @@ export class ScionPageAgentCreate extends LitElement {
 
   private async loadHarnessConfigs(): Promise<void> {
     try {
-      const url = this.groveId
-        ? `/api/v1/harness-configs?status=active&groveId=${encodeURIComponent(this.groveId)}&limit=100`
+      const url = this.projectId
+        ? `/api/v1/harness-configs?status=active&projectId=${encodeURIComponent(this.projectId)}&limit=100`
         : '/api/v1/harness-configs?status=active&limit=100';
       const res = await apiFetch(url);
       if (res.ok) {
@@ -853,10 +853,10 @@ export class ScionPageAgentCreate extends LitElement {
     this.gcpServiceAccountId = '';
     this.gcpMetadataMode = 'block';
 
-    if (!this.groveId) return;
+    if (!this.projectId) return;
 
     try {
-      const res = await apiFetch(`/api/v1/groves/${this.groveId}/gcp-service-accounts`);
+      const res = await apiFetch(`/api/v1/projects/${this.projectId}/gcp-service-accounts`);
       if (res.ok) {
         const data = (await res.json()) as
           | {
@@ -869,8 +869,8 @@ export class ScionPageAgentCreate extends LitElement {
       // Non-critical — just won't show GCP identity section
     }
 
-    // Apply grove default GCP identity if configured
-    const settings = await this.fetchGroveSettings(this.groveId);
+    // Apply project default GCP identity if configured
+    const settings = await this.fetchProjectSettings(this.projectId);
     if (settings?.defaultGCPIdentityMode) {
       const mode = settings.defaultGCPIdentityMode as 'block' | 'passthrough' | 'assign';
       if (mode === 'assign' && settings.defaultGCPIdentityServiceAccountID) {
@@ -894,11 +894,11 @@ export class ScionPageAgentCreate extends LitElement {
   }
 
   /**
-   * Fetch grove settings and return the defaultTemplate value (if any).
-   * Results are cached per groveId to avoid redundant requests.
+   * Fetch project settings and return the defaultTemplate value (if any).
+   * Results are cached per projectId to avoid redundant requests.
    */
-  private async fetchGroveSettings(
-    groveId: string
+  private async fetchProjectSettings(
+    projectId: string
   ): Promise<{
     defaultTemplate?: string;
     defaultHarnessConfig?: string;
@@ -908,13 +908,13 @@ export class ScionPageAgentCreate extends LitElement {
     defaultGCPIdentityMode?: string;
     defaultGCPIdentityServiceAccountID?: string;
   } | null> {
-    if (!groveId) return null;
+    if (!projectId) return null;
 
-    const cached = this.groveSettingsCache.get(groveId);
+    const cached = this.projectSettingsCache.get(projectId);
     if (cached !== undefined) return cached;
 
     try {
-      const res = await apiFetch(`/api/v1/groves/${groveId}/settings`);
+      const res = await apiFetch(`/api/v1/projects/${projectId}/settings`);
       if (res.ok) {
         const data = (await res.json()) as {
           defaultTemplate?: string;
@@ -925,7 +925,7 @@ export class ScionPageAgentCreate extends LitElement {
           defaultGCPIdentityMode?: string;
           defaultGCPIdentityServiceAccountID?: string;
         };
-        this.groveSettingsCache.set(groveId, data);
+        this.projectSettingsCache.set(projectId, data);
         return data;
       }
     } catch {
@@ -1000,11 +1000,11 @@ export class ScionPageAgentCreate extends LitElement {
 
     return html`
       <a
-        href="${this.sourceGrove ? `/groves/${this.sourceGrove.id}` : '/agents'}"
+        href="${this.sourceProject ? `/projects/${this.sourceProject.id}` : '/agents'}"
         class="back-link"
       >
         <sl-icon name="arrow-left"></sl-icon>
-        ${this.sourceGrove ? `To ${this.sourceGrove.name}` : 'Back to Agents'}
+        ${this.sourceProject ? `To ${this.sourceProject.name}` : 'Back to Agents'}
       </a>
 
       <div class="page-header">
@@ -1047,7 +1047,7 @@ export class ScionPageAgentCreate extends LitElement {
             ></sl-input>
           </div>
 
-          ${this.selectedGrove?.gitRemote && !isSharedWorkspace(this.selectedGrove)
+          ${this.selectedProject?.gitRemote && !isSharedWorkspace(this.selectedProject)
             ? html`
                 <div class="form-field">
                   <label for="branch">Branch</label>
@@ -1065,25 +1065,25 @@ export class ScionPageAgentCreate extends LitElement {
             : ''}
 
           <div class="form-field">
-            <label for="grove">Grove</label>
+            <label for="project">Project</label>
             <sl-select
-              id="grove"
-              placeholder="Select a grove..."
-              .value=${this.groveId}
+              id="project"
+              placeholder="Select a project..."
+              .value=${this.projectId}
               @sl-change=${(e: Event) => {
-                this.groveId = (e.target as HTMLElement & { value: string }).value;
-                this.selectBrokerForGrove();
+                this.projectId = (e.target as HTMLElement & { value: string }).value;
+                this.selectBrokerForProject();
                 void this.selectDefaultTemplate();
                 void this.loadHarnessConfigs();
                 void this.loadGCPServiceAccounts();
-                // Clear branch if new grove is not git-based
-                if (!this.selectedGrove?.gitRemote) {
+                // Clear branch if new project is not git-based
+                if (!this.selectedProject?.gitRemote) {
                   this.branch = '';
                 }
               }}
               required
             >
-              ${this.groves.map((g) => html`<sl-option value=${g.id}>${g.name}</sl-option>`)}
+              ${this.projects.map((p) => html`<sl-option value=${p.id}>${p.name}</sl-option>`)}
             </sl-select>
             <div class="hint">The project workspace for this agent.</div>
           </div>
@@ -1099,8 +1099,8 @@ export class ScionPageAgentCreate extends LitElement {
               ${this.filteredTemplates.map(
                 (t) =>
                   html`<sl-option value=${t.id}
-                    >${t.displayName || t.name}${t.scope === 'grove'
-                      ? ' (grove)'
+                    >${t.displayName || t.name}${t.scope === 'project'
+                      ? ' (project)'
                       : ''}${t.description ? ` - ${t.description}` : ''}</sl-option
                   >`
               )}
@@ -1282,7 +1282,7 @@ export class ScionPageAgentCreate extends LitElement {
                     : html`
                         <div class="hint" style="margin-top: 0;">
                           No verified service accounts available. Register and verify service
-                          accounts in grove settings.
+                          accounts in project settings.
                         </div>
                       `}
                 </div>
@@ -1347,7 +1347,7 @@ export class ScionPageAgentCreate extends LitElement {
                 if (this.editingAgentId) {
                   await this.deleteEditingAgent();
                 }
-                const dest = this.sourceGrove ? `/groves/${this.sourceGrove.id}` : '/agents';
+                const dest = this.sourceProject ? `/projects/${this.sourceProject.id}` : '/agents';
                 window.history.pushState({}, '', dest);
                 window.dispatchEvent(new PopStateEvent('popstate'));
               }}

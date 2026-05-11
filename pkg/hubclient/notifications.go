@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"net/url"
 	"time"
 
@@ -49,7 +50,7 @@ type Notification struct {
 	ID             string    `json:"id"`
 	SubscriptionID string    `json:"subscriptionId"`
 	AgentID        string    `json:"agentId"`
-	GroveID        string    `json:"groveId"`
+	ProjectID      string    `json:"projectId"`
 	SubscriberType string    `json:"subscriberType"`
 	SubscriberID   string    `json:"subscriberId"`
 	Status         string    `json:"status"`
@@ -59,6 +60,36 @@ type Notification struct {
 	CreatedAt      time.Time `json:"createdAt"`
 }
 
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (n *Notification) UnmarshalJSON(data []byte) error {
+	type Alias Notification
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(n),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if n.ProjectID == "" && aux.GroveID != "" {
+		n.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (n Notification) MarshalJSON() ([]byte, error) {
+	type Alias Notification
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(n),
+		GroveID: n.ProjectID,
+	})
+}
+
 // List returns notifications for the current user.
 func (s *notificationService) List(ctx context.Context, opts *ListNotificationsOptions) ([]Notification, error) {
 	query := url.Values{}
@@ -66,7 +97,7 @@ func (s *notificationService) List(ctx context.Context, opts *ListNotificationsO
 		query.Set("acknowledged", "true")
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/notifications", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/notifications", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +113,7 @@ func (s *notificationService) List(ctx context.Context, opts *ListNotificationsO
 
 // Acknowledge marks a single notification as acknowledged.
 func (s *notificationService) Acknowledge(ctx context.Context, id string) error {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/notifications/"+url.PathEscape(id)+"/ack", nil, nil)
+	resp, err := s.c.post(ctx, "/api/v1/notifications/"+url.PathEscape(id)+"/ack", nil, nil)
 	if err != nil {
 		return err
 	}
@@ -91,7 +122,7 @@ func (s *notificationService) Acknowledge(ctx context.Context, id string) error 
 
 // AcknowledgeAll marks all unacknowledged notifications as acknowledged.
 func (s *notificationService) AcknowledgeAll(ctx context.Context) error {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/notifications/ack-all", nil, nil)
+	resp, err := s.c.post(ctx, "/api/v1/notifications/ack-all", nil, nil)
 	if err != nil {
 		return err
 	}
@@ -128,8 +159,38 @@ type subscriptionService struct {
 type CreateSubscriptionRequest struct {
 	Scope             string   `json:"scope"`
 	AgentID           string   `json:"agentId,omitempty"`
-	GroveID           string   `json:"groveId"`
+	ProjectID         string   `json:"projectId"`
 	TriggerActivities []string `json:"triggerActivities"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (r CreateSubscriptionRequest) MarshalJSON() ([]byte, error) {
+	type Alias CreateSubscriptionRequest
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(r),
+		GroveID: r.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (r *CreateSubscriptionRequest) UnmarshalJSON(data []byte) error {
+	type Alias CreateSubscriptionRequest
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // UpdateSubscriptionRequest is the request body for updating a subscription.
@@ -139,9 +200,9 @@ type UpdateSubscriptionRequest struct {
 
 // ListSubscriptionsOptions configures subscription listing.
 type ListSubscriptionsOptions struct {
-	GroveID string
-	AgentID string
-	Scope   string
+	ProjectID string
+	AgentID   string
+	Scope     string
 }
 
 // Subscription represents a notification subscription from the Hub API.
@@ -151,15 +212,45 @@ type Subscription struct {
 	AgentID           string    `json:"agentId,omitempty"`
 	SubscriberType    string    `json:"subscriberType"`
 	SubscriberID      string    `json:"subscriberId"`
-	GroveID           string    `json:"groveId"`
+	ProjectID         string    `json:"projectId"`
 	TriggerActivities []string  `json:"triggerActivities"`
 	CreatedAt         time.Time `json:"createdAt"`
 	CreatedBy         string    `json:"createdBy"`
 }
 
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (s *Subscription) UnmarshalJSON(data []byte) error {
+	type Alias Subscription
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(s),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if s.ProjectID == "" && aux.GroveID != "" {
+		s.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (s Subscription) MarshalJSON() ([]byte, error) {
+	type Alias Subscription
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(s),
+		GroveID: s.ProjectID,
+	})
+}
+
 // Create creates a new notification subscription.
 func (s *subscriptionService) Create(ctx context.Context, req *CreateSubscriptionRequest) (*Subscription, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/notifications/subscriptions", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/notifications/subscriptions", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -170,8 +261,9 @@ func (s *subscriptionService) Create(ctx context.Context, req *CreateSubscriptio
 func (s *subscriptionService) List(ctx context.Context, opts *ListSubscriptionsOptions) ([]Subscription, error) {
 	query := url.Values{}
 	if opts != nil {
-		if opts.GroveID != "" {
-			query.Set("groveId", opts.GroveID)
+		if opts.ProjectID != "" {
+			query.Set("projectId", opts.ProjectID)
+			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.AgentID != "" {
 			query.Set("agentId", opts.AgentID)
@@ -181,7 +273,7 @@ func (s *subscriptionService) List(ctx context.Context, opts *ListSubscriptionsO
 		}
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/notifications/subscriptions", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/notifications/subscriptions", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +289,7 @@ func (s *subscriptionService) List(ctx context.Context, opts *ListSubscriptionsO
 
 // Update modifies the trigger activities of a subscription.
 func (s *subscriptionService) Update(ctx context.Context, id string, req *UpdateSubscriptionRequest) (*Subscription, error) {
-	resp, err := s.c.transport.Patch(ctx, "/api/v1/notifications/subscriptions/"+url.PathEscape(id), req, nil)
+	resp, err := s.c.patch(ctx, "/api/v1/notifications/subscriptions/"+url.PathEscape(id), req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +298,7 @@ func (s *subscriptionService) Update(ctx context.Context, id string, req *Update
 
 // Delete removes a subscription by ID.
 func (s *subscriptionService) Delete(ctx context.Context, id string) error {
-	resp, err := s.c.transport.Delete(ctx, "/api/v1/notifications/subscriptions/"+url.PathEscape(id), nil)
+	resp, err := s.c.delete(ctx, "/api/v1/notifications/subscriptions/"+url.PathEscape(id), nil)
 	if err != nil {
 		return err
 	}
@@ -215,7 +307,7 @@ func (s *subscriptionService) Delete(ctx context.Context, id string) error {
 
 // BulkCreate creates multiple subscriptions in a single request.
 func (s *subscriptionService) BulkCreate(ctx context.Context, reqs []CreateSubscriptionRequest) ([]Subscription, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/notifications/subscriptions/bulk", reqs, nil)
+	resp, err := s.c.post(ctx, "/api/v1/notifications/subscriptions/bulk", reqs, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -234,8 +326,8 @@ type SubscriptionTemplateService interface {
 	// Create creates a new subscription template.
 	Create(ctx context.Context, req *CreateSubscriptionTemplateRequest) (*SubscriptionTemplate, error)
 
-	// List returns subscription templates, optionally filtered by grove.
-	List(ctx context.Context, groveID string) ([]SubscriptionTemplate, error)
+	// List returns subscription templates, optionally filtered by project.
+	List(ctx context.Context, projectID string) ([]SubscriptionTemplate, error)
 
 	// Delete removes a template by ID.
 	Delete(ctx context.Context, id string) error
@@ -251,7 +343,7 @@ type CreateSubscriptionTemplateRequest struct {
 	Name              string   `json:"name"`
 	Scope             string   `json:"scope"`
 	TriggerActivities []string `json:"triggerActivities"`
-	GroveID           string   `json:"groveId"`
+	ProjectID         string   `json:"groveId"`
 }
 
 // SubscriptionTemplate represents a subscription template from the Hub API.
@@ -260,26 +352,27 @@ type SubscriptionTemplate struct {
 	Name              string   `json:"name"`
 	Scope             string   `json:"scope"`
 	TriggerActivities []string `json:"triggerActivities"`
-	GroveID           string   `json:"groveId"`
+	ProjectID         string   `json:"groveId"`
 	CreatedBy         string   `json:"createdBy"`
 }
 
 // Create creates a new subscription template.
 func (s *subscriptionTemplateService) Create(ctx context.Context, req *CreateSubscriptionTemplateRequest) (*SubscriptionTemplate, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/notifications/templates", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/notifications/templates", req, nil)
 	if err != nil {
 		return nil, err
 	}
 	return apiclient.DecodeResponse[SubscriptionTemplate](resp)
 }
 
-// List returns subscription templates, optionally filtered by grove.
-func (s *subscriptionTemplateService) List(ctx context.Context, groveID string) ([]SubscriptionTemplate, error) {
+// List returns subscription templates, optionally filtered by project.
+func (s *subscriptionTemplateService) List(ctx context.Context, projectID string) ([]SubscriptionTemplate, error) {
 	query := url.Values{}
-	if groveID != "" {
-		query.Set("groveId", groveID)
+	if projectID != "" {
+		query.Set("projectId", projectID)
+		query.Set("groveId", projectID)
 	}
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/notifications/templates", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/notifications/templates", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +388,7 @@ func (s *subscriptionTemplateService) List(ctx context.Context, groveID string) 
 
 // Delete removes a template by ID.
 func (s *subscriptionTemplateService) Delete(ctx context.Context, id string) error {
-	resp, err := s.c.transport.Delete(ctx, "/api/v1/notifications/templates/"+url.PathEscape(id), nil)
+	resp, err := s.c.delete(ctx, "/api/v1/notifications/templates/"+url.PathEscape(id), nil)
 	if err != nil {
 		return err
 	}
@@ -307,7 +400,7 @@ func (s *subscriptionService) BulkDelete(ctx context.Context, ids []string) (int
 	body := struct {
 		IDs []string `json:"ids"`
 	}{IDs: ids}
-	resp, err := s.c.transport.Post(ctx, "/api/v1/notifications/subscriptions/bulk-delete", body, nil)
+	resp, err := s.c.post(ctx, "/api/v1/notifications/subscriptions/bulk-delete", body, nil)
 	if err != nil {
 		return 0, err
 	}

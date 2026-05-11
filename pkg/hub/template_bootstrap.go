@@ -228,9 +228,9 @@ func (s *Server) syncExistingTemplate(ctx context.Context, existing *store.Templ
 }
 
 // bootstrapSingleTemplate imports one local template directory into the
-// Hub's database and storage backend under the given scope and groveID.
+// Hub's database and storage backend under the given scope and projectID.
 // For global templates pass store.TemplateScopeGlobal and "".
-func (s *Server) bootstrapSingleTemplate(ctx context.Context, name, templatePath, scope, groveID string) error {
+func (s *Server) bootstrapSingleTemplate(ctx context.Context, name, templatePath, scope, projectID string) error {
 	stor := s.GetStorage()
 
 	// Collect files from the template directory
@@ -245,7 +245,7 @@ func (s *Server) bootstrapSingleTemplate(ctx context.Context, name, templatePath
 	slug := api.Slugify(name)
 
 	// Create a pending template record
-	storagePath := storage.TemplateStoragePath(scope, groveID, slug)
+	storagePath := storage.TemplateStoragePath(scope, projectID, slug)
 	tmpl := &store.Template{
 		ID:                   api.NewUUID(),
 		Name:                 name,
@@ -253,12 +253,12 @@ func (s *Server) bootstrapSingleTemplate(ctx context.Context, name, templatePath
 		Harness:              cfgInfo.Harness,
 		DefaultHarnessConfig: cfgInfo.DefaultHarnessConfig,
 		Scope:                scope,
-		ScopeID:              groveID,
-		GroveID:              groveID, // deprecated alias kept for compatibility
+		ScopeID:              projectID,
+		ProjectID:              projectID, // deprecated alias kept for compatibility
 		Status:               store.TemplateStatusPending,
 		StoragePath:          storagePath,
 		StorageBucket:        stor.Bucket(),
-		StorageURI:           storage.TemplateStorageURI(stor.Bucket(), scope, groveID, slug),
+		StorageURI:           storage.TemplateStorageURI(stor.Bucket(), scope, projectID, slug),
 		Visibility:           store.VisibilityPrivate,
 	}
 
@@ -309,7 +309,7 @@ func (s *Server) bootstrapSingleTemplate(ctx context.Context, name, templatePath
 		"defaultHarnessConfig", cfgInfo.DefaultHarnessConfig)
 
 	// Import any harness-configs bundled inside the template
-	s.importTemplateHarnessConfigs(ctx, templatePath, scope, groveID)
+	s.importTemplateHarnessConfigs(ctx, templatePath, scope, projectID)
 
 	return nil
 }
@@ -368,7 +368,7 @@ func inferHarnessFromName(name string) string {
 
 // importTemplateHarnessConfigs imports harness-configs bundled inside a
 // template's harness-configs/ subdirectory into the Hub's harness-config store.
-// Configs are scoped to match the template's scope (global or grove).
+// Configs are scoped to match the template's scope (global or project).
 func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath, scope, scopeID string) {
 	hcDir := filepath.Join(templatePath, "harness-configs")
 	info, err := os.Stat(hcDir)
@@ -387,8 +387,8 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath,
 	}
 
 	hcScope := store.HarnessConfigScopeGlobal
-	if scope == string(store.TemplateScopeGrove) {
-		hcScope = store.HarnessConfigScopeGrove
+	if scope == string(store.TemplateScopeProject) {
+		hcScope = store.HarnessConfigScopeProject
 	}
 
 	for _, entry := range entries {
@@ -430,8 +430,8 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath,
 
 // importTemplatesFromRemote fetches a remote source URL, discovers scion
 // templates within it, and registers each one into the Hub store scoped
-// to the given grove. Returns the names of all templates imported or updated.
-func (s *Server) importTemplatesFromRemote(ctx context.Context, groveID, sourceURL string) ([]string, error) {
+// to the given project. Returns the names of all templates imported or updated.
+func (s *Server) importTemplatesFromRemote(ctx context.Context, projectID, sourceURL string) ([]string, error) {
 	if !config.IsRemoteURI(sourceURL) {
 		return nil, fmt.Errorf("source must be a remote URI (http://, https://, or rclone)")
 	}
@@ -441,11 +441,11 @@ func (s *Server) importTemplatesFromRemote(ctx context.Context, groveID, sourceU
 		return nil, fmt.Errorf("template storage is not configured")
 	}
 
-	// If the grove has a GitHub App installation, mint a token for authenticated access
+	// If the project has a GitHub App installation, mint a token for authenticated access
 	var authToken string
-	grove, err := s.store.GetGrove(ctx, groveID)
-	if err == nil && grove != nil && grove.GitHubInstallationID != nil {
-		if token, _, mintErr := s.MintGitHubAppTokenForGrove(ctx, grove); mintErr == nil && token != "" {
+	project, err := s.store.GetProject(ctx, projectID)
+	if err == nil && project != nil && project.GitHubInstallationID != nil {
+		if token, _, mintErr := s.MintGitHubAppTokenForProject(ctx, project); mintErr == nil && token != "" {
 			authToken = token
 		}
 	}
@@ -487,14 +487,14 @@ func (s *Server) importTemplatesFromRemote(ctx context.Context, groveID, sourceU
 	var imported []string
 	for _, td := range dirs {
 		slug := api.Slugify(td.name)
-		existing, err := s.store.GetTemplateBySlug(ctx, slug, store.TemplateScopeGrove, groveID)
+		existing, err := s.store.GetTemplateBySlug(ctx, slug, store.TemplateScopeProject, projectID)
 		if err != nil && err != store.ErrNotFound {
 			s.templateLog.Warn("template import: failed to look up template, skipping",
 				"name", td.name, "error", err)
 			continue
 		}
 		if existing == nil {
-			if err := s.bootstrapSingleTemplate(ctx, td.name, td.path, store.TemplateScopeGrove, groveID); err != nil {
+			if err := s.bootstrapSingleTemplate(ctx, td.name, td.path, store.TemplateScopeProject, projectID); err != nil {
 				s.templateLog.Warn("template import: failed to import template, skipping",
 					"name", td.name, "error", err)
 				continue
@@ -512,30 +512,30 @@ func (s *Server) importTemplatesFromRemote(ctx context.Context, groveID, sourceU
 }
 
 // importTemplatesFromWorkspace imports templates from a path within the
-// grove's workspace filesystem. The workspacePath is relative to the grove's
+// project's workspace filesystem. The workspacePath is relative to the project's
 // workspace root (e.g. "/.scion/templates" or "/my/custom/path").
-func (s *Server) importTemplatesFromWorkspace(ctx context.Context, grove *store.Grove, workspacePath string) ([]string, error) {
+func (s *Server) importTemplatesFromWorkspace(ctx context.Context, project *store.Project, workspacePath string) ([]string, error) {
 	stor := s.GetStorage()
 	if stor == nil {
 		return nil, fmt.Errorf("template storage is not configured")
 	}
 
-	// Resolve the grove's workspace root on disk
-	groveRoot, err := s.resolveGroveWebDAVPath(ctx, grove)
+	// Resolve the project's workspace root on disk
+	projectRoot, err := s.resolveProjectWebDAVPath(ctx, project)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve grove workspace: %w", err)
+		return nil, fmt.Errorf("failed to resolve project workspace: %w", err)
 	}
 
-	// Clean and join the workspace path to the grove root.
+	// Clean and join the workspace path to the project root.
 	// Strip leading slash so it joins correctly.
 	rel := strings.TrimPrefix(filepath.Clean(workspacePath), "/")
-	templatesDir := filepath.Join(groveRoot, rel)
+	templatesDir := filepath.Join(projectRoot, rel)
 
-	// Validate the resolved path is within the grove root
-	absRoot, _ := filepath.Abs(groveRoot)
+	// Validate the resolved path is within the project root
+	absRoot, _ := filepath.Abs(projectRoot)
 	absDir, _ := filepath.Abs(templatesDir)
 	if !strings.HasPrefix(absDir, absRoot) {
-		return nil, fmt.Errorf("workspace path must be within the grove workspace")
+		return nil, fmt.Errorf("workspace path must be within the project workspace")
 	}
 
 	info, err := os.Stat(templatesDir)
@@ -572,14 +572,14 @@ func (s *Server) importTemplatesFromWorkspace(ctx context.Context, grove *store.
 	var imported []string
 	for _, td := range dirs {
 		slug := api.Slugify(td.name)
-		existing, lookupErr := s.store.GetTemplateBySlug(ctx, slug, store.TemplateScopeGrove, grove.ID)
+		existing, lookupErr := s.store.GetTemplateBySlug(ctx, slug, store.TemplateScopeProject, project.ID)
 		if lookupErr != nil && lookupErr != store.ErrNotFound {
 			s.templateLog.Warn("workspace template import: failed to look up template, skipping",
 				"name", td.name, "error", lookupErr)
 			continue
 		}
 		if existing == nil {
-			if bootstrapErr := s.bootstrapSingleTemplate(ctx, td.name, td.path, store.TemplateScopeGrove, grove.ID); bootstrapErr != nil {
+			if bootstrapErr := s.bootstrapSingleTemplate(ctx, td.name, td.path, store.TemplateScopeProject, project.ID); bootstrapErr != nil {
 				s.templateLog.Warn("workspace template import: failed to import template, skipping",
 					"name", td.name, "error", bootstrapErr)
 				continue

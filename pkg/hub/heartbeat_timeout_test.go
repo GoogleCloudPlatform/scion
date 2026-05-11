@@ -82,15 +82,15 @@ func TestAgentHeartbeatTimeoutHandler_MarksStaleAgents(t *testing.T) {
 	srv, s, ep := setupHeartbeatTestServer(t)
 	ctx := context.Background()
 
-	// Create grove
-	grove := &store.Grove{
+	// Create project
+	project := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Test Grove",
-		Slug:       "test-grove-hb",
+		Name:       "Test Project",
+		Slug:       "test-project-hb",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	// Create a running agent with a heartbeat
@@ -99,7 +99,7 @@ func TestAgentHeartbeatTimeoutHandler_MarksStaleAgents(t *testing.T) {
 		Slug:       "stale-runner",
 		Name:       "Stale Runner",
 		Template:   "claude",
-		GroveID:    grove.ID,
+		ProjectID:    project.ID,
 		Phase:      string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
@@ -120,7 +120,7 @@ func TestAgentHeartbeatTimeoutHandler_MarksStaleAgents(t *testing.T) {
 		Slug:       "stopped-agent",
 		Name:       "Stopped Agent",
 		Template:   "claude",
-		GroveID:    grove.ID,
+		ProjectID:    project.ID,
 		Phase:      string(state.PhaseStopped),
 		Visibility: store.VisibilityPrivate,
 	}
@@ -173,14 +173,14 @@ func TestAgentHeartbeatTimeoutHandler_ClearedBySubsequentHeartbeat(t *testing.T)
 	_, s, _ := setupHeartbeatTestServer(t)
 	ctx := context.Background()
 
-	grove := &store.Grove{
+	project := &store.Project{
 		ID:         api.NewUUID(),
-		Name:       "Recovery Grove",
-		Slug:       "recovery-grove",
+		Name:       "Recovery Project",
+		Slug:       "recovery-project",
 		Visibility: store.VisibilityPrivate,
 	}
-	if err := s.CreateGrove(ctx, grove); err != nil {
-		t.Fatalf("failed to create grove: %v", err)
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
 	}
 
 	agent := &store.Agent{
@@ -188,7 +188,7 @@ func TestAgentHeartbeatTimeoutHandler_ClearedBySubsequentHeartbeat(t *testing.T)
 		Slug:     "recovery-agent",
 		Name:     "Recovery Agent",
 		Template: "claude",
-		GroveID:  grove.ID,
+		ProjectID:  project.ID,
 		Phase:    string(state.PhaseRunning), Activity: string(state.ActivityOffline),
 		Visibility: store.VisibilityPrivate,
 	}

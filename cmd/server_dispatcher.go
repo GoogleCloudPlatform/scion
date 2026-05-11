@@ -50,14 +50,15 @@ func newAgentDispatcherAdapter(mgr agent.Manager, s store.Store, brokerID string
 // DispatchAgentCreate implements hub.AgentDispatcher.
 // It starts the agent on the runtime broker and updates the hub store with runtime info.
 func (d *agentDispatcherAdapter) DispatchAgentCreate(ctx context.Context, hubAgent *store.Agent) error {
-	grovePath := d.resolveGrovePath(ctx, hubAgent.GroveID)
-	opts := d.buildStartOptions(hubAgent, grovePath, false)
+	projectPath := d.resolveProjectPath(ctx, hubAgent.ProjectID)
+	opts := d.buildStartOptions(hubAgent, projectPath, false)
 
 	// Ensure grove ID label is present for tracking
 	if hubAgent.Labels == nil {
 		hubAgent.Labels = make(map[string]string)
 	}
-	hubAgent.Labels["scion.grove"] = hubAgent.GroveID
+	hubAgent.Labels["scion.project"] = hubAgent.ProjectID
+	hubAgent.Labels["scion.grove"] = hubAgent.ProjectID
 
 	// Start the agent on the runtime broker
 	agentInfo, err := d.manager.Start(ctx, opts)
@@ -83,14 +84,15 @@ func (d *agentDispatcherAdapter) DispatchAgentCreate(ctx context.Context, hubAge
 // DispatchAgentStart implements hub.AgentDispatcher.
 // For co-located runtime brokers, this resumes a stopped agent.
 func (d *agentDispatcherAdapter) DispatchAgentStart(ctx context.Context, hubAgent *store.Agent, task string) error {
-	grovePath := d.resolveGrovePath(ctx, hubAgent.GroveID)
-	opts := d.buildStartOptions(hubAgent, grovePath, true)
+	projectPath := d.resolveProjectPath(ctx, hubAgent.ProjectID)
+	opts := d.buildStartOptions(hubAgent, projectPath, true)
 
 	// Ensure grove ID label is present for tracking
 	if hubAgent.Labels == nil {
 		hubAgent.Labels = make(map[string]string)
 	}
-	hubAgent.Labels["scion.grove"] = hubAgent.GroveID
+	hubAgent.Labels["scion.project"] = hubAgent.ProjectID
+	hubAgent.Labels["scion.grove"] = hubAgent.ProjectID
 	if task != "" {
 		opts.Task = task
 	}
@@ -142,14 +144,15 @@ func (d *agentDispatcherAdapter) DispatchAgentRestart(ctx context.Context, hubAg
 		log.Printf("Warning: failed to stop agent during restart: %v", err)
 	}
 
-	grovePath := d.resolveGrovePath(ctx, hubAgent.GroveID)
-	opts := d.buildStartOptions(hubAgent, grovePath, true)
+	projectPath := d.resolveProjectPath(ctx, hubAgent.ProjectID)
+	opts := d.buildStartOptions(hubAgent, projectPath, true)
 
 	// Ensure grove ID label is present for tracking
 	if hubAgent.Labels == nil {
 		hubAgent.Labels = make(map[string]string)
 	}
-	hubAgent.Labels["scion.grove"] = hubAgent.GroveID
+	hubAgent.Labels["scion.project"] = hubAgent.ProjectID
+	hubAgent.Labels["scion.grove"] = hubAgent.ProjectID
 
 	agentInfo, err := d.manager.Start(ctx, opts)
 	if err != nil {
@@ -170,7 +173,7 @@ func (d *agentDispatcherAdapter) DispatchAgentRestart(ctx context.Context, hubAg
 	return nil
 }
 
-func (d *agentDispatcherAdapter) buildStartOptions(hubAgent *store.Agent, grovePath string, resume bool) api.StartOptions {
+func (d *agentDispatcherAdapter) buildStartOptions(hubAgent *store.Agent, projectPath string, resume bool) api.StartOptions {
 	// Build StartOptions from the hub agent record
 	env := make(map[string]string)
 	if hubAgent.AppliedConfig != nil && hubAgent.AppliedConfig.Env != nil {
@@ -183,7 +186,7 @@ func (d *agentDispatcherAdapter) buildStartOptions(hubAgent *store.Agent, groveP
 		Image:     hubAgent.Image,
 		Env:       env,
 		Detached:  &hubAgent.Detached,
-		GrovePath: grovePath,
+		ProjectPath: projectPath,
 		Resume:    resume,
 	}
 
@@ -196,13 +199,13 @@ func (d *agentDispatcherAdapter) buildStartOptions(hubAgent *store.Agent, groveP
 	return opts
 }
 
-func (d *agentDispatcherAdapter) resolveGrovePath(ctx context.Context, groveID string) string {
-	if groveID == "" || d.brokerID == "" {
+func (d *agentDispatcherAdapter) resolveProjectPath(ctx context.Context, projectID string) string {
+	if projectID == "" || d.brokerID == "" {
 		return ""
 	}
-	provider, err := d.store.GetGroveProvider(ctx, groveID, d.brokerID)
+	provider, err := d.store.GetProjectProvider(ctx, projectID, d.brokerID)
 	if err != nil {
-		log.Printf("Warning: failed to get grove provider for path lookup: %v", err)
+		log.Printf("Warning: failed to get project provider for path lookup: %v", err)
 		return ""
 	}
 	return provider.LocalPath
@@ -212,26 +215,26 @@ func (d *agentDispatcherAdapter) resolveGrovePath(ctx context.Context, groveID s
 // It removes an agent from the runtime broker.
 func (d *agentDispatcherAdapter) DispatchAgentDelete(ctx context.Context, hubAgent *store.Agent, deleteFiles, removeBranch, _ bool, _ time.Time) error {
 	// Look up the local path for this grove on this runtime broker
-	var grovePath string
-	if hubAgent.GroveID != "" && d.brokerID != "" {
-		provider, err := d.store.GetGroveProvider(ctx, hubAgent.GroveID, d.brokerID)
+	var projectPath string
+	if hubAgent.ProjectID != "" && d.brokerID != "" {
+		provider, err := d.store.GetProjectProvider(ctx, hubAgent.ProjectID, d.brokerID)
 		if err != nil {
-			log.Printf("Warning: failed to get grove provider for path lookup: %v", err)
+			log.Printf("Warning: failed to get project provider for path lookup: %v", err)
 		} else if provider.LocalPath != "" {
-			grovePath = provider.LocalPath
+			projectPath = provider.LocalPath
 		}
 	}
 
 	// For hub-native groves the provider LocalPath is typically empty.
 	// Resolve from the grove slug so file cleanup can find the agent
 	// directory at ~/.scion/groves/<slug>/.scion/agents/<name>.
-	if grovePath == "" && hubAgent.GroveID != "" && deleteFiles {
-		grove, err := d.store.GetGrove(ctx, hubAgent.GroveID)
+	if projectPath == "" && hubAgent.ProjectID != "" && deleteFiles {
+		grove, err := d.store.GetProject(ctx, hubAgent.ProjectID)
 		if err == nil && grove.GitRemote == "" && grove.Slug != "" {
 			if globalDir, gErr := config.GetGlobalDir(); gErr == nil {
 				candidate := filepath.Join(globalDir, "groves", grove.Slug)
 				if _, sErr := os.Stat(candidate); sErr == nil {
-					grovePath = candidate
+					projectPath = candidate
 				}
 			}
 		}
@@ -241,7 +244,7 @@ func (d *agentDispatcherAdapter) DispatchAgentDelete(ctx context.Context, hubAge
 	_ = d.manager.Stop(ctx, hubAgent.Name)
 
 	// Delete the agent
-	_, err := d.manager.Delete(ctx, hubAgent.Name, deleteFiles, grovePath, removeBranch)
+	_, err := d.manager.Delete(ctx, hubAgent.Name, deleteFiles, projectPath, removeBranch)
 	if err != nil {
 		return fmt.Errorf("failed to delete agent: %w", err)
 	}
@@ -255,7 +258,7 @@ func (d *agentDispatcherAdapter) DispatchAgentMessage(ctx context.Context, hubAg
 	// Raw messages bypass the paste buffer and send literal bytes via send-keys
 	if structuredMsg != nil && structuredMsg.Raw {
 		deliveryText := messages.FormatForDelivery(structuredMsg)
-		if err := d.manager.MessageRaw(ctx, hubAgent.Name, hubAgent.GroveID, deliveryText); err != nil {
+		if err := d.manager.MessageRaw(ctx, hubAgent.Name, hubAgent.ProjectID, deliveryText); err != nil {
 			return fmt.Errorf("failed to send raw message: %w", err)
 		}
 		return nil
@@ -266,7 +269,7 @@ func (d *agentDispatcherAdapter) DispatchAgentMessage(ctx context.Context, hubAg
 	if structuredMsg != nil {
 		deliveryText = messages.FormatForDelivery(structuredMsg)
 	}
-	if err := d.manager.Message(ctx, hubAgent.Name, hubAgent.GroveID, deliveryText, interrupt); err != nil {
+	if err := d.manager.Message(ctx, hubAgent.Name, hubAgent.ProjectID, deliveryText, interrupt); err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 	return nil

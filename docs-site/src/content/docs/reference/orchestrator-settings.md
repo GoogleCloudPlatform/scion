@@ -10,7 +10,7 @@ This document describes the configuration for the Scion orchestrator, managed th
 Scion loads settings from the following locations, merging them in order (later sources override earlier ones):
 
 1.  **Global Settings**: `~/.scion/settings.yaml` (User-wide defaults)
-2.  **Grove Settings**: `.scion/settings.yaml` (Project-specific overrides)
+2.  **Project Settings**: `.scion/settings.yaml` (Project-specific overrides)
 3.  **Environment Variables**: `SCION_*` overrides.
 
 ## Versioned Format
@@ -63,15 +63,15 @@ Settings for connecting the CLI to a Scion Hub.
 hub:
   enabled: true
   endpoint: "https://hub.example.com"
-  grove_id: "uuid-or-slug"
+  project_id: "uuid-or-slug"
   local_only: false
 ```
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `enabled` | bool | Whether to enable Hub integration for this grove. |
+| `enabled` | bool | Whether to enable Hub integration for this project. |
 | `endpoint` | string | The Hub API endpoint URL. Can be overridden per-agent in `scion-agent.yaml`. |
-| `grove_id` | string | The unique identifier for this grove on the Hub. |
+| `project_id` | string | The unique identifier for this project on the Hub. |
 | `local_only` | bool | If `true`, forces local-only operation even if the Hub is configured. |
 
 :::caution[Moved Fields]
@@ -215,7 +215,7 @@ profiles:
 
 ## Telemetry Configuration (`telemetry`)
 
-Controls agent telemetry collection, forwarding, privacy filtering, and debug output. Telemetry settings can be defined at global or grove scope and are merged across the hierarchy (last write wins). They can also be overridden per-template or per-agent in `scion-agent.yaml`.
+Controls agent telemetry collection, forwarding, privacy filtering, and debug output. Telemetry settings can be defined at global or project scope and are merged across the hierarchy (last write wins). They can also be overridden per-template or per-agent in `scion-agent.yaml`.
 
 See the [Metrics & OpenTelemetry guide](/scion/hub-admin/metrics/) for operational details.
 
@@ -311,7 +311,7 @@ Settings can be overridden using environment variables with the `SCION_` prefix.
 | `active_profile` | `SCION_ACTIVE_PROFILE` |
 | `default_template` | `SCION_DEFAULT_TEMPLATE` |
 | `hub.endpoint` | `SCION_HUB_ENDPOINT` |
-| `hub.grove_id` | `SCION_HUB_GROVE_ID` |
+| `hub.project_id` | `SCION_HUB_PROJECT_ID` |
 | `cli.autohelp` | `SCION_CLI_AUTOHELP` |
 | `telemetry.enabled` | `SCION_TELEMETRY_ENABLED` |
 | `telemetry.cloud.enabled` | `SCION_TELEMETRY_CLOUD_ENABLED` |

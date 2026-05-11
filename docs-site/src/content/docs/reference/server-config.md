@@ -83,7 +83,7 @@ Controls the Runtime Broker service.
 | `hub_endpoint` | string | | The Hub URL this broker connects to. |
 | `container_hub_endpoint` | string | | Overrides `hub_endpoint` when injecting the Hub URL into agent containers. Use when containers cannot reach the Hub at the broker's address (e.g. `http://host.containers.internal:8080` for local development). |
 | `broker_token` | string | | Authentication token for the Hub. |
-| `auto_provide` | bool | `false` | Automatically add as provider for new groves. |
+| `auto_provide` | bool | `false` | Automatically add as provider for new projects. |
 
 ### Database (`server.database`)
 
@@ -176,7 +176,7 @@ See the [Local Development Logging guide](/scion/development/logging/) for detai
 When `server.hub.public_url` is not explicitly set, the Hub endpoint injected into agents is resolved in this order:
 
 1. `SCION_SERVER_HUB_PUBLIC_URL` or `server.hub.public_url` — explicit Hub public URL.
-2. Grove-level `hub.endpoint` setting.
+2. Project-level `hub.endpoint` setting.
 3. `SCION_SERVER_BASE_URL` — the server's public base URL (also used for OAuth redirects).
 4. Auto-computed `http://localhost:{port}` (last resort).
 
