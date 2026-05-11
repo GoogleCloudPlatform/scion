@@ -981,7 +981,7 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 
 	// Get project ID for project scope
 	var projectID string
-	if scope == "project" || scope == "project" {
+	if scope == "project" {
 		projectID, err = GetProjectID(hubCtx)
 		if err != nil {
 			return err
