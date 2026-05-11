@@ -4000,7 +4000,7 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/api/v1/projects/") {
 		path = strings.TrimPrefix(r.URL.Path, "/api/v1/projects/")
 	} else {
-		path = strings.TrimPrefix(r.URL.Path, "/api/v1/projects/")
+		path = strings.TrimPrefix(r.URL.Path, "/api/v1/groves/")
 	}
 
 	if path == "" {
@@ -4673,7 +4673,7 @@ func (s *Server) handleProjectByID(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/api/v1/projects") {
 		id = extractID(r, "/api/v1/projects")
 	} else {
-		id = extractID(r, "/api/v1/projects")
+		id = extractID(r, "/api/v1/groves")
 	}
 
 	if id == "" || id == "register" {

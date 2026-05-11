@@ -314,6 +314,7 @@ func (p *ChannelEventPublisher) PublishAgentStatus(_ context.Context, agent *sto
 	p.publish("agent."+agent.ID+".status", evt)
 	if agent.ProjectID != "" {
 		p.publish("project."+agent.ProjectID+".agent.status", evt)
+		p.publish("grove."+agent.ProjectID+".agent.status", evt)
 	}
 }
 
@@ -342,6 +343,7 @@ func (p *ChannelEventPublisher) PublishAgentCreated(_ context.Context, agent *st
 	p.publish("agent."+agent.ID+".created", evt)
 	if agent.ProjectID != "" {
 		p.publish("project."+agent.ProjectID+".agent.created", evt)
+		p.publish("grove."+agent.ProjectID+".agent.created", evt)
 	}
 }
 
@@ -355,6 +357,7 @@ func (p *ChannelEventPublisher) PublishAgentDeleted(_ context.Context, agentID, 
 	p.publish("agent."+agentID+".deleted", evt)
 	if projectID != "" {
 		p.publish("project."+projectID+".agent.deleted", evt)
+		p.publish("grove."+projectID+".agent.deleted", evt)
 	}
 }
 
@@ -366,6 +369,7 @@ func (p *ChannelEventPublisher) PublishProjectCreated(_ context.Context, project
 		Slug:      project.Slug,
 	}
 	p.publish("project."+project.ID+".created", evt)
+	p.publish("grove."+project.ID+".created", evt)
 }
 
 // PublishProjectUpdated publishes a project updated event.
@@ -375,6 +379,7 @@ func (p *ChannelEventPublisher) PublishProjectUpdated(_ context.Context, project
 		Name:      project.Name,
 	}
 	p.publish("project."+project.ID+".updated", evt)
+	p.publish("grove."+project.ID+".updated", evt)
 }
 
 // PublishProjectDeleted publishes a project deleted event.
@@ -383,6 +388,7 @@ func (p *ChannelEventPublisher) PublishProjectDeleted(_ context.Context, project
 		ProjectID: projectID,
 	}
 	p.publish("project."+projectID+".deleted", evt)
+	p.publish("grove."+projectID+".deleted", evt)
 }
 
 // PublishBrokerConnected publishes broker connection events, one per project the broker serves.
@@ -395,6 +401,7 @@ func (p *ChannelEventPublisher) PublishBrokerConnected(_ context.Context, broker
 			Status:     "online",
 		}
 		p.publish("project."+gid+".broker.status", evt)
+		p.publish("grove."+gid+".broker.status", evt)
 	}
 }
 
@@ -407,6 +414,7 @@ func (p *ChannelEventPublisher) PublishBrokerDisconnected(_ context.Context, bro
 			Status:    "offline",
 		}
 		p.publish("project."+gid+".broker.status", evt)
+		p.publish("grove."+gid+".broker.status", evt)
 	}
 }
 
@@ -489,6 +497,7 @@ func (p *ChannelEventPublisher) PublishUserMessage(_ context.Context, msg *store
 	}
 	if recipientIsUser && msg.ProjectID != "" {
 		p.publish("project."+msg.ProjectID+".user.message", evt)
+		p.publish("grove."+msg.ProjectID+".user.message", evt)
 	}
 	if msg.AgentID != "" {
 		p.publish("agent."+msg.AgentID+".message", evt)

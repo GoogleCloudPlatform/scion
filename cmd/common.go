@@ -284,25 +284,25 @@ func GetProjectID(hubCtx *HubContext) (string, error) {
 	// Fall back to git remote lookup
 	gitRemote := util.GetGitRemote()
 	if gitRemote == "" {
-		return "", fmt.Errorf("no git origin remote found for this project.\n\nThe Hub uses the origin remote URL to identify groves.\nRun 'scion hub link' to link this grove with the Hub, or use --no-hub for local-only mode")
+		return "", fmt.Errorf("no git origin remote found for this project.\n\nThe Hub uses the origin remote URL to identify projects.\nRun 'scion hub link' to link this project with the Hub, or use --no-hub for local-only mode")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Look up groves by git remote
+	// Look up projects by git remote
 	resp, err := hubCtx.Client.Projects().List(ctx, &hubclient.ListProjectsOptions{
 		GitRemote: util.NormalizeGitRemote(gitRemote),
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to look up grove by git remote: %w", err)
+		return "", fmt.Errorf("failed to look up project by git remote: %w", err)
 	}
 
 	if len(resp.Projects) == 0 {
-		return "", fmt.Errorf("no grove found for git remote: %s\n\nRun 'scion hub link' to link this grove with the Hub", gitRemote)
+		return "", fmt.Errorf("no project found for git remote: %s\n\nRun 'scion hub link' to link this project with the Hub", gitRemote)
 	}
 
-	// Return the first matching grove
+	// Return the first matching project
 	return resp.Projects[0].ID, nil
 }
 

@@ -205,7 +205,7 @@ func (d *agentDispatcherAdapter) resolveProjectPath(ctx context.Context, project
 	}
 	provider, err := d.store.GetProjectProvider(ctx, projectID, d.brokerID)
 	if err != nil {
-		log.Printf("Warning: failed to get grove provider for path lookup: %v", err)
+		log.Printf("Warning: failed to get project provider for path lookup: %v", err)
 		return ""
 	}
 	return provider.LocalPath
@@ -219,7 +219,7 @@ func (d *agentDispatcherAdapter) DispatchAgentDelete(ctx context.Context, hubAge
 	if hubAgent.ProjectID != "" && d.brokerID != "" {
 		provider, err := d.store.GetProjectProvider(ctx, hubAgent.ProjectID, d.brokerID)
 		if err != nil {
-			log.Printf("Warning: failed to get grove provider for path lookup: %v", err)
+			log.Printf("Warning: failed to get project provider for path lookup: %v", err)
 		} else if provider.LocalPath != "" {
 			projectPath = provider.LocalPath
 		}

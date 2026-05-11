@@ -76,14 +76,14 @@ If the agent was started with tmux support, this will attach to the tmux session
 						// Update display info
 						projectDir = globalDir
 						projectName = "global"
-						fmt.Printf("Agent '%s' not found in local grove, using global agent.\n", agentName)
+						fmt.Printf("Agent '%s' not found in local project, using global agent.\n", agentName)
 					}
 				}
 			}
 		}
 
 		if !found {
-			return fmt.Errorf("agent '%s' not found in grove '%s'", agentName, projectName)
+			return fmt.Errorf("agent '%s' not found in project '%s'", agentName, projectName)
 		}
 
 		rt := runtime.GetRuntime(targetProjectPath, profile)
@@ -97,13 +97,13 @@ If the agent was started with tmux support, this will attach to the tmux session
 			attachID = agents[0].ContainerID
 		}
 
-		fmt.Printf("Attaching to agent '%s' (grove: %s)...\n", agentName, projectName)
+		fmt.Printf("Attaching to agent '%s' (project: %s)...\n", agentName, projectName)
 		err = rt.Attach(context.Background(), attachID)
 		if err != nil {
 			// If the error is "not found", we can augment it with grove info
 			if err.Error() == fmt.Sprintf("agent '%s' not found", attachID) ||
 				err.Error() == fmt.Sprintf("agent '%s' container not found. It may have exited and been removed.", attachID) {
-				return fmt.Errorf("agent '%s' not found in grove '%s'", agentName, projectName)
+				return fmt.Errorf("agent '%s' not found in project '%s'", agentName, projectName)
 			}
 			return err
 		}
