@@ -26,10 +26,10 @@ func TestHubHandler_EventMapping(t *testing.T) {
 		expectedStatus string
 	}{
 		{
-			name:           "session start sends idle (running phase)",
+			name:           "session start sends working (running phase)",
 			eventName:      hooks.EventSessionStart,
 			expectCall:     true,
-			expectedStatus: "idle",
+			expectedStatus: "working",
 		},
 		{
 			name:           "prompt submit sends thinking",
@@ -51,16 +51,16 @@ func TestHubHandler_EventMapping(t *testing.T) {
 			expectedStatus: "executing",
 		},
 		{
-			name:           "tool end sends idle",
+			name:           "tool end sends working",
 			eventName:      hooks.EventToolEnd,
 			expectCall:     true,
-			expectedStatus: "idle",
+			expectedStatus: "working",
 		},
 		{
-			name:           "agent end sends idle",
+			name:           "agent end sends working",
 			eventName:      hooks.EventAgentEnd,
 			expectCall:     true,
-			expectedStatus: "idle",
+			expectedStatus: "working",
 		},
 		{
 			name:           "notification sends waiting_for_input",
@@ -293,11 +293,11 @@ func TestHubHandler_StickyStatus(t *testing.T) {
 			expectCall:    false,
 		},
 		{
-			name:           "tool-end sends idle when local activity is idle",
-			localActivity:  "idle",
+			name:           "tool-end sends working when local activity is working",
+			localActivity:  "working",
 			eventName:      hooks.EventToolEnd,
 			expectCall:     true,
-			expectedStatus: "idle",
+			expectedStatus: "working",
 		},
 		{
 			name:          "agent-end skipped when local activity is waiting_for_input",
@@ -324,8 +324,8 @@ func TestHubHandler_StickyStatus(t *testing.T) {
 			expectCall:    false,
 		},
 		{
-			name:           "model-start sends thinking when local activity is idle",
-			localActivity:  "idle",
+			name:           "model-start sends thinking when local activity is working",
+			localActivity:  "working",
 			eventName:      hooks.EventModelStart,
 			expectCall:     true,
 			expectedStatus: "thinking",
@@ -338,8 +338,8 @@ func TestHubHandler_StickyStatus(t *testing.T) {
 			expectCall:    false,
 		},
 		{
-			name:           "tool-start sends executing when local activity is idle",
-			localActivity:  "idle",
+			name:           "tool-start sends executing when local activity is working",
+			localActivity:  "working",
 			eventName:      hooks.EventToolStart,
 			eventData:      hooks.EventData{ToolName: "Bash"},
 			expectCall:     true,
@@ -360,11 +360,11 @@ func TestHubHandler_StickyStatus(t *testing.T) {
 			expectedStatus: "thinking",
 		},
 		{
-			name:           "session-start always sends idle (clears sticky)",
+			name:           "session-start always sends working (clears sticky)",
 			localActivity:  "waiting_for_input",
 			eventName:      hooks.EventSessionStart,
 			expectCall:     true,
-			expectedStatus: "idle",
+			expectedStatus: "working",
 		},
 	}
 
@@ -656,7 +656,7 @@ func TestHubHandler_AssistantTextForwarding(t *testing.T) {
 			t.Errorf("Expected outbound type %q, got %q", "assistant-reply", outboundType)
 		}
 		if statusCalls != 1 {
-			t.Errorf("Expected 1 status call (idle), got %d", statusCalls)
+			t.Errorf("Expected 1 status call (working), got %d", statusCalls)
 		}
 	})
 

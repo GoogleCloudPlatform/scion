@@ -224,7 +224,7 @@ function handleEventInstant(evt: PlaybackEvent): void {
       agentRing.updateState({
         agentId: lifecycle.agentId,
         phase: 'created',
-        activity: 'idle',
+        activity: 'working',
       });
       break;
     }
@@ -285,7 +285,7 @@ function handleEvent(evt: PlaybackEvent): void {
             agentRing.updateState({
               agentId: lifecycle.agentId,
               phase: 'created',
-              activity: 'idle',
+              activity: 'working',
             });
           }, 900); // BEAM_CHARGE + BEAM_TRAVEL duration
           break;
@@ -296,7 +296,7 @@ function handleEvent(evt: PlaybackEvent): void {
       agentRing.updateState({
         agentId: lifecycle.agentId,
         phase: 'created',
-        activity: 'idle',
+        activity: 'working',
       });
       break;
     }

@@ -76,7 +76,7 @@ func TestAgentStatusUpdate_Authorization(t *testing.T) {
 
 	t.Run("Agent 1 can update its own status", func(t *testing.T) {
 		status := store.AgentStatusUpdate{
-			Activity: "idle",
+			Activity: "working",
 			Message:  "Waiting for user input",
 		}
 		body, _ := json.Marshal(status)
@@ -92,7 +92,7 @@ func TestAgentStatusUpdate_Authorization(t *testing.T) {
 		// Verify update in store
 		updated, err := s.GetAgent(ctx, agent1.ID)
 		require.NoError(t, err)
-		assert.Equal(t, "idle", updated.Activity)
+		assert.Equal(t, "working", updated.Activity)
 		assert.Equal(t, "Waiting for user input", updated.Message)
 	})
 
@@ -3089,41 +3089,41 @@ func TestBrokerHeartbeat_StalledAgentRecoveredByNewActivity(t *testing.T) {
 	assert.Empty(t, updated.StalledFromActivity, "stalled_from_activity should be cleared on recovery")
 }
 
-func TestBrokerHeartbeat_StalledIdleAgentNotOverwrittenBySameActivity(t *testing.T) {
+func TestBrokerHeartbeat_StalledWorkingAgentNotOverwrittenBySameActivity(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	project := &store.Project{ID: "project-stall-idle", Name: "Stall Idle Project", Slug: "stall-idle-project"}
+	project := &store.Project{ID: "project-stall-working", Name: "Stall Working Project", Slug: "stall-working-project"}
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	broker := &store.RuntimeBroker{
-		ID: "broker-stall-idle", Name: "Stall Idle Broker", Slug: "stall-idle-broker",
+		ID: "broker-stall-working", Name: "Stall Working Broker", Slug: "stall-working-broker",
 		Status: store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
 	agent := &store.Agent{
-		ID: "agent-stall-idle", Slug: "stall-idle-slug", Name: "Stall Idle Agent",
+		ID: "agent-stall-working", Slug: "stall-working-slug", Name: "Stall Working Agent",
 		ProjectID: project.ID, RuntimeBrokerID: broker.ID,
 		Phase: string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	// Set agent to running+idle
+	// Set agent to running+working
 	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
 		Phase:    string(state.PhaseRunning),
-		Activity: string(state.ActivityIdle),
+		Activity: string(state.ActivityWorking),
 	}))
 
-	// Simulate stalled detection: mark agent stalled with stalled_from_activity = idle
+	// Simulate stalled detection: mark agent stalled with stalled_from_activity = working
 	db := s.(*sqlite.SQLiteStore).DB()
 	staleActivity := time.Now().Add(-10 * time.Minute)
 	_, err := db.ExecContext(ctx,
-		"UPDATE agents SET activity = 'stalled', stalled_from_activity = 'idle', last_activity_event = ?, last_seen = ? WHERE id = ?",
+		"UPDATE agents SET activity = 'stalled', stalled_from_activity = 'working', last_activity_event = ?, last_seen = ? WHERE id = ?",
 		staleActivity, time.Now().Add(-10*time.Second), agent.ID)
 	require.NoError(t, err)
 
-	// Send heartbeat still reporting "idle" — should NOT clear the stall
+	// Send heartbeat still reporting "working" — should NOT clear the stall
 	hb := brokerHeartbeatRequest{
 		Status: "online",
 		Projects: []brokerProjectHeartbeat{{
@@ -3132,7 +3132,7 @@ func TestBrokerHeartbeat_StalledIdleAgentNotOverwrittenBySameActivity(t *testing
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
 				Phase:    string(state.PhaseRunning),
-				Activity: "idle",
+				Activity: "working",
 			}},
 		}},
 	}
@@ -3141,8 +3141,8 @@ func TestBrokerHeartbeat_StalledIdleAgentNotOverwrittenBySameActivity(t *testing
 
 	updated, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "stalled", updated.Activity, "agent should remain stalled when heartbeat reports same pre-stall idle activity")
-	assert.Equal(t, "idle", updated.StalledFromActivity, "stalled_from_activity should be preserved")
+	assert.Equal(t, "stalled", updated.Activity, "agent should remain stalled when heartbeat reports same pre-stall working activity")
+	assert.Equal(t, "working", updated.StalledFromActivity, "stalled_from_activity should be preserved")
 }
 
 func TestBrokerHeartbeat_DoesNotRevertStoppedAgent(t *testing.T) {
@@ -3330,7 +3330,7 @@ func TestBrokerHeartbeat_DoesNotOverwriteTerminalActivityWithNonTerminal(t *test
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
 				Phase:    string(state.PhaseStopped),
-				Activity: string(state.ActivityIdle),
+				Activity: string(state.ActivityWorking),
 			}},
 		}},
 	}
@@ -4324,7 +4324,7 @@ func TestPreserveTerminalPhase(t *testing.T) {
 
 		// Simulate broker response setting phase to running on the in-memory agent
 		agent.Phase = string(state.PhaseRunning)
-		agent.Activity = string(state.ActivityIdle)
+		agent.Activity = string(state.ActivityWorking)
 
 		// preserveTerminalPhase should detect the DB has error and preserve it
 		srv.preserveTerminalPhase(ctx, agent)

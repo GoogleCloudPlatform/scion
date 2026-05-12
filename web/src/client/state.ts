@@ -29,7 +29,7 @@ import { SSEClient } from './sse-client.js';
 import type { SSEUpdateEvent } from './sse-client.js';
 import type { Agent, Project, RuntimeBroker } from '../shared/types.js';
 
-/** Activities that should not be overwritten by idle/empty transitions */
+/** Activities that should not be overwritten by working/empty transitions */
 const STICKY_ACTIVITIES = new Set(['waiting_for_input', 'completed', 'limits_exceeded']);
 
 /** Subscription scope matches view context */
@@ -297,12 +297,12 @@ export class StateManager extends EventTarget {
         }
       }
 
-      // Preserve sticky activities: if the incoming activity is idle/empty
+      // Preserve sticky activities: if the incoming activity is working/empty
       // but the existing activity is sticky, keep the existing value.
       const incomingActivity = delta.activity as string | undefined;
       if (
         incomingActivity !== undefined &&
-        (incomingActivity === 'idle' || incomingActivity === '') &&
+        (incomingActivity === 'working' || incomingActivity === '') &&
         base.activity &&
         STICKY_ACTIVITIES.has(base.activity)
       ) {

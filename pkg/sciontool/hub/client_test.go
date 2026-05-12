@@ -169,16 +169,16 @@ func TestClient_UpdateStatus(t *testing.T) {
 
 	err := client.UpdateStatus(context.Background(), StatusUpdate{
 		Phase:    state.PhaseRunning,
-		Activity: state.ActivityIdle,
-		Status:   "idle",
+		Activity: state.ActivityWorking,
+		Status:   "working",
 		Message:  "test message",
 	})
 
 	require.NoError(t, err)
 	assert.Equal(t, "test-token", receivedToken)
 	assert.Equal(t, state.PhaseRunning, receivedStatus.Phase)
-	assert.Equal(t, state.ActivityIdle, receivedStatus.Activity)
-	assert.Equal(t, "idle", receivedStatus.Status)
+	assert.Equal(t, state.ActivityWorking, receivedStatus.Activity)
+	assert.Equal(t, "working", receivedStatus.Status)
 	assert.Equal(t, "test message", receivedStatus.Message)
 }
 
@@ -224,11 +224,11 @@ func TestClient_ReportState(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("running/idle", func(t *testing.T) {
-		err := client.ReportState(ctx, state.PhaseRunning, state.ActivityIdle, "ready")
+		err := client.ReportState(ctx, state.PhaseRunning, state.ActivityWorking, "ready")
 		require.NoError(t, err)
 		assert.Equal(t, "running", lastPayload["phase"])
-		assert.Equal(t, "idle", lastPayload["activity"])
-		assert.Equal(t, "idle", lastPayload["status"])
+		assert.Equal(t, "working", lastPayload["activity"])
+		assert.Equal(t, "working", lastPayload["status"])
 		assert.Equal(t, "ready", lastPayload["message"])
 	})
 
@@ -309,8 +309,8 @@ func TestClient_RetryLogic(t *testing.T) {
 		client.retryMaxDelay = 50 * time.Millisecond
 
 		err := client.UpdateStatus(context.Background(), StatusUpdate{
-			Activity: state.ActivityIdle,
-			Status:   "idle",
+			Activity: state.ActivityWorking,
+			Status:   "working",
 		})
 		require.NoError(t, err)
 		assert.Equal(t, 3, attempts, "should have retried until success")
@@ -329,8 +329,8 @@ func TestClient_RetryLogic(t *testing.T) {
 		client.retryBaseDelay = 10 * time.Millisecond
 
 		err := client.UpdateStatus(context.Background(), StatusUpdate{
-			Activity: state.ActivityIdle,
-			Status:   "idle",
+			Activity: state.ActivityWorking,
+			Status:   "working",
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "400")
@@ -351,8 +351,8 @@ func TestClient_RetryLogic(t *testing.T) {
 		client.retryBaseDelay = 10 * time.Millisecond
 
 		err := client.UpdateStatus(context.Background(), StatusUpdate{
-			Activity: state.ActivityIdle,
-			Status:   "idle",
+			Activity: state.ActivityWorking,
+			Status:   "working",
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "3 attempts")
@@ -375,8 +375,8 @@ func TestClient_RetryLogic(t *testing.T) {
 		defer cancel()
 
 		err := client.UpdateStatus(ctx, StatusUpdate{
-			Activity: state.ActivityIdle,
-			Status:   "idle",
+			Activity: state.ActivityWorking,
+			Status:   "working",
 		})
 		require.Error(t, err)
 		assert.True(t, attempts < 5, "should have stopped early due to context timeout")

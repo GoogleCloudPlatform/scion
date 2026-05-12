@@ -45,11 +45,11 @@ func (h *LoggingHandler) eventToTag(event *hooks.Event) string {
 	case hooks.EventModelStart:
 		return string(state.ActivityThinking)
 	case hooks.EventModelEnd:
-		return string(state.ActivityIdle)
+		return string(state.ActivityWorking)
 	case hooks.EventToolStart:
 		return string(state.ActivityExecuting)
 	case hooks.EventToolEnd, hooks.EventAgentEnd:
-		return string(state.ActivityIdle)
+		return string(state.ActivityWorking)
 	case hooks.EventNotification:
 		return string(state.ActivityWaitingForInput)
 	case hooks.EventResponseComplete:
@@ -59,11 +59,11 @@ func (h *LoggingHandler) eventToTag(event *hooks.Event) string {
 	case hooks.EventPreStart:
 		return string(state.PhaseStarting)
 	case hooks.EventPostStart:
-		return string(state.ActivityIdle)
+		return string(state.ActivityWorking)
 	case hooks.EventPreStop:
 		return string(state.PhaseStopping)
 	default:
-		return string(state.ActivityIdle)
+		return string(state.ActivityWorking)
 	}
 }
 

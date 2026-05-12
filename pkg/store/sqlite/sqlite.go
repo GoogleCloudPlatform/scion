@@ -145,6 +145,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV49,
 		migrateV50,
 		migrationV51,
+		migrationV52,
 	}
 
 	// Create migrations table if not exists
@@ -735,11 +736,11 @@ ALTER TABLE agents ADD COLUMN tool_name TEXT DEFAULT '';
 UPDATE agents SET phase = 'created' WHERE status IN ('created', 'pending');
 UPDATE agents SET phase = 'provisioning' WHERE status = 'provisioning';
 UPDATE agents SET phase = 'cloning' WHERE status = 'cloning';
-UPDATE agents SET phase = 'running', activity = 'idle' WHERE status = 'running';
+UPDATE agents SET phase = 'running', activity = 'working' WHERE status = 'running';
 UPDATE agents SET phase = 'stopped' WHERE status = 'stopped';
 UPDATE agents SET phase = 'error' WHERE status = 'error';
 UPDATE agents SET phase = 'running', activity = 'thinking' WHERE status = 'busy';
-UPDATE agents SET phase = 'running', activity = 'idle' WHERE status = 'idle';
+UPDATE agents SET phase = 'running', activity = 'working' WHERE status = 'idle';
 UPDATE agents SET phase = 'running', activity = 'waiting_for_input' WHERE status = 'waiting_for_input';
 UPDATE agents SET phase = 'running', activity = 'completed' WHERE status = 'completed';
 UPDATE agents SET phase = 'running', activity = 'limits_exceeded' WHERE status = 'limits_exceeded';
@@ -759,7 +760,8 @@ UPDATE agents SET phase = 'created' WHERE (phase = '' OR phase IS NULL) AND stat
 UPDATE agents SET phase = 'stopped' WHERE (phase = '' OR phase IS NULL) AND status = 'deleted';
 
 -- Backfill activity from status for running agents
-UPDATE agents SET activity = status WHERE phase = 'running' AND (activity = '' OR activity IS NULL) AND status IN ('idle','waiting_for_input','completed','limits_exceeded','offline');
+UPDATE agents SET activity = status WHERE phase = 'running' AND (activity = '' OR activity IS NULL) AND status IN ('waiting_for_input','completed','limits_exceeded','offline');
+UPDATE agents SET activity = 'working' WHERE phase = 'running' AND (activity = '' OR activity IS NULL) AND status = 'idle';
 UPDATE agents SET activity = 'thinking' WHERE phase = 'running' AND (activity = '' OR activity IS NULL) AND status = 'busy';
 
 -- Update soft-delete index: rely on deleted_at instead of status
@@ -1331,6 +1333,12 @@ CREATE INDEX IF NOT EXISTS idx_gcp_sa_project ON gcp_service_accounts(project_id
 // migrationV51 adds group_id to messages for correlating set[] deliveries.
 const migrationV51 = `
 ALTER TABLE messages ADD COLUMN group_id TEXT NOT NULL DEFAULT '';
+`
+
+// migrationV52 renames the idle activity to working for clearer agent state reporting.
+const migrationV52 = `
+UPDATE agents SET activity = 'working' WHERE activity = 'idle';
+UPDATE agents SET stalled_from_activity = 'working' WHERE stalled_from_activity = 'idle';
 `
 
 // tableExists checks whether a table with the given name exists in the database.

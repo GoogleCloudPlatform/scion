@@ -77,7 +77,7 @@ func TestActivityIsValid(t *testing.T) {
 		want     bool
 	}{
 		// All 10 valid activities.
-		{ActivityIdle, true},
+		{ActivityWorking, true},
 		{ActivityThinking, true},
 		{ActivityExecuting, true},
 		{ActivityWaitingForInput, true},
@@ -113,8 +113,8 @@ func TestActivityIsValid(t *testing.T) {
 }
 
 func TestActivityValidate(t *testing.T) {
-	if err := ActivityIdle.Validate(); err != nil {
-		t.Errorf("ActivityIdle.Validate() returned unexpected error: %v", err)
+	if err := ActivityWorking.Validate(); err != nil {
+		t.Errorf("ActivityWorking.Validate() returned unexpected error: %v", err)
 	}
 	if err := Activity("").Validate(); err != nil {
 		t.Errorf("Activity(\"\").Validate() returned unexpected error: %v", err)
@@ -140,7 +140,7 @@ func TestActivityIsSticky(t *testing.T) {
 		{ActivityCompleted, true},
 		{ActivityLimitsExceeded, true},
 		{ActivityCrashed, true},
-		{ActivityIdle, false},
+		{ActivityWorking, false},
 		{ActivityThinking, false},
 		{ActivityExecuting, false},
 		{ActivityStalled, false},
@@ -168,7 +168,7 @@ func TestActivityIsPlatformSet(t *testing.T) {
 	}{
 		{ActivityStalled, true},
 		{ActivityOffline, true},
-		{ActivityIdle, false},
+		{ActivityWorking, false},
 		{ActivityThinking, false},
 		{ActivityExecuting, false},
 		{ActivityWaitingForInput, false},
@@ -199,7 +199,7 @@ func TestActivityIsTerminal(t *testing.T) {
 	}{
 		{ActivityCrashed, true},
 		{ActivityLimitsExceeded, true},
-		{ActivityIdle, false},
+		{ActivityWorking, false},
 		{ActivityThinking, false},
 		{ActivityExecuting, false},
 		{ActivityWaitingForInput, false},
@@ -298,7 +298,7 @@ func TestAgentStateValidate(t *testing.T) {
 	}{
 		{
 			name:    "valid running with activity",
-			state:   AgentState{Phase: PhaseRunning, Activity: ActivityIdle},
+			state:   AgentState{Phase: PhaseRunning, Activity: ActivityWorking},
 			wantErr: false,
 		},
 		{
@@ -323,7 +323,7 @@ func TestAgentStateValidate(t *testing.T) {
 		},
 		{
 			name:    "invalid: activity with suspended phase",
-			state:   AgentState{Phase: PhaseSuspended, Activity: ActivityIdle},
+			state:   AgentState{Phase: PhaseSuspended, Activity: ActivityWorking},
 			wantErr: true,
 		},
 		{
@@ -338,7 +338,7 @@ func TestAgentStateValidate(t *testing.T) {
 		},
 		{
 			name:    "invalid: non-terminal activity with stopped phase",
-			state:   AgentState{Phase: PhaseStopped, Activity: ActivityIdle},
+			state:   AgentState{Phase: PhaseStopped, Activity: ActivityWorking},
 			wantErr: true,
 		},
 		{

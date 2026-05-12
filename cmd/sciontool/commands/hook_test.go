@@ -106,7 +106,7 @@ func TestProcessHookData_SessionEvents(t *testing.T) {
 	statusData, _ := os.ReadFile(statusPath)
 	var status map[string]interface{}
 	json.Unmarshal(statusData, &status)
-	assert.Equal(t, "idle", status["activity"]) // session-start sets idle activity
+	assert.Equal(t, "working", status["activity"]) // session-start sets working activity
 	assert.Nil(t, status["status"])             // legacy field removed
 
 	// Test SessionEnd

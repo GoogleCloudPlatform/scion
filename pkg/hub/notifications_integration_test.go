@@ -162,7 +162,7 @@ func (env *integrationTestEnv) updateStatusViaAPI(t *testing.T, agentID, status,
 	case "running", "stopped", "error", "provisioning", "created":
 		statusUpdate.Phase = status
 	default:
-		// Activities: completed, waiting_for_input, idle, limits_exceeded, etc.
+		// Activities: completed, waiting_for_input, working, limits_exceeded, etc.
 		statusUpdate.Activity = status
 	}
 	body, _ := json.Marshal(statusUpdate)
@@ -440,7 +440,7 @@ func TestIntegration_StatusNormalization_NonTriggerStatusNoNotification(t *testi
 
 	// Status updates that should NOT trigger notifications
 	env.updateStatusViaAPI(t, child.ID, "running", "", "")
-	env.updateStatusViaAPI(t, child.ID, "idle", "", "")
+	env.updateStatusViaAPI(t, child.ID, "working", "", "")
 
 	time.Sleep(300 * time.Millisecond)
 

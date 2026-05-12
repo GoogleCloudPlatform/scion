@@ -385,7 +385,7 @@ func formatLastSeen(t time.Time) string {
 // formatLastActivity formats a status and timestamp as a combined "activity, time ago" string.
 func formatLastActivity(status string, t time.Time) string {
 	timePart := formatLastSeen(t)
-	if status == "" || status == "IDLE" || status == "idle" {
+	if status == "" || status == "WORKING" || status == "working" {
 		return timePart
 	}
 	if timePart == "-" {
