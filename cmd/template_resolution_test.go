@@ -47,15 +47,15 @@ func TestParseTemplateScope(t *testing.T) {
 			expectedName:  "claude",
 		},
 		{
-			name:          "grove scope prefix",
+			name:          "grove scope prefix (normalized to project)",
 			input:         "grove:custom-template",
-			expectedScope: "grove",
+			expectedScope: "project",
 			expectedName:  "custom-template",
 		},
 		{
-			name:          "project scope prefix (synonym for grove)",
+			name:          "project scope prefix",
 			input:         "project:custom-template",
-			expectedScope: "grove",
+			expectedScope: "project",
 			expectedName:  "custom-template",
 		},
 		{
@@ -73,7 +73,7 @@ func TestParseTemplateScope(t *testing.T) {
 		{
 			name:          "multiple colons",
 			input:         "grove:my:template",
-			expectedScope: "grove",
+			expectedScope: "project",
 			expectedName:  "my:template",
 		},
 		{

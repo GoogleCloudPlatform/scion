@@ -497,8 +497,8 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 		if tpl.Path != groveTplDir {
 			t.Errorf("expected path %q, got %q", groveTplDir, tpl.Path)
 		}
-		if tpl.Scope != "grove" {
-			t.Errorf("expected scope 'grove', got %q", tpl.Scope)
+		if tpl.Scope != "project" {
+			t.Errorf("expected scope 'project', got %q", tpl.Scope)
 		}
 	})
 
@@ -572,8 +572,8 @@ func TestFindTemplateInProjectPath_GitGroveInRepoTemplates(t *testing.T) {
 	if tpl.Path != inRepoTplDir {
 		t.Errorf("expected template path %q, got %q", inRepoTplDir, tpl.Path)
 	}
-	if tpl.Scope != "grove" {
-		t.Errorf("expected scope 'grove', got %q", tpl.Scope)
+	if tpl.Scope != "project" {
+		t.Errorf("expected scope 'project', got %q", tpl.Scope)
 	}
 }
 
