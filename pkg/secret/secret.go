@@ -39,7 +39,7 @@ const (
 // Scope constants define the visibility of a secret.
 const (
 	ScopeUser          = "user"
-	ScopeProject       = "grove"
+	ScopeProject       = "project"
 	ScopeRuntimeBroker = "runtime_broker"
 )
 
