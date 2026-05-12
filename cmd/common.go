@@ -241,6 +241,42 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 	}, nil
 }
 
+// CheckAgentsGitignore verifies that .scion/agents/ is listed in .gitignore
+// when running inside a git repo with a project-local project directory.
+// This runs once before any agent provisioning so the user gets a single
+// clear error instead of one per agent.
+func CheckAgentsGitignore(projectPath string) error {
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
+	if err != nil {
+		return nil
+	}
+
+	if !util.IsGitRepoDir(projectDir) {
+		return nil
+	}
+
+	if os.Getenv("SCION_HOST_UID") != "" {
+		return nil
+	}
+
+	root, err := util.RepoRootDir(projectDir)
+	if err != nil {
+		return nil
+	}
+
+	rel, err := filepath.Rel(root, projectDir)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return nil
+	}
+
+	agentsPath := filepath.ToSlash(filepath.Join(rel, "agents"))
+	if !util.IsIgnored(root, agentsPath+"/") {
+		return fmt.Errorf("security error: '%s/' must be in .gitignore when using a project-local project.\n\nRun 'scion init' to set up the project, or manually add '%s/' to your .gitignore", agentsPath, agentsPath)
+	}
+
+	return nil
+}
+
 // PrintUsingHub prints the informational message about using the Hub to stderr.
 // It is suppressed entirely in JSON output mode to keep stdout clean.
 func PrintUsingHub(endpoint string) {
@@ -328,6 +364,11 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		default:
 			return fmt.Errorf("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai", harnessAuthFlag)
 		}
+	}
+
+	// Pre-flight: verify .scion/agents/ is gitignored (once, before any provisioning).
+	if err := CheckAgentsGitignore(projectPath); err != nil {
+		return err
 	}
 
 	// Check if Hub should be used, excluding the target agent from sync requirements.
