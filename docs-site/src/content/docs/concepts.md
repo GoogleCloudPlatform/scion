@@ -61,7 +61,7 @@ Agent state uses a **layered model** with three dimensions:
   `created` → `provisioning` → `cloning` → `starting` → `running` → `stopping` → `stopped` (or `error`)
 
 - **Activity** — What the agent is doing within the `running` phase:
-  `idle`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `offline`
+  `working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `offline`
 
 - **Detail** — Freeform context about the current activity (tool name, message, task summary).
 

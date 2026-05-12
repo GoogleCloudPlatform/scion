@@ -325,7 +325,7 @@ func TestBlockingTaskIgnoresActiveDispatch(t *testing.T) {
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Sender:    "agent:agent-a",
 		Recipient: "user:test-user",
-		Msg:       "IDLE",
+		Msg:       "WORKING",
 		Type:      messages.TypeStateChange,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}

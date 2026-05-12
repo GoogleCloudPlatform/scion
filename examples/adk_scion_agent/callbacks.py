@@ -47,6 +47,6 @@ async def after_tool_callback(tool, args, tool_context, tool_response):
 
 
 async def after_agent_callback(callback_context):
-    """Agent turn complete — set activity to idle."""
-    sciontool.write_agent_status("idle")
+    """Agent turn complete — set activity to working."""
+    sciontool.write_agent_status("working")
     return None

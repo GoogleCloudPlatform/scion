@@ -26,7 +26,7 @@ Most endpoints require a `Bearer` token in the `Authorization` header.
 
 Agent state uses a layered model:
 - **Phase**: Lifecycle stage (`created`, `provisioning`, `cloning`, `running`, `stopped`, `error`).
-- **Activity**: Runtime activity within the `running` phase (`idle`, `thinking`, `executing`, `waiting_for_input`, `completed`, `limits_exceeded`, `offline`). Note: `offline` occurs when an agent heartbeat has not been heard for some time, often due to an expired auth token that the agent failed to refresh.
+- **Activity**: Runtime activity within the `running` phase (`working`, `thinking`, `executing`, `waiting_for_input`, `completed`, `limits_exceeded`, `offline`). Note: `offline` occurs when an agent heartbeat has not been heard for some time, often due to an expired auth token that the agent failed to refresh.
 - **Detail**: Freeform context (tool name, message, task summary).
 
 #### Projects (`/api/v1/projects`)

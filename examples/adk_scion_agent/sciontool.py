@@ -82,7 +82,7 @@ def write_agent_status(activity: str) -> None:
     blocked, completed, or limits_exceeded.
 
     Args:
-        activity: One of "thinking", "executing", "idle" (or other transient
+        activity: One of "thinking", "executing", "working" (or other transient
             activities). Values are lowercase to match scion's StatusHandler.
     """
     try:
