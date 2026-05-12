@@ -27,8 +27,7 @@ const (
 // deliveryMessage is the subset of StructuredMessage fields delivered to the agent.
 // The recipient field is stripped to save tokens.
 type deliveryMessage struct {
-	Version     int      `json:"version"`
-	Timestamp   string   `json:"timestamp"`
+	Timestamp string `json:"timestamp"`
 	Sender      string   `json:"sender"`
 	Msg         string   `json:"msg"`
 	Type        string   `json:"type"`
@@ -46,8 +45,7 @@ func FormatForDelivery(msg *StructuredMessage) string {
 	}
 
 	dm := deliveryMessage{
-		Version:     msg.Version,
-		Timestamp:   msg.Timestamp,
+		Timestamp: msg.Timestamp,
 		Sender:      msg.Sender,
 		Msg:         msg.Msg,
 		Type:        msg.Type,
