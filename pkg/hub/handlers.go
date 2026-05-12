@@ -2209,6 +2209,9 @@ type MessageRequest struct {
 	// Notify subscribes the sender to status notifications for this agent
 	// (COMPLETED, WAITING_FOR_INPUT, LIMITS_EXCEEDED, STALLED, ERROR).
 	Notify bool `json:"notify,omitempty"`
+
+	// Wake resumes a suspended agent before delivering the message.
+	Wake bool `json:"wake,omitempty"`
 }
 
 func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id string) {
@@ -2285,6 +2288,64 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	// Wake handling: if requested, resume a suspended agent before message delivery.
+	if req.Wake {
+		switch state.Phase(agent.Phase) {
+		case state.PhaseSuspended:
+			if !s.checkBrokerAvailability(w, r, agent) {
+				return
+			}
+			dispatcher := s.GetDispatcher()
+			if dispatcher == nil {
+				ServiceNotReady(w, "Dispatch not available — server may still be starting up")
+				return
+			}
+			if agent.RuntimeBrokerID == "" {
+				ServiceNotReady(w, "Agent has no runtime broker assigned")
+				return
+			}
+
+			if err := dispatcher.DispatchAgentStart(ctx, agent, ""); err != nil {
+				RuntimeError(w, "Failed to wake agent: "+err.Error())
+				return
+			}
+
+			newPhase := string(state.PhaseRunning)
+			statusUpdate := store.AgentStatusUpdate{
+				Phase: newPhase,
+			}
+			if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			agent.Phase = newPhase
+			s.events.PublishAgentStatus(ctx, agent)
+
+			if err := s.waitForAgentReady(ctx, id, 15*time.Second); err != nil {
+				RuntimeError(w, "Agent resumed but did not become ready: "+err.Error())
+				return
+			}
+
+		case state.PhaseRunning:
+			// no-op
+
+		case state.PhaseStopped:
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				"Agent is stopped, not suspended — use 'scion start' to start a fresh session", nil)
+			return
+
+		case state.PhaseError:
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				"Agent is in error state — use 'scion start' to restart", nil)
+			return
+
+		default:
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				fmt.Sprintf("Agent is not yet running (phase: %s) — wait for it to reach running state", agent.Phase), nil)
+			return
+		}
 	}
 
 	// Populate recipient slug and ID from the resolved agent.
