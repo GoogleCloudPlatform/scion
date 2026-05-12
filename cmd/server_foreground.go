@@ -589,6 +589,12 @@ func initStore(cfg *config.GlobalConfig) (store.Store, error) {
 			return nil, fmt.Errorf("failed to run ent migrations: %w", err)
 		}
 
+		if err := entc.MigrateGroveToProjectData(context.Background(), entDSN, sqliteStore); err != nil {
+			entClient.Close()
+			sqliteStore.Close()
+			return nil, fmt.Errorf("failed to migrate ent data: %w", err)
+		}
+
 		s := entadapter.NewCompositeStore(sqliteStore, entClient)
 
 		if err := s.Ping(context.Background()); err != nil {
