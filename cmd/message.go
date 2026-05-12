@@ -384,7 +384,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 				defer cancel()
 
 				msg := buildStructuredMessage(sender, "agent:"+name, message)
-				if err := agentSvc.SendStructuredMessage(ctx, name, msg, interrupt, false); err != nil {
+				if err := agentSvc.SendStructuredMessage(ctx, name, msg, interrupt, false, false); err != nil {
 					fmt.Printf("Warning: failed to send message to agent '%s' via Hub: %s\n", name, err)
 					return
 				}
@@ -429,7 +429,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 				defer cancel()
 
 				msg := buildStructuredMessage(sender, "agent:"+name, message)
-				if err := agentSvc.SendStructuredMessage(ctx, name, msg, interrupt, false); err != nil {
+				if err := agentSvc.SendStructuredMessage(ctx, name, msg, interrupt, false, false); err != nil {
 					fmt.Printf("Warning: failed to send message to agent '%s' via Hub: %s\n", name, err)
 					return
 				}
@@ -457,7 +457,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	defer cancel()
 
 	msg := buildStructuredMessage(sender, "agent:"+agentName, message)
-	if err := agentSvc.SendStructuredMessage(ctx, agentName, msg, interrupt, notify); err != nil {
+	if err := agentSvc.SendStructuredMessage(ctx, agentName, msg, interrupt, notify, false); err != nil {
 		return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
 	}
 
