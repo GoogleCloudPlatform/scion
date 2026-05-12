@@ -31,7 +31,7 @@ import (
 type Template struct {
 	Name  string
 	Path  string
-	Scope string // "global" or "grove"
+	Scope string // "global" or "project"
 }
 
 // ResolveContent resolves a template field value to its content bytes.
@@ -241,7 +241,7 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 }
 
 // FindTemplateInScope finds a template by name in a specific scope only.
-// Scope must be "global" or "grove". Returns nil if not found in that scope.
+// Scope must be "global" or "project". Returns nil if not found in that scope.
 func FindTemplateInScope(name, scope string) *Template {
 	var dir string
 	var err error
@@ -249,7 +249,7 @@ func FindTemplateInScope(name, scope string) *Template {
 	switch scope {
 	case "global":
 		dir, err = GetGlobalTemplatesDir()
-	case "grove":
+	case "project", "grove":
 		dir, err = GetProjectTemplatesDir()
 	default:
 		return nil
@@ -374,7 +374,7 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 	projectTemplatesDir := filepath.Join(projectPath, "templates")
 	path := filepath.Join(projectTemplatesDir, name)
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
-		return &Template{Name: name, Path: path, Scope: "grove"}, nil
+		return &Template{Name: name, Path: path, Scope: "project"}, nil
 	}
 
 	// Fall back to global templates
@@ -560,7 +560,7 @@ func ListTemplatesGrouped() (global []*Template, project []*Template, err error)
 
 	// Scan project templates
 	if projectDir, err := GetProjectTemplatesDir(); err == nil {
-		project = scan(projectDir, "grove")
+		project = scan(projectDir, "project")
 	}
 
 	// Sort both lists by name for consistent output
@@ -602,7 +602,7 @@ func ListTemplates() ([]*Template, error) {
 
 	// 2. Scan project templates (higher precedence)
 	if projectDir, err := GetProjectTemplatesDir(); err == nil {
-		scan(projectDir, "grove")
+		scan(projectDir, "project")
 	}
 
 	var list []*Template

@@ -163,7 +163,7 @@ func normalizeHarnessConfigSourceURL(raw string) string {
 func installToHub(hubCtx *HubContext, name, localPath, harnessType string) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
-	scope := "grove"
+	scope := "project"
 	scopeID := ""
 
 	if globalMode {

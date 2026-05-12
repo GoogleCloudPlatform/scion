@@ -111,8 +111,8 @@ func parseTemplateScope(templateName string) (scope, name string) {
 		// Check if it's a known scope prefix
 		switch prefix {
 		case "global", "grove", "project", "user":
-			if prefix == "project" {
-				return "grove", templateName[idx+1:]
+			if prefix == "grove" {
+				return "project", templateName[idx+1:]
 			}
 			return prefix, templateName[idx+1:]
 		}
@@ -132,8 +132,8 @@ func findTemplateOnHub(ctx context.Context, hubCtx *HubContext, name, scope, pro
 	// If explicit scope is provided, search only that scope
 	if scope != "" {
 		effectiveScope := scope
-		if effectiveScope == "project" {
-			effectiveScope = "grove"
+		if effectiveScope == "grove" {
+			effectiveScope = "project"
 		}
 
 		opts := &hubclient.ListTemplatesOptions{
@@ -141,7 +141,7 @@ func findTemplateOnHub(ctx context.Context, hubCtx *HubContext, name, scope, pro
 			Scope:  effectiveScope,
 			Status: "active",
 		}
-		if effectiveScope == "grove" && projectID != "" {
+		if effectiveScope == "project" && projectID != "" {
 			opts.ProjectID = projectID
 		}
 
@@ -165,7 +165,7 @@ func findTemplateOnHub(ctx context.Context, hubCtx *HubContext, name, scope, pro
 	if projectID != "" {
 		opts := &hubclient.ListTemplatesOptions{
 			Name:    name,
-			Scope:   "grove",
+			Scope:   "project",
 			ProjectID: projectID,
 			Status:  "active",
 		}
@@ -310,7 +310,7 @@ func promptForLocalTemplateUpload(ctx context.Context, hubCtx *HubContext, local
 		effectiveScope = templateScope
 	}
 	if effectiveScope == "" {
-		effectiveScope = "grove"
+		effectiveScope = "project"
 	}
 
 	fmt.Printf("\nTemplate '%s' was not found on the Hub but exists locally at:\n", localTemplate.Name)
@@ -368,10 +368,10 @@ func uploadLocalTemplate(ctx context.Context, hubCtx *HubContext, localTemplate 
 		effectiveScope = templateScope
 	}
 	if effectiveScope == "" {
-		effectiveScope = "grove"
+		effectiveScope = "project"
 	}
-	if effectiveScope == "project" {
-		effectiveScope = "grove"
+	if effectiveScope == "grove" {
+		effectiveScope = "project"
 	}
 
 	fmt.Printf("Uploading template '%s' to Hub (%s scope)...\n", localTemplate.Name, effectiveScope)
