@@ -269,7 +269,7 @@ func CheckAgentsGitignore(projectPath string) error {
 		return nil
 	}
 
-	agentsPath := filepath.Join(rel, "agents")
+	agentsPath := filepath.ToSlash(filepath.Join(rel, "agents"))
 	if !util.IsIgnored(root, agentsPath+"/") {
 		return fmt.Errorf("security error: '%s/' must be in .gitignore when using a project-local project.\n\nRun 'scion init' to set up the project, or manually add '%s/' to your .gitignore", agentsPath, agentsPath)
 	}
