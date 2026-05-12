@@ -1153,7 +1153,9 @@ export class ScionPageAgentDetail extends LitElement {
                     status=${agent.activity as StatusType}
                     label=${agent.activity}
                     size="small"
-                  ></scion-status-badge>`
+                  ></scion-status-badge>${(agent.updated || agent.updatedAt)
+                    ? html`<span style="color: var(--scion-text-muted, #64748b); font-size: 0.85em; margin-left: 0.5em;">${this.formatRelativeTime((agent.updated || agent.updatedAt)!)}</span>`
+                    : ''}`
                 : html`<span style="color: var(--scion-text-muted, #64748b);">—</span>`}
             </span>
           </div>
