@@ -93,7 +93,7 @@ func (s *SQLiteStore) Ping(ctx context.Context) error {
 
 // Migrate applies database migrations.
 func (s *SQLiteStore) Migrate(ctx context.Context) error {
-	migrations := []string{
+	migrations := []any{
 		migrationV1,
 		migrationV2,
 		migrationV3,
@@ -143,7 +143,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV47,
 		migrationV48,
 		migrationV49,
-		migrationV50,
+		migrateV50,
 	}
 
 	// Create migrations table if not exists
@@ -179,32 +179,58 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 			continue
 		}
 
-		needsFKOff := foreignKeysOffMigrations[version]
+		switch m := migration.(type) {
+		case string:
+			needsFKOff := foreignKeysOffMigrations[version]
 
-		if needsFKOff {
-			if err := s.applyMigrationWithFKOff(ctx, version, migration); err != nil {
-				return err
+			if needsFKOff {
+				if err := s.applyMigrationWithFKOff(ctx, version, m); err != nil {
+					return err
+				}
+				continue
 			}
-			continue
-		}
 
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("failed to start transaction for migration %d: %w", version, err)
-		}
+			tx, err := s.db.BeginTx(ctx, nil)
+			if err != nil {
+				return fmt.Errorf("failed to start transaction for migration %d: %w", version, err)
+			}
 
-		if _, err := tx.ExecContext(ctx, migration); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("failed to apply migration %d: %w", version, err)
-		}
+			if _, err := tx.ExecContext(ctx, m); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("failed to apply migration %d: %w", version, err)
+			}
 
-		if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (?)", version); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("failed to record migration %d: %w", version, err)
-		}
+			if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (?)", version); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("failed to record migration %d: %w", version, err)
+			}
 
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("failed to commit migration %d: %w", version, err)
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("failed to commit migration %d: %w", version, err)
+			}
+
+		case func(ctx context.Context, tx *sql.Tx) error:
+			tx, err := s.db.BeginTx(ctx, nil)
+			if err != nil {
+				return fmt.Errorf("failed to start transaction for migration %d: %w", version, err)
+			}
+
+			if err := m(ctx, tx); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("failed to apply migration %d: %w", version, err)
+			}
+
+			if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (?)", version); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("failed to record migration %d: %w", version, err)
+			}
+
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("failed to commit migration %d: %w", version, err)
+			}
+
+		default:
+			return fmt.Errorf("migration %d: unsupported type %T", version, migration)
 		}
 	}
 
@@ -1179,30 +1205,63 @@ CREATE TABLE IF NOT EXISTS invite_codes (
 CREATE INDEX IF NOT EXISTS idx_invite_codes_expires ON invite_codes(expires_at);
 `
 
-// Migration V50: Rename 'grove' entities to 'project'.
+// migrateV50 renames 'grove' entities to 'project' idempotently.
 // This is Phase 4 of the grove-to-project rename strategy.
-const migrationV50 = `
--- 1. Rename Tables
-ALTER TABLE groves RENAME TO projects;
-ALTER TABLE grove_contributors RENAME TO project_contributors;
-ALTER TABLE grove_sync_state RENAME TO project_sync_state;
+// Each rename operation checks whether the old name still exists before
+// attempting the rename, so the migration can be re-run safely on databases
+// that partially applied an earlier (non-idempotent) version of V50.
+func migrateV50(ctx context.Context, tx *sql.Tx) error {
+	// 1. Rename Tables (check before renaming)
+	tableRenames := [][2]string{
+		{"groves", "projects"},
+		{"grove_contributors", "project_contributors"},
+		{"grove_sync_state", "project_sync_state"},
+	}
+	for _, r := range tableRenames {
+		exists, err := tableExists(ctx, tx, r[0])
+		if err != nil {
+			return fmt.Errorf("checking table %s: %w", r[0], err)
+		}
+		if exists {
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", r[0], r[1])); err != nil {
+				return fmt.Errorf("renaming table %s to %s: %w", r[0], r[1], err)
+			}
+		}
+	}
 
--- 2. Rename Columns
-ALTER TABLE project_contributors RENAME COLUMN grove_id TO project_id;
-ALTER TABLE project_sync_state RENAME COLUMN grove_id TO project_id;
-ALTER TABLE agents RENAME COLUMN grove_id TO project_id;
-ALTER TABLE templates RENAME COLUMN grove_id TO project_id;
-ALTER TABLE notification_subscriptions RENAME COLUMN grove_id TO project_id;
-ALTER TABLE notifications RENAME COLUMN grove_id TO project_id;
-ALTER TABLE scheduled_events RENAME COLUMN grove_id TO project_id;
-ALTER TABLE schedules RENAME COLUMN grove_id TO project_id;
-ALTER TABLE subscription_templates RENAME COLUMN grove_id TO project_id;
-ALTER TABLE user_access_tokens RENAME COLUMN grove_id TO project_id;
-ALTER TABLE messages RENAME COLUMN grove_id TO project_id;
-ALTER TABLE groups RENAME COLUMN grove_id TO project_id;
-ALTER TABLE gcp_service_accounts RENAME COLUMN grove_id TO project_id;
+	// 2. Rename Columns (check before renaming)
+	// After step 1, tables are at their new names. If step 1 was already
+	// applied in a prior run, the tables are also at their new names.
+	columnRenames := [][3]string{
+		{"project_contributors", "grove_id", "project_id"},
+		{"project_sync_state", "grove_id", "project_id"},
+		{"agents", "grove_id", "project_id"},
+		{"templates", "grove_id", "project_id"},
+		{"notification_subscriptions", "grove_id", "project_id"},
+		{"notifications", "grove_id", "project_id"},
+		{"scheduled_events", "grove_id", "project_id"},
+		{"schedules", "grove_id", "project_id"},
+		{"subscription_templates", "grove_id", "project_id"},
+		{"user_access_tokens", "grove_id", "project_id"},
+		{"messages", "grove_id", "project_id"},
+		{"groups", "grove_id", "project_id"},
+		{"gcp_service_accounts", "grove_id", "project_id"},
+	}
+	for _, r := range columnRenames {
+		exists, err := columnExists(ctx, tx, r[0], r[1])
+		if err != nil {
+			return fmt.Errorf("checking column %s.%s: %w", r[0], r[1], err)
+		}
+		if exists {
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s", r[0], r[1], r[2])); err != nil {
+				return fmt.Errorf("renaming column %s.%s to %s: %w", r[0], r[1], r[2], err)
+			}
+		}
+	}
 
--- 3. Update Data Values
+	// 3. Update Data Values (already idempotent — UPDATE WHERE is a no-op
+	// when the old value no longer exists)
+	dataUpdates := `
 UPDATE env_vars SET scope = 'project' WHERE scope = 'grove';
 UPDATE secrets SET scope = 'project' WHERE scope = 'grove';
 UPDATE policies SET scope_type = 'project' WHERE scope_type = 'grove';
@@ -1210,8 +1269,13 @@ UPDATE gcp_service_accounts SET scope = 'project' WHERE scope = 'grove';
 UPDATE groups SET group_type = 'project_agents' WHERE group_type = 'grove_agents';
 UPDATE notification_subscriptions SET scope = 'project' WHERE scope = 'grove';
 UPDATE subscription_templates SET scope = 'project' WHERE scope = 'grove';
+`
+	if _, err := tx.ExecContext(ctx, dataUpdates); err != nil {
+		return fmt.Errorf("updating data values: %w", err)
+	}
 
--- 4. Rename/Recreate Indexes
+	// 4. Rename/Recreate Indexes (already idempotent — DROP IF EXISTS / CREATE IF NOT EXISTS)
+	indexSQL := `
 DROP INDEX IF EXISTS idx_groves_slug;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_slug ON projects(slug);
 DROP INDEX IF EXISTS idx_groves_git_remote;
@@ -1223,7 +1287,6 @@ CREATE INDEX IF NOT EXISTS idx_projects_default_runtime_broker ON projects(defau
 
 DROP INDEX IF EXISTS idx_agents_grove_slug;
 DROP INDEX IF EXISTS idx_agents_project_slug;
--- Use (agent_id, project_id) order to match Ent schema's (slug, project_id)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_project_slug ON agents(agent_id, project_id);
 DROP INDEX IF EXISTS idx_agents_grove;
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id);
@@ -1255,6 +1318,51 @@ CREATE INDEX IF NOT EXISTS idx_groups_project ON groups(project_id);
 DROP INDEX IF EXISTS idx_gcp_sa_grove;
 CREATE INDEX IF NOT EXISTS idx_gcp_sa_project ON gcp_service_accounts(project_id);
 `
+	if _, err := tx.ExecContext(ctx, indexSQL); err != nil {
+		return fmt.Errorf("updating indexes: %w", err)
+	}
+
+	return nil
+}
+
+// tableExists checks whether a table with the given name exists in the database.
+func tableExists(ctx context.Context, tx *sql.Tx, tableName string) (bool, error) {
+	var name string
+	err := tx.QueryRowContext(ctx,
+		"SELECT name FROM sqlite_master WHERE type='table' AND name=?", tableName,
+	).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// columnExists checks whether a column with the given name exists in the specified table.
+func columnExists(ctx context.Context, tx *sql.Tx, tableName, columnName string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", tableName))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			return false, err
+		}
+		if name == columnName {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
 
 // Helper functions for JSON marshaling/unmarshaling
 func marshalJSON(v interface{}) string {
