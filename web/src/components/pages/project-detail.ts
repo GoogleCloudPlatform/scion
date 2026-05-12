@@ -1290,7 +1290,7 @@ export class ScionPageProjectDetail extends LitElement {
                           data-tab=${tab.key}
                           .dataSource=${this.getTabDataSource(tab.key)}
                           ?editable=${isEditable}
-                          ?showArchive=${tab.key === 'workspace'}
+                          ?showArchive=${true}
                           @file-edit-requested=${this.handleFileEditRequested}
                           @file-preview-requested=${this.handleFilePreviewRequested}
                           @file-create-requested=${this.handleFileCreateRequested}

@@ -174,8 +174,12 @@ export class WorkspaceFileBrowserDataSource implements FileBrowserDataSource {
  */
 export class SharedDirFileBrowserDataSource implements FileBrowserDataSource {
   private readonly basePath: string;
+  private readonly projectId: string;
+  private readonly dirName: string;
 
   constructor(projectId: string, dirName: string) {
+    this.projectId = projectId;
+    this.dirName = dirName;
     this.basePath = `/api/v1/projects/${projectId}/shared-dirs/${encodeURIComponent(dirName)}/files`;
   }
 
@@ -232,7 +236,7 @@ export class SharedDirFileBrowserDataSource implements FileBrowserDataSource {
   }
 
   getArchiveUrl(): string | null {
-    return null;
+    return `/api/v1/projects/${this.projectId}/shared-dirs/${encodeURIComponent(this.dirName)}/archive`;
   }
 }
 

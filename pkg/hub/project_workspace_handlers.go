@@ -555,6 +555,107 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 	}
 }
 
+// handleProjectSharedDirArchive creates a zip archive of a shared directory and serves it for download.
+func (s *Server) handleProjectSharedDirArchive(w http.ResponseWriter, r *http.Request, projectID, dirName string) {
+	ctx := r.Context()
+
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Verify the shared dir is declared on this project
+	found := false
+	for _, d := range project.SharedDirs {
+		if d.Name == dirName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		NotFound(w, "Shared directory")
+		return
+	}
+
+	resolution, resolveErr := s.resolveSharedDirPath(ctx, project, dirName)
+	if resolveErr != nil {
+		Conflict(w, resolveErr.Error())
+		return
+	}
+	sharedDirPath := resolution.Path
+
+	if _, err := os.Stat(sharedDirPath); err != nil {
+		if os.IsNotExist(err) {
+			NotFound(w, "Shared directory")
+			return
+		}
+		InternalError(w)
+		return
+	}
+
+	archiveName := project.Slug + "-" + dirName + ".zip"
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, archiveName))
+
+	zw := zip.NewWriter(w)
+	defer zw.Close()
+
+	err = filepath.WalkDir(sharedDirPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		relPath, err := filepath.Rel(sharedDirPath, path)
+		if err != nil {
+			return err
+		}
+
+		if relPath == "." {
+			return nil
+		}
+
+		if d.IsDir() {
+			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		header.Name = relPath
+		header.Method = zip.Deflate
+
+		writer, err := zw.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		_, err = io.Copy(writer, f)
+		return err
+	})
+
+	if err != nil {
+		return
+	}
+}
+
 // ProjectWorkspaceWriteRequest is the request body for writing file content.
 type ProjectWorkspaceWriteRequest struct {
 	Content         string `json:"content"`
