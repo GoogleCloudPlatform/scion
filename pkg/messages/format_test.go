@@ -73,9 +73,12 @@ func TestFormatForDelivery_Structured(t *testing.T) {
 		t.Error("missing urgent in output")
 	}
 
-	// Should NOT contain recipient (stripped)
+	// Should NOT contain recipient or version (stripped)
 	if strings.Contains(result, `"recipient"`) {
 		t.Error("recipient should be stripped from delivery")
+	}
+	if strings.Contains(result, `"version"`) {
+		t.Error("version should be stripped from delivery")
 	}
 }
 

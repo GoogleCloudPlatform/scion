@@ -25,9 +25,9 @@ const (
 )
 
 // deliveryMessage is the subset of StructuredMessage fields delivered to the agent.
-// The recipient field is stripped to save tokens.
+// The recipient and version fields are stripped to save tokens.
 type deliveryMessage struct {
-	Timestamp string `json:"timestamp"`
+	Timestamp   string   `json:"timestamp"`
 	Sender      string   `json:"sender"`
 	Msg         string   `json:"msg"`
 	Type        string   `json:"type"`
@@ -38,14 +38,14 @@ type deliveryMessage struct {
 
 // FormatForDelivery formats a structured message for delivery to an agent via tmux.
 // If the message has plain=true, only the raw msg text is returned.
-// The recipient field is stripped before delivery.
+// The recipient and version fields are stripped before delivery.
 func FormatForDelivery(msg *StructuredMessage) string {
 	if msg.Plain || msg.Raw {
 		return msg.Msg
 	}
 
 	dm := deliveryMessage{
-		Timestamp: msg.Timestamp,
+		Timestamp:   msg.Timestamp,
 		Sender:      msg.Sender,
 		Msg:         msg.Msg,
 		Type:        msg.Type,
