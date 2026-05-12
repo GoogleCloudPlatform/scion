@@ -98,7 +98,7 @@ func (m *heartbeatMockManager) Start(ctx context.Context, opts api.StartOptions)
 	return nil, nil
 }
 
-func (m *heartbeatMockManager) Stop(ctx context.Context, agentID string) error {
+func (m *heartbeatMockManager) Stop(ctx context.Context, agentID string, projectPath string) error {
 	return nil
 }
 

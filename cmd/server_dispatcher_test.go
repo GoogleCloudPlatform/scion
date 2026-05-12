@@ -47,7 +47,7 @@ func (m *mockAgentManager) Start(ctx context.Context, opts api.StartOptions) (*a
 	}, nil
 }
 
-func (m *mockAgentManager) Stop(ctx context.Context, agentID string) error {
+func (m *mockAgentManager) Stop(ctx context.Context, agentID string, projectPath string) error {
 	m.stopCalls++
 	m.stopAgent = agentID
 	return nil

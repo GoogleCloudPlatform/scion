@@ -121,6 +121,7 @@ func (d *agentDispatcherAdapter) DispatchAgentStart(ctx context.Context, hubAgen
 // DispatchAgentStop implements hub.AgentDispatcher.
 // It stops a running agent on the runtime broker.
 func (d *agentDispatcherAdapter) DispatchAgentStop(ctx context.Context, hubAgent *store.Agent) error {
+	// Hub-dispatched operations don't scope by project path; the hub handles authorization.
 	if err := d.manager.Stop(ctx, hubAgent.Name, ""); err != nil {
 		return fmt.Errorf("failed to stop agent: %w", err)
 	}

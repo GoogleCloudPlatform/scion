@@ -90,7 +90,7 @@ func (m *protocolMockManager) Provision(ctx context.Context, opts api.StartOptio
 func (m *protocolMockManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	return nil, nil
 }
-func (m *protocolMockManager) Stop(ctx context.Context, agentID string) error {
+func (m *protocolMockManager) Stop(ctx context.Context, agentID string, projectPath string) error {
 	return nil
 }
 func (m *protocolMockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
