@@ -40,7 +40,7 @@ var (
 type waiter struct {
 	ch        chan *messages.StructuredMessage
 	agentSlug string
-	projectID   string
+	projectID string
 }
 
 // Bridge is the core bridge logic that ties together state management,
@@ -246,7 +246,7 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	task := &state.Task{
 		ID:        taskID,
 		ContextID: agentCtx.ContextID,
-		ProjectID:   agentCtx.ProjectID,
+		ProjectID: agentCtx.ProjectID,
 		AgentSlug: agentCtx.AgentSlug,
 		AgentID:   agentCtx.AgentID,
 		State:     TaskStateSubmitted,
@@ -315,7 +315,7 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	b.addWaiter(taskID, &waiter{
 		ch:        responseCh,
 		agentSlug: agentCtx.AgentSlug,
-		projectID:   agentCtx.ProjectID,
+		projectID: agentCtx.ProjectID,
 	})
 	defer b.removeWaiter(taskID)
 	defer b.unregisterActiveTask(taskID, aKey)
@@ -852,10 +852,10 @@ func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, con
 
 		b.log.Info("auto-provisioning agent", "slug", agentSlug, "project", projectSlug, "template", projectCfg.DefaultTemplate)
 		created, err := b.hubClient.Agents().Create(ctx, &hubclient.CreateAgentRequest{
-			Name:     agentSlug,
-			ProjectID:  projectSlug,
-			Template: projectCfg.DefaultTemplate,
-			Labels:   map[string]string{"a2a-bridge/auto-provisioned": "true"},
+			Name:      agentSlug,
+			ProjectID: projectSlug,
+			Template:  projectCfg.DefaultTemplate,
+			Labels:    map[string]string{"a2a-bridge/auto-provisioned": "true"},
 		})
 		if err != nil {
 			// Concurrent create may have succeeded; re-list to find the agent.
@@ -888,7 +888,7 @@ func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, con
 	now := time.Now()
 	agentCtx := &state.Context{
 		ContextID:  newContextID,
-		ProjectID:    projectID,
+		ProjectID:  projectID,
 		AgentSlug:  agentSlug,
 		AgentID:    agentID,
 		CreatedAt:  now,

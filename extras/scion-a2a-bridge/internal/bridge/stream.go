@@ -182,7 +182,7 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 	task := &state.Task{
 		ID:        taskID,
 		ContextID: agentCtx.ContextID,
-		ProjectID:   agentCtx.ProjectID,
+		ProjectID: agentCtx.ProjectID,
 		AgentSlug: agentCtx.AgentSlug,
 		AgentID:   agentCtx.AgentID,
 		State:     TaskStateSubmitted,

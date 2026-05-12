@@ -30,13 +30,13 @@ import (
 // messageTestState captures and restores package-level vars for test isolation.
 type messageTestState struct {
 	projectPath string
-	noHub     bool
+	noHub       bool
 }
 
 func saveMessageTestState() messageTestState {
 	return messageTestState{
 		projectPath: projectPath,
-		noHub:     noHub,
+		noHub:       noHub,
 	}
 }
 
@@ -140,9 +140,9 @@ func TestSendMessageViaHub_SingleAgent(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  projectID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	err = sendMessageViaHub(hubCtx, "my-agent", "hello world", false, false, false, false, false)
@@ -170,9 +170,9 @@ func TestSendMessageViaHub_SingleAgentInterrupt(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  projectID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	// Set interrupt flag for this test
@@ -208,9 +208,9 @@ func TestSendMessageViaHub_Broadcast(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  projectID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	// Set broadcast flag for structured message construction
@@ -245,9 +245,9 @@ func TestSendMessageViaHub_BroadcastNoAgents(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  projectID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	err = sendMessageViaHub(hubCtx, "", "hello", false, true, false, false, false)
@@ -314,9 +314,9 @@ func TestSendMessageViaHub_SingleAgentError(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  projectID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false, false, false)
@@ -450,9 +450,9 @@ func TestSendMessageViaHub_BroadcastPartialFailure(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  projectID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	// Broadcast should not return an error on partial failure
@@ -554,9 +554,9 @@ func TestSendMessageViaHub_NotifyFlag(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  projectID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false, true, false)
@@ -602,9 +602,9 @@ func TestSendMessageViaHub_NoNotifyFlag(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  projectID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	// Explicit --no-notify: notify should be false
@@ -644,9 +644,9 @@ func TestSendOutboundMessageViaHub(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  projectID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	t.Setenv("SCION_AGENT_NAME", "my-agent")
@@ -675,9 +675,9 @@ func TestSendOutboundMessageViaHub_RequiresAgentContext(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  "grove-test",
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: "grove-test",
 	}
 
 	t.Setenv("SCION_AGENT_NAME", "")
@@ -967,9 +967,9 @@ func TestSendMessageViaHub_WakePassedThrough(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  projectID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	// Send with wake=true
