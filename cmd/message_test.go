@@ -859,15 +859,10 @@ func TestSendSetMessageViaHub_RequiresHub(t *testing.T) {
 	msgAll = false
 
 	err := messageCmd.RunE(messageCmd, []string{"set[agent:a,agent:b]", "hello"})
-	// This should try to check Hub availability and fail (no hub configured in test)
-	// The exact error depends on CheckHubAvailabilityWithOptions, but it should not panic
-	if err != nil {
-		// Expected: either Hub not available or set[] recipients require Hub mode
-		assert.True(t,
-			assert.ObjectsAreEqual("set[] recipients require Hub mode (use 'scion hub enable' first)", err.Error()) ||
-				err != nil, // any error is acceptable since we can't set up Hub in this test
-		)
-	}
+	// When Hub is not configured, this should fail with "set[] recipients require Hub mode".
+	// When Hub is configured but test agents don't exist, delivery fails.
+	// Either way, an error must be returned — never silent nil.
+	require.Error(t, err)
 }
 
 func TestNotifyFlagValidation(t *testing.T) {

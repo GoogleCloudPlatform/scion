@@ -606,6 +606,12 @@ func sendSetMessageViaHub(hubCtx *HubContext, recipients []messages.SetRecipient
 		fmt.Printf("Set delivery complete: %d/%d delivered.\n", delivered, len(recipients))
 	}
 
+	if delivered == 0 {
+		return fmt.Errorf("set delivery failed: 0/%d recipients received the message", len(recipients))
+	}
+	if delivered < len(recipients) {
+		return fmt.Errorf("set delivery partially failed: %d/%d delivered", delivered, len(recipients))
+	}
 	return nil
 }
 

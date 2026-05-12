@@ -2322,6 +2322,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			AgentID:     agent.ID,
 			CreatedAt:   time.Now(),
 		}
+		// Propagate GroupID from metadata so CLI-originated set[] messages
+		// preserve correlation in the store.
+		if structuredMsg.Metadata != nil {
+			if gid, ok := structuredMsg.Metadata["group_id"]; ok {
+				storeMsg.GroupID = gid
+			}
+		}
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist message", "error", err)
 		}
