@@ -4135,7 +4135,9 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 			if len(parts) > 1 {
 				rest = parts[1]
 			}
-			if strings.HasPrefix(rest, "files") {
+			if rest == "archive" {
+				s.handleProjectSharedDirArchive(w, r, projectID, name)
+			} else if strings.HasPrefix(rest, "files") {
 				filePath := strings.TrimPrefix(rest, "files")
 				filePath = strings.TrimPrefix(filePath, "/")
 				s.handleSharedDirFiles(w, r, projectID, name, filePath)

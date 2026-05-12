@@ -461,52 +461,15 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 	io.Copy(w, f)
 }
 
-// handleProjectWorkspaceArchive creates a zip archive of the entire workspace and serves it for download.
-func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Request, projectID string) {
-	ctx := r.Context()
-
-	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
-		return
-	}
-
-	// Look up the project
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Resolve workspace path — supports hub-native, shared-workspace, and linked projects
-	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
-	if err != nil {
-		Conflict(w, err.Error())
-		return
-	}
-
-	// Check workspace directory exists
-	if _, err := os.Stat(workspacePath); err != nil {
-		if os.IsNotExist(err) {
-			NotFound(w, "Workspace")
-			return
-		}
-		InternalError(w)
-		return
-	}
-
-	archiveName := project.Slug + "-workspace.zip"
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, archiveName))
-
-	zw := zip.NewWriter(w)
-	defer zw.Close()
-
-	err = filepath.WalkDir(workspacePath, func(path string, d fs.DirEntry, err error) error {
+// writeDirectoryToZip walks dirPath and writes all files into the given zip.Writer,
+// preserving directory structure relative to dirPath.
+func writeDirectoryToZip(zw *zip.Writer, dirPath string) error {
+	return filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		relPath, err := filepath.Rel(workspacePath, path)
+		relPath, err := filepath.Rel(dirPath, path)
 		if err != nil {
 			return err
 		}
@@ -547,10 +510,109 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 		_, err = io.Copy(writer, f)
 		return err
 	})
+}
 
+// handleProjectWorkspaceArchive creates a zip archive of the entire workspace and serves it for download.
+func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Request, projectID string) {
+	ctx := r.Context()
+
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	// Look up the project
+	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Resolve workspace path — supports hub-native, shared-workspace, and linked projects
+	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
+	if err != nil {
+		Conflict(w, err.Error())
+		return
+	}
+
+	// Check workspace directory exists
+	if _, err := os.Stat(workspacePath); err != nil {
+		if os.IsNotExist(err) {
+			NotFound(w, "Workspace")
+			return
+		}
+		InternalError(w)
+		return
+	}
+
+	archiveName := project.Slug + "-workspace.zip"
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, archiveName))
+
+	zw := zip.NewWriter(w)
+	defer zw.Close()
+
+	if err := writeDirectoryToZip(zw, workspacePath); err != nil {
 		// At this point we've already started writing, so we can't send an error response.
 		// The zip will be truncated/corrupt, which the client will notice.
+		slog.WarnContext(ctx, "failed to complete workspace archive", "project_id", projectID, "error", err)
+		return
+	}
+}
+
+// handleProjectSharedDirArchive creates a zip archive of a shared directory and serves it for download.
+func (s *Server) handleProjectSharedDirArchive(w http.ResponseWriter, r *http.Request, projectID, dirName string) {
+	ctx := r.Context()
+
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Verify the shared dir is declared on this project
+	found := false
+	for _, d := range project.SharedDirs {
+		if d.Name == dirName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		NotFound(w, "Shared directory")
+		return
+	}
+
+	resolution, resolveErr := s.resolveSharedDirPath(ctx, project, dirName)
+	if resolveErr != nil {
+		Conflict(w, resolveErr.Error())
+		return
+	}
+	sharedDirPath := resolution.Path
+
+	if _, err := os.Stat(sharedDirPath); err != nil {
+		if os.IsNotExist(err) {
+			NotFound(w, "Shared directory")
+			return
+		}
+		InternalError(w)
+		return
+	}
+
+	archiveName := project.Slug + "-" + dirName + ".zip"
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, archiveName))
+
+	zw := zip.NewWriter(w)
+	defer zw.Close()
+
+	if err := writeDirectoryToZip(zw, sharedDirPath); err != nil {
+		slog.WarnContext(ctx, "failed to complete shared dir archive", "project_id", projectID, "dir", dirName, "error", err)
 		return
 	}
 }
