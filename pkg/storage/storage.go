@@ -206,7 +206,7 @@ func TemplateStoragePath(scope, scopeID, templateSlug string) string {
 	switch scope {
 	case "global":
 		return "templates/global/" + templateSlug
-	case "grove":
+	case "grove", "project":
 		return "templates/groves/" + scopeID + "/" + templateSlug
 	case "user":
 		return "templates/users/" + scopeID + "/" + templateSlug
@@ -227,7 +227,7 @@ func HarnessConfigStoragePath(scope, scopeID, slug string) string {
 	switch scope {
 	case "global":
 		return "harness-configs/global/" + slug
-	case "grove":
+	case "grove", "project":
 		return "harness-configs/groves/" + scopeID + "/" + slug
 	case "user":
 		return "harness-configs/users/" + scopeID + "/" + slug
