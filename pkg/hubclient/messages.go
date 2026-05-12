@@ -119,7 +119,7 @@ func (s *messageService) List(ctx context.Context, opts *ListMessagesOptions) (*
 			query.Set("agent", opts.AgentID)
 		}
 		if opts.ProjectID != "" {
-			query.Set("grove", opts.ProjectID)
+			query.Set("project", opts.ProjectID)
 		}
 		if opts.Type != "" {
 			query.Set("type", opts.Type)
