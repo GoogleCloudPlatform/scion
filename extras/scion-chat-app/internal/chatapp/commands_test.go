@@ -68,6 +68,18 @@ func TestHandleEvent_CommandRouting(t *testing.T) {
 			args:        "bogus",
 			wantContain: "Unknown command",
 		},
+		{
+			name:        "scion help with extra args falls through to messaging",
+			command:     "scion",
+			args:        "help me understand X",
+			wantContain: "not linked",
+		},
+		{
+			name:        "scionAdmin help with extra args returns unknown command",
+			command:     "scionAdmin",
+			args:        "help something",
+			wantContain: "Unknown command",
+		},
 	}
 
 	for _, tt := range tests {
