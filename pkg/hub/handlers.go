@@ -2275,6 +2275,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
+	// Detect set[] recipient for multi-target fan-out.
+	if structuredMsg != nil && messages.IsSetRecipient(structuredMsg.Recipient) {
+		s.handleSetMessage(w, r, id, structuredMsg, plainMessage, req.Interrupt)
+		return
+	}
+
 	agent, err := s.store.GetAgent(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -2315,6 +2321,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			Broadcasted: structuredMsg.Broadcasted,
 			AgentID:     agent.ID,
 			CreatedAt:   time.Now(),
+		}
+		// Propagate GroupID from metadata so CLI-originated set[] messages
+		// preserve correlation in the store.
+		if structuredMsg.Metadata != nil {
+			if gid, ok := structuredMsg.Metadata["group_id"]; ok {
+				storeMsg.GroupID = gid
+			}
 		}
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist message", "error", err)
@@ -2358,6 +2371,174 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// SetMessageRecipientResult represents the delivery status for one recipient in a set[] delivery.
+type SetMessageRecipientResult struct {
+	Recipient string `json:"recipient"`
+	Status    string `json:"status"`
+	Error     string `json:"error,omitempty"`
+}
+
+// SetMessageResponse is the JSON response for a set[] message delivery.
+type SetMessageResponse struct {
+	GroupID    string                      `json:"group_id"`
+	Delivered int                         `json:"delivered"`
+	Failed    int                         `json:"failed"`
+	Results   []SetMessageRecipientResult `json:"results"`
+}
+
+// handleSetMessage fans out a structured message to multiple recipients parsed from set[].
+func (s *Server) handleSetMessage(w http.ResponseWriter, r *http.Request, anchorID string, msg *messages.StructuredMessage, plainMessage string, interrupt bool) {
+	ctx := r.Context()
+
+	recipients, err := messages.ParseSetRecipient(msg.Recipient)
+	if err != nil {
+		ValidationError(w, "invalid set[] recipient: "+err.Error(), nil)
+		return
+	}
+
+	// Resolve the anchor agent for project context.
+	anchorAgent, err := s.store.GetAgent(ctx, anchorID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	projectID := anchorAgent.ProjectID
+
+	groupID := api.NewUUID()
+	results := make([]SetMessageRecipientResult, len(recipients))
+	delivered := 0
+
+	dispatcher := s.GetDispatcher()
+
+	for i, recip := range recipients {
+		recipStr := recip.String()
+
+		switch recip.Kind {
+		case messages.RecipientAgent:
+			agent, err := s.store.GetAgentBySlug(ctx, projectID, api.Slugify(recip.Name))
+			if err != nil {
+				results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "agent not found: " + recip.Name}
+				continue
+			}
+
+			agentMsg := *msg
+			agentMsg.Recipient = "agent:" + agent.Slug
+			agentMsg.RecipientID = agent.ID
+
+			storeMsg := &store.Message{
+				ID:          api.NewUUID(),
+				ProjectID:  projectID,
+				Sender:     agentMsg.Sender,
+				SenderID:   agentMsg.SenderID,
+				Recipient:  agentMsg.Recipient,
+				RecipientID: agentMsg.RecipientID,
+				Msg:        agentMsg.Msg,
+				Type:       agentMsg.Type,
+				Urgent:     agentMsg.Urgent,
+				AgentID:    agent.ID,
+				GroupID:    groupID,
+				CreatedAt:  time.Now(),
+			}
+			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
+				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
+			}
+			s.events.PublishUserMessage(ctx, storeMsg)
+
+			if dispatcher != nil && agent.RuntimeBrokerID != "" {
+				if err := dispatcher.DispatchAgentMessage(ctx, agent, plainMessage, interrupt, &agentMsg); err != nil {
+					results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
+					continue
+				}
+			} else if dispatcher == nil {
+				results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "dispatcher not available"}
+				continue
+			} else {
+				results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "agent has no runtime broker"}
+				continue
+			}
+
+			results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "delivered"}
+			delivered++
+
+		case messages.RecipientUser:
+			userRecip := "user:" + recip.Name
+			userID := ""
+
+			// Try to resolve user by email or display name.
+			identifier := recip.Name
+			if strings.Contains(identifier, "@") {
+				if u, err := s.store.GetUserByEmail(ctx, identifier); err == nil {
+					userID = u.ID
+					name := u.DisplayName
+					if name == "" {
+						name = u.Email
+					}
+					userRecip = "user:" + name
+				}
+			}
+			if userID == "" {
+				result, lookupErr := s.store.ListUsers(ctx, store.UserFilter{Search: identifier}, store.ListOptions{Limit: 1})
+				if lookupErr == nil && len(result.Items) == 1 {
+					u := result.Items[0]
+					userID = u.ID
+					name := u.DisplayName
+					if name == "" {
+						name = u.Email
+					}
+					userRecip = "user:" + name
+				}
+			}
+
+			if userID == "" {
+				results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "user not found: " + recip.Name}
+				continue
+			}
+
+			userMsg := *msg
+			userMsg.Recipient = userRecip
+			userMsg.RecipientID = userID
+
+			storeMsg := &store.Message{
+				ID:          api.NewUUID(),
+				ProjectID:  projectID,
+				Sender:     userMsg.Sender,
+				SenderID:   userMsg.SenderID,
+				Recipient:  userMsg.Recipient,
+				RecipientID: userMsg.RecipientID,
+				Msg:        userMsg.Msg,
+				Type:       userMsg.Type,
+				Urgent:     userMsg.Urgent,
+				AgentID:    anchorAgent.ID,
+				GroupID:    groupID,
+				CreatedAt:  time.Now(),
+			}
+			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
+				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
+			}
+			s.events.PublishUserMessage(ctx, storeMsg)
+
+			results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "delivered"}
+			delivered++
+		}
+	}
+
+	s.logMessage("set message dispatched",
+		"project_id", projectID,
+		"group_id", groupID,
+		"total", len(recipients),
+		"delivered", delivered,
+		"failed", len(recipients)-delivered,
+	)
+
+	resp := SetMessageResponse{
+		GroupID:   groupID,
+		Delivered: delivered,
+		Failed:    len(recipients) - delivered,
+		Results:   results,
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // BroadcastMessageRequest is the request body for broadcasting a message via the broker.

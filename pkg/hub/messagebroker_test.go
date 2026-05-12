@@ -697,6 +697,60 @@ func TestMessageBrokerProxy_ProjectSubscriptionDedup(t *testing.T) {
 	}
 }
 
+func TestMessageBrokerProxy_PublishToSet(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	setupBrokerTestAgent(t, s, projectID, "set-agent-a", "running")
+	setupBrokerTestAgent(t, s, projectID, "set-agent-b", "running")
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	b := broker.NewInProcessBroker(slog.Default())
+	defer b.Close()
+
+	dispatcher := &brokerMockDispatcher{}
+
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
+	proxy.Start()
+	defer proxy.Stop()
+
+	proxy.subscribeAgent(projectID, "set-agent-a")
+	proxy.subscribeAgent(projectID, "set-agent-b")
+
+	msg := messages.NewInstruction("user:alice", "", "hello set")
+
+	recipients := []messages.SetRecipient{
+		{Kind: messages.RecipientAgent, Name: "set-agent-a"},
+		{Kind: messages.RecipientAgent, Name: "set-agent-b"},
+	}
+
+	errs := proxy.PublishToSet(context.Background(), projectID, recipients, msg)
+	for k, err := range errs {
+		if err != nil {
+			t.Errorf("PublishToSet error for %s: %v", k, err)
+		}
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	dispatched := dispatcher.getMessages()
+	if len(dispatched) != 2 {
+		t.Fatalf("expected 2 dispatched messages from PublishToSet, got %d", len(dispatched))
+	}
+
+	slugs := map[string]bool{}
+	for _, d := range dispatched {
+		slugs[d.agentSlug] = true
+		if d.msg != "hello set" {
+			t.Errorf("expected msg 'hello set', got %q", d.msg)
+		}
+	}
+	if !slugs["set-agent-a"] || !slugs["set-agent-b"] {
+		t.Errorf("expected both set-agent-a and set-agent-b to receive messages, got %v", slugs)
+	}
+}
+
 func TestRecipientSlug(t *testing.T) {
 	tests := []struct {
 		input    string

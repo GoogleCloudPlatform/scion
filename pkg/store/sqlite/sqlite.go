@@ -144,6 +144,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrationV48,
 		migrationV49,
 		migrateV50,
+		migrationV51,
 	}
 
 	// Create migrations table if not exists
@@ -1326,6 +1327,11 @@ CREATE INDEX IF NOT EXISTS idx_gcp_sa_project ON gcp_service_accounts(project_id
 
 	return nil
 }
+
+// migrationV51 adds group_id to messages for correlating set[] deliveries.
+const migrationV51 = `
+ALTER TABLE messages ADD COLUMN group_id TEXT NOT NULL DEFAULT '';
+`
 
 // tableExists checks whether a table with the given name exists in the database.
 func tableExists(ctx context.Context, tx *sql.Tx, tableName string) (bool, error) {

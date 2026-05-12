@@ -69,22 +69,26 @@ func newMessageMockHubServer(t *testing.T, projectID string, runningAgents []hub
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
-		case r.Method == http.MethodGet && (r.URL.Path == "/api/v1/groves/"+projectID+"/agents" || r.URL.Path == "/api/v1/agents"):
+		case r.Method == http.MethodGet && (r.URL.Path == "/api/v1/groves/"+projectID+"/agents" || r.URL.Path == "/api/v1/projects/"+projectID+"/agents" || r.URL.Path == "/api/v1/agents"):
 			// List agents endpoint
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": runningAgents,
 			})
 
 		case r.Method == http.MethodPost:
-			// Extract agent name from path: /api/v1/groves/<projectID>/agents/<name>/message
+			// Extract agent name from path: /api/v1/projects/<projectID>/agents/<name>/message
+			// or /api/v1/groves/<projectID>/agents/<name>/message (legacy)
 			// or /api/v1/agents/<name>/message
 			var agentName string
+			projectPrefix := "/api/v1/projects/" + projectID + "/agents/"
 			grovePrefix := "/api/v1/groves/" + projectID + "/agents/"
 			globalPrefix := "/api/v1/agents/"
 			path := r.URL.Path
-			if len(path) > len(grovePrefix) && path[:len(grovePrefix)] == grovePrefix {
+			if len(path) > len(projectPrefix) && path[:len(projectPrefix)] == projectPrefix {
+				rest := path[len(projectPrefix):]
+				agentName = rest[:len(rest)-len("/message")]
+			} else if len(path) > len(grovePrefix) && path[:len(grovePrefix)] == grovePrefix {
 				rest := path[len(grovePrefix):]
-				// rest is "<name>/message"
 				agentName = rest[:len(rest)-len("/message")]
 			} else if len(path) > len(globalPrefix) && path[:len(globalPrefix)] == globalPrefix {
 				rest := path[len(globalPrefix):]
@@ -400,9 +404,17 @@ func TestSendMessageViaHub_BroadcastPartialFailure(t *testing.T) {
 		case r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{"agents": agents})
 		case r.Method == http.MethodPost:
-			prefix := "/api/v1/groves/" + projectID + "/agents/"
-			rest := r.URL.Path[len(prefix):]
-			agentName := rest[:len(rest)-len("/message")]
+			projectPrefix := "/api/v1/projects/" + projectID + "/agents/"
+			grovePrefix := "/api/v1/groves/" + projectID + "/agents/"
+			var agentName string
+			path := r.URL.Path
+			if len(path) > len(projectPrefix) && path[:len(projectPrefix)] == projectPrefix {
+				rest := path[len(projectPrefix):]
+				agentName = rest[:len(rest)-len("/message")]
+			} else if len(path) > len(grovePrefix) && path[:len(grovePrefix)] == grovePrefix {
+				rest := path[len(grovePrefix):]
+				agentName = rest[:len(rest)-len("/message")]
+			}
 
 			if agentName == "bad-agent" {
 				w.WriteHeader(http.StatusInternalServerError)
@@ -714,6 +726,143 @@ func TestUserRecipientFlagValidation(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
+}
+
+func TestSetRecipientFlagValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		raw       bool
+		broadcast bool
+		all       bool
+		in        string
+		notify    bool
+		wantErr   string
+	}{
+		{
+			name:    "set with raw not allowed",
+			args:    []string{"set[agent:a,agent:b]", "hello"},
+			raw:     true,
+			wantErr: "--raw cannot be used with set[] recipients",
+		},
+		{
+			name:      "set with broadcast not allowed",
+			args:      []string{"set[agent:a,agent:b]", "hello"},
+			broadcast: true,
+			wantErr:   "set[] recipients cannot be combined with --broadcast or --all",
+		},
+		{
+			name:    "set with all not allowed",
+			args:    []string{"set[agent:a,agent:b]", "hello"},
+			all:     true,
+			wantErr: "set[] recipients cannot be combined with --broadcast or --all",
+		},
+		{
+			name:    "set with in not allowed",
+			args:    []string{"set[agent:a,agent:b]", "hello"},
+			in:      "30m",
+			wantErr: "--in/--at cannot be used with set[] recipients",
+		},
+		{
+			name:    "set with notify not allowed",
+			args:    []string{"set[agent:a,agent:b]", "hello"},
+			notify:  true,
+			wantErr: "--notify cannot be used with set[] recipients",
+		},
+		{
+			name:    "invalid set",
+			args:    []string{"set[agent:a]", "hello"},
+			wantErr: "invalid set recipient",
+		},
+		{
+			name:    "empty set",
+			args:    []string{"set[]", "hello"},
+			wantErr: "invalid set recipient",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origRaw := msgRaw
+			origBroadcast, origAll := msgBroadcast, msgAll
+			origIn := msgIn
+			origNotify := msgNotify
+			defer func() {
+				msgRaw = origRaw
+				msgBroadcast = origBroadcast
+				msgAll = origAll
+				msgIn = origIn
+				msgNotify = origNotify
+			}()
+
+			msgRaw = tc.raw
+			msgBroadcast = tc.broadcast
+			msgAll = tc.all
+			msgIn = tc.in
+			msgNotify = tc.notify
+
+			err := messageCmd.RunE(messageCmd, tc.args)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+func TestSendSetMessageViaHub(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "grove-msg-set"
+	agents := []hubclient.Agent{
+		{Name: "agent-a", Status: "running"},
+		{Name: "agent-b", Status: "running"},
+	}
+	server, sent := newMessageMockHubServer(t, projectID, agents)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:   client,
+		Endpoint: server.URL,
+		ProjectID:  projectID,
+	}
+
+	recipients := []messages.SetRecipient{
+		{Kind: messages.RecipientAgent, Name: "agent-a"},
+		{Kind: messages.RecipientAgent, Name: "agent-b"},
+	}
+
+	err = sendSetMessageViaHub(hubCtx, recipients, "set hello", false)
+	require.NoError(t, err)
+
+	require.Len(t, *sent, 2)
+	names := make([]string, len(*sent))
+	for i, s := range *sent {
+		names[i] = s.AgentName
+		assert.Equal(t, "set hello", s.Message)
+		require.NotNil(t, s.StructuredMsg)
+		assert.NotEmpty(t, s.StructuredMsg.Metadata["group_id"])
+	}
+	assert.ElementsMatch(t, []string{"agent-a", "agent-b"}, names)
+}
+
+func TestSendSetMessageViaHub_RequiresHub(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	// set[] without Hub should fail at the RunE level, not get to sendSetMessageViaHub
+	origBroadcast, origAll := msgBroadcast, msgAll
+	defer func() { msgBroadcast = origBroadcast; msgAll = origAll }()
+	msgBroadcast = false
+	msgAll = false
+
+	err := messageCmd.RunE(messageCmd, []string{"set[agent:a,agent:b]", "hello"})
+	// When Hub is not configured, this should fail with "set[] recipients require Hub mode".
+	// When Hub is configured but test agents don't exist, delivery fails.
+	// Either way, an error must be returned — never silent nil.
+	require.Error(t, err)
 }
 
 func TestNotifyFlagValidation(t *testing.T) {

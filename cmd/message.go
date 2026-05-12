@@ -52,20 +52,26 @@ Recipients:
   <agent-name>       Send to an agent (default, same as agent:<name>)
   agent:<name>       Send to an agent explicitly
   user:<name>        Send to a user's inbox (Hub mode only)
+  set[a,b,...]       Send to multiple recipients (Hub mode only)
 
 If --broadcast is used, the recipient can be omitted and the message will be sent to all running agents.
 
 Examples:
   scion message my-agent "Please review the PR"
-  scion message user:alice "I need clarification on the auth module"`,
+  scion message user:alice "I need clarification on the auth module"
+  scion message "set[agent:reviewer,user:alice,deploy-bot]" "Release v2 is ready"`,
 	Args:              cobra.MinimumNArgs(1),
 	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var agentName string
 		var userRecipient string
+		var setRecipients []messages.SetRecipient
 		var message string
 
 		if msgBroadcast || msgAll {
+			if len(args) > 0 && messages.IsSetRecipient(args[0]) {
+				return fmt.Errorf("set[] recipients cannot be combined with --broadcast or --all")
+			}
 			message = strings.Join(args, " ")
 		} else {
 			if len(args) < 2 {
@@ -74,7 +80,13 @@ Examples:
 			recipient := args[0]
 			message = strings.Join(args[1:], " ")
 
-			if strings.HasPrefix(recipient, "user:") {
+			if messages.IsSetRecipient(recipient) {
+				parsed, err := messages.ParseSetRecipient(recipient)
+				if err != nil {
+					return fmt.Errorf("invalid set recipient: %w", err)
+				}
+				setRecipients = parsed
+			} else if strings.HasPrefix(recipient, "user:") {
 				userRecipient = recipient
 			} else if strings.Contains(recipient, "@") && !strings.HasPrefix(recipient, "agent:") {
 				// Bare email address — treat as user recipient
@@ -127,6 +139,22 @@ Examples:
 			}
 		}
 
+		// Validate set[] recipient restrictions
+		if len(setRecipients) > 0 {
+			if msgBroadcast || msgAll {
+				return fmt.Errorf("set[] recipients cannot be combined with --broadcast or --all")
+			}
+			if msgRaw {
+				return fmt.Errorf("--raw cannot be used with set[] recipients")
+			}
+			if msgIn != "" || msgAt != "" {
+				return fmt.Errorf("--in/--at cannot be used with set[] recipients")
+			}
+			if msgNotify {
+				return fmt.Errorf("--notify cannot be used with set[] recipients")
+			}
+		}
+
 		// Validate attachments
 		if len(msgAttach) > messages.MaxAttachments {
 			return fmt.Errorf("too many attachments: %d (max %d)", len(msgAttach), messages.MaxAttachments)
@@ -135,7 +163,10 @@ Examples:
 		// Check if Hub should be used
 		var hubCtx *HubContext
 		var err error
-		if userRecipient != "" {
+		if len(setRecipients) > 0 {
+			// Set recipients: skip sync (multiple recipients, no single agent)
+			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
+		} else if userRecipient != "" {
 			// User recipient: skip sync (no agent involved)
 			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
 		} else if msgAll {
@@ -150,6 +181,11 @@ Examples:
 		}
 		if err != nil {
 			return err
+		}
+
+		// Set recipients require Hub mode
+		if len(setRecipients) > 0 && hubCtx == nil {
+			return fmt.Errorf("set[] recipients require Hub mode (use 'scion hub enable' first)")
 		}
 
 		// User recipients require Hub mode
@@ -168,6 +204,11 @@ Examples:
 		// --notify requires Hub mode
 		if msgNotify && hubCtx == nil {
 			return fmt.Errorf("--notify requires Hub mode (use 'scion hub enable' first)")
+		}
+
+		// Set-targeted messages: fan out to each recipient
+		if len(setRecipients) > 0 {
+			return sendSetMessageViaHub(hubCtx, setRecipients, message, msgInterrupt)
 		}
 
 		// User-targeted messages: route to outbound-message endpoint
@@ -463,6 +504,113 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 
 	if !isJSONOutput() {
 		fmt.Printf("Message sent to %s via Hub.\n", userRecipient)
+	}
+	return nil
+}
+
+func sendSetMessageViaHub(hubCtx *HubContext, recipients []messages.SetRecipient, message string, interrupt bool) error {
+	if !isJSONOutput() {
+		PrintUsingHub(hubCtx.Endpoint)
+	}
+
+	sender := resolveSenderIdentity(hubCtx)
+	groupID := api.NewUUID()
+
+	projectID, err := GetProjectID(hubCtx)
+	if err != nil {
+		return wrapHubError(err)
+	}
+	agentSvc := hubCtx.Client.ProjectAgents(projectID)
+
+	if !isJSONOutput() {
+		fmt.Printf("Sending message to %d recipients...\n", len(recipients))
+	}
+
+	type recipientResult struct {
+		Recipient string `json:"recipient"`
+		Status    string `json:"status"`
+		Error     string `json:"error,omitempty"`
+	}
+
+	results := make([]recipientResult, len(recipients))
+	var wg sync.WaitGroup
+
+	for i, r := range recipients {
+		wg.Add(1)
+		go func(idx int, recip messages.SetRecipient) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			recipStr := recip.String()
+			switch recip.Kind {
+			case messages.RecipientAgent:
+				slug := api.Slugify(recip.Name)
+				msg := buildStructuredMessage(sender, "agent:"+slug, message)
+				msg.Metadata = map[string]string{"group_id": groupID}
+				if err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false); err != nil {
+					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
+					if !isJSONOutput() {
+						fmt.Printf("  Failed: %s: %s\n", recipStr, err)
+					}
+					return
+				}
+				results[idx] = recipientResult{Recipient: recipStr, Status: "delivered"}
+				if !isJSONOutput() {
+					fmt.Printf("  Delivered: %s\n", recipStr)
+				}
+
+			case messages.RecipientUser:
+				senderAgent := os.Getenv("SCION_AGENT_NAME")
+				if senderAgent == "" {
+					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: "sending to users requires agent context (SCION_AGENT_NAME not set)"}
+					if !isJSONOutput() {
+						fmt.Printf("  Failed: %s: agent context required\n", recipStr)
+					}
+					return
+				}
+				userRecip := recipStr
+				if !strings.HasPrefix(userRecip, "user:") {
+					userRecip = "user:" + recip.Name
+				}
+				outMsg := &hubclient.OutboundMessageRequest{
+					Recipient: userRecip,
+					Msg:       message,
+					Type:      "instruction",
+					Urgent:    interrupt,
+				}
+				if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
+					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
+					if !isJSONOutput() {
+						fmt.Printf("  Failed: %s: %s\n", recipStr, err)
+					}
+					return
+				}
+				results[idx] = recipientResult{Recipient: recipStr, Status: "delivered"}
+				if !isJSONOutput() {
+					fmt.Printf("  Delivered: %s\n", recipStr)
+				}
+			}
+		}(i, r)
+	}
+	wg.Wait()
+
+	delivered := 0
+	for _, r := range results {
+		if r.Status == "delivered" {
+			delivered++
+		}
+	}
+
+	if !isJSONOutput() {
+		fmt.Printf("Set delivery complete: %d/%d delivered.\n", delivered, len(recipients))
+	}
+
+	if delivered == 0 {
+		return fmt.Errorf("set delivery failed: 0/%d recipients received the message", len(recipients))
+	}
+	if delivered < len(recipients) {
+		return fmt.Errorf("set delivery partially failed: %d/%d delivered", delivered, len(recipients))
 	}
 	return nil
 }
