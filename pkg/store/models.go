@@ -1268,6 +1268,7 @@ type Message struct {
 	Broadcasted bool      `json:"broadcasted,omitempty"`
 	Read        bool      `json:"read"`    // Whether recipient has read/acknowledged
 	AgentID     string    `json:"agentId"` // The agent involved (sender or recipient)
+	GroupID     string    `json:"groupId,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
 }
 

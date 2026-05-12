@@ -42,13 +42,13 @@ func (s *SQLiteStore) CreateMessage(ctx context.Context, msg *store.Message) err
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO messages (
 			id, project_id, sender, sender_id, recipient, recipient_id,
-			msg, type, urgent, broadcasted, read, agent_id, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			msg, type, urgent, broadcasted, read, agent_id, group_id, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		msg.ID, msg.ProjectID, msg.Sender, msg.SenderID, msg.Recipient, msg.RecipientID,
 		msg.Msg, msg.Type,
 		boolToInt(msg.Urgent), boolToInt(msg.Broadcasted), boolToInt(msg.Read),
-		msg.AgentID, msg.CreatedAt,
+		msg.AgentID, msg.GroupID, msg.CreatedAt,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -63,7 +63,7 @@ func (s *SQLiteStore) CreateMessage(ctx context.Context, msg *store.Message) err
 func (s *SQLiteStore) GetMessage(ctx context.Context, id string) (*store.Message, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, project_id, sender, sender_id, recipient, recipient_id,
-			msg, type, urgent, broadcasted, read, agent_id, created_at
+			msg, type, urgent, broadcasted, read, agent_id, group_id, created_at
 		FROM messages
 		WHERE id = ?
 	`, id)
@@ -73,7 +73,7 @@ func (s *SQLiteStore) GetMessage(ctx context.Context, id string) (*store.Message
 	if err := row.Scan(
 		&msg.ID, &msg.ProjectID, &msg.Sender, &msg.SenderID, &msg.Recipient, &msg.RecipientID,
 		&msg.Msg, &msg.Type, &urgent, &broadcasted, &read,
-		&msg.AgentID, &msg.CreatedAt,
+		&msg.AgentID, &msg.GroupID, &msg.CreatedAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, store.ErrNotFound
@@ -140,7 +140,7 @@ func (s *SQLiteStore) ListMessages(ctx context.Context, filter store.MessageFilt
 
 	query := fmt.Sprintf(`
 		SELECT id, project_id, sender, sender_id, recipient, recipient_id,
-			msg, type, urgent, broadcasted, read, agent_id, created_at
+			msg, type, urgent, broadcasted, read, agent_id, group_id, created_at
 		FROM messages %s ORDER BY created_at DESC LIMIT ?
 	`, whereClause)
 	args = append(args, limit+1)
@@ -158,7 +158,7 @@ func (s *SQLiteStore) ListMessages(ctx context.Context, filter store.MessageFilt
 		if err := rows.Scan(
 			&msg.ID, &msg.ProjectID, &msg.Sender, &msg.SenderID, &msg.Recipient, &msg.RecipientID,
 			&msg.Msg, &msg.Type, &urgent, &broadcasted, &read,
-			&msg.AgentID, &msg.CreatedAt,
+			&msg.AgentID, &msg.GroupID, &msg.CreatedAt,
 		); err != nil {
 			return nil, err
 		}

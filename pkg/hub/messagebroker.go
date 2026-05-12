@@ -244,6 +244,30 @@ func (p *MessageBrokerProxy) PublishUserMessage(ctx context.Context, projectID, 
 	return p.broker.Publish(ctx, topic, msg)
 }
 
+// PublishToSet fans out a message to a parsed set of recipients, delegating
+// to PublishMessage for agents and PublishUserMessage for users.
+func (p *MessageBrokerProxy) PublishToSet(ctx context.Context, projectID string, recipients []messages.SetRecipient, msg *messages.StructuredMessage) map[string]error {
+	errs := make(map[string]error, len(recipients))
+	for _, r := range recipients {
+		recipMsg := *msg
+		recipMsg.Recipient = r.String()
+
+		switch r.Kind {
+		case messages.RecipientAgent:
+			recipMsg.Recipient = "agent:" + r.Name
+			if err := p.PublishMessage(ctx, projectID, &recipMsg); err != nil {
+				errs[r.String()] = err
+			}
+		case messages.RecipientUser:
+			recipMsg.Recipient = "user:" + r.Name
+			if err := p.PublishUserMessage(ctx, projectID, r.Name, &recipMsg); err != nil {
+				errs[r.String()] = err
+			}
+		}
+	}
+	return errs
+}
+
 // EnsureProjectSubscriptions sets up broker subscriptions for all running agents
 // in the specified project. Called when a project becomes active or a broker reconnects.
 func (p *MessageBrokerProxy) EnsureProjectSubscriptions(ctx context.Context, projectID string) error {
