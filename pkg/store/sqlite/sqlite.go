@@ -1269,6 +1269,8 @@ UPDATE gcp_service_accounts SET scope = 'project' WHERE scope = 'grove';
 UPDATE groups SET group_type = 'project_agents' WHERE group_type = 'grove_agents';
 UPDATE notification_subscriptions SET scope = 'project' WHERE scope = 'grove';
 UPDATE subscription_templates SET scope = 'project' WHERE scope = 'grove';
+UPDATE templates SET scope = 'project' WHERE scope = 'grove';
+UPDATE harness_configs SET scope = 'project' WHERE scope = 'grove';
 `
 	if _, err := tx.ExecContext(ctx, dataUpdates); err != nil {
 		return fmt.Errorf("updating data values: %w", err)
