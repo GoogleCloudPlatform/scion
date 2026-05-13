@@ -18,7 +18,6 @@ package entc
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -30,5 +29,5 @@ type ProjectSlugResolver interface {
 
 // MigrateGroveToProjectData is a no-op when built without SQLite support.
 func MigrateGroveToProjectData(_ context.Context, _ string, _ ProjectSlugResolver) error {
-	return fmt.Errorf("MigrateGroveToProjectData requires SQLite support (build without -tags no_sqlite)")
+	return nil
 }

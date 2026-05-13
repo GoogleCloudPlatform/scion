@@ -32,7 +32,7 @@ const (
 	AttrRecipient    = "recipient"
 	AttrRecipientID  = "recipient_id"
 	AttrMsgType      = "msg_type"
-	AttrMsgProjectID = "grove_id"
+	AttrMsgProjectID = "project_id"
 )
 
 // MessageLoggerConfig configures the dedicated message logger.
