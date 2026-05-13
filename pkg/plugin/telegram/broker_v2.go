@@ -75,7 +75,8 @@ type TelegramBrokerV2 struct {
 	sentIDs   map[string]time.Time
 	sentIDsMu sync.Mutex
 
-	agentCacheTTL time.Duration
+	agentCacheTTL  time.Duration
+	projectSlugMap map[string]string // injected by hub: projectID → slug
 
 	InboundHandler func(topic string, msg *messages.StructuredMessage)
 
@@ -182,10 +183,18 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		b.importV1UserMappings(ctx, mappingsJSON)
 	}
 
+	// Parse hub-injected project slug map (projectID → slug).
+	if slugMapJSON, ok := config["project_slug_map"]; ok && slugMapJSON != "" {
+		var m map[string]string
+		if err := json.Unmarshal([]byte(slugMapJSON), &m); err == nil {
+			b.projectSlugMap = m
+		}
+	}
+
 	// After hub credentials are available, resolve any group link slugs that
 	// were stored as UUIDs during the first Configure() call (before hub_url
 	// was injected). Run synchronously so errors are visible in startup logs.
-	if b.hubURL != "" {
+	if b.hubURL != "" && len(b.projectSlugMap) > 0 {
 		slugCtx, slugCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		b.resolveStaleGroupSlugs(slugCtx)
 		slugCancel()
@@ -205,26 +214,14 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 // (i.e., slug was not resolved during initial import). Called after hub credentials
 // become available on the second Configure() call.
 func (b *TelegramBrokerV2) resolveStaleGroupSlugs(ctx context.Context) {
-	if b.hubClient == nil {
-		b.log.Warn("Slug resolution skipped: hubClient is nil")
+	// Use the project slug map injected by the hub at configure time.
+	// This avoids needing user-level API access from broker credentials.
+	if len(b.projectSlugMap) == 0 {
+		b.log.Debug("Slug resolution skipped: no project_slug_map injected by hub")
 		return
 	}
-
-	projects, err := b.hubClient.ListProjects(ctx)
-	if err != nil {
-		b.log.Warn("Could not resolve project slugs (hub unavailable)", "error", err)
-		return
-	}
-	b.log.Debug("Slug resolution: fetched projects from hub", "count", len(projects))
-	slugByID := make(map[string]string, len(projects))
-	for _, p := range projects {
-		b.log.Debug("Project from hub", "id", p.ID, "name", p.Name, "slug", p.Slug)
-		if p.Slug != "" {
-			slugByID[p.ID] = p.Slug
-		} else if p.Name != "" {
-			slugByID[p.ID] = p.Name
-		}
-	}
+	slugByID := b.projectSlugMap
+	b.log.Debug("Slug resolution: using hub-injected project slug map", "count", len(slugByID))
 
 	links, err := b.store.GetAllGroupLinks(ctx)
 	if err != nil {

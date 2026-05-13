@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -351,6 +352,21 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 								"hub_url":   hubEndpoint,
 								"hmac_key":  secretKey,
 								"broker_id": brokerID,
+							}
+							// Inject project slug map so hub-managed plugins can resolve
+							// human-readable project names without user-level API access.
+							if projects, listErr := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 500}); listErr == nil {
+								slugMap := make(map[string]string, len(projects.Items))
+								for _, p := range projects.Items {
+									if p.Slug != "" {
+										slugMap[p.ID] = p.Slug
+									} else {
+										slugMap[p.ID] = p.Name
+									}
+								}
+								if jsonBytes, jsonErr := json.Marshal(slugMap); jsonErr == nil {
+									hubCreds["project_slug_map"] = string(jsonBytes)
+								}
 							}
 							if cfgErr := pluginMgr.ConfigureBroker(bt, hubCreds); cfgErr != nil {
 								log.Printf("Warning: failed to inject hub credentials into broker plugin %q: %v", bt, cfgErr)
