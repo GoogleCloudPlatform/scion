@@ -616,8 +616,14 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		return b.publishInputNeeded(ctx, api, sq, chatIDs, msg, agentSlug, projectID)
 	}
 
+	// Resolve recipient's Telegram @username for the message header.
+	recipientUsername := ""
+	if msg != nil && strings.HasPrefix(msg.Sender, "agent:") && strings.HasPrefix(msg.Recipient, "user:") {
+		recipientUsername = b.resolveRecipientUsername(ctx, store, msg.Recipient)
+	}
+
 	// Format the message for Telegram.
-	text := FormatMessageV2(msg, agentSlug)
+	text := FormatMessageV2(msg, agentSlug, recipientUsername)
 	if text == "" {
 		return nil
 	}
@@ -663,6 +669,29 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 	return errors.Join(errs...)
 }
 
+// resolveRecipientUsername looks up the Telegram username for a recipient
+// string of the form "user:email" or "user:uuid". Returns "" if the
+// recipient cannot be resolved.
+func (b *TelegramBrokerV2) resolveRecipientUsername(ctx context.Context, store Store, recipient string) string {
+	if store == nil || !strings.HasPrefix(recipient, "user:") {
+		return ""
+	}
+	val := strings.TrimPrefix(recipient, "user:")
+	if val == "" {
+		return ""
+	}
+	var mapping *TelegramUserMapping
+	if strings.Contains(val, "@") {
+		mapping, _ = store.GetUserMappingByEmail(ctx, val)
+	} else {
+		mapping, _ = store.GetUserMappingByScionUserID(ctx, val)
+	}
+	if mapping != nil && mapping.TelegramUsername != "" {
+		return mapping.TelegramUsername
+	}
+	return ""
+}
+
 // resolveRecipientChats looks up target chats for a specific recipient.
 func (b *TelegramBrokerV2) resolveRecipientChats(ctx context.Context, recipient, projectID, agentSlug string) []int64 {
 	// Extract email from "user:email@example.com" format.
@@ -686,7 +715,11 @@ func (b *TelegramBrokerV2) resolveRecipientChats(ctx context.Context, recipient,
 
 // publishInputNeeded sends an InputNeeded message with an inline keyboard.
 func (b *TelegramBrokerV2) publishInputNeeded(ctx context.Context, api *TelegramAPIClient, sq *SendQueue, chatIDs []int64, msg *messages.StructuredMessage, agentSlug, projectID string) error {
-	text := FormatMessageV2(msg, agentSlug)
+	recipientUsername := ""
+	if msg != nil && strings.HasPrefix(msg.Sender, "agent:") && strings.HasPrefix(msg.Recipient, "user:") {
+		recipientUsername = b.resolveRecipientUsername(ctx, b.store, msg.Recipient)
+	}
+	text := FormatMessageV2(msg, agentSlug, recipientUsername)
 	if text == "" {
 		return nil
 	}
@@ -1663,7 +1696,9 @@ func generateRequestID() string {
 }
 
 // FormatMessageV2 extends FormatMessage with v2-specific formatting.
-func FormatMessageV2(msg *messages.StructuredMessage, agentSlug string) string {
+// An optional recipientUsername (e.g. "bob585") appends " → @bob585" to the
+// header when the message is agent-to-user, making the target clear in groups.
+func FormatMessageV2(msg *messages.StructuredMessage, agentSlug string, recipientUsername ...string) string {
 	if msg == nil {
 		return ""
 	}
@@ -1684,9 +1719,17 @@ func FormatMessageV2(msg *messages.StructuredMessage, agentSlug string) string {
 		fmt.Fprintf(&b, "👀 🤖 %s → 🤖 %s 👀", senderSlug, recipientSlug)
 	} else if agentSlug != "" {
 		fmt.Fprintf(&b, "🤖 %s", agentSlug)
+		if len(recipientUsername) > 0 && recipientUsername[0] != "" &&
+			strings.HasPrefix(msg.Sender, "agent:") && strings.HasPrefix(msg.Recipient, "user:") {
+			fmt.Fprintf(&b, " → @%s", recipientUsername[0])
+		}
 	} else if strings.HasPrefix(msg.Sender, "agent:") {
 		slug := strings.TrimPrefix(msg.Sender, "agent:")
 		fmt.Fprintf(&b, "🤖 %s", slug)
+		if len(recipientUsername) > 0 && recipientUsername[0] != "" &&
+			strings.HasPrefix(msg.Recipient, "user:") {
+			fmt.Fprintf(&b, " → @%s", recipientUsername[0])
+		}
 	} else {
 		b.WriteString(msg.Sender)
 	}

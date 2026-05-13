@@ -1613,6 +1613,88 @@ func TestFormatMessageV2(t *testing.T) {
 	}
 }
 
+func TestFormatMessageV2_RecipientUsername(t *testing.T) {
+	tests := []struct {
+		name              string
+		msg               *messages.StructuredMessage
+		agentSlug         string
+		recipientUsername string
+		wantContains      string
+		wantNotContains   string
+	}{
+		{
+			name: "agent-to-user with username",
+			msg: &messages.StructuredMessage{
+				Sender:    "agent:coder",
+				Recipient: "user:alice@example.com",
+				Msg:       "hello",
+			},
+			agentSlug:         "coder",
+			recipientUsername: "bob585",
+			wantContains:      "🤖 coder → @bob585",
+		},
+		{
+			name: "agent-to-user without username",
+			msg: &messages.StructuredMessage{
+				Sender:    "agent:coder",
+				Recipient: "user:alice@example.com",
+				Msg:       "hello",
+			},
+			agentSlug:         "coder",
+			recipientUsername: "",
+			wantContains:      "🤖 coder",
+			wantNotContains:   "→",
+		},
+		{
+			name: "agent-to-agent ignores username",
+			msg: &messages.StructuredMessage{
+				Sender:    "agent:coder",
+				Recipient: "agent:reviewer",
+				Msg:       "check this",
+			},
+			agentSlug:         "coder",
+			recipientUsername: "bob585",
+			wantContains:      "👀 🤖 coder → 🤖 reviewer 👀",
+			wantNotContains:   "@bob585",
+		},
+		{
+			name: "agent-to-user no agentSlug falls back to sender",
+			msg: &messages.StructuredMessage{
+				Sender:    "agent:deployer",
+				Recipient: "user:alice@example.com",
+				Msg:       "deployed",
+			},
+			agentSlug:         "",
+			recipientUsername: "alice_tg",
+			wantContains:      "🤖 deployer → @alice_tg",
+		},
+		{
+			name: "non-agent sender ignores username",
+			msg: &messages.StructuredMessage{
+				Sender:    "user:alice",
+				Recipient: "user:bob",
+				Msg:       "hi",
+			},
+			agentSlug:         "",
+			recipientUsername: "bob_tg",
+			wantContains:      "user:alice",
+			wantNotContains:   "@bob_tg",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := FormatMessageV2(tt.msg, tt.agentSlug, tt.recipientUsername)
+			if tt.wantContains != "" {
+				assert.Contains(t, result, tt.wantContains)
+			}
+			if tt.wantNotContains != "" {
+				assert.NotContains(t, result, tt.wantNotContains)
+			}
+		})
+	}
+}
+
 // --- Webhook mode tests ---
 
 func TestV2_Configure_WebhookMode(t *testing.T) {
