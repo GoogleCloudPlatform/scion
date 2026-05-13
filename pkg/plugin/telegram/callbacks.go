@@ -138,6 +138,9 @@ func (h *CallbackHandler) handleSetupCallback(ctx context.Context, cb *CallbackQ
 	case "cancel":
 		return h.handleSetupCancel(ctx, cb, chatID, messageID)
 
+	case "unlink":
+		return h.handleSetupUnlink(ctx, cb, chatID, messageID)
+
 	default:
 		return fmt.Errorf("unknown setup sub-action: %s", parts[0])
 	}
@@ -271,6 +274,17 @@ func (h *CallbackHandler) handleSetupCancel(ctx context.Context, cb *CallbackQue
 
 	h.editMessage(ctx, chatID, messageID, "Setup cancelled.", nil)
 	h.answerCallback(ctx, cb.ID, "", false)
+	return nil
+}
+
+func (h *CallbackHandler) handleSetupUnlink(ctx context.Context, cb *CallbackQuery, chatID, messageID int64) error {
+	if err := h.store.DeleteGroupLink(ctx, chatID); err != nil {
+		h.log.Error("Failed to unlink group", "chat_id", chatID, "error", err)
+		h.answerCallback(ctx, cb.ID, "Failed to unlink.", false)
+		return err
+	}
+	h.editMessage(ctx, chatID, messageID, "This group has been unlinked from the scion hub. Use /setup to link it again.", nil)
+	h.answerCallback(ctx, cb.ID, "Group unlinked.", false)
 	return nil
 }
 

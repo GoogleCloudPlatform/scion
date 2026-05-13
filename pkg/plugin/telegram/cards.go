@@ -138,14 +138,17 @@ func buildAskUserKeyboard(requestID string, choices []string) *InlineKeyboardMar
 	return &InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
-// buildSetupConfirmKeyboard creates a keyboard showing current project link with change/keep options.
-// Callback data: setup:change / setup:keep
+// buildSetupConfirmKeyboard creates a keyboard showing current project link with change/keep/unlink options.
+// Callback data: setup:change / setup:keep / setup:unlink
 func buildSetupConfirmKeyboard(currentProject string) *InlineKeyboardMarkup {
 	return &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
 			{
 				{Text: fmt.Sprintf("Keep (%s)", currentProject), CallbackData: "setup:keep"},
 				{Text: "Change project", CallbackData: "setup:change"},
+			},
+			{
+				{Text: "Unlink this group", CallbackData: "setup:unlink"},
 			},
 		},
 	}
