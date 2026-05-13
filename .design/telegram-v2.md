@@ -1704,3 +1704,26 @@ that sharing implementation would be forced. The recommended approach:
 | `pkg/hub/telegram_link.go` | Phase 1: thin wrapper → Phase 2: remove |
 | `pkg/plugin/telegram/register_v2.go` | Update HTTP calls to generic endpoints |
 | Web UI | Add generic `/profile/link` page (replaces `/profile/telegram-link`) |
+
+---
+
+## Future Direction: DM-as-Private-Agent-Channel (/talk command)
+
+**Concept**: Users can initiate a private 1:1 conversation with a specific agent via the bot DM, without involving a group chat.
+
+**Proposed UX:**
+- `/talk chat2 coordinator` in DM → routes subsequent DM messages to that agent
+- `/endtalk` → stops DM routing, returns to command-only DM mode
+- Agent replies come back to the user's DM (not any group)
+
+**Architecture fit:**
+- `ConversationContext` already tracks (userID, projectID, agentSlug) → lastChatID
+- If DM chatID (= user's Telegram userID for private chats) is stored as lastChatID, agent replies automatically route to DM
+- Missing: routing of non-command DM messages to the configured agent
+
+**Related:** `scion message --thread-id` flag (exists in CLI) may allow agents to reference a specific conversation thread. Future implementation could use thread IDs to link DM conversations to specific agent sessions, enabling proper conversation continuity across DM ↔ group transitions.
+
+**Open questions:**
+- How does user end a /talk session and return to group routing?
+- How to handle multiple concurrent /talk sessions (one per agent)?
+- Should /talk persist across bot restarts (stored in DB)?
