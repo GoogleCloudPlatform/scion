@@ -52,7 +52,7 @@ const (
 
 // inboundPayload is the JSON body sent to the hub API inbound endpoint.
 type inboundPayload struct {
-	Topic   string                     `json:"topic"`
+	Topic   string                      `json:"topic"`
 	Message *messages.StructuredMessage `json:"message"`
 }
 
