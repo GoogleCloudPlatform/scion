@@ -431,7 +431,7 @@ func writeHumanLine(topic string, msg *messages.StructuredMessage, fullMsg bool,
 	}
 
 	if includeField(fields, "attachments") && len(msg.Attachments) > 0 {
-		fmt.Fprintf(&b, "  attachments=%v\n", msg.Attachments)
+		fmt.Fprintf(&b, "  attachments=[%s]\n", strings.Join(msg.Attachments, ", "))
 	}
 
 	os.Stdout.WriteString(b.String())
