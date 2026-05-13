@@ -68,7 +68,11 @@ func buildProjectSelectionKeyboard(projects []ProjectOption) *InlineKeyboardMark
 // buildAgentSelectionKeyboard creates an inline keyboard for default agent selection during /setup.
 // Callback data format: setup:dflt:<agentSlug>
 func buildAgentSelectionKeyboard(agents []string, currentDefault string) *InlineKeyboardMarkup {
-	return buildAgentKeyboard(agents, currentDefault, "setup:dflt")
+	kb := buildAgentKeyboard(agents, currentDefault, "setup:dflt")
+	kb.InlineKeyboard = append(kb.InlineKeyboard, []InlineKeyboardButton{
+		{Text: "No default agent", CallbackData: "setup:dflt:"},
+	})
+	return kb
 }
 
 // buildDefaultAgentKeyboard creates an inline keyboard for /default command.

@@ -217,7 +217,9 @@ func TestBuildProjectSelectionKeyboard_Empty(t *testing.T) {
 
 func TestBuildAgentSelectionKeyboard_SingleAgent(t *testing.T) {
 	kb := buildAgentSelectionKeyboard([]string{"coder"}, "coder")
-	require.Len(t, kb.InlineKeyboard, 1)
+	require.Len(t, kb.InlineKeyboard, 2)
 	assert.Len(t, kb.InlineKeyboard[0], 1)
 	assert.Equal(t, "✓ coder (current)", kb.InlineKeyboard[0][0].Text)
+	assert.Equal(t, "No default agent", kb.InlineKeyboard[1][0].Text)
+	assert.Equal(t, "setup:dflt:", kb.InlineKeyboard[1][0].CallbackData)
 }

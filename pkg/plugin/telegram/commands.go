@@ -180,9 +180,6 @@ func (h *CommandHandler) handleSetup(msg *TGMessage) {
 				h.log.Debug("Using cached project list for /setup", "count", len(projects))
 			}
 		}
-		if senderID != "" {
-			promptText = "Select a project to link this group to:\n_Register with /register to see only your projects._"
-		}
 	}
 
 	if len(projects) == 0 {
@@ -319,7 +316,8 @@ func (h *CommandHandler) handleHelp(msg *TGMessage) {
 			"/agents — List agents in the linked project\n"+
 			"/settings — Configure group settings\n"+
 			"/unlink — Unlink this group from its project\n"+
-			"/help — Show this help message")
+			"/help — Show this help message\n\n"+
+			"Send /help in a DM to the bot for account management commands.")
 	} else {
 		h.reply(chatID, "Available commands (DM):\n"+
 			"/register — Link your Telegram account to your scion hub identity\n"+

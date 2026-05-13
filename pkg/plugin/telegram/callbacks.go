@@ -195,7 +195,7 @@ func (h *CallbackHandler) handleSetupProject(ctx context.Context, cb *CallbackQu
 
 	kb := buildAgentSelectionKeyboard(agents, "")
 	h.editMessage(ctx, chatID, messageID,
-		fmt.Sprintf("Project *%s* selected.\nChoose a default agent:", projectSlug), kb)
+		fmt.Sprintf("Project *%s* selected.\nChoose a default agent:\n_Messages sent to the bot in this group will be forwarded to the default agent._\n_You can also @mention a specific agent by name._", projectSlug), kb)
 	h.answerCallback(ctx, cb.ID, "", false)
 	return nil
 }
