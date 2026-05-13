@@ -343,7 +343,37 @@ type CreateSubscriptionTemplateRequest struct {
 	Name              string   `json:"name"`
 	Scope             string   `json:"scope"`
 	TriggerActivities []string `json:"triggerActivities"`
-	ProjectID         string   `json:"groveId"`
+	ProjectID         string   `json:"projectId"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (r *CreateSubscriptionTemplateRequest) UnmarshalJSON(data []byte) error {
+	type Alias CreateSubscriptionTemplateRequest
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (r CreateSubscriptionTemplateRequest) MarshalJSON() ([]byte, error) {
+	type Alias CreateSubscriptionTemplateRequest
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(r),
+		GroveID: r.ProjectID,
+	})
 }
 
 // SubscriptionTemplate represents a subscription template from the Hub API.
@@ -352,8 +382,38 @@ type SubscriptionTemplate struct {
 	Name              string   `json:"name"`
 	Scope             string   `json:"scope"`
 	TriggerActivities []string `json:"triggerActivities"`
-	ProjectID         string   `json:"groveId"`
+	ProjectID         string   `json:"projectId"`
 	CreatedBy         string   `json:"createdBy"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (t *SubscriptionTemplate) UnmarshalJSON(data []byte) error {
+	type Alias SubscriptionTemplate
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(t),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if t.ProjectID == "" && aux.GroveID != "" {
+		t.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (t SubscriptionTemplate) MarshalJSON() ([]byte, error) {
+	type Alias SubscriptionTemplate
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(t),
+		GroveID: t.ProjectID,
+	})
 }
 
 // Create creates a new subscription template.

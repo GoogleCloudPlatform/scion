@@ -59,8 +59,8 @@ type PlaybackManifest struct {
 	TimeRange TimeRange   `json:"timeRange"`
 	Agents    []AgentInfo `json:"agents"`
 	Files     []FileNode  `json:"files"`
-	GroveID   string      `json:"groveId"`
-	GroveName string      `json:"groveName"`
+	ProjectID   string      `json:"projectId"`
+	ProjectName string      `json:"projectName"`
 	MaxDepth  int         `json:"maxDepth"`
 }
 
@@ -187,16 +187,16 @@ func ParseLogFile(path string, fsLogPath string, maxDepth int) (*ParseResult, er
 		})
 	}
 
-	// Determine grove info
-	groveID, groveName := extractGroveInfo(entries)
+	// Determine project info
+	projectID, projectName := extractProjectInfo(entries)
 
 	manifest := PlaybackManifest{
 		Type:      "manifest",
 		TimeRange: timeRange,
 		Agents:    agents,
 		Files:     []FileNode{}, // Files are added dynamically via events
-		GroveID:   groveID,
-		GroveName: groveName,
+		ProjectID:   projectID,
+		ProjectName: projectName,
 		MaxDepth:  maxDepth,
 	}
 
@@ -282,7 +282,7 @@ func extractTimeRange(entries []GCPLogEntry) TimeRange {
 func extractProjectInfo(entries []GCPLogEntry) (string, string) {
 	for _, e := range entries {
 		if gid, ok := e.Labels["grove_id"]; ok {
-			// Try to find grove name from server logs
+			// Try to find project name from server logs
 			name := gid
 			if slug, ok := e.JSONPayload["slug"]; ok {
 				if s, ok := slug.(string); ok && !strings.Contains(s, ":") {

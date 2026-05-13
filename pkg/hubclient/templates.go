@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/url"
 	"time"
@@ -88,9 +89,39 @@ type CreateTemplateRequest struct {
 	Name       string          `json:"name"`
 	Harness    string          `json:"harness,omitempty"`
 	Scope      string          `json:"scope"`
-	ProjectID  string          `json:"groveId,omitempty"`
+	ProjectID  string          `json:"projectId,omitempty"`
 	Config     *TemplateConfig `json:"config,omitempty"`
 	Visibility string          `json:"visibility,omitempty"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (r *CreateTemplateRequest) UnmarshalJSON(data []byte) error {
+	type Alias CreateTemplateRequest
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (r CreateTemplateRequest) MarshalJSON() ([]byte, error) {
+	type Alias CreateTemplateRequest
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(r),
+		GroveID: r.ProjectID,
+	})
 }
 
 // UpdateTemplateRequest is the request for updating a template.
@@ -105,6 +136,36 @@ type CloneTemplateRequest struct {
 	Name      string `json:"name"`
 	Scope     string `json:"scope"`
 	ProjectID string `json:"projectId"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (r *CloneTemplateRequest) UnmarshalJSON(data []byte) error {
+	type Alias CloneTemplateRequest
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (r CloneTemplateRequest) MarshalJSON() ([]byte, error) {
+	type Alias CloneTemplateRequest
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(r),
+		GroveID: r.ProjectID,
+	})
 }
 
 // FileUploadRequest describes a file to upload.
