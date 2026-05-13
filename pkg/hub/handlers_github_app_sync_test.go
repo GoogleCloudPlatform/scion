@@ -25,7 +25,7 @@ import (
 func TestComparePermissions(t *testing.T) {
 	tests := []struct {
 		name          string
-		projectPerms    *store.GitHubTokenPermissions
+		projectPerms  *store.GitHubTokenPermissions
 		appPerms      map[string]string
 		expectedCount int
 		expectedFirst string // first missing perm substring (if any)
@@ -91,7 +91,7 @@ func TestComparePermissions(t *testing.T) {
 			expectedCount: 3,
 		},
 		{
-			name:       "empty project permissions — no missing",
+			name:         "empty project permissions — no missing",
 			projectPerms: &store.GitHubTokenPermissions{},
 			appPerms: map[string]string{
 				"contents": "write",

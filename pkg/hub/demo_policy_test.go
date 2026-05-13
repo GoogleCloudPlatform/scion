@@ -119,7 +119,7 @@ func TestDemoPolicy_AgentCreate_ProjectMemberAllowed(t *testing.T) {
 	// Alice is a project member — should pass authorization.
 	// Request will fail downstream (no broker/template), but NOT with 403.
 	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "test-agent",
+		Name:      "test-agent",
 		ProjectID: project.ID,
 	})
 	// Should not be 403 — alice has permission
@@ -132,7 +132,7 @@ func TestDemoPolicy_AgentCreate_NonMemberDenied(t *testing.T) {
 
 	// Bob is NOT a project member — should be denied with 403
 	rec := doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "test-agent",
+		Name:      "test-agent",
 		ProjectID: project.ID,
 	})
 	assert.Equal(t, http.StatusForbidden, rec.Code,
@@ -156,7 +156,7 @@ func TestDemoPolicy_AgentCreate_AdminBypass(t *testing.T) {
 
 	// Admin should bypass authorization even without project membership
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "admin-agent",
+		Name:      "admin-agent",
 		ProjectID: project.ID,
 	})
 	assert.NotEqual(t, http.StatusForbidden, rec.Code,
@@ -176,7 +176,7 @@ func TestDemoPolicy_AgentDelete_OwnerAllowed(t *testing.T) {
 		ID:           "agent-del-owner",
 		Slug:         "agent-del-owner",
 		Name:         "Agent to Delete",
-		ProjectID:      project.ID,
+		ProjectID:    project.ID,
 		OwnerID:      alice.ID,
 		CreatedBy:    alice.ID,
 		Phase:        string(state.PhaseStopped),
@@ -202,7 +202,7 @@ func TestDemoPolicy_AgentDelete_NonOwnerDenied(t *testing.T) {
 		ID:           "agent-del-nonowner",
 		Slug:         "agent-del-nonowner",
 		Name:         "Agent to Delete",
-		ProjectID:      project.ID,
+		ProjectID:    project.ID,
 		OwnerID:      alice.ID,
 		CreatedBy:    alice.ID,
 		Phase:        string(state.PhaseStopped),
@@ -237,7 +237,7 @@ func TestDemoPolicy_AgentDelete_AdminBypass(t *testing.T) {
 		ID:           "agent-del-admin",
 		Slug:         "agent-del-admin",
 		Name:         "Agent for Admin Delete",
-		ProjectID:      project.ID,
+		ProjectID:    project.ID,
 		OwnerID:      alice.ID,
 		CreatedBy:    alice.ID,
 		Phase:        string(state.PhaseStopped),
@@ -262,7 +262,7 @@ func TestDemoPolicy_AgentDelete_DirectPath_NonOwnerDenied(t *testing.T) {
 		ID:           "agent-del-direct",
 		Slug:         "agent-del-direct",
 		Name:         "Agent Direct Delete",
-		ProjectID:      project.ID,
+		ProjectID:    project.ID,
 		OwnerID:      alice.ID,
 		CreatedBy:    alice.ID,
 		Phase:        string(state.PhaseStopped),
@@ -291,7 +291,7 @@ func TestDemoPolicy_AgentAction_OwnerAllowed(t *testing.T) {
 		ID:           "agent-action-owner",
 		Slug:         "agent-action-owner",
 		Name:         "Agent Action Test",
-		ProjectID:      project.ID,
+		ProjectID:    project.ID,
 		OwnerID:      alice.ID,
 		CreatedBy:    alice.ID,
 		Phase:        string(state.PhaseRunning),
@@ -321,7 +321,7 @@ func TestDemoPolicy_AgentAction_NonOwnerDenied(t *testing.T) {
 		ID:           "agent-action-nonowner",
 		Slug:         "agent-action-nonowner",
 		Name:         "Agent Action Test",
-		ProjectID:      project.ID,
+		ProjectID:    project.ID,
 		OwnerID:      alice.ID,
 		CreatedBy:    alice.ID,
 		Phase:        string(state.PhaseRunning),
@@ -360,7 +360,7 @@ func TestDemoPolicy_AgentAction_AdminBypass(t *testing.T) {
 		ID:           "agent-action-admin",
 		Slug:         "agent-action-admin",
 		Name:         "Agent Admin Action",
-		ProjectID:      project.ID,
+		ProjectID:    project.ID,
 		OwnerID:      alice.ID,
 		CreatedBy:    alice.ID,
 		Phase:        string(state.PhaseRunning),
@@ -385,7 +385,7 @@ func TestDemoPolicy_AgentAction_DirectPath_NonOwnerDenied(t *testing.T) {
 		ID:           "agent-action-direct",
 		Slug:         "agent-action-direct",
 		Name:         "Agent Direct Action",
-		ProjectID:      project.ID,
+		ProjectID:    project.ID,
 		OwnerID:      alice.ID,
 		CreatedBy:    alice.ID,
 		Phase:        string(state.PhaseRunning),
@@ -488,7 +488,7 @@ func TestDemoPolicy_EndToEnd_ProjectCreatorCanCreateAgent(t *testing.T) {
 
 	// Step 2: Create an agent in the project via the HTTP handler (as alice)
 	agentRec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "e2e-test-agent",
+		Name:      "e2e-test-agent",
 		ProjectID: project.ID,
 	})
 
@@ -556,7 +556,7 @@ func TestDemoPolicy_ProjectRecreation_CreatorCanCreateAgent(t *testing.T) {
 
 	// Verify alice can create agents
 	agentRec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "agent-before-delete",
+		Name:      "agent-before-delete",
 		ProjectID: project1.ID,
 	})
 	assert.NotEqual(t, http.StatusForbidden, agentRec.Code,
@@ -578,7 +578,7 @@ func TestDemoPolicy_ProjectRecreation_CreatorCanCreateAgent(t *testing.T) {
 
 	// Step 4: Verify alice can still create agents in the recreated project
 	agentRec2 := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "agent-after-recreate",
+		Name:      "agent-after-recreate",
 		ProjectID: project2.ID,
 	})
 	assert.NotEqual(t, http.StatusForbidden, agentRec2.Code,
@@ -627,7 +627,7 @@ func TestDemoPolicy_ProjectMembersGroupIdempotent(t *testing.T) {
 
 	// Verify alice can create agents
 	agentRec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "agent-idempotent",
+		Name:      "agent-idempotent",
 		ProjectID: project.ID,
 	})
 	assert.NotEqual(t, http.StatusForbidden, agentRec.Code,

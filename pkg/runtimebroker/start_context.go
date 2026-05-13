@@ -339,9 +339,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 
 	// --- Build StartOptions ---
 	opts := api.StartOptions{
-		Name:       in.Name,
-		BrokerMode: true,
-		ProjectPath:  in.ProjectPath,
+		Name:        in.Name,
+		BrokerMode:  true,
+		ProjectPath: in.ProjectPath,
 	}
 
 	if in.Attach {

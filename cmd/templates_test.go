@@ -34,7 +34,7 @@ type templateTestState struct {
 	globalMode  bool
 	noHub       bool
 	autoConfirm bool
-	projectPath   string
+	projectPath string
 }
 
 func saveTemplateTestState() templateTestState {
@@ -43,7 +43,7 @@ func saveTemplateTestState() templateTestState {
 		globalMode:  globalMode,
 		noHub:       noHub,
 		autoConfirm: autoConfirm,
-		projectPath:   projectPath,
+		projectPath: projectPath,
 	}
 }
 

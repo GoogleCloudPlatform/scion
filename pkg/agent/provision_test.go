@@ -235,9 +235,9 @@ func TestProvisionWritesTaskToPromptMd(t *testing.T) {
 
 	t.Run("with task", func(t *testing.T) {
 		opts := api.StartOptions{
-			Name:      "agent-with-task",
-			Task:      "implement feature X",
-			Template:  "default",
+			Name:        "agent-with-task",
+			Task:        "implement feature X",
+			Template:    "default",
 			ProjectPath: projectScionDir,
 		}
 
@@ -258,8 +258,8 @@ func TestProvisionWritesTaskToPromptMd(t *testing.T) {
 
 	t.Run("without task", func(t *testing.T) {
 		opts := api.StartOptions{
-			Name:      "agent-no-task",
-			Template:  "default",
+			Name:        "agent-no-task",
+			Template:    "default",
 			ProjectPath: projectScionDir,
 		}
 
@@ -1166,7 +1166,7 @@ func TestProvisionAgent_SharedWorkspaceRelocatesAgentState(t *testing.T) {
 		Name:            "shared-agent",
 		Task:            "do the thing",
 		Template:        "gemini",
-		ProjectPath:       projectScionDir,
+		ProjectPath:     projectScionDir,
 		Workspace:       sharedWorkspace,
 		SharedWorkspace: true,
 	}
@@ -1245,7 +1245,7 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	opts := api.StartOptions{
 		Name:            "legacy-agent",
 		Template:        "gemini",
-		ProjectPath:       projectScionDir,
+		ProjectPath:     projectScionDir,
 		Workspace:       sharedWorkspace,
 		SharedWorkspace: true,
 	}

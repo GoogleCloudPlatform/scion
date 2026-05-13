@@ -115,11 +115,11 @@ func TestStart_ErrorPropagation_Tmux(t *testing.T) {
 
 	// Run Start
 	opts := api.StartOptions{
-		Name:      "test-agent",
+		Name:        "test-agent",
 		ProjectPath: projectScionDir,
-		Profile:   "test",
-		Task:      "do something",
-		Template:  "gemini",
+		Profile:     "test",
+		Task:        "do something",
+		Template:    "gemini",
 	}
 
 	_, err = manager.Start(context.Background(), opts)
@@ -221,11 +221,11 @@ func TestStart_ErrorPropagation_Tmux_Missing(t *testing.T) {
 
 	// Run Start
 	opts := api.StartOptions{
-		Name:      "test-agent",
+		Name:        "test-agent",
 		ProjectPath: projectScionDir,
-		Profile:   "test",
-		Task:      "do something",
-		Template:  "gemini",
+		Profile:     "test",
+		Task:        "do something",
+		Template:    "gemini",
 	}
 
 	_, err = manager.Start(context.Background(), opts)
@@ -308,11 +308,11 @@ func TestStart_RunFailureMarksAgentInfoError(t *testing.T) {
 	manager := &AgentManager{Runtime: mockRuntime}
 
 	_, err = manager.Start(context.Background(), api.StartOptions{
-		Name:      "test-agent",
+		Name:        "test-agent",
 		ProjectPath: projectScionDir,
-		Profile:   "test",
-		Task:      "do something",
-		Template:  "gemini",
+		Profile:     "test",
+		Task:        "do something",
+		Template:    "gemini",
 	})
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -419,11 +419,11 @@ func TestStart_ErrorPropagation_FalsePositive_Tmux(t *testing.T) {
 	}
 
 	opts := api.StartOptions{
-		Name:      "test-agent",
+		Name:        "test-agent",
 		ProjectPath: projectScionDir,
-		Profile:   "test",
-		Task:      "do something",
-		Template:  "gemini",
+		Profile:     "test",
+		Task:        "do something",
+		Template:    "gemini",
 	}
 
 	_, err = manager.Start(context.Background(), opts)
@@ -517,11 +517,11 @@ func TestStart_ErrorPropagation_Tmux_CommandNotFound(t *testing.T) {
 	}
 
 	opts := api.StartOptions{
-		Name:      "test-agent",
+		Name:        "test-agent",
 		ProjectPath: projectScionDir,
-		Profile:   "test",
-		Task:      "do something",
-		Template:  "gemini",
+		Profile:     "test",
+		Task:        "do something",
+		Template:    "gemini",
 	}
 
 	_, err = manager.Start(context.Background(), opts)

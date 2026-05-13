@@ -17,7 +17,7 @@ import (
 )
 
 var (
-	projectPath      string
+	projectPath    string
 	globalMode     bool
 	profile        string
 	outputFormat   string
@@ -180,7 +180,7 @@ return an error instead of blocking.`,
 func Execute() {
 	// Early settings load to determine autoHelp behavior
 	// This handles cases where ExecuteC fails during flag parsing or unknown commands
-	tempProjectPath:= ""
+	tempProjectPath := ""
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
 		if arg == "--project" || arg == "--grove" || arg == "-g" {

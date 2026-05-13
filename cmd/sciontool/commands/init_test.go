@@ -162,7 +162,6 @@ func TestGitCloneWorkspace_NoCloneURL(t *testing.T) {
 		}
 	}()
 
-
 	tmpWorkspace := t.TempDir()
 	t.Setenv("SCION_WORKSPACE_PATH", tmpWorkspace)
 	err := gitCloneWorkspace(0, 0, "/tmp")

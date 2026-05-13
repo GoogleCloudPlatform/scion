@@ -100,7 +100,7 @@ func TestDispatchAgentStart(t *testing.T) {
 	require.NoError(t, err)
 
 	provider := &store.ProjectProvider{
-		ProjectID:   grove.ID,
+		ProjectID: grove.ID,
 		BrokerID:  brokerID,
 		LocalPath: "/tmp/fake/grove",
 	}
@@ -109,13 +109,13 @@ func TestDispatchAgentStart(t *testing.T) {
 
 	// Create agent
 	agent := &store.Agent{
-		ID:       "agent-1",
-		Slug:     "test-agent",
-		Name:     "test-agent",
-		ProjectID:  grove.ID,
-		Template: "gemini",
-		Image:    "test-image",
-		Detached: true,
+		ID:        "agent-1",
+		Slug:      "test-agent",
+		Name:      "test-agent",
+		ProjectID: grove.ID,
+		Template:  "gemini",
+		Image:     "test-image",
+		Detached:  true,
 		AppliedConfig: &store.AgentAppliedConfig{
 			Env:  map[string]string{"FOO": "BAR"},
 			Task: "original task",
@@ -163,9 +163,9 @@ func TestDispatchAgentRestart(t *testing.T) {
 	require.NoError(t, err)
 
 	agent := &store.Agent{
-		ID:      "agent-1",
-		Slug:    "test-agent",
-		Name:    "test-agent",
+		ID:        "agent-1",
+		Slug:      "test-agent",
+		Name:      "test-agent",
 		ProjectID: grove.ID,
 	}
 	err = s.CreateAgent(ctx, agent)

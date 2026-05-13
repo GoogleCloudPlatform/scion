@@ -27,12 +27,12 @@ const MessageLogID = "scion-messages"
 
 // Standard attribute keys for message log entries.
 const (
-	AttrSender      = "sender"
-	AttrSenderID    = "sender_id"
-	AttrRecipient   = "recipient"
-	AttrRecipientID = "recipient_id"
-	AttrMsgType     = "msg_type"
-	AttrMsgProjectID  = "grove_id"
+	AttrSender       = "sender"
+	AttrSenderID     = "sender_id"
+	AttrRecipient    = "recipient"
+	AttrRecipientID  = "recipient_id"
+	AttrMsgType      = "msg_type"
+	AttrMsgProjectID = "project_id"
 )
 
 // MessageLoggerConfig configures the dedicated message logger.

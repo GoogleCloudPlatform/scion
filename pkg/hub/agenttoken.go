@@ -63,9 +63,9 @@ const (
 // AgentTokenClaims represents the custom claims in an agent JWT.
 type AgentTokenClaims struct {
 	jwt.Claims
-	ProjectID  string            `json:"project_id,omitempty"`
-	Scopes   []AgentTokenScope `json:"scopes,omitempty"`
-	Ancestry []string          `json:"ancestry,omitempty"` // [root_user, ..., parent_agent]
+	ProjectID string            `json:"project_id,omitempty"`
+	Scopes    []AgentTokenScope `json:"scopes,omitempty"`
+	Ancestry  []string          `json:"ancestry,omitempty"` // [root_user, ..., parent_agent]
 }
 
 // AgentTokenConfig holds configuration for agent token generation.
@@ -133,9 +133,9 @@ func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes
 			NotBefore: jwt.NewNumericDate(now),
 			ID:        generateTokenID(),
 		},
-		ProjectID:  projectID,
-		Scopes:   scopes,
-		Ancestry: ancestry,
+		ProjectID: projectID,
+		Scopes:    scopes,
+		Ancestry:  ancestry,
 	}
 
 	token, err := jwt.Signed(s.signer).Claims(claims).Serialize()
@@ -204,9 +204,9 @@ func (s *AgentTokenService) GenerateAgentTokenWithExpiry(agentID, projectID stri
 			NotBefore: jwt.NewNumericDate(now),
 			ID:        generateTokenID(),
 		},
-		ProjectID:  projectID,
-		Scopes:   scopes,
-		Ancestry: ancestry,
+		ProjectID: projectID,
+		Scopes:    scopes,
+		Ancestry:  ancestry,
 	}
 
 	token, err := jwt.Signed(s.signer).Claims(claims).Serialize()

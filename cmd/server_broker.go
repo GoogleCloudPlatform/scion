@@ -140,7 +140,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 
 	// Add runtime broker as provider to global project
 	provider := &store.ProjectProvider{
-		ProjectID:    globalGrove.ID,
+		ProjectID:  globalGrove.ID,
 		BrokerID:   brokerID,
 		BrokerName: brokerName,
 		LocalPath:  globalPath, // ~/.scion for the global project

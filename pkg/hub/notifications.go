@@ -228,10 +228,10 @@ func (nd *NotificationDispatcher) handleDeletedEvent(evt Event) {
 
 		// Build a synthetic status event for storeAndDispatch
 		statusEvt := AgentStatusEvent{
-			AgentID:  deletedEvt.AgentID,
-			ProjectID:  deletedEvt.ProjectID,
-			Phase:    "stopped",
-			Activity: "DELETED",
+			AgentID:   deletedEvt.AgentID,
+			ProjectID: deletedEvt.ProjectID,
+			Phase:     "stopped",
+			Activity:  "DELETED",
 		}
 		nd.storeAndDispatch(ctx, sub, statusEvt)
 	}
@@ -274,7 +274,7 @@ func (nd *NotificationDispatcher) storeAndDispatch(ctx context.Context, sub *sto
 		ID:             api.NewUUID(),
 		SubscriptionID: sub.ID,
 		AgentID:        evt.AgentID,
-		ProjectID:        sub.ProjectID,
+		ProjectID:      sub.ProjectID,
 		SubscriberType: sub.SubscriberType,
 		SubscriberID:   sub.SubscriberID,
 		Status:         strings.ToUpper(effectiveStatus),
@@ -448,7 +448,7 @@ func (nd *NotificationDispatcher) createInboxMessage(ctx context.Context, sub *s
 
 	storeMsg := &store.Message{
 		ID:          api.NewUUID(),
-		ProjectID:     notif.ProjectID,
+		ProjectID:   notif.ProjectID,
 		Sender:      "agent:" + agent.Slug,
 		SenderID:    agent.ID,
 		Recipient:   "user:" + sub.SubscriberID,

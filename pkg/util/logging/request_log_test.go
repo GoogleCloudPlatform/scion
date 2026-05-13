@@ -179,9 +179,9 @@ func TestExtractIDsFromPath(t *testing.T) {
 	patterns := HubPathPatterns()
 
 	tests := []struct {
-		path    string
+		path      string
 		projectID string
-		agentID string
+		agentID   string
 	}{
 		{"/api/v1/groves/my-project/agents", "my-project", ""},
 		{"/api/v1/groves/my-project", "my-project", ""},
@@ -251,8 +251,8 @@ func TestRequestLogMiddleware_ProducesCorrectJSON(t *testing.T) {
 	if entry["component"] != "hub" {
 		t.Errorf("expected component=hub, got %v", entry["component"])
 	}
-	if entry["grove_id"] != "test-grove" {
-		t.Errorf("expected grove_id=test-grove, got %v", entry["grove_id"])
+	if entry["project_id"] != "test-grove" {
+		t.Errorf("expected project_id=test-grove, got %v", entry["project_id"])
 	}
 
 	// Check request_id is present (UUID)
@@ -351,8 +351,8 @@ func TestRequestLogMiddleware_HandlerEnrichment(t *testing.T) {
 	var entry map[string]any
 	json.Unmarshal(buf.Bytes(), &entry)
 
-	if entry["grove_id"] != "enriched-grove" {
-		t.Errorf("expected grove_id=enriched-grove, got %v", entry["grove_id"])
+	if entry["project_id"] != "enriched-grove" {
+		t.Errorf("expected project_id=enriched-grove, got %v", entry["project_id"])
 	}
 	if entry["agent_id"] != "enriched-agent" {
 		t.Errorf("expected agent_id=enriched-agent, got %v", entry["agent_id"])
@@ -477,7 +477,7 @@ func TestLoggerContextEnrichment(t *testing.T) {
 	meta := &RequestMeta{
 		RequestID: "req-enriched",
 		TraceID:   "trace-enriched",
-		ProjectID:   "grove-enriched",
+		ProjectID: "grove-enriched",
 		AgentID:   "agent-enriched",
 	}
 	ctx := ContextWithRequestMeta(context.Background(), meta)

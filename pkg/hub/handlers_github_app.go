@@ -490,7 +490,7 @@ func (s *Server) handleProjectGitHubInstallation(w http.ResponseWriter, r *http.
 		s.events.PublishProjectUpdated(r.Context(), project)
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"project_id":        projectID,
+			"project_id":      projectID,
 			"installation_id": req.InstallationID,
 			"status":          "associated",
 		})
@@ -548,7 +548,7 @@ func (s *Server) handleGetProjectGitHubStatus(w http.ResponseWriter, r *http.Req
 	}
 
 	resp := map[string]interface{}{
-		"project_id":        projectID,
+		"project_id":      projectID,
 		"installation_id": project.GitHubInstallationID,
 		"status":          project.GitHubAppStatus,
 	}
@@ -770,9 +770,9 @@ func (s *Server) handleGitHubAppSyncPermissions(w http.ResponseWriter, r *http.R
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"app_permissions": appPermissions,
+		"app_permissions":   appPermissions,
 		"affected_projects": affectedProjects,
-		"affected_count":  len(affectedProjects),
+		"affected_count":    len(affectedProjects),
 	})
 }
 
@@ -845,8 +845,8 @@ func (s *Server) syncAppPermissions(ctx context.Context) (map[string]string, []m
 		}
 
 		affectedProjects = append(affectedProjects, map[string]interface{}{
-			"project_id":            project.ID,
-			"project_name":          project.Name,
+			"project_id":          project.ID,
+			"project_name":        project.Name,
 			"missing_permissions": missingPerms,
 		})
 

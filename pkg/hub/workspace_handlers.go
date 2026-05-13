@@ -189,7 +189,7 @@ func (s *Server) handleWorkspaceStatus(w http.ResponseWriter, r *http.Request, a
 	// For now, return basic status
 	writeJSON(w, http.StatusOK, WorkspaceStatusResponse{
 		Slug:       agentID, // agentID parameter is the URL slug
-		ProjectID:    agent.ProjectID,
+		ProjectID:  agent.ProjectID,
 		StorageURI: storageURI,
 		LastSync:   nil, // Will be populated in Phase 4
 	})

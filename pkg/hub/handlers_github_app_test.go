@@ -458,9 +458,9 @@ func TestHandleAgentGitHubTokenRefresh_NoAuth(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:      "agent_gh_refresh",
-		Name:    "test-agent",
-		Slug:    "test-agent",
+		ID:        "agent_gh_refresh",
+		Name:      "test-agent",
+		Slug:      "test-agent",
 		ProjectID: project.ID,
 	}
 	if err := srv.store.CreateAgent(ctx, agent); err != nil {
@@ -490,9 +490,9 @@ func TestHandleAgentGitHubTokenRefresh_DevAuth(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:      "agent_gh_refresh2",
-		Name:    "test-agent-2",
-		Slug:    "test-agent-2",
+		ID:        "agent_gh_refresh2",
+		Name:      "test-agent-2",
+		Slug:      "test-agent-2",
 		ProjectID: project.ID,
 	}
 	if err := srv.store.CreateAgent(ctx, agent); err != nil {
@@ -522,9 +522,9 @@ func TestHandleAgentGitHubTokenRefresh_SelfAccess(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:      "agent_gh_refresh3",
-		Name:    "test-agent-3",
-		Slug:    "test-agent-3",
+		ID:        "agent_gh_refresh3",
+		Name:      "test-agent-3",
+		Slug:      "test-agent-3",
 		ProjectID: project.ID,
 	}
 	if err := srv.store.CreateAgent(ctx, agent); err != nil {
@@ -566,9 +566,9 @@ func TestHandleAgentGitHubTokenRefresh_NoInstallation(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:      "agent_gh_refresh4",
-		Name:    "test-agent-4",
-		Slug:    "test-agent-4",
+		ID:        "agent_gh_refresh4",
+		Name:      "test-agent-4",
+		Slug:      "test-agent-4",
 		ProjectID: project.ID,
 	}
 	if err := srv.store.CreateAgent(ctx, agent); err != nil {

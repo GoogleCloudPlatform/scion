@@ -326,7 +326,7 @@ type RemoteCreateAgentRequest struct {
 	ID          string             `json:"id,omitempty"` // Hub UUID for status reporting
 	Slug        string             `json:"slug"`         // URL-safe identifier for the agent
 	Name        string             `json:"name"`
-	ProjectID     string             `json:"projectId"`
+	ProjectID   string             `json:"projectId"`
 	UserID      string             `json:"userId,omitempty"`
 	Config      *RemoteAgentConfig `json:"config,omitempty"`
 	ResolvedEnv map[string]string  `json:"resolvedEnv,omitempty"`
@@ -1648,7 +1648,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			Slug:            slug,
 			Name:            slug,
 			Template:        payload.Template,
-			ProjectID:         evt.ProjectID,
+			ProjectID:       evt.ProjectID,
 			RuntimeBrokerID: runtimeBrokerID,
 			Phase:           "created",
 			Detached:        true,
@@ -1768,7 +1768,7 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 	// Create a one-shot event from the schedule
 	evt := store.ScheduledEvent{
 		ID:         api.NewUUID(),
-		ProjectID:    sched.ProjectID,
+		ProjectID:  sched.ProjectID,
 		EventType:  sched.EventType,
 		FireAt:     now,
 		Payload:    sched.Payload,

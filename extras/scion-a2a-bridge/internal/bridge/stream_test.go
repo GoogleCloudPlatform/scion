@@ -315,7 +315,7 @@ func TestBlockingTaskIgnoresActiveDispatch(t *testing.T) {
 	b.addWaiter(taskID, &waiter{
 		ch:        responseCh,
 		agentSlug: "agent-a",
-		projectID:   "grove1",
+		projectID: "grove1",
 	})
 	defer b.removeWaiter(taskID)
 

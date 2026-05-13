@@ -59,7 +59,7 @@ const (
 type GCPTokenEvent struct {
 	EventType           GCPTokenEventType `json:"eventType"`
 	AgentID             string            `json:"agentId"`
-	ProjectID             string            `json:"projectId"`
+	ProjectID           string            `json:"projectId"`
 	ServiceAccountEmail string            `json:"serviceAccountEmail"`
 	ServiceAccountID    string            `json:"serviceAccountId"`
 	Success             bool              `json:"success"`
@@ -86,14 +86,14 @@ type BrokerAuthEvent struct {
 type InviteAuditEventType string
 
 const (
-	InviteAuditAllowListAdd       InviteAuditEventType = "allow_list_add"
-	InviteAuditAllowListRemove    InviteAuditEventType = "allow_list_remove"
-	InviteAuditAllowListBulkAdd   InviteAuditEventType = "allow_list_bulk_add"
-	InviteAuditInviteCreated      InviteAuditEventType = "invite_created"
-	InviteAuditInviteRedeemed     InviteAuditEventType = "invite_redeemed"
-	InviteAuditInviteRevoked      InviteAuditEventType = "invite_revoked"
-	InviteAuditInviteDeleted      InviteAuditEventType = "invite_deleted"
-	InviteAuditLoginDenied        InviteAuditEventType = "login_denied"
+	InviteAuditAllowListAdd     InviteAuditEventType = "allow_list_add"
+	InviteAuditAllowListRemove  InviteAuditEventType = "allow_list_remove"
+	InviteAuditAllowListBulkAdd InviteAuditEventType = "allow_list_bulk_add"
+	InviteAuditInviteCreated    InviteAuditEventType = "invite_created"
+	InviteAuditInviteRedeemed   InviteAuditEventType = "invite_redeemed"
+	InviteAuditInviteRevoked    InviteAuditEventType = "invite_revoked"
+	InviteAuditInviteDeleted    InviteAuditEventType = "invite_deleted"
+	InviteAuditLoginDenied      InviteAuditEventType = "login_denied"
 )
 
 // InviteAuditEvent represents an auditable event for the invite/allow-list system.
@@ -415,7 +415,7 @@ func LogGCPTokenGeneration(ctx context.Context, logger AuditLogger, eventType GC
 	event := &GCPTokenEvent{
 		EventType:           eventType,
 		AgentID:             agentID,
-		ProjectID:             projectID,
+		ProjectID:           projectID,
 		ServiceAccountEmail: saEmail,
 		ServiceAccountID:    saID,
 		Success:             success,

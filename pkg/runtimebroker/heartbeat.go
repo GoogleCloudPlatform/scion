@@ -256,7 +256,7 @@ func (s *HeartbeatService) gatherProjectAgents() []hubclient.ProjectHeartbeat {
 			continue
 		}
 		groves = append(groves, hubclient.ProjectHeartbeat{
-			ProjectID:    groveID,
+			ProjectID:  groveID,
 			AgentCount: len(agentList),
 			Agents:     agentList,
 		})

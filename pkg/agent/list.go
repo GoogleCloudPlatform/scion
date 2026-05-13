@@ -241,9 +241,9 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 						// It's an agent directory but we can't read info.
 						// Maybe report minimal info?
 						info = &api.AgentInfo{
-							Name:  e.Name(),
+							Name:    e.Name(),
 							Project: projectName,
-							Phase: "unknown",
+							Phase:   "unknown",
 						}
 					} else {
 						continue
@@ -254,8 +254,8 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 					Name:            e.Name(),
 					Template:        info.Template,
 					HarnessConfig:   info.HarnessConfig,
-					Project:           projectName,
-					ProjectPath:       gp,
+					Project:         projectName,
+					ProjectPath:     gp,
 					ContainerStatus: "created",
 					Image:           info.Image,
 					Phase:           info.Phase,

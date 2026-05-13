@@ -58,7 +58,7 @@ var (
 	brokerRestartDebug       bool
 
 	// broker provide/withdraw flags
-	brokerProjectID     string
+	brokerProjectID   string
 	brokerBrokerID    string // --broker flag for remote broker operations
 	brokerMakeDefault bool   // --make-default flag to set broker as project default
 	brokerHubFlag     string // --hub flag to target a specific hub connection
@@ -1316,8 +1316,7 @@ func runBrokerWithdraw(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Broker '%s' removed as provider from project '%s'\n", brokerName, projectName)
 
 	return nil
-	}
-
+}
 
 func runBrokerStatus(cmd *cobra.Command, args []string) error {
 	// Bridge --json flag to global --format
@@ -1579,8 +1578,7 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
-	}
-
+}
 
 func runBrokerHubs(cmd *cobra.Command, args []string) error {
 	// Bridge --json flag to global --format

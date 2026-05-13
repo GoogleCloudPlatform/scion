@@ -27,14 +27,14 @@ func TestSetAgentSubscription_CrossGroveIsolation(t *testing.T) {
 		PlatformUserID: "user-1",
 		Platform:       "googlechat",
 		AgentID:        "deploy",
-		ProjectID:        "grove-A",
+		ProjectID:      "grove-A",
 		Activities:     "COMPLETED",
 	}
 	subB := &AgentSubscription{
 		PlatformUserID: "user-1",
 		Platform:       "googlechat",
 		AgentID:        "deploy",
-		ProjectID:        "grove-B",
+		ProjectID:      "grove-B",
 		Activities:     "ERROR",
 	}
 
@@ -77,14 +77,14 @@ func TestDeleteAgentSubscription_GroveScoped(t *testing.T) {
 		PlatformUserID: "user-1",
 		Platform:       "googlechat",
 		AgentID:        "deploy",
-		ProjectID:        "grove-A",
+		ProjectID:      "grove-A",
 		Activities:     "COMPLETED",
 	}
 	subB := &AgentSubscription{
 		PlatformUserID: "user-1",
 		Platform:       "googlechat",
 		AgentID:        "deploy",
-		ProjectID:        "grove-B",
+		ProjectID:      "grove-B",
 		Activities:     "ERROR",
 	}
 
@@ -214,7 +214,7 @@ func TestMigrateAgentSubscriptionsPK_PreservesData(t *testing.T) {
 		PlatformUserID: "user-1",
 		Platform:       "googlechat",
 		AgentID:        "deploy",
-		ProjectID:        "grove-B",
+		ProjectID:      "grove-B",
 		Activities:     "ERROR",
 	}); err != nil {
 		t.Fatalf("set cross-grove sub: %v", err)

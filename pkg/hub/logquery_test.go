@@ -90,7 +90,7 @@ func TestBuildLogFilter(t *testing.T) {
 		{
 			name: "project ID filter",
 			opts: LogQueryOptions{
-				AgentID: "agent-123",
+				AgentID:   "agent-123",
 				ProjectID: "project-abc",
 			},
 			expected: `labels.agent_id = "agent-123" AND labels.project_id = "project-abc"`,
@@ -152,9 +152,9 @@ func TestBuildLogFilter_LogID(t *testing.T) {
 		{
 			name: "message log with project_id filter",
 			opts: LogQueryOptions{
-				AgentID: "agent-123",
+				AgentID:   "agent-123",
 				ProjectID: "project-abc",
-				LogID:   "scion-messages",
+				LogID:     "scion-messages",
 			},
 			projectID: "my-project",
 			expected:  `logName = "projects/my-project/logs/scion-messages" AND (labels.recipient_id = "agent-123" OR labels.sender_id = "agent-123") AND labels.project_id = "project-abc"`,
@@ -179,7 +179,7 @@ func TestConvertLogEntry(t *testing.T) {
 			Severity:  gcplog.Info,
 			Payload:   "Agent started processing task",
 			Labels: map[string]string{
-				"agent_id": "abc123",
+				"agent_id":   "abc123",
 				"project_id": "my-project",
 			},
 			InsertID: "insert-1",

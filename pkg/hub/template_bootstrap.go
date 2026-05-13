@@ -254,7 +254,7 @@ func (s *Server) bootstrapSingleTemplate(ctx context.Context, name, templatePath
 		DefaultHarnessConfig: cfgInfo.DefaultHarnessConfig,
 		Scope:                scope,
 		ScopeID:              projectID,
-		ProjectID:              projectID, // deprecated alias kept for compatibility
+		ProjectID:            projectID, // deprecated alias kept for compatibility
 		Status:               store.TemplateStatusPending,
 		StoragePath:          storagePath,
 		StorageBucket:        stor.Bucket(),

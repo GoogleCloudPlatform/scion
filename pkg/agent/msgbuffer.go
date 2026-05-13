@@ -52,9 +52,9 @@ type MessageBuffer struct {
 
 // agentBuffer holds the pending messages and timer for a single agent.
 type agentBuffer struct {
-	messages []string    // accumulated messages waiting for delivery
-	timer    *time.Timer // debounce timer; fires to trigger delivery
-	projectID  string      // grove scope for delivery
+	messages  []string    // accumulated messages waiting for delivery
+	timer     *time.Timer // debounce timer; fires to trigger delivery
+	projectID string      // grove scope for delivery
 }
 
 // NewMessageBuffer creates a new MessageBuffer with the given debounce delay

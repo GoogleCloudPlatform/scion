@@ -82,7 +82,7 @@ func TestResolveAgentID_AgentNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for non-existent agent")
 	}
-	if err.Error() != "agent 'nonexistent-agent' not found in grove" {
+	if err.Error() != "agent 'nonexistent-agent' not found in project" {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -138,7 +138,7 @@ func TestResolveLocalWorkspacePath_WorktreeExists(t *testing.T) {
 	}
 
 	// Set projectPath to the grove directory
-	oldProjectPath:= projectPath
+	oldProjectPath := projectPath
 	projectPath = groveDir
 	defer func() { projectPath = oldProjectPath }()
 
@@ -161,7 +161,7 @@ func TestResolveLocalWorkspacePath_FallbackToCurrent(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	// Set projectPath to the temp directory (no worktrees exist)
-	oldProjectPath:= projectPath
+	oldProjectPath := projectPath
 	projectPath = tmpDir
 	defer func() { projectPath = oldProjectPath }()
 
@@ -178,7 +178,7 @@ func TestResolveLocalWorkspacePath_FallbackToCurrent(t *testing.T) {
 
 func TestResolveLocalWorkspacePath_EmptyProjectPath(t *testing.T) {
 	// Clear grove path
-	oldProjectPath:= projectPath
+	oldProjectPath := projectPath
 	projectPath = ""
 	defer func() { projectPath = oldProjectPath }()
 

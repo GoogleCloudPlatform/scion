@@ -307,12 +307,12 @@ func init() {
 
 	// Hidden aliases for 'groves' for backward compatibility
 	hubGrovesCmd := &cobra.Command{
-		Use:    "groves",
+		Use:     "groves",
 		Aliases: []string{"grove"},
-		Hidden: true,
-		Short:  "Alias for 'projects'",
-		RunE:   runHubProjects,
-		Args:   cobra.MaximumNArgs(1),
+		Hidden:  true,
+		Short:   "Alias for 'projects'",
+		RunE:    runHubProjects,
+		Args:    cobra.MaximumNArgs(1),
 	}
 	hubCmd.AddCommand(hubGrovesCmd)
 
@@ -963,7 +963,7 @@ func printProjectContext(client hubclient.Client, projectPath string, isGlobal b
 	var linkedProject *hubclient.Project
 
 	// First try hub.projectId (explicit link), then fall back to project_id
-	hubProjectID:= settings.GetHubProjectID()
+	hubProjectID := settings.GetHubProjectID()
 	if hubProjectID != "" {
 		project, err := client.Projects().Get(ctx, hubProjectID)
 		if err == nil {
@@ -1095,7 +1095,7 @@ func getProjectContextJSON(client hubclient.Client, projectPath string, isGlobal
 	var linkedProject *hubclient.Project
 
 	// First try hub.projectId (explicit link), then fall back to project_id
-	hubProjectID:= settings.GetHubProjectID()
+	hubProjectID := settings.GetHubProjectID()
 	if hubProjectID != "" {
 		project, err := client.Projects().Get(ctx, hubProjectID)
 		if err == nil {
@@ -1437,9 +1437,9 @@ func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
 			Command: "hub projects delete",
 			Message: fmt.Sprintf("Project '%s' deleted successfully.", project.Name),
 			Details: map[string]interface{}{
-				"projectId":    project.ID,
-				"projectName":  project.Name,
-				"agentCount": project.AgentCount,
+				"projectId":   project.ID,
+				"projectName": project.Name,
+				"agentCount":  project.AgentCount,
 			},
 		})
 	}
@@ -2243,7 +2243,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	// determine whether hub.projectId was explicitly set for THIS project, rather
 	// than inherited from global settings via the koanf merge chain.
 	localSettings, _ := config.LoadSettingsFromDir(resolvedPath)
-	localHubProjectID:= ""
+	localHubProjectID := ""
 	if localSettings != nil {
 		localHubProjectID = localSettings.GetHubProjectID()
 	}
@@ -2368,7 +2368,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	}
 
 	// Use the hub project ID for all hub API calls from here on
-	effectiveHubProjectID:= hubLookupID
+	effectiveHubProjectID := hubLookupID
 	if effectiveHubProjectID == "" {
 		effectiveHubProjectID = projectID
 	}
@@ -2411,7 +2411,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 				"project":      projectName,
 				"projectId":    projectID,
 				"hubProjectId": effectiveHubProjectID,
-				"endpoint":   endpoint,
+				"endpoint":     endpoint,
 			},
 		})
 	}
@@ -2423,12 +2423,12 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	if hubsync.ShowSyncAfterLinkPrompt(autoConfirm) {
 		// Create HubContext for sync
 		hubCtx := &hubsync.HubContext{
-			Client:    client,
-			Endpoint:  endpoint,
-			Settings:  settings,
+			Client:      client,
+			Endpoint:    endpoint,
+			Settings:    settings,
 			ProjectID:   effectiveHubProjectID,
 			ProjectPath: resolvedPath,
-			IsGlobal:  isGlobal,
+			IsGlobal:    isGlobal,
 		}
 
 		syncResult, err := hubsync.CompareAgents(ctx, hubCtx)
@@ -2495,10 +2495,10 @@ func offerTemplateSyncOnLink(projectPath, endpoint, projectID string) {
 	}
 
 	hubCtx := &HubContext{
-		Client:    client,
-		Endpoint:  endpoint,
+		Client:      client,
+		Endpoint:    endpoint,
 		ProjectPath: projectPath,
-		Settings:  settings,
+		Settings:    settings,
 	}
 
 	fmt.Println("\nSyncing project templates to Hub...")

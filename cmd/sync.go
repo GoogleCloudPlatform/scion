@@ -24,8 +24,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/dustin/go-humanize"
@@ -167,7 +167,7 @@ func runProjectSync(direction projectsync.Direction) error {
 	result, err := projectsync.Sync(ctx, projectsync.Options{
 		LocalPath:       workspacePath,
 		HubEndpoint:     hubCtx.Endpoint,
-		ProjectID:         projectID,
+		ProjectID:       projectID,
 		AuthToken:       authToken,
 		Direction:       direction,
 		DryRun:          syncDryRun,
@@ -184,7 +184,7 @@ func runProjectSync(direction projectsync.Direction) error {
 			"command":   "sync",
 			"scope":     "project",
 			"direction": string(result.Direction),
-			"projectId":   projectID,
+			"projectId": projectID,
 			"dryRun":    result.DryRun,
 		})
 	}

@@ -117,7 +117,7 @@ func (s *Server) updateProjectSyncState(projectID, workspacePath string) {
 
 	now := time.Now()
 	state := &store.ProjectSyncState{
-		ProjectID:      projectID,
+		ProjectID:    projectID,
 		BrokerID:     "", // hub-native
 		LastSyncTime: &now,
 		FileCount:    fileCount,
@@ -405,7 +405,7 @@ func (s *Server) handleProjectSyncStatus(w http.ResponseWriter, r *http.Request,
 	}
 
 	writeJSON(w, http.StatusOK, ProjectSyncStatusResponse{
-		ProjectID:    projectID,
+		ProjectID:  projectID,
 		States:     states,
 		TotalFiles: totalFiles,
 		TotalBytes: totalBytes,

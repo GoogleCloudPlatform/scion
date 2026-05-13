@@ -26,34 +26,34 @@ import (
 
 func TestBuildWebDAVURL(t *testing.T) {
 	tests := []struct {
-		name     string
-		endpoint string
-		projectID  string
-		expected string
+		name      string
+		endpoint  string
+		projectID string
+		expected  string
 	}{
 		{
-			name:     "basic",
-			endpoint: "https://hub.example.com",
-			projectID:  "my-grove",
-			expected: "https://hub.example.com/api/v1/groves/my-grove/dav",
+			name:      "basic",
+			endpoint:  "https://hub.example.com",
+			projectID: "my-project",
+			expected:  "https://hub.example.com/api/v1/projects/my-project/dav",
 		},
 		{
-			name:     "trailing slash",
-			endpoint: "https://hub.example.com/",
-			projectID:  "my-grove",
-			expected: "https://hub.example.com/api/v1/groves/my-grove/dav",
+			name:      "trailing slash",
+			endpoint:  "https://hub.example.com/",
+			projectID: "my-project",
+			expected:  "https://hub.example.com/api/v1/projects/my-project/dav",
 		},
 		{
-			name:     "with port",
-			endpoint: "http://localhost:8080",
-			projectID:  "test-grove-123",
-			expected: "http://localhost:8080/api/v1/groves/test-grove-123/dav",
+			name:      "with port",
+			endpoint:  "http://localhost:8080",
+			projectID: "test-project-123",
+			expected:  "http://localhost:8080/api/v1/projects/test-project-123/dav",
 		},
 		{
-			name:     "uuid grove id",
-			endpoint: "https://hub.example.com",
-			projectID:  "550e8400-e29b-41d4-a716-446655440000",
-			expected: "https://hub.example.com/api/v1/groves/550e8400-e29b-41d4-a716-446655440000/dav",
+			name:      "uuid project id",
+			endpoint:  "https://hub.example.com",
+			projectID: "550e8400-e29b-41d4-a716-446655440000",
+			expected:  "https://hub.example.com/api/v1/projects/550e8400-e29b-41d4-a716-446655440000/dav",
 		},
 	}
 
@@ -84,9 +84,9 @@ func TestSync_ValidationErrors(t *testing.T) {
 			errMsg: "hub endpoint is required",
 		},
 		{
-			name:   "missing grove ID",
+			name:   "missing project ID",
 			opts:   Options{LocalPath: "/tmp/workspace", HubEndpoint: "https://hub.example.com"},
-			errMsg: "grove ID is required",
+			errMsg: "project ID is required",
 		},
 	}
 
@@ -120,12 +120,12 @@ func TestBuildRcloneRemoteString(t *testing.T) {
 	// Verify that the remote string properly single-quotes values so that
 	// special characters (e.g. "://" in URLs) are not parsed as rclone
 	// connection-string delimiters.
-	davURL := buildWebDAVURL("https://hub.example.com", "grove-123")
+	davURL := buildWebDAVURL("https://hub.example.com", "project-123")
 	token := "eyJhbGciOiJIUzI1NiJ9.test.signature"
 
 	remote := fmt.Sprintf(":webdav,url='%s',bearer_token='%s':", davURL, token)
 
-	assert.Contains(t, remote, "url='https://hub.example.com/api/v1/groves/grove-123/dav'")
+	assert.Contains(t, remote, "url='https://hub.example.com/api/v1/projects/project-123/dav'")
 	assert.Contains(t, remote, "bearer_token='eyJhbGciOiJIUzI1NiJ9.test.signature'")
 	assert.True(t, strings.HasPrefix(remote, ":webdav,"))
 	assert.True(t, strings.HasSuffix(remote, ":"))

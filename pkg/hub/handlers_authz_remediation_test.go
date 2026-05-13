@@ -127,22 +127,22 @@ func TestAuthzRemediation_ListEndpointsFilterUnauthorizedItems(t *testing.T) {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, hiddenBroker))
 
 	visibleAgent := &store.Agent{
-		ID:      "agent-visible-authz",
-		Slug:    "agent-visible-authz",
-		Name:    "Visible Agent",
+		ID:        "agent-visible-authz",
+		Slug:      "agent-visible-authz",
+		Name:      "Visible Agent",
 		ProjectID: visibleProject.ID,
-		OwnerID: "owner-outside-user",
-		Phase:   string(state.PhaseRunning),
+		OwnerID:   "owner-outside-user",
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, visibleAgent))
 
 	hiddenAgent := &store.Agent{
-		ID:      "agent-hidden-authz",
-		Slug:    "agent-hidden-authz",
-		Name:    "Hidden Agent",
+		ID:        "agent-hidden-authz",
+		Slug:      "agent-hidden-authz",
+		Name:      "Hidden Agent",
 		ProjectID: hiddenProject.ID,
-		OwnerID: "owner-outside-user",
-		Phase:   string(state.PhaseRunning),
+		OwnerID:   "owner-outside-user",
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, hiddenAgent))
 
@@ -210,12 +210,12 @@ func TestAuthzRemediation_AgentAndWorkspaceRoutesEnforceResourcePermissions(t *t
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:      "agent-workspace-authz",
-		Slug:    "agent-workspace-authz",
-		Name:    "Workspace Agent",
+		ID:        "agent-workspace-authz",
+		Slug:      "agent-workspace-authz",
+		Name:      "Workspace Agent",
 		ProjectID: project.ID,
-		OwnerID: "owner-outside-user",
-		Phase:   string(state.PhaseStopped),
+		OwnerID:   "owner-outside-user",
+		Phase:     string(state.PhaseStopped),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 

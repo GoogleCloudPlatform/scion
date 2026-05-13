@@ -50,16 +50,16 @@ type noopEventPublisher struct{}
 func (noopEventPublisher) PublishAgentStatus(_ context.Context, _ *store.Agent)              {}
 func (noopEventPublisher) PublishAgentCreated(_ context.Context, _ *store.Agent)             {}
 func (noopEventPublisher) PublishAgentDeleted(_ context.Context, _, _ string)                {}
-func (noopEventPublisher) PublishProjectCreated(_ context.Context, _ *store.Project)             {}
-func (noopEventPublisher) PublishProjectUpdated(_ context.Context, _ *store.Project)             {}
-func (noopEventPublisher) PublishProjectDeleted(_ context.Context, _ string)                   {}
+func (noopEventPublisher) PublishProjectCreated(_ context.Context, _ *store.Project)         {}
+func (noopEventPublisher) PublishProjectUpdated(_ context.Context, _ *store.Project)         {}
+func (noopEventPublisher) PublishProjectDeleted(_ context.Context, _ string)                 {}
 func (noopEventPublisher) PublishBrokerConnected(_ context.Context, _, _ string, _ []string) {}
 func (noopEventPublisher) PublishBrokerDisconnected(_ context.Context, _ string, _ []string) {}
 func (noopEventPublisher) PublishBrokerStatus(_ context.Context, _, _ string)                {}
 func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notification)      {}
 func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message)            {}
-func (noopEventPublisher) PublishAllowListChanged(_ context.Context, _, _ string)             {}
-func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _, _ string)             {}
+func (noopEventPublisher) PublishAllowListChanged(_ context.Context, _, _ string)            {}
+func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _, _ string)            {}
 func (noopEventPublisher) Close()                                                            {}
 
 // Event is a published event with a subject and JSON-encoded data.

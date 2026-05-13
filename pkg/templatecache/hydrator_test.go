@@ -93,29 +93,29 @@ type mockHubClient struct {
 	templates hubclient.TemplateService
 }
 
-func (m *mockHubClient) Agents() hubclient.AgentService                                 { return nil }
-func (m *mockHubClient) ProjectAgents(projectID string) hubclient.AgentService              { return nil }
-func (m *mockHubClient) Projects() hubclient.ProjectService                                 { return nil }
-func (m *mockHubClient) RuntimeBrokers() hubclient.RuntimeBrokerService                 { return nil }
-func (m *mockHubClient) Templates() hubclient.TemplateService                           { return m.templates }
-func (m *mockHubClient) HarnessConfigs() hubclient.HarnessConfigService                 { return nil }
-func (m *mockHubClient) Workspace() hubclient.WorkspaceService                          { return nil }
-func (m *mockHubClient) Users() hubclient.UserService                                   { return nil }
-func (m *mockHubClient) Env() hubclient.EnvService                                      { return nil }
-func (m *mockHubClient) Secrets() hubclient.SecretService                               { return nil }
-func (m *mockHubClient) Auth() hubclient.AuthService                                    { return nil }
-func (m *mockHubClient) Tokens() hubclient.TokenService                                 { return nil }
-func (m *mockHubClient) Notifications() hubclient.NotificationService                   { return nil }
-func (m *mockHubClient) Subscriptions() hubclient.SubscriptionService                   { return nil }
-func (m *mockHubClient) SubscriptionTemplates() hubclient.SubscriptionTemplateService   { return nil }
+func (m *mockHubClient) Agents() hubclient.AgentService                                   { return nil }
+func (m *mockHubClient) ProjectAgents(projectID string) hubclient.AgentService            { return nil }
+func (m *mockHubClient) Projects() hubclient.ProjectService                               { return nil }
+func (m *mockHubClient) RuntimeBrokers() hubclient.RuntimeBrokerService                   { return nil }
+func (m *mockHubClient) Templates() hubclient.TemplateService                             { return m.templates }
+func (m *mockHubClient) HarnessConfigs() hubclient.HarnessConfigService                   { return nil }
+func (m *mockHubClient) Workspace() hubclient.WorkspaceService                            { return nil }
+func (m *mockHubClient) Users() hubclient.UserService                                     { return nil }
+func (m *mockHubClient) Env() hubclient.EnvService                                        { return nil }
+func (m *mockHubClient) Secrets() hubclient.SecretService                                 { return nil }
+func (m *mockHubClient) Auth() hubclient.AuthService                                      { return nil }
+func (m *mockHubClient) Tokens() hubclient.TokenService                                   { return nil }
+func (m *mockHubClient) Notifications() hubclient.NotificationService                     { return nil }
+func (m *mockHubClient) Subscriptions() hubclient.SubscriptionService                     { return nil }
+func (m *mockHubClient) SubscriptionTemplates() hubclient.SubscriptionTemplateService     { return nil }
 func (m *mockHubClient) ScheduledEvents(projectID string) hubclient.ScheduledEventService { return nil }
 func (m *mockHubClient) Schedules(projectID string) hubclient.ScheduleService             { return nil }
 func (m *mockHubClient) GCPServiceAccounts(projectID string) hubclient.GCPServiceAccountService {
 	return nil
 }
-func (m *mockHubClient) Messages() hubclient.MessageService { return nil }
+func (m *mockHubClient) Messages() hubclient.MessageService    { return nil }
 func (m *mockHubClient) AllowList() hubclient.AllowListService { return nil }
-func (m *mockHubClient) Invites() hubclient.InviteService { return nil }
+func (m *mockHubClient) Invites() hubclient.InviteService      { return nil }
 func (m *mockHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return nil, nil
 }

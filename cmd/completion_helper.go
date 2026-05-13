@@ -67,7 +67,7 @@ func completeAgentNames(cmd *cobra.Command, args []string, toComplete string) ([
 	}
 
 	// Helper to scan a grove directory for local agents
-	scanProject:= func(groveDir string) {
+	scanProject := func(groveDir string) {
 		if groveDir == "" {
 			return
 		}

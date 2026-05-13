@@ -312,13 +312,13 @@ type mockScheduledEventStore struct {
 	mu          sync.Mutex
 	events      map[string]*store.ScheduledEvent
 	agents      map[string]*store.Agent
-	projects      map[string]*store.Project
+	projects    map[string]*store.Project
 }
 
 func newMockStore() *mockScheduledEventStore {
 	return &mockScheduledEventStore{
-		events: make(map[string]*store.ScheduledEvent),
-		agents: make(map[string]*store.Agent),
+		events:   make(map[string]*store.ScheduledEvent),
+		agents:   make(map[string]*store.Agent),
 		projects: make(map[string]*store.Project),
 	}
 }
@@ -475,7 +475,7 @@ func TestOneShotTimerFiresAtCorrectTime(t *testing.T) {
 
 	evt := store.ScheduledEvent{
 		ID:        "timer-1",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "message",
 		FireAt:    time.Now().Add(50 * time.Millisecond),
 		Payload:   "{}",
@@ -527,7 +527,7 @@ func TestOneShotExpiredTimerFiresImmediately(t *testing.T) {
 	ctx := context.Background()
 	evt := store.ScheduledEvent{
 		ID:        "expired-1",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "message",
 		FireAt:    time.Now().Add(-1 * time.Hour), // In the past
 		Payload:   "{}",
@@ -576,7 +576,7 @@ func TestOneShotTimerCancellation(t *testing.T) {
 
 	evt := store.ScheduledEvent{
 		ID:        "cancel-1",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "message",
 		FireAt:    time.Now().Add(10 * time.Second), // Far in the future
 		Payload:   "{}",
@@ -625,7 +625,7 @@ func TestScheduleEventPersistsAndSchedules(t *testing.T) {
 
 	evt := store.ScheduledEvent{
 		ID:        "schedule-1",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "message",
 		FireAt:    time.Now().Add(5 * time.Second),
 		Payload:   `{"msg":"test"}`,
@@ -669,7 +669,7 @@ func TestStopCancelsAllOneShotTimers(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		evt := store.ScheduledEvent{
 			ID:        "stop-timer-" + string(rune('a'+i)),
-			ProjectID:   "project-1",
+			ProjectID: "project-1",
 			EventType: "message",
 			FireAt:    time.Now().Add(1 * time.Hour),
 			Payload:   "{}",
@@ -712,7 +712,7 @@ func TestOneShotHandlerPanicRecovery(t *testing.T) {
 
 	evt := store.ScheduledEvent{
 		ID:        "panic-1",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "message",
 		FireAt:    time.Now(),
 		Payload:   "{}",
@@ -742,7 +742,7 @@ func TestOneShotUnknownEventTypeReturnsError(t *testing.T) {
 
 	evt := store.ScheduledEvent{
 		ID:        "unknown-1",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "nonexistent_type",
 		FireAt:    time.Now(),
 		Payload:   "{}",
@@ -779,7 +779,7 @@ func TestOneShotNilStoreSafety(t *testing.T) {
 	// ScheduleEvent should return an error
 	err := s.ScheduleEvent(ctx, store.ScheduledEvent{
 		ID:        "nil-store-1",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour),
 		Payload:   "{}",
@@ -814,7 +814,7 @@ func TestRegisterEventHandlerAndDispatch(t *testing.T) {
 
 	evt := store.ScheduledEvent{
 		ID:        "handler-test-1",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "message",
 		FireAt:    time.Now(),
 		Payload:   `{"msg":"hello"}`,
@@ -855,7 +855,7 @@ func TestEventHandlerErrorIsCaptured(t *testing.T) {
 
 	evt := store.ScheduledEvent{
 		ID:        "handler-err-1",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "message",
 		FireAt:    time.Now(),
 		Payload:   "{}",
@@ -884,7 +884,7 @@ func TestUnregisteredEventTypeReturnsError(t *testing.T) {
 
 	evt := store.ScheduledEvent{
 		ID:        "no-handler-1",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "some_unregistered_type",
 		FireAt:    time.Now(),
 		Payload:   "{}",
@@ -926,7 +926,7 @@ func TestScheduleEventWithCancelledCallerContext(t *testing.T) {
 
 	evt := store.ScheduledEvent{
 		ID:        "req-ctx-1",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "message",
 		FireAt:    time.Now().Add(80 * time.Millisecond),
 		Payload:   `{"msg":"test"}`,
@@ -980,7 +980,7 @@ func TestExpiredEventsFromDowntimeStillFire(t *testing.T) {
 	for i, staleness := range []time.Duration{5 * time.Minute, 2 * time.Hour, 24 * time.Hour} {
 		evt := store.ScheduledEvent{
 			ID:        fmt.Sprintf("downtime-%d", i),
-			ProjectID:   "project-1",
+			ProjectID: "project-1",
 			EventType: "message",
 			FireAt:    now.Add(-staleness),
 			Payload:   `{"msg":"recover me"}`,
@@ -1039,7 +1039,7 @@ func TestMessageEventHandler_AgentNotFound(t *testing.T) {
 
 	evt := store.ScheduledEvent{
 		ID:        "msg-no-agent-1",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "message",
 		Payload:   `{"agentName":"deleted-agent","message":"hello?"}`,
 	}
@@ -1065,7 +1065,7 @@ func TestMessageEventHandler_AgentNotFoundByID(t *testing.T) {
 
 	evt := store.ScheduledEvent{
 		ID:        "msg-no-agent-2",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "message",
 		Payload:   `{"agentId":"nonexistent-id","message":"hello?"}`,
 	}
@@ -1100,7 +1100,7 @@ func TestMultipleEventHandlers(t *testing.T) {
 	// Fire a message event
 	msgEvt := store.ScheduledEvent{
 		ID:        "multi-msg-1",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "message",
 		FireAt:    time.Now(),
 		Payload:   "{}",
@@ -1112,7 +1112,7 @@ func TestMultipleEventHandlers(t *testing.T) {
 	// Fire a status_update event
 	statusEvt := store.ScheduledEvent{
 		ID:        "multi-status-1",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "status_update",
 		FireAt:    time.Now(),
 		Payload:   "{}",
@@ -1137,7 +1137,7 @@ func TestDispatchAgentEventHandler_InvalidPayload(t *testing.T) {
 	ctx := context.Background()
 	evt := store.ScheduledEvent{
 		ID:        "dispatch-bad-1",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `not valid json`,
 	}
@@ -1159,7 +1159,7 @@ func TestDispatchAgentEventHandler_MissingAgentName(t *testing.T) {
 	ctx := context.Background()
 	evt := store.ScheduledEvent{
 		ID:        "dispatch-noname-1",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"template":"my-template"}`,
 	}
@@ -1181,7 +1181,7 @@ func TestDispatchAgentEventHandler_ProjectNotFound(t *testing.T) {
 	ctx := context.Background()
 	evt := store.ScheduledEvent{
 		ID:        "dispatch-noproject-1",
-		ProjectID:   "nonexistent-project",
+		ProjectID: "nonexistent-project",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"worker-1"}`,
 	}
@@ -1199,11 +1199,11 @@ func TestDispatchAgentEventHandler_AgentAlreadyExists(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
 	ms.agents["existing-1"] = &store.Agent{
-		ID:      "existing-1",
-		Slug:    "worker-1",
-		Name:    "worker-1",
+		ID:        "existing-1",
+		Slug:      "worker-1",
+		Name:      "worker-1",
 		ProjectID: "project-1",
-		Phase:   "running",
+		Phase:     "running",
 	}
 
 	srv := &Server{store: ms}
@@ -1212,7 +1212,7 @@ func TestDispatchAgentEventHandler_AgentAlreadyExists(t *testing.T) {
 	ctx := context.Background()
 	evt := store.ScheduledEvent{
 		ID:        "dispatch-exists-1",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"worker-1"}`,
 	}
@@ -1236,7 +1236,7 @@ func TestDispatchAgentEventHandler_CreatesAgentNoDispatcher(t *testing.T) {
 	ctx := context.Background()
 	evt := store.ScheduledEvent{
 		ID:        "dispatch-ok-1",
-		ProjectID:   "project-1",
+		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"new-worker","template":"my-tmpl","task":"Do the thing"}`,
 	}

@@ -67,9 +67,9 @@ func TestChannelEventPublisher_PublishAgentStatus(t *testing.T) {
 	defer unsub2()
 
 	agent := &store.Agent{
-		ID:      "a1",
+		ID:        "a1",
 		ProjectID: "g1",
-		Phase:   "running",
+		Phase:     "running",
 	}
 
 	pub.PublishAgentStatus(context.Background(), agent)
@@ -111,7 +111,7 @@ func TestChannelEventPublisher_PublishAgentStatus_IncludesTurnCounts(t *testing.
 
 	agent := &store.Agent{
 		ID:                "a1",
-		ProjectID:           "g1",
+		ProjectID:         "g1",
 		Phase:             "running",
 		Activity:          "thinking",
 		CurrentTurns:      5,
@@ -155,7 +155,7 @@ func TestChannelEventPublisher_PublishAgentCreated(t *testing.T) {
 
 	agent := &store.Agent{
 		ID:              "a1",
-		ProjectID:         "g1",
+		ProjectID:       "g1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
 		Template:        "claude",
@@ -283,7 +283,7 @@ func TestChannelEventPublisher_PublishUserMessage_FanOut(t *testing.T) {
 
 	msg := &store.Message{
 		ID:          "m1",
-		ProjectID:     "g1",
+		ProjectID:   "g1",
 		Sender:      "agent:coder",
 		SenderID:    "a1",
 		Recipient:   "user:alice",
@@ -297,9 +297,9 @@ func TestChannelEventPublisher_PublishUserMessage_FanOut(t *testing.T) {
 	pub.PublishUserMessage(context.Background(), msg)
 
 	for name, ch := range map[string]<-chan Event{
-		"user":  userCh,
+		"user":    userCh,
 		"project": projectCh,
-		"agent": agentCh,
+		"agent":   agentCh,
 	} {
 		select {
 		case evt := <-ch:
@@ -333,7 +333,7 @@ func TestChannelEventPublisher_PublishUserMessage_UserToAgent(t *testing.T) {
 
 	msg := &store.Message{
 		ID:          "m2",
-		ProjectID:     "g1",
+		ProjectID:   "g1",
 		Sender:      "user:alice",
 		SenderID:    "u1",
 		Recipient:   "agent:coder",
@@ -385,7 +385,7 @@ func TestChannelEventPublisher_PublishUserMessage_Broadcasted(t *testing.T) {
 
 	msg := &store.Message{
 		ID:          "m3",
-		ProjectID:     "g1",
+		ProjectID:   "g1",
 		Sender:      "user:alice",
 		SenderID:    "u1",
 		Recipient:   "agent:coder",
@@ -425,7 +425,7 @@ func TestChannelEventPublisher_PublishBrokerConnected(t *testing.T) {
 	pub.PublishBrokerConnected(context.Background(), "b1", "broker-1", []string{"g1", "g2"})
 
 	for _, tc := range []struct {
-		ch      <-chan Event
+		ch        <-chan Event
 		projectID string
 	}{
 		{ch1, "g1"},
@@ -454,9 +454,9 @@ func TestChannelEventPublisher_Backpressure(t *testing.T) {
 	defer unsub()
 
 	agent := &store.Agent{
-		ID:      "a1",
+		ID:        "a1",
 		ProjectID: "g1",
-		Phase:   "running",
+		Phase:     "running",
 	}
 
 	// Fill the buffer (capacity 64) and then some
@@ -495,9 +495,9 @@ func TestChannelEventPublisher_SubscribeUnsubscribe(t *testing.T) {
 	ch, unsub := pub.Subscribe("agent.a1.status")
 
 	agent := &store.Agent{
-		ID:      "a1",
+		ID:        "a1",
 		ProjectID: "g1",
-		Phase:   "running",
+		Phase:     "running",
 	}
 
 	// Should receive before unsub
@@ -578,7 +578,7 @@ func TestChannelEventPublisher_PublishNotification(t *testing.T) {
 	notif := &store.Notification{
 		ID:        "n1",
 		AgentID:   "a1",
-		ProjectID:   "g1",
+		ProjectID: "g1",
 		Status:    "COMPLETED",
 		Message:   "test-agent has reached a state of COMPLETED",
 		CreatedAt: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC),

@@ -40,7 +40,7 @@ func TestTaskCRUD(t *testing.T) {
 	task := &Task{
 		ID:        "task-1",
 		ContextID: "ctx-1",
-		ProjectID:   "grove-1",
+		ProjectID: "grove-1",
 		AgentSlug: "agent-1",
 		AgentID:   "agent-id-1",
 		State:     "submitted",
@@ -141,7 +141,7 @@ func TestContextCRUD(t *testing.T) {
 
 	ctx := &Context{
 		ContextID:  "ctx-1",
-		ProjectID:    "grove-1",
+		ProjectID:  "grove-1",
 		AgentSlug:  "agent-1",
 		AgentID:    "agent-id-1",
 		CreatedAt:  now,

@@ -433,7 +433,7 @@ type V1HubClientConfig struct {
 	Enabled   *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	Linked    *bool  `json:"linked,omitempty" yaml:"linked,omitempty" koanf:"linked"`
 	Endpoint  string `json:"endpoint,omitempty" yaml:"endpoint,omitempty" koanf:"endpoint"`
-	ProjectID   string `json:"grove_id,omitempty" yaml:"grove_id,omitempty" koanf:"grove_id"`
+	ProjectID string `json:"grove_id,omitempty" yaml:"grove_id,omitempty" koanf:"grove_id"`
 	LocalOnly *bool  `json:"local_only,omitempty" yaml:"local_only,omitempty" koanf:"local_only"`
 }
 
@@ -1364,7 +1364,7 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 			Enabled:   legacy.Hub.Enabled,
 			Linked:    legacy.Hub.Linked,
 			Endpoint:  legacy.Hub.Endpoint,
-			ProjectID:   legacy.Hub.ProjectID,
+			ProjectID: legacy.Hub.ProjectID,
 			LocalOnly: legacy.Hub.LocalOnly,
 		}
 		if legacy.Hub.Token != "" {
@@ -1485,7 +1485,7 @@ func convertVersionedToLegacy(vs *VersionedSettings) *Settings {
 			Enabled:   vs.Hub.Enabled,
 			Linked:    vs.Hub.Linked,
 			Endpoint:  vs.Hub.Endpoint,
-			ProjectID:   vs.Hub.ProjectID,
+			ProjectID: vs.Hub.ProjectID,
 			LocalOnly: vs.Hub.LocalOnly,
 		}
 	}

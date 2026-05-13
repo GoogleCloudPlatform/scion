@@ -70,13 +70,13 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
 	filter := store.HarnessConfigFilter{
-		Name:    query.Get("name"),
-		Scope:   query.Get("scope"),
-		ScopeID: query.Get("scopeId"),
+		Name:      query.Get("name"),
+		Scope:     query.Get("scope"),
+		ScopeID:   query.Get("scopeId"),
 		ProjectID: query.Get("projectId"),
-		Harness: query.Get("harness"),
-		Status:  query.Get("status"),
-		Search:  query.Get("search"),
+		Harness:   query.Get("harness"),
+		Status:    query.Get("status"),
+		Search:    query.Get("search"),
 	}
 
 	// Default to active harness configs only

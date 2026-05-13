@@ -63,7 +63,7 @@ func TestListEnrichesTemplateAndHarnessFromAgentInfo(t *testing.T) {
 			return []api.AgentInfo{
 				{
 					Name:            agentName,
-					ProjectPath:       projectPath,
+					ProjectPath:     projectPath,
 					ContainerStatus: "Up 2 hours",
 					// Template and HarnessConfig intentionally empty
 				},
@@ -129,9 +129,9 @@ func TestListDoesNotOverrideRuntimeTemplate(t *testing.T) {
 		ListFunc: func(_ context.Context, _ map[string]string) ([]api.AgentInfo, error) {
 			return []api.AgentInfo{
 				{
-					Name:      agentName,
+					Name:        agentName,
 					ProjectPath: projectPath,
-					Template:  "from-runtime-label", // already set by runtime
+					Template:    "from-runtime-label", // already set by runtime
 				},
 			}, nil
 		},
@@ -186,7 +186,7 @@ func TestListSetsLastSeenFromAgentInfoMtime(t *testing.T) {
 		ListFunc: func(_ context.Context, _ map[string]string) ([]api.AgentInfo, error) {
 			return []api.AgentInfo{
 				{
-					Name:      agentName,
+					Name:        agentName,
 					ProjectPath: projectPath,
 				},
 			}, nil
@@ -358,7 +358,7 @@ func TestListReconcilesPhaseWithContainerStatus(t *testing.T) {
 					return []api.AgentInfo{
 						{
 							Name:            agentName,
-							ProjectPath:       projectPath,
+							ProjectPath:     projectPath,
 							ContainerStatus: tc.containerStatus,
 						},
 					}, nil
@@ -450,7 +450,7 @@ func TestListPreservesRuntimeTerminalStateForKubernetes(t *testing.T) {
 					return []api.AgentInfo{
 						{
 							Name:            agentName,
-							ProjectPath:       projectPath,
+							ProjectPath:     projectPath,
 							Runtime:         "kubernetes",
 							Phase:           tc.runtimePhase,
 							ContainerStatus: tc.containerStatus,

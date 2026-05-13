@@ -168,7 +168,7 @@ func (m *mockProjectStore) GetProject(_ context.Context, id string) (*store.Proj
 }
 func (m *mockProjectStore) CreateProject(context.Context, *store.Project) error { return nil }
 func (m *mockProjectStore) UpdateProject(context.Context, *store.Project) error { return nil }
-func (m *mockProjectStore) DeleteProject(context.Context, string) error       { return nil }
+func (m *mockProjectStore) DeleteProject(context.Context, string) error         { return nil }
 func (m *mockProjectStore) GetProjectBySlug(context.Context, string) (*store.Project, error) {
 	return nil, store.ErrNotFound
 }

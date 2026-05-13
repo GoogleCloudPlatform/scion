@@ -25,7 +25,7 @@ const (
 	AttrComponent = "component"
 	AttrSubsystem = "subsystem"
 	AttrTraceID   = "trace_id"
-	AttrProjectID   = "grove_id"
+	AttrProjectID = "project_id"
 	AttrAgentID   = "agent_id"
 	AttrBrokerID  = "broker_id"
 	AttrRequestID = "request_id"

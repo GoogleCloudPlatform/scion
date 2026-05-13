@@ -123,7 +123,7 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 	// Parse query parameters
 	query := r.URL.Query()
 	opts := LogQueryOptions{
-		AgentID: agent.ID,
+		AgentID:   agent.ID,
 		ProjectID: agent.ProjectID,
 	}
 
@@ -300,9 +300,9 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 
 	query := r.URL.Query()
 	opts := LogQueryOptions{
-		AgentID: agent.ID,
+		AgentID:   agent.ID,
 		ProjectID: agent.ProjectID,
-		LogID:   logging.MessageLogID,
+		LogID:     logging.MessageLogID,
 	}
 
 	if v := query.Get("tail"); v != "" {
@@ -370,9 +370,9 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 	}
 
 	opts := LogQueryOptions{
-		AgentID: agent.ID,
+		AgentID:   agent.ID,
 		ProjectID: agent.ProjectID,
-		LogID:   logging.MessageLogID,
+		LogID:     logging.MessageLogID,
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -461,7 +461,7 @@ func (s *Server) handleProjectMessageLogs(w http.ResponseWriter, r *http.Request
 	query := r.URL.Query()
 	opts := LogQueryOptions{
 		ProjectID: project.ID,
-		LogID:   logging.MessageLogID,
+		LogID:     logging.MessageLogID,
 	}
 
 	if v := query.Get("tail"); v != "" {
@@ -529,7 +529,7 @@ func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.R
 
 	opts := LogQueryOptions{
 		ProjectID: project.ID,
-		LogID:   logging.MessageLogID,
+		LogID:     logging.MessageLogID,
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")

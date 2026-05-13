@@ -99,7 +99,7 @@ func TestAgentHeartbeatTimeoutHandler_MarksStaleAgents(t *testing.T) {
 		Slug:       "stale-runner",
 		Name:       "Stale Runner",
 		Template:   "claude",
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		Phase:      string(state.PhaseCreated),
 		Visibility: store.VisibilityPrivate,
 	}
@@ -120,7 +120,7 @@ func TestAgentHeartbeatTimeoutHandler_MarksStaleAgents(t *testing.T) {
 		Slug:       "stopped-agent",
 		Name:       "Stopped Agent",
 		Template:   "claude",
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		Phase:      string(state.PhaseStopped),
 		Visibility: store.VisibilityPrivate,
 	}
@@ -184,12 +184,12 @@ func TestAgentHeartbeatTimeoutHandler_ClearedBySubsequentHeartbeat(t *testing.T)
 	}
 
 	agent := &store.Agent{
-		ID:       api.NewUUID(),
-		Slug:     "recovery-agent",
-		Name:     "Recovery Agent",
-		Template: "claude",
-		ProjectID:  project.ID,
-		Phase:    string(state.PhaseRunning), Activity: string(state.ActivityOffline),
+		ID:        api.NewUUID(),
+		Slug:      "recovery-agent",
+		Name:      "Recovery Agent",
+		Template:  "claude",
+		ProjectID: project.ID,
+		Phase:     string(state.PhaseRunning), Activity: string(state.ActivityOffline),
 		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {

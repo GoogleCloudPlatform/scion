@@ -109,8 +109,8 @@ func TestEnvGather_HubDispatch_AllSatisfied(t *testing.T) {
 
 	// Add provider so broker can serve this project
 	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  "project-1",
-		BrokerID: "broker-1",
+		ProjectID: "project-1",
+		BrokerID:  "broker-1",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestEnvGather_HubDispatch_AllSatisfied(t *testing.T) {
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "broker-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -179,7 +179,7 @@ func TestEnvGather_HubDispatch_NeedsGather(t *testing.T) {
 		ID:              "agent-2",
 		Name:            "test-agent-2",
 		Slug:            "test-agent-2",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "broker-2",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -227,7 +227,7 @@ func TestEnvGather_HubDispatch_FinalizeEnv(t *testing.T) {
 		ID:              "agent-3",
 		Name:            "test-agent-3",
 		Slug:            "test-agent-3",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "broker-3",
 	}
 
@@ -293,7 +293,7 @@ func TestEnvGather_HubHandler_202Response(t *testing.T) {
 	// Create agent with GatherEnv=true
 	reqBody := map[string]interface{}{
 		"name":      "gather-agent",
-		"projectId":   "project-gather",
+		"projectId": "project-gather",
 		"template":  "claude",
 		"gatherEnv": true,
 	}
@@ -432,7 +432,7 @@ func TestEnvGather_HubHandler_SubmitEnv(t *testing.T) {
 		ID:              "agent-submit",
 		Name:            "submit-agent",
 		Slug:            "submit-agent",
-		ProjectID:         "project-submit",
+		ProjectID:       "project-submit",
 		RuntimeBrokerID: "broker-submit",
 		Phase:           string(state.PhaseProvisioning),
 		AppliedConfig: &store.AgentAppliedConfig{
@@ -494,11 +494,11 @@ func TestEnvGather_HubHandler_SubmitEnv_InvalidState(t *testing.T) {
 
 	// Create agent in running state (not valid for env submission)
 	agent := &store.Agent{
-		ID:      "agent-invalid",
-		Name:    "invalid-agent",
-		Slug:    "invalid-agent",
+		ID:        "agent-invalid",
+		Name:      "invalid-agent",
+		Slug:      "invalid-agent",
 		ProjectID: "project-invalid",
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 	}
 	if err := st.CreateAgent(ctx, agent); err != nil {
 		t.Fatal(err)
@@ -555,7 +555,7 @@ func TestEnvGather_HubEnvResolution(t *testing.T) {
 		ID:              "agent-env",
 		Name:            "env-agent",
 		Slug:            "env-agent",
-		ProjectID:         "project-env",
+		ProjectID:       "project-env",
 		RuntimeBrokerID: "broker-env",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -610,7 +610,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GlobalRoute(t *testing.T) {
 		ID:              "stale-agent-global",
 		Name:            "retry-agent",
 		Slug:            "retry-agent",
-		ProjectID:         "project-retry-global",
+		ProjectID:       "project-retry-global",
 		RuntimeBrokerID: "broker-retry-global",
 		Phase:           string(state.PhaseProvisioning),
 		AppliedConfig: &store.AgentAppliedConfig{
@@ -635,7 +635,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GlobalRoute(t *testing.T) {
 	// Second create request with GatherEnv=true
 	reqBody := map[string]interface{}{
 		"name":      "retry-agent",
-		"projectId":   "project-retry-global",
+		"projectId": "project-retry-global",
 		"template":  "claude",
 		"gatherEnv": true,
 	}
@@ -708,9 +708,9 @@ func TestEnvGather_BuildResponse_SecretScope(t *testing.T) {
 	srv.SetSecretBackend(backend)
 
 	agent := &store.Agent{
-		ID:      "agent-scope-test",
-		Name:    "scope-test-agent",
-		OwnerID: "owner-1",
+		ID:        "agent-scope-test",
+		Name:      "scope-test-agent",
+		OwnerID:   "owner-1",
 		ProjectID: "project-1",
 	}
 
@@ -793,7 +793,7 @@ func TestEnvGather_SecretInfoRelay(t *testing.T) {
 
 	reqBody := map[string]interface{}{
 		"name":      "si-relay-agent",
-		"projectId":   "project-si-relay",
+		"projectId": "project-si-relay",
 		"template":  "claude",
 		"gatherEnv": true,
 	}
@@ -873,7 +873,7 @@ func TestEnvGather_SecretInfoRelayType(t *testing.T) {
 
 	reqBody := map[string]interface{}{
 		"name":      "si-type-agent",
-		"projectId":   "project-si-type",
+		"projectId": "project-si-type",
 		"template":  "claude",
 		"gatherEnv": true,
 	}
@@ -957,9 +957,9 @@ func TestNonGatherEnv_MissingEnvVars_Returns422(t *testing.T) {
 
 	// Create agent WITHOUT GatherEnv (simulating web/API caller)
 	reqBody := map[string]interface{}{
-		"name":     "nogather-missing-agent",
-		"projectId":  "project-nogather-missing",
-		"template": "claude",
+		"name":      "nogather-missing-agent",
+		"projectId": "project-nogather-missing",
+		"template":  "claude",
 		// gatherEnv is NOT set — this is the non-CLI path
 	}
 
@@ -1105,9 +1105,9 @@ func TestNonGatherEnv_AllSatisfied_Returns201(t *testing.T) {
 
 	// Create agent WITHOUT GatherEnv — all env satisfied
 	reqBody := map[string]interface{}{
-		"name":     "nogather-ok-agent",
-		"projectId":  "project-nogather-ok",
-		"template": "claude",
+		"name":      "nogather-ok-agent",
+		"projectId": "project-nogather-ok",
+		"template":  "claude",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", reqBody)
@@ -1171,7 +1171,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_ProjectRoute(t *testing.T) {
 		ID:              "stale-agent-route",
 		Name:            "retry-route-agent",
 		Slug:            "retry-route-agent",
-		ProjectID:         "project-retry-route",
+		ProjectID:       "project-retry-route",
 		RuntimeBrokerID: "broker-retry-route",
 		Phase:           string(state.PhaseProvisioning),
 		AppliedConfig: &store.AgentAppliedConfig{

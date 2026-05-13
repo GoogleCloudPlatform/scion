@@ -83,6 +83,7 @@ type UpdateScheduleRequest struct {
 	Payload   string `json:"payload,omitempty"`
 	Status    string `json:"status,omitempty"`
 }
+
 // Schedule represents a recurring schedule returned by the Hub API.
 type Schedule struct {
 	ID            string     `json:"id"`

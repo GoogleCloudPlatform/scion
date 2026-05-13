@@ -74,11 +74,11 @@ func TestAgentGroups(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:      "agent-1",
-		Slug:    "agent-1-slug",
-		Name:    "Agent 1",
+		ID:        "agent-1",
+		Slug:      "agent-1-slug",
+		Name:      "Agent 1",
 		ProjectID: project.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -137,11 +137,11 @@ func TestPrincipalResolve_Agent(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:      "agent-1",
-		Slug:    "agent-1-slug",
-		Name:    "Agent 1",
+		ID:        "agent-1",
+		Slug:      "agent-1-slug",
+		Name:      "Agent 1",
 		ProjectID: project.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -242,7 +242,7 @@ func TestPrincipalResolve_AgentWithCreator(t *testing.T) {
 		ID:        "agent-deleg",
 		Slug:      "agent-deleg-slug",
 		Name:      "Delegated Agent",
-		ProjectID:   project.ID,
+		ProjectID: project.ID,
 		Phase:     string(state.PhaseRunning),
 		CreatedBy: "creator-1",
 	}

@@ -206,7 +206,7 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 
 	req := &hubclient.CreateTokenRequest{
 		Name:      tokenCreateName,
-		ProjectID:   project.ID,
+		ProjectID: project.ID,
 		Scopes:    scopes,
 		ExpiresAt: expiresAt,
 	}

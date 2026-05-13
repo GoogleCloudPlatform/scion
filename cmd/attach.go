@@ -53,7 +53,7 @@ If the agent was started with tmux support, this will attach to the tmux session
 		// Try to resolve grove info for better error messages
 		projectDir, _ := config.GetResolvedProjectDir(projectPath)
 		projectName := config.GetProjectName(projectDir)
-		targetProjectPath:= projectPath
+		targetProjectPath := projectPath
 
 		// Verify agent exists
 		found := false

@@ -30,22 +30,22 @@ import (
 
 // secretTestState captures and restores package-level vars for test isolation.
 type secretTestState struct {
-	home              string
-	projectPath         string
-	secretProjectScope  string
-	secretBrokerScope string
-	secretScope       string
-	secretOutputJSON  bool
+	home               string
+	projectPath        string
+	secretProjectScope string
+	secretBrokerScope  string
+	secretScope        string
+	secretOutputJSON   bool
 }
 
 func saveSecretTestState() secretTestState {
 	return secretTestState{
-		home:              os.Getenv("HOME"),
-		projectPath:         projectPath,
-		secretProjectScope:  secretProjectScope,
-		secretBrokerScope: secretBrokerScope,
-		secretScope:       secretScope,
-		secretOutputJSON:  secretOutputJSON,
+		home:               os.Getenv("HOME"),
+		projectPath:        projectPath,
+		secretProjectScope: secretProjectScope,
+		secretBrokerScope:  secretBrokerScope,
+		secretScope:        secretScope,
+		secretOutputJSON:   secretOutputJSON,
 	}
 }
 

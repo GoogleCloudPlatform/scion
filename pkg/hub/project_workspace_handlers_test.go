@@ -895,7 +895,7 @@ func TestSharedDirFiles_GitProjectWithEmbeddedBroker(t *testing.T) {
 
 	// Add as provider WITHOUT LocalPath (simulates auto-link / shared-workspace)
 	provider := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		// LocalPath intentionally empty — fallback resolves via hub workspace marker

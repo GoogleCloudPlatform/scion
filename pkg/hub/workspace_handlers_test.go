@@ -135,7 +135,7 @@ func TestWorkspaceStatusHandler(t *testing.T) {
 		ID:           "agent_workspace_test_1",
 		Slug:         "workspace-test-agent",
 		Name:         "test-agent",
-		ProjectID:      "project_test_1",
+		ProjectID:    "project_test_1",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -196,7 +196,7 @@ func TestWorkspaceSyncFromHandler_AgentNotRunning(t *testing.T) {
 		ID:           "agent_stopped_1",
 		Slug:         "stopped-agent",
 		Name:         "stopped-agent",
-		ProjectID:      "project_test",
+		ProjectID:    "project_test",
 		Phase:        string(state.PhaseStopped),
 		StateVersion: 1,
 		Created:      now,
@@ -230,7 +230,7 @@ func TestWorkspaceSyncToHandler_EmptyFiles(t *testing.T) {
 		ID:           "agent_syncto_test",
 		Slug:         "sync-to-test-agent",
 		Name:         "test-agent",
-		ProjectID:      "project_syncto",
+		ProjectID:    "project_syncto",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -267,7 +267,7 @@ func TestWorkspaceSyncToFinalizeHandler_MissingManifest(t *testing.T) {
 		ID:           "agent_finalize_test",
 		Slug:         "finalize-test-agent",
 		Name:         "test-agent",
-		ProjectID:      "project_finalize",
+		ProjectID:    "project_finalize",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -304,7 +304,7 @@ func TestWorkspaceRoutesRequireAuth(t *testing.T) {
 		ID:           "agent_auth_test",
 		Slug:         "auth-test-agent",
 		Name:         "test-agent",
-		ProjectID:      "project_auth",
+		ProjectID:    "project_auth",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -425,7 +425,7 @@ func TestWorkspaceSyncFromHandler_StorageNotConfigured(t *testing.T) {
 		ID:           agentID,
 		Slug:         "no-storage-agent",
 		Name:         "test-agent",
-		ProjectID:      projectID,
+		ProjectID:    projectID,
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -466,7 +466,7 @@ func TestWorkspaceSyncToHandler_StorageNotConfigured(t *testing.T) {
 		ID:           "agent_syncto_no_storage",
 		Slug:         "sync-to-no-storage-agent",
 		Name:         "test-agent",
-		ProjectID:      "project_syncto_no_storage",
+		ProjectID:    "project_syncto_no_storage",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -503,7 +503,7 @@ func TestWorkspaceSyncToFinalizeHandler_StorageNotConfigured(t *testing.T) {
 		ID:           "agent_finalize_no_storage",
 		Slug:         "finalize-no-storage-agent",
 		Name:         "test-agent",
-		ProjectID:      "project_finalize_no_storage",
+		ProjectID:    "project_finalize_no_storage",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -541,7 +541,7 @@ func TestWorkspaceSyncToFinalizeHandler_AgentNotRunning(t *testing.T) {
 		ID:           "agent_finalize_stopped",
 		Slug:         "finalize-stopped-agent",
 		Name:         "stopped-agent",
-		ProjectID:      "project_finalize_stopped",
+		ProjectID:    "project_finalize_stopped",
 		Phase:        string(state.PhaseStopped),
 		StateVersion: 1,
 		Created:      now,
@@ -577,7 +577,7 @@ func TestWorkspaceMethodNotAllowed(t *testing.T) {
 		ID:           "agent_method_test",
 		Slug:         "method-test-agent",
 		Name:         "test-agent",
-		ProjectID:      "project_method",
+		ProjectID:    "project_method",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -641,7 +641,7 @@ func TestWorkspaceSyncToHandler_InvalidJSON(t *testing.T) {
 		ID:           "agent_invalid_json",
 		Slug:         "invalid-json-agent",
 		Name:         "test-agent",
-		ProjectID:      "project_invalid_json",
+		ProjectID:    "project_invalid_json",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -678,7 +678,7 @@ func TestWorkspaceSyncToFinalizeHandler_InvalidJSON(t *testing.T) {
 		ID:           "agent_finalize_invalid",
 		Slug:         "finalize-invalid-agent",
 		Name:         "test-agent",
-		ProjectID:      "project_finalize_invalid",
+		ProjectID:    "project_finalize_invalid",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -739,7 +739,7 @@ func TestWorkspaceStatusResponse_JSONSerialization(t *testing.T) {
 	now := time.Now()
 	resp := WorkspaceStatusResponse{
 		Slug:       "agent-123",
-		ProjectID:    "project-456",
+		ProjectID:  "project-456",
 		StorageURI: "gs://bucket/workspaces/project-456/agent-123/",
 		LastSync: &WorkspaceSyncInfo{
 			Direction:   "from",
@@ -792,7 +792,7 @@ func TestWorkspaceUnknownAction(t *testing.T) {
 		ID:           "agent_unknown_action",
 		Slug:         "unknown-action-agent",
 		Name:         "test-agent",
-		ProjectID:      "project_unknown",
+		ProjectID:    "project_unknown",
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -896,7 +896,7 @@ func TestSyncHubNativeWorkspaceBack_SkipsGitProject(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:      "agent-sync-1",
+		ID:        "agent-sync-1",
 		ProjectID: "project-git-sync",
 	}
 
@@ -932,7 +932,7 @@ func TestSyncHubNativeWorkspaceBack_SkipsColocatedBroker(t *testing.T) {
 		t.Fatalf("failed to create broker: %v", err)
 	}
 	provider := &store.ProjectProvider{
-		ProjectID:    "project-colo-sync",
+		ProjectID:  "project-colo-sync",
 		BrokerID:   "broker-colo",
 		BrokerName: "colo-broker",
 		LocalPath:  "/home/user/.scion",
@@ -944,7 +944,7 @@ func TestSyncHubNativeWorkspaceBack_SkipsColocatedBroker(t *testing.T) {
 
 	agent := &store.Agent{
 		ID:              "agent-colo-sync",
-		ProjectID:         "project-colo-sync",
+		ProjectID:       "project-colo-sync",
 		RuntimeBrokerID: "broker-colo",
 	}
 
@@ -958,7 +958,7 @@ func TestSyncHubNativeWorkspaceBack_NoProjectID(t *testing.T) {
 	ctx := context.Background()
 
 	agent := &store.Agent{
-		ID:      "agent-no-project",
+		ID:        "agent-no-project",
 		ProjectID: "", // No project ID
 	}
 

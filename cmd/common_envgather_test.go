@@ -57,9 +57,9 @@ func TestGatherAndSubmitEnv_NonInteractiveGathersFromLocalEnv(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  projectID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	resp := &hubclient.CreateAgentResponse{
@@ -205,9 +205,9 @@ func TestStartAgentViaHub_EnvGatherFailureCleansUp(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  projectID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	err = startAgentViaHub(hubCtx, "test-agent", "", false, nil)
@@ -276,11 +276,11 @@ func TestStartAgentViaHub_GlobalGroveSkipsWorkspaceBootstrap(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:    client,
-		Endpoint:  server.URL,
+		Client:      client,
+		Endpoint:    server.URL,
 		ProjectID:   projectID,
 		ProjectPath: settingsPath,
-		IsGlobal:  true,
+		IsGlobal:    true,
 	}
 
 	err = startAgentViaHub(hubCtx, "global-agent", "hello", false, nil)
@@ -359,9 +359,9 @@ func TestGatherAndSubmitEnv_InteractiveSecretPrompt(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  projectID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	resp := &hubclient.CreateAgentResponse{

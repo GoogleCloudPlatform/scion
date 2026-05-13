@@ -22,7 +22,7 @@ import (
 
 func TestGenerateCacheKey(t *testing.T) {
 	tests := []struct {
-		name      string
+		name        string
 		projectPath string
 	}{
 		{"simple path", "/home/user/project/.scion"},

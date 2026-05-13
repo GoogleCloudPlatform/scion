@@ -286,7 +286,13 @@ func TestCodexApplyAuthSettings_NilResolvedNoOp(t *testing.T) {
 }
 
 func TestCodexApplyTelemetrySettings_EnabledMergesOtelAndPreservesKeys(t *testing.T) {
-	for _, e := range os.Environ() { if strings.HasPrefix(e, "SCION_") { k := strings.SplitN(e, "=", 2)[0]; os.Unsetenv(k); val := os.Getenv(k); os.Unsetenv(k); defer os.Setenv(k, val) } }
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "SCION_") {
+			k := strings.SplitN(e, "=", 2)[0]
+			t.Setenv(k, "") // registers cleanup to restore original value
+			os.Unsetenv(k)  //nolint:errcheck
+		}
+	}
 	agentHome := t.TempDir()
 	c := &Codex{}
 
@@ -364,7 +370,13 @@ exporter = { otlp-grpc = {
 }
 
 func TestCodexProvision_ReconcilesTelemetryFromScionAgentConfig(t *testing.T) {
-	for _, e := range os.Environ() { if strings.HasPrefix(e, "SCION_") { k := strings.SplitN(e, "=", 2)[0]; os.Unsetenv(k); val := os.Getenv(k); os.Unsetenv(k); defer os.Setenv(k, val) } }
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "SCION_") {
+			k := strings.SplitN(e, "=", 2)[0]
+			t.Setenv(k, "") // registers cleanup to restore original value
+			os.Unsetenv(k)  //nolint:errcheck
+		}
+	}
 	agentDir := t.TempDir()
 	agentHome := filepath.Join(agentDir, "home")
 	requireNoErr(t, os.MkdirAll(agentHome, 0755))

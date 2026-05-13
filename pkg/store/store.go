@@ -108,7 +108,6 @@ type Store interface {
 
 	// Invite Code operations (User Invitation System)
 	InviteCodeStore
-
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -457,7 +456,6 @@ type InviteCodeStore interface {
 type ProjectProviderStore interface {
 	// AddProjectProvider adds a broker as a provider to a project.
 	AddProjectProvider(ctx context.Context, provider *ProjectProvider) error
-
 
 	// RemoveProjectProvider removes a broker from a project's providers.
 	RemoveProjectProvider(ctx context.Context, projectID, brokerID string) error

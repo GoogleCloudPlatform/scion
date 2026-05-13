@@ -446,9 +446,9 @@ func (s *Server) handleGitHubAppDiscover(w http.ResponseWriter, r *http.Request)
 		matchedProjects := s.matchProjectsToInstallation(ctx, installation)
 
 		discovered = append(discovered, map[string]interface{}{
-			"installation_id": ghInst.ID,
-			"account":         ghInst.Account.Login,
-			"repositories":    repoNames,
+			"installation_id":  ghInst.ID,
+			"account":          ghInst.Account.Login,
+			"repositories":     repoNames,
 			"matched_projects": matchedProjects,
 		})
 	}

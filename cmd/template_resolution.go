@@ -164,10 +164,10 @@ func findTemplateOnHub(ctx context.Context, hubCtx *HubContext, name, scope, pro
 	// First, check project scope if we have a project ID
 	if projectID != "" {
 		opts := &hubclient.ListTemplatesOptions{
-			Name:    name,
-			Scope:   "project",
+			Name:      name,
+			Scope:     "project",
 			ProjectID: projectID,
-			Status:  "active",
+			Status:    "active",
 		}
 
 		resp, err := hubCtx.Client.Templates().List(listCtx, opts)

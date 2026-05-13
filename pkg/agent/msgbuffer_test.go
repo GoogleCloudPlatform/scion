@@ -24,7 +24,7 @@ import (
 // deliveryRecord captures a single call to the delivery function.
 type deliveryRecord struct {
 	agentID   string
-	projectID   string
+	projectID string
 	message   string
 	interrupt bool
 }

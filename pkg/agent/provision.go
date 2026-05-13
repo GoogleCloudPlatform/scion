@@ -575,7 +575,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Step 3: Copy skills directories into harness-specific location
 	resolved, err := harness.Resolve(ctx, harness.ResolveOptions{
 		Name:          harnessConfigName,
-		ProjectPath:     projectPath,
+		ProjectPath:   projectPath,
 		TemplatePaths: templatePaths,
 		ProfileName:   profileName,
 		Settings:      settings,

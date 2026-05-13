@@ -2452,7 +2452,7 @@ type SetMessageRecipientResult struct {
 
 // SetMessageResponse is the JSON response for a set[] message delivery.
 type SetMessageResponse struct {
-	GroupID    string                      `json:"group_id"`
+	GroupID   string                      `json:"group_id"`
 	Delivered int                         `json:"delivered"`
 	Failed    int                         `json:"failed"`
 	Results   []SetMessageRecipientResult `json:"results"`
@@ -2499,17 +2499,17 @@ func (s *Server) handleSetMessage(w http.ResponseWriter, r *http.Request, anchor
 
 			storeMsg := &store.Message{
 				ID:          api.NewUUID(),
-				ProjectID:  projectID,
-				Sender:     agentMsg.Sender,
-				SenderID:   agentMsg.SenderID,
-				Recipient:  agentMsg.Recipient,
+				ProjectID:   projectID,
+				Sender:      agentMsg.Sender,
+				SenderID:    agentMsg.SenderID,
+				Recipient:   agentMsg.Recipient,
 				RecipientID: agentMsg.RecipientID,
-				Msg:        agentMsg.Msg,
-				Type:       agentMsg.Type,
-				Urgent:     agentMsg.Urgent,
-				AgentID:    agent.ID,
-				GroupID:    groupID,
-				CreatedAt:  time.Now(),
+				Msg:         agentMsg.Msg,
+				Type:        agentMsg.Type,
+				Urgent:      agentMsg.Urgent,
+				AgentID:     agent.ID,
+				GroupID:     groupID,
+				CreatedAt:   time.Now(),
 			}
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
@@ -2572,17 +2572,17 @@ func (s *Server) handleSetMessage(w http.ResponseWriter, r *http.Request, anchor
 
 			storeMsg := &store.Message{
 				ID:          api.NewUUID(),
-				ProjectID:  projectID,
-				Sender:     userMsg.Sender,
-				SenderID:   userMsg.SenderID,
-				Recipient:  userMsg.Recipient,
+				ProjectID:   projectID,
+				Sender:      userMsg.Sender,
+				SenderID:    userMsg.SenderID,
+				Recipient:   userMsg.Recipient,
 				RecipientID: userMsg.RecipientID,
-				Msg:        userMsg.Msg,
-				Type:       userMsg.Type,
-				Urgent:     userMsg.Urgent,
-				AgentID:    anchorAgent.ID,
-				GroupID:    groupID,
-				CreatedAt:  time.Now(),
+				Msg:         userMsg.Msg,
+				Type:        userMsg.Type,
+				Urgent:      userMsg.Urgent,
+				AgentID:     anchorAgent.ID,
+				GroupID:     groupID,
+				CreatedAt:   time.Now(),
 			}
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)

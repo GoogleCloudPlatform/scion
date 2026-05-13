@@ -63,7 +63,7 @@ type LogSourceLocation struct {
 // LogQueryOptions configures a Cloud Logging query.
 type LogQueryOptions struct {
 	AgentID   string
-	ProjectID   string
+	ProjectID string
 	BrokerID  string
 	LogID     string // Cloud Logging log ID (e.g. "scion-messages"); empty = default log
 	Tail      int

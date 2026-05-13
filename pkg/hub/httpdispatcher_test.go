@@ -59,8 +59,8 @@ type mockRuntimeBrokerClient struct {
 	lastEndpoint     string
 	lastAgentID      string
 	lastTask         string
-	lastProjectPath    string
-	lastProjectSlug    string
+	lastProjectPath  string
+	lastProjectSlug  string
 	lastMessage      string
 	lastInterrupt    bool
 	lastResolvedEnv  map[string]string
@@ -232,7 +232,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate(t *testing.T) {
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -406,9 +406,9 @@ func TestHTTPRuntimeBrokerClient_CreateAgent(t *testing.T) {
 	client := NewHTTPRuntimeBrokerClient()
 
 	req := &RemoteCreateAgentRequest{
-		ID:      "hub-uuid-1",
-		Slug:    "agent-1",
-		Name:    "test-agent",
+		ID:        "hub-uuid-1",
+		Slug:      "agent-1",
+		Name:      "test-agent",
 		ProjectID: "project-1",
 	}
 
@@ -563,7 +563,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithProjectProviderPath(t *test
 
 	// Add a project provider record WITH a local path
 	provider := &store.ProjectProvider{
-		ProjectID:    "project-1",
+		ProjectID:  "project-1",
 		BrokerID:   "broker-1",
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/projects/myproject/.scion",
@@ -580,7 +580,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithProjectProviderPath(t *test
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "broker-1",
 	}
 
@@ -676,7 +676,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithoutProjectProviderPath(t *t
 
 	// Add a project provider record WITHOUT a local path (simulating auto-provide)
 	provider := &store.ProjectProvider{
-		ProjectID:    "project-1",
+		ProjectID:  "project-1",
 		BrokerID:   "broker-1",
 		BrokerName: "test-broker",
 		LocalPath:  "",
@@ -694,7 +694,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithoutProjectProviderPath(t *t
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "broker-1",
 	}
 
@@ -735,7 +735,7 @@ func TestHTTPAgentDispatcher_DispatchAgentProvision(t *testing.T) {
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -813,7 +813,7 @@ func TestHTTPAgentDispatcher_DispatchAgentProvision_PassesTaskThrough(t *testing
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			Task: "implement feature X",
@@ -862,7 +862,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithWorkspace(t *testing.T) {
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -910,7 +910,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithCreatorName(t *testing.T) {
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -956,7 +956,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithoutCreatorName(t *testing.T
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -997,7 +997,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_DoesNotSetProvisionOnly(t *test
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			Task: "do something",
@@ -1044,7 +1044,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_WithProjectProviderPath(t *testi
 
 	// Add a project provider record with a local path
 	provider := &store.ProjectProvider{
-		ProjectID:    "project-1",
+		ProjectID:  "project-1",
 		BrokerID:   "broker-1",
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/projects/myproject/.scion",
@@ -1061,7 +1061,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_WithProjectProviderPath(t *testi
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "broker-1",
 	}
 
@@ -1119,7 +1119,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIdentity(t *testing
 	}
 
 	provider := &store.ProjectProvider{
-		ProjectID:    "project-1",
+		ProjectID:  "project-1",
 		BrokerID:   "broker-1",
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/projects/myproject/.scion",
@@ -1136,7 +1136,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIdentity(t *testing
 		ID:              "agent-uuid-123",
 		Name:            "test-agent",
 		Slug:            "test-agent-slug",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "broker-1",
 	}
 
@@ -1205,7 +1205,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_HubNativeProject(t *testing.T) {
 		ID:              "agent-hub-1",
 		Name:            "hub-agent",
 		Slug:            "hub-agent",
-		ProjectID:         "project-hub",
+		ProjectID:       "project-hub",
 		RuntimeBrokerID: "broker-1",
 	}
 
@@ -1262,7 +1262,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ProjectSlugSetForGitRemoteWithou
 		ID:              "agent-git-1",
 		Name:            "git-agent",
 		Slug:            "git-agent",
-		ProjectID:         "project-git",
+		ProjectID:       "project-git",
 		RuntimeBrokerID: "broker-1",
 	}
 
@@ -1309,7 +1309,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 
 	// Add a project provider with a local path
 	provider := &store.ProjectProvider{
-		ProjectID:    "project-env",
+		ProjectID:  "project-env",
 		BrokerID:   "broker-env",
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/project/.scion",
@@ -1348,7 +1348,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 		ID:              "agent-env",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-env",
+		ProjectID:       "project-env",
 		OwnerID:         "owner-1",
 		RuntimeBrokerID: "broker-env",
 		AppliedConfig: &store.AgentAppliedConfig{
@@ -1430,7 +1430,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ConfigEnvTakesPrecedence(t *test
 		ID:              "agent-prec",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-prec",
+		ProjectID:       "project-prec",
 		RuntimeBrokerID: "broker-prec",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "gemini",
@@ -1493,7 +1493,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_StorageOverridesEmptyConfigEnv(t
 		ID:              "agent-empty-env",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-empty-env",
+		ProjectID:       "project-empty-env",
 		RuntimeBrokerID: "broker-empty-env",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "gemini",
@@ -1544,7 +1544,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_InjectsDevToken(t *testing.T) {
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -1593,7 +1593,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoDevToken(t *testing.T) {
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "host-1",
 	}
 
@@ -1633,7 +1633,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_DevTokenMergesWithExistingEnv(t
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -1692,7 +1692,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_AppliesBrokerResponse(t *testing
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "broker-1",
 		Phase:           string(state.PhaseCreated),
 	}
@@ -1742,7 +1742,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesGitClone(t *testing.T
 		ID:              "agent-gc-1",
 		Name:            "git-clone-agent",
 		Slug:            "git-clone-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -1805,7 +1805,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProfile(t *testing.T)
 		ID:              "agent-profile-1",
 		Name:            "profile-agent",
 		Slug:            "profile-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -1863,7 +1863,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProjectSlug_HubNative
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-hub-native",
+		ProjectID:       "project-hub-native",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -1916,7 +1916,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_ProjectSlugSet_GitProject(t *te
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-git",
+		ProjectID:       "project-git",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -1960,7 +1960,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_EmptyProfile(t *testing.T) {
 		ID:              "agent-no-profile-1",
 		Name:            "no-profile-agent",
 		Slug:            "no-profile-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -2015,7 +2015,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoProjectSlug_LocalPathProject(
 
 	// Add a project provider record WITH a local path
 	provider := &store.ProjectProvider{
-		ProjectID:    "project-local",
+		ProjectID:  "project-local",
 		BrokerID:   "broker-1",
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/projects/myproject/.scion",
@@ -2032,7 +2032,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoProjectSlug_LocalPathProject(
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-local",
+		ProjectID:       "project-local",
 		RuntimeBrokerID: "broker-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -2121,7 +2121,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_LinkedProjectNoGitRemote(t *tes
 
 	// Add a project provider record WITH a local path
 	provider := &store.ProjectProvider{
-		ProjectID:    "project-linked-no-git",
+		ProjectID:  "project-linked-no-git",
 		BrokerID:   "broker-1",
 		BrokerName: "test-broker",
 		LocalPath:  "/Users/user/dev/projects/my-project/.scion",
@@ -2138,7 +2138,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_LinkedProjectNoGitRemote(t *tes
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-linked-no-git",
+		ProjectID:       "project-linked-no-git",
 		RuntimeBrokerID: "broker-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -2351,7 +2351,7 @@ func TestBuildCreateRequest_ResolvesProjectAndUserScopes(t *testing.T) {
 		Name:            "test-agent",
 		Slug:            "test-agent",
 		OwnerID:         "user-1",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig:   &store.AgentAppliedConfig{},
 	}
@@ -2455,7 +2455,7 @@ func TestBuildCreateRequest_PropagatesHarnessName(t *testing.T) {
 		ID:              "agent-harness-1",
 		Name:            "harness-agent",
 		Slug:            "harness-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "gemini",
@@ -2643,7 +2643,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIDAndSlug(t *testin
 	}
 
 	provider := &store.ProjectProvider{
-		ProjectID:    "project-id-test",
+		ProjectID:  "project-id-test",
 		BrokerID:   "broker-id-test",
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/project/.scion",
@@ -2660,7 +2660,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIDAndSlug(t *testin
 		ID:              "agent-uuid-123",
 		Name:            "my-agent",
 		Slug:            "my-agent",
-		ProjectID:         "project-id-test",
+		ProjectID:       "project-id-test",
 		RuntimeBrokerID: "broker-id-test",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -2715,7 +2715,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesInlineConfig(t *testing.
 	}
 
 	provider := &store.ProjectProvider{
-		ProjectID:    "project-inline",
+		ProjectID:  "project-inline",
 		BrokerID:   "broker-inline",
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/project/.scion",
@@ -2737,7 +2737,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesInlineConfig(t *testing.
 		ID:              "agent-inline-cfg",
 		Name:            "inline-agent",
 		Slug:            "inline-agent",
-		ProjectID:         "project-inline",
+		ProjectID:       "project-inline",
 		RuntimeBrokerID: "broker-inline",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -2788,7 +2788,7 @@ func TestDispatchAgentStart_IncludesHubEndpoint(t *testing.T) {
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		OwnerID:         "user-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
@@ -2861,7 +2861,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesSharedWorkspace(t *te
 		ID:              "agent-shared-1",
 		Name:            "shared-agent",
 		Slug:            "shared-agent",
-		ProjectID:         "project-shared-ws",
+		ProjectID:       "project-shared-ws",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -2918,7 +2918,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_InjectsGCPIdentityEnv(t *testing
 	}
 
 	provider := &store.ProjectProvider{
-		ProjectID:    "project-gcp",
+		ProjectID:  "project-gcp",
 		BrokerID:   "broker-gcp",
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/projects/myproject/.scion",
@@ -2935,7 +2935,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_InjectsGCPIdentityEnv(t *testing
 		ID:              "agent-gcp-1",
 		Name:            "gcp-agent",
 		Slug:            "gcp-agent",
-		ProjectID:         "project-gcp",
+		ProjectID:       "project-gcp",
 		RuntimeBrokerID: "broker-gcp",
 		AppliedConfig: &store.AgentAppliedConfig{
 			GCPIdentity: &store.GCPIdentityConfig{
@@ -2994,7 +2994,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_GCPBlockMode(t *testing.T) {
 	}
 
 	provider := &store.ProjectProvider{
-		ProjectID:    "project-gcp-block",
+		ProjectID:  "project-gcp-block",
 		BrokerID:   "broker-gcp-block",
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/projects/myproject/.scion",
@@ -3011,7 +3011,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_GCPBlockMode(t *testing.T) {
 		ID:              "agent-gcp-block",
 		Name:            "gcp-agent",
 		Slug:            "gcp-agent",
-		ProjectID:         "project-gcp-block",
+		ProjectID:       "project-gcp-block",
 		RuntimeBrokerID: "broker-gcp-block",
 		AppliedConfig: &store.AgentAppliedConfig{
 			GCPIdentity: &store.GCPIdentityConfig{
@@ -3097,7 +3097,7 @@ func TestBuildCreateRequest_UserGitHubTokenPrecedesApp(t *testing.T) {
 		Name:            "test-agent",
 		Slug:            "test-agent",
 		OwnerID:         "user-1",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			Env: map[string]string{
@@ -3182,7 +3182,7 @@ func TestBuildCreateRequest_GitHubAppTokenWhenNoUserToken(t *testing.T) {
 		Name:            "test-agent",
 		Slug:            "test-agent",
 		OwnerID:         "user-1",
-		ProjectID:         "project-1",
+		ProjectID:       "project-1",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig:   &store.AgentAppliedConfig{},
 	}

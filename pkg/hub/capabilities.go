@@ -29,7 +29,7 @@ type Capabilities struct {
 // ResourceActions maps resource types to the actions applicable to individual resources.
 var ResourceActions = map[string][]Action{
 	"agent":               {ActionRead, ActionUpdate, ActionDelete, ActionStart, ActionStop, ActionMessage, ActionAttach},
-	"project":               {ActionRead, ActionUpdate, ActionDelete, ActionManage, ActionRegister},
+	"project":             {ActionRead, ActionUpdate, ActionDelete, ActionManage, ActionRegister},
 	"template":            {ActionRead, ActionUpdate, ActionDelete},
 	"group":               {ActionRead, ActionUpdate, ActionDelete, ActionAddMember, ActionRemoveMember},
 	"user":                {ActionRead, ActionUpdate},
@@ -41,7 +41,7 @@ var ResourceActions = map[string][]Action{
 // ScopeActions maps resource types to scope-level actions (e.g., create, list).
 var ScopeActions = map[string][]Action{
 	"agent":               {ActionCreate, ActionList, ActionStopAll},
-	"project":               {ActionCreate, ActionList},
+	"project":             {ActionCreate, ActionList},
 	"template":            {ActionCreate, ActionList},
 	"group":               {ActionCreate, ActionList},
 	"policy":              {ActionCreate, ActionList},

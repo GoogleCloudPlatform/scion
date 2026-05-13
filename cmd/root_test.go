@@ -131,7 +131,7 @@ func TestFormatFlagCheck(t *testing.T) {
 
 func TestHubAuthLoginDoesNotRequireImageRegistry(t *testing.T) {
 	origGlobalMode := globalMode
-	origProjectPath:= projectPath
+	origProjectPath := projectPath
 	origProfile := profile
 	origOutputFormat := outputFormat
 	origNoHub := noHub
@@ -172,7 +172,7 @@ func TestHubAuthLoginDoesNotRequireImageRegistry(t *testing.T) {
 
 func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
 	origGlobalMode := globalMode
-	origProjectPath:= projectPath
+	origProjectPath := projectPath
 	origProfile := profile
 	origOutputFormat := outputFormat
 	origNoHub := noHub

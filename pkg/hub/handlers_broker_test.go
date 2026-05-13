@@ -112,7 +112,7 @@ func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob,
 
 	// Link broker as a provider to the project and set as default
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     broker.Status,
@@ -163,7 +163,7 @@ func TestBrokerAuthz_Dispatch_OwnerAllowed(t *testing.T) {
 	// Alice (broker owner) should pass dispatch authorization.
 	// The request may fail downstream (no dispatcher), but NOT with 403.
 	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "dispatch-owner-test",
+		Name:      "dispatch-owner-test",
 		ProjectID: project.ID,
 	})
 	assert.NotEqual(t, http.StatusForbidden, rec.Code,
@@ -177,7 +177,7 @@ func TestBrokerAuthz_Dispatch_NonOwnerDenied(t *testing.T) {
 	// The default broker is owned by alice so resolveRuntimeBroker will skip it,
 	// resulting in a "no broker available" error rather than 403.
 	rec := doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "dispatch-nonowner-test",
+		Name:      "dispatch-nonowner-test",
 		ProjectID: project.ID,
 	})
 	// Bob should not succeed — he can't dispatch to alice's broker
@@ -196,7 +196,7 @@ func TestBrokerAuthz_Dispatch_AutoProvide_NonOwnerAllowed(t *testing.T) {
 	// Bob (not the broker owner) should be allowed to dispatch on an auto-provide broker.
 	// The request may fail downstream (no dispatcher), but NOT with 403 or "no broker available".
 	rec := doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "dispatch-autoprovide-test",
+		Name:      "dispatch-autoprovide-test",
 		ProjectID: project.ID,
 	})
 	assert.NotEqual(t, http.StatusForbidden, rec.Code,
@@ -212,7 +212,7 @@ func TestBrokerAuthz_Dispatch_AdminBypass(t *testing.T) {
 	// Admin should bypass broker dispatch authorization.
 	// The request may fail downstream (no dispatcher), but NOT with 403.
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "dispatch-admin-test",
+		Name:      "dispatch-admin-test",
 		ProjectID: project.ID,
 	})
 	assert.NotEqual(t, http.StatusForbidden, rec.Code,
@@ -380,7 +380,7 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 
 	// Register broker as provider
 	provider := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -390,7 +390,7 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 	t.Run("Resolve by ID", func(t *testing.T) {
 		body := map[string]interface{}{
 			"name":            "Agent ID",
-			"projectId":         project.ID,
+			"projectId":       project.ID,
 			"runtimeBrokerId": "broker_id_123",
 		}
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
@@ -404,7 +404,7 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 	t.Run("Resolve by Name", func(t *testing.T) {
 		body := map[string]interface{}{
 			"name":            "Agent Name",
-			"projectId":         project.ID,
+			"projectId":       project.ID,
 			"runtimeBrokerId": "My Laptop",
 		}
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
@@ -418,7 +418,7 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 	t.Run("Resolve by Slug", func(t *testing.T) {
 		body := map[string]interface{}{
 			"name":            "Agent Slug",
-			"projectId":         project.ID,
+			"projectId":       project.ID,
 			"runtimeBrokerId": "my-laptop",
 		}
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
@@ -432,7 +432,7 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 	t.Run("Invalid broker", func(t *testing.T) {
 		body := map[string]interface{}{
 			"name":            "Agent Invalid",
-			"projectId":         project.ID,
+			"projectId":       project.ID,
 			"runtimeBrokerId": "non-existent",
 		}
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)

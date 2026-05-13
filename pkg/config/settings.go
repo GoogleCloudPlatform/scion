@@ -130,7 +130,7 @@ type HubConnectionConfig struct {
 }
 
 type Settings struct {
-	ProjectID         string                         `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
+	ProjectID       string                         `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
 	ActiveProfile   string                         `json:"active_profile" yaml:"active_profile" koanf:"active_profile"`
 	DefaultTemplate string                         `json:"default_template,omitempty" yaml:"default_template,omitempty" koanf:"default_template"`
 	WorkspacePath   string                         `json:"workspace_path,omitempty" yaml:"workspace_path,omitempty" koanf:"workspace_path"`

@@ -90,8 +90,6 @@ func TestCreateGCPServiceAccount_InferProjectIDFromEmail(t *testing.T) {
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID), body)
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-
-
 	var sa store.GCPServiceAccount
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sa))
 	assert.Equal(t, "my-project", sa.ProjectID)
