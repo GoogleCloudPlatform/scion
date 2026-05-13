@@ -190,6 +190,23 @@ type deleteMessageRequest struct {
 	MessageID int64 `json:"message_id"`
 }
 
+// BotCommand represents a bot command for the setMyCommands API.
+type BotCommand struct {
+	Command     string `json:"command"`
+	Description string `json:"description"`
+}
+
+// BotCommandScope specifies the scope of bot commands (e.g. private chats, group chats).
+type BotCommandScope struct {
+	Type string `json:"type"`
+}
+
+// setMyCommandsRequest is the JSON body for the setMyCommands API call.
+type setMyCommandsRequest struct {
+	Commands []BotCommand     `json:"commands"`
+	Scope    *BotCommandScope `json:"scope,omitempty"`
+}
+
 // getUpdatesRequest is the JSON body for the getUpdates API call.
 type getUpdatesRequest struct {
 	Offset         int64    `json:"offset,omitempty"`
@@ -295,6 +312,43 @@ func (c *TelegramAPIClient) GetMe(ctx context.Context) (*BotUser, error) {
 	}
 
 	return &bot, nil
+}
+
+// SetMyCommands registers the bot's command list with Telegram for autocomplete.
+// If scope is non-nil, commands are set for that specific scope only.
+func (c *TelegramAPIClient) SetMyCommands(ctx context.Context, commands []BotCommand, scope *BotCommandScope) error {
+	body := setMyCommandsRequest{
+		Commands: commands,
+		Scope:    scope,
+	}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal setMyCommands request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.methodURL("setMyCommands"), bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("create setMyCommands request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("setMyCommands request failed: %w", c.redactToken(err))
+	}
+	defer resp.Body.Close()
+
+	var apiResp apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return fmt.Errorf("decode setMyCommands response: %w", err)
+	}
+
+	if !apiResp.OK {
+		return &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
+	}
+
+	return nil
 }
 
 // GetUpdates calls the getUpdates API with long polling to receive updates.

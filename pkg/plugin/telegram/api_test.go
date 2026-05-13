@@ -226,6 +226,73 @@ func TestSendMessage_ContextCanceled(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestSetMyCommands_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/bottest-token/setMyCommands", r.URL.Path)
+		assert.Equal(t, "POST", r.Method)
+		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+
+		var reqBody setMyCommandsRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&reqBody))
+		assert.Len(t, reqBody.Commands, 2)
+		assert.Equal(t, "help", reqBody.Commands[0].Command)
+		assert.Equal(t, "Show help", reqBody.Commands[0].Description)
+		require.NotNil(t, reqBody.Scope)
+		assert.Equal(t, "all_private_chats", reqBody.Scope.Type)
+
+		resp := apiResponse{OK: true, Result: mustJSON(t, true)}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := newTestAPIClient(t, srv)
+	err := client.SetMyCommands(context.Background(), []BotCommand{
+		{Command: "help", Description: "Show help"},
+		{Command: "status", Description: "Show status"},
+	}, &BotCommandScope{Type: "all_private_chats"})
+	require.NoError(t, err)
+}
+
+func TestSetMyCommands_NoScope(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var reqBody setMyCommandsRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&reqBody))
+		assert.Nil(t, reqBody.Scope)
+
+		resp := apiResponse{OK: true, Result: mustJSON(t, true)}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := newTestAPIClient(t, srv)
+	err := client.SetMyCommands(context.Background(), []BotCommand{
+		{Command: "help", Description: "Show help"},
+	}, nil)
+	require.NoError(t, err)
+}
+
+func TestSetMyCommands_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := apiResponse{
+			OK:          false,
+			Description: "Bad Request: invalid command",
+			ErrorCode:   400,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := newTestAPIClient(t, srv)
+	err := client.SetMyCommands(context.Background(), []BotCommand{
+		{Command: "bad!", Description: "invalid"},
+	}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid command")
+}
+
 // mustJSON marshals v to json.RawMessage, failing the test on error.
 func mustJSON(t *testing.T, v interface{}) json.RawMessage {
 	t.Helper()

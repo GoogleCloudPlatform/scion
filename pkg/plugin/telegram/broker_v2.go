@@ -163,6 +163,8 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	}
 	b.botInfo = bot
 
+	b.registerBotCommands(ctx)
+
 	// Create hub client.
 	b.hubClient = NewHTTPHubClient(b.hubURL, b.hmacKey, b.brokerID)
 
@@ -215,6 +217,33 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		"db_path", dbPath,
 	)
 	return nil
+}
+
+// registerBotCommands sets the bot's command menu in Telegram for autocomplete.
+// It registers separate command lists for private chats and group chats.
+func (b *TelegramBrokerV2) registerBotCommands(ctx context.Context) {
+	privateCommands := []BotCommand{
+		{Command: "register", Description: "Link your Telegram account to your scion hub identity"},
+		{Command: "unregister", Description: "Remove your Telegram account link"},
+		{Command: "status", Description: "Show linked groups and registration status"},
+		{Command: "notifications", Description: "Manage agent notification subscriptions"},
+		{Command: "help", Description: "Show available commands"},
+	}
+	groupCommands := []BotCommand{
+		{Command: "setup", Description: "Link this group to a scion project"},
+		{Command: "agents", Description: "List agents in the linked project"},
+		{Command: "default", Description: "Set the default agent"},
+		{Command: "settings", Description: "Configure group settings (observer mode, notifications)"},
+		{Command: "unlink", Description: "Unlink this group from its project"},
+		{Command: "help", Description: "Show available commands"},
+	}
+
+	if err := b.api.SetMyCommands(ctx, privateCommands, &BotCommandScope{Type: "all_private_chats"}); err != nil {
+		b.log.Warn("failed to register private chat commands", "error", err)
+	}
+	if err := b.api.SetMyCommands(ctx, groupCommands, &BotCommandScope{Type: "all_group_chats"}); err != nil {
+		b.log.Warn("failed to register group chat commands", "error", err)
+	}
 }
 
 // resolveStaleGroupSlugs updates GroupLinks where ProjectSlug equals ProjectID
