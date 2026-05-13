@@ -486,6 +486,11 @@ func (h *RegistrationHandler) checkLinkingStatus(ctx context.Context, telegramUs
 	if err != nil {
 		return nil, fmt.Errorf("create linking status request: %w", err)
 	}
+	if h.hmacKey != "" && h.brokerID != "" {
+		if err := signBrokerRequest(req, h.brokerID, h.hmacKey); err != nil {
+			return nil, fmt.Errorf("sign linking status request: %w", err)
+		}
+	}
 
 	resp, err := h.httpClient.Do(req)
 	if err != nil {
