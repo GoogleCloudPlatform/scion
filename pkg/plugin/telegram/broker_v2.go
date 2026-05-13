@@ -182,6 +182,13 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		b.importV1UserMappings(ctx, mappingsJSON)
 	}
 
+	// After hub credentials are available, resolve any group link slugs that
+	// were stored as UUIDs during the first Configure() call (before hub_url
+	// was injected). This is a no-op if all slugs are already resolved.
+	if b.hubURL != "" {
+		go b.resolveStaleGroupSlugs(context.Background())
+	}
+
 	b.log.Info("Telegram v2 broker configured",
 		"bot_username", bot.Username,
 		"bot_id", bot.ID,
@@ -190,6 +197,49 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		"db_path", dbPath,
 	)
 	return nil
+}
+
+// resolveStaleGroupSlugs updates GroupLinks where ProjectSlug equals ProjectID
+// (i.e., slug was not resolved during initial import). Called after hub credentials
+// become available on the second Configure() call.
+func (b *TelegramBrokerV2) resolveStaleGroupSlugs(ctx context.Context) {
+	if b.hubClient == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	projects, err := b.hubClient.ListProjects(ctx)
+	if err != nil {
+		b.log.Warn("Could not resolve project slugs (hub unavailable)", "error", err)
+		return
+	}
+	slugByID := make(map[string]string, len(projects))
+	for _, p := range projects {
+		if p.Slug != "" {
+			slugByID[p.ID] = p.Slug
+		} else if p.Name != "" {
+			slugByID[p.ID] = p.Name
+		}
+	}
+
+	links, err := b.store.GetAllGroupLinks(ctx)
+	if err != nil {
+		b.log.Warn("Could not list group links for slug resolution", "error", err)
+		return
+	}
+	for _, link := range links {
+		if link.ProjectSlug == link.ProjectID {
+			if slug, ok := slugByID[link.ProjectID]; ok {
+				link.ProjectSlug = slug
+				if err := b.store.SaveGroupLink(ctx, link); err != nil {
+					b.log.Warn("Failed to update group link slug", "chat_id", link.ChatID, "error", err)
+				} else {
+					b.log.Info("Resolved group link project slug", "chat_id", link.ChatID, "project_id", link.ProjectID, "slug", slug)
+				}
+			}
+		}
+	}
 }
 
 // importV1ChatRoutes parses v1-format chat_routes JSON and creates GroupLinks.
