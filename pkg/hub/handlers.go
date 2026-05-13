@@ -2312,21 +2312,30 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				return
 			}
 
-			newPhase := string(state.PhaseRunning)
-			statusUpdate := store.AgentStatusUpdate{
-				Phase: newPhase,
-			}
+			// Set phase to 'starting' while we wait for readiness.
+			statusUpdate := store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}
 			if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
 				writeErrorFromErr(w, err, "")
 				return
 			}
-			agent.Phase = newPhase
+			agent.Phase = string(state.PhaseStarting)
 			s.events.PublishAgentStatus(ctx, agent)
 
 			if err := s.waitForAgentReady(ctx, id, 15*time.Second); err != nil {
+				// On failure, set agent to an error state for clarity.
+				_ = s.store.UpdateAgentStatus(ctx, id, store.AgentStatusUpdate{Phase: string(state.PhaseError), Message: "Failed to become ready after wake"})
 				RuntimeError(w, "Agent resumed but did not become ready: "+err.Error())
 				return
 			}
+
+			// Agent is ready, set phase to 'running'.
+			statusUpdate = store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}
+			if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			agent.Phase = string(state.PhaseRunning)
+			s.events.PublishAgentStatus(ctx, agent)
 
 		case state.PhaseRunning:
 			// no-op

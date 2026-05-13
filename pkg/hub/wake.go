@@ -42,7 +42,7 @@ func (s *Server) waitForAgentReady(ctx context.Context, agentID string, timeout 
 			}
 
 			phase := state.Phase(agent.Phase)
-			if phase != state.PhaseRunning {
+			if phase != state.PhaseStarting && phase != state.PhaseRunning {
 				return fmt.Errorf("agent entered unexpected phase %q while waiting for readiness", agent.Phase)
 			}
 

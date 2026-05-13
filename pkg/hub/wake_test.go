@@ -136,7 +136,7 @@ func TestHandleAgentMessage_WakeUnknownPhase(t *testing.T) {
 // TestWaitForAgentReady_Timeout verifies that waitForAgentReady returns a
 // timeout error when the agent never reports activity.
 func TestWaitForAgentReady_Timeout(t *testing.T) {
-	srv, _, agent := createWakeTestFixtures(t, string(state.PhaseRunning))
+	srv, _, agent := createWakeTestFixtures(t, string(state.PhaseStarting))
 
 	ctx := context.Background()
 	err := srv.waitForAgentReady(ctx, agent.ID, 100*time.Millisecond)
@@ -147,7 +147,7 @@ func TestWaitForAgentReady_Timeout(t *testing.T) {
 // TestWaitForAgentReady_ActivityReported verifies that waitForAgentReady
 // returns successfully once the agent's Activity field is non-empty.
 func TestWaitForAgentReady_ActivityReported(t *testing.T) {
-	srv, s, agent := createWakeTestFixtures(t, string(state.PhaseRunning))
+	srv, s, agent := createWakeTestFixtures(t, string(state.PhaseStarting))
 	ctx := context.Background()
 
 	// In a goroutine, update the agent's activity after a short delay.
@@ -165,7 +165,7 @@ func TestWaitForAgentReady_ActivityReported(t *testing.T) {
 // TestWaitForAgentReady_UnexpectedPhase verifies that waitForAgentReady
 // returns an error when the agent transitions to an unexpected phase.
 func TestWaitForAgentReady_UnexpectedPhase(t *testing.T) {
-	srv, s, agent := createWakeTestFixtures(t, string(state.PhaseRunning))
+	srv, s, agent := createWakeTestFixtures(t, string(state.PhaseStarting))
 	ctx := context.Background()
 
 	// In a goroutine, change the agent's phase to stopped after a short delay.
