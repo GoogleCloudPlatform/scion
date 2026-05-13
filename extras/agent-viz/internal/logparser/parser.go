@@ -188,7 +188,7 @@ func ParseLogFile(path string, fsLogPath string, maxDepth int) (*ParseResult, er
 	}
 
 	// Determine grove info
-	groveID, groveName := extractGroveInfo(entries)
+	groveID, groveName := extractProjectInfo(entries)
 
 	manifest := PlaybackManifest{
 		Type:      "manifest",
