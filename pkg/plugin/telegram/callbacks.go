@@ -147,22 +147,33 @@ func (h *CallbackHandler) handleSetupCallback(ctx context.Context, cb *CallbackQ
 }
 
 func (h *CallbackHandler) handleSetupProject(ctx context.Context, cb *CallbackQuery, chatID, messageID int64, projectID string) error {
-	agents, err := h.hubClient.ListAgents(ctx, projectID)
+	agentInfos, err := h.hubClient.ListAgents(ctx, projectID)
 	if err != nil {
 		h.log.Error("Failed to list agents for project", "project_id", projectID, "error", err)
 		h.answerCallback(ctx, cb.ID, "Failed to fetch agents. Try again.", false)
 		return err
 	}
+	agents := agentSlugs(agentInfos)
 
-	// Look up the project slug from the callback lookup or hub.
-	// We store the pending setup state so the next step knows the project.
+	// Look up the project slug from cached list or fresh hub fetch.
 	projectSlug := projectID
-	projects, listErr := h.hubClient.ListProjects(ctx)
-	if listErr == nil {
-		for _, p := range projects {
-			if p.ID == projectID {
-				projectSlug = p.Slug
-				break
+	h.mu.Lock()
+	cached := h.cachedProjects
+	h.mu.Unlock()
+	for _, p := range cached {
+		if p.ID == projectID {
+			projectSlug = p.DisplayName()
+			break
+		}
+	}
+	if projectSlug == projectID {
+		// Not in cache — try fresh fetch
+		if fresh, err := h.hubClient.ListProjectsFresh(ctx); err == nil {
+			for _, p := range fresh {
+				if p.ID == projectID {
+					projectSlug = p.DisplayName()
+					break
+				}
 			}
 		}
 	}
