@@ -82,22 +82,44 @@ func FormatMessage(msg *messages.StructuredMessage) string {
 // in a state-change card before truncation.
 const maxTaskSummaryLength = 200
 
-// stateEmoji maps known agent states to display emoji.
+// stateEmoji maps agent states to display emoji matching the scion web UI.
 var stateEmoji = map[string]string{
-	"running":  "🟢",
-	"error":    "🔴",
-	"idle":     "🟡",
-	"stopped":  "🟡",
-	"starting": "⏳",
+	"created":      "🆕",
+	"provisioning": "📦",
+	"cloning":      "📥",
+	"starting":     "🚀",
+	"running":      "▶️",
+	"stopping":     "⏹️",
+	"stopped":      "⏹️",
+	"suspended":    "⏸️",
+	"error":        "❌",
+	"idle":         "💤",
+	"thinking":     "💭",
+	"executing":    "⚙️",
+	"blocked":      "🚧",
+	"completed":    "✅",
+	"stalled":      "⏳",
+	"offline":      "📡",
 }
 
-// stateLabel maps known agent states to human-readable labels.
+// stateLabel maps agent states to human-readable labels.
 var stateLabel = map[string]string{
-	"running":  "Running",
-	"error":    "Error",
-	"idle":     "Idle",
-	"stopped":  "Stopped",
-	"starting": "Starting",
+	"created":      "Created",
+	"provisioning": "Provisioning",
+	"cloning":      "Cloning",
+	"starting":     "Starting",
+	"running":      "Running",
+	"stopping":     "Stopping",
+	"stopped":      "Stopped",
+	"suspended":    "Suspended",
+	"error":        "Error",
+	"idle":         "Idle",
+	"thinking":     "Thinking",
+	"executing":    "Executing",
+	"blocked":      "Blocked",
+	"completed":    "Completed",
+	"stalled":      "Stalled",
+	"offline":      "Offline",
 }
 
 // FormatStateChangeCard converts a state-change StructuredMessage into an
