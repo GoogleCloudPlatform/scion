@@ -49,18 +49,23 @@ func FormatMessage(msg *messages.StructuredMessage) string {
 		b.WriteString("[Broadcast] ")
 	}
 
-	// Add type-specific header
+	// Build sender label: "🤖 @agent-slug" for agents, sender string for others.
+	senderLabel := msg.Sender
+	if strings.HasPrefix(msg.Sender, "agent:") {
+		slug := strings.TrimPrefix(msg.Sender, "agent:")
+		senderLabel = "🤖 @" + slug
+	}
+
+	// Header: sender label, with type qualifier for non-reply types.
 	switch msg.Type {
 	case messages.TypeInstruction:
-		fmt.Fprintf(&b, "Instruction from %s", msg.Sender)
+		fmt.Fprintf(&b, "%s [instruction]", senderLabel)
 	case messages.TypeInputNeeded:
-		fmt.Fprintf(&b, "Input Needed from %s", msg.Sender)
+		fmt.Fprintf(&b, "%s [input needed]", senderLabel)
 	case messages.TypeStateChange:
-		fmt.Fprintf(&b, "State Change from %s", msg.Sender)
-	case messages.TypeAssistantReply:
-		fmt.Fprintf(&b, "Reply from %s", msg.Sender)
+		fmt.Fprintf(&b, "%s [state change]", senderLabel)
 	default:
-		fmt.Fprintf(&b, "Message from %s", msg.Sender)
+		b.WriteString(senderLabel)
 	}
 
 	// Add status if present
