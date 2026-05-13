@@ -3853,6 +3853,112 @@ func (s *SQLiteStore) IsEmailAllowListed(ctx context.Context, email string) (boo
 	return count > 0, nil
 }
 
+func (s *SQLiteStore) UpdateAllowListEntryInviteID(ctx context.Context, email string, inviteID string) error {
+	result, err := s.db.ExecContext(ctx,
+		"UPDATE allow_list SET invite_id = ? WHERE email = ?",
+		inviteID, strings.ToLower(email))
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) ListAllowListEntriesWithInvites(ctx context.Context, opts store.ListOptions) (*store.ListResult[store.AllowListEntryWithInvite], error) {
+	var totalCount int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM allow_list").Scan(&totalCount); err != nil {
+		return nil, err
+	}
+
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+
+	var conditions []string
+	var args []interface{}
+
+	if opts.Cursor != "" {
+		conditions = append(conditions, `(a.created < (SELECT created FROM allow_list WHERE id = ?)
+			OR (a.created = (SELECT created FROM allow_list WHERE id = ?) AND a.id < ?))`)
+		args = append(args, opts.Cursor, opts.Cursor, opts.Cursor)
+	}
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	query := fmt.Sprintf(`
+		SELECT a.id, a.email, a.note, a.added_by, a.invite_id, a.created,
+		       i.code_prefix, i.max_uses, i.use_count, i.expires_at, i.revoked
+		FROM allow_list a
+		LEFT JOIN invite_codes i ON a.invite_id = i.id AND a.invite_id != ''
+		%s ORDER BY a.created DESC, a.id DESC LIMIT ?
+	`, whereClause)
+	args = append(args, limit+1)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []store.AllowListEntryWithInvite
+	for rows.Next() {
+		var entry store.AllowListEntryWithInvite
+		var codePrefix sql.NullString
+		var maxUses, useCount, revoked sql.NullInt64
+		var expiresAt sql.NullTime
+		if err := rows.Scan(
+			&entry.ID, &entry.Email, &entry.Note, &entry.AddedBy, &entry.InviteID, &entry.Created,
+			&codePrefix, &maxUses, &useCount, &expiresAt, &revoked,
+		); err != nil {
+			return nil, err
+		}
+		if codePrefix.Valid {
+			entry.InviteCodePrefix = codePrefix.String
+		}
+		if maxUses.Valid {
+			entry.InviteMaxUses = int(maxUses.Int64)
+		}
+		if useCount.Valid {
+			entry.InviteUseCount = int(useCount.Int64)
+		}
+		if expiresAt.Valid {
+			entry.InviteExpiresAt = expiresAt.Time
+		}
+		if revoked.Valid {
+			entry.InviteRevoked = revoked.Int64 != 0
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if entries == nil {
+		entries = []store.AllowListEntryWithInvite{}
+	}
+
+	var nextCursor string
+	if len(entries) > limit {
+		nextCursor = entries[limit-1].ID
+		entries = entries[:limit]
+	}
+
+	return &store.ListResult[store.AllowListEntryWithInvite]{
+		Items:      entries,
+		TotalCount: totalCount,
+		NextCursor: nextCursor,
+	}, nil
+}
+
 func (s *SQLiteStore) BulkAddAllowListEntries(ctx context.Context, entries []*store.AllowListEntry) (int, int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

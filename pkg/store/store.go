@@ -438,6 +438,8 @@ type AllowListStore interface {
 	IsEmailAllowListed(ctx context.Context, email string) (bool, error)
 	BulkAddAllowListEntries(ctx context.Context, entries []*AllowListEntry) (added int, skipped int, err error)
 	ListEmailDomains(ctx context.Context) ([]string, error)
+	UpdateAllowListEntryInviteID(ctx context.Context, email string, inviteID string) error
+	ListAllowListEntriesWithInvites(ctx context.Context, opts ListOptions) (*ListResult[AllowListEntryWithInvite], error)
 }
 
 // InviteCodeStore defines operations for invite code management.

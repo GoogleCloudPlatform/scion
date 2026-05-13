@@ -53,6 +53,7 @@ type InviteCreateRequest struct {
 	ExpiresIn string `json:"expiresIn"`
 	MaxUses   int    `json:"maxUses"`
 	Note      string `json:"note"`
+	Email     string `json:"email,omitempty"` // Optional: link invite to allow-list entry
 }
 
 // InviteCreateResponse is the response from creating an invite code.
