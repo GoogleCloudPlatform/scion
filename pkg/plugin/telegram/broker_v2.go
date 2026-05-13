@@ -993,28 +993,28 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID strin
 		b.log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
 	}
 	if cached != nil && time.Since(cached.RefreshedAt) < b.agentCacheTTL {
-		return cached.AgentSlugs
+		return agentSlugs(cached.Agents)
 	}
 
 	agents, err := b.hubClient.ListAgents(ctx, projectID)
 	if err != nil {
 		b.log.Warn("Failed to refresh agent list from hub", "project_id", projectID, "error", err)
 		if cached != nil {
-			return cached.AgentSlugs
+			return agentSlugs(cached.Agents)
 		}
 		return nil
 	}
 
 	saveErr := b.store.SaveProjectAgents(ctx, &ProjectAgents{
 		ProjectID:   projectID,
-		AgentSlugs:  agents,
+		Agents:      agents,
 		RefreshedAt: time.Now(),
 	})
 	if saveErr != nil {
 		b.log.Warn("Failed to cache agents", "project_id", projectID, "error", saveErr)
 	}
 
-	return agents
+	return agentSlugs(agents)
 }
 
 // --- Dynamic subscription management ---

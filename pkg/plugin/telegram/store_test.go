@@ -268,7 +268,7 @@ func TestStore_ProjectAgents_SaveAndGet(t *testing.T) {
 
 	pa := &ProjectAgents{
 		ProjectID:   "proj-1",
-		AgentSlugs:  []string{"coder", "reviewer", "tester"},
+		Agents:      []AgentInfo{{Slug: "coder", Activity: "executing"}, {Slug: "reviewer", Activity: "idle"}, {Slug: "tester"}},
 		RefreshedAt: time.Date(2026, 5, 10, 8, 0, 0, 0, time.UTC),
 	}
 	require.NoError(t, store.SaveProjectAgents(ctx, pa))
@@ -277,7 +277,7 @@ func TestStore_ProjectAgents_SaveAndGet(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "proj-1", got.ProjectID)
-	assert.Equal(t, []string{"coder", "reviewer", "tester"}, got.AgentSlugs)
+	assert.Equal(t, []AgentInfo{{Slug: "coder", Activity: "executing"}, {Slug: "reviewer", Activity: "idle"}, {Slug: "tester"}}, got.Agents)
 	assert.Equal(t, 2026, got.RefreshedAt.Year())
 }
 
@@ -296,19 +296,19 @@ func TestStore_ProjectAgents_Upsert(t *testing.T) {
 
 	pa := &ProjectAgents{
 		ProjectID:   "proj-1",
-		AgentSlugs:  []string{"coder"},
+		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now().UTC(),
 	}
 	require.NoError(t, store.SaveProjectAgents(ctx, pa))
 
-	pa.AgentSlugs = []string{"coder", "reviewer"}
+	pa.Agents = []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}}
 	pa.RefreshedAt = time.Now().UTC().Add(time.Hour)
 	require.NoError(t, store.SaveProjectAgents(ctx, pa))
 
 	got, err := store.GetProjectAgents(ctx, "proj-1")
 	require.NoError(t, err)
 	require.NotNil(t, got)
-	assert.Equal(t, []string{"coder", "reviewer"}, got.AgentSlugs)
+	assert.Equal(t, []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}}, got.Agents)
 }
 
 func TestStore_ProjectAgents_EmptySlice(t *testing.T) {
@@ -317,7 +317,7 @@ func TestStore_ProjectAgents_EmptySlice(t *testing.T) {
 
 	pa := &ProjectAgents{
 		ProjectID:   "proj-1",
-		AgentSlugs:  []string{},
+		Agents:      []AgentInfo{},
 		RefreshedAt: time.Now().UTC(),
 	}
 	require.NoError(t, store.SaveProjectAgents(ctx, pa))
@@ -325,7 +325,7 @@ func TestStore_ProjectAgents_EmptySlice(t *testing.T) {
 	got, err := store.GetProjectAgents(ctx, "proj-1")
 	require.NoError(t, err)
 	require.NotNil(t, got)
-	assert.Equal(t, []string{}, got.AgentSlugs)
+	assert.Equal(t, []AgentInfo{}, got.Agents)
 }
 
 // --- TelegramUserMapping ---

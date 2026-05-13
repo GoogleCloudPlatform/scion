@@ -38,12 +38,12 @@ import (
 type fakeHubClient struct {
 	mu       sync.Mutex
 	projects []ProjectOption
-	agents   map[string][]string // projectID → agent slugs
+	agents   map[string][]AgentInfo // projectID → agents
 }
 
 func newFakeHubClient() *fakeHubClient {
 	return &fakeHubClient{
-		agents: make(map[string][]string),
+		agents: make(map[string][]AgentInfo),
 	}
 }
 
@@ -65,7 +65,7 @@ func (f *fakeHubClient) ListProjectsFresh(_ context.Context) ([]ProjectOption, e
 	return f.projects, nil
 }
 
-func (f *fakeHubClient) ListAgents(_ context.Context, projectID string) ([]string, error) {
+func (f *fakeHubClient) ListAgents(_ context.Context, projectID string) ([]AgentInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.agents[projectID], nil
@@ -455,7 +455,7 @@ func TestV2_HandleIncoming_UnlinkedGroupIgnored(t *testing.T) {
 func TestV2_HandleGroupMessage_BotMentionDefaultAgent(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	hub := newFakeHubClient()
-	hub.agents["proj-1"] = []string{"coder", "reviewer"}
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}}
 	b := newTestBrokerV2WithHub(t, tgSrv, hub)
 
 	ctx := context.Background()
@@ -474,7 +474,7 @@ func TestV2_HandleGroupMessage_BotMentionDefaultAgent(t *testing.T) {
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
 		ProjectID:   "proj-1",
-		AgentSlugs:  []string{"coder", "reviewer"},
+		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
 	}))
 
@@ -518,7 +518,7 @@ func TestV2_HandleGroupMessage_BotMentionDefaultAgent(t *testing.T) {
 func TestV2_HandleGroupMessage_DirectAgentMention(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	hub := newFakeHubClient()
-	hub.agents["proj-1"] = []string{"coder", "reviewer"}
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}}
 	b := newTestBrokerV2WithHub(t, tgSrv, hub)
 
 	ctx := context.Background()
@@ -536,7 +536,7 @@ func TestV2_HandleGroupMessage_DirectAgentMention(t *testing.T) {
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
 		ProjectID:   "proj-1",
-		AgentSlugs:  []string{"coder", "reviewer"},
+		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
 	}))
 
@@ -568,7 +568,7 @@ func TestV2_HandleGroupMessage_DirectAgentMention(t *testing.T) {
 func TestV2_HandleGroupMessage_AllMention(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	hub := newFakeHubClient()
-	hub.agents["proj-1"] = []string{"coder", "reviewer"}
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}}
 	b := newTestBrokerV2WithHub(t, tgSrv, hub)
 
 	ctx := context.Background()
@@ -586,7 +586,7 @@ func TestV2_HandleGroupMessage_AllMention(t *testing.T) {
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
 		ProjectID:   "proj-1",
-		AgentSlugs:  []string{"coder", "reviewer"},
+		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
 	}))
 
@@ -649,7 +649,7 @@ func TestV2_HandleGroupMessage_NoMention(t *testing.T) {
 func TestV2_HandleGroupMessage_UserMappingResolution(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	hub := newFakeHubClient()
-	hub.agents["proj-1"] = []string{"coder"}
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
 	b := newTestBrokerV2WithHub(t, tgSrv, hub)
 
 	ctx := context.Background()
@@ -662,7 +662,7 @@ func TestV2_HandleGroupMessage_UserMappingResolution(t *testing.T) {
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
 		ProjectID:   "proj-1",
-		AgentSlugs:  []string{"coder"},
+		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
 	}))
 	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
@@ -705,7 +705,7 @@ func TestV2_HandleGroupMessage_UserMappingResolution(t *testing.T) {
 func TestV2_HandleGroupMessage_ConversationContextSaved(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	hub := newFakeHubClient()
-	hub.agents["proj-1"] = []string{"coder"}
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
 	b := newTestBrokerV2WithHub(t, tgSrv, hub)
 
 	ctx := context.Background()
@@ -723,7 +723,7 @@ func TestV2_HandleGroupMessage_ConversationContextSaved(t *testing.T) {
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
 		ProjectID:   "proj-1",
-		AgentSlugs:  []string{"coder"},
+		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
 	}))
 

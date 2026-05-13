@@ -207,7 +207,7 @@ func TestCommandHandler_Agents_WithAgents(t *testing.T) {
 		LinkedAt:     time.Now().UTC(),
 		Active:       true,
 	}))
-	hub.agents["proj-1"] = []string{"coder", "reviewer"}
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder", Activity: "executing"}, {Slug: "reviewer", Activity: "idle"}}
 
 	h.HandleCommand(&TGMessage{
 		Text: "/agents",
@@ -219,6 +219,8 @@ func TestCommandHandler_Agents_WithAgents(t *testing.T) {
 	assert.Contains(t, sent[0].Text, "@coder")
 	assert.Contains(t, sent[0].Text, "@reviewer")
 	assert.Contains(t, sent[0].Text, "(default)")
+	assert.Contains(t, sent[0].Text, "executing")
+	assert.Contains(t, sent[0].Text, "idle")
 }
 
 func TestCommandHandler_Agents_NoAgents(t *testing.T) {
@@ -231,7 +233,7 @@ func TestCommandHandler_Agents_NoAgents(t *testing.T) {
 		LinkedAt:  time.Now().UTC(),
 		Active:    true,
 	}))
-	hub.agents["proj-1"] = []string{}
+	hub.agents["proj-1"] = []AgentInfo{}
 
 	h.HandleCommand(&TGMessage{
 		Text: "/agents",

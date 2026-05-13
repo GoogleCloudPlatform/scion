@@ -29,8 +29,8 @@ import (
 
 // AgentInfo holds an agent's slug and current activity state.
 type AgentInfo struct {
-	Slug     string
-	Activity string
+	Slug     string `json:"slug"`
+	Activity string `json:"activity,omitempty"`
 }
 
 // HubClient provides access to the Scion hub API for project and agent listing.

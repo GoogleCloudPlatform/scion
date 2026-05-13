@@ -85,10 +85,10 @@ type ConversationContext struct {
 	LastMessageAt  time.Time
 }
 
-// ProjectAgents caches the list of agent slugs for a project.
+// ProjectAgents caches the list of agents for a project.
 type ProjectAgents struct {
 	ProjectID   string
-	AgentSlugs  []string
+	Agents      []AgentInfo
 	RefreshedAt time.Time
 }
 
@@ -300,7 +300,7 @@ func (s *sqliteStore) GetConversationContext(ctx context.Context, telegramUserID
 // --- ProjectAgents ---
 
 func (s *sqliteStore) SaveProjectAgents(ctx context.Context, pa *ProjectAgents) error {
-	slugsJSON, err := json.Marshal(pa.AgentSlugs)
+	slugsJSON, err := json.Marshal(pa.Agents)
 	if err != nil {
 		return fmt.Errorf("marshal agent_slugs: %w", err)
 	}
@@ -326,7 +326,7 @@ func (s *sqliteStore) GetProjectAgents(ctx context.Context, projectID string) (*
 	if err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal([]byte(slugsJSON), &pa.AgentSlugs); err != nil {
+	if err := json.Unmarshal([]byte(slugsJSON), &pa.Agents); err != nil {
 		return nil, fmt.Errorf("unmarshal agent_slugs: %w", err)
 	}
 	pa.RefreshedAt, err = time.Parse(time.RFC3339, refreshedAt)
