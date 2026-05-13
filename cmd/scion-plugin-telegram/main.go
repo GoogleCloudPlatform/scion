@@ -61,7 +61,14 @@ func main() {
 
 func servePlugin() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	impl := telegram.New(log)
+
+	var impl plugin.MessageBrokerPluginInterface
+	if os.Getenv("SCION_TELEGRAM_V2") == "1" {
+		impl = telegram.NewV2(log)
+		log.Info("Using Telegram broker v2")
+	} else {
+		impl = telegram.New(log)
+	}
 
 	goplugin.Serve(&goplugin.ServeConfig{
 		HandshakeConfig: goplugin.HandshakeConfig{
