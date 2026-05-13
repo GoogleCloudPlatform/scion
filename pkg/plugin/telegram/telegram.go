@@ -88,6 +88,9 @@ type TelegramBroker struct {
 	chatRoutes map[int64]string   // chatID -> topic
 	topicChats map[string][]int64 // topic -> chatIDs (inverse of chatRoutes)
 
+	// User identity mapping: Telegram user ID -> scion user (e.g. "user:ptone@google.com")
+	userMappings map[string]string
+
 	// Long polling state
 	pollCancel context.CancelFunc
 	pollDone   chan struct{}
@@ -116,7 +119,7 @@ func New(log *slog.Logger) *TelegramBroker {
 
 // Configure sets up the Telegram broker from the provided config map.
 // Recognized keys: bot_token (required), hub_url, hmac_key, broker_id,
-// plugin_name, chat_routes (JSON), api_base_url (for testing).
+// plugin_name, chat_routes (JSON), user_mappings (JSON), api_base_url (for testing).
 func (b *TelegramBroker) Configure(config map[string]string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -151,6 +154,15 @@ func (b *TelegramBroker) Configure(config map[string]string) error {
 		if err := b.parseChatRoutes(routesJSON); err != nil {
 			return fmt.Errorf("invalid chat_routes: %w", err)
 		}
+	}
+
+	// Parse user mappings if provided
+	if mappingsJSON, ok := config["user_mappings"]; ok && mappingsJSON != "" {
+		var raw map[string]string
+		if err := json.Unmarshal([]byte(mappingsJSON), &raw); err != nil {
+			return fmt.Errorf("invalid user_mappings: %w", err)
+		}
+		b.userMappings = raw
 	}
 
 	// Validate the bot token by calling getMe
@@ -492,8 +504,15 @@ func (b *TelegramBroker) handleIncomingMessage(tgMsg *TGMessage) {
 		}
 	}
 
-	// Map chat to topic
+	// Check user mappings for a scion identity override
 	b.mu.RLock()
+	if senderID != "" && b.userMappings != nil {
+		if mapped, ok := b.userMappings[senderID]; ok {
+			sender = "user:" + mapped
+		}
+	}
+
+	// Map chat to topic
 	topic, ok := b.chatRoutes[tgMsg.Chat.ID]
 	b.mu.RUnlock()
 
@@ -525,6 +544,9 @@ func (b *TelegramBroker) handleIncomingMessage(tgMsg *TGMessage) {
 		b.log.Debug("Filtered echo message via origin marker", "topic", topic)
 		return
 	}
+
+	b.log.Debug("Delivering inbound Telegram message",
+		"topic", topic, "sender", sender, "telegram_user_id", senderID)
 
 	b.deliverInbound(topic, msg)
 }

@@ -616,6 +616,134 @@ func TestHubAPIDelivery(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestConfigure_WithUserMappings(t *testing.T) {
+	tgSrv := newFakeTelegramServer(t)
+	b := New(slog.Default())
+	defer b.Close()
+
+	err := b.Configure(map[string]string{
+		"bot_token":     "test-token",
+		"api_base_url":  tgSrv.srv.URL,
+		"user_mappings": `{"8663066556": "ptone@google.com", "123": "alice@example.com"}`,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "ptone@google.com", b.userMappings["8663066556"])
+	assert.Equal(t, "alice@example.com", b.userMappings["123"])
+}
+
+func TestConfigure_InvalidUserMappings(t *testing.T) {
+	tgSrv := newFakeTelegramServer(t)
+	b := New(slog.Default())
+	defer b.Close()
+
+	err := b.Configure(map[string]string{
+		"bot_token":     "test-token",
+		"api_base_url":  tgSrv.srv.URL,
+		"user_mappings": `not-json`,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid user_mappings")
+}
+
+func TestInboundDelivery_UserMapping(t *testing.T) {
+	tgSrv := newFakeTelegramServer(t)
+
+	b := New(slog.Default())
+	defer b.Close()
+
+	err := b.Configure(map[string]string{
+		"bot_token":     "test-token",
+		"api_base_url":  tgSrv.srv.URL,
+		"user_mappings": `{"456": "alice@example.com"}`,
+	})
+	require.NoError(t, err)
+
+	b.mu.Lock()
+	b.chatRoutes[789] = "scion.project.p1.agent.coder.messages"
+	b.mu.Unlock()
+
+	var deliveredMsg *messages.StructuredMessage
+	done := make(chan struct{}, 1)
+	b.InboundHandler = func(_ string, msg *messages.StructuredMessage) {
+		deliveredMsg = msg
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+
+	tgSrv.setUpdates([]Update{
+		{
+			UpdateID: 1,
+			Message: &TGMessage{
+				MessageID: 42,
+				From:      &TGUser{ID: 456, Username: "alice", FirstName: "Alice"},
+				Chat:      TGChat{ID: 789, Type: "private"},
+				Date:      1700000000,
+				Text:      "mapped user",
+			},
+		},
+	})
+
+	require.NoError(t, b.Subscribe("scion.project.p1.>"))
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for inbound delivery")
+	}
+
+	assert.Equal(t, "user:alice@example.com", deliveredMsg.Sender)
+	assert.Equal(t, "456", deliveredMsg.SenderID)
+}
+
+func TestInboundDelivery_UserMappingNoMatch(t *testing.T) {
+	tgSrv := newFakeTelegramServer(t)
+
+	b := New(slog.Default())
+	defer b.Close()
+
+	err := b.Configure(map[string]string{
+		"bot_token":     "test-token",
+		"api_base_url":  tgSrv.srv.URL,
+		"user_mappings": `{"999": "other@example.com"}`,
+	})
+	require.NoError(t, err)
+
+	var deliveredMsg *messages.StructuredMessage
+	done := make(chan struct{}, 1)
+	b.InboundHandler = func(_ string, msg *messages.StructuredMessage) {
+		deliveredMsg = msg
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+
+	tgSrv.setUpdates([]Update{
+		{
+			UpdateID: 1,
+			Message: &TGMessage{
+				MessageID: 1,
+				From:      &TGUser{ID: 456, Username: "alice"},
+				Chat:      TGChat{ID: 789, Type: "private"},
+				Date:      time.Now().Unix(),
+				Text:      "unmapped user",
+			},
+		},
+	})
+
+	require.NoError(t, b.Subscribe("scion.>"))
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for inbound delivery")
+	}
+
+	assert.Equal(t, "telegram:alice", deliveredMsg.Sender)
+}
+
 func TestRecipientFromTopic(t *testing.T) {
 	tests := []struct {
 		topic string
