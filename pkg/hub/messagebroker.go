@@ -184,12 +184,11 @@ func (p *MessageBrokerProxy) RequestSubscription(pattern string) error {
 		return nil
 	}
 
-	sub, err := p.broker.Subscribe(pattern, func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
-		// Route the message to the plugin for external delivery.
-		if pubErr := p.broker.Publish(ctx, topic, msg); pubErr != nil {
-			p.log.Error("Failed to deliver plugin-requested message", "pattern", pattern, "error", pubErr)
-		}
-	})
+	// With FanOutBroker, all plugin spokes receive Publish() calls directly
+	// for every message. Re-publishing via p.broker.Publish() here would
+	// loop back through InProcessBroker's own subscribers, creating a
+	// feedback storm. The subscription is tracked for accounting only.
+	sub, err := p.broker.Subscribe(pattern, func(_ context.Context, _ string, _ *messages.StructuredMessage) {})
 	if err != nil {
 		return fmt.Errorf("failed to subscribe for plugin pattern %q: %w", pattern, err)
 	}
