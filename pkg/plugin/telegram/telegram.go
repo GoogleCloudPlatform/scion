@@ -25,7 +25,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -263,16 +265,16 @@ func (b *TelegramBroker) Publish(ctx context.Context, topic string, msg *message
 	}
 
 	// Send to each matching chat
-	var lastErr error
+	var errs []error
 	for _, chatID := range chatIDs {
 		if _, err := api.SendMessage(ctx, chatID, text, ""); err != nil {
 			b.log.Error("Failed to send Telegram message",
 				"chat_id", chatID, "topic", topic, "error", err)
-			lastErr = err
+			errs = append(errs, err)
 		}
 	}
 
-	return lastErr
+	return errors.Join(errs...)
 }
 
 // Subscribe registers a subscription pattern. When the first subscription is
@@ -555,18 +557,19 @@ func isEcho(msg *messages.StructuredMessage) bool {
 
 // deliverInbound sends a message to the hub API or InboundHandler.
 func (b *TelegramBroker) deliverInbound(topic string, msg *messages.StructuredMessage) {
-	// Prefer the in-process handler if set (testing mode)
-	if b.InboundHandler != nil {
-		b.InboundHandler(topic, msg)
-		return
-	}
-
 	b.mu.RLock()
+	handler := b.InboundHandler
 	hubURL := b.hubURL
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName
 	b.mu.RUnlock()
+
+	// Prefer the in-process handler if set (testing mode)
+	if handler != nil {
+		handler(topic, msg)
+		return
+	}
 
 	if hubURL == "" {
 		b.log.Debug("No hub URL configured, dropping inbound message", "topic", topic)
@@ -615,6 +618,7 @@ func (b *TelegramBroker) deliverInbound(topic string, msg *messages.StructuredMe
 		b.log.Error("Failed to deliver inbound message", "error", err, "topic", topic)
 		return
 	}
+	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
 	if resp.StatusCode >= 400 {

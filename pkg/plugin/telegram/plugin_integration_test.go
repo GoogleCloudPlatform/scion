@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/rpc"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -239,10 +240,10 @@ func TestRPCIntegration_FullLifecycle(t *testing.T) {
 // TestRPCIntegration_HubDelivery tests the full path through RPC including
 // hub API delivery (not just InboundHandler).
 func TestRPCIntegration_HubDelivery(t *testing.T) {
-	var hubReceived int
+	var hubReceived int32
 	hubSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/broker/inbound" {
-			hubReceived++
+			atomic.AddInt32(&hubReceived, 1)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -279,6 +280,6 @@ func TestRPCIntegration_HubDelivery(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
-		return hubReceived > 0
+		return atomic.LoadInt32(&hubReceived) > 0
 	}, 5*time.Second, 50*time.Millisecond)
 }

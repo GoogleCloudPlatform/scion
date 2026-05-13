@@ -17,6 +17,7 @@ package telegram
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
@@ -81,6 +82,8 @@ func FormatMessage(msg *messages.StructuredMessage) string {
 }
 
 // truncateMessage ensures the text does not exceed Telegram's message limit.
+// It walks backward to a valid UTF-8 rune boundary to avoid splitting
+// multi-byte characters (emoji, CJK, accented characters).
 func truncateMessage(text string) string {
 	if len(text) <= maxTelegramMessageLength {
 		return text
@@ -89,6 +92,10 @@ func truncateMessage(text string) string {
 	cutoff := maxTelegramMessageLength - len(truncationSuffix)
 	if cutoff < 0 {
 		cutoff = 0
+	}
+	// Walk backward to a valid rune boundary
+	for cutoff > 0 && !utf8.RuneStart(text[cutoff]) {
+		cutoff--
 	}
 	return text[:cutoff] + truncationSuffix
 }

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -131,6 +132,15 @@ func (c *TelegramAPIClient) methodURL(method string) string {
 	return fmt.Sprintf("%s/bot%s/%s", c.baseURL, c.botToken, method)
 }
 
+// redactToken removes the bot token from error messages to prevent
+// accidental credential leakage in logs.
+func (c *TelegramAPIClient) redactToken(err error) error {
+	if err == nil || c.botToken == "" {
+		return err
+	}
+	return fmt.Errorf("%s", strings.ReplaceAll(err.Error(), c.botToken, "[REDACTED]"))
+}
+
 // GetMe calls the getMe API to validate the bot token and retrieve bot info.
 func (c *TelegramAPIClient) GetMe(ctx context.Context) (*BotUser, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", c.methodURL("getMe"), nil)
@@ -140,7 +150,7 @@ func (c *TelegramAPIClient) GetMe(ctx context.Context) (*BotUser, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("getMe request failed: %w", err)
+		return nil, fmt.Errorf("getMe request failed: %w", c.redactToken(err))
 	}
 	defer resp.Body.Close()
 
@@ -184,7 +194,7 @@ func (c *TelegramAPIClient) GetUpdates(ctx context.Context, offset int64, timeou
 
 	resp, err := c.pollClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("getUpdates request failed: %w", err)
+		return nil, fmt.Errorf("getUpdates request failed: %w", c.redactToken(err))
 	}
 	defer resp.Body.Close()
 
@@ -226,7 +236,7 @@ func (c *TelegramAPIClient) SendMessage(ctx context.Context, chatID int64, text,
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("sendMessage request failed: %w", err)
+		return nil, fmt.Errorf("sendMessage request failed: %w", c.redactToken(err))
 	}
 	defer resp.Body.Close()
 
