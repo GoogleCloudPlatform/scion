@@ -142,6 +142,14 @@ func (s *Server) handleAdminAllowListGet(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	now := time.Now()
+	for i := range result.Items {
+		entry := &result.Items[i]
+		if !entry.InviteExpiresAt.IsZero() && now.After(entry.InviteExpiresAt) {
+			entry.InviteExpired = true
+		}
+	}
+
 	writeJSON(w, http.StatusOK, AllowListResponse{
 		Items:      result.Items,
 		TotalCount: result.TotalCount,

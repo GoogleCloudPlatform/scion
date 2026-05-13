@@ -53,6 +53,7 @@ interface AllowListEntry {
   inviteUseCount?: number;
   inviteExpiresAt?: string;
   inviteRevoked?: boolean;
+  inviteExpired?: boolean;
 }
 
 interface InviteCodeEntry {
@@ -1258,7 +1259,7 @@ export class ScionPageAdminUsers extends LitElement {
   private getAllowListInviteStatus(entry: AllowListEntry): string | null {
     if (!entry.inviteId || !entry.inviteCodePrefix) return null;
     if (entry.inviteRevoked) return 'revoked';
-    if (entry.inviteExpiresAt && new Date() > new Date(entry.inviteExpiresAt)) return 'expired';
+    if (entry.inviteExpired) return 'expired';
     if (entry.inviteMaxUses && entry.inviteMaxUses > 0
         && entry.inviteUseCount !== undefined
         && entry.inviteUseCount >= entry.inviteMaxUses) return 'exhausted';

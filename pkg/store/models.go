@@ -615,6 +615,7 @@ type AllowListEntryWithInvite struct {
 	InviteUseCount   int       `json:"inviteUseCount,omitempty"`
 	InviteExpiresAt  time.Time `json:"inviteExpiresAt,omitempty"`
 	InviteRevoked    bool      `json:"inviteRevoked,omitempty"`
+	InviteExpired    bool      `json:"inviteExpired,omitempty"`
 }
 
 // =============================================================================

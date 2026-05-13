@@ -146,6 +146,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		migrateV50,
 		migrationV51,
 		migrationV52,
+		migrationV53,
 	}
 
 	// Create migrations table if not exists
@@ -1338,6 +1339,11 @@ ALTER TABLE messages ADD COLUMN group_id TEXT NOT NULL DEFAULT '';
 const migrationV52 = `
 UPDATE agents SET activity = 'working' WHERE activity = 'idle';
 UPDATE agents SET stalled_from_activity = 'working' WHERE stalled_from_activity = 'idle';
+`
+
+// migrationV53 adds an index on (created, id) to allow_list for efficient keyset pagination.
+const migrationV53 = `
+CREATE INDEX IF NOT EXISTS idx_allow_list_created_id ON allow_list (created DESC, id DESC);
 `
 
 // tableExists checks whether a table with the given name exists in the database.
@@ -3794,9 +3800,12 @@ func (s *SQLiteStore) ListAllowListEntries(ctx context.Context, opts store.ListO
 	var args []interface{}
 
 	if opts.Cursor != "" {
-		conditions = append(conditions, `(created < (SELECT created FROM allow_list WHERE id = ?)
-			OR (created = (SELECT created FROM allow_list WHERE id = ?) AND id < ?))`)
-		args = append(args, opts.Cursor, opts.Cursor, opts.Cursor)
+		var cursorCreated time.Time
+		if err := s.db.QueryRowContext(ctx, "SELECT created FROM allow_list WHERE id = ?", opts.Cursor).Scan(&cursorCreated); err != nil {
+			return nil, fmt.Errorf("invalid cursor: %w", err)
+		}
+		conditions = append(conditions, `(created < ? OR (created = ? AND id < ?))`)
+		args = append(args, cursorCreated, cursorCreated, opts.Cursor)
 	}
 
 	whereClause := ""
@@ -3885,9 +3894,12 @@ func (s *SQLiteStore) ListAllowListEntriesWithInvites(ctx context.Context, opts 
 	var args []interface{}
 
 	if opts.Cursor != "" {
-		conditions = append(conditions, `(a.created < (SELECT created FROM allow_list WHERE id = ?)
-			OR (a.created = (SELECT created FROM allow_list WHERE id = ?) AND a.id < ?))`)
-		args = append(args, opts.Cursor, opts.Cursor, opts.Cursor)
+		var cursorCreated time.Time
+		if err := s.db.QueryRowContext(ctx, "SELECT created FROM allow_list WHERE id = ?", opts.Cursor).Scan(&cursorCreated); err != nil {
+			return nil, fmt.Errorf("invalid cursor: %w", err)
+		}
+		conditions = append(conditions, `(a.created < ? OR (a.created = ? AND a.id < ?))`)
+		args = append(args, cursorCreated, cursorCreated, opts.Cursor)
 	}
 
 	whereClause := ""
