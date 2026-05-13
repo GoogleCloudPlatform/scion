@@ -534,7 +534,7 @@ func (c *ControlChannelClient) handleStreamOpen(data []byte) error {
 		)
 	}
 
-		// Create stream handler
+	// Create stream handler
 	handler := &StreamHandler{
 		streamID:   open.StreamID,
 		streamType: open.StreamType,

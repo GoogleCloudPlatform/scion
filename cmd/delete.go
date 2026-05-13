@@ -122,7 +122,7 @@ var deleteCmd = &cobra.Command{
 
 				statusf("Deleting stopped agent '%s' (status: %s)...\n", agentName, a.ContainerStatus)
 
-				targetProjectPath:= a.ProjectPath
+				targetProjectPath := a.ProjectPath
 				if targetProjectPath == "" {
 					targetProjectPath = resolvedGrove
 				}

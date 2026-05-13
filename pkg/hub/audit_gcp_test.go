@@ -113,7 +113,7 @@ func TestLogAuditLogger_LogGCPTokenEvent(t *testing.T) {
 	err := logger.LogGCPTokenEvent(context.Background(), &GCPTokenEvent{
 		EventType:           GCPTokenEventAccessToken,
 		AgentID:             "agent-1",
-		ProjectID:             "project-1",
+		ProjectID:           "project-1",
 		ServiceAccountEmail: "sa@proj.iam.gserviceaccount.com",
 		Success:             true,
 	})
@@ -125,7 +125,7 @@ func TestLogAuditLogger_LogGCPTokenEvent(t *testing.T) {
 	err = logger.LogGCPTokenEvent(context.Background(), &GCPTokenEvent{
 		EventType:           GCPTokenEventIdentityToken,
 		AgentID:             "agent-1",
-		ProjectID:             "project-1",
+		ProjectID:           "project-1",
 		ServiceAccountEmail: "sa@proj.iam.gserviceaccount.com",
 		Success:             false,
 		FailReason:          "permission denied",

@@ -200,7 +200,7 @@ func TestAgentList(t *testing.T) {
 			ID:           "agent_" + string(rune('a'+i)),
 			Slug:         "test-agent-" + string(rune('a'+i)),
 			Name:         "Test Agent " + string(rune('A'+i)),
-			ProjectID:      project.ID,
+			ProjectID:    project.ID,
 			Phase:        string(state.PhaseStopped),
 			StateVersion: 1,
 			Created:      time.Now(),
@@ -262,7 +262,7 @@ func TestAgentCreate(t *testing.T) {
 
 	// Register the broker as a provider to the project
 	contrib := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -272,7 +272,7 @@ func TestAgentCreate(t *testing.T) {
 	}
 
 	body := map[string]interface{}{
-		"name":    "New Agent",
+		"name":      "New Agent",
 		"projectId": project.ID,
 	}
 
@@ -341,7 +341,7 @@ func TestAgentCreate_NoTask(t *testing.T) {
 
 	// Register the broker as a provider
 	contrib := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -352,7 +352,7 @@ func TestAgentCreate_NoTask(t *testing.T) {
 
 	// Create agent without a task via /api/v1/agents
 	body := map[string]interface{}{
-		"name":    "Taskless Agent",
+		"name":      "Taskless Agent",
 		"projectId": project.ID,
 	}
 
@@ -412,7 +412,7 @@ func TestAgentCreate_NoTaskViaProject(t *testing.T) {
 
 	// Register the broker as a provider
 	contrib := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -479,7 +479,7 @@ func TestAgentCreate_AttachNoTask(t *testing.T) {
 
 	// Register the broker as a provider
 	contrib := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -490,9 +490,9 @@ func TestAgentCreate_AttachNoTask(t *testing.T) {
 
 	// Create agent with attach=true but no task
 	body := map[string]interface{}{
-		"name":    "Attach Agent",
+		"name":      "Attach Agent",
 		"projectId": project.ID,
-		"attach":  true,
+		"attach":    true,
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
@@ -550,7 +550,7 @@ func TestAgentCreate_SingleProvider(t *testing.T) {
 
 	// Register the broker as the only provider to the project
 	contrib := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -561,7 +561,7 @@ func TestAgentCreate_SingleProvider(t *testing.T) {
 
 	// Create agent without specifying runtimeBrokerId
 	body := map[string]interface{}{
-		"name":    "Auto Resolved Agent",
+		"name":      "Auto Resolved Agent",
 		"projectId": project.ID,
 	}
 
@@ -611,7 +611,7 @@ func TestAgentCreate_SingleOfflineProvider(t *testing.T) {
 	}
 
 	contrib := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOffline,
@@ -621,7 +621,7 @@ func TestAgentCreate_SingleOfflineProvider(t *testing.T) {
 	}
 
 	body := map[string]interface{}{
-		"name":    "No Auto Resolve Agent",
+		"name":      "No Auto Resolve Agent",
 		"projectId": project.ID,
 	}
 
@@ -682,7 +682,7 @@ func TestAgentCreate_MultipleProviders(t *testing.T) {
 
 	// Register both brokers as providers to the project
 	contrib1 := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker1.ID,
 		BrokerName: broker1.Name,
 		Status:     store.BrokerStatusOnline,
@@ -692,7 +692,7 @@ func TestAgentCreate_MultipleProviders(t *testing.T) {
 	}
 
 	contrib2 := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker2.ID,
 		BrokerName: broker2.Name,
 		Status:     store.BrokerStatusOnline,
@@ -703,7 +703,7 @@ func TestAgentCreate_MultipleProviders(t *testing.T) {
 
 	// Attempt to create agent without specifying runtimeBrokerId
 	body := map[string]interface{}{
-		"name":    "Ambiguous Agent",
+		"name":      "Ambiguous Agent",
 		"projectId": project.ID,
 	}
 
@@ -754,7 +754,7 @@ func TestAgentGetByID(t *testing.T) {
 		ID:           "agent_test1",
 		Slug:         "test-agent",
 		Name:         "Test Agent",
-		ProjectID:      project.ID,
+		ProjectID:    project.ID,
 		Phase:        string(state.PhaseStopped),
 		StateVersion: 1,
 		Created:      time.Now(),
@@ -820,7 +820,7 @@ func TestAgentDelete(t *testing.T) {
 		ID:           "agent_delete",
 		Slug:         "delete-me",
 		Name:         "Delete Me",
-		ProjectID:      project.ID,
+		ProjectID:    project.ID,
 		Phase:        string(state.PhaseStopped),
 		StateVersion: 1,
 		Created:      time.Now(),
@@ -1317,7 +1317,7 @@ func TestListProviders(t *testing.T) {
 	}
 
 	contrib := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		LocalPath:  "/test/path",
@@ -1536,7 +1536,7 @@ func TestRuntimeBrokerDeleteCascadesProviders(t *testing.T) {
 	// Add broker as provider to both projects
 	for _, projectID := range []string{project1.ID, project2.ID} {
 		provider := &store.ProjectProvider{
-			ProjectID:    projectID,
+			ProjectID:  projectID,
 			BrokerID:   broker.ID,
 			BrokerName: broker.Name,
 			Status:     store.BrokerStatusOnline,
@@ -1846,7 +1846,7 @@ func TestRuntimeBrokerListWithProjectLocalPath(t *testing.T) {
 
 	// Add broker as project provider with a local path
 	contrib := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		LocalPath:  "/path/to/project/.scion",
@@ -2444,7 +2444,7 @@ func TestAgentCreate_StoresTemplateSlug(t *testing.T) {
 
 	// Register broker as provider
 	provider := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -2470,9 +2470,9 @@ func TestAgentCreate_StoresTemplateSlug(t *testing.T) {
 
 	// Create agent referencing template by its ID (simulating CLI behavior)
 	body := map[string]interface{}{
-		"name":     "Slug Test Agent",
-		"projectId":  project.ID,
-		"template": tmpl.ID,
+		"name":      "Slug Test Agent",
+		"projectId": project.ID,
+		"template":  tmpl.ID,
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
@@ -2613,7 +2613,7 @@ func TestOutboundMessage_UnknownRecipient(t *testing.T) {
 		ID:              api.NewUUID(),
 		Name:            "sender",
 		Slug:            "sender",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		Phase:           "running",
 		RuntimeBrokerID: "broker-msg",
 		Visibility:      store.VisibilityPrivate,
@@ -2630,7 +2630,7 @@ func TestOutboundMessage_UnknownRecipient(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 
 	agentIdent := &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:  jwt.Claims{Subject: agent.ID},
+		Claims:    jwt.Claims{Subject: agent.ID},
 		ProjectID: project.ID,
 	}}
 	req = req.WithContext(contextWithIdentity(req.Context(), agentIdent))

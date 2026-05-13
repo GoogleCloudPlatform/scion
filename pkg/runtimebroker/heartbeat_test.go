@@ -252,21 +252,21 @@ func TestHeartbeatService_IncludesPhaseActivity(t *testing.T) {
 	manager := &heartbeatMockManager{
 		agents: []api.AgentInfo{
 			{
-				Name:     "agent-structured",
-				ProjectID:  "grove-1",
-				Phase:    "running",
-				Activity: "thinking",
-			},
-			{
-				Name:     "agent-waiting",
-				ProjectID:  "grove-1",
-				Phase:    "running",
-				Activity: "waiting_for_input",
-			},
-			{
-				Name:    "agent-stopped",
+				Name:      "agent-structured",
 				ProjectID: "grove-1",
-				Phase:   "stopped",
+				Phase:     "running",
+				Activity:  "thinking",
+			},
+			{
+				Name:      "agent-waiting",
+				ProjectID: "grove-1",
+				Phase:     "running",
+				Activity:  "waiting_for_input",
+			},
+			{
+				Name:      "agent-stopped",
+				ProjectID: "grove-1",
+				Phase:     "stopped",
 			},
 		},
 	}

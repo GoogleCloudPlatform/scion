@@ -104,7 +104,6 @@ func TestProject_JSON(t *testing.T) {
 		}
 	})
 
-
 	t.Run("marshal dual fields", func(t *testing.T) {
 		p := Project{
 			ID:          "my-id",

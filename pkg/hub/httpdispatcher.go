@@ -216,7 +216,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		ID:          agent.ID,
 		Slug:        agent.Slug,
 		Name:        agent.Name,
-		ProjectID:     agent.ProjectID,
+		ProjectID:   agent.ProjectID,
 		UserID:      agent.OwnerID,
 		HubEndpoint: d.hubEndpoint,
 		ProjectPath: projectInfo.projectPath,
@@ -1231,9 +1231,9 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 			AuthzCheck: func(s secret.SecretMeta) bool {
 				decision := d.authzService.CheckAccess(ctx, &agentIdentityWrapper{
 					AgentTokenClaims: &AgentTokenClaims{
-						Claims:   jwt.Claims{Subject: agentID},
-						ProjectID:  agent.ProjectID,
-						Ancestry: ancestry,
+						Claims:    jwt.Claims{Subject: agentID},
+						ProjectID: agent.ProjectID,
+						Ancestry:  ancestry,
 					},
 				}, Resource{
 					Type: "secret",

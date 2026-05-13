@@ -666,7 +666,7 @@ func setupWorkspaceProject(t *testing.T, projectName string) (*Server, store.Sto
 	}
 
 	if err := s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   brokerID,
 		BrokerName: broker.Name,
 		LocalPath:  workspaceRoot,
@@ -706,7 +706,7 @@ func TestImportTemplatesFromWorkspace_ImportsTemplates(t *testing.T) {
 	}
 
 	result, err := s.ListTemplates(ctx, store.TemplateFilter{
-		Scope:   string(store.TemplateScopeProject),
+		Scope:     string(store.TemplateScopeProject),
 		ProjectID: project.ID,
 	}, store.ListOptions{Limit: 10})
 	if err != nil {

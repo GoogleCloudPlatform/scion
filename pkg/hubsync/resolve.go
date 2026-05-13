@@ -139,14 +139,14 @@ func resolveHubProjectRef(ref string, opts EnsureHubReadyOptions) (*HubContext, 
 	}
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: endpoint,
-		Settings: settings,
-		ProjectID:  project.ID,
-		BrokerID: brokerID,
+		Client:    client,
+		Endpoint:  endpoint,
+		Settings:  settings,
+		ProjectID: project.ID,
+		BrokerID:  brokerID,
 		// Use the fallback project path for settings access, not the target project
 		ProjectPath: fallbackPath,
-		IsGlobal:  isGlobal,
+		IsGlobal:    isGlobal,
 	}
 
 	debugf("resolveHubProjectRef: resolved project %s (ID: %s) via hub", project.Name, project.ID)

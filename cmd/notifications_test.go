@@ -120,7 +120,7 @@ func TestSubscriptionsListEndToEnd(t *testing.T) {
 			AgentID:           "agent-1",
 			SubscriberType:    store.SubscriberTypeUser,
 			SubscriberID:      "user-1",
-			ProjectID:           "grove-1",
+			ProjectID:         "grove-1",
 			TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT"},
 			CreatedAt:         time.Date(2026, 3, 18, 0, 0, 0, 0, time.UTC),
 			CreatedBy:         "user-1",
@@ -130,7 +130,7 @@ func TestSubscriptionsListEndToEnd(t *testing.T) {
 			Scope:             store.SubscriptionScopeProject,
 			SubscriberType:    store.SubscriberTypeUser,
 			SubscriberID:      "user-1",
-			ProjectID:           "grove-1",
+			ProjectID:         "grove-1",
 			TriggerActivities: []string{"COMPLETED"},
 			CreatedAt:         time.Date(2026, 3, 17, 0, 0, 0, 0, time.UTC),
 			CreatedBy:         "user-1",
@@ -195,7 +195,7 @@ func TestSubscriptionCreateEndToEnd(t *testing.T) {
 			json.NewEncoder(w).Encode(hubclient.Subscription{
 				ID:                "new-sub-id",
 				Scope:             req.Scope,
-				ProjectID:           req.ProjectID,
+				ProjectID:         req.ProjectID,
 				SubscriberType:    store.SubscriberTypeUser,
 				SubscriberID:      "user-1",
 				TriggerActivities: req.TriggerActivities,
@@ -215,7 +215,7 @@ func TestSubscriptionCreateEndToEnd(t *testing.T) {
 
 	sub, err := client.Subscriptions().Create(context.Background(), &hubclient.CreateSubscriptionRequest{
 		Scope:             store.SubscriptionScopeProject,
-		ProjectID:           "grove-1",
+		ProjectID:         "grove-1",
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT"},
 	})
 	if err != nil {

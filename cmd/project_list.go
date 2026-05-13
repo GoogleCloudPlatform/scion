@@ -27,7 +27,7 @@ var projectListCmd = &cobra.Command{
 	Use:     "list",
 	Aliases: []string{"ls"},
 	Short:   "List all known projects on this machine",
-	Long:    `List all projects known to scion, including the global project and all project workspaces. Shows workspace path, type, agent count, and status for each project.
+	Long: `List all projects known to scion, including the global project and all project workspaces. Shows workspace path, type, agent count, and status for each project.
 
 Orphaned projects (where the workspace no longer exists) are flagged.
 Use 'scion project prune' to clean them up.`,

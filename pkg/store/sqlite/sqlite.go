@@ -2236,7 +2236,6 @@ func (s *SQLiteStore) GetProject(ctx context.Context, id string) (*store.Project
 	return project, nil
 }
 
-
 // populateProjectType sets the computed ProjectType field based on how the project was established.
 // Type is "linked" (pre-existing local project linked to Hub) or "hub-native" (created via Hub).
 // Whether a project is git-backed is orthogonal — indicated by the GitRemote field.
@@ -2469,7 +2468,7 @@ func (s *SQLiteStore) ListProjects(ctx context.Context, filter store.ProjectFilt
 
 	var projects []store.Project
 	type projectRow struct {
-		project                store.Project
+		project              store.Project
 		labels               string
 		annotations          string
 		sharedDirs           string

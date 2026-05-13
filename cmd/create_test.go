@@ -25,16 +25,16 @@ import (
 
 // createTestState captures and restores package-level vars for test isolation.
 type createTestState struct {
-	home      string
+	home        string
 	projectPath string
-	noHub     bool
+	noHub       bool
 }
 
 func saveCreateTestState() createTestState {
 	return createTestState{
-		home:      os.Getenv("HOME"),
+		home:        os.Getenv("HOME"),
 		projectPath: projectPath,
-		noHub:     noHub,
+		noHub:       noHub,
 	}
 }
 

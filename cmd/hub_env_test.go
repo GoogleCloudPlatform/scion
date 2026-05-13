@@ -223,8 +223,8 @@ func setupEnvProjectWithHubProjectID(t *testing.T, home, endpoint, projectID str
 	settings := map[string]interface{}{
 		"grove_id": "test-grove",
 		"hub": map[string]interface{}{
-			"enabled":  true,
-			"endpoint": endpoint,
+			"enabled":   true,
+			"endpoint":  endpoint,
 			"projectId": projectID,
 		},
 	}

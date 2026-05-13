@@ -116,8 +116,8 @@ func TestAuthenticatedBrokerClient_CreateAgent(t *testing.T) {
 
 	// Make request
 	req := &RemoteCreateAgentRequest{
-		Slug:    "agent-1",
-		Name:    "test-agent",
+		Slug:      "agent-1",
+		Name:      "test-agent",
 		ProjectID: "project-1",
 	}
 
@@ -274,8 +274,8 @@ func TestAuthenticatedBrokerClient_MissingSecretFailsClosed(t *testing.T) {
 
 	// Make request - should fail before sending anything
 	req := &RemoteCreateAgentRequest{
-		Slug:    "agent-1",
-		Name:    "test-agent",
+		Slug:      "agent-1",
+		Name:      "test-agent",
 		ProjectID: "project-1",
 	}
 
@@ -345,8 +345,8 @@ func TestAuthenticatedBrokerClient_ExpiredSecretFailsClosed(t *testing.T) {
 
 	// Make request - should fail before sending due to expired secret
 	req := &RemoteCreateAgentRequest{
-		Slug:    "agent-1",
-		Name:    "test-agent",
+		Slug:      "agent-1",
+		Name:      "test-agent",
 		ProjectID: "project-1",
 	}
 

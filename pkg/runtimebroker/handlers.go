@@ -560,9 +560,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		Name:            req.Name,
 		AgentID:         req.ID,
 		Slug:            req.Slug,
-		ProjectPath:       req.ProjectPath,
-		ProjectSlug:       req.ProjectSlug,
-		ProjectID:         req.ProjectID,
+		ProjectPath:     req.ProjectPath,
+		ProjectSlug:     req.ProjectSlug,
+		ProjectID:       req.ProjectID,
 		Config:          req.Config,
 		InlineConfig:    req.InlineConfig,
 		SharedDirs:      req.SharedDirs,
@@ -966,8 +966,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 	// Read optional task, grovePath, groveSlug, harnessConfig, and resolvedEnv from request body
 	var startReq struct {
 		Task            string               `json:"task"`
-		ProjectPath       string               `json:"grovePath"`
-		ProjectSlug       string               `json:"groveSlug"`
+		ProjectPath     string               `json:"grovePath"`
+		ProjectSlug     string               `json:"groveSlug"`
 		HarnessConfig   string               `json:"harnessConfig"`
 		ResolvedEnv     map[string]string    `json:"resolvedEnv"`
 		ResolvedSecrets []api.ResolvedSecret `json:"resolvedSecrets,omitempty"`
@@ -999,8 +999,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:            id,
-		ProjectPath:       startReq.ProjectPath,
-		ProjectSlug:       startReq.ProjectSlug,
+		ProjectPath:     startReq.ProjectPath,
+		ProjectSlug:     startReq.ProjectSlug,
 		Config:          cfg,
 		ResolvedEnv:     startReq.ResolvedEnv,
 		ResolvedSecrets: startReq.ResolvedSecrets,
@@ -1192,7 +1192,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, groveI
 
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:        agentName,
-		ProjectPath:   grovePath,
+		ProjectPath: grovePath,
 		ResolvedEnv: restartReq.ResolvedEnv,
 		HTTPRequest: r,
 	})
@@ -1972,9 +1972,9 @@ func (s *Server) finalizeEnv(w http.ResponseWriter, r *http.Request, id string) 
 		Name:            origReq.Name,
 		AgentID:         origReq.ID,
 		Slug:            origReq.Slug,
-		ProjectPath:       origReq.ProjectPath,
-		ProjectSlug:       origReq.ProjectSlug,
-		ProjectID:         origReq.ProjectID,
+		ProjectPath:     origReq.ProjectPath,
+		ProjectSlug:     origReq.ProjectSlug,
+		ProjectID:       origReq.ProjectID,
 		Config:          origReq.Config,
 		InlineConfig:    origReq.InlineConfig,
 		SharedDirs:      origReq.SharedDirs,

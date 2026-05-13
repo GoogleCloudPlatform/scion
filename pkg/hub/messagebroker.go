@@ -273,7 +273,7 @@ func (p *MessageBrokerProxy) PublishToSet(ctx context.Context, projectID string,
 func (p *MessageBrokerProxy) EnsureProjectSubscriptions(ctx context.Context, projectID string) error {
 	result, err := p.store.ListAgents(ctx, store.AgentFilter{
 		ProjectID: projectID,
-		Phase:   "running",
+		Phase:     "running",
 	}, store.ListOptions{})
 	if err != nil {
 		return err
@@ -427,7 +427,7 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 
 	storeMsg := &store.Message{
 		ID:          api.NewUUID(),
-		ProjectID:     projectID,
+		ProjectID:   projectID,
 		Sender:      msg.Sender,
 		SenderID:    msg.SenderID,
 		Recipient:   msg.Recipient,
@@ -502,7 +502,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	// Persist to message store (write-through; non-fatal if store fails).
 	storeMsg := &store.Message{
 		ID:          api.NewUUID(),
-		ProjectID:     projectID,
+		ProjectID:   projectID,
 		Sender:      msg.Sender,
 		SenderID:    msg.SenderID,
 		Recipient:   msg.Recipient,
@@ -535,7 +535,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 func (p *MessageBrokerProxy) fanOutToProject(ctx context.Context, projectID string, msg *messages.StructuredMessage) {
 	result, err := p.store.ListAgents(ctx, store.AgentFilter{
 		ProjectID: projectID,
-		Phase:   "running",
+		Phase:     "running",
 	}, store.ListOptions{})
 	if err != nil {
 		p.log.Error("Failed to list agents for project broadcast fan-out",

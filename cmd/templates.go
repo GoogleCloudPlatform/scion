@@ -80,9 +80,9 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 			// Fetch project templates from Hub (if we have a project ID)
 			if projectID != "" {
 				projectResp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
-					Scope:   "project",
+					Scope:     "project",
 					ProjectID: projectID,
-					Status:  "active",
+					Status:    "active",
 				})
 				if err == nil {
 					hubProject = projectResp.Templates
@@ -167,7 +167,7 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 
 func printTemplateListLocalMode(w *tabwriter.Writer, global, project []*config.Template) {
 	hasGlobal := len(global) > 0
-	hasProject:= len(project) > 0
+	hasProject := len(project) > 0
 
 	if !hasGlobal && !hasProject {
 		fmt.Fprintln(w, "No templates found.")
@@ -255,6 +255,7 @@ func printTemplateListHubMode(w *tabwriter.Writer, localGlobal, localProject []*
 		}
 	}
 }
+
 var templatesShowCmd = &cobra.Command{
 	Use:   "show <name>",
 	Short: "Show template configuration",
@@ -276,7 +277,7 @@ func runTemplateShow(cmd *cobra.Command, args []string) error {
 	opts := &ResolveOpts{
 		LocalOnly:   localOnly,
 		HubOnly:     hubOnly,
-		ProjectOnly:   false,
+		ProjectOnly: false,
 		GlobalOnly:  globalMode,
 		AutoConfirm: autoConfirm,
 	}
@@ -414,7 +415,7 @@ func runTemplateDelete(cmd *cobra.Command, args []string) error {
 	opts := &ResolveOpts{
 		LocalOnly:   localOnly,
 		HubOnly:     hubOnly,
-		ProjectOnly:   false,
+		ProjectOnly: false,
 		GlobalOnly:  globalMode,
 		AutoConfirm: autoConfirm,
 	}
@@ -854,7 +855,7 @@ func runTemplatePull(cmd *cobra.Command, args []string) error {
 	// Build resolution options - Hub only for pull
 	opts := &ResolveOpts{
 		HubOnly:     true,
-		ProjectOnly:   false,
+		ProjectOnly: false,
 		GlobalOnly:  globalMode,
 		AutoConfirm: autoConfirm,
 	}
@@ -991,10 +992,10 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 	// Check if a template with this name already exists in the same scope
 	var templateID string
 	existingResp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
-		Name:    name,
-		Scope:   scope,
+		Name:      name,
+		Scope:     scope,
 		ProjectID: projectID,
-		Status:  "active",
+		Status:    "active",
 	})
 	if err != nil {
 		return fmt.Errorf("failed to check for existing template: %w", err)
@@ -1073,9 +1074,9 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 		// Create new template - upload all files
 		fmt.Printf("Creating template '%s' in Hub...\n", name)
 		createReq := &hubclient.CreateTemplateRequest{
-			Name:    name,
-			Harness: harnessType,
-			Scope:   scope,
+			Name:      name,
+			Harness:   harnessType,
+			Scope:     scope,
 			ProjectID: projectID,
 		}
 
@@ -1243,9 +1244,9 @@ func runTemplateStatus(cmd *cobra.Command, args []string) error {
 	var hubProject, hubGlobal []hubclient.Template
 	if projectID != "" {
 		resp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
-			Scope:   "project",
+			Scope:     "project",
 			ProjectID: projectID,
-			Status:  "active",
+			Status:    "active",
 		})
 		if err == nil {
 			hubProject = resp.Templates
@@ -1345,7 +1346,7 @@ func runTemplateStatus(cmd *cobra.Command, args []string) error {
 	if isJSONOutput() {
 		return outputJSON(map[string]interface{}{
 			"scope":     scopeLabel,
-			"projectId":   projectID,
+			"projectId": projectID,
 			"templates": entries,
 		})
 	}

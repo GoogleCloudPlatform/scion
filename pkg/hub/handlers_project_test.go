@@ -461,7 +461,7 @@ func TestCreateAgent_HubNativeProject_ExplicitBroker_AutoLinks(t *testing.T) {
 	// Create agent with explicit broker — this should auto-link the broker
 	body := map[string]interface{}{
 		"name":            "autolink-agent",
-		"projectId":         project.ID,
+		"projectId":       project.ID,
 		"runtimeBrokerId": broker.ID,
 	}
 
@@ -529,7 +529,7 @@ func TestCreateProject_HubNative_AutoProvide(t *testing.T) {
 
 	// Now create an agent — should work without explicit broker
 	agentBody := map[string]interface{}{
-		"name":    "autoprovide-agent",
+		"name":      "autoprovide-agent",
 		"projectId": project.ID,
 	}
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents", agentBody)
@@ -604,7 +604,7 @@ func TestDeleteProject_DeleteAgents_DispatchesToBroker(t *testing.T) {
 		ID:              "agent-online-project-del-2",
 		Slug:            "agent-online-project-del-2-slug",
 		Name:            "Agent Online project-del 2",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: "broker-online-project-del",
 		Phase:           string(state.PhaseRunning),
 	}
@@ -665,7 +665,7 @@ func TestCreateAgent_HubNativeProject_NoProviders_NoBroker(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	body := map[string]interface{}{
-		"name":    "orphan-agent",
+		"name":      "orphan-agent",
 		"projectId": project.ID,
 	}
 
@@ -790,14 +790,14 @@ func TestDeleteProject_HubNative_DispatchesCleanupToBrokers(t *testing.T) {
 
 	// Link both as providers
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID: broker1.ID,
-		LinkedBy: "test",
+		ProjectID: project.ID,
+		BrokerID:  broker1.ID,
+		LinkedBy:  "test",
 	}))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID: broker2.ID,
-		LinkedBy: "test",
+		ProjectID: project.ID,
+		BrokerID:  broker2.ID,
+		LinkedBy:  "test",
 	}))
 
 	// Set up a mock client and dispatcher
@@ -852,14 +852,14 @@ func TestDeleteProject_HubNative_SkipsEmbeddedBroker(t *testing.T) {
 
 	// Link both as providers
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID: embeddedBroker.ID,
-		LinkedBy: "test",
+		ProjectID: project.ID,
+		BrokerID:  embeddedBroker.ID,
+		LinkedBy:  "test",
 	}))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID: remoteBroker.ID,
-		LinkedBy: "test",
+		ProjectID: project.ID,
+		BrokerID:  remoteBroker.ID,
+		LinkedBy:  "test",
 	}))
 
 	// Mark embedded broker
@@ -904,9 +904,9 @@ func TestDeleteProject_GitBacked_NoCleanupDispatched(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID: broker.ID,
-		LinkedBy: "test",
+		ProjectID: project.ID,
+		BrokerID:  broker.ID,
+		LinkedBy:  "test",
 	}))
 
 	// Set up mock client and dispatcher
@@ -949,7 +949,7 @@ func TestResolveRuntimeBroker_HubNativeProject_NoLocalPath(t *testing.T) {
 	// Create agent with explicit broker — triggers resolveRuntimeBroker auto-link
 	agentBody := map[string]interface{}{
 		"name":            "resolve-localpath-agent",
-		"projectId":         project.ID,
+		"projectId":       project.ID,
 		"runtimeBrokerId": broker.ID,
 	}
 
@@ -1006,7 +1006,7 @@ func TestProjectRegisterPreservesProviderLocalPath(t *testing.T) {
 	// Now simulate converting to hub-native: clear localPath directly
 	// (as autoLinkProviders would do, or via admin action)
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:    projectID,
+		ProjectID:  projectID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,

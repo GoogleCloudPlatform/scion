@@ -246,7 +246,7 @@ func setupProjectAndBroker(t *testing.T, s store.Store) (string, string) {
 	}
 
 	provider := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -268,9 +268,9 @@ func TestCreateAgentWithWorkspaceBootstrap(t *testing.T) {
 
 	// Create an agent with workspace files and a task
 	body := CreateAgentRequest{
-		Name:    "bootstrap-agent",
+		Name:      "bootstrap-agent",
 		ProjectID: projectID,
-		Task:    "do something",
+		Task:      "do something",
 		WorkspaceFiles: []transfer.FileInfo{
 			{Path: "main.go", Size: 100, Hash: "sha256:abc123"},
 			{Path: "go.mod", Size: 50, Hash: "sha256:def456"},
@@ -338,9 +338,9 @@ func TestCreateAgentWithWorkspaceBootstrap_ExistingFiles(t *testing.T) {
 
 	// Create a first agent to get its ID, then test with pre-existing storage
 	body := CreateAgentRequest{
-		Name:    "bootstrap-existing",
+		Name:      "bootstrap-existing",
 		ProjectID: projectID,
-		Task:    "do something",
+		Task:      "do something",
 		WorkspaceFiles: []transfer.FileInfo{
 			{Path: "main.go", Size: 100, Hash: "sha256:abc123"},
 			{Path: "go.mod", Size: 50, Hash: "sha256:def456"},
@@ -367,9 +367,9 @@ func TestCreateAgentWithWorkspaceBootstrap_ExistingFiles(t *testing.T) {
 
 	// Create second agent - different name to avoid conflicts
 	body2 := CreateAgentRequest{
-		Name:    "bootstrap-existing-2",
+		Name:      "bootstrap-existing-2",
 		ProjectID: projectID,
-		Task:    "do something",
+		Task:      "do something",
 		WorkspaceFiles: []transfer.FileInfo{
 			{Path: "main.go", Size: 100, Hash: "sha256:abc123"},
 			{Path: "go.mod", Size: 50, Hash: "sha256:def456"},
@@ -413,9 +413,9 @@ func TestCreateAgentWithWorkspaceBootstrap_NoStorage(t *testing.T) {
 	projectID, _ := setupProjectAndBroker(t, s)
 
 	body := CreateAgentRequest{
-		Name:    "bootstrap-no-storage",
+		Name:      "bootstrap-no-storage",
 		ProjectID: projectID,
-		Task:    "do something",
+		Task:      "do something",
 		WorkspaceFiles: []transfer.FileInfo{
 			{Path: "main.go", Size: 100, Hash: "sha256:abc123"},
 		},
@@ -437,7 +437,7 @@ func TestCreateAgentWithWorkspaceBootstrap_NoTask(t *testing.T) {
 	// since ProvisionOnly is not set, the agent is dispatched via DispatchAgentCreate.
 	// Without a broker-reported status, it falls back to "provisioning".
 	body := CreateAgentRequest{
-		Name:    "bootstrap-no-task",
+		Name:      "bootstrap-no-task",
 		ProjectID: projectID,
 		WorkspaceFiles: []transfer.FileInfo{
 			{Path: "main.go", Size: 100, Hash: "sha256:abc123"},
@@ -497,7 +497,7 @@ func TestCreateAgentWithWorkspaceBootstrap_LocalProvider(t *testing.T) {
 
 	// Add project provider WITH a LocalPath — this is the key difference
 	provider := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		LocalPath:  "/home/user/project/.scion",
@@ -509,9 +509,9 @@ func TestCreateAgentWithWorkspaceBootstrap_LocalProvider(t *testing.T) {
 
 	// Create an agent with workspace files and a task
 	body := CreateAgentRequest{
-		Name:    "local-workspace-agent",
+		Name:      "local-workspace-agent",
 		ProjectID: project.ID,
-		Task:    "do something locally",
+		Task:      "do something locally",
 		WorkspaceFiles: []transfer.FileInfo{
 			{Path: "main.go", Size: 100, Hash: "sha256:abc123"},
 			{Path: "go.mod", Size: 50, Hash: "sha256:def456"},
@@ -564,9 +564,9 @@ func TestCreateAgentWithoutBootstrap(t *testing.T) {
 
 	// Normal create without workspace files - should use normal dispatch path
 	body := CreateAgentRequest{
-		Name:    "normal-agent",
+		Name:      "normal-agent",
 		ProjectID: projectID,
-		Task:    "do something",
+		Task:      "do something",
 	}
 
 	rec := doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
@@ -605,7 +605,7 @@ func TestCreateThenStartWithTask(t *testing.T) {
 	// Step 1: Create the agent (provision-only)
 	createBody := CreateAgentRequest{
 		Name:          "staged-agent",
-		ProjectID:       projectID,
+		ProjectID:     projectID,
 		ProvisionOnly: true,
 	}
 	rec := doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents", createBody)
@@ -623,9 +623,9 @@ func TestCreateThenStartWithTask(t *testing.T) {
 
 	// Step 2: Start the agent with a task (this previously returned 409)
 	startBody := CreateAgentRequest{
-		Name:    "staged-agent",
+		Name:      "staged-agent",
 		ProjectID: projectID,
-		Task:    "hello world",
+		Task:      "hello world",
 	}
 	rec = doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents", startBody)
 	if rec.Code != http.StatusOK {
@@ -661,7 +661,7 @@ func TestCreateThenStartWithoutTask(t *testing.T) {
 	// Step 1: Create the agent with a task (provision-only, task written to prompt.md)
 	createBody := CreateAgentRequest{
 		Name:          "staged-agent-2",
-		ProjectID:       projectID,
+		ProjectID:     projectID,
 		Task:          "saved task",
 		ProvisionOnly: true,
 	}
@@ -672,7 +672,7 @@ func TestCreateThenStartWithoutTask(t *testing.T) {
 
 	// Step 2: Start the agent without a task — task is optional
 	startBody := CreateAgentRequest{
-		Name:    "staged-agent-2",
+		Name:      "staged-agent-2",
 		ProjectID: projectID,
 	}
 	rec = doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents", startBody)
@@ -708,7 +708,7 @@ func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 		ID:              "agent_bootstrap_finalize",
 		Slug:            "bootstrap-finalize",
 		Name:            "Bootstrap Finalize",
-		ProjectID:         projectID,
+		ProjectID:       projectID,
 		RuntimeBrokerID: "broker_bootstrap_test",
 		Phase:           string(state.PhaseProvisioning),
 		Visibility:      store.VisibilityPrivate,
@@ -794,7 +794,7 @@ func TestSyncToFinalize_BootstrapMode_MissingFile(t *testing.T) {
 		ID:              "agent_bootstrap_missing",
 		Slug:            "bootstrap-missing",
 		Name:            "Bootstrap Missing",
-		ProjectID:         projectID,
+		ProjectID:       projectID,
 		RuntimeBrokerID: "broker_bootstrap_test",
 		Phase:           string(state.PhaseProvisioning),
 		Visibility:      store.VisibilityPrivate,
@@ -838,7 +838,7 @@ func TestSyncToFinalize_RejectsStoppedAgent(t *testing.T) {
 		ID:              "agent_bootstrap_stopped",
 		Slug:            "bootstrap-stopped",
 		Name:            "Bootstrap Stopped",
-		ProjectID:         projectID,
+		ProjectID:       projectID,
 		RuntimeBrokerID: "broker_bootstrap_test",
 		Phase:           string(state.PhaseStopped),
 		Visibility:      store.VisibilityPrivate,
@@ -888,7 +888,7 @@ func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 		ID:              "agent_bootstrap_nodisp",
 		Slug:            "bootstrap-nodisp",
 		Name:            "Bootstrap No Dispatcher",
-		ProjectID:         projectID,
+		ProjectID:       projectID,
 		RuntimeBrokerID: "broker_bootstrap_test",
 		Phase:           string(state.PhaseProvisioning),
 		Visibility:      store.VisibilityPrivate,
@@ -926,7 +926,7 @@ func TestDispatcherPassesWorkspaceStoragePath(t *testing.T) {
 		ID:              "agent_with_storage_path",
 		Slug:            "storage-path-agent",
 		Name:            "Storage Path Agent",
-		ProjectID:         "project_test",
+		ProjectID:       "project_test",
 		RuntimeBrokerID: "broker_test",
 		Phase:           string(state.PhaseProvisioning),
 		AppliedConfig: &store.AgentAppliedConfig{
@@ -1070,7 +1070,7 @@ func TestBrokerCreateAgentRequest_WorkspaceStoragePath(t *testing.T) {
 
 	var req struct {
 		Name                 string `json:"name"`
-		ProjectPath            string `json:"projectPath"`
+		ProjectPath          string `json:"projectPath"`
 		WorkspaceStoragePath string `json:"workspaceStoragePath"`
 	}
 

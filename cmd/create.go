@@ -115,7 +115,7 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 			Profile:       profile,
 			HarnessConfig: effectiveHarnessConfig,
 			Image:         effectiveImage,
-			ProjectPath:     projectPath,
+			ProjectPath:   projectPath,
 			Branch:        effectiveBranch,
 			Workspace:     workspace,
 			InlineConfig:  inlineCfg,
@@ -180,7 +180,7 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 	// Build create request — always provision-only (create does not start the agent)
 	req := &hubclient.CreateAgentRequest{
 		Name:            agentName,
-		ProjectID:         projectID,
+		ProjectID:       projectID,
 		Template:        resolvedTemplate,
 		HarnessConfig:   harnessConfigFlag,
 		HarnessAuth:     harnessAuthFlag,
@@ -288,7 +288,6 @@ func init() {
 	createCmd.Flags().BoolVar(&uploadTemplate, "upload-template", false, "Automatically upload local template to Hub if not found")
 	createCmd.Flags().BoolVar(&noUpload, "no-upload", false, "Fail if template requires upload (never prompt)")
 	createCmd.Flags().StringVar(&templateScope, "template-scope", "project", "Scope for uploaded template (global, project, user)")
-
 
 	// Inline config flag
 	createCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")

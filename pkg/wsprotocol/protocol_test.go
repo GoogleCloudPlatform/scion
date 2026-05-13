@@ -253,7 +253,6 @@ func TestDualFieldSupport(t *testing.T) {
 	})
 }
 
-
 func TestEventMessage(t *testing.T) {
 	payload := HeartbeatPayload{
 		Timestamp:    time.Now().Unix(),

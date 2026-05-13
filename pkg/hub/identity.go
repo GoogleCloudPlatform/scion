@@ -88,14 +88,14 @@ func (u *AuthenticatedUser) ClientType() string { return u.clientType }
 type ScopedUserIdentity struct {
 	UserIdentity
 	projectID string
-	scopes  []string
+	scopes    []string
 }
 
 // NewScopedUserIdentity creates a ScopedUserIdentity.
 func NewScopedUserIdentity(user UserIdentity, projectID string, scopes []string) *ScopedUserIdentity {
 	return &ScopedUserIdentity{
 		UserIdentity: user,
-		projectID:      projectID,
+		projectID:    projectID,
 		scopes:       scopes,
 	}
 }

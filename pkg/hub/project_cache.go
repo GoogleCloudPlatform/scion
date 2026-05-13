@@ -229,7 +229,7 @@ func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request
 	// Get sync state for the cache
 	resp := ProjectCacheStatusResponse{
 		ProjectID: projectID,
-		Cached:  cached,
+		Cached:    cached,
 	}
 
 	// Look up the latest sync state (from any broker)
@@ -308,7 +308,7 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 	}
 
 	state := &store.ProjectSyncState{
-		ProjectID:      projectID,
+		ProjectID:    projectID,
 		BrokerID:     brokerID,
 		LastSyncTime: &now,
 		FileCount:    fileCount,
@@ -322,7 +322,7 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 		"project_id", projectID, "files", fileCount, "bytes", totalBytes)
 
 	writeJSON(w, http.StatusOK, ProjectCacheRefreshResponse{
-		ProjectID:    projectID,
+		ProjectID:  projectID,
 		BrokerID:   brokerID,
 		FileCount:  fileCount,
 		TotalBytes: totalBytes,
@@ -352,7 +352,7 @@ func (s *Server) refreshProjectCacheFromBroker(ctx context.Context, project *sto
 	// Tunnel request to broker to upload project workspace to GCS.
 	// The workspace path tells the broker which directory to upload.
 	uploadReq := RuntimeBrokerProjectUploadRequest{
-		ProjectID:       project.ID,
+		ProjectID:     project.ID,
 		StoragePath:   storagePath,
 		WorkspacePath: provider.LocalPath,
 	}
@@ -379,7 +379,7 @@ func (s *Server) refreshProjectCacheFromBroker(ctx context.Context, project *sto
 	// Update sync state
 	now := time.Now()
 	state := &store.ProjectSyncState{
-		ProjectID:      project.ID,
+		ProjectID:    project.ID,
 		BrokerID:     brokerID,
 		LastSyncTime: &now,
 		FileCount:    uploadResp.UploadedFiles,
@@ -395,7 +395,7 @@ func (s *Server) refreshProjectCacheFromBroker(ctx context.Context, project *sto
 		"files", uploadResp.UploadedFiles, "bytes", uploadResp.UploadedBytes)
 
 	return &ProjectCacheRefreshResponse{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   brokerID,
 		FileCount:  uploadResp.UploadedFiles,
 		TotalBytes: uploadResp.UploadedBytes,

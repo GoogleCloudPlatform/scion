@@ -49,16 +49,16 @@ var (
 
 // UserAccessTokenService handles UAT generation, validation, and management.
 type UserAccessTokenService struct {
-	tokens store.UserAccessTokenStore
-	users  store.UserStore
+	tokens   store.UserAccessTokenStore
+	users    store.UserStore
 	projects store.ProjectStore
 }
 
 // NewUserAccessTokenService creates a new UAT service.
 func NewUserAccessTokenService(tokens store.UserAccessTokenStore, users store.UserStore, projects store.ProjectStore) *UserAccessTokenService {
 	return &UserAccessTokenService{
-		tokens: tokens,
-		users:  users,
+		tokens:   tokens,
+		users:    users,
 		projects: projects,
 	}
 }
@@ -136,7 +136,7 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 		Name:      name,
 		Prefix:    prefix,
 		KeyHash:   hashStr,
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		Scopes:    expanded,
 		ExpiresAt: expiresAt,
 		Created:   now,

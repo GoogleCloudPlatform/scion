@@ -252,7 +252,7 @@ func TestSchedule_History(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		evt := &store.ScheduledEvent{
 			ID:         "hist-evt-" + string(rune('a'+i)),
-			ProjectID:    projectID,
+			ProjectID:  projectID,
 			EventType:  "message",
 			FireAt:     created.CreatedAt,
 			Payload:    created.Payload,

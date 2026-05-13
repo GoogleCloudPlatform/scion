@@ -145,7 +145,7 @@ type CLIAuthTokenResponse struct {
 // TokenCreateRequest is the request body for creating a user access token.
 type TokenCreateRequest struct {
 	Name      string     `json:"name"`
-	ProjectID   string     `json:"projectId"`
+	ProjectID string     `json:"projectId"`
 	Scopes    []string   `json:"scopes"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
@@ -176,7 +176,7 @@ func (t TokenResponse) MarshalJSON() ([]byte, error) {
 		Alias
 		ProjectID string `json:"groveId"`
 	}{
-		Alias:   Alias(t),
+		Alias:     Alias(t),
 		ProjectID: t.ProjectID,
 	})
 }
@@ -749,7 +749,7 @@ func tokenToResponse(t store.UserAccessToken) TokenResponse {
 		ID:        t.ID,
 		Name:      t.Name,
 		Prefix:    t.Prefix,
-		ProjectID:   t.ProjectID,
+		ProjectID: t.ProjectID,
 		Scopes:    t.Scopes,
 		Revoked:   t.Revoked,
 		ExpiresAt: t.ExpiresAt,

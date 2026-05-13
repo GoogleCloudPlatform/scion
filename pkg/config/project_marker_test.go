@@ -23,7 +23,7 @@ import (
 func TestProjectMarker_ShortUUID(t *testing.T) {
 	tests := []struct {
 		projectID string
-		want    string
+		want      string
 	}{
 		{"550e8400-e29b-41d4-a716-446655440000", "550e8400"},
 		{"abcdef12-3456-7890-abcd-ef1234567890", "abcdef12"},

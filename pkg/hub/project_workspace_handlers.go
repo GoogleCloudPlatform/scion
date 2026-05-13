@@ -59,18 +59,18 @@ type ProjectWorkspaceFile struct {
 // ProjectWorkspaceListResponse is the response for listing project workspace files.
 type ProjectWorkspaceListResponse struct {
 	Files      []ProjectWorkspaceFile `json:"files"`
-	TotalSize  int64                `json:"totalSize"`
-	TotalCount int                  `json:"totalCount"`
-	HasMore    bool                 `json:"hasMore,omitempty"`
+	TotalSize  int64                  `json:"totalSize"`
+	TotalCount int                    `json:"totalCount"`
+	HasMore    bool                   `json:"hasMore,omitempty"`
 }
 
 // SharedDirListResponse extends the workspace list response with provider metadata.
 type SharedDirListResponse struct {
 	Files         []ProjectWorkspaceFile `json:"files"`
-	TotalSize     int64                `json:"totalSize"`
-	TotalCount    int                  `json:"totalCount"`
-	HasMore       bool                 `json:"hasMore,omitempty"`
-	ProviderCount int                  `json:"providerCount,omitempty"`
+	TotalSize     int64                  `json:"totalSize"`
+	TotalCount    int                    `json:"totalCount"`
+	HasMore       bool                   `json:"hasMore,omitempty"`
+	ProviderCount int                    `json:"providerCount,omitempty"`
 }
 
 // FileSearchResult holds the result of a workspace file search.

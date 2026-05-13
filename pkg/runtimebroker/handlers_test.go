@@ -34,15 +34,15 @@ import (
 
 // mockManager implements agent.Manager for testing
 type mockManager struct {
-	agents              []api.AgentInfo
-	startCalls          int
-	stopCalls           int
-	deleteCalls         int
-	startErr            error
-	stopErr             error
-	lastStartOpts       api.StartOptions
+	agents                []api.AgentInfo
+	startCalls            int
+	stopCalls             int
+	deleteCalls           int
+	startErr              error
+	stopErr               error
+	lastStartOpts         api.StartOptions
 	lastDeleteProjectPath string
-	lastDeleteAgentID   string
+	lastDeleteAgentID     string
 }
 
 func (m *mockManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
@@ -640,11 +640,11 @@ runtimes:
 	mgr := &mockManager{
 		agents: []api.AgentInfo{
 			{
-				ID:        "container-abc",
-				Name:      "my-agent",
-				Slug:      "",       // empty slug — handler must fall back to Name
+				ID:          "container-abc",
+				Name:        "my-agent",
+				Slug:        "",       // empty slug — handler must fall back to Name
 				ProjectPath: dotScion, // matches production: ProjectPath is the resolved .scion directory
-				Phase:     "running",
+				Phase:       "running",
 			},
 		},
 	}
@@ -1913,9 +1913,9 @@ func TestCreateAgentConnectionHubEndpoint(t *testing.T) {
 // gitCloneCapturingManager captures env and GitClone from Start options.
 type gitCloneCapturingManager struct {
 	mockManager
-	lastEnv       map[string]string
-	lastGitClone  *api.GitCloneConfig
-	lastWorkspace string
+	lastEnv         map[string]string
+	lastGitClone    *api.GitCloneConfig
+	lastWorkspace   string
 	lastProjectPath string
 }
 
@@ -2042,7 +2042,7 @@ func TestFinalizeEnvPassesAgentBranch(t *testing.T) {
 	srv.pendingEnvGather[agentID] = &pendingAgentState{
 		AgentID: agentID,
 		Request: &CreateAgentRequest{
-			Name:      "finalize-branch-agent",
+			Name:        "finalize-branch-agent",
 			ProjectPath: "",
 			Config: &CreateAgentConfig{
 				Template: "claude",
@@ -2169,8 +2169,8 @@ runtimes:
 	srv.config.ForceRuntime = ""
 
 	opts := api.StartOptions{
-		Name:      "test-agent",
-		Profile:   "apple",
+		Name:        "test-agent",
+		Profile:     "apple",
 		ProjectPath: projectPath,
 	}
 	mgr := srv.resolveManagerForOpts(opts)
@@ -2206,8 +2206,8 @@ runtimes:
 	srv, _ := newTestServerWithProvisionCapture()
 
 	opts := api.StartOptions{
-		Name:      "test-agent",
-		Profile:   "local",
+		Name:        "test-agent",
+		Profile:     "local",
 		ProjectPath: projectPath,
 	}
 	mgr := srv.resolveManagerForOpts(opts)

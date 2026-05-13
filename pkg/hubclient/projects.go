@@ -121,13 +121,13 @@ type BrokerInfo struct {
 
 // RegisterProjectResponse is the response from registering a project.
 type RegisterProjectResponse struct {
-	Project     *Project       `json:"project"`
-	LegacyProject *Project     `json:"grove,omitempty"`      // Legacy alias for compatibility
-	Broker      *RuntimeBroker `json:"broker,omitempty"`      // Populated if brokerId or broker provided
-	Created     bool           `json:"created"`               // True if project was newly created
-	Matches     []ProjectMatch `json:"matches,omitempty"`     // Populated when multiple projects share the same git remote
-	BrokerToken string         `json:"brokerToken,omitempty"` // DEPRECATED: use two-phase registration
-	SecretKey   string         `json:"secretKey,omitempty"`   // DEPRECATED: secrets only from /brokers/join
+	Project       *Project       `json:"project"`
+	LegacyProject *Project       `json:"grove,omitempty"`       // Legacy alias for compatibility
+	Broker        *RuntimeBroker `json:"broker,omitempty"`      // Populated if brokerId or broker provided
+	Created       bool           `json:"created"`               // True if project was newly created
+	Matches       []ProjectMatch `json:"matches,omitempty"`     // Populated when multiple projects share the same git remote
+	BrokerToken   string         `json:"brokerToken,omitempty"` // DEPRECATED: use two-phase registration
+	SecretKey     string         `json:"secretKey,omitempty"`   // DEPRECATED: secrets only from /brokers/join
 }
 
 // UnmarshalJSON implements custom unmarshaling to support legacy grove field.
@@ -332,7 +332,7 @@ func (s *projectService) ListAgents(ctx context.Context, projectID string, opts 
 	type listResponse struct {
 		Agents     []Agent `json:"agents"`
 		NextCursor string  `json:"nextCursor,omitempty"`
-		TotalCount int       `json:"totalCount,omitempty"`
+		TotalCount int     `json:"totalCount,omitempty"`
 	}
 
 	result, err := apiclient.DecodeResponse[listResponse](resp)

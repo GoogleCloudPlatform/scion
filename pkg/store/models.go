@@ -234,12 +234,12 @@ func (p Project) MarshalJSON() ([]byte, error) {
 	type Alias Project
 	return json.Marshal(&struct {
 		Alias
-		ProjectID   string `json:"groveId"`
+		ProjectID string `json:"groveId"`
 		GroveName string `json:"groveName"`
 		Grove     string `json:"grove"`
 	}{
 		Alias:     Alias(p),
-		ProjectID:   p.ID,
+		ProjectID: p.ID,
 		GroveName: p.Name,
 		Grove:     p.Slug,
 	})
@@ -639,10 +639,10 @@ const InviteCodePrefixLength = 8
 
 // InviteStats contains aggregate statistics about invite codes and the allow list.
 type InviteStats struct {
-	PendingInvites     int              `json:"pendingInvites"`
-	TotalRedemptions   int              `json:"totalRedemptions"`
-	AllowListCount     int              `json:"allowListCount"`
-	RecentRedemptions  []InviteCodeInfo `json:"recentRedemptions"`
+	PendingInvites    int              `json:"pendingInvites"`
+	TotalRedemptions  int              `json:"totalRedemptions"`
+	AllowListCount    int              `json:"allowListCount"`
+	RecentRedemptions []InviteCodeInfo `json:"recentRedemptions"`
 }
 
 // InviteCodeInfo is a lightweight representation of an invite code for stats.

@@ -25,20 +25,20 @@ func TestParseAgentMessageTopic(t *testing.T) {
 	tests := []struct {
 		name      string
 		topic     string
-		projectID   string
+		projectID string
 		agentSlug string
 		wantErr   bool
 	}{
 		{
 			name:      "valid topic",
 			topic:     "scion.project.my-project-123.agent.coder.messages",
-			projectID:   "my-project-123",
+			projectID: "my-project-123",
 			agentSlug: "coder",
 		},
 		{
 			name:      "valid topic with uuid project",
 			topic:     "scion.project.abc-def-123.agent.code-reviewer.messages",
-			projectID:   "abc-def-123",
+			projectID: "abc-def-123",
 			agentSlug: "code-reviewer",
 		},
 		{

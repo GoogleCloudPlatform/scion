@@ -179,9 +179,9 @@ func TestExtractIDsFromPath(t *testing.T) {
 	patterns := HubPathPatterns()
 
 	tests := []struct {
-		path    string
+		path      string
 		projectID string
-		agentID string
+		agentID   string
 	}{
 		{"/api/v1/groves/my-project/agents", "my-project", ""},
 		{"/api/v1/groves/my-project", "my-project", ""},
@@ -477,7 +477,7 @@ func TestLoggerContextEnrichment(t *testing.T) {
 	meta := &RequestMeta{
 		RequestID: "req-enriched",
 		TraceID:   "trace-enriched",
-		ProjectID:   "grove-enriched",
+		ProjectID: "grove-enriched",
 		AgentID:   "agent-enriched",
 	}
 	ctx := ContextWithRequestMeta(context.Background(), meta)

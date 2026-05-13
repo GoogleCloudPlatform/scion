@@ -467,7 +467,7 @@ func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projec
 		return false
 	}
 	groups, err := a.store.ListGroups(ctx, store.GroupFilter{
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		GroupType: store.GroupTypeExplicit,
 	}, store.ListOptions{Limit: 10})
 	if err != nil || len(groups.Items) == 0 {

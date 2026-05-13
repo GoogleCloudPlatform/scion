@@ -1426,9 +1426,9 @@ func TestSSEHandler_EventDelivery(t *testing.T) {
 			select {
 			case <-ticker.C:
 				pub.publish("project.test123.agent.status", AgentStatusEvent{
-					AgentID: "agent-1",
+					AgentID:   "agent-1",
 					ProjectID: "test123",
-					Phase:   "running",
+					Phase:     "running",
 				})
 			case <-stop:
 				return
@@ -1681,7 +1681,7 @@ func TestResolveAPIPath(t *testing.T) {
 		{"/login", ""},
 		{"/settings", ""},
 		{"/admin/users", ""},
-		{"/agents/abc/terminal", ""}, // too many segments
+		{"/agents/abc/terminal", ""},   // too many segments
 		{"/projects/abc/settings", ""}, // too many segments
 	}
 

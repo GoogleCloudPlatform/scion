@@ -40,7 +40,7 @@ type CreateTemplateRequest struct {
 	Harness      string                `json:"harness,omitempty"`
 	Scope        string                `json:"scope"`
 	ScopeID      string                `json:"scopeId,omitempty"`
-	ProjectID      string                `json:"projectId,omitempty"` // Deprecated: use ScopeID
+	ProjectID    string                `json:"projectId,omitempty"` // Deprecated: use ScopeID
 	Config       *store.TemplateConfig `json:"config,omitempty"`
 	BaseTemplate string                `json:"baseTemplate,omitempty"`
 	Visibility   string                `json:"visibility,omitempty"`
@@ -112,7 +112,7 @@ type CloneTemplateRequest struct {
 	Name       string `json:"name"`
 	Scope      string `json:"scope"`
 	ScopeID    string `json:"scopeId,omitempty"`
-	ProjectID    string `json:"projectId,omitempty"` // Deprecated
+	ProjectID  string `json:"projectId,omitempty"` // Deprecated
 	Visibility string `json:"visibility,omitempty"`
 }
 
@@ -134,13 +134,13 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
 	filter := store.TemplateFilter{
-		Name:    query.Get("name"),
-		Scope:   query.Get("scope"),
-		ScopeID: query.Get("scopeId"),
+		Name:      query.Get("name"),
+		Scope:     query.Get("scope"),
+		ScopeID:   query.Get("scopeId"),
 		ProjectID: query.Get("projectId"), // Backwards compat
-		Harness: query.Get("harness"),
-		Status:  query.Get("status"),
-		Search:  query.Get("search"),
+		Harness:   query.Get("harness"),
+		Status:    query.Get("status"),
+		Search:    query.Get("search"),
 	}
 
 	// Default to active templates only
@@ -233,7 +233,7 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		Config:       req.Config,
 		Scope:        req.Scope,
 		ScopeID:      scopeID,
-		ProjectID:      scopeID, // Keep for backwards compat
+		ProjectID:    scopeID, // Keep for backwards compat
 		BaseTemplate: req.BaseTemplate,
 		Visibility:   req.Visibility,
 		Status:       store.TemplateStatusPending, // Start as pending until files uploaded
@@ -700,7 +700,7 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		Config:       source.Config,
 		Scope:        req.Scope,
 		ScopeID:      scopeID,
-		ProjectID:      scopeID,
+		ProjectID:    scopeID,
 		BaseTemplate: source.ID, // Track the source template
 		Visibility:   req.Visibility,
 		Status:       store.TemplateStatusPending,

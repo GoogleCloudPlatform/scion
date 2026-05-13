@@ -914,7 +914,7 @@ func TestProjectWorkspaceUpload_MissingStoragePath(t *testing.T) {
 	srv := New(cfg, mgr, rt)
 
 	body := ProjectWorkspaceUploadRequest{
-		ProjectID:       "grove-123",
+		ProjectID:     "grove-123",
 		WorkspacePath: "/tmp/test",
 	}
 
@@ -932,7 +932,7 @@ func TestProjectWorkspaceUpload_MissingWorkspacePath(t *testing.T) {
 	srv := New(cfg, mgr, rt)
 
 	body := ProjectWorkspaceUploadRequest{
-		ProjectID:     "grove-123",
+		ProjectID:   "grove-123",
 		StoragePath: "workspaces/test/grove-workspace",
 	}
 
@@ -950,7 +950,7 @@ func TestProjectWorkspaceUpload_NoBucket(t *testing.T) {
 	srv := New(cfg, mgr, rt)
 
 	body := ProjectWorkspaceUploadRequest{
-		ProjectID:       "grove-123",
+		ProjectID:     "grove-123",
 		StoragePath:   "workspaces/test/grove-workspace",
 		WorkspacePath: "/tmp/test",
 	}
@@ -970,7 +970,7 @@ func TestProjectWorkspaceUpload_NonExistentPath(t *testing.T) {
 	srv := New(cfg, mgr, rt)
 
 	body := ProjectWorkspaceUploadRequest{
-		ProjectID:       "grove-123",
+		ProjectID:     "grove-123",
 		StoragePath:   "workspaces/test/grove-workspace",
 		WorkspacePath: "/nonexistent/path/12345",
 	}

@@ -146,7 +146,7 @@ func (s *Server) handleNotificationRoutes(w http.ResponseWriter, r *http.Request
 type createSubscriptionRequest struct {
 	Scope             string   `json:"scope"`
 	AgentID           string   `json:"agentId,omitempty"`
-	ProjectID           string   `json:"projectId"`
+	ProjectID         string   `json:"projectId"`
 	TriggerActivities []string `json:"triggerActivities"`
 }
 
@@ -210,7 +210,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			AgentID:           req.AgentID,
 			SubscriberType:    store.SubscriberTypeUser,
 			SubscriberID:      user.ID(),
-			ProjectID:           req.ProjectID,
+			ProjectID:         req.ProjectID,
 			TriggerActivities: req.TriggerActivities,
 			CreatedBy:         user.ID(),
 		}
@@ -383,7 +383,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 				AgentID:           req.AgentID,
 				SubscriberType:    store.SubscriberTypeUser,
 				SubscriberID:      user.ID(),
-				ProjectID:           req.ProjectID,
+				ProjectID:         req.ProjectID,
 				TriggerActivities: req.TriggerActivities,
 				CreatedBy:         user.ID(),
 			}
@@ -456,7 +456,7 @@ type createTemplateRequest struct {
 	Name              string   `json:"name"`
 	Scope             string   `json:"scope"`
 	TriggerActivities []string `json:"triggerActivities"`
-	ProjectID           string   `json:"projectId"`
+	ProjectID         string   `json:"projectId"`
 }
 
 // handleSubscriptionTemplateRoutes handles CRUD for subscription templates.
@@ -488,7 +488,7 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 			Name:              req.Name,
 			Scope:             req.Scope,
 			TriggerActivities: req.TriggerActivities,
-			ProjectID:           req.ProjectID,
+			ProjectID:         req.ProjectID,
 			CreatedBy:         user.ID(),
 		}
 

@@ -27,7 +27,7 @@ import (
 type Task struct {
 	ID        string
 	ContextID string
-	ProjectID   string
+	ProjectID string
 	AgentSlug string
 	AgentID   string
 	State     string
@@ -39,7 +39,7 @@ type Task struct {
 // Context maps an A2A contextId to a Scion agent.
 type Context struct {
 	ContextID  string
-	ProjectID    string
+	ProjectID  string
 	AgentSlug  string
 	AgentID    string
 	CreatedAt  time.Time
@@ -338,4 +338,3 @@ func (s *Store) DeletePushConfigForTask(taskID, id string) error {
 	}
 	return nil
 }
-

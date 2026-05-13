@@ -206,7 +206,7 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 
 	evt := store.ScheduledEvent{
 		ID:        api.NewUUID(),
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		EventType: req.EventType,
 		FireAt:    fireAt,
 		Payload:   payload,
@@ -235,7 +235,7 @@ func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, pro
 	query := r.URL.Query()
 
 	filter := store.ScheduledEventFilter{
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		EventType: query.Get("eventType"),
 		Status:    query.Get("status"),
 	}

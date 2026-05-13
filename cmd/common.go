@@ -231,13 +231,13 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 
 	// Convert hubsync.HubContext to cmd.HubContext
 	return &HubContext{
-		Client:    hubCtx.Client,
-		Endpoint:  hubCtx.Endpoint,
-		Settings:  hubCtx.Settings,
+		Client:      hubCtx.Client,
+		Endpoint:    hubCtx.Endpoint,
+		Settings:    hubCtx.Settings,
 		ProjectID:   hubCtx.ProjectID,
-		BrokerID:  hubCtx.BrokerID,
+		BrokerID:    hubCtx.BrokerID,
 		ProjectPath: hubCtx.ProjectPath,
-		IsGlobal:  hubCtx.IsGlobal,
+		IsGlobal:    hubCtx.IsGlobal,
 	}, nil
 }
 
@@ -475,7 +475,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		HarnessConfig: effectiveHarnessConfig,
 		HarnessAuth:   effectiveHarnessAuth,
 		Image:         resolvedImage,
-		ProjectPath:     projectPath,
+		ProjectPath:   projectPath,
 		Resume:        effectiveResume,
 		Detached:      detached,
 		NoAuth:        noAuth,
@@ -664,7 +664,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	// Build create request (Hub creates and starts in one operation)
 	req := &hubclient.CreateAgentRequest{
 		Name:            agentName,
-		ProjectID:         projectID,
+		ProjectID:       projectID,
 		Template:        resolvedTemplate,
 		HarnessConfig:   harnessConfigFlag,
 		HarnessAuth:     harnessAuthFlag,

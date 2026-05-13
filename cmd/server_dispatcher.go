@@ -182,13 +182,13 @@ func (d *agentDispatcherAdapter) buildStartOptions(hubAgent *store.Agent, projec
 	}
 
 	opts := api.StartOptions{
-		Name:      hubAgent.Name,
-		Template:  hubAgent.Template,
-		Image:     hubAgent.Image,
-		Env:       env,
-		Detached:  &hubAgent.Detached,
+		Name:        hubAgent.Name,
+		Template:    hubAgent.Template,
+		Image:       hubAgent.Image,
+		Env:         env,
+		Detached:    &hubAgent.Detached,
 		ProjectPath: projectPath,
-		Resume:    resume,
+		Resume:      resume,
 	}
 
 	if hubAgent.AppliedConfig != nil {

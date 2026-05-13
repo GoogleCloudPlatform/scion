@@ -90,9 +90,9 @@ func TestResolveSecrets(t *testing.T) {
 	dispatcher.SetSecretBackend(backend)
 
 	agent := &store.Agent{
-		ID:      "agent-1",
-		Name:    "test-agent",
-		OwnerID: "user-1",
+		ID:        "agent-1",
+		Name:      "test-agent",
+		OwnerID:   "user-1",
 		ProjectID: "project-1",
 	}
 
@@ -204,9 +204,9 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 	dispatcher.SetSecretBackend(backend)
 
 	agent := &store.Agent{
-		ID:      "agent-1",
-		Name:    "test-agent",
-		OwnerID: "user-1",
+		ID:        "agent-1",
+		Name:      "test-agent",
+		OwnerID:   "user-1",
 		ProjectID: "project-1",
 	}
 
@@ -336,9 +336,9 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 	dispatcher.SetSecretBackend(backend)
 
 	agent := &store.Agent{
-		ID:      "agent-hub-1",
-		Name:    "hub-test-agent",
-		OwnerID: "user-1",
+		ID:        "agent-hub-1",
+		Name:      "hub-test-agent",
+		OwnerID:   "user-1",
 		ProjectID: "project-1",
 	}
 
@@ -403,9 +403,9 @@ func TestResolveSecrets_NoBackend(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:      "agent-1",
-		Name:    "test-agent",
-		OwnerID: "user-1",
+		ID:        "agent-1",
+		Name:      "test-agent",
+		OwnerID:   "user-1",
 		ProjectID: "project-1",
 	}
 

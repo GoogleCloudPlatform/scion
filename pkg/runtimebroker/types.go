@@ -464,7 +464,7 @@ type MessageRequest struct {
 func (r *MessageRequest) UnmarshalJSON(data []byte) error {
 	type Alias MessageRequest
 	aux := &struct {
-		GroveID       string `json:"grove_id"`
+		GroveID      string `json:"grove_id"`
 		LegacyProjID string `json:"project_id"`
 		*Alias
 	}{
@@ -573,7 +573,7 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		Image:                 info.Image,
 		RuntimeType:           info.Runtime,
 		Profile:               info.Profile,
-		ProjectID:               info.ProjectID,
+		ProjectID:             info.ProjectID,
 		Status:                status,
 		Phase:                 phase,
 		Activity:              activity,

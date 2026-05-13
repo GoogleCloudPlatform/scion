@@ -336,7 +336,7 @@ func TestEnvVar_ProjectScope_AgentReadOwnProject(t *testing.T) {
 		ID:           "agent_env_test",
 		Slug:         "env-test-agent",
 		Name:         "Env Test Agent",
-		ProjectID:      project.ID,
+		ProjectID:    project.ID,
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      time.Now(),

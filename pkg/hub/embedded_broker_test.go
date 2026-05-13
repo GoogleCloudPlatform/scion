@@ -85,7 +85,7 @@ func TestCreateAgent_SkipsGCSSyncForEmbeddedBroker(t *testing.T) {
 
 	// Create a project provider WITHOUT LocalPath (simulating autoLinkProviders behavior)
 	provider := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   brokerID,
 		BrokerName: broker.Name,
 		// LocalPath intentionally empty — this is the bug scenario
@@ -105,7 +105,7 @@ func TestCreateAgent_SkipsGCSSyncForEmbeddedBroker(t *testing.T) {
 
 	// Create agent request for the hub-native project
 	reqBody := CreateAgentRequest{
-		Name:    "test-agent",
+		Name:      "test-agent",
 		ProjectID: project.ID,
 	}
 	body, _ := json.Marshal(reqBody)

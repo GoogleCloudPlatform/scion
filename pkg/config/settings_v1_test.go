@@ -38,9 +38,9 @@ func TestVersionedSettings_YAMLRoundTrip(t *testing.T) {
 		ActiveProfile:   "local",
 		DefaultTemplate: "gemini",
 		Hub: &V1HubClientConfig{
-			Enabled:  boolPtr(true),
-			Endpoint: "https://hub.example.com",
-			ProjectID:  "test-grove",
+			Enabled:   boolPtr(true),
+			Endpoint:  "https://hub.example.com",
+			ProjectID: "test-grove",
 		},
 		CLI: &V1CLIConfig{
 			AutoHelp:            &autoHelp,
@@ -339,9 +339,9 @@ func TestAdaptLegacySettings_FullMapping(t *testing.T) {
 		ActiveProfile:   "local",
 		DefaultTemplate: "gemini",
 		Hub: &HubClientConfig{
-			Enabled:  &enabled,
-			Endpoint: "https://hub.example.com",
-			ProjectID:  "test-grove",
+			Enabled:   &enabled,
+			Endpoint:  "https://hub.example.com",
+			ProjectID: "test-grove",
 		},
 		CLI: &CLIConfig{
 			AutoHelp: &autoHelp,
@@ -491,9 +491,9 @@ func TestConvertVersionedToLegacy(t *testing.T) {
 		ActiveProfile:   "local",
 		DefaultTemplate: "gemini",
 		Hub: &V1HubClientConfig{
-			Enabled:  boolPtr(true),
-			Endpoint: "https://hub.example.com",
-			ProjectID:  "test-grove",
+			Enabled:   boolPtr(true),
+			Endpoint:  "https://hub.example.com",
+			ProjectID: "test-grove",
 		},
 		CLI: &V1CLIConfig{
 			AutoHelp:            boolPtr(true),
@@ -3472,7 +3472,7 @@ func TestGetVersionedSettingValue(t *testing.T) {
 			Enabled:   &enabled,
 			Linked:    &linked,
 			Endpoint:  "https://hub.example.com",
-			ProjectID:   "grove-123",
+			ProjectID: "grove-123",
 			LocalOnly: &localOnly,
 		},
 		Server: &V1ServerConfig{

@@ -552,7 +552,7 @@ func TestHandleGitHubWebhook_InstallationCreatedIdempotent(t *testing.T) {
 // recordingEventPublisher records calls to PublishProjectUpdated for test assertions.
 type recordingEventPublisher struct {
 	noopEventPublisher
-	mu           sync.Mutex
+	mu             sync.Mutex
 	projectUpdates []*store.Project
 }
 

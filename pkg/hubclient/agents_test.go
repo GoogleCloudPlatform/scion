@@ -23,7 +23,7 @@ import (
 
 func TestAgentService_List_QueryParameters(t *testing.T) {
 	projectID := "project-123"
-	
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		if query.Get("projectId") != projectID {
@@ -51,7 +51,7 @@ func TestAgentService_List_QueryParameters(t *testing.T) {
 
 func TestSubscriptionService_List_QueryParameters(t *testing.T) {
 	projectID := "project-123"
-	
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		if query.Get("projectId") != projectID {
@@ -79,7 +79,7 @@ func TestSubscriptionService_List_QueryParameters(t *testing.T) {
 
 func TestSubscriptionTemplateService_List_QueryParameters(t *testing.T) {
 	projectID := "project-123"
-	
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		if query.Get("projectId") != projectID {

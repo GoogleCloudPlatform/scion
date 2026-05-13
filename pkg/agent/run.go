@@ -352,7 +352,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 		resolved, err := harness.Resolve(ctx, harness.ResolveOptions{
 			Name:          harnessConfigName,
-			ProjectPath:     projectDir,
+			ProjectPath:   projectDir,
 			TemplatePaths: resolveTemplatePaths,
 			ProfileName:   profileName,
 			Settings:      settings,

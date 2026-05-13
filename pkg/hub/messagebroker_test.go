@@ -144,7 +144,7 @@ func setupBrokerTestAgent(t *testing.T, s store.Store, projectID, slug, phase st
 		ID:              api.NewUUID(),
 		Name:            slug,
 		Slug:            slug,
-		ProjectID:         projectID,
+		ProjectID:       projectID,
 		Phase:           phase,
 		RuntimeBrokerID: "broker-1",
 		Visibility:      store.VisibilityPrivate,

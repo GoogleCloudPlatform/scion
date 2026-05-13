@@ -37,11 +37,11 @@ func seedCreatedAgentForHarnessTest(t *testing.T, s store.Store, id, harnessConf
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:      "agent-" + id,
-		Slug:    "agent-" + id,
-		Name:    "Agent " + id,
+		ID:        "agent-" + id,
+		Slug:      "agent-" + id,
+		Name:      "Agent " + id,
 		ProjectID: project.ID,
-		Phase:   string(state.PhaseCreated),
+		Phase:     string(state.PhaseCreated),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: harnessConfig,
 		},

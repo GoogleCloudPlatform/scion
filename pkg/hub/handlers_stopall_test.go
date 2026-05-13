@@ -44,11 +44,11 @@ func TestStopAllAgents_Global(t *testing.T) {
 	// Create running agents
 	for i, name := range []string{"agent-1", "agent-2", "agent-3"} {
 		agent := &store.Agent{
-			ID:      name,
-			Slug:    name,
-			Name:    name,
+			ID:        name,
+			Slug:      name,
+			Name:      name,
 			ProjectID: project.ID,
-			Phase:   string(state.PhaseRunning),
+			Phase:     string(state.PhaseRunning),
 		}
 		if i == 2 {
 			// agent-3 is already stopped

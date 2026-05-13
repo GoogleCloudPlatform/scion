@@ -168,6 +168,7 @@ func (m *StreamOpenMessage) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal((*Alias)(&copy))
 }
+
 // UnmarshalJSON implements custom unmarshaling for StreamOpenMessage to handle dual fields.
 func (m *StreamOpenMessage) UnmarshalJSON(data []byte) error {
 	type Alias StreamOpenMessage
@@ -184,7 +185,6 @@ func (m *StreamOpenMessage) UnmarshalJSON(data []byte) error {
 	}
 	return nil
 }
-
 
 // StreamFrame carries data for a multiplexed stream.
 type StreamFrame struct {

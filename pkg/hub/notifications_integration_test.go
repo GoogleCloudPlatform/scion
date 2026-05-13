@@ -41,7 +41,7 @@ type integrationTestEnv struct {
 	pub      *ChannelEventPublisher
 	recorder *recordingDispatcher
 	nd       *NotificationDispatcher
-	project    *store.Project
+	project  *store.Project
 	broker   *store.RuntimeBroker
 	tokenSvc *AgentTokenService
 }
@@ -82,7 +82,7 @@ func setupIntegrationTest(t *testing.T) *integrationTestEnv {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -104,7 +104,7 @@ func setupIntegrationTest(t *testing.T) *integrationTestEnv {
 		pub:      pub,
 		recorder: recorder,
 		nd:       nd,
-		project:    project,
+		project:  project,
 		broker:   broker,
 		tokenSvc: tokenSvc,
 	}
@@ -123,10 +123,10 @@ func (env *integrationTestEnv) createAgentWithNotify(t *testing.T, callingAgent 
 	require.NoError(t, err)
 
 	body, _ := json.Marshal(CreateAgentRequest{
-		Name:    subAgentName,
+		Name:      subAgentName,
 		ProjectID: env.project.ID,
-		Task:    "do work",
-		Notify:  true,
+		Task:      "do work",
+		Notify:    true,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(body))
 	req.Header.Set("X-Scion-Agent-Token", token)
@@ -189,7 +189,7 @@ func TestIntegration_AgentCreatesAgentWithNotify_FullFlow(t *testing.T) {
 		ID:              "agent-parent",
 		Slug:            "parent-agent",
 		Name:            "Parent Agent",
-		ProjectID:         env.project.ID,
+		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -245,7 +245,7 @@ func TestIntegration_AgentCreatesAgentWithNotify_WaitingForInput(t *testing.T) {
 		ID:              "agent-parent-wfi",
 		Slug:            "parent-agent-wfi",
 		Name:            "Parent Agent WFI",
-		ProjectID:         env.project.ID,
+		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -293,7 +293,7 @@ func TestIntegration_AgentCreatesAgentWithNotify_MultipleStatusChanges(t *testin
 		ID:              "agent-parent-multi",
 		Slug:            "parent-multi",
 		Name:            "Parent Multi",
-		ProjectID:         env.project.ID,
+		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -351,7 +351,7 @@ func TestIntegration_StatusNormalization_LowercaseEventMatchesUppercaseTrigger(t
 		ID:              "agent-parent-case",
 		Slug:            "parent-case",
 		Name:            "Parent Case",
-		ProjectID:         env.project.ID,
+		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -388,7 +388,7 @@ func TestIntegration_StatusNormalization_DedupAcrossCaseBoundaries(t *testing.T)
 		ID:              "agent-parent-dedup",
 		Slug:            "parent-dedup",
 		Name:            "Parent Dedup",
-		ProjectID:         env.project.ID,
+		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -429,7 +429,7 @@ func TestIntegration_StatusNormalization_NonTriggerStatusNoNotification(t *testi
 		ID:              "agent-parent-nontrig",
 		Slug:            "parent-nontrig",
 		Name:            "Parent NonTrig",
-		ProjectID:         env.project.ID,
+		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -479,7 +479,7 @@ func TestIntegration_SubscriptionCleanup_HardDeleteCascades(t *testing.T) {
 		ID:              "agent-parent-hdel",
 		Slug:            "parent-hdel",
 		Name:            "Parent Hard Delete",
-		ProjectID:         env.project.ID,
+		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -531,7 +531,7 @@ func TestIntegration_SubscriptionCleanup_SoftDeleteRetainsSubscriptions(t *testi
 		ID:              "agent-parent-sdel",
 		Slug:            "parent-sdel",
 		Name:            "Parent Soft Delete",
-		ProjectID:         env.project.ID,
+		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -578,10 +578,10 @@ func TestIntegration_HumanNotification_FullLifecycle(t *testing.T) {
 
 	// User creates agent with notify=true via the dev auth token
 	rec := doRequest(t, env.srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "User Watched Agent",
+		Name:      "User Watched Agent",
 		ProjectID: env.project.ID,
-		Task:    "run analysis",
-		Notify:  true,
+		Task:      "run analysis",
+		Notify:    true,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
@@ -644,10 +644,10 @@ func TestIntegration_HumanNotification_AckAll(t *testing.T) {
 	// Create two agents with notify for the same user
 	for _, name := range []string{"Ack All Agent One", "Ack All Agent Two"} {
 		rec := doRequest(t, env.srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-			Name:    name,
+			Name:      name,
 			ProjectID: env.project.ID,
-			Task:    "work",
-			Notify:  true,
+			Task:      "work",
+			Notify:    true,
 		})
 		require.Equal(t, http.StatusCreated, rec.Code)
 
@@ -687,10 +687,10 @@ func TestIntegration_HumanNotification_MultipleStatusTransitions(t *testing.T) {
 
 	// User creates agent with notify
 	rec := doRequest(t, env.srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "Multi Status Agent",
+		Name:      "Multi Status Agent",
 		ProjectID: env.project.ID,
-		Task:    "complex work",
-		Notify:  true,
+		Task:      "complex work",
+		Notify:    true,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
@@ -744,7 +744,7 @@ func TestIntegration_MultipleSubscribers_AgentAndUser(t *testing.T) {
 		ID:              "agent-parent-multi-sub",
 		Slug:            "parent-multi-sub",
 		Name:            "Parent Multi Sub",
-		ProjectID:         env.project.ID,
+		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -760,7 +760,7 @@ func TestIntegration_MultipleSubscribers_AgentAndUser(t *testing.T) {
 		AgentID:           child.ID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      DevUserID,
-		ProjectID:           env.project.ID,
+		ProjectID:         env.project.ID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedAt:         time.Now(),
 		CreatedBy:         DevUserID,
@@ -805,7 +805,7 @@ func TestIntegration_NoNotifyFlag_NoSubscription(t *testing.T) {
 		ID:              "agent-parent-no-notify",
 		Slug:            "parent-no-notify",
 		Name:            "Parent No Notify",
-		ProjectID:         env.project.ID,
+		ProjectID:       env.project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: env.broker.ID,
 		Visibility:      store.VisibilityPrivate,
@@ -820,10 +820,10 @@ func TestIntegration_NoNotifyFlag_NoSubscription(t *testing.T) {
 	require.NoError(t, err)
 
 	body, _ := json.Marshal(CreateAgentRequest{
-		Name:    "Child No Notify",
+		Name:      "Child No Notify",
 		ProjectID: env.project.ID,
-		Task:    "do work",
-		Notify:  false,
+		Task:      "do work",
+		Notify:    false,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(body))
 	req.Header.Set("X-Scion-Agent-Token", token)
@@ -864,7 +864,7 @@ func TestIntegration_PATCHSubscriptionTriggers(t *testing.T) {
 		Scope:             store.SubscriptionScopeProject,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      DevUserID,
-		ProjectID:           env.project.ID,
+		ProjectID:         env.project.ID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedAt:         time.Now(),
 		CreatedBy:         DevUserID,
@@ -899,12 +899,12 @@ func TestIntegration_BulkCreateSubscriptions(t *testing.T) {
 	reqs := []createSubscriptionRequest{
 		{
 			Scope:             store.SubscriptionScopeProject,
-			ProjectID:           env.project.ID,
+			ProjectID:         env.project.ID,
 			TriggerActivities: []string{"COMPLETED"},
 		},
 		{
 			Scope:             store.SubscriptionScopeProject,
-			ProjectID:           env.project.ID,
+			ProjectID:         env.project.ID,
 			TriggerActivities: []string{"ERROR"},
 		},
 	}
@@ -931,7 +931,7 @@ func TestIntegration_SubscriptionTemplates_CRUD(t *testing.T) {
 		Name:              "All Events",
 		Scope:             store.SubscriptionScopeProject,
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "DELETED", "ERROR"},
-		ProjectID:           env.project.ID,
+		ProjectID:         env.project.ID,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/templates", bytes.NewReader(createBody))
 	req.Header.Set("Content-Type", "application/json")

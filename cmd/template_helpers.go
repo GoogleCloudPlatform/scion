@@ -32,10 +32,10 @@ import (
 type TemplateLocation string
 
 const (
-	LocationLocalProject  TemplateLocation = "local-project"
-	LocationLocalGlobal TemplateLocation = "local-global"
-	LocationHubProject    TemplateLocation = "hub-project"
-	LocationHubGlobal   TemplateLocation = "hub-global"
+	LocationLocalProject TemplateLocation = "local-project"
+	LocationLocalGlobal  TemplateLocation = "local-global"
+	LocationHubProject   TemplateLocation = "hub-project"
+	LocationHubGlobal    TemplateLocation = "hub-global"
 )
 
 // TemplateMatch represents a template found during resolution.
@@ -190,10 +190,10 @@ func findHubTemplates(ctx context.Context, name string, hubCtx *HubContext, opts
 	// Search project scope unless GlobalOnly is set
 	if !opts.GlobalOnly && projectID != "" {
 		resp, err := hubCtx.Client.Templates().List(listCtx, &hubclient.ListTemplatesOptions{
-			Name:    name,
-			Scope:   "project",
+			Name:      name,
+			Scope:     "project",
 			ProjectID: projectID,
-			Status:  "active",
+			Status:    "active",
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to search Hub project templates: %w", err)

@@ -120,11 +120,11 @@ func TestHandleUserMessage_NoSubscriptionRequired(t *testing.T) {
 	}
 
 	if err := store.SetSpaceLink(&state.SpaceLink{
-		SpaceID:   "spaces/AAQAx",
-		Platform:  "googlechat",
+		SpaceID:     "spaces/AAQAx",
+		Platform:    "googlechat",
 		ProjectID:   "grove-abc",
 		ProjectSlug: "my-grove",
-		LinkedBy:  "test",
+		LinkedBy:    "test",
 	}); err != nil {
 		t.Fatalf("setting space link: %v", err)
 	}
@@ -192,11 +192,11 @@ func TestHandleUserMessage_RoutesNonInstructionToNotification(t *testing.T) {
 	}
 
 	if err := store.SetSpaceLink(&state.SpaceLink{
-		SpaceID:   "spaces/AAQAx",
-		Platform:  "googlechat",
+		SpaceID:     "spaces/AAQAx",
+		Platform:    "googlechat",
 		ProjectID:   "grove-abc",
 		ProjectSlug: "my-grove",
-		LinkedBy:  "test",
+		LinkedBy:    "test",
 	}); err != nil {
 		t.Fatalf("setting space link: %v", err)
 	}
@@ -299,11 +299,11 @@ func TestHandleUserMessage_AssistantReplyTruncated(t *testing.T) {
 	}
 
 	if err := store.SetSpaceLink(&state.SpaceLink{
-		SpaceID:   "spaces/AAQAx",
-		Platform:  "googlechat",
+		SpaceID:     "spaces/AAQAx",
+		Platform:    "googlechat",
 		ProjectID:   "grove-abc",
 		ProjectSlug: "my-grove",
-		LinkedBy:  "test",
+		LinkedBy:    "test",
 	}); err != nil {
 		t.Fatalf("setting space link: %v", err)
 	}
@@ -369,11 +369,11 @@ func TestHandleUserMessage_ShortAssistantReplyNotTruncated(t *testing.T) {
 	}
 
 	if err := store.SetSpaceLink(&state.SpaceLink{
-		SpaceID:   "spaces/AAQAx",
-		Platform:  "googlechat",
+		SpaceID:     "spaces/AAQAx",
+		Platform:    "googlechat",
 		ProjectID:   "grove-abc",
 		ProjectSlug: "my-grove",
-		LinkedBy:  "test",
+		LinkedBy:    "test",
 	}); err != nil {
 		t.Fatalf("setting space link: %v", err)
 	}

@@ -201,7 +201,7 @@ func TestScheduledEvent_List(t *testing.T) {
 	for i, status := range []string{store.ScheduledEventPending, store.ScheduledEventFired} {
 		evt := &store.ScheduledEvent{
 			ID:        "list-evt-" + string(rune('a'+i)),
-			ProjectID:   projectID,
+			ProjectID: projectID,
 			EventType: "message",
 			FireAt:    time.Now().Add(time.Duration(i+1) * time.Hour),
 			Payload:   `{"message":"test"}`,
@@ -235,7 +235,7 @@ func TestScheduledEvent_Get(t *testing.T) {
 
 	evt := &store.ScheduledEvent{
 		ID:        "get-evt-1",
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour),
 		Payload:   `{"message":"get me"}`,
@@ -275,7 +275,7 @@ func TestScheduledEvent_GetWrongProject(t *testing.T) {
 	// Create event in first project
 	evt := &store.ScheduledEvent{
 		ID:        "wrong-project-evt",
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour),
 		Payload:   `{}`,
@@ -295,7 +295,7 @@ func TestScheduledEvent_Cancel(t *testing.T) {
 
 	evt := &store.ScheduledEvent{
 		ID:        "cancel-evt-1",
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour),
 		Payload:   `{"message":"cancel me"}`,

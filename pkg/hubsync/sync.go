@@ -312,13 +312,13 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	}
 
 	hubCtx := &HubContext{
-		Client:    client,
-		Endpoint:  endpoint,
-		Settings:  settings,
+		Client:      client,
+		Endpoint:    endpoint,
+		Settings:    settings,
 		ProjectID:   effectiveProjectID,
-		BrokerID:  brokerID,
+		BrokerID:    brokerID,
 		ProjectPath: resolvedPath,
-		IsGlobal:  isGlobal,
+		IsGlobal:    isGlobal,
 	}
 
 	debugf("HubContext created: endpoint=%s, groveID=%s (local=%s), brokerID=%s, grovePath=%s, isGlobal=%v",
@@ -813,7 +813,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 		fmt.Printf("Registering agent '%s' on Hub...\n", name)
 		debugf("Creating agent: name=%s, groveID=%s (hub will resolve runtime broker)", name, hubCtx.ProjectID)
 		req := &hubclient.CreateAgentRequest{
-			Name:    name,
+			Name:      name,
 			ProjectID: hubCtx.ProjectID,
 		}
 

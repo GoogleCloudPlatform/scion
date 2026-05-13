@@ -50,7 +50,6 @@ func init() {
 	resumeCmd.Flags().BoolVar(&noUpload, "no-upload", false, "Fail if template requires upload (never prompt)")
 	resumeCmd.Flags().StringVar(&templateScope, "template-scope", "project", "Scope for uploaded template (global, project, user)")
 
-
 	// Telemetry override flags
 	resumeCmd.Flags().BoolVar(&enableTelemetry, "enable-telemetry", false, "Explicitly enable telemetry for this agent")
 	resumeCmd.Flags().BoolVar(&disableTelemetry, "disable-telemetry", false, "Explicitly disable telemetry for this agent")

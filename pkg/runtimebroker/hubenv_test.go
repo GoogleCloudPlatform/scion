@@ -67,35 +67,35 @@ func TestResolveHubEndpointForStartPrecedence(t *testing.T) {
 		name                 string
 		broker               string
 		resolved             map[string]string
-		projectPath            string
+		projectPath          string
 		containerHubEndpoint string
 		want                 string
 	}{
 		{
-			name:      "resolved env wins over broker",
-			broker:    "https://broker.example.com",
-			resolved:  map[string]string{"SCION_HUB_ENDPOINT": "https://resolved.example.com"},
+			name:        "resolved env wins over broker",
+			broker:      "https://broker.example.com",
+			resolved:    map[string]string{"SCION_HUB_ENDPOINT": "https://resolved.example.com"},
 			projectPath: groveDir,
-			want:      "https://resolved.example.com",
+			want:        "https://resolved.example.com",
 		},
 		{
-			name:      "broker fallback when resolved env absent",
-			broker:    "https://broker.example.com",
-			resolved:  map[string]string{"UNRELATED": "x"},
+			name:        "broker fallback when resolved env absent",
+			broker:      "https://broker.example.com",
+			resolved:    map[string]string{"UNRELATED": "x"},
 			projectPath: groveDir,
-			want:      "https://broker.example.com",
+			want:        "https://broker.example.com",
 		},
 		{
-			name:      "resolved env wins over settings",
-			resolved:  map[string]string{"SCION_HUB_URL": "https://resolved-legacy.example.com"},
+			name:        "resolved env wins over settings",
+			resolved:    map[string]string{"SCION_HUB_URL": "https://resolved-legacy.example.com"},
 			projectPath: groveDir,
-			want:      "https://resolved-legacy.example.com",
+			want:        "https://resolved-legacy.example.com",
 		},
 		{
-			name:      "settings fallback when others absent",
-			resolved:  map[string]string{"UNRELATED": "x"},
+			name:        "settings fallback when others absent",
+			resolved:    map[string]string{"UNRELATED": "x"},
 			projectPath: groveDir,
-			want:      "https://settings.example.com",
+			want:        "https://settings.example.com",
 		},
 		{
 			name:                 "production combo: resolved public URL prevents bridge override over localhost broker",
@@ -128,7 +128,7 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 		connection           string
 		broker               string
 		resolved             map[string]string
-		projectPath            string
+		projectPath          string
 		containerHubEndpoint string
 		runtimeName          string
 		want                 string
@@ -152,15 +152,15 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			want:   "https://broker.example.com",
 		},
 		{
-			name:      "resolved env fallback",
-			resolved:  map[string]string{"SCION_HUB_ENDPOINT": "https://resolved.example.com"},
+			name:        "resolved env fallback",
+			resolved:    map[string]string{"SCION_HUB_ENDPOINT": "https://resolved.example.com"},
 			projectPath: groveDir,
-			want:      "https://resolved.example.com",
+			want:        "https://resolved.example.com",
 		},
 		{
-			name:      "settings fallback when others absent",
+			name:        "settings fallback when others absent",
 			projectPath: groveDir,
-			want:      "https://settings.example.com",
+			want:        "https://settings.example.com",
 		},
 		{
 			name:                 "localhost req overridden by non-localhost connection",

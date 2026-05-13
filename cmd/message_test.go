@@ -890,9 +890,9 @@ func TestSendSetMessageViaHub(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  projectID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	recipients := []messages.SetRecipient{

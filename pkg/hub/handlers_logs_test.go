@@ -49,8 +49,8 @@ func createTestAgent(t *testing.T, s store.Store) *store.Agent {
 	}
 
 	agent := &store.Agent{
-		ID:      api.NewUUID(),
-		Name:    "test-agent-" + api.NewUUID()[:8],
+		ID:        api.NewUUID(),
+		Name:      "test-agent-" + api.NewUUID()[:8],
 		ProjectID: project.ID,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {

@@ -613,10 +613,10 @@ func TestIsGlobalProject(t *testing.T) {
 	srv := newTestServer(t)
 
 	tests := []struct {
-		name      string
+		name        string
 		projectID   string
 		projectPath string
-		expected  bool
+		expected    bool
 	}{
 		{"empty both", "", "", true},
 		{"global id", "global", "/some/path", true},

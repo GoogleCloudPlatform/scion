@@ -687,11 +687,11 @@ type GCPQuotaProjectInfo struct {
 
 // GCPQuotaResponse is the response for GET /api/v1/admin/gcp-quota.
 type GCPQuotaResponse struct {
-	MintingConfigured bool                 `json:"minting_configured"`
-	GCPProjectID      string               `json:"gcp_project_id,omitempty"`
-	GlobalMinted      int                  `json:"global_minted"`
-	GlobalCap         int                  `json:"global_cap"`
-	PerProjectCap     int                  `json:"per_project_cap"`
+	MintingConfigured bool                  `json:"minting_configured"`
+	GCPProjectID      string                `json:"gcp_project_id,omitempty"`
+	GlobalMinted      int                   `json:"global_minted"`
+	GlobalCap         int                   `json:"global_cap"`
+	PerProjectCap     int                   `json:"per_project_cap"`
 	Projects          []GCPQuotaProjectInfo `json:"projects,omitempty"`
 }
 

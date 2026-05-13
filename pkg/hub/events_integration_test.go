@@ -93,7 +93,7 @@ func setupEventTestServer(t *testing.T) (*Server, store.Store, *ChannelEventPubl
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
 	provider := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -117,7 +117,7 @@ func TestEventPublisher_CreateAgentEmitsEvent(t *testing.T) {
 
 	// Create agent via API
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "event-agent",
+		Name:      "event-agent",
 		ProjectID: project.ID,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
@@ -140,11 +140,11 @@ func TestEventPublisher_DeleteAgentEmitsEvent(t *testing.T) {
 	ctx := context.Background()
 
 	agent := &store.Agent{
-		ID:      "agent-evt-del",
-		Slug:    "agent-evt-del",
-		Name:    "Delete Me",
+		ID:        "agent-evt-del",
+		Slug:      "agent-evt-del",
+		Name:      "Delete Me",
 		ProjectID: project.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 

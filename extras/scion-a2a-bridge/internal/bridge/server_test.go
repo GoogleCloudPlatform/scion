@@ -365,8 +365,8 @@ func TestCancelTaskAlreadyTerminal(t *testing.T) {
 	defer store.Close()
 
 	cfg := &Config{
-		Bridge: BridgeConfig{ExternalURL: "https://a2a.test.example.com"},
-		Auth:   AuthConfig{Scheme: "apiKey", APIKey: "test-api-key"},
+		Bridge:   BridgeConfig{ExternalURL: "https://a2a.test.example.com"},
+		Auth:     AuthConfig{Scheme: "apiKey", APIKey: "test-api-key"},
 		Projects: []GroveConfig{{Slug: "test-grove", ExposedAgents: []string{"test-agent"}}},
 	}
 

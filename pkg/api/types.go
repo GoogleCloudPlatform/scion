@@ -620,7 +620,6 @@ func (a AgentInfo) MarshalJSON() ([]byte, error) {
 	})
 }
 
-
 // AgentDetail provides freeform context about the current activity.
 type AgentDetail struct {
 	ToolName    string `json:"toolName,omitempty"`

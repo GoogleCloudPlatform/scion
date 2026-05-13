@@ -559,8 +559,8 @@ func TestGroupMembersAddAgent(t *testing.T) {
 
 	// Create the agent
 	agent := &store.Agent{
-		ID:      "agent_abc123",
-		Name:    "Test Agent",
+		ID:        "agent_abc123",
+		Name:      "Test Agent",
 		ProjectID: project.ID,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {

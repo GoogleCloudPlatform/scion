@@ -49,20 +49,20 @@ func TestAgentStatusUpdate_Authorization(t *testing.T) {
 
 	// Create two agents
 	agent1 := &store.Agent{
-		ID:      "agent-1",
-		Slug:    "agent-1-slug",
-		Name:    "Agent 1",
+		ID:        "agent-1",
+		Slug:      "agent-1-slug",
+		Name:      "Agent 1",
 		ProjectID: project.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent1))
 
 	agent2 := &store.Agent{
-		ID:      "agent-2",
-		Slug:    "agent-2-slug",
-		Name:    "Agent 2",
+		ID:        "agent-2",
+		Slug:      "agent-2-slug",
+		Name:      "Agent 2",
 		ProjectID: project.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2))
 
@@ -155,11 +155,11 @@ func TestAgentStatusUpdate_Heartbeat(t *testing.T) {
 
 	// Create an agent
 	agent := &store.Agent{
-		ID:      "agent-h",
-		Slug:    "agent-h-slug",
-		Name:    "Agent Heartbeat",
+		ID:        "agent-h",
+		Slug:      "agent-h-slug",
+		Name:      "Agent Heartbeat",
 		ProjectID: project.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -216,7 +216,7 @@ func setupOfflineBrokerAgent(t *testing.T, s store.Store, suffix string) (*store
 		ID:              fmt.Sprintf("agent-offline-%s", suffix),
 		Slug:            fmt.Sprintf("agent-offline-%s-slug", suffix),
 		Name:            fmt.Sprintf("Agent Offline %s", suffix),
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 	}
@@ -251,11 +251,11 @@ func TestDeleteAgent_NoBroker(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:      "agent-nobroker",
-		Slug:    "agent-nobroker-slug",
-		Name:    "Agent No Broker",
+		ID:        "agent-nobroker",
+		Slug:      "agent-nobroker-slug",
+		Name:      "Agent No Broker",
 		ProjectID: project.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 		// No RuntimeBrokerID set
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -309,7 +309,7 @@ func setupOnlineBrokerAgent(t *testing.T, s store.Store, suffix string) (*store.
 		ID:              fmt.Sprintf("agent-online-%s", suffix),
 		Slug:            fmt.Sprintf("agent-online-%s-slug", suffix),
 		Name:            fmt.Sprintf("Agent Online %s", suffix),
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 	}
@@ -440,7 +440,7 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
 	contrib := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -453,11 +453,11 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 
 	// Create the calling agent
 	callingAgent := &store.Agent{
-		ID:      "agent-caller",
-		Slug:    "agent-caller",
-		Name:    "Calling Agent",
+		ID:        "agent-caller",
+		Slug:      "agent-caller",
+		Name:      "Calling Agent",
 		ProjectID: project.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, callingAgent))
 
@@ -472,9 +472,9 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 		require.NoError(t, err)
 
 		body, _ := json.Marshal(CreateAgentRequest{
-			Name:    "Sub Agent",
+			Name:      "Sub Agent",
 			ProjectID: project.ID,
-			Task:    "do something",
+			Task:      "do something",
 		})
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(body))
 		req.Header.Set("X-Scion-Agent-Token", token)
@@ -511,7 +511,7 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 		require.NoError(t, err)
 
 		body, _ := json.Marshal(CreateAgentRequest{
-			Name:    "Cross Project Agent",
+			Name:      "Cross Project Agent",
 			ProjectID: otherProject.ID,
 		})
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(body))
@@ -532,7 +532,7 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 		require.NoError(t, err)
 
 		body, _ := json.Marshal(CreateAgentRequest{
-			Name:    "Unauthorized Sub",
+			Name:      "Unauthorized Sub",
 			ProjectID: project.ID,
 		})
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(body))
@@ -560,21 +560,21 @@ func TestAgentLifecycle_WithScope(t *testing.T) {
 
 	// Create the calling agent
 	callingAgent := &store.Agent{
-		ID:      "agent-lc-caller",
-		Slug:    "agent-lc-caller",
-		Name:    "Lifecycle Caller",
+		ID:        "agent-lc-caller",
+		Slug:      "agent-lc-caller",
+		Name:      "Lifecycle Caller",
 		ProjectID: project.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, callingAgent))
 
 	// Create a target agent in the same project
 	targetAgent := &store.Agent{
-		ID:      "agent-lc-target",
-		Slug:    "agent-lc-target",
-		Name:    "Lifecycle Target",
+		ID:        "agent-lc-target",
+		Slug:      "agent-lc-target",
+		Name:      "Lifecycle Target",
 		ProjectID: project.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, targetAgent))
 
@@ -608,11 +608,11 @@ func TestAgentLifecycle_WithScope(t *testing.T) {
 		require.NoError(t, s.CreateProject(ctx, otherProject))
 
 		otherAgent := &store.Agent{
-			ID:      "agent-lc-other",
-			Slug:    "agent-lc-other",
-			Name:    "Other LC Agent",
+			ID:        "agent-lc-other",
+			Slug:      "agent-lc-other",
+			Name:      "Other LC Agent",
 			ProjectID: otherProject.ID,
-			Phase:   string(state.PhaseRunning),
+			Phase:     string(state.PhaseRunning),
 		}
 		require.NoError(t, s.CreateAgent(ctx, otherAgent))
 
@@ -669,29 +669,29 @@ func TestAgentGetAgent_ProjectIsolation(t *testing.T) {
 
 	// Create agents in each project
 	agent1 := &store.Agent{
-		ID:      "agent-get-caller",
-		Slug:    "agent-get-caller",
-		Name:    "Get Caller",
+		ID:        "agent-get-caller",
+		Slug:      "agent-get-caller",
+		Name:      "Get Caller",
 		ProjectID: project1.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent1))
 
 	agent2SameProject := &store.Agent{
-		ID:      "agent-get-same",
-		Slug:    "agent-get-same",
-		Name:    "Same Project Agent",
+		ID:        "agent-get-same",
+		Slug:      "agent-get-same",
+		Name:      "Same Project Agent",
 		ProjectID: project1.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2SameProject))
 
 	agentOtherProject := &store.Agent{
-		ID:      "agent-get-other",
-		Slug:    "agent-get-other",
-		Name:    "Other Project Agent",
+		ID:        "agent-get-other",
+		Slug:      "agent-get-other",
+		Name:      "Other Project Agent",
 		ProjectID: project2.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentOtherProject))
 
@@ -853,7 +853,7 @@ func setupCreateAgentServer(t *testing.T, disp AgentDispatcher) (*Server, store.
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
 	provider := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -874,9 +874,9 @@ func TestCreateAgent_BrokerStatusPreserved(t *testing.T) {
 
 	// Create an agent with a task — should dispatch and preserve broker-reported "running" status
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "status-test",
+		Name:      "status-test",
 		ProjectID: project.ID,
-		Task:    "do something",
+		Task:      "do something",
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -902,9 +902,9 @@ func TestCreateAgent_FallbackToProvisioningWhenNoBrokerStatus(t *testing.T) {
 	srv, _, project := setupCreateAgentServer(t, disp)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "fallback-test",
+		Name:      "fallback-test",
 		ProjectID: project.ID,
-		Task:    "do something",
+		Task:      "do something",
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -943,9 +943,9 @@ func TestCreateAgent_RetriesVersionConflictAfterDispatch(t *testing.T) {
 	ctx := context.Background()
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "version-conflict-agent",
+		Name:      "version-conflict-agent",
 		ProjectID: project.ID,
-		Task:    "do something",
+		Task:      "do something",
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -977,7 +977,7 @@ func TestCreateAgent_EnvGatherRetriesVersionConflict(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:      "env-gather-conflict-agent",
-		ProjectID:   project.ID,
+		ProjectID: project.ID,
 		Task:      "do something",
 		GatherEnv: true,
 	})
@@ -1003,7 +1003,7 @@ func TestCreateAgent_ProvisionOnlyRetriesVersionConflict(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:          "provision-only-conflict-agent",
-		ProjectID:       project.ID,
+		ProjectID:     project.ID,
 		Task:          "some task",
 		ProvisionOnly: true,
 	})
@@ -1024,7 +1024,7 @@ func TestCreateAgent_StartsWithoutTask(t *testing.T) {
 	srv, _, project := setupCreateAgentServer(t, disp)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "no-task-agent",
+		Name:      "no-task-agent",
 		ProjectID: project.ID,
 		// No Task, no Attach — should still start (not provision-only)
 	})
@@ -1047,7 +1047,7 @@ func TestCreateAgent_ProvisionOnlyStaysCreated(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:          "provision-only-agent",
-		ProjectID:       project.ID,
+		ProjectID:     project.ID,
 		Task:          "some task",
 		ProvisionOnly: true,
 	})
@@ -1072,7 +1072,7 @@ func TestCreateAgent_RestartFromProvisioningStatus(t *testing.T) {
 		ID:              "agent-stuck-prov",
 		Slug:            "stuck-agent",
 		Name:            "stuck-agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseProvisioning),
 	}
@@ -1080,9 +1080,9 @@ func TestCreateAgent_RestartFromProvisioningStatus(t *testing.T) {
 
 	// Try to start the same agent name — should succeed by re-starting, not 409
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "stuck-agent",
+		Name:      "stuck-agent",
 		ProjectID: project.ID,
-		Task:    "retry task",
+		Task:      "retry task",
 	})
 
 	assert.Equal(t, http.StatusOK, rec.Code,
@@ -1104,7 +1104,7 @@ func TestCreateAgent_RestartFromPendingStatus(t *testing.T) {
 		ID:              "agent-pending",
 		Slug:            "pending-agent",
 		Name:            "pending-agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseCreated),
 	}
@@ -1112,9 +1112,9 @@ func TestCreateAgent_RestartFromPendingStatus(t *testing.T) {
 
 	// Try to start the same agent name — should succeed
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "pending-agent",
+		Name:      "pending-agent",
 		ProjectID: project.ID,
-		Task:    "retry task",
+		Task:      "retry task",
 	})
 
 	assert.Equal(t, http.StatusOK, rec.Code,
@@ -1131,7 +1131,7 @@ func TestCreateAgent_RecreateFromRunningStatus(t *testing.T) {
 		ID:              "agent-running-stale",
 		Slug:            "running-agent",
 		Name:            "running-agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseRunning),
 	}
@@ -1139,9 +1139,9 @@ func TestCreateAgent_RecreateFromRunningStatus(t *testing.T) {
 
 	// Start with the same name — should delete old agent and create new one
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "running-agent",
+		Name:      "running-agent",
 		ProjectID: project.ID,
-		Task:    "new task",
+		Task:      "new task",
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code,
@@ -1172,7 +1172,7 @@ func TestCreateAgent_RecreateFromErrorStatus(t *testing.T) {
 		ID:              "agent-errored",
 		Slug:            "error-agent",
 		Name:            "error-agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseError),
 	}
@@ -1180,9 +1180,9 @@ func TestCreateAgent_RecreateFromErrorStatus(t *testing.T) {
 
 	// Start with the same name — should delete and recreate
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "error-agent",
+		Name:      "error-agent",
 		ProjectID: project.ID,
-		Task:    "retry after error",
+		Task:      "retry after error",
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code,
@@ -1203,16 +1203,16 @@ func TestCreateAgent_RecreateFromStoppedStatus(t *testing.T) {
 		ID:              "agent-stopped",
 		Slug:            "stopped-agent",
 		Name:            "stopped-agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseStopped),
 	}
 	require.NoError(t, s.CreateAgent(ctx, stoppedAgent))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "stopped-agent",
+		Name:      "stopped-agent",
 		ProjectID: project.ID,
-		Task:    "restart after stop",
+		Task:      "restart after stop",
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code,
@@ -1252,7 +1252,7 @@ func TestAgentCreate_LocalTemplateWithLocalBroker(t *testing.T) {
 
 	// Register the broker as a provider WITH a local path
 	provider := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		LocalPath:  "/home/user/project/.scion",
@@ -1263,9 +1263,9 @@ func TestAgentCreate_LocalTemplateWithLocalBroker(t *testing.T) {
 	// Create agent with a template name that does NOT exist on the Hub.
 	// Because the broker has a LocalPath, this should succeed.
 	body := map[string]interface{}{
-		"name":     "Local Template Agent",
-		"projectId":  project.ID,
-		"template": "my-local-template",
+		"name":      "Local Template Agent",
+		"projectId": project.ID,
+		"template":  "my-local-template",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
@@ -1314,7 +1314,7 @@ func TestAgentCreate_LocalTemplateWithRemoteBroker(t *testing.T) {
 
 	// Register the broker as a provider WITHOUT a local path
 	provider := &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -1325,9 +1325,9 @@ func TestAgentCreate_LocalTemplateWithRemoteBroker(t *testing.T) {
 	// Create agent with a template name that does NOT exist on the Hub.
 	// Without local access, this should fail with NotFound.
 	body := map[string]interface{}{
-		"name":     "Remote Template Agent",
-		"projectId":  project.ID,
-		"template": "nonexistent-template",
+		"name":      "Remote Template Agent",
+		"projectId": project.ID,
+		"template":  "nonexistent-template",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
@@ -1356,9 +1356,9 @@ func TestAgentCreate_LocalTemplateNoBroker(t *testing.T) {
 	// Create agent with a template name that does NOT exist on the Hub.
 	// Without any broker, this should fail (422 validation error for missing broker).
 	body := map[string]interface{}{
-		"name":     "No Broker Agent",
-		"projectId":  project.ID,
-		"template": "nonexistent-template",
+		"name":      "No Broker Agent",
+		"projectId": project.ID,
+		"template":  "nonexistent-template",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
@@ -1374,9 +1374,9 @@ func TestCreateAgent_CreatorName_UserEmail(t *testing.T) {
 
 	// Use dev auth token (which creates a DevUser with email "dev@localhost")
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "user-created-agent",
+		Name:      "user-created-agent",
 		ProjectID: project.ID,
-		Task:    "do something",
+		Task:      "do something",
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -1410,11 +1410,11 @@ func TestListAgents_ServerTimeIncluded(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:      "agent-servertime",
-		Slug:    "agent-servertime-slug",
-		Name:    "ServerTime Agent",
+		ID:        "agent-servertime",
+		Slug:      "agent-servertime-slug",
+		Name:      "ServerTime Agent",
 		ProjectID: project.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -1546,7 +1546,7 @@ func TestCreateAgent_GitAnchoredProjectPopulatesGitClone(t *testing.T) {
 
 	// Add project provider
 	provider := &store.ProjectProvider{
-		ProjectID:    gitProject.ID,
+		ProjectID:  gitProject.ID,
 		BrokerID:   "broker-create",
 		BrokerName: "Create Test Broker",
 		Status:     store.BrokerStatusOnline,
@@ -1554,9 +1554,9 @@ func TestCreateAgent_GitAnchoredProjectPopulatesGitClone(t *testing.T) {
 	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "git-agent",
+		Name:      "git-agent",
 		ProjectID: gitProject.ID,
-		Task:    "implement feature",
+		Task:      "implement feature",
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -1581,9 +1581,9 @@ func TestCreateAgent_NonGitProjectNoGitClone(t *testing.T) {
 	ctx := context.Background()
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "non-git-agent",
+		Name:      "non-git-agent",
 		ProjectID: project.ID,
-		Task:    "do something",
+		Task:      "do something",
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -1620,7 +1620,7 @@ func TestCreateProjectAgent_GitAnchoredProjectPopulatesGitClone(t *testing.T) {
 
 	// Add project provider
 	provider := &store.ProjectProvider{
-		ProjectID:    gitProject.ID,
+		ProjectID:  gitProject.ID,
 		BrokerID:   "broker-create",
 		BrokerName: "Create Test Broker",
 		Status:     store.BrokerStatusOnline,
@@ -1695,7 +1695,7 @@ func TestCreateAgent_GitProjectCloneURLFallback(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, gitProject))
 
 	provider := &store.ProjectProvider{
-		ProjectID:    gitProject.ID,
+		ProjectID:  gitProject.ID,
 		BrokerID:   "broker-create",
 		BrokerName: "Create Test Broker",
 		Status:     store.BrokerStatusOnline,
@@ -1703,9 +1703,9 @@ func TestCreateAgent_GitProjectCloneURLFallback(t *testing.T) {
 	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "fallback-url-agent",
+		Name:      "fallback-url-agent",
 		ProjectID: gitProject.ID,
-		Task:    "test fallback",
+		Task:      "test fallback",
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -1747,7 +1747,7 @@ func TestCreateAgent_GitProjectSchemelessCloneURL(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, gitProject))
 
 	provider := &store.ProjectProvider{
-		ProjectID:    gitProject.ID,
+		ProjectID:  gitProject.ID,
 		BrokerID:   "broker-create",
 		BrokerName: "Create Test Broker",
 		Status:     store.BrokerStatusOnline,
@@ -1755,9 +1755,9 @@ func TestCreateAgent_GitProjectSchemelessCloneURL(t *testing.T) {
 	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "schemeless-url-agent",
+		Name:      "schemeless-url-agent",
 		ProjectID: gitProject.ID,
-		Task:    "test schemeless",
+		Task:      "test schemeless",
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -1797,7 +1797,7 @@ func TestCreateAgent_GitProjectDefaultBranchFallback(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, gitProject))
 
 	provider := &store.ProjectProvider{
-		ProjectID:    gitProject.ID,
+		ProjectID:  gitProject.ID,
 		BrokerID:   "broker-create",
 		BrokerName: "Create Test Broker",
 		Status:     store.BrokerStatusOnline,
@@ -1805,9 +1805,9 @@ func TestCreateAgent_GitProjectDefaultBranchFallback(t *testing.T) {
 	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "fallback-branch-agent",
+		Name:      "fallback-branch-agent",
 		ProjectID: gitProject.ID,
-		Task:    "test branch fallback",
+		Task:      "test branch fallback",
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -1834,10 +1834,10 @@ func TestCreateAgent_ProfileStoredInAppliedConfig(t *testing.T) {
 	ctx := context.Background()
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "profiled-agent",
+		Name:      "profiled-agent",
 		ProjectID: project.ID,
-		Profile: "custom-profile",
-		Task:    "do something",
+		Profile:   "custom-profile",
+		Task:      "do something",
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -1862,11 +1862,11 @@ func TestCreateAgent_ProfileStoredWithConfigOverride(t *testing.T) {
 	ctx := context.Background()
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "profiled-agent-with-config",
+		Name:      "profiled-agent-with-config",
 		ProjectID: project.ID,
-		Profile: "other-profile",
-		Task:    "do something",
-		Config:  &api.ScionConfig{Image: "custom-image:latest"},
+		Profile:   "other-profile",
+		Task:      "do something",
+		Config:    &api.ScionConfig{Image: "custom-image:latest"},
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -1892,9 +1892,9 @@ func TestCreateAgent_ScionConfigInlineConfigPreserved(t *testing.T) {
 
 	// Create an agent with a full ScionConfig including fields beyond the old AgentConfigOverride
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "inline-config-agent",
+		Name:      "inline-config-agent",
 		ProjectID: project.ID,
-		Task:    "review code",
+		Task:      "review code",
 		Config: &api.ScionConfig{
 			Image:            "custom:latest",
 			Model:            "claude-opus-4-6",
@@ -1941,9 +1941,9 @@ func TestCreateAgent_ScionConfigTaskFieldMerge(t *testing.T) {
 
 	// When both req.Task and Config.Task are set, req.Task takes precedence
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "task-merge-agent",
+		Name:      "task-merge-agent",
 		ProjectID: project.ID,
-		Task:    "request-level task",
+		Task:      "request-level task",
 		Config: &api.ScionConfig{
 			Task: "config-level task",
 		},
@@ -1965,7 +1965,7 @@ func TestCreateAgent_ScionConfigTaskFromConfigOnly(t *testing.T) {
 
 	// When only Config.Task is set (no req.Task), it should be used
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "task-config-only-agent",
+		Name:      "task-config-only-agent",
 		ProjectID: project.ID,
 		Config: &api.ScionConfig{
 			Task: "config-only task",
@@ -1997,11 +1997,11 @@ func TestListAgents_HarnessConfigEnriched(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:      "agent-harness-enrich",
-		Slug:    "agent-harness-enrich",
-		Name:    "Harness Agent",
+		ID:        "agent-harness-enrich",
+		Slug:      "agent-harness-enrich",
+		Name:      "Harness Agent",
 		ProjectID: project.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "gemini",
 		},
@@ -2052,11 +2052,11 @@ func TestGetAgent_HarnessConfigEnriched(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:      "agent-harness-get",
-		Slug:    "agent-harness-get",
-		Name:    "Harness Get Agent",
+		ID:        "agent-harness-get",
+		Slug:      "agent-harness-get",
+		Name:      "Harness Get Agent",
 		ProjectID: project.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 		},
@@ -2083,7 +2083,7 @@ func TestCreateAgent_HarnessFromRequestField(t *testing.T) {
 	// Create agent with no template but explicit harness (sync scenario)
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:          "sync-agent",
-		ProjectID:       project.ID,
+		ProjectID:     project.ID,
 		HarnessConfig: "gemini",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -2125,9 +2125,9 @@ func TestGetAgent_ProfileInResponse(t *testing.T) {
 
 	// Create agent with explicit profile
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "profile-get-agent",
+		Name:      "profile-get-agent",
 		ProjectID: project.ID,
-		Profile: "docker-dev",
+		Profile:   "docker-dev",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
@@ -2173,7 +2173,7 @@ func TestHeartbeat_BackfillsProfile(t *testing.T) {
 		ID:              "agent-profile-hb",
 		Slug:            "profile-hb-agent",
 		Name:            "Profile HB Agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 		AppliedConfig:   &store.AgentAppliedConfig{},
@@ -2189,7 +2189,7 @@ func TestHeartbeat_BackfillsProfile(t *testing.T) {
 	heartbeat := brokerHeartbeatRequest{
 		Status: "online",
 		Projects: []brokerProjectHeartbeat{{
-			ProjectID:    project.ID,
+			ProjectID:  project.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:    agent.Slug,
@@ -2221,7 +2221,7 @@ func TestCreateAgent_HarnessNotTemplateUUID(t *testing.T) {
 	// Update the existing provider to have a LocalPath so the hub allows
 	// the template to be resolved locally by the broker.
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   "broker-create",
 		BrokerName: "Create Test Broker",
 		LocalPath:  "/some/local/path",
@@ -2232,7 +2232,7 @@ func TestCreateAgent_HarnessNotTemplateUUID(t *testing.T) {
 	templateUUID := "003879ad-f000-426d-b52f-08f537c4c6ce"
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:          "uuid-tmpl-agent",
-		ProjectID:       project.ID,
+		ProjectID:     project.ID,
 		Template:      templateUUID,
 		HarnessConfig: "gemini",
 	})
@@ -2263,7 +2263,7 @@ func TestCreateProjectAgent_RecreateFromRunningStatus(t *testing.T) {
 		ID:              "project-agent-running",
 		Slug:            "running-project-agent",
 		Name:            "running-project-agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseRunning),
 	}
@@ -2300,7 +2300,7 @@ func TestCreateProjectAgent_RecreateFromStoppedStatus(t *testing.T) {
 		ID:              "project-agent-stopped",
 		Slug:            "stopped-project-agent",
 		Name:            "stopped-project-agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseStopped),
 	}
@@ -2329,7 +2329,7 @@ func TestCreateProjectAgent_RecreateFromErrorStatus(t *testing.T) {
 		ID:              "project-agent-errored",
 		Slug:            "errored-project-agent",
 		Name:            "errored-project-agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseError),
 	}
@@ -2358,7 +2358,7 @@ func TestCreateProjectAgent_RestartFromProvisioningStatus(t *testing.T) {
 		ID:              "project-agent-prov",
 		Slug:            "prov-project-agent",
 		Name:            "prov-project-agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseProvisioning),
 	}
@@ -2389,7 +2389,7 @@ func TestCreateProjectAgent_RestartFromPendingStatus(t *testing.T) {
 		ID:              "project-agent-pending",
 		Slug:            "pending-project-agent",
 		Name:            "pending-project-agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseCreated),
 	}
@@ -2419,7 +2419,7 @@ func TestCreateProjectAgent_ConfigUpdateOnRestart(t *testing.T) {
 		ID:              "project-agent-config",
 		Slug:            "config-project-agent",
 		Name:            "config-project-agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseCreated),
 		AppliedConfig: &store.AgentAppliedConfig{
@@ -2463,7 +2463,7 @@ func TestCreateProjectAgent_BrokerIDRecovery(t *testing.T) {
 		ID:              "project-agent-no-broker",
 		Slug:            "no-broker-project-agent",
 		Name:            "no-broker-project-agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: "", // empty — should be recovered
 		Phase:           string(state.PhaseCreated),
 	}
@@ -2498,16 +2498,16 @@ func TestCreateAgent_BrokerIDRecovery(t *testing.T) {
 		ID:              "agent-no-broker",
 		Slug:            "no-broker-agent",
 		Name:            "no-broker-agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: "", // empty — should be recovered
 		Phase:           string(state.PhaseCreated),
 	}
 	require.NoError(t, s.CreateAgent(ctx, existingAgent))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "no-broker-agent",
+		Name:      "no-broker-agent",
 		ProjectID: project.ID,
-		Task:    "start with recovered broker",
+		Task:      "start with recovered broker",
 	})
 
 	require.Equal(t, http.StatusOK, rec.Code,
@@ -2535,7 +2535,7 @@ func TestCreateAgent_CleanupModeStrictFailsOnBrokerDeleteError(t *testing.T) {
 		ID:              "agent-stale-strict",
 		Slug:            "stale-strict-agent",
 		Name:            "stale-strict-agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseRunning),
 	}
@@ -2543,7 +2543,7 @@ func TestCreateAgent_CleanupModeStrictFailsOnBrokerDeleteError(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:        "stale-strict-agent",
-		ProjectID:     project.ID,
+		ProjectID:   project.ID,
 		CleanupMode: "strict",
 	})
 	require.Equal(t, http.StatusBadGateway, rec.Code)
@@ -2566,7 +2566,7 @@ func TestCreateAgent_CleanupModeForceContinuesOnBrokerDeleteError(t *testing.T) 
 		ID:              "agent-stale-force",
 		Slug:            "stale-force-agent",
 		Name:            "stale-force-agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseRunning),
 	}
@@ -2574,7 +2574,7 @@ func TestCreateAgent_CleanupModeForceContinuesOnBrokerDeleteError(t *testing.T) 
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:        "stale-force-agent",
-		ProjectID:     project.ID,
+		ProjectID:   project.ID,
 		CleanupMode: "force",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -2590,7 +2590,7 @@ func TestCreateAgent_InvalidCleanupMode(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:        "invalid-cleanup-agent",
-		ProjectID:     project.ID,
+		ProjectID:   project.ID,
 		CleanupMode: "sometimes",
 	})
 	require.Equal(t, http.StatusBadRequest, rec.Code)
@@ -2618,7 +2618,7 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -2628,11 +2628,11 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 
 	// Create the calling agent (the one that will subscribe to notifications)
 	callingAgent := &store.Agent{
-		ID:      "agent-lead",
-		Slug:    "lead-agent",
-		Name:    "Lead Agent",
+		ID:        "agent-lead",
+		Slug:      "lead-agent",
+		Name:      "Lead Agent",
 		ProjectID: project.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, callingAgent))
 
@@ -2648,10 +2648,10 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 		require.NoError(t, err)
 
 		body, _ := json.Marshal(CreateAgentRequest{
-			Name:    "Sub Worker",
+			Name:      "Sub Worker",
 			ProjectID: project.ID,
-			Task:    "implement auth module",
-			Notify:  true,
+			Task:      "implement auth module",
+			Notify:    true,
 		})
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(body))
 		req.Header.Set("X-Scion-Agent-Token", token)
@@ -2691,10 +2691,10 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 		require.NoError(t, err)
 
 		body, _ := json.Marshal(CreateAgentRequest{
-			Name:    "Sub Worker No Notify",
+			Name:      "Sub Worker No Notify",
 			ProjectID: project.ID,
-			Task:    "implement tests",
-			Notify:  false,
+			Task:      "implement tests",
+			Notify:    false,
 		})
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(body))
 		req.Header.Set("X-Scion-Agent-Token", token)
@@ -2715,10 +2715,10 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 
 	t.Run("Notify=true for user caller creates user subscription", func(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-			Name:    "User Notified Agent",
+			Name:      "User Notified Agent",
 			ProjectID: project.ID,
-			Task:    "run analysis",
-			Notify:  true,
+			Task:      "run analysis",
+			Notify:    true,
 		})
 		require.Equal(t, http.StatusCreated, rec.Code)
 
@@ -2756,7 +2756,7 @@ func TestCreateAgent_NotifySubscriptionCascadeOnDelete(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -2765,11 +2765,11 @@ func TestCreateAgent_NotifySubscriptionCascadeOnDelete(t *testing.T) {
 	require.NoError(t, s.UpdateProject(ctx, project))
 
 	callingAgent := &store.Agent{
-		ID:      "agent-cascade-lead",
-		Slug:    "cascade-lead",
-		Name:    "Cascade Lead",
+		ID:        "agent-cascade-lead",
+		Slug:      "cascade-lead",
+		Name:      "Cascade Lead",
 		ProjectID: project.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, callingAgent))
 
@@ -2783,10 +2783,10 @@ func TestCreateAgent_NotifySubscriptionCascadeOnDelete(t *testing.T) {
 
 	// Create agent with notify
 	body, _ := json.Marshal(CreateAgentRequest{
-		Name:    "Cascade Sub",
+		Name:      "Cascade Sub",
 		ProjectID: project.ID,
-		Task:    "do work",
-		Notify:  true,
+		Task:      "do work",
+		Notify:    true,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(body))
 	req.Header.Set("X-Scion-Agent-Token", token)
@@ -2846,7 +2846,7 @@ func TestBrokerHeartbeat_PublishesActivitySSE(t *testing.T) {
 	heartbeat := brokerHeartbeatRequest{
 		Status: "online",
 		Projects: []brokerProjectHeartbeat{{
-			ProjectID:    project.ID,
+			ProjectID:  project.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
@@ -2902,7 +2902,7 @@ func TestBrokerHeartbeat_RepeatedActivityDoesNotRefreshLastActivityEvent(t *test
 	hb1 := brokerHeartbeatRequest{
 		Status: "online",
 		Projects: []brokerProjectHeartbeat{{
-			ProjectID:    project.ID,
+			ProjectID:  project.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
@@ -2930,7 +2930,7 @@ func TestBrokerHeartbeat_RepeatedActivityDoesNotRefreshLastActivityEvent(t *test
 	hb2 := brokerHeartbeatRequest{
 		Status: "online",
 		Projects: []brokerProjectHeartbeat{{
-			ProjectID:    project.ID,
+			ProjectID:  project.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
@@ -2953,7 +2953,7 @@ func TestBrokerHeartbeat_RepeatedActivityDoesNotRefreshLastActivityEvent(t *test
 	hb3 := brokerHeartbeatRequest{
 		Status: "online",
 		Projects: []brokerProjectHeartbeat{{
-			ProjectID:    project.ID,
+			ProjectID:  project.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
@@ -3012,7 +3012,7 @@ func TestBrokerHeartbeat_StalledAgentNotOverwrittenBySameActivity(t *testing.T) 
 	hb := brokerHeartbeatRequest{
 		Status: "online",
 		Projects: []brokerProjectHeartbeat{{
-			ProjectID:    project.ID,
+			ProjectID:  project.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
@@ -3070,7 +3070,7 @@ func TestBrokerHeartbeat_StalledAgentRecoveredByNewActivity(t *testing.T) {
 	hb := brokerHeartbeatRequest{
 		Status: "online",
 		Projects: []brokerProjectHeartbeat{{
-			ProjectID:    project.ID,
+			ProjectID:  project.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
@@ -3127,7 +3127,7 @@ func TestBrokerHeartbeat_StalledWorkingAgentNotOverwrittenBySameActivity(t *test
 	hb := brokerHeartbeatRequest{
 		Status: "online",
 		Projects: []brokerProjectHeartbeat{{
-			ProjectID:    project.ID,
+			ProjectID:  project.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
@@ -3183,7 +3183,7 @@ func TestBrokerHeartbeat_DoesNotRevertStoppedAgent(t *testing.T) {
 	hb := brokerHeartbeatRequest{
 		Status: "online",
 		Projects: []brokerProjectHeartbeat{{
-			ProjectID:    project.ID,
+			ProjectID:  project.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:            agent.Slug,
@@ -3234,7 +3234,7 @@ func TestBrokerHeartbeat_DoesNotRevertStoppedAgent_LegacyPath(t *testing.T) {
 	hb := brokerHeartbeatRequest{
 		Status: "online",
 		Projects: []brokerProjectHeartbeat{{
-			ProjectID:    project.ID,
+			ProjectID:  project.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:            agent.Slug,
@@ -3277,7 +3277,7 @@ func TestBrokerHeartbeat_PropagatesTerminalActivityOnStoppedAgent(t *testing.T) 
 	hb := brokerHeartbeatRequest{
 		Status: "online",
 		Projects: []brokerProjectHeartbeat{{
-			ProjectID:    grove.ID,
+			ProjectID:  grove.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
@@ -3325,7 +3325,7 @@ func TestBrokerHeartbeat_DoesNotOverwriteTerminalActivityWithNonTerminal(t *test
 	hb := brokerHeartbeatRequest{
 		Status: "online",
 		Projects: []brokerProjectHeartbeat{{
-			ProjectID:    grove.ID,
+			ProjectID:  grove.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
@@ -3354,7 +3354,7 @@ func TestCreateAgent_RestartCreatesNotificationSubscription(t *testing.T) {
 		ID:              "agent-notify-restart",
 		Slug:            "notify-agent",
 		Name:            "notify-agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseCreated),
 	}
@@ -3362,10 +3362,10 @@ func TestCreateAgent_RestartCreatesNotificationSubscription(t *testing.T) {
 
 	// Restart the agent with Notify: true — should create a notification subscription
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "notify-agent",
+		Name:      "notify-agent",
 		ProjectID: project.ID,
-		Task:    "restart task",
-		Notify:  true,
+		Task:      "restart task",
+		Notify:    true,
 	})
 
 	assert.Equal(t, http.StatusOK, rec.Code, "restarting agent should succeed")
@@ -3392,7 +3392,7 @@ func TestCreateAgent_RestartNoSubscriptionWithoutNotify(t *testing.T) {
 		ID:              "agent-no-notify",
 		Slug:            "no-notify-agent",
 		Name:            "no-notify-agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: "broker-create",
 		Phase:           string(state.PhaseCreated),
 	}
@@ -3400,9 +3400,9 @@ func TestCreateAgent_RestartNoSubscriptionWithoutNotify(t *testing.T) {
 
 	// Restart the agent without Notify — should NOT create a subscription
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "no-notify-agent",
+		Name:      "no-notify-agent",
 		ProjectID: project.ID,
-		Task:    "restart task",
+		Task:      "restart task",
 	})
 
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -3433,7 +3433,7 @@ func TestHandleAgentMessage_PlainTextBuildsStructuredMessage(t *testing.T) {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -3443,7 +3443,7 @@ func TestHandleAgentMessage_PlainTextBuildsStructuredMessage(t *testing.T) {
 		ID:              "agent-msg-1",
 		Slug:            "agent-msg-1",
 		Name:            "Msg Agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 	}
@@ -3498,7 +3498,7 @@ func TestHandleAgentMessage_StructuredMessagePopulatesSender(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -3508,7 +3508,7 @@ func TestHandleAgentMessage_StructuredMessagePopulatesSender(t *testing.T) {
 		ID:              "agent-msg-sender-1",
 		Slug:            "agent-msg-sender-1",
 		Name:            "Msg Sender Agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 	}
@@ -3560,7 +3560,7 @@ func TestHandleAgentMessage_NotifyCreatesSubscription(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -3570,7 +3570,7 @@ func TestHandleAgentMessage_NotifyCreatesSubscription(t *testing.T) {
 		ID:              "agent-msg-notify-1",
 		Slug:            "agent-msg-notify-1",
 		Name:            "Msg Notify Agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 	}
@@ -3620,7 +3620,7 @@ func TestHandleAgentMessage_NoNotifyNoSubscription(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -3630,7 +3630,7 @@ func TestHandleAgentMessage_NoNotifyNoSubscription(t *testing.T) {
 		ID:              "agent-msg-no-notify-1",
 		Slug:            "agent-msg-no-notify-1",
 		Name:            "Msg No Notify Agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 	}
@@ -3666,11 +3666,11 @@ func TestHandleAgentMessage_NoDispatcher_Returns503(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:      "agent-msg-503",
-		Slug:    "agent-msg-503",
-		Name:    "Msg 503 Agent",
+		ID:        "agent-msg-503",
+		Slug:      "agent-msg-503",
+		Name:      "Msg 503 Agent",
 		ProjectID: project.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -3697,11 +3697,11 @@ func TestHandleAgentMessage_NoBrokerID_Returns503(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:      "agent-msg-503-nobroker",
-		Slug:    "agent-msg-503-nobroker",
-		Name:    "Msg 503 NoBroker Agent",
+		ID:        "agent-msg-503-nobroker",
+		Slug:      "agent-msg-503-nobroker",
+		Name:      "Msg 503 NoBroker Agent",
 		ProjectID: project.ID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 		// No RuntimeBrokerID set
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -3732,9 +3732,9 @@ func TestCreateAgent_DispatchFailure_CleansUpBroker(t *testing.T) {
 	ctx := context.Background()
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "auth-fail-agent",
+		Name:      "auth-fail-agent",
 		ProjectID: project.ID,
-		Task:    "do something",
+		Task:      "do something",
 	})
 
 	// Should return a runtime error
@@ -3777,9 +3777,9 @@ func TestCreateAgent_GCPIdentityAssign(t *testing.T) {
 	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "gcp-assign-agent",
+		Name:      "gcp-assign-agent",
 		ProjectID: project.ID,
-		Task:    "do something",
+		Task:      "do something",
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode:     "assign",
 			ServiceAccountID: sa.ID,
@@ -3811,9 +3811,9 @@ func TestCreateAgent_GCPIdentityBlock(t *testing.T) {
 	ctx := context.Background()
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "gcp-block-agent",
+		Name:      "gcp-block-agent",
 		ProjectID: project.ID,
-		Task:    "do something",
+		Task:      "do something",
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode: "block",
 		},
@@ -3836,9 +3836,9 @@ func TestCreateAgent_GCPIdentityPassthrough(t *testing.T) {
 	srv, _, project := setupCreateAgentServer(t, disp)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "gcp-passthrough-agent",
+		Name:      "gcp-passthrough-agent",
 		ProjectID: project.ID,
-		Task:    "do something",
+		Task:      "do something",
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode: "passthrough",
 		},
@@ -3856,9 +3856,9 @@ func TestCreateAgent_GCPIdentityNoField(t *testing.T) {
 	srv, _, project := setupCreateAgentServer(t, disp)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "gcp-none-agent",
+		Name:      "gcp-none-agent",
 		ProjectID: project.ID,
-		Task:    "do something",
+		Task:      "do something",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
@@ -3876,7 +3876,7 @@ func TestCreateAgent_GCPIdentityInvalidMode(t *testing.T) {
 	srv, _, project := setupCreateAgentServer(t, disp)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "gcp-invalid-mode",
+		Name:      "gcp-invalid-mode",
 		ProjectID: project.ID,
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode: "invalid",
@@ -3890,7 +3890,7 @@ func TestCreateAgent_GCPIdentityAssignMissingSA(t *testing.T) {
 	srv, _, project := setupCreateAgentServer(t, disp)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "gcp-missing-sa",
+		Name:      "gcp-missing-sa",
 		ProjectID: project.ID,
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode: "assign",
@@ -3904,7 +3904,7 @@ func TestCreateAgent_GCPIdentityAssignNonexistentSA(t *testing.T) {
 	srv, _, project := setupCreateAgentServer(t, disp)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "gcp-nonexistent-sa",
+		Name:      "gcp-nonexistent-sa",
 		ProjectID: project.ID,
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode:     "assign",
@@ -3932,7 +3932,7 @@ func TestCreateAgent_GCPIdentityAssignUnverifiedSA(t *testing.T) {
 	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "gcp-unverified-sa",
+		Name:      "gcp-unverified-sa",
 		ProjectID: project.ID,
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode:     "assign",
@@ -3961,7 +3961,7 @@ func TestCreateAgent_GCPIdentityAssignWrongProject(t *testing.T) {
 	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "gcp-wrong-project",
+		Name:      "gcp-wrong-project",
 		ProjectID: project.ID,
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode:     "assign",
@@ -3976,7 +3976,7 @@ func TestCreateAgent_GCPIdentityBlockWithSAID(t *testing.T) {
 	srv, _, project := setupCreateAgentServer(t, disp)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "gcp-block-with-sa",
+		Name:      "gcp-block-with-sa",
 		ProjectID: project.ID,
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode:     "block",
@@ -3991,7 +3991,7 @@ func TestCreateAgent_GCPIdentityPassthroughWithSAID(t *testing.T) {
 	srv, _, project := setupCreateAgentServer(t, disp)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "gcp-passthrough-with-sa",
+		Name:      "gcp-passthrough-with-sa",
 		ProjectID: project.ID,
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode:     "passthrough",
@@ -4041,7 +4041,7 @@ func TestCreateAgent_GCPPassthrough_BrokerOwnerAllowed(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -4051,9 +4051,9 @@ func TestCreateAgent_GCPPassthrough_BrokerOwnerAllowed(t *testing.T) {
 
 	// Broker owner should be allowed to use passthrough
 	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "pt-owner-agent",
+		Name:      "pt-owner-agent",
 		ProjectID: project.ID,
-		Task:    "do something",
+		Task:      "do something",
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode: "passthrough",
 		},
@@ -4118,7 +4118,7 @@ func TestCreateAgent_GCPPassthrough_NonOwnerDenied(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -4128,9 +4128,9 @@ func TestCreateAgent_GCPPassthrough_NonOwnerDenied(t *testing.T) {
 
 	// Non-owner should be DENIED passthrough
 	rec := doRequestAsUser(t, srv, nonOwner, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "pt-denied-agent",
+		Name:      "pt-denied-agent",
 		ProjectID: project.ID,
-		Task:    "do something",
+		Task:      "do something",
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode: "passthrough",
 		},
@@ -4190,7 +4190,7 @@ func TestCreateAgent_GCPPassthrough_AdminAllowed(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -4200,9 +4200,9 @@ func TestCreateAgent_GCPPassthrough_AdminAllowed(t *testing.T) {
 
 	// Admin (non-owner) should be allowed passthrough
 	rec := doRequestAsUser(t, srv, adminUser, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "pt-admin-agent",
+		Name:      "pt-admin-agent",
 		ProjectID: project.ID,
-		Task:    "do something",
+		Task:      "do something",
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode: "passthrough",
 		},
@@ -4238,9 +4238,9 @@ func TestCreateAgent_GCPIdentityBlockOverridesProjectDefault(t *testing.T) {
 
 	// Create agent with explicit "block" — should override project default
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "gcp-block-override-agent",
+		Name:      "gcp-block-override-agent",
 		ProjectID: project.ID,
-		Task:    "do something",
+		Task:      "do something",
 		GCPIdentity: &GCPIdentityAssignment{
 			MetadataMode: "block",
 		},
@@ -4284,9 +4284,9 @@ func TestCreateAgent_GCPIdentityProjectDefaultApplied(t *testing.T) {
 
 	// Create agent WITHOUT GCP identity — project default should apply
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name:    "gcp-project-default-agent",
+		Name:      "gcp-project-default-agent",
 		ProjectID: project.ID,
-		Task:    "do something",
+		Task:      "do something",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code)
 
@@ -4308,11 +4308,11 @@ func TestPreserveTerminalPhase(t *testing.T) {
 
 	t.Run("preserves error phase", func(t *testing.T) {
 		agent := &store.Agent{
-			ID:      "agent-tp-error",
-			Slug:    "agent-tp-error",
-			Name:    "TP Error Agent",
+			ID:        "agent-tp-error",
+			Slug:      "agent-tp-error",
+			Name:      "TP Error Agent",
 			ProjectID: project.ID,
-			Phase:   string(state.PhaseCreated),
+			Phase:     string(state.PhaseCreated),
 		}
 		require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -4335,11 +4335,11 @@ func TestPreserveTerminalPhase(t *testing.T) {
 
 	t.Run("preserves stopped phase", func(t *testing.T) {
 		agent := &store.Agent{
-			ID:      "agent-tp-stopped",
-			Slug:    "agent-tp-stopped",
-			Name:    "TP Stopped Agent",
+			ID:        "agent-tp-stopped",
+			Slug:      "agent-tp-stopped",
+			Name:      "TP Stopped Agent",
 			ProjectID: project.ID,
-			Phase:   string(state.PhaseCreated),
+			Phase:     string(state.PhaseCreated),
 		}
 		require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -4355,11 +4355,11 @@ func TestPreserveTerminalPhase(t *testing.T) {
 
 	t.Run("does not overwrite non-terminal phase", func(t *testing.T) {
 		agent := &store.Agent{
-			ID:      "agent-tp-running",
-			Slug:    "agent-tp-running",
-			Name:    "TP Running Agent",
+			ID:        "agent-tp-running",
+			Slug:      "agent-tp-running",
+			Name:      "TP Running Agent",
 			ProjectID: project.ID,
-			Phase:   string(state.PhaseCreated),
+			Phase:     string(state.PhaseCreated),
 		}
 		require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -4446,7 +4446,7 @@ func TestHandleAgentExec_DispatchesToRuntimeBroker(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -4456,7 +4456,7 @@ func TestHandleAgentExec_DispatchesToRuntimeBroker(t *testing.T) {
 		ID:              "agent-exec-1",
 		Slug:            "agent-exec-1",
 		Name:            "Exec Agent",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 	}
@@ -4498,7 +4498,7 @@ func TestHandleProjectAgentExec_DispatchesToRuntimeBroker(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:    project.ID,
+		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
@@ -4508,7 +4508,7 @@ func TestHandleProjectAgentExec_DispatchesToRuntimeBroker(t *testing.T) {
 		ID:              "agent-exec-project-route",
 		Slug:            "agent-exec-project-route",
 		Name:            "Exec Agent Project Route",
-		ProjectID:         project.ID,
+		ProjectID:       project.ID,
 		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 	}

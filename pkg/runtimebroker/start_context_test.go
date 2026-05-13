@@ -91,7 +91,7 @@ func TestBuildStartContext_BasicFields(t *testing.T) {
 		Name:        "my-agent",
 		AgentID:     "uuid-1",
 		Slug:        "my-agent-slug",
-		ProjectID:     "grove-1",
+		ProjectID:   "grove-1",
 		Attach:      false,
 		HTTPRequest: r,
 	})
@@ -256,7 +256,7 @@ func TestBuildStartContext_GitClone(t *testing.T) {
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
-		Name:      "agent-1",
+		Name:        "agent-1",
 		ProjectPath: "/some/path",
 		Config: &CreateAgentConfig{
 			Branch: "feature-1",
@@ -339,7 +339,7 @@ func TestBuildStartContext_HubNativeProjectWritesMarker(t *testing.T) {
 	projectPath := filepath.Join(grovesDir, "web-demo")
 
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
-		Name:      "agent-1",
+		Name:        "agent-1",
 		ProjectSlug: "web-demo",
 		ProjectPath: projectPath,
 		ProjectID:   "6d868c0f-b862-49e0-a44b-3555a3887ee3",
@@ -395,7 +395,7 @@ func TestBuildStartContext_HubNativeProjectSlugResolution(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
-		Name:      "agent-1",
+		Name:        "agent-1",
 		ProjectSlug: "my-project",
 		ProjectID:   "aabbccdd-1234-5678-9012-abcdef123456",
 	})
@@ -431,7 +431,7 @@ func TestBuildStartContext_HubNativeProjectPreservesExistingProjectID(t *testing
 	}
 
 	_, err := srv.buildStartContext(context.Background(), startContextInputs{
-		Name:      "agent-1",
+		Name:        "agent-1",
 		ProjectSlug: "existing-grove",
 		ProjectPath: projectPath,
 		ProjectID:   "new-id-from-hub",
@@ -471,7 +471,7 @@ func TestBuildStartContext_HubNativeProjectPreservesExistingMarker(t *testing.T)
 	}
 
 	_, err := srv.buildStartContext(context.Background(), startContextInputs{
-		Name:      "agent-1",
+		Name:        "agent-1",
 		ProjectSlug: "existing-grove",
 		ProjectPath: projectPath,
 		ProjectID:   "new-id-from-hub",

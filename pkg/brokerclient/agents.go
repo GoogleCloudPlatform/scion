@@ -71,8 +71,8 @@ type agentService struct {
 // ListAgentsOptions configures agent list filtering.
 type ListAgentsOptions struct {
 	ProjectID string
-	Status  string
-	Page    apiclient.PageOptions
+	Status    string
+	Page      apiclient.PageOptions
 }
 
 // DeleteAgentOptions configures agent deletion.

@@ -55,7 +55,7 @@ type HttpRequest struct {
 // RequestMeta holds mutable request-scoped metadata that handlers can enrich.
 type RequestMeta struct {
 	mu        sync.Mutex
-	ProjectID   string
+	ProjectID string
 	AgentID   string
 	BrokerID  string
 	RequestID string
@@ -292,7 +292,7 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 
 			// Create request metadata and store in context
 			meta := &RequestMeta{
-				ProjectID:   groveID,
+				ProjectID: groveID,
 				AgentID:   agentID,
 				RequestID: requestID,
 				TraceID:   traceID,
