@@ -341,20 +341,6 @@ func (h *CommandHandler) handleStatus(msg *TGMessage) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if msg.From != nil {
-		senderID := strconv.FormatInt(msg.From.ID, 10)
-		mapping, err := h.store.GetUserMapping(ctx, senderID)
-		if err != nil {
-			h.log.Error("Failed to check user mapping", "error", err, "telegram_user_id", senderID)
-			h.reply(chatID, "Something went wrong. Please try again.")
-			return
-		}
-		if mapping == nil {
-			h.reply(chatID, "Please /register first to use this bot.")
-			return
-		}
-	}
-
 	links, err := h.store.GetAllGroupLinks(ctx)
 	if err != nil {
 		h.log.Error("Failed to get group links", "error", err)
@@ -398,7 +384,21 @@ func (h *CommandHandler) handleStatus(msg *TGMessage) {
 		lines = append(lines, line)
 	}
 
-	h.reply(chatID, "Linked groups:\n"+strings.Join(lines, "\n"))
+	// Build status with registration info first.
+	regStatus := "Not registered"
+	if msg.From != nil {
+		senderID := strconv.FormatInt(msg.From.ID, 10)
+		if m, _ := h.store.GetUserMapping(ctx, senderID); m != nil {
+			if m.ScionEmail != "" {
+				regStatus = "Registered as " + m.ScionEmail
+			} else if m.ScionUserID != "" {
+				regStatus = "Registered (user ID: " + m.ScionUserID + ")"
+			}
+		}
+	}
+
+	output := "Registration: " + regStatus + "\n\nLinked groups:\n" + strings.Join(lines, "\n")
+	h.reply(chatID, output)
 }
 
 func (h *CommandHandler) handleSettings(msg *TGMessage) {
