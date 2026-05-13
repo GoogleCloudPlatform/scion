@@ -154,24 +154,68 @@ func buildSetupConfirmKeyboard(currentProject string) *InlineKeyboardMarkup {
 	}
 }
 
-// buildSettingsKeyboard creates keyboard for /settings command (observer mode: show agent-to-agent messages in group).
-// Callback data: settings:a2a:on / settings:a2a:off
-func buildSettingsKeyboard(showAgentToAgent bool) *InlineKeyboardMarkup {
-	onLabel := "Observer: On"
-	offLabel := "Observer: Off"
+// buildSettingsKeyboard creates keyboard for /settings command.
+// Includes observer mode toggle and group notifications toggle.
+func buildSettingsKeyboard(showAgentToAgent, notifyInGroup bool) *InlineKeyboardMarkup {
+	a2aOnLabel := "Observer: On"
+	a2aOffLabel := "Observer: Off"
 	if showAgentToAgent {
-		onLabel = "✓ Observer: On"
+		a2aOnLabel = "✓ Observer: On"
 	} else {
-		offLabel = "✓ Observer: Off"
+		a2aOffLabel = "✓ Observer: Off"
 	}
+
+	grpOnLabel := "Group Notifications: On"
+	grpOffLabel := "Group Notifications: Off"
+	if notifyInGroup {
+		grpOnLabel = "✓ Group Notifications: On"
+	} else {
+		grpOffLabel = "✓ Group Notifications: Off"
+	}
+
 	return &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
 			{
-				{Text: onLabel, CallbackData: "settings:a2a:on"},
-				{Text: offLabel, CallbackData: "settings:a2a:off"},
+				{Text: a2aOnLabel, CallbackData: "settings:a2a:on"},
+				{Text: a2aOffLabel, CallbackData: "settings:a2a:off"},
+			},
+			{
+				{Text: grpOnLabel, CallbackData: "settings:grp:on"},
+				{Text: grpOffLabel, CallbackData: "settings:grp:off"},
 			},
 		},
 	}
+}
+
+// notificationAgentEntry pairs an agent with its notification-enabled state for keyboard building.
+type notificationAgentEntry struct {
+	ProjectSlug string
+	ProjectID   string
+	AgentSlug   string
+	Enabled     bool
+}
+
+// buildNotificationsKeyboard creates an inline keyboard for per-agent notification toggles.
+// Callback data: notify:<projectID>:<agentSlug>
+func buildNotificationsKeyboard(agents []notificationAgentEntry) *InlineKeyboardMarkup {
+	var rows [][]InlineKeyboardButton
+	for _, a := range agents {
+		label := a.AgentSlug
+		if a.ProjectSlug != "" {
+			label = a.ProjectSlug + "/" + a.AgentSlug
+		}
+		if a.Enabled {
+			label = "🔔 " + label
+		} else {
+			label = "🔕 " + label
+		}
+		btn := InlineKeyboardButton{
+			Text:         label,
+			CallbackData: truncateCallback(fmt.Sprintf("notify:%s:%s", a.ProjectID, a.AgentSlug)),
+		}
+		rows = append(rows, []InlineKeyboardButton{btn})
+	}
+	return &InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
 // truncateCallback ensures callback data stays within Telegram's 64-byte limit.

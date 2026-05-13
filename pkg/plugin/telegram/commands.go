@@ -109,6 +109,9 @@ func (h *CommandHandler) HandleCommand(msg *TGMessage) bool {
 	case "/settings":
 		h.handleSettings(msg)
 		return true
+	case "/notifications":
+		h.handleNotifications(msg)
+		return true
 	default:
 		return false
 	}
@@ -322,6 +325,7 @@ func (h *CommandHandler) handleHelp(msg *TGMessage) {
 			"/register — Link your Telegram account to your scion hub identity\n"+
 			"/unregister — Remove your Telegram account link\n"+
 			"/status — Show linked groups and registration status\n"+
+			"/notifications — Manage per-agent notification subscriptions\n"+
 			"/help — Show this help message\n\n"+
 			"Add me to a group and use /setup there to link it to a scion project.")
 	}
@@ -416,8 +420,102 @@ func (h *CommandHandler) handleSettings(msg *TGMessage) {
 		return
 	}
 
-	kb := buildSettingsKeyboard(link.ShowAgentToAgent)
+	kb := buildSettingsKeyboard(link.ShowAgentToAgent, link.NotifyInGroup)
 	h.replyWithKeyboard(chatID, "Group settings:", kb)
+}
+
+func (h *CommandHandler) handleNotifications(msg *TGMessage) {
+	chatID := msg.Chat.ID
+
+	if isGroupChat(chatID) {
+		h.reply(chatID, "Use /notifications in a direct message.")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	senderID := ""
+	if msg.From != nil {
+		senderID = strconv.FormatInt(msg.From.ID, 10)
+	}
+	if senderID == "" {
+		h.reply(chatID, "Could not identify your user.")
+		return
+	}
+
+	mapping, err := h.store.GetUserMapping(ctx, senderID)
+	if err != nil {
+		h.log.Error("Failed to check user mapping", "error", err)
+		h.reply(chatID, "Something went wrong. Please try again.")
+		return
+	}
+	if mapping == nil {
+		h.reply(chatID, "Please /register first to manage notifications.")
+		return
+	}
+
+	links, err := h.store.GetAllGroupLinks(ctx)
+	if err != nil {
+		h.log.Error("Failed to get group links", "error", err)
+		h.reply(chatID, "Something went wrong. Please try again.")
+		return
+	}
+
+	if len(links) == 0 {
+		h.reply(chatID, "No linked projects found. Link a group to a project with /setup first.")
+		return
+	}
+
+	existingPrefs, err := h.store.GetNotificationPrefs(ctx, senderID)
+	if err != nil {
+		h.log.Error("Failed to get notification prefs", "error", err)
+		h.reply(chatID, "Something went wrong. Please try again.")
+		return
+	}
+	prefMap := make(map[string]bool)
+	for _, p := range existingPrefs {
+		prefMap[p.ProjectID+":"+p.AgentSlug] = p.Enabled
+	}
+
+	seen := make(map[string]bool)
+	var entries []notificationAgentEntry
+	for _, link := range links {
+		if !link.Active {
+			continue
+		}
+		if seen[link.ProjectID] {
+			continue
+		}
+		seen[link.ProjectID] = true
+
+		agents, agentErr := h.getAgents(ctx, link.ProjectID)
+		if agentErr != nil {
+			h.log.Warn("Failed to list agents for notification prefs", "project_id", link.ProjectID, "error", agentErr)
+			continue
+		}
+
+		for _, agent := range agents {
+			enabled := true
+			if val, ok := prefMap[link.ProjectID+":"+agent.Slug]; ok {
+				enabled = val
+			}
+			entries = append(entries, notificationAgentEntry{
+				ProjectSlug: link.ProjectSlug,
+				ProjectID:   link.ProjectID,
+				AgentSlug:   agent.Slug,
+				Enabled:     enabled,
+			})
+		}
+	}
+
+	if len(entries) == 0 {
+		h.reply(chatID, "No agents found across linked projects.")
+		return
+	}
+
+	kb := buildNotificationsKeyboard(entries)
+	h.replyWithKeyboard(chatID, "Tap an agent to toggle notifications:", kb)
 }
 
 // getAgents returns agents for a project, using the store cache with a

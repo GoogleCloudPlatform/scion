@@ -629,6 +629,121 @@ func TestStore_CallbackLookup_CleanExpired(t *testing.T) {
 	assert.NotNil(t, got)
 }
 
+// --- NotificationPref ---
+
+func TestStore_NotificationPref_SaveAndGet(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	pref := &NotificationPref{
+		TelegramUserID: "456",
+		ProjectID:      "proj-1",
+		AgentSlug:      "coder",
+		Enabled:        true,
+	}
+	require.NoError(t, store.SaveNotificationPref(ctx, pref))
+
+	got, err := store.GetNotificationPref(ctx, "456", "proj-1", "coder")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "456", got.TelegramUserID)
+	assert.Equal(t, "proj-1", got.ProjectID)
+	assert.Equal(t, "coder", got.AgentSlug)
+	assert.True(t, got.Enabled)
+}
+
+func TestStore_NotificationPref_GetNotFound(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	got, err := store.GetNotificationPref(ctx, "456", "proj-1", "nonexistent")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+func TestStore_NotificationPref_Toggle(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	pref := &NotificationPref{
+		TelegramUserID: "456",
+		ProjectID:      "proj-1",
+		AgentSlug:      "coder",
+		Enabled:        true,
+	}
+	require.NoError(t, store.SaveNotificationPref(ctx, pref))
+
+	pref.Enabled = false
+	require.NoError(t, store.SaveNotificationPref(ctx, pref))
+
+	got, err := store.GetNotificationPref(ctx, "456", "proj-1", "coder")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.False(t, got.Enabled)
+}
+
+func TestStore_NotificationPref_GetAll(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	for _, slug := range []string{"coder", "reviewer", "tester"} {
+		require.NoError(t, store.SaveNotificationPref(ctx, &NotificationPref{
+			TelegramUserID: "456",
+			ProjectID:      "proj-1",
+			AgentSlug:      slug,
+			Enabled:        slug != "reviewer",
+		}))
+	}
+
+	prefs, err := store.GetNotificationPrefs(ctx, "456")
+	require.NoError(t, err)
+	assert.Len(t, prefs, 3)
+
+	prefMap := make(map[string]bool)
+	for _, p := range prefs {
+		prefMap[p.AgentSlug] = p.Enabled
+	}
+	assert.True(t, prefMap["coder"])
+	assert.False(t, prefMap["reviewer"])
+	assert.True(t, prefMap["tester"])
+}
+
+func TestStore_NotificationPref_GetAllEmpty(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	prefs, err := store.GetNotificationPrefs(ctx, "nonexistent")
+	require.NoError(t, err)
+	assert.Len(t, prefs, 0)
+}
+
+func TestStore_GroupLink_NotifyInGroup(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	link := &GroupLink{
+		ChatID:        -100,
+		ProjectID:     "proj-1",
+		LinkedAt:      time.Now().UTC(),
+		Active:        true,
+		NotifyInGroup: true,
+	}
+	require.NoError(t, store.SaveGroupLink(ctx, link))
+
+	got, err := store.GetGroupLink(ctx, -100)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.True(t, got.NotifyInGroup)
+
+	link.NotifyInGroup = false
+	require.NoError(t, store.SaveGroupLink(ctx, link))
+
+	got, err = store.GetGroupLink(ctx, -100)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.False(t, got.NotifyInGroup)
+}
+
 // --- Store lifecycle ---
 
 func TestStore_OpenInvalidPath(t *testing.T) {

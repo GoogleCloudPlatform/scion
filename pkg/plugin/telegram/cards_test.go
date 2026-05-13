@@ -141,8 +141,8 @@ func TestBuildSetupConfirmKeyboard(t *testing.T) {
 }
 
 func TestBuildSettingsKeyboard_AgentToAgentOn(t *testing.T) {
-	kb := buildSettingsKeyboard(true)
-	require.Len(t, kb.InlineKeyboard, 1)
+	kb := buildSettingsKeyboard(true, false)
+	require.Len(t, kb.InlineKeyboard, 2)
 	assert.Equal(t, "✓ Observer: On", kb.InlineKeyboard[0][0].Text)
 	assert.Equal(t, "settings:a2a:on", kb.InlineKeyboard[0][0].CallbackData)
 	assert.Equal(t, "Observer: Off", kb.InlineKeyboard[0][1].Text)
@@ -150,10 +150,32 @@ func TestBuildSettingsKeyboard_AgentToAgentOn(t *testing.T) {
 }
 
 func TestBuildSettingsKeyboard_AgentToAgentOff(t *testing.T) {
-	kb := buildSettingsKeyboard(false)
-	require.Len(t, kb.InlineKeyboard, 1)
+	kb := buildSettingsKeyboard(false, false)
+	require.Len(t, kb.InlineKeyboard, 2)
 	assert.Equal(t, "Observer: On", kb.InlineKeyboard[0][0].Text)
 	assert.Equal(t, "✓ Observer: Off", kb.InlineKeyboard[0][1].Text)
+}
+
+func TestBuildSettingsKeyboard_GroupNotifyOn(t *testing.T) {
+	kb := buildSettingsKeyboard(false, true)
+	require.Len(t, kb.InlineKeyboard, 2)
+	assert.Equal(t, "✓ Group Notifications: On", kb.InlineKeyboard[1][0].Text)
+	assert.Equal(t, "settings:grp:on", kb.InlineKeyboard[1][0].CallbackData)
+	assert.Equal(t, "Group Notifications: Off", kb.InlineKeyboard[1][1].Text)
+	assert.Equal(t, "settings:grp:off", kb.InlineKeyboard[1][1].CallbackData)
+}
+
+func TestBuildNotificationsKeyboard(t *testing.T) {
+	agents := []notificationAgentEntry{
+		{ProjectSlug: "proj-a", ProjectID: "id-a", AgentSlug: "coder", Enabled: true},
+		{ProjectSlug: "proj-a", ProjectID: "id-a", AgentSlug: "reviewer", Enabled: false},
+	}
+	kb := buildNotificationsKeyboard(agents)
+	require.Len(t, kb.InlineKeyboard, 2)
+	assert.Equal(t, "🔔 proj-a/coder", kb.InlineKeyboard[0][0].Text)
+	assert.Equal(t, "notify:id-a:coder", kb.InlineKeyboard[0][0].CallbackData)
+	assert.Equal(t, "🔕 proj-a/reviewer", kb.InlineKeyboard[1][0].Text)
+	assert.Equal(t, "notify:id-a:reviewer", kb.InlineKeyboard[1][0].CallbackData)
 }
 
 func TestCallbackData_Under64Bytes(t *testing.T) {

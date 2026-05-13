@@ -97,6 +97,8 @@ func (h *CallbackHandler) HandleCallback(ctx context.Context, cb *CallbackQuery)
 		return h.handleAskCallback(ctx, cb, parts[1:])
 	case "settings":
 		return nil, h.handleSettingsCallback(ctx, cb, parts[1:])
+	case "notify":
+		return nil, h.handleNotifyCallback(ctx, cb, parts[1:])
 	default:
 		return nil, fmt.Errorf("unknown callback action: %s", parts[0])
 	}
@@ -416,23 +418,33 @@ func (h *CallbackHandler) handleSettingsCallback(ctx context.Context, cb *Callba
 		messageID = cb.Message.MessageID
 	}
 
-	if setting != "a2a" {
-		return fmt.Errorf("unknown setting: %s", setting)
-	}
-
 	link, err := h.store.GetGroupLink(ctx, chatID)
 	if err != nil || link == nil {
 		h.answerCallback(ctx, cb.ID, "Group is not linked to a project.", false)
 		return err
 	}
 
-	switch value {
-	case "on":
-		link.ShowAgentToAgent = true
-	case "off":
-		link.ShowAgentToAgent = false
+	switch setting {
+	case "a2a":
+		switch value {
+		case "on":
+			link.ShowAgentToAgent = true
+		case "off":
+			link.ShowAgentToAgent = false
+		default:
+			return fmt.Errorf("invalid a2a value: %s", value)
+		}
+	case "grp":
+		switch value {
+		case "on":
+			link.NotifyInGroup = true
+		case "off":
+			link.NotifyInGroup = false
+		default:
+			return fmt.Errorf("invalid grp value: %s", value)
+		}
 	default:
-		return fmt.Errorf("invalid a2a value: %s", value)
+		return fmt.Errorf("unknown setting: %s", setting)
 	}
 
 	if err := h.store.SaveGroupLink(ctx, link); err != nil {
@@ -441,14 +453,129 @@ func (h *CallbackHandler) handleSettingsCallback(ctx context.Context, cb *Callba
 		return err
 	}
 
-	kb := buildSettingsKeyboard(link.ShowAgentToAgent)
+	kb := buildSettingsKeyboard(link.ShowAgentToAgent, link.NotifyInGroup)
+	h.editMarkup(ctx, chatID, messageID, kb)
+
+	var toastMsg string
+	switch setting {
+	case "a2a":
+		label := "off"
+		if link.ShowAgentToAgent {
+			label = "on"
+		}
+		toastMsg = fmt.Sprintf("Observer mode: %s", label)
+	case "grp":
+		label := "off"
+		if link.NotifyInGroup {
+			label = "on"
+		}
+		toastMsg = fmt.Sprintf("Group notifications: %s", label)
+	}
+	h.answerCallback(ctx, cb.ID, toastMsg, false)
+	return nil
+}
+
+func (h *CallbackHandler) handleNotifyCallback(ctx context.Context, cb *CallbackQuery, parts []string) error {
+	if len(parts) < 2 {
+		return fmt.Errorf("invalid notify callback data")
+	}
+
+	projectID := parts[0]
+	agentSlug := parts[1]
+
+	chatID := int64(0)
+	messageID := int64(0)
+	if cb.Message != nil {
+		chatID = cb.Message.Chat.ID
+		messageID = cb.Message.MessageID
+	}
+
+	senderID := ""
+	if cb.From != nil {
+		senderID = strconv.FormatInt(cb.From.ID, 10)
+	}
+	if senderID == "" {
+		h.answerCallback(ctx, cb.ID, "Could not identify user.", false)
+		return nil
+	}
+
+	existing, err := h.store.GetNotificationPref(ctx, senderID, projectID, agentSlug)
+	if err != nil {
+		h.log.Error("Failed to get notification pref", "error", err)
+		h.answerCallback(ctx, cb.ID, "Something went wrong.", false)
+		return err
+	}
+
+	newEnabled := false
+	if existing == nil {
+		newEnabled = false
+	} else {
+		newEnabled = !existing.Enabled
+	}
+
+	if err := h.store.SaveNotificationPref(ctx, &NotificationPref{
+		TelegramUserID: senderID,
+		ProjectID:      projectID,
+		AgentSlug:      agentSlug,
+		Enabled:        newEnabled,
+	}); err != nil {
+		h.log.Error("Failed to save notification pref", "error", err)
+		h.answerCallback(ctx, cb.ID, "Failed to update.", false)
+		return err
+	}
+
+	allPrefs, err := h.store.GetNotificationPrefs(ctx, senderID)
+	if err != nil {
+		h.log.Error("Failed to reload notification prefs", "error", err)
+		h.answerCallback(ctx, cb.ID, "Updated but failed to refresh.", false)
+		return err
+	}
+	prefMap := make(map[string]bool)
+	for _, p := range allPrefs {
+		prefMap[p.ProjectID+":"+p.AgentSlug] = p.Enabled
+	}
+
+	links, err := h.store.GetAllGroupLinks(ctx)
+	if err != nil {
+		h.log.Error("Failed to get group links", "error", err)
+		h.answerCallback(ctx, cb.ID, "Updated but failed to refresh.", false)
+		return err
+	}
+
+	seen := make(map[string]bool)
+	var entries []notificationAgentEntry
+	for _, link := range links {
+		if !link.Active || seen[link.ProjectID] {
+			continue
+		}
+		seen[link.ProjectID] = true
+
+		cached, _ := h.store.GetProjectAgents(ctx, link.ProjectID)
+		if cached == nil {
+			continue
+		}
+		for _, agent := range cached.Agents {
+			enabled := true
+			if val, ok := prefMap[link.ProjectID+":"+agent.Slug]; ok {
+				enabled = val
+			}
+			entries = append(entries, notificationAgentEntry{
+				ProjectSlug: link.ProjectSlug,
+				ProjectID:   link.ProjectID,
+				AgentSlug:   agent.Slug,
+				Enabled:     enabled,
+			})
+		}
+	}
+
+	kb := buildNotificationsKeyboard(entries)
 	h.editMarkup(ctx, chatID, messageID, kb)
 
 	label := "off"
-	if link.ShowAgentToAgent {
+	if newEnabled {
 		label = "on"
 	}
-	h.answerCallback(ctx, cb.ID, fmt.Sprintf("Observer mode: %s", label), false)
+	h.answerCallback(ctx, cb.ID, fmt.Sprintf("%s notifications: %s", agentSlug, label), false)
 	return nil
 }
 
