@@ -618,10 +618,16 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		return b.publishInputNeeded(ctx, api, sq, chatIDs, msg, agentSlug, projectID)
 	}
 
-	// File attachment: when telegram_attachment_path is set, send the file
-	// via sendDocument with the message body as caption instead of a text message.
-	if msg != nil && msg.Metadata != nil {
-		if attachPath, ok := msg.Metadata["telegram_attachment_path"]; ok && attachPath != "" {
+	// File attachment: check msg.Attachments (scion CLI --attach flag convention)
+	// first, then fall back to telegram_attachment_path metadata key.
+	if msg != nil {
+		attachPath := ""
+		if len(msg.Attachments) > 0 {
+			attachPath = msg.Attachments[0]
+		} else if msg.Metadata != nil {
+			attachPath = msg.Metadata["telegram_attachment_path"]
+		}
+		if attachPath != "" {
 			return b.publishAttachment(ctx, api, chatIDs, msg, agentSlug, attachPath)
 		}
 	}
