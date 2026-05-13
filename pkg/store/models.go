@@ -427,6 +427,36 @@ type Template struct {
 	Updated time.Time `json:"updated"`
 }
 
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (t Template) MarshalJSON() ([]byte, error) {
+	type Alias Template
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(t),
+		GroveID: t.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (t *Template) UnmarshalJSON(data []byte) error {
+	type Alias Template
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(t),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if t.ProjectID == "" && aux.GroveID != "" {
+		t.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
 // TemplateFile represents a file within a template.
 type TemplateFile struct {
 	Path string `json:"path"`           // Relative path (e.g., "home/.bashrc")
@@ -791,6 +821,36 @@ type SubscriptionTemplate struct {
 	TriggerActivities []string `json:"triggerActivities"` // Pre-configured trigger set
 	ProjectID         string   `json:"projectId"`         // Project scope (empty = global)
 	CreatedBy         string   `json:"createdBy"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (t SubscriptionTemplate) MarshalJSON() ([]byte, error) {
+	type Alias SubscriptionTemplate
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(t),
+		GroveID: t.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (t *SubscriptionTemplate) UnmarshalJSON(data []byte) error {
+	type Alias SubscriptionTemplate
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(t),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if t.ProjectID == "" && aux.GroveID != "" {
+		t.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // Notification represents a notification record generated from a subscription match.

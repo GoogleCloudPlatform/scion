@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -457,6 +458,22 @@ type createTemplateRequest struct {
 	Scope             string   `json:"scope"`
 	TriggerActivities []string `json:"triggerActivities"`
 	ProjectID         string   `json:"projectId"`
+}
+
+// UnmarshalJSON implements backward compatibility for the grove-to-project rename.
+func (r *createTemplateRequest) UnmarshalJSON(data []byte) error {
+	type Alias createTemplateRequest
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{Alias: (*Alias)(r)}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // handleSubscriptionTemplateRoutes handles CRUD for subscription templates.

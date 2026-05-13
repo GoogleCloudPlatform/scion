@@ -263,3 +263,87 @@ func TestTemplateWithCapabilities_UnmarshalJSON(t *testing.T) {
 		assert.Equal(t, "p1", tmpl.ProjectID)
 	})
 }
+
+func TestCreateTemplateRequest_UnmarshalJSON(t *testing.T) {
+	t.Run("HandleProjectID", func(t *testing.T) {
+		data := `{"name":"tmpl","scope":"project","projectId":"p1"}`
+		var req CreateTemplateRequest
+		err := json.Unmarshal([]byte(data), &req)
+		require.NoError(t, err)
+		assert.Equal(t, "tmpl", req.Name)
+		assert.Equal(t, "p1", req.ProjectID)
+	})
+
+	t.Run("HandleGroveID", func(t *testing.T) {
+		data := `{"name":"tmpl","scope":"project","groveId":"p1"}`
+		var req CreateTemplateRequest
+		err := json.Unmarshal([]byte(data), &req)
+		require.NoError(t, err)
+		assert.Equal(t, "tmpl", req.Name)
+		assert.Equal(t, "p1", req.ProjectID)
+	})
+
+	t.Run("ProjectIDTakesPrecedence", func(t *testing.T) {
+		data := `{"name":"tmpl","scope":"project","projectId":"p1","groveId":"p2"}`
+		var req CreateTemplateRequest
+		err := json.Unmarshal([]byte(data), &req)
+		require.NoError(t, err)
+		assert.Equal(t, "p1", req.ProjectID)
+	})
+}
+
+func TestCloneTemplateRequest_UnmarshalJSON(t *testing.T) {
+	t.Run("HandleProjectID", func(t *testing.T) {
+		data := `{"name":"clone","scope":"project","projectId":"p1"}`
+		var req CloneTemplateRequest
+		err := json.Unmarshal([]byte(data), &req)
+		require.NoError(t, err)
+		assert.Equal(t, "clone", req.Name)
+		assert.Equal(t, "p1", req.ProjectID)
+	})
+
+	t.Run("HandleGroveID", func(t *testing.T) {
+		data := `{"name":"clone","scope":"project","groveId":"p1"}`
+		var req CloneTemplateRequest
+		err := json.Unmarshal([]byte(data), &req)
+		require.NoError(t, err)
+		assert.Equal(t, "clone", req.Name)
+		assert.Equal(t, "p1", req.ProjectID)
+	})
+
+	t.Run("ProjectIDTakesPrecedence", func(t *testing.T) {
+		data := `{"name":"clone","scope":"project","projectId":"p1","groveId":"p2"}`
+		var req CloneTemplateRequest
+		err := json.Unmarshal([]byte(data), &req)
+		require.NoError(t, err)
+		assert.Equal(t, "p1", req.ProjectID)
+	})
+}
+
+func TestCreateNotificationTemplateRequest_UnmarshalJSON(t *testing.T) {
+	t.Run("HandleProjectID", func(t *testing.T) {
+		data := `{"name":"notif","scope":"project","projectId":"p1","triggerActivities":["agent.started"]}`
+		var req createTemplateRequest
+		err := json.Unmarshal([]byte(data), &req)
+		require.NoError(t, err)
+		assert.Equal(t, "notif", req.Name)
+		assert.Equal(t, "p1", req.ProjectID)
+	})
+
+	t.Run("HandleGroveID", func(t *testing.T) {
+		data := `{"name":"notif","scope":"project","groveId":"p1","triggerActivities":["agent.started"]}`
+		var req createTemplateRequest
+		err := json.Unmarshal([]byte(data), &req)
+		require.NoError(t, err)
+		assert.Equal(t, "notif", req.Name)
+		assert.Equal(t, "p1", req.ProjectID)
+	})
+
+	t.Run("ProjectIDTakesPrecedence", func(t *testing.T) {
+		data := `{"name":"notif","scope":"project","projectId":"p1","groveId":"p2","triggerActivities":["agent.started"]}`
+		var req createTemplateRequest
+		err := json.Unmarshal([]byte(data), &req)
+		require.NoError(t, err)
+		assert.Equal(t, "p1", req.ProjectID)
+	})
+}
