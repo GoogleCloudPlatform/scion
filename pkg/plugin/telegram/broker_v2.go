@@ -633,9 +633,18 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 	}
 
 	// Resolve recipient's Telegram @username for the message header.
+	// Try msg.Recipient first, then fall back to extracting user ID from the topic.
 	recipientUsername := ""
-	if msg != nil && strings.HasPrefix(msg.Sender, "agent:") && strings.HasPrefix(msg.Recipient, "user:") {
-		recipientUsername = b.resolveRecipientUsername(ctx, store, msg.Recipient)
+	if msg != nil && strings.HasPrefix(msg.Sender, "agent:") && store != nil {
+		if strings.HasPrefix(msg.Recipient, "user:") {
+			recipientUsername = b.resolveRecipientUsername(ctx, store, msg.Recipient)
+		}
+		// Fallback: extract user ID from topic (scion.grove.<id>.user.<userid>.messages)
+		if recipientUsername == "" {
+			if userID := extractUserIDFromTopic(topic); userID != "" {
+				recipientUsername = b.resolveRecipientUsername(ctx, store, "user:"+userID)
+			}
+		}
 	}
 
 	// Format the message for Telegram.
@@ -1817,4 +1826,16 @@ func FormatMessageV2(msg *messages.StructuredMessage, agentSlug string, recipien
 
 	text := b.String()
 	return truncateMessage(text)
+}
+
+// extractUserIDFromTopic extracts the user ID from a topic of the form
+// scion.grove.<id>.user.<userid>.messages or scion.project.<id>.user.<userid>.messages.
+func extractUserIDFromTopic(topic string) string {
+	parts := strings.Split(topic, ".")
+	for i, p := range parts {
+		if p == "user" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
 }
