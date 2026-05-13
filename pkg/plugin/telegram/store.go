@@ -45,6 +45,7 @@ type Store interface {
 	SaveUserMapping(ctx context.Context, mapping *TelegramUserMapping) error
 	GetUserMapping(ctx context.Context, telegramUserID string) (*TelegramUserMapping, error)
 	GetUserMappingByEmail(ctx context.Context, email string) (*TelegramUserMapping, error)
+	GetUserMappingByUsername(ctx context.Context, username string) (*TelegramUserMapping, error)
 	GetUserMappingByScionUserID(ctx context.Context, userID string) (*TelegramUserMapping, error)
 	DeleteUserMapping(ctx context.Context, telegramUserID string) error
 	GetAllUserMappings(ctx context.Context) ([]*TelegramUserMapping, error)
@@ -206,6 +207,7 @@ CREATE TABLE IF NOT EXISTS user_mappings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_mappings_email ON user_mappings(scion_email);
+CREATE INDEX IF NOT EXISTS idx_user_mappings_username ON user_mappings(telegram_username);
 
 CREATE TABLE IF NOT EXISTS pending_ask_users (
 	request_id TEXT PRIMARY KEY,
@@ -400,6 +402,12 @@ func (s *sqliteStore) GetUserMapping(ctx context.Context, telegramUserID string)
 func (s *sqliteStore) GetUserMappingByEmail(ctx context.Context, email string) (*TelegramUserMapping, error) {
 	const q = `SELECT telegram_user_id, telegram_username, scion_user_id, scion_email, linked_at FROM user_mappings WHERE scion_email = ?`
 	row := s.db.QueryRowContext(ctx, q, email)
+	return scanUserMapping(row)
+}
+
+func (s *sqliteStore) GetUserMappingByUsername(ctx context.Context, username string) (*TelegramUserMapping, error) {
+	const q = `SELECT telegram_user_id, telegram_username, scion_user_id, scion_email, linked_at FROM user_mappings WHERE telegram_username = ? COLLATE NOCASE`
+	row := s.db.QueryRowContext(ctx, q, username)
 	return scanUserMapping(row)
 }
 
