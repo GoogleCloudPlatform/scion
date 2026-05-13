@@ -607,6 +607,17 @@ type AllowListEntry struct {
 	Created  time.Time `json:"created"`
 }
 
+// AllowListEntryWithInvite enriches an AllowListEntry with associated invite code details.
+type AllowListEntryWithInvite struct {
+	AllowListEntry
+	InviteCodePrefix string    `json:"inviteCodePrefix,omitempty"`
+	InviteMaxUses    int       `json:"inviteMaxUses,omitempty"`
+	InviteUseCount   int       `json:"inviteUseCount,omitempty"`
+	InviteExpiresAt  time.Time `json:"inviteExpiresAt,omitempty"`
+	InviteRevoked    bool      `json:"inviteRevoked,omitempty"`
+	InviteExpired    bool      `json:"inviteExpired,omitempty"`
+}
+
 // =============================================================================
 // Invite Codes
 // =============================================================================

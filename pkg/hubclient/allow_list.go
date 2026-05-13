@@ -35,14 +35,19 @@ type allowListService struct {
 	c *client
 }
 
-// AllowListEntry represents an email on the allow list.
+// AllowListEntry represents an email on the allow list, optionally enriched with invite details.
 type AllowListEntry struct {
-	ID       string    `json:"id"`
-	Email    string    `json:"email"`
-	Note     string    `json:"note"`
-	AddedBy  string    `json:"addedBy"`
-	InviteID string    `json:"inviteId,omitempty"`
-	Created  time.Time `json:"created"`
+	ID               string    `json:"id"`
+	Email            string    `json:"email"`
+	Note             string    `json:"note"`
+	AddedBy          string    `json:"addedBy"`
+	InviteID         string    `json:"inviteId,omitempty"`
+	Created          time.Time `json:"created"`
+	InviteCodePrefix string    `json:"inviteCodePrefix,omitempty"`
+	InviteMaxUses    int       `json:"inviteMaxUses,omitempty"`
+	InviteUseCount   int       `json:"inviteUseCount,omitempty"`
+	InviteExpiresAt  time.Time `json:"inviteExpiresAt,omitempty"`
+	InviteRevoked    bool      `json:"inviteRevoked,omitempty"`
 }
 
 // AllowListResponse is the response from listing allow list entries.

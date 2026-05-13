@@ -47,6 +47,13 @@ interface AllowListEntry {
   addedBy: string;
   inviteId?: string;
   created: string;
+  // Enriched invite details from joined query
+  inviteCodePrefix?: string;
+  inviteMaxUses?: number;
+  inviteUseCount?: number;
+  inviteExpiresAt?: string;
+  inviteRevoked?: boolean;
+  inviteExpired?: boolean;
 }
 
 interface InviteCodeEntry {
@@ -182,6 +189,9 @@ export class ScionPageAdminUsers extends LitElement {
 
   @state()
   private createdInviteResult: InviteCreateResult | null = null;
+
+  @state()
+  private generateInviteForEmail: string | null = null;
 
   @state()
   private inviteCopied = false;
@@ -949,14 +959,14 @@ export class ScionPageAdminUsers extends LitElement {
           aria-controls="panel-allow-list"
           class="tab-btn ${this.activeTab === 'allow-list' ? 'active' : ''}"
           @click=${() => { this.activeTab = 'allow-list'; this.loadAllowList(); }}
-        >Allow List ${this.allowListTotalCount > 0 ? `(${this.allowListTotalCount})` : ''}</button>
+        >Members ${this.allowListTotalCount > 0 ? `(${this.allowListTotalCount})` : ''}</button>
         <button
           role="tab"
           aria-selected=${this.activeTab === 'invites'}
           aria-controls="panel-invites"
           class="tab-btn ${this.activeTab === 'invites' ? 'active' : ''}"
           @click=${() => { this.activeTab = 'invites'; this.loadInvites(); }}
-        >Invites ${this.invitesTotalCount > 0 ? `(${this.invitesTotalCount})` : ''}</button>
+        >All Invites ${this.invitesTotalCount > 0 ? `(${this.invitesTotalCount})` : ''}</button>
       </div>
 
       ${this.activeTab === 'users'
@@ -1221,6 +1231,8 @@ export class ScionPageAdminUsers extends LitElement {
       this.addEmailValue = '';
       this.addEmailNote = '';
       void this.loadAllowList();
+      // Immediately offer to generate an invite for the new member
+      this.openGenerateInviteForMember(email);
     } catch (err) {
       this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to add email');
     } finally {
@@ -1244,6 +1256,29 @@ export class ScionPageAdminUsers extends LitElement {
     }
   }
 
+  private getAllowListInviteStatus(entry: AllowListEntry): string | null {
+    if (!entry.inviteId || !entry.inviteCodePrefix) return null;
+    if (entry.inviteRevoked) return 'revoked';
+    if (entry.inviteExpired) return 'expired';
+    if (entry.inviteMaxUses && entry.inviteMaxUses > 0
+        && entry.inviteUseCount !== undefined
+        && entry.inviteUseCount >= entry.inviteMaxUses) return 'exhausted';
+    return 'active';
+  }
+
+  private canGenerateInvite(entry: AllowListEntry): boolean {
+    const status = this.getAllowListInviteStatus(entry);
+    return status === null || status === 'expired' || status === 'revoked' || status === 'exhausted';
+  }
+
+  private openGenerateInviteForMember(email: string): void {
+    this.generateInviteForEmail = email;
+    this.createInviteMaxUses = 1;
+    this.createInviteNote = email;
+    this.createInviteExpiry = '24h';
+    this.showCreateInviteDialog = true;
+  }
+
   private renderAllowListTab() {
     if (this.allowListLoading) {
       return this.renderLoading();
@@ -1251,7 +1286,7 @@ export class ScionPageAdminUsers extends LitElement {
 
     return html`
       <div class="allow-list-header">
-        <span>${this.allowListTotalCount} email${this.allowListTotalCount !== 1 ? 's' : ''} on the allow list</span>
+        <span>${this.allowListTotalCount} member${this.allowListTotalCount !== 1 ? 's' : ''} on the allow list</span>
         <div style="display: flex; gap: 0.5rem">
           <sl-button size="small" variant="default" @click=${() => { this.showImportDialog = true; }}>
             <sl-icon slot="prefix" name="upload"></sl-icon>
@@ -1259,7 +1294,7 @@ export class ScionPageAdminUsers extends LitElement {
           </sl-button>
           <sl-button size="small" variant="primary" @click=${() => { this.showAddEmailDialog = true; this.loadEmailDomains(); }}>
             <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-            Add Email
+            Add Member
           </sl-button>
         </div>
       </div>
@@ -1268,8 +1303,8 @@ export class ScionPageAdminUsers extends LitElement {
         ? html`
             <div class="empty-state">
               <sl-icon name="shield-lock"></sl-icon>
-              <h2>No Allow List Entries</h2>
-              <p>When invite-only mode is enabled, only emails on this list (and admin emails) can log in.</p>
+              <h2>No Members</h2>
+              <p>When invite-only mode is enabled, only emails on this list (and admin emails) can log in. Add a member and generate their invite link.</p>
             </div>
           `
         : html`
@@ -1278,6 +1313,7 @@ export class ScionPageAdminUsers extends LitElement {
                 <thead>
                   <tr>
                     <th>Email</th>
+                    <th>Invite</th>
                     <th class="hide-mobile">Note</th>
                     <th class="hide-mobile">Added</th>
                     <th class="actions-cell"></th>
@@ -1285,27 +1321,56 @@ export class ScionPageAdminUsers extends LitElement {
                 </thead>
                 <tbody>
                   ${this.allowListEntries.map(
-                    (entry) => html`
-                      <tr>
-                        <td>${entry.email}</td>
-                        <td class="hide-mobile"><span class="meta-text">${entry.note || '-'}</span></td>
-                        <td class="hide-mobile"><span class="meta-text">${this.formatRelativeTime(entry.created)}</span></td>
-                        <td class="actions-cell">
-                          <sl-button
-                            size="small"
-                            variant="text"
-                            @click=${() => this.removeFromAllowList(entry.email)}
-                          >
-                            <sl-icon name="trash" style="color: var(--sl-color-danger-600, #dc2626)"></sl-icon>
-                          </sl-button>
-                        </td>
-                      </tr>
-                    `,
+                    (entry) => this.renderAllowListRow(entry),
                   )}
                 </tbody>
               </table>
             </div>
           `}
+    `;
+  }
+
+  private renderAllowListRow(entry: AllowListEntry) {
+    const inviteStatus = this.getAllowListInviteStatus(entry);
+    const canGenerate = this.canGenerateInvite(entry);
+
+    return html`
+      <tr>
+        <td>${entry.email}</td>
+        <td>
+          ${inviteStatus
+            ? html`<span class="invite-status ${inviteStatus}">${inviteStatus}</span>`
+            : html`<span class="meta-text">—</span>`}
+        </td>
+        <td class="hide-mobile"><span class="meta-text">${entry.note || '-'}</span></td>
+        <td class="hide-mobile"><span class="meta-text">${this.formatRelativeTime(entry.created)}</span></td>
+        <td class="actions-cell">
+          <sl-dropdown placement="bottom-end" hoist>
+            <sl-button slot="trigger" size="small" variant="text" caret>
+              <sl-icon name="three-dots-vertical"></sl-icon>
+            </sl-button>
+            <sl-menu>
+              ${canGenerate
+                ? html`<sl-menu-item @click=${() => this.openGenerateInviteForMember(entry.email)}>
+                    <sl-icon slot="prefix" name="send"></sl-icon>
+                    Generate Invite
+                  </sl-menu-item>`
+                : nothing}
+              ${inviteStatus === 'active' && entry.inviteId
+                ? html`<sl-menu-item @click=${() => this.revokeInvite(entry.inviteId!)}>
+                    <sl-icon slot="prefix" name="slash-circle"></sl-icon>
+                    Revoke Invite
+                  </sl-menu-item>`
+                : nothing}
+              ${canGenerate || inviteStatus === 'active' ? html`<sl-divider></sl-divider>` : nothing}
+              <sl-menu-item class="menu-item-danger" @click=${() => this.removeFromAllowList(entry.email)}>
+                <sl-icon slot="prefix" name="trash"></sl-icon>
+                Remove
+              </sl-menu-item>
+            </sl-menu>
+          </sl-dropdown>
+        </td>
+      </tr>
     `;
   }
 
@@ -1320,7 +1385,7 @@ export class ScionPageAdminUsers extends LitElement {
 
     return html`
       <sl-dialog
-        label="Add Email to Allow List"
+        label="Add Member"
         open
         @sl-request-close=${() => { if (!this.addEmailInProgress) this.showAddEmailDialog = false; }}
       >
@@ -1510,15 +1575,19 @@ export class ScionPageAdminUsers extends LitElement {
   private async createInvite(): Promise<void> {
     this.createInviteInProgress = true;
     try {
+      const body: Record<string, unknown> = {
+        expiresIn: this.createInviteExpiry,
+        maxUses: this.createInviteMaxUses,
+        note: this.createInviteNote,
+      };
+      if (this.generateInviteForEmail) {
+        body.email = this.generateInviteForEmail;
+      }
       const response = await fetch('/api/v1/admin/invites', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          expiresIn: this.createInviteExpiry,
-          maxUses: this.createInviteMaxUses,
-          note: this.createInviteNote,
-        }),
+        body: JSON.stringify(body),
       });
       if (!response.ok) {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
@@ -1529,7 +1598,12 @@ export class ScionPageAdminUsers extends LitElement {
       this.createInviteExpiry = '1h';
       this.createInviteMaxUses = 1;
       this.createInviteNote = '';
+      this.generateInviteForEmail = null;
       void this.loadInvites();
+      // Also refresh allow list to show updated inline invite status
+      if (this.activeTab === 'allow-list') {
+        void this.loadAllowList();
+      }
     } catch (err) {
       this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to create invite');
     } finally {
@@ -1548,6 +1622,10 @@ export class ScionPageAdminUsers extends LitElement {
       }
       this.showFeedback('success', 'Invite code revoked.');
       void this.loadInvites();
+      // Also refresh allow list to update inline invite status
+      if (this.activeTab === 'allow-list') {
+        void this.loadAllowList();
+      }
     } catch (err) {
       this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to revoke invite');
     }
@@ -1677,13 +1755,21 @@ export class ScionPageAdminUsers extends LitElement {
 
   private renderCreateInviteDialog() {
     if (!this.showCreateInviteDialog) return nothing;
+    const dialogLabel = this.generateInviteForEmail
+      ? `Generate Invite`
+      : 'Create Invite Code';
     return html`
       <sl-dialog
-        label="Create Invite Code"
+        label=${dialogLabel}
         open
-        @sl-request-close=${() => { if (!this.createInviteInProgress) this.showCreateInviteDialog = false; }}
+        @sl-request-close=${() => { if (!this.createInviteInProgress) { this.showCreateInviteDialog = false; this.generateInviteForEmail = null; } }}
       >
         <div class="create-invite-form">
+          ${this.generateInviteForEmail
+            ? html`<p style="margin: 0; font-size: 0.875rem; color: var(--scion-text-muted, #64748b)">
+                Generating invite for <strong style="color: var(--scion-text, #1e293b)">${this.generateInviteForEmail}</strong>
+              </p>`
+            : nothing}
           <sl-select
             label="Expiration"
             .value=${this.createInviteExpiry}
@@ -1715,14 +1801,14 @@ export class ScionPageAdminUsers extends LitElement {
           slot="footer"
           variant="default"
           ?disabled=${this.createInviteInProgress}
-          @click=${() => { this.showCreateInviteDialog = false; }}
+          @click=${() => { this.showCreateInviteDialog = false; this.generateInviteForEmail = null; }}
         >Cancel</sl-button>
         <sl-button
           slot="footer"
           variant="primary"
           ?loading=${this.createInviteInProgress}
           @click=${() => this.createInvite()}
-        >Create</sl-button>
+        >${this.generateInviteForEmail ? 'Generate' : 'Create'}</sl-button>
       </sl-dialog>
     `;
   }

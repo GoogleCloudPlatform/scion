@@ -45,9 +45,9 @@ type AllowListBulkAddResponse struct {
 }
 
 type AllowListResponse struct {
-	Items      []store.AllowListEntry `json:"items"`
-	TotalCount int                    `json:"totalCount"`
-	NextCursor string                 `json:"nextCursor,omitempty"`
+	Items      []store.AllowListEntryWithInvite `json:"items"`
+	TotalCount int                              `json:"totalCount"`
+	NextCursor string                           `json:"nextCursor,omitempty"`
 }
 
 // handleAdminAllowList handles GET/POST /api/v1/admin/allow-list.
@@ -136,10 +136,18 @@ func (s *Server) handleAdminAllowListGet(w http.ResponseWriter, r *http.Request)
 		opts.Cursor = q.Get("cursor")
 	}
 
-	result, err := s.store.ListAllowListEntries(r.Context(), opts)
+	result, err := s.store.ListAllowListEntriesWithInvites(r.Context(), opts)
 	if err != nil {
 		InternalError(w)
 		return
+	}
+
+	now := time.Now()
+	for i := range result.Items {
+		entry := &result.Items[i]
+		if !entry.InviteExpiresAt.IsZero() && now.After(entry.InviteExpiresAt) {
+			entry.InviteExpired = true
+		}
 	}
 
 	writeJSON(w, http.StatusOK, AllowListResponse{

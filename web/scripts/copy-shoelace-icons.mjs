@@ -70,6 +70,7 @@ const USED_ICONS = [
   'download',
   'emoji-frown',
   'envelope',
+  'envelope-open',
   'exclamation-circle-fill',
   'exclamation-octagon',
   'exclamation-triangle',
