@@ -1070,6 +1070,9 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		return
 	}
 
+	// Resolve @username mentions to scion user identities.
+	resolvedMentionsJSON := b.resolveUserMentions(ctx, tgMsg)
+
 	// Deliver to each target agent.
 	for _, agentSlug := range targets {
 		// Update conversation context.
@@ -1104,6 +1107,10 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			},
 		}
 
+		if resolvedMentionsJSON != "" {
+			msg.Metadata["resolved_mentions"] = resolvedMentionsJSON
+		}
+
 		if isEcho(msg) {
 			b.log.Debug("Filtered echo message via origin marker", "topic", topic)
 			continue
@@ -1114,6 +1121,68 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 
 		b.deliverInbound(topic, msg)
 	}
+}
+
+// resolveUserMentions extracts @username mentions from a Telegram message's
+// entities, looks each up in the user_mappings store, and returns a JSON string
+// mapping "@username" → "user:email" for all resolved mentions. Returns "" if
+// no mentions resolve.
+func (b *TelegramBrokerV2) resolveUserMentions(ctx context.Context, tgMsg *TGMessage) string {
+	if len(tgMsg.Entities) == 0 {
+		return ""
+	}
+
+	resolved := make(map[string]string)
+
+	for _, ent := range tgMsg.Entities {
+		switch ent.Type {
+		case "mention":
+			if ent.Offset < 0 || ent.Offset+ent.Length > len(tgMsg.Text) {
+				continue
+			}
+			mention := tgMsg.Text[ent.Offset : ent.Offset+ent.Length]
+			username := strings.TrimPrefix(mention, "@")
+			if username == "" {
+				continue
+			}
+			mapping, err := b.store.GetUserMappingByUsername(ctx, username)
+			if err != nil {
+				b.log.Warn("Failed to look up mention username", "username", username, "error", err)
+				continue
+			}
+			if mapping != nil && mapping.ScionUserID != "" {
+				resolved[mention] = mapping.ScionUserID
+			}
+		case "text_mention":
+			if ent.User == nil {
+				continue
+			}
+			tgUserID := strconv.FormatInt(ent.User.ID, 10)
+			mapping, err := b.store.GetUserMapping(ctx, tgUserID)
+			if err != nil {
+				b.log.Warn("Failed to look up text_mention user", "telegram_user_id", tgUserID, "error", err)
+				continue
+			}
+			displayName := "@" + ent.User.FirstName
+			if ent.User.Username != "" {
+				displayName = "@" + ent.User.Username
+			}
+			if mapping != nil && mapping.ScionUserID != "" {
+				resolved[displayName] = mapping.ScionUserID
+			}
+		}
+	}
+
+	if len(resolved) == 0 {
+		return ""
+	}
+
+	data, err := json.Marshal(resolved)
+	if err != nil {
+		b.log.Warn("Failed to marshal resolved mentions", "error", err)
+		return ""
+	}
+	return string(data)
 }
 
 // --- Callback query handling ---
@@ -1339,8 +1408,12 @@ func FormatMessageV2(msg *messages.StructuredMessage, agentSlug string) string {
 		b.WriteString("[Broadcast] ")
 	}
 
-	// Header: "🤖 agent-slug" for agent messages (no @ to avoid Telegram mention detection).
-	if agentSlug != "" {
+	// For agent-to-agent messages, show: "👀 🤖sender → 🤖recipient 👀"
+	if strings.HasPrefix(msg.Sender, "agent:") && strings.HasPrefix(msg.Recipient, "agent:") {
+		senderSlug := strings.TrimPrefix(msg.Sender, "agent:")
+		recipientSlug := strings.TrimPrefix(msg.Recipient, "agent:")
+		fmt.Fprintf(&b, "👀 🤖 %s → 🤖 %s 👀", senderSlug, recipientSlug)
+	} else if agentSlug != "" {
 		fmt.Fprintf(&b, "🤖 %s", agentSlug)
 	} else if strings.HasPrefix(msg.Sender, "agent:") {
 		slug := strings.TrimPrefix(msg.Sender, "agent:")
