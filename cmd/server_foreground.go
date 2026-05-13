@@ -325,6 +325,24 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 				if !pluginMgr.IsSelfManaged(scionplugin.PluginTypeBroker, bt) && hubSrv != nil && s != nil {
 					brokerID := "plugin-broker-" + bt
 					if authSvc := hubSrv.GetBrokerAuthService(); authSvc != nil {
+						// Ensure the runtime broker entity exists (required by
+						// the broker_secrets foreign key constraint).
+						if _, err := s.GetRuntimeBroker(ctx, brokerID); err != nil {
+							pluginBroker := &store.RuntimeBroker{
+								ID:              brokerID,
+								Name:            "plugin-" + bt,
+								Slug:            api.Slugify("plugin-" + bt),
+								Version:         "0.1.0",
+								Status:          store.BrokerStatusOnline,
+								ConnectionState: "embedded",
+								Labels:          map[string]string{"scion.io/plugin": bt},
+								Created:         time.Now(),
+								Updated:         time.Now(),
+							}
+							if createErr := s.CreateRuntimeBroker(ctx, pluginBroker); createErr != nil {
+								log.Printf("Warning: failed to register broker entity for plugin %q: %v", bt, createErr)
+							}
+						}
 						secretKey, secretErr := authSvc.GenerateAndStoreSecret(ctx, brokerID)
 						if secretErr != nil {
 							log.Printf("Warning: failed to generate secret for broker plugin %q: %v", bt, secretErr)
