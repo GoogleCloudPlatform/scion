@@ -758,6 +758,202 @@ func TestV2_HandleGroupMessage_ConversationContextSaved(t *testing.T) {
 	assert.Equal(t, int64(-200), cc.LastChatID)
 }
 
+// --- Reply routing fallback tests ---
+
+func TestV2_HandleGroupMessage_ReplyToBotMessage(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:       -200,
+		ProjectID:    "proj-1",
+		ProjectSlug:  "my-project",
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		ProjectID:   "proj-1",
+		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
+		RefreshedAt: time.Now(),
+	}))
+
+	var deliveredTopic string
+	var deliveredMsg *messages.StructuredMessage
+	done := make(chan struct{}, 1)
+	b.InboundHandler = func(topic string, msg *messages.StructuredMessage) {
+		deliveredTopic = topic
+		deliveredMsg = msg
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+
+	// Simulate replying to a bot message from the "reviewer" agent.
+	// No @-mention in the user's reply text — routing should use reply-to fallback.
+	b.handleGroupMessage(&TGMessage{
+		MessageID: 99,
+		From:      &TGUser{ID: 456, Username: "alice"},
+		Chat:      TGChat{ID: -200, Type: "group"},
+		Date:      time.Now().Unix(),
+		Text:      "yes, looks good to me",
+		ReplyToMessage: &TGMessage{
+			MessageID: 50,
+			From:      &TGUser{ID: b.botInfo.ID, IsBot: true, Username: b.botInfo.Username},
+			Chat:      TGChat{ID: -200, Type: "group"},
+			Text:      "🤖 reviewer\n\nPlease review the PR",
+		},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delivery")
+	}
+
+	assert.Equal(t, "scion.project.proj-1.agent.reviewer.messages", deliveredTopic)
+	assert.Equal(t, "yes, looks good to me", deliveredMsg.Msg)
+	assert.Equal(t, "agent:reviewer", deliveredMsg.Recipient)
+}
+
+func TestV2_HandleGroupMessage_ReplyToBotMessage_MentionTakesPriority(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:       -200,
+		ProjectID:    "proj-1",
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		ProjectID:   "proj-1",
+		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
+		RefreshedAt: time.Now(),
+	}))
+
+	var deliveredTopic string
+	done := make(chan struct{}, 1)
+	b.InboundHandler = func(topic string, msg *messages.StructuredMessage) {
+		deliveredTopic = topic
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+
+	// Reply to a reviewer message BUT explicitly mention @coder — mention wins.
+	b.handleGroupMessage(&TGMessage{
+		MessageID: 99,
+		From:      &TGUser{ID: 456, Username: "alice"},
+		Chat:      TGChat{ID: -200, Type: "group"},
+		Date:      time.Now().Unix(),
+		Text:      "@coder handle this instead",
+		ReplyToMessage: &TGMessage{
+			MessageID: 50,
+			From:      &TGUser{ID: b.botInfo.ID, IsBot: true, Username: b.botInfo.Username},
+			Chat:      TGChat{ID: -200, Type: "group"},
+			Text:      "🤖 reviewer\n\nSome reviewer message",
+		},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delivery")
+	}
+
+	// @coder mention takes priority over reply-to-reviewer
+	assert.Equal(t, "scion.project.proj-1.agent.coder.messages", deliveredTopic)
+}
+
+func TestV2_HandleGroupMessage_ReplyConversationContextFallback(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:       -200,
+		ProjectID:    "proj-1",
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		ProjectID:   "proj-1",
+		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
+		RefreshedAt: time.Now(),
+	}))
+
+	// Save a conversation context so the fallback can find it.
+	require.NoError(t, b.store.SaveConversationContext(ctx, &ConversationContext{
+		TelegramUserID: "456",
+		ProjectID:      "proj-1",
+		AgentSlug:      "reviewer",
+		LastChatID:     -200,
+		LastMessageAt:  time.Now().UTC(),
+	}))
+
+	var deliveredTopic string
+	done := make(chan struct{}, 1)
+	b.InboundHandler = func(topic string, msg *messages.StructuredMessage) {
+		deliveredTopic = topic
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+
+	// Reply to a bot message that has no parseable agent slug (e.g. a system message).
+	// Should fall back to conversation context.
+	b.handleGroupMessage(&TGMessage{
+		MessageID: 99,
+		From:      &TGUser{ID: 456, Username: "alice"},
+		Chat:      TGChat{ID: -200, Type: "group"},
+		Date:      time.Now().Unix(),
+		Text:      "continue with that",
+		ReplyToMessage: &TGMessage{
+			MessageID: 50,
+			From:      &TGUser{ID: b.botInfo.ID, IsBot: true, Username: b.botInfo.Username},
+			Chat:      TGChat{ID: -200, Type: "group"},
+			Text:      "System notification: deployment complete",
+		},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delivery")
+	}
+
+	assert.Equal(t, "scion.project.proj-1.agent.reviewer.messages", deliveredTopic)
+}
+
 // --- Publish tests ---
 
 func TestV2_Publish_DirectChatID(t *testing.T) {

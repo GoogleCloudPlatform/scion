@@ -25,6 +25,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1033,6 +1034,31 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 
 	// Resolve target agents from @-mentions.
 	targets := resolveTargetAgents(tgMsg, botUsername, link.DefaultAgent, agents)
+
+	// Fallback 1: reply-to-bot-message — extract the agent from the replied-to message.
+	if len(targets) == 0 && tgMsg.ReplyToMessage != nil {
+		if b.botInfo != nil && tgMsg.ReplyToMessage.From != nil && tgMsg.ReplyToMessage.From.ID == b.botInfo.ID {
+			if slug := extractAgentFromBotMessage(tgMsg.ReplyToMessage.Text); slug != "" {
+				if slices.Contains(agents, slug) {
+					targets = []string{slug}
+				}
+			}
+		}
+	}
+
+	// Fallback 2: most recent conversation context for this user+project.
+	if len(targets) == 0 && tgMsg.ReplyToMessage != nil {
+		if b.botInfo != nil && tgMsg.ReplyToMessage.From != nil && tgMsg.ReplyToMessage.From.ID == b.botInfo.ID {
+			if tgMsg.From != nil {
+				senderIDStr := strconv.FormatInt(tgMsg.From.ID, 10)
+				cc, err := b.store.GetLatestConversationContext(ctx, senderIDStr, link.ProjectID)
+				if err == nil && cc != nil && slices.Contains(agents, cc.AgentSlug) {
+					targets = []string{cc.AgentSlug}
+				}
+			}
+		}
+	}
+
 	if len(targets) == 0 {
 		return
 	}

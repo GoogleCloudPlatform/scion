@@ -260,6 +260,41 @@ func TestStore_ConversationContext_MultipleKeys(t *testing.T) {
 	assert.Equal(t, "reviewer", got2.AgentSlug)
 }
 
+func TestStore_ConversationContext_GetLatest(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Save two contexts with different timestamps — "reviewer" is more recent.
+	require.NoError(t, store.SaveConversationContext(ctx, &ConversationContext{
+		TelegramUserID: "456",
+		ProjectID:      "proj-1",
+		AgentSlug:      "coder",
+		LastChatID:     -100,
+		LastMessageAt:  time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC),
+	}))
+	require.NoError(t, store.SaveConversationContext(ctx, &ConversationContext{
+		TelegramUserID: "456",
+		ProjectID:      "proj-1",
+		AgentSlug:      "reviewer",
+		LastChatID:     -100,
+		LastMessageAt:  time.Date(2026, 5, 12, 10, 0, 0, 0, time.UTC),
+	}))
+
+	got, err := store.GetLatestConversationContext(ctx, "456", "proj-1")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "reviewer", got.AgentSlug)
+}
+
+func TestStore_ConversationContext_GetLatest_NotFound(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	got, err := store.GetLatestConversationContext(ctx, "999", "proj-unknown")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
 // --- ProjectAgents ---
 
 func TestStore_ProjectAgents_SaveAndGet(t *testing.T) {

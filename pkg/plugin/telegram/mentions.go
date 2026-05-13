@@ -15,6 +15,7 @@
 package telegram
 
 import (
+	"regexp"
 	"strings"
 	"unicode"
 )
@@ -151,4 +152,34 @@ func stripMentions(text string, botUsername string, agentSlugs []string) string 
 		parts = append(parts, word)
 	}
 	return strings.Join(parts, " ")
+}
+
+// Precompiled patterns for extractAgentFromBotMessage.
+var (
+	// agentToAgentRe matches the observer format: "👀 🤖 sender → 🤖 recipient 👀"
+	agentToAgentRe = regexp.MustCompile(`^(?:\[URGENT\] )?(?:\[Broadcast\] )?👀 🤖 \S+ → 🤖 (\S+) 👀`)
+	// standardAgentRe matches the standard format: "🤖 agent-slug" (optionally followed by " [status]")
+	standardAgentRe = regexp.MustCompile(`^(?:\[URGENT\] )?(?:\[Broadcast\] )?🤖 (\S+?)(?:\s*\[|\s*\n|$)`)
+)
+
+// extractAgentFromBotMessage parses a FormatMessageV2 output and extracts the
+// target agent slug. For agent-to-agent observer messages it returns the
+// recipient; for standard messages it returns the agent slug. Returns "" if
+// the text does not match any known format.
+func extractAgentFromBotMessage(text string) string {
+	if text == "" {
+		return ""
+	}
+
+	// Try agent-to-agent format first (more specific).
+	if m := agentToAgentRe.FindStringSubmatch(text); m != nil {
+		return m[1]
+	}
+
+	// Try standard agent format.
+	if m := standardAgentRe.FindStringSubmatch(text); m != nil {
+		return m[1]
+	}
+
+	return ""
 }

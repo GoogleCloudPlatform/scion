@@ -272,3 +272,58 @@ func TestResolveTargetAgents_BotAndOtherAgents(t *testing.T) {
 	result := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
 	assert.Equal(t, []string{"coder", "reviewer"}, result)
 }
+
+// --- extractAgentFromBotMessage tests ---
+
+func TestExtractAgentFromBotMessage_StandardFormat(t *testing.T) {
+	text := "🤖 coder\n\nSome message body here"
+	assert.Equal(t, "coder", extractAgentFromBotMessage(text))
+}
+
+func TestExtractAgentFromBotMessage_WithUrgentPrefix(t *testing.T) {
+	text := "[URGENT] 🤖 coder\n\nSomething urgent happened"
+	assert.Equal(t, "coder", extractAgentFromBotMessage(text))
+}
+
+func TestExtractAgentFromBotMessage_WithBroadcastPrefix(t *testing.T) {
+	text := "[Broadcast] 🤖 coder\n\nBroadcast message"
+	assert.Equal(t, "coder", extractAgentFromBotMessage(text))
+}
+
+func TestExtractAgentFromBotMessage_WithUrgentAndBroadcast(t *testing.T) {
+	text := "[URGENT] [Broadcast] 🤖 coder\n\nUrgent broadcast"
+	assert.Equal(t, "coder", extractAgentFromBotMessage(text))
+}
+
+func TestExtractAgentFromBotMessage_WithStatus(t *testing.T) {
+	text := "🤖 coder [running]\n\nDoing some work"
+	assert.Equal(t, "coder", extractAgentFromBotMessage(text))
+}
+
+func TestExtractAgentFromBotMessage_AgentToAgent(t *testing.T) {
+	text := "👀 🤖 sender → 🤖 recipient 👀\n\nSome agent-to-agent message"
+	assert.Equal(t, "recipient", extractAgentFromBotMessage(text))
+}
+
+func TestExtractAgentFromBotMessage_AgentToAgentUrgent(t *testing.T) {
+	text := "[URGENT] 👀 🤖 sender → 🤖 recipient 👀\n\nUrgent inter-agent"
+	assert.Equal(t, "recipient", extractAgentFromBotMessage(text))
+}
+
+func TestExtractAgentFromBotMessage_NoMatch(t *testing.T) {
+	assert.Equal(t, "", extractAgentFromBotMessage("Hello world"))
+}
+
+func TestExtractAgentFromBotMessage_Empty(t *testing.T) {
+	assert.Equal(t, "", extractAgentFromBotMessage(""))
+}
+
+func TestExtractAgentFromBotMessage_HyphenatedSlug(t *testing.T) {
+	text := "🤖 my-agent\n\nMessage body"
+	assert.Equal(t, "my-agent", extractAgentFromBotMessage(text))
+}
+
+func TestExtractAgentFromBotMessage_UnderscoreSlug(t *testing.T) {
+	text := "🤖 code_reviewer [idle]\n\nWaiting for tasks"
+	assert.Equal(t, "code_reviewer", extractAgentFromBotMessage(text))
+}

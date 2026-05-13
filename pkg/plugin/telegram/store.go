@@ -36,6 +36,7 @@ type Store interface {
 	// ConversationContext
 	SaveConversationContext(ctx context.Context, cc *ConversationContext) error
 	GetConversationContext(ctx context.Context, telegramUserID string, projectID string, agentSlug string) (*ConversationContext, error)
+	GetLatestConversationContext(ctx context.Context, telegramUserID string, projectID string) (*ConversationContext, error)
 
 	// ProjectAgents cache
 	SaveProjectAgents(ctx context.Context, pa *ProjectAgents) error
@@ -321,6 +322,29 @@ ON CONFLICT(telegram_user_id, project_id, agent_slug) DO UPDATE SET
 func (s *sqliteStore) GetConversationContext(ctx context.Context, telegramUserID string, projectID string, agentSlug string) (*ConversationContext, error) {
 	const q = `SELECT telegram_user_id, project_id, agent_slug, last_chat_id, last_message_at FROM conversation_contexts WHERE telegram_user_id = ? AND project_id = ? AND agent_slug = ?`
 	row := s.db.QueryRowContext(ctx, q, telegramUserID, projectID, agentSlug)
+
+	var cc ConversationContext
+	var lastMessageAt string
+	err := row.Scan(&cc.TelegramUserID, &cc.ProjectID, &cc.AgentSlug, &cc.LastChatID, &lastMessageAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	cc.LastMessageAt, err = time.Parse(time.RFC3339, lastMessageAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse last_message_at: %w", err)
+	}
+	return &cc, nil
+}
+
+func (s *sqliteStore) GetLatestConversationContext(ctx context.Context, telegramUserID string, projectID string) (*ConversationContext, error) {
+	const q = `SELECT telegram_user_id, project_id, agent_slug, last_chat_id, last_message_at
+FROM conversation_contexts
+WHERE telegram_user_id = ? AND project_id = ?
+ORDER BY last_message_at DESC LIMIT 1`
+	row := s.db.QueryRowContext(ctx, q, telegramUserID, projectID)
 
 	var cc ConversationContext
 	var lastMessageAt string
