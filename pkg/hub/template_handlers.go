@@ -17,6 +17,7 @@ package hub
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"sort"
 	"strconv"
@@ -45,6 +46,24 @@ type CreateTemplateRequest struct {
 	BaseTemplate string                `json:"baseTemplate,omitempty"`
 	Visibility   string                `json:"visibility,omitempty"`
 	Files        []FileUploadRequest   `json:"files,omitempty"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (r *CreateTemplateRequest) UnmarshalJSON(data []byte) error {
+	type Alias CreateTemplateRequest
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // FileUploadRequest describes a file to upload.
@@ -114,6 +133,22 @@ type CloneTemplateRequest struct {
 	ScopeID    string `json:"scopeId,omitempty"`
 	ProjectID  string `json:"projectId,omitempty"` // Deprecated
 	Visibility string `json:"visibility,omitempty"`
+}
+
+// UnmarshalJSON implements backward compatibility for the grove-to-project rename.
+func (r *CloneTemplateRequest) UnmarshalJSON(data []byte) error {
+	type Alias CloneTemplateRequest
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{Alias: (*Alias)(r)}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // handleTemplatesV2 handles the /api/v1/templates endpoint with storage support.
