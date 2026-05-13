@@ -228,19 +228,12 @@ func (p *MessageBrokerProxy) PublishBroadcast(ctx context.Context, projectID str
 	return p.broker.Publish(ctx, broker.TopicProjectBroadcast(projectID), msg)
 }
 
-// PublishUserMessage publishes a message to the user-targeted broker topic and
-// handles local delivery (DB persistence + SSE) directly. The external broker
-// receives the message for chat-app delivery while the hub persists and
-// publishes the SSE event so the web UI is updated immediately.
+// PublishUserMessage publishes a message to the user-targeted broker topic.
+// Local delivery (DB persistence + SSE) is handled by the InProcessBroker
+// subscription in subscribeProjectUserMessages — do not call deliverToUser()
+// here to avoid double-delivery.
 func (p *MessageBrokerProxy) PublishUserMessage(ctx context.Context, projectID, userID string, msg *messages.StructuredMessage) error {
 	topic := broker.TopicUserMessages(projectID, userID)
-
-	// Deliver locally: persist to message store and publish SSE event.
-	// This is necessary because the BrokerPluginAdapter does not invoke
-	// local subscription handlers — it only forwards via RPC.
-	p.deliverToUser(ctx, projectID, topic, msg)
-
-	// Publish to external broker for chat-app / external delivery.
 	return p.broker.Publish(ctx, topic, msg)
 }
 

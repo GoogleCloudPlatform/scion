@@ -395,8 +395,8 @@ func TestMessageBrokerProxy_UserMessageDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to list messages: %v", err)
 	}
-	if len(result.Items) != 2 {
-		t.Fatalf("expected 2 persisted user messages (local + broker), got %d", len(result.Items))
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 persisted user message, got %d", len(result.Items))
 	}
 	if result.Items[0].Msg != "question for you" {
 		t.Errorf("expected msg 'question for you', got %q", result.Items[0].Msg)
@@ -454,8 +454,8 @@ func TestMessageBrokerProxy_EnsureProjectSubscriptionsIncludesUserMessages(t *te
 	if err != nil {
 		t.Fatalf("failed to list messages: %v", err)
 	}
-	if len(result.Items) != 2 {
-		t.Fatalf("expected 2 persisted user messages after EnsureProjectSubscriptions (local + broker), got %d", len(result.Items))
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 persisted user message after EnsureProjectSubscriptions, got %d", len(result.Items))
 	}
 }
 
@@ -636,8 +636,8 @@ func TestMessageBrokerProxy_StartBootstrapsExistingProjects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to list messages: %v", err)
 	}
-	if len(result.Items) != 2 {
-		t.Fatalf("expected 2 persisted messages from bootstrapped subscription (local + broker), got %d", len(result.Items))
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 persisted message from bootstrapped subscription, got %d", len(result.Items))
 	}
 	if result.Items[0].Msg != "bootstrap test" {
 		t.Errorf("expected msg 'bootstrap test', got %q", result.Items[0].Msg)
@@ -692,8 +692,8 @@ func TestMessageBrokerProxy_ProjectSubscriptionDedup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to list messages: %v", err)
 	}
-	if len(result.Items) != 2 {
-		t.Fatalf("expected exactly 2 persisted messages (local + broker), got %d", len(result.Items))
+	if len(result.Items) != 1 {
+		t.Fatalf("expected exactly 1 persisted message, got %d", len(result.Items))
 	}
 }
 
