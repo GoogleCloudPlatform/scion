@@ -411,7 +411,24 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 	// Route state-change notifications to the user's personal DM
 	// instead of the group chat.
 	if msg != nil && msg.Type == messages.TypeStateChange {
-		return b.publishStateChangeDM(ctx, api, store, msg, projectID, agentSlug)
+		// Route state changes to the recipient's personal DM AND to any
+		// linked groups that have notify_in_group enabled.
+		dmErr := b.publishStateChangeDM(ctx, api, store, msg, projectID, agentSlug)
+		if store != nil && projectID != "" {
+			links, _ := store.GetGroupLinksForProject(ctx, projectID)
+			for _, link := range links {
+				if link.Active && link.NotifyInGroup {
+					text := FormatMessageV2(msg, agentSlug)
+					if text != "" {
+						if _, err := api.SendMessage(ctx, link.ChatID, text, ""); err != nil {
+							b.log.Warn("Failed to send state-change group notification",
+								"chat_id", link.ChatID, "error", err)
+						}
+					}
+				}
+			}
+		}
+		return dmErr
 	}
 
 	// Collect target chat IDs via dynamic routing.
