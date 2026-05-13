@@ -183,3 +183,38 @@ func extractAgentFromBotMessage(text string) string {
 
 	return ""
 }
+
+// extractUnresolvedMentions returns @mention tokens from the message that do not
+// match the bot username or any known agent slug. Used to detect when a user
+// explicitly @mentioned something that isn't a known integration target.
+func extractUnresolvedMentions(text, botUsername string, knownAgents []string) []string {
+	known := make(map[string]bool, len(knownAgents)+1)
+	if botUsername != "" {
+		known[strings.ToLower(botUsername)] = true
+	}
+	for _, a := range knownAgents {
+		known[strings.ToLower(a)] = true
+		known["all"] = true
+	}
+
+	var unresolved []string
+	seen := make(map[string]bool)
+	for _, word := range strings.Fields(text) {
+		if !strings.HasPrefix(word, "@") {
+			continue
+		}
+		name := strings.TrimPrefix(word, "@")
+		name = strings.TrimRightFunc(name, func(r rune) bool {
+			return unicode.IsPunct(r) && r != '_' && r != '-'
+		})
+		if name == "" {
+			continue
+		}
+		lower := strings.ToLower(name)
+		if !known[lower] && !seen[lower] {
+			seen[lower] = true
+			unresolved = append(unresolved, name)
+		}
+	}
+	return unresolved
+}

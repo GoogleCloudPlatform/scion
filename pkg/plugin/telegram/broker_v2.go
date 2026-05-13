@@ -1060,6 +1060,14 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	}
 
 	if len(targets) == 0 {
+		// If the bot was explicitly mentioned but no agent matched, tell the user.
+		if isBotMentioned(tgMsg, botUsername) {
+			unresolved := extractUnresolvedMentions(tgMsg.Text, botUsername, agents)
+			if len(unresolved) > 0 {
+				errMsg := fmt.Sprintf("No agent named %q found in this project. Use /agents to see available agents.", unresolved[0])
+				b.api.SendMessage(ctx, chatID, errMsg, "") //nolint:errcheck
+			}
+		}
 		return
 	}
 
