@@ -18,6 +18,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"testing"
@@ -2020,6 +2021,58 @@ func TestMigrationV40PreservesAgents(t *testing.T) {
 	agent, err = s.GetAgent(ctx, agentID)
 	require.NoError(t, err)
 	assert.Equal(t, "Test Agent", agent.Name)
+}
+
+func TestMigrationV53_AllowListMissing(t *testing.T) {
+	// Regression test: V48 and V49 were inserted into the migration sequence,
+	// pushing the grove-to-project rename from V48 to V50. Databases that
+	// already applied the old V48 (the rename) have version 48 recorded in
+	// schema_migrations, so the new V48 (CREATE TABLE allow_list) is skipped.
+	// V53 must create the allow_list table if it doesn't exist before adding
+	// the index.
+	s, err := New(":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+
+	// Run all migrations normally first.
+	err = s.Migrate(ctx)
+	require.NoError(t, err)
+
+	// Simulate the bug: drop allow_list (as if V48 was a different migration
+	// when it was originally applied) and roll back schema_migrations so V53
+	// will re-run.
+	_, err = s.db.ExecContext(ctx, `
+		DROP TABLE IF EXISTS allow_list;
+		DELETE FROM schema_migrations WHERE version >= 53;
+	`)
+	require.NoError(t, err)
+
+	// Verify allow_list doesn't exist.
+	var tableName string
+	err = s.db.QueryRowContext(ctx,
+		"SELECT name FROM sqlite_master WHERE type='table' AND name='allow_list'",
+	).Scan(&tableName)
+	require.ErrorIs(t, err, sql.ErrNoRows,
+		"allow_list should not exist before re-migration")
+
+	// Re-run Migrate. V53 should succeed by creating the allow_list table
+	// before adding the index.
+	err = s.Migrate(ctx)
+	require.NoError(t, err, "Migrate must succeed even when allow_list was never created by V48")
+
+	// Verify allow_list table now exists and is usable.
+	_, err = s.db.ExecContext(ctx,
+		"INSERT INTO allow_list (id, email, added_by) VALUES ('test-id', 'test@example.com', 'admin')")
+	require.NoError(t, err, "allow_list table should be usable after migration")
+
+	// Verify the index exists.
+	var indexName string
+	err = s.db.QueryRowContext(ctx,
+		"SELECT name FROM sqlite_master WHERE type='index' AND name='idx_allow_list_created_id'",
+	).Scan(&indexName)
+	require.NoError(t, err, "idx_allow_list_created_id index should exist")
 }
 
 func TestPing(t *testing.T) {
