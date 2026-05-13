@@ -645,6 +645,8 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 				recipientUsername = b.resolveRecipientUsername(ctx, store, "user:"+userID)
 			}
 		}
+		b.log.Debug("Resolved recipient username for outbound header",
+			"recipient", msg.Recipient, "topic", topic, "username", recipientUsername)
 	}
 
 	// Format the message for Telegram.
