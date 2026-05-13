@@ -418,9 +418,9 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 			links, _ := store.GetGroupLinksForProject(ctx, projectID)
 			for _, link := range links {
 				if link.Active && link.NotifyInGroup {
-					text := FormatMessageV2(msg, agentSlug)
+					text := FormatStateChangeCard(msg, agentSlug)
 					if text != "" {
-						if _, err := api.SendMessage(ctx, link.ChatID, text, ""); err != nil {
+						if _, err := api.SendMessage(ctx, link.ChatID, text, "HTML"); err != nil {
 							b.log.Warn("Failed to send state-change group notification",
 								"chat_id", link.ChatID, "error", err)
 						}
@@ -691,12 +691,12 @@ func (b *TelegramBrokerV2) publishStateChangeDM(ctx context.Context, api *Telegr
 		return nil
 	}
 
-	text := FormatMessageV2(msg, agentSlug)
+	text := FormatStateChangeCard(msg, agentSlug)
 	if text == "" {
 		return nil
 	}
 
-	_, err = api.SendMessage(ctx, tgUserID, text, "")
+	_, err = api.SendMessage(ctx, tgUserID, text, "HTML")
 	if err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.IsTransient() {

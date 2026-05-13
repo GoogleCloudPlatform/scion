@@ -16,7 +16,9 @@ package telegram
 
 import (
 	"fmt"
+	"html"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -74,6 +76,119 @@ func FormatMessage(msg *messages.StructuredMessage) string {
 
 	text := b.String()
 	return truncateMessage(text)
+}
+
+// maxTaskSummaryLength is the maximum length for the task summary line
+// in a state-change card before truncation.
+const maxTaskSummaryLength = 200
+
+// stateEmoji maps known agent states to display emoji.
+var stateEmoji = map[string]string{
+	"running":  "🟢",
+	"error":    "🔴",
+	"idle":     "🟡",
+	"stopped":  "🟡",
+	"starting": "⏳",
+}
+
+// stateLabel maps known agent states to human-readable labels.
+var stateLabel = map[string]string{
+	"running":  "Running",
+	"error":    "Error",
+	"idle":     "Idle",
+	"stopped":  "Stopped",
+	"starting": "Starting",
+}
+
+// FormatStateChangeCard converts a state-change StructuredMessage into an
+// HTML-formatted status card for Telegram. The card shows the agent name,
+// state emoji, project name, timestamp, and task summary. All user-supplied
+// content is HTML-escaped to prevent injection. The result is guaranteed to
+// be under maxTelegramMessageLength.
+func FormatStateChangeCard(msg *messages.StructuredMessage, agentSlug string) string {
+	if msg == nil {
+		return ""
+	}
+
+	// Determine the status string (normalise to lowercase for lookup).
+	status := strings.ToLower(msg.Status)
+
+	emoji := stateEmoji[status]
+	if emoji == "" {
+		emoji = "⚪"
+	}
+
+	label := stateLabel[status]
+	if label == "" {
+		// Capitalise the first letter of the raw status as fallback.
+		if msg.Status != "" {
+			label = strings.ToUpper(msg.Status[:1]) + msg.Status[1:]
+		} else {
+			label = "Unknown"
+		}
+	}
+
+	escapedSlug := html.EscapeString(agentSlug)
+	if escapedSlug == "" {
+		// Fall back to sender slug if agentSlug is empty.
+		if strings.HasPrefix(msg.Sender, "agent:") {
+			escapedSlug = html.EscapeString(strings.TrimPrefix(msg.Sender, "agent:"))
+		} else {
+			escapedSlug = html.EscapeString(msg.Sender)
+		}
+	}
+
+	var b strings.Builder
+
+	// Header: <b>🟢 coder — Running</b>
+	fmt.Fprintf(&b, "<b>%s %s — %s</b>\n", emoji, escapedSlug, html.EscapeString(label))
+
+	// Project line.
+	project := ""
+	if msg.Metadata != nil {
+		if pid, ok := msg.Metadata["project_id"]; ok && pid != "" {
+			project = pid
+		}
+	}
+	if project != "" {
+		fmt.Fprintf(&b, "📋 Project: %s\n", html.EscapeString(project))
+	}
+
+	// Timestamp line.
+	ts := formatTimestamp(msg.Timestamp)
+	if ts != "" {
+		fmt.Fprintf(&b, "🕐 %s\n", html.EscapeString(ts))
+	}
+
+	// Task summary (the message body).
+	summary := strings.TrimSpace(msg.Msg)
+	if summary != "" {
+		if len(summary) > maxTaskSummaryLength {
+			summary = summary[:maxTaskSummaryLength] + "…"
+		}
+		if status == "error" {
+			fmt.Fprintf(&b, "⚠️ %s", html.EscapeString(summary))
+		} else {
+			b.WriteString(html.EscapeString(summary))
+		}
+	}
+
+	text := b.String()
+	return truncateMessage(text)
+}
+
+// formatTimestamp parses an RFC3339 timestamp and returns a human-friendly
+// representation like "May 13, 2:30 PM UTC". Returns the raw string if
+// parsing fails.
+func formatTimestamp(ts string) string {
+	if ts == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return ts
+	}
+	return t.UTC().Format("Jan 2, 3:04 PM UTC")
 }
 
 // truncateMessage ensures the text does not exceed Telegram's message limit.
