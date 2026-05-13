@@ -570,19 +570,29 @@ func (b *TelegramBrokerV2) publishStateChangeDM(ctx context.Context, api *Telegr
 		return nil
 	}
 
-	email := strings.TrimPrefix(msg.Recipient, "user:")
-	if email == msg.Recipient || email == "" {
+	recipientVal := strings.TrimPrefix(msg.Recipient, "user:")
+	if recipientVal == msg.Recipient || recipientVal == "" {
 		b.log.Debug("State-change recipient is not a user, dropping", "recipient", msg.Recipient)
 		return nil
 	}
 
-	mapping, err := store.GetUserMappingByEmail(ctx, email)
+	// Hub may pass recipient as email OR as UUID; try both lookups.
+	var mapping *TelegramUserMapping
+	var err error
+	if strings.Contains(recipientVal, "@") {
+		mapping, err = store.GetUserMappingByEmail(ctx, recipientVal)
+	} else {
+		mapping, err = store.GetUserMappingByScionUserID(ctx, recipientVal)
+		if err == nil && mapping == nil {
+			mapping, err = store.GetUserMappingByEmail(ctx, recipientVal)
+		}
+	}
 	if err != nil {
-		b.log.Warn("Failed to look up user mapping for state-change DM", "email", email, "error", err)
+		b.log.Warn("Failed to look up user mapping for state-change DM", "recipient", recipientVal, "error", err)
 		return nil
 	}
 	if mapping == nil {
-		b.log.Debug("No user mapping for state-change recipient, dropping", "email", email)
+		b.log.Debug("No user mapping for state-change recipient, dropping", "recipient", recipientVal)
 		return nil
 	}
 
@@ -595,7 +605,7 @@ func (b *TelegramBrokerV2) publishStateChangeDM(ctx context.Context, api *Telegr
 		}
 		if pref != nil && !pref.Enabled {
 			b.log.Debug("User disabled notifications for agent, skipping DM",
-				"email", email, "project", projectID, "agent", agentSlug)
+				"recipient", recipientVal, "project", projectID, "agent", agentSlug)
 			return nil
 		}
 	}

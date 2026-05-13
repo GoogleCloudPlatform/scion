@@ -45,6 +45,7 @@ type Store interface {
 	SaveUserMapping(ctx context.Context, mapping *TelegramUserMapping) error
 	GetUserMapping(ctx context.Context, telegramUserID string) (*TelegramUserMapping, error)
 	GetUserMappingByEmail(ctx context.Context, email string) (*TelegramUserMapping, error)
+	GetUserMappingByScionUserID(ctx context.Context, userID string) (*TelegramUserMapping, error)
 	DeleteUserMapping(ctx context.Context, telegramUserID string) error
 	GetAllUserMappings(ctx context.Context) ([]*TelegramUserMapping, error)
 
@@ -395,6 +396,12 @@ func (s *sqliteStore) GetUserMapping(ctx context.Context, telegramUserID string)
 func (s *sqliteStore) GetUserMappingByEmail(ctx context.Context, email string) (*TelegramUserMapping, error) {
 	const q = `SELECT telegram_user_id, telegram_username, scion_user_id, scion_email, linked_at FROM user_mappings WHERE scion_email = ?`
 	row := s.db.QueryRowContext(ctx, q, email)
+	return scanUserMapping(row)
+}
+
+func (s *sqliteStore) GetUserMappingByScionUserID(ctx context.Context, userID string) (*TelegramUserMapping, error) {
+	const q = `SELECT telegram_user_id, telegram_username, scion_user_id, scion_email, linked_at FROM user_mappings WHERE scion_user_id = ?`
+	row := s.db.QueryRowContext(ctx, q, userID)
 	return scanUserMapping(row)
 }
 
