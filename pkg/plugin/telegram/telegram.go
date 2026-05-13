@@ -781,6 +781,8 @@ func msgDedupKey(msg *messages.StructuredMessage) string {
 	h := sha256.New()
 	h.Write([]byte(msg.Sender))
 	h.Write([]byte("|"))
+	h.Write([]byte(msg.Recipient)) // include recipient so set[] broadcasts to N agents aren't deduped
+	h.Write([]byte("|"))
 	h.Write([]byte(msg.Timestamp))
 	h.Write([]byte("|"))
 	h.Write([]byte(msg.Type))
