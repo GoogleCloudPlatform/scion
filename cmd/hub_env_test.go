@@ -30,22 +30,22 @@ import (
 
 // envTestState captures and restores package-level vars for test isolation.
 type envTestState struct {
-	home           string
-	projectPath      string
-	envProjectScope  string
-	envBrokerScope string
-	envScope       string
-	envOutputJSON  bool
+	home            string
+	projectPath     string
+	envProjectScope string
+	envBrokerScope  string
+	envScope        string
+	envOutputJSON   bool
 }
 
 func saveEnvTestState() envTestState {
 	return envTestState{
-		home:           os.Getenv("HOME"),
-		projectPath:      projectPath,
-		envProjectScope:  envProjectScope,
-		envBrokerScope: envBrokerScope,
-		envScope:       envScope,
-		envOutputJSON:  envOutputJSON,
+		home:            os.Getenv("HOME"),
+		projectPath:     projectPath,
+		envProjectScope: envProjectScope,
+		envBrokerScope:  envBrokerScope,
+		envScope:        envScope,
+		envOutputJSON:   envOutputJSON,
 	}
 }
 
@@ -225,7 +225,7 @@ func setupEnvProjectWithHubProjectID(t *testing.T, home, endpoint, projectID str
 		"hub": map[string]interface{}{
 			"enabled":  true,
 			"endpoint": endpoint,
-			"groveId":  projectID,
+			"projectId": projectID,
 		},
 	}
 	data, err := json.Marshal(settings)
