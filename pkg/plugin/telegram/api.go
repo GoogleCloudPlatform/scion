@@ -51,17 +51,27 @@ type BotUser struct {
 
 // Update represents a Telegram update from getUpdates.
 type Update struct {
-	UpdateID int64      `json:"update_id"`
-	Message  *TGMessage `json:"message,omitempty"`
+	UpdateID      int64          `json:"update_id"`
+	Message       *TGMessage     `json:"message,omitempty"`
+	CallbackQuery *CallbackQuery `json:"callback_query,omitempty"`
 }
 
 // TGMessage represents a Telegram message.
 type TGMessage struct {
-	MessageID int64   `json:"message_id"`
-	From      *TGUser `json:"from,omitempty"`
-	Chat      TGChat  `json:"chat"`
-	Date      int64   `json:"date"`
-	Text      string  `json:"text"`
+	MessageID      int64           `json:"message_id"`
+	From           *TGUser         `json:"from,omitempty"`
+	Chat           TGChat          `json:"chat"`
+	Date           int64           `json:"date"`
+	Text           string          `json:"text"`
+	Entities       []MessageEntity `json:"entities,omitempty"`
+	ReplyToMessage *TGMessage      `json:"reply_to_message,omitempty"`
+}
+
+// MessageEntity represents a special entity in a Telegram message (e.g. @mentions, commands).
+type MessageEntity struct {
+	Type   string `json:"type"`
+	Offset int    `json:"offset"`
+	Length int    `json:"length"`
 }
 
 // TGUser represents a Telegram user.
@@ -115,11 +125,69 @@ func (e *APIError) IsTransient() bool {
 	return e.Code == http.StatusTooManyRequests || e.Code >= 500
 }
 
+// InlineKeyboardMarkup represents a Telegram inline keyboard attached to a message.
+type InlineKeyboardMarkup struct {
+	InlineKeyboard [][]InlineKeyboardButton `json:"inline_keyboard"`
+}
+
+// InlineKeyboardButton represents a single button in an inline keyboard.
+type InlineKeyboardButton struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data,omitempty"`
+	URL          string `json:"url,omitempty"`
+}
+
+// CallbackQuery represents an incoming callback query from a button press.
+type CallbackQuery struct {
+	ID      string     `json:"id"`
+	From    *TGUser    `json:"from"`
+	Message *TGMessage `json:"message,omitempty"`
+	Data    string     `json:"data,omitempty"`
+}
+
 // sendMessageRequest is the JSON body for the sendMessage API call.
 type sendMessageRequest struct {
 	ChatID    int64  `json:"chat_id"`
 	Text      string `json:"text"`
 	ParseMode string `json:"parse_mode,omitempty"`
+}
+
+// sendMessageWithKeyboardRequest is the JSON body for sendMessage with an inline keyboard.
+type sendMessageWithKeyboardRequest struct {
+	ChatID           int64                 `json:"chat_id"`
+	Text             string                `json:"text"`
+	ParseMode        string                `json:"parse_mode,omitempty"`
+	ReplyMarkup      *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+	ReplyToMessageID int64                 `json:"reply_to_message_id,omitempty"`
+}
+
+// editMessageTextRequest is the JSON body for the editMessageText API call.
+type editMessageTextRequest struct {
+	ChatID      int64                 `json:"chat_id"`
+	MessageID   int64                 `json:"message_id"`
+	Text        string                `json:"text"`
+	ParseMode   string                `json:"parse_mode,omitempty"`
+	ReplyMarkup *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+}
+
+// editMessageReplyMarkupRequest is the JSON body for the editMessageReplyMarkup API call.
+type editMessageReplyMarkupRequest struct {
+	ChatID      int64                 `json:"chat_id"`
+	MessageID   int64                 `json:"message_id"`
+	ReplyMarkup *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+}
+
+// answerCallbackQueryRequest is the JSON body for the answerCallbackQuery API call.
+type answerCallbackQueryRequest struct {
+	CallbackQueryID string `json:"callback_query_id"`
+	Text            string `json:"text,omitempty"`
+	ShowAlert       bool   `json:"show_alert,omitempty"`
+}
+
+// deleteMessageRequest is the JSON body for the deleteMessage API call.
+type deleteMessageRequest struct {
+	ChatID    int64 `json:"chat_id"`
+	MessageID int64 `json:"message_id"`
 }
 
 // getUpdatesRequest is the JSON body for the getUpdates API call.
@@ -286,4 +354,227 @@ func (c *TelegramAPIClient) SendMessage(ctx context.Context, chatID int64, text,
 	}
 
 	return &msg, nil
+}
+
+// SendMessageWithKeyboard sends a text message with an inline keyboard and optional reply.
+func (c *TelegramAPIClient) SendMessageWithKeyboard(ctx context.Context, chatID int64, text, parseMode string, keyboard *InlineKeyboardMarkup, replyToMessageID int64) (*TGMessage, error) {
+	body := sendMessageWithKeyboardRequest{
+		ChatID:           chatID,
+		Text:             text,
+		ParseMode:        parseMode,
+		ReplyMarkup:      keyboard,
+		ReplyToMessageID: replyToMessageID,
+	}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal sendMessage request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.methodURL("sendMessage"), bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("create sendMessage request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sendMessage request failed: %w", c.redactToken(err))
+	}
+	defer resp.Body.Close()
+
+	var apiResp apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("decode sendMessage response: %w", err)
+	}
+
+	if !apiResp.OK {
+		apiErr := &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
+		if apiResp.Parameters != nil {
+			apiErr.RetryAfterSec = apiResp.Parameters.RetryAfterSec
+		}
+		return nil, apiErr
+	}
+
+	var msg TGMessage
+	if err := json.Unmarshal(apiResp.Result, &msg); err != nil {
+		return nil, fmt.Errorf("unmarshal sendMessage result: %w", err)
+	}
+
+	return &msg, nil
+}
+
+// EditMessageText edits the text and optional keyboard of an existing message.
+func (c *TelegramAPIClient) EditMessageText(ctx context.Context, chatID int64, messageID int64, text, parseMode string, keyboard *InlineKeyboardMarkup) (*TGMessage, error) {
+	body := editMessageTextRequest{
+		ChatID:      chatID,
+		MessageID:   messageID,
+		Text:        text,
+		ParseMode:   parseMode,
+		ReplyMarkup: keyboard,
+	}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal editMessageText request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.methodURL("editMessageText"), bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("create editMessageText request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("editMessageText request failed: %w", c.redactToken(err))
+	}
+	defer resp.Body.Close()
+
+	var apiResp apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("decode editMessageText response: %w", err)
+	}
+
+	if !apiResp.OK {
+		apiErr := &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
+		if apiResp.Parameters != nil {
+			apiErr.RetryAfterSec = apiResp.Parameters.RetryAfterSec
+		}
+		return nil, apiErr
+	}
+
+	var msg TGMessage
+	if err := json.Unmarshal(apiResp.Result, &msg); err != nil {
+		return nil, fmt.Errorf("unmarshal editMessageText result: %w", err)
+	}
+
+	return &msg, nil
+}
+
+// EditMessageReplyMarkup edits only the inline keyboard of an existing message.
+func (c *TelegramAPIClient) EditMessageReplyMarkup(ctx context.Context, chatID int64, messageID int64, keyboard *InlineKeyboardMarkup) (*TGMessage, error) {
+	body := editMessageReplyMarkupRequest{
+		ChatID:      chatID,
+		MessageID:   messageID,
+		ReplyMarkup: keyboard,
+	}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal editMessageReplyMarkup request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.methodURL("editMessageReplyMarkup"), bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("create editMessageReplyMarkup request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("editMessageReplyMarkup request failed: %w", c.redactToken(err))
+	}
+	defer resp.Body.Close()
+
+	var apiResp apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("decode editMessageReplyMarkup response: %w", err)
+	}
+
+	if !apiResp.OK {
+		apiErr := &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
+		if apiResp.Parameters != nil {
+			apiErr.RetryAfterSec = apiResp.Parameters.RetryAfterSec
+		}
+		return nil, apiErr
+	}
+
+	var msg TGMessage
+	if err := json.Unmarshal(apiResp.Result, &msg); err != nil {
+		return nil, fmt.Errorf("unmarshal editMessageReplyMarkup result: %w", err)
+	}
+
+	return &msg, nil
+}
+
+// AnswerCallbackQuery sends an acknowledgement for a callback query from an inline button.
+func (c *TelegramAPIClient) AnswerCallbackQuery(ctx context.Context, callbackQueryID, text string, showAlert bool) error {
+	body := answerCallbackQueryRequest{
+		CallbackQueryID: callbackQueryID,
+		Text:            text,
+		ShowAlert:       showAlert,
+	}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal answerCallbackQuery request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.methodURL("answerCallbackQuery"), bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("create answerCallbackQuery request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("answerCallbackQuery request failed: %w", c.redactToken(err))
+	}
+	defer resp.Body.Close()
+
+	var apiResp apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return fmt.Errorf("decode answerCallbackQuery response: %w", err)
+	}
+
+	if !apiResp.OK {
+		apiErr := &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
+		if apiResp.Parameters != nil {
+			apiErr.RetryAfterSec = apiResp.Parameters.RetryAfterSec
+		}
+		return apiErr
+	}
+
+	return nil
+}
+
+// DeleteMessage deletes a message from a chat.
+func (c *TelegramAPIClient) DeleteMessage(ctx context.Context, chatID int64, messageID int64) error {
+	body := deleteMessageRequest{
+		ChatID:    chatID,
+		MessageID: messageID,
+	}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal deleteMessage request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.methodURL("deleteMessage"), bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("create deleteMessage request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("deleteMessage request failed: %w", c.redactToken(err))
+	}
+	defer resp.Body.Close()
+
+	var apiResp apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return fmt.Errorf("decode deleteMessage response: %w", err)
+	}
+
+	if !apiResp.OK {
+		apiErr := &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
+		if apiResp.Parameters != nil {
+			apiErr.RetryAfterSec = apiResp.Parameters.RetryAfterSec
+		}
+		return apiErr
+	}
+
+	return nil
 }
