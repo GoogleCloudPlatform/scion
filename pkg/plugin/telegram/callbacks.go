@@ -448,7 +448,7 @@ func (h *CallbackHandler) handleSettingsCallback(ctx context.Context, cb *Callba
 	if link.ShowAgentToAgent {
 		label = "on"
 	}
-	h.answerCallback(ctx, cb.ID, fmt.Sprintf("Agent-to-agent visibility: %s", label), false)
+	h.answerCallback(ctx, cb.ID, fmt.Sprintf("Observer mode: %s", label), false)
 	return nil
 }
 

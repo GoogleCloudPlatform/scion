@@ -143,17 +143,17 @@ func TestBuildSetupConfirmKeyboard(t *testing.T) {
 func TestBuildSettingsKeyboard_AgentToAgentOn(t *testing.T) {
 	kb := buildSettingsKeyboard(true)
 	require.Len(t, kb.InlineKeyboard, 1)
-	assert.Equal(t, "✓ A2A: On", kb.InlineKeyboard[0][0].Text)
+	assert.Equal(t, "✓ Observer: On", kb.InlineKeyboard[0][0].Text)
 	assert.Equal(t, "settings:a2a:on", kb.InlineKeyboard[0][0].CallbackData)
-	assert.Equal(t, "A2A: Off", kb.InlineKeyboard[0][1].Text)
+	assert.Equal(t, "Observer: Off", kb.InlineKeyboard[0][1].Text)
 	assert.Equal(t, "settings:a2a:off", kb.InlineKeyboard[0][1].CallbackData)
 }
 
 func TestBuildSettingsKeyboard_AgentToAgentOff(t *testing.T) {
 	kb := buildSettingsKeyboard(false)
 	require.Len(t, kb.InlineKeyboard, 1)
-	assert.Equal(t, "A2A: On", kb.InlineKeyboard[0][0].Text)
-	assert.Equal(t, "✓ A2A: Off", kb.InlineKeyboard[0][1].Text)
+	assert.Equal(t, "Observer: On", kb.InlineKeyboard[0][0].Text)
+	assert.Equal(t, "✓ Observer: Off", kb.InlineKeyboard[0][1].Text)
 }
 
 func TestCallbackData_Under64Bytes(t *testing.T) {

@@ -154,15 +154,15 @@ func buildSetupConfirmKeyboard(currentProject string) *InlineKeyboardMarkup {
 	}
 }
 
-// buildSettingsKeyboard creates keyboard for /settings command (agent-to-agent visibility toggle).
+// buildSettingsKeyboard creates keyboard for /settings command (observer mode: show agent-to-agent messages in group).
 // Callback data: settings:a2a:on / settings:a2a:off
 func buildSettingsKeyboard(showAgentToAgent bool) *InlineKeyboardMarkup {
-	onLabel := "A2A: On"
-	offLabel := "A2A: Off"
+	onLabel := "Observer: On"
+	offLabel := "Observer: Off"
 	if showAgentToAgent {
-		onLabel = "✓ A2A: On"
+		onLabel = "✓ Observer: On"
 	} else {
-		offLabel = "✓ A2A: Off"
+		offLabel = "✓ Observer: Off"
 	}
 	return &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
