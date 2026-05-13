@@ -2063,6 +2063,9 @@ func (s *Server) registerRoutes() {
 	// Broker plugin inbound message delivery
 	s.mux.HandleFunc("/api/v1/broker/inbound", s.handleBrokerInbound)
 
+	// Broker plugin project listing (fresh list for /setup flows)
+	s.mux.HandleFunc("/api/v1/broker/projects", s.handleBrokerProjects)
+
 	// Admin system endpoints
 	s.mux.HandleFunc("/api/v1/admin/maintenance", s.handleAdminMaintenance)
 	s.mux.HandleFunc("/api/v1/admin/maintenance/operations", s.handleAdminMaintenanceOps)
