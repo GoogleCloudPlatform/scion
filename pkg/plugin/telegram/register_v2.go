@@ -27,6 +27,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
 // RegistrationHandler manages the hub-verified code-based registration flow.
@@ -34,6 +36,8 @@ type RegistrationHandler struct {
 	store      Store
 	api        *TelegramAPIClient
 	hubURL     string
+	hmacKey    string
+	brokerID   string
 	httpClient *http.Client
 	log        *slog.Logger
 
@@ -76,7 +80,7 @@ const (
 )
 
 // NewRegistrationHandler creates a new RegistrationHandler.
-func NewRegistrationHandler(store Store, api *TelegramAPIClient, hubURL string, log *slog.Logger) *RegistrationHandler {
+func NewRegistrationHandler(store Store, api *TelegramAPIClient, hubURL, hmacKey, brokerID string, log *slog.Logger) *RegistrationHandler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -84,6 +88,8 @@ func NewRegistrationHandler(store Store, api *TelegramAPIClient, hubURL string, 
 		store:      store,
 		api:        api,
 		hubURL:     hubURL,
+		hmacKey:    hmacKey,
+		brokerID:   brokerID,
 		httpClient: &http.Client{Timeout: 15 * time.Second},
 		log:        log,
 		pending:    make(map[string]*pendingLinkReg),
@@ -454,6 +460,11 @@ func (h *RegistrationHandler) registerCodeWithHub(ctx context.Context, code, tel
 		return fmt.Errorf("create linking code request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if h.hmacKey != "" && h.brokerID != "" {
+		if err := signBrokerRequest(req, h.brokerID, h.hmacKey); err != nil {
+			return fmt.Errorf("sign linking code request: %w", err)
+		}
+	}
 
 	resp, err := h.httpClient.Do(req)
 	if err != nil {
@@ -525,4 +536,17 @@ func generateLinkingCode() (string, error) {
 		result[i] = linkingCodeCharset[n.Int64()]
 	}
 	return string(result), nil
+}
+
+// signBrokerRequest signs an HTTP request with HMAC broker credentials.
+func signBrokerRequest(req *http.Request, brokerID, hmacKey string) error {
+	secretKey, err := decodeBase64(hmacKey)
+	if err != nil {
+		return fmt.Errorf("decode HMAC key: %w", err)
+	}
+	auth := &apiclient.HMACAuth{
+		BrokerID:  brokerID,
+		SecretKey: secretKey,
+	}
+	return auth.ApplyAuth(req)
 }

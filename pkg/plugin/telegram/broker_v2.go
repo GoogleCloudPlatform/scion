@@ -171,7 +171,7 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	// Create component handlers.
 	b.commands = NewCommandHandler(b.store, b.api, b.hubClient, bot.Username, b.log)
 	b.callbacks = NewCallbackHandler(b.store, b.api, b.hubClient, b.log)
-	b.registration = NewRegistrationHandler(b.store, b.api, b.hubURL, b.log)
+	b.registration = NewRegistrationHandler(b.store, b.api, b.hubURL, b.hmacKey, b.brokerID, b.log)
 
 	// Handle v1 migration: import chat routes as group links.
 	if routesJSON, ok := config["v1_chat_routes"]; ok && routesJSON != "" {
