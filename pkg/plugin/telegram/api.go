@@ -236,6 +236,37 @@ func (c *TelegramAPIClient) redactToken(err error) error {
 	return fmt.Errorf("%s", strings.ReplaceAll(err.Error(), c.botToken, "[REDACTED]"))
 }
 
+// GetChat calls the getChat API to retrieve chat information including the title.
+func (c *TelegramAPIClient) GetChat(ctx context.Context, chatID int64) (*TGChat, error) {
+	url := fmt.Sprintf("%s?chat_id=%d", c.methodURL("getChat"), chatID)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create getChat request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("getChat request failed: %w", c.redactToken(err))
+	}
+	defer resp.Body.Close()
+
+	var apiResp apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("decode getChat response: %w", err)
+	}
+
+	if !apiResp.OK {
+		return nil, &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
+	}
+
+	var chat TGChat
+	if err := json.Unmarshal(apiResp.Result, &chat); err != nil {
+		return nil, fmt.Errorf("unmarshal getChat result: %w", err)
+	}
+
+	return &chat, nil
+}
+
 // GetMe calls the getMe API to validate the bot token and retrieve bot info.
 func (c *TelegramAPIClient) GetMe(ctx context.Context) (*BotUser, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", c.methodURL("getMe"), nil)

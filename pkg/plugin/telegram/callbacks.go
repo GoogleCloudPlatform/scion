@@ -207,6 +207,13 @@ func (h *CallbackHandler) finishSetup(ctx context.Context, cb *CallbackQuery, ch
 		linkedBy = strconv.FormatInt(cb.From.ID, 10)
 	}
 
+	if chatTitle == "" {
+		chat, err := h.api.GetChat(ctx, chatID)
+		if err == nil && chat.Title != "" {
+			chatTitle = chat.Title
+		}
+	}
+
 	link := &GroupLink{
 		ChatID:       chatID,
 		ChatTitle:    chatTitle,
@@ -235,18 +242,21 @@ func (h *CallbackHandler) finishSetup(ctx context.Context, cb *CallbackQuery, ch
 }
 
 func (h *CallbackHandler) handleSetupChange(ctx context.Context, cb *CallbackQuery, chatID, messageID int64) error {
-	h.mu.Lock()
-	projects := h.cachedProjects
-	h.mu.Unlock()
-
-	if len(projects) == 0 {
-		var err error
-		projects, err = h.hubClient.ListProjects(ctx)
-		if err != nil {
-			h.log.Error("Failed to list projects", "error", err)
-			h.answerCallback(ctx, cb.ID, "Failed to fetch projects.", false)
-			return err
+	fresh, freshErr := h.hubClient.ListProjectsFresh(ctx)
+	var projects []ProjectOption
+	if freshErr == nil && len(fresh) > 0 {
+		projects = fresh
+		h.mu.Lock()
+		h.cachedProjects = fresh
+		h.mu.Unlock()
+		h.log.Debug("Using fresh project list for setup change", "count", len(projects))
+	} else {
+		if freshErr != nil {
+			h.log.Warn("Failed to fetch fresh projects, falling back", "error", freshErr)
 		}
+		h.mu.Lock()
+		projects = h.cachedProjects
+		h.mu.Unlock()
 	}
 
 	if len(projects) == 0 {

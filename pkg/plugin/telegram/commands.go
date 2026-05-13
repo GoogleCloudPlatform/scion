@@ -30,6 +30,7 @@ import (
 // HubClient provides access to the Scion hub API for project and agent listing.
 type HubClient interface {
 	ListProjects(ctx context.Context) ([]ProjectOption, error)
+	ListProjectsFresh(ctx context.Context) ([]ProjectOption, error)
 	ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error)
 	ListAgents(ctx context.Context, projectID string) ([]string, error)
 }
@@ -156,18 +157,19 @@ func (h *CommandHandler) handleSetup(msg *TGMessage) {
 	}
 
 	if len(projects) == 0 {
-		if len(h.cachedProjects) > 0 {
-			projects = h.cachedProjects
-			h.log.Debug("Using cached project list for /setup", "count", len(projects))
+		fresh, freshErr := h.hubClient.ListProjectsFresh(ctx)
+		if freshErr == nil && len(fresh) > 0 {
+			projects = fresh
+			h.cachedProjects = fresh
+			h.log.Debug("Using fresh project list from hub for /setup", "count", len(projects))
 		} else {
-			var err error
-			projects, err = h.hubClient.ListProjects(ctx)
-			if err != nil {
-				h.log.Error("Failed to list projects from hub", "error", err)
-				h.reply(chatID, "Failed to fetch projects. Please try again later.")
-				return
+			if freshErr != nil {
+				h.log.Warn("Failed to fetch fresh projects, falling back", "error", freshErr)
 			}
-			h.log.Debug("Listed projects from hub", "count", len(projects))
+			if len(h.cachedProjects) > 0 {
+				projects = h.cachedProjects
+				h.log.Debug("Using cached project list for /setup", "count", len(projects))
+			}
 		}
 		if senderID != "" {
 			promptText = "Select a project to link this group to:\n_Register with /register to see only your projects._"
@@ -307,10 +309,12 @@ func (h *CommandHandler) handleHelp(msg *TGMessage) {
 			"/unlink — Unlink this group from its project\n"+
 			"/help — Show this help message")
 	} else {
-		h.reply(chatID, "Available commands:\n"+
-			"/status — Show linked groups\n"+
+		h.reply(chatID, "Available commands (DM):\n"+
+			"/register — Link your Telegram account to your scion hub identity\n"+
+			"/unregister — Remove your Telegram account link\n"+
+			"/status — Show linked groups and registration status\n"+
 			"/help — Show this help message\n\n"+
-			"Use /setup in a group chat to get started.")
+			"Add me to a group and use /setup there to link it to a scion project.")
 	}
 }
 
@@ -355,9 +359,16 @@ func (h *CommandHandler) handleStatus(msg *TGMessage) {
 	for _, link := range links {
 		title := link.ChatTitle
 		if title == "" {
-			title = fmt.Sprintf("chat %d", link.ChatID)
+			chat, err := h.api.GetChat(ctx, link.ChatID)
+			if err == nil && chat.Title != "" {
+				title = chat.Title
+			}
 		}
-		lines = append(lines, fmt.Sprintf("• %s → %s (default: %s)", title, link.ProjectSlug, link.DefaultAgent))
+		if title != "" {
+			lines = append(lines, fmt.Sprintf("• %s (%d) → %s (default: %s)", title, link.ChatID, link.ProjectSlug, link.DefaultAgent))
+		} else {
+			lines = append(lines, fmt.Sprintf("• chat %d → %s (default: %s)", link.ChatID, link.ProjectSlug, link.DefaultAgent))
+		}
 	}
 
 	h.reply(chatID, "Linked groups:\n"+strings.Join(lines, "\n"))
@@ -503,6 +514,45 @@ func (c *httpHubClient) ListProjects(ctx context.Context) ([]ProjectOption, erro
 	}
 
 	slog.Debug("Hub returned projects", "count", len(result.Projects))
+
+	projects := make([]ProjectOption, len(result.Projects))
+	for i, p := range result.Projects {
+		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
+	}
+	return projects, nil
+}
+
+func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption, error) {
+	url := c.hubURL + "/api/v1/broker/projects"
+
+	slog.Debug("Listing fresh projects from hub broker endpoint", "url", url, "broker_id", c.brokerID)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create list fresh projects request: %w", err)
+	}
+
+	if err := c.signRequest(req); err != nil {
+		return nil, fmt.Errorf("sign request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list fresh projects request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Debug("Hub returned non-OK for list fresh projects", "status", resp.StatusCode, "url", url)
+		return nil, fmt.Errorf("list fresh projects returned status %d", resp.StatusCode)
+	}
+
+	var result hubProjectsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode list fresh projects response: %w", err)
+	}
+
+	slog.Debug("Hub returned fresh projects", "count", len(result.Projects))
 
 	projects := make([]ProjectOption, len(result.Projects))
 	for i, p := range result.Projects {
