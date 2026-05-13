@@ -251,8 +251,8 @@ func TestRequestLogMiddleware_ProducesCorrectJSON(t *testing.T) {
 	if entry["component"] != "hub" {
 		t.Errorf("expected component=hub, got %v", entry["component"])
 	}
-	if entry["grove_id"] != "test-grove" {
-		t.Errorf("expected grove_id=test-grove, got %v", entry["grove_id"])
+	if entry["project_id"] != "test-grove" {
+		t.Errorf("expected project_id=test-grove, got %v", entry["project_id"])
 	}
 
 	// Check request_id is present (UUID)
@@ -351,8 +351,8 @@ func TestRequestLogMiddleware_HandlerEnrichment(t *testing.T) {
 	var entry map[string]any
 	json.Unmarshal(buf.Bytes(), &entry)
 
-	if entry["grove_id"] != "enriched-grove" {
-		t.Errorf("expected grove_id=enriched-grove, got %v", entry["grove_id"])
+	if entry["project_id"] != "enriched-grove" {
+		t.Errorf("expected project_id=enriched-grove, got %v", entry["project_id"])
 	}
 	if entry["agent_id"] != "enriched-agent" {
 		t.Errorf("expected agent_id=enriched-agent, got %v", entry["agent_id"])
