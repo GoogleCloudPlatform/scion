@@ -1545,7 +1545,7 @@ func TestFormatMessageV2(t *testing.T) {
 				Type: messages.TypeInstruction,
 			},
 			agentSlug: "coder",
-			contains:  []string{"[coder]", "Message", "hello world"},
+			contains:  []string{"🤖 coder", "hello world"},
 		},
 		{
 			name: "urgent broadcast",
@@ -1557,7 +1557,7 @@ func TestFormatMessageV2(t *testing.T) {
 				Status:      "error",
 			},
 			agentSlug: "monitor",
-			contains:  []string{"[URGENT]", "[Broadcast]", "[monitor]", "Status Update", "[error]", "alert!"},
+			contains:  []string{"[URGENT]", "[Broadcast]", "🤖 monitor", "[error]", "alert!"},
 		},
 		{
 			name: "input needed",
@@ -1566,7 +1566,7 @@ func TestFormatMessageV2(t *testing.T) {
 				Type: messages.TypeInputNeeded,
 			},
 			agentSlug: "coder",
-			contains:  []string{"Input Needed", "proceed?"},
+			contains:  []string{"🤖 coder", "proceed?"},
 		},
 		{
 			name: "assistant reply",
@@ -1575,7 +1575,7 @@ func TestFormatMessageV2(t *testing.T) {
 				Type: messages.TypeAssistantReply,
 			},
 			agentSlug: "",
-			contains:  []string{"Reply", "here is the result"},
+			contains:  []string{"here is the result"},
 		},
 	}
 

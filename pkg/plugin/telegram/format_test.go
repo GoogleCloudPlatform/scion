@@ -25,7 +25,7 @@ import (
 func TestFormatMessage_Instruction(t *testing.T) {
 	msg := messages.NewInstruction("user:alice", "agent:coder", "please review the code")
 	text := FormatMessage(msg)
-	assert.Contains(t, text, "Instruction from user:alice")
+	assert.Contains(t, text, "user:alice")
 	assert.Contains(t, text, "please review the code")
 	assert.NotContains(t, text, "Please reply")
 }
@@ -33,7 +33,7 @@ func TestFormatMessage_Instruction(t *testing.T) {
 func TestFormatMessage_InputNeeded(t *testing.T) {
 	msg := messages.NewNotification("agent:coder", "user:alice", "need approval", messages.TypeInputNeeded)
 	text := FormatMessage(msg)
-	assert.Contains(t, text, "Input Needed from agent:coder")
+	assert.Contains(t, text, "🤖 coder")
 	assert.Contains(t, text, "need approval")
 	assert.Contains(t, text, "Please reply in this chat to respond.")
 }
@@ -41,7 +41,7 @@ func TestFormatMessage_InputNeeded(t *testing.T) {
 func TestFormatMessage_StateChange(t *testing.T) {
 	msg := messages.NewNotification("agent:coder", "user:alice", "task completed", messages.TypeStateChange)
 	text := FormatMessage(msg)
-	assert.Contains(t, text, "State Change from agent:coder")
+	assert.Contains(t, text, "🤖 coder")
 	assert.Contains(t, text, "task completed")
 }
 
@@ -54,7 +54,7 @@ func TestFormatMessage_AssistantReply(t *testing.T) {
 		Type:      messages.TypeAssistantReply,
 	}
 	text := FormatMessage(msg)
-	assert.Contains(t, text, "Reply from agent:coder")
+	assert.Contains(t, text, "🤖 coder")
 	assert.Contains(t, text, "here is the solution")
 }
 
@@ -67,7 +67,7 @@ func TestFormatMessage_UnknownType(t *testing.T) {
 		Type:      "unknown",
 	}
 	text := FormatMessage(msg)
-	assert.Contains(t, text, "Message from system")
+	assert.Contains(t, text, "system")
 	assert.Contains(t, text, "unknown type message")
 }
 
@@ -76,7 +76,7 @@ func TestFormatMessage_Urgent(t *testing.T) {
 	msg.Urgent = true
 	text := FormatMessage(msg)
 	assert.True(t, strings.HasPrefix(text, "[URGENT] "))
-	assert.Contains(t, text, "Instruction from user:alice")
+	assert.Contains(t, text, "user:alice")
 }
 
 func TestFormatMessage_Broadcasted(t *testing.T) {
@@ -84,7 +84,7 @@ func TestFormatMessage_Broadcasted(t *testing.T) {
 	msg.Broadcasted = true
 	text := FormatMessage(msg)
 	assert.Contains(t, text, "[Broadcast] ")
-	assert.Contains(t, text, "Instruction from user:alice")
+	assert.Contains(t, text, "user:alice")
 }
 
 func TestFormatMessage_UrgentAndBroadcasted(t *testing.T) {

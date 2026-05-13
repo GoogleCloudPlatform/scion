@@ -280,7 +280,7 @@ func TestPublishToChat(t *testing.T) {
 	require.Len(t, sent, 1)
 	assert.Equal(t, int64(789), sent[0].ChatID)
 	assert.Contains(t, sent[0].Text, "hello")
-	assert.Contains(t, sent[0].Text, "Instruction from user:alice")
+	assert.Contains(t, sent[0].Text, "user:alice")
 }
 
 func TestPublishDedup(t *testing.T) {

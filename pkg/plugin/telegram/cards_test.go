@@ -126,12 +126,15 @@ func TestBuildAskUserKeyboard_EmptyChoices(t *testing.T) {
 
 func TestBuildSetupConfirmKeyboard(t *testing.T) {
 	kb := buildSetupConfirmKeyboard("my-project")
-	require.Len(t, kb.InlineKeyboard, 1)
+	require.Len(t, kb.InlineKeyboard, 2)
 	assert.Len(t, kb.InlineKeyboard[0], 2)
 	assert.Equal(t, "Keep (my-project)", kb.InlineKeyboard[0][0].Text)
 	assert.Equal(t, "setup:keep", kb.InlineKeyboard[0][0].CallbackData)
 	assert.Equal(t, "Change project", kb.InlineKeyboard[0][1].Text)
 	assert.Equal(t, "setup:change", kb.InlineKeyboard[0][1].CallbackData)
+	assert.Len(t, kb.InlineKeyboard[1], 1)
+	assert.Equal(t, "Unlink this group", kb.InlineKeyboard[1][0].Text)
+	assert.Equal(t, "setup:unlink", kb.InlineKeyboard[1][0].CallbackData)
 }
 
 func TestBuildSettingsKeyboard_AgentToAgentOn(t *testing.T) {

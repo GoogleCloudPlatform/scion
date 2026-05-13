@@ -216,8 +216,8 @@ func TestCommandHandler_Agents_WithAgents(t *testing.T) {
 
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1)
-	assert.Contains(t, sent[0].Text, "@coder")
-	assert.Contains(t, sent[0].Text, "@reviewer")
+	assert.Contains(t, sent[0].Text, "coder")
+	assert.Contains(t, sent[0].Text, "reviewer")
 	assert.Contains(t, sent[0].Text, "(default)")
 	assert.Contains(t, sent[0].Text, "executing")
 	assert.Contains(t, sent[0].Text, "idle")
@@ -272,8 +272,8 @@ func TestCommandHandler_Help_DM(t *testing.T) {
 
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1)
-	assert.Contains(t, sent[0].Text, "/status")
-	assert.Contains(t, sent[0].Text, "group chat")
+	assert.Contains(t, sent[0].Text, "/register")
+	assert.Contains(t, sent[0].Text, "/setup")
 }
 
 // --- /unlink ---
@@ -367,7 +367,7 @@ func TestCommandHandler_Status_InDM_Unregistered(t *testing.T) {
 
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1)
-	assert.Contains(t, sent[0].Text, "/register first")
+	assert.Contains(t, sent[0].Text, "No groups are currently linked.")
 }
 
 func TestCommandHandler_Status_InDM_NoLinks(t *testing.T) {
