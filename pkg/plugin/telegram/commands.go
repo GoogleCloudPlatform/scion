@@ -27,12 +27,18 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
+// AgentInfo holds an agent's slug and current activity state.
+type AgentInfo struct {
+	Slug     string
+	Activity string
+}
+
 // HubClient provides access to the Scion hub API for project and agent listing.
 type HubClient interface {
 	ListProjects(ctx context.Context) ([]ProjectOption, error)
 	ListProjectsFresh(ctx context.Context) ([]ProjectOption, error)
 	ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error)
-	ListAgents(ctx context.Context, projectID string) ([]string, error)
+	ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error)
 }
 
 // CommandHandler processes bot commands from incoming Telegram messages.
@@ -215,7 +221,7 @@ func (h *CommandHandler) handleDefault(msg *TGMessage) {
 		return
 	}
 
-	kb := buildDefaultAgentKeyboard(agents, link.DefaultAgent)
+	kb := buildDefaultAgentKeyboard(agentSlugs(agents), link.DefaultAgent)
 	h.replyWithKeyboard(chatID, "Select the default agent for @-mentions:", kb)
 }
 
@@ -251,8 +257,11 @@ func (h *CommandHandler) handleAgents(msg *TGMessage) {
 
 	var lines []string
 	for _, agent := range agents {
-		label := agent
-		if agent == link.DefaultAgent {
+		label := agent.Slug
+		if agent.Activity != "" {
+			label += " — " + agent.Activity
+		}
+		if agent.Slug == link.DefaultAgent {
 			label += " (default)"
 		}
 		lines = append(lines, fmt.Sprintf("• @%s", label))
@@ -364,11 +373,26 @@ func (h *CommandHandler) handleStatus(msg *TGMessage) {
 				title = chat.Title
 			}
 		}
-		if title != "" {
-			lines = append(lines, fmt.Sprintf("• %s (%d) → %s (default: %s)", title, link.ChatID, link.ProjectSlug, link.DefaultAgent))
-		} else {
-			lines = append(lines, fmt.Sprintf("• chat %d → %s (default: %s)", link.ChatID, link.ProjectSlug, link.DefaultAgent))
+		// Resolve slug from cached projects if stored as UUID.
+		slug := link.ProjectSlug
+		if slug == link.ProjectID && len(h.cachedProjects) > 0 {
+			for _, p := range h.cachedProjects {
+				if p.ID == link.ProjectID {
+					slug = p.DisplayName()
+					break
+				}
+			}
 		}
+		var line string
+		if title != "" {
+			line = fmt.Sprintf("• %s (%d) → %s", title, link.ChatID, slug)
+		} else {
+			line = fmt.Sprintf("• chat %d → %s", link.ChatID, slug)
+		}
+		if link.DefaultAgent != "" {
+			line += " (default: " + link.DefaultAgent + ")"
+		}
+		lines = append(lines, line)
 	}
 
 	h.reply(chatID, "Linked groups:\n"+strings.Join(lines, "\n"))
@@ -398,26 +422,26 @@ func (h *CommandHandler) handleSettings(msg *TGMessage) {
 
 // getAgents returns agents for a project, using the store cache with a
 // fallback to the hub API.
-func (h *CommandHandler) getAgents(ctx context.Context, projectID string) ([]string, error) {
+func (h *CommandHandler) getAgents(ctx context.Context, projectID string) ([]AgentInfo, error) {
 	cached, err := h.store.GetProjectAgents(ctx, projectID)
 	if err != nil {
 		h.log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
 	}
 	if cached != nil && time.Since(cached.RefreshedAt) < 5*time.Minute {
-		return cached.AgentSlugs, nil
+		return cached.Agents, nil
 	}
 
 	agents, err := h.hubClient.ListAgents(ctx, projectID)
 	if err != nil {
 		if cached != nil {
-			return cached.AgentSlugs, nil
+			return cached.Agents, nil
 		}
 		return nil, err
 	}
 
 	saveErr := h.store.SaveProjectAgents(ctx, &ProjectAgents{
 		ProjectID:   projectID,
-		AgentSlugs:  agents,
+		Agents:      agents,
 		RefreshedAt: time.Now(),
 	})
 	if saveErr != nil {
@@ -425,6 +449,15 @@ func (h *CommandHandler) getAgents(ctx context.Context, projectID string) ([]str
 	}
 
 	return agents, nil
+}
+
+// agentSlugs extracts just the slug strings from a slice of AgentInfo.
+func agentSlugs(agents []AgentInfo) []string {
+	slugs := make([]string, len(agents))
+	for i, a := range agents {
+		slugs[i] = a.Slug
+	}
+	return slugs
 }
 
 func (h *CommandHandler) reply(chatID int64, text string) {
@@ -480,7 +513,8 @@ type hubAgentsResponse struct {
 }
 
 type hubAgent struct {
-	Slug string `json:"slug"`
+	Slug     string `json:"slug"`
+	Activity string `json:"activity"`
 }
 
 func (c *httpHubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
@@ -597,7 +631,7 @@ func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID string)
 	return projects, nil
 }
 
-func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]string, error) {
+func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error) {
 	url := fmt.Sprintf("%s/api/v1/groves/%s/agents", c.hubURL, projectID)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -623,9 +657,9 @@ func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]str
 		return nil, fmt.Errorf("decode list agents response: %w", err)
 	}
 
-	agents := make([]string, len(result.Agents))
+	agents := make([]AgentInfo, len(result.Agents))
 	for i, a := range result.Agents {
-		agents[i] = a.Slug
+		agents[i] = AgentInfo{Slug: a.Slug, Activity: a.Activity}
 	}
 	return agents, nil
 }
