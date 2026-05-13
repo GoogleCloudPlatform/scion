@@ -127,6 +127,9 @@ func (h *CallbackHandler) handleSetupCallback(ctx context.Context, cb *CallbackQ
 	case "keep":
 		return h.handleSetupKeep(ctx, cb, chatID, messageID)
 
+	case "cancel":
+		return h.handleSetupCancel(ctx, cb, chatID, messageID)
+
 	default:
 		return fmt.Errorf("unknown setup sub-action: %s", parts[0])
 	}
@@ -243,6 +246,16 @@ func (h *CallbackHandler) handleSetupChange(ctx context.Context, cb *CallbackQue
 func (h *CallbackHandler) handleSetupKeep(ctx context.Context, cb *CallbackQuery, chatID, messageID int64) error {
 	h.editMessage(ctx, chatID, messageID, "Keeping current configuration.", nil)
 	h.answerCallback(ctx, cb.ID, "Configuration kept.", false)
+	return nil
+}
+
+func (h *CallbackHandler) handleSetupCancel(ctx context.Context, cb *CallbackQuery, chatID, messageID int64) error {
+	h.mu.Lock()
+	delete(h.pendingSetups, chatID)
+	h.mu.Unlock()
+
+	h.editMessage(ctx, chatID, messageID, "Setup cancelled.", nil)
+	h.answerCallback(ctx, cb.ID, "", false)
 	return nil
 }
 

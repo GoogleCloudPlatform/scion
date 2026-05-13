@@ -58,6 +58,10 @@ func buildProjectSelectionKeyboard(projects []ProjectOption) *InlineKeyboardMark
 		rows = append(rows, row)
 	}
 
+	rows = append(rows, []InlineKeyboardButton{
+		{Text: "Cancel", CallbackData: "setup:cancel"},
+	})
+
 	return &InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 

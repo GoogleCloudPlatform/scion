@@ -26,10 +26,12 @@ func TestBuildProjectSelectionKeyboard_SingleProject(t *testing.T) {
 	kb := buildProjectSelectionKeyboard([]ProjectOption{
 		{ID: "proj1", Slug: "my-project"},
 	})
-	require.Len(t, kb.InlineKeyboard, 1)
+	require.Len(t, kb.InlineKeyboard, 2)
 	assert.Len(t, kb.InlineKeyboard[0], 1)
 	assert.Equal(t, "my-project", kb.InlineKeyboard[0][0].Text)
 	assert.Equal(t, "setup:proj:proj1", kb.InlineKeyboard[0][0].CallbackData)
+	assert.Equal(t, "Cancel", kb.InlineKeyboard[1][0].Text)
+	assert.Equal(t, "setup:cancel", kb.InlineKeyboard[1][0].CallbackData)
 }
 
 func TestBuildProjectSelectionKeyboard_ThreeProjects(t *testing.T) {
@@ -38,12 +40,13 @@ func TestBuildProjectSelectionKeyboard_ThreeProjects(t *testing.T) {
 		{ID: "p2", Slug: "beta"},
 		{ID: "p3", Slug: "gamma"},
 	})
-	require.Len(t, kb.InlineKeyboard, 2)
+	require.Len(t, kb.InlineKeyboard, 3)
 	assert.Len(t, kb.InlineKeyboard[0], 2)
 	assert.Len(t, kb.InlineKeyboard[1], 1)
 	assert.Equal(t, "alpha", kb.InlineKeyboard[0][0].Text)
 	assert.Equal(t, "beta", kb.InlineKeyboard[0][1].Text)
 	assert.Equal(t, "gamma", kb.InlineKeyboard[1][0].Text)
+	assert.Equal(t, "Cancel", kb.InlineKeyboard[2][0].Text)
 }
 
 func TestBuildProjectSelectionKeyboard_TenProjects(t *testing.T) {
@@ -55,10 +58,11 @@ func TestBuildProjectSelectionKeyboard_TenProjects(t *testing.T) {
 		})
 	}
 	kb := buildProjectSelectionKeyboard(projects)
-	require.Len(t, kb.InlineKeyboard, 5)
-	for _, row := range kb.InlineKeyboard {
+	require.Len(t, kb.InlineKeyboard, 6)
+	for _, row := range kb.InlineKeyboard[:5] {
 		assert.LessOrEqual(t, len(row), 2)
 	}
+	assert.Equal(t, "Cancel", kb.InlineKeyboard[5][0].Text)
 }
 
 func TestBuildProjectSelectionKeyboard_CallbackDataFormat(t *testing.T) {
@@ -185,7 +189,8 @@ func TestTruncateCallback_LongData(t *testing.T) {
 
 func TestBuildProjectSelectionKeyboard_Empty(t *testing.T) {
 	kb := buildProjectSelectionKeyboard(nil)
-	assert.Empty(t, kb.InlineKeyboard)
+	require.Len(t, kb.InlineKeyboard, 1)
+	assert.Equal(t, "Cancel", kb.InlineKeyboard[0][0].Text)
 }
 
 func TestBuildAgentSelectionKeyboard_SingleAgent(t *testing.T) {

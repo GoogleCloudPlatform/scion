@@ -53,6 +53,12 @@ func (f *fakeHubClient) ListProjects(_ context.Context) ([]ProjectOption, error)
 	return f.projects, nil
 }
 
+func (f *fakeHubClient) ListProjectsForUser(_ context.Context, _ string) ([]ProjectOption, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.projects, nil
+}
+
 func (f *fakeHubClient) ListAgents(_ context.Context, projectID string) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

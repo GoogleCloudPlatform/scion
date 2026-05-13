@@ -30,6 +30,7 @@ import (
 // HubClient provides access to the Scion hub API for project and agent listing.
 type HubClient interface {
 	ListProjects(ctx context.Context) ([]ProjectOption, error)
+	ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error)
 	ListAgents(ctx context.Context, projectID string) ([]string, error)
 }
 
@@ -131,18 +132,46 @@ func (h *CommandHandler) handleSetup(msg *TGMessage) {
 	}
 
 	var projects []ProjectOption
-	if len(h.cachedProjects) > 0 {
-		projects = h.cachedProjects
-		h.log.Debug("Using cached project list for /setup", "count", len(projects))
-	} else {
-		var err error
-		projects, err = h.hubClient.ListProjects(ctx)
-		if err != nil {
-			h.log.Error("Failed to list projects from hub", "error", err)
-			h.reply(chatID, "Failed to fetch projects. Please try again later.")
-			return
+	promptText := "Select a project to link this group to:"
+
+	senderID := ""
+	if msg.From != nil {
+		senderID = strconv.FormatInt(msg.From.ID, 10)
+	}
+
+	if senderID != "" {
+		mapping, mapErr := h.store.GetUserMapping(ctx, senderID)
+		if mapErr != nil {
+			h.log.Warn("Failed to check user mapping for /setup filtering", "error", mapErr)
 		}
-		h.log.Debug("Listed projects from hub", "count", len(projects))
+		if mapping != nil && mapping.ScionUserID != "" {
+			userProjects, userErr := h.hubClient.ListProjectsForUser(ctx, mapping.ScionUserID)
+			if userErr != nil {
+				h.log.Warn("Failed to list user projects, falling back to all", "error", userErr)
+			} else if len(userProjects) > 0 {
+				projects = userProjects
+				h.log.Debug("Using user-filtered project list for /setup", "user_id", mapping.ScionUserID, "count", len(projects))
+			}
+		}
+	}
+
+	if len(projects) == 0 {
+		if len(h.cachedProjects) > 0 {
+			projects = h.cachedProjects
+			h.log.Debug("Using cached project list for /setup", "count", len(projects))
+		} else {
+			var err error
+			projects, err = h.hubClient.ListProjects(ctx)
+			if err != nil {
+				h.log.Error("Failed to list projects from hub", "error", err)
+				h.reply(chatID, "Failed to fetch projects. Please try again later.")
+				return
+			}
+			h.log.Debug("Listed projects from hub", "count", len(projects))
+		}
+		if senderID != "" {
+			promptText = "Select a project to link this group to:\n_Register with /register to see only your projects._"
+		}
 	}
 
 	if len(projects) == 0 {
@@ -151,7 +180,7 @@ func (h *CommandHandler) handleSetup(msg *TGMessage) {
 	}
 
 	kb := buildProjectSelectionKeyboard(projects)
-	h.replyWithKeyboard(chatID, "Select a project to link this group to:", kb)
+	h.replyWithKeyboard(chatID, promptText, kb)
 }
 
 func (h *CommandHandler) handleDefault(msg *TGMessage) {
@@ -474,6 +503,42 @@ func (c *httpHubClient) ListProjects(ctx context.Context) ([]ProjectOption, erro
 	}
 
 	slog.Debug("Hub returned projects", "count", len(result.Projects))
+
+	projects := make([]ProjectOption, len(result.Projects))
+	for i, p := range result.Projects {
+		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
+	}
+	return projects, nil
+}
+
+func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error) {
+	url := c.hubURL + "/api/v1/groves?ownerId=" + ownerID
+
+	slog.Debug("Listing projects for user from hub", "url", url, "owner_id", ownerID)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create list user projects request: %w", err)
+	}
+
+	if err := c.signRequest(req); err != nil {
+		return nil, fmt.Errorf("sign request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list user projects request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("list user projects returned status %d", resp.StatusCode)
+	}
+
+	var result hubProjectsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode list user projects response: %w", err)
+	}
 
 	projects := make([]ProjectOption, len(result.Projects))
 	for i, p := range result.Projects {
