@@ -514,10 +514,11 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 	defer cancel()
 
 	outMsg := &hubclient.OutboundMessageRequest{
-		Recipient: userRecipient,
-		Msg:       message,
-		Type:      "instruction",
-		Urgent:    urgent,
+		Recipient:   userRecipient,
+		Msg:         message,
+		Type:        "instruction",
+		Urgent:      urgent,
+		Attachments: msgAttach,
 	}
 
 	if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {

@@ -495,11 +495,12 @@ func (s *agentService) SendStructuredMessage(ctx context.Context, agentID string
 
 // OutboundMessageRequest is the request body for sending an agent-to-human outbound message.
 type OutboundMessageRequest struct {
-	Recipient   string `json:"recipient,omitempty"`
-	RecipientID string `json:"recipient_id,omitempty"`
-	Msg         string `json:"msg"`
-	Type        string `json:"type,omitempty"`
-	Urgent      bool   `json:"urgent,omitempty"`
+	Recipient   string   `json:"recipient,omitempty"`
+	RecipientID string   `json:"recipient_id,omitempty"`
+	Msg         string   `json:"msg"`
+	Type        string   `json:"type,omitempty"`
+	Urgent      bool     `json:"urgent,omitempty"`
+	Attachments []string `json:"attachments,omitempty"`
 }
 
 // SendOutboundMessage sends a message from an agent to a human inbox.
