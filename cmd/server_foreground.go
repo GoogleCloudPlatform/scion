@@ -293,35 +293,44 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		hubSrv.SetDispatcher(dispatcher)
 		log.Printf("Agent dispatcher configured (HTTP-based)")
 
-		// Initialize message broker from versioned settings
+		// Initialize message broker from versioned settings.
+		// Uses FanOutBroker to support multiple simultaneous broker plugins.
 		if vs, err := config.LoadVersionedSettings(""); err == nil && vs.Server != nil && vs.Server.MessageBroker != nil && vs.Server.MessageBroker.Enabled {
-			brokerType := vs.Server.MessageBroker.Type
-			if brokerType == "" {
-				brokerType = "inprocess"
-			}
-			switch brokerType {
-			case "inprocess":
-				b := broker.NewInProcessBroker(logging.Subsystem("hub.broker.inprocess"))
-				hubSrv.StartMessageBroker(b)
-				log.Printf("Message broker started: type=%s", brokerType)
-			default:
-				// Try loading as a plugin broker
-				if pluginMgr.HasPlugin(scionplugin.PluginTypeBroker, brokerType) {
-					b, pluginErr := pluginMgr.GetBroker(brokerType)
-					if pluginErr != nil {
-						log.Printf("Warning: failed to get broker plugin %q: %v", brokerType, pluginErr)
-					} else {
-						hubSrv.StartMessageBroker(b)
-						log.Printf("Message broker started: type=%s (plugin)", brokerType)
-					}
-				} else {
-					log.Printf("Warning: unknown message broker type %q (no plugin loaded), skipping", brokerType)
-				}
+			var namedBrokers []broker.NamedBroker
+
+			// InProcessBroker is always present for local pub/sub routing.
+			inproc := broker.NewInProcessBroker(logging.Subsystem("hub.broker.inprocess"))
+			namedBrokers = append(namedBrokers, broker.NamedBroker{Name: "inprocess", Broker: inproc})
+
+			// Resolve the list of plugin broker types.
+			brokerTypes := vs.Server.MessageBroker.Types
+			if len(brokerTypes) == 0 && vs.Server.MessageBroker.Type != "" && vs.Server.MessageBroker.Type != "inprocess" {
+				brokerTypes = []string{vs.Server.MessageBroker.Type}
 			}
 
+			for _, bt := range brokerTypes {
+				if !pluginMgr.HasPlugin(scionplugin.PluginTypeBroker, bt) {
+					log.Printf("Warning: broker plugin %q not loaded, skipping", bt)
+					continue
+				}
+				b, pluginErr := pluginMgr.GetBroker(bt)
+				if pluginErr != nil {
+					log.Printf("Warning: failed to get broker plugin %q: %v", bt, pluginErr)
+					continue
+				}
+
+				observer := isObserverBroker(pluginMgr, bt)
+				namedBrokers = append(namedBrokers, broker.NamedBroker{
+					Name: bt, Broker: b, Observer: observer,
+				})
+				log.Printf("Message broker spoke added: name=%s observer=%v", bt, observer)
+			}
+
+			fanout := broker.NewFanOutBroker(namedBrokers, logging.Subsystem("hub.broker.fanout"))
+			hubSrv.StartMessageBroker(fanout)
+			log.Printf("Message broker started: fan-out with %d spoke(s)", len(namedBrokers))
+
 			// Wire the broker proxy as the host callbacks target for broker plugins.
-			// This enables plugin-initiated subscriptions via the HostCallbacks
-			// reverse channel (the proxy implements plugin.HostCallbacks).
 			if proxy := hubSrv.GetMessageBrokerProxy(); proxy != nil {
 				pluginMgr.SetBrokerHostCallbacks(proxy)
 			}
@@ -1165,6 +1174,28 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	}
 
 	return nil
+}
+
+// isObserverBroker determines whether a broker plugin should be treated as an
+// observer (fire-and-forget on publish errors). It checks the plugin's
+// capabilities first, then falls back to a name-based heuristic.
+func isObserverBroker(pluginMgr *scionplugin.Manager, name string) bool {
+	raw, err := pluginMgr.Get(scionplugin.PluginTypeBroker, name)
+	if err == nil {
+		if rpc, ok := raw.(*scionplugin.BrokerRPCClient); ok {
+			if info, infoErr := rpc.GetInfo(); infoErr == nil && info != nil {
+				for _, cap := range info.Capabilities {
+					if strings.EqualFold(cap, "observer") {
+						return true
+					}
+				}
+				return false
+			}
+		}
+	}
+	// Heuristic fallback: names containing "log" or "debug" are observers.
+	lower := strings.ToLower(name)
+	return strings.Contains(lower, "log") || strings.Contains(lower, "debug")
 }
 
 // initPluginManager creates and loads a plugin manager from versioned settings.
