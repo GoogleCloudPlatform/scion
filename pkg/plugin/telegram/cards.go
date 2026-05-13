@@ -160,7 +160,7 @@ func buildSetupConfirmKeyboard(currentProject string) *InlineKeyboardMarkup {
 
 // buildSettingsKeyboard creates keyboard for /settings command.
 // Includes observer mode toggle and group notifications toggle.
-func buildSettingsKeyboard(showAgentToAgent, notifyInGroup bool) *InlineKeyboardMarkup {
+func buildSettingsKeyboard(showAgentToAgent, notifyInGroup, showAssistantReply bool) *InlineKeyboardMarkup {
 	a2aOnLabel := "Observer: On"
 	a2aOffLabel := "Observer: Off"
 	if showAgentToAgent {
@@ -177,11 +177,23 @@ func buildSettingsKeyboard(showAgentToAgent, notifyInGroup bool) *InlineKeyboard
 		grpOffLabel = "✓ Group Notifications: Off"
 	}
 
+	comOnLabel := "Commentary: On"
+	comOffLabel := "Commentary: Off"
+	if showAssistantReply {
+		comOnLabel = "✓ Commentary: On"
+	} else {
+		comOffLabel = "✓ Commentary: Off"
+	}
+
 	return &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
 			{
 				{Text: a2aOnLabel, CallbackData: "settings:a2a:on"},
 				{Text: a2aOffLabel, CallbackData: "settings:a2a:off"},
+			},
+			{
+				{Text: comOnLabel, CallbackData: "settings:commentary:on"},
+				{Text: comOffLabel, CallbackData: "settings:commentary:off"},
 			},
 			{
 				{Text: grpOnLabel, CallbackData: "settings:grp:on"},

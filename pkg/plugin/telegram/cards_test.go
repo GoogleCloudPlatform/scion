@@ -141,8 +141,8 @@ func TestBuildSetupConfirmKeyboard(t *testing.T) {
 }
 
 func TestBuildSettingsKeyboard_AgentToAgentOn(t *testing.T) {
-	kb := buildSettingsKeyboard(true, false)
-	require.Len(t, kb.InlineKeyboard, 2)
+	kb := buildSettingsKeyboard(true, false, true)
+	require.Len(t, kb.InlineKeyboard, 3)
 	assert.Equal(t, "✓ Observer: On", kb.InlineKeyboard[0][0].Text)
 	assert.Equal(t, "settings:a2a:on", kb.InlineKeyboard[0][0].CallbackData)
 	assert.Equal(t, "Observer: Off", kb.InlineKeyboard[0][1].Text)
@@ -150,19 +150,35 @@ func TestBuildSettingsKeyboard_AgentToAgentOn(t *testing.T) {
 }
 
 func TestBuildSettingsKeyboard_AgentToAgentOff(t *testing.T) {
-	kb := buildSettingsKeyboard(false, false)
-	require.Len(t, kb.InlineKeyboard, 2)
+	kb := buildSettingsKeyboard(false, false, true)
+	require.Len(t, kb.InlineKeyboard, 3)
 	assert.Equal(t, "Observer: On", kb.InlineKeyboard[0][0].Text)
 	assert.Equal(t, "✓ Observer: Off", kb.InlineKeyboard[0][1].Text)
 }
 
+func TestBuildSettingsKeyboard_CommentaryOn(t *testing.T) {
+	kb := buildSettingsKeyboard(false, false, true)
+	require.Len(t, kb.InlineKeyboard, 3)
+	assert.Equal(t, "✓ Commentary: On", kb.InlineKeyboard[1][0].Text)
+	assert.Equal(t, "settings:commentary:on", kb.InlineKeyboard[1][0].CallbackData)
+	assert.Equal(t, "Commentary: Off", kb.InlineKeyboard[1][1].Text)
+	assert.Equal(t, "settings:commentary:off", kb.InlineKeyboard[1][1].CallbackData)
+}
+
+func TestBuildSettingsKeyboard_CommentaryOff(t *testing.T) {
+	kb := buildSettingsKeyboard(false, false, false)
+	require.Len(t, kb.InlineKeyboard, 3)
+	assert.Equal(t, "Commentary: On", kb.InlineKeyboard[1][0].Text)
+	assert.Equal(t, "✓ Commentary: Off", kb.InlineKeyboard[1][1].Text)
+}
+
 func TestBuildSettingsKeyboard_GroupNotifyOn(t *testing.T) {
-	kb := buildSettingsKeyboard(false, true)
-	require.Len(t, kb.InlineKeyboard, 2)
-	assert.Equal(t, "✓ Group Notifications: On", kb.InlineKeyboard[1][0].Text)
-	assert.Equal(t, "settings:grp:on", kb.InlineKeyboard[1][0].CallbackData)
-	assert.Equal(t, "Group Notifications: Off", kb.InlineKeyboard[1][1].Text)
-	assert.Equal(t, "settings:grp:off", kb.InlineKeyboard[1][1].CallbackData)
+	kb := buildSettingsKeyboard(false, true, true)
+	require.Len(t, kb.InlineKeyboard, 3)
+	assert.Equal(t, "✓ Group Notifications: On", kb.InlineKeyboard[2][0].Text)
+	assert.Equal(t, "settings:grp:on", kb.InlineKeyboard[2][0].CallbackData)
+	assert.Equal(t, "Group Notifications: Off", kb.InlineKeyboard[2][1].Text)
+	assert.Equal(t, "settings:grp:off", kb.InlineKeyboard[2][1].CallbackData)
 }
 
 func TestBuildNotificationsKeyboard(t *testing.T) {

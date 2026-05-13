@@ -445,6 +445,29 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		}
 	}
 
+	// Commentary filter: suppress assistant-reply messages per group link setting.
+	if msg != nil && msg.Type == messages.TypeAssistantReply {
+		filtered := chatIDs[:0]
+		for _, chatID := range chatIDs {
+			link, err := store.GetGroupLink(ctx, chatID)
+			if err != nil {
+				b.log.Warn("Failed to load group link for commentary check", "chat_id", chatID, "error", err)
+				filtered = append(filtered, chatID)
+				continue
+			}
+			if link == nil || link.ShowAssistantReply {
+				filtered = append(filtered, chatID)
+				continue
+			}
+			b.log.Debug("Suppressed assistant-reply message (commentary off)",
+				"chat_id", chatID, "sender", msg.Sender)
+		}
+		chatIDs = filtered
+		if len(chatIDs) == 0 {
+			return nil
+		}
+	}
+
 	// Handle InputNeeded messages with inline keyboards.
 	if msg != nil && msg.Type == messages.TypeInputNeeded {
 		return b.publishInputNeeded(ctx, api, chatIDs, msg, agentSlug, projectID)

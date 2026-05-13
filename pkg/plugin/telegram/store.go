@@ -79,8 +79,9 @@ type GroupLink struct {
 	LinkedBy         string
 	LinkedAt         time.Time
 	Active           bool
-	ShowAgentToAgent bool
-	NotifyInGroup    bool
+	ShowAgentToAgent   bool
+	NotifyInGroup      bool
+	ShowAssistantReply bool
 }
 
 // ConversationContext tracks the last chat context for a user+project+agent tuple.
@@ -174,8 +175,9 @@ CREATE TABLE IF NOT EXISTS group_links (
 	linked_by          TEXT NOT NULL DEFAULT '',
 	linked_at          TEXT NOT NULL,
 	active             INTEGER NOT NULL DEFAULT 1,
-	show_agent_to_agent INTEGER NOT NULL DEFAULT 0,
-	notify_in_group    INTEGER NOT NULL DEFAULT 0
+	show_agent_to_agent    INTEGER NOT NULL DEFAULT 0,
+	notify_in_group        INTEGER NOT NULL DEFAULT 0,
+	show_assistant_reply   INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_group_links_project ON group_links(project_id);
@@ -238,6 +240,7 @@ CREATE TABLE IF NOT EXISTS notification_prefs (
 
 func (s *sqliteStore) migrate() error {
 	s.addColumnIfNotExists("group_links", "notify_in_group", "INTEGER NOT NULL DEFAULT 0")
+	s.addColumnIfNotExists("group_links", "show_assistant_reply", "INTEGER NOT NULL DEFAULT 1")
 	return nil
 }
 
@@ -254,27 +257,28 @@ func (s *sqliteStore) Close() error {
 
 func (s *sqliteStore) SaveGroupLink(ctx context.Context, link *GroupLink) error {
 	const q = `
-INSERT INTO group_links (chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO group_links (chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group, show_assistant_reply)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(chat_id) DO UPDATE SET
 	chat_title=excluded.chat_title, project_id=excluded.project_id, project_slug=excluded.project_slug,
 	default_agent=excluded.default_agent, linked_by=excluded.linked_by, linked_at=excluded.linked_at,
-	active=excluded.active, show_agent_to_agent=excluded.show_agent_to_agent, notify_in_group=excluded.notify_in_group`
+	active=excluded.active, show_agent_to_agent=excluded.show_agent_to_agent, notify_in_group=excluded.notify_in_group,
+	show_assistant_reply=excluded.show_assistant_reply`
 	_, err := s.db.ExecContext(ctx, q,
 		link.ChatID, link.ChatTitle, link.ProjectID, link.ProjectSlug,
 		link.DefaultAgent, link.LinkedBy, link.LinkedAt.UTC().Format(time.RFC3339),
-		boolToInt(link.Active), boolToInt(link.ShowAgentToAgent), boolToInt(link.NotifyInGroup))
+		boolToInt(link.Active), boolToInt(link.ShowAgentToAgent), boolToInt(link.NotifyInGroup), boolToInt(link.ShowAssistantReply))
 	return err
 }
 
 func (s *sqliteStore) GetGroupLink(ctx context.Context, chatID int64) (*GroupLink, error) {
-	const q = `SELECT chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group FROM group_links WHERE chat_id = ?`
+	const q = `SELECT chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group, show_assistant_reply FROM group_links WHERE chat_id = ?`
 	row := s.db.QueryRowContext(ctx, q, chatID)
 	return scanGroupLink(row)
 }
 
 func (s *sqliteStore) GetGroupLinksForProject(ctx context.Context, projectID string) ([]*GroupLink, error) {
-	const q = `SELECT chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group FROM group_links WHERE project_id = ?`
+	const q = `SELECT chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group, show_assistant_reply FROM group_links WHERE project_id = ?`
 	rows, err := s.db.QueryContext(ctx, q, projectID)
 	if err != nil {
 		return nil, err
@@ -284,7 +288,7 @@ func (s *sqliteStore) GetGroupLinksForProject(ctx context.Context, projectID str
 }
 
 func (s *sqliteStore) GetAllGroupLinks(ctx context.Context) ([]*GroupLink, error) {
-	const q = `SELECT chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group FROM group_links`
+	const q = `SELECT chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group, show_assistant_reply FROM group_links`
 	rows, err := s.db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, err
@@ -580,9 +584,9 @@ func (s *sqliteStore) GetNotificationPref(ctx context.Context, telegramUserID, p
 func scanGroupLink(row *sql.Row) (*GroupLink, error) {
 	var link GroupLink
 	var linkedAt string
-	var active, showA2A, notifyInGroup int
+	var active, showA2A, notifyInGroup, showAssistantReply int
 	err := row.Scan(&link.ChatID, &link.ChatTitle, &link.ProjectID, &link.ProjectSlug,
-		&link.DefaultAgent, &link.LinkedBy, &linkedAt, &active, &showA2A, &notifyInGroup)
+		&link.DefaultAgent, &link.LinkedBy, &linkedAt, &active, &showA2A, &notifyInGroup, &showAssistantReply)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -596,6 +600,7 @@ func scanGroupLink(row *sql.Row) (*GroupLink, error) {
 	link.Active = active != 0
 	link.ShowAgentToAgent = showA2A != 0
 	link.NotifyInGroup = notifyInGroup != 0
+	link.ShowAssistantReply = showAssistantReply != 0
 	return &link, nil
 }
 
@@ -604,9 +609,9 @@ func scanGroupLinks(rows *sql.Rows) ([]*GroupLink, error) {
 	for rows.Next() {
 		var link GroupLink
 		var linkedAt string
-		var active, showA2A, notifyInGroup int
+		var active, showA2A, notifyInGroup, showAssistantReply int
 		err := rows.Scan(&link.ChatID, &link.ChatTitle, &link.ProjectID, &link.ProjectSlug,
-			&link.DefaultAgent, &link.LinkedBy, &linkedAt, &active, &showA2A, &notifyInGroup)
+			&link.DefaultAgent, &link.LinkedBy, &linkedAt, &active, &showA2A, &notifyInGroup, &showAssistantReply)
 		if err != nil {
 			return nil, err
 		}
@@ -617,6 +622,7 @@ func scanGroupLinks(rows *sql.Rows) ([]*GroupLink, error) {
 		link.Active = active != 0
 		link.ShowAgentToAgent = showA2A != 0
 		link.NotifyInGroup = notifyInGroup != 0
+		link.ShowAssistantReply = showAssistantReply != 0
 		links = append(links, &link)
 	}
 	return links, rows.Err()

@@ -434,6 +434,15 @@ func (h *CallbackHandler) handleSettingsCallback(ctx context.Context, cb *Callba
 		default:
 			return fmt.Errorf("invalid a2a value: %s", value)
 		}
+	case "commentary":
+		switch value {
+		case "on":
+			link.ShowAssistantReply = true
+		case "off":
+			link.ShowAssistantReply = false
+		default:
+			return fmt.Errorf("invalid commentary value: %s", value)
+		}
 	case "grp":
 		switch value {
 		case "on":
@@ -453,7 +462,7 @@ func (h *CallbackHandler) handleSettingsCallback(ctx context.Context, cb *Callba
 		return err
 	}
 
-	kb := buildSettingsKeyboard(link.ShowAgentToAgent, link.NotifyInGroup)
+	kb := buildSettingsKeyboard(link.ShowAgentToAgent, link.NotifyInGroup, link.ShowAssistantReply)
 	h.editMarkup(ctx, chatID, messageID, kb)
 
 	var toastMsg string
@@ -464,6 +473,12 @@ func (h *CallbackHandler) handleSettingsCallback(ctx context.Context, cb *Callba
 			label = "on"
 		}
 		toastMsg = fmt.Sprintf("Observer mode: %s", label)
+	case "commentary":
+		label := "off"
+		if link.ShowAssistantReply {
+			label = "on"
+		}
+		toastMsg = fmt.Sprintf("Commentary: %s", label)
 	case "grp":
 		label := "off"
 		if link.NotifyInGroup {
