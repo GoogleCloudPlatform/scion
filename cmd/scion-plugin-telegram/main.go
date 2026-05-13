@@ -51,6 +51,9 @@ func main() {
 	fmt.Println("  broker_id       Broker ID for HMAC signing")
 	fmt.Println("  chat_routes     JSON map of chat IDs to topic patterns")
 	fmt.Println("  user_mappings   JSON map of Telegram user IDs to scion user emails/IDs")
+	fmt.Println("  register_addr   HTTP listen address for registration server (e.g., :9093)")
+	fmt.Println("  register_url    External URL for registration links (e.g., https://example.com)")
+	fmt.Println("  mappings_file   Path to persist user mappings JSON file")
 	fmt.Println("  api_base_url    Override Telegram API base URL (for testing)")
 	os.Exit(0)
 }

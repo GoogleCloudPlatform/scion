@@ -91,6 +91,12 @@ type TelegramBroker struct {
 	// User identity mapping: Telegram user ID -> scion user (e.g. "user:ptone@google.com")
 	userMappings map[string]string
 
+	// Registration server and config
+	regServer    *registrationServer
+	registerURL  string // external URL for registration links
+	registerAddr string // HTTP listen address
+	mappingsFile string // path to persisted mappings JSON
+
 	// Long polling state
 	pollCancel context.CancelFunc
 	pollDone   chan struct{}
@@ -165,6 +171,24 @@ func (b *TelegramBroker) Configure(config map[string]string) error {
 		b.userMappings = raw
 	}
 
+	// Registration config
+	if v, ok := config["register_addr"]; ok && v != "" {
+		b.registerAddr = v
+	}
+	if v, ok := config["register_url"]; ok && v != "" {
+		b.registerURL = v
+	}
+	if v, ok := config["mappings_file"]; ok && v != "" {
+		b.mappingsFile = v
+	}
+
+	// Load persisted mappings (merges with static config, static takes precedence)
+	if b.mappingsFile != "" {
+		if err := b.loadUserMappings(b.mappingsFile); err != nil {
+			b.log.Warn("Failed to load user mappings file", "path", b.mappingsFile, "error", err)
+		}
+	}
+
 	// Validate the bot token by calling getMe
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -174,6 +198,19 @@ func (b *TelegramBroker) Configure(config map[string]string) error {
 		return fmt.Errorf("failed to validate bot token: %w", err)
 	}
 	b.botInfo = bot
+
+	// Start registration server if an address is configured
+	if b.registerAddr != "" {
+		b.regServer = newRegistrationServer(b)
+		actualAddr, err := b.regServer.start(b.registerAddr)
+		if err != nil {
+			return fmt.Errorf("start registration server: %w", err)
+		}
+		if b.registerURL == "" {
+			b.registerURL = "http://" + actualAddr
+		}
+		b.log.Info("Registration server started", "addr", actualAddr, "url", b.registerURL)
+	}
 
 	b.log.Info("Telegram broker configured",
 		"bot_username", bot.Username,
@@ -340,8 +377,8 @@ func (b *TelegramBroker) Unsubscribe(pattern string) error {
 	return nil
 }
 
-// Close shuts down the Telegram broker, stopping the polling goroutine
-// and releasing resources.
+// Close shuts down the Telegram broker, stopping the polling goroutine,
+// registration server, and releasing resources.
 func (b *TelegramBroker) Close() error {
 	b.mu.Lock()
 	if b.closed {
@@ -350,9 +387,14 @@ func (b *TelegramBroker) Close() error {
 	}
 	b.closed = true
 	b.subs = make(map[string]bool)
+	regServer := b.regServer
 	b.mu.Unlock()
 
 	b.stopPolling()
+
+	if regServer != nil {
+		regServer.stop()
+	}
 
 	b.log.Info("Telegram broker closed")
 	return nil
@@ -363,7 +405,7 @@ func (b *TelegramBroker) GetInfo() (*plugin.PluginInfo, error) {
 	return &plugin.PluginInfo{
 		Name:         "telegram",
 		Version:      "0.1.0",
-		Capabilities: []string{"echo-filter", "long-polling", "telegram-bot-api"},
+		Capabilities: []string{"echo-filter", "long-polling", "telegram-bot-api", "user-registration"},
 	}, nil
 }
 
@@ -489,6 +531,11 @@ func (b *TelegramBroker) handleIncomingMessage(tgMsg *TGMessage) {
 
 	if botInfo != nil && tgMsg.From != nil && tgMsg.From.ID == botInfo.ID {
 		b.log.Debug("Filtered echo message from bot", "message_id", tgMsg.MessageID)
+		return
+	}
+
+	// Handle bot commands (/register, /unregister)
+	if strings.HasPrefix(tgMsg.Text, "/") && b.handleBotCommand(tgMsg) {
 		return
 	}
 
