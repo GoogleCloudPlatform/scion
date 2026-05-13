@@ -208,6 +208,13 @@ type setMyCommandsRequest struct {
 	Scope    *BotCommandScope `json:"scope,omitempty"`
 }
 
+// setWebhookRequest is the JSON body for the setWebhook API call.
+type setWebhookRequest struct {
+	URL            string   `json:"url"`
+	SecretToken    string   `json:"secret_token,omitempty"`
+	AllowedUpdates []string `json:"allowed_updates,omitempty"`
+}
+
 // getUpdatesRequest is the JSON body for the getUpdates API call.
 type getUpdatesRequest struct {
 	Offset         int64    `json:"offset,omitempty"`
@@ -620,6 +627,71 @@ func (c *TelegramAPIClient) AnswerCallbackQuery(ctx context.Context, callbackQue
 			apiErr.RetryAfterSec = apiResp.Parameters.RetryAfterSec
 		}
 		return apiErr
+	}
+
+	return nil
+}
+
+// SetWebhook registers a webhook URL with Telegram for receiving updates.
+// When set, Telegram will POST updates to the given URL instead of requiring
+// long-polling via getUpdates.
+func (c *TelegramAPIClient) SetWebhook(ctx context.Context, webhookURL, secretToken string) error {
+	body := setWebhookRequest{
+		URL:            webhookURL,
+		SecretToken:    secretToken,
+		AllowedUpdates: []string{"message", "callback_query"},
+	}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal setWebhook request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.methodURL("setWebhook"), bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("create setWebhook request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("setWebhook request failed: %w", c.redactToken(err))
+	}
+	defer resp.Body.Close()
+
+	var apiResp apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return fmt.Errorf("decode setWebhook response: %w", err)
+	}
+
+	if !apiResp.OK {
+		return &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
+	}
+
+	return nil
+}
+
+// DeleteWebhook removes the current webhook integration, reverting to
+// getUpdates long-polling mode.
+func (c *TelegramAPIClient) DeleteWebhook(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, "POST", c.methodURL("deleteWebhook"), nil)
+	if err != nil {
+		return fmt.Errorf("create deleteWebhook request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("deleteWebhook request failed: %w", c.redactToken(err))
+	}
+	defer resp.Body.Close()
+
+	var apiResp apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return fmt.Errorf("decode deleteWebhook response: %w", err)
+	}
+
+	if !apiResp.OK {
+		return &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
 	}
 
 	return nil

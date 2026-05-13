@@ -15,6 +15,7 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -24,9 +25,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
 	"log/slog"
-
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -81,6 +80,7 @@ type fakeTGServerV2 struct {
 	editedMarkups      []editMessageReplyMarkupRequest
 	answeredCallbacks  []answerCallbackQueryRequest
 	nextSendMessageID  int64
+	webhookURL         string
 }
 
 func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
@@ -174,6 +174,26 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 				OK:     true,
 				Result: mustJSONRawV2(t, []Update{}),
 			})
+
+		case "/bottest-token/setWebhook":
+			var req setWebhookRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			f.mu.Lock()
+			f.webhookURL = req.URL
+			f.mu.Unlock()
+			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
+
+		case "/bottest-token/deleteWebhook":
+			f.mu.Lock()
+			f.webhookURL = ""
+			f.mu.Unlock()
+			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
+
+		case "/bottest-token/setMyCommands":
+			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
 
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -1591,4 +1611,228 @@ func TestFormatMessageV2(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- Webhook mode tests ---
+
+func TestV2_Configure_WebhookMode(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	err := b.Configure(map[string]string{
+		"bot_token":      "test-token",
+		"api_base_url":   tgSrv.srv.URL,
+		"hub_url":        "http://hub.test",
+		"broker_id":      "broker-test",
+		"db_path":        dbPath,
+		"inbound_mode":   "webhook",
+		"webhook_url":    "https://example.com/telegram/webhook",
+		"webhook_listen": ":0",
+		"webhook_secret": "test-secret",
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "webhook", b.inboundMode)
+	assert.NotNil(t, b.webhookServer)
+
+	tgSrv.mu.Lock()
+	assert.Equal(t, "https://example.com/telegram/webhook", tgSrv.webhookURL)
+	tgSrv.mu.Unlock()
+}
+
+func TestV2_Configure_WebhookMode_MissingURL(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	err := b.Configure(map[string]string{
+		"bot_token":    "test-token",
+		"api_base_url": tgSrv.srv.URL,
+		"db_path":      dbPath,
+		"inbound_mode": "webhook",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "webhook_url is required")
+}
+
+func TestV2_Configure_InvalidInboundMode(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	err := b.Configure(map[string]string{
+		"bot_token":    "test-token",
+		"api_base_url": tgSrv.srv.URL,
+		"db_path":      dbPath,
+		"inbound_mode": "invalid",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid inbound_mode")
+}
+
+func TestV2_Configure_DefaultPollMode(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	err := b.Configure(map[string]string{
+		"bot_token":    "test-token",
+		"api_base_url": tgSrv.srv.URL,
+		"db_path":      dbPath,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "poll", b.inboundMode)
+	assert.Nil(t, b.webhookServer)
+}
+
+func TestV2_WebhookMode_PollingDoesNotStart(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	err := b.Configure(map[string]string{
+		"bot_token":      "test-token",
+		"api_base_url":   tgSrv.srv.URL,
+		"db_path":        dbPath,
+		"inbound_mode":   "webhook",
+		"webhook_url":    "https://example.com/telegram/webhook",
+		"webhook_listen": ":0",
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, b.Subscribe("scion.project.proj-1.>"))
+
+	b.mu.RLock()
+	assert.Nil(t, b.pollCancel, "polling should not start in webhook mode")
+	b.mu.RUnlock()
+}
+
+func TestV2_WebhookMode_InboundMessageDelivery(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	b := NewV2(slog.Default())
+	defer b.Close()
+
+	err := b.Configure(map[string]string{
+		"bot_token":      "test-token",
+		"api_base_url":   tgSrv.srv.URL,
+		"hub_url":        "http://hub.test",
+		"broker_id":      "broker-test",
+		"db_path":        dbPath,
+		"inbound_mode":   "webhook",
+		"webhook_url":    "https://example.com/telegram/webhook",
+		"webhook_listen": ":0",
+		"webhook_secret": "webhook-secret",
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:       -200,
+		ProjectID:    "proj-1",
+		ProjectSlug:  "my-project",
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		ProjectID:   "proj-1",
+		Agents:      []AgentInfo{{Slug: "coder"}},
+		RefreshedAt: time.Now(),
+	}))
+
+	var deliveredTopic string
+	var deliveredMsg *messages.StructuredMessage
+	done := make(chan struct{}, 1)
+	b.InboundHandler = func(topic string, msg *messages.StructuredMessage) {
+		deliveredTopic = topic
+		deliveredMsg = msg
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+
+	update := Update{
+		UpdateID: 42,
+		Message: &TGMessage{
+			MessageID: 10,
+			From:      &TGUser{ID: 456, Username: "alice"},
+			Chat:      TGChat{ID: -200, Type: "group"},
+			Date:      time.Now().Unix(),
+			Text:      "@test_bot hello webhook",
+			Entities: []MessageEntity{
+				{Type: "mention", Offset: 0, Length: 9},
+			},
+		},
+	}
+	body, err := json.Marshal(update)
+	require.NoError(t, err)
+
+	webhookAddr := b.webhookServer.actualAddr
+	req, err := http.NewRequest("POST", "http://"+webhookAddr+webhookPath, bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(secretTokenHeader, "webhook-secret")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for webhook message delivery")
+	}
+
+	assert.Equal(t, "scion.project.proj-1.agent.coder.messages", deliveredTopic)
+	assert.Equal(t, "hello webhook", deliveredMsg.Msg)
+	assert.Equal(t, "user:alice@example.com", deliveredMsg.Sender)
+	assert.Equal(t, "agent:coder", deliveredMsg.Recipient)
+}
+
+func TestV2_WebhookMode_Close(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	b := NewV2(slog.Default())
+
+	err := b.Configure(map[string]string{
+		"bot_token":      "test-token",
+		"api_base_url":   tgSrv.srv.URL,
+		"db_path":        dbPath,
+		"inbound_mode":   "webhook",
+		"webhook_url":    "https://example.com/telegram/webhook",
+		"webhook_listen": ":0",
+	})
+	require.NoError(t, err)
+
+	tgSrv.mu.Lock()
+	assert.Equal(t, "https://example.com/telegram/webhook", tgSrv.webhookURL)
+	tgSrv.mu.Unlock()
+
+	require.NoError(t, b.Close())
+
+	tgSrv.mu.Lock()
+	assert.Empty(t, tgSrv.webhookURL, "webhook should be deleted on close")
+	tgSrv.mu.Unlock()
 }

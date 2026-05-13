@@ -300,3 +300,96 @@ func mustJSON(t *testing.T, v interface{}) json.RawMessage {
 	require.NoError(t, err)
 	return data
 }
+
+func TestSetWebhook_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/bottest-token/setWebhook", r.URL.Path)
+		assert.Equal(t, "POST", r.Method)
+		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+
+		var reqBody setWebhookRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&reqBody))
+		assert.Equal(t, "https://example.com/telegram/webhook", reqBody.URL)
+		assert.Equal(t, "my-secret", reqBody.SecretToken)
+		assert.Contains(t, reqBody.AllowedUpdates, "message")
+		assert.Contains(t, reqBody.AllowedUpdates, "callback_query")
+
+		resp := apiResponse{OK: true, Result: mustJSON(t, true)}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := newTestAPIClient(t, srv)
+	err := client.SetWebhook(context.Background(), "https://example.com/telegram/webhook", "my-secret")
+	require.NoError(t, err)
+}
+
+func TestSetWebhook_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := apiResponse{
+			OK:          false,
+			Description: "Bad Request: bad webhook",
+			ErrorCode:   400,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := newTestAPIClient(t, srv)
+	err := client.SetWebhook(context.Background(), "https://example.com/webhook", "secret")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bad webhook")
+}
+
+func TestSetWebhook_NoSecret(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var reqBody setWebhookRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&reqBody))
+		assert.Empty(t, reqBody.SecretToken)
+
+		resp := apiResponse{OK: true, Result: mustJSON(t, true)}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := newTestAPIClient(t, srv)
+	err := client.SetWebhook(context.Background(), "https://example.com/webhook", "")
+	require.NoError(t, err)
+}
+
+func TestDeleteWebhook_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/bottest-token/deleteWebhook", r.URL.Path)
+		assert.Equal(t, "POST", r.Method)
+
+		resp := apiResponse{OK: true, Result: mustJSON(t, true)}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := newTestAPIClient(t, srv)
+	err := client.DeleteWebhook(context.Background())
+	require.NoError(t, err)
+}
+
+func TestDeleteWebhook_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := apiResponse{
+			OK:          false,
+			Description: "Internal Server Error",
+			ErrorCode:   500,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := newTestAPIClient(t, srv)
+	err := client.DeleteWebhook(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Internal Server Error")
+}
