@@ -172,7 +172,6 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 	// DROP TABLE on a parent table triggers ON DELETE CASCADE on child tables.
 	foreignKeysOffMigrations := map[int]bool{
 		40: true, // V40 drops and recreates the projects table
-		48: true, // V48 renames tables and columns
 	}
 
 	// Apply pending migrations
@@ -1342,7 +1341,32 @@ UPDATE agents SET stalled_from_activity = 'working' WHERE stalled_from_activity 
 `
 
 // migrationV53 adds an index on (created, id) to allow_list for efficient keyset pagination.
+// It also ensures the allow_list table exists, because databases created before V48/V49 were
+// inserted into the migration sequence already have version 48 recorded with different content
+// (the grove-to-project rename that is now V50). On those databases V48 is skipped, so the
+// allow_list table was never created.
 const migrationV53 = `
+CREATE TABLE IF NOT EXISTS allow_list (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    note TEXT NOT NULL DEFAULT '',
+    added_by TEXT NOT NULL,
+    invite_id TEXT NOT NULL DEFAULT '',
+    created DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS invite_codes (
+    id TEXT PRIMARY KEY,
+    code_hash TEXT NOT NULL UNIQUE,
+    code_prefix TEXT NOT NULL,
+    max_uses INTEGER NOT NULL DEFAULT 1,
+    use_count INTEGER NOT NULL DEFAULT 0,
+    expires_at DATETIME NOT NULL,
+    revoked INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    created DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_invite_codes_expires ON invite_codes(expires_at);
 CREATE INDEX IF NOT EXISTS idx_allow_list_created_id ON allow_list (created DESC, id DESC);
 `
 
