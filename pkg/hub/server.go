@@ -506,6 +506,9 @@ type Server struct {
 
 	logQueryService *LogQueryService // Cloud Logging query service (nil = disabled)
 
+	// Telegram link service for code-based account linking (nil = disabled)
+	telegramLinkService *TelegramLinkService
+
 	// Channel registry for external notification delivery (nil = disabled)
 	channelRegistry *ChannelRegistry
 
@@ -632,6 +635,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize invite code service
 	srv.inviteService = NewInviteService(s, s)
+
+	// Initialize Telegram link service
+	srv.telegramLinkService = NewTelegramLinkService()
 
 	// Initialize OAuth service if configured
 	if cfg.OAuthConfig.IsConfigured() {
@@ -1962,6 +1968,9 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		if s.messageBrokerProxy != nil {
 			s.messageBrokerProxy.Stop()
 		}
+		if s.telegramLinkService != nil {
+			s.telegramLinkService.Close()
+		}
 		if s.events != nil {
 			s.events.Close()
 		}
@@ -2092,6 +2101,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/github-app/installations/", s.handleGitHubAppInstallations)
 	s.mux.HandleFunc("/api/v1/github-app/installations/discover", s.handleGitHubAppDiscover)
 	s.mux.HandleFunc("/api/v1/github-app/sync-permissions", s.handleGitHubAppSyncPermissions)
+
+	// Telegram account linking endpoints
+	s.mux.HandleFunc("/api/v1/telegram/link", s.handleTelegramLink)
+	s.mux.HandleFunc("/api/v1/telegram/link/verify", s.handleTelegramLinkVerify)
+	s.mux.HandleFunc("/api/v1/telegram/link/status", s.handleTelegramLinkStatus)
 
 	// GitHub App webhook and setup callback (unauthenticated — uses webhook signature)
 	s.mux.HandleFunc("/api/v1/webhooks/github", s.handleGitHubWebhook)

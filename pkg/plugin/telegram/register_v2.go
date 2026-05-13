@@ -18,10 +18,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"strconv"
 	"strings"
@@ -29,7 +29,7 @@ import (
 	"time"
 )
 
-// RegistrationHandler manages the hub-verified token-based registration flow.
+// RegistrationHandler manages the hub-verified code-based registration flow.
 type RegistrationHandler struct {
 	store      Store
 	api        *TelegramAPIClient
@@ -43,31 +43,37 @@ type RegistrationHandler struct {
 
 // pendingLinkReg holds state for an in-progress hub-based linking registration.
 type pendingLinkReg struct {
-	Token          string
+	Code           string
 	TelegramUserID string
 	ChatID         int64
 	ExpiresAt      time.Time
+	pollCancel     context.CancelFunc
 }
 
-// linkingTokenRequest is the JSON body sent to the hub to register a linking token.
-type linkingTokenRequest struct {
-	Token          string `json:"token"`
+// linkingCodeRequest is the JSON body sent to the hub to register a linking code.
+type linkingCodeRequest struct {
+	Code           string `json:"code"`
 	TelegramUserID string `json:"telegramUserId"`
 }
 
-// linkingStatusResponse is the JSON response from checking a linking token's status.
+// linkingStatusResponse is the JSON response from checking a linking status.
 type linkingStatusResponse struct {
-	Status string       `json:"status"` // "pending", "confirmed", "expired"
+	Status string       `json:"status"` // "pending", "confirmed", "expired", "not_found"
 	User   *linkingUser `json:"user,omitempty"`
 }
 
-// linkingUser holds user info returned by the hub when a linking token is confirmed.
+// linkingUser holds user info returned by the hub when a linking code is confirmed.
 type linkingUser struct {
 	ID    string `json:"id"`
 	Email string `json:"email"`
 }
 
-const linkingTokenExpiry = 10 * time.Minute
+const (
+	linkingCodeExpiry    = 15 * time.Minute
+	linkingPollInterval = 10 * time.Second
+	linkingCodeCharset  = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+	linkingCodeLength   = 6
+)
 
 // NewRegistrationHandler creates a new RegistrationHandler.
 func NewRegistrationHandler(store Store, api *TelegramAPIClient, hubURL string, log *slog.Logger) *RegistrationHandler {
@@ -84,9 +90,8 @@ func NewRegistrationHandler(store Store, api *TelegramAPIClient, hubURL string, 
 	}
 }
 
-// HandleRegister handles the /register command. It generates a one-time
-// linking token, registers it with the hub, and sends the user a link to
-// the hub where they can confirm their identity.
+// HandleRegister handles the /register command. It generates a short
+// linking code, registers it with the hub, and sends the user instructions.
 func (h *RegistrationHandler) HandleRegister(msg *TGMessage) {
 	if msg.From == nil {
 		return
@@ -117,48 +122,62 @@ func (h *RegistrationHandler) HandleRegister(msg *TGMessage) {
 		return
 	}
 
-	token := generateLinkingToken()
+	code, err := generateLinkingCode()
+	if err != nil {
+		h.log.Error("Failed to generate linking code", "error", err)
+		h.sendReply(chatID, "Something went wrong. Please try again.")
+		return
+	}
 
-	if err := h.registerTokenWithHub(ctx, token, telegramUserID); err != nil {
-		h.log.Error("Failed to register linking token with hub", "error", err)
+	if err := h.registerCodeWithHub(ctx, code, telegramUserID); err != nil {
+		h.log.Error("Failed to register linking code with hub", "error", err)
 		h.sendReply(chatID, "Failed to start registration. Please try again later.")
 		return
 	}
 
+	// Cancel any existing pending registration for this user.
 	h.mu.Lock()
 	h.cleanExpiredLocked()
-	h.pending[telegramUserID] = &pendingLinkReg{
-		Token:          token,
+	if old, ok := h.pending[telegramUserID]; ok && old.pollCancel != nil {
+		old.pollCancel()
+	}
+
+	pollCtx, pollCancel := context.WithCancel(context.Background())
+	reg := &pendingLinkReg{
+		Code:           code,
 		TelegramUserID: telegramUserID,
 		ChatID:         chatID,
-		ExpiresAt:      time.Now().Add(linkingTokenExpiry),
+		ExpiresAt:      time.Now().Add(linkingCodeExpiry),
+		pollCancel:     pollCancel,
 	}
+	h.pending[telegramUserID] = reg
 	h.mu.Unlock()
 
-	linkURL := fmt.Sprintf("%s/telegram/register?token=%s", strings.TrimRight(h.hubURL, "/"), token)
+	hubLink := fmt.Sprintf("%s/profile/telegram", strings.TrimRight(h.hubURL, "/"))
 
 	text := fmt.Sprintf(
-		"Link your scion account\n\n"+
-			"1. Open the link below (you must be logged into the hub)\n"+
-			"2. Confirm the linking on the hub page\n\n"+
-			"Then send: /register confirm",
+		"To link your Telegram account, go to the hub and enter this code:\n\n"+
+			"*%s*\n\n"+
+			"The code expires in 15 minutes.",
+		code,
 	)
 
 	keyboard := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
 			{
-				{Text: "Link account on hub", URL: linkURL},
+				{Text: "Open hub settings", URL: hubLink},
 			},
 		},
 	}
 
-	if _, err := h.api.SendMessageWithKeyboard(ctx, chatID, text, "", keyboard, 0); err != nil {
+	if _, err := h.api.SendMessageWithKeyboard(ctx, chatID, text, "Markdown", keyboard, 0); err != nil {
 		h.log.Error("Failed to send registration card", "error", err, "chat_id", chatID)
 	}
+
+	go h.pollForConfirmation(pollCtx, reg)
 }
 
-// HandleRegisterConfirm handles /register confirm. It checks with the hub
-// whether the linking token was confirmed and, on success, stores the user mapping.
+// HandleRegisterConfirm handles /register confirm as a manual fallback.
 func (h *RegistrationHandler) HandleRegisterConfirm(msg *TGMessage) {
 	if msg.From == nil {
 		return
@@ -170,6 +189,9 @@ func (h *RegistrationHandler) HandleRegisterConfirm(msg *TGMessage) {
 	h.mu.Lock()
 	reg, ok := h.pending[telegramUserID]
 	if ok && time.Now().After(reg.ExpiresAt) {
+		if reg.pollCancel != nil {
+			reg.pollCancel()
+		}
 		delete(h.pending, telegramUserID)
 		ok = false
 	}
@@ -183,7 +205,7 @@ func (h *RegistrationHandler) HandleRegisterConfirm(msg *TGMessage) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	statusResp, err := h.checkLinkingStatus(ctx, reg.Token)
+	statusResp, err := h.checkLinkingStatus(ctx, telegramUserID)
 	if err != nil {
 		h.log.Error("Failed to check linking status", "error", err)
 		h.sendReply(chatID, "Something went wrong checking your registration. Please try again.")
@@ -192,13 +214,16 @@ func (h *RegistrationHandler) HandleRegisterConfirm(msg *TGMessage) {
 
 	switch statusResp.Status {
 	case "pending":
-		h.sendReply(chatID, "Not yet confirmed. Please open the link and confirm on the hub, then try again.")
+		h.sendReply(chatID, "Not yet confirmed. Please open the hub and enter your code, then try again.")
 		return
-	case "expired":
+	case "expired", "not_found":
 		h.mu.Lock()
+		if old, ok := h.pending[telegramUserID]; ok && old.pollCancel != nil {
+			old.pollCancel()
+		}
 		delete(h.pending, telegramUserID)
 		h.mu.Unlock()
-		h.sendReply(chatID, "Token expired. Run /register again.")
+		h.sendReply(chatID, "Code expired. Run /register again.")
 		return
 	case "confirmed":
 		// Continue below.
@@ -208,47 +233,10 @@ func (h *RegistrationHandler) HandleRegisterConfirm(msg *TGMessage) {
 		return
 	}
 
-	if statusResp.User == nil {
-		h.log.Error("Linking status confirmed but missing user info")
-		h.sendReply(chatID, "Registration failed: could not retrieve user info. Please try again.")
-		return
-	}
-
-	username := ""
-	if msg.From.Username != "" {
-		username = msg.From.Username
-	} else if msg.From.FirstName != "" {
-		username = msg.From.FirstName
-	}
-
-	mapping := &TelegramUserMapping{
-		TelegramUserID:   telegramUserID,
-		TelegramUsername: username,
-		ScionUserID:      statusResp.User.ID,
-		ScionEmail:       statusResp.User.Email,
-		LinkedAt:         time.Now(),
-	}
-
-	if err := h.store.SaveUserMapping(ctx, mapping); err != nil {
-		h.log.Error("Failed to save user mapping", "error", err, "telegram_user_id", telegramUserID)
-		h.sendReply(chatID, "Failed to save registration. Please try again.")
-		return
-	}
-
-	h.mu.Lock()
-	delete(h.pending, telegramUserID)
-	h.mu.Unlock()
-
-	h.sendReply(chatID, fmt.Sprintf("Linked! You are %s", statusResp.User.Email))
-	h.log.Info("User registered via hub linking",
-		"telegram_user_id", telegramUserID,
-		"scion_email", statusResp.User.Email,
-		"scion_user_id", statusResp.User.ID,
-	)
+	h.completeRegistration(msg, reg, statusResp)
 }
 
-// HandleUnregister handles the /unregister command. It removes the user's
-// Telegram-to-scion identity mapping.
+// HandleUnregister handles the /unregister command.
 func (h *RegistrationHandler) HandleUnregister(msg *TGMessage) {
 	if msg.From == nil {
 		return
@@ -329,39 +317,160 @@ func (h *RegistrationHandler) ImportV1Mappings(ctx context.Context, mappings map
 	return firstErr
 }
 
-// registerTokenWithHub POSTs a linking token to the hub for registration.
-func (h *RegistrationHandler) registerTokenWithHub(ctx context.Context, token, telegramUserID string) error {
-	body, err := json.Marshal(linkingTokenRequest{
-		Token:          token,
+// pollForConfirmation polls the hub for confirmation status in the background.
+func (h *RegistrationHandler) pollForConfirmation(ctx context.Context, reg *pendingLinkReg) {
+	ticker := time.NewTicker(linkingPollInterval)
+	defer ticker.Stop()
+
+	deadline := reg.ExpiresAt
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case t := <-ticker.C:
+			if t.After(deadline) {
+				h.mu.Lock()
+				if cur, ok := h.pending[reg.TelegramUserID]; ok && cur.Code == reg.Code {
+					delete(h.pending, reg.TelegramUserID)
+				}
+				h.mu.Unlock()
+				return
+			}
+
+			checkCtx, checkCancel := context.WithTimeout(ctx, 10*time.Second)
+			statusResp, err := h.checkLinkingStatus(checkCtx, reg.TelegramUserID)
+			checkCancel()
+
+			if err != nil {
+				h.log.Debug("Poll check failed", "error", err, "telegram_user_id", reg.TelegramUserID)
+				continue
+			}
+
+			if statusResp.Status == "confirmed" && statusResp.User != nil {
+				h.completeRegistrationFromPoll(reg, statusResp)
+				return
+			}
+		}
+	}
+}
+
+// completeRegistration saves the user mapping and notifies the user (manual confirm path).
+func (h *RegistrationHandler) completeRegistration(msg *TGMessage, reg *pendingLinkReg, statusResp *linkingStatusResponse) {
+	if statusResp.User == nil {
+		h.log.Error("Linking status confirmed but missing user info")
+		h.sendReply(reg.ChatID, "Registration failed: could not retrieve user info. Please try again.")
+		return
+	}
+
+	username := ""
+	if msg.From != nil {
+		if msg.From.Username != "" {
+			username = msg.From.Username
+		} else if msg.From.FirstName != "" {
+			username = msg.From.FirstName
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mapping := &TelegramUserMapping{
+		TelegramUserID:   reg.TelegramUserID,
+		TelegramUsername: username,
+		ScionUserID:      statusResp.User.ID,
+		ScionEmail:       statusResp.User.Email,
+		LinkedAt:         time.Now(),
+	}
+
+	if err := h.store.SaveUserMapping(ctx, mapping); err != nil {
+		h.log.Error("Failed to save user mapping", "error", err, "telegram_user_id", reg.TelegramUserID)
+		h.sendReply(reg.ChatID, "Failed to save registration. Please try again.")
+		return
+	}
+
+	h.mu.Lock()
+	if reg.pollCancel != nil {
+		reg.pollCancel()
+	}
+	delete(h.pending, reg.TelegramUserID)
+	h.mu.Unlock()
+
+	h.sendReply(reg.ChatID, fmt.Sprintf("Linked! You are %s", statusResp.User.Email))
+	h.log.Info("User registered via hub linking",
+		"telegram_user_id", reg.TelegramUserID,
+		"scion_email", statusResp.User.Email,
+		"scion_user_id", statusResp.User.ID,
+	)
+}
+
+// completeRegistrationFromPoll saves the user mapping when confirmed via background polling.
+func (h *RegistrationHandler) completeRegistrationFromPoll(reg *pendingLinkReg, statusResp *linkingStatusResponse) {
+	if statusResp.User == nil {
+		h.log.Error("Poll confirmed but missing user info", "telegram_user_id", reg.TelegramUserID)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mapping := &TelegramUserMapping{
+		TelegramUserID:   reg.TelegramUserID,
+		TelegramUsername: "",
+		ScionUserID:      statusResp.User.ID,
+		ScionEmail:       statusResp.User.Email,
+		LinkedAt:         time.Now(),
+	}
+
+	if err := h.store.SaveUserMapping(ctx, mapping); err != nil {
+		h.log.Error("Failed to save user mapping from poll", "error", err, "telegram_user_id", reg.TelegramUserID)
+		return
+	}
+
+	h.mu.Lock()
+	delete(h.pending, reg.TelegramUserID)
+	h.mu.Unlock()
+
+	h.sendReply(reg.ChatID, fmt.Sprintf("Linked! You are %s", statusResp.User.Email))
+	h.log.Info("User registered via hub linking (auto-detected)",
+		"telegram_user_id", reg.TelegramUserID,
+		"scion_email", statusResp.User.Email,
+		"scion_user_id", statusResp.User.ID,
+	)
+}
+
+// registerCodeWithHub POSTs a linking code to the hub for registration.
+func (h *RegistrationHandler) registerCodeWithHub(ctx context.Context, code, telegramUserID string) error {
+	body, err := json.Marshal(linkingCodeRequest{
+		Code:           code,
 		TelegramUserID: telegramUserID,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal linking token request: %w", err)
+		return fmt.Errorf("marshal linking code request: %w", err)
 	}
 
 	url := h.hubURL + "/api/v1/telegram/link"
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("create linking token request: %w", err)
+		return fmt.Errorf("create linking code request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := h.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("linking token request failed: %w", err)
+		return fmt.Errorf("linking code request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("linking token endpoint returned status %d", resp.StatusCode)
+		return fmt.Errorf("linking code endpoint returned status %d", resp.StatusCode)
 	}
 
 	return nil
 }
 
-// checkLinkingStatus checks with the hub whether a linking token was confirmed.
-func (h *RegistrationHandler) checkLinkingStatus(ctx context.Context, token string) (*linkingStatusResponse, error) {
-	url := fmt.Sprintf("%s/api/v1/telegram/link/%s", h.hubURL, token)
+// checkLinkingStatus checks with the hub whether a linking code was confirmed.
+func (h *RegistrationHandler) checkLinkingStatus(ctx context.Context, telegramUserID string) (*linkingStatusResponse, error) {
+	url := fmt.Sprintf("%s/api/v1/telegram/link/status?telegram_user_id=%s", h.hubURL, telegramUserID)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create linking status request: %w", err)
@@ -396,14 +505,24 @@ func (h *RegistrationHandler) cleanExpiredLocked() {
 	now := time.Now()
 	for id, reg := range h.pending {
 		if now.After(reg.ExpiresAt) {
+			if reg.pollCancel != nil {
+				reg.pollCancel()
+			}
 			delete(h.pending, id)
 		}
 	}
 }
 
-// generateLinkingToken creates a cryptographically random hex token.
-func generateLinkingToken() string {
-	b := make([]byte, 16)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+// generateLinkingCode creates a 6-character alphanumeric code using a
+// charset that avoids ambiguous characters (0/O, 1/I/L).
+func generateLinkingCode() (string, error) {
+	result := make([]byte, linkingCodeLength)
+	for i := range result {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(linkingCodeCharset))))
+		if err != nil {
+			return "", fmt.Errorf("generate random char: %w", err)
+		}
+		result[i] = linkingCodeCharset[n.Int64()]
+	}
+	return string(result), nil
 }
