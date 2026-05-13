@@ -793,13 +793,17 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		}
 	}
 
-	// Check for scion identity mapping.
+	// Check for scion identity mapping — unregistered users cannot route messages.
 	if senderID != "" {
 		mapping, err := b.store.GetUserMapping(ctx, senderID)
 		if err == nil && mapping != nil {
 			if mapping.ScionEmail != "" {
 				sender = "user:" + mapping.ScionEmail
 			}
+		} else if mapping == nil {
+			b.log.Debug("Unregistered user tried to mention agent", "sender_id", senderID)
+			b.api.SendMessage(ctx, chatID, "Please /register first to use this bot.", "")
+			return
 		}
 	}
 
@@ -826,7 +830,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			}
 		}
 
-		topic := fmt.Sprintf("scion.grove.%s.agent.%s.messages", link.ProjectID, agentSlug)
+		topic := fmt.Sprintf("scion.project.%s.agent.%s.messages", link.ProjectID, agentSlug)
 		recipient := "agent:" + agentSlug
 
 		msg := &messages.StructuredMessage{
@@ -870,7 +874,7 @@ func (b *TelegramBrokerV2) handleCallbackQuery(ctx context.Context, cb *Callback
 	}
 
 	// Deliver the ask-user response to the hub.
-	topic := fmt.Sprintf("scion.grove.%s.agent.%s.messages", resp.ProjectID, resp.AgentSlug)
+	topic := fmt.Sprintf("scion.project.%s.agent.%s.messages", resp.ProjectID, resp.AgentSlug)
 
 	// Determine sender identity from the callback user.
 	sender := "telegram:unknown"
@@ -942,7 +946,7 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID strin
 // --- Dynamic subscription management ---
 
 func (b *TelegramBrokerV2) subscribeForProject(projectID string) {
-	pattern := fmt.Sprintf("scion.grove.%s.>", projectID)
+	pattern := fmt.Sprintf("scion.project.%s.>", projectID)
 
 	b.mu.RLock()
 	hc := b.hostCallbacks
@@ -957,7 +961,7 @@ func (b *TelegramBrokerV2) subscribeForProject(projectID string) {
 }
 
 func (b *TelegramBrokerV2) unsubscribeForProject(projectID string) {
-	pattern := fmt.Sprintf("scion.grove.%s.>", projectID)
+	pattern := fmt.Sprintf("scion.project.%s.>", projectID)
 
 	b.mu.RLock()
 	hc := b.hostCallbacks

@@ -316,11 +316,33 @@ func TestCommandHandler_Status_InGroup(t *testing.T) {
 	assert.Contains(t, sent[0].Text, "direct message")
 }
 
-func TestCommandHandler_Status_InDM_NoLinks(t *testing.T) {
+func TestCommandHandler_Status_InDM_Unregistered(t *testing.T) {
 	h, tgSrv, _, _ := newTestCommandHandler(t)
 
 	h.HandleCommand(&TGMessage{
 		Text: "/status",
+		From: &TGUser{ID: 456, Username: "alice"},
+		Chat: TGChat{ID: 456, Type: "private"},
+	})
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.Contains(t, sent[0].Text, "/register first")
+}
+
+func TestCommandHandler_Status_InDM_NoLinks(t *testing.T) {
+	h, tgSrv, _, store := newTestCommandHandler(t)
+
+	ctx := context.Background()
+	require.NoError(t, store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+
+	h.HandleCommand(&TGMessage{
+		Text: "/status",
+		From: &TGUser{ID: 456, Username: "alice"},
 		Chat: TGChat{ID: 456, Type: "private"},
 	})
 
@@ -333,6 +355,11 @@ func TestCommandHandler_Status_InDM_WithLinks(t *testing.T) {
 	h, tgSrv, _, store := newTestCommandHandler(t)
 
 	ctx := context.Background()
+	require.NoError(t, store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
 	require.NoError(t, store.SaveGroupLink(ctx, &GroupLink{
 		ChatID:       -100,
 		ChatTitle:    "Dev Group",
@@ -344,6 +371,7 @@ func TestCommandHandler_Status_InDM_WithLinks(t *testing.T) {
 
 	h.HandleCommand(&TGMessage{
 		Text: "/status",
+		From: &TGUser{ID: 456, Username: "alice"},
 		Chat: TGChat{ID: 456, Type: "private"},
 	})
 

@@ -313,10 +313,11 @@ func TestParseTopicComponents(t *testing.T) {
 		wantProject string
 		wantAgent   string
 	}{
+		{"scion.project.myproj.agent.coder.messages", "myproj", "coder"},
 		{"scion.grove.myproj.agent.coder.messages", "myproj", "coder"},
-		{"scion.grove.proj1.broadcast", "proj1", ""},
+		{"scion.project.proj1.broadcast", "proj1", ""},
 		{"scion.project.proj2.agent.reviewer.messages", "proj2", "reviewer"},
-		{"scion.grove.proj1.agent.coder.agent.reviewer.messages", "proj1", "reviewer"},
+		{"scion.project.proj1.agent.coder.agent.reviewer.messages", "proj1", "reviewer"},
 		{"unknown-topic-format", "unknown-topic-format", ""},
 	}
 
@@ -446,6 +447,11 @@ func TestV2_HandleGroupMessage_BotMentionDefaultAgent(t *testing.T) {
 	b := newTestBrokerV2WithHub(t, tgSrv, hub)
 
 	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
 	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
 		ChatID:       -200,
 		ProjectID:    "proj-1",
@@ -489,9 +495,9 @@ func TestV2_HandleGroupMessage_BotMentionDefaultAgent(t *testing.T) {
 		t.Fatal("timed out waiting for delivery")
 	}
 
-	assert.Equal(t, "scion.grove.proj-1.agent.coder.messages", deliveredTopic)
+	assert.Equal(t, "scion.project.proj-1.agent.coder.messages", deliveredTopic)
 	assert.Equal(t, "hello there", deliveredMsg.Msg)
-	assert.Equal(t, "telegram:alice", deliveredMsg.Sender)
+	assert.Equal(t, "user:alice@example.com", deliveredMsg.Sender)
 	assert.Equal(t, "456", deliveredMsg.SenderID)
 	assert.Equal(t, "agent:coder", deliveredMsg.Recipient)
 	assert.Equal(t, "-200", deliveredMsg.Metadata["telegram_chat_id"])
@@ -504,6 +510,11 @@ func TestV2_HandleGroupMessage_DirectAgentMention(t *testing.T) {
 	b := newTestBrokerV2WithHub(t, tgSrv, hub)
 
 	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
 	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
 		ChatID:       -200,
 		ProjectID:    "proj-1",
@@ -539,7 +550,7 @@ func TestV2_HandleGroupMessage_DirectAgentMention(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.Len(t, deliveredTopics, 1)
-	assert.Equal(t, "scion.grove.proj-1.agent.reviewer.messages", deliveredTopics[0])
+	assert.Equal(t, "scion.project.proj-1.agent.reviewer.messages", deliveredTopics[0])
 }
 
 func TestV2_HandleGroupMessage_AllMention(t *testing.T) {
@@ -549,6 +560,11 @@ func TestV2_HandleGroupMessage_AllMention(t *testing.T) {
 	b := newTestBrokerV2WithHub(t, tgSrv, hub)
 
 	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
 	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
 		ChatID:       -200,
 		ProjectID:    "proj-1",
@@ -583,8 +599,8 @@ func TestV2_HandleGroupMessage_AllMention(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Len(t, deliveredTopics, 2)
-	assert.Contains(t, deliveredTopics, "scion.grove.proj-1.agent.coder.messages")
-	assert.Contains(t, deliveredTopics, "scion.grove.proj-1.agent.reviewer.messages")
+	assert.Contains(t, deliveredTopics, "scion.project.proj-1.agent.coder.messages")
+	assert.Contains(t, deliveredTopics, "scion.project.proj-1.agent.reviewer.messages")
 }
 
 func TestV2_HandleGroupMessage_NoMention(t *testing.T) {
@@ -681,6 +697,11 @@ func TestV2_HandleGroupMessage_ConversationContextSaved(t *testing.T) {
 	b := newTestBrokerV2WithHub(t, tgSrv, hub)
 
 	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
 	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
 		ChatID:       -200,
 		ProjectID:    "proj-1",
@@ -736,7 +757,7 @@ func TestV2_Publish_DirectChatID(t *testing.T) {
 		"telegram_chat_id": "-300",
 	}
 
-	err := b.Publish(context.Background(), "scion.grove.proj-1.agent.coder.messages", msg)
+	err := b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages", msg)
 	require.NoError(t, err)
 
 	sent := tgSrv.getSentMessages()
@@ -771,7 +792,7 @@ func TestV2_Publish_ConversationContextRouting(t *testing.T) {
 		Type:      messages.TypeAssistantReply,
 	}
 
-	err := b.Publish(ctx, "scion.grove.proj-1.agent.coder.messages", msg)
+	err := b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", msg)
 	require.NoError(t, err)
 
 	sent := tgSrv.getSentMessages()
@@ -803,7 +824,7 @@ func TestV2_Publish_BroadcastToGroupLinks(t *testing.T) {
 
 	msg := messages.NewInstruction("system", "broadcast", "system update")
 
-	err := b.Publish(ctx, "scion.grove.proj-1.broadcast", msg)
+	err := b.Publish(ctx, "scion.project.proj-1.broadcast", msg)
 	require.NoError(t, err)
 
 	sent := tgSrv.getSentMessages()
@@ -820,7 +841,7 @@ func TestV2_Publish_NoRouteDropsMessage(t *testing.T) {
 
 	msg := messages.NewInstruction("agent:coder", "user:nobody", "lost message")
 
-	err := b.Publish(context.Background(), "scion.grove.unknown-proj.agent.coder.messages", msg)
+	err := b.Publish(context.Background(), "scion.project.unknown-proj.agent.coder.messages", msg)
 	require.NoError(t, err)
 
 	assert.Empty(t, tgSrv.getSentMessages())
@@ -840,10 +861,10 @@ func TestV2_Publish_Dedup(t *testing.T) {
 
 	msg := messages.NewInstruction("agent:coder", "user:alice", "hello")
 
-	require.NoError(t, b.Publish(ctx, "scion.grove.proj-1.agent.coder.messages", msg))
+	require.NoError(t, b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", msg))
 	assert.Len(t, tgSrv.getSentMessages(), 1)
 
-	require.NoError(t, b.Publish(ctx, "scion.grove.proj-1.agent.coder.messages", msg))
+	require.NoError(t, b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", msg))
 	assert.Len(t, tgSrv.getSentMessages(), 1, "duplicate should be skipped")
 }
 
@@ -862,7 +883,7 @@ func TestV2_Publish_InputNeeded(t *testing.T) {
 		},
 	}
 
-	err := b.Publish(context.Background(), "scion.grove.proj-1.agent.coder.messages", msg)
+	err := b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages", msg)
 	require.NoError(t, err)
 
 	sent := tgSrv.getSentMessages()
@@ -900,7 +921,7 @@ func TestV2_Publish_ReplyToMessageID(t *testing.T) {
 		},
 	}
 
-	err := b.Publish(context.Background(), "scion.grove.proj-1.agent.coder.messages", msg)
+	err := b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages", msg)
 	require.NoError(t, err)
 
 	sent := tgSrv.getSentMessages()
@@ -954,7 +975,7 @@ func TestV2_HandleCallback_AskUserResponse(t *testing.T) {
 		t.Fatal("timed out")
 	}
 
-	assert.Equal(t, "scion.grove.proj-1.agent.coder.messages", deliveredTopic)
+	assert.Equal(t, "scion.project.proj-1.agent.coder.messages", deliveredTopic)
 	assert.Equal(t, "Yes", deliveredMsg.Msg)
 	assert.Equal(t, "telegram:alice", deliveredMsg.Sender)
 	assert.Equal(t, "req-123", deliveredMsg.Metadata["ask_request_id"])
@@ -1066,17 +1087,17 @@ func TestV2_SubscribeUnsubscribe(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	b := newTestBrokerV2(t, tgSrv)
 
-	require.NoError(t, b.Subscribe("scion.grove.proj-1.>"))
+	require.NoError(t, b.Subscribe("scion.project.proj-1.>"))
 
 	b.mu.RLock()
-	assert.True(t, b.subs["scion.grove.proj-1.>"])
+	assert.True(t, b.subs["scion.project.proj-1.>"])
 	assert.NotNil(t, b.pollCancel)
 	b.mu.RUnlock()
 
-	require.NoError(t, b.Unsubscribe("scion.grove.proj-1.>"))
+	require.NoError(t, b.Unsubscribe("scion.project.proj-1.>"))
 
 	b.mu.RLock()
-	assert.False(t, b.subs["scion.grove.proj-1.>"])
+	assert.False(t, b.subs["scion.project.proj-1.>"])
 	b.mu.RUnlock()
 }
 

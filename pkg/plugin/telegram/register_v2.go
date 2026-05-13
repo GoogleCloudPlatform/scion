@@ -17,16 +17,19 @@ package telegram
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
-// RegistrationHandler manages the hub-verified device auth registration flow.
+// RegistrationHandler manages the hub-verified token-based registration flow.
 type RegistrationHandler struct {
 	store      Store
 	api        *TelegramAPIClient
@@ -35,54 +38,36 @@ type RegistrationHandler struct {
 	log        *slog.Logger
 
 	mu      sync.Mutex
-	pending map[string]*pendingDeviceReg // telegramUserID → pending registration
+	pending map[string]*pendingLinkReg // telegramUserID → pending registration
 }
 
-// pendingDeviceReg holds state for an in-progress device auth registration.
-type pendingDeviceReg struct {
-	DeviceCode      string
-	UserCode        string
-	VerificationURL string
-	TelegramUserID  string
-	ChatID          int64
-	ExpiresAt       time.Time
+// pendingLinkReg holds state for an in-progress hub-based linking registration.
+type pendingLinkReg struct {
+	Token          string
+	TelegramUserID string
+	ChatID         int64
+	ExpiresAt      time.Time
 }
 
-// deviceCodeRequest is the JSON body sent to the hub device code endpoint.
-type deviceCodeRequest struct {
-	Provider string `json:"provider,omitempty"`
+// linkingTokenRequest is the JSON body sent to the hub to register a linking token.
+type linkingTokenRequest struct {
+	Token          string `json:"token"`
+	TelegramUserID string `json:"telegramUserId"`
 }
 
-// deviceCodeResponse is the JSON response from the hub device code endpoint.
-type deviceCodeResponse struct {
-	DeviceCode              string `json:"deviceCode"`
-	UserCode                string `json:"userCode"`
-	VerificationURL         string `json:"verificationUrl"`
-	VerificationURLComplete string `json:"verificationUrlComplete,omitempty"`
-	ExpiresIn               int    `json:"expiresIn"`
-	Interval                int    `json:"interval"`
+// linkingStatusResponse is the JSON response from checking a linking token's status.
+type linkingStatusResponse struct {
+	Status string       `json:"status"` // "pending", "confirmed", "expired"
+	User   *linkingUser `json:"user,omitempty"`
 }
 
-// deviceTokenRequest is the JSON body sent to the hub device token endpoint.
-type deviceTokenRequest struct {
-	DeviceCode string `json:"deviceCode"`
-	Provider   string `json:"provider,omitempty"`
-}
-
-// deviceTokenResponse is the JSON response from the hub device token endpoint.
-type deviceTokenResponse struct {
-	AccessToken  string      `json:"accessToken,omitempty"`
-	RefreshToken string      `json:"refreshToken,omitempty"`
-	ExpiresIn    int64       `json:"expiresIn,omitempty"`
-	User         *deviceUser `json:"user,omitempty"`
-}
-
-// deviceTokenErrorResponse is returned as the HTTP status code on non-200 responses.
-// 202 = authorization_pending, 410 = expired_token, 429 = slow_down.
-type deviceUser struct {
+// linkingUser holds user info returned by the hub when a linking token is confirmed.
+type linkingUser struct {
 	ID    string `json:"id"`
 	Email string `json:"email"`
 }
+
+const linkingTokenExpiry = 10 * time.Minute
 
 // NewRegistrationHandler creates a new RegistrationHandler.
 func NewRegistrationHandler(store Store, api *TelegramAPIClient, hubURL string, log *slog.Logger) *RegistrationHandler {
@@ -95,13 +80,13 @@ func NewRegistrationHandler(store Store, api *TelegramAPIClient, hubURL string, 
 		hubURL:     hubURL,
 		httpClient: &http.Client{Timeout: 15 * time.Second},
 		log:        log,
-		pending:    make(map[string]*pendingDeviceReg),
+		pending:    make(map[string]*pendingLinkReg),
 	}
 }
 
-// HandleRegister handles the /register command. It initiates the device auth
-// flow by requesting a device code from the hub and sending the user an inline
-// keyboard card with a verification URL button.
+// HandleRegister handles the /register command. It generates a one-time
+// linking token, registers it with the hub, and sends the user a link to
+// the hub where they can confirm their identity.
 func (h *RegistrationHandler) HandleRegister(msg *TGMessage) {
 	if msg.From == nil {
 		return
@@ -110,7 +95,6 @@ func (h *RegistrationHandler) HandleRegister(msg *TGMessage) {
 	chatID := msg.Chat.ID
 	telegramUserID := strconv.FormatInt(msg.From.ID, 10)
 
-	// Must be in DM (positive chat ID).
 	if chatID < 0 {
 		h.sendReply(chatID, "Please DM me to register. This command only works in a direct message.")
 		return
@@ -119,7 +103,6 @@ func (h *RegistrationHandler) HandleRegister(msg *TGMessage) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	// Check if already registered.
 	existing, err := h.store.GetUserMapping(ctx, telegramUserID)
 	if err != nil {
 		h.log.Error("Failed to check user mapping", "error", err, "telegram_user_id", telegramUserID)
@@ -134,45 +117,37 @@ func (h *RegistrationHandler) HandleRegister(msg *TGMessage) {
 		return
 	}
 
-	// Request device code from hub.
-	codeResp, err := h.requestDeviceCode(ctx)
-	if err != nil {
-		h.log.Error("Failed to request device code", "error", err)
+	token := generateLinkingToken()
+
+	if err := h.registerTokenWithHub(ctx, token, telegramUserID); err != nil {
+		h.log.Error("Failed to register linking token with hub", "error", err)
 		h.sendReply(chatID, "Failed to start registration. Please try again later.")
 		return
 	}
 
-	// Store pending registration.
 	h.mu.Lock()
 	h.cleanExpiredLocked()
-	h.pending[telegramUserID] = &pendingDeviceReg{
-		DeviceCode:      codeResp.DeviceCode,
-		UserCode:        codeResp.UserCode,
-		VerificationURL: codeResp.VerificationURL,
-		TelegramUserID:  telegramUserID,
-		ChatID:          chatID,
-		ExpiresAt:       time.Now().Add(time.Duration(codeResp.ExpiresIn) * time.Second),
+	h.pending[telegramUserID] = &pendingLinkReg{
+		Token:          token,
+		TelegramUserID: telegramUserID,
+		ChatID:         chatID,
+		ExpiresAt:      time.Now().Add(linkingTokenExpiry),
 	}
 	h.mu.Unlock()
 
-	// Use the complete URL if available, otherwise fall back to the base URL.
-	verifyURL := codeResp.VerificationURLComplete
-	if verifyURL == "" {
-		verifyURL = codeResp.VerificationURL
-	}
+	linkURL := fmt.Sprintf("%s/telegram/register?token=%s", strings.TrimRight(h.hubURL, "/"), token)
 
 	text := fmt.Sprintf(
 		"Link your scion account\n\n"+
-			"1. Open the verification link below\n"+
-			"2. Enter code: %s\n\n"+
+			"1. Open the link below (you must be logged into the hub)\n"+
+			"2. Confirm the linking on the hub page\n\n"+
 			"Then send: /register confirm",
-		codeResp.UserCode,
 	)
 
 	keyboard := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
 			{
-				{Text: "Open verification link", URL: verifyURL},
+				{Text: "Link account on hub", URL: linkURL},
 			},
 		},
 	}
@@ -182,8 +157,8 @@ func (h *RegistrationHandler) HandleRegister(msg *TGMessage) {
 	}
 }
 
-// HandleRegisterConfirm handles /register confirm. It polls the hub for the
-// device token and, on success, stores the user mapping.
+// HandleRegisterConfirm handles /register confirm. It checks with the hub
+// whether the linking token was confirmed and, on success, stores the user mapping.
 func (h *RegistrationHandler) HandleRegisterConfirm(msg *TGMessage) {
 	if msg.From == nil {
 		return
@@ -208,32 +183,33 @@ func (h *RegistrationHandler) HandleRegisterConfirm(msg *TGMessage) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	// Poll hub for device token.
-	tokenResp, status, err := h.pollDeviceToken(ctx, reg.DeviceCode)
+	statusResp, err := h.checkLinkingStatus(ctx, reg.Token)
 	if err != nil {
-		h.log.Error("Failed to poll device token", "error", err)
-		h.sendReply(chatID, "Something went wrong checking your authorization. Please try again.")
+		h.log.Error("Failed to check linking status", "error", err)
+		h.sendReply(chatID, "Something went wrong checking your registration. Please try again.")
 		return
 	}
 
-	switch status {
-	case "authorization_pending":
-		h.sendReply(chatID, "Not yet authorized. Please complete the verification step and try again.")
+	switch statusResp.Status {
+	case "pending":
+		h.sendReply(chatID, "Not yet confirmed. Please open the link and confirm on the hub, then try again.")
 		return
-	case "expired_token":
+	case "expired":
 		h.mu.Lock()
 		delete(h.pending, telegramUserID)
 		h.mu.Unlock()
-		h.sendReply(chatID, "Code expired. Run /register again.")
+		h.sendReply(chatID, "Token expired. Run /register again.")
 		return
-	case "slow_down":
-		h.sendReply(chatID, "Too many attempts. Please wait a moment and try again.")
+	case "confirmed":
+		// Continue below.
+	default:
+		h.log.Warn("Unknown linking status", "status", statusResp.Status)
+		h.sendReply(chatID, "Unexpected status. Please try again.")
 		return
 	}
 
-	// Success — extract user info and store mapping.
-	if tokenResp.User == nil {
-		h.log.Error("Device token response missing user info")
+	if statusResp.User == nil {
+		h.log.Error("Linking status confirmed but missing user info")
 		h.sendReply(chatID, "Registration failed: could not retrieve user info. Please try again.")
 		return
 	}
@@ -248,8 +224,8 @@ func (h *RegistrationHandler) HandleRegisterConfirm(msg *TGMessage) {
 	mapping := &TelegramUserMapping{
 		TelegramUserID:   telegramUserID,
 		TelegramUsername: username,
-		ScionUserID:      tokenResp.User.ID,
-		ScionEmail:       tokenResp.User.Email,
+		ScionUserID:      statusResp.User.ID,
+		ScionEmail:       statusResp.User.Email,
 		LinkedAt:         time.Now(),
 	}
 
@@ -259,16 +235,15 @@ func (h *RegistrationHandler) HandleRegisterConfirm(msg *TGMessage) {
 		return
 	}
 
-	// Clean up pending registration.
 	h.mu.Lock()
 	delete(h.pending, telegramUserID)
 	h.mu.Unlock()
 
-	h.sendReply(chatID, fmt.Sprintf("Linked! You are %s", tokenResp.User.Email))
-	h.log.Info("User registered via device auth",
+	h.sendReply(chatID, fmt.Sprintf("Linked! You are %s", statusResp.User.Email))
+	h.log.Info("User registered via hub linking",
 		"telegram_user_id", telegramUserID,
-		"scion_email", tokenResp.User.Email,
-		"scion_user_id", tokenResp.User.ID,
+		"scion_email", statusResp.User.Email,
+		"scion_user_id", statusResp.User.ID,
 	)
 }
 
@@ -282,7 +257,6 @@ func (h *RegistrationHandler) HandleUnregister(msg *TGMessage) {
 	chatID := msg.Chat.ID
 	telegramUserID := strconv.FormatInt(msg.From.ID, 10)
 
-	// Must be in DM.
 	if chatID < 0 {
 		h.sendReply(chatID, "Please DM me to unregister. This command only works in a direct message.")
 		return
@@ -355,75 +329,59 @@ func (h *RegistrationHandler) ImportV1Mappings(ctx context.Context, mappings map
 	return firstErr
 }
 
-// requestDeviceCode calls the hub's device authorization endpoint.
-func (h *RegistrationHandler) requestDeviceCode(ctx context.Context) (*deviceCodeResponse, error) {
-	body, err := json.Marshal(deviceCodeRequest{})
+// registerTokenWithHub POSTs a linking token to the hub for registration.
+func (h *RegistrationHandler) registerTokenWithHub(ctx context.Context, token, telegramUserID string) error {
+	body, err := json.Marshal(linkingTokenRequest{
+		Token:          token,
+		TelegramUserID: telegramUserID,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("marshal device code request: %w", err)
+		return fmt.Errorf("marshal linking token request: %w", err)
 	}
 
-	url := h.hubURL + "/api/v1/auth/cli/device"
+	url := h.hubURL + "/api/v1/telegram/link"
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("create device code request: %w", err)
+		return fmt.Errorf("create linking token request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := h.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("device code request failed: %w", err)
+		return fmt.Errorf("linking token request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("linking token endpoint returned status %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// checkLinkingStatus checks with the hub whether a linking token was confirmed.
+func (h *RegistrationHandler) checkLinkingStatus(ctx context.Context, token string) (*linkingStatusResponse, error) {
+	url := fmt.Sprintf("%s/api/v1/telegram/link/%s", h.hubURL, token)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create linking status request: %w", err)
+	}
+
+	resp, err := h.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("linking status request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("device code endpoint returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("linking status endpoint returned status %d", resp.StatusCode)
 	}
 
-	var codeResp deviceCodeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&codeResp); err != nil {
-		return nil, fmt.Errorf("decode device code response: %w", err)
+	var statusResp linkingStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&statusResp); err != nil {
+		return nil, fmt.Errorf("decode linking status response: %w", err)
 	}
-	return &codeResp, nil
-}
-
-// pollDeviceToken polls the hub for the device token result.
-// Returns (response, status, error). Status is empty string on success,
-// or one of "authorization_pending", "expired_token", "slow_down".
-func (h *RegistrationHandler) pollDeviceToken(ctx context.Context, deviceCode string) (*deviceTokenResponse, string, error) {
-	body, err := json.Marshal(deviceTokenRequest{DeviceCode: deviceCode})
-	if err != nil {
-		return nil, "", fmt.Errorf("marshal device token request: %w", err)
-	}
-
-	url := h.hubURL + "/api/v1/auth/cli/device/token"
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-	if err != nil {
-		return nil, "", fmt.Errorf("create device token request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := h.httpClient.Do(req)
-	if err != nil {
-		return nil, "", fmt.Errorf("device token request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-		var tokenResp deviceTokenResponse
-		if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-			return nil, "", fmt.Errorf("decode device token response: %w", err)
-		}
-		return &tokenResp, "", nil
-	case http.StatusAccepted: // 202
-		return nil, "authorization_pending", nil
-	case http.StatusGone: // 410
-		return nil, "expired_token", nil
-	case http.StatusTooManyRequests: // 429
-		return nil, "slow_down", nil
-	default:
-		return nil, "", fmt.Errorf("device token endpoint returned status %d", resp.StatusCode)
-	}
+	return &statusResp, nil
 }
 
 func (h *RegistrationHandler) sendReply(chatID int64, text string) {
@@ -441,4 +399,11 @@ func (h *RegistrationHandler) cleanExpiredLocked() {
 			delete(h.pending, id)
 		}
 	}
+}
+
+// generateLinkingToken creates a cryptographically random hex token.
+func generateLinkingToken() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }

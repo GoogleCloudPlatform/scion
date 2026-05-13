@@ -19,7 +19,19 @@ import "fmt"
 // ProjectOption represents a project choice for keyboard selection.
 type ProjectOption struct {
 	ID   string
+	Name string
 	Slug string
+}
+
+// DisplayName returns a human-readable label for the project.
+func (p ProjectOption) DisplayName() string {
+	if p.Name != "" {
+		return p.Name
+	}
+	if p.Slug != "" {
+		return p.Slug
+	}
+	return p.ID
 }
 
 // maxCallbackData is the Telegram limit for callback_data (64 bytes).
@@ -33,7 +45,7 @@ func buildProjectSelectionKeyboard(projects []ProjectOption) *InlineKeyboardMark
 
 	for _, p := range projects {
 		btn := InlineKeyboardButton{
-			Text:         p.Slug,
+			Text:         p.DisplayName(),
 			CallbackData: truncateCallback(fmt.Sprintf("setup:proj:%s", p.ID)),
 		}
 		row = append(row, btn)

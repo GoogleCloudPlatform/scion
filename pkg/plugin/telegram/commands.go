@@ -131,7 +131,20 @@ func (h *CommandHandler) handleSetup(msg *TGMessage) {
 		return
 	}
 
+	h.log.Debug("Listed projects from hub", "count", len(projects))
+
 	if len(projects) == 0 {
+		senderID := ""
+		if msg.From != nil {
+			senderID = strconv.FormatInt(msg.From.ID, 10)
+		}
+		if senderID != "" {
+			mapping, mErr := h.store.GetUserMapping(ctx, senderID)
+			if mErr == nil && mapping == nil {
+				h.reply(chatID, "No projects found. Please /register first (DM me), then try /setup again.")
+				return
+			}
+		}
 		h.reply(chatID, "No projects found. Create a project in the hub first.")
 		return
 	}
@@ -282,6 +295,20 @@ func (h *CommandHandler) handleStatus(msg *TGMessage) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	if msg.From != nil {
+		senderID := strconv.FormatInt(msg.From.ID, 10)
+		mapping, err := h.store.GetUserMapping(ctx, senderID)
+		if err != nil {
+			h.log.Error("Failed to check user mapping", "error", err, "telegram_user_id", senderID)
+			h.reply(chatID, "Something went wrong. Please try again.")
+			return
+		}
+		if mapping == nil {
+			h.reply(chatID, "Please /register first to use this bot.")
+			return
+		}
+	}
+
 	links, err := h.store.GetAllGroupLinks(ctx)
 	if err != nil {
 		h.log.Error("Failed to get group links", "error", err)
@@ -403,6 +430,7 @@ type hubProjectsResponse struct {
 
 type hubProject struct {
 	ID   string `json:"id"`
+	Name string `json:"name"`
 	Slug string `json:"slug"`
 }
 
@@ -416,6 +444,9 @@ type hubAgent struct {
 
 func (c *httpHubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
 	url := c.hubURL + "/api/v1/groves"
+
+	slog.Debug("Listing projects from hub", "url", url, "broker_id", c.brokerID)
+
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list projects request: %w", err)
@@ -432,6 +463,7 @@ func (c *httpHubClient) ListProjects(ctx context.Context) ([]ProjectOption, erro
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		slog.Debug("Hub returned non-OK for list projects", "status", resp.StatusCode, "url", url)
 		return nil, fmt.Errorf("list projects returned status %d", resp.StatusCode)
 	}
 
@@ -440,9 +472,11 @@ func (c *httpHubClient) ListProjects(ctx context.Context) ([]ProjectOption, erro
 		return nil, fmt.Errorf("decode list projects response: %w", err)
 	}
 
+	slog.Debug("Hub returned projects", "count", len(result.Projects))
+
 	projects := make([]ProjectOption, len(result.Projects))
 	for i, p := range result.Projects {
-		projects[i] = ProjectOption{ID: p.ID, Slug: p.Slug}
+		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
 	}
 	return projects, nil
 }
