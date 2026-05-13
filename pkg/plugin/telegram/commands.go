@@ -258,6 +258,7 @@ func (h *CommandHandler) handleAgents(msg *TGMessage) {
 
 	var lines []string
 	for _, agent := range agents {
+		emoji := activityEmoji(agent.Activity)
 		label := agent.Slug
 		if agent.Activity != "" {
 			label += " — " + agent.Activity
@@ -265,7 +266,7 @@ func (h *CommandHandler) handleAgents(msg *TGMessage) {
 		if agent.Slug == link.DefaultAgent {
 			label += " (default)"
 		}
-		lines = append(lines, fmt.Sprintf("🤖 %s", label))
+		lines = append(lines, fmt.Sprintf("%s 🤖 %s", emoji, label))
 	}
 
 	h.reply(chatID, fmt.Sprintf("Agents in *%s*:\n%s", link.ProjectSlug, strings.Join(lines, "\n")))
@@ -776,4 +777,26 @@ func (c *httpHubClient) signRequest(req *http.Request) error {
 		SecretKey: secretKey,
 	}
 	return auth.ApplyAuth(req)
+}
+
+// activityEmoji returns an emoji for an agent activity state, matching the web UI.
+func activityEmoji(activity string) string {
+	switch strings.ToLower(activity) {
+	case "idle":
+		return "💤"
+	case "executing":
+		return "⚙️"
+	case "thinking":
+		return "💭"
+	case "blocked":
+		return "🚧"
+	case "completed":
+		return "✅"
+	case "error":
+		return "❌"
+	case "stalled":
+		return "⏳"
+	default:
+		return "▶️"
+	}
 }

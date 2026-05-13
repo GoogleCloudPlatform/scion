@@ -47,11 +47,12 @@ type RegistrationHandler struct {
 
 // pendingLinkReg holds state for an in-progress hub-based linking registration.
 type pendingLinkReg struct {
-	Code           string
-	TelegramUserID string
-	ChatID         int64
-	ExpiresAt      time.Time
-	pollCancel     context.CancelFunc
+	Code              string
+	TelegramUserID    string
+	TelegramUsername  string // captured at /register time for display
+	ChatID            int64
+	ExpiresAt         time.Time
+	pollCancel        context.CancelFunc
 }
 
 // linkingCodeRequest is the JSON body sent to the hub to register a linking code.
@@ -149,12 +150,17 @@ func (h *RegistrationHandler) HandleRegister(msg *TGMessage) {
 	}
 
 	pollCtx, pollCancel := context.WithCancel(context.Background())
+	tgUsername := ""
+	if msg.From != nil {
+		tgUsername = msg.From.Username
+	}
 	reg := &pendingLinkReg{
-		Code:           code,
-		TelegramUserID: telegramUserID,
-		ChatID:         chatID,
-		ExpiresAt:      time.Now().Add(linkingCodeExpiry),
-		pollCancel:     pollCancel,
+		Code:             code,
+		TelegramUserID:   telegramUserID,
+		TelegramUsername: tgUsername,
+		ChatID:           chatID,
+		ExpiresAt:        time.Now().Add(linkingCodeExpiry),
+		pollCancel:       pollCancel,
 	}
 	h.pending[telegramUserID] = reg
 	h.mu.Unlock()
@@ -421,7 +427,7 @@ func (h *RegistrationHandler) completeRegistrationFromPoll(reg *pendingLinkReg, 
 
 	mapping := &TelegramUserMapping{
 		TelegramUserID:   reg.TelegramUserID,
-		TelegramUsername: "",
+		TelegramUsername: reg.TelegramUsername, // captured when user sent /register
 		ScionUserID:      statusResp.User.ID,
 		ScionEmail:       statusResp.User.Email,
 		LinkedAt:         time.Now(),
