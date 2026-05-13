@@ -130,6 +130,24 @@ func (h BrokerHeartbeat) MarshalJSON() ([]byte, error) {
 	})
 }
 
+// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
+func (h *BrokerHeartbeat) UnmarshalJSON(data []byte) error {
+	type Alias BrokerHeartbeat
+	aux := &struct {
+		Groves []ProjectHeartbeat `json:"groves,omitempty"`
+		*Alias
+	}{
+		Alias: (*Alias)(h),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if len(h.Projects) == 0 && len(aux.Groves) > 0 {
+		h.Projects = aux.Groves
+	}
+	return nil
+}
+
 // ProjectHeartbeat is per-project status in a heartbeat.
 type ProjectHeartbeat struct {
 	ProjectID  string           `json:"projectId"`
@@ -147,6 +165,24 @@ func (h ProjectHeartbeat) MarshalJSON() ([]byte, error) {
 		Alias:   Alias(h),
 		GroveID: h.ProjectID,
 	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (h *ProjectHeartbeat) UnmarshalJSON(data []byte) error {
+	type Alias ProjectHeartbeat
+	aux := &struct {
+		GroveID string `json:"groveId,omitempty"`
+		*Alias
+	}{
+		Alias: (*Alias)(h),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if h.ProjectID == "" && aux.GroveID != "" {
+		h.ProjectID = aux.GroveID
+	}
+	return nil
 }
 
 // AgentHeartbeat is per-agent status in a heartbeat.

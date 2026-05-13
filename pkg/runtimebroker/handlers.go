@@ -213,8 +213,10 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		"scion.agent": "true",
 	}
 
-	// Add optional filters
-	if groveID := query.Get("groveId"); groveID != "" {
+	// Add optional filters — support both projectId and legacy groveId.
+	if projectID := query.Get("projectId"); projectID != "" {
+		filter["scion.project_id"] = projectID
+	} else if groveID := query.Get("groveId"); groveID != "" {
 		filter["scion.project_id"] = groveID
 	}
 	if status := query.Get("status"); status != "" {

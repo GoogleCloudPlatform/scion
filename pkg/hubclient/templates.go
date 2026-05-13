@@ -138,6 +138,36 @@ type CloneTemplateRequest struct {
 	ProjectID string `json:"projectId"`
 }
 
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (r *CloneTemplateRequest) UnmarshalJSON(data []byte) error {
+	type Alias CloneTemplateRequest
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (r CloneTemplateRequest) MarshalJSON() ([]byte, error) {
+	type Alias CloneTemplateRequest
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(r),
+		GroveID: r.ProjectID,
+	})
+}
+
 // FileUploadRequest describes a file to upload.
 type FileUploadRequest struct {
 	Path string `json:"path"`

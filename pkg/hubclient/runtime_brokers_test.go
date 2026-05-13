@@ -115,3 +115,91 @@ func TestBrokerHeartbeat_MarshalJSON(t *testing.T) {
 		t.Errorf("Expected groveId 'p1', got %v", projects[0].(map[string]interface{})["groveId"])
 	}
 }
+
+func TestBrokerHeartbeat_UnmarshalJSON(t *testing.T) {
+	t.Run("HandleProjectsKey", func(t *testing.T) {
+		data := `{"status":"online","projects":[{"projectId":"p1","agentCount":2}]}`
+		var hb BrokerHeartbeat
+		if err := json.Unmarshal([]byte(data), &hb); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if hb.Status != "online" {
+			t.Errorf("Expected status 'online', got '%s'", hb.Status)
+		}
+		if len(hb.Projects) != 1 {
+			t.Fatalf("Expected 1 project, got %d", len(hb.Projects))
+		}
+		if hb.Projects[0].ProjectID != "p1" {
+			t.Errorf("Expected project ID 'p1', got '%s'", hb.Projects[0].ProjectID)
+		}
+		if hb.Projects[0].AgentCount != 2 {
+			t.Errorf("Expected agent count 2, got %d", hb.Projects[0].AgentCount)
+		}
+	})
+
+	t.Run("HandleGrovesKey", func(t *testing.T) {
+		data := `{"status":"online","groves":[{"groveId":"g1","agentCount":3}]}`
+		var hb BrokerHeartbeat
+		if err := json.Unmarshal([]byte(data), &hb); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if len(hb.Projects) != 1 {
+			t.Fatalf("Expected 1 project, got %d", len(hb.Projects))
+		}
+		if hb.Projects[0].ProjectID != "g1" {
+			t.Errorf("Expected project ID 'g1', got '%s'", hb.Projects[0].ProjectID)
+		}
+		if hb.Projects[0].AgentCount != 3 {
+			t.Errorf("Expected agent count 3, got %d", hb.Projects[0].AgentCount)
+		}
+	})
+
+	t.Run("ProjectsKeyTakesPrecedence", func(t *testing.T) {
+		data := `{"status":"online","projects":[{"projectId":"p1","agentCount":1}],"groves":[{"groveId":"g1","agentCount":2}]}`
+		var hb BrokerHeartbeat
+		if err := json.Unmarshal([]byte(data), &hb); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if len(hb.Projects) != 1 {
+			t.Fatalf("Expected 1 project, got %d", len(hb.Projects))
+		}
+		if hb.Projects[0].ProjectID != "p1" {
+			t.Errorf("Expected project ID 'p1' (from projects key), got '%s'", hb.Projects[0].ProjectID)
+		}
+	})
+}
+
+func TestProjectHeartbeat_UnmarshalJSON(t *testing.T) {
+	t.Run("HandleProjectIdKey", func(t *testing.T) {
+		data := `{"projectId":"p1","agentCount":5}`
+		var ph ProjectHeartbeat
+		if err := json.Unmarshal([]byte(data), &ph); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if ph.ProjectID != "p1" {
+			t.Errorf("Expected project ID 'p1', got '%s'", ph.ProjectID)
+		}
+	})
+
+	t.Run("HandleGroveIdKey", func(t *testing.T) {
+		data := `{"groveId":"g1","agentCount":3}`
+		var ph ProjectHeartbeat
+		if err := json.Unmarshal([]byte(data), &ph); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if ph.ProjectID != "g1" {
+			t.Errorf("Expected project ID 'g1', got '%s'", ph.ProjectID)
+		}
+	})
+
+	t.Run("ProjectIdTakesPrecedence", func(t *testing.T) {
+		data := `{"projectId":"p1","groveId":"g1","agentCount":1}`
+		var ph ProjectHeartbeat
+		if err := json.Unmarshal([]byte(data), &ph); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if ph.ProjectID != "p1" {
+			t.Errorf("Expected project ID 'p1' (projectId takes precedence), got '%s'", ph.ProjectID)
+		}
+	})
+}
