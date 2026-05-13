@@ -222,6 +222,14 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 			return fmt.Errorf("failed to set webhook: %w", err)
 		}
 
+		// Stop any existing webhook server before starting a new one.
+		// Configure() is called twice (first with plugin config, then with hub
+		// credentials). The second call must not fail on port-already-bound.
+		if b.webhookServer != nil {
+			b.webhookServer.Stop()
+			b.webhookServer = nil
+		}
+
 		// Create and start the webhook server.
 		b.webhookServer = NewWebhookServer(webhookListen, webhookSecret, func(update Update) {
 			if update.CallbackQuery != nil {
