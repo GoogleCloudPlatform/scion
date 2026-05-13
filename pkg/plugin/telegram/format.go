@@ -49,24 +49,14 @@ func FormatMessage(msg *messages.StructuredMessage) string {
 		b.WriteString("[Broadcast] ")
 	}
 
-	// Build sender label: "🤖 @agent-slug" for agents, sender string for others.
+	// Build sender label: "🤖 agent-slug" for agents (no @ to avoid Telegram mention detection).
 	senderLabel := msg.Sender
 	if strings.HasPrefix(msg.Sender, "agent:") {
 		slug := strings.TrimPrefix(msg.Sender, "agent:")
-		senderLabel = "🤖 @" + slug
+		senderLabel = "🤖 " + slug
 	}
 
-	// Header: sender label, with type qualifier for non-reply types.
-	switch msg.Type {
-	case messages.TypeInstruction:
-		fmt.Fprintf(&b, "%s [instruction]", senderLabel)
-	case messages.TypeInputNeeded:
-		fmt.Fprintf(&b, "%s [input needed]", senderLabel)
-	case messages.TypeStateChange:
-		fmt.Fprintf(&b, "%s [state change]", senderLabel)
-	default:
-		b.WriteString(senderLabel)
-	}
+	b.WriteString(senderLabel)
 
 	// Add status if present
 	if msg.Status != "" {

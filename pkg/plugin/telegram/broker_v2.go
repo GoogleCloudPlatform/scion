@@ -1156,25 +1156,17 @@ func FormatMessageV2(msg *messages.StructuredMessage, agentSlug string) string {
 		b.WriteString("[Broadcast] ")
 	}
 
-	// Header: "🤖 @agent-slug" for agent messages, with type qualifier for non-reply types.
+	// Header: "🤖 agent-slug" for agent messages (no @ to avoid Telegram mention detection).
 	if agentSlug != "" {
-		fmt.Fprintf(&b, "🤖 @%s", agentSlug)
+		fmt.Fprintf(&b, "🤖 %s", agentSlug)
 	} else if strings.HasPrefix(msg.Sender, "agent:") {
 		slug := strings.TrimPrefix(msg.Sender, "agent:")
-		fmt.Fprintf(&b, "🤖 @%s", slug)
+		fmt.Fprintf(&b, "🤖 %s", slug)
 	} else {
 		b.WriteString(msg.Sender)
 	}
 
-	switch msg.Type {
-	case messages.TypeInputNeeded:
-		b.WriteString(" [input needed]")
-	case messages.TypeStateChange:
-		b.WriteString(" [state change]")
-	case messages.TypeInstruction:
-		b.WriteString(" [instruction]")
-	// TypeAssistantReply is the common case — no qualifier needed
-	}
+	// No type qualifier — keep the header clean.
 
 	if msg.Status != "" {
 		fmt.Fprintf(&b, " [%s]", msg.Status)
