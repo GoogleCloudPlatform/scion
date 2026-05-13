@@ -817,6 +817,149 @@ func TestRecipientFromTopic(t *testing.T) {
 	}
 }
 
+func TestPublish_Swallows429(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/bottest-token/getMe":
+			json.NewEncoder(w).Encode(apiResponse{
+				OK: true,
+				Result: mustJSONRaw(t, BotUser{
+					ID: 100, IsBot: true, FirstName: "TestBot", Username: "test_bot",
+				}),
+			})
+		case r.URL.Path == "/bottest-token/sendMessage":
+			json.NewEncoder(w).Encode(apiResponse{
+				OK:          false,
+				ErrorCode:   429,
+				Description: "Too Many Requests: retry after 35",
+				Parameters:  &apiParameters{RetryAfterSec: 35},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	b := New(slog.Default())
+	defer b.Close()
+	require.NoError(t, b.Configure(map[string]string{
+		"bot_token":    "test-token",
+		"api_base_url": srv.URL,
+	}))
+	b.topicChats["test.topic"] = []int64{789}
+
+	msg := messages.NewInstruction("user:alice", "agent:coder", "rate limited")
+	err := b.Publish(context.Background(), "test.topic", msg)
+	assert.NoError(t, err, "429 should be swallowed, not propagated")
+}
+
+func TestPublish_Swallows5xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/bottest-token/getMe":
+			json.NewEncoder(w).Encode(apiResponse{
+				OK: true,
+				Result: mustJSONRaw(t, BotUser{
+					ID: 100, IsBot: true, FirstName: "TestBot", Username: "test_bot",
+				}),
+			})
+		case r.URL.Path == "/bottest-token/sendMessage":
+			json.NewEncoder(w).Encode(apiResponse{
+				OK:          false,
+				ErrorCode:   502,
+				Description: "Bad Gateway",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	b := New(slog.Default())
+	defer b.Close()
+	require.NoError(t, b.Configure(map[string]string{
+		"bot_token":    "test-token",
+		"api_base_url": srv.URL,
+	}))
+	b.topicChats["test.topic"] = []int64{789}
+
+	msg := messages.NewInstruction("user:alice", "agent:coder", "server error")
+	err := b.Publish(context.Background(), "test.topic", msg)
+	assert.NoError(t, err, "5xx should be swallowed, not propagated")
+}
+
+func TestPublish_PropagatesPermanentError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/bottest-token/getMe":
+			json.NewEncoder(w).Encode(apiResponse{
+				OK: true,
+				Result: mustJSONRaw(t, BotUser{
+					ID: 100, IsBot: true, FirstName: "TestBot", Username: "test_bot",
+				}),
+			})
+		case r.URL.Path == "/bottest-token/sendMessage":
+			json.NewEncoder(w).Encode(apiResponse{
+				OK:          false,
+				ErrorCode:   400,
+				Description: "Bad Request: chat not found",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	b := New(slog.Default())
+	defer b.Close()
+	require.NoError(t, b.Configure(map[string]string{
+		"bot_token":    "test-token",
+		"api_base_url": srv.URL,
+	}))
+	b.topicChats["test.topic"] = []int64{789}
+
+	msg := messages.NewInstruction("user:alice", "agent:coder", "bad request")
+	err := b.Publish(context.Background(), "test.topic", msg)
+	assert.Error(t, err, "permanent errors (4xx non-429) should propagate")
+	assert.Contains(t, err.Error(), "chat not found")
+}
+
+func TestAPIError_IsTransient(t *testing.T) {
+	tests := []struct {
+		name      string
+		code      int
+		transient bool
+	}{
+		{"429 rate limit", 429, true},
+		{"500 internal", 500, true},
+		{"502 bad gateway", 502, true},
+		{"503 unavailable", 503, true},
+		{"400 bad request", 400, false},
+		{"401 unauthorized", 401, false},
+		{"403 forbidden", 403, false},
+		{"404 not found", 404, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := &APIError{Code: tt.code, Description: "test"}
+			assert.Equal(t, tt.transient, e.IsTransient())
+		})
+	}
+}
+
+func TestAPIError_ErrorString(t *testing.T) {
+	e := &APIError{Code: 429, Description: "Too Many Requests", RetryAfterSec: 35}
+	assert.Contains(t, e.Error(), "429")
+	assert.Contains(t, e.Error(), "retry after 35s")
+
+	e2 := &APIError{Code: 500, Description: "Internal Server Error"}
+	assert.Contains(t, e2.Error(), "500")
+	assert.NotContains(t, e2.Error(), "retry after")
+}
+
 func TestSubjectMatchesPattern(t *testing.T) {
 	tests := []struct {
 		pattern string

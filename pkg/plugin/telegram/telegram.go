@@ -341,10 +341,21 @@ func (b *TelegramBroker) Publish(ctx context.Context, topic string, msg *message
 		return nil
 	}
 
-	// Send to each matching chat
+	// Send to each matching chat.
+	// Transient Telegram API errors (429 rate limits, 5xx) are logged and
+	// swallowed — propagating them would cause the caller to retry and
+	// amplify the problem into a message storm.
 	var errs []error
 	for _, chatID := range chatIDs {
 		if _, err := api.SendMessage(ctx, chatID, text, ""); err != nil {
+			var apiErr *APIError
+			if errors.As(err, &apiErr) && apiErr.IsTransient() {
+				b.log.Warn("Transient Telegram API error, dropping message",
+					"chat_id", chatID, "topic", topic,
+					"code", apiErr.Code, "retry_after_sec", apiErr.RetryAfterSec,
+					"error", err)
+				continue
+			}
 			b.log.Error("Failed to send Telegram message",
 				"chat_id", chatID, "topic", topic, "error", err)
 			errs = append(errs, err)

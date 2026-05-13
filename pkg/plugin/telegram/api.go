@@ -86,6 +86,33 @@ type apiResponse struct {
 	Result      json.RawMessage `json:"result,omitempty"`
 	Description string          `json:"description,omitempty"`
 	ErrorCode   int             `json:"error_code,omitempty"`
+	Parameters  *apiParameters  `json:"parameters,omitempty"`
+}
+
+// apiParameters contains optional response parameters from the Telegram API,
+// such as retry_after for 429 rate-limit responses.
+type apiParameters struct {
+	RetryAfterSec int `json:"retry_after,omitempty"`
+}
+
+// APIError represents a non-OK response from the Telegram Bot API.
+type APIError struct {
+	Code          int
+	Description   string
+	RetryAfterSec int
+}
+
+func (e *APIError) Error() string {
+	if e.RetryAfterSec > 0 {
+		return fmt.Sprintf("telegram API error %d: %s (retry after %ds)", e.Code, e.Description, e.RetryAfterSec)
+	}
+	return fmt.Sprintf("telegram API error %d: %s", e.Code, e.Description)
+}
+
+// IsTransient returns true for errors that represent temporary failures
+// (429 rate limits, 5xx server errors) rather than permanent ones.
+func (e *APIError) IsTransient() bool {
+	return e.Code == http.StatusTooManyRequests || e.Code >= 500
 }
 
 // sendMessageRequest is the JSON body for the sendMessage API call.
@@ -246,7 +273,11 @@ func (c *TelegramAPIClient) SendMessage(ctx context.Context, chatID int64, text,
 	}
 
 	if !apiResp.OK {
-		return nil, fmt.Errorf("sendMessage failed: %s (code %d)", apiResp.Description, apiResp.ErrorCode)
+		apiErr := &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
+		if apiResp.Parameters != nil {
+			apiErr.RetryAfterSec = apiResp.Parameters.RetryAfterSec
+		}
+		return nil, apiErr
 	}
 
 	var msg TGMessage
