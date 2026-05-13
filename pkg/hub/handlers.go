@@ -188,7 +188,7 @@ type ListAgentsResponse struct {
 
 type CreateAgentRequest struct {
 	Name            string            `json:"name"`
-	ProjectID         string            `json:"projectId"`
+	ProjectID       string            `json:"projectId"`
 	RuntimeBrokerID string            `json:"runtimeBrokerId,omitempty"` // Optional: uses project's default if not specified
 	Template        string            `json:"template"`
 	HarnessConfig   string            `json:"harnessConfig,omitempty"` // Explicit harness config name (used during sync when template may not be on Hub)
@@ -274,7 +274,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
 	filter := store.AgentFilter{
-		ProjectID:         query.Get("projectId"),
+		ProjectID:       query.Get("projectId"),
 		RuntimeBrokerID: query.Get("runtimeBrokerId"),
 		Phase:           query.Get("phase"),
 		IncludeDeleted:  query.Get("includeDeleted") == "true",
@@ -615,7 +615,7 @@ func (s *Server) createAgentInProject(
 		Slug:            slug,
 		Name:            slug,
 		Template:        req.Template,
-		ProjectID:         projectID,
+		ProjectID:       projectID,
 		RuntimeBrokerID: runtimeBrokerID,
 		Phase:           string(state.PhaseCreated),
 		Labels:          req.Labels,
@@ -2022,7 +2022,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 
 	storeMsg := &store.Message{
 		ID:          api.NewUUID(),
-		ProjectID:     agent.ProjectID,
+		ProjectID:   agent.ProjectID,
 		Sender:      "agent:" + agent.Slug,
 		SenderID:    agent.ID,
 		Recipient:   recipient,
@@ -2209,6 +2209,9 @@ type MessageRequest struct {
 	// Notify subscribes the sender to status notifications for this agent
 	// (COMPLETED, WAITING_FOR_INPUT, LIMITS_EXCEEDED, STALLED, ERROR).
 	Notify bool `json:"notify,omitempty"`
+
+	// Wake resumes a suspended agent before delivering the message.
+	Wake bool `json:"wake,omitempty"`
 }
 
 func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id string) {
@@ -2287,6 +2290,73 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
+	// Wake handling: if requested, resume a suspended agent before message delivery.
+	if req.Wake {
+		switch state.Phase(agent.Phase) {
+		case state.PhaseSuspended:
+			if !s.checkBrokerAvailability(w, r, agent) {
+				return
+			}
+			dispatcher := s.GetDispatcher()
+			if dispatcher == nil {
+				ServiceNotReady(w, "Dispatch not available — server may still be starting up")
+				return
+			}
+			if agent.RuntimeBrokerID == "" {
+				ServiceNotReady(w, "Agent has no runtime broker assigned")
+				return
+			}
+
+			if err := dispatcher.DispatchAgentStart(ctx, agent, ""); err != nil {
+				RuntimeError(w, "Failed to wake agent: "+err.Error())
+				return
+			}
+
+			// Set phase to 'starting' while we wait for readiness.
+			statusUpdate := store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}
+			if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			agent.Phase = string(state.PhaseStarting)
+			s.events.PublishAgentStatus(ctx, agent)
+
+			if err := s.waitForAgentReady(ctx, id, 15*time.Second); err != nil {
+				// On failure, set agent to an error state for clarity.
+				_ = s.store.UpdateAgentStatus(ctx, id, store.AgentStatusUpdate{Phase: string(state.PhaseError), Message: "Failed to become ready after wake"})
+				RuntimeError(w, "Agent resumed but did not become ready: "+err.Error())
+				return
+			}
+
+			// Agent is ready, set phase to 'running'.
+			statusUpdate = store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}
+			if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			agent.Phase = string(state.PhaseRunning)
+			s.events.PublishAgentStatus(ctx, agent)
+
+		case state.PhaseRunning:
+			// no-op
+
+		case state.PhaseStopped:
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				"Agent is stopped, not suspended — use 'scion start' to start a fresh session", nil)
+			return
+
+		case state.PhaseError:
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				"Agent is in error state — use 'scion start' to restart", nil)
+			return
+
+		default:
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				fmt.Sprintf("Agent is not yet running (phase: %s) — wait for it to reach running state", agent.Phase), nil)
+			return
+		}
+	}
+
 	// Populate recipient slug and ID from the resolved agent.
 	structuredMsg.Recipient = "agent:" + agent.Slug
 	structuredMsg.RecipientID = agent.ID
@@ -2310,7 +2380,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	if structuredMsg != nil {
 		storeMsg := &store.Message{
 			ID:          api.NewUUID(),
-			ProjectID:     agent.ProjectID,
+			ProjectID:   agent.ProjectID,
 			Sender:      structuredMsg.Sender,
 			SenderID:    structuredMsg.SenderID,
 			Recipient:   structuredMsg.Recipient,
@@ -2637,7 +2707,7 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 
 	result, err := s.store.ListAgents(ctx, store.AgentFilter{
 		ProjectID: projectID,
-		Phase:   "running",
+		Phase:     "running",
 	}, store.ListOptions{})
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -2660,7 +2730,7 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		// Persist broadcast message per recipient (non-fatal)
 		storeMsg := &store.Message{
 			ID:          api.NewUUID(),
-			ProjectID:     projectID,
+			ProjectID:   projectID,
 			Sender:      agentMsg.Sender,
 			SenderID:    agentMsg.SenderID,
 			Recipient:   agentMsg.Recipient,
@@ -2877,7 +2947,7 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 	scope := "all"
 	filter := store.AgentFilter{
 		ProjectID: projectID,
-		Phase:   string(state.PhaseRunning),
+		Phase:     string(state.PhaseRunning),
 	}
 
 	if projectID == "" {
@@ -3003,7 +3073,7 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 // Returns "" if the user is not a member of the project.
 func (s *Server) resolveUserProjectRole(ctx context.Context, projectID, userID string) string {
 	groups, err := s.store.ListGroups(ctx, store.GroupFilter{
-		ProjectID:   projectID,
+		ProjectID: projectID,
 		GroupType: store.GroupTypeExplicit,
 	}, store.ListOptions{Limit: 10})
 	if err != nil || len(groups.Items) == 0 {
@@ -3044,14 +3114,14 @@ type CreateProjectRequest struct {
 }
 
 type RegisterProjectRequest struct {
-	ID        string              `json:"id,omitempty"` // Client-provided project ID
-	Name      string              `json:"name"`
-	GitRemote string              `json:"gitRemote"`
-	Path      string              `json:"path,omitempty"`
-	BrokerID  string              `json:"brokerId,omitempty"` // Link to existing broker (two-phase flow)
+	ID        string                     `json:"id,omitempty"` // Client-provided project ID
+	Name      string                     `json:"name"`
+	GitRemote string                     `json:"gitRemote"`
+	Path      string                     `json:"path,omitempty"`
+	BrokerID  string                     `json:"brokerId,omitempty"` // Link to existing broker (two-phase flow)
 	Broker    *RegisterProjectBrokerInfo `json:"broker,omitempty"`   // DEPRECATED: Use BrokerID with two-phase registration
-	Profiles  []string            `json:"profiles,omitempty"`
-	Labels    map[string]string   `json:"labels,omitempty"`
+	Profiles  []string                   `json:"profiles,omitempty"`
+	Labels    map[string]string          `json:"labels,omitempty"`
 }
 
 // UnmarshalJSON implements custom unmarshaling to support legacy groveId keys.
@@ -3090,7 +3160,7 @@ type RegisterProjectResponse struct {
 	LegacyProject *store.Project           `json:"grove,omitempty"`
 	Broker        *store.RuntimeBroker     `json:"broker,omitempty"`
 	Created       bool                     `json:"created"`
-	Matches       []hubclient.ProjectMatch `json:"matches,omitempty"` // Populated when multiple projects share the same git remote
+	Matches       []hubclient.ProjectMatch `json:"matches,omitempty"`     // Populated when multiple projects share the same git remote
 	BrokerToken   string                   `json:"brokerToken,omitempty"` // DEPRECATED: use two-phase registration
 	SecretKey     string                   `json:"secretKey,omitempty"`   // DEPRECATED: secrets only from /brokers/join
 }
@@ -3429,7 +3499,7 @@ func (s *Server) createProjectGroup(ctx context.Context, project *store.Project)
 		Name:      project.Name + " Agents",
 		Slug:      agentsSlug,
 		GroupType: store.GroupTypeProjectAgents,
-		ProjectID:   project.ID,
+		ProjectID: project.ID,
 		CreatedBy: project.CreatedBy,
 	}
 	if err := s.store.CreateGroup(ctx, projectGroup); err != nil {
@@ -3473,7 +3543,7 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 		Name:      project.Name + " Members",
 		Slug:      membersSlug,
 		GroupType: store.GroupTypeExplicit,
-		ProjectID:   project.ID,
+		ProjectID: project.ID,
 		OwnerID:   project.OwnerID,
 		CreatedBy: project.CreatedBy,
 	}
@@ -3691,10 +3761,10 @@ func (s *Server) initHubNativeProject(project *store.Project) error {
 
 	// Write hub connection settings into the seeded settings file.
 	settingsUpdates := map[string]string{
-		"hub.enabled":  "true",
-		"hub.endpoint": s.config.HubEndpoint,
-		"hub.projectId":  project.ID,
-		"project_id":     project.ID,
+		"hub.enabled":   "true",
+		"hub.endpoint":  s.config.HubEndpoint,
+		"hub.projectId": project.ID,
+		"project_id":    project.ID,
 	}
 	for key, value := range settingsUpdates {
 		if err := config.UpdateSetting(scionDir, key, value, false); err != nil {
@@ -3745,10 +3815,10 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 
 	// Write hub connection settings
 	settingsUpdates := map[string]string{
-		"hub.enabled":  "true",
-		"hub.endpoint": s.config.HubEndpoint,
-		"hub.projectId":  project.ID,
-		"project_id":     project.ID,
+		"hub.enabled":   "true",
+		"hub.endpoint":  s.config.HubEndpoint,
+		"hub.projectId": project.ID,
+		"project_id":    project.ID,
 	}
 	for key, value := range settingsUpdates {
 		if err := config.UpdateSetting(scionDir, key, value, false); err != nil {
@@ -4068,7 +4138,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		provider := &store.ProjectProvider{
-			ProjectID:    project.ID,
+			ProjectID:  project.ID,
 			BrokerID:   broker.ID,
 			BrokerName: broker.Name,
 			LocalPath:  localPath,
@@ -4164,7 +4234,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		provider := &store.ProjectProvider{
-			ProjectID:    project.ID,
+			ProjectID:  project.ID,
 			BrokerID:   broker.ID,
 			BrokerName: broker.Name,
 			LocalPath:  localPath,
@@ -4551,7 +4621,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	query := r.URL.Query()
 
 	filter := store.AgentFilter{
-		ProjectID:         projectID,
+		ProjectID:       projectID,
 		RuntimeBrokerID: query.Get("runtimeBrokerId"),
 		Phase:           query.Get("phase"),
 		IncludeDeleted:  query.Get("includeDeleted") == "true",
@@ -5348,9 +5418,9 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 
 	projectID := query.Get("projectId")
 	filter := store.RuntimeBrokerFilter{
-		Status:  query.Get("status"),
+		Status:    query.Get("status"),
 		ProjectID: projectID,
-		Name:    query.Get("name"),
+		Name:      query.Get("name"),
 	}
 
 	limit := 50
@@ -6041,11 +6111,11 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 
 // BrokerProjectInfo describes a project from a broker's perspective.
 type BrokerProjectInfo struct {
-	ProjectID    string `json:"projectId"`
-	ProjectName  string `json:"projectName"`
-	GitRemote  string `json:"gitRemote,omitempty"`
-	AgentCount int    `json:"agentCount"`
-	LocalPath  string `json:"localPath,omitempty"`
+	ProjectID   string `json:"projectId"`
+	ProjectName string `json:"projectName"`
+	GitRemote   string `json:"gitRemote,omitempty"`
+	AgentCount  int    `json:"agentCount"`
+	LocalPath   string `json:"localPath,omitempty"`
 }
 
 // ListBrokerProjectsResponse is the response for listing projects a broker provides.
@@ -6074,7 +6144,7 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 	projects := make([]BrokerProjectInfo, 0, len(providers))
 	for _, p := range providers {
 		info := BrokerProjectInfo{
-			ProjectID:   p.ProjectID,
+			ProjectID: p.ProjectID,
 			LocalPath: p.LocalPath,
 		}
 
@@ -6086,7 +6156,7 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 
 		// Count agents for this project on this broker
 		agentResult, err := s.store.ListAgents(ctx, store.AgentFilter{
-			ProjectID:         p.ProjectID,
+			ProjectID:       p.ProjectID,
 			RuntimeBrokerID: brokerID,
 		}, store.ListOptions{Limit: 0})
 		if err == nil {
@@ -6095,10 +6165,11 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 
 		projects = append(projects, info)
 	}
-writeJSON(w, http.StatusOK, ListBrokerProjectsResponse{
-	Projects: projects,
-})
+	writeJSON(w, http.StatusOK, ListBrokerProjectsResponse{
+		Projects: projects,
+	})
 }
+
 // ============================================================================
 // Template Endpoints
 // ============================================================================
@@ -6137,9 +6208,9 @@ func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
 	filter := store.TemplateFilter{
-		Scope:   query.Get("scope"),
+		Scope:     query.Get("scope"),
 		ProjectID: query.Get("projectId"),
-		Harness: query.Get("harness"),
+		Harness:   query.Get("harness"),
 	}
 
 	limit := 50
@@ -7782,7 +7853,7 @@ func (s *Server) autoLinkProviders(ctx context.Context, project *store.Project) 
 
 	for _, autoBroker := range autoProviders.Items {
 		provider := &store.ProjectProvider{
-			ProjectID:    project.ID,
+			ProjectID:  project.ID,
 			BrokerID:   autoBroker.ID,
 			BrokerName: autoBroker.Name,
 			Status:     autoBroker.Status,
@@ -7900,7 +7971,7 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 
 	// Create provider record
 	provider := &store.ProjectProvider{
-		ProjectID:    projectID,
+		ProjectID:  projectID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		LocalPath:  req.LocalPath,
@@ -8627,7 +8698,7 @@ func (s *Server) createNotifySubscription(ctx context.Context, agentID, projectI
 		AgentID:           agentID,
 		SubscriberType:    notifySubscriberType,
 		SubscriberID:      notifySubscriberID,
-		ProjectID:           projectID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR"},
 		CreatedAt:         time.Now(),
 		CreatedBy:         createdBy,
@@ -8889,7 +8960,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		broker, err := s.findBrokerByIDOrSlug(ctx, requestedBrokerID)
 		if err == nil && broker != nil {
 			provider := &store.ProjectProvider{
-				ProjectID:    project.ID,
+				ProjectID:  project.ID,
 				BrokerID:   broker.ID,
 				BrokerName: broker.Name,
 				Status:     broker.Status,

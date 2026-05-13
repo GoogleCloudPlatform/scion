@@ -182,7 +182,7 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 	task := &state.Task{
 		ID:        taskID,
 		ContextID: agentCtx.ContextID,
-		ProjectID:   agentCtx.ProjectID,
+		ProjectID: agentCtx.ProjectID,
 		AgentSlug: agentCtx.AgentSlug,
 		AgentID:   agentCtx.AgentID,
 		State:     TaskStateSubmitted,
@@ -232,7 +232,7 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 		sendCtx, cancel := context.WithTimeout(b.shutdownCtx, 30*time.Second)
 		defer cancel()
 
-		if err := b.hubClient.Agents().SendStructuredMessage(sendCtx, agentCtx.AgentID, scionMsg, false, false); err != nil {
+		if err := b.hubClient.Agents().SendStructuredMessage(sendCtx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
 			b.log.Error("streaming send failed", "error", err, "task_id", taskID)
 			if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
 				b.log.Error("failed to update task state", "error", err, "task_id", taskID)

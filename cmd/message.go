@@ -40,6 +40,7 @@ var msgPlain bool
 var msgRaw bool
 var msgAttach []string
 var msgNotify bool
+var msgWake bool
 
 // messageCmd represents the message command
 var messageCmd = &cobra.Command{
@@ -155,6 +156,22 @@ Examples:
 			}
 		}
 
+		// Validate --wake restrictions
+		if msgWake {
+			if msgBroadcast || msgAll {
+				return fmt.Errorf("--wake cannot be combined with --broadcast or --all")
+			}
+			if msgIn != "" || msgAt != "" {
+				return fmt.Errorf("--wake cannot be combined with --in or --at")
+			}
+			if msgRaw {
+				return fmt.Errorf("--wake cannot be combined with --raw")
+			}
+			if userRecipient != "" {
+				return fmt.Errorf("--wake cannot be used with user recipients")
+			}
+		}
+
 		// Validate attachments
 		if len(msgAttach) > messages.MaxAttachments {
 			return fmt.Errorf("too many attachments: %d (max %d)", len(msgAttach), messages.MaxAttachments)
@@ -217,7 +234,12 @@ Examples:
 		}
 
 		if hubCtx != nil {
-			return sendMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgBroadcast, msgAll, msgNotify)
+			return sendMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgBroadcast, msgAll, msgNotify, msgWake)
+		}
+
+		// --wake requires Hub mode
+		if msgWake {
+			return fmt.Errorf("--wake requires Hub mode (use 'scion hub enable' first)")
 		}
 
 		// Local mode — structured messages are only available in Hub mode,
@@ -342,7 +364,7 @@ func buildStructuredMessage(sender, recipient, message string) *messages.Structu
 	return msg
 }
 
-func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, interrupt bool, broadcast bool, all bool, notify bool) error {
+func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, interrupt bool, broadcast bool, all bool, notify bool, wake bool) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
@@ -384,7 +406,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 				defer cancel()
 
 				msg := buildStructuredMessage(sender, "agent:"+name, message)
-				if err := agentSvc.SendStructuredMessage(ctx, name, msg, interrupt, false); err != nil {
+				if err := agentSvc.SendStructuredMessage(ctx, name, msg, interrupt, false, false); err != nil {
 					fmt.Printf("Warning: failed to send message to agent '%s' via Hub: %s\n", name, err)
 					return
 				}
@@ -429,7 +451,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 				defer cancel()
 
 				msg := buildStructuredMessage(sender, "agent:"+name, message)
-				if err := agentSvc.SendStructuredMessage(ctx, name, msg, interrupt, false); err != nil {
+				if err := agentSvc.SendStructuredMessage(ctx, name, msg, interrupt, false, false); err != nil {
 					fmt.Printf("Warning: failed to send message to agent '%s' via Hub: %s\n", name, err)
 					return
 				}
@@ -457,7 +479,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	defer cancel()
 
 	msg := buildStructuredMessage(sender, "agent:"+agentName, message)
-	if err := agentSvc.SendStructuredMessage(ctx, agentName, msg, interrupt, notify); err != nil {
+	if err := agentSvc.SendStructuredMessage(ctx, agentName, msg, interrupt, notify, wake); err != nil {
 		return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
 	}
 
@@ -548,7 +570,7 @@ func sendSetMessageViaHub(hubCtx *HubContext, recipients []messages.SetRecipient
 				slug := api.Slugify(recip.Name)
 				msg := buildStructuredMessage(sender, "agent:"+slug, message)
 				msg.Metadata = map[string]string{"group_id": groupID}
-				if err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false); err != nil {
+				if err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false, false); err != nil {
 					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
 					if !isJSONOutput() {
 						fmt.Printf("  Failed: %s: %s\n", recipStr, err)
@@ -664,5 +686,6 @@ func init() {
 	messageCmd.Flags().BoolVar(&msgRaw, "raw", false, "Send literal bytes via tmux send-keys with no trailing Enter (supports control keys like arrows and Escape)")
 	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable")
 	messageCmd.Flags().BoolVar(&msgNotify, "notify", false, "Subscribe to notifications for the target agent (completed, waiting for input, etc.)")
+	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
 	rootCmd.AddCommand(messageCmd)
 }
