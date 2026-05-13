@@ -82,7 +82,7 @@ func (p Phase) Validate() error {
 type Activity string
 
 const (
-	ActivityIdle            Activity = "idle"
+	ActivityWorking         Activity = "working"
 	ActivityThinking        Activity = "thinking"
 	ActivityExecuting       Activity = "executing"
 	ActivityWaitingForInput Activity = "waiting_for_input"
@@ -96,7 +96,7 @@ const (
 
 // allActivities is the internal list; Activities() returns a copy.
 var allActivities = []Activity{
-	ActivityIdle,
+	ActivityWorking,
 	ActivityThinking,
 	ActivityExecuting,
 	ActivityWaitingForInput,

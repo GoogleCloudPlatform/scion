@@ -25,7 +25,7 @@ func TestMapActivityToTaskState(t *testing.T) {
 		activity string
 		want     string
 	}{
-		{"IDLE", TaskStateCompleted},
+		{"WORKING", TaskStateWorking},
 		{"THINKING", TaskStateWorking},
 		{"EXECUTING", TaskStateWorking},
 		{"WAITING_FOR_INPUT", TaskStateInputRequired},
@@ -35,7 +35,7 @@ func TestMapActivityToTaskState(t *testing.T) {
 		{"LIMITS_EXCEEDED", TaskStateFailed},
 		{"OFFLINE", TaskStateFailed},
 		{"UNKNOWN_ACTIVITY", TaskStateWorking},
-		{"idle", TaskStateCompleted},
+		{"working", TaskStateWorking},
 	}
 
 	for _, tt := range tests {

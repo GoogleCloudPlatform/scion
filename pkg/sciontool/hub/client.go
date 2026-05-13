@@ -313,7 +313,7 @@ func (c *Client) calculateBackoff(attempt int) time.Duration {
 
 // Heartbeat sends a heartbeat to the Hub.
 // Note: Heartbeat only updates last_seen timestamp, it does not change the agent's status.
-// This allows the actual status (idle, busy, etc.) to be preserved between heartbeats.
+// This allows the actual status (working, busy, etc.) to be preserved between heartbeats.
 func (c *Client) Heartbeat(ctx context.Context) error {
 	return c.UpdateStatus(ctx, StatusUpdate{
 		Heartbeat: true,

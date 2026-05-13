@@ -5935,7 +5935,7 @@ func (p *brokerProjectHeartbeat) UnmarshalJSON(data []byte) error {
 // brokerAgentHeartbeat is per-agent status in a heartbeat.
 type brokerAgentHeartbeat struct {
 	Slug            string `json:"slug"`   // Agent's URL-safe identifier (name)
-	Status          string `json:"status"` // Session status (IDLE, THINKING, etc.)
+	Status          string `json:"status"` // Session status (WORKING, THINKING, etc.)
 	Phase           string `json:"phase,omitempty"`
 	Activity        string `json:"activity,omitempty"`
 	ContainerStatus string `json:"containerStatus,omitempty"`

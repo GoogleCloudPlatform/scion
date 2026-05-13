@@ -569,7 +569,7 @@ func extractEventsOpt(entries []GCPLogEntry, agents []AgentInfo, skipFileEvents 
 			Data: AgentStateEvent{
 				AgentID:  agentID,
 				Phase:    "running",
-				Activity: "idle",
+				Activity: "working",
 			},
 		})
 	}
@@ -597,7 +597,7 @@ func extractEventsOpt(entries []GCPLogEntry, agents []AgentInfo, skipFileEvents 
 					Data: AgentStateEvent{
 						AgentID:  aid,
 						Phase:    "running",
-						Activity: "idle",
+						Activity: "working",
 					},
 				})
 			case "agent.session.end":
@@ -625,7 +625,7 @@ func extractEventsOpt(entries []GCPLogEntry, agents []AgentInfo, skipFileEvents 
 					Timestamp: ts,
 					Data: AgentStateEvent{
 						AgentID:  aid,
-						Activity: "idle",
+						Activity: "working",
 					},
 				})
 			case "agent.tool.call":

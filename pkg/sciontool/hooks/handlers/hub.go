@@ -48,9 +48,9 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 	var err error
 	switch event.Name {
 	case hooks.EventSessionStart:
-		// Session starting - report running phase with idle activity (clears any sticky)
-		log.Debug("Hub: Reporting running/idle (session start)")
-		err = h.client.ReportState(ctx, state.PhaseRunning, state.ActivityIdle, "Session started")
+		// Session starting - report running phase with working activity (clears any sticky)
+		log.Debug("Hub: Reporting running/working (session start)")
+		err = h.client.ReportState(ctx, state.PhaseRunning, state.ActivityWorking, "Session started")
 
 	case hooks.EventPromptSubmit, hooks.EventAgentStart:
 		// New work events - always clear sticky status
@@ -150,15 +150,15 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 			}
 		}
 
-		// Check if local activity is sticky before sending idle
+		// Check if local activity is sticky before sending working
 		if h.isLocalActivitySticky() {
-			log.Debug("Hub: Skipping idle (local activity is sticky)")
+			log.Debug("Hub: Skipping working (local activity is sticky)")
 			return nil
 		}
-		log.Debug("Hub: Reporting idle (step completed)")
-		as := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityIdle}
+		log.Debug("Hub: Reporting working (step completed)")
+		as := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWorking}
 		err = h.client.UpdateStatus(ctx, hub.StatusUpdate{
-			Activity: state.ActivityIdle,
+			Activity: state.ActivityWorking,
 			Status:   as.DisplayStatus(),
 			Message:  "Ready",
 		})

@@ -466,10 +466,10 @@ func runInit(args []string) int {
 			hubCtx, hubCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			startedAtStr := time.Now().UTC().Format(time.RFC3339)
 			zeroCount := 0
-			s := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityIdle}
+			s := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWorking}
 			if err := hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
 				Phase:             state.PhaseRunning,
-				Activity:          state.ActivityIdle,
+				Activity:          state.ActivityWorking,
 				Status:            s.DisplayStatus(),
 				Message:           "Agent started",
 				StartedAt:         startedAtStr,

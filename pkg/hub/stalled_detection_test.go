@@ -352,7 +352,7 @@ func TestAgentStalledDetectionHandler_IdleAgentMarkedStalled(t *testing.T) {
 	project := &store.Project{
 		ID:         api.NewUUID(),
 		Name:       "Idle Stalled Project",
-		Slug:       "idle-stalled-project",
+		Slug:       "working-stalled-project",
 		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
@@ -361,7 +361,7 @@ func TestAgentStalledDetectionHandler_IdleAgentMarkedStalled(t *testing.T) {
 
 	agent := &store.Agent{
 		ID:         api.NewUUID(),
-		Slug:       "idle-agent",
+		Slug:       "working-agent",
 		Name:       "Idle Agent",
 		Template:   "claude",
 		ProjectID:    project.ID,
@@ -372,15 +372,15 @@ func TestAgentStalledDetectionHandler_IdleAgentMarkedStalled(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	// Set to running with idle activity
+	// Set to running with working activity
 	if err := s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
 		Phase:    string(state.PhaseRunning),
-		Activity: string(state.ActivityIdle),
+		Activity: string(state.ActivityWorking),
 	}); err != nil {
 		t.Fatalf("failed to update agent status: %v", err)
 	}
 
-	// Make activity stale but keep heartbeat recent (process alive but stuck at idle)
+	// Make activity stale but keep heartbeat recent (process alive but stuck at working)
 	staleActivity := time.Now().Add(-10 * time.Minute)
 	recentHB := time.Now().Add(-30 * time.Second)
 	db := s.(*sqlite.SQLiteStore).DB()
@@ -390,13 +390,13 @@ func TestAgentStalledDetectionHandler_IdleAgentMarkedStalled(t *testing.T) {
 		t.Fatalf("failed to set stale activity: %v", err)
 	}
 
-	// Run stalled detection — should mark this idle agent as stalled
+	// Run stalled detection — should mark this working agent as stalled
 	handler := srv.agentStalledDetectionHandler()
 	handler(ctx)
 
 	published := ep.publishedAgents()
 	if len(published) != 1 {
-		t.Fatalf("expected 1 published event (idle agent should be stalled), got %d", len(published))
+		t.Fatalf("expected 1 published event (working agent should be stalled), got %d", len(published))
 	}
 	if published[0].Activity != string(state.ActivityStalled) {
 		t.Errorf("published agent activity = %q, want %q", published[0].Activity, string(state.ActivityStalled))
@@ -410,8 +410,8 @@ func TestAgentStalledDetectionHandler_IdleAgentMarkedStalled(t *testing.T) {
 	if a.Activity != string(state.ActivityStalled) {
 		t.Errorf("agent activity = %q, want %q", a.Activity, string(state.ActivityStalled))
 	}
-	if a.StalledFromActivity != string(state.ActivityIdle) {
-		t.Errorf("stalled_from_activity = %q, want %q", a.StalledFromActivity, string(state.ActivityIdle))
+	if a.StalledFromActivity != string(state.ActivityWorking) {
+		t.Errorf("stalled_from_activity = %q, want %q", a.StalledFromActivity, string(state.ActivityWorking))
 	}
 }
 

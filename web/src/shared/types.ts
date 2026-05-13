@@ -191,7 +191,7 @@ export type AgentPhase =
  * Agent runtime activity (only meaningful when phase=running)
  */
 export type AgentActivity =
-  | 'idle'
+  | 'working'
   | 'thinking'
   | 'executing'
   | 'waiting_for_input'

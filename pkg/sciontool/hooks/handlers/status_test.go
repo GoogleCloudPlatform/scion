@@ -52,12 +52,12 @@ func TestStatusHandler_UpdatePhase(t *testing.T) {
 	assert.Equal(t, "starting", info.Phase)
 	assert.Equal(t, "", info.Activity)
 
-	err = h.UpdatePhase(state.PhaseRunning, state.ActivityIdle, "")
+	err = h.UpdatePhase(state.PhaseRunning, state.ActivityWorking, "")
 	require.NoError(t, err)
 
 	info = readAgentInfo(t, statusPath)
 	assert.Equal(t, "running", info.Phase)
-	assert.Equal(t, "idle", info.Activity)
+	assert.Equal(t, "working", info.Activity)
 }
 
 func TestStatusHandler_Handle(t *testing.T) {
@@ -81,15 +81,15 @@ func TestStatusHandler_Handle(t *testing.T) {
 			wantActivity: "",
 		},
 		{
-			name:         "PostStart sets running/idle",
+			name:         "PostStart sets running/working",
 			event:        &hooks.Event{Name: hooks.EventPostStart},
 			wantPhase:    "running",
-			wantActivity: "idle",
+			wantActivity: "working",
 		},
 		{
-			name:         "SessionStart sets idle activity",
+			name:         "SessionStart sets working activity",
 			event:        &hooks.Event{Name: hooks.EventSessionStart},
-			wantActivity: "idle",
+			wantActivity: "working",
 		},
 		{
 			name:         "PreStop sets stopping phase",
@@ -108,14 +108,14 @@ func TestStatusHandler_Handle(t *testing.T) {
 			wantActivity: "executing",
 		},
 		{
-			name:         "ToolEnd sets idle",
+			name:         "ToolEnd sets working",
 			event:        &hooks.Event{Name: hooks.EventToolEnd},
-			wantActivity: "idle",
+			wantActivity: "working",
 		},
 		{
-			name:         "AgentEnd sets idle",
+			name:         "AgentEnd sets working",
 			event:        &hooks.Event{Name: hooks.EventAgentEnd},
-			wantActivity: "idle",
+			wantActivity: "working",
 		},
 		{
 			name:         "SessionEnd sets stopped phase",
@@ -159,7 +159,7 @@ func TestStatusHandler_ToolStartSetsToolName(t *testing.T) {
 	require.NoError(t, err)
 
 	info = readAgentInfo(t, statusPath)
-	assert.Equal(t, "idle", info.Activity)
+	assert.Equal(t, "working", info.Activity)
 	assert.Equal(t, "", info.ToolName)
 }
 
@@ -509,8 +509,8 @@ func TestStatusHandler_PreservesExtraFields(t *testing.T) {
 	// Seed agent-info.json with extra fields (as written at provisioning time)
 	initial := map[string]interface{}{
 		"phase":         "running",
-		"activity":      "idle",
-		"status":        "idle",
+		"activity":      "working",
+		"status":        "working",
 		"template":      "my-template",
 		"harnessConfig": "claude",
 		"runtime":       "docker",
@@ -556,8 +556,8 @@ func TestStatusHandler_RemovesLegacyFields(t *testing.T) {
 	// Seed agent-info.json with legacy status and sessionStatus fields
 	initial := map[string]interface{}{
 		"phase":         "running",
-		"activity":      "idle",
-		"status":        "idle",
+		"activity":      "working",
+		"status":        "working",
 		"sessionStatus": "WAITING_FOR_INPUT",
 	}
 	data, err := json.Marshal(initial)

@@ -542,7 +542,7 @@ type AgentInfo struct {
 	// Status fields
 	ContainerStatus string       `json:"containerStatus,omitempty"` // Container status (e.g., Up 2 hours)
 	Phase           string       `json:"phase,omitempty"`           // Lifecycle phase (created, provisioning, running, stopped, error)
-	Activity        string       `json:"activity,omitempty"`        // Runtime activity (idle, thinking, executing, waiting_for_input, completed)
+	Activity        string       `json:"activity,omitempty"`        // Runtime activity (working, thinking, executing, waiting_for_input, completed)
 	Detail          *AgentDetail `json:"detail,omitempty"`          // Freeform context about the current activity
 
 	// Runtime configuration

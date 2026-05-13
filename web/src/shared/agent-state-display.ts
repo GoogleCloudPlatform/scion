@@ -67,7 +67,7 @@ export const PHASE_DISPLAY: Record<AgentPhase, StateDisplay> = {
 // ---------------------------------------------------------------------------
 
 export const ACTIVITY_DISPLAY: Record<AgentActivity, StateDisplay> = {
-  idle: { emoji: '💤', icon: 'circle-fill', variant: 'success', pulse: false },
+  working: { emoji: '🔄', icon: 'circle-fill', variant: 'success', pulse: false },
   thinking: { emoji: '💭', icon: 'lightning-charge', variant: 'primary', pulse: true },
   executing: { emoji: '⚙️', icon: 'gear', variant: 'primary', pulse: true },
   waiting_for_input: {

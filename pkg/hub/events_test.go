@@ -160,7 +160,7 @@ func TestChannelEventPublisher_PublishAgentCreated(t *testing.T) {
 		Slug:            "test-agent",
 		Template:        "claude",
 		Phase:           "created",
-		Activity:        "idle",
+		Activity:        "working",
 		ContainerStatus: "running",
 		Image:           "scion-claude:latest",
 		Runtime:         "docker",
@@ -180,7 +180,7 @@ func TestChannelEventPublisher_PublishAgentCreated(t *testing.T) {
 		if data.AgentID != "a1" || data.Name != "test-agent" || data.Template != "claude" {
 			t.Errorf("unexpected identity data: %+v", data)
 		}
-		if data.Phase != "created" || data.Activity != "idle" || data.ContainerStatus != "running" {
+		if data.Phase != "created" || data.Activity != "working" || data.ContainerStatus != "running" {
 			t.Errorf("unexpected status data: %+v", data)
 		}
 		if data.Image != "scion-claude:latest" || data.Runtime != "docker" || data.RuntimeBrokerID != "b1" {

@@ -371,16 +371,16 @@ func TestAgentStatusUpdate(t *testing.T) {
 	assert.Equal(t, "executing", retrieved.Activity)
 	assert.Equal(t, "Bash", retrieved.ToolName)
 
-	// Change activity from executing to idle → toolName is cleared
+	// Change activity from executing to working → toolName is cleared
 	err = s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
 		Phase:    "running",
-		Activity: "idle",
+		Activity: "working",
 	})
 	require.NoError(t, err)
 
 	retrieved, err = s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "idle", retrieved.Activity)
+	assert.Equal(t, "working", retrieved.Activity)
 	assert.Equal(t, "", retrieved.ToolName, "toolName should be cleared when activity changes away from executing")
 
 	// Set only activity (phase preserved from previous update)
@@ -425,7 +425,7 @@ func TestAgentStatusUpdate_PhaseActivityRoundTrip(t *testing.T) {
 		Template:   "claude",
 		ProjectID:  project.ID,
 		Phase:      "running",
-		Activity:   "idle",
+		Activity:   "working",
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -434,20 +434,20 @@ func TestAgentStatusUpdate_PhaseActivityRoundTrip(t *testing.T) {
 	retrieved, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "running", retrieved.Phase)
-	assert.Equal(t, "idle", retrieved.Activity)
+	assert.Equal(t, "working", retrieved.Activity)
 
 	// Verify round-trip through GetBySlug
 	retrieved, err = s.GetAgentBySlug(ctx, project.ID, "roundtrip-agent")
 	require.NoError(t, err)
 	assert.Equal(t, "running", retrieved.Phase)
-	assert.Equal(t, "idle", retrieved.Activity)
+	assert.Equal(t, "working", retrieved.Activity)
 
 	// Verify round-trip through List
 	result, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
 	assert.Equal(t, "running", result.Items[0].Phase)
-	assert.Equal(t, "idle", result.Items[0].Activity)
+	assert.Equal(t, "working", result.Items[0].Activity)
 }
 
 func TestSoftDeleteFilterExclusion(t *testing.T) {
@@ -2245,7 +2245,7 @@ func TestMarkStaleAgentsOffline(t *testing.T) {
 	threshold := time.Now().Add(-2 * time.Minute)
 
 	// These agents have phase=running with non-sticky activities → should be marked offline
-	activeActivities := []string{"idle", "thinking", "executing", "waiting_for_input"}
+	activeActivities := []string{"working", "thinking", "executing", "waiting_for_input"}
 
 	var expectedIDs []string
 	for i, activity := range activeActivities {
@@ -2320,7 +2320,7 @@ func TestMarkStaleAgentsOffline(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, recentAgent))
 	require.NoError(t, s.UpdateAgentStatus(ctx, recentAgent.ID, store.AgentStatusUpdate{
-		Phase: "running", Activity: "idle",
+		Phase: "running", Activity: "working",
 	}))
 	// last_seen is set to now by UpdateAgentStatus, which is within the threshold
 
@@ -2358,7 +2358,7 @@ func TestMarkStaleAgentsOffline(t *testing.T) {
 	// Verify recent agent was NOT affected
 	a, err = s.GetAgent(ctx, recentAgent.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "idle", a.Activity)
+	assert.Equal(t, "working", a.Activity)
 }
 
 func TestMarkStaleAgentsOffline_Idempotent(t *testing.T) {
@@ -2383,7 +2383,7 @@ func TestMarkStaleAgentsOffline_Idempotent(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
-		Phase: "running", Activity: "idle",
+		Phase: "running", Activity: "working",
 	}))
 	_, err := s.db.ExecContext(ctx, "UPDATE agents SET last_seen = ? WHERE id = ?", staleTime, agent.ID)
 	require.NoError(t, err)
@@ -2433,7 +2433,7 @@ func TestMarkStalledAgents(t *testing.T) {
 	heartbeatRecency := time.Now().Add(-2 * time.Minute)
 
 	// --- Should be marked stalled: stale activity + recent heartbeat ---
-	stalledActivities := []string{"thinking", "executing", "idle"}
+	stalledActivities := []string{"thinking", "executing", "working"}
 	var expectedIDs []string
 	for _, activity := range stalledActivities {
 		agent := &store.Agent{
@@ -2463,7 +2463,7 @@ func TestMarkStalledAgents(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, recentAgent))
 	require.NoError(t, s.UpdateAgentStatus(ctx, recentAgent.ID, store.AgentStatusUpdate{
-		Phase: "running", Activity: "idle",
+		Phase: "running", Activity: "working",
 	}))
 	// last_activity_event is set to now by UpdateAgentStatus, which is within threshold
 
@@ -2475,7 +2475,7 @@ func TestMarkStalledAgents(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, offlineAgent))
 	require.NoError(t, s.UpdateAgentStatus(ctx, offlineAgent.ID, store.AgentStatusUpdate{
-		Phase: "running", Activity: "idle",
+		Phase: "running", Activity: "working",
 	}))
 	staleHeartbeat := time.Now().Add(-5 * time.Minute)
 	_, err := s.db.ExecContext(ctx,
@@ -2583,11 +2583,11 @@ func TestMarkStalledAgents(t *testing.T) {
 	// Verify excluded agents were NOT affected
 	a, err := s.GetAgent(ctx, recentAgent.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "idle", a.Activity)
+	assert.Equal(t, "working", a.Activity)
 
 	a, err = s.GetAgent(ctx, offlineAgent.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "idle", a.Activity, "stale heartbeat agent should not be stalled")
+	assert.Equal(t, "working", a.Activity, "stale heartbeat agent should not be stalled")
 
 	a, err = s.GetAgent(ctx, completedAgent.ID)
 	require.NoError(t, err)
@@ -2742,7 +2742,7 @@ func TestUpdateAgentStatus_ProtectsTerminalActivity(t *testing.T) {
 
 	// Non-terminal activity should not overwrite crashed
 	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
-		Activity: string(state.ActivityIdle),
+		Activity: string(state.ActivityWorking),
 	}))
 
 	a, err := s.GetAgent(ctx, agent.ID)
