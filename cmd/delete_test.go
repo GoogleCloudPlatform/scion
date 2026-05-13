@@ -34,7 +34,7 @@ import (
 // deleteTestState captures and restores package-level vars for test isolation.
 type deleteTestState struct {
 	home           string
-	projectPath      string
+	projectPath    string
 	preserveBranch bool
 	noHub          bool
 	autoConfirm    bool
@@ -44,7 +44,7 @@ type deleteTestState struct {
 func saveDeleteTestState() deleteTestState {
 	return deleteTestState{
 		home:           os.Getenv("HOME"),
-		projectPath:      projectPath,
+		projectPath:    projectPath,
 		preserveBranch: preserveBranch,
 		noHub:          noHub,
 		autoConfirm:    autoConfirm,
@@ -91,8 +91,8 @@ func newDeleteMockHubServer(t *testing.T, projectID string) (*httptest.Server, *
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
 		case r.Method == http.MethodDelete:
-			// Extract agent name from path: /api/v1/groves/<projectID>/agents/<agentName>
-			prefix := "/api/v1/groves/" + projectID + "/agents/"
+			// Extract agent name from path: /api/v1/projects/<projectID>/agents/<agentName>
+			prefix := "/api/v1/projects/" + projectID + "/agents/"
 			agentName := r.URL.Path[len(prefix):]
 			deletedAgents = append(deletedAgents, agentName)
 			w.WriteHeader(http.StatusNoContent)
@@ -179,9 +179,9 @@ func TestDeleteAgentsViaHub_CleansUpLocalFiles(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  projectID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	// Run the function under test
@@ -220,9 +220,9 @@ func TestDeleteAgentsViaHub_MultipleAgents(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  projectID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	err = deleteAgentsViaHub(hubCtx, []string{"agent-one", "agent-two"})
@@ -275,9 +275,9 @@ func TestDeleteAgentsViaHub_HubFailsSkipsLocalCleanup(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  projectID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	err = deleteAgentsViaHub(hubCtx, []string{"missing-agent"})
@@ -310,9 +310,9 @@ func TestDeleteAgentsViaHub_NoLocalFiles(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		ProjectID:  projectID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	// Should succeed without error even when no local files exist
@@ -337,9 +337,9 @@ func TestDeleteAgentsViaHub_LocalCleanupFailureCreatesStaleLocalNotToRegister(t 
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/groves/"+projectID+"/agents/stale-agent":
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/projects/"+projectID+"/agents/stale-agent":
 			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/groves/"+projectID+"/agents":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID+"/agents":
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents":     []interface{}{},
 				"serverTime": time.Now().UTC().Format(time.RFC3339Nano),
@@ -363,11 +363,11 @@ func TestDeleteAgentsViaHub_LocalCleanupFailureCreatesStaleLocalNotToRegister(t 
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:    client,
-		Endpoint:  server.URL,
+		Client:      client,
+		Endpoint:    server.URL,
 		ProjectID:   projectID,
 		ProjectPath: groveDir,
-		IsGlobal:  false,
+		IsGlobal:    false,
 	}
 
 	err = deleteAgentsViaHub(hubCtx, []string{"stale-agent"})
@@ -378,12 +378,12 @@ func TestDeleteAgentsViaHub_LocalCleanupFailureCreatesStaleLocalNotToRegister(t 
 	require.NotEmpty(t, state.LastSyncedAt, "expected watermark checkpoint after hub delete")
 
 	syncCtx := &hubsync.HubContext{
-		Client:    client,
+		Client:      client,
 		ProjectID:   projectID,
-		BrokerID:  "",
+		BrokerID:    "",
 		ProjectPath: groveDir,
-		IsGlobal:  false,
-		Settings:  &config.Settings{},
+		IsGlobal:    false,
+		Settings:    &config.Settings{},
 	}
 	result, err := hubsync.CompareAgents(context.Background(), syncCtx)
 	require.NoError(t, err)
