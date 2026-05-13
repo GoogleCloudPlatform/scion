@@ -1156,20 +1156,24 @@ func FormatMessageV2(msg *messages.StructuredMessage, agentSlug string) string {
 		b.WriteString("[Broadcast] ")
 	}
 
-	// Add agent slug header when available.
+	// Header: "🤖 @agent-slug" for agent messages, with type qualifier for non-reply types.
 	if agentSlug != "" {
-		fmt.Fprintf(&b, "[%s] ", agentSlug)
+		fmt.Fprintf(&b, "🤖 @%s", agentSlug)
+	} else if strings.HasPrefix(msg.Sender, "agent:") {
+		slug := strings.TrimPrefix(msg.Sender, "agent:")
+		fmt.Fprintf(&b, "🤖 @%s", slug)
+	} else {
+		b.WriteString(msg.Sender)
 	}
 
 	switch msg.Type {
 	case messages.TypeInputNeeded:
-		b.WriteString("Input Needed")
+		b.WriteString(" [input needed]")
 	case messages.TypeStateChange:
-		b.WriteString("Status Update")
-	case messages.TypeAssistantReply:
-		b.WriteString("Reply")
-	default:
-		b.WriteString("Message")
+		b.WriteString(" [state change]")
+	case messages.TypeInstruction:
+		b.WriteString(" [instruction]")
+	// TypeAssistantReply is the common case — no qualifier needed
 	}
 
 	if msg.Status != "" {
