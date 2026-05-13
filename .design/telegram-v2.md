@@ -645,52 +645,54 @@ through the hub UI or CLI, not through Telegram.
 
 ### 3.4 Registration Flow Redesign
 
-Registration is a plugin concern — no hub API changes needed. The plugin uses
-the hub's existing device authorization flow (same pattern as scion-chat-app)
-to verify user identity, and stores the mapping in its own SQLite store.
+Registration uses the hub's generic Platform Identity Linking service
+(Section 10). The plugin generates a code, registers it with the hub, and
+sends the user a link to the hub web UI where they confirm the link while
+authenticated.
 
-#### Device Auth Flow (same as chat-app)
+#### Code-Based Linking Flow
 
 ```
 User DMs bot: /register
-Bot calls:    hub.Auth().RequestDeviceCode(ctx, "")
+Bot generates: 6-char code (e.g., "AB3X7K")
+Bot calls:     POST /api/v1/identity/link
+               {platform: "telegram", platform_user_id: "98765",
+                code: "AB3X7K", metadata: {username: "@alice"}}
 Bot replies:
 ┌─────────────────────────────────────┐
 │  Link your scion account            │
 │                                     │
-│  1. Open: https://hub.example.com/  │
-│     device                          │
-│  2. Enter code: ABC-1234            │
+│  Click below and log in to confirm: │
 │                                     │
-│  Then send: /register confirm       │
-│                                     │
-│  [Open verification link]           │
+│  [Link Account]                     │
+│  (opens hub.example.com/profile/    │
+│   link?platform=telegram&           │
+│   code=AB3X7K&user_name=@alice)     │
 └─────────────────────────────────────┘
 
-User clicks link, authenticates with hub in browser.
+User clicks link → hub web UI → authenticates → confirms.
 
-User DMs bot: /register confirm
-Bot calls:    hub.Auth().PollDeviceToken(ctx, deviceCode, "")
-Hub returns:  AccessToken + User (ID, email)
-Bot stores:   TelegramUserMapping in SQLite
-Bot replies:  "Linked! You are alice@example.com"
+Bot polls:   GET /api/v1/identity/link/status?platform=telegram&platform_user_id=98765
+Hub returns: {status: "confirmed", user_id: "...", email: "alice@example.com"}
+Bot stores:  TelegramUserMapping in local SQLite
+Bot replies: "Linked! You are alice@example.com"
 ```
 
-**Implementation (mirrors chat-app `cmdRegister`):**
+**Implementation:**
 
 1. User sends `/register` to bot in DM
-2. Bot calls `hubClient.Auth().RequestDeviceCode(ctx, "")` → gets
-   `DeviceCodeResponse` with verification URL, user code, device code
-3. Bot sends inline keyboard card with verification URL button and user code
-4. Bot stores pending registration: `{deviceCode, telegramUserID, chatID, expiresAt}`
-5. User authenticates with hub in browser, enters the user code
-6. User sends `/register confirm` in DM
-7. Bot calls `hubClient.Auth().PollDeviceToken(ctx, deviceCode, "")`:
-   - `"authorization_pending"` → "Not yet authorized, please complete the
-     verification step and try again"
-   - `"expired_token"` → "Code expired, run /register again"
-   - Success → receives `AccessToken` and `User` object (ID, email)
-8. Bot stores mapping in SQLite:
+2. Bot checks if already linked (local SQLite lookup)
+3. Bot generates 6-char code (crypto/rand, `ABCDEFGHJKMNPQRSTUVWXYZ23456789`)
+4. Bot POSTs to hub `POST /api/v1/identity/link` with platform, user ID, code,
+   and metadata (username, display name)
+5. Bot sends inline keyboard card with URL button pointing to generic hub
+   link page: `{hub_url}/profile/link?platform=telegram&code=AB3X7K&user_name=@alice`
+6. Bot starts background polling (10s interval) on
+   `GET /api/v1/identity/link/status?platform=telegram&platform_user_id=98765`
+7. User clicks link, authenticates with hub in browser, confirms on the
+   generic `/profile/link` page → hub calls `PlatformLinkService.VerifyCode()`
+8. Poll returns `status: "confirmed"` with user ID and email
+9. Bot stores mapping in local SQLite:
    ```go
    type TelegramUserMapping struct {
        TelegramUserID   string
@@ -700,17 +702,20 @@ Bot replies:  "Linked! You are alice@example.com"
        LinkedAt         time.Time
    }
    ```
-9. Bot confirms: "Linked! You are alice@example.com"
+10. Bot confirms: "Linked! You are alice@example.com"
 
 **Security properties:**
-- Proves ownership of both identities: user must authenticate with hub AND
-  have access to their Telegram account
-- Uses the hub's standard OAuth device flow — no custom auth endpoints
-- No self-asserted email — hub returns the authenticated user's identity
-- Device codes are time-limited (hub-enforced TTL)
+- Proves ownership of both identities: user must be logged into hub AND have
+  access to their Telegram account
+- Code is short-lived (15-minute TTL, hub-enforced)
+- No self-asserted email — hub knows the user from their JWT session
+- Hub persists the link in `external_identities` table (survives restarts)
+- Plugin's local SQLite copy is a hot-path cache of the authoritative hub record
 
 **Unregistration:**
-User sends `/unregister` in DM → mapping deleted from SQLite → confirmed.
+User sends `/unregister` in DM → bot calls
+`DELETE /api/v1/identity/link?platform=telegram&platform_user_id=98765` →
+mapping deleted from hub's `external_identities` and local SQLite → confirmed.
 
 #### Migration from v1 Registration
 
@@ -787,12 +792,11 @@ type PendingAskUser struct {
 }
 ```
 
-#### 3.5.2 No Hub-Side State
+#### 3.5.2 Hub-Side State (Generic Platform Identity Service)
 
-User identity mappings are stored in the plugin's SQLite (not the hub DB).
-Registration is a plugin concern — the plugin uses the hub's existing device
-auth flow to verify identity but manages its own mapping table. No new hub
-models or endpoints are needed.
+The hub stores the authoritative identity link in the `external_identities`
+table (see Section 10.4 for full schema). The plugin's local
+`TelegramUserMapping` in SQLite is a hot-path cache of this data.
 
 The `TelegramUserMapping` struct (in plugin SQLite) is defined in Section 3.4.
 
@@ -978,16 +982,15 @@ Publish(topic, msg)
     └─ Deduplication check (same as v1)
 ```
 
-### 3.9 Hub API Usage (No New Endpoints)
-
-The plugin uses only existing hub API endpoints. No hub-side changes required.
+### 3.9 Hub API Usage
 
 ```
-# Authentication (existing device auth flow)
-POST /auth/device/code          → Request device code for registration
-POST /auth/device/token         → Poll for device token after user authenticates
+# Platform identity linking (new generic service — see Section 10)
+POST /api/v1/identity/link          → Plugin registers pending link code
+POST /api/v1/identity/link/verify   → User confirms link in web UI
+GET  /api/v1/identity/link/status   → Plugin polls for confirmation
 
-# Project and agent discovery
+# Project and agent discovery (existing)
 GET /api/v1/groves              → List projects (for /setup inline keyboard)
 GET /api/v1/groves/{id}/agents  → List agents (for default agent selection, @-mention cache)
 
@@ -1136,8 +1139,13 @@ func (c *TelegramAPIClient) SetMyCommands(
 | `pkg/plugin/telegram/mentions.go` | **NEW**: @-mention parser and agent name matching |
 | `pkg/plugin/telegram/callbacks.go` | **NEW**: Callback query dispatcher and handlers |
 | `pkg/plugin/telegram/cards.go` | **NEW**: Inline keyboard builders for each card type |
-| `pkg/hub/handlers.go` | Add broker publish in `handleAgentMessage()` for agent-to-agent observability |
-| `pkg/hub/server.go` | No other changes — plugin uses existing hub APIs only |
+| `pkg/hub/platform_link.go` | **NEW**: Generic `PlatformLinkService` (see Section 10) |
+| `pkg/hub/handlers.go` | Add generic `/api/v1/identity/link*` handlers; add broker publish in `handleAgentMessage()` |
+| `pkg/hub/server.go` | Register identity link routes, initialize `PlatformLinkService` |
+| `pkg/store/models.go` | Add `PendingPlatformLink`, `ExternalIdentity` models |
+| `pkg/store/store.go` | Add `PlatformLinkStore` interface |
+| `pkg/store/postgres/` | Migration for `pending_platform_links` and `external_identities` tables |
+| `pkg/hub/telegram_link.go` | Thin wrapper → then remove (migration path in Section 10.9) |
 
 ## 7. Open Questions
 
@@ -1145,11 +1153,12 @@ func (c *TelegramAPIClient) SetMyCommands(
    storage interface abstracted so the plugin can later use the hub's main
    Postgres when configured. *(Decision: owner feedback 2026-05-13)*
 
-2. **Hub API ownership**: **Resolved** — Registration and identity mapping are
-   plugin concerns, not hub concerns. No new hub API endpoints. The plugin
-   uses the hub's existing device auth flow (same as chat-app) to verify user
-   identity, and stores mappings in its own SQLite. The hub remains unaware
-   of Telegram-specific integrations. *(Decision: owner feedback 2026-05-13)*
+2. **Hub API ownership**: **Resolved** — Registration uses a generic Platform
+   Identity Linking service (Section 10) with platform-agnostic endpoints at
+   `/api/v1/identity/link*`. The hub is not Telegram-aware — the platform name
+   is a parameter. The plugin stores a local SQLite cache of the authoritative
+   hub-side `external_identities` record. *(Revised: generalized service
+   designed 2026-05-13)*
 
 3. **Structured choices in InputNeeded**: **Resolved** — Metadata convention
    only. Agents set `Metadata["choices"]` as a JSON array of labels. No
@@ -1271,3 +1280,427 @@ Rejected because:
 3. Message threading via Telegram reply-to
 4. Inline keyboard expiry and cleanup
 5. Monitoring: metrics for message volume, callback latency, error rates
+
+## 10. Platform Identity Linking Service (Generalized)
+
+**Added**: 2026-05-13 — Generalization of the Telegram-specific
+`TelegramLinkService` to support Discord, Slack, and future integrations.
+
+### 10.1 Problem Statement
+
+The current identity linking implementation is Telegram-specific:
+- `TelegramLinkService` in `pkg/hub/telegram_link.go` is in-memory (lost on
+  restart), hard-coded to Telegram field names, and registers routes under
+  `/api/v1/telegram/link`
+- `register_v2.go` in the Telegram plugin posts to these Telegram-specific
+  endpoints
+- Adding Discord or Slack would require duplicating the entire flow with new
+  endpoint prefixes, new service structs, and new handler methods
+
+We want a single hub-side service that any messaging platform can use for
+identity linking, with the platform name as a parameter rather than baked
+into the code.
+
+### 10.2 Current Flow (Telegram-Specific)
+
+```
+Telegram Plugin                Hub                          Web UI
+     |                          |                             |
+     |--POST /telegram/link---->| RegisterCode(code, tgID)    |
+     |   {code, tg_user_id}     | [in-memory map]             |
+     |                          |                             |
+     |                          |                   User opens link
+     |                          |<--POST /telegram/link/verify-|
+     |                          |   {code, userID, email}      |
+     |                          | VerifyCode → "confirmed"     |
+     |                          |                             |
+     |--GET /telegram/link/---->| GetStatusByTelegramUser     |
+     |  status?tg_user_id=X     | → {confirmed, userID, email}|
+     |                          |                             |
+     | Store mapping locally    |                             |
+```
+
+**Weaknesses:**
+- In-memory storage (`sync.Mutex` + `map[string]*telegramPendingLink`) — lost
+  on restart, no audit trail
+- Telegram-specific field names throughout (`TelegramUserID`, `/telegram/link`)
+- No persistent record of linked identities — the hub forgets the link after
+  the plugin consumes it
+- Each new platform would require copy-pasting the service
+
+### 10.3 Proposed Design: Generic Platform Identity Service
+
+#### API Endpoints
+
+All endpoints are platform-agnostic. The platform is a parameter:
+
+```
+POST   /api/v1/identity/link
+       Auth: Broker (HMAC)
+       Body: {
+         "platform": "telegram",
+         "platform_user_id": "98765",
+         "code": "AB3X7K",
+         "metadata": {
+           "username": "@alice",
+           "display_name": "Alice"
+         }
+       }
+       → 201 Created
+
+POST   /api/v1/identity/link/verify
+       Auth: User (JWT)
+       Body: {
+         "code": "AB3X7K"
+       }
+       → 200 OK { "platform": "telegram", "platform_user_id": "98765" }
+
+GET    /api/v1/identity/link/status?platform=telegram&platform_user_id=98765
+       Auth: Broker (HMAC)
+       → 200 OK { "status": "confirmed", "user_id": "...", "email": "..." }
+       → 200 OK { "status": "pending" }
+       → 404 Not Found (no pending link)
+
+DELETE /api/v1/identity/link?platform=telegram&platform_user_id=98765
+       Auth: Broker (HMAC) or User (JWT)
+       → 204 No Content (removes the link)
+
+GET    /api/v1/identity/links
+       Auth: User (JWT)
+       → 200 OK [ { "platform": "telegram", "platform_user_id": "98765",
+                     "metadata": {...}, "linked_at": "..." }, ... ]
+       (User can see their own linked platforms)
+```
+
+#### How It Replaces the Telegram-Specific Endpoints
+
+| Current (Telegram-specific) | New (Generic) |
+|------------------------------|---------------|
+| `POST /api/v1/telegram/link` | `POST /api/v1/identity/link` with `platform: "telegram"` |
+| `POST /api/v1/telegram/link/verify` | `POST /api/v1/identity/link/verify` |
+| `GET /api/v1/telegram/link/status?telegram_user_id=X` | `GET /api/v1/identity/link/status?platform=telegram&platform_user_id=X` |
+
+#### Registration Link URL Convention
+
+When the plugin sends a registration link to the user, the URL includes
+platform-specific data as query parameters so the hub web UI page is generic:
+
+```
+{hub_url}/profile/link?platform=telegram&code=AB3X7K&user_name=@alice
+{hub_url}/profile/link?platform=discord&code=XY9M2P&user_name=alice%230001
+{hub_url}/profile/link?platform=slack&code=QR4T8N&user_name=@alice
+```
+
+The hub web UI renders a single generic page:
+
+```
+┌─────────────────────────────────────┐
+│  Link your Telegram account         │
+│                                     │
+│  Linking @alice to your scion       │
+│  account.                           │
+│                                     │
+│  Code: [AB3X7K] (pre-filled)        │
+│                                     │
+│  [Confirm Link]                     │
+└─────────────────────────────────────┘
+```
+
+The page title and description are derived from the `platform` query param.
+The code is pre-filled from the `code` param. On submit, the page POSTs to
+`/api/v1/identity/link/verify` with the user's JWT.
+
+### 10.4 Database Schema
+
+Two tables: one for pending links (transient), one for confirmed links
+(persistent). This replaces the in-memory map and adds a durable record.
+
+#### `pending_platform_links` (transient, TTL-cleaned)
+
+```sql
+CREATE TABLE pending_platform_links (
+    code              TEXT PRIMARY KEY,        -- 6-char code, uppercase
+    platform          TEXT NOT NULL,           -- "telegram", "discord", "slack"
+    platform_user_id  TEXT NOT NULL,           -- external ID on that platform
+    metadata          JSONB,                   -- platform-specific: username, display_name, etc.
+    status            TEXT NOT NULL DEFAULT 'pending',  -- "pending" | "confirmed"
+    confirmed_user_id TEXT,                    -- scion user ID (set on verify)
+    confirmed_email   TEXT,                    -- scion email (set on verify)
+    created_at        TIMESTAMP NOT NULL DEFAULT NOW(),
+    expires_at        TIMESTAMP NOT NULL,      -- created_at + 15 minutes
+    UNIQUE (platform, platform_user_id)        -- one pending code per platform user
+);
+
+CREATE INDEX idx_pending_platform_user
+    ON pending_platform_links (platform, platform_user_id);
+```
+
+The `UNIQUE (platform, platform_user_id)` constraint means registering a new
+code for the same platform user replaces the previous one (same as the current
+Telegram behavior). A background cleanup job deletes expired rows.
+
+#### `external_identities` (persistent, the authoritative link record)
+
+```sql
+CREATE TABLE external_identities (
+    id                TEXT PRIMARY KEY,        -- UUID
+    user_id           TEXT NOT NULL,           -- FK to users.id
+    platform          TEXT NOT NULL,           -- "telegram", "discord", "slack"
+    platform_user_id  TEXT NOT NULL,           -- external platform ID
+    metadata          JSONB,                   -- username, display_name, avatar, etc.
+    linked_at         TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (platform, platform_user_id),       -- one scion user per platform identity
+    UNIQUE (user_id, platform)                 -- one platform identity per scion user per platform
+);
+
+CREATE INDEX idx_ext_id_user ON external_identities (user_id);
+CREATE INDEX idx_ext_id_platform ON external_identities (platform, platform_user_id);
+```
+
+**Constraint semantics:**
+- `UNIQUE (platform, platform_user_id)` — a Telegram user can only be linked
+  to one scion user (prevents identity sharing)
+- `UNIQUE (user_id, platform)` — a scion user can only have one Telegram
+  identity (simplifies routing; if multi-account is needed later, drop this)
+
+When `/api/v1/identity/link/verify` succeeds, the service:
+1. Marks the `pending_platform_links` row as `status = 'confirmed'`
+2. Inserts a row into `external_identities`
+3. The plugin polls `GET .../status`, sees `confirmed`, and stores a local copy
+
+### 10.5 Service Implementation
+
+```go
+// pkg/hub/platform_link.go
+
+type PlatformLinkService struct {
+    store  store.PlatformLinkStore
+    logger *slog.Logger
+}
+
+type PlatformLinkStore interface {
+    // Pending links (transient)
+    CreatePendingLink(ctx context.Context, link *PendingPlatformLink) error
+    GetPendingByCode(ctx context.Context, code string) (*PendingPlatformLink, error)
+    GetPendingByPlatformUser(ctx context.Context, platform, platformUserID string) (*PendingPlatformLink, error)
+    ConfirmPending(ctx context.Context, code, userID, email string) error
+    DeleteExpiredPending(ctx context.Context) (int, error)
+
+    // External identities (persistent)
+    CreateExternalIdentity(ctx context.Context, id *ExternalIdentity) error
+    GetExternalIdentity(ctx context.Context, platform, platformUserID string) (*ExternalIdentity, error)
+    GetExternalIdentitiesByUser(ctx context.Context, userID string) ([]*ExternalIdentity, error)
+    DeleteExternalIdentity(ctx context.Context, platform, platformUserID string) error
+}
+
+// RegisterCode is called by broker plugins via POST /api/v1/identity/link
+func (s *PlatformLinkService) RegisterCode(ctx context.Context, platform, platformUserID, code string, metadata map[string]any) error {
+    return s.store.CreatePendingLink(ctx, &PendingPlatformLink{
+        Code:           strings.ToUpper(code),
+        Platform:       platform,
+        PlatformUserID: platformUserID,
+        Metadata:       metadata,
+        Status:         "pending",
+        ExpiresAt:      time.Now().Add(15 * time.Minute),
+    })
+}
+
+// VerifyCode is called by the web UI via POST /api/v1/identity/link/verify
+func (s *PlatformLinkService) VerifyCode(ctx context.Context, code, userID, email string) (*PendingPlatformLink, error) {
+    pending, err := s.store.GetPendingByCode(ctx, strings.ToUpper(code))
+    if err != nil {
+        return nil, fmt.Errorf("invalid code")
+    }
+    if pending.Status != "pending" {
+        return nil, fmt.Errorf("code already used")
+    }
+    if time.Now().After(pending.ExpiresAt) {
+        return nil, fmt.Errorf("code expired")
+    }
+
+    // Confirm the pending link
+    if err := s.store.ConfirmPending(ctx, pending.Code, userID, email); err != nil {
+        return nil, err
+    }
+
+    // Create the persistent external identity record
+    if err := s.store.CreateExternalIdentity(ctx, &ExternalIdentity{
+        ID:             uuid.NewString(),
+        UserID:         userID,
+        Platform:       pending.Platform,
+        PlatformUserID: pending.PlatformUserID,
+        Metadata:       pending.Metadata,
+    }); err != nil {
+        return nil, err
+    }
+
+    pending.Status = "confirmed"
+    pending.ConfirmedUserID = userID
+    pending.ConfirmedEmail = email
+    return pending, nil
+}
+
+// GetStatus is called by broker plugins via GET /api/v1/identity/link/status
+func (s *PlatformLinkService) GetStatus(ctx context.Context, platform, platformUserID string) (string, string, string, error) {
+    pending, err := s.store.GetPendingByPlatformUser(ctx, platform, platformUserID)
+    if err != nil {
+        return "", "", "", err
+    }
+    return pending.Status, pending.ConfirmedUserID, pending.ConfirmedEmail, nil
+}
+```
+
+### 10.6 Plugin-Side Changes
+
+The Telegram plugin's `register_v2.go` changes its HTTP calls from
+Telegram-specific to generic endpoints:
+
+```go
+// Before (Telegram-specific):
+POST {hubURL}/api/v1/telegram/link
+     {"code": "AB3X7K", "telegram_user_id": "98765"}
+
+// After (generic):
+POST {hubURL}/api/v1/identity/link
+     {"platform": "telegram", "platform_user_id": "98765",
+      "code": "AB3X7K", "metadata": {"username": "@alice"}}
+```
+
+```go
+// Before:
+GET {hubURL}/api/v1/telegram/link/status?telegram_user_id=98765
+
+// After:
+GET {hubURL}/api/v1/identity/link/status?platform=telegram&platform_user_id=98765
+```
+
+The registration link sent to the user changes format:
+
+```go
+// Before:
+fmt.Sprintf("%s/profile/telegram-link?code=%s", hubURL, code)
+
+// After:
+fmt.Sprintf("%s/profile/link?platform=telegram&code=%s&user_name=%s",
+    hubURL, code, url.QueryEscape("@"+username))
+```
+
+The plugin still stores a local `TelegramUserMapping` in its SQLite for
+hot-path lookups. The hub's `external_identities` table is the authoritative
+record; the plugin's local copy is a cache.
+
+### 10.7 How Other Platforms Use the Same Service
+
+#### Discord Plugin
+
+```go
+// On /register command in Discord:
+code := generateLinkingCode()
+httpPost(hubURL+"/api/v1/identity/link", map[string]any{
+    "platform":         "discord",
+    "platform_user_id": discordUser.ID,
+    "code":             code,
+    "metadata": map[string]any{
+        "username":      discordUser.Username + "#" + discordUser.Discriminator,
+        "display_name":  discordUser.GlobalName,
+    },
+})
+linkURL := fmt.Sprintf("%s/profile/link?platform=discord&code=%s&user_name=%s",
+    hubURL, code, url.QueryEscape(discordUser.Username))
+// Send linkURL to user via Discord DM
+// Start polling GET /api/v1/identity/link/status?platform=discord&platform_user_id=...
+```
+
+#### Slack Plugin
+
+```go
+// On /register slash command in Slack:
+code := generateLinkingCode()
+httpPost(hubURL+"/api/v1/identity/link", map[string]any{
+    "platform":         "slack",
+    "platform_user_id": slackUser.ID,
+    "code":             code,
+    "metadata": map[string]any{
+        "username":     slackUser.Name,
+        "workspace_id": slackWorkspace.ID,
+    },
+})
+linkURL := fmt.Sprintf("%s/profile/link?platform=slack&code=%s&user_name=%s",
+    hubURL, code, url.QueryEscape("@"+slackUser.Name))
+// Send linkURL to user via Slack DM (as a button)
+// Start polling...
+```
+
+#### Chat-App (Google Chat)
+
+The existing chat-app uses device auth (`Auth().RequestDeviceCode`). It could
+optionally migrate to this service, or keep device auth as an alternative flow.
+Both are valid — device auth is pull-based (user authenticates at a URL), while
+platform linking is push-based (user confirms a code in the hub UI). The
+`external_identities` table should be populated by either flow.
+
+### 10.8 Relationship to Invite Codes
+
+The invite code system (`InviteService` in `pkg/hub/invite_service.go`) and
+platform linking serve different purposes but share structural patterns:
+
+| Aspect | Invite Codes | Platform Linking |
+|--------|-------------|------------------|
+| **Purpose** | Onboard new user to hub | Link existing user to external platform |
+| **Who initiates** | Admin creates code | Plugin creates code on user's behalf |
+| **Who redeems** | New user | Existing authenticated user |
+| **Auth required to redeem** | None (code grants access) | User JWT (must already be logged in) |
+| **Persistence** | DB (InviteCodeStore) | DB (PlatformLinkStore) |
+| **Code format** | `scion_inv_` + 24 random bytes | 6-char alphanumeric |
+
+They are **peer concepts** — both involve a code-mediated trust bridge between
+an outside context and the hub. However, the semantics are different enough
+that sharing implementation would be forced. The recommended approach:
+
+- **Shared patterns**: Both use the same DB, same code validation patterns,
+  same cleanup goroutine approach
+- **Separate services**: `InviteService` and `PlatformLinkService` remain
+  distinct because their auth models differ (invite = unauthenticated redeem,
+  platform link = authenticated verify)
+- **Shared table patterns**: The `pending_platform_links` table mirrors the
+  invite code's hash + expiry + use-tracking pattern, adapted for the
+  two-phase (register + verify) flow
+
+### 10.9 Migration Path
+
+#### Phase 1: Add Generic Service Alongside Telegram-Specific
+
+1. Create `pkg/hub/platform_link.go` with `PlatformLinkService`
+2. Add `pending_platform_links` and `external_identities` tables
+3. Register generic endpoints at `/api/v1/identity/link*`
+4. Keep existing `/api/v1/telegram/link*` endpoints as thin wrappers that
+   delegate to `PlatformLinkService` with `platform = "telegram"`
+5. Update Telegram plugin `register_v2.go` to call generic endpoints
+
+#### Phase 2: Remove Telegram-Specific Code
+
+1. Remove `TelegramLinkService` from `pkg/hub/telegram_link.go`
+2. Remove `/api/v1/telegram/link*` route registrations
+3. Remove Telegram-specific handler methods from server
+4. All Telegram linking flows through generic service
+
+#### Phase 3: Onboard Other Platforms
+
+1. Discord plugin uses `POST /api/v1/identity/link` with `platform: "discord"`
+2. Slack plugin uses same with `platform: "slack"`
+3. Hub web UI `/profile/link` page already handles all platforms generically
+4. `external_identities` table accumulates all platform links
+
+### 10.10 Files to Change
+
+| File | Change |
+|------|--------|
+| `pkg/hub/platform_link.go` | **NEW**: `PlatformLinkService` implementation |
+| `pkg/hub/handlers.go` | Add generic `/api/v1/identity/link*` handlers |
+| `pkg/hub/server.go` | Register new routes, initialize `PlatformLinkService` |
+| `pkg/store/models.go` | Add `PendingPlatformLink`, `ExternalIdentity` models |
+| `pkg/store/store.go` | Add `PlatformLinkStore` interface |
+| `pkg/store/postgres/` | Add migration for `pending_platform_links` and `external_identities` tables |
+| `pkg/hub/telegram_link.go` | Phase 1: thin wrapper → Phase 2: remove |
+| `pkg/plugin/telegram/register_v2.go` | Update HTTP calls to generic endpoints |
+| Web UI | Add generic `/profile/link` page (replaces `/profile/telegram-link`) |
