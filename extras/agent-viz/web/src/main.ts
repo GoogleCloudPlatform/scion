@@ -133,15 +133,15 @@ function handleManifest(m: PlaybackManifest): void {
     agents: m.agents.length,
     files: m.files.length,
     timeRange: m.timeRange,
-    groveId: m.groveId,
-    groveName: m.groveName,
+    projectId: m.projectId,
+    projectName: m.projectName,
   });
   console.log('[agent-viz] Agents:', m.agents.map((a) => `${a.name} (${a.id.substring(0, 8)})`));
 
   // Update title
-  const title = document.getElementById('grove-title');
+  const title = document.getElementById('project-title');
   if (title) {
-    title.textContent = m.groveName || m.groveId || 'Agent Visualizer';
+    title.textContent = m.projectName || m.projectId || 'Agent Visualizer';
   }
 
   // Initialize file graph empty — files are added dynamically via events
