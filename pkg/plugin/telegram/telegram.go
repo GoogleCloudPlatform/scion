@@ -23,7 +23,9 @@ package telegram
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,6 +52,9 @@ const (
 
 	// defaultPollBackoff is the backoff duration after a polling error.
 	defaultPollBackoff = 5 * time.Second
+
+	// dedupTTL is how long a message ID is remembered for deduplication.
+	dedupTTL = 5 * time.Minute
 )
 
 // inboundPayload is the JSON body sent to the hub API inbound endpoint.
@@ -102,6 +107,11 @@ type TelegramBroker struct {
 	pollDone   chan struct{}
 	lastOffset int64
 
+	// Outbound deduplication: prevents sending the same message twice
+	// when the broker delivers duplicates within a short window.
+	sentIDs   map[string]time.Time
+	sentIDsMu sync.Mutex
+
 	// InboundHandler is an optional callback for inbound messages.
 	// When set, messages are delivered here instead of via the hub API.
 	// This is used for in-process testing without a running hub.
@@ -117,6 +127,7 @@ func New(log *slog.Logger) *TelegramBroker {
 		subs:       make(map[string]bool),
 		chatRoutes: make(map[int64]string),
 		topicChats: make(map[string][]int64),
+		sentIDs:    make(map[string]time.Time),
 		log:        log,
 		pluginName: "telegram",
 		httpClient: &http.Client{Timeout: 10 * time.Second},
@@ -290,6 +301,20 @@ func (b *TelegramBroker) Publish(ctx context.Context, topic string, msg *message
 
 	if api == nil {
 		return fmt.Errorf("telegram broker not configured")
+	}
+
+	// Dedup: skip if we've already sent this exact message recently.
+	dedupKey := msgDedupKey(msg)
+	if dedupKey != "" {
+		b.sentIDsMu.Lock()
+		if t, ok := b.sentIDs[dedupKey]; ok && time.Since(t) < dedupTTL {
+			b.sentIDsMu.Unlock()
+			b.log.Debug("Skipping duplicate message", "topic", topic, "dedup_key", dedupKey)
+			return nil
+		}
+		b.sentIDs[dedupKey] = time.Now()
+		b.pruneSentIDsLocked()
+		b.sentIDsMu.Unlock()
 	}
 
 	// Format the message for Telegram
@@ -744,6 +769,35 @@ func decodeBase64(s string) ([]byte, error) {
 		return b, nil
 	}
 	return nil, fmt.Errorf("invalid base64 encoding")
+}
+
+// msgDedupKey returns a stable fingerprint for a message, used to detect
+// duplicate deliveries of the same logical message. Returns "" if the
+// message is nil or has no content to fingerprint.
+func msgDedupKey(msg *messages.StructuredMessage) string {
+	if msg == nil || msg.Msg == "" {
+		return ""
+	}
+	h := sha256.New()
+	h.Write([]byte(msg.Sender))
+	h.Write([]byte("|"))
+	h.Write([]byte(msg.Timestamp))
+	h.Write([]byte("|"))
+	h.Write([]byte(msg.Type))
+	h.Write([]byte("|"))
+	h.Write([]byte(msg.Msg))
+	return hex.EncodeToString(h.Sum(nil)[:16])
+}
+
+// pruneSentIDsLocked removes dedup entries older than dedupTTL.
+// Must be called with sentIDsMu held.
+func (b *TelegramBroker) pruneSentIDsLocked() {
+	now := time.Now()
+	for k, t := range b.sentIDs {
+		if now.Sub(t) > dedupTTL {
+			delete(b.sentIDs, k)
+		}
+	}
 }
 
 // subjectMatchesPattern checks if a subject matches a NATS-style pattern.

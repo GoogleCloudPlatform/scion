@@ -283,6 +283,77 @@ func TestPublishToChat(t *testing.T) {
 	assert.Contains(t, sent[0].Text, "Instruction from user:alice")
 }
 
+func TestPublishDedup(t *testing.T) {
+	tgSrv := newFakeTelegramServer(t)
+	b := newTestBroker(t, tgSrv)
+
+	b.topicChats["test.topic"] = []int64{789}
+
+	msg := messages.NewInstruction("user:alice", "agent:coder", "hello")
+
+	// First publish should succeed
+	require.NoError(t, b.Publish(context.Background(), "test.topic", msg))
+	assert.Len(t, tgSrv.getSentMessages(), 1)
+
+	// Second publish of the same message should be deduplicated
+	require.NoError(t, b.Publish(context.Background(), "test.topic", msg))
+	assert.Len(t, tgSrv.getSentMessages(), 1, "duplicate message should be skipped")
+
+	// Third publish of the same message should also be deduplicated
+	require.NoError(t, b.Publish(context.Background(), "test.topic", msg))
+	assert.Len(t, tgSrv.getSentMessages(), 1, "duplicate message should still be skipped")
+
+	// A different message should go through
+	msg2 := messages.NewInstruction("user:alice", "agent:coder", "different content")
+	require.NoError(t, b.Publish(context.Background(), "test.topic", msg2))
+	assert.Len(t, tgSrv.getSentMessages(), 2, "different message should be sent")
+}
+
+func TestPublishDedupExpiry(t *testing.T) {
+	tgSrv := newFakeTelegramServer(t)
+	b := newTestBroker(t, tgSrv)
+
+	b.topicChats["test.topic"] = []int64{789}
+
+	msg := messages.NewInstruction("user:alice", "agent:coder", "hello")
+
+	// First publish
+	require.NoError(t, b.Publish(context.Background(), "test.topic", msg))
+	assert.Len(t, tgSrv.getSentMessages(), 1)
+
+	// Manually expire the dedup entry
+	b.sentIDsMu.Lock()
+	for k := range b.sentIDs {
+		b.sentIDs[k] = time.Now().Add(-dedupTTL - time.Second)
+	}
+	b.sentIDsMu.Unlock()
+
+	// Same message should now go through again
+	require.NoError(t, b.Publish(context.Background(), "test.topic", msg))
+	assert.Len(t, tgSrv.getSentMessages(), 2, "expired dedup entry should allow resend")
+}
+
+func TestMsgDedupKey(t *testing.T) {
+	msg1 := messages.NewInstruction("user:alice", "agent:coder", "hello")
+	msg2 := messages.NewInstruction("user:alice", "agent:coder", "hello")
+	msg2.Timestamp = msg1.Timestamp // same timestamp
+
+	// Same content → same key
+	assert.Equal(t, msgDedupKey(msg1), msgDedupKey(msg2))
+
+	// Different content → different key
+	msg3 := messages.NewInstruction("user:alice", "agent:coder", "world")
+	msg3.Timestamp = msg1.Timestamp
+	assert.NotEqual(t, msgDedupKey(msg1), msgDedupKey(msg3))
+
+	// Nil message → empty key
+	assert.Equal(t, "", msgDedupKey(nil))
+
+	// Empty body → empty key
+	msg4 := &messages.StructuredMessage{}
+	assert.Equal(t, "", msgDedupKey(msg4))
+}
+
 func TestPublishNoRoute(t *testing.T) {
 	tgSrv := newFakeTelegramServer(t)
 	b := newTestBroker(t, tgSrv)
