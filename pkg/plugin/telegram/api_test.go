@@ -393,3 +393,61 @@ func TestDeleteWebhook_Error(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Internal Server Error")
 }
+
+func TestSendMessageWithForceReply_NoKeyboard(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/bottest-token/sendMessage", r.URL.Path)
+
+		var reqBody sendMessageForceReplyRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&reqBody))
+		assert.Equal(t, int64(111), reqBody.ChatID)
+		assert.Equal(t, "HTML", reqBody.ParseMode)
+
+		var markup ForceReply
+		require.NoError(t, json.Unmarshal(reqBody.ReplyMarkup, &markup))
+		assert.True(t, markup.ForceReply)
+		assert.True(t, markup.Selective)
+
+		result := TGMessage{
+			MessageID: 55,
+			Chat:      TGChat{ID: 111, Type: "private"},
+		}
+		resp := apiResponse{OK: true, Result: mustJSON(t, result)}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := newTestAPIClient(t, srv)
+	msg, err := client.SendMessageWithForceReply(context.Background(), 111, "What next?", "HTML", nil)
+	require.NoError(t, err)
+	assert.Equal(t, int64(55), msg.MessageID)
+}
+
+func TestSendMessageWithForceReply_WithKeyboard(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var reqBody sendMessageForceReplyRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&reqBody))
+
+		var markup InlineKeyboardMarkup
+		require.NoError(t, json.Unmarshal(reqBody.ReplyMarkup, &markup))
+		require.Len(t, markup.InlineKeyboard, 1)
+		assert.Equal(t, "Yes", markup.InlineKeyboard[0][0].Text)
+
+		result := TGMessage{MessageID: 56, Chat: TGChat{ID: 111, Type: "private"}}
+		resp := apiResponse{OK: true, Result: mustJSON(t, result)}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	kb := &InlineKeyboardMarkup{
+		InlineKeyboard: [][]InlineKeyboardButton{
+			{{Text: "Yes", CallbackData: "y"}, {Text: "No", CallbackData: "n"}},
+		},
+	}
+	client := newTestAPIClient(t, srv)
+	msg, err := client.SendMessageWithForceReply(context.Background(), 111, "Confirm?", "HTML", kb)
+	require.NoError(t, err)
+	assert.Equal(t, int64(56), msg.MessageID)
+}

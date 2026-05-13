@@ -511,6 +511,23 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		return dmErr
 	}
 
+	// Route input-needed prompts to the recipient user's personal DM when
+	// the recipient is a known user. Falls through to normal chat routing
+	// when there is no user recipient (e.g. metadata-based routing).
+	if msg != nil && msg.Type == messages.TypeInputNeeded &&
+		strings.HasPrefix(msg.Recipient, "user:") {
+		dmErr := b.publishInputNeededDM(ctx, api, sq, store, msg, projectID, agentSlug)
+		if store != nil && projectID != "" {
+			links, _ := store.GetGroupLinksForProject(ctx, projectID)
+			for _, link := range links {
+				if link.Active && link.NotifyInGroup {
+					b.publishInputNeeded(ctx, api, sq, []int64{link.ChatID}, msg, agentSlug, projectID)
+				}
+			}
+		}
+		return dmErr
+	}
+
 	// Collect target chat IDs via dynamic routing.
 	var chatIDs []int64
 
@@ -801,6 +818,100 @@ func (b *TelegramBrokerV2) publishStateChangeDM(ctx context.Context, api *Telegr
 		b.log.Error("Failed to send state-change DM",
 			"telegram_user_id", tgUserID, "error", err)
 		return err
+	}
+
+	return nil
+}
+
+// publishInputNeededDM sends an InputNeeded prompt to the recipient user's
+// personal Telegram DM. When the message has structured choices, inline
+// keyboard buttons are shown; otherwise Telegram's ForceReply markup is used
+// to pre-focus the reply input. A PendingAskUser record is saved so the
+// callback handler can route the user's response back.
+func (b *TelegramBrokerV2) publishInputNeededDM(ctx context.Context, api *TelegramAPIClient, sq *SendQueue, store Store, msg *messages.StructuredMessage, projectID, agentSlug string) error {
+	if store == nil {
+		return nil
+	}
+
+	recipientVal := strings.TrimPrefix(msg.Recipient, "user:")
+	if recipientVal == msg.Recipient || recipientVal == "" {
+		b.log.Debug("InputNeeded recipient is not a user, dropping", "recipient", msg.Recipient)
+		return nil
+	}
+
+	var mapping *TelegramUserMapping
+	var err error
+	if strings.Contains(recipientVal, "@") {
+		mapping, err = store.GetUserMappingByEmail(ctx, recipientVal)
+	} else {
+		mapping, err = store.GetUserMappingByScionUserID(ctx, recipientVal)
+		if err == nil && mapping == nil {
+			mapping, err = store.GetUserMappingByEmail(ctx, recipientVal)
+		}
+	}
+	if err != nil {
+		b.log.Warn("Failed to look up user mapping for input-needed DM", "recipient", recipientVal, "error", err)
+		return nil
+	}
+	if mapping == nil {
+		b.log.Debug("No user mapping for input-needed recipient, dropping", "recipient", recipientVal)
+		return nil
+	}
+
+	tgUserID, err := strconv.ParseInt(mapping.TelegramUserID, 10, 64)
+	if err != nil {
+		b.log.Warn("Invalid Telegram user ID in mapping", "telegram_user_id", mapping.TelegramUserID, "error", err)
+		return nil
+	}
+
+	text := FormatInputNeededCard(msg, agentSlug)
+	if text == "" {
+		return nil
+	}
+
+	var choices []string
+	if msg.Metadata != nil {
+		if choicesJSON, ok := msg.Metadata["choices"]; ok && choicesJSON != "" {
+			json.Unmarshal([]byte(choicesJSON), &choices)
+		}
+	}
+
+	requestID := generateRequestID()
+	keyboard := buildAskUserKeyboard(requestID, choices)
+
+	var sent *TGMessage
+	if keyboard != nil {
+		if sq != nil {
+			sent, err = sq.Send(ctx, tgUserID, text, "HTML", keyboard, 0)
+		} else {
+			sent, err = api.SendMessageWithKeyboard(ctx, tgUserID, text, "HTML", keyboard, 0)
+		}
+	} else {
+		sent, err = api.SendMessageWithForceReply(ctx, tgUserID, text, "HTML", nil)
+	}
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.IsTransient() {
+			b.log.Warn("Transient error sending input-needed DM",
+				"telegram_user_id", tgUserID, "error", err)
+			return nil
+		}
+		b.log.Error("Failed to send input-needed DM",
+			"telegram_user_id", tgUserID, "error", err)
+		return err
+	}
+
+	pending := &PendingAskUser{
+		RequestID: requestID,
+		MessageID: sent.MessageID,
+		ChatID:    tgUserID,
+		AgentSlug: agentSlug,
+		ProjectID: projectID,
+		Choices:   choices,
+		ExpiresAt: time.Now().Add(askUserExpiry),
+	}
+	if err := b.store.SavePendingAskUser(ctx, pending); err != nil {
+		b.log.Error("Failed to save pending ask user for DM", "error", err)
 	}
 
 	return nil

@@ -314,6 +314,75 @@ func TestFormatStateChangeCard_NoTimestamp(t *testing.T) {
 	assert.NotContains(t, text, "🕐")
 }
 
+// --- FormatInputNeededCard tests ---
+
+func TestFormatInputNeededCard_Basic(t *testing.T) {
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: "2026-05-13T14:30:00Z",
+		Sender:    "agent:coder",
+		Recipient: "user:alice",
+		Msg:       "Which database backend should I use?",
+		Type:      messages.TypeInputNeeded,
+		Metadata: map[string]string{
+			"project_id": "alpha",
+		},
+	}
+	text := FormatInputNeededCard(msg, "coder")
+	assert.Contains(t, text, "<b>🤖 coder [input needed]</b>")
+	assert.Contains(t, text, "📋 Project: alpha")
+	assert.Contains(t, text, "🕐 May 13, 2:30 PM UTC")
+	assert.Contains(t, text, "Which database backend should I use?")
+}
+
+func TestFormatInputNeededCard_NoProject(t *testing.T) {
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: "2026-05-13T10:00:00Z",
+		Sender:    "agent:worker",
+		Recipient: "user:bob",
+		Msg:       "Proceed with deployment?",
+		Type:      messages.TypeInputNeeded,
+	}
+	text := FormatInputNeededCard(msg, "worker")
+	assert.Contains(t, text, "<b>🤖 worker [input needed]</b>")
+	assert.Contains(t, text, "Proceed with deployment?")
+	assert.NotContains(t, text, "📋 Project:")
+}
+
+func TestFormatInputNeededCard_HTMLEscape(t *testing.T) {
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: "2026-05-13T09:00:00Z",
+		Sender:    "agent:coder",
+		Recipient: "user:alice",
+		Msg:       "Use <b>bold</b> or &plain?",
+		Type:      messages.TypeInputNeeded,
+		Metadata: map[string]string{
+			"project_id": "proj<evil>",
+		},
+	}
+	text := FormatInputNeededCard(msg, "code<r")
+	assert.Contains(t, text, "code&lt;r")
+	assert.Contains(t, text, "proj&lt;evil&gt;")
+	assert.Contains(t, text, "&lt;b&gt;bold&lt;/b&gt;")
+}
+
+func TestFormatInputNeededCard_FallbackSender(t *testing.T) {
+	msg := &messages.StructuredMessage{
+		Version: messages.Version,
+		Sender:  "agent:deployer",
+		Msg:     "Ready?",
+		Type:    messages.TypeInputNeeded,
+	}
+	text := FormatInputNeededCard(msg, "")
+	assert.Contains(t, text, "<b>🤖 deployer [input needed]</b>")
+}
+
+func TestFormatInputNeededCard_Nil(t *testing.T) {
+	assert.Empty(t, FormatInputNeededCard(nil, "x"))
+}
+
 func TestFormatTimestamp(t *testing.T) {
 	tests := []struct {
 		input string

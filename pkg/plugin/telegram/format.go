@@ -199,6 +199,54 @@ func FormatStateChangeCard(msg *messages.StructuredMessage, agentSlug string) st
 	return truncateMessage(text)
 }
 
+// FormatInputNeededCard converts an input-needed StructuredMessage into an
+// HTML-formatted card for Telegram DMs. The card header shows a robot emoji
+// and agent name, followed by the prompt text. All user-supplied content is
+// HTML-escaped.
+func FormatInputNeededCard(msg *messages.StructuredMessage, agentSlug string) string {
+	if msg == nil {
+		return ""
+	}
+
+	escapedSlug := html.EscapeString(agentSlug)
+	if escapedSlug == "" {
+		if strings.HasPrefix(msg.Sender, "agent:") {
+			escapedSlug = html.EscapeString(strings.TrimPrefix(msg.Sender, "agent:"))
+		} else {
+			escapedSlug = html.EscapeString(msg.Sender)
+		}
+	}
+
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "<b>🤖 %s [input needed]</b>\n", escapedSlug)
+
+	project := ""
+	if msg.Metadata != nil {
+		if pid, ok := msg.Metadata["project_id"]; ok && pid != "" {
+			project = pid
+		}
+	}
+	if project != "" {
+		fmt.Fprintf(&b, "📋 Project: %s\n", html.EscapeString(project))
+	}
+
+	ts := formatTimestamp(msg.Timestamp)
+	if ts != "" {
+		fmt.Fprintf(&b, "🕐 %s\n", html.EscapeString(ts))
+	}
+
+	prompt := strings.TrimSpace(msg.Msg)
+	if prompt != "" {
+		if len(prompt) > maxTaskSummaryLength {
+			prompt = prompt[:maxTaskSummaryLength] + "…"
+		}
+		fmt.Fprintf(&b, "\n%s", html.EscapeString(prompt))
+	}
+
+	return truncateMessage(b.String())
+}
+
 // formatTimestamp parses an RFC3339 timestamp and returns a human-friendly
 // representation like "May 13, 2:30 PM UTC". Returns the raw string if
 // parsing fails.

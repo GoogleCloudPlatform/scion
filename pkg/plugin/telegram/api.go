@@ -162,6 +162,22 @@ type sendMessageWithKeyboardRequest struct {
 	ReplyToMessageID int64                 `json:"reply_to_message_id,omitempty"`
 }
 
+// ForceReply instructs Telegram clients to display a reply interface to the
+// user, as if the user had selected the bot's message and tapped 'Reply'.
+type ForceReply struct {
+	ForceReply bool `json:"force_reply"`
+	Selective  bool `json:"selective,omitempty"`
+}
+
+// sendMessageForceReplyRequest is the JSON body for sendMessage with
+// ForceReply markup and an optional inline keyboard.
+type sendMessageForceReplyRequest struct {
+	ChatID    int64            `json:"chat_id"`
+	Text      string           `json:"text"`
+	ParseMode string           `json:"parse_mode,omitempty"`
+	ReplyMarkup json.RawMessage `json:"reply_markup,omitempty"`
+}
+
 // editMessageTextRequest is the JSON body for the editMessageText API call.
 type editMessageTextRequest struct {
 	ChatID      int64                 `json:"chat_id"`
@@ -457,6 +473,67 @@ func (c *TelegramAPIClient) SendMessageWithKeyboard(ctx context.Context, chatID 
 		ParseMode:        parseMode,
 		ReplyMarkup:      keyboard,
 		ReplyToMessageID: replyToMessageID,
+	}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal sendMessage request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.methodURL("sendMessage"), bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("create sendMessage request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sendMessage request failed: %w", c.redactToken(err))
+	}
+	defer resp.Body.Close()
+
+	var apiResp apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("decode sendMessage response: %w", err)
+	}
+
+	if !apiResp.OK {
+		apiErr := &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
+		if apiResp.Parameters != nil {
+			apiErr.RetryAfterSec = apiResp.Parameters.RetryAfterSec
+		}
+		return nil, apiErr
+	}
+
+	var msg TGMessage
+	if err := json.Unmarshal(apiResp.Result, &msg); err != nil {
+		return nil, fmt.Errorf("unmarshal sendMessage result: %w", err)
+	}
+
+	return &msg, nil
+}
+
+// SendMessageWithForceReply sends a text message with Telegram's ForceReply
+// markup so the recipient's client pre-focuses a reply input. If keyboard is
+// non-nil, inline keyboard buttons are included instead of the ForceReply
+// (Telegram only allows one reply_markup type per message).
+func (c *TelegramAPIClient) SendMessageWithForceReply(ctx context.Context, chatID int64, text, parseMode string, keyboard *InlineKeyboardMarkup) (*TGMessage, error) {
+	var markup json.RawMessage
+	var err error
+	if keyboard != nil {
+		markup, err = json.Marshal(keyboard)
+	} else {
+		markup, err = json.Marshal(&ForceReply{ForceReply: true, Selective: true})
+	}
+	if err != nil {
+		return nil, fmt.Errorf("marshal reply_markup: %w", err)
+	}
+
+	body := sendMessageForceReplyRequest{
+		ChatID:      chatID,
+		Text:        text,
+		ParseMode:   parseMode,
+		ReplyMarkup: markup,
 	}
 
 	jsonBody, err := json.Marshal(body)
