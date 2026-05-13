@@ -19,6 +19,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"strings"
 	"time"
@@ -569,6 +571,80 @@ func (c *TelegramAPIClient) SendMessageWithForceReply(ctx context.Context, chatI
 	var msg TGMessage
 	if err := json.Unmarshal(apiResp.Result, &msg); err != nil {
 		return nil, fmt.Errorf("unmarshal sendMessage result: %w", err)
+	}
+
+	return &msg, nil
+}
+
+// SendDocument uploads a file via Telegram's sendDocument API using
+// multipart/form-data. The caption is sent alongside the document.
+//
+// Limitation: this method receives an io.Reader, so the caller is responsible
+// for opening the file. The current broker reads files from the local
+// filesystem (telegram_attachment_path metadata). This works when the plugin
+// runs on the same host as the agent with a shared volume mount. In a GKE
+// environment with separate volume mounts, the plugin will not have local
+// access to agent files — a future telegram_attachment_url metadata key
+// should fetch the file from a URL (GCS signed URL or hub download endpoint)
+// instead.
+func (c *TelegramAPIClient) SendDocument(ctx context.Context, chatID int64, filename string, document io.Reader, caption, parseMode string) (*TGMessage, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	if err := writer.WriteField("chat_id", fmt.Sprintf("%d", chatID)); err != nil {
+		return nil, fmt.Errorf("write chat_id field: %w", err)
+	}
+	if caption != "" {
+		if err := writer.WriteField("caption", caption); err != nil {
+			return nil, fmt.Errorf("write caption field: %w", err)
+		}
+	}
+	if parseMode != "" {
+		if err := writer.WriteField("parse_mode", parseMode); err != nil {
+			return nil, fmt.Errorf("write parse_mode field: %w", err)
+		}
+	}
+
+	part, err := writer.CreateFormFile("document", filename)
+	if err != nil {
+		return nil, fmt.Errorf("create document form file: %w", err)
+	}
+	if _, err := io.Copy(part, document); err != nil {
+		return nil, fmt.Errorf("copy document data: %w", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("close multipart writer: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.methodURL("sendDocument"), &body)
+	if err != nil {
+		return nil, fmt.Errorf("create sendDocument request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sendDocument request failed: %w", c.redactToken(err))
+	}
+	defer resp.Body.Close()
+
+	var apiResp apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("decode sendDocument response: %w", err)
+	}
+
+	if !apiResp.OK {
+		apiErr := &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
+		if apiResp.Parameters != nil {
+			apiErr.RetryAfterSec = apiResp.Parameters.RetryAfterSec
+		}
+		return nil, apiErr
+	}
+
+	var msg TGMessage
+	if err := json.Unmarshal(apiResp.Result, &msg); err != nil {
+		return nil, fmt.Errorf("unmarshal sendDocument result: %w", err)
 	}
 
 	return &msg, nil

@@ -17,8 +17,10 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -450,4 +452,102 @@ func TestSendMessageWithForceReply_WithKeyboard(t *testing.T) {
 	msg, err := client.SendMessageWithForceReply(context.Background(), 111, "Confirm?", "HTML", kb)
 	require.NoError(t, err)
 	assert.Equal(t, int64(56), msg.MessageID)
+}
+
+func TestSendDocument_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/bottest-token/sendDocument", r.URL.Path)
+		assert.Equal(t, "POST", r.Method)
+		assert.Contains(t, r.Header.Get("Content-Type"), "multipart/form-data")
+
+		err := r.ParseMultipartForm(10 << 20)
+		require.NoError(t, err)
+
+		assert.Equal(t, "789", r.FormValue("chat_id"))
+		assert.Equal(t, "Here is the report", r.FormValue("caption"))
+		assert.Empty(t, r.FormValue("parse_mode"))
+
+		file, header, err := r.FormFile("document")
+		require.NoError(t, err)
+		defer file.Close()
+		assert.Equal(t, "report.pdf", header.Filename)
+
+		data, err := io.ReadAll(file)
+		require.NoError(t, err)
+		assert.Equal(t, "fake-pdf-content", string(data))
+
+		result := TGMessage{
+			MessageID: 99,
+			Chat:      TGChat{ID: 789, Type: "private"},
+		}
+		resp := apiResponse{OK: true, Result: mustJSON(t, result)}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := newTestAPIClient(t, srv)
+	doc := strings.NewReader("fake-pdf-content")
+	msg, err := client.SendDocument(context.Background(), 789, "report.pdf", doc, "Here is the report", "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(99), msg.MessageID)
+}
+
+func TestSendDocument_WithParseMode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		err := r.ParseMultipartForm(10 << 20)
+		require.NoError(t, err)
+		assert.Equal(t, "HTML", r.FormValue("parse_mode"))
+
+		result := TGMessage{MessageID: 100, Chat: TGChat{ID: 789}}
+		resp := apiResponse{OK: true, Result: mustJSON(t, result)}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := newTestAPIClient(t, srv)
+	doc := strings.NewReader("content")
+	msg, err := client.SendDocument(context.Background(), 789, "file.txt", doc, "caption", "HTML")
+	require.NoError(t, err)
+	assert.Equal(t, int64(100), msg.MessageID)
+}
+
+func TestSendDocument_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := apiResponse{
+			OK:          false,
+			Description: "Bad Request: file is too big",
+			ErrorCode:   400,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := newTestAPIClient(t, srv)
+	doc := strings.NewReader("big-content")
+	_, err := client.SendDocument(context.Background(), 789, "huge.zip", doc, "", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "file is too big")
+}
+
+func TestSendDocument_EmptyCaption(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		err := r.ParseMultipartForm(10 << 20)
+		require.NoError(t, err)
+		assert.Empty(t, r.FormValue("caption"))
+
+		result := TGMessage{MessageID: 101, Chat: TGChat{ID: 789}}
+		resp := apiResponse{OK: true, Result: mustJSON(t, result)}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := newTestAPIClient(t, srv)
+	doc := strings.NewReader("content")
+	msg, err := client.SendDocument(context.Background(), 789, "data.csv", doc, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(101), msg.MessageID)
 }

@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"net/http"
 	"slices"
 	"strconv"
@@ -616,6 +618,14 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		return b.publishInputNeeded(ctx, api, sq, chatIDs, msg, agentSlug, projectID)
 	}
 
+	// File attachment: when telegram_attachment_path is set, send the file
+	// via sendDocument with the message body as caption instead of a text message.
+	if msg != nil && msg.Metadata != nil {
+		if attachPath, ok := msg.Metadata["telegram_attachment_path"]; ok && attachPath != "" {
+			return b.publishAttachment(ctx, api, chatIDs, msg, agentSlug, attachPath)
+		}
+	}
+
 	// Resolve recipient's Telegram @username for the message header.
 	recipientUsername := ""
 	if msg != nil && strings.HasPrefix(msg.Sender, "agent:") && strings.HasPrefix(msg.Recipient, "user:") {
@@ -948,6 +958,62 @@ func (b *TelegramBrokerV2) publishInputNeededDM(ctx context.Context, api *Telegr
 	}
 
 	return nil
+}
+
+// publishAttachment reads a file from the local filesystem and sends it to
+// each target chat via Telegram's sendDocument API. The message body is used
+// as the document caption.
+//
+// This reads from telegram_attachment_path on the local filesystem, which
+// requires the plugin process to share a volume mount with the agent that
+// wrote the file. This is valid in single-VM / shared-dir setups but will
+// NOT work when agents and the plugin run in separate GKE pods with isolated
+// volumes. A future telegram_attachment_url metadata key should support
+// fetching the file from a URL (e.g. GCS signed URL) instead.
+func (b *TelegramBrokerV2) publishAttachment(ctx context.Context, api *TelegramAPIClient, chatIDs []int64, msg *messages.StructuredMessage, agentSlug, attachPath string) error {
+	f, err := os.Open(attachPath)
+	if err != nil {
+		b.log.Error("Failed to open attachment file",
+			"path", attachPath, "error", err)
+		return fmt.Errorf("open attachment %q: %w", attachPath, err)
+	}
+	defer f.Close()
+
+	filename := filepath.Base(attachPath)
+	if name, ok := msg.Metadata["telegram_attachment_name"]; ok && name != "" {
+		filename = name
+	}
+
+	caption := truncateMessage(FormatMessageV2(msg, agentSlug))
+	// Telegram caption limit is 1024 characters.
+	if len(caption) > 1024 {
+		caption = caption[:1021] + "..."
+	}
+
+	var errs []error
+	for i, chatID := range chatIDs {
+		// Rewind the file reader for each send after the first.
+		if i > 0 {
+			if _, err := f.Seek(0, io.SeekStart); err != nil {
+				errs = append(errs, fmt.Errorf("seek attachment for chat %d: %w", chatID, err))
+				continue
+			}
+		}
+
+		_, err := api.SendDocument(ctx, chatID, filename, f, caption, "")
+		if err != nil {
+			var apiErr *APIError
+			if errors.As(err, &apiErr) && apiErr.IsTransient() {
+				b.log.Warn("Transient error sending attachment",
+					"chat_id", chatID, "error", err)
+				continue
+			}
+			b.log.Error("Failed to send attachment",
+				"chat_id", chatID, "path", attachPath, "error", err)
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // --- Subscribe / Unsubscribe / Close ---
