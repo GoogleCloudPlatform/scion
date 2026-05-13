@@ -162,6 +162,13 @@ func (b *TelegramBroker) Configure(config map[string]string) error {
 		}
 	}
 
+	// Parse outbound routes if provided (topic pattern → chat ID, reverse of chat_routes)
+	if outboundJSON, ok := config["outbound_routes"]; ok && outboundJSON != "" {
+		if err := b.parseOutboundRoutes(outboundJSON); err != nil {
+			return fmt.Errorf("invalid outbound_routes: %w", err)
+		}
+	}
+
 	// Parse user mappings if provided
 	if mappingsJSON, ok := config["user_mappings"]; ok && mappingsJSON != "" {
 		var raw map[string]string
@@ -240,6 +247,27 @@ func (b *TelegramBroker) parseChatRoutes(routesJSON string) error {
 		}
 		b.chatRoutes[chatID] = topic
 		b.topicChats[topic] = append(b.topicChats[topic], chatID)
+	}
+
+	return nil
+}
+
+// parseOutboundRoutes parses a JSON string mapping topic patterns to chat IDs.
+// This is the reverse of chat_routes: it allows routing outbound messages
+// (e.g. user-topic replies) to specific Telegram chats.
+// Expected format: {"scion.project.*.user.*.messages": "-5242408331"}
+func (b *TelegramBroker) parseOutboundRoutes(routesJSON string) error {
+	var raw map[string]string
+	if err := json.Unmarshal([]byte(routesJSON), &raw); err != nil {
+		return fmt.Errorf("parse JSON: %w", err)
+	}
+
+	for topicPattern, chatIDStr := range raw {
+		chatID, err := strconv.ParseInt(chatIDStr, 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid chat ID %q for pattern %q: %w", chatIDStr, topicPattern, err)
+		}
+		b.topicChats[topicPattern] = append(b.topicChats[topicPattern], chatID)
 	}
 
 	return nil

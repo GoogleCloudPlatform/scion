@@ -209,6 +209,61 @@ func TestConfigure_WithChatRoutes(t *testing.T) {
 	assert.Contains(t, b.topicChats["scion.project.p1.agent.coder.messages"], int64(123))
 }
 
+func TestConfigure_WithOutboundRoutes(t *testing.T) {
+	tgSrv := newFakeTelegramServer(t)
+	b := New(slog.Default())
+	defer b.Close()
+
+	err := b.Configure(map[string]string{
+		"bot_token":       "test-token",
+		"api_base_url":    tgSrv.srv.URL,
+		"chat_routes":     `{"-100": "scion.project.p1.agent.coder.messages"}`,
+		"outbound_routes": `{"scion.project.p1.user.*.messages": "-100"}`,
+	})
+	require.NoError(t, err)
+
+	// chat_routes populates both chatRoutes and topicChats
+	assert.Equal(t, "scion.project.p1.agent.coder.messages", b.chatRoutes[-100])
+	// outbound_routes adds to topicChats only
+	assert.Contains(t, b.topicChats["scion.project.p1.user.*.messages"], int64(-100))
+}
+
+func TestConfigure_InvalidOutboundRoutes(t *testing.T) {
+	tgSrv := newFakeTelegramServer(t)
+	b := New(slog.Default())
+	defer b.Close()
+
+	err := b.Configure(map[string]string{
+		"bot_token":       "test-token",
+		"api_base_url":    tgSrv.srv.URL,
+		"outbound_routes": `not-json`,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid outbound_routes")
+}
+
+func TestPublishViaOutboundRoute(t *testing.T) {
+	tgSrv := newFakeTelegramServer(t)
+	b := New(slog.Default())
+	defer b.Close()
+
+	err := b.Configure(map[string]string{
+		"bot_token":       "test-token",
+		"api_base_url":    tgSrv.srv.URL,
+		"outbound_routes": `{"scion.project.p1.user.*.messages": "789"}`,
+	})
+	require.NoError(t, err)
+
+	msg := messages.NewInstruction("agent:coder", "user:alice", "reply to user")
+	err = b.Publish(context.Background(), "scion.project.p1.user.alice.messages", msg)
+	require.NoError(t, err)
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.Equal(t, int64(789), sent[0].ChatID)
+	assert.Contains(t, sent[0].Text, "reply to user")
+}
+
 func TestPublishToChat(t *testing.T) {
 	tgSrv := newFakeTelegramServer(t)
 	b := newTestBroker(t, tgSrv)
