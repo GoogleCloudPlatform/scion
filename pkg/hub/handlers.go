@@ -2423,6 +2423,21 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
+	// Publish agent-to-agent messages through the broker so plugin observers
+	// (Telegram, broker-log) can see them. ObserverOnly prevents the hub's own
+	// subscription from re-dispatching.
+	if strings.HasPrefix(structuredMsg.Sender, "agent:") &&
+		strings.HasPrefix(structuredMsg.Recipient, "agent:") {
+		if bp := s.GetMessageBrokerProxy(); bp != nil {
+			observerMsg := *structuredMsg
+			observerMsg.ObserverOnly = true
+			if err := bp.PublishMessage(ctx, agent.ProjectID, &observerMsg); err != nil {
+				s.messageLog.Error("Failed to publish agent-to-agent observer message",
+					"agent_id", agent.ID, "error", err)
+			}
+		}
+	}
+
 	// Create notification subscription if requested
 	if req.Notify {
 		var notifySubscriberType, notifySubscriberID, createdBy string
@@ -2527,6 +2542,18 @@ func (s *Server) handleSetMessage(w http.ResponseWriter, r *http.Request, anchor
 			} else {
 				results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "agent has no runtime broker"}
 				continue
+			}
+
+			// Publish agent-to-agent messages through the broker for plugin observers.
+			if strings.HasPrefix(agentMsg.Sender, "agent:") {
+				if bp := s.GetMessageBrokerProxy(); bp != nil {
+					observerMsg := agentMsg
+					observerMsg.ObserverOnly = true
+					if err := bp.PublishMessage(ctx, projectID, &observerMsg); err != nil {
+						s.messageLog.Error("Failed to publish set[] observer message",
+							"recipient", recipStr, "error", err)
+					}
+				}
 			}
 
 			results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "delivered"}

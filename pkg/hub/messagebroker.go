@@ -478,8 +478,13 @@ func (p *MessageBrokerProxy) subscribeGlobalBroadcast() {
 }
 
 // deliverToAgent dispatches a message to a specific agent via the existing
-// DispatchAgentMessage path.
+// DispatchAgentMessage path. ObserverOnly messages are skipped — they were
+// already delivered directly and are only published for plugin observers.
 func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agentSlug string, msg *messages.StructuredMessage) {
+	if msg.ObserverOnly {
+		return
+	}
+
 	dispatcher := p.getDispatcher()
 	if dispatcher == nil {
 		p.log.Warn("No dispatcher available, cannot deliver broker message",

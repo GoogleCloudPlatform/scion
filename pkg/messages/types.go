@@ -66,8 +66,9 @@ type StructuredMessage struct {
 	Type        string            `json:"type"`
 	Plain       bool              `json:"plain,omitempty"`
 	Raw         bool              `json:"raw,omitempty"`
-	Urgent      bool              `json:"urgent,omitempty"`
-	Broadcasted bool              `json:"broadcasted,omitempty"`
+	Urgent       bool              `json:"urgent,omitempty"`
+	Broadcasted  bool              `json:"broadcasted,omitempty"`
+	ObserverOnly bool              `json:"observer_only,omitempty"`
 	Status      string            `json:"status,omitempty"`
 	Attachments []string          `json:"attachments,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
