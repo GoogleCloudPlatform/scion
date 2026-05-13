@@ -118,6 +118,44 @@ func TestCommandHandler_Setup_InGroup_WithProjects(t *testing.T) {
 	require.NotNil(t, sent[0].ReplyMarkup)
 }
 
+func TestCommandHandler_Setup_InGroup_CachedProjects(t *testing.T) {
+	h, tgSrv, hub, _ := newTestCommandHandler(t)
+	hub.projects = []ProjectOption{} // hub returns nothing
+
+	h.SetProjects([]ProjectOption{
+		{ID: "proj-1", Slug: "cached-project"},
+		{ID: "proj-2", Slug: "other-cached"},
+	})
+
+	h.HandleCommand(&TGMessage{
+		Text: "/setup",
+		Chat: TGChat{ID: -100, Type: "group"},
+	})
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.Contains(t, sent[0].Text, "Select a project")
+	require.NotNil(t, sent[0].ReplyMarkup)
+}
+
+func TestCommandHandler_Setup_InGroup_CachedProjectsFallbackToHub(t *testing.T) {
+	h, tgSrv, hub, _ := newTestCommandHandler(t)
+	hub.projects = []ProjectOption{
+		{ID: "proj-1", Slug: "hub-project"},
+	}
+	// no cached projects set — should fall back to hub
+
+	h.HandleCommand(&TGMessage{
+		Text: "/setup",
+		Chat: TGChat{ID: -100, Type: "group"},
+	})
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	assert.Contains(t, sent[0].Text, "Select a project")
+	require.NotNil(t, sent[0].ReplyMarkup)
+}
+
 func TestCommandHandler_Setup_AlreadyLinked(t *testing.T) {
 	h, tgSrv, _, store := newTestCommandHandler(t)
 

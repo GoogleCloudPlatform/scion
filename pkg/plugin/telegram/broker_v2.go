@@ -188,6 +188,12 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		var m map[string]string
 		if err := json.Unmarshal([]byte(slugMapJSON), &m); err == nil {
 			b.projectSlugMap = m
+
+			projects := make([]ProjectOption, 0, len(m))
+			for id, slug := range m {
+				projects = append(projects, ProjectOption{ID: id, Slug: slug})
+			}
+			b.commands.SetProjects(projects)
 		}
 	}
 

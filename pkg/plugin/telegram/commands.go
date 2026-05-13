@@ -35,11 +35,12 @@ type HubClient interface {
 
 // CommandHandler processes bot commands from incoming Telegram messages.
 type CommandHandler struct {
-	store       Store
-	api         *TelegramAPIClient
-	hubClient   HubClient
-	botUsername string
-	log         *slog.Logger
+	store          Store
+	api            *TelegramAPIClient
+	hubClient      HubClient
+	botUsername     string
+	log            *slog.Logger
+	cachedProjects []ProjectOption
 }
 
 // NewCommandHandler creates a new CommandHandler.
@@ -54,6 +55,11 @@ func NewCommandHandler(store Store, api *TelegramAPIClient, hubClient HubClient,
 		botUsername:  botUsername,
 		log:         log,
 	}
+}
+
+// SetProjects updates the cached project list used by /setup.
+func (h *CommandHandler) SetProjects(projects []ProjectOption) {
+	h.cachedProjects = projects
 }
 
 // HandleCommand dispatches an incoming message to the appropriate command
@@ -124,27 +130,22 @@ func (h *CommandHandler) handleSetup(msg *TGMessage) {
 		return
 	}
 
-	projects, err := h.hubClient.ListProjects(ctx)
-	if err != nil {
-		h.log.Error("Failed to list projects from hub", "error", err)
-		h.reply(chatID, "Failed to fetch projects. Please try again later.")
-		return
+	var projects []ProjectOption
+	if len(h.cachedProjects) > 0 {
+		projects = h.cachedProjects
+		h.log.Debug("Using cached project list for /setup", "count", len(projects))
+	} else {
+		var err error
+		projects, err = h.hubClient.ListProjects(ctx)
+		if err != nil {
+			h.log.Error("Failed to list projects from hub", "error", err)
+			h.reply(chatID, "Failed to fetch projects. Please try again later.")
+			return
+		}
+		h.log.Debug("Listed projects from hub", "count", len(projects))
 	}
 
-	h.log.Debug("Listed projects from hub", "count", len(projects))
-
 	if len(projects) == 0 {
-		senderID := ""
-		if msg.From != nil {
-			senderID = strconv.FormatInt(msg.From.ID, 10)
-		}
-		if senderID != "" {
-			mapping, mErr := h.store.GetUserMapping(ctx, senderID)
-			if mErr == nil && mapping == nil {
-				h.reply(chatID, "No projects found. Please /register first (DM me), then try /setup again.")
-				return
-			}
-		}
 		h.reply(chatID, "No projects found. Create a project in the hub first.")
 		return
 	}
