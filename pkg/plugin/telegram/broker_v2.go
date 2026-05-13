@@ -226,7 +226,9 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		// Configure() is called twice (first with plugin config, then with hub
 		// credentials). The second call must not fail on port-already-bound.
 		if b.webhookServer != nil {
-			b.webhookServer.Stop()
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = b.webhookServer.Stop(stopCtx)
+			stopCancel()
 			b.webhookServer = nil
 		}
 
