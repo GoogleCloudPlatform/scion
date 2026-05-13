@@ -184,9 +184,11 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 
 	// After hub credentials are available, resolve any group link slugs that
 	// were stored as UUIDs during the first Configure() call (before hub_url
-	// was injected). This is a no-op if all slugs are already resolved.
+	// was injected). Run synchronously so errors are visible in startup logs.
 	if b.hubURL != "" {
-		go b.resolveStaleGroupSlugs(context.Background())
+		slugCtx, slugCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		b.resolveStaleGroupSlugs(slugCtx)
+		slugCancel()
 	}
 
 	b.log.Info("Telegram v2 broker configured",
@@ -204,18 +206,19 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 // become available on the second Configure() call.
 func (b *TelegramBrokerV2) resolveStaleGroupSlugs(ctx context.Context) {
 	if b.hubClient == nil {
+		b.log.Warn("Slug resolution skipped: hubClient is nil")
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
 
 	projects, err := b.hubClient.ListProjects(ctx)
 	if err != nil {
 		b.log.Warn("Could not resolve project slugs (hub unavailable)", "error", err)
 		return
 	}
+	b.log.Debug("Slug resolution: fetched projects from hub", "count", len(projects))
 	slugByID := make(map[string]string, len(projects))
 	for _, p := range projects {
+		b.log.Debug("Project from hub", "id", p.ID, "name", p.Name, "slug", p.Slug)
 		if p.Slug != "" {
 			slugByID[p.ID] = p.Slug
 		} else if p.Name != "" {
