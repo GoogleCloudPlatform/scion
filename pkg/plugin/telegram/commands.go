@@ -265,7 +265,7 @@ func (h *CommandHandler) handleAgents(msg *TGMessage) {
 		if agent.Slug == link.DefaultAgent {
 			label += " (default)"
 		}
-		lines = append(lines, fmt.Sprintf("• @%s", label))
+		lines = append(lines, fmt.Sprintf("🤖 %s", label))
 	}
 
 	h.reply(chatID, fmt.Sprintf("Agents in *%s*:\n%s", link.ProjectSlug, strings.Join(lines, "\n")))

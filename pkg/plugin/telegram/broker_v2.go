@@ -599,7 +599,13 @@ func (b *TelegramBrokerV2) publishInputNeeded(ctx context.Context, api *Telegram
 	var errs []error
 	for _, chatID := range chatIDs {
 		keyboard := buildAskUserKeyboard(requestID, choices)
-		sent, err := api.SendMessageWithKeyboard(ctx, chatID, text, "", keyboard, 0)
+		var sent *TGMessage
+		var err error
+		if keyboard == nil {
+			sent, err = api.SendMessage(ctx, chatID, text, "")
+		} else {
+			sent, err = api.SendMessageWithKeyboard(ctx, chatID, text, "", keyboard, 0)
+		}
 		if err != nil {
 			var apiErr *APIError
 			if errors.As(err, &apiErr) && apiErr.IsTransient() {

@@ -116,18 +116,12 @@ func TestBuildAskUserKeyboard_WithChoices(t *testing.T) {
 
 func TestBuildAskUserKeyboard_NoChoices(t *testing.T) {
 	kb := buildAskUserKeyboard("req-99", nil)
-	require.Len(t, kb.InlineKeyboard, 1)
-	assert.Len(t, kb.InlineKeyboard[0], 2)
-	assert.Equal(t, "Yes", kb.InlineKeyboard[0][0].Text)
-	assert.Equal(t, "ask:yes:req-99", kb.InlineKeyboard[0][0].CallbackData)
-	assert.Equal(t, "No", kb.InlineKeyboard[0][1].Text)
-	assert.Equal(t, "ask:no:req-99", kb.InlineKeyboard[0][1].CallbackData)
+	assert.Nil(t, kb)
 }
 
 func TestBuildAskUserKeyboard_EmptyChoices(t *testing.T) {
 	kb := buildAskUserKeyboard("req-1", []string{})
-	require.Len(t, kb.InlineKeyboard, 1)
-	assert.Equal(t, "Yes", kb.InlineKeyboard[0][0].Text)
+	assert.Nil(t, kb)
 }
 
 func TestBuildSetupConfirmKeyboard(t *testing.T) {

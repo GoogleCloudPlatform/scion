@@ -109,17 +109,10 @@ func buildAgentKeyboard(agents []string, currentDefault string, prefix string) *
 
 // buildAskUserKeyboard creates an inline keyboard for InputNeeded messages.
 // If choices are provided, each gets a button: ask:opt:<requestID>:<index>
-// If no choices, defaults to [Yes] [No]: ask:yes:<requestID> / ask:no:<requestID>
+// If no choices, returns nil so the user can type a free-form reply.
 func buildAskUserKeyboard(requestID string, choices []string) *InlineKeyboardMarkup {
 	if len(choices) == 0 {
-		return &InlineKeyboardMarkup{
-			InlineKeyboard: [][]InlineKeyboardButton{
-				{
-					{Text: "Yes", CallbackData: truncateCallback(fmt.Sprintf("ask:yes:%s", requestID))},
-					{Text: "No", CallbackData: truncateCallback(fmt.Sprintf("ask:no:%s", requestID))},
-				},
-			},
-		}
+		return nil
 	}
 
 	var rows [][]InlineKeyboardButton
