@@ -628,6 +628,9 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 			attachPath = msg.Metadata["telegram_attachment_path"]
 		}
 		if attachPath != "" {
+			// Translate /workspace/<file> → /home/scion/.scion/projects/<projectSlug>/<file>
+			// Agent containers mount the hub's project directory as /workspace.
+			attachPath = b.resolveAttachmentPath(ctx, store, attachPath, projectID)
 			return b.publishAttachment(ctx, api, chatIDs, msg, agentSlug, attachPath)
 		}
 	}
@@ -975,6 +978,30 @@ func (b *TelegramBrokerV2) publishInputNeededDM(ctx context.Context, api *Telegr
 	}
 
 	return nil
+}
+
+// resolveAttachmentPath translates an agent-relative /workspace path to the
+// corresponding host-side path under /home/scion/.scion/projects/<slug>/.
+// Agent containers mount /home/scion/.scion/projects/<slug> as /workspace.
+// Falls back to the original path if translation is not possible.
+func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Store, attachPath, projectID string) string {
+	const workspacePrefix = "/workspace/"
+	if !strings.HasPrefix(attachPath, workspacePrefix) {
+		return attachPath
+	}
+	relPath := strings.TrimPrefix(attachPath, workspacePrefix)
+
+	// Look up project slug from group links (we know projectID from the topic).
+	if store != nil && projectID != "" {
+		links, err := store.GetGroupLinksForProject(ctx, projectID)
+		if err == nil && len(links) > 0 && links[0].ProjectSlug != "" {
+			slug := links[0].ProjectSlug
+			hostPath := "/home/scion/.scion/projects/" + slug + "/" + relPath
+			b.log.Debug("Translated attachment path", "from", attachPath, "to", hostPath)
+			return hostPath
+		}
+	}
+	return attachPath
 }
 
 // publishAttachment reads a file from the local filesystem and sends it to
