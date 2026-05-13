@@ -301,7 +301,7 @@ func TestCreateSharedDirPVCs_MissingGroveLabel(t *testing.T) {
 
 	err := rt.createSharedDirPVCs(ctx, "default", config)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "missing scion.grove label")
+	assert.Contains(t, err.Error(), "missing scion.project or scion.grove label")
 }
 
 func TestCleanupSharedDirPVCs(t *testing.T) {

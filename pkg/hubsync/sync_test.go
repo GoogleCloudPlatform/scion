@@ -77,7 +77,7 @@ func TestEnsureHubReady_GlobalFallbackWithHubEnabled(t *testing.T) {
 
 	// Write settings with hub enabled and endpoint pointing to our test server
 	// grove_id is a top-level setting, not nested under hub
-	settingsContent := fmt.Sprintf(`grove_id: %s
+	settingsContent := fmt.Sprintf(`project_id: %s
 hub:
   enabled: true
   endpoint: %s
@@ -1791,11 +1791,11 @@ func TestCompareAgents_WatermarkBoundary(t *testing.T) {
 			}
 
 			hubCtx := &HubContext{
-				Client:    client,
+				Client:      client,
 				ProjectID:   projectID,
-				BrokerID:  brokerID,
+				BrokerID:    brokerID,
 				ProjectPath: tmpDir,
-				Settings:  &config.Settings{},
+				Settings:    &config.Settings{},
 			}
 
 			result, err := CompareAgents(context.Background(), hubCtx)
@@ -1862,11 +1862,11 @@ func TestCompareAgents_LocalOnlyStaleAfterWatermark(t *testing.T) {
 		t.Fatalf("failed to create hub client: %v", err)
 	}
 	hubCtx := &HubContext{
-		Client:    client,
+		Client:      client,
 		ProjectID:   projectID,
-		BrokerID:  brokerID,
+		BrokerID:    brokerID,
 		ProjectPath: tmpDir,
-		Settings:  &config.Settings{},
+		Settings:    &config.Settings{},
 	}
 
 	result, err := CompareAgents(context.Background(), hubCtx)
@@ -1940,11 +1940,11 @@ func TestCompareAgents_PreviouslySyncedDeletedFromHub(t *testing.T) {
 		t.Fatalf("failed to create hub client: %v", err)
 	}
 	hubCtx := &HubContext{
-		Client:    client,
+		Client:      client,
 		ProjectID:   projectID,
-		BrokerID:  brokerID,
+		BrokerID:    brokerID,
 		ProjectPath: tmpDir,
-		Settings:  &config.Settings{},
+		Settings:    &config.Settings{},
 	}
 
 	result, err := CompareAgents(context.Background(), hubCtx)
@@ -2010,11 +2010,11 @@ func TestCompareAgents_NewLocalAgentNotInSyncedList(t *testing.T) {
 		t.Fatalf("failed to create hub client: %v", err)
 	}
 	hubCtx := &HubContext{
-		Client:    client,
+		Client:      client,
 		ProjectID:   projectID,
-		BrokerID:  brokerID,
+		BrokerID:    brokerID,
 		ProjectPath: tmpDir,
-		Settings:  &config.Settings{},
+		Settings:    &config.Settings{},
 	}
 
 	result, err := CompareAgents(context.Background(), hubCtx)
@@ -2139,11 +2139,11 @@ func TestStaleLocalAgentSurvivesSyncCycle(t *testing.T) {
 		t.Fatalf("failed to create hub client: %v", err)
 	}
 	hubCtx := &HubContext{
-		Client:    client,
+		Client:      client,
 		ProjectID:   projectID,
-		BrokerID:  brokerID,
+		BrokerID:    brokerID,
 		ProjectPath: tmpDir,
-		Settings:  &config.Settings{},
+		Settings:    &config.Settings{},
 	}
 
 	// --- First sync cycle ---
@@ -2225,11 +2225,11 @@ func TestCompareAgents_HubAgentDifferentBrokerMatchesLocal(t *testing.T) {
 	}
 
 	hubCtx := &HubContext{
-		Client:    client,
+		Client:      client,
 		ProjectID:   projectID,
-		BrokerID:  localBrokerID,
+		BrokerID:    localBrokerID,
 		ProjectPath: tmpDir,
-		Settings:  &config.Settings{},
+		Settings:    &config.Settings{},
 	}
 
 	result, err := CompareAgents(context.Background(), hubCtx)
@@ -2302,11 +2302,11 @@ func TestCompareAgents_HubOnlyAgentDifferentBrokerIsRemoteOnly(t *testing.T) {
 	}
 
 	hubCtx := &HubContext{
-		Client:    client,
+		Client:      client,
 		ProjectID:   projectID,
-		BrokerID:  localBrokerID,
+		BrokerID:    localBrokerID,
 		ProjectPath: tmpDir,
-		Settings:  &config.Settings{},
+		Settings:    &config.Settings{},
 	}
 
 	result, err := CompareAgents(context.Background(), hubCtx)
