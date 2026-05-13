@@ -570,7 +570,7 @@ func sendSetMessageViaHub(hubCtx *HubContext, recipients []messages.SetRecipient
 				slug := api.Slugify(recip.Name)
 				msg := buildStructuredMessage(sender, "agent:"+slug, message)
 				msg.Metadata = map[string]string{"group_id": groupID}
-				if err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false); err != nil {
+				if err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false, false); err != nil {
 					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
 					if !isJSONOutput() {
 						fmt.Printf("  Failed: %s: %s\n", recipStr, err)
