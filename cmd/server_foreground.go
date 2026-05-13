@@ -319,6 +319,30 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					continue
 				}
 
+				// Inject hub credentials into hub-managed broker plugins so they
+				// can authenticate back to the Hub API. Self-managed plugins
+				// handle their own credential lifecycle.
+				if !pluginMgr.IsSelfManaged(scionplugin.PluginTypeBroker, bt) && hubSrv != nil && s != nil {
+					brokerID := "plugin-broker-" + bt
+					if authSvc := hubSrv.GetBrokerAuthService(); authSvc != nil {
+						secretKey, secretErr := authSvc.GenerateAndStoreSecret(ctx, brokerID)
+						if secretErr != nil {
+							log.Printf("Warning: failed to generate secret for broker plugin %q: %v", bt, secretErr)
+						} else {
+							hubCreds := map[string]string{
+								"hub_url":   hubEndpoint,
+								"hmac_key":  secretKey,
+								"broker_id": brokerID,
+							}
+							if cfgErr := pluginMgr.ConfigureBroker(bt, hubCreds); cfgErr != nil {
+								log.Printf("Warning: failed to inject hub credentials into broker plugin %q: %v", bt, cfgErr)
+							} else {
+								log.Printf("Injected hub credentials into broker plugin %q (broker_id=%s)", bt, brokerID)
+							}
+						}
+					}
+				}
+
 				observer := isObserverBroker(pluginMgr, bt)
 				namedBrokers = append(namedBrokers, broker.NamedBroker{
 					Name: bt, Broker: b, Observer: observer,

@@ -393,6 +393,26 @@ func (m *Manager) GetHarness(name string) (api.Harness, error) {
 	return harnessClient, nil
 }
 
+// ConfigureBroker sends additional configuration to a loaded broker plugin.
+// This is used to inject runtime credentials (hub_url, hmac_key, broker_id)
+// that are not available at initial plugin load time.
+func (m *Manager) ConfigureBroker(name string, config map[string]string) error {
+	key := PluginTypeBroker + ":" + name
+	m.mu.RLock()
+	raw, ok := m.dispensed[key]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("broker plugin not loaded: %s", name)
+	}
+
+	rpcClient, ok := raw.(*BrokerRPCClient)
+	if !ok {
+		return fmt.Errorf("plugin %s is not a broker RPC client", name)
+	}
+
+	return rpcClient.Configure(config)
+}
+
 // HasPlugin returns true if a plugin with the given type and name is loaded.
 func (m *Manager) HasPlugin(pluginType, name string) bool {
 	key := pluginType + ":" + name
