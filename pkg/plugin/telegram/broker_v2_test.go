@@ -1093,6 +1093,135 @@ func TestV2_HandleCallback_ExpiredRequest(t *testing.T) {
 	assert.Contains(t, callbacks[0].Text, "expired")
 }
 
+// --- Publish: state-change DM routing ---
+
+func TestV2_Publish_StateChange_RoutedToDM(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+	// Also create a group link — state-change should NOT go here.
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:    -200,
+		ProjectID: "proj-1",
+		LinkedAt:  time.Now().UTC(),
+		Active:    true,
+	}))
+
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Sender:    "agent:coder",
+		Recipient: "user:alice@example.com",
+		Msg:       "Agent coder completed successfully",
+		Type:      messages.TypeStateChange,
+		Status:    "completed",
+	}
+
+	err := b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", msg)
+	require.NoError(t, err)
+
+	sent := tgSrv.getSentMessages()
+	require.Len(t, sent, 1)
+	// DM chat ID equals the user's Telegram user ID.
+	assert.Equal(t, int64(456), sent[0].ChatID)
+	assert.Contains(t, sent[0].Text, "completed")
+}
+
+func TestV2_Publish_StateChange_NotSentToGroup(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+
+	ctx := context.Background()
+	// Group link exists but no user mapping — message should be dropped,
+	// not broadcast to the group.
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:    -200,
+		ProjectID: "proj-1",
+		LinkedAt:  time.Now().UTC(),
+		Active:    true,
+	}))
+
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Sender:    "agent:coder",
+		Recipient: "user:unknown@example.com",
+		Msg:       "Agent coder errored",
+		Type:      messages.TypeStateChange,
+		Status:    "error",
+	}
+
+	err := b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", msg)
+	require.NoError(t, err)
+
+	// No messages should be sent — dropped, not broadcast to group.
+	assert.Empty(t, tgSrv.getSentMessages())
+}
+
+func TestV2_Publish_StateChange_RespectNotificationPref(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+	// User explicitly disabled notifications for this agent.
+	require.NoError(t, b.store.SaveNotificationPref(ctx, &NotificationPref{
+		TelegramUserID: "456",
+		ProjectID:      "proj-1",
+		AgentSlug:      "coder",
+		Enabled:        false,
+	}))
+
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Sender:    "agent:coder",
+		Recipient: "user:alice@example.com",
+		Msg:       "Agent coder completed",
+		Type:      messages.TypeStateChange,
+		Status:    "completed",
+	}
+
+	err := b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", msg)
+	require.NoError(t, err)
+
+	// No messages should be sent — user disabled notifications.
+	assert.Empty(t, tgSrv.getSentMessages())
+}
+
+func TestV2_Publish_StateChange_NonUserRecipientDropped(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:    -200,
+		ProjectID: "proj-1",
+		LinkedAt:  time.Now().UTC(),
+		Active:    true,
+	}))
+
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Sender:    "agent:coder",
+		Recipient: "agent:reviewer",
+		Msg:       "state changed",
+		Type:      messages.TypeStateChange,
+	}
+
+	err := b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", msg)
+	require.NoError(t, err)
+
+	assert.Empty(t, tgSrv.getSentMessages())
+}
+
 // --- Subscribe/Unsubscribe/Close ---
 
 func TestV2_SubscribeUnsubscribe(t *testing.T) {

@@ -379,6 +379,12 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 	// Determine the project and agent from the topic.
 	projectID, agentSlug := parseTopicComponents(topic)
 
+	// Route state-change notifications to the user's personal DM
+	// instead of the group chat.
+	if msg != nil && msg.Type == messages.TypeStateChange {
+		return b.publishStateChangeDM(ctx, api, store, msg, projectID, agentSlug)
+	}
+
 	// Collect target chat IDs via dynamic routing.
 	var chatIDs []int64
 
@@ -553,6 +559,72 @@ func (b *TelegramBrokerV2) publishInputNeeded(ctx context.Context, api *Telegram
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// publishStateChangeDM sends a state-change notification to the recipient
+// user's personal Telegram DM (private chat). The DM chat ID equals the
+// user's Telegram user ID. If the recipient cannot be resolved to a
+// Telegram user, the message is silently dropped.
+func (b *TelegramBrokerV2) publishStateChangeDM(ctx context.Context, api *TelegramAPIClient, store Store, msg *messages.StructuredMessage, projectID, agentSlug string) error {
+	if store == nil {
+		return nil
+	}
+
+	email := strings.TrimPrefix(msg.Recipient, "user:")
+	if email == msg.Recipient || email == "" {
+		b.log.Debug("State-change recipient is not a user, dropping", "recipient", msg.Recipient)
+		return nil
+	}
+
+	mapping, err := store.GetUserMappingByEmail(ctx, email)
+	if err != nil {
+		b.log.Warn("Failed to look up user mapping for state-change DM", "email", email, "error", err)
+		return nil
+	}
+	if mapping == nil {
+		b.log.Debug("No user mapping for state-change recipient, dropping", "email", email)
+		return nil
+	}
+
+	// Respect per-user notification preferences: if the user explicitly
+	// disabled notifications for this agent, skip the DM.
+	if projectID != "" && agentSlug != "" {
+		pref, prefErr := store.GetNotificationPref(ctx, mapping.TelegramUserID, projectID, agentSlug)
+		if prefErr != nil {
+			b.log.Warn("Failed to check notification pref", "error", prefErr)
+		}
+		if pref != nil && !pref.Enabled {
+			b.log.Debug("User disabled notifications for agent, skipping DM",
+				"email", email, "project", projectID, "agent", agentSlug)
+			return nil
+		}
+	}
+
+	tgUserID, err := strconv.ParseInt(mapping.TelegramUserID, 10, 64)
+	if err != nil {
+		b.log.Warn("Invalid Telegram user ID in mapping", "telegram_user_id", mapping.TelegramUserID, "error", err)
+		return nil
+	}
+
+	text := FormatMessageV2(msg, agentSlug)
+	if text == "" {
+		return nil
+	}
+
+	_, err = api.SendMessage(ctx, tgUserID, text, "")
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.IsTransient() {
+			b.log.Warn("Transient error sending state-change DM",
+				"telegram_user_id", tgUserID, "error", err)
+			return nil
+		}
+		b.log.Error("Failed to send state-change DM",
+			"telegram_user_id", tgUserID, "error", err)
+		return err
+	}
+
+	return nil
 }
 
 // --- Subscribe / Unsubscribe / Close ---
