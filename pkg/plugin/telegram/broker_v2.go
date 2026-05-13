@@ -76,8 +76,14 @@ type TelegramBrokerV2 struct {
 	sentIDs   map[string]time.Time
 	sentIDsMu sync.Mutex
 
+	sendQueue *SendQueue
+
 	agentCacheTTL  time.Duration
 	projectSlugMap map[string]string // injected by hub: projectID → slug
+
+	// Webhook mode fields.
+	inboundMode   string // "poll" (default) or "webhook"
+	webhookServer *WebhookServer
 
 	InboundHandler func(topic string, msg *messages.StructuredMessage)
 
@@ -133,6 +139,21 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	baseURL := config["api_base_url"]
 	b.api = NewAPIClient(botToken, baseURL)
 
+	// Initialize send queue with rate limiting.
+	sqSize := 0
+	if v, ok := config["send_queue_size"]; ok && v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			sqSize = n
+		}
+	}
+	var sqDelay time.Duration
+	if v, ok := config["send_min_delay"]; ok && v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			sqDelay = d
+		}
+	}
+	b.sendQueue = NewSendQueue(b.api, b.log, sqSize, sqDelay)
+
 	// Parse optional agent cache TTL.
 	if v, ok := config["agent_cache_ttl"]; ok && v != "" {
 		d, err := time.ParseDuration(v)
@@ -165,6 +186,57 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	b.botInfo = bot
 
 	b.registerBotCommands(ctx)
+
+	// Parse inbound mode: "poll" (default) or "webhook".
+	b.inboundMode = "poll"
+	if v, ok := config["inbound_mode"]; ok && v != "" {
+		switch v {
+		case "poll", "webhook":
+			b.inboundMode = v
+		default:
+			b.store.Close()
+			return fmt.Errorf("invalid inbound_mode %q: must be \"poll\" or \"webhook\"", v)
+		}
+	}
+
+	// Set up webhook if configured.
+	if b.inboundMode == "webhook" {
+		webhookURL, ok := config["webhook_url"]
+		if !ok || webhookURL == "" {
+			b.store.Close()
+			return fmt.Errorf("webhook_url is required when inbound_mode is \"webhook\"")
+		}
+
+		webhookListen := config["webhook_listen"]
+		if webhookListen == "" {
+			webhookListen = ":9094"
+		}
+
+		webhookSecret := config["webhook_secret"]
+
+		// Register the webhook with Telegram.
+		if err := b.api.SetWebhook(ctx, webhookURL, webhookSecret); err != nil {
+			b.store.Close()
+			return fmt.Errorf("failed to set webhook: %w", err)
+		}
+
+		// Create and start the webhook server.
+		b.webhookServer = NewWebhookServer(webhookListen, webhookSecret, func(update Update) {
+			if update.CallbackQuery != nil {
+				cbCtx, cbCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cbCancel()
+				b.handleCallbackQuery(cbCtx, update.CallbackQuery)
+			}
+			if update.Message != nil {
+				b.handleIncomingMessageV2(update.Message)
+			}
+		}, b.log)
+
+		if _, err := b.webhookServer.Start(); err != nil {
+			b.store.Close()
+			return fmt.Errorf("failed to start webhook server: %w", err)
+		}
+	}
 
 	// Create hub client.
 	b.hubClient = NewHTTPHubClient(b.hubURL, b.hmacKey, b.brokerID)
@@ -216,6 +288,7 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		"hub_url", b.hubURL,
 		"broker_id", b.brokerID,
 		"db_path", dbPath,
+		"inbound_mode", b.inboundMode,
 	)
 	return nil
 }
@@ -386,6 +459,7 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 	}
 	api := b.api
 	store := b.store
+	sq := b.sendQueue
 	b.mu.RUnlock()
 
 	if api == nil {
@@ -414,14 +488,19 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 	if msg != nil && msg.Type == messages.TypeStateChange {
 		// Route state changes to the recipient's personal DM AND to any
 		// linked groups that have notify_in_group enabled.
-		dmErr := b.publishStateChangeDM(ctx, api, store, msg, projectID, agentSlug)
+		dmErr := b.publishStateChangeDM(ctx, api, sq, store, msg, projectID, agentSlug)
 		if store != nil && projectID != "" {
 			links, _ := store.GetGroupLinksForProject(ctx, projectID)
 			for _, link := range links {
 				if link.Active && link.NotifyInGroup {
 					text := FormatStateChangeCard(msg, agentSlug)
 					if text != "" {
-						if _, err := api.SendMessage(ctx, link.ChatID, text, "HTML"); err != nil {
+						if sq != nil {
+							if _, err := sq.Send(ctx, link.ChatID, text, "HTML", nil, 0); err != nil {
+								b.log.Warn("Failed to send state-change group notification",
+									"chat_id", link.ChatID, "error", err)
+							}
+						} else if _, err := api.SendMessage(ctx, link.ChatID, text, "HTML"); err != nil {
 							b.log.Warn("Failed to send state-change group notification",
 								"chat_id", link.ChatID, "error", err)
 						}
@@ -517,7 +596,7 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 
 	// Handle InputNeeded messages with inline keyboards.
 	if msg != nil && msg.Type == messages.TypeInputNeeded {
-		return b.publishInputNeeded(ctx, api, chatIDs, msg, agentSlug, projectID)
+		return b.publishInputNeeded(ctx, api, sq, chatIDs, msg, agentSlug, projectID)
 	}
 
 	// Format the message for Telegram.
@@ -537,7 +616,15 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 	var errs []error
 	for _, chatID := range chatIDs {
 		var err error
-		if replyToMsgID > 0 {
+		if sq != nil {
+			var keyboard *InlineKeyboardMarkup
+			if replyToMsgID > 0 {
+				// Pass nil keyboard but use replyTo.
+				_, err = sq.Send(ctx, chatID, text, "", keyboard, replyToMsgID)
+			} else {
+				_, err = sq.Send(ctx, chatID, text, "", nil, 0)
+			}
+		} else if replyToMsgID > 0 {
 			_, err = api.SendMessageWithKeyboard(ctx, chatID, text, "", nil, replyToMsgID)
 		} else {
 			_, err = api.SendMessage(ctx, chatID, text, "")
@@ -581,7 +668,7 @@ func (b *TelegramBrokerV2) resolveRecipientChats(ctx context.Context, recipient,
 }
 
 // publishInputNeeded sends an InputNeeded message with an inline keyboard.
-func (b *TelegramBrokerV2) publishInputNeeded(ctx context.Context, api *TelegramAPIClient, chatIDs []int64, msg *messages.StructuredMessage, agentSlug, projectID string) error {
+func (b *TelegramBrokerV2) publishInputNeeded(ctx context.Context, api *TelegramAPIClient, sq *SendQueue, chatIDs []int64, msg *messages.StructuredMessage, agentSlug, projectID string) error {
 	text := FormatMessageV2(msg, agentSlug)
 	if text == "" {
 		return nil
@@ -602,7 +689,9 @@ func (b *TelegramBrokerV2) publishInputNeeded(ctx context.Context, api *Telegram
 		keyboard := buildAskUserKeyboard(requestID, choices)
 		var sent *TGMessage
 		var err error
-		if keyboard == nil {
+		if sq != nil {
+			sent, err = sq.Send(ctx, chatID, text, "", keyboard, 0)
+		} else if keyboard == nil {
 			sent, err = api.SendMessage(ctx, chatID, text, "")
 		} else {
 			sent, err = api.SendMessageWithKeyboard(ctx, chatID, text, "", keyboard, 0)
@@ -641,7 +730,7 @@ func (b *TelegramBrokerV2) publishInputNeeded(ctx context.Context, api *Telegram
 // user's personal Telegram DM (private chat). The DM chat ID equals the
 // user's Telegram user ID. If the recipient cannot be resolved to a
 // Telegram user, the message is silently dropped.
-func (b *TelegramBrokerV2) publishStateChangeDM(ctx context.Context, api *TelegramAPIClient, store Store, msg *messages.StructuredMessage, projectID, agentSlug string) error {
+func (b *TelegramBrokerV2) publishStateChangeDM(ctx context.Context, api *TelegramAPIClient, sq *SendQueue, store Store, msg *messages.StructuredMessage, projectID, agentSlug string) error {
 	if store == nil {
 		return nil
 	}
@@ -697,7 +786,11 @@ func (b *TelegramBrokerV2) publishStateChangeDM(ctx context.Context, api *Telegr
 		return nil
 	}
 
-	_, err = api.SendMessage(ctx, tgUserID, text, "HTML")
+	if sq != nil {
+		_, err = sq.Send(ctx, tgUserID, text, "HTML", nil, 0)
+	} else {
+		_, err = api.SendMessage(ctx, tgUserID, text, "HTML")
+	}
 	if err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.IsTransient() {
@@ -768,9 +861,37 @@ func (b *TelegramBrokerV2) Close() error {
 	b.closed = true
 	b.subs = make(map[string]bool)
 	store := b.store
+	api := b.api
+	webhookSrv := b.webhookServer
+	inboundMode := b.inboundMode
+	sendQueue := b.sendQueue
 	b.mu.Unlock()
 
-	b.stopPolling()
+	// Shut down inbound transport.
+	if inboundMode == "webhook" {
+		// Remove the webhook registration from Telegram.
+		if api != nil {
+			shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := api.DeleteWebhook(shutCtx); err != nil {
+				b.log.Warn("Failed to delete webhook on close", "error", err)
+			}
+			shutCancel()
+		}
+		// Stop the local HTTP server.
+		if webhookSrv != nil {
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := webhookSrv.Stop(stopCtx); err != nil {
+				b.log.Warn("Failed to stop webhook server", "error", err)
+			}
+			stopCancel()
+		}
+	} else {
+		b.stopPolling()
+	}
+
+	if sendQueue != nil {
+		sendQueue.Close()
+	}
 
 	if store != nil {
 		store.Close()
@@ -826,6 +947,9 @@ func (b *TelegramBrokerV2) HealthCheck() (*plugin.HealthStatus, error) {
 // --- Long polling ---
 
 func (b *TelegramBrokerV2) startPolling() {
+	if b.inboundMode == "webhook" {
+		return // webhook mode handles inbound via HTTP
+	}
 	if b.pollCancel != nil {
 		return
 	}
