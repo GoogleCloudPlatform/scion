@@ -237,9 +237,7 @@ func (m *Manager) loadPlugin(dp DiscoveredPlugin) error {
 	}
 	m.clients[key] = client
 	m.selfManaged[key] = dp.SelfManaged
-	if dp.SelfManaged {
-		m.configs[key] = dp
-	}
+	m.configs[key] = dp
 	// Cache the dispensed interface so subsequent Get() calls don't
 	// trigger a second Dispense (which would start another AcceptAndServe
 	// on the same MuxBroker stream ID, causing a timeout).
@@ -393,13 +391,15 @@ func (m *Manager) GetHarness(name string) (api.Harness, error) {
 	return harnessClient, nil
 }
 
-// ConfigureBroker sends additional configuration to a loaded broker plugin.
-// This is used to inject runtime credentials (hub_url, hmac_key, broker_id)
+// ConfigureBroker re-configures a loaded broker plugin by merging extra
+// key-value pairs into the plugin's original settings.yaml config. This
+// is used to inject runtime credentials (hub_url, hmac_key, broker_id)
 // that are not available at initial plugin load time.
-func (m *Manager) ConfigureBroker(name string, config map[string]string) error {
+func (m *Manager) ConfigureBroker(name string, extra map[string]string) error {
 	key := PluginTypeBroker + ":" + name
 	m.mu.RLock()
 	raw, ok := m.dispensed[key]
+	dp, hasDP := m.configs[key]
 	m.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("broker plugin not loaded: %s", name)
@@ -410,7 +410,21 @@ func (m *Manager) ConfigureBroker(name string, config map[string]string) error {
 		return fmt.Errorf("plugin %s is not a broker RPC client", name)
 	}
 
-	return rpcClient.Configure(config)
+	// Start from the original plugin config and layer the extra values on top.
+	merged := make(map[string]string)
+	if hasDP {
+		for k, v := range dp.Config {
+			merged[k] = v
+		}
+	}
+	if rpcClient.hostCallbacksAvailable {
+		merged[hostCallbacksConfigKey] = "true"
+	}
+	for k, v := range extra {
+		merged[k] = v
+	}
+
+	return rpcClient.Configure(merged)
 }
 
 // HasPlugin returns true if a plugin with the given type and name is loaded.
