@@ -139,7 +139,7 @@ func TestFormatStateChangeCard_Running(t *testing.T) {
 		},
 	}
 	text := FormatStateChangeCard(msg, "coder")
-	assert.Contains(t, text, "<b>🟢 coder — Running</b>")
+	assert.Contains(t, text, "<b>▶️ coder — Running</b>")
 	assert.Contains(t, text, "📋 Project: alpha")
 	assert.Contains(t, text, "🕐 May 13, 2:30 PM UTC")
 	assert.Contains(t, text, "Reviewing PR #42")
@@ -160,7 +160,7 @@ func TestFormatStateChangeCard_Error(t *testing.T) {
 		},
 	}
 	text := FormatStateChangeCard(msg, "coder")
-	assert.Contains(t, text, "<b>🔴 coder — Error</b>")
+	assert.Contains(t, text, "<b>❌ coder — Error</b>")
 	assert.Contains(t, text, "📋 Project: alpha")
 	assert.Contains(t, text, "⚠️")
 	assert.Contains(t, text, "Task failed: migration script returned exit code 1")
@@ -177,7 +177,7 @@ func TestFormatStateChangeCard_Idle(t *testing.T) {
 		Status:    "idle",
 	}
 	text := FormatStateChangeCard(msg, "worker")
-	assert.Contains(t, text, "<b>🟡 worker — Idle</b>")
+	assert.Contains(t, text, "<b>💤 worker — Idle</b>")
 	assert.Contains(t, text, "Waiting for input")
 	assert.NotContains(t, text, "📋 Project:")
 }
@@ -193,7 +193,7 @@ func TestFormatStateChangeCard_Stopped(t *testing.T) {
 		Status:    "stopped",
 	}
 	text := FormatStateChangeCard(msg, "worker")
-	assert.Contains(t, text, "<b>🟡 worker — Stopped</b>")
+	assert.Contains(t, text, "<b>⏹️ worker — Stopped</b>")
 }
 
 func TestFormatStateChangeCard_Starting(t *testing.T) {
@@ -210,7 +210,7 @@ func TestFormatStateChangeCard_Starting(t *testing.T) {
 		},
 	}
 	text := FormatStateChangeCard(msg, "deployer")
-	assert.Contains(t, text, "<b>⏳ deployer — Starting</b>")
+	assert.Contains(t, text, "<b>🚀 deployer — Starting</b>")
 	assert.Contains(t, text, "📋 Project: beta")
 	assert.Contains(t, text, "Initializing workspace")
 }
@@ -226,8 +226,8 @@ func TestFormatStateChangeCard_UnknownStatus(t *testing.T) {
 		Status:    "THINKING",
 	}
 	text := FormatStateChangeCard(msg, "coder")
-	// Unknown status gets ⚪ emoji and capitalised label.
-	assert.Contains(t, text, "<b>⚪ coder — THINKING</b>")
+	// "THINKING" is normalised to lowercase and matches the known "thinking" state.
+	assert.Contains(t, text, "<b>💭 coder — Thinking</b>")
 }
 
 func TestFormatStateChangeCard_HTMLEscape(t *testing.T) {
