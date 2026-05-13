@@ -41,8 +41,16 @@ type CallbackHandler struct {
 	hubClient HubClient
 	log       *slog.Logger
 
-	mu            sync.Mutex
-	pendingSetups map[int64]*pendingSetup // chatID → setup state
+	mu             sync.Mutex
+	pendingSetups  map[int64]*pendingSetup // chatID → setup state
+	cachedProjects []ProjectOption         // hub-injected project list
+}
+
+// SetProjects updates the cached project list used by the "change project" flow.
+func (h *CallbackHandler) SetProjects(projects []ProjectOption) {
+	h.mu.Lock()
+	h.cachedProjects = projects
+	h.mu.Unlock()
 }
 
 // pendingSetup tracks the multi-step /setup flow between project and agent selection.
@@ -224,15 +232,22 @@ func (h *CallbackHandler) finishSetup(ctx context.Context, cb *CallbackQuery, ch
 }
 
 func (h *CallbackHandler) handleSetupChange(ctx context.Context, cb *CallbackQuery, chatID, messageID int64) error {
-	projects, err := h.hubClient.ListProjects(ctx)
-	if err != nil {
-		h.log.Error("Failed to list projects", "error", err)
-		h.answerCallback(ctx, cb.ID, "Failed to fetch projects.", false)
-		return err
+	h.mu.Lock()
+	projects := h.cachedProjects
+	h.mu.Unlock()
+
+	if len(projects) == 0 {
+		var err error
+		projects, err = h.hubClient.ListProjects(ctx)
+		if err != nil {
+			h.log.Error("Failed to list projects", "error", err)
+			h.answerCallback(ctx, cb.ID, "Failed to fetch projects.", false)
+			return err
+		}
 	}
 
 	if len(projects) == 0 {
-		h.editMessage(ctx, chatID, messageID, "No projects found.", nil)
+		h.editMessage(ctx, chatID, messageID, "No projects found. Please /register first.", nil)
 		h.answerCallback(ctx, cb.ID, "", false)
 		return nil
 	}

@@ -194,6 +194,7 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 				projects = append(projects, ProjectOption{ID: id, Slug: slug})
 			}
 			b.commands.SetProjects(projects)
+				b.callbacks.SetProjects(projects)
 		}
 	}
 
