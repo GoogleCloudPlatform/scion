@@ -26,7 +26,7 @@ import (
 	"os"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
-	"github.com/GoogleCloudPlatform/scion/pkg/plugin/telegram"
+	"github.com/GoogleCloudPlatform/scion/extras/scion-telegram/internal/telegram"
 	goplugin "github.com/hashicorp/go-plugin"
 )
 
