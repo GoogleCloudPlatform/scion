@@ -218,10 +218,27 @@ func (b *TelegramBrokerV2) importV1ChatRoutes(ctx context.Context, routesJSON st
 		}
 
 		projectID, agentSlug := parseTopicComponents(topic)
+		// Attempt to resolve the project slug from the hub. Falls back to
+		// the project ID if the hub is unavailable during migration.
+		projectSlug := projectID
+		if b.hubClient != nil {
+			if projects, err := b.hubClient.ListProjects(ctx); err == nil {
+				for _, p := range projects {
+					if p.ID == projectID {
+						if p.Slug != "" {
+							projectSlug = p.Slug
+						} else if p.Name != "" {
+							projectSlug = p.Name
+						}
+						break
+					}
+				}
+			}
+		}
 		link := &GroupLink{
 			ChatID:       chatID,
 			ProjectID:    projectID,
-			ProjectSlug:  projectID,
+			ProjectSlug:  projectSlug,
 			DefaultAgent: agentSlug,
 			LinkedBy:     "v1-migration",
 			LinkedAt:     time.Now(),
