@@ -29,6 +29,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// brokerCallbackTimeout bounds how long a broker subscription callback may
+// spend on persistence and dispatch. Subscription callbacks run asynchronously
+// from the publisher and must NOT use the publisher's context (typically an
+// HTTP request context) because it may already be canceled by the time the
+// callback fires.
+const brokerCallbackTimeout = 30 * time.Second
+
 // MessageBrokerProxy bridges the message broker with the Hub's agent lifecycle
 // and dispatch infrastructure. It:
 //   - Subscribes to broker topics on behalf of agents (agents don't have direct broker access)
@@ -332,7 +339,9 @@ func (p *MessageBrokerProxy) subscribeAgent(projectID, agentSlug string) {
 	p.subscribedTopics[topic] = true
 	p.mu.Unlock()
 
-	sub, err := p.broker.Subscribe(topic, func(ctx context.Context, t string, msg *messages.StructuredMessage) {
+	sub, err := p.broker.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
+		ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
+		defer cancel()
 		p.deliverToAgent(ctx, projectID, agentSlug, msg)
 	})
 	if err != nil {
@@ -361,7 +370,9 @@ func (p *MessageBrokerProxy) subscribeProjectBroadcast(projectID string) {
 	p.subscribedTopics[topic] = true
 	p.mu.Unlock()
 
-	sub, err := p.broker.Subscribe(topic, func(ctx context.Context, t string, msg *messages.StructuredMessage) {
+	sub, err := p.broker.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
+		ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
+		defer cancel()
 		p.fanOutToProject(ctx, projectID, msg)
 	})
 	if err != nil {
@@ -392,7 +403,9 @@ func (p *MessageBrokerProxy) subscribeProjectUserMessages(projectID string) {
 	p.subscribedTopics[topic] = true
 	p.mu.Unlock()
 
-	sub, err := p.broker.Subscribe(topic, func(ctx context.Context, t string, msg *messages.StructuredMessage) {
+	sub, err := p.broker.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
+		ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
+		defer cancel()
 		p.deliverToUser(ctx, projectID, t, msg)
 	})
 	if err != nil {
@@ -455,7 +468,9 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 func (p *MessageBrokerProxy) subscribeGlobalBroadcast() {
 	topic := broker.TopicGlobalBroadcast()
 
-	_, err := p.broker.Subscribe(topic, func(ctx context.Context, t string, msg *messages.StructuredMessage) {
+	_, err := p.broker.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
+		ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
+		defer cancel()
 		p.fanOutGlobal(ctx, msg)
 	})
 	if err != nil {
