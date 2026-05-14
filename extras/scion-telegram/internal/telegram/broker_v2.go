@@ -714,6 +714,11 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 					"error", err)
 				continue
 			}
+			if errors.As(err, &apiErr) && apiErr.IsMigrated() {
+				b.log.Warn("Group upgraded to supergroup, skipping message",
+					"old_chat_id", chatID, "new_chat_id", apiErr.MigrateToChatID)
+				continue // TODO: migrate group_links record to new chat_id
+			}
 			b.log.Error("Failed to send Telegram message",
 				"chat_id", chatID, "error", err)
 			errs = append(errs, err)
@@ -850,6 +855,11 @@ func (b *TelegramBrokerV2) publishInputNeeded(ctx context.Context, api *Telegram
 				b.log.Warn("Transient error sending input-needed",
 					"chat_id", chatID, "error", err)
 				continue
+			}
+			if errors.As(err, &apiErr) && apiErr.IsMigrated() {
+				b.log.Warn("Group upgraded to supergroup, skipping input-needed",
+					"old_chat_id", chatID, "new_chat_id", apiErr.MigrateToChatID)
+				continue // TODO: migrate group_links record to new chat_id
 			}
 			b.log.Error("Failed to send input-needed message",
 				"chat_id", chatID, "error", err)
@@ -1525,8 +1535,20 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 
 	// Fallback 1: reply-to-bot-message — extract the agent from the replied-to message.
 	if len(targets) == 0 && tgMsg.ReplyToMessage != nil {
+		replyFromID := int64(0)
+		if tgMsg.ReplyToMessage.From != nil {
+			replyFromID = tgMsg.ReplyToMessage.From.ID
+		}
+		botID := int64(0)
+		if b.botInfo != nil {
+			botID = b.botInfo.ID
+		}
+		b.log.Debug("Fallback1: checking reply-to message", "reply_from_id", replyFromID, "bot_id", botID)
 		if b.botInfo != nil && tgMsg.ReplyToMessage.From != nil && tgMsg.ReplyToMessage.From.ID == b.botInfo.ID {
-			if slug := extractAgentFromBotMessage(tgMsg.ReplyToMessage.Text); slug != "" {
+			slug := extractAgentFromBotMessage(tgMsg.ReplyToMessage.Text)
+			b.log.Debug("Fallback1: extractAgentFromBotMessage result", "slug", slug)
+			if slug != "" {
+				b.log.Debug("Fallback1: agent in knownAgents check", "slug", slug, "agents", agents)
 				if slices.Contains(agents, slug) {
 					targets = []string{slug}
 				}
@@ -1536,12 +1558,18 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 
 	// Fallback 2: most recent conversation context for this user+project.
 	if len(targets) == 0 && tgMsg.ReplyToMessage != nil {
+		b.log.Debug("Fallback1: failed - trying conversation context")
 		if b.botInfo != nil && tgMsg.ReplyToMessage.From != nil && tgMsg.ReplyToMessage.From.ID == b.botInfo.ID {
 			if tgMsg.From != nil {
 				senderIDStr := strconv.FormatInt(tgMsg.From.ID, 10)
 				cc, err := b.store.GetLatestConversationContext(ctx, senderIDStr, link.ProjectID)
-				if err == nil && cc != nil && slices.Contains(agents, cc.AgentSlug) {
-					targets = []string{cc.AgentSlug}
+				ccSlug := ""
+				if err == nil && cc != nil {
+					ccSlug = cc.AgentSlug
+				}
+				b.log.Debug("Fallback2: conversation context result", "agent_slug", ccSlug, "err", err)
+				if ccSlug != "" && slices.Contains(agents, ccSlug) {
+					targets = []string{ccSlug}
 				}
 			}
 		}
@@ -1555,6 +1583,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	if len(targets) == 0 && link.DefaultAgent != "" {
 		text := strings.TrimSpace(tgMsg.Text)
 		if text != "" && !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "@") && !hasNonBotUserMention(tgMsg, botUsername, agents) {
+			b.log.Debug("Using default agent", "agent", link.DefaultAgent)
 			targets = []string{link.DefaultAgent}
 		}
 	}

@@ -65,9 +65,10 @@ type TGMessage struct {
 	From           *TGUser         `json:"from,omitempty"`
 	Chat           TGChat          `json:"chat"`
 	Date           int64           `json:"date"`
-	Text           string          `json:"text"`
-	Entities       []MessageEntity `json:"entities,omitempty"`
-	ReplyToMessage *TGMessage      `json:"reply_to_message,omitempty"`
+	Text            string          `json:"text"`
+	Entities        []MessageEntity `json:"entities,omitempty"`
+	ReplyToMessage  *TGMessage      `json:"reply_to_message,omitempty"`
+	MigrateToChatID int64           `json:"migrate_to_chat_id,omitempty"`
 }
 
 // MessageEntity represents a special entity in a Telegram message (e.g. @mentions, commands).
@@ -106,14 +107,16 @@ type apiResponse struct {
 // apiParameters contains optional response parameters from the Telegram API,
 // such as retry_after for 429 rate-limit responses.
 type apiParameters struct {
-	RetryAfterSec int `json:"retry_after,omitempty"`
+	RetryAfterSec   int   `json:"retry_after,omitempty"`
+	MigrateToChatID int64 `json:"migrate_to_chat_id,omitempty"`
 }
 
 // APIError represents a non-OK response from the Telegram Bot API.
 type APIError struct {
-	Code          int
-	Description   string
-	RetryAfterSec int
+	Code            int
+	Description     string
+	RetryAfterSec   int
+	MigrateToChatID int64
 }
 
 func (e *APIError) Error() string {
@@ -127,6 +130,10 @@ func (e *APIError) Error() string {
 // (429 rate limits, 5xx server errors) rather than permanent ones.
 func (e *APIError) IsTransient() bool {
 	return e.Code == http.StatusTooManyRequests || e.Code >= 500
+}
+
+func (e *APIError) IsMigrated() bool {
+	return e.MigrateToChatID != 0
 }
 
 // InlineKeyboardMarkup represents a Telegram inline keyboard attached to a message.
@@ -456,6 +463,7 @@ func (c *TelegramAPIClient) SendMessage(ctx context.Context, chatID int64, text,
 		apiErr := &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
 		if apiResp.Parameters != nil {
 			apiErr.RetryAfterSec = apiResp.Parameters.RetryAfterSec
+			apiErr.MigrateToChatID = apiResp.Parameters.MigrateToChatID
 		}
 		return nil, apiErr
 	}
@@ -504,6 +512,7 @@ func (c *TelegramAPIClient) SendMessageWithKeyboard(ctx context.Context, chatID 
 		apiErr := &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
 		if apiResp.Parameters != nil {
 			apiErr.RetryAfterSec = apiResp.Parameters.RetryAfterSec
+			apiErr.MigrateToChatID = apiResp.Parameters.MigrateToChatID
 		}
 		return nil, apiErr
 	}
@@ -565,6 +574,7 @@ func (c *TelegramAPIClient) SendMessageWithForceReply(ctx context.Context, chatI
 		apiErr := &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
 		if apiResp.Parameters != nil {
 			apiErr.RetryAfterSec = apiResp.Parameters.RetryAfterSec
+			apiErr.MigrateToChatID = apiResp.Parameters.MigrateToChatID
 		}
 		return nil, apiErr
 	}
@@ -639,6 +649,7 @@ func (c *TelegramAPIClient) SendDocument(ctx context.Context, chatID int64, file
 		apiErr := &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
 		if apiResp.Parameters != nil {
 			apiErr.RetryAfterSec = apiResp.Parameters.RetryAfterSec
+			apiErr.MigrateToChatID = apiResp.Parameters.MigrateToChatID
 		}
 		return nil, apiErr
 	}
@@ -687,6 +698,7 @@ func (c *TelegramAPIClient) EditMessageText(ctx context.Context, chatID int64, m
 		apiErr := &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
 		if apiResp.Parameters != nil {
 			apiErr.RetryAfterSec = apiResp.Parameters.RetryAfterSec
+			apiErr.MigrateToChatID = apiResp.Parameters.MigrateToChatID
 		}
 		return nil, apiErr
 	}
@@ -733,6 +745,7 @@ func (c *TelegramAPIClient) EditMessageReplyMarkup(ctx context.Context, chatID i
 		apiErr := &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
 		if apiResp.Parameters != nil {
 			apiErr.RetryAfterSec = apiResp.Parameters.RetryAfterSec
+			apiErr.MigrateToChatID = apiResp.Parameters.MigrateToChatID
 		}
 		return nil, apiErr
 	}
@@ -779,6 +792,7 @@ func (c *TelegramAPIClient) AnswerCallbackQuery(ctx context.Context, callbackQue
 		apiErr := &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
 		if apiResp.Parameters != nil {
 			apiErr.RetryAfterSec = apiResp.Parameters.RetryAfterSec
+			apiErr.MigrateToChatID = apiResp.Parameters.MigrateToChatID
 		}
 		return apiErr
 	}
@@ -884,6 +898,7 @@ func (c *TelegramAPIClient) DeleteMessage(ctx context.Context, chatID int64, mes
 		apiErr := &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
 		if apiResp.Parameters != nil {
 			apiErr.RetryAfterSec = apiResp.Parameters.RetryAfterSec
+			apiErr.MigrateToChatID = apiResp.Parameters.MigrateToChatID
 		}
 		return apiErr
 	}
