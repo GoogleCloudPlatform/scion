@@ -330,16 +330,25 @@ func (h *CallbackHandler) handleDefaultCallback(ctx context.Context, cb *Callbac
 		return err
 	}
 
-	link.DefaultAgent = agentSlug
+	if agentSlug == "__none__" {
+		link.DefaultAgent = ""
+	} else {
+		link.DefaultAgent = agentSlug
+	}
 	if err := h.store.SaveGroupLink(ctx, link); err != nil {
 		h.log.Error("Failed to update default agent", "chat_id", chatID, "error", err)
 		h.answerCallback(ctx, cb.ID, "Failed to update default agent.", false)
 		return err
 	}
 
-	h.editMessage(ctx, chatID, messageID,
-		fmt.Sprintf("Default agent set to @%s.", agentSlug), nil)
-	h.answerCallback(ctx, cb.ID, fmt.Sprintf("Default: @%s", agentSlug), false)
+	if agentSlug == "__none__" {
+		h.editMessage(ctx, chatID, messageID, "Default agent removed.", nil)
+		h.answerCallback(ctx, cb.ID, "Default: none", false)
+	} else {
+		h.editMessage(ctx, chatID, messageID,
+			fmt.Sprintf("Default agent set to @%s.", agentSlug), nil)
+		h.answerCallback(ctx, cb.ID, fmt.Sprintf("Default: @%s", agentSlug), false)
+	}
 	return nil
 }
 

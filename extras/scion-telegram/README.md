@@ -151,7 +151,7 @@ The hub will discover and launch `scion-plugin-telegram` as a managed subprocess
 |---------|-------------|
 | `/setup` | Link this group to a Scion project |
 | `/agents` | List agents in the linked project with real-time state |
-| `/default` | Set the default agent for unaddressed messages |
+| `/default` | Set or clear the default agent for unaddressed messages |
 | `/settings` | Configure group settings (see below) |
 | `/unlink` | Unlink this group from its project |
 | `/help` | Show available commands |
@@ -168,17 +168,18 @@ The hub will discover and launch `scion-plugin-telegram` as a managed subprocess
 
 ### Sending Messages to Agents
 
-Messages are routed based on @-mentions:
+Messages are routed based on @-mentions. If a default agent is set and the message is plain text (no `@mention` or `/command` prefix), it is automatically routed to the default agent — no @-mention required.
 
 | Pattern | Routing |
 |---------|---------|
+| `hello, can you help?` | Routes to the default agent (if set) |
 | `@botname @agentslug message` | Routes to the named agent |
 | `@botname message` | Routes to the group's default agent |
 | `@agentslug message` | Routes to the agent if the slug is recognized |
 | `@all message` | Broadcasts to ALL agents in the linked project |
 | *(reply to a bot message)* | Continues the conversation with the same agent |
 
-The bot strips @-mentions from the message text before forwarding to the agent.
+The bot strips @-mentions from the message text before forwarding to the agent. Use `/default` to set, change, or clear the default agent. Selecting "No default agent" disables automatic routing — only explicit @-mentions and replies will reach agents.
 
 ### Receiving Messages from Agents
 

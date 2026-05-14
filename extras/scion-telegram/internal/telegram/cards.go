@@ -78,7 +78,15 @@ func buildAgentSelectionKeyboard(agents []string, currentDefault string) *Inline
 // buildDefaultAgentKeyboard creates an inline keyboard for /default command.
 // Callback data format: dflt:<agentSlug>
 func buildDefaultAgentKeyboard(agents []string, currentDefault string) *InlineKeyboardMarkup {
-	return buildAgentKeyboard(agents, currentDefault, "dflt")
+	kb := buildAgentKeyboard(agents, currentDefault, "dflt")
+	noneLabel := "No default agent"
+	if currentDefault == "" {
+		noneLabel = "✓ No default agent (current)"
+	}
+	kb.InlineKeyboard = append(kb.InlineKeyboard, []InlineKeyboardButton{
+		{Text: noneLabel, CallbackData: "dflt:__none__"},
+	})
+	return kb
 }
 
 func buildAgentKeyboard(agents []string, currentDefault string, prefix string) *InlineKeyboardMarkup {
