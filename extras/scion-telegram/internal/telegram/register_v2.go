@@ -167,8 +167,8 @@ func (h *RegistrationHandler) HandleRegister(msg *TGMessage) {
 
 	hubLink := fmt.Sprintf("%s/profile/telegram?code=%s", strings.TrimRight(h.hubURL, "/"), code)
 
-	text := "To link your Telegram account, tap the button below to open the scion hub.\n\n" +
-		"The code will be applied automatically (expires in 15 minutes)."
+	text := "To link your Telegram and Scion accounts, tap and hold the button below and choose \"Open in ...\" your authenticated browser.\n\n" +
+		"(Link expires in 15 minutes.)"
 
 	keyboard := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
