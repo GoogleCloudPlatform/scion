@@ -1497,9 +1497,11 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	}
 
 	// Fallback 3: unaddressed plain text → default agent.
+	// Skip when the message contains @mentions of other Telegram users
+	// (not the bot, not a known agent) — those are user-to-user messages.
 	if len(targets) == 0 && link.DefaultAgent != "" {
 		text := strings.TrimSpace(tgMsg.Text)
-		if text != "" && !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "@") {
+		if text != "" && !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "@") && !hasNonBotUserMention(tgMsg, botUsername, agents) {
 			targets = []string{link.DefaultAgent}
 		}
 	}

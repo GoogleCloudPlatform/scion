@@ -445,3 +445,87 @@ func TestIsBotMentioned_MultipleEmojisBeforeMention(t *testing.T) {
 	}
 	assert.True(t, isBotMentioned(msg, "ScionHubBot"))
 }
+
+// --- hasNonBotUserMention tests ---
+
+func TestHasNonBotUserMention_UserMention(t *testing.T) {
+	msg := &TGMessage{
+		Text: "@bob what is new",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 4},
+		},
+	}
+	assert.True(t, hasNonBotUserMention(msg, "ScionHubBot", []string{"coder", "reviewer"}))
+}
+
+func TestHasNonBotUserMention_BotMention(t *testing.T) {
+	msg := &TGMessage{
+		Text: "@ScionHubBot hello",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 12},
+		},
+	}
+	assert.False(t, hasNonBotUserMention(msg, "ScionHubBot", []string{"coder"}))
+}
+
+func TestHasNonBotUserMention_AgentMention(t *testing.T) {
+	msg := &TGMessage{
+		Text: "@coder help me",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 6},
+		},
+	}
+	assert.False(t, hasNonBotUserMention(msg, "ScionHubBot", []string{"coder", "reviewer"}))
+}
+
+func TestHasNonBotUserMention_TextMentionNonBot(t *testing.T) {
+	msg := &TGMessage{
+		Text: "Bob Smith what is new",
+		Entities: []MessageEntity{
+			{Type: "text_mention", Offset: 0, Length: 9, User: &TGUser{ID: 12345, FirstName: "Bob", LastName: "Smith"}},
+		},
+	}
+	assert.True(t, hasNonBotUserMention(msg, "ScionHubBot", []string{"coder"}))
+}
+
+func TestHasNonBotUserMention_TextMentionBot(t *testing.T) {
+	msg := &TGMessage{
+		Text: "ScionHubBot do something",
+		Entities: []MessageEntity{
+			{Type: "text_mention", Offset: 0, Length: 11, User: &TGUser{ID: 999, Username: "ScionHubBot", IsBot: true}},
+		},
+	}
+	assert.False(t, hasNonBotUserMention(msg, "ScionHubBot", []string{"coder"}))
+}
+
+func TestHasNonBotUserMention_NoEntities(t *testing.T) {
+	msg := &TGMessage{
+		Text: "just a regular message",
+	}
+	assert.False(t, hasNonBotUserMention(msg, "ScionHubBot", []string{"coder"}))
+}
+
+func TestHasNonBotUserMention_NilMessage(t *testing.T) {
+	assert.False(t, hasNonBotUserMention(nil, "ScionHubBot", []string{"coder"}))
+}
+
+func TestHasNonBotUserMention_MixedBotAndUserMention(t *testing.T) {
+	msg := &TGMessage{
+		Text: "@ScionHubBot @alice hello",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 12},
+			{Type: "mention", Offset: 13, Length: 6},
+		},
+	}
+	assert.True(t, hasNonBotUserMention(msg, "ScionHubBot", []string{"coder"}))
+}
+
+func TestHasNonBotUserMention_CaseInsensitive(t *testing.T) {
+	msg := &TGMessage{
+		Text: "@scionhubbot hello",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 12},
+		},
+	}
+	assert.False(t, hasNonBotUserMention(msg, "ScionHubBot", []string{"coder"}))
+}

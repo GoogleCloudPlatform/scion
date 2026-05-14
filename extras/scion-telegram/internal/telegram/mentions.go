@@ -207,6 +207,46 @@ func stripMentions(text string, botUsername string, agentSlugs []string) string 
 	return strings.Join(parts, " ")
 }
 
+// hasNonBotUserMention returns true if the message contains any mention or
+// text_mention entity pointing to a Telegram user who is neither the bot
+// nor a known agent.
+func hasNonBotUserMention(msg *TGMessage, botUsername string, knownAgents []string) bool {
+	if msg == nil || len(msg.Entities) == 0 {
+		return false
+	}
+	lowerBot := strings.ToLower(botUsername)
+	agentSet := make(map[string]bool, len(knownAgents))
+	for _, a := range knownAgents {
+		agentSet[strings.ToLower(a)] = true
+	}
+	for _, ent := range msg.Entities {
+		switch ent.Type {
+		case "mention":
+			mention, ok := utf16Extract(msg.Text, ent.Offset, ent.Length)
+			if !ok {
+				continue
+			}
+			username := strings.ToLower(strings.TrimPrefix(mention, "@"))
+			if username == "" || username == lowerBot || agentSet[username] {
+				continue
+			}
+			return true
+		case "text_mention":
+			if ent.User == nil {
+				continue
+			}
+			if botUsername != "" && strings.ToLower(ent.User.Username) == lowerBot {
+				continue
+			}
+			if ent.User.Username != "" && agentSet[strings.ToLower(ent.User.Username)] {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
 // Precompiled patterns for extractAgentFromBotMessage.
 var (
 	// agentToAgentRe matches the observer format: "👀 🤖 sender → 🤖 recipient 👀"
