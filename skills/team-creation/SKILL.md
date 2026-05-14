@@ -5,14 +5,14 @@ description: >-
   Use when the user describes a multi-agent team, panel, crew, pipeline, or any scenario
   requiring coordinated LLM agents with distinct roles. Also use when adding new roles to an
   existing team, modifying workflows, or restructuring agent coordination. Produces ready-to-use
-  template directories in .scion/templates/.
+  template directories in .scion/templates/ by default, or in a custom path if specified.
 ---
 
 # Scion Team Creation & Extension Skill
 
 You create and extend **scion agent templates** — the blueprints that define specialized agent roles. Given a description of a team (roles, responsibilities, workflow), you produce template directories that can be used to start agents with `scion start <name> --type <template>`.
 
-When extending an existing team, review the current templates in `.scion/templates/` to understand the established patterns, naming, and workflow before making changes.
+When extending an existing team, review the current templates to understand the established patterns, naming, and workflow before making changes.
 
 ## Template Directory Structure
 
@@ -22,7 +22,7 @@ Each template lives in `.scion/templates/<template-name>/` and contains:
 .scion/templates/<template-name>/
 ├── scion-agent.yaml       # REQUIRED: template metadata and config
 ├── agents.md              # REQUIRED: agent behavioral instructions
-├── system-prompt.md       # OPTIONAL: role persona and expertise framing
+├── system-prompt.md       # REQUIRED: role persona and expertise framing
 └── skills/                # OPTIONAL: harness skills (agentskills.io standard)
     └── <skill-name>/
         └── SKILL.md
@@ -69,9 +69,9 @@ services:
 
 ### agents.md (Agent Instructions)
 
-This file contains the behavioral instructions injected into the agent's context. Every `agents.md` MUST begin with the **status reporting boilerplate** — the block that instructs agents to call `sciontool status` for `ask_user`, `blocked`, and `task_completed` events. This is mandatory scion infrastructure. Copy it from any existing template's `agents.md` in the project.
+This file contains the behavioral instructions injected into the agent's context. 
 
-After the boilerplate, add role-specific instructions describing what the agent should do, how it should behave, and any constraints on its work.
+The primary contents should focus on task and job work describing what the agent should do, how it should behave, and any constraints on its work.
 
 Do **not** include instructions on how to use the scion CLI (starting agents, messaging, `scion look`, etc.) — every agent automatically receives base CLI operating instructions from the platform.
 
@@ -88,6 +88,8 @@ prioritizing correctness and clarity over style preferences.
 ```
 
 If the role doesn't need a distinct persona, omit this file and remove the `system_prompt` line from `scion-agent.yaml`.
+
+This file can contain broad direction around skillsets.
 
 ## Harness Skills
 
@@ -193,6 +195,7 @@ Read the existing templates in `.scion/templates/` to understand:
 - The orchestrator's workflow and how it references workers
 - Naming conventions and patterns already established
 - Any existing skills in template `skills/` directories
+- Skill may be hard copied between templates if they are relevant to more than one type.
 
 ### 2. Determine the Change
 
@@ -209,9 +212,7 @@ Read the existing templates in `.scion/templates/` to understand:
 
 ## Gotchas
 
-- **Never omit the status boilerplate** from `agents.md`. Without it, scion cannot track agent state.
 - **Don't duplicate CLI usage instructions**. Every agent already receives base scion CLI instructions from the platform.
 - **Don't create `home/` directories** in custom templates. The default template provides all infrastructure.
 - **Template names = directory names**. The `description` in `scion-agent.yaml` is cosmetic; the `--type` value is the directory name.
-- **Workers communicate through the orchestrator**. Agents don't message each other directly.
 - **Skills are harness-portable**. Write `SKILL.md` content without assuming a specific harness — scion mounts skills into the correct location automatically.
