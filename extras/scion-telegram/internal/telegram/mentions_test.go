@@ -517,7 +517,28 @@ func TestHasNonBotUserMention_MixedBotAndUserMention(t *testing.T) {
 			{Type: "mention", Offset: 13, Length: 6},
 		},
 	}
-	assert.True(t, hasNonBotUserMention(msg, "ScionHubBot", []string{"coder"}))
+	// @alice is at offset>0 so it does not block default routing.
+	assert.False(t, hasNonBotUserMention(msg, "ScionHubBot", []string{"coder"}))
+}
+
+func TestHasNonBotUserMention_MentionAtOffsetGtZero(t *testing.T) {
+	msg := &TGMessage{
+		Text: "hey @bob what do you think",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 4, Length: 4},
+		},
+	}
+	assert.False(t, hasNonBotUserMention(msg, "ScionHubBot", []string{"coder"}))
+}
+
+func TestHasNonBotUserMention_TextMentionAtOffsetGtZero(t *testing.T) {
+	msg := &TGMessage{
+		Text: "hey Bob Smith what do you think",
+		Entities: []MessageEntity{
+			{Type: "text_mention", Offset: 4, Length: 9, User: &TGUser{ID: 12345, FirstName: "Bob", LastName: "Smith"}},
+		},
+	}
+	assert.False(t, hasNonBotUserMention(msg, "ScionHubBot", []string{"coder"}))
 }
 
 func TestHasNonBotUserMention_CaseInsensitive(t *testing.T) {

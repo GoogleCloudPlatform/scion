@@ -207,9 +207,10 @@ func stripMentions(text string, botUsername string, agentSlugs []string) string 
 	return strings.Join(parts, " ")
 }
 
-// hasNonBotUserMention returns true if the message contains any mention or
-// text_mention entity pointing to a Telegram user who is neither the bot
-// nor a known agent.
+// hasNonBotUserMention returns true if the message starts with (offset=0) a
+// mention or text_mention entity pointing to a Telegram user who is neither
+// the bot nor a known agent. Mentions embedded later in the message (offset>0)
+// are ignored so the message can still route to the default agent.
 func hasNonBotUserMention(msg *TGMessage, botUsername string, knownAgents []string) bool {
 	if msg == nil || len(msg.Entities) == 0 {
 		return false
@@ -220,6 +221,9 @@ func hasNonBotUserMention(msg *TGMessage, botUsername string, knownAgents []stri
 		agentSet[strings.ToLower(a)] = true
 	}
 	for _, ent := range msg.Entities {
+		if ent.Offset != 0 {
+			continue
+		}
 		switch ent.Type {
 		case "mention":
 			mention, ok := utf16Extract(msg.Text, ent.Offset, ent.Length)
