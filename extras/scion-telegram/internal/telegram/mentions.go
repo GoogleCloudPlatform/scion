@@ -286,6 +286,8 @@ var (
 	agentToAgentRe = regexp.MustCompile(`^(?:\[URGENT\] )?(?:\[Broadcast\] )?👀 🤖 \S+ → 🤖 (\S+) 👀`)
 	// standardAgentRe matches the standard format: "🤖 agent-slug" (optionally followed by " [status]")
 	standardAgentRe = regexp.MustCompile(`^(?:\[URGENT\] )?(?:\[Broadcast\] )?🤖 (\S+?)(?:\s*\[|\s*\n|$)`)
+	// stateChangeCardRe matches state change card headers: "✅ agent-slug — Completed"
+	stateChangeCardRe = regexp.MustCompile(`^(?:\[URGENT\] )?(?:\[Broadcast\] )?\S+ (\S+?) — \S`)
 )
 
 // extractAgentFromBotMessage parses a FormatMessageV2 output and extracts the
@@ -304,6 +306,11 @@ func extractAgentFromBotMessage(text string) string {
 
 	// Try standard agent format.
 	if m := standardAgentRe.FindStringSubmatch(text); m != nil {
+		return m[1]
+	}
+
+	// Try state change card format (e.g. "✅ coordinator — Completed").
+	if m := stateChangeCardRe.FindStringSubmatch(text); m != nil {
 		return m[1]
 	}
 

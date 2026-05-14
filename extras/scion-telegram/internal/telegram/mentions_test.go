@@ -310,6 +310,31 @@ func TestExtractAgentFromBotMessage_AgentToAgentUrgent(t *testing.T) {
 	assert.Equal(t, "recipient", extractAgentFromBotMessage(text))
 }
 
+func TestExtractAgentFromBotMessage_StateChangeCompleted(t *testing.T) {
+	text := "✅ coordinator — Completed\n\nTask finished successfully"
+	assert.Equal(t, "coordinator", extractAgentFromBotMessage(text))
+}
+
+func TestExtractAgentFromBotMessage_StateChangeRunning(t *testing.T) {
+	text := "▶️ coder — Running\n\nWorking on task"
+	assert.Equal(t, "coder", extractAgentFromBotMessage(text))
+}
+
+func TestExtractAgentFromBotMessage_StateChangeHyphenatedSlug(t *testing.T) {
+	text := "⏸️ my-agent — Paused\n\nWaiting for input"
+	assert.Equal(t, "my-agent", extractAgentFromBotMessage(text))
+}
+
+func TestExtractAgentFromBotMessage_StateChangeUrgent(t *testing.T) {
+	text := "[URGENT] ✅ coordinator — Completed\n\nDone"
+	assert.Equal(t, "coordinator", extractAgentFromBotMessage(text))
+}
+
+func TestExtractAgentFromBotMessage_StateChangeBroadcast(t *testing.T) {
+	text := "[Broadcast] ✅ coordinator — Completed\n\nDone"
+	assert.Equal(t, "coordinator", extractAgentFromBotMessage(text))
+}
+
 func TestExtractAgentFromBotMessage_NoMatch(t *testing.T) {
 	assert.Equal(t, "", extractAgentFromBotMessage("Hello world"))
 }
