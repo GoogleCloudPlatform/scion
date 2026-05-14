@@ -89,6 +89,15 @@ const maxTaskSummaryLength = 200
 // or mid-entity truncation.
 const htmlCardOverhead = 300
 
+// maxSlugDisplayLength is the maximum plain-text length for an agent slug
+// before HTML escaping. Prevents unbounded slug expansion from pushing
+// the assembled HTML card over the Telegram limit.
+const maxSlugDisplayLength = 64
+
+// maxProjectDisplayLength is the maximum plain-text length for a project ID
+// before HTML escaping.
+const maxProjectDisplayLength = 100
+
 // stateEmoji maps agent states to display emoji matching the scion web UI.
 var stateEmoji = map[string]string{
 	"created":      "🆕",
@@ -157,20 +166,20 @@ func FormatStateChangeCard(msg *messages.StructuredMessage, agentSlug string) st
 		}
 	}
 
-	escapedSlug := html.EscapeString(agentSlug)
-	if escapedSlug == "" {
-		// Fall back to sender slug if agentSlug is empty.
+	slug := agentSlug
+	if slug == "" {
 		if strings.HasPrefix(msg.Sender, "agent:") {
-			escapedSlug = html.EscapeString(strings.TrimPrefix(msg.Sender, "agent:"))
+			slug = strings.TrimPrefix(msg.Sender, "agent:")
 		} else {
-			escapedSlug = html.EscapeString(msg.Sender)
+			slug = msg.Sender
 		}
 	}
+	slug = truncatePlainText(slug, maxSlugDisplayLength)
 
 	var b strings.Builder
 
 	// Header: <b>🟢 coder — Running</b>
-	fmt.Fprintf(&b, "<b>%s %s — %s</b>\n", emoji, escapedSlug, html.EscapeString(label))
+	fmt.Fprintf(&b, "<b>%s %s — %s</b>\n", emoji, html.EscapeString(slug), html.EscapeString(label))
 
 	// Project line.
 	project := ""
@@ -180,6 +189,7 @@ func FormatStateChangeCard(msg *messages.StructuredMessage, agentSlug string) st
 		}
 	}
 	if project != "" {
+		project = truncatePlainText(project, maxProjectDisplayLength)
 		fmt.Fprintf(&b, "📋 Project: %s\n", html.EscapeString(project))
 	}
 
@@ -206,8 +216,7 @@ func FormatStateChangeCard(msg *messages.StructuredMessage, agentSlug string) st
 		}
 	}
 
-	text := b.String()
-	return truncateMessage(text)
+	return truncateHTMLMessage(b.String())
 }
 
 // FormatInputNeededCard converts an input-needed StructuredMessage into an
@@ -219,18 +228,19 @@ func FormatInputNeededCard(msg *messages.StructuredMessage, agentSlug string) st
 		return ""
 	}
 
-	escapedSlug := html.EscapeString(agentSlug)
-	if escapedSlug == "" {
+	slug := agentSlug
+	if slug == "" {
 		if strings.HasPrefix(msg.Sender, "agent:") {
-			escapedSlug = html.EscapeString(strings.TrimPrefix(msg.Sender, "agent:"))
+			slug = strings.TrimPrefix(msg.Sender, "agent:")
 		} else {
-			escapedSlug = html.EscapeString(msg.Sender)
+			slug = msg.Sender
 		}
 	}
+	slug = truncatePlainText(slug, maxSlugDisplayLength)
 
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "<b>🤖 %s [input needed]</b>\n", escapedSlug)
+	fmt.Fprintf(&b, "<b>🤖 %s [input needed]</b>\n", html.EscapeString(slug))
 
 	project := ""
 	if msg.Metadata != nil {
@@ -239,6 +249,7 @@ func FormatInputNeededCard(msg *messages.StructuredMessage, agentSlug string) st
 		}
 	}
 	if project != "" {
+		project = truncatePlainText(project, maxProjectDisplayLength)
 		fmt.Fprintf(&b, "📋 Project: %s\n", html.EscapeString(project))
 	}
 
@@ -259,7 +270,7 @@ func FormatInputNeededCard(msg *messages.StructuredMessage, agentSlug string) st
 		fmt.Fprintf(&b, "\n%s", html.EscapeString(prompt))
 	}
 
-	return truncateMessage(b.String())
+	return truncateHTMLMessage(b.String())
 }
 
 // formatTimestamp parses an RFC3339 timestamp and returns a human-friendly
@@ -289,6 +300,36 @@ func truncatePlainText(text string, maxLen int) string {
 		cutoff--
 	}
 	return text[:cutoff] + "…"
+}
+
+// truncateHTMLMessage ensures HTML-formatted text does not exceed Telegram's
+// message limit without splitting HTML tags or entities at the truncation
+// boundary. After truncating to a valid rune boundary, it strips any trailing
+// partial HTML tag (a '<' without a closing '>') or partial HTML entity
+// (a '&' without a closing ';').
+func truncateHTMLMessage(text string) string {
+	if len(text) <= maxTelegramMessageLength {
+		return text
+	}
+	cutoff := maxTelegramMessageLength - len(truncationSuffix)
+	if cutoff < 0 {
+		cutoff = 0
+	}
+	for cutoff > 0 && !utf8.RuneStart(text[cutoff]) {
+		cutoff--
+	}
+	truncated := text[:cutoff]
+	if lastLT := strings.LastIndex(truncated, "<"); lastLT != -1 {
+		if !strings.Contains(truncated[lastLT:], ">") {
+			truncated = truncated[:lastLT]
+		}
+	}
+	if lastAmp := strings.LastIndex(truncated, "&"); lastAmp != -1 {
+		if !strings.Contains(truncated[lastAmp:], ";") {
+			truncated = truncated[:lastAmp]
+		}
+	}
+	return truncated + truncationSuffix
 }
 
 // truncateMessage ensures the text does not exceed Telegram's message limit.

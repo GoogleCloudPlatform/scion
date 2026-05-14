@@ -383,6 +383,101 @@ func TestFormatInputNeededCard_Nil(t *testing.T) {
 	assert.Empty(t, FormatInputNeededCard(nil, "x"))
 }
 
+// --- truncateHTMLMessage tests ---
+
+func TestTruncateHTMLMessage_NoTruncationNeeded(t *testing.T) {
+	text := "<b>hello</b>"
+	got := truncateHTMLMessage(text)
+	assert.Equal(t, text, got)
+}
+
+func TestTruncateHTMLMessage_DoesNotSplitTag(t *testing.T) {
+	// Position filler so the byte cutoff lands inside "<b>".
+	// cutoff = 4096 - len("\n[truncated]") = 4084
+	// filler(4082) + "<b" = 4084 → truncation would split the tag.
+	filler := strings.Repeat("x", maxTelegramMessageLength-len(truncationSuffix)-2)
+	text := filler + "<b>cut here</b>"
+	got := truncateHTMLMessage(text)
+	assert.LessOrEqual(t, len(got), maxTelegramMessageLength)
+	assert.True(t, strings.HasSuffix(got, truncationSuffix))
+	// The partial "<b" must have been stripped.
+	assert.NotContains(t, got, "<b")
+}
+
+func TestTruncateHTMLMessage_DoesNotSplitEntity(t *testing.T) {
+	// Build a string that will truncate mid-entity like &amp;
+	filler := strings.Repeat("x", maxTelegramMessageLength-10)
+	text := filler + "&amp; more"
+	got := truncateHTMLMessage(text)
+	assert.LessOrEqual(t, len(got), maxTelegramMessageLength)
+	// Must not contain a partial '&amp' without closing ';'.
+	lastAmp := strings.LastIndex(got, "&")
+	if lastAmp != -1 {
+		afterAmp := got[lastAmp:]
+		if !strings.HasSuffix(afterAmp, truncationSuffix) {
+			assert.Contains(t, afterAmp, ";", "truncation left a partial HTML entity")
+		}
+	}
+}
+
+func TestFormatStateChangeCard_LongSlugTruncated(t *testing.T) {
+	longSlug := strings.Repeat("a", 200)
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: "2026-05-13T09:00:00Z",
+		Sender:    "agent:coder",
+		Recipient: "user:alice",
+		Msg:       "hello",
+		Type:      messages.TypeStateChange,
+		Status:    "running",
+	}
+	text := FormatStateChangeCard(msg, longSlug)
+	assert.LessOrEqual(t, len(text), maxTelegramMessageLength)
+	assert.Contains(t, text, "…")
+}
+
+func TestFormatStateChangeCard_LongProjectTruncated(t *testing.T) {
+	longProject := strings.Repeat("p", 200)
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: "2026-05-13T09:00:00Z",
+		Sender:    "agent:coder",
+		Recipient: "user:alice",
+		Msg:       "hello",
+		Type:      messages.TypeStateChange,
+		Status:    "running",
+		Metadata:  map[string]string{"project_id": longProject},
+	}
+	text := FormatStateChangeCard(msg, "coder")
+	assert.LessOrEqual(t, len(text), maxTelegramMessageLength)
+}
+
+func TestFormatStateChangeCard_HTMLSpecialCharsInSlugNoMidTagTruncation(t *testing.T) {
+	// Slug full of '<' chars: each becomes '&lt;' (4x expansion).
+	// Without slug truncation, this could push the HTML over 4096 and
+	// truncateMessage would cut mid-entity.
+	evilSlug := strings.Repeat("<", 200)
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: "2026-05-13T09:00:00Z",
+		Sender:    "agent:coder",
+		Recipient: "user:alice",
+		Msg:       "summary",
+		Type:      messages.TypeStateChange,
+		Status:    "running",
+	}
+	text := FormatStateChangeCard(msg, evilSlug)
+	assert.LessOrEqual(t, len(text), maxTelegramMessageLength)
+	// Verify no broken HTML entities: every '&' must have a matching ';'.
+	for i := 0; i < len(text); i++ {
+		if text[i] == '&' {
+			rest := text[i:]
+			semiIdx := strings.Index(rest, ";")
+			assert.True(t, semiIdx != -1 && semiIdx < 10, "broken HTML entity at position %d", i)
+		}
+	}
+}
+
 func TestFormatTimestamp(t *testing.T) {
 	tests := []struct {
 		input string
