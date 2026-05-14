@@ -98,6 +98,35 @@ func utf16Extract(s string, offset, length int) (string, bool) {
 	return "", false
 }
 
+// utf16ByteRange returns the byte start (inclusive) and byte end (exclusive)
+// positions in s that correspond to a UTF-16 offset and length.
+func utf16ByteRange(s string, offset, length int) (int, int, bool) {
+	if offset < 0 || length < 0 {
+		return 0, 0, false
+	}
+
+	var (
+		u16pos    int
+		byteStart = -1
+	)
+
+	for i, r := range s {
+		if u16pos == offset {
+			byteStart = i
+		}
+		if byteStart >= 0 && u16pos == offset+length {
+			return byteStart, i, true
+		}
+		u16pos += utf16CodeUnits(r)
+	}
+
+	if byteStart >= 0 && u16pos == offset+length {
+		return byteStart, len(s), true
+	}
+
+	return 0, 0, false
+}
+
 // utf16CodeUnits returns the number of UTF-16 code units needed to represent rune r.
 func utf16CodeUnits(r rune) int {
 	if r >= 0x10000 {

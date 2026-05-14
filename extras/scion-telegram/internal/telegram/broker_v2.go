@@ -1546,15 +1546,16 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		}
 	}
 
-	// Strip mentions to get clean message text.
-	cleanText := stripMentions(tgMsg.Text, botUsername, targets)
+	// Resolve @username mentions to scion user identities and replace
+	// text_mention display names with "user:email" in the message text.
+	resolvedText, resolvedMentionsJSON := b.resolveUserMentions(ctx, tgMsg)
+
+	// Strip bot/agent mentions to get clean message text.
+	cleanText := stripMentions(resolvedText, botUsername, targets)
 	cleanText = strings.TrimSpace(cleanText)
 	if cleanText == "" {
 		return
 	}
-
-	// Resolve @username mentions to scion user identities.
-	resolvedMentionsJSON := b.resolveUserMentions(ctx, tgMsg)
 
 	// Deliver to each target agent.
 	for _, agentSlug := range targets {
@@ -1606,16 +1607,25 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	}
 }
 
-// resolveUserMentions extracts @username mentions from a Telegram message's
-// entities, looks each up in the user_mappings store, and returns a JSON string
-// mapping "@username" → "user:email" for all resolved mentions. Returns "" if
-// no mentions resolve.
-func (b *TelegramBrokerV2) resolveUserMentions(ctx context.Context, tgMsg *TGMessage) string {
+// resolveUserMentions extracts @username and text_mention entities from a
+// Telegram message, looks each up in the user_mappings store, and returns:
+//   - modifiedText: the message text with text_mention display names (offset>0)
+//     replaced by "user:email" for registered users
+//   - resolvedJSON: a JSON string mapping display names → "user:email" for all
+//     resolved mentions (empty string if none resolve)
+func (b *TelegramBrokerV2) resolveUserMentions(ctx context.Context, tgMsg *TGMessage) (string, string) {
 	if len(tgMsg.Entities) == 0 {
-		return ""
+		return tgMsg.Text, ""
 	}
 
 	resolved := make(map[string]string)
+
+	type textReplacement struct {
+		offset      int
+		length      int
+		replacement string
+	}
+	var replacements []textReplacement
 
 	for _, ent := range tgMsg.Entities {
 		switch ent.Type {
@@ -1646,26 +1656,49 @@ func (b *TelegramBrokerV2) resolveUserMentions(ctx context.Context, tgMsg *TGMes
 				b.log.Warn("Failed to look up text_mention user", "telegram_user_id", tgUserID, "error", err)
 				continue
 			}
-			displayName := "@" + ent.User.FirstName
-			if ent.User.Username != "" {
-				displayName = "@" + ent.User.Username
+			if mapping == nil || mapping.ScionEmail == "" {
+				continue
 			}
-			if mapping != nil && mapping.ScionUserID != "" {
-				resolved[displayName] = mapping.ScionUserID
+			displayName := ent.User.FirstName
+			if ent.User.Username != "" {
+				displayName = ent.User.Username
+			}
+			scionIdentity := "user:" + mapping.ScionEmail
+			resolved["@"+displayName] = scionIdentity
+			if ent.Offset > 0 {
+				replacements = append(replacements, textReplacement{
+					offset:      ent.Offset,
+					length:      ent.Length,
+					replacement: scionIdentity,
+				})
 			}
 		}
 	}
 
+	modifiedText := tgMsg.Text
+	if len(replacements) > 0 {
+		slices.SortFunc(replacements, func(a, b textReplacement) int {
+			return b.offset - a.offset
+		})
+		for _, r := range replacements {
+			start, end, ok := utf16ByteRange(modifiedText, r.offset, r.length)
+			if !ok {
+				continue
+			}
+			modifiedText = modifiedText[:start] + r.replacement + modifiedText[end:]
+		}
+	}
+
 	if len(resolved) == 0 {
-		return ""
+		return modifiedText, ""
 	}
 
 	data, err := json.Marshal(resolved)
 	if err != nil {
 		b.log.Warn("Failed to marshal resolved mentions", "error", err)
-		return ""
+		return modifiedText, ""
 	}
-	return string(data)
+	return modifiedText, string(data)
 }
 
 // --- Callback query handling ---
