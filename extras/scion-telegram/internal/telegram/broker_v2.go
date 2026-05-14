@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -669,6 +670,11 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 			"recipient", msg.Recipient, "topic", topic, "username", recipientUsername)
 	}
 
+	// Replace scion user emails with Telegram @mentions in the message body.
+	if msg != nil && store != nil {
+		msg.Msg = resolveOutboundMentions(ctx, store, msg.Msg)
+	}
+
 	// Format the message for Telegram.
 	text := FormatMessageV2(msg, agentSlug, recipientUsername)
 	if text == "" {
@@ -737,6 +743,51 @@ func (b *TelegramBrokerV2) resolveRecipientUsername(ctx context.Context, store S
 		return mapping.TelegramUsername
 	}
 	return ""
+}
+
+var outboundEmailRe = regexp.MustCompile(`(?:user:)?[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
+
+// resolveOutboundMentions scans text for scion user emails (with optional
+// "user:" prefix) and replaces them with Telegram @mentions when the user
+// is registered and has a username.
+func resolveOutboundMentions(ctx context.Context, store Store, text string) string {
+	if store == nil || text == "" {
+		return text
+	}
+
+	matches := outboundEmailRe.FindAllStringIndex(text, -1)
+	if len(matches) == 0 {
+		return text
+	}
+
+	for i := len(matches) - 1; i >= 0; i-- {
+		start, end := matches[i][0], matches[i][1]
+
+		if start > 0 {
+			prev := text[start-1]
+			if prev == '/' || prev == ':' {
+				continue
+			}
+		}
+		if end < len(text) && text[end] == '/' {
+			continue
+		}
+
+		match := text[start:end]
+		email := match
+		if strings.HasPrefix(email, "user:") {
+			email = strings.TrimPrefix(email, "user:")
+		}
+
+		mapping, err := store.GetUserMappingByEmail(ctx, email)
+		if err != nil || mapping == nil || mapping.TelegramUsername == "" {
+			continue
+		}
+
+		text = text[:start] + "@" + mapping.TelegramUsername + text[end:]
+	}
+
+	return text
 }
 
 // resolveRecipientChats looks up target chats for a specific recipient.

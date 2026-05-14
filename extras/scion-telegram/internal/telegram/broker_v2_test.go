@@ -1918,3 +1918,99 @@ func TestV2_WebhookMode_Close(t *testing.T) {
 	assert.Empty(t, tgSrv.webhookURL, "webhook should be deleted on close")
 	tgSrv.mu.Unlock()
 }
+
+func TestResolveOutboundMentions(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID:   "100",
+		TelegramUsername: "ptone805",
+		ScionEmail:       "ptone@google.com",
+		LinkedAt:         time.Now().UTC(),
+	}))
+	require.NoError(t, store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "200",
+		ScionEmail:     "nousername@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{
+			name: "user:email replaced",
+			text: "Hey user:ptone@google.com check this",
+			want: "Hey @ptone805 check this",
+		},
+		{
+			name: "standalone email replaced",
+			text: "Hey ptone@google.com check this",
+			want: "Hey @ptone805 check this",
+		},
+		{
+			name: "no username leaves as-is",
+			text: "Contact nousername@example.com please",
+			want: "Contact nousername@example.com please",
+		},
+		{
+			name: "unknown email leaves as-is",
+			text: "Contact unknown@example.com please",
+			want: "Contact unknown@example.com please",
+		},
+		{
+			name: "email in URL skipped",
+			text: "See https://ptone@google.com/path",
+			want: "See https://ptone@google.com/path",
+		},
+		{
+			name: "mailto skipped",
+			text: "Send to mailto:ptone@google.com",
+			want: "Send to mailto:ptone@google.com",
+		},
+		{
+			name: "multiple emails",
+			text: "user:ptone@google.com and nousername@example.com",
+			want: "@ptone805 and nousername@example.com",
+		},
+		{
+			name: "email at start of text",
+			text: "ptone@google.com said hello",
+			want: "@ptone805 said hello",
+		},
+		{
+			name: "email at end of text",
+			text: "message from ptone@google.com",
+			want: "message from @ptone805",
+		},
+		{
+			name: "empty text",
+			text: "",
+			want: "",
+		},
+		{
+			name: "no emails",
+			text: "just a regular message",
+			want: "just a regular message",
+		},
+		{
+			name: "email followed by slash skipped",
+			text: "http://ptone@google.com/foo",
+			want: "http://ptone@google.com/foo",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveOutboundMentions(ctx, store, tt.text)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+
+	t.Run("nil store returns text unchanged", func(t *testing.T) {
+		got := resolveOutboundMentions(ctx, nil, "ptone@google.com")
+		assert.Equal(t, "ptone@google.com", got)
+	})
+}
