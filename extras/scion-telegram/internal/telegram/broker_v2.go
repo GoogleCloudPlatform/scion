@@ -1000,36 +1000,67 @@ func (b *TelegramBrokerV2) publishInputNeededDM(ctx context.Context, api *Telegr
 // resolveAttachmentPath translates an agent-relative /workspace path to the
 // corresponding host-side path under /home/scion/.scion/projects/<slug>/.
 // Agent containers mount /home/scion/.scion/projects/<slug> as /workspace.
-// Falls back to the original path if translation is not possible.
+// Accepts "/workspace/file", "/workspace", "workspace/file", "workspace",
+// and bare relative paths like "file.png". Falls back to the original path
+// if translation is not possible.
 func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Store, attachPath, projectID string) string {
-	const workspacePrefix = "/workspace/"
-	if !strings.HasPrefix(attachPath, workspacePrefix) {
+	originalPath := attachPath
+
+	var relPath string
+	switch {
+	case strings.HasPrefix(attachPath, "/workspace/"):
+		relPath = strings.TrimPrefix(attachPath, "/workspace/")
+	case attachPath == "/workspace":
+		relPath = "."
+	case strings.HasPrefix(attachPath, "workspace/"):
+		relPath = strings.TrimPrefix(attachPath, "workspace/")
+	case attachPath == "workspace":
+		relPath = "."
+	case !strings.HasPrefix(attachPath, "/"):
+		relPath = attachPath
+	default:
 		return attachPath
 	}
-	relPath := filepath.Clean(strings.TrimPrefix(attachPath, workspacePrefix))
-	if strings.HasPrefix(relPath, "..") || filepath.IsAbs(relPath) {
+
+	relPath = filepath.Clean(relPath)
+	if strings.HasPrefix(relPath, "..") || (filepath.IsAbs(relPath) && relPath != ".") {
 		b.log.Warn("Attachment path escapes workspace, ignoring translation",
 			"attach_path", attachPath, "rel_path", relPath)
 		return attachPath
 	}
 
-	// Look up project slug from group links (we know projectID from the topic).
+	// Look up project slug from group links, falling back to the injected slug map.
+	slug := ""
 	if store != nil && projectID != "" {
 		links, err := store.GetGroupLinksForProject(ctx, projectID)
 		if err == nil && len(links) > 0 && links[0].ProjectSlug != "" {
-			slug := links[0].ProjectSlug
-			hostPath := filepath.Join("/home/scion/.scion/projects", slug, relPath)
-			expectedPrefix := filepath.Join("/home/scion/.scion/projects", slug) + "/"
-			if !strings.HasPrefix(hostPath, expectedPrefix) {
-				b.log.Warn("Resolved attachment path escapes project directory",
-					"host_path", hostPath, "expected_prefix", expectedPrefix)
-				return attachPath
-			}
-			b.log.Debug("Translated attachment path", "from", attachPath, "to", hostPath)
-			return hostPath
+			slug = links[0].ProjectSlug
 		}
 	}
-	return attachPath
+	if slug == "" && projectID != "" {
+		slug = b.projectSlugMap[projectID]
+	}
+	if slug == "" {
+		b.log.Debug("Attachment path unchanged, no project slug found",
+			"original", originalPath, "project_id", projectID)
+		return attachPath
+	}
+
+	projectDir := filepath.Join("/home/scion/.scion/projects", slug)
+	var hostPath string
+	if relPath == "." {
+		hostPath = projectDir
+	} else {
+		hostPath = filepath.Join(projectDir, relPath)
+		if !strings.HasPrefix(hostPath, projectDir+"/") {
+			b.log.Warn("Resolved attachment path escapes project directory",
+				"host_path", hostPath, "expected_prefix", projectDir+"/")
+			return attachPath
+		}
+	}
+
+	b.log.Debug("Resolved attachment path", "original", originalPath, "resolved", hostPath)
+	return hostPath
 }
 
 // publishAttachment reads a file from the local filesystem and sends it to
@@ -1462,6 +1493,14 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 					targets = []string{cc.AgentSlug}
 				}
 			}
+		}
+	}
+
+	// Fallback 3: unaddressed plain text → default agent.
+	if len(targets) == 0 && link.DefaultAgent != "" {
+		text := strings.TrimSpace(tgMsg.Text)
+		if text != "" && !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "@") {
+			targets = []string{link.DefaultAgent}
 		}
 	}
 
