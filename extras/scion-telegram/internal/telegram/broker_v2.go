@@ -1643,8 +1643,17 @@ func (b *TelegramBrokerV2) resolveUserMentions(ctx context.Context, tgMsg *TGMes
 				b.log.Warn("Failed to look up mention username", "username", username, "error", err)
 				continue
 			}
-			if mapping != nil && mapping.ScionUserID != "" {
-				resolved[mention] = mapping.ScionUserID
+			if mapping == nil || mapping.ScionEmail == "" {
+				continue
+			}
+			scionIdentity := "user:" + mapping.ScionEmail
+			resolved[mention] = scionIdentity
+			if ent.Offset > 0 {
+				replacements = append(replacements, textReplacement{
+					offset:      ent.Offset,
+					length:      ent.Length,
+					replacement: scionIdentity,
+				})
 			}
 		case "text_mention":
 			if ent.User == nil {
