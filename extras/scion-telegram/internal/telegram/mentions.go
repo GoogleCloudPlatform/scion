@@ -61,6 +61,51 @@ func resolveTargetAgents(msg *TGMessage, botUsername string, defaultAgent string
 	return result
 }
 
+// utf16Extract extracts a substring from s using UTF-16 code unit offset and length,
+// as provided by the Telegram Bot API entity fields. BMP characters (< U+10000) count
+// as 1 UTF-16 code unit; supplementary-plane characters (>= U+10000, e.g. most emoji)
+// count as 2 (a surrogate pair). Returns the extracted substring and true, or ("", false)
+// if the offset+length falls outside the string.
+func utf16Extract(s string, offset, length int) (string, bool) {
+	if offset < 0 || length < 0 {
+		return "", false
+	}
+
+	var (
+		u16pos    int // current position in UTF-16 code units
+		byteStart = -1
+	)
+
+	for i, r := range s {
+		if u16pos == offset {
+			byteStart = i
+		}
+		if byteStart >= 0 && u16pos == offset+length {
+			return s[byteStart:i], true
+		}
+		u16pos += utf16CodeUnits(r)
+	}
+
+	// Handle end-of-string: the target range ends exactly at the string boundary.
+	if byteStart >= 0 && u16pos == offset+length {
+		return s[byteStart:], true
+	}
+	// Handle zero-length at end-of-string.
+	if byteStart < 0 && u16pos == offset && length == 0 {
+		return "", true
+	}
+
+	return "", false
+}
+
+// utf16CodeUnits returns the number of UTF-16 code units needed to represent rune r.
+func utf16CodeUnits(r rune) int {
+	if r >= 0x10000 {
+		return 2 // supplementary plane → surrogate pair
+	}
+	return 1
+}
+
 // isBotMentioned checks Telegram's structured entities for a mention matching the bot's username.
 func isBotMentioned(msg *TGMessage, botUsername string) bool {
 	if msg == nil || botUsername == "" {
@@ -71,10 +116,10 @@ func isBotMentioned(msg *TGMessage, botUsername string) bool {
 		if ent.Type != "mention" {
 			continue
 		}
-		if ent.Offset < 0 || ent.Offset+ent.Length > len(msg.Text) {
+		mention, ok := utf16Extract(msg.Text, ent.Offset, ent.Length)
+		if !ok {
 			continue
 		}
-		mention := msg.Text[ent.Offset : ent.Offset+ent.Length]
 		mention = strings.TrimPrefix(mention, "@")
 		if strings.ToLower(mention) == lower {
 			return true

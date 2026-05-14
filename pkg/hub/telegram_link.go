@@ -16,6 +16,7 @@ package hub
 
 import (
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -23,6 +24,11 @@ import (
 )
 
 const telegramLinkCodeTTL = 15 * time.Minute
+
+const (
+	verifyRatePerSecond = 5.0 / 60.0 // 5 attempts per minute
+	verifyBurst         = 5
+)
 
 // telegramPendingLink holds state for a pending Telegram account linking.
 type telegramPendingLink struct {
@@ -38,15 +44,21 @@ type telegramPendingLink struct {
 type TelegramLinkService struct {
 	mu      sync.Mutex
 	pending map[string]*telegramPendingLink // code → pending link
-	done    chan struct{}
+
+	verifyMu       sync.Mutex
+	verifyLimiters map[string]*tokenBucket // IP → token bucket
+
+	closeOnce sync.Once
+	done      chan struct{}
 }
 
 // NewTelegramLinkService creates a new TelegramLinkService and starts
 // a background goroutine that periodically removes expired entries.
 func NewTelegramLinkService() *TelegramLinkService {
 	s := &TelegramLinkService{
-		pending: make(map[string]*telegramPendingLink),
-		done:    make(chan struct{}),
+		pending:        make(map[string]*telegramPendingLink),
+		verifyLimiters: make(map[string]*tokenBucket),
+		done:           make(chan struct{}),
 	}
 	go s.cleanupLoop()
 	return s
@@ -125,9 +137,40 @@ func (s *TelegramLinkService) ConsumePending(telegramUserID string) {
 	}
 }
 
+// AllowVerify checks whether the given IP is within the verify rate limit.
+func (s *TelegramLinkService) AllowVerify(ip string) bool {
+	s.verifyMu.Lock()
+	defer s.verifyMu.Unlock()
+
+	now := time.Now()
+	b, ok := s.verifyLimiters[ip]
+	if !ok {
+		b = &tokenBucket{
+			tokens:    float64(verifyBurst) - 1, // consume one token
+			lastCheck: now,
+		}
+		s.verifyLimiters[ip] = b
+		return true
+	}
+
+	// Refill tokens based on elapsed time.
+	elapsed := now.Sub(b.lastCheck).Seconds()
+	b.tokens += elapsed * verifyRatePerSecond
+	if b.tokens > float64(verifyBurst) {
+		b.tokens = float64(verifyBurst)
+	}
+	b.lastCheck = now
+
+	if b.tokens >= 1 {
+		b.tokens--
+		return true
+	}
+	return false
+}
+
 // Close stops the background cleanup goroutine.
 func (s *TelegramLinkService) Close() {
-	close(s.done)
+	s.closeOnce.Do(func() { close(s.done) })
 }
 
 func (s *TelegramLinkService) cleanupLoop() {
@@ -139,14 +182,25 @@ func (s *TelegramLinkService) cleanupLoop() {
 		case <-s.done:
 			return
 		case <-ticker.C:
-			s.mu.Lock()
 			now := time.Now()
+
+			s.mu.Lock()
 			for code, p := range s.pending {
 				if now.After(p.ExpiresAt) {
 					delete(s.pending, code)
 				}
 			}
 			s.mu.Unlock()
+
+			// Clean up stale verify rate limiter entries.
+			s.verifyMu.Lock()
+			cutoff := now.Add(-30 * time.Minute)
+			for ip, b := range s.verifyLimiters {
+				if b.lastCheck.Before(cutoff) {
+					delete(s.verifyLimiters, ip)
+				}
+			}
+			s.verifyMu.Unlock()
 		}
 	}
 }
@@ -207,6 +261,18 @@ func (s *Server) handleTelegramLinkVerify(w http.ResponseWriter, r *http.Request
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
 		return
+	}
+
+	// Rate limit by client IP to prevent brute-force attacks on link codes.
+	if s.telegramLinkService != nil {
+		ip, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			ip = r.RemoteAddr // fallback if no port
+		}
+		if !s.telegramLinkService.AllowVerify(ip) {
+			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many verify attempts, try again later", nil)
+			return
+		}
 	}
 
 	var req struct {
@@ -294,4 +360,10 @@ func (s *Server) handleTelegramLinkStatus(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+
+	// Clean up confirmed entries after sending the response so the
+	// Telegram plugin receives the confirmation exactly once.
+	if status == "confirmed" {
+		s.telegramLinkService.ConsumePending(telegramUserID)
+	}
 }

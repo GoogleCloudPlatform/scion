@@ -82,6 +82,13 @@ func FormatMessage(msg *messages.StructuredMessage) string {
 // in a state-change card before truncation.
 const maxTaskSummaryLength = 200
 
+// htmlCardOverhead is a generous estimate of the byte overhead from HTML
+// tags, emoji, fixed labels, project line, and timestamp in status cards.
+// Used to calculate the remaining budget for variable text content so that
+// truncation happens on plain text BEFORE HTML wrapping, preventing mid-tag
+// or mid-entity truncation.
+const htmlCardOverhead = 300
+
 // stateEmoji maps agent states to display emoji matching the scion web UI.
 var stateEmoji = map[string]string{
 	"created":      "🆕",
@@ -183,11 +190,15 @@ func FormatStateChangeCard(msg *messages.StructuredMessage, agentSlug string) st
 	}
 
 	// Task summary (the message body).
+	// Truncate plain text BEFORE HTML escaping so truncation cannot split
+	// HTML tags or entities (fixes mid-tag truncation bug).
 	summary := strings.TrimSpace(msg.Msg)
 	if summary != "" {
-		if len(summary) > maxTaskSummaryLength {
-			summary = summary[:maxTaskSummaryLength] + "…"
+		summaryBudget := maxTelegramMessageLength - htmlCardOverhead
+		if summaryBudget > maxTaskSummaryLength {
+			summaryBudget = maxTaskSummaryLength
 		}
+		summary = truncatePlainText(summary, summaryBudget)
 		if status == "error" {
 			fmt.Fprintf(&b, "⚠️ %s", html.EscapeString(summary))
 		} else {
@@ -236,11 +247,15 @@ func FormatInputNeededCard(msg *messages.StructuredMessage, agentSlug string) st
 		fmt.Fprintf(&b, "🕐 %s\n", html.EscapeString(ts))
 	}
 
+	// Truncate plain text BEFORE HTML escaping so truncation cannot split
+	// HTML tags or entities (fixes mid-tag truncation bug).
 	prompt := strings.TrimSpace(msg.Msg)
 	if prompt != "" {
-		if len(prompt) > maxTaskSummaryLength {
-			prompt = prompt[:maxTaskSummaryLength] + "…"
+		promptBudget := maxTelegramMessageLength - htmlCardOverhead
+		if promptBudget > maxTaskSummaryLength {
+			promptBudget = maxTaskSummaryLength
 		}
+		prompt = truncatePlainText(prompt, promptBudget)
 		fmt.Fprintf(&b, "\n%s", html.EscapeString(prompt))
 	}
 
@@ -259,6 +274,21 @@ func formatTimestamp(ts string) string {
 		return ts
 	}
 	return t.UTC().Format("Jan 2, 3:04 PM UTC")
+}
+
+// truncatePlainText truncates plain text to maxLen bytes at a rune boundary.
+// If truncation occurs, an ellipsis ("…") is appended. This function is
+// designed for truncating variable text content BEFORE HTML wrapping, so
+// that truncation cannot split HTML tags or entities.
+func truncatePlainText(text string, maxLen int) string {
+	if len(text) <= maxLen {
+		return text
+	}
+	cutoff := maxLen
+	for cutoff > 0 && !utf8.RuneStart(text[cutoff]) {
+		cutoff--
+	}
+	return text[:cutoff] + "…"
 }
 
 // truncateMessage ensures the text does not exceed Telegram's message limit.

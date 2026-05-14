@@ -327,3 +327,121 @@ func TestExtractAgentFromBotMessage_UnderscoreSlug(t *testing.T) {
 	text := "🤖 code_reviewer [idle]\n\nWaiting for tasks"
 	assert.Equal(t, "code_reviewer", extractAgentFromBotMessage(text))
 }
+
+// --- utf16Extract tests ---
+
+func TestUtf16Extract_ASCIIOnly(t *testing.T) {
+	s := "@ScionHubBot hello"
+	got, ok := utf16Extract(s, 0, 12)
+	assert.True(t, ok)
+	assert.Equal(t, "@ScionHubBot", got)
+}
+
+func TestUtf16Extract_ASCIIMidString(t *testing.T) {
+	s := "hey @ScionHubBot help"
+	got, ok := utf16Extract(s, 4, 12)
+	assert.True(t, ok)
+	assert.Equal(t, "@ScionHubBot", got)
+}
+
+func TestUtf16Extract_EmojiBeforeMention(t *testing.T) {
+	// 🎉 is U+1F389 — a supplementary-plane character: 4 bytes in UTF-8, 2 UTF-16 code units.
+	// So "🎉 " is 2 + 1 = 3 UTF-16 code units, but 4 + 1 = 5 bytes.
+	// Telegram would report offset=3, length=12 for "@ScionHubBot".
+	s := "🎉 @ScionHubBot hello"
+	got, ok := utf16Extract(s, 3, 12)
+	assert.True(t, ok)
+	assert.Equal(t, "@ScionHubBot", got)
+}
+
+func TestUtf16Extract_MultipleEmojisBeforeMention(t *testing.T) {
+	// Two supplementary emoji: "🎉🚀 " = 2+2+1 = 5 UTF-16 code units.
+	s := "🎉🚀 @ScionHubBot"
+	got, ok := utf16Extract(s, 5, 12)
+	assert.True(t, ok)
+	assert.Equal(t, "@ScionHubBot", got)
+}
+
+func TestUtf16Extract_CJKBeforeMention(t *testing.T) {
+	// CJK characters are BMP (1 UTF-16 code unit each, but 3 bytes in UTF-8).
+	// "你好 " = 3 UTF-16 code units.
+	s := "你好 @ScionHubBot"
+	got, ok := utf16Extract(s, 3, 12)
+	assert.True(t, ok)
+	assert.Equal(t, "@ScionHubBot", got)
+}
+
+func TestUtf16Extract_MixedEmojiAndCJK(t *testing.T) {
+	// "🎉你好 " = 2 + 1 + 1 + 1 = 5 UTF-16 code units.
+	s := "🎉你好 @bot"
+	got, ok := utf16Extract(s, 5, 4)
+	assert.True(t, ok)
+	assert.Equal(t, "@bot", got)
+}
+
+func TestUtf16Extract_MentionAtEnd(t *testing.T) {
+	s := "hello @bot"
+	got, ok := utf16Extract(s, 6, 4)
+	assert.True(t, ok)
+	assert.Equal(t, "@bot", got)
+}
+
+func TestUtf16Extract_OutOfBounds(t *testing.T) {
+	s := "short"
+	_, ok := utf16Extract(s, 0, 100)
+	assert.False(t, ok)
+}
+
+func TestUtf16Extract_NegativeOffset(t *testing.T) {
+	_, ok := utf16Extract("hello", -1, 3)
+	assert.False(t, ok)
+}
+
+func TestUtf16Extract_NegativeLength(t *testing.T) {
+	_, ok := utf16Extract("hello", 0, -1)
+	assert.False(t, ok)
+}
+
+func TestUtf16Extract_ZeroLength(t *testing.T) {
+	got, ok := utf16Extract("hello", 2, 0)
+	assert.True(t, ok)
+	assert.Equal(t, "", got)
+}
+
+func TestUtf16Extract_EmptyString(t *testing.T) {
+	got, ok := utf16Extract("", 0, 0)
+	assert.True(t, ok)
+	assert.Equal(t, "", got)
+}
+
+func TestUtf16Extract_EntireString(t *testing.T) {
+	s := "@bot"
+	got, ok := utf16Extract(s, 0, 4)
+	assert.True(t, ok)
+	assert.Equal(t, "@bot", got)
+}
+
+// --- Integration: isBotMentioned with emoji ---
+
+func TestIsBotMentioned_EmojiBeforeMention(t *testing.T) {
+	// "🎉 @ScionHubBot hello" — emoji is 2 UTF-16 code units, space is 1.
+	// Telegram reports mention entity at offset=3, length=12.
+	msg := &TGMessage{
+		Text: "🎉 @ScionHubBot hello",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 3, Length: 12},
+		},
+	}
+	assert.True(t, isBotMentioned(msg, "ScionHubBot"))
+}
+
+func TestIsBotMentioned_MultipleEmojisBeforeMention(t *testing.T) {
+	// "🎉🚀 @ScionHubBot" — offset=5 (2+2+1), length=12.
+	msg := &TGMessage{
+		Text: "🎉🚀 @ScionHubBot",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 5, Length: 12},
+		},
+	}
+	assert.True(t, isBotMentioned(msg, "ScionHubBot"))
+}
