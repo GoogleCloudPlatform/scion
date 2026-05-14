@@ -107,22 +107,30 @@ func utf16CodeUnits(r rune) int {
 }
 
 // isBotMentioned checks Telegram's structured entities for a mention matching the bot's username.
+// Handles both "mention" entities (@username text) and "text_mention" entities (tapping a user
+// from a previous message creates a text_mention with a User object instead of @username text).
 func isBotMentioned(msg *TGMessage, botUsername string) bool {
 	if msg == nil || botUsername == "" {
 		return false
 	}
 	lower := strings.ToLower(botUsername)
 	for _, ent := range msg.Entities {
-		if ent.Type != "mention" {
-			continue
-		}
-		mention, ok := utf16Extract(msg.Text, ent.Offset, ent.Length)
-		if !ok {
-			continue
-		}
-		mention = strings.TrimPrefix(mention, "@")
-		if strings.ToLower(mention) == lower {
-			return true
+		switch ent.Type {
+		case "mention":
+			mention, ok := utf16Extract(msg.Text, ent.Offset, ent.Length)
+			if !ok {
+				continue
+			}
+			mention = strings.TrimPrefix(mention, "@")
+			if strings.ToLower(mention) == lower {
+				return true
+			}
+		case "text_mention":
+			// text_mention is used when tapping a user's name from a previous message.
+			// The mention text may not contain @username; identity is in ent.User.
+			if ent.User != nil && strings.ToLower(ent.User.Username) == lower {
+				return true
+			}
 		}
 	}
 	return false
