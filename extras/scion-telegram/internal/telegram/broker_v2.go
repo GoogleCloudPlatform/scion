@@ -187,6 +187,13 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	}
 	b.botInfo = bot
 
+	if !bot.CanReadAllGroupMessages {
+		b.log.Warn("Bot has privacy mode enabled (can_read_all_group_messages=false). " +
+			"Group members must use /commands or reply to bot messages. " +
+			"Regular @mentions will NOT be delivered. " +
+			"Disable via BotFather: /mybots → Bot Settings → Group Privacy → Turn OFF.")
+	}
+
 	b.registerBotCommands(ctx)
 
 	// Parse inbound mode: "poll" (default) or "webhook".

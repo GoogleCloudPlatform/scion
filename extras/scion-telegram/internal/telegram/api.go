@@ -45,10 +45,11 @@ const (
 
 // BotUser represents a Telegram bot user returned by getMe.
 type BotUser struct {
-	ID        int64  `json:"id"`
-	IsBot     bool   `json:"is_bot"`
-	FirstName string `json:"first_name"`
-	Username  string `json:"username"`
+	ID                      int64  `json:"id"`
+	IsBot                   bool   `json:"is_bot"`
+	FirstName               string `json:"first_name"`
+	Username                string `json:"username"`
+	CanReadAllGroupMessages bool   `json:"can_read_all_group_messages"`
 }
 
 // Update represents a Telegram update from getUpdates.
