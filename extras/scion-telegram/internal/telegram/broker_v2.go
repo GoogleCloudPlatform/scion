@@ -579,7 +579,7 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 	if msg != nil && !msg.Broadcasted &&
 		strings.HasPrefix(msg.Sender, "agent:") &&
 		strings.HasPrefix(msg.Recipient, "agent:") {
-		filtered := chatIDs[:0]
+		filtered := make([]int64, 0, len(chatIDs))
 		for _, chatID := range chatIDs {
 			link, err := store.GetGroupLink(ctx, chatID)
 			if err != nil {
@@ -602,7 +602,7 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 
 	// Commentary filter: suppress assistant-reply messages per group link setting.
 	if msg != nil && msg.Type == messages.TypeAssistantReply {
-		filtered := chatIDs[:0]
+		filtered := make([]int64, 0, len(chatIDs))
 		for _, chatID := range chatIDs {
 			link, err := store.GetGroupLink(ctx, chatID)
 			if err != nil {
@@ -999,14 +999,25 @@ func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Stor
 	if !strings.HasPrefix(attachPath, workspacePrefix) {
 		return attachPath
 	}
-	relPath := strings.TrimPrefix(attachPath, workspacePrefix)
+	relPath := filepath.Clean(strings.TrimPrefix(attachPath, workspacePrefix))
+	if strings.HasPrefix(relPath, "..") || filepath.IsAbs(relPath) {
+		b.log.Warn("Attachment path escapes workspace, ignoring translation",
+			"attach_path", attachPath, "rel_path", relPath)
+		return attachPath
+	}
 
 	// Look up project slug from group links (we know projectID from the topic).
 	if store != nil && projectID != "" {
 		links, err := store.GetGroupLinksForProject(ctx, projectID)
 		if err == nil && len(links) > 0 && links[0].ProjectSlug != "" {
 			slug := links[0].ProjectSlug
-			hostPath := "/home/scion/.scion/projects/" + slug + "/" + relPath
+			hostPath := filepath.Join("/home/scion/.scion/projects", slug, relPath)
+			expectedPrefix := filepath.Join("/home/scion/.scion/projects", slug) + "/"
+			if !strings.HasPrefix(hostPath, expectedPrefix) {
+				b.log.Warn("Resolved attachment path escapes project directory",
+					"host_path", hostPath, "expected_prefix", expectedPrefix)
+				return attachPath
+			}
 			b.log.Debug("Translated attachment path", "from", attachPath, "to", hostPath)
 			return hostPath
 		}
@@ -1559,10 +1570,10 @@ func (b *TelegramBrokerV2) resolveUserMentions(ctx context.Context, tgMsg *TGMes
 	for _, ent := range tgMsg.Entities {
 		switch ent.Type {
 		case "mention":
-			if ent.Offset < 0 || ent.Offset+ent.Length > len(tgMsg.Text) {
+			mention, ok := utf16Extract(tgMsg.Text, ent.Offset, ent.Length)
+			if !ok {
 				continue
 			}
-			mention := tgMsg.Text[ent.Offset : ent.Offset+ent.Length]
 			username := strings.TrimPrefix(mention, "@")
 			if username == "" {
 				continue

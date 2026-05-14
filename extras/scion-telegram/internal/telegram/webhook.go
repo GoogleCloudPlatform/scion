@@ -16,6 +16,7 @@ package telegram
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -103,7 +104,7 @@ func (ws *WebhookServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	// Validate secret token.
 	if ws.secretToken != "" {
 		token := r.Header.Get(secretTokenHeader)
-		if token != ws.secretToken {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(ws.secretToken)) != 1 {
 			ws.log.Warn("Webhook request with invalid secret token")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
