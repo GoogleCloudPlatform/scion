@@ -165,19 +165,15 @@ func (h *RegistrationHandler) HandleRegister(msg *TGMessage) {
 	h.pending[telegramUserID] = reg
 	h.mu.Unlock()
 
-	hubLink := fmt.Sprintf("%s/profile/telegram", strings.TrimRight(h.hubURL, "/"))
+	hubLink := fmt.Sprintf("%s/profile/telegram?code=%s", strings.TrimRight(h.hubURL, "/"), code)
 
-	text := fmt.Sprintf(
-		"To link your Telegram account, go to the hub and enter this code:\n\n"+
-			"*%s*\n\n"+
-			"The code expires in 15 minutes.",
-		code,
-	)
+	text := "To link your Telegram account, tap the button below to open the scion hub.\n\n" +
+		"The code will be applied automatically (expires in 15 minutes)."
 
 	keyboard := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
 			{
-				{Text: "Open hub settings", URL: hubLink},
+				{Text: "Link Telegram account", URL: hubLink},
 			},
 		},
 	}

@@ -39,6 +39,52 @@ export class ScionPageProfileTelegram extends LitElement {
   @state()
   private _linkedTelegramId = '';
 
+  override connectedCallback(): void {
+    super.connectedCallback();
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('code');
+    if (code) {
+      this._code = code.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+      if (this._code.length === 6) {
+        this._autoSubmit();
+      }
+    }
+  }
+
+  private async _autoSubmit(): Promise<void> {
+    this._status = 'submitting';
+    this._message = 'Linking your account…';
+
+    try {
+      const resp = await apiFetch('/api/v1/telegram/link/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: this._code }),
+      });
+
+      if (resp.ok) {
+        const data = (await resp.json()) as {
+          status: string;
+          telegramUserId: string;
+          user: { id: string; email: string };
+        };
+        this._status = 'success';
+        this._linkedTelegramId = data.telegramUserId;
+        this._message = 'Telegram account linked successfully! You can close this page and return to Telegram.';
+        this._code = '';
+      } else {
+        const errData = (await resp.json().catch(() => null)) as {
+          message?: string;
+        } | null;
+        this._status = 'error';
+        this._message = errData?.message || 'Code not found or expired. Please try again with a new code from the bot.';
+      }
+    } catch {
+      this._status = 'error';
+      this._message = 'Failed to connect to the server. Please try again.';
+    }
+  }
+
   static override styles = css`
     :host {
       display: block;
