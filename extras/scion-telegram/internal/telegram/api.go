@@ -59,16 +59,44 @@ type Update struct {
 	CallbackQuery *CallbackQuery `json:"callback_query,omitempty"`
 }
 
+// PhotoSize represents one available size of a photo or file/sticker thumbnail.
+type PhotoSize struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	FileSize     int64  `json:"file_size"`
+}
+
+// TGDocument represents a general file sent in a Telegram message.
+type TGDocument struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	FileName     string `json:"file_name"`
+	MimeType     string `json:"mime_type"`
+	FileSize     int64  `json:"file_size"`
+}
+
+// TGFile represents a file ready for download, returned by the getFile API.
+type TGFile struct {
+	FileID   string `json:"file_id"`
+	FileSize int64  `json:"file_size"`
+	FilePath string `json:"file_path"`
+}
+
 // TGMessage represents a Telegram message.
 type TGMessage struct {
-	MessageID      int64           `json:"message_id"`
-	From           *TGUser         `json:"from,omitempty"`
-	Chat           TGChat          `json:"chat"`
-	Date           int64           `json:"date"`
+	MessageID       int64           `json:"message_id"`
+	From            *TGUser         `json:"from,omitempty"`
+	Chat            TGChat          `json:"chat"`
+	Date            int64           `json:"date"`
 	Text            string          `json:"text"`
+	Caption         string          `json:"caption,omitempty"`
 	Entities        []MessageEntity `json:"entities,omitempty"`
 	ReplyToMessage  *TGMessage      `json:"reply_to_message,omitempty"`
 	MigrateToChatID int64           `json:"migrate_to_chat_id,omitempty"`
+	Photo           []PhotoSize     `json:"photo,omitempty"`
+	Document        *TGDocument     `json:"document,omitempty"`
 }
 
 // MessageEntity represents a special entity in a Telegram message (e.g. @mentions, commands).
@@ -863,6 +891,59 @@ func (c *TelegramAPIClient) DeleteWebhook(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// GetFile calls the getFile API to get the file path for downloading.
+func (c *TelegramAPIClient) GetFile(ctx context.Context, fileID string) (*TGFile, error) {
+	url := fmt.Sprintf("%s?file_id=%s", c.methodURL("getFile"), fileID)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create getFile request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("getFile request failed: %w", c.redactToken(err))
+	}
+	defer resp.Body.Close()
+
+	var apiResp apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("decode getFile response: %w", err)
+	}
+
+	if !apiResp.OK {
+		return nil, &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
+	}
+
+	var file TGFile
+	if err := json.Unmarshal(apiResp.Result, &file); err != nil {
+		return nil, fmt.Errorf("unmarshal getFile result: %w", err)
+	}
+
+	return &file, nil
+}
+
+// DownloadFile downloads a file from Telegram's file storage using the path
+// returned by GetFile. The caller must close the returned ReadCloser.
+func (c *TelegramAPIClient) DownloadFile(ctx context.Context, filePath string) (io.ReadCloser, error) {
+	url := fmt.Sprintf("%s/file/bot%s/%s", c.baseURL, c.botToken, filePath)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create file download request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("file download request failed: %w", c.redactToken(err))
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("file download failed with status %d", resp.StatusCode)
+	}
+
+	return resp.Body, nil
 }
 
 // DeleteMessage deletes a message from a chat.

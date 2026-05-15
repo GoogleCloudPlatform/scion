@@ -1439,8 +1439,13 @@ func (b *TelegramBrokerV2) getUpdatesV2(ctx context.Context, offset int64, timeo
 // --- Inbound message handling ---
 
 func (b *TelegramBrokerV2) handleIncomingMessageV2(tgMsg *TGMessage) {
-	if tgMsg.Text == "" {
+	if tgMsg.Text == "" && tgMsg.Caption == "" && tgMsg.Photo == nil && tgMsg.Document == nil {
 		return
+	}
+
+	// Use caption as text fallback for photo/document messages.
+	if tgMsg.Text == "" && tgMsg.Caption != "" {
+		tgMsg.Text = tgMsg.Caption
 	}
 
 	// Echo filtering.
@@ -1580,14 +1585,16 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		}
 	}
 
-	// Fallback 3: unaddressed plain text → default agent.
+	// Fallback 3: unaddressed plain text or file attachment → default agent.
 	// Skip when the message leads with (offset=0) an @mention of another
 	// Telegram user — that's a user-to-user message. Mentions embedded
 	// later (offset>0) do not block default routing; resolveUserMentions
 	// injects the resolved scion identity for those.
 	if len(targets) == 0 && link.DefaultAgent != "" {
+		hasAttachment := tgMsg.Photo != nil || tgMsg.Document != nil
 		text := strings.TrimSpace(tgMsg.Text)
-		if text != "" && !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "@") && !hasNonBotUserMention(tgMsg, botUsername, agents) {
+		textRoutes := text != "" && !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "@") && !hasNonBotUserMention(tgMsg, botUsername, agents)
+		if textRoutes || hasAttachment {
 			b.log.Debug("Using default agent", "agent", link.DefaultAgent)
 			targets = []string{link.DefaultAgent}
 		}
@@ -1638,7 +1645,28 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	// Strip bot/agent mentions to get clean message text.
 	cleanText := stripMentions(resolvedText, botUsername, targets)
 	cleanText = strings.TrimSpace(cleanText)
-	if cleanText == "" {
+
+	// Download file attachments (photos/documents).
+	var attachmentPath, placeholder string
+	if tgMsg.Photo != nil || tgMsg.Document != nil {
+		var err error
+		attachmentPath, placeholder, err = b.downloadTelegramFile(ctx, tgMsg, link.ProjectSlug)
+		if err != nil {
+			b.log.Error("Failed to download telegram file", "error", err)
+			b.api.SendMessage(ctx, chatID, "Failed to process attachment: "+err.Error(), "")
+		}
+	}
+
+	// Build final message text: clean text + attachment placeholder.
+	msgText := cleanText
+	if placeholder != "" {
+		if msgText != "" {
+			msgText = msgText + "\n" + placeholder
+		} else {
+			msgText = placeholder
+		}
+	}
+	if msgText == "" {
 		return
 	}
 
@@ -1667,13 +1695,17 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			Sender:    sender,
 			SenderID:  senderID,
 			Recipient: recipient,
-			Msg:       cleanText,
+			Msg:       msgText,
 			Type:      messages.TypeInstruction,
 			Metadata: map[string]string{
 				"telegram_chat_id":    strconv.FormatInt(chatID, 10),
 				"telegram_message_id": strconv.FormatInt(tgMsg.MessageID, 10),
 				"project_id":         link.ProjectID,
 			},
+		}
+
+		if attachmentPath != "" {
+			msg.Attachments = []string{attachmentPath}
 		}
 
 		if resolvedMentionsJSON != "" {
@@ -1690,6 +1722,78 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 
 		b.deliverInbound(topic, msg)
 	}
+}
+
+const maxTelegramFileSize = 20 * 1024 * 1024 // 20 MB
+
+// downloadTelegramFile downloads a photo or document from a Telegram message
+// and saves it to the agent's workspace downloads directory. Returns the
+// agent-relative path and a placeholder string for the message body.
+func (b *TelegramBrokerV2) downloadTelegramFile(ctx context.Context, tgMsg *TGMessage, projectSlug string) (agentPath, placeholder string, err error) {
+	var fileID, fileName, fileType string
+	var fileSize int64
+
+	switch {
+	case tgMsg.Document != nil:
+		fileID = tgMsg.Document.FileID
+		fileSize = tgMsg.Document.FileSize
+		fileName = tgMsg.Document.FileName
+		if fileName == "" {
+			fileName = tgMsg.Document.FileUniqueID
+		}
+		fileType = "Document"
+	case len(tgMsg.Photo) > 0:
+		largest := tgMsg.Photo[len(tgMsg.Photo)-1]
+		fileID = largest.FileID
+		fileSize = largest.FileSize
+		fileName = fmt.Sprintf("photo_%s.jpg", largest.FileUniqueID)
+		fileType = "Photo"
+	default:
+		return "", "", fmt.Errorf("message has no photo or document")
+	}
+
+	if fileSize > maxTelegramFileSize {
+		return "", "", fmt.Errorf("file too large (%d bytes, max %d)", fileSize, maxTelegramFileSize)
+	}
+
+	tgFile, err := b.api.GetFile(ctx, fileID)
+	if err != nil {
+		return "", "", fmt.Errorf("getFile: %w", err)
+	}
+
+	body, err := b.api.DownloadFile(ctx, tgFile.FilePath)
+	if err != nil {
+		return "", "", fmt.Errorf("download file: %w", err)
+	}
+	defer body.Close()
+
+	timestamp := time.Now().Unix()
+	destName := fmt.Sprintf("tg_%d_%s", timestamp, fileName)
+
+	hostDir := filepath.Join("/home/scion/.scion/projects", projectSlug, "downloads")
+	if err := os.MkdirAll(hostDir, 0o755); err != nil {
+		return "", "", fmt.Errorf("create downloads dir: %w", err)
+	}
+
+	destPath := filepath.Join(hostDir, destName)
+	f, err := os.Create(destPath)
+	if err != nil {
+		return "", "", fmt.Errorf("create file: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := io.Copy(f, body); err != nil {
+		os.Remove(destPath)
+		return "", "", fmt.Errorf("write file: %w", err)
+	}
+
+	agentPath = filepath.Join("/workspace/downloads", destName)
+	placeholder = fmt.Sprintf("📎 [%s attached: %s]", fileType, fileName)
+
+	b.log.Info("Downloaded telegram file",
+		"type", fileType, "file", fileName, "path", destPath, "agent_path", agentPath)
+
+	return agentPath, placeholder, nil
 }
 
 // resolveUserMentions extracts @username and text_mention entities from a

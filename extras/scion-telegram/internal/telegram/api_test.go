@@ -551,3 +551,77 @@ func TestSendDocument_EmptyCaption(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(101), msg.MessageID)
 }
+
+func TestGetFile_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/bottest-token/getFile", r.URL.Path)
+		assert.Equal(t, "GET", r.Method)
+		assert.Equal(t, "file-abc-123", r.URL.Query().Get("file_id"))
+
+		result := TGFile{
+			FileID:   "file-abc-123",
+			FileSize: 12345,
+			FilePath: "photos/file_0.jpg",
+		}
+		resp := apiResponse{OK: true, Result: mustJSON(t, result)}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := newTestAPIClient(t, srv)
+	file, err := client.GetFile(context.Background(), "file-abc-123")
+	require.NoError(t, err)
+	assert.Equal(t, "file-abc-123", file.FileID)
+	assert.Equal(t, int64(12345), file.FileSize)
+	assert.Equal(t, "photos/file_0.jpg", file.FilePath)
+}
+
+func TestGetFile_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := apiResponse{
+			OK:          false,
+			Description: "Bad Request: invalid file_id",
+			ErrorCode:   400,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := newTestAPIClient(t, srv)
+	_, err := client.GetFile(context.Background(), "bad-id")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid file_id")
+}
+
+func TestDownloadFile_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/file/bottest-token/photos/file_0.jpg", r.URL.Path)
+		assert.Equal(t, "GET", r.Method)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("fake-image-data"))
+	}))
+	defer srv.Close()
+
+	client := newTestAPIClient(t, srv)
+	rc, err := client.DownloadFile(context.Background(), "photos/file_0.jpg")
+	require.NoError(t, err)
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.Equal(t, "fake-image-data", string(data))
+}
+
+func TestDownloadFile_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	client := newTestAPIClient(t, srv)
+	_, err := client.DownloadFile(context.Background(), "photos/missing.jpg")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "status 404")
+}

@@ -18,14 +18,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-	"log/slog"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -195,7 +198,23 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 		case "/bottest-token/setMyCommands":
 			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
 
+		case "/bottest-token/getFile":
+			fileID := r.URL.Query().Get("file_id")
+			json.NewEncoder(w).Encode(apiResponse{
+				OK: true,
+				Result: mustJSONRawV2(t, TGFile{
+					FileID:   fileID,
+					FileSize: 1024,
+					FilePath: "photos/" + fileID + ".jpg",
+				}),
+			})
+
 		default:
+			if strings.HasPrefix(r.URL.Path, "/file/bottest-token/") {
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte("fake-file-content"))
+				return
+			}
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
@@ -2013,4 +2032,285 @@ func TestResolveOutboundMentions(t *testing.T) {
 		got := resolveOutboundMentions(ctx, nil, "ptone@google.com")
 		assert.Equal(t, "ptone@google.com", got)
 	})
+}
+
+// --- File attachment tests ---
+
+func TestV2_HandleIncoming_PhotoMessageNotDropped(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+
+	tmpDir := t.TempDir()
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:       -200,
+		ProjectID:    "proj-1",
+		ProjectSlug:  filepath.Base(tmpDir),
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		ProjectID:   "proj-1",
+		Agents:      []AgentInfo{{Slug: "coder"}},
+		RefreshedAt: time.Now(),
+	}))
+
+	// Override the project path to use temp dir.
+	origHome := os.Getenv("HOME")
+	_ = origHome // keep for reference
+
+	var deliveredMsg *messages.StructuredMessage
+	done := make(chan struct{}, 1)
+	b.InboundHandler = func(_ string, msg *messages.StructuredMessage) {
+		deliveredMsg = msg
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+
+	// Photo-only message (no text, no caption).
+	b.handleIncomingMessageV2(&TGMessage{
+		MessageID: 42,
+		From:      &TGUser{ID: 456, Username: "alice"},
+		Chat:      TGChat{ID: -200, Type: "group"},
+		Date:      time.Now().Unix(),
+		Photo: []PhotoSize{
+			{FileID: "small", FileUniqueID: "uniq1", Width: 90, Height: 90, FileSize: 100},
+			{FileID: "large", FileUniqueID: "uniq2", Width: 800, Height: 600, FileSize: 5000},
+		},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delivery")
+	}
+
+	require.NotNil(t, deliveredMsg)
+	assert.Contains(t, deliveredMsg.Msg, "📎")
+	assert.Contains(t, deliveredMsg.Msg, "Photo attached")
+	assert.Len(t, deliveredMsg.Attachments, 1)
+	assert.Contains(t, deliveredMsg.Attachments[0], "/workspace/downloads/")
+}
+
+func TestV2_HandleIncoming_DocumentWithCaption(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+
+	tmpDir := t.TempDir()
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:       -200,
+		ProjectID:    "proj-1",
+		ProjectSlug:  filepath.Base(tmpDir),
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		ProjectID:   "proj-1",
+		Agents:      []AgentInfo{{Slug: "coder"}},
+		RefreshedAt: time.Now(),
+	}))
+
+	var deliveredMsg *messages.StructuredMessage
+	done := make(chan struct{}, 1)
+	b.InboundHandler = func(_ string, msg *messages.StructuredMessage) {
+		deliveredMsg = msg
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+
+	b.handleIncomingMessageV2(&TGMessage{
+		MessageID: 43,
+		From:      &TGUser{ID: 456, Username: "alice"},
+		Chat:      TGChat{ID: -200, Type: "group"},
+		Date:      time.Now().Unix(),
+		Caption:   "please review this file",
+		Document: &TGDocument{
+			FileID:       "doc-abc",
+			FileUniqueID: "docuniq1",
+			FileName:     "report.pdf",
+			MimeType:     "application/pdf",
+			FileSize:     8192,
+		},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delivery")
+	}
+
+	require.NotNil(t, deliveredMsg)
+	assert.Contains(t, deliveredMsg.Msg, "please review this file")
+	assert.Contains(t, deliveredMsg.Msg, "📎")
+	assert.Contains(t, deliveredMsg.Msg, "Document attached: report.pdf")
+	assert.Len(t, deliveredMsg.Attachments, 1)
+	assert.Contains(t, deliveredMsg.Attachments[0], "report.pdf")
+}
+
+func TestV2_HandleIncoming_EmptyMessageDropped(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+
+	var received int32
+	b.InboundHandler = func(_ string, _ *messages.StructuredMessage) {
+		atomic.AddInt32(&received, 1)
+	}
+
+	// No text, no caption, no photo, no document.
+	b.handleIncomingMessageV2(&TGMessage{
+		MessageID: 1,
+		From:      &TGUser{ID: 456, Username: "alice"},
+		Chat:      TGChat{ID: -200, Type: "group"},
+	})
+
+	assert.Equal(t, int32(0), atomic.LoadInt32(&received))
+}
+
+func TestV2_DownloadTelegramFile_PhotoPicksLargest(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+
+	tmpDir := t.TempDir()
+	slug := filepath.Base(tmpDir)
+
+	// Point project path to temp dir.
+	projectDir := filepath.Join(tmpDir, ".scion", "projects", slug)
+	require.NoError(t, os.MkdirAll(projectDir, 0o755))
+
+	// Patch HOME so /home/scion/.scion/projects/<slug> resolves to temp dir.
+	// Instead, we'll test with the actual slug and just verify the function returns.
+	ctx := context.Background()
+
+	tgMsg := &TGMessage{
+		Photo: []PhotoSize{
+			{FileID: "small", FileUniqueID: "u1", Width: 90, Height: 90, FileSize: 100},
+			{FileID: "medium", FileUniqueID: "u2", Width: 320, Height: 240, FileSize: 2000},
+			{FileID: "large", FileUniqueID: "u3", Width: 1280, Height: 960, FileSize: 5000},
+		},
+	}
+
+	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug)
+	require.NoError(t, err)
+	assert.Contains(t, agentPath, "/workspace/downloads/")
+	assert.Contains(t, agentPath, "photo_u3.jpg")
+	assert.Contains(t, placeholder, "Photo attached")
+	assert.Contains(t, placeholder, "photo_u3.jpg")
+}
+
+func TestV2_DownloadTelegramFile_DocumentFallbackName(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+
+	tmpDir := t.TempDir()
+	slug := filepath.Base(tmpDir)
+
+	ctx := context.Background()
+
+	tgMsg := &TGMessage{
+		Document: &TGDocument{
+			FileID:       "doc-xyz",
+			FileUniqueID: "docuniq99",
+			FileName:     "", // empty filename
+			MimeType:     "application/octet-stream",
+			FileSize:     512,
+		},
+	}
+
+	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug)
+	require.NoError(t, err)
+	assert.Contains(t, agentPath, "docuniq99")
+	assert.Contains(t, placeholder, "Document attached")
+}
+
+func TestV2_DownloadTelegramFile_TooLarge(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+
+	ctx := context.Background()
+
+	tgMsg := &TGMessage{
+		Document: &TGDocument{
+			FileID:       "big-file",
+			FileUniqueID: "bigid",
+			FileName:     "huge.zip",
+			FileSize:     25 * 1024 * 1024, // 25 MB > 20 MB limit
+		},
+	}
+
+	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "test-slug")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "file too large")
+}
+
+func TestV2_DownloadTelegramFile_NoAttachment(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+
+	ctx := context.Background()
+	tgMsg := &TGMessage{Text: "just text"}
+
+	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "test-slug")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no photo or document")
+}
+
+func TestV2_DownloadTelegramFile_DownloadFailure(t *testing.T) {
+	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getFile"):
+			json.NewEncoder(w).Encode(apiResponse{
+				OK: true,
+				Result: mustJSONRawV2(t, TGFile{
+					FileID:   "file-id",
+					FilePath: "photos/fail.jpg",
+				}),
+			})
+		case strings.HasPrefix(r.URL.Path, "/file/"):
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer failSrv.Close()
+
+	client := NewAPIClient("test-token", failSrv.URL)
+	b := &TelegramBrokerV2{
+		api: client,
+		log: slog.Default(),
+	}
+
+	ctx := context.Background()
+	tgMsg := &TGMessage{
+		Photo: []PhotoSize{
+			{FileID: "file-id", FileUniqueID: "u1", FileSize: 100},
+		},
+	}
+
+	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "test-slug")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "download file")
 }
