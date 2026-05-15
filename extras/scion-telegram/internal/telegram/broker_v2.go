@@ -1551,12 +1551,12 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		b.log.Debug("Fallback1: reply-to message text sample", "text_prefix", replyText)
 		if b.botInfo != nil && tgMsg.ReplyToMessage.From != nil && tgMsg.ReplyToMessage.From.ID == b.botInfo.ID {
 			slug := extractAgentFromBotMessage(tgMsg.ReplyToMessage.Text)
-			b.log.Debug("Fallback1: extractAgentFromBotMessage result", "slug", slug, "in_agents", slices.Contains(agents, slug))
+			b.log.Debug("Fallback1: extractAgentFromBotMessage result", "slug", slug)
 			if slug != "" {
-				b.log.Debug("Fallback1: agent in knownAgents check", "slug", slug, "agents", agents)
-				if slices.Contains(agents, slug) {
-					targets = []string{slug}
-				}
+				// Trust the extracted slug — it came from a message the bot sent.
+				// Skip knownAgents validation: the agent may not be in the cached
+				// list (e.g., created after the last cache refresh, or not running).
+				targets = []string{slug}
 			}
 		}
 	}
