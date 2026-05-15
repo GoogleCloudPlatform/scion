@@ -64,6 +64,7 @@ type StructuredMessage struct {
 	SenderID    string            `json:"sender_id,omitempty"`
 	Recipient   string            `json:"recipient"`
 	RecipientID string            `json:"recipient_id,omitempty"`
+	Recipients  string            `json:"recipients,omitempty"`
 	Msg         string            `json:"msg"`
 	Type        string            `json:"type"`
 	Plain       bool              `json:"plain,omitempty"`
@@ -162,6 +163,9 @@ func (m *StructuredMessage) LogAttrs() []any {
 	}
 	if m.RecipientID != "" {
 		attrs = append(attrs, "recipient_id", m.RecipientID)
+	}
+	if m.Recipients != "" {
+		attrs = append(attrs, "recipients", m.Recipients)
 	}
 	return attrs
 }

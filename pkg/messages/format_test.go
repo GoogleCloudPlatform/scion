@@ -132,6 +132,42 @@ func TestFormatForDelivery_Raw(t *testing.T) {
 	}
 }
 
+func TestFormatForDelivery_WithRecipients(t *testing.T) {
+	msg := &StructuredMessage{
+		Version:    Version,
+		Timestamp:  "2026-05-15T14:00:00Z",
+		Sender:     "user:alice",
+		Recipient:  "agent:coder",
+		Recipients: "set[user:alice,agent:coder,agent:reviewer]",
+		Msg:        "review this",
+		Type:       TypeGroupSet,
+	}
+
+	result := FormatForDelivery(msg)
+	if !strings.Contains(result, `"recipients": "set[user:alice,agent:coder,agent:reviewer]"`) {
+		t.Error("missing recipients in delivery output")
+	}
+	if !strings.Contains(result, `"type": "group-set"`) {
+		t.Error("missing group-set type in delivery output")
+	}
+}
+
+func TestFormatForDelivery_OmitsEmptyRecipients(t *testing.T) {
+	msg := &StructuredMessage{
+		Version:   Version,
+		Timestamp: "2026-05-15T14:00:00Z",
+		Sender:    "user:alice",
+		Recipient: "agent:coder",
+		Msg:       "single message",
+		Type:      TypeInstruction,
+	}
+
+	result := FormatForDelivery(msg)
+	if strings.Contains(result, "recipients") {
+		t.Error("recipients should be omitted when empty")
+	}
+}
+
 func TestFormatForDelivery_WithAttachments(t *testing.T) {
 	msg := &StructuredMessage{
 		Version:     Version,

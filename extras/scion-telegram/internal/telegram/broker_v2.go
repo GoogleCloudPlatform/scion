@@ -1676,6 +1676,16 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		msgType = messages.TypeGroupSet
 	}
 
+	// Build the recipients set string for group-set messages.
+	var recipientsSet string
+	if msgType == messages.TypeGroupSet {
+		prefixed := make([]string, len(targets))
+		for i, slug := range targets {
+			prefixed[i] = "agent:" + slug
+		}
+		recipientsSet = messages.FormatSetRecipients(sender, prefixed)
+	}
+
 	// Deliver to each target agent.
 	for _, agentSlug := range targets {
 		// Update conversation context.
@@ -1696,13 +1706,14 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		recipient := "agent:" + agentSlug
 
 		msg := &messages.StructuredMessage{
-			Version:   messages.Version,
-			Timestamp: time.Unix(tgMsg.Date, 0).UTC().Format(time.RFC3339),
-			Sender:    sender,
-			SenderID:  senderID,
-			Recipient: recipient,
-			Msg:       msgText,
-			Type:      msgType,
+			Version:    messages.Version,
+			Timestamp:  time.Unix(tgMsg.Date, 0).UTC().Format(time.RFC3339),
+			Sender:     sender,
+			SenderID:   senderID,
+			Recipient:  recipient,
+			Recipients: recipientsSet,
+			Msg:        msgText,
+			Type:       msgType,
 			Metadata: map[string]string{
 				"telegram_chat_id":    strconv.FormatInt(chatID, 10),
 				"telegram_message_id": strconv.FormatInt(tgMsg.MessageID, 10),

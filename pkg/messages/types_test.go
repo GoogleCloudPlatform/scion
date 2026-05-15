@@ -251,6 +251,32 @@ func TestLogAttrsWithoutIDs(t *testing.T) {
 	}
 }
 
+func TestLogAttrsWithRecipients(t *testing.T) {
+	m := &StructuredMessage{
+		Version:    Version,
+		Sender:     "user:alice",
+		Recipient:  "agent:coder",
+		Recipients: "set[user:alice,agent:coder,agent:reviewer]",
+		Msg:        "hello",
+		Type:       TypeGroupSet,
+	}
+
+	attrs := m.LogAttrs()
+
+	found := false
+	for i := 0; i < len(attrs)-1; i += 2 {
+		if attrs[i] == "recipients" {
+			found = true
+			if attrs[i+1] != "set[user:alice,agent:coder,agent:reviewer]" {
+				t.Errorf("recipients = %v, want %q", attrs[i+1], "set[user:alice,agent:coder,agent:reviewer]")
+			}
+		}
+	}
+	if !found {
+		t.Error("LogAttrs() should include recipients when set")
+	}
+}
+
 func TestSenderPrefix(t *testing.T) {
 	tests := []struct {
 		input string

@@ -96,6 +96,22 @@ func ParseSetRecipient(s string) ([]SetRecipient, error) {
 	return recipients, nil
 }
 
+// FormatSetRecipients builds a set[...] string from a sender identity and a
+// list of recipient identities. The sender is included as the first element so
+// that the full group is represented. All identities should be prefixed
+// (e.g. "user:alice", "agent:coder").
+func FormatSetRecipients(sender string, recipients []string) string {
+	var b strings.Builder
+	b.WriteString(SetPrefix)
+	b.WriteString(sender)
+	for _, r := range recipients {
+		b.WriteByte(',')
+		b.WriteString(r)
+	}
+	b.WriteString(SetSuffix)
+	return b.String()
+}
+
 func classifyRecipient(s string) (SetRecipient, error) {
 	if strings.HasPrefix(s, "agent:") {
 		name := strings.TrimPrefix(s, "agent:")

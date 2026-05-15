@@ -2493,6 +2493,12 @@ func (s *Server) handleSetMessage(w http.ResponseWriter, r *http.Request, anchor
 	}
 	projectID := anchorAgent.ProjectID
 
+	recipientStrs := make([]string, len(recipients))
+	for i, r := range recipients {
+		recipientStrs[i] = r.String()
+	}
+	recipientsSet := messages.FormatSetRecipients(msg.Sender, recipientStrs)
+
 	groupID := api.NewUUID()
 	results := make([]SetMessageRecipientResult, len(recipients))
 	delivered := 0
@@ -2513,6 +2519,7 @@ func (s *Server) handleSetMessage(w http.ResponseWriter, r *http.Request, anchor
 			agentMsg := *msg
 			agentMsg.Recipient = "agent:" + agent.Slug
 			agentMsg.RecipientID = agent.ID
+			agentMsg.Recipients = recipientsSet
 
 			storeMsg := &store.Message{
 				ID:          api.NewUUID(),
@@ -2598,6 +2605,7 @@ func (s *Server) handleSetMessage(w http.ResponseWriter, r *http.Request, anchor
 			userMsg := *msg
 			userMsg.Recipient = userRecip
 			userMsg.RecipientID = userID
+			userMsg.Recipients = recipientsSet
 
 			storeMsg := &store.Message{
 				ID:          api.NewUUID(),
