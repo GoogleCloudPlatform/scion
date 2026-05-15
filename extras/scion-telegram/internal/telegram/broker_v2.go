@@ -1544,9 +1544,14 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			botID = b.botInfo.ID
 		}
 		b.log.Debug("Fallback1: checking reply-to message", "reply_from_id", replyFromID, "bot_id", botID)
+		replyText := tgMsg.ReplyToMessage.Text
+		if len([]rune(replyText)) > 100 {
+			replyText = string([]rune(replyText)[:100])
+		}
+		b.log.Debug("Fallback1: reply-to message text sample", "text_prefix", replyText)
 		if b.botInfo != nil && tgMsg.ReplyToMessage.From != nil && tgMsg.ReplyToMessage.From.ID == b.botInfo.ID {
 			slug := extractAgentFromBotMessage(tgMsg.ReplyToMessage.Text)
-			b.log.Debug("Fallback1: extractAgentFromBotMessage result", "slug", slug)
+			b.log.Debug("Fallback1: extractAgentFromBotMessage result", "slug", slug, "in_agents", slices.Contains(agents, slug))
 			if slug != "" {
 				b.log.Debug("Fallback1: agent in knownAgents check", "slug", slug, "agents", agents)
 				if slices.Contains(agents, slug) {
