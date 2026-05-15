@@ -209,7 +209,8 @@ func (h *CommandHandler) handleDefault(msg *TGMessage) {
 		return
 	}
 
-	agents, err := h.getAgents(ctx, link.ProjectID)
+	// Always fetch fresh agent list so the keyboard reflects current state.
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID)
 	if err != nil {
 		h.log.Error("Failed to list agents", "project_id", link.ProjectID, "error", err)
 		h.reply(chatID, "Failed to fetch agents. Please try again later.")
