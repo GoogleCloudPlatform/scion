@@ -44,6 +44,7 @@ const (
 	TypeInputNeeded    = "input-needed"
 	TypeStateChange    = "state-change"
 	TypeAssistantReply = "assistant-reply"
+	TypeGroupSet       = "group-set"
 )
 
 // validTypes is the set of valid message types.
@@ -52,6 +53,7 @@ var validTypes = map[string]bool{
 	TypeInputNeeded:    true,
 	TypeStateChange:    true,
 	TypeAssistantReply: true,
+	TypeGroupSet:       true,
 }
 
 // StructuredMessage represents a formatted Scion message.
@@ -77,7 +79,7 @@ type StructuredMessage struct {
 // ValidateType returns an error if the message type is not in the closed enum.
 func ValidateType(t string) error {
 	if !validTypes[t] {
-		return fmt.Errorf("invalid message type %q: must be one of: instruction, input-needed, state-change, assistant-reply", t)
+		return fmt.Errorf("invalid message type %q: must be one of: instruction, input-needed, state-change, assistant-reply, group-set", t)
 	}
 	return nil
 }

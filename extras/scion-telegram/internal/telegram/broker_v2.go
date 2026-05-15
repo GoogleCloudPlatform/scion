@@ -1536,7 +1536,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	b.mu.RUnlock()
 
 	// Resolve target agents from @-mentions.
-	targets := resolveTargetAgents(tgMsg, botUsername, link.DefaultAgent, agents)
+	targets, isAll := resolveTargetAgents(tgMsg, botUsername, link.DefaultAgent, agents)
 
 	// Fallback 1: reply-to-bot-message — extract the agent from the replied-to message.
 	if len(targets) == 0 && tgMsg.ReplyToMessage != nil {
@@ -1670,6 +1670,12 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		return
 	}
 
+	// Determine message type: multi-agent @mentions (not @all) use group-set.
+	msgType := messages.TypeInstruction
+	if !isAll && len(targets) > 1 {
+		msgType = messages.TypeGroupSet
+	}
+
 	// Deliver to each target agent.
 	for _, agentSlug := range targets {
 		// Update conversation context.
@@ -1696,7 +1702,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			SenderID:  senderID,
 			Recipient: recipient,
 			Msg:       msgText,
-			Type:      messages.TypeInstruction,
+			Type:      msgType,
 			Metadata: map[string]string{
 				"telegram_chat_id":    strconv.FormatInt(chatID, 10),
 				"telegram_message_id": strconv.FormatInt(tgMsg.MessageID, 10),

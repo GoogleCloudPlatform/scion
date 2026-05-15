@@ -21,23 +21,23 @@ import (
 )
 
 // resolveTargetAgents determines which agents a message should be routed to.
-// Returns a deduplicated list of agent slugs.
+// Returns a deduplicated list of agent slugs and whether @all was used.
 //
 // Tier 1: Bot @-mention (@ScionHubBot) → routes to group's default agent
 // Tier 2: Direct agent @-mention (@coder) → routes to named agent(s)
 // Tier 3: @all → routes to ALL agents in the linked project
 //
-// If no agent is resolved, returns nil (message should be silently ignored).
-func resolveTargetAgents(msg *TGMessage, botUsername string, defaultAgent string, knownAgents []string) []string {
+// If no agent is resolved, returns nil, false (message should be silently ignored).
+func resolveTargetAgents(msg *TGMessage, botUsername string, defaultAgent string, knownAgents []string) ([]string, bool) {
 	if msg == nil {
-		return nil
+		return nil, false
 	}
 
 	botMentioned := isBotMentioned(msg, botUsername)
 	agentMentions, hasAll := extractAgentMentions(msg.Text, knownAgents)
 
 	if hasAll {
-		return knownAgents
+		return knownAgents, true
 	}
 
 	seen := make(map[string]bool)
@@ -56,9 +56,9 @@ func resolveTargetAgents(msg *TGMessage, botUsername string, defaultAgent string
 	}
 
 	if len(result) == 0 {
-		return nil
+		return nil, false
 	}
-	return result
+	return result, false
 }
 
 // utf16Extract extracts a substring from s using UTF-16 code unit offset and length,

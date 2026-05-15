@@ -27,32 +27,36 @@ func TestResolveTargetAgents_BotMentionOnly(t *testing.T) {
 			{Type: "mention", Offset: 0, Length: 12},
 		},
 	}
-	result := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
+	result, isAll := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
 	assert.Equal(t, []string{"coder"}, result)
+	assert.False(t, isAll)
 }
 
 func TestResolveTargetAgents_SingleAgentMention(t *testing.T) {
 	msg := &TGMessage{
 		Text: "@reviewer check this PR",
 	}
-	result := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
+	result, isAll := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
 	assert.Equal(t, []string{"reviewer"}, result)
+	assert.False(t, isAll)
 }
 
 func TestResolveTargetAgents_MultipleAgentMentions(t *testing.T) {
 	msg := &TGMessage{
 		Text: "@coder @reviewer both of you look at this",
 	}
-	result := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer", "tester"})
+	result, isAll := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer", "tester"})
 	assert.Equal(t, []string{"coder", "reviewer"}, result)
+	assert.False(t, isAll)
 }
 
 func TestResolveTargetAgents_DuplicateMentions(t *testing.T) {
 	msg := &TGMessage{
 		Text: "@coder @coder help me",
 	}
-	result := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
+	result, isAll := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
 	assert.Equal(t, []string{"coder"}, result)
+	assert.False(t, isAll)
 }
 
 func TestResolveTargetAgents_BotPlusExplicitDefault(t *testing.T) {
@@ -62,8 +66,9 @@ func TestResolveTargetAgents_BotPlusExplicitDefault(t *testing.T) {
 			{Type: "mention", Offset: 0, Length: 12},
 		},
 	}
-	result := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
+	result, isAll := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
 	assert.Equal(t, []string{"coder"}, result)
+	assert.False(t, isAll)
 }
 
 func TestResolveTargetAgents_All(t *testing.T) {
@@ -71,53 +76,60 @@ func TestResolveTargetAgents_All(t *testing.T) {
 		Text: "@all deploy update",
 	}
 	known := []string{"coder", "reviewer", "tester"}
-	result := resolveTargetAgents(msg, "ScionHubBot", "coder", known)
+	result, isAll := resolveTargetAgents(msg, "ScionHubBot", "coder", known)
 	assert.Equal(t, known, result)
+	assert.True(t, isAll)
 }
 
 func TestResolveTargetAgents_NoMentions(t *testing.T) {
 	msg := &TGMessage{
 		Text: "just a regular message",
 	}
-	result := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
+	result, isAll := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
 	assert.Nil(t, result)
+	assert.False(t, isAll)
 }
 
 func TestResolveTargetAgents_UnknownMention(t *testing.T) {
 	msg := &TGMessage{
 		Text: "@stranger hello",
 	}
-	result := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
+	result, isAll := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
 	assert.Nil(t, result)
+	assert.False(t, isAll)
 }
 
 func TestResolveTargetAgents_NilMessage(t *testing.T) {
-	result := resolveTargetAgents(nil, "ScionHubBot", "coder", []string{"coder"})
+	result, isAll := resolveTargetAgents(nil, "ScionHubBot", "coder", []string{"coder"})
 	assert.Nil(t, result)
+	assert.False(t, isAll)
 }
 
 func TestResolveTargetAgents_MentionWithTrailingPunctuation(t *testing.T) {
 	msg := &TGMessage{
 		Text: "@coder, can you help?",
 	}
-	result := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
+	result, isAll := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
 	assert.Equal(t, []string{"coder"}, result)
+	assert.False(t, isAll)
 }
 
 func TestResolveTargetAgents_MentionWithPeriod(t *testing.T) {
 	msg := &TGMessage{
 		Text: "Hey @reviewer.",
 	}
-	result := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
+	result, isAll := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
 	assert.Equal(t, []string{"reviewer"}, result)
+	assert.False(t, isAll)
 }
 
 func TestResolveTargetAgents_MentionWithExclamation(t *testing.T) {
 	msg := &TGMessage{
 		Text: "@coder!",
 	}
-	result := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder"})
+	result, isAll := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder"})
 	assert.Equal(t, []string{"coder"}, result)
+	assert.False(t, isAll)
 }
 
 func TestIsBotMentioned_CaseInsensitive(t *testing.T) {
@@ -258,8 +270,9 @@ func TestResolveTargetAgents_BotMentionEmptyDefault(t *testing.T) {
 			{Type: "mention", Offset: 0, Length: 12},
 		},
 	}
-	result := resolveTargetAgents(msg, "ScionHubBot", "", []string{"coder"})
+	result, isAll := resolveTargetAgents(msg, "ScionHubBot", "", []string{"coder"})
 	assert.Nil(t, result)
+	assert.False(t, isAll)
 }
 
 func TestResolveTargetAgents_BotAndOtherAgents(t *testing.T) {
@@ -269,8 +282,9 @@ func TestResolveTargetAgents_BotAndOtherAgents(t *testing.T) {
 			{Type: "mention", Offset: 0, Length: 12},
 		},
 	}
-	result := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
+	result, isAll := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "reviewer"})
 	assert.Equal(t, []string{"coder", "reviewer"}, result)
+	assert.False(t, isAll)
 }
 
 // --- extractAgentFromBotMessage tests ---

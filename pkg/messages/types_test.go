@@ -28,6 +28,7 @@ func TestValidateType(t *testing.T) {
 		{TypeInputNeeded, false},
 		{TypeStateChange, false},
 		{TypeAssistantReply, false},
+		{TypeGroupSet, false},
 		{"unknown", true},
 		{"", true},
 	}
