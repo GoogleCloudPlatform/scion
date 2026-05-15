@@ -284,8 +284,10 @@ func hasNonBotUserMention(msg *TGMessage, botUsername string, knownAgents []stri
 var (
 	// agentToAgentRe matches the observer format: "👀 🤖 sender → 🤖 recipient 👀"
 	agentToAgentRe = regexp.MustCompile(`^(?:\[URGENT\] )?(?:\[Broadcast\] )?👀 🤖 \S+ → 🤖 (\S+) 👀`)
-	// standardAgentRe matches the standard format: "🤖 agent-slug" (optionally followed by " [status]")
-	standardAgentRe = regexp.MustCompile(`^(?:\[URGENT\] )?(?:\[Broadcast\] )?🤖 (\S+?)(?:\s*\[|\s*\n|$)`)
+	// standardAgentRe matches the standard format: "🤖 agent-slug" optionally followed by
+	// " → @recipient", " [status]", newline, etc. Uses greedy \S+ which stops at first
+	// whitespace — correctly handles "🤖 blue → @ptone805 message body".
+	standardAgentRe = regexp.MustCompile(`^(?:\[URGENT\] )?(?:\[Broadcast\] )?🤖 (\S+)`)
 	// stateChangeCardRe matches state change card headers: "✅ agent-slug — Completed"
 	stateChangeCardRe = regexp.MustCompile(`^(?:\[URGENT\] )?(?:\[Broadcast\] )?\S+ (\S+?) — \S`)
 )
