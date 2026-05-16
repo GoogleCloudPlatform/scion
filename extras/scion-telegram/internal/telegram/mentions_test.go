@@ -15,6 +15,7 @@
 package telegram
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -588,4 +589,178 @@ func TestHasNonBotUserMention_CaseInsensitive(t *testing.T) {
 		},
 	}
 	assert.False(t, hasNonBotUserMention(msg, "ScionHubBot", []string{"coder"}))
+}
+
+// --- entityMentionSet tests ---
+
+func TestEntityMentionSet_RealUserMention(t *testing.T) {
+	msg := &TGMessage{
+		Text: "@john hello",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 5},
+		},
+	}
+	set := entityMentionSet(msg)
+	assert.True(t, set["john"])
+	assert.Equal(t, 1, len(set))
+}
+
+func TestEntityMentionSet_MultipleMentions(t *testing.T) {
+	msg := &TGMessage{
+		Text: "@alice and @bob hello",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 6},
+			{Type: "mention", Offset: 11, Length: 4},
+		},
+	}
+	set := entityMentionSet(msg)
+	assert.True(t, set["alice"])
+	assert.True(t, set["bob"])
+	assert.Equal(t, 2, len(set))
+}
+
+func TestEntityMentionSet_NoEntities(t *testing.T) {
+	msg := &TGMessage{
+		Text: "@typo hello",
+	}
+	set := entityMentionSet(msg)
+	assert.Equal(t, 0, len(set))
+}
+
+func TestEntityMentionSet_IgnoresNonMentionEntities(t *testing.T) {
+	msg := &TGMessage{
+		Text: "/start @john",
+		Entities: []MessageEntity{
+			{Type: "bot_command", Offset: 0, Length: 6},
+			{Type: "mention", Offset: 7, Length: 5},
+		},
+	}
+	set := entityMentionSet(msg)
+	assert.True(t, set["john"])
+	assert.Equal(t, 1, len(set))
+}
+
+func TestEntityMentionSet_NilMessage(t *testing.T) {
+	set := entityMentionSet(nil)
+	assert.Equal(t, 0, len(set))
+}
+
+func TestEntityMentionSet_CaseInsensitive(t *testing.T) {
+	msg := &TGMessage{
+		Text: "@John hello",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 5},
+		},
+	}
+	set := entityMentionSet(msg)
+	assert.True(t, set["john"])
+}
+
+func TestEntityMentionSet_IgnoresTextMention(t *testing.T) {
+	msg := &TGMessage{
+		Text: "Bob Smith hello",
+		Entities: []MessageEntity{
+			{Type: "text_mention", Offset: 0, Length: 9, User: &TGUser{ID: 123, FirstName: "Bob"}},
+		},
+	}
+	set := entityMentionSet(msg)
+	assert.Equal(t, 0, len(set))
+}
+
+// --- extractUnresolvedMentions tests ---
+
+func TestExtractUnresolvedMentions_TypoAgent(t *testing.T) {
+	result := extractUnresolvedMentions("@agent-typo hello", "ScionHubBot", []string{"coder", "reviewer"})
+	assert.Equal(t, []string{"agent-typo"}, result)
+}
+
+func TestExtractUnresolvedMentions_AllKnown(t *testing.T) {
+	result := extractUnresolvedMentions("@coder @reviewer hello", "ScionHubBot", []string{"coder", "reviewer"})
+	assert.Nil(t, result)
+}
+
+func TestExtractUnresolvedMentions_BotFiltered(t *testing.T) {
+	result := extractUnresolvedMentions("@ScionHubBot hello", "ScionHubBot", []string{"coder"})
+	assert.Nil(t, result)
+}
+
+func TestExtractUnresolvedMentions_MixedKnownAndUnknown(t *testing.T) {
+	result := extractUnresolvedMentions("@coder @agent-typo hello", "ScionHubBot", []string{"coder", "reviewer"})
+	assert.Equal(t, []string{"agent-typo"}, result)
+}
+
+func TestExtractUnresolvedMentions_MultipleUnknown(t *testing.T) {
+	result := extractUnresolvedMentions("@typo1 @typo2 hello", "ScionHubBot", []string{"coder"})
+	assert.Equal(t, []string{"typo1", "typo2"}, result)
+}
+
+func TestExtractUnresolvedMentions_NoMentions(t *testing.T) {
+	result := extractUnresolvedMentions("just regular text", "ScionHubBot", []string{"coder"})
+	assert.Nil(t, result)
+}
+
+// --- Integration: typo detection vs real user mention ---
+
+func TestTypoDetection_TypoAgentNoEntity(t *testing.T) {
+	// @agent-typo with no entity → not a real Telegram user → should be flagged.
+	msg := &TGMessage{
+		Text: "@agent-typo hello",
+	}
+	unresolved := extractUnresolvedMentions(msg.Text, "ScionHubBot", []string{"coder", "reviewer"})
+	assert.Equal(t, []string{"agent-typo"}, unresolved)
+
+	entityMentions := entityMentionSet(msg)
+	var typos []string
+	for _, name := range unresolved {
+		lower := name
+		if len(lower) > 0 {
+			lower = strings.ToLower(lower)
+		}
+		if !entityMentions[lower] {
+			typos = append(typos, "@"+name)
+		}
+	}
+	assert.Equal(t, []string{"@agent-typo"}, typos)
+}
+
+func TestTypoDetection_RealUserWithEntity(t *testing.T) {
+	// @john with a mention entity → real Telegram user → should NOT be flagged.
+	msg := &TGMessage{
+		Text: "@john hello",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 5},
+		},
+	}
+	unresolved := extractUnresolvedMentions(msg.Text, "ScionHubBot", []string{"coder", "reviewer"})
+	assert.Equal(t, []string{"john"}, unresolved)
+
+	entityMentions := entityMentionSet(msg)
+	var typos []string
+	for _, name := range unresolved {
+		if !entityMentions[strings.ToLower(name)] {
+			typos = append(typos, "@"+name)
+		}
+	}
+	assert.Empty(t, typos)
+}
+
+func TestTypoDetection_MixedTypoAndRealUser(t *testing.T) {
+	// @john (real user with entity) + @agent-typo (no entity) → only agent-typo flagged.
+	msg := &TGMessage{
+		Text: "@john @agent-typo hello",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 5},
+		},
+	}
+	unresolved := extractUnresolvedMentions(msg.Text, "ScionHubBot", []string{"coder"})
+	assert.Equal(t, []string{"john", "agent-typo"}, unresolved)
+
+	entityMentions := entityMentionSet(msg)
+	var typos []string
+	for _, name := range unresolved {
+		if !entityMentions[strings.ToLower(name)] {
+			typos = append(typos, "@"+name)
+		}
+	}
+	assert.Equal(t, []string{"@agent-typo"}, typos)
 }

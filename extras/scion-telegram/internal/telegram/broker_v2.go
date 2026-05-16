@@ -1608,6 +1608,24 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 				errMsg := fmt.Sprintf("No agent named %q found in this project. Use /agents to see available agents.", unresolved[0])
 				b.api.SendMessage(ctx, chatID, errMsg, "") //nolint:errcheck
 			}
+		} else {
+			// Check for @tokens not matching any known agent. Filter out
+			// real Telegram user mentions (those have a "mention" entity
+			// from the Bot API) so we only flag likely agent-name typos.
+			unresolved := extractUnresolvedMentions(tgMsg.Text, botUsername, agents)
+			if len(unresolved) > 0 {
+				entityMentions := entityMentionSet(tgMsg)
+				var typos []string
+				for _, name := range unresolved {
+					if !entityMentions[strings.ToLower(name)] {
+						typos = append(typos, "@"+name)
+					}
+				}
+				if len(typos) > 0 {
+					errMsg := fmt.Sprintf("Unknown agent(s): %s. Use /agents to see available agents.", strings.Join(typos, ", "))
+					b.api.SendMessage(ctx, chatID, errMsg, "") //nolint:errcheck
+				}
+			}
 		}
 		return
 	}

@@ -319,6 +319,31 @@ func extractAgentFromBotMessage(text string) string {
 	return ""
 }
 
+// entityMentionSet returns the set of lowercase usernames that appear in
+// msg.Entities as "mention" type — these are real Telegram users confirmed by
+// the Bot API. Tokens typed as @something that do NOT appear in this set were
+// not recognized by Telegram as valid usernames.
+func entityMentionSet(msg *TGMessage) map[string]bool {
+	set := make(map[string]bool)
+	if msg == nil {
+		return set
+	}
+	for _, ent := range msg.Entities {
+		if ent.Type != "mention" {
+			continue
+		}
+		mention, ok := utf16Extract(msg.Text, ent.Offset, ent.Length)
+		if !ok {
+			continue
+		}
+		username := strings.TrimPrefix(mention, "@")
+		if username != "" {
+			set[strings.ToLower(username)] = true
+		}
+	}
+	return set
+}
+
 // extractUnresolvedMentions returns @mention tokens from the message that do not
 // match the bot username or any known agent slug. Used to detect when a user
 // explicitly @mentioned something that isn't a known integration target.
