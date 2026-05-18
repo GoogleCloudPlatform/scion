@@ -175,6 +175,13 @@ func processHookData(data []byte) error {
 	// Register built-in dialects.
 	dialects.RegisterBuiltins(processor)
 
+	// Discover data-driven dialect from harness bundle if not built-in.
+	if _, ok := processor.Dialects[hookDialect]; !ok {
+		if md, err := dialects.DiscoverMappingDialect(hookDialect); err == nil {
+			processor.RegisterDialect(md)
+		}
+	}
+
 	// Register handlers
 	statusHandler := handlers.NewStatusHandler()
 	loggingHandler := handlers.NewLoggingHandler()
