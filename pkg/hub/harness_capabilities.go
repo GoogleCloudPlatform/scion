@@ -58,6 +58,9 @@ func (s *Server) resolveHarnessTypeFromConfigRef(ctx context.Context, projectID,
 			if inferred := inferHarnessFromName(hc.Harness); inferred != "" {
 				return inferred
 			}
+			if hc.Harness != "" {
+				return hc.Harness
+			}
 		}
 	}
 
@@ -68,6 +71,9 @@ func (s *Server) resolveHarnessTypeFromConfigRef(ctx context.Context, projectID,
 		}
 		if inferred := inferHarnessFromName(hc.Harness); inferred != "" {
 			return inferred
+		}
+		if hc.Harness != "" {
+			return hc.Harness
 		}
 	}
 
@@ -85,6 +91,9 @@ func (s *Server) resolveAgentHarnessType(ctx context.Context, agent *store.Agent
 	if agent.AppliedConfig != nil && agent.AppliedConfig.InlineConfig != nil {
 		if h := canonicalHarnessName(agent.AppliedConfig.InlineConfig.Harness); h != "" {
 			return h
+		}
+		if agent.AppliedConfig.InlineConfig.Harness != "" {
+			return agent.AppliedConfig.InlineConfig.Harness
 		}
 	}
 

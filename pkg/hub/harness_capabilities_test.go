@@ -121,3 +121,28 @@ func TestUpdateAgent_AllowsMaxDurationForAllHarnesses(t *testing.T) {
 	require.NotNil(t, updated.AppliedConfig.InlineConfig)
 	assert.Equal(t, "10m", updated.AppliedConfig.InlineConfig.MaxDuration)
 }
+
+func TestGetAgent_CustomHarnessTypeFromHarnessConfig(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	hc := &store.HarnessConfig{
+		ID:         "hc-custom",
+		Name:       "custom-harness",
+		Slug:       "custom-harness",
+		Harness:    "custom-harness",
+		Scope:      store.HarnessConfigScopeGlobal,
+		Status:     store.HarnessConfigStatusActive,
+		Visibility: store.VisibilityPublic,
+	}
+	require.NoError(t, s.CreateHarnessConfig(ctx, hc))
+
+	agent := seedCreatedAgentForHarnessTest(t, s, "custom-type", "custom-harness")
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got AgentWithCapabilities
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, "custom-harness", got.ResolvedHarness, "custom harness type should pass through from Hub DB harness config")
+}
