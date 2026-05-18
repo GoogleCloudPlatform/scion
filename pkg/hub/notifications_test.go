@@ -495,8 +495,8 @@ func TestNotificationDispatcher_UserSubscriberInboxWithBroker(t *testing.T) {
 	}
 	require.NoError(t, env.store.CreateNotificationSubscription(context.Background(), userSub))
 
-	// Set up a broker proxy — notifications should NOT be routed through the
-	// broker (only explicit scion-message commands use the broker path).
+	// Set up a broker proxy — notifications are routed through the broker so
+	// external integrations (Telegram, Discord) can render state-change cards.
 	rb := &recordingBroker{}
 	proxy := NewMessageBrokerProxy(rb, env.store, env.pub, func() AgentDispatcher { return env.dispatcher }, slog.Default())
 	env.nd.SetBrokerProxy(proxy)
@@ -509,10 +509,12 @@ func TestNotificationDispatcher_UserSubscriberInboxWithBroker(t *testing.T) {
 	// Wait for processing
 	time.Sleep(300 * time.Millisecond)
 
-	// Broker should NOT receive the notification (only scion message does).
-	assert.Empty(t, rb.getPublishes(), "broker should not receive notification publishes")
+	// Broker should receive the notification for external integrations.
+	publishes := rb.getPublishes()
+	require.Len(t, publishes, 1, "broker should receive notification publish")
+	assert.Equal(t, messages.TypeStateChange, publishes[0].msg.Type)
 
-	// Inbox message should be created directly for the web UI.
+	// Inbox message should also be created directly for the web UI.
 	msgs, err := env.store.ListMessages(context.Background(), store.MessageFilter{
 		RecipientID: "user-broker-inbox",
 		ProjectID:   env.project.ID,
@@ -941,7 +943,7 @@ func TestNotificationDispatcher_ErrorPhase(t *testing.T) {
 	assert.Equal(t, "ERROR", notifs[0].Status)
 }
 
-func TestNotificationDispatcher_BrokerNotUsedForUserNotification(t *testing.T) {
+func TestNotificationDispatcher_BrokerUsedForUserNotification(t *testing.T) {
 	env := setupNotificationTest(t)
 
 	// Replace the agent subscription with a user subscription
@@ -963,8 +965,8 @@ func TestNotificationDispatcher_BrokerNotUsedForUserNotification(t *testing.T) {
 	proxy := NewMessageBrokerProxy(rb, env.store, env.pub, func() AgentDispatcher { return env.dispatcher }, slog.Default())
 	env.nd.SetBrokerProxy(proxy)
 
-	// Also set up a recording channel — should receive the notification since
-	// the broker path is no longer used for notifications.
+	// Also set up a recording channel — should also receive the notification
+	// as a fallback for deployments without broker plugins.
 	ch := &recordingChannel{name: "test-channel"}
 	env.nd.channelRegistry = &ChannelRegistry{
 		channels: []NotificationChannel{ch},
@@ -980,8 +982,11 @@ func TestNotificationDispatcher_BrokerNotUsedForUserNotification(t *testing.T) {
 	// Wait for processing
 	time.Sleep(300 * time.Millisecond)
 
-	// Broker should NOT receive the notification (only scion message uses broker).
-	assert.Empty(t, rb.getPublishes(), "broker should not receive notification publishes")
+	// Broker should receive the notification for external integrations.
+	publishes := rb.getPublishes()
+	require.Len(t, publishes, 1, "broker should receive notification publish")
+	assert.Equal(t, messages.TypeStateChange, publishes[0].msg.Type)
+	assert.Equal(t, "COMPLETED", publishes[0].msg.Status)
 
 	// Inbox message should be created directly for the web UI.
 	msgs, err := env.store.ListMessages(context.Background(), store.MessageFilter{
@@ -991,7 +996,7 @@ func TestNotificationDispatcher_BrokerNotUsedForUserNotification(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, msgs.Items, 1, "inbox message should be created directly")
 
-	// Channel registry should be called as a fallback for external delivery.
+	// Channel registry should also be called as a fallback.
 	assert.Len(t, ch.getDeliveries(), 1, "channel registry should receive the notification")
 }
 

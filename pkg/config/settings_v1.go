@@ -305,6 +305,10 @@ type V1MessageBrokerConfig struct {
 	Enabled bool `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	// Type selects the broker adapter: "inprocess" (default). Future: "nats", "redis".
 	Type string `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`
+	// Types lists multiple broker plugin names for fan-out mode.
+	// When non-empty, all listed plugins run concurrently via FanOutBroker.
+	// Falls back to Type (singular) for backward compatibility.
+	Types []string `json:"types,omitempty" yaml:"types,omitempty" koanf:"types"`
 }
 
 // V1PluginsConfig configures external plugin loading for message brokers and harnesses.

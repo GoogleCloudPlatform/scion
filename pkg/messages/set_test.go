@@ -214,6 +214,72 @@ func TestParseSetRecipient_MaxLimit(t *testing.T) {
 	}
 }
 
+func TestFormatSetRecipients(t *testing.T) {
+	tests := []struct {
+		name       string
+		sender     string
+		recipients []string
+		want       string
+	}{
+		{
+			name:       "user sender with two agents",
+			sender:     "user:alice",
+			recipients: []string{"agent:coder", "agent:reviewer"},
+			want:       "set[user:alice,agent:coder,agent:reviewer]",
+		},
+		{
+			name:       "agent sender with agents",
+			sender:     "agent:lead",
+			recipients: []string{"agent:coder", "agent:reviewer"},
+			want:       "set[agent:lead,agent:coder,agent:reviewer]",
+		},
+		{
+			name:       "mixed recipients",
+			sender:     "user:bob@example.com",
+			recipients: []string{"agent:deploy", "user:carol@example.com"},
+			want:       "set[user:bob@example.com,agent:deploy,user:carol@example.com]",
+		},
+		{
+			name:       "single recipient",
+			sender:     "user:alice",
+			recipients: []string{"agent:coder"},
+			want:       "set[user:alice,agent:coder]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatSetRecipients(tt.sender, tt.recipients)
+			if got != tt.want {
+				t.Errorf("FormatSetRecipients() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatSetRecipients_Roundtrip(t *testing.T) {
+	sender := "user:alice"
+	recipients := []string{"agent:coder", "agent:reviewer"}
+	formatted := FormatSetRecipients(sender, recipients)
+
+	parsed, err := ParseSetRecipient(formatted)
+	if err != nil {
+		t.Fatalf("roundtrip parse failed: %v", err)
+	}
+	if len(parsed) != 3 {
+		t.Fatalf("expected 3 parsed recipients (sender + 2), got %d", len(parsed))
+	}
+	if parsed[0].String() != "user:alice" {
+		t.Errorf("parsed[0] = %q, want %q", parsed[0].String(), "user:alice")
+	}
+	if parsed[1].String() != "agent:coder" {
+		t.Errorf("parsed[1] = %q, want %q", parsed[1].String(), "agent:coder")
+	}
+	if parsed[2].String() != "agent:reviewer" {
+		t.Errorf("parsed[2] = %q, want %q", parsed[2].String(), "agent:reviewer")
+	}
+}
+
 func TestSetRecipientString(t *testing.T) {
 	r := SetRecipient{Kind: RecipientAgent, Name: "reviewer"}
 	if r.String() != "agent:reviewer" {

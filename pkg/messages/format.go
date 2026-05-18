@@ -29,6 +29,7 @@ const (
 type deliveryMessage struct {
 	Timestamp   string   `json:"timestamp"`
 	Sender      string   `json:"sender"`
+	Recipients  string   `json:"recipients,omitempty"`
 	Msg         string   `json:"msg"`
 	Type        string   `json:"type"`
 	Urgent      bool     `json:"urgent,omitempty"`
@@ -47,6 +48,7 @@ func FormatForDelivery(msg *StructuredMessage) string {
 	dm := deliveryMessage{
 		Timestamp:   msg.Timestamp,
 		Sender:      msg.Sender,
+		Recipients:  msg.Recipients,
 		Msg:         msg.Msg,
 		Type:        msg.Type,
 		Urgent:      msg.Urgent,

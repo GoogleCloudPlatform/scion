@@ -29,6 +29,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// brokerCallbackTimeout bounds how long a broker subscription callback may
+// spend on persistence and dispatch. Subscription callbacks run asynchronously
+// from the publisher and must NOT use the publisher's context (typically an
+// HTTP request context) because it may already be canceled by the time the
+// callback fires.
+const brokerCallbackTimeout = 30 * time.Second
+
 // MessageBrokerProxy bridges the message broker with the Hub's agent lifecycle
 // and dispatch infrastructure. It:
 //   - Subscribes to broker topics on behalf of agents (agents don't have direct broker access)
@@ -177,12 +184,11 @@ func (p *MessageBrokerProxy) RequestSubscription(pattern string) error {
 		return nil
 	}
 
-	sub, err := p.broker.Subscribe(pattern, func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
-		// Route the message to the plugin for external delivery.
-		if pubErr := p.broker.Publish(ctx, topic, msg); pubErr != nil {
-			p.log.Error("Failed to deliver plugin-requested message", "pattern", pattern, "error", pubErr)
-		}
-	})
+	// With FanOutBroker, all plugin spokes receive Publish() calls directly
+	// for every message. Re-publishing via p.broker.Publish() here would
+	// loop back through InProcessBroker's own subscribers, creating a
+	// feedback storm. The subscription is tracked for accounting only.
+	sub, err := p.broker.Subscribe(pattern, func(_ context.Context, _ string, _ *messages.StructuredMessage) {})
 	if err != nil {
 		return fmt.Errorf("failed to subscribe for plugin pattern %q: %w", pattern, err)
 	}
@@ -228,19 +234,12 @@ func (p *MessageBrokerProxy) PublishBroadcast(ctx context.Context, projectID str
 	return p.broker.Publish(ctx, broker.TopicProjectBroadcast(projectID), msg)
 }
 
-// PublishUserMessage publishes a message to the user-targeted broker topic and
-// handles local delivery (DB persistence + SSE) directly. The external broker
-// receives the message for chat-app delivery while the hub persists and
-// publishes the SSE event so the web UI is updated immediately.
+// PublishUserMessage publishes a message to the user-targeted broker topic.
+// Local delivery (DB persistence + SSE) is handled by the InProcessBroker
+// subscription in subscribeProjectUserMessages — do not call deliverToUser()
+// here to avoid double-delivery.
 func (p *MessageBrokerProxy) PublishUserMessage(ctx context.Context, projectID, userID string, msg *messages.StructuredMessage) error {
 	topic := broker.TopicUserMessages(projectID, userID)
-
-	// Deliver locally: persist to message store and publish SSE event.
-	// This is necessary because the BrokerPluginAdapter does not invoke
-	// local subscription handlers — it only forwards via RPC.
-	p.deliverToUser(ctx, projectID, topic, msg)
-
-	// Publish to external broker for chat-app / external delivery.
 	return p.broker.Publish(ctx, topic, msg)
 }
 
@@ -339,7 +338,9 @@ func (p *MessageBrokerProxy) subscribeAgent(projectID, agentSlug string) {
 	p.subscribedTopics[topic] = true
 	p.mu.Unlock()
 
-	sub, err := p.broker.Subscribe(topic, func(ctx context.Context, t string, msg *messages.StructuredMessage) {
+	sub, err := p.broker.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
+		ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
+		defer cancel()
 		p.deliverToAgent(ctx, projectID, agentSlug, msg)
 	})
 	if err != nil {
@@ -368,7 +369,9 @@ func (p *MessageBrokerProxy) subscribeProjectBroadcast(projectID string) {
 	p.subscribedTopics[topic] = true
 	p.mu.Unlock()
 
-	sub, err := p.broker.Subscribe(topic, func(ctx context.Context, t string, msg *messages.StructuredMessage) {
+	sub, err := p.broker.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
+		ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
+		defer cancel()
 		p.fanOutToProject(ctx, projectID, msg)
 	})
 	if err != nil {
@@ -399,7 +402,9 @@ func (p *MessageBrokerProxy) subscribeProjectUserMessages(projectID string) {
 	p.subscribedTopics[topic] = true
 	p.mu.Unlock()
 
-	sub, err := p.broker.Subscribe(topic, func(ctx context.Context, t string, msg *messages.StructuredMessage) {
+	sub, err := p.broker.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
+		ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
+		defer cancel()
 		p.deliverToUser(ctx, projectID, t, msg)
 	})
 	if err != nil {
@@ -462,7 +467,9 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 func (p *MessageBrokerProxy) subscribeGlobalBroadcast() {
 	topic := broker.TopicGlobalBroadcast()
 
-	_, err := p.broker.Subscribe(topic, func(ctx context.Context, t string, msg *messages.StructuredMessage) {
+	_, err := p.broker.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
+		ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
+		defer cancel()
 		p.fanOutGlobal(ctx, msg)
 	})
 	if err != nil {
@@ -471,8 +478,13 @@ func (p *MessageBrokerProxy) subscribeGlobalBroadcast() {
 }
 
 // deliverToAgent dispatches a message to a specific agent via the existing
-// DispatchAgentMessage path.
+// DispatchAgentMessage path. ObserverOnly messages are skipped — they were
+// already delivered directly and are only published for plugin observers.
 func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agentSlug string, msg *messages.StructuredMessage) {
+	if msg.ObserverOnly {
+		return
+	}
+
 	dispatcher := p.getDispatcher()
 	if dispatcher == nil {
 		p.log.Warn("No dispatcher available, cannot deliver broker message",

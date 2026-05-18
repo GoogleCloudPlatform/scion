@@ -51,6 +51,10 @@ const PROFILE_SECTIONS: NavSection[] = [
     title: 'Notifications',
     items: [{ path: '/profile/settings', label: 'Notifications & Settings', icon: 'bell' }],
   },
+  {
+    title: 'Integrations',
+    items: [{ path: '/profile/telegram', label: 'Telegram', icon: 'send' }],
+  },
 ];
 
 @customElement('scion-profile-nav')

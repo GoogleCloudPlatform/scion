@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -293,35 +294,101 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		hubSrv.SetDispatcher(dispatcher)
 		log.Printf("Agent dispatcher configured (HTTP-based)")
 
-		// Initialize message broker from versioned settings
+		// Initialize message broker from versioned settings.
+		// Uses FanOutBroker to support multiple simultaneous broker plugins.
 		if vs, err := config.LoadVersionedSettings(""); err == nil && vs.Server != nil && vs.Server.MessageBroker != nil && vs.Server.MessageBroker.Enabled {
-			brokerType := vs.Server.MessageBroker.Type
-			if brokerType == "" {
-				brokerType = "inprocess"
-			}
-			switch brokerType {
-			case "inprocess":
-				b := broker.NewInProcessBroker(logging.Subsystem("hub.broker.inprocess"))
-				hubSrv.StartMessageBroker(b)
-				log.Printf("Message broker started: type=%s", brokerType)
-			default:
-				// Try loading as a plugin broker
-				if pluginMgr.HasPlugin(scionplugin.PluginTypeBroker, brokerType) {
-					b, pluginErr := pluginMgr.GetBroker(brokerType)
-					if pluginErr != nil {
-						log.Printf("Warning: failed to get broker plugin %q: %v", brokerType, pluginErr)
-					} else {
-						hubSrv.StartMessageBroker(b)
-						log.Printf("Message broker started: type=%s (plugin)", brokerType)
-					}
-				} else {
-					log.Printf("Warning: unknown message broker type %q (no plugin loaded), skipping", brokerType)
-				}
+			var namedBrokers []broker.NamedBroker
+
+			// InProcessBroker is always present for local pub/sub routing.
+			inproc := broker.NewInProcessBroker(logging.Subsystem("hub.broker.inprocess"))
+			namedBrokers = append(namedBrokers, broker.NamedBroker{Name: "inprocess", Broker: inproc})
+
+			// Resolve the list of plugin broker types.
+			brokerTypes := vs.Server.MessageBroker.Types
+			if len(brokerTypes) == 0 && vs.Server.MessageBroker.Type != "" && vs.Server.MessageBroker.Type != "inprocess" {
+				brokerTypes = []string{vs.Server.MessageBroker.Type}
 			}
 
+			for _, bt := range brokerTypes {
+				if !pluginMgr.HasPlugin(scionplugin.PluginTypeBroker, bt) {
+					log.Printf("Warning: broker plugin %q not loaded, skipping", bt)
+					continue
+				}
+				b, pluginErr := pluginMgr.GetBroker(bt)
+				if pluginErr != nil {
+					log.Printf("Warning: failed to get broker plugin %q: %v", bt, pluginErr)
+					continue
+				}
+
+				// Inject hub credentials into hub-managed broker plugins so they
+				// can authenticate back to the Hub API. Self-managed plugins
+				// handle their own credential lifecycle.
+				if !pluginMgr.IsSelfManaged(scionplugin.PluginTypeBroker, bt) && hubSrv != nil && s != nil {
+					brokerID := "plugin-broker-" + bt
+					if authSvc := hubSrv.GetBrokerAuthService(); authSvc != nil {
+						// Ensure the runtime broker entity exists (required by
+						// the broker_secrets foreign key constraint).
+						if _, err := s.GetRuntimeBroker(ctx, brokerID); err != nil {
+							pluginBroker := &store.RuntimeBroker{
+								ID:              brokerID,
+								Name:            "plugin-" + bt,
+								Slug:            api.Slugify("plugin-" + bt),
+								Version:         "0.1.0",
+								Status:          store.BrokerStatusOnline,
+								ConnectionState: "embedded",
+								Labels:          map[string]string{"scion.io/plugin": bt},
+								Created:         time.Now(),
+								Updated:         time.Now(),
+							}
+							if createErr := s.CreateRuntimeBroker(ctx, pluginBroker); createErr != nil {
+								log.Printf("Warning: failed to register broker entity for plugin %q: %v", bt, createErr)
+							}
+						}
+						secretKey, secretErr := authSvc.GenerateAndStoreSecret(ctx, brokerID)
+						if secretErr != nil {
+							log.Printf("Warning: failed to generate secret for broker plugin %q: %v", bt, secretErr)
+						} else {
+							hubCreds := map[string]string{
+								"hub_url":   hubEndpoint,
+								"hmac_key":  secretKey,
+								"broker_id": brokerID,
+							}
+							// Inject project slug map so hub-managed plugins can resolve
+							// human-readable project names without user-level API access.
+							if projects, listErr := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 500}); listErr == nil {
+								slugMap := make(map[string]string, len(projects.Items))
+								for _, p := range projects.Items {
+									if p.Slug != "" {
+										slugMap[p.ID] = p.Slug
+									} else {
+										slugMap[p.ID] = p.Name
+									}
+								}
+								if jsonBytes, jsonErr := json.Marshal(slugMap); jsonErr == nil {
+									hubCreds["project_slug_map"] = string(jsonBytes)
+								}
+							}
+							if cfgErr := pluginMgr.ConfigureBroker(bt, hubCreds); cfgErr != nil {
+								log.Printf("Warning: failed to inject hub credentials into broker plugin %q: %v", bt, cfgErr)
+							} else {
+								log.Printf("Injected hub credentials into broker plugin %q (broker_id=%s)", bt, brokerID)
+							}
+						}
+					}
+				}
+
+				observer := isObserverBroker(pluginMgr, bt)
+				namedBrokers = append(namedBrokers, broker.NamedBroker{
+					Name: bt, Broker: b, Observer: observer,
+				})
+				log.Printf("Message broker spoke added: name=%s observer=%v", bt, observer)
+			}
+
+			fanout := broker.NewFanOutBroker(namedBrokers, logging.Subsystem("hub.broker.fanout"))
+			hubSrv.StartMessageBroker(fanout)
+			log.Printf("Message broker started: fan-out with %d spoke(s)", len(namedBrokers))
+
 			// Wire the broker proxy as the host callbacks target for broker plugins.
-			// This enables plugin-initiated subscriptions via the HostCallbacks
-			// reverse channel (the proxy implements plugin.HostCallbacks).
 			if proxy := hubSrv.GetMessageBrokerProxy(); proxy != nil {
 				pluginMgr.SetBrokerHostCallbacks(proxy)
 			}
@@ -1165,6 +1232,28 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	}
 
 	return nil
+}
+
+// isObserverBroker determines whether a broker plugin should be treated as an
+// observer (fire-and-forget on publish errors). It checks the plugin's
+// capabilities first, then falls back to a name-based heuristic.
+func isObserverBroker(pluginMgr *scionplugin.Manager, name string) bool {
+	raw, err := pluginMgr.Get(scionplugin.PluginTypeBroker, name)
+	if err == nil {
+		if rpc, ok := raw.(*scionplugin.BrokerRPCClient); ok {
+			if info, infoErr := rpc.GetInfo(); infoErr == nil && info != nil {
+				for _, cap := range info.Capabilities {
+					if strings.EqualFold(cap, "observer") {
+						return true
+					}
+				}
+				return false
+			}
+		}
+	}
+	// Heuristic fallback: names containing "log" or "debug" are observers.
+	lower := strings.ToLower(name)
+	return strings.Contains(lower, "log") || strings.Contains(lower, "debug")
 }
 
 // initPluginManager creates and loads a plugin manager from versioned settings.

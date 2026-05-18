@@ -514,10 +514,11 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 	defer cancel()
 
 	outMsg := &hubclient.OutboundMessageRequest{
-		Recipient: userRecipient,
-		Msg:       message,
-		Type:      "instruction",
-		Urgent:    urgent,
+		Recipient:   userRecipient,
+		Msg:         message,
+		Type:        "instruction",
+		Urgent:      urgent,
+		Attachments: msgAttach,
 	}
 
 	if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
@@ -596,10 +597,11 @@ func sendSetMessageViaHub(hubCtx *HubContext, recipients []messages.SetRecipient
 					userRecip = "user:" + recip.Name
 				}
 				outMsg := &hubclient.OutboundMessageRequest{
-					Recipient: userRecip,
-					Msg:       message,
-					Type:      "instruction",
-					Urgent:    interrupt,
+					Recipient:   userRecip,
+					Msg:         message,
+					Type:        "instruction",
+					Urgent:      interrupt,
+					Attachments: msgAttach,
 				}
 				if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
 					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
