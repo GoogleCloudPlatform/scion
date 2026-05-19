@@ -466,10 +466,10 @@ func runInit(args []string) int {
 			hubCtx, hubCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			startedAtStr := time.Now().UTC().Format(time.RFC3339)
 			zeroCount := 0
-			s := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityIdle}
+			s := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWorking}
 			if err := hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
 				Phase:             state.PhaseRunning,
-				Activity:          state.ActivityIdle,
+				Activity:          state.ActivityWorking,
 				Status:            s.DisplayStatus(),
 				Message:           "Agent started",
 				StartedAt:         startedAtStr,
@@ -779,13 +779,71 @@ func runInit(args []string) int {
 		log.Error("Session-end hooks failed: %v", err)
 	}
 
-	// Report final stopped status to Hub
+	// Determine the final exit code and whether this was a crash.
+	// Also recognize ExitCodeLimitsExceeded from the child process itself
+	// (e.g., the harness detected limits before the supervisor signal).
+	if !limitsExceeded && result.code == handlers.ExitCodeLimitsExceeded {
+		limitsExceeded = true
+	}
+	finalCode := result.code
+	if limitsExceeded {
+		finalCode = handlers.ExitCodeLimitsExceeded
+	} else if result.err != nil && result.code == 0 {
+		finalCode = 1
+	}
+	isCrash := !limitsExceeded && finalCode != 0
+
+	// Build crash message: distinguish real child exit codes from
+	// synthetic ones produced by supervisor errors.
+	var crashMsg string
+	if isCrash {
+		if result.err != nil && result.code == 0 {
+			crashMsg = fmt.Sprintf("Agent crashed (supervisor error: %v)", result.err)
+		} else {
+			crashMsg = fmt.Sprintf("Agent crashed with exit code %d", finalCode)
+		}
+	}
+
+	// Update local agent-info.json BEFORE the Hub report so the broker
+	// heartbeat can relay crash/limits state even if the Hub call is slow
+	// or fails entirely.
+	if isCrash {
+		statusHandler.UpdatePhase(state.PhaseStopped, state.ActivityCrashed, "")
+		statusHandler.SetMessage(crashMsg)
+	} else if limitsExceeded {
+		statusHandler.UpdatePhase(state.PhaseStopped, state.ActivityLimitsExceeded, "")
+		statusHandler.SetMessage("limits exceeded")
+	}
+
+	// Report final status to Hub, distinguishing clean stop from crash.
 	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
 		hubCtx, hubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := hubClient.ReportState(hubCtx, state.PhaseStopped, "", "Agent stopped"); err != nil {
-			log.Error("Failed to report stopped status to Hub: %v", err)
+		var hubErr error
+		if isCrash {
+			s := state.AgentState{Phase: state.PhaseStopped, Activity: state.ActivityCrashed}
+			hubErr = hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
+				Phase:    state.PhaseStopped,
+				Activity: state.ActivityCrashed,
+				Status:   s.DisplayStatus(),
+				Message:  crashMsg,
+				ExitCode: &finalCode,
+			})
+		} else if limitsExceeded {
+			s := state.AgentState{Phase: state.PhaseStopped, Activity: state.ActivityLimitsExceeded}
+			hubErr = hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
+				Phase:    state.PhaseStopped,
+				Activity: state.ActivityLimitsExceeded,
+				Status:   s.DisplayStatus(),
+				Message:  "Agent stopped: limits exceeded",
+				ExitCode: &finalCode,
+			})
 		} else {
-			log.Info("Reported stopped status to Hub")
+			hubErr = hubClient.ReportState(hubCtx, state.PhaseStopped, "", "Agent stopped")
+		}
+		if hubErr != nil {
+			log.Error("Failed to report final status to Hub: %v", hubErr)
+		} else {
+			log.Info("Reported final status to Hub (exitCode=%d, crash=%v)", finalCode, isCrash)
 		}
 		hubCancel()
 	}
@@ -1116,7 +1174,10 @@ func gitCloneWorkspace(uid, gid int, agentHome string) error {
 		return nil
 	}
 
-	workspacePath := "/workspace"
+	workspacePath := os.Getenv("SCION_WORKSPACE_PATH")
+	if workspacePath == "" {
+		workspacePath = "/workspace"
+	}
 
 	// Check if workspace already has content (stop/start scenario).
 	// Ignore marker-only directories (e.g. .scion/) that may have been

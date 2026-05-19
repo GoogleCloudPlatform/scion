@@ -44,6 +44,7 @@ const (
 	TypeInputNeeded    = "input-needed"
 	TypeStateChange    = "state-change"
 	TypeAssistantReply = "assistant-reply"
+	TypeGroupSet       = "group-set"
 )
 
 // validTypes is the set of valid message types.
@@ -52,6 +53,7 @@ var validTypes = map[string]bool{
 	TypeInputNeeded:    true,
 	TypeStateChange:    true,
 	TypeAssistantReply: true,
+	TypeGroupSet:       true,
 }
 
 // StructuredMessage represents a formatted Scion message.
@@ -62,12 +64,14 @@ type StructuredMessage struct {
 	SenderID    string            `json:"sender_id,omitempty"`
 	Recipient   string            `json:"recipient"`
 	RecipientID string            `json:"recipient_id,omitempty"`
+	Recipients  string            `json:"recipients,omitempty"`
 	Msg         string            `json:"msg"`
 	Type        string            `json:"type"`
 	Plain       bool              `json:"plain,omitempty"`
 	Raw         bool              `json:"raw,omitempty"`
-	Urgent      bool              `json:"urgent,omitempty"`
-	Broadcasted bool              `json:"broadcasted,omitempty"`
+	Urgent       bool              `json:"urgent,omitempty"`
+	Broadcasted  bool              `json:"broadcasted,omitempty"`
+	ObserverOnly bool              `json:"observer_only,omitempty"`
 	Status      string            `json:"status,omitempty"`
 	Attachments []string          `json:"attachments,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
@@ -76,7 +80,7 @@ type StructuredMessage struct {
 // ValidateType returns an error if the message type is not in the closed enum.
 func ValidateType(t string) error {
 	if !validTypes[t] {
-		return fmt.Errorf("invalid message type %q: must be one of: instruction, input-needed, state-change, assistant-reply", t)
+		return fmt.Errorf("invalid message type %q: must be one of: instruction, input-needed, state-change, assistant-reply, group-set", t)
 	}
 	return nil
 }
@@ -159,6 +163,9 @@ func (m *StructuredMessage) LogAttrs() []any {
 	}
 	if m.RecipientID != "" {
 		attrs = append(attrs, "recipient_id", m.RecipientID)
+	}
+	if m.Recipients != "" {
+		attrs = append(attrs, "recipients", m.Recipients)
 	}
 	return attrs
 }

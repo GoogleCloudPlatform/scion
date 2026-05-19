@@ -244,11 +244,11 @@ func TestAgentWithCapabilities_JSONStructure(t *testing.T) {
 	assert.Equal(t, "update", actions[1])
 }
 
-func TestGroveWithCapabilities_JSONStructure(t *testing.T) {
-	gwc := GroveWithCapabilities{
-		Grove: store.Grove{
-			ID:   "grove-json-1",
-			Name: "Test Grove",
+func TestProjectWithCapabilities_JSONStructure(t *testing.T) {
+	gwc := ProjectWithCapabilities{
+		Project: store.Project{
+			ID:   "project-json-1",
+			Name: "Test Project",
 		},
 		Cap: &Capabilities{
 			Actions: []string{"read", "manage"},
@@ -261,8 +261,8 @@ func TestGroveWithCapabilities_JSONStructure(t *testing.T) {
 	var result map[string]interface{}
 	require.NoError(t, json.Unmarshal(data, &result))
 
-	assert.Equal(t, "grove-json-1", result["id"])
-	assert.Equal(t, "Test Grove", result["name"])
+	assert.Equal(t, "project-json-1", result["id"])
+	assert.Equal(t, "Test Project", result["name"])
 
 	capObj, ok := result["_capabilities"].(map[string]interface{})
 	require.True(t, ok)
@@ -312,21 +312,21 @@ func TestComputeCapabilitiesBatch_EmptyList(t *testing.T) {
 
 func TestResourceBuilders(t *testing.T) {
 	t.Run("agentResource", func(t *testing.T) {
-		a := &store.Agent{ID: "a1", OwnerID: "u1", GroveID: "g1", Labels: map[string]string{"env": "prod"}, Ancestry: []string{"u1"}}
+		a := &store.Agent{ID: "a1", OwnerID: "u1", ProjectID: "g1", Labels: map[string]string{"env": "prod"}, Ancestry: []string{"u1"}}
 		r := agentResource(a)
 		assert.Equal(t, "agent", r.Type)
 		assert.Equal(t, "a1", r.ID)
 		assert.Equal(t, "u1", r.OwnerID)
-		assert.Equal(t, "grove", r.ParentType)
+		assert.Equal(t, "project", r.ParentType)
 		assert.Equal(t, "g1", r.ParentID)
 		assert.Equal(t, "prod", r.Labels["env"])
 		assert.Equal(t, []string{"u1"}, r.Ancestry)
 	})
 
-	t.Run("groveResource", func(t *testing.T) {
-		g := &store.Grove{ID: "g1", OwnerID: "u1"}
-		r := groveResource(g)
-		assert.Equal(t, "grove", r.Type)
+	t.Run("projectResource", func(t *testing.T) {
+		g := &store.Project{ID: "g1", OwnerID: "u1"}
+		r := projectResource(g)
+		assert.Equal(t, "project", r.Type)
 		assert.Equal(t, "g1", r.ID)
 		assert.Equal(t, "u1", r.OwnerID)
 	})

@@ -79,14 +79,14 @@ func TestGCPHandler_EmptyMessageSuppressed(t *testing.T) {
 	assert.Equal(t, "GET", httpReq["requestMethod"])
 }
 
-func TestGCPHandler_LabelsPromoteAgentGrove(t *testing.T) {
+func TestGCPHandler_LabelsPromoteAgentProject(t *testing.T) {
 	var buf bytes.Buffer
 	handler := NewGCPHandler(&buf, nil, "test-component")
 	logger := slog.New(handler)
 
 	logger.Info("test message",
 		AttrAgentID, "agent-abc",
-		AttrGroveID, "grove-xyz",
+		AttrProjectID, "grove-xyz",
 	)
 
 	var data map[string]interface{}
@@ -96,11 +96,11 @@ func TestGCPHandler_LabelsPromoteAgentGrove(t *testing.T) {
 	labels := data[GCPKeyLabels].(map[string]interface{})
 	assert.Equal(t, "test-component", labels["component"])
 	assert.Equal(t, "agent-abc", labels[AttrAgentID])
-	assert.Equal(t, "grove-xyz", labels[AttrGroveID])
+	assert.Equal(t, "grove-xyz", labels[AttrProjectID])
 
 	// Also present in payload
 	assert.Equal(t, "agent-abc", data[AttrAgentID])
-	assert.Equal(t, "grove-xyz", data[AttrGroveID])
+	assert.Equal(t, "grove-xyz", data[AttrProjectID])
 }
 
 func TestGCPHandler_LabelsFromWithAttrs(t *testing.T) {
@@ -110,7 +110,7 @@ func TestGCPHandler_LabelsFromWithAttrs(t *testing.T) {
 	// Simulate Logger(ctx) which uses slog.With()
 	childHandler := handler.WithAttrs([]slog.Attr{
 		slog.String(AttrAgentID, "pre-agent"),
-		slog.String(AttrGroveID, "pre-grove"),
+		slog.String(AttrProjectID, "pre-grove"),
 	})
 	logger := slog.New(childHandler)
 
@@ -122,7 +122,7 @@ func TestGCPHandler_LabelsFromWithAttrs(t *testing.T) {
 
 	labels := data[GCPKeyLabels].(map[string]interface{})
 	assert.Equal(t, "pre-agent", labels[AttrAgentID])
-	assert.Equal(t, "pre-grove", labels[AttrGroveID])
+	assert.Equal(t, "pre-grove", labels[AttrProjectID])
 }
 
 func TestGCPHandler_TraceCorrelationFields(t *testing.T) {

@@ -36,7 +36,7 @@ func TestGetGlobalDir(t *testing.T) {
 	}
 }
 
-func TestGetGroveName(t *testing.T) {
+func TestGetProjectName(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	tests := []struct {
@@ -52,8 +52,8 @@ func TestGetGroveName(t *testing.T) {
 		if err := os.MkdirAll(tt.path, 0755); err != nil {
 			t.Fatal(err)
 		}
-		if got := GetGroveName(tt.path); got != tt.want {
-			t.Errorf("GetGroveName(%q) = %q, want %q", tt.path, got, tt.want)
+		if got := GetProjectName(tt.path); got != tt.want {
+			t.Errorf("GetProjectName(%q) = %q, want %q", tt.path, got, tt.want)
 		}
 	}
 }
@@ -100,13 +100,13 @@ func TestGetResolvedProjectDir_WalkUp(t *testing.T) {
 	// /tmp/grove/.scion
 	// /tmp/grove/subdir/deep
 
-	tmpGrove := t.TempDir()
-	scionDir := filepath.Join(tmpGrove, ".scion")
+	tmpProject := t.TempDir()
+	scionDir := filepath.Join(tmpProject, ".scion")
 	if err := os.Mkdir(scionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	subDir := filepath.Join(tmpGrove, "subdir", "deep")
+	subDir := filepath.Join(tmpProject, "subdir", "deep")
 	if err := os.MkdirAll(subDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestGetResolvedProjectDir_WalkUp(t *testing.T) {
 	}
 }
 
-func TestRequireGrovePath_ExplicitGlobal(t *testing.T) {
+func TestRequireProjectPath_ExplicitGlobal(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpHome)
@@ -147,9 +147,9 @@ func TestRequireGrovePath_ExplicitGlobal(t *testing.T) {
 	globalDir := filepath.Join(tmpHome, GlobalDir)
 
 	// Test "global" path
-	got, isGlobal, err := RequireGrovePath("global")
+	got, isGlobal, err := RequireProjectPath("global")
 	if err != nil {
-		t.Fatalf("RequireGrovePath(global) error: %v", err)
+		t.Fatalf("RequireProjectPath(global) error: %v", err)
 	}
 	if !isGlobal {
 		t.Error("expected isGlobal=true")
@@ -159,9 +159,9 @@ func TestRequireGrovePath_ExplicitGlobal(t *testing.T) {
 	}
 
 	// Test "home" path
-	got, isGlobal, err = RequireGrovePath("home")
+	got, isGlobal, err = RequireProjectPath("home")
 	if err != nil {
-		t.Fatalf("RequireGrovePath(home) error: %v", err)
+		t.Fatalf("RequireProjectPath(home) error: %v", err)
 	}
 	if !isGlobal {
 		t.Error("expected isGlobal=true")
@@ -171,7 +171,7 @@ func TestRequireGrovePath_ExplicitGlobal(t *testing.T) {
 	}
 }
 
-func TestRequireGrovePath_NoProjectError(t *testing.T) {
+func TestRequireProjectPath_NoProjectError(t *testing.T) {
 	// Create a clean temp dir with no .scion
 	tmpDir := t.TempDir()
 
@@ -194,7 +194,7 @@ func TestRequireGrovePath_NoProjectError(t *testing.T) {
 	}
 
 	// Should error when no project found and no explicit path
-	_, _, err := RequireGrovePath("")
+	_, _, err := RequireProjectPath("")
 	if err == nil {
 		t.Fatal("expected error when no project found, got nil")
 	}
@@ -205,9 +205,9 @@ func TestRequireGrovePath_NoProjectError(t *testing.T) {
 	}
 }
 
-func TestRequireGrovePath_HubContextFallback(t *testing.T) {
+func TestRequireProjectPath_HubContextFallback(t *testing.T) {
 	// When SCION_HUB_ENDPOINT is set and no .scion exists,
-	// RequireGrovePath should succeed (hub context fallback).
+	// RequireProjectPath should succeed (hub context fallback).
 	tmpDir := t.TempDir()
 
 	origWd, _ := os.Getwd()
@@ -221,7 +221,7 @@ func TestRequireGrovePath_HubContextFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, _, err := RequireGrovePath("")
+	got, _, err := RequireProjectPath("")
 	if err != nil {
 		t.Fatalf("expected no error in hub context, got: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestRequireGrovePath_HubContextFallback(t *testing.T) {
 	// Should return a synthetic .scion path under CWD
 	expected := filepath.Join(tmpDir, DotScion)
 	if got != expected {
-		t.Errorf("RequireGrovePath() = %q, want %q", got, expected)
+		t.Errorf("RequireProjectPath() = %q, want %q", got, expected)
 	}
 }
 
@@ -285,25 +285,25 @@ func TestFindProjectRoot_HubContextNoScion_Disabled(t *testing.T) {
 }
 
 func TestFindProjectRoot_MarkerWithHubFallback(t *testing.T) {
-	// When a .scion marker file exists but the external grove-configs path
+	// When a .scion marker file exists but the external project-configs path
 	// doesn't, and hub context is available, FindProjectRoot should succeed.
 	tmpDir := t.TempDir()
 
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 
-	// Set HOME to a dir where grove-configs won't exist
+	// Set HOME to a dir where project-configs won't exist
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", "http://hub.example.com")
 
 	// Write a valid marker file
-	marker := &GroveMarker{
-		GroveID:   "test-grove-id-1234",
-		GroveName: "test-project",
-		GroveSlug: "test-project",
+	marker := &ProjectMarker{
+		ProjectID:   "test-grove-id-1234",
+		ProjectName: "test-project",
+		ProjectSlug: "test-project",
 	}
-	WriteGroveMarker(filepath.Join(tmpDir, ".scion"), marker)
+	WriteProjectMarker(filepath.Join(tmpDir, ".scion"), marker)
 
 	if err := os.Chdir(tmpDir); err != nil {
 		t.Fatal(err)
@@ -322,10 +322,10 @@ func TestFindProjectRoot_MarkerWithHubFallback(t *testing.T) {
 	}
 }
 
-func TestRequireGrovePath_ProjectExists(t *testing.T) {
+func TestRequireProjectPath_ProjectExists(t *testing.T) {
 	// Create a project with .scion
-	tmpGrove := t.TempDir()
-	scionDir := filepath.Join(tmpGrove, ".scion")
+	tmpProject := t.TempDir()
+	scionDir := filepath.Join(tmpProject, ".scion")
 	if err := os.Mkdir(scionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -339,14 +339,14 @@ func TestRequireGrovePath_ProjectExists(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", origHome)
 
-	if err := os.Chdir(tmpGrove); err != nil {
+	if err := os.Chdir(tmpProject); err != nil {
 		t.Fatal(err)
 	}
 
 	// Should succeed when project found
-	got, isGlobal, err := RequireGrovePath("")
+	got, isGlobal, err := RequireProjectPath("")
 	if err != nil {
-		t.Fatalf("RequireGrovePath failed: %v", err)
+		t.Fatalf("RequireProjectPath failed: %v", err)
 	}
 	if isGlobal {
 		t.Error("expected isGlobal=false for project grove")
@@ -359,9 +359,9 @@ func TestRequireGrovePath_ProjectExists(t *testing.T) {
 	}
 }
 
-func TestResolveGrovePath_ExplicitProjectRoot(t *testing.T) {
+func TestResolveProjectPath_ExplicitProjectRoot(t *testing.T) {
 	// When passing a project root (not ending in .scion) that contains a .scion dir,
-	// ResolveGrovePath should resolve to the .scion subdirectory.
+	// ResolveProjectPath should resolve to the .scion subdirectory.
 	// This is the -g / --grove flag use case.
 
 	tmpHome := t.TempDir()
@@ -377,23 +377,23 @@ func TestResolveGrovePath_ExplicitProjectRoot(t *testing.T) {
 	}
 
 	// Pass the project root (without .scion) as explicit path
-	got, isGlobal, err := ResolveGrovePath(tmpProject)
+	got, isGlobal, err := ResolveProjectPath(tmpProject)
 	if err != nil {
-		t.Fatalf("ResolveGrovePath(%q) error: %v", tmpProject, err)
+		t.Fatalf("ResolveProjectPath(%q) error: %v", tmpProject, err)
 	}
 
 	evalGot, _ := filepath.EvalSymlinks(got)
 	evalExpected, _ := filepath.EvalSymlinks(projectScion)
 
 	if evalGot != evalExpected {
-		t.Errorf("ResolveGrovePath(%q) = %q, want %q", tmpProject, evalGot, evalExpected)
+		t.Errorf("ResolveProjectPath(%q) = %q, want %q", tmpProject, evalGot, evalExpected)
 	}
 	if isGlobal {
 		t.Error("expected isGlobal=false for project grove")
 	}
 }
 
-func TestResolveGrovePath_ExplicitDotScionPath(t *testing.T) {
+func TestResolveProjectPath_ExplicitDotScionPath(t *testing.T) {
 	// When passing a path already ending in .scion, it should be used as-is.
 
 	tmpHome := t.TempDir()
@@ -407,20 +407,20 @@ func TestResolveGrovePath_ExplicitDotScionPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, _, err := ResolveGrovePath(projectScion)
+	got, _, err := ResolveProjectPath(projectScion)
 	if err != nil {
-		t.Fatalf("ResolveGrovePath(%q) error: %v", projectScion, err)
+		t.Fatalf("ResolveProjectPath(%q) error: %v", projectScion, err)
 	}
 
 	evalGot, _ := filepath.EvalSymlinks(got)
 	evalExpected, _ := filepath.EvalSymlinks(projectScion)
 
 	if evalGot != evalExpected {
-		t.Errorf("ResolveGrovePath(%q) = %q, want %q", projectScion, evalGot, evalExpected)
+		t.Errorf("ResolveProjectPath(%q) = %q, want %q", projectScion, evalGot, evalExpected)
 	}
 }
 
-func TestResolveGrovePath_ExplicitPathNoDotScion(t *testing.T) {
+func TestResolveProjectPath_ExplicitPathNoDotScion(t *testing.T) {
 	// When passing a path that doesn't contain a .scion dir, it should be returned as-is.
 
 	tmpHome := t.TempDir()
@@ -430,21 +430,21 @@ func TestResolveGrovePath_ExplicitPathNoDotScion(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	got, _, err := ResolveGrovePath(tmpDir)
+	got, _, err := ResolveProjectPath(tmpDir)
 	if err != nil {
-		t.Fatalf("ResolveGrovePath(%q) error: %v", tmpDir, err)
+		t.Fatalf("ResolveProjectPath(%q) error: %v", tmpDir, err)
 	}
 
 	evalGot, _ := filepath.EvalSymlinks(got)
 	evalExpected, _ := filepath.EvalSymlinks(tmpDir)
 
 	if evalGot != evalExpected {
-		t.Errorf("ResolveGrovePath(%q) = %q, want %q", tmpDir, evalGot, evalExpected)
+		t.Errorf("ResolveProjectPath(%q) = %q, want %q", tmpDir, evalGot, evalExpected)
 	}
 }
 
-func TestRequireGrovePath_ExplicitProjectRoot(t *testing.T) {
-	// RequireGrovePath should also resolve project root to .scion subdirectory.
+func TestRequireProjectPath_ExplicitProjectRoot(t *testing.T) {
+	// RequireProjectPath should also resolve project root to .scion subdirectory.
 
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
@@ -457,23 +457,23 @@ func TestRequireGrovePath_ExplicitProjectRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, isGlobal, err := RequireGrovePath(tmpProject)
+	got, isGlobal, err := RequireProjectPath(tmpProject)
 	if err != nil {
-		t.Fatalf("RequireGrovePath(%q) error: %v", tmpProject, err)
+		t.Fatalf("RequireProjectPath(%q) error: %v", tmpProject, err)
 	}
 
 	evalGot, _ := filepath.EvalSymlinks(got)
 	evalExpected, _ := filepath.EvalSymlinks(projectScion)
 
 	if evalGot != evalExpected {
-		t.Errorf("RequireGrovePath(%q) = %q, want %q", tmpProject, evalGot, evalExpected)
+		t.Errorf("RequireProjectPath(%q) = %q, want %q", tmpProject, evalGot, evalExpected)
 	}
 	if isGlobal {
 		t.Error("expected isGlobal=false for project grove")
 	}
 }
 
-func TestResolveGrovePath_GlobalViaWalkUp(t *testing.T) {
+func TestResolveProjectPath_GlobalViaWalkUp(t *testing.T) {
 	// Test that when FindProjectRoot walks up and finds ~/.scion,
 	// it is correctly identified as the global grove (isGlobal=true)
 
@@ -501,11 +501,11 @@ func TestResolveGrovePath_GlobalViaWalkUp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// ResolveGrovePath should walk up and find ~/.scion,
+	// ResolveProjectPath should walk up and find ~/.scion,
 	// and recognize it as the global grove
-	got, isGlobal, err := ResolveGrovePath("")
+	got, isGlobal, err := ResolveProjectPath("")
 	if err != nil {
-		t.Fatalf("ResolveGrovePath failed: %v", err)
+		t.Fatalf("ResolveProjectPath failed: %v", err)
 	}
 
 	evalGot, _ := filepath.EvalSymlinks(got)
@@ -519,7 +519,7 @@ func TestResolveGrovePath_GlobalViaWalkUp(t *testing.T) {
 	}
 }
 
-func TestResolveGrovePath_ProjectNotGlobal(t *testing.T) {
+func TestResolveProjectPath_ProjectNotGlobal(t *testing.T) {
 	// Test that a project grove (not at ~/) is correctly identified as NOT global
 
 	tmpHome := t.TempDir()
@@ -541,9 +541,9 @@ func TestResolveGrovePath_ProjectNotGlobal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, isGlobal, err := ResolveGrovePath("")
+	got, isGlobal, err := ResolveProjectPath("")
 	if err != nil {
-		t.Fatalf("ResolveGrovePath failed: %v", err)
+		t.Fatalf("ResolveProjectPath failed: %v", err)
 	}
 
 	evalGot, _ := filepath.EvalSymlinks(got)

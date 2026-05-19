@@ -43,8 +43,8 @@ type envService struct {
 
 // ListEnvOptions configures environment variable listing.
 type ListEnvOptions struct {
-	Scope   string // user, grove, runtime_broker (default: user)
-	ScopeID string // ID of the scoped entity (required for grove/runtime_broker)
+	Scope   string // user, project, runtime_broker (default: user)
+	ScopeID string // ID of the scoped entity (required for project/runtime_broker)
 	Key     string // Optional: filter by specific key
 }
 
@@ -57,15 +57,15 @@ type ListEnvResponse struct {
 
 // EnvScopeOptions specifies the scope for get/delete operations.
 type EnvScopeOptions struct {
-	Scope   string // user, grove, runtime_broker (default: user)
-	ScopeID string // ID of the scoped entity (required for grove/runtime_broker)
+	Scope   string // user, project, runtime_broker (default: user)
+	ScopeID string // ID of the scoped entity (required for project/runtime_broker)
 }
 
 // SetEnvRequest is the request for setting an environment variable.
 type SetEnvRequest struct {
 	Value         string `json:"value"`                   // Required: variable value
 	Scope         string `json:"scope,omitempty"`         // Scope type (default: user)
-	ScopeID       string `json:"scopeId,omitempty"`       // Required for grove/runtime_broker scope
+	ScopeID       string `json:"scopeId,omitempty"`       // Required for project/runtime_broker scope
 	Description   string `json:"description,omitempty"`   // Optional description
 	Sensitive     bool   `json:"sensitive,omitempty"`     // Mask value in responses
 	InjectionMode string `json:"injectionMode,omitempty"` // "always" or "as_needed" (default: "as_needed")
@@ -93,7 +93,7 @@ func (s *envService) List(ctx context.Context, opts *ListEnvOptions) (*ListEnvRe
 		}
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/env", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/env", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +112,7 @@ func (s *envService) Get(ctx context.Context, key string, opts *EnvScopeOptions)
 		}
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/env/"+url.PathEscape(key), query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/env/"+url.PathEscape(key), query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +121,7 @@ func (s *envService) Get(ctx context.Context, key string, opts *EnvScopeOptions)
 
 // Set creates or updates an environment variable.
 func (s *envService) Set(ctx context.Context, key string, req *SetEnvRequest) (*SetEnvResponse, error) {
-	resp, err := s.c.transport.Put(ctx, "/api/v1/env/"+url.PathEscape(key), req, nil)
+	resp, err := s.c.put(ctx, "/api/v1/env/"+url.PathEscape(key), req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +145,7 @@ func (s *envService) Delete(ctx context.Context, key string, opts *EnvScopeOptio
 		path += "?" + query.Encode()
 	}
 
-	resp, err := s.c.transport.Delete(ctx, path, nil)
+	resp, err := s.c.delete(ctx, path, nil)
 	if err != nil {
 		return err
 	}

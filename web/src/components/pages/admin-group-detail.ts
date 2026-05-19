@@ -109,7 +109,7 @@ export class ScionPageAdminGroupDetail extends LitElement {
       color: var(--sl-color-primary-600, #2563eb);
     }
 
-    .group-icon.grove_agents {
+    .group-icon.project_agents {
       background: var(--sl-color-success-100, #dcfce7);
       color: var(--sl-color-success-600, #16a34a);
     }
@@ -132,7 +132,7 @@ export class ScionPageAdminGroupDetail extends LitElement {
       color: var(--sl-color-primary-700, #1d4ed8);
     }
 
-    .type-badge.grove_agents {
+    .type-badge.project_agents {
       background: var(--sl-color-success-100, #dcfce7);
       color: var(--sl-color-success-700, #15803d);
     }
@@ -328,11 +328,11 @@ export class ScionPageAdminGroupDetail extends LitElement {
         <div class="header-info">
           <div class="header-title">
             <div class="group-icon ${this.group.groupType}">
-              <sl-icon name="${this.group.groupType === 'grove_agents' ? 'cpu' : 'people'}"></sl-icon>
+              <sl-icon name="${this.group.groupType === 'project_agents' ? 'cpu' : 'people'}"></sl-icon>
             </div>
             <h1>${this.group.name}</h1>
             <span class="type-badge ${this.group.groupType}">
-              ${this.group.groupType === 'grove_agents' ? 'grove agents' : 'explicit'}
+              ${this.group.groupType === 'project_agents' ? 'project agents' : 'explicit'}
             </span>
           </div>
           <span class="header-slug">${this.group.slug}</span>
@@ -369,11 +369,11 @@ export class ScionPageAdminGroupDetail extends LitElement {
                 </div>
               `
             : nothing}
-          ${this.group.groveId
+          ${this.group.projectId
             ? html`
                 <div class="detail-item">
-                  <span class="detail-label">Grove</span>
-                  <span class="detail-value mono">${this.group.groveId}</span>
+                  <span class="detail-label">Project</span>
+                  <span class="detail-value mono">${this.group.projectId}</span>
                 </div>
               `
             : nothing}
@@ -382,7 +382,7 @@ export class ScionPageAdminGroupDetail extends LitElement {
 
       <scion-group-member-editor
         groupId=${this.group.id}
-        ?readOnly=${this.group.groupType === 'grove_agents'}
+        ?readOnly=${this.group.groupType === 'project_agents'}
       ></scion-group-member-editor>
     `;
   }

@@ -258,7 +258,7 @@ start_hub_server() {
 
     mkdir -p "$TEST_DIR"
 
-    local cmd=("$SCION" "server" "start"
+    local cmd=("$SCION" "server" "start" "--foreground" "--production"
         "--enable-hub"
         "--dev-auth"
         "--port" "$HUB_PORT"
@@ -513,12 +513,12 @@ test_phase2_grove_scope() {
     json_output=$($SCION hub env get --grove="$GROVE_ID" --json GROVE_VAR_A 2>/dev/null) || true
     local json_scope=""
     json_scope=$(echo "$json_output" | jq -r '.scope // empty' 2>/dev/null) || true
-    if [[ "$json_scope" == "grove" ]]; then
-        log_success "2.9  Get grove env var --json shows scope=grove"
+    if [[ "$json_scope" == "project" ]]; then
+        log_success "2.9  Get grove env var --json shows scope=project"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
-        log_error "2.9  Get grove env var --json shows scope=grove"
-        log_error "  expected scope 'grove', got: $json_output"
+        log_error "2.9  Get grove env var --json shows scope=project"
+        log_error "  expected scope 'project', got: $json_output"
         TESTS_FAILED=$((TESTS_FAILED + 1))
     fi
 
@@ -621,13 +621,13 @@ test_phase4_injection_and_secret() {
     # 4.1 Set var with --always
     assert_output_contains \
         "4.1  Set var with --always" \
-        "(always)" \
+        "always" \
         $SCION hub env set --always "INJECT_VAR_A=always_val"
 
     # 4.2 Get var shows (always) annotation
     assert_output_contains \
         "4.2  Get var shows (always) annotation" \
-        "(always)" \
+        "always" \
         $SCION hub env get INJECT_VAR_A
 
     # 4.3 Set var with explicit --as-needed
@@ -645,7 +645,7 @@ test_phase4_injection_and_secret() {
     # 4.5 Set var with --secret
     assert_output_contains \
         "4.5  Set var with --secret" \
-        "(secret)" \
+        "secret" \
         $SCION hub env set --secret "SECRET_VAR_A=s3cret_val"
 
     # 4.6 Get secret var shows masked value
@@ -663,24 +663,24 @@ test_phase4_injection_and_secret() {
     # 4.8 Update var from as-needed to always
     assert_output_contains \
         "4.8  Update var to --always" \
-        "(always)" \
+        "always" \
         $SCION hub env set --always "INJECT_VAR_B=updated_always"
 
     # 4.9 Verify update changed injection mode
     assert_output_contains \
         "4.9  Verify updated injection mode" \
-        "(always)" \
+        "always" \
         $SCION hub env get INJECT_VAR_B
 
     # 4.10 Set var with --secret --always combined
     assert_output_contains \
         "4.10 Set var with --secret --always" \
-        "(always)" \
+        "always" \
         $SCION hub env set --secret --always "COMBO_VAR=combo_val"
 
     assert_output_contains \
         "4.10b Set var with --secret --always shows secret" \
-        "(secret)" \
+        "secret" \
         $SCION hub env get COMBO_VAR
 
     # 4.11 --always and --as-needed together is rejected

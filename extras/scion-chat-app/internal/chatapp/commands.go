@@ -144,8 +144,11 @@ func (r *CommandRouter) handleCommand(ctx context.Context, event *ChatEvent) (*E
 
 	switch sub {
 	case "help":
-		r.log.Info("scion command (help)", "space", event.SpaceID, "user", event.UserID)
-		return r.cmdScionHelp(ctx, event)
+		if len(parts) == 1 {
+			r.log.Info("scion command (help)", "space", event.SpaceID, "user", event.UserID)
+			return r.cmdScionHelp(ctx, event)
+		}
+		return r.cmdMessage(ctx, event, parts)
 	case "message", "msg":
 		r.log.Info("scion command (message)", "args", strings.Join(parts[1:], " "), "space", event.SpaceID, "user", event.UserID)
 		return r.cmdMessage(ctx, event, parts[1:])
@@ -204,7 +207,12 @@ func (r *CommandRouter) handleAdminCommand(ctx context.Context, event *ChatEvent
 	case "set-default":
 		resp, err = r.cmdSetDefault(ctx, event, args)
 	case "help":
-		resp, err = r.cmdAdminHelp(ctx, event)
+		if len(args) == 0 {
+			resp, err = r.cmdAdminHelp(ctx, event)
+		} else {
+			r.log.Warn("unknown admin command", "subcommand", strings.Join(parts, " "))
+			resp = textResponse(event, fmt.Sprintf("Unknown command: `%s`. Use `/scionAdmin help` for available commands.", strings.Join(parts, " ")))
+		}
 	default:
 		r.log.Warn("unknown admin command", "subcommand", subcommand)
 		resp = textResponse(event, fmt.Sprintf("Unknown command: `%s`. Use `/scionAdmin help` for available commands.", subcommand))
@@ -1060,7 +1068,7 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 		msg.Msg = fmt.Sprintf("[thread:%s] %s", threadID, msg.Msg)
 	}
 
-	if err := client.GroveAgents(link.GroveID).SendStructuredMessage(ctx, agentSlug, msg, false, false); err != nil {
+	if err := client.GroveAgents(link.GroveID).SendStructuredMessage(ctx, agentSlug, msg, false, false, false); err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to send message to `%s`: %v", agentSlug, err)), nil
 	}
 

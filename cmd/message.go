@@ -39,7 +39,8 @@ var msgAt string
 var msgPlain bool
 var msgRaw bool
 var msgAttach []string
-var msgNoNotify bool
+var msgNotify bool
+var msgWake bool
 
 // messageCmd represents the message command
 var messageCmd = &cobra.Command{
@@ -52,20 +53,26 @@ Recipients:
   <agent-name>       Send to an agent (default, same as agent:<name>)
   agent:<name>       Send to an agent explicitly
   user:<name>        Send to a user's inbox (Hub mode only)
+  set[a,b,...]       Send to multiple recipients (Hub mode only)
 
 If --broadcast is used, the recipient can be omitted and the message will be sent to all running agents.
 
 Examples:
   scion message my-agent "Please review the PR"
-  scion message user:alice "I need clarification on the auth module"`,
+  scion message user:alice "I need clarification on the auth module"
+  scion message "set[agent:reviewer,user:alice,deploy-bot]" "Release v2 is ready"`,
 	Args:              cobra.MinimumNArgs(1),
 	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var agentName string
 		var userRecipient string
+		var setRecipients []messages.SetRecipient
 		var message string
 
 		if msgBroadcast || msgAll {
+			if len(args) > 0 && messages.IsSetRecipient(args[0]) {
+				return fmt.Errorf("set[] recipients cannot be combined with --broadcast or --all")
+			}
 			message = strings.Join(args, " ")
 		} else {
 			if len(args) < 2 {
@@ -74,7 +81,13 @@ Examples:
 			recipient := args[0]
 			message = strings.Join(args[1:], " ")
 
-			if strings.HasPrefix(recipient, "user:") {
+			if messages.IsSetRecipient(recipient) {
+				parsed, err := messages.ParseSetRecipient(recipient)
+				if err != nil {
+					return fmt.Errorf("invalid set recipient: %w", err)
+				}
+				setRecipients = parsed
+			} else if strings.HasPrefix(recipient, "user:") {
 				userRecipient = recipient
 			} else if strings.Contains(recipient, "@") && !strings.HasPrefix(recipient, "agent:") {
 				// Bare email address — treat as user recipient
@@ -109,6 +122,11 @@ Examples:
 			}
 		}
 
+		// Validate --notify restrictions
+		if msgNotify && (msgBroadcast || msgAll) {
+			return fmt.Errorf("--notify cannot be combined with --broadcast or --all")
+		}
+
 		// Validate user-recipient restrictions
 		if userRecipient != "" {
 			if msgBroadcast || msgAll {
@@ -122,6 +140,38 @@ Examples:
 			}
 		}
 
+		// Validate set[] recipient restrictions
+		if len(setRecipients) > 0 {
+			if msgBroadcast || msgAll {
+				return fmt.Errorf("set[] recipients cannot be combined with --broadcast or --all")
+			}
+			if msgRaw {
+				return fmt.Errorf("--raw cannot be used with set[] recipients")
+			}
+			if msgIn != "" || msgAt != "" {
+				return fmt.Errorf("--in/--at cannot be used with set[] recipients")
+			}
+			if msgNotify {
+				return fmt.Errorf("--notify cannot be used with set[] recipients")
+			}
+		}
+
+		// Validate --wake restrictions
+		if msgWake {
+			if msgBroadcast || msgAll {
+				return fmt.Errorf("--wake cannot be combined with --broadcast or --all")
+			}
+			if msgIn != "" || msgAt != "" {
+				return fmt.Errorf("--wake cannot be combined with --in or --at")
+			}
+			if msgRaw {
+				return fmt.Errorf("--wake cannot be combined with --raw")
+			}
+			if userRecipient != "" {
+				return fmt.Errorf("--wake cannot be used with user recipients")
+			}
+		}
+
 		// Validate attachments
 		if len(msgAttach) > messages.MaxAttachments {
 			return fmt.Errorf("too many attachments: %d (max %d)", len(msgAttach), messages.MaxAttachments)
@@ -130,21 +180,29 @@ Examples:
 		// Check if Hub should be used
 		var hubCtx *HubContext
 		var err error
-		if userRecipient != "" {
+		if len(setRecipients) > 0 {
+			// Set recipients: skip sync (multiple recipients, no single agent)
+			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
+		} else if userRecipient != "" {
 			// User recipient: skip sync (no agent involved)
-			hubCtx, err = CheckHubAvailabilityWithOptions(grovePath, true)
+			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
 		} else if msgAll {
 			// Cross-grove operation: skip sync
-			hubCtx, err = CheckHubAvailabilityWithOptions(grovePath, true)
+			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
 		} else if msgBroadcast {
 			// Grove-scoped broadcast: no specific agent
-			hubCtx, err = CheckHubAvailability(grovePath)
+			hubCtx, err = CheckHubAvailability(projectPath)
 		} else {
 			// Single agent: exclude target from sync requirements
-			hubCtx, err = CheckHubAvailabilityForAgent(grovePath, agentName, false)
+			hubCtx, err = CheckHubAvailabilityForAgent(projectPath, agentName, false)
 		}
 		if err != nil {
 			return err
+		}
+
+		// Set recipients require Hub mode
+		if len(setRecipients) > 0 && hubCtx == nil {
+			return fmt.Errorf("set[] recipients require Hub mode (use 'scion hub enable' first)")
 		}
 
 		// User recipients require Hub mode
@@ -160,20 +218,35 @@ Examples:
 			return scheduleMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgPlain)
 		}
 
+		// --notify requires Hub mode
+		if msgNotify && hubCtx == nil {
+			return fmt.Errorf("--notify requires Hub mode (use 'scion hub enable' first)")
+		}
+
+		// Set-targeted messages: fan out to each recipient
+		if len(setRecipients) > 0 {
+			return sendSetMessageViaHub(hubCtx, setRecipients, message, msgInterrupt)
+		}
+
 		// User-targeted messages: route to outbound-message endpoint
 		if userRecipient != "" {
 			return sendOutboundMessageViaHub(hubCtx, userRecipient, message, msgInterrupt)
 		}
 
 		if hubCtx != nil {
-			return sendMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgBroadcast, msgAll, !msgNoNotify)
+			return sendMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgBroadcast, msgAll, msgNotify, msgWake)
+		}
+
+		// --wake requires Hub mode
+		if msgWake {
+			return fmt.Errorf("--wake requires Hub mode (use 'scion hub enable' first)")
 		}
 
 		// Local mode — structured messages are only available in Hub mode,
 		// so local mode continues to use plain text delivery.
 		ctx := context.Background()
 
-		rt := runtime.GetRuntime(grovePath, profile)
+		rt := runtime.GetRuntime(projectPath, profile)
 		mgr := agent.NewManager(rt)
 		defer mgr.Close()
 
@@ -190,10 +263,10 @@ Examples:
 			}
 
 			if !msgAll {
-				projectDir, _ := config.GetResolvedProjectDir(grovePath)
+				projectDir, _ := config.GetResolvedProjectDir(projectPath)
 				if projectDir != "" {
-					filters["scion.grove_path"] = projectDir
-					filters["scion.grove"] = config.GetGroveName(projectDir)
+					filters["scion.project_path"] = projectDir
+					filters["scion.project"] = config.GetProjectName(projectDir)
 				}
 			}
 
@@ -291,7 +364,7 @@ func buildStructuredMessage(sender, recipient, message string) *messages.Structu
 	return msg
 }
 
-func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, interrupt bool, broadcast bool, all bool, notify bool) error {
+func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, interrupt bool, broadcast bool, all bool, notify bool, wake bool) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
@@ -301,11 +374,11 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 
 	// Grove-scoped broadcast: list running agents, then fan-out individually.
 	if broadcast && !all {
-		groveID, err := GetGroveID(hubCtx)
+		projectID, err := GetProjectID(hubCtx)
 		if err != nil {
 			return wrapHubError(err)
 		}
-		agentSvc := hubCtx.Client.GroveAgents(groveID)
+		agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -333,7 +406,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 				defer cancel()
 
 				msg := buildStructuredMessage(sender, "agent:"+name, message)
-				if err := agentSvc.SendStructuredMessage(ctx, name, msg, interrupt, false); err != nil {
+				if err := agentSvc.SendStructuredMessage(ctx, name, msg, interrupt, false, false); err != nil {
 					fmt.Printf("Warning: failed to send message to agent '%s' via Hub: %s\n", name, err)
 					return
 				}
@@ -378,7 +451,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 				defer cancel()
 
 				msg := buildStructuredMessage(sender, "agent:"+name, message)
-				if err := agentSvc.SendStructuredMessage(ctx, name, msg, interrupt, false); err != nil {
+				if err := agentSvc.SendStructuredMessage(ctx, name, msg, interrupt, false, false); err != nil {
 					fmt.Printf("Warning: failed to send message to agent '%s' via Hub: %s\n", name, err)
 					return
 				}
@@ -392,11 +465,11 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	}
 
 	// Single agent: direct message
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
-	agentSvc := hubCtx.Client.GroveAgents(groveID)
+	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
 	if !isJSONOutput() {
 		fmt.Printf("Sending message to agent '%s'...\n", agentName)
@@ -406,7 +479,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	defer cancel()
 
 	msg := buildStructuredMessage(sender, "agent:"+agentName, message)
-	if err := agentSvc.SendStructuredMessage(ctx, agentName, msg, interrupt, notify); err != nil {
+	if err := agentSvc.SendStructuredMessage(ctx, agentName, msg, interrupt, notify, wake); err != nil {
 		return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
 	}
 
@@ -431,20 +504,21 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		return fmt.Errorf("sending messages to users is only supported from within an agent container (SCION_AGENT_NAME not set)")
 	}
 
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
-	agentSvc := hubCtx.Client.GroveAgents(groveID)
+	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	outMsg := &hubclient.OutboundMessageRequest{
-		Recipient: userRecipient,
-		Msg:       message,
-		Type:      "instruction",
-		Urgent:    urgent,
+		Recipient:   userRecipient,
+		Msg:         message,
+		Type:        "instruction",
+		Urgent:      urgent,
+		Attachments: msgAttach,
 	}
 
 	if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
@@ -457,12 +531,120 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 	return nil
 }
 
+func sendSetMessageViaHub(hubCtx *HubContext, recipients []messages.SetRecipient, message string, interrupt bool) error {
+	if !isJSONOutput() {
+		PrintUsingHub(hubCtx.Endpoint)
+	}
+
+	sender := resolveSenderIdentity(hubCtx)
+	groupID := api.NewUUID()
+
+	projectID, err := GetProjectID(hubCtx)
+	if err != nil {
+		return wrapHubError(err)
+	}
+	agentSvc := hubCtx.Client.ProjectAgents(projectID)
+
+	if !isJSONOutput() {
+		fmt.Printf("Sending message to %d recipients...\n", len(recipients))
+	}
+
+	type recipientResult struct {
+		Recipient string `json:"recipient"`
+		Status    string `json:"status"`
+		Error     string `json:"error,omitempty"`
+	}
+
+	results := make([]recipientResult, len(recipients))
+	var wg sync.WaitGroup
+
+	for i, r := range recipients {
+		wg.Add(1)
+		go func(idx int, recip messages.SetRecipient) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			recipStr := recip.String()
+			switch recip.Kind {
+			case messages.RecipientAgent:
+				slug := api.Slugify(recip.Name)
+				msg := buildStructuredMessage(sender, "agent:"+slug, message)
+				msg.Metadata = map[string]string{"group_id": groupID}
+				if err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false, false); err != nil {
+					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
+					if !isJSONOutput() {
+						fmt.Printf("  Failed: %s: %s\n", recipStr, err)
+					}
+					return
+				}
+				results[idx] = recipientResult{Recipient: recipStr, Status: "delivered"}
+				if !isJSONOutput() {
+					fmt.Printf("  Delivered: %s\n", recipStr)
+				}
+
+			case messages.RecipientUser:
+				senderAgent := os.Getenv("SCION_AGENT_NAME")
+				if senderAgent == "" {
+					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: "sending to users requires agent context (SCION_AGENT_NAME not set)"}
+					if !isJSONOutput() {
+						fmt.Printf("  Failed: %s: agent context required\n", recipStr)
+					}
+					return
+				}
+				userRecip := recipStr
+				if !strings.HasPrefix(userRecip, "user:") {
+					userRecip = "user:" + recip.Name
+				}
+				outMsg := &hubclient.OutboundMessageRequest{
+					Recipient:   userRecip,
+					Msg:         message,
+					Type:        "instruction",
+					Urgent:      interrupt,
+					Attachments: msgAttach,
+				}
+				if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
+					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
+					if !isJSONOutput() {
+						fmt.Printf("  Failed: %s: %s\n", recipStr, err)
+					}
+					return
+				}
+				results[idx] = recipientResult{Recipient: recipStr, Status: "delivered"}
+				if !isJSONOutput() {
+					fmt.Printf("  Delivered: %s\n", recipStr)
+				}
+			}
+		}(i, r)
+	}
+	wg.Wait()
+
+	delivered := 0
+	for _, r := range results {
+		if r.Status == "delivered" {
+			delivered++
+		}
+	}
+
+	if !isJSONOutput() {
+		fmt.Printf("Set delivery complete: %d/%d delivered.\n", delivered, len(recipients))
+	}
+
+	if delivered == 0 {
+		return fmt.Errorf("set delivery failed: 0/%d recipients received the message", len(recipients))
+	}
+	if delivered < len(recipients) {
+		return fmt.Errorf("set delivery partially failed: %d/%d delivered", delivered, len(recipients))
+	}
+	return nil
+}
+
 func scheduleMessageViaHub(hubCtx *HubContext, agentName string, message string, interrupt bool, plain bool) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
 
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -484,7 +666,7 @@ func scheduleMessageViaHub(hubCtx *HubContext, agentName string, message string,
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	evt, err := hubCtx.Client.ScheduledEvents(groveID).Create(ctx, req)
+	evt, err := hubCtx.Client.ScheduledEvents(projectID).Create(ctx, req)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to schedule message: %w", err))
 	}
@@ -505,6 +687,7 @@ func init() {
 	messageCmd.Flags().BoolVar(&msgPlain, "plain", false, "Mark for plain-text delivery (message still flows as structured JSON internally)")
 	messageCmd.Flags().BoolVar(&msgRaw, "raw", false, "Send literal bytes via tmux send-keys with no trailing Enter (supports control keys like arrows and Escape)")
 	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable")
-	messageCmd.Flags().BoolVar(&msgNoNotify, "no-notify", false, "Do not subscribe to notifications for the target agent")
+	messageCmd.Flags().BoolVar(&msgNotify, "notify", false, "Subscribe to notifications for the target agent (completed, waiting for input, etc.)")
+	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
 	rootCmd.AddCommand(messageCmd)
 }

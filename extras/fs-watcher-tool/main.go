@@ -151,7 +151,7 @@ func run(cfg fswatcher.Config) error {
 
 	var groveDiscovery *fswatcher.GroveDiscovery
 	if cfg.Grove != "" {
-		groveDiscovery = fswatcher.NewGroveDiscovery(dockerClient, cfg.Grove, cfg.Debug)
+		groveDiscovery = fswatcher.NewProjectDiscovery(dockerClient, cfg.Grove, cfg.Debug)
 		groveDirs, err := groveDiscovery.Discover(ctx)
 		if err != nil {
 			return fmt.Errorf("grove discovery: %w", err)

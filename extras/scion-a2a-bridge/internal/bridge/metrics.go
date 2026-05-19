@@ -62,7 +62,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 				Name: "a2a_bridge_tasks_created_total",
 				Help: "Total tasks created.",
 			},
-			[]string{"grove"},
+			[]string{"project"},
 		),
 		TasksCompleted: prometheus.NewCounterVec(
 			prometheus.CounterOpts{

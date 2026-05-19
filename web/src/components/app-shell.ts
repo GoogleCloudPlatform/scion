@@ -40,7 +40,7 @@ import type { PageTitleDetail } from '../client/page-title.js';
  */
 const PAGE_TITLES: Record<string, string> = {
   '/': 'Dashboard',
-  '/groves': 'Groves',
+  '/projects': 'Projects',
   '/agents': 'Agents',
   '/brokers': 'Brokers',
   '/settings': 'Settings',
@@ -203,7 +203,7 @@ export class ScionApp extends LitElement {
 
   /**
    * Handle page-title events from detail page components to refine the
-   * document title with entity-specific context (grove name, agent name, etc.).
+   * document title with entity-specific context (project name, agent name, etc.).
    */
   private handlePageTitle(event: CustomEvent<PageTitleDetail>): void {
     const segments = event.detail?.segments;
@@ -295,20 +295,20 @@ export class ScionApp extends LitElement {
     }
 
     // Check for pattern matches
-    if (this.currentPath === '/groves/new') {
-      return 'Create Grove';
+    if (this.currentPath === '/projects/new') {
+      return 'Create Project';
     }
-    if (this.currentPath.match(/^\/groves\/[^/]+\/settings$/)) {
-      return 'Grove Settings';
+    if (this.currentPath.match(/^\/projects\/[^/]+\/settings$/)) {
+      return 'Project Settings';
     }
-    if (this.currentPath.match(/^\/groves\/[^/]+\/schedules$/)) {
+    if (this.currentPath.match(/^\/projects\/[^/]+\/schedules$/)) {
       return 'Schedules';
     }
-    if (this.currentPath.match(/^\/groves\/[^/]+\/templates\/[^/]+$/)) {
+    if (this.currentPath.match(/^\/projects\/[^/]+\/templates\/[^/]+$/)) {
       return 'Template';
     }
-    if (this.currentPath.startsWith('/groves/')) {
-      return 'Grove';
+    if (this.currentPath.startsWith('/projects/')) {
+      return 'Project';
     }
     if (this.currentPath === '/agents/new') {
       return 'Create Agent';

@@ -26,7 +26,7 @@ Key sections:
 | `hub` | Scion Hub endpoint, admin user, signing key (file path or GCP Secret Manager) |
 | `plugin` | Broker plugin RPC listen address (default `localhost:9090`) |
 | `auth` | Client authentication — API key or bearer token |
-| `groves` | Which groves and agents to expose, with optional auto-provisioning |
+| `projects` | Which projects and agents to expose, with optional auto-provisioning |
 | `state` | SQLite database path |
 | `timeouts` | Send message timeout, SSE keepalive interval, push retry limit |
 | `rate_limit` | Per-key token-bucket rate limiting |
@@ -57,8 +57,8 @@ docker run -p 8443:8443 -p 9090:9090 \
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/.well-known/agent-card.json` | GET | Bridge registry card |
-| `/groves/{grove}/agents/{agent}/.well-known/agent-card.json` | GET | Per-agent A2A card |
-| `/groves/{grove}/agents/{agent}/jsonrpc` | POST | A2A JSON-RPC endpoint |
+| `/projects/{project}/agents/{agent}/.well-known/agent-card.json` | GET | Per-agent A2A card |
+| `/projects/{project}/agents/{agent}/jsonrpc` | POST | A2A JSON-RPC endpoint |
 | `/healthz` | GET | Liveness check |
 | `/readyz` | GET | Readiness check (database, broker) |
 | `/metrics` | GET | Prometheus metrics (restrict access — see Security) |
@@ -98,7 +98,7 @@ Step-by-step instructions for installing, configuring, and running the A2A bridg
    - A file on disk containing the raw base64 string, or
    - A GCP Secret Manager resource name (e.g., `projects/my-project/secrets/hub-signing-key`).
 4. Have a Hub admin user email that the bridge will authenticate as (e.g., `a2a-bridge@example.com`).
-5. Know the grove slug(s) you want to expose over A2A.
+5. Know the project slug(s) you want to expose over A2A.
 
 ### 2. Build the binary
 
@@ -134,7 +134,7 @@ Edit `scion-a2a-bridge.yaml`. The required fields are:
 | `bridge.listen_address` | Address for the A2A HTTP server | `:8443` |
 | `bridge.external_url` | Public URL where A2A clients reach the bridge | `https://a2a.example.com` |
 | `auth.api_key` | Static API key clients pass in the `X-API-Key` header. Supports env var expansion. | `${A2A_API_KEY}` |
-| `groves[].slug` | Grove slug to expose. Add one entry per grove. | `my-grove` |
+| `projects[].slug` | Grove slug to expose. Add one entry per project. | `my-project` |
 | `plugin.listen_address` | Broker plugin RPC listen address | `localhost:9090` |
 
 Minimal config example:
@@ -159,8 +159,8 @@ auth:
   scheme: "apiKey"
   api_key: "${A2A_API_KEY}"
 
-groves:
-  - slug: "my-grove"
+projects:
+  - slug: "my-project"
     auto_provision: false
 
 state:
@@ -217,8 +217,8 @@ curl -s -o /dev/null -w '%{http_code}' http://localhost:8443/readyz
 # Bridge registry agent card — expect JSON with A2A agent card
 curl -s http://localhost:8443/.well-known/agent-card.json | head -20
 
-# Per-agent card (replace GROVE and AGENT with actual values)
-curl -s http://localhost:8443/groves/GROVE/agents/AGENT/.well-known/agent-card.json
+# Per-agent card (replace PROJECT and AGENT with actual values)
+curl -s http://localhost:8443/projects/PROJECT/agents/AGENT/.well-known/agent-card.json
 ```
 
 ### 7. Test with a sample JSON-RPC request
@@ -229,7 +229,7 @@ Send a `message/send` request to an agent's JSON-RPC endpoint:
 curl -s -X POST \
   -H "Content-Type: application/json" \
   -H "X-API-Key: ${A2A_API_KEY}" \
-  http://localhost:8443/groves/GROVE/agents/AGENT/jsonrpc \
+  http://localhost:8443/projects/PROJECT/agents/AGENT/jsonrpc \
   -d '{
     "jsonrpc": "2.0",
     "id": "test-1",
@@ -245,7 +245,7 @@ curl -s -X POST \
   }'
 ```
 
-Replace `GROVE` and `AGENT` with the target grove slug and agent name. A successful response contains a `result` object with `id`, `status`, and `artifacts` fields.
+Replace `PROJECT` and `AGENT` with the target project slug and agent name. A successful response contains a `result` object with `id`, `status`, and `artifacts` fields.
 
 ### 8. Docker deployment
 

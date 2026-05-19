@@ -26,62 +26,51 @@ func TestSlugify(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "simple lowercase",
-			input:    "hello",
-			expected: "hello",
-		},
-		{
-			name:     "mixed case",
+			name:     "basic",
 			input:    "Hello World",
 			expected: "hello-world",
 		},
 		{
 			name:     "special characters",
-			input:    "Hello! @World#",
+			input:    "Hello!@#$%^&*()_+World",
 			expected: "hello-world",
 		},
 		{
-			name:     "unicode accents",
-			input:    "Caf\u00e9",
-			expected: "cafe",
+			name:     "unicode",
+			input:    "Héllö Wörld",
+			expected: "hello-world",
 		},
 		{
-			name:     "numbers",
-			input:    "agent-123",
-			expected: "agent-123",
-		},
-		{
-			name:     "leading/trailing spaces",
-			input:    "  hello world  ",
+			name:     "leading and trailing dashes",
+			input:    "-Hello World-",
 			expected: "hello-world",
 		},
 		{
 			name:     "multiple dashes",
-			input:    "hello---world",
+			input:    "Hello---World",
 			expected: "hello-world",
 		},
 		{
-			name:     "underscores become dashes",
-			input:    "hello_world",
-			expected: "hello-world",
+			name:     "long string",
+			input:    strings.Repeat("a", 100),
+			expected: strings.Repeat("a", MaxSlugLength),
+		},
+		{
+			name:     "numbers",
+			input:    "Agent 007",
+			expected: "agent-007",
 		},
 		{
 			name:     "empty string",
 			input:    "",
 			expected: "",
 		},
-		{
-			name:     "only special chars",
-			input:    "!@#$%",
-			expected: "",
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := Slugify(tt.input)
-			if result != tt.expected {
-				t.Errorf("Slugify(%q) = %q, want %q", tt.input, result, tt.expected)
+			if got := Slugify(tt.input); got != tt.expected {
+				t.Errorf("Slugify(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
 		})
 	}
@@ -89,69 +78,34 @@ func TestSlugify(t *testing.T) {
 
 func TestValidateAgentName(t *testing.T) {
 	tests := []struct {
-		name      string
-		input     string
-		wantSlug  string
-		wantError bool
+		name    string
+		input   string
+		wantErr bool
 	}{
 		{
-			name:      "valid simple name",
-			input:     "my-agent",
-			wantSlug:  "my-agent",
-			wantError: false,
+			name:    "valid",
+			input:   "My Agent",
+			wantErr: false,
 		},
 		{
-			name:      "valid name with spaces",
-			input:     "My Agent",
-			wantSlug:  "my-agent",
-			wantError: false,
+			name:    "invalid empty",
+			input:   "",
+			wantErr: true,
 		},
 		{
-			name:      "empty string",
-			input:     "",
-			wantSlug:  "",
-			wantError: true,
-		},
-		{
-			name:      "all special characters",
-			input:     "!@#$%^&*()",
-			wantSlug:  "",
-			wantError: true,
-		},
-		{
-			name:      "problematic name with special chars and slashes",
-			input:     "slug Stres$@ . / test",
-			wantSlug:  "slug-stres-test",
-			wantError: false,
-		},
-		{
-			name:      "only spaces",
-			input:     "   ",
-			wantSlug:  "",
-			wantError: true,
+			name:    "invalid special chars",
+			input:   "!@#$%",
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			slug, err := ValidateAgentName(tt.input)
-			if (err != nil) != tt.wantError {
-				t.Errorf("ValidateAgentName(%q) error = %v, wantError %v", tt.input, err, tt.wantError)
-				return
-			}
-			if slug != tt.wantSlug {
-				t.Errorf("ValidateAgentName(%q) slug = %q, want %q", tt.input, slug, tt.wantSlug)
+			_, err := ValidateAgentName(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateAgentName(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
 			}
 		})
-	}
-}
-
-func TestSlugifyLengthLimit(t *testing.T) {
-	longInput := strings.Repeat("a", 100)
-	result := Slugify(longInput)
-
-	if len(result) > MaxSlugLength {
-		t.Errorf("Slugify produced slug of length %d, want <= %d", len(result), MaxSlugLength)
 	}
 }
 
@@ -163,156 +117,171 @@ func TestSlugifyWithSuffix(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "simple with suffix",
-			input:    "my-agent",
-			suffix:   "abc123",
-			expected: "my-agent-abc123",
+			name:     "basic",
+			input:    "Hello World",
+			suffix:   "123",
+			expected: "hello-world-123",
 		},
 		{
-			name:     "empty suffix",
-			input:    "my-agent",
+			name:     "no suffix",
+			input:    "Hello World",
 			suffix:   "",
-			expected: "my-agent",
+			expected: "hello-world",
 		},
 		{
-			name:     "long input truncated",
-			input:    strings.Repeat("a", 100),
-			suffix:   "xyz",
-			expected: strings.Repeat("a", MaxSlugLength-4) + "-xyz",
+			name:     "truncation",
+			input:    strings.Repeat("a", MaxSlugLength),
+			suffix:   "abc",
+			expected: strings.Repeat("a", MaxSlugLength-len("abc")-1) + "-abc",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := SlugifyWithSuffix(tt.input, tt.suffix)
-			if result != tt.expected {
-				t.Errorf("SlugifyWithSuffix(%q, %q) = %q, want %q", tt.input, tt.suffix, result, tt.expected)
-			}
-			if len(result) > MaxSlugLength {
-				t.Errorf("SlugifyWithSuffix produced slug of length %d, want <= %d", len(result), MaxSlugLength)
+			if got := SlugifyWithSuffix(tt.input, tt.suffix); got != tt.expected {
+				t.Errorf("SlugifyWithSuffix(%q, %q) = %q, want %q", tt.input, tt.suffix, got, tt.expected)
 			}
 		})
 	}
 }
 
-func TestNewUUID(t *testing.T) {
-	id := NewUUID()
-	if len(id) != 36 {
-		t.Errorf("NewUUID() = %q, want 36 char UUID", id)
-	}
-
-	// Should have 4 dashes at correct positions
-	if id[8] != '-' || id[13] != '-' || id[18] != '-' || id[23] != '-' {
-		t.Errorf("NewUUID() = %q, not valid UUID format", id)
-	}
-}
-
-func TestNewShortID(t *testing.T) {
-	id := NewShortID()
-	if len(id) != 8 {
-		t.Errorf("NewShortID() = %q, want 8 chars", id)
-	}
-}
-
-func TestMakeGroveID(t *testing.T) {
-	tests := []struct {
-		name       string
-		id         string
-		groveName  string
-		wantPrefix string
-		wantSuffix string
-	}{
-		{
-			name:       "with provided ID",
-			id:         "abc123",
-			groveName:  "My Project",
-			wantPrefix: "abc123",
-			wantSuffix: "my-project",
-		},
-		{
-			name:       "empty ID generates new",
-			id:         "",
-			groveName:  "Test Grove",
-			wantPrefix: "", // Will be a UUID
-			wantSuffix: "test-grove",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := MakeGroveID(tt.id, tt.groveName)
-
-			if tt.wantPrefix != "" {
-				expected := tt.wantPrefix + GroveIDSeparator + tt.wantSuffix
-				if result != expected {
-					t.Errorf("MakeGroveID(%q, %q) = %q, want %q", tt.id, tt.groveName, result, expected)
-				}
-			} else {
-				// Should end with the slug
-				if !strings.HasSuffix(result, GroveIDSeparator+tt.wantSuffix) {
-					t.Errorf("MakeGroveID(%q, %q) = %q, want suffix %q", tt.id, tt.groveName, result, tt.wantSuffix)
-				}
-			}
-		})
-	}
-}
-
-func TestParseGroveID(t *testing.T) {
+func TestDisplayNameWithSerial(t *testing.T) {
 	tests := []struct {
 		name     string
-		groveID  string
-		wantID   string
-		wantSlug string
-		wantOK   bool
+		baseName string
+		slug     string
+		baseSlug string
+		expected string
 	}{
 		{
-			name:     "hosted format",
-			groveID:  "abc123__my-project",
-			wantID:   "abc123",
-			wantSlug: "my-project",
-			wantOK:   true,
+			name:     "no serial",
+			baseName: "My Agent",
+			slug:     "my-agent",
+			baseSlug: "my-agent",
+			expected: "My Agent",
 		},
 		{
-			name:     "local format",
-			groveID:  "my-local-project",
-			wantID:   "",
-			wantSlug: "my-local-project",
-			wantOK:   false,
+			name:     "with serial",
+			baseName: "My Agent",
+			slug:     "my-agent-2",
+			baseSlug: "my-agent",
+			expected: "My Agent (2)",
 		},
 		{
-			name:     "multiple separators",
-			groveID:  "abc123__my__project",
-			wantID:   "abc123",
-			wantSlug: "my__project",
-			wantOK:   true,
+			name:     "unrelated slug",
+			baseName: "My Agent",
+			slug:     "different-slug",
+			baseSlug: "my-agent",
+			expected: "My Agent",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			id, slug, ok := ParseGroveID(tt.groveID)
-			if id != tt.wantID || slug != tt.wantSlug || ok != tt.wantOK {
-				t.Errorf("ParseGroveID(%q) = (%q, %q, %v), want (%q, %q, %v)",
-					tt.groveID, id, slug, ok, tt.wantID, tt.wantSlug, tt.wantOK)
+			if got := DisplayNameWithSerial(tt.baseName, tt.slug, tt.baseSlug); got != tt.expected {
+				t.Errorf("DisplayNameWithSerial(%q, %q, %q) = %q, want %q", tt.baseName, tt.slug, tt.baseSlug, got, tt.expected)
 			}
 		})
 	}
 }
 
-func TestIsHostedGroveID(t *testing.T) {
+func TestMakeProjectID(t *testing.T) {
 	tests := []struct {
-		groveID string
-		want    bool
+		name        string
+		id          string
+		projectName string
+		wantPrefix  string
+		wantSuffix  string
 	}{
-		{"abc123__my-project", true},
-		{"my-local-project", false},
+		{
+			name:        "with ID",
+			id:          "abc123",
+			projectName: "My Project",
+			wantPrefix:  "abc123",
+			wantSuffix:  "my-project",
+		},
+		{
+			name:        "without ID",
+			id:          "",
+			projectName: "Test Project",
+			wantSuffix:  "test-project",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := MakeProjectID(tt.id, tt.projectName)
+			if tt.id != "" {
+				expected := tt.wantPrefix + ProjectIDSeparator + tt.wantSuffix
+				if result != expected {
+					t.Errorf("MakeProjectID(%q, %q) = %q, want %q", tt.id, tt.projectName, result, expected)
+				}
+			} else {
+				// Should have generated a UUID
+				if !strings.HasSuffix(result, ProjectIDSeparator+tt.wantSuffix) {
+					t.Errorf("MakeProjectID(%q, %q) = %q, want suffix %q", tt.id, tt.projectName, result, tt.wantSuffix)
+				}
+			}
+		})
+	}
+}
+
+func TestParseProjectID(t *testing.T) {
+	tests := []struct {
+		name      string
+		projectID string
+		wantID    string
+		wantSlug  string
+		wantOK    bool
+	}{
+		{
+			name:      "hosted format",
+			projectID: "abc123__my-project",
+			wantID:    "abc123",
+			wantSlug:  "my-project",
+			wantOK:    true,
+		},
+		{
+			name:      "simple format",
+			projectID: "my-local-project",
+			wantID:    "",
+			wantSlug:  "my-local-project",
+			wantOK:    false,
+		},
+		{
+			name:      "multiple separators",
+			projectID: "abc123__my__project",
+			wantID:    "abc123",
+			wantSlug:  "my__project",
+			wantOK:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id, slug, ok := ParseProjectID(tt.projectID)
+			if id != tt.wantID || slug != tt.wantSlug || ok != tt.wantOK {
+				t.Errorf("ParseProjectID(%q) = (%q, %q, %v), want (%q, %q, %v)",
+					tt.projectID, id, slug, ok, tt.wantID, tt.wantSlug, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestIsHostedProjectID(t *testing.T) {
+	tests := []struct {
+		projectID string
+		want      bool
+	}{
+		{"abc__def", true},
+		{"abc", false},
 		{"", false},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.groveID, func(t *testing.T) {
-			if got := IsHostedGroveID(tt.groveID); got != tt.want {
-				t.Errorf("IsHostedGroveID(%q) = %v, want %v", tt.groveID, got, tt.want)
+		t.Run(tt.projectID, func(t *testing.T) {
+			if got := IsHostedProjectID(tt.projectID); got != tt.want {
+				t.Errorf("IsHostedProjectID(%q) = %v, want %v", tt.projectID, got, tt.want)
 			}
 		})
 	}

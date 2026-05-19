@@ -152,6 +152,9 @@ type DevAuthConfig struct {
 	// AuthorizedDomains is a list of email domains allowed to authenticate.
 	// If empty, all domains are allowed.
 	AuthorizedDomains []string `json:"authorizedDomains" yaml:"authorizedDomains" koanf:"authorizedDomains"`
+	// UserAccessMode controls how user access is evaluated at login time.
+	// Values: "open" (default), "domain_restricted", "invite_only".
+	UserAccessMode string `json:"userAccessMode" yaml:"userAccessMode" koanf:"userAccessMode"`
 }
 
 // OAuthProviderConfig holds OAuth credentials for a single provider.
@@ -557,6 +560,7 @@ func envKeyToConfigKey(envKey string) string {
 		"logformat":            "logFormat",
 		"localpath":            "localPath",
 		"authorizeddomains":    "authorizedDomains",
+		"useraccessmode":       "userAccessMode",
 		"adminemails":          "adminEmails",
 		"gcpprojectid":         "gcpProjectId",
 		"gcpcredentials":       "gcpCredentials",

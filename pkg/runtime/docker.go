@@ -169,7 +169,20 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 		// Filter by labels if requested
 		match := true
 		for k, v := range labelFilter {
-			if labels[k] != v {
+			actual := labels[k]
+			// Fallback for project labels
+			if actual == "" {
+				switch k {
+				case "scion.project":
+					actual = labels["scion.grove"]
+				case "scion.project_id":
+					actual = labels["scion.grove_id"]
+				case "scion.project_path":
+					actual = labels["scion.grove_path"]
+				}
+			}
+
+			if actual != v {
 				match = false
 				break
 			}
@@ -192,10 +205,25 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 				Template:        labels["scion.template"],
 				HarnessConfig:   labels["scion.harness_config"],
 				HarnessAuth:     labels["scion.harness_auth"],
-				Grove:           labels["scion.grove"],
-				GroveID:         labels["scion.grove_id"],
-				GrovePath:       labels["scion.grove_path"],
-				Runtime:         r.Name(),
+				Project: func() string {
+					if p := labels["scion.project"]; p != "" {
+						return p
+					}
+					return labels["scion.grove"]
+				}(),
+				ProjectID: func() string {
+					if p := labels["scion.project_id"]; p != "" {
+						return p
+					}
+					return labels["scion.grove_id"]
+				}(),
+				ProjectPath: func() string {
+					if p := labels["scion.project_path"]; p != "" {
+						return p
+					}
+					return labels["scion.grove_path"]
+				}(),
+				Runtime: r.Name(),
 			})
 		}
 	}

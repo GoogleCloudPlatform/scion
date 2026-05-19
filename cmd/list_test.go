@@ -82,8 +82,8 @@ func TestFormatLastActivity(t *testing.T) {
 		{"activity with time", "thinking", now.Add(-30 * time.Second), "thinking, 30 seconds ago"},
 		{"phase with time", "stopped", now.Add(-2 * time.Hour), "stopped, 2 hours ago"},
 		{"empty status with time", "", now.Add(-5 * time.Minute), "5 minutes ago"},
-		{"IDLE status with time", "IDLE", now.Add(-5 * time.Minute), "5 minutes ago"},
-		{"idle status with time", "idle", now.Add(-5 * time.Minute), "5 minutes ago"},
+		{"WORKING status with time", "WORKING", now.Add(-5 * time.Minute), "5 minutes ago"},
+		{"working status with time", "working", now.Add(-5 * time.Minute), "5 minutes ago"},
 		{"activity with zero time", "running", time.Time{}, "running"},
 		{"empty status with zero time", "", time.Time{}, "-"},
 	}
@@ -105,7 +105,7 @@ func TestDisplayAgentsLocalMode(t *testing.T) {
 			Template:        "default",
 			HarnessConfig:   "claude",
 			Runtime:         "docker",
-			Grove:           "my-project",
+			Project:         "my-project",
 			Phase:           "running",
 			Activity:        "thinking",
 			ContainerStatus: "Up 2 hours",
@@ -115,7 +115,7 @@ func TestDisplayAgentsLocalMode(t *testing.T) {
 			Name:            "agent-2",
 			Template:        "research",
 			Runtime:         "docker",
-			Grove:           "my-project",
+			Project:         "my-project",
 			Phase:           "stopped",
 			ContainerStatus: "created",
 			// No HarnessConfig, no LastSeen
@@ -146,7 +146,7 @@ func TestDisplayAgentsLocalMode(t *testing.T) {
 	}
 
 	header := lines[0]
-	for _, col := range []string{"NAME", "TEMPLATE", "HARNESS-CFG", "RUNTIME", "GROVE", "PHASE", "CONTAINER", "LAST ACTIVITY"} {
+	for _, col := range []string{"NAME", "TEMPLATE", "HARNESS-CFG", "RUNTIME", "PROJECT", "PHASE", "CONTAINER", "LAST ACTIVITY"} {
 		if !strings.Contains(header, col) {
 			t.Errorf("header missing column %q: %s", col, header)
 		}
@@ -176,7 +176,7 @@ func TestDisplayAgentsHubMode(t *testing.T) {
 			Template:          "default",
 			HarnessConfig:     "gemini",
 			Runtime:           "docker",
-			Grove:             "hub-project",
+			Project:           "hub-project",
 			RuntimeBrokerName: "local-broker",
 			Phase:             "running",
 			ContainerStatus:   "Up 5 minutes",
@@ -207,7 +207,7 @@ func TestDisplayAgentsHubMode(t *testing.T) {
 
 	header := lines[0]
 	// Hub mode should have BROKER column
-	for _, col := range []string{"NAME", "TEMPLATE", "HARNESS-CFG", "RUNTIME", "GROVE", "BROKER", "PHASE", "CONTAINER", "LAST ACTIVITY"} {
+	for _, col := range []string{"NAME", "TEMPLATE", "HARNESS-CFG", "RUNTIME", "PROJECT", "BROKER", "PHASE", "CONTAINER", "LAST ACTIVITY"} {
 		if !strings.Contains(header, col) {
 			t.Errorf("hub mode header missing column %q: %s", col, header)
 		}
@@ -236,21 +236,21 @@ func TestDisplayAgentsSortByTime(t *testing.T) {
 			Name:     "old-agent",
 			Template: "default",
 			Runtime:  "docker",
-			Grove:    "my-project",
+			Project:  "my-project",
 			LastSeen: now.Add(-10 * time.Minute),
 		},
 		{
 			Name:     "new-agent",
 			Template: "default",
 			Runtime:  "docker",
-			Grove:    "my-project",
+			Project:  "my-project",
 			LastSeen: now.Add(-1 * time.Minute),
 		},
 		{
 			Name:     "mid-agent",
 			Template: "default",
 			Runtime:  "docker",
-			Grove:    "my-project",
+			Project:  "my-project",
 			LastSeen: now.Add(-5 * time.Minute),
 		},
 	}
@@ -342,7 +342,7 @@ func TestDisplayAgentsFriendlyTemplateName(t *testing.T) {
 			Name:            "agent-cache-path",
 			Template:        "/home/user/.scion/templates/cache/abc123/claude",
 			Runtime:         "docker",
-			Grove:           "my-project",
+			Project:         "my-project",
 			Phase:           "running",
 			ContainerStatus: "Up 1 hour",
 		},
@@ -350,7 +350,7 @@ func TestDisplayAgentsFriendlyTemplateName(t *testing.T) {
 			Name:            "agent-simple",
 			Template:        "gemini",
 			Runtime:         "docker",
-			Grove:           "my-project",
+			Project:         "my-project",
 			Phase:           "running",
 			ContainerStatus: "Up 2 hours",
 		},
@@ -524,7 +524,7 @@ func TestDisplayAgentsRunningFlag(t *testing.T) {
 			Name:            "active-agent",
 			Template:        "default",
 			Runtime:         "docker",
-			Grove:           "my-project",
+			Project:         "my-project",
 			Phase:           "running",
 			ContainerStatus: "Up 1 hour",
 		},
@@ -532,7 +532,7 @@ func TestDisplayAgentsRunningFlag(t *testing.T) {
 			Name:            "stopped-agent",
 			Template:        "default",
 			Runtime:         "docker",
-			Grove:           "my-project",
+			Project:         "my-project",
 			Phase:           "stopped",
 			ContainerStatus: "Exited",
 		},

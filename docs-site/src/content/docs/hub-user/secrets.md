@@ -23,10 +23,10 @@ Scion distinguishes between regular environment variables and secure secrets:
 Both variables and secrets can be scoped to different levels. Scion resolves these hierarchically when an agent starts:
 
 1.  **User Scope**: Personal secrets for a specific user. Applied to all agents owned by that user.
-2.  **Grove Scope**: Project-level secrets. Available to all agents running in a specific Grove.
+2.  **Project Scope**: Project-level secrets. Available to all agents running in a specific Project.
 3.  **Broker Scope**: Infrastructure-level secrets. Available only to agents running on a specific Runtime Broker (e.g., for hardware-specific config).
 
-**Resolution Priority:** When multiple scopes define the same secret key, the more specific scope wins. Broker scope has the highest priority, followed by Grove, then User, then Hub. Template `env` blocks and CLI `--env` flags are layered on top of resolved secrets.
+**Resolution Priority:** When multiple scopes define the same secret key, the more specific scope wins. Broker scope has the highest priority, followed by Project, then User, then Hub. Template `env` blocks and CLI `--env` flags are layered on top of resolved secrets.
 
 ---
 ## Injection Modes
@@ -39,8 +39,8 @@ Both environment variables and secrets support **Injection Modes**, which contro
 You can set the injection mode via the CLI using the `--always` flag:
 
 ```bash
-# Set a variable to be always injected in a grove
-scion hub env set --grove --always LOG_LEVEL=debug
+# Set a variable to be always injected in a project
+scion hub env set --project --always LOG_LEVEL=debug
 
 # Set a secret to be always injected for a user
 scion hub secret set --always MY_GLOBAL_TOKEN secret-value
@@ -57,8 +57,8 @@ Use the `scion hub env` command suite to manage non-sensitive configuration.
 # Set a user-scoped variable
 scion hub env set API_URL=https://api.example.com
 
-# Set a grove-scoped variable (inferred from current directory)
-scion hub env set --grove LOG_LEVEL=debug
+# Set a project-scoped variable (inferred from current directory)
+scion hub env set --project LOG_LEVEL=debug
 
 # Set a variable only for a specific broker
 scion hub env set --broker=my-gpu-node CUDA_VISIBLE_DEVICES=0
@@ -75,8 +75,8 @@ Secrets can be set manually via the CLI or Web Dashboard, or gathered interactiv
 # Set a user-scoped secret
 scion hub secret set ANTHROPIC_API_KEY sk-ant-api01-...
 
-# Set a grove-scoped secret
-scion hub secret set --grove DB_PASSWORD my-secure-password
+# Set a project-scoped secret
+scion hub secret set --project DB_PASSWORD my-secure-password
 ```
 
 **Interactive Secrets-Gather:**
@@ -162,7 +162,7 @@ When GCP Secret Manager is configured, Scion uses a **hybrid storage** model:
 When an agent starts, the Runtime Broker requests a "Resolved Environment" from the Hub. The Hub merges secret values in this order (last one wins for the same key):
 1. Hub Secrets (global defaults)
 2. User Secrets
-3. Grove Secrets
+3. Project Secrets
 4. Broker Secrets
 5. Template `env` block
 6. CLI `--env` flags

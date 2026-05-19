@@ -134,21 +134,21 @@ func TestInitProject_NonGitCreatesMarkerAndExternalDir(t *testing.T) {
 	}
 
 	// Read the marker and verify content
-	marker, err := ReadGroveMarker(markerPath)
+	marker, err := ReadProjectMarker(markerPath)
 	if err != nil {
-		t.Fatalf("ReadGroveMarker failed: %v", err)
+		t.Fatalf("ReadProjectMarker failed: %v", err)
 	}
-	if marker.GroveSlug == "" {
+	if marker.ProjectSlug == "" {
 		t.Error("marker should have a grove-slug")
 	}
-	if marker.GroveID == "" {
+	if marker.ProjectID == "" {
 		t.Error("marker should have a grove-id")
 	}
 
 	// Verify external grove directory was created
-	externalPath, err := marker.ExternalGrovePath()
+	externalPath, err := marker.ExternalProjectPath()
 	if err != nil {
-		t.Fatalf("ExternalGrovePath failed: %v", err)
+		t.Fatalf("ExternalProjectPath failed: %v", err)
 	}
 
 	// Check standard dirs
@@ -216,7 +216,7 @@ func TestInitProject_NonGitIdempotent(t *testing.T) {
 	}
 
 	// Read marker from first init
-	marker1, _ := ReadGroveMarker(filepath.Join(projectDir, ".scion"))
+	marker1, _ := ReadProjectMarker(filepath.Join(projectDir, ".scion"))
 
 	// Second init should succeed and use existing marker
 	if err := InitProject(scionDir, GetMockHarnesses()); err != nil {
@@ -224,13 +224,13 @@ func TestInitProject_NonGitIdempotent(t *testing.T) {
 	}
 
 	// Read marker after second init — should be unchanged
-	marker2, _ := ReadGroveMarker(filepath.Join(projectDir, ".scion"))
-	if marker1.GroveID != marker2.GroveID {
-		t.Errorf("grove-id changed between inits: %q → %q", marker1.GroveID, marker2.GroveID)
+	marker2, _ := ReadProjectMarker(filepath.Join(projectDir, ".scion"))
+	if marker1.ProjectID != marker2.ProjectID {
+		t.Errorf("grove-id changed between inits: %q → %q", marker1.ProjectID, marker2.ProjectID)
 	}
 }
 
-func TestInitProject_GitCreatesGroveIDAndExternalDir(t *testing.T) {
+func TestInitProject_GitCreatesProjectIDAndExternalDir(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 	mockRuntimeDetection(t, "docker")
@@ -261,18 +261,18 @@ func TestInitProject_GitCreatesGroveIDAndExternalDir(t *testing.T) {
 	}
 
 	// Verify grove-id file was created
-	groveID, err := ReadGroveID(scionDir)
+	projectID, err := ReadProjectID(scionDir)
 	if err != nil {
-		t.Fatalf("ReadGroveID failed: %v", err)
+		t.Fatalf("ReadProjectID failed: %v", err)
 	}
-	if groveID == "" {
+	if projectID == "" {
 		t.Error("grove-id should not be empty")
 	}
 
 	// Verify external agents directory was created
-	externalDir, err := GetGitGroveExternalAgentsDir(scionDir)
+	externalDir, err := GetGitProjectExternalAgentsDir(scionDir)
 	if err != nil {
-		t.Fatalf("GetGitGroveExternalAgentsDir failed: %v", err)
+		t.Fatalf("GetGitProjectExternalAgentsDir failed: %v", err)
 	}
 	if externalDir == "" {
 		t.Fatal("external agents dir should not be empty")
@@ -282,9 +282,9 @@ func TestInitProject_GitCreatesGroveIDAndExternalDir(t *testing.T) {
 	}
 
 	// Verify settings.yaml is in the external config dir (machine-specific, not committed)
-	externalConfigDir, err := GetGitGroveExternalConfigDir(scionDir)
+	externalConfigDir, err := GetGitProjectExternalConfigDir(scionDir)
 	if err != nil {
-		t.Fatalf("GetGitGroveExternalConfigDir failed: %v", err)
+		t.Fatalf("GetGitProjectExternalConfigDir failed: %v", err)
 	}
 	if externalConfigDir == "" {
 		t.Fatal("external config dir should not be empty")
@@ -311,7 +311,7 @@ func TestInitProject_GitCreatesGroveIDAndExternalDir(t *testing.T) {
 	}
 }
 
-func TestInitProject_GitIdempotentGroveID(t *testing.T) {
+func TestInitProject_GitIdempotentProjectID(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 	mockRuntimeDetection(t, "docker")
@@ -330,16 +330,16 @@ func TestInitProject_GitIdempotentGroveID(t *testing.T) {
 	if err := InitProject(scionDir, GetMockHarnesses()); err != nil {
 		t.Fatalf("first InitProject failed: %v", err)
 	}
-	groveID1, _ := ReadGroveID(scionDir)
+	projectID1, _ := ReadProjectID(scionDir)
 
 	// Second init
 	if err := InitProject(scionDir, GetMockHarnesses()); err != nil {
 		t.Fatalf("second InitProject failed: %v", err)
 	}
-	groveID2, _ := ReadGroveID(scionDir)
+	projectID2, _ := ReadProjectID(scionDir)
 
-	if groveID1 != groveID2 {
-		t.Errorf("grove-id changed between inits: %q → %q", groveID1, groveID2)
+	if projectID1 != projectID2 {
+		t.Errorf("grove-id changed between inits: %q → %q", projectID1, projectID2)
 	}
 }
 

@@ -112,7 +112,7 @@ type ScopeType string
 // ScopeType values.
 const (
 	ScopeTypeHub      ScopeType = "hub"
-	ScopeTypeGrove    ScopeType = "grove"
+	ScopeTypeProject  ScopeType = "project"
 	ScopeTypeResource ScopeType = "resource"
 )
 
@@ -123,7 +123,7 @@ func (st ScopeType) String() string {
 // ScopeTypeValidator is a validator for the "scope_type" field enum values. It is called by the builders before save.
 func ScopeTypeValidator(st ScopeType) error {
 	switch st {
-	case ScopeTypeHub, ScopeTypeGrove, ScopeTypeResource:
+	case ScopeTypeHub, ScopeTypeProject, ScopeTypeResource:
 		return nil
 	default:
 		return fmt.Errorf("accesspolicy: invalid enum value for scope_type field: %q", st)

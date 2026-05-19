@@ -47,7 +47,7 @@ var (
 var scheduleCmd = &cobra.Command{
 	Use:   "schedule",
 	Short: "Manage scheduled events",
-	Long:  `List, inspect, create, and cancel scheduled events for the current grove.`,
+	Long:  `List, inspect, create, and cancel scheduled events for the current project.`,
 }
 
 // scheduleListCmd lists scheduled events for the current grove.
@@ -124,7 +124,7 @@ var scheduleHistoryCmd = &cobra.Command{
 }
 
 func runScheduleList(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailabilityWithOptions(grovePath, true)
+	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
 	if err != nil {
 		return err
 	}
@@ -136,7 +136,7 @@ func runScheduleList(cmd *cobra.Command, args []string) error {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
 
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -162,7 +162,7 @@ func runScheduleList(cmd *cobra.Command, args []string) error {
 			opts.EventType = scheduleType
 		}
 
-		resp, err := hubCtx.Client.ScheduledEvents(groveID).List(ctx, opts)
+		resp, err := hubCtx.Client.ScheduledEvents(projectID).List(ctx, opts)
 		if err != nil {
 			return wrapHubError(fmt.Errorf("failed to list scheduled events: %w", err))
 		}
@@ -175,7 +175,7 @@ func runScheduleList(cmd *cobra.Command, args []string) error {
 			opts.Status = scheduleStatus
 		}
 
-		resp, err := hubCtx.Client.Schedules(groveID).List(ctx, opts)
+		resp, err := hubCtx.Client.Schedules(projectID).List(ctx, opts)
 		if err != nil {
 			return wrapHubError(fmt.Errorf("failed to list recurring schedules: %w", err))
 		}
@@ -245,7 +245,7 @@ func runScheduleList(cmd *cobra.Command, args []string) error {
 func runScheduleGet(cmd *cobra.Command, args []string) error {
 	resourceID := args[0]
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(grovePath, true)
+	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
 	if err != nil {
 		return err
 	}
@@ -257,7 +257,7 @@ func runScheduleGet(cmd *cobra.Command, args []string) error {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
 
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -266,7 +266,7 @@ func runScheduleGet(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	// Try as one-shot event first
-	evt, evtErr := hubCtx.Client.ScheduledEvents(groveID).Get(ctx, resourceID)
+	evt, evtErr := hubCtx.Client.ScheduledEvents(projectID).Get(ctx, resourceID)
 	if evtErr == nil {
 		if isJSONOutput() {
 			return outputJSON(evt)
@@ -276,7 +276,7 @@ func runScheduleGet(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Type:       %s\n", evt.EventType)
 		fmt.Printf("  Status:     %s\n", evt.Status)
 		fmt.Printf("  Fire At:    %s (%s)\n", evt.FireAt.Format(time.RFC3339), formatScheduleTime(evt.FireAt, evt.Status))
-		fmt.Printf("  Grove:      %s\n", evt.GroveID)
+		fmt.Printf("  Project:      %s\n", evt.ProjectID)
 		fmt.Printf("  Created:    %s\n", evt.CreatedAt.Format(time.RFC3339))
 		if evt.CreatedBy != "" {
 			fmt.Printf("  Created By: %s\n", evt.CreatedBy)
@@ -307,7 +307,7 @@ func runScheduleGet(cmd *cobra.Command, args []string) error {
 	}
 
 	// Try as recurring schedule
-	sched, schedErr := hubCtx.Client.Schedules(groveID).Get(ctx, resourceID)
+	sched, schedErr := hubCtx.Client.Schedules(projectID).Get(ctx, resourceID)
 	if schedErr == nil {
 		if isJSONOutput() {
 			return outputJSON(sched)
@@ -336,7 +336,7 @@ func printScheduleDetail(sched *hubclient.Schedule) {
 		fmt.Printf("  Last Run:   %s\n", lastRunInfo)
 	}
 	fmt.Printf("  Event Type: %s\n", sched.EventType)
-	fmt.Printf("  Grove:      %s\n", sched.GroveID)
+	fmt.Printf("  Project:      %s\n", sched.ProjectID)
 	fmt.Printf("  Created:    %s\n", sched.CreatedAt.Format(time.RFC3339))
 	if sched.CreatedBy != "" {
 		fmt.Printf("  Created By: %s\n", sched.CreatedBy)
@@ -376,7 +376,7 @@ func printScheduleDetail(sched *hubclient.Schedule) {
 func runScheduleCancel(cmd *cobra.Command, args []string) error {
 	eventID := args[0]
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(grovePath, true)
+	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
 	if err != nil {
 		return err
 	}
@@ -388,7 +388,7 @@ func runScheduleCancel(cmd *cobra.Command, args []string) error {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
 
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -396,7 +396,7 @@ func runScheduleCancel(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := hubCtx.Client.ScheduledEvents(groveID).Cancel(ctx, eventID); err != nil {
+	if err := hubCtx.Client.ScheduledEvents(projectID).Cancel(ctx, eventID); err != nil {
 		return wrapHubError(fmt.Errorf("failed to cancel scheduled event: %w", err))
 	}
 
@@ -435,7 +435,7 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unsupported event type: %q (supported: message, dispatch_agent)", scheduleType)
 	}
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(grovePath, true)
+	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
 	if err != nil {
 		return err
 	}
@@ -447,7 +447,7 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
 
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -471,7 +471,7 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	evt, err := hubCtx.Client.ScheduledEvents(groveID).Create(ctx, req)
+	evt, err := hubCtx.Client.ScheduledEvents(projectID).Create(ctx, req)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to create scheduled event: %w", err))
 	}
@@ -515,7 +515,7 @@ func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unsupported event type: %q (supported: message, dispatch_agent)", scheduleType)
 	}
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(grovePath, true)
+	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
 	if err != nil {
 		return err
 	}
@@ -527,7 +527,7 @@ func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
 
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -547,7 +547,7 @@ func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	sched, err := hubCtx.Client.Schedules(groveID).Create(ctx, req)
+	sched, err := hubCtx.Client.Schedules(projectID).Create(ctx, req)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to create recurring schedule: %w", err))
 	}
@@ -570,7 +570,7 @@ func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
 func runSchedulePause(cmd *cobra.Command, args []string) error {
 	scheduleID := args[0]
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(grovePath, true)
+	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
 	if err != nil {
 		return err
 	}
@@ -582,7 +582,7 @@ func runSchedulePause(cmd *cobra.Command, args []string) error {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
 
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -590,7 +590,7 @@ func runSchedulePause(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if _, err := hubCtx.Client.Schedules(groveID).Pause(ctx, scheduleID); err != nil {
+	if _, err := hubCtx.Client.Schedules(projectID).Pause(ctx, scheduleID); err != nil {
 		return wrapHubError(fmt.Errorf("failed to pause schedule: %w", err))
 	}
 
@@ -604,7 +604,7 @@ func runSchedulePause(cmd *cobra.Command, args []string) error {
 func runScheduleResume(cmd *cobra.Command, args []string) error {
 	scheduleID := args[0]
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(grovePath, true)
+	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
 	if err != nil {
 		return err
 	}
@@ -616,7 +616,7 @@ func runScheduleResume(cmd *cobra.Command, args []string) error {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
 
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -624,7 +624,7 @@ func runScheduleResume(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	sched, err := hubCtx.Client.Schedules(groveID).Resume(ctx, scheduleID)
+	sched, err := hubCtx.Client.Schedules(projectID).Resume(ctx, scheduleID)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to resume schedule: %w", err))
 	}
@@ -644,7 +644,7 @@ func runScheduleResume(cmd *cobra.Command, args []string) error {
 func runScheduleDelete(cmd *cobra.Command, args []string) error {
 	scheduleID := args[0]
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(grovePath, true)
+	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
 	if err != nil {
 		return err
 	}
@@ -656,7 +656,7 @@ func runScheduleDelete(cmd *cobra.Command, args []string) error {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
 
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -664,7 +664,7 @@ func runScheduleDelete(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := hubCtx.Client.Schedules(groveID).Delete(ctx, scheduleID); err != nil {
+	if err := hubCtx.Client.Schedules(projectID).Delete(ctx, scheduleID); err != nil {
 		return wrapHubError(fmt.Errorf("failed to delete schedule: %w", err))
 	}
 
@@ -676,7 +676,7 @@ func runScheduleDelete(cmd *cobra.Command, args []string) error {
 }
 
 func runScheduleHistory(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailabilityWithOptions(grovePath, true)
+	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
 	if err != nil {
 		return err
 	}
@@ -688,7 +688,7 @@ func runScheduleHistory(cmd *cobra.Command, args []string) error {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
 
-	groveID, err := GetGroveID(hubCtx)
+	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
@@ -702,7 +702,7 @@ func runScheduleHistory(cmd *cobra.Command, args []string) error {
 	}
 
 	scheduleID := args[0]
-	resp, err := hubCtx.Client.Schedules(groveID).History(ctx, scheduleID, nil)
+	resp, err := hubCtx.Client.Schedules(projectID).History(ctx, scheduleID, nil)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to get schedule history: %w", err))
 	}

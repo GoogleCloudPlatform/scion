@@ -297,8 +297,17 @@ func (m *ControlChannelManager) handleMessage(hc *BrokerConnection, data []byte)
 	case wsprotocol.TypeConnect:
 		// Client sent connect message after we already sent connected.
 		// This is expected - just acknowledge we received it.
+		var msg wsprotocol.ConnectMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			m.log.Warn("Failed to parse connect message", "brokerID", hc.brokerID, "error", err)
+			return nil
+		}
+
 		if m.config.Debug {
-			m.log.Debug("Received connect message from broker (already connected)", "brokerID", hc.brokerID)
+			m.log.Debug("Received connect message from broker (already connected)",
+				"brokerID", hc.brokerID,
+				"projects", msg.Projects,
+				"version", msg.Version)
 		}
 		return nil
 	case wsprotocol.TypeResponse:
@@ -480,13 +489,13 @@ func (m *ControlChannelManager) TunnelRequest(ctx context.Context, brokerID stri
 }
 
 // OpenStream opens a new multiplexed stream to a broker.
-func (m *ControlChannelManager) OpenStream(ctx context.Context, brokerID, streamType, agentID, groveID string, cols, rows int) (*StreamProxy, error) {
+func (m *ControlChannelManager) OpenStream(ctx context.Context, brokerID, streamType, agentID, projectID string, cols, rows int) (*StreamProxy, error) {
 	hc := m.GetConnection(brokerID)
 	if hc == nil {
 		return nil, fmt.Errorf("broker %s not connected", brokerID)
 	}
 
-	return hc.OpenStream(ctx, streamType, agentID, groveID, cols, rows)
+	return hc.OpenStream(ctx, streamType, agentID, projectID, cols, rows)
 }
 
 // SendStreamData sends data on an existing stream.
@@ -598,7 +607,7 @@ func (hc *BrokerConnection) TunnelRequest(ctx context.Context, req *wsprotocol.R
 }
 
 // OpenStream opens a new multiplexed stream.
-func (hc *BrokerConnection) OpenStream(ctx context.Context, streamType, agentID, groveID string, cols, rows int) (*StreamProxy, error) {
+func (hc *BrokerConnection) OpenStream(ctx context.Context, streamType, agentID, projectID string, cols, rows int) (*StreamProxy, error) {
 	streamID := uuid.New().String()
 	stream := NewStreamProxy(streamID, streamType, agentID)
 
@@ -607,7 +616,7 @@ func (hc *BrokerConnection) OpenStream(ctx context.Context, streamType, agentID,
 	hc.streamsMu.Unlock()
 
 	// Send stream open message
-	openMsg := wsprotocol.NewStreamOpenMessage(streamID, streamType, agentID, groveID, cols, rows)
+	openMsg := wsprotocol.NewStreamOpenMessage(streamID, streamType, agentID, projectID, cols, rows)
 	if err := hc.conn.WriteJSON(openMsg); err != nil {
 		hc.streamsMu.Lock()
 		delete(hc.streams, streamID)

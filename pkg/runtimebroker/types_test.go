@@ -15,11 +15,216 @@
 package runtimebroker
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
+
+func TestBrokerInfoResponse_JSON(t *testing.T) {
+	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
+		jsonData := `{
+			"brokerId": "b1",
+			"version": "1.0",
+			"groves": [{"projectId": "p1", "projectName": "Project 1"}]
+		}`
+		var resp BrokerInfoResponse
+		if err := json.Unmarshal([]byte(jsonData), &resp); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if len(resp.Projects) != 1 {
+			t.Fatalf("Expected 1 project, got %d", len(resp.Projects))
+		}
+		if resp.Projects[0].ProjectID != "p1" {
+			t.Errorf("ProjectID = %q, want %q", resp.Projects[0].ProjectID, "p1")
+		}
+	})
+
+	t.Run("marshal dual fields", func(t *testing.T) {
+		resp := BrokerInfoResponse{
+			BrokerID: "b1",
+			Version:  "1.0",
+			Projects: []ProjectInfo{
+				{ProjectID: "p1", ProjectName: "Project 1"},
+			},
+		}
+		data, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("Unmarshal back failed: %v", err)
+		}
+
+		if _, ok := m["projects"]; !ok {
+			t.Errorf("Missing 'projects' field")
+		}
+		if _, ok := m["groves"]; !ok {
+			t.Errorf("Missing 'groves' field")
+		}
+	})
+}
+
+func TestProjectInfo_JSON(t *testing.T) {
+	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
+		jsonData := `{"groveId": "legacy-id", "groveName": "legacy-name"}`
+		var info ProjectInfo
+		if err := json.Unmarshal([]byte(jsonData), &info); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if info.ProjectID != "legacy-id" {
+			t.Errorf("ProjectID = %q, want %q", info.ProjectID, "legacy-id")
+		}
+		if info.ProjectName != "legacy-name" {
+			t.Errorf("ProjectName = %q, want %q", info.ProjectName, "legacy-name")
+		}
+	})
+
+	t.Run("marshal dual fields", func(t *testing.T) {
+		info := ProjectInfo{
+			ProjectID:   "my-id",
+			ProjectName: "my-name",
+		}
+		data, err := json.Marshal(info)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("Unmarshal back failed: %v", err)
+		}
+
+		if m["projectId"] != "my-id" || m["groveId"] != "my-id" {
+			t.Errorf("ID fields mismatch: projectId=%v, groveId=%v", m["projectId"], m["groveId"])
+		}
+		if m["projectName"] != "my-name" || m["groveName"] != "my-name" {
+			t.Errorf("Name fields mismatch: projectName=%v, groveName=%v", m["projectName"], m["groveName"])
+		}
+	})
+}
+
+func TestAgentResponse_JSON(t *testing.T) {
+	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
+		jsonData := `{"groveId": "legacy-id", "slug": "agent-1", "status": "running"}`
+		var resp AgentResponse
+		if err := json.Unmarshal([]byte(jsonData), &resp); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if resp.ProjectID != "legacy-id" {
+			t.Errorf("ProjectID = %q, want %q", resp.ProjectID, "legacy-id")
+		}
+	})
+
+	t.Run("marshal dual fields", func(t *testing.T) {
+		resp := AgentResponse{
+			ProjectID: "my-id",
+			Slug:      "agent-1",
+			Status:    "running",
+		}
+		data, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("Unmarshal back failed: %v", err)
+		}
+
+		if m["projectId"] != "my-id" || m["groveId"] != "my-id" {
+			t.Errorf("ID fields mismatch: projectId=%v, groveId=%v", m["projectId"], m["groveId"])
+		}
+	})
+}
+
+func TestCreateAgentRequest_JSON(t *testing.T) {
+	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
+		jsonData := `{
+			"groveId": "legacy-id",
+			"grovePath": "/legacy/path",
+			"groveSlug": "legacy-slug",
+			"name": "agent-1"
+		}`
+		var req CreateAgentRequest
+		if err := json.Unmarshal([]byte(jsonData), &req); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if req.ProjectID != "legacy-id" {
+			t.Errorf("ProjectID = %q, want %q", req.ProjectID, "legacy-id")
+		}
+		if req.ProjectPath != "/legacy/path" {
+			t.Errorf("ProjectPath = %q, want %q", req.ProjectPath, "/legacy/path")
+		}
+		if req.ProjectSlug != "legacy-slug" {
+			t.Errorf("ProjectSlug = %q, want %q", req.ProjectSlug, "legacy-slug")
+		}
+	})
+
+	t.Run("marshal dual fields", func(t *testing.T) {
+		req := CreateAgentRequest{
+			ProjectID:   "my-id",
+			ProjectPath: "/my/path",
+			ProjectSlug: "my-slug",
+			Name:        "agent-1",
+		}
+		data, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("Unmarshal back failed: %v", err)
+		}
+
+		if m["projectId"] != "my-id" || m["groveId"] != "my-id" {
+			t.Errorf("ID fields mismatch")
+		}
+		if m["projectPath"] != "/my/path" || m["grovePath"] != "/my/path" {
+			t.Errorf("Path fields mismatch")
+		}
+		if m["projectSlug"] != "my-slug" || m["groveSlug"] != "my-slug" {
+			t.Errorf("Slug fields mismatch")
+		}
+	})
+}
+
+func TestMessageRequest_JSON(t *testing.T) {
+	t.Run("unmarshal legacy grove fields", func(t *testing.T) {
+		jsonData := `{"grove_id": "legacy-id", "message": "hello"}`
+		var req MessageRequest
+		if err := json.Unmarshal([]byte(jsonData), &req); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if req.ProjectID != "legacy-id" {
+			t.Errorf("ProjectID = %q, want %q", req.ProjectID, "legacy-id")
+		}
+	})
+
+	t.Run("marshal dual fields", func(t *testing.T) {
+		req := MessageRequest{
+			ProjectID: "my-id",
+			Message:   "hello",
+		}
+		data, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("Unmarshal back failed: %v", err)
+		}
+
+		if m["project_id"] != "my-id" || m["grove_id"] != "my-id" {
+			t.Errorf("ID fields mismatch")
+		}
+	})
+}
 
 func TestAgentInfoToResponse(t *testing.T) {
 	tests := []struct {

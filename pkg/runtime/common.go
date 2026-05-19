@@ -202,7 +202,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// live under <workspace>/.scion/agents/ on the broker — that path
 			// would be visible to every container in the grove. Provisioning
 			// relocates prompt.md and scion-agent.json to
-			// ~/.scion/grove-configs/<slug>__<uuid>/.scion/agents/<name>/
+			// ~/.scion/project-configs/<slug>__<uuid>/.scion/agents/<name>/
 			// (config.GetAgentDir with sharedWorkspace=true), so there is
 			// nothing to leak through this mount. See
 			// .design/hub-shared-workspace-isolation.md (defense by absence).
@@ -280,6 +280,12 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// Pass host user UID/GID for container user synchronization
 	addEnv("SCION_HOST_UID", fmt.Sprintf("%d", os.Getuid()))
 	addEnv("SCION_HOST_GID", fmt.Sprintf("%d", os.Getgid()))
+
+	// Phase 3 & 5: Project/Grove identity injection
+	addEnv("SCION_PROJECT", config.Project)
+	addEnv("SCION_GROVE", config.Project)
+	addEnv("SCION_PROJECT_ID", config.ProjectID)
+	addEnv("SCION_GROVE_ID", config.ProjectID)
 
 	// Mount gcloud config if it exists on the host (local mode only).
 	// In broker mode, credentials are projected via ResolvedSecrets;
@@ -380,6 +386,17 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	for k, v := range config.Annotations {
 		addArg("--label", fmt.Sprintf("%s=%s", k, v))
 	}
+
+	// Phase 5: Standard project labels
+	if config.Project != "" {
+		addArg("--label", fmt.Sprintf("scion.project=%s", config.Project))
+		addArg("--label", fmt.Sprintf("scion.grove=%s", config.Project))
+	}
+	if config.ProjectID != "" {
+		addArg("--label", fmt.Sprintf("scion.project_id=%s", config.ProjectID))
+		addArg("--label", fmt.Sprintf("scion.grove_id=%s", config.ProjectID))
+	}
+
 	if config.Template != "" {
 		addArg("--label", fmt.Sprintf("scion.template=%s", config.Template))
 	}

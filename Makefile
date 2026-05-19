@@ -4,7 +4,9 @@
 BINARY        := scion
 BUILD_DIR     := ./build
 CONTAINER_DIR := ./.build/container
-INSTALL_DIR   := $(HOME)/.local/bin
+PREFIX        ?= /usr/local
+DESTDIR       ?=
+INSTALL_DIR   := $(PREFIX)/bin
 MAIN_PKG      := ./cmd/scion
 LDFLAGS            := $(shell ./hack/version.sh)
 SCIONTOOL_LDFLAGS  := $(shell ./hack/version.sh github.com/GoogleCloudPlatform/scion/cmd/sciontool/commands)
@@ -26,12 +28,24 @@ build:
 	@go build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) $(MAIN_PKG)
 	@echo "Binary: $(BUILD_DIR)/$(BINARY)"
 
-## install: Build and install the binary to ~/.local/bin
+## install: Build and install the binary (default: /usr/local/bin, override with PREFIX=~/.local)
 install: build
-	@echo "Installing $(BINARY) to $(INSTALL_DIR)..."
-	@mkdir -p $(INSTALL_DIR)
-	@install $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR)/$(BINARY)
-	@echo "Installed: $(INSTALL_DIR)/$(BINARY)"
+	@echo "Installing $(BINARY) to $(DESTDIR)$(INSTALL_DIR)..."
+	@mkdir -p $(DESTDIR)$(INSTALL_DIR)
+	@install $(BUILD_DIR)/$(BINARY) $(DESTDIR)$(INSTALL_DIR)/$(BINARY)
+	@echo ""
+	@echo "✔ Installed $(BINARY) to $(DESTDIR)$(INSTALL_DIR)/$(BINARY)"
+	@echo ""
+	@echo "  Run 'scion --version' to verify."
+	@echo ""
+	@case ":$$PATH:" in \
+		*":$(INSTALL_DIR):"* | *":$(INSTALL_DIR)/:"*) ;; \
+		*) echo "  ⚠ WARNING: $(INSTALL_DIR) is not in your PATH."; \
+		   echo "  Add it with:"; \
+		   echo ""; \
+		   echo "    export PATH=\"$(INSTALL_DIR):\$$PATH\""; \
+		   echo "" ;; \
+	esac
 
 ## test: Run all tests
 test:

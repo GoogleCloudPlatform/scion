@@ -89,8 +89,19 @@ func NewGCPExporter(config *Config) (*GCPExporter, error) {
 	if agentID := os.Getenv("SCION_AGENT_ID"); agentID != "" {
 		commonLabels["agent_id"] = agentID
 	}
-	if groveID := os.Getenv("SCION_GROVE_ID"); groveID != "" {
+	groveID := os.Getenv("SCION_GROVE_ID")
+	projectID := os.Getenv("SCION_PROJECT_ID")
+	if groveID != "" {
 		commonLabels["grove_id"] = groveID
+	}
+	if projectID != "" {
+		commonLabels["project_id"] = projectID
+	}
+	// Ensure both are set if either is available for transition
+	if groveID == "" && projectID != "" {
+		commonLabels["grove_id"] = projectID
+	} else if projectID == "" && groveID != "" {
+		commonLabels["project_id"] = groveID
 	}
 
 	var loggerOpts []logging.LoggerOption

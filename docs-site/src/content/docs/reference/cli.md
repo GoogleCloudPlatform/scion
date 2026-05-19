@@ -2,14 +2,14 @@
 title: Scion CLI Reference
 ---
 
-The Scion CLI is the primary interface for managing agents, groves, and server components.
+The Scion CLI is the primary interface for managing agents, projects, and server components.
 
 ## Global Flags
 
 These flags are available on all commands:
 
-- `-g, --grove <string>`: Grove identifier: path, slug (with Hub), or git URL (with Hub).
-- `--global`: Use the global grove (equivalent to `--grove global`).
+- `-g, --project <string>`: Project identifier: path, slug (with Hub), or git URL (with Hub).
+- `--global`: Use the global project (equivalent to `--project global`).
 - `-p, --profile <name>`: Configuration profile to use.
 - `--format <string>`: Output format (`json` or `plain`).
 - `--hub <url>`: Hub API endpoint URL (overrides `SCION_HUB_ENDPOINT`).
@@ -77,8 +77,8 @@ Sends a message to a running agent's harness by enqueuing it into its input stre
     - `<message>`: The text to send to the agent.
 - **Flags:**
     - `-i, --interrupt`: Interrupt the harness before sending the message.
-    - `-b, --broadcast`: Send the message to all running agents in the current grove.
-    - `-a, --all`: Send the message to all running agents across all groves.
+    - `-b, --broadcast`: Send the message to all running agents in the current project.
+    - `-a, --all`: Send the message to all running agents across all projects.
     - `--notify`: Get notified when the target agent(s) respond or reach a terminal state after receiving the message.
 
 ### `scion messages` (aliases: `msgs`, `inbox`)
@@ -136,24 +136,24 @@ Synchronizes the agent workspace between the host and the container.
 
 ## Configuration & Workspace
 
-### `scion grove`
+### `scion project`
 
-Manages the Scion workspace (Grove).
+Manages the Scion workspace (Project).
 
-- `scion grove init`: Initialize a new grove. By default, creates a `.scion` directory in the current directory or the root of the current git repository.
+- `scion project init`: Initialize a new project. By default, creates a `.scion` directory in the current directory or the root of the current git repository.
     - Flags:
-        - `--global`: Initialize the global grove in the home directory.
+        - `--global`: Initialize the global project in the home directory.
         - `--machine`: Perform full machine-level setup (seeds harness-configs, templates, settings).
         - `--image-registry <string>`: Configure the container image registry path (e.g., `ghcr.io/myorg`).
     - **Note:** If you are in a git repository, add `.scion/agents` to your `.gitignore` to avoid issues with nested git worktrees: `echo ".scion/agents" >> .gitignore`
-    - **Hub Integration:** If a Hub endpoint is configured, `init` will prompt to register the new grove with the Hub.
-- `scion grove list` (alias `ls`): List all groves known to Scion on this machine, including their type, agent count, status, and workspace path.
-- `scion grove prune`: Detect and remove grove configurations whose workspace directories no longer exist. This stops any running containers associated with orphaned groves before cleaning up.
-- `scion grove reconnect <new-workspace-path>`: Reconnect a moved workspace to its externalized grove configuration. This fixes groves that show as "orphaned" after being relocated.
+    - **Hub Integration:** If a Hub endpoint is configured, `init` will prompt to register the new project with the Hub.
+- `scion project list` (alias `ls`): List all projects known to Scion on this machine, including their type, agent count, status, and workspace path.
+- `scion project prune`: Detect and remove project configurations whose workspace directories no longer exist. This stops any running containers associated with orphaned projects before cleaning up.
+- `scion project reconnect <new-workspace-path>`: Reconnect a moved workspace to its externalized project configuration. This fixes projects that show as "orphaned" after being relocated.
 
 ### `scion clean`
 
-Removes the scion grove configuration from the current project or global location.
+Removes the scion project configuration from the current project or global location.
 
 **Usage:** `scion clean [flags]`
 
@@ -177,11 +177,11 @@ Open a new shell in the active Scion configuration directory.
 
 **Usage:** `scion cd-config`
 
-### `scion cd-grove`
+### `scion cd-project`
 
-Open a new shell in the active grove's workspace directory.
+Open a new shell in the active project's workspace directory.
 
-**Usage:** `scion cd-grove`
+**Usage:** `scion cd-project`
 
 ### `scion cdw`
 
@@ -191,9 +191,9 @@ Change directory to the workspace of an agent.
 
 ### `scion shared-dir`
 
-Manages shared directories for agents within a grove.
+Manages shared directories for agents within a project.
 
-- `list`: List shared directories in the current grove.
+- `list`: List shared directories in the current project.
 - `create <name>`: Create a new shared directory.
 - `info <name>`: View details about a specific shared directory.
 - `remove <name>`: Remove a shared directory (permanently deletes contents).
@@ -213,7 +213,7 @@ Manages agent templates.
 - `update-default`: Update the global default template with the latest from the binary.
     - Flags:
         - `--force`: Overwrite the existing default template if it already exists.
-- `sync [--all]`: Sync grove-level templates with the Hub. Use `--all` to sync all templates at once.
+- `sync [--all]`: Sync project-level templates with the Hub. Use `--all` to sync all templates at once.
 - `status`: Show the sync status of templates relative to the Hub.
 
 ## Hub Integration
@@ -237,9 +237,9 @@ Manages connection to and interaction with a Scion Hub.
     - `logout`: Clear stored credentials.
 - `scion hub status`: Show the current Hub connection status.
 - `scion hub notifications`: Retrieve a list of recent system notifications and agent alerts.
-- `scion hub link`: Link the current local grove to the Hub.
-- `scion hub unlink`: Unlink the current grove from the Hub locally.
-- `scion hub groves`: List all groves registered on the Hub.
+- `scion hub link`: Link the current local project to the Hub.
+- `scion hub unlink`: Unlink the current project from the Hub locally.
+- `scion hub projects`: List all projects registered on the Hub.
 - `scion hub brokers`: List all runtime brokers registered on the Hub.
 - `scion hub secret`: Manage write-only secrets on the Hub.
     - `set <key> <value>`: Set a secret.
@@ -249,7 +249,7 @@ Manages connection to and interaction with a Scion Hub.
     - `set <key>=<value>`: Set a variable.
     - `get [key]`: Get variable values.
     - `clear <key>`: Remove a variable.
-- `scion hub grove create <git-url>`: Create a grove from a remote git repository.
+- `scion hub project create <git-url>`: Create a project from a remote git repository.
     - Flags: `--slug`, `--name`, `--branch`, `--visibility`, `--json`
 
 ## Infrastructure
@@ -263,8 +263,8 @@ Manages the local host as a Runtime Broker.
 - `scion broker stop`: Stop the broker daemon.
 - `scion broker register`: Register this host as a Runtime Broker with the Hub.
 - `scion broker deregister`: Remove this broker's registration from the Hub.
-- `scion broker provide`: Add this broker as a provider for a grove.
-- `scion broker withdraw`: Remove this broker as a provider from a grove.
+- `scion broker provide`: Add this broker as a provider for a project.
+- `scion broker withdraw`: Remove this broker as a provider from a project.
 
 ### `scion server`
 

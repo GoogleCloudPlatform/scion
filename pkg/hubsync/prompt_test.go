@@ -59,7 +59,7 @@ func TestNextSlugFromMatches(t *testing.T) {
 	tests := []struct {
 		name     string
 		baseSlug string
-		matches  []GroveMatch
+		matches  []ProjectMatch
 		want     string
 	}{
 		{
@@ -71,7 +71,7 @@ func TestNextSlugFromMatches(t *testing.T) {
 		{
 			name:     "one match with base slug",
 			baseSlug: "widgets",
-			matches: []GroveMatch{
+			matches: []ProjectMatch{
 				{Slug: "widgets"},
 			},
 			want: "widgets-1",
@@ -79,7 +79,7 @@ func TestNextSlugFromMatches(t *testing.T) {
 		{
 			name:     "two matches with serial",
 			baseSlug: "widgets",
-			matches: []GroveMatch{
+			matches: []ProjectMatch{
 				{Slug: "widgets"},
 				{Slug: "widgets-1"},
 			},
@@ -88,7 +88,7 @@ func TestNextSlugFromMatches(t *testing.T) {
 		{
 			name:     "gap in serial",
 			baseSlug: "widgets",
-			matches: []GroveMatch{
+			matches: []ProjectMatch{
 				{Slug: "widgets"},
 				{Slug: "widgets-3"},
 			},
@@ -97,7 +97,7 @@ func TestNextSlugFromMatches(t *testing.T) {
 		{
 			name:     "no base slug match but serial exists",
 			baseSlug: "widgets",
-			matches: []GroveMatch{
+			matches: []ProjectMatch{
 				{Slug: "widgets-2"},
 			},
 			want: "widgets-3",
@@ -105,7 +105,7 @@ func TestNextSlugFromMatches(t *testing.T) {
 		{
 			name:     "unrelated slugs only",
 			baseSlug: "widgets",
-			matches: []GroveMatch{
+			matches: []ProjectMatch{
 				{Slug: "gadgets"},
 			},
 			want: "",
@@ -122,15 +122,15 @@ func TestNextSlugFromMatches(t *testing.T) {
 	}
 }
 
-func TestShowMatchingGrovesPrompt_AutoConfirm(t *testing.T) {
-	matches := []GroveMatch{
+func TestShowMatchingProjectsPrompt_AutoConfirm(t *testing.T) {
+	matches := []ProjectMatch{
 		{ID: "id-1", Name: "widgets", Slug: "widgets"},
 		{ID: "id-2", Name: "widgets (2)", Slug: "widgets-2"},
 	}
 
-	choice, selectedID := ShowMatchingGrovesPrompt("widgets", matches, "widgets-3", true)
-	if choice != GroveChoiceLink {
-		t.Errorf("expected GroveChoiceLink, got %v", choice)
+	choice, selectedID := ShowMatchingProjectsPrompt("widgets", matches, "widgets-3", true)
+	if choice != ProjectChoiceLink {
+		t.Errorf("expected ProjectChoiceLink, got %v", choice)
 	}
 	if selectedID != "id-1" {
 		t.Errorf("expected selected ID 'id-1', got %q", selectedID)

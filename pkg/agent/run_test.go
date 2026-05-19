@@ -287,10 +287,10 @@ profiles:
 
 	// In broker mode, empty env vars should NOT cause an error
 	_, err := mgr.Start(context.Background(), api.StartOptions{
-		Name:       "broker-test",
-		GrovePath:  projectScionDir,
-		BrokerMode: true,
-		NoAuth:     true,
+		Name:        "broker-test",
+		ProjectPath: projectScionDir,
+		BrokerMode:  true,
+		NoAuth:      true,
 		Env: map[string]string{
 			"GEMINI_API_KEY": "resolved-from-hub",
 		},
@@ -375,9 +375,9 @@ profiles:
 
 	// In local mode (BrokerMode=false), empty env vars should be fatal
 	_, err := mgr.Start(context.Background(), api.StartOptions{
-		Name:      "local-test",
-		GrovePath: projectScionDir,
-		NoAuth:    true,
+		Name:        "local-test",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
 	})
 	if err == nil {
 		t.Fatal("expected Start to fail on empty env vars in local mode")
@@ -594,9 +594,9 @@ func TestStartResumeNonExistentAgent(t *testing.T) {
 
 	// Try to resume a non-existent agent
 	opts := api.StartOptions{
-		Name:      "non-existent-agent",
-		GrovePath: scionDir,
-		Resume:    true,
+		Name:        "non-existent-agent",
+		ProjectPath: scionDir,
+		Resume:      true,
 	}
 
 	_, err := mgr.Start(context.Background(), opts)
@@ -668,9 +668,9 @@ profiles:
 	mgr := NewManager(mockRT)
 
 	_, err := mgr.Start(context.Background(), api.StartOptions{
-		Name:      "test-agent",
-		GrovePath: projectScionDir,
-		NoAuth:    true,
+		Name:        "test-agent",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
 	})
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
@@ -739,9 +739,9 @@ profiles:
 	mgr := NewManager(mockRT)
 
 	_, err := mgr.Start(context.Background(), api.StartOptions{
-		Name:      "test-agent",
-		GrovePath: projectScionDir,
-		NoAuth:    true,
+		Name:        "test-agent",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
 	})
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
@@ -809,10 +809,10 @@ profiles:
 	mgr := NewManager(mockRT)
 
 	_, err := mgr.Start(context.Background(), api.StartOptions{
-		Name:      "test-agent",
-		Template:  hydratedTplDir, // absolute path, simulating hydrated template
-		GrovePath: projectScionDir,
-		NoAuth:    true,
+		Name:        "test-agent",
+		Template:    hydratedTplDir, // absolute path, simulating hydrated template
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
 	})
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
@@ -890,10 +890,10 @@ profiles:
 	mgr := NewManager(mockRT)
 
 	_, err := mgr.Start(context.Background(), api.StartOptions{
-		Name:      "test-agent",
-		Template:  "test4",
-		GrovePath: projectScionDir,
-		NoAuth:    true,
+		Name:        "test-agent",
+		Template:    "test4",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
 	})
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
@@ -1111,10 +1111,10 @@ profiles:
 
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
-			Name:      "flag-test",
-			GrovePath: projectScionDir,
-			Task:      "do something",
-			NoAuth:    true,
+			Name:        "flag-test",
+			ProjectPath: projectScionDir,
+			Task:        "do something",
+			NoAuth:      true,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -1160,10 +1160,10 @@ profiles:
 
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
-			Name:      "noflag-test",
-			GrovePath: projectScionDir,
-			Task:      "do something",
-			NoAuth:    true,
+			Name:        "noflag-test",
+			ProjectPath: projectScionDir,
+			Task:        "do something",
+			NoAuth:      true,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -1241,9 +1241,9 @@ profiles:
 
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
-			Name:      "telem-on",
-			GrovePath: projectScionDir,
-			NoAuth:    true,
+			Name:        "telem-on",
+			ProjectPath: projectScionDir,
+			NoAuth:      true,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -1275,9 +1275,9 @@ profiles:
 
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
-			Name:      "telem-off",
-			GrovePath: projectScionDir,
-			NoAuth:    true,
+			Name:        "telem-off",
+			ProjectPath: projectScionDir,
+			NoAuth:      true,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -1347,7 +1347,7 @@ profiles:
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
 			Name:              "override-enable",
-			GrovePath:         projectScionDir,
+			ProjectPath:       projectScionDir,
 			NoAuth:            true,
 			TelemetryOverride: boolPtr(true),
 		})
@@ -1382,7 +1382,7 @@ profiles:
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
 			Name:              "override-disable",
-			GrovePath:         projectScionDir,
+			ProjectPath:       projectScionDir,
 			NoAuth:            true,
 			TelemetryOverride: boolPtr(false),
 		})
@@ -1416,7 +1416,7 @@ profiles:
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
 			Name:              "override-no-config",
-			GrovePath:         projectScionDir,
+			ProjectPath:       projectScionDir,
 			NoAuth:            true,
 			TelemetryOverride: boolPtr(true),
 		})
@@ -1431,6 +1431,13 @@ profiles:
 }
 
 func TestSettingsTelemetryMergedIntoStart(t *testing.T) {
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "SCION_") {
+			k := strings.SplitN(e, "=", 2)[0]
+			t.Setenv(k, "") // registers cleanup to restore original value
+			os.Unsetenv(k)  //nolint:errcheck
+		}
+	}
 	// Verify that telemetry cloud config from settings.yaml gets merged into
 	// the container env vars during Start(), enabling cloud export.
 	tmpDir := t.TempDir()
@@ -1495,7 +1502,7 @@ telemetry:
 	env := make(map[string]string)
 	_, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:              "settings-telem",
-		GrovePath:         projectScionDir,
+		ProjectPath:       projectScionDir,
 		NoAuth:            true,
 		TelemetryOverride: boolPtr(true),
 		Env:               env,
@@ -1574,7 +1581,7 @@ profiles:
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
 			Name:        "auth-override",
-			GrovePath:   projectScionDir,
+			ProjectPath: projectScionDir,
 			NoAuth:      true,
 			HarnessAuth: "vertex-ai",
 		})
@@ -1785,7 +1792,7 @@ func TestFilterResolvedSecretsForResolvedAuth(t *testing.T) {
 	}
 }
 
-func TestStartInjectsHubEnvFromGroveSettings(t *testing.T) {
+func TestStartInjectsHubEnvFromProjectSettings(t *testing.T) {
 	// When grove settings have hub enabled with an endpoint, Start() should
 	// inject SCION_HUB_ENDPOINT and SCION_HUB_URL into the container env.
 	tmpDir := t.TempDir()
@@ -1853,9 +1860,9 @@ profiles:
 	mgr := NewManager(mockRT)
 
 	_, err := mgr.Start(context.Background(), api.StartOptions{
-		Name:      "test-agent",
-		GrovePath: projectScionDir,
-		NoAuth:    true,
+		Name:        "test-agent",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
 	})
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
@@ -1948,9 +1955,9 @@ profiles:
 	mgr := NewManager(mockRT)
 
 	_, err := mgr.Start(context.Background(), api.StartOptions{
-		Name:      "test-agent",
-		GrovePath: projectScionDir,
-		NoAuth:    true,
+		Name:        "test-agent",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
 		Env: map[string]string{
 			"SCION_HUB_ENDPOINT": "http://broker-dispatch:9810",
 		},
@@ -2141,9 +2148,9 @@ profiles:
 		mgr := NewManager(mockRT)
 
 		_, err := mgr.Start(context.Background(), api.StartOptions{
-			Name:      "test-agent",
-			GrovePath: projectScionDir,
-			NoAuth:    true,
+			Name:        "test-agent",
+			ProjectPath: projectScionDir,
+			NoAuth:      true,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -2193,9 +2200,9 @@ profiles:
 		mgr := NewManager(mockRT)
 
 		_, err := mgr.Start(context.Background(), api.StartOptions{
-			Name:      "hub-disabled-agent",
-			GrovePath: projectScionDir,
-			NoAuth:    true,
+			Name:        "hub-disabled-agent",
+			ProjectPath: projectScionDir,
+			NoAuth:      true,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -2239,9 +2246,9 @@ profiles:
 		mgr := NewManager(mockRT)
 
 		_, err := mgr.Start(context.Background(), api.StartOptions{
-			Name:      "hub-disabled-env",
-			GrovePath: projectScionDir,
-			NoAuth:    true,
+			Name:        "hub-disabled-env",
+			ProjectPath: projectScionDir,
+			NoAuth:      true,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -2341,9 +2348,9 @@ profiles:
 	mgr := NewManager(mockRT)
 
 	_, err := mgr.Start(context.Background(), api.StartOptions{
-		Name:      "hub-env-test",
-		GrovePath: projectScionDir,
-		NoAuth:    true,
+		Name:        "hub-env-test",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
 	})
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
@@ -2464,9 +2471,9 @@ runtimes:
 	mgr := NewManager(mockRT)
 
 	_, err := mgr.Start(context.Background(), api.StartOptions{
-		Name:      "test-agent",
-		GrovePath: projectScionDir,
-		NoAuth:    true,
+		Name:        "test-agent",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
 	})
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)

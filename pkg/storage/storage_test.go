@@ -75,28 +75,28 @@ func TestTemplateStorageURI(t *testing.T) {
 
 func TestWorkspaceStoragePath(t *testing.T) {
 	tests := []struct {
-		name    string
-		groveID string
-		agentID string
-		want    string
+		name      string
+		projectID string
+		agentID   string
+		want      string
 	}{
 		{
-			name:    "basic path",
-			groveID: "grove-abc",
-			agentID: "agent-123",
-			want:    "workspaces/grove-abc/agent-123",
+			name:      "basic path",
+			projectID: "grove-abc",
+			agentID:   "agent-123",
+			want:      "workspaces/grove-abc/agent-123",
 		},
 		{
-			name:    "with special characters in IDs",
-			groveID: "grove_xyz",
-			agentID: "agent_456",
-			want:    "workspaces/grove_xyz/agent_456",
+			name:      "with special characters in IDs",
+			projectID: "grove_xyz",
+			agentID:   "agent_456",
+			want:      "workspaces/grove_xyz/agent_456",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := WorkspaceStoragePath(tt.groveID, tt.agentID)
+			got := WorkspaceStoragePath(tt.projectID, tt.agentID)
 			if got != tt.want {
 				t.Errorf("WorkspaceStoragePath() = %q, want %q", got, tt.want)
 			}
@@ -106,31 +106,31 @@ func TestWorkspaceStoragePath(t *testing.T) {
 
 func TestWorkspaceStorageURI(t *testing.T) {
 	tests := []struct {
-		name    string
-		bucket  string
-		groveID string
-		agentID string
-		want    string
+		name      string
+		bucket    string
+		projectID string
+		agentID   string
+		want      string
 	}{
 		{
-			name:    "basic URI",
-			bucket:  "scion-hub-dev",
-			groveID: "grove-abc",
-			agentID: "agent-123",
-			want:    "gs://scion-hub-dev/workspaces/grove-abc/agent-123/",
+			name:      "basic URI",
+			bucket:    "scion-hub-dev",
+			projectID: "grove-abc",
+			agentID:   "agent-123",
+			want:      "gs://scion-hub-dev/workspaces/grove-abc/agent-123/",
 		},
 		{
-			name:    "production bucket",
-			bucket:  "scion-hub-prod",
-			groveID: "grove-xyz",
-			agentID: "agent-456",
-			want:    "gs://scion-hub-prod/workspaces/grove-xyz/agent-456/",
+			name:      "production bucket",
+			bucket:    "scion-hub-prod",
+			projectID: "grove-xyz",
+			agentID:   "agent-456",
+			want:      "gs://scion-hub-prod/workspaces/grove-xyz/agent-456/",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := WorkspaceStorageURI(tt.bucket, tt.groveID, tt.agentID)
+			got := WorkspaceStorageURI(tt.bucket, tt.projectID, tt.agentID)
 			if got != tt.want {
 				t.Errorf("WorkspaceStorageURI() = %q, want %q", got, tt.want)
 			}
@@ -138,29 +138,29 @@ func TestWorkspaceStorageURI(t *testing.T) {
 	}
 }
 
-func TestGroveWorkspaceStoragePath(t *testing.T) {
+func TestProjectWorkspaceStoragePath(t *testing.T) {
 	tests := []struct {
-		name    string
-		groveID string
-		want    string
+		name      string
+		projectID string
+		want      string
 	}{
 		{
-			name:    "basic grove path",
-			groveID: "grove-abc",
-			want:    "workspaces/grove-abc/grove-workspace",
+			name:      "basic grove path",
+			projectID: "grove-abc",
+			want:      "workspaces/grove-abc/grove-workspace",
 		},
 		{
-			name:    "with UUID grove ID",
-			groveID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-			want:    "workspaces/a1b2c3d4-e5f6-7890-abcd-ef1234567890/grove-workspace",
+			name:      "with UUID grove ID",
+			projectID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+			want:      "workspaces/a1b2c3d4-e5f6-7890-abcd-ef1234567890/grove-workspace",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := GroveWorkspaceStoragePath(tt.groveID)
+			got := ProjectWorkspaceStoragePath(tt.projectID)
 			if got != tt.want {
-				t.Errorf("GroveWorkspaceStoragePath() = %q, want %q", got, tt.want)
+				t.Errorf("ProjectWorkspaceStoragePath() = %q, want %q", got, tt.want)
 			}
 		})
 	}

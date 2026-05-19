@@ -40,7 +40,7 @@ func TestNewEngine(t *testing.T) {
 				Data: logparser.AgentStateEvent{
 					AgentID:  "a1",
 					Phase:    "running",
-					Activity: "idle",
+					Activity: "working",
 				},
 			},
 			{
@@ -88,7 +88,7 @@ func TestPlaybackSpeed(t *testing.T) {
 			{
 				Type:      "agent_state",
 				Timestamp: "2026-03-22T16:30:01.000Z",
-				Data:      logparser.AgentStateEvent{AgentID: "a1", Activity: "idle"},
+				Data:      logparser.AgentStateEvent{AgentID: "a1", Activity: "working"},
 			},
 		},
 	}

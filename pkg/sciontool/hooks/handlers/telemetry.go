@@ -495,6 +495,10 @@ func (h *TelemetryHandler) metricAttrs() []attribute.KeyValue {
 	}
 	if v := os.Getenv("SCION_GROVE_ID"); v != "" {
 		attrs = append(attrs, attribute.String("grove_id", v))
+		attrs = append(attrs, attribute.String("project_id", v))
+	} else if v := os.Getenv("SCION_PROJECT_ID"); v != "" {
+		attrs = append(attrs, attribute.String("grove_id", v))
+		attrs = append(attrs, attribute.String("project_id", v))
 	}
 	return attrs
 }

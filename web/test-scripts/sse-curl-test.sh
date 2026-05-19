@@ -24,10 +24,10 @@
 #   - scion server running with --enable-hub --enable-web --dev-auth
 #
 # Usage:
-#   TOKEN=<dev-token> GROVE_ID=<uuid> ./sse-curl-test.sh
+#   TOKEN=<dev-token> PROJECT_ID=<uuid> ./sse-curl-test.sh
 #
 # The script will:
-#   1. Open an SSE connection to /events for the given grove
+#   1. Open an SSE connection to /events for the given project
 #   2. Create an agent via the API
 #   3. Update the agent status to running
 #   4. Delete the agent
@@ -36,12 +36,12 @@
 set -euo pipefail
 
 TOKEN="${TOKEN:?Set TOKEN to the dev auth token}"
-GROVE_ID="${GROVE_ID:?Set GROVE_ID to the grove UUID}"
+PROJECT_ID="${PROJECT_ID:?Set PROJECT_ID to the project UUID}"
 BASE="${BASE:-http://localhost:8080}"
 
 # Get a session cookie (SSE endpoint requires session auth, not Bearer)
 COOKIE=$(curl -s -c - -H "Authorization: Bearer ${TOKEN}" \
-  "${BASE}/api/v1/groves" 2>/dev/null | grep scion_sess | awk '{print $NF}')
+  "${BASE}/api/v1/projects" 2>/dev/null | grep scion_sess | awk '{print $NF}')
 
 if [ -z "$COOKIE" ]; then
   echo "ERROR: Could not obtain session cookie. Is the server running?"
@@ -51,7 +51,7 @@ fi
 echo "=== Starting SSE listener ==="
 SSE_OUTPUT=$(mktemp)
 timeout 20 curl -sN -b "scion_sess=${COOKIE}" \
-  "${BASE}/events?sub=grove.${GROVE_ID}.>" > "$SSE_OUTPUT" 2>&1 &
+  "${BASE}/events?sub=project.${PROJECT_ID}.>" > "$SSE_OUTPUT" 2>&1 &
 SSE_PID=$!
 sleep 2
 
@@ -59,7 +59,7 @@ echo "=== Creating agent ==="
 AGENT_NAME="sse-test-$(date +%s)"
 CREATE_RESP=$(curl -s -X POST -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \
-  -d "{\"name\": \"${AGENT_NAME}\", \"groveId\": \"${GROVE_ID}\", \"provisionOnly\": true}" \
+  -d "{\"name\": \"${AGENT_NAME}\", \"projectId\": \"${PROJECT_ID}\", \"provisionOnly\": true}" \
   "${BASE}/api/v1/agents")
 AGENT_ID=$(echo "$CREATE_RESP" | python3 -c "import sys, json; print(json.load(sys.stdin).get('agent', {}).get('id', ''))" 2>/dev/null || echo "")
 echo "Agent ID: ${AGENT_ID}"

@@ -245,7 +245,7 @@ func (s *Server) handleAdminScheduler(w http.ResponseWriter, r *http.Request) {
 
 	status := s.scheduler.Status()
 
-	// Fetch recent scheduled events across all groves.
+	// Fetch recent scheduled events across all projects.
 	var events []store.ScheduledEvent
 	if s.store != nil {
 		result, err := s.store.ListScheduledEvents(r.Context(), store.ScheduledEventFilter{}, store.ListOptions{Limit: 50})
@@ -254,7 +254,7 @@ func (s *Server) handleAdminScheduler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Fetch recurring schedules across all groves.
+	// Fetch recurring schedules across all projects.
 	var schedules []store.Schedule
 	if s.store != nil {
 		result, err := s.store.ListSchedules(r.Context(), store.ScheduleFilter{}, store.ListOptions{Limit: 100})

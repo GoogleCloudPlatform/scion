@@ -61,7 +61,7 @@ export class AgentRing {
         x: this.centerX + Math.cos(angle) * this.ringRadius,
         y: this.centerY + Math.sin(angle) * this.ringRadius,
         phase: 'created',
-        activity: 'idle',
+        activity: 'working',
         toolName: '',
         enterTime: Date.now(),
       });
@@ -99,7 +99,7 @@ export class AgentRing {
       x: this.centerX + Math.cos(angle) * this.ringRadius,
       y: this.centerY + Math.sin(angle) * this.ringRadius,
       phase: 'created',
-      activity: 'idle',
+      activity: 'working',
       toolName: '',
       enterTime: now,
     });

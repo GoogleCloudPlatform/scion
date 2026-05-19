@@ -15,9 +15,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/grove"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/google/uuid"
@@ -36,8 +36,8 @@ const (
 	TypeAgent           = "Agent"
 	TypeGroup           = "Group"
 	TypeGroupMembership = "GroupMembership"
-	TypeGrove           = "Grove"
 	TypePolicyBinding   = "PolicyBinding"
+	TypeProject         = "Project"
 	TypeUser            = "User"
 )
 
@@ -1445,8 +1445,8 @@ type AgentMutation struct {
 	created                *time.Time
 	updated                *time.Time
 	clearedFields          map[string]struct{}
-	grove                  *uuid.UUID
-	clearedgrove           bool
+	project                *uuid.UUID
+	clearedproject         bool
 	creator                *uuid.UUID
 	clearedcreator         bool
 	owner                  *uuid.UUID
@@ -1687,40 +1687,40 @@ func (m *AgentMutation) ResetTemplate() {
 	delete(m.clearedFields, agent.FieldTemplate)
 }
 
-// SetGroveID sets the "grove_id" field.
-func (m *AgentMutation) SetGroveID(u uuid.UUID) {
-	m.grove = &u
+// SetProjectID sets the "project_id" field.
+func (m *AgentMutation) SetProjectID(u uuid.UUID) {
+	m.project = &u
 }
 
-// GroveID returns the value of the "grove_id" field in the mutation.
-func (m *AgentMutation) GroveID() (r uuid.UUID, exists bool) {
-	v := m.grove
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *AgentMutation) ProjectID() (r uuid.UUID, exists bool) {
+	v := m.project
 	if v == nil {
 		return
 	}
 	return *v, true
 }
 
-// OldGroveID returns the old "grove_id" field's value of the Agent entity.
+// OldProjectID returns the old "project_id" field's value of the Agent entity.
 // If the Agent object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *AgentMutation) OldGroveID(ctx context.Context) (v uuid.UUID, err error) {
+func (m *AgentMutation) OldProjectID(ctx context.Context) (v uuid.UUID, err error) {
 	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldGroveID is only allowed on UpdateOne operations")
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
 	}
 	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldGroveID requires an ID field in the mutation")
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
 	}
 	oldValue, err := m.oldValue(ctx)
 	if err != nil {
-		return v, fmt.Errorf("querying old value for OldGroveID: %w", err)
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
 	}
-	return oldValue.GroveID, nil
+	return oldValue.ProjectID, nil
 }
 
-// ResetGroveID resets all changes to the "grove_id" field.
-func (m *AgentMutation) ResetGroveID() {
-	m.grove = nil
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *AgentMutation) ResetProjectID() {
+	m.project = nil
 }
 
 // SetStatus sets the "status" field.
@@ -2001,31 +2001,31 @@ func (m *AgentMutation) ResetUpdated() {
 	m.updated = nil
 }
 
-// ClearGrove clears the "grove" edge to the Grove entity.
-func (m *AgentMutation) ClearGrove() {
-	m.clearedgrove = true
-	m.clearedFields[agent.FieldGroveID] = struct{}{}
+// ClearProject clears the "project" edge to the Project entity.
+func (m *AgentMutation) ClearProject() {
+	m.clearedproject = true
+	m.clearedFields[agent.FieldProjectID] = struct{}{}
 }
 
-// GroveCleared reports if the "grove" edge to the Grove entity was cleared.
-func (m *AgentMutation) GroveCleared() bool {
-	return m.clearedgrove
+// ProjectCleared reports if the "project" edge to the Project entity was cleared.
+func (m *AgentMutation) ProjectCleared() bool {
+	return m.clearedproject
 }
 
-// GroveIDs returns the "grove" edge IDs in the mutation.
+// ProjectIDs returns the "project" edge IDs in the mutation.
 // Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
-// GroveID instead. It exists only for internal usage by the builders.
-func (m *AgentMutation) GroveIDs() (ids []uuid.UUID) {
-	if id := m.grove; id != nil {
+// ProjectID instead. It exists only for internal usage by the builders.
+func (m *AgentMutation) ProjectIDs() (ids []uuid.UUID) {
+	if id := m.project; id != nil {
 		ids = append(ids, *id)
 	}
 	return
 }
 
-// ResetGrove resets all changes to the "grove" edge.
-func (m *AgentMutation) ResetGrove() {
-	m.grove = nil
-	m.clearedgrove = false
+// ResetProject resets all changes to the "project" edge.
+func (m *AgentMutation) ResetProject() {
+	m.project = nil
+	m.clearedproject = false
 }
 
 // SetCreatorID sets the "creator" edge to the User entity by id.
@@ -2247,8 +2247,8 @@ func (m *AgentMutation) Fields() []string {
 	if m.template != nil {
 		fields = append(fields, agent.FieldTemplate)
 	}
-	if m.grove != nil {
-		fields = append(fields, agent.FieldGroveID)
+	if m.project != nil {
+		fields = append(fields, agent.FieldProjectID)
 	}
 	if m.status != nil {
 		fields = append(fields, agent.FieldStatus)
@@ -2285,8 +2285,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.Name()
 	case agent.FieldTemplate:
 		return m.Template()
-	case agent.FieldGroveID:
-		return m.GroveID()
+	case agent.FieldProjectID:
+		return m.ProjectID()
 	case agent.FieldStatus:
 		return m.Status()
 	case agent.FieldCreatedBy:
@@ -2316,8 +2316,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldName(ctx)
 	case agent.FieldTemplate:
 		return m.OldTemplate(ctx)
-	case agent.FieldGroveID:
-		return m.OldGroveID(ctx)
+	case agent.FieldProjectID:
+		return m.OldProjectID(ctx)
 	case agent.FieldStatus:
 		return m.OldStatus(ctx)
 	case agent.FieldCreatedBy:
@@ -2362,12 +2362,12 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetTemplate(v)
 		return nil
-	case agent.FieldGroveID:
+	case agent.FieldProjectID:
 		v, ok := value.(uuid.UUID)
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
-		m.SetGroveID(v)
+		m.SetProjectID(v)
 		return nil
 	case agent.FieldStatus:
 		v, ok := value.(agent.Status)
@@ -2497,8 +2497,8 @@ func (m *AgentMutation) ResetField(name string) error {
 	case agent.FieldTemplate:
 		m.ResetTemplate()
 		return nil
-	case agent.FieldGroveID:
-		m.ResetGroveID()
+	case agent.FieldProjectID:
+		m.ResetProjectID()
 		return nil
 	case agent.FieldStatus:
 		m.ResetStatus()
@@ -2528,8 +2528,8 @@ func (m *AgentMutation) ResetField(name string) error {
 // AddedEdges returns all edge names that were set/added in this mutation.
 func (m *AgentMutation) AddedEdges() []string {
 	edges := make([]string, 0, 5)
-	if m.grove != nil {
-		edges = append(edges, agent.EdgeGrove)
+	if m.project != nil {
+		edges = append(edges, agent.EdgeProject)
 	}
 	if m.creator != nil {
 		edges = append(edges, agent.EdgeCreator)
@@ -2550,8 +2550,8 @@ func (m *AgentMutation) AddedEdges() []string {
 // name in this mutation.
 func (m *AgentMutation) AddedIDs(name string) []ent.Value {
 	switch name {
-	case agent.EdgeGrove:
-		if id := m.grove; id != nil {
+	case agent.EdgeProject:
+		if id := m.project; id != nil {
 			return []ent.Value{*id}
 		}
 	case agent.EdgeCreator:
@@ -2613,8 +2613,8 @@ func (m *AgentMutation) RemovedIDs(name string) []ent.Value {
 // ClearedEdges returns all edge names that were cleared in this mutation.
 func (m *AgentMutation) ClearedEdges() []string {
 	edges := make([]string, 0, 5)
-	if m.clearedgrove {
-		edges = append(edges, agent.EdgeGrove)
+	if m.clearedproject {
+		edges = append(edges, agent.EdgeProject)
 	}
 	if m.clearedcreator {
 		edges = append(edges, agent.EdgeCreator)
@@ -2635,8 +2635,8 @@ func (m *AgentMutation) ClearedEdges() []string {
 // was cleared in this mutation.
 func (m *AgentMutation) EdgeCleared(name string) bool {
 	switch name {
-	case agent.EdgeGrove:
-		return m.clearedgrove
+	case agent.EdgeProject:
+		return m.clearedproject
 	case agent.EdgeCreator:
 		return m.clearedcreator
 	case agent.EdgeOwner:
@@ -2653,8 +2653,8 @@ func (m *AgentMutation) EdgeCleared(name string) bool {
 // if that edge is not defined in the schema.
 func (m *AgentMutation) ClearEdge(name string) error {
 	switch name {
-	case agent.EdgeGrove:
-		m.ClearGrove()
+	case agent.EdgeProject:
+		m.ClearProject()
 		return nil
 	case agent.EdgeCreator:
 		m.ClearCreator()
@@ -2670,8 +2670,8 @@ func (m *AgentMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *AgentMutation) ResetEdge(name string) error {
 	switch name {
-	case agent.EdgeGrove:
-		m.ResetGrove()
+	case agent.EdgeProject:
+		m.ResetProject()
 		return nil
 	case agent.EdgeCreator:
 		m.ResetCreator()
@@ -2699,7 +2699,7 @@ type GroupMutation struct {
 	slug                   *string
 	description            *string
 	group_type             *group.GroupType
-	grove_id               *uuid.UUID
+	project_id             *uuid.UUID
 	labels                 *map[string]string
 	annotations            *map[string]string
 	created                *time.Time
@@ -2986,53 +2986,53 @@ func (m *GroupMutation) ResetGroupType() {
 	m.group_type = nil
 }
 
-// SetGroveID sets the "grove_id" field.
-func (m *GroupMutation) SetGroveID(u uuid.UUID) {
-	m.grove_id = &u
+// SetProjectID sets the "project_id" field.
+func (m *GroupMutation) SetProjectID(u uuid.UUID) {
+	m.project_id = &u
 }
 
-// GroveID returns the value of the "grove_id" field in the mutation.
-func (m *GroupMutation) GroveID() (r uuid.UUID, exists bool) {
-	v := m.grove_id
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *GroupMutation) ProjectID() (r uuid.UUID, exists bool) {
+	v := m.project_id
 	if v == nil {
 		return
 	}
 	return *v, true
 }
 
-// OldGroveID returns the old "grove_id" field's value of the Group entity.
+// OldProjectID returns the old "project_id" field's value of the Group entity.
 // If the Group object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *GroupMutation) OldGroveID(ctx context.Context) (v *uuid.UUID, err error) {
+func (m *GroupMutation) OldProjectID(ctx context.Context) (v *uuid.UUID, err error) {
 	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldGroveID is only allowed on UpdateOne operations")
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
 	}
 	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldGroveID requires an ID field in the mutation")
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
 	}
 	oldValue, err := m.oldValue(ctx)
 	if err != nil {
-		return v, fmt.Errorf("querying old value for OldGroveID: %w", err)
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
 	}
-	return oldValue.GroveID, nil
+	return oldValue.ProjectID, nil
 }
 
-// ClearGroveID clears the value of the "grove_id" field.
-func (m *GroupMutation) ClearGroveID() {
-	m.grove_id = nil
-	m.clearedFields[group.FieldGroveID] = struct{}{}
+// ClearProjectID clears the value of the "project_id" field.
+func (m *GroupMutation) ClearProjectID() {
+	m.project_id = nil
+	m.clearedFields[group.FieldProjectID] = struct{}{}
 }
 
-// GroveIDCleared returns if the "grove_id" field was cleared in this mutation.
-func (m *GroupMutation) GroveIDCleared() bool {
-	_, ok := m.clearedFields[group.FieldGroveID]
+// ProjectIDCleared returns if the "project_id" field was cleared in this mutation.
+func (m *GroupMutation) ProjectIDCleared() bool {
+	_, ok := m.clearedFields[group.FieldProjectID]
 	return ok
 }
 
-// ResetGroveID resets all changes to the "grove_id" field.
-func (m *GroupMutation) ResetGroveID() {
-	m.grove_id = nil
-	delete(m.clearedFields, group.FieldGroveID)
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *GroupMutation) ResetProjectID() {
+	m.project_id = nil
+	delete(m.clearedFields, group.FieldProjectID)
 }
 
 // SetLabels sets the "labels" field.
@@ -3593,8 +3593,8 @@ func (m *GroupMutation) Fields() []string {
 	if m.group_type != nil {
 		fields = append(fields, group.FieldGroupType)
 	}
-	if m.grove_id != nil {
-		fields = append(fields, group.FieldGroveID)
+	if m.project_id != nil {
+		fields = append(fields, group.FieldProjectID)
 	}
 	if m.labels != nil {
 		fields = append(fields, group.FieldLabels)
@@ -3630,8 +3630,8 @@ func (m *GroupMutation) Field(name string) (ent.Value, bool) {
 		return m.Description()
 	case group.FieldGroupType:
 		return m.GroupType()
-	case group.FieldGroveID:
-		return m.GroveID()
+	case group.FieldProjectID:
+		return m.ProjectID()
 	case group.FieldLabels:
 		return m.Labels()
 	case group.FieldAnnotations:
@@ -3661,8 +3661,8 @@ func (m *GroupMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldDescription(ctx)
 	case group.FieldGroupType:
 		return m.OldGroupType(ctx)
-	case group.FieldGroveID:
-		return m.OldGroveID(ctx)
+	case group.FieldProjectID:
+		return m.OldProjectID(ctx)
 	case group.FieldLabels:
 		return m.OldLabels(ctx)
 	case group.FieldAnnotations:
@@ -3712,12 +3712,12 @@ func (m *GroupMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetGroupType(v)
 		return nil
-	case group.FieldGroveID:
+	case group.FieldProjectID:
 		v, ok := value.(uuid.UUID)
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
-		m.SetGroveID(v)
+		m.SetProjectID(v)
 		return nil
 	case group.FieldLabels:
 		v, ok := value.(map[string]string)
@@ -3794,8 +3794,8 @@ func (m *GroupMutation) ClearedFields() []string {
 	if m.FieldCleared(group.FieldDescription) {
 		fields = append(fields, group.FieldDescription)
 	}
-	if m.FieldCleared(group.FieldGroveID) {
-		fields = append(fields, group.FieldGroveID)
+	if m.FieldCleared(group.FieldProjectID) {
+		fields = append(fields, group.FieldProjectID)
 	}
 	if m.FieldCleared(group.FieldLabels) {
 		fields = append(fields, group.FieldLabels)
@@ -3826,8 +3826,8 @@ func (m *GroupMutation) ClearField(name string) error {
 	case group.FieldDescription:
 		m.ClearDescription()
 		return nil
-	case group.FieldGroveID:
-		m.ClearGroveID()
+	case group.FieldProjectID:
+		m.ClearProjectID()
 		return nil
 	case group.FieldLabels:
 		m.ClearLabels()
@@ -3861,8 +3861,8 @@ func (m *GroupMutation) ResetField(name string) error {
 	case group.FieldGroupType:
 		m.ResetGroupType()
 		return nil
-	case group.FieldGroveID:
-		m.ResetGroveID()
+	case group.FieldProjectID:
+		m.ResetProjectID()
 		return nil
 	case group.FieldLabels:
 		m.ResetLabels()
@@ -4874,1015 +4874,6 @@ func (m *GroupMembershipMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown GroupMembership edge %s", name)
 }
 
-// GroveMutation represents an operation that mutates the Grove nodes in the graph.
-type GroveMutation struct {
-	config
-	op            Op
-	typ           string
-	id            *uuid.UUID
-	name          *string
-	slug          *string
-	git_remote    *string
-	labels        *map[string]string
-	annotations   *map[string]string
-	created       *time.Time
-	updated       *time.Time
-	created_by    *string
-	owner_id      *string
-	visibility    *string
-	clearedFields map[string]struct{}
-	agents        map[uuid.UUID]struct{}
-	removedagents map[uuid.UUID]struct{}
-	clearedagents bool
-	done          bool
-	oldValue      func(context.Context) (*Grove, error)
-	predicates    []predicate.Grove
-}
-
-var _ ent.Mutation = (*GroveMutation)(nil)
-
-// groveOption allows management of the mutation configuration using functional options.
-type groveOption func(*GroveMutation)
-
-// newGroveMutation creates new mutation for the Grove entity.
-func newGroveMutation(c config, op Op, opts ...groveOption) *GroveMutation {
-	m := &GroveMutation{
-		config:        c,
-		op:            op,
-		typ:           TypeGrove,
-		clearedFields: make(map[string]struct{}),
-	}
-	for _, opt := range opts {
-		opt(m)
-	}
-	return m
-}
-
-// withGroveID sets the ID field of the mutation.
-func withGroveID(id uuid.UUID) groveOption {
-	return func(m *GroveMutation) {
-		var (
-			err   error
-			once  sync.Once
-			value *Grove
-		)
-		m.oldValue = func(ctx context.Context) (*Grove, error) {
-			once.Do(func() {
-				if m.done {
-					err = errors.New("querying old values post mutation is not allowed")
-				} else {
-					value, err = m.Client().Grove.Get(ctx, id)
-				}
-			})
-			return value, err
-		}
-		m.id = &id
-	}
-}
-
-// withGrove sets the old Grove of the mutation.
-func withGrove(node *Grove) groveOption {
-	return func(m *GroveMutation) {
-		m.oldValue = func(context.Context) (*Grove, error) {
-			return node, nil
-		}
-		m.id = &node.ID
-	}
-}
-
-// Client returns a new `ent.Client` from the mutation. If the mutation was
-// executed in a transaction (ent.Tx), a transactional client is returned.
-func (m GroveMutation) Client() *Client {
-	client := &Client{config: m.config}
-	client.init()
-	return client
-}
-
-// Tx returns an `ent.Tx` for mutations that were executed in transactions;
-// it returns an error otherwise.
-func (m GroveMutation) Tx() (*Tx, error) {
-	if _, ok := m.driver.(*txDriver); !ok {
-		return nil, errors.New("ent: mutation is not running in a transaction")
-	}
-	tx := &Tx{config: m.config}
-	tx.init()
-	return tx, nil
-}
-
-// SetID sets the value of the id field. Note that this
-// operation is only accepted on creation of Grove entities.
-func (m *GroveMutation) SetID(id uuid.UUID) {
-	m.id = &id
-}
-
-// ID returns the ID value in the mutation. Note that the ID is only available
-// if it was provided to the builder or after it was returned from the database.
-func (m *GroveMutation) ID() (id uuid.UUID, exists bool) {
-	if m.id == nil {
-		return
-	}
-	return *m.id, true
-}
-
-// IDs queries the database and returns the entity ids that match the mutation's predicate.
-// That means, if the mutation is applied within a transaction with an isolation level such
-// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
-// or updated by the mutation.
-func (m *GroveMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
-	switch {
-	case m.op.Is(OpUpdateOne | OpDeleteOne):
-		id, exists := m.ID()
-		if exists {
-			return []uuid.UUID{id}, nil
-		}
-		fallthrough
-	case m.op.Is(OpUpdate | OpDelete):
-		return m.Client().Grove.Query().Where(m.predicates...).IDs(ctx)
-	default:
-		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
-	}
-}
-
-// SetName sets the "name" field.
-func (m *GroveMutation) SetName(s string) {
-	m.name = &s
-}
-
-// Name returns the value of the "name" field in the mutation.
-func (m *GroveMutation) Name() (r string, exists bool) {
-	v := m.name
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldName returns the old "name" field's value of the Grove entity.
-// If the Grove object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *GroveMutation) OldName(ctx context.Context) (v string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldName is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldName requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldName: %w", err)
-	}
-	return oldValue.Name, nil
-}
-
-// ResetName resets all changes to the "name" field.
-func (m *GroveMutation) ResetName() {
-	m.name = nil
-}
-
-// SetSlug sets the "slug" field.
-func (m *GroveMutation) SetSlug(s string) {
-	m.slug = &s
-}
-
-// Slug returns the value of the "slug" field in the mutation.
-func (m *GroveMutation) Slug() (r string, exists bool) {
-	v := m.slug
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldSlug returns the old "slug" field's value of the Grove entity.
-// If the Grove object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *GroveMutation) OldSlug(ctx context.Context) (v string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldSlug is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldSlug requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldSlug: %w", err)
-	}
-	return oldValue.Slug, nil
-}
-
-// ResetSlug resets all changes to the "slug" field.
-func (m *GroveMutation) ResetSlug() {
-	m.slug = nil
-}
-
-// SetGitRemote sets the "git_remote" field.
-func (m *GroveMutation) SetGitRemote(s string) {
-	m.git_remote = &s
-}
-
-// GitRemote returns the value of the "git_remote" field in the mutation.
-func (m *GroveMutation) GitRemote() (r string, exists bool) {
-	v := m.git_remote
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldGitRemote returns the old "git_remote" field's value of the Grove entity.
-// If the Grove object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *GroveMutation) OldGitRemote(ctx context.Context) (v *string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldGitRemote is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldGitRemote requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldGitRemote: %w", err)
-	}
-	return oldValue.GitRemote, nil
-}
-
-// ClearGitRemote clears the value of the "git_remote" field.
-func (m *GroveMutation) ClearGitRemote() {
-	m.git_remote = nil
-	m.clearedFields[grove.FieldGitRemote] = struct{}{}
-}
-
-// GitRemoteCleared returns if the "git_remote" field was cleared in this mutation.
-func (m *GroveMutation) GitRemoteCleared() bool {
-	_, ok := m.clearedFields[grove.FieldGitRemote]
-	return ok
-}
-
-// ResetGitRemote resets all changes to the "git_remote" field.
-func (m *GroveMutation) ResetGitRemote() {
-	m.git_remote = nil
-	delete(m.clearedFields, grove.FieldGitRemote)
-}
-
-// SetLabels sets the "labels" field.
-func (m *GroveMutation) SetLabels(value map[string]string) {
-	m.labels = &value
-}
-
-// Labels returns the value of the "labels" field in the mutation.
-func (m *GroveMutation) Labels() (r map[string]string, exists bool) {
-	v := m.labels
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldLabels returns the old "labels" field's value of the Grove entity.
-// If the Grove object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *GroveMutation) OldLabels(ctx context.Context) (v map[string]string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldLabels is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldLabels requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldLabels: %w", err)
-	}
-	return oldValue.Labels, nil
-}
-
-// ClearLabels clears the value of the "labels" field.
-func (m *GroveMutation) ClearLabels() {
-	m.labels = nil
-	m.clearedFields[grove.FieldLabels] = struct{}{}
-}
-
-// LabelsCleared returns if the "labels" field was cleared in this mutation.
-func (m *GroveMutation) LabelsCleared() bool {
-	_, ok := m.clearedFields[grove.FieldLabels]
-	return ok
-}
-
-// ResetLabels resets all changes to the "labels" field.
-func (m *GroveMutation) ResetLabels() {
-	m.labels = nil
-	delete(m.clearedFields, grove.FieldLabels)
-}
-
-// SetAnnotations sets the "annotations" field.
-func (m *GroveMutation) SetAnnotations(value map[string]string) {
-	m.annotations = &value
-}
-
-// Annotations returns the value of the "annotations" field in the mutation.
-func (m *GroveMutation) Annotations() (r map[string]string, exists bool) {
-	v := m.annotations
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldAnnotations returns the old "annotations" field's value of the Grove entity.
-// If the Grove object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *GroveMutation) OldAnnotations(ctx context.Context) (v map[string]string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldAnnotations is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldAnnotations requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldAnnotations: %w", err)
-	}
-	return oldValue.Annotations, nil
-}
-
-// ClearAnnotations clears the value of the "annotations" field.
-func (m *GroveMutation) ClearAnnotations() {
-	m.annotations = nil
-	m.clearedFields[grove.FieldAnnotations] = struct{}{}
-}
-
-// AnnotationsCleared returns if the "annotations" field was cleared in this mutation.
-func (m *GroveMutation) AnnotationsCleared() bool {
-	_, ok := m.clearedFields[grove.FieldAnnotations]
-	return ok
-}
-
-// ResetAnnotations resets all changes to the "annotations" field.
-func (m *GroveMutation) ResetAnnotations() {
-	m.annotations = nil
-	delete(m.clearedFields, grove.FieldAnnotations)
-}
-
-// SetCreated sets the "created" field.
-func (m *GroveMutation) SetCreated(t time.Time) {
-	m.created = &t
-}
-
-// Created returns the value of the "created" field in the mutation.
-func (m *GroveMutation) Created() (r time.Time, exists bool) {
-	v := m.created
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldCreated returns the old "created" field's value of the Grove entity.
-// If the Grove object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *GroveMutation) OldCreated(ctx context.Context) (v time.Time, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldCreated is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldCreated requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldCreated: %w", err)
-	}
-	return oldValue.Created, nil
-}
-
-// ResetCreated resets all changes to the "created" field.
-func (m *GroveMutation) ResetCreated() {
-	m.created = nil
-}
-
-// SetUpdated sets the "updated" field.
-func (m *GroveMutation) SetUpdated(t time.Time) {
-	m.updated = &t
-}
-
-// Updated returns the value of the "updated" field in the mutation.
-func (m *GroveMutation) Updated() (r time.Time, exists bool) {
-	v := m.updated
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldUpdated returns the old "updated" field's value of the Grove entity.
-// If the Grove object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *GroveMutation) OldUpdated(ctx context.Context) (v time.Time, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldUpdated is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldUpdated requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldUpdated: %w", err)
-	}
-	return oldValue.Updated, nil
-}
-
-// ResetUpdated resets all changes to the "updated" field.
-func (m *GroveMutation) ResetUpdated() {
-	m.updated = nil
-}
-
-// SetCreatedBy sets the "created_by" field.
-func (m *GroveMutation) SetCreatedBy(s string) {
-	m.created_by = &s
-}
-
-// CreatedBy returns the value of the "created_by" field in the mutation.
-func (m *GroveMutation) CreatedBy() (r string, exists bool) {
-	v := m.created_by
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldCreatedBy returns the old "created_by" field's value of the Grove entity.
-// If the Grove object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *GroveMutation) OldCreatedBy(ctx context.Context) (v string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldCreatedBy is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldCreatedBy requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldCreatedBy: %w", err)
-	}
-	return oldValue.CreatedBy, nil
-}
-
-// ClearCreatedBy clears the value of the "created_by" field.
-func (m *GroveMutation) ClearCreatedBy() {
-	m.created_by = nil
-	m.clearedFields[grove.FieldCreatedBy] = struct{}{}
-}
-
-// CreatedByCleared returns if the "created_by" field was cleared in this mutation.
-func (m *GroveMutation) CreatedByCleared() bool {
-	_, ok := m.clearedFields[grove.FieldCreatedBy]
-	return ok
-}
-
-// ResetCreatedBy resets all changes to the "created_by" field.
-func (m *GroveMutation) ResetCreatedBy() {
-	m.created_by = nil
-	delete(m.clearedFields, grove.FieldCreatedBy)
-}
-
-// SetOwnerID sets the "owner_id" field.
-func (m *GroveMutation) SetOwnerID(s string) {
-	m.owner_id = &s
-}
-
-// OwnerID returns the value of the "owner_id" field in the mutation.
-func (m *GroveMutation) OwnerID() (r string, exists bool) {
-	v := m.owner_id
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldOwnerID returns the old "owner_id" field's value of the Grove entity.
-// If the Grove object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *GroveMutation) OldOwnerID(ctx context.Context) (v string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldOwnerID is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldOwnerID requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldOwnerID: %w", err)
-	}
-	return oldValue.OwnerID, nil
-}
-
-// ClearOwnerID clears the value of the "owner_id" field.
-func (m *GroveMutation) ClearOwnerID() {
-	m.owner_id = nil
-	m.clearedFields[grove.FieldOwnerID] = struct{}{}
-}
-
-// OwnerIDCleared returns if the "owner_id" field was cleared in this mutation.
-func (m *GroveMutation) OwnerIDCleared() bool {
-	_, ok := m.clearedFields[grove.FieldOwnerID]
-	return ok
-}
-
-// ResetOwnerID resets all changes to the "owner_id" field.
-func (m *GroveMutation) ResetOwnerID() {
-	m.owner_id = nil
-	delete(m.clearedFields, grove.FieldOwnerID)
-}
-
-// SetVisibility sets the "visibility" field.
-func (m *GroveMutation) SetVisibility(s string) {
-	m.visibility = &s
-}
-
-// Visibility returns the value of the "visibility" field in the mutation.
-func (m *GroveMutation) Visibility() (r string, exists bool) {
-	v := m.visibility
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldVisibility returns the old "visibility" field's value of the Grove entity.
-// If the Grove object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *GroveMutation) OldVisibility(ctx context.Context) (v string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldVisibility is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldVisibility requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldVisibility: %w", err)
-	}
-	return oldValue.Visibility, nil
-}
-
-// ResetVisibility resets all changes to the "visibility" field.
-func (m *GroveMutation) ResetVisibility() {
-	m.visibility = nil
-}
-
-// AddAgentIDs adds the "agents" edge to the Agent entity by ids.
-func (m *GroveMutation) AddAgentIDs(ids ...uuid.UUID) {
-	if m.agents == nil {
-		m.agents = make(map[uuid.UUID]struct{})
-	}
-	for i := range ids {
-		m.agents[ids[i]] = struct{}{}
-	}
-}
-
-// ClearAgents clears the "agents" edge to the Agent entity.
-func (m *GroveMutation) ClearAgents() {
-	m.clearedagents = true
-}
-
-// AgentsCleared reports if the "agents" edge to the Agent entity was cleared.
-func (m *GroveMutation) AgentsCleared() bool {
-	return m.clearedagents
-}
-
-// RemoveAgentIDs removes the "agents" edge to the Agent entity by IDs.
-func (m *GroveMutation) RemoveAgentIDs(ids ...uuid.UUID) {
-	if m.removedagents == nil {
-		m.removedagents = make(map[uuid.UUID]struct{})
-	}
-	for i := range ids {
-		delete(m.agents, ids[i])
-		m.removedagents[ids[i]] = struct{}{}
-	}
-}
-
-// RemovedAgents returns the removed IDs of the "agents" edge to the Agent entity.
-func (m *GroveMutation) RemovedAgentsIDs() (ids []uuid.UUID) {
-	for id := range m.removedagents {
-		ids = append(ids, id)
-	}
-	return
-}
-
-// AgentsIDs returns the "agents" edge IDs in the mutation.
-func (m *GroveMutation) AgentsIDs() (ids []uuid.UUID) {
-	for id := range m.agents {
-		ids = append(ids, id)
-	}
-	return
-}
-
-// ResetAgents resets all changes to the "agents" edge.
-func (m *GroveMutation) ResetAgents() {
-	m.agents = nil
-	m.clearedagents = false
-	m.removedagents = nil
-}
-
-// Where appends a list predicates to the GroveMutation builder.
-func (m *GroveMutation) Where(ps ...predicate.Grove) {
-	m.predicates = append(m.predicates, ps...)
-}
-
-// WhereP appends storage-level predicates to the GroveMutation builder. Using this method,
-// users can use type-assertion to append predicates that do not depend on any generated package.
-func (m *GroveMutation) WhereP(ps ...func(*sql.Selector)) {
-	p := make([]predicate.Grove, len(ps))
-	for i := range ps {
-		p[i] = ps[i]
-	}
-	m.Where(p...)
-}
-
-// Op returns the operation name.
-func (m *GroveMutation) Op() Op {
-	return m.op
-}
-
-// SetOp allows setting the mutation operation.
-func (m *GroveMutation) SetOp(op Op) {
-	m.op = op
-}
-
-// Type returns the node type of this mutation (Grove).
-func (m *GroveMutation) Type() string {
-	return m.typ
-}
-
-// Fields returns all fields that were changed during this mutation. Note that in
-// order to get all numeric fields that were incremented/decremented, call
-// AddedFields().
-func (m *GroveMutation) Fields() []string {
-	fields := make([]string, 0, 10)
-	if m.name != nil {
-		fields = append(fields, grove.FieldName)
-	}
-	if m.slug != nil {
-		fields = append(fields, grove.FieldSlug)
-	}
-	if m.git_remote != nil {
-		fields = append(fields, grove.FieldGitRemote)
-	}
-	if m.labels != nil {
-		fields = append(fields, grove.FieldLabels)
-	}
-	if m.annotations != nil {
-		fields = append(fields, grove.FieldAnnotations)
-	}
-	if m.created != nil {
-		fields = append(fields, grove.FieldCreated)
-	}
-	if m.updated != nil {
-		fields = append(fields, grove.FieldUpdated)
-	}
-	if m.created_by != nil {
-		fields = append(fields, grove.FieldCreatedBy)
-	}
-	if m.owner_id != nil {
-		fields = append(fields, grove.FieldOwnerID)
-	}
-	if m.visibility != nil {
-		fields = append(fields, grove.FieldVisibility)
-	}
-	return fields
-}
-
-// Field returns the value of a field with the given name. The second boolean
-// return value indicates that this field was not set, or was not defined in the
-// schema.
-func (m *GroveMutation) Field(name string) (ent.Value, bool) {
-	switch name {
-	case grove.FieldName:
-		return m.Name()
-	case grove.FieldSlug:
-		return m.Slug()
-	case grove.FieldGitRemote:
-		return m.GitRemote()
-	case grove.FieldLabels:
-		return m.Labels()
-	case grove.FieldAnnotations:
-		return m.Annotations()
-	case grove.FieldCreated:
-		return m.Created()
-	case grove.FieldUpdated:
-		return m.Updated()
-	case grove.FieldCreatedBy:
-		return m.CreatedBy()
-	case grove.FieldOwnerID:
-		return m.OwnerID()
-	case grove.FieldVisibility:
-		return m.Visibility()
-	}
-	return nil, false
-}
-
-// OldField returns the old value of the field from the database. An error is
-// returned if the mutation operation is not UpdateOne, or the query to the
-// database failed.
-func (m *GroveMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
-	switch name {
-	case grove.FieldName:
-		return m.OldName(ctx)
-	case grove.FieldSlug:
-		return m.OldSlug(ctx)
-	case grove.FieldGitRemote:
-		return m.OldGitRemote(ctx)
-	case grove.FieldLabels:
-		return m.OldLabels(ctx)
-	case grove.FieldAnnotations:
-		return m.OldAnnotations(ctx)
-	case grove.FieldCreated:
-		return m.OldCreated(ctx)
-	case grove.FieldUpdated:
-		return m.OldUpdated(ctx)
-	case grove.FieldCreatedBy:
-		return m.OldCreatedBy(ctx)
-	case grove.FieldOwnerID:
-		return m.OldOwnerID(ctx)
-	case grove.FieldVisibility:
-		return m.OldVisibility(ctx)
-	}
-	return nil, fmt.Errorf("unknown Grove field %s", name)
-}
-
-// SetField sets the value of a field with the given name. It returns an error if
-// the field is not defined in the schema, or if the type mismatched the field
-// type.
-func (m *GroveMutation) SetField(name string, value ent.Value) error {
-	switch name {
-	case grove.FieldName:
-		v, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetName(v)
-		return nil
-	case grove.FieldSlug:
-		v, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetSlug(v)
-		return nil
-	case grove.FieldGitRemote:
-		v, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetGitRemote(v)
-		return nil
-	case grove.FieldLabels:
-		v, ok := value.(map[string]string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetLabels(v)
-		return nil
-	case grove.FieldAnnotations:
-		v, ok := value.(map[string]string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetAnnotations(v)
-		return nil
-	case grove.FieldCreated:
-		v, ok := value.(time.Time)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetCreated(v)
-		return nil
-	case grove.FieldUpdated:
-		v, ok := value.(time.Time)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetUpdated(v)
-		return nil
-	case grove.FieldCreatedBy:
-		v, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetCreatedBy(v)
-		return nil
-	case grove.FieldOwnerID:
-		v, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetOwnerID(v)
-		return nil
-	case grove.FieldVisibility:
-		v, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetVisibility(v)
-		return nil
-	}
-	return fmt.Errorf("unknown Grove field %s", name)
-}
-
-// AddedFields returns all numeric fields that were incremented/decremented during
-// this mutation.
-func (m *GroveMutation) AddedFields() []string {
-	return nil
-}
-
-// AddedField returns the numeric value that was incremented/decremented on a field
-// with the given name. The second boolean return value indicates that this field
-// was not set, or was not defined in the schema.
-func (m *GroveMutation) AddedField(name string) (ent.Value, bool) {
-	return nil, false
-}
-
-// AddField adds the value to the field with the given name. It returns an error if
-// the field is not defined in the schema, or if the type mismatched the field
-// type.
-func (m *GroveMutation) AddField(name string, value ent.Value) error {
-	switch name {
-	}
-	return fmt.Errorf("unknown Grove numeric field %s", name)
-}
-
-// ClearedFields returns all nullable fields that were cleared during this
-// mutation.
-func (m *GroveMutation) ClearedFields() []string {
-	var fields []string
-	if m.FieldCleared(grove.FieldGitRemote) {
-		fields = append(fields, grove.FieldGitRemote)
-	}
-	if m.FieldCleared(grove.FieldLabels) {
-		fields = append(fields, grove.FieldLabels)
-	}
-	if m.FieldCleared(grove.FieldAnnotations) {
-		fields = append(fields, grove.FieldAnnotations)
-	}
-	if m.FieldCleared(grove.FieldCreatedBy) {
-		fields = append(fields, grove.FieldCreatedBy)
-	}
-	if m.FieldCleared(grove.FieldOwnerID) {
-		fields = append(fields, grove.FieldOwnerID)
-	}
-	return fields
-}
-
-// FieldCleared returns a boolean indicating if a field with the given name was
-// cleared in this mutation.
-func (m *GroveMutation) FieldCleared(name string) bool {
-	_, ok := m.clearedFields[name]
-	return ok
-}
-
-// ClearField clears the value of the field with the given name. It returns an
-// error if the field is not defined in the schema.
-func (m *GroveMutation) ClearField(name string) error {
-	switch name {
-	case grove.FieldGitRemote:
-		m.ClearGitRemote()
-		return nil
-	case grove.FieldLabels:
-		m.ClearLabels()
-		return nil
-	case grove.FieldAnnotations:
-		m.ClearAnnotations()
-		return nil
-	case grove.FieldCreatedBy:
-		m.ClearCreatedBy()
-		return nil
-	case grove.FieldOwnerID:
-		m.ClearOwnerID()
-		return nil
-	}
-	return fmt.Errorf("unknown Grove nullable field %s", name)
-}
-
-// ResetField resets all changes in the mutation for the field with the given name.
-// It returns an error if the field is not defined in the schema.
-func (m *GroveMutation) ResetField(name string) error {
-	switch name {
-	case grove.FieldName:
-		m.ResetName()
-		return nil
-	case grove.FieldSlug:
-		m.ResetSlug()
-		return nil
-	case grove.FieldGitRemote:
-		m.ResetGitRemote()
-		return nil
-	case grove.FieldLabels:
-		m.ResetLabels()
-		return nil
-	case grove.FieldAnnotations:
-		m.ResetAnnotations()
-		return nil
-	case grove.FieldCreated:
-		m.ResetCreated()
-		return nil
-	case grove.FieldUpdated:
-		m.ResetUpdated()
-		return nil
-	case grove.FieldCreatedBy:
-		m.ResetCreatedBy()
-		return nil
-	case grove.FieldOwnerID:
-		m.ResetOwnerID()
-		return nil
-	case grove.FieldVisibility:
-		m.ResetVisibility()
-		return nil
-	}
-	return fmt.Errorf("unknown Grove field %s", name)
-}
-
-// AddedEdges returns all edge names that were set/added in this mutation.
-func (m *GroveMutation) AddedEdges() []string {
-	edges := make([]string, 0, 1)
-	if m.agents != nil {
-		edges = append(edges, grove.EdgeAgents)
-	}
-	return edges
-}
-
-// AddedIDs returns all IDs (to other nodes) that were added for the given edge
-// name in this mutation.
-func (m *GroveMutation) AddedIDs(name string) []ent.Value {
-	switch name {
-	case grove.EdgeAgents:
-		ids := make([]ent.Value, 0, len(m.agents))
-		for id := range m.agents {
-			ids = append(ids, id)
-		}
-		return ids
-	}
-	return nil
-}
-
-// RemovedEdges returns all edge names that were removed in this mutation.
-func (m *GroveMutation) RemovedEdges() []string {
-	edges := make([]string, 0, 1)
-	if m.removedagents != nil {
-		edges = append(edges, grove.EdgeAgents)
-	}
-	return edges
-}
-
-// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
-// the given name in this mutation.
-func (m *GroveMutation) RemovedIDs(name string) []ent.Value {
-	switch name {
-	case grove.EdgeAgents:
-		ids := make([]ent.Value, 0, len(m.removedagents))
-		for id := range m.removedagents {
-			ids = append(ids, id)
-		}
-		return ids
-	}
-	return nil
-}
-
-// ClearedEdges returns all edge names that were cleared in this mutation.
-func (m *GroveMutation) ClearedEdges() []string {
-	edges := make([]string, 0, 1)
-	if m.clearedagents {
-		edges = append(edges, grove.EdgeAgents)
-	}
-	return edges
-}
-
-// EdgeCleared returns a boolean which indicates if the edge with the given name
-// was cleared in this mutation.
-func (m *GroveMutation) EdgeCleared(name string) bool {
-	switch name {
-	case grove.EdgeAgents:
-		return m.clearedagents
-	}
-	return false
-}
-
-// ClearEdge clears the value of the edge with the given name. It returns an error
-// if that edge is not defined in the schema.
-func (m *GroveMutation) ClearEdge(name string) error {
-	switch name {
-	}
-	return fmt.Errorf("unknown Grove unique edge %s", name)
-}
-
-// ResetEdge resets all changes to the edge with the given name in this mutation.
-// It returns an error if the edge is not defined in the schema.
-func (m *GroveMutation) ResetEdge(name string) error {
-	switch name {
-	case grove.EdgeAgents:
-		m.ResetAgents()
-		return nil
-	}
-	return fmt.Errorf("unknown Grove edge %s", name)
-}
-
 // PolicyBindingMutation represents an operation that mutates the PolicyBinding nodes in the graph.
 type PolicyBindingMutation struct {
 	config
@@ -6827,6 +5818,1015 @@ func (m *PolicyBindingMutation) ResetEdge(name string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown PolicyBinding edge %s", name)
+}
+
+// ProjectMutation represents an operation that mutates the Project nodes in the graph.
+type ProjectMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *uuid.UUID
+	name          *string
+	slug          *string
+	git_remote    *string
+	labels        *map[string]string
+	annotations   *map[string]string
+	created       *time.Time
+	updated       *time.Time
+	created_by    *string
+	owner_id      *string
+	visibility    *string
+	clearedFields map[string]struct{}
+	agents        map[uuid.UUID]struct{}
+	removedagents map[uuid.UUID]struct{}
+	clearedagents bool
+	done          bool
+	oldValue      func(context.Context) (*Project, error)
+	predicates    []predicate.Project
+}
+
+var _ ent.Mutation = (*ProjectMutation)(nil)
+
+// projectOption allows management of the mutation configuration using functional options.
+type projectOption func(*ProjectMutation)
+
+// newProjectMutation creates new mutation for the Project entity.
+func newProjectMutation(c config, op Op, opts ...projectOption) *ProjectMutation {
+	m := &ProjectMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeProject,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withProjectID sets the ID field of the mutation.
+func withProjectID(id uuid.UUID) projectOption {
+	return func(m *ProjectMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *Project
+		)
+		m.oldValue = func(ctx context.Context) (*Project, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().Project.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withProject sets the old Project of the mutation.
+func withProject(node *Project) projectOption {
+	return func(m *ProjectMutation) {
+		m.oldValue = func(context.Context) (*Project, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m ProjectMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m ProjectMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of Project entities.
+func (m *ProjectMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *ProjectMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *ProjectMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().Project.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetName sets the "name" field.
+func (m *ProjectMutation) SetName(s string) {
+	m.name = &s
+}
+
+// Name returns the value of the "name" field in the mutation.
+func (m *ProjectMutation) Name() (r string, exists bool) {
+	v := m.name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldName returns the old "name" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldName: %w", err)
+	}
+	return oldValue.Name, nil
+}
+
+// ResetName resets all changes to the "name" field.
+func (m *ProjectMutation) ResetName() {
+	m.name = nil
+}
+
+// SetSlug sets the "slug" field.
+func (m *ProjectMutation) SetSlug(s string) {
+	m.slug = &s
+}
+
+// Slug returns the value of the "slug" field in the mutation.
+func (m *ProjectMutation) Slug() (r string, exists bool) {
+	v := m.slug
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSlug returns the old "slug" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldSlug(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSlug is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSlug requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSlug: %w", err)
+	}
+	return oldValue.Slug, nil
+}
+
+// ResetSlug resets all changes to the "slug" field.
+func (m *ProjectMutation) ResetSlug() {
+	m.slug = nil
+}
+
+// SetGitRemote sets the "git_remote" field.
+func (m *ProjectMutation) SetGitRemote(s string) {
+	m.git_remote = &s
+}
+
+// GitRemote returns the value of the "git_remote" field in the mutation.
+func (m *ProjectMutation) GitRemote() (r string, exists bool) {
+	v := m.git_remote
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGitRemote returns the old "git_remote" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldGitRemote(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGitRemote is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGitRemote requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGitRemote: %w", err)
+	}
+	return oldValue.GitRemote, nil
+}
+
+// ClearGitRemote clears the value of the "git_remote" field.
+func (m *ProjectMutation) ClearGitRemote() {
+	m.git_remote = nil
+	m.clearedFields[project.FieldGitRemote] = struct{}{}
+}
+
+// GitRemoteCleared returns if the "git_remote" field was cleared in this mutation.
+func (m *ProjectMutation) GitRemoteCleared() bool {
+	_, ok := m.clearedFields[project.FieldGitRemote]
+	return ok
+}
+
+// ResetGitRemote resets all changes to the "git_remote" field.
+func (m *ProjectMutation) ResetGitRemote() {
+	m.git_remote = nil
+	delete(m.clearedFields, project.FieldGitRemote)
+}
+
+// SetLabels sets the "labels" field.
+func (m *ProjectMutation) SetLabels(value map[string]string) {
+	m.labels = &value
+}
+
+// Labels returns the value of the "labels" field in the mutation.
+func (m *ProjectMutation) Labels() (r map[string]string, exists bool) {
+	v := m.labels
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLabels returns the old "labels" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldLabels(ctx context.Context) (v map[string]string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLabels is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLabels requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLabels: %w", err)
+	}
+	return oldValue.Labels, nil
+}
+
+// ClearLabels clears the value of the "labels" field.
+func (m *ProjectMutation) ClearLabels() {
+	m.labels = nil
+	m.clearedFields[project.FieldLabels] = struct{}{}
+}
+
+// LabelsCleared returns if the "labels" field was cleared in this mutation.
+func (m *ProjectMutation) LabelsCleared() bool {
+	_, ok := m.clearedFields[project.FieldLabels]
+	return ok
+}
+
+// ResetLabels resets all changes to the "labels" field.
+func (m *ProjectMutation) ResetLabels() {
+	m.labels = nil
+	delete(m.clearedFields, project.FieldLabels)
+}
+
+// SetAnnotations sets the "annotations" field.
+func (m *ProjectMutation) SetAnnotations(value map[string]string) {
+	m.annotations = &value
+}
+
+// Annotations returns the value of the "annotations" field in the mutation.
+func (m *ProjectMutation) Annotations() (r map[string]string, exists bool) {
+	v := m.annotations
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAnnotations returns the old "annotations" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldAnnotations(ctx context.Context) (v map[string]string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAnnotations is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAnnotations requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAnnotations: %w", err)
+	}
+	return oldValue.Annotations, nil
+}
+
+// ClearAnnotations clears the value of the "annotations" field.
+func (m *ProjectMutation) ClearAnnotations() {
+	m.annotations = nil
+	m.clearedFields[project.FieldAnnotations] = struct{}{}
+}
+
+// AnnotationsCleared returns if the "annotations" field was cleared in this mutation.
+func (m *ProjectMutation) AnnotationsCleared() bool {
+	_, ok := m.clearedFields[project.FieldAnnotations]
+	return ok
+}
+
+// ResetAnnotations resets all changes to the "annotations" field.
+func (m *ProjectMutation) ResetAnnotations() {
+	m.annotations = nil
+	delete(m.clearedFields, project.FieldAnnotations)
+}
+
+// SetCreated sets the "created" field.
+func (m *ProjectMutation) SetCreated(t time.Time) {
+	m.created = &t
+}
+
+// Created returns the value of the "created" field in the mutation.
+func (m *ProjectMutation) Created() (r time.Time, exists bool) {
+	v := m.created
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreated returns the old "created" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldCreated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreated: %w", err)
+	}
+	return oldValue.Created, nil
+}
+
+// ResetCreated resets all changes to the "created" field.
+func (m *ProjectMutation) ResetCreated() {
+	m.created = nil
+}
+
+// SetUpdated sets the "updated" field.
+func (m *ProjectMutation) SetUpdated(t time.Time) {
+	m.updated = &t
+}
+
+// Updated returns the value of the "updated" field in the mutation.
+func (m *ProjectMutation) Updated() (r time.Time, exists bool) {
+	v := m.updated
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdated returns the old "updated" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldUpdated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdated: %w", err)
+	}
+	return oldValue.Updated, nil
+}
+
+// ResetUpdated resets all changes to the "updated" field.
+func (m *ProjectMutation) ResetUpdated() {
+	m.updated = nil
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (m *ProjectMutation) SetCreatedBy(s string) {
+	m.created_by = &s
+}
+
+// CreatedBy returns the value of the "created_by" field in the mutation.
+func (m *ProjectMutation) CreatedBy() (r string, exists bool) {
+	v := m.created_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedBy returns the old "created_by" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldCreatedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedBy: %w", err)
+	}
+	return oldValue.CreatedBy, nil
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (m *ProjectMutation) ClearCreatedBy() {
+	m.created_by = nil
+	m.clearedFields[project.FieldCreatedBy] = struct{}{}
+}
+
+// CreatedByCleared returns if the "created_by" field was cleared in this mutation.
+func (m *ProjectMutation) CreatedByCleared() bool {
+	_, ok := m.clearedFields[project.FieldCreatedBy]
+	return ok
+}
+
+// ResetCreatedBy resets all changes to the "created_by" field.
+func (m *ProjectMutation) ResetCreatedBy() {
+	m.created_by = nil
+	delete(m.clearedFields, project.FieldCreatedBy)
+}
+
+// SetOwnerID sets the "owner_id" field.
+func (m *ProjectMutation) SetOwnerID(s string) {
+	m.owner_id = &s
+}
+
+// OwnerID returns the value of the "owner_id" field in the mutation.
+func (m *ProjectMutation) OwnerID() (r string, exists bool) {
+	v := m.owner_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOwnerID returns the old "owner_id" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldOwnerID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOwnerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOwnerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOwnerID: %w", err)
+	}
+	return oldValue.OwnerID, nil
+}
+
+// ClearOwnerID clears the value of the "owner_id" field.
+func (m *ProjectMutation) ClearOwnerID() {
+	m.owner_id = nil
+	m.clearedFields[project.FieldOwnerID] = struct{}{}
+}
+
+// OwnerIDCleared returns if the "owner_id" field was cleared in this mutation.
+func (m *ProjectMutation) OwnerIDCleared() bool {
+	_, ok := m.clearedFields[project.FieldOwnerID]
+	return ok
+}
+
+// ResetOwnerID resets all changes to the "owner_id" field.
+func (m *ProjectMutation) ResetOwnerID() {
+	m.owner_id = nil
+	delete(m.clearedFields, project.FieldOwnerID)
+}
+
+// SetVisibility sets the "visibility" field.
+func (m *ProjectMutation) SetVisibility(s string) {
+	m.visibility = &s
+}
+
+// Visibility returns the value of the "visibility" field in the mutation.
+func (m *ProjectMutation) Visibility() (r string, exists bool) {
+	v := m.visibility
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVisibility returns the old "visibility" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldVisibility(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVisibility is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVisibility requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVisibility: %w", err)
+	}
+	return oldValue.Visibility, nil
+}
+
+// ResetVisibility resets all changes to the "visibility" field.
+func (m *ProjectMutation) ResetVisibility() {
+	m.visibility = nil
+}
+
+// AddAgentIDs adds the "agents" edge to the Agent entity by ids.
+func (m *ProjectMutation) AddAgentIDs(ids ...uuid.UUID) {
+	if m.agents == nil {
+		m.agents = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		m.agents[ids[i]] = struct{}{}
+	}
+}
+
+// ClearAgents clears the "agents" edge to the Agent entity.
+func (m *ProjectMutation) ClearAgents() {
+	m.clearedagents = true
+}
+
+// AgentsCleared reports if the "agents" edge to the Agent entity was cleared.
+func (m *ProjectMutation) AgentsCleared() bool {
+	return m.clearedagents
+}
+
+// RemoveAgentIDs removes the "agents" edge to the Agent entity by IDs.
+func (m *ProjectMutation) RemoveAgentIDs(ids ...uuid.UUID) {
+	if m.removedagents == nil {
+		m.removedagents = make(map[uuid.UUID]struct{})
+	}
+	for i := range ids {
+		delete(m.agents, ids[i])
+		m.removedagents[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedAgents returns the removed IDs of the "agents" edge to the Agent entity.
+func (m *ProjectMutation) RemovedAgentsIDs() (ids []uuid.UUID) {
+	for id := range m.removedagents {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// AgentsIDs returns the "agents" edge IDs in the mutation.
+func (m *ProjectMutation) AgentsIDs() (ids []uuid.UUID) {
+	for id := range m.agents {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetAgents resets all changes to the "agents" edge.
+func (m *ProjectMutation) ResetAgents() {
+	m.agents = nil
+	m.clearedagents = false
+	m.removedagents = nil
+}
+
+// Where appends a list predicates to the ProjectMutation builder.
+func (m *ProjectMutation) Where(ps ...predicate.Project) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the ProjectMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *ProjectMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.Project, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *ProjectMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *ProjectMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (Project).
+func (m *ProjectMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *ProjectMutation) Fields() []string {
+	fields := make([]string, 0, 10)
+	if m.name != nil {
+		fields = append(fields, project.FieldName)
+	}
+	if m.slug != nil {
+		fields = append(fields, project.FieldSlug)
+	}
+	if m.git_remote != nil {
+		fields = append(fields, project.FieldGitRemote)
+	}
+	if m.labels != nil {
+		fields = append(fields, project.FieldLabels)
+	}
+	if m.annotations != nil {
+		fields = append(fields, project.FieldAnnotations)
+	}
+	if m.created != nil {
+		fields = append(fields, project.FieldCreated)
+	}
+	if m.updated != nil {
+		fields = append(fields, project.FieldUpdated)
+	}
+	if m.created_by != nil {
+		fields = append(fields, project.FieldCreatedBy)
+	}
+	if m.owner_id != nil {
+		fields = append(fields, project.FieldOwnerID)
+	}
+	if m.visibility != nil {
+		fields = append(fields, project.FieldVisibility)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *ProjectMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case project.FieldName:
+		return m.Name()
+	case project.FieldSlug:
+		return m.Slug()
+	case project.FieldGitRemote:
+		return m.GitRemote()
+	case project.FieldLabels:
+		return m.Labels()
+	case project.FieldAnnotations:
+		return m.Annotations()
+	case project.FieldCreated:
+		return m.Created()
+	case project.FieldUpdated:
+		return m.Updated()
+	case project.FieldCreatedBy:
+		return m.CreatedBy()
+	case project.FieldOwnerID:
+		return m.OwnerID()
+	case project.FieldVisibility:
+		return m.Visibility()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *ProjectMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case project.FieldName:
+		return m.OldName(ctx)
+	case project.FieldSlug:
+		return m.OldSlug(ctx)
+	case project.FieldGitRemote:
+		return m.OldGitRemote(ctx)
+	case project.FieldLabels:
+		return m.OldLabels(ctx)
+	case project.FieldAnnotations:
+		return m.OldAnnotations(ctx)
+	case project.FieldCreated:
+		return m.OldCreated(ctx)
+	case project.FieldUpdated:
+		return m.OldUpdated(ctx)
+	case project.FieldCreatedBy:
+		return m.OldCreatedBy(ctx)
+	case project.FieldOwnerID:
+		return m.OldOwnerID(ctx)
+	case project.FieldVisibility:
+		return m.OldVisibility(ctx)
+	}
+	return nil, fmt.Errorf("unknown Project field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ProjectMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case project.FieldName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetName(v)
+		return nil
+	case project.FieldSlug:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSlug(v)
+		return nil
+	case project.FieldGitRemote:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGitRemote(v)
+		return nil
+	case project.FieldLabels:
+		v, ok := value.(map[string]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLabels(v)
+		return nil
+	case project.FieldAnnotations:
+		v, ok := value.(map[string]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAnnotations(v)
+		return nil
+	case project.FieldCreated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreated(v)
+		return nil
+	case project.FieldUpdated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdated(v)
+		return nil
+	case project.FieldCreatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedBy(v)
+		return nil
+	case project.FieldOwnerID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOwnerID(v)
+		return nil
+	case project.FieldVisibility:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVisibility(v)
+		return nil
+	}
+	return fmt.Errorf("unknown Project field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *ProjectMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *ProjectMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ProjectMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown Project numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *ProjectMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(project.FieldGitRemote) {
+		fields = append(fields, project.FieldGitRemote)
+	}
+	if m.FieldCleared(project.FieldLabels) {
+		fields = append(fields, project.FieldLabels)
+	}
+	if m.FieldCleared(project.FieldAnnotations) {
+		fields = append(fields, project.FieldAnnotations)
+	}
+	if m.FieldCleared(project.FieldCreatedBy) {
+		fields = append(fields, project.FieldCreatedBy)
+	}
+	if m.FieldCleared(project.FieldOwnerID) {
+		fields = append(fields, project.FieldOwnerID)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *ProjectMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *ProjectMutation) ClearField(name string) error {
+	switch name {
+	case project.FieldGitRemote:
+		m.ClearGitRemote()
+		return nil
+	case project.FieldLabels:
+		m.ClearLabels()
+		return nil
+	case project.FieldAnnotations:
+		m.ClearAnnotations()
+		return nil
+	case project.FieldCreatedBy:
+		m.ClearCreatedBy()
+		return nil
+	case project.FieldOwnerID:
+		m.ClearOwnerID()
+		return nil
+	}
+	return fmt.Errorf("unknown Project nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *ProjectMutation) ResetField(name string) error {
+	switch name {
+	case project.FieldName:
+		m.ResetName()
+		return nil
+	case project.FieldSlug:
+		m.ResetSlug()
+		return nil
+	case project.FieldGitRemote:
+		m.ResetGitRemote()
+		return nil
+	case project.FieldLabels:
+		m.ResetLabels()
+		return nil
+	case project.FieldAnnotations:
+		m.ResetAnnotations()
+		return nil
+	case project.FieldCreated:
+		m.ResetCreated()
+		return nil
+	case project.FieldUpdated:
+		m.ResetUpdated()
+		return nil
+	case project.FieldCreatedBy:
+		m.ResetCreatedBy()
+		return nil
+	case project.FieldOwnerID:
+		m.ResetOwnerID()
+		return nil
+	case project.FieldVisibility:
+		m.ResetVisibility()
+		return nil
+	}
+	return fmt.Errorf("unknown Project field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *ProjectMutation) AddedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.agents != nil {
+		edges = append(edges, project.EdgeAgents)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *ProjectMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case project.EdgeAgents:
+		ids := make([]ent.Value, 0, len(m.agents))
+		for id := range m.agents {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *ProjectMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.removedagents != nil {
+		edges = append(edges, project.EdgeAgents)
+	}
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *ProjectMutation) RemovedIDs(name string) []ent.Value {
+	switch name {
+	case project.EdgeAgents:
+		ids := make([]ent.Value, 0, len(m.removedagents))
+		for id := range m.removedagents {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *ProjectMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.clearedagents {
+		edges = append(edges, project.EdgeAgents)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *ProjectMutation) EdgeCleared(name string) bool {
+	switch name {
+	case project.EdgeAgents:
+		return m.clearedagents
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *ProjectMutation) ClearEdge(name string) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown Project unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *ProjectMutation) ResetEdge(name string) error {
+	switch name {
+	case project.EdgeAgents:
+		m.ResetAgents()
+		return nil
+	}
+	return fmt.Errorf("unknown Project edge %s", name)
 }
 
 // UserMutation represents an operation that mutates the User nodes in the graph.

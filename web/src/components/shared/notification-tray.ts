@@ -639,13 +639,13 @@ export class ScionNotificationTray extends LitElement {
         </div>
         <div class="panel-footer">
           <a
-            href="/groves"
+            href="/projects"
             class="manage-link"
             @click=${(e: Event): void => {
               e.preventDefault();
               this.open = false;
               document.removeEventListener('click', this.boundOnClickOutside, true);
-              window.history.pushState({}, '', '/groves');
+              window.history.pushState({}, '', '/projects');
               window.dispatchEvent(new PopStateEvent('popstate'));
             }}
           >Manage subscriptions</a>

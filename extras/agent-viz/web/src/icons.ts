@@ -19,7 +19,7 @@
 
 const ICON_PATHS: Record<string, { path: string; color: string; pulse?: boolean }> = {
   // Activity icons
-  idle: {
+  working: {
     path: 'M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16z',
     color: '#198754',
   },
@@ -102,5 +102,5 @@ export function getIconForState(
     return { path: icon.path, color: icon.color, pulse: icon.pulse ?? false };
   }
   // Default
-  return { path: ICON_PATHS.idle.path, color: ICON_PATHS.idle.color, pulse: false };
+  return { path: ICON_PATHS.working.path, color: ICON_PATHS.working.color, pulse: false };
 }

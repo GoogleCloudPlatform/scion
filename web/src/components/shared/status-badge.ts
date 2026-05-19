@@ -50,7 +50,7 @@ export type StatusType =
   | 'created'
   | 'suspended'
   // Agent activity states
-  | 'idle'
+  | 'working'
   | 'thinking'
   | 'executing'
   | 'waiting_for_input'

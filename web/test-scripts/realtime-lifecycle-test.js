@@ -18,7 +18,7 @@
  * Real-Time Event Lifecycle Test
  *
  * Validates that SSE events flow from the Hub API through to the browser UI.
- * Uses Playwright to hold a browser open on the grove detail page, then
+ * Uses Playwright to hold a browser open on the project detail page, then
  * exercises the full agent lifecycle via API calls (create, status update,
  * delete), taking screenshots at each step to verify the UI updates
  * dynamically without page reload.
@@ -27,14 +27,14 @@
  *   - scion server running: scion server start --enable-hub --enable-web
  *       --enable-runtime-broker --dev-auth --web-assets-dir ./web/dist/client
  *   - Web assets built: cd web && npm run build
- *   - A grove and broker-provider link must already exist (see setup below)
+ *   - A project and broker-provider link must already exist (see setup below)
  *   - Playwright + Chromium: cd /tmp && npm install playwright
  *
  * Usage:
- *   GROVE_ID=<uuid> TOKEN=<dev-token> node realtime-lifecycle-test.js
+ *   PROJECT_ID=<uuid> TOKEN=<dev-token> node realtime-lifecycle-test.js
  *
  * Environment variables:
- *   GROVE_ID  - UUID of an existing grove (required)
+ *   PROJECT_ID  - UUID of an existing project (required)
  *   TOKEN     - Dev auth token from server startup logs (required)
  *   BASE      - Server base URL (default: http://localhost:8080)
  *   CHROMIUM  - Path to chromium binary (default: /usr/bin/chromium)
@@ -42,14 +42,14 @@
  */
 const { chromium } = require('playwright');
 
-const GROVE_ID = process.env.GROVE_ID || '';
+const PROJECT_ID = process.env.PROJECT_ID || '';
 const TOKEN = process.env.TOKEN || '';
 const BASE = process.env.BASE || 'http://localhost:8080';
 const CHROMIUM_PATH = process.env.CHROMIUM || '/usr/bin/chromium';
 const OUT_DIR = process.env.OUT_DIR || '/tmp';
 
-if (!GROVE_ID || !TOKEN) {
-  console.error('Usage: GROVE_ID=<uuid> TOKEN=<dev-token> node realtime-lifecycle-test.js');
+if (!PROJECT_ID || !TOKEN) {
+  console.error('Usage: PROJECT_ID=<uuid> TOKEN=<dev-token> node realtime-lifecycle-test.js');
   process.exit(1);
 }
 
@@ -82,15 +82,15 @@ async function run() {
     }
   });
 
-  // Step 1: Navigate to the grove detail page
-  console.log('\n=== STEP 1: Navigate to grove detail page ===');
-  await page.goto(`${BASE}/groves/${GROVE_ID}`, {
+  // Step 1: Navigate to the project detail page
+  console.log('\n=== STEP 1: Navigate to project detail page ===');
+  await page.goto(`${BASE}/projects/${PROJECT_ID}`, {
     waitUntil: 'domcontentloaded',
     timeout: 15000,
   });
   await page.waitForTimeout(3000);
-  await page.screenshot({ path: `${OUT_DIR}/rt-01-grove-empty.png`, fullPage: false });
-  console.log(`Screenshot: ${OUT_DIR}/rt-01-grove-empty.png`);
+  await page.screenshot({ path: `${OUT_DIR}/rt-01-project-empty.png`, fullPage: false });
+  console.log(`Screenshot: ${OUT_DIR}/rt-01-project-empty.png`);
 
   // Step 2: Create an agent via API
   console.log('\n=== STEP 2: Create agent via API ===');
@@ -102,7 +102,7 @@ async function run() {
     },
     body: JSON.stringify({
       name: `rt-agent-${Date.now()}`,
-      groveId: GROVE_ID,
+      projectId: PROJECT_ID,
       provisionOnly: true,
     }),
   });

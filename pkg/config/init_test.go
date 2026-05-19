@@ -77,12 +77,12 @@ func TestGetDefaultSettingsDataYAML_OSSpecific(t *testing.T) {
 	}
 }
 
-func TestGenerateGroveIDForDir_NoGitRepo(t *testing.T) {
+func TestGenerateProjectIDForDir_NoGitRepo(t *testing.T) {
 	// Create a non-git directory
 	tmpDir := t.TempDir()
 
-	// GenerateGroveIDForDir should return a UUID
-	id := GenerateGroveIDForDir(tmpDir)
+	// GenerateProjectIDForDir should return a UUID
+	id := GenerateProjectIDForDir(tmpDir)
 	if id == "" {
 		t.Error("expected non-empty grove ID")
 	}
@@ -93,10 +93,18 @@ func TestGenerateGroveIDForDir_NoGitRepo(t *testing.T) {
 	}
 }
 
-func TestIsInsideGrove(t *testing.T) {
+func TestIsInsideProject(t *testing.T) {
+	// Unset Hub context to avoid synthetic project root detection
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID"} {
+		if val, ok := os.LookupEnv(e); ok {
+			os.Unsetenv(e)
+			defer os.Setenv(e, val)
+		}
+	}
+
 	// Create a directory with .scion
-	tmpGrove := t.TempDir()
-	scionDir := filepath.Join(tmpGrove, ".scion")
+	tmpProject := t.TempDir()
+	scionDir := filepath.Join(tmpProject, ".scion")
 	if err := os.Mkdir(scionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -111,23 +119,23 @@ func TestIsInsideGrove(t *testing.T) {
 	defer os.Setenv("HOME", origHome)
 
 	// When in the grove directory
-	if err := os.Chdir(tmpGrove); err != nil {
+	if err := os.Chdir(tmpProject); err != nil {
 		t.Fatal(err)
 	}
-	if !IsInsideGrove() {
-		t.Error("expected IsInsideGrove=true when in grove directory")
+	if !IsInsideProject() {
+		t.Error("expected IsInsideProject=true when in grove directory")
 	}
 
 	// When in a subdirectory of the grove
-	subDir := filepath.Join(tmpGrove, "subdir")
+	subDir := filepath.Join(tmpProject, "subdir")
 	if err := os.Mkdir(subDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chdir(subDir); err != nil {
 		t.Fatal(err)
 	}
-	if !IsInsideGrove() {
-		t.Error("expected IsInsideGrove=true when in subdirectory of grove")
+	if !IsInsideProject() {
+		t.Error("expected IsInsideProject=true when in subdirectory of grove")
 	}
 
 	// When outside any grove
@@ -135,15 +143,15 @@ func TestIsInsideGrove(t *testing.T) {
 	if err := os.Chdir(outsideDir); err != nil {
 		t.Fatal(err)
 	}
-	if IsInsideGrove() {
-		t.Error("expected IsInsideGrove=false when outside any grove")
+	if IsInsideProject() {
+		t.Error("expected IsInsideProject=false when outside any grove")
 	}
 }
 
-func TestGetEnclosingGrovePath(t *testing.T) {
+func TestGetEnclosingProjectPath(t *testing.T) {
 	// Create a directory with .scion
-	tmpGrove := t.TempDir()
-	scionDir := filepath.Join(tmpGrove, ".scion")
+	tmpProject := t.TempDir()
+	scionDir := filepath.Join(tmpProject, ".scion")
 	if err := os.Mkdir(scionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +166,7 @@ func TestGetEnclosingGrovePath(t *testing.T) {
 	defer os.Setenv("HOME", origHome)
 
 	// Create a subdirectory
-	subDir := filepath.Join(tmpGrove, "subdir", "deep")
+	subDir := filepath.Join(tmpProject, "subdir", "deep")
 	if err := os.MkdirAll(subDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -168,25 +176,25 @@ func TestGetEnclosingGrovePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	grovePath, rootDir, found := GetEnclosingGrovePath()
+	projectPath, rootDir, found := GetEnclosingProjectPath()
 	if !found {
 		t.Fatal("expected to find enclosing grove")
 	}
 
-	evalGrovePath, _ := filepath.EvalSymlinks(grovePath)
+	evalProjectPath, _ := filepath.EvalSymlinks(projectPath)
 	evalScionDir, _ := filepath.EvalSymlinks(scionDir)
-	if evalGrovePath != evalScionDir {
-		t.Errorf("expected grovePath=%q, got %q", evalScionDir, evalGrovePath)
+	if evalProjectPath != evalScionDir {
+		t.Errorf("expected projectPath=%q, got %q", evalScionDir, evalProjectPath)
 	}
 
 	evalRootDir, _ := filepath.EvalSymlinks(rootDir)
-	evalTmpGrove, _ := filepath.EvalSymlinks(tmpGrove)
-	if evalRootDir != evalTmpGrove {
-		t.Errorf("expected rootDir=%q, got %q", evalTmpGrove, evalRootDir)
+	evalTmpProject, _ := filepath.EvalSymlinks(tmpProject)
+	if evalRootDir != evalTmpProject {
+		t.Errorf("expected rootDir=%q, got %q", evalTmpProject, evalRootDir)
 	}
 }
 
-func TestGetEnclosingGrovePath_NotFound(t *testing.T) {
+func TestGetEnclosingProjectPath_NotFound(t *testing.T) {
 	// Create a directory without .scion
 	tmpDir := t.TempDir()
 
@@ -203,7 +211,7 @@ func TestGetEnclosingGrovePath_NotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, found := GetEnclosingGrovePath()
+	_, _, found := GetEnclosingProjectPath()
 	if found {
 		t.Error("expected found=false when no enclosing grove")
 	}
@@ -598,10 +606,10 @@ func TestInitProject_UsesDetectedRuntime(t *testing.T) {
 		t.Fatalf("InitProject failed: %v", err)
 	}
 
-	// Grove settings should not contain profiles or runtimes; those live in global settings.
-	// For git groves settings.yaml is in the external config dir; use GetGroveConfigDir
+	// Project settings should not contain profiles or runtimes; those live in global settings.
+	// For git groves settings.yaml is in the external config dir; use GetProjectConfigDir
 	// to find the canonical location regardless of grove type.
-	configDir := GetGroveConfigDir(projectDir)
+	configDir := GetProjectConfigDir(projectDir)
 	data, err := os.ReadFile(filepath.Join(configDir, "settings.yaml"))
 	if err != nil {
 		t.Fatalf("failed to read settings.yaml: %v", err)
@@ -801,13 +809,13 @@ func TestInitMachine_PreservesSettings(t *testing.T) {
 	}
 }
 
-func TestWriteGroveSettings_V1PlacesGroveIDUnderHub(t *testing.T) {
+func TestWriteGroveSettings_V1PlacesProjectIDUnderHub(t *testing.T) {
 	tmpDir := t.TempDir()
-	groveID := "test-grove-id-abc123"
+	projectID := "test-grove-id-abc123"
 
-	err := writeGroveSettings(tmpDir, "/tmp/project", groveID, InitProjectOpts{SkipRuntimeCheck: true})
+	err := writeProjectSettings(tmpDir, "/tmp/project", projectID, InitProjectOpts{SkipRuntimeCheck: true})
 	if err != nil {
-		t.Fatalf("writeGroveSettings failed: %v", err)
+		t.Fatalf("writeProjectSettings failed: %v", err)
 	}
 
 	// Read the written settings file
@@ -837,7 +845,7 @@ func TestWriteGroveSettings_V1PlacesGroveIDUnderHub(t *testing.T) {
 	if !ok {
 		t.Fatal("expected hub section in settings")
 	}
-	if hub["grove_id"] != groveID {
-		t.Errorf("expected hub.grove_id=%q, got %v", groveID, hub["grove_id"])
+	if hub["grove_id"] != projectID {
+		t.Errorf("expected hub.grove_id=%q, got %v", projectID, hub["grove_id"])
 	}
 }

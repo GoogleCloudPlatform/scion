@@ -94,23 +94,23 @@ func (_u *GroupUpdate) SetNillableGroupType(v *group.GroupType) *GroupUpdate {
 	return _u
 }
 
-// SetGroveID sets the "grove_id" field.
-func (_u *GroupUpdate) SetGroveID(v uuid.UUID) *GroupUpdate {
-	_u.mutation.SetGroveID(v)
+// SetProjectID sets the "project_id" field.
+func (_u *GroupUpdate) SetProjectID(v uuid.UUID) *GroupUpdate {
+	_u.mutation.SetProjectID(v)
 	return _u
 }
 
-// SetNillableGroveID sets the "grove_id" field if the given value is not nil.
-func (_u *GroupUpdate) SetNillableGroveID(v *uuid.UUID) *GroupUpdate {
+// SetNillableProjectID sets the "project_id" field if the given value is not nil.
+func (_u *GroupUpdate) SetNillableProjectID(v *uuid.UUID) *GroupUpdate {
 	if v != nil {
-		_u.SetGroveID(*v)
+		_u.SetProjectID(*v)
 	}
 	return _u
 }
 
-// ClearGroveID clears the value of the "grove_id" field.
-func (_u *GroupUpdate) ClearGroveID() *GroupUpdate {
-	_u.mutation.ClearGroveID()
+// ClearProjectID clears the value of the "project_id" field.
+func (_u *GroupUpdate) ClearProjectID() *GroupUpdate {
+	_u.mutation.ClearProjectID()
 	return _u
 }
 
@@ -427,11 +427,11 @@ func (_u *GroupUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if value, ok := _u.mutation.GroupType(); ok {
 		_spec.SetField(group.FieldGroupType, field.TypeEnum, value)
 	}
-	if value, ok := _u.mutation.GroveID(); ok {
-		_spec.SetField(group.FieldGroveID, field.TypeUUID, value)
+	if value, ok := _u.mutation.ProjectID(); ok {
+		_spec.SetField(group.FieldProjectID, field.TypeUUID, value)
 	}
-	if _u.mutation.GroveIDCleared() {
-		_spec.ClearField(group.FieldGroveID, field.TypeUUID)
+	if _u.mutation.ProjectIDCleared() {
+		_spec.ClearField(group.FieldProjectID, field.TypeUUID)
 	}
 	if value, ok := _u.mutation.Labels(); ok {
 		_spec.SetField(group.FieldLabels, field.TypeJSON, value)
@@ -745,23 +745,23 @@ func (_u *GroupUpdateOne) SetNillableGroupType(v *group.GroupType) *GroupUpdateO
 	return _u
 }
 
-// SetGroveID sets the "grove_id" field.
-func (_u *GroupUpdateOne) SetGroveID(v uuid.UUID) *GroupUpdateOne {
-	_u.mutation.SetGroveID(v)
+// SetProjectID sets the "project_id" field.
+func (_u *GroupUpdateOne) SetProjectID(v uuid.UUID) *GroupUpdateOne {
+	_u.mutation.SetProjectID(v)
 	return _u
 }
 
-// SetNillableGroveID sets the "grove_id" field if the given value is not nil.
-func (_u *GroupUpdateOne) SetNillableGroveID(v *uuid.UUID) *GroupUpdateOne {
+// SetNillableProjectID sets the "project_id" field if the given value is not nil.
+func (_u *GroupUpdateOne) SetNillableProjectID(v *uuid.UUID) *GroupUpdateOne {
 	if v != nil {
-		_u.SetGroveID(*v)
+		_u.SetProjectID(*v)
 	}
 	return _u
 }
 
-// ClearGroveID clears the value of the "grove_id" field.
-func (_u *GroupUpdateOne) ClearGroveID() *GroupUpdateOne {
-	_u.mutation.ClearGroveID()
+// ClearProjectID clears the value of the "project_id" field.
+func (_u *GroupUpdateOne) ClearProjectID() *GroupUpdateOne {
+	_u.mutation.ClearProjectID()
 	return _u
 }
 
@@ -1108,11 +1108,11 @@ func (_u *GroupUpdateOne) sqlSave(ctx context.Context) (_node *Group, err error)
 	if value, ok := _u.mutation.GroupType(); ok {
 		_spec.SetField(group.FieldGroupType, field.TypeEnum, value)
 	}
-	if value, ok := _u.mutation.GroveID(); ok {
-		_spec.SetField(group.FieldGroveID, field.TypeUUID, value)
+	if value, ok := _u.mutation.ProjectID(); ok {
+		_spec.SetField(group.FieldProjectID, field.TypeUUID, value)
 	}
-	if _u.mutation.GroveIDCleared() {
-		_spec.ClearField(group.FieldGroveID, field.TypeUUID)
+	if _u.mutation.ProjectIDCleared() {
+		_spec.ClearField(group.FieldProjectID, field.TypeUUID)
 	}
 	if value, ok := _u.mutation.Labels(); ok {
 		_spec.SetField(group.FieldLabels, field.TypeJSON, value)

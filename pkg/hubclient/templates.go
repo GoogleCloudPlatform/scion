@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/url"
 	"time"
@@ -68,13 +69,13 @@ type templateService struct {
 
 // ListTemplatesOptions configures template list filtering.
 type ListTemplatesOptions struct {
-	Name    string // Filter by exact template name
-	Search  string // Full-text search on name/description
-	Scope   string // Filter by scope (global, grove, user)
-	GroveID string // Filter by grove
-	Harness string // Filter by harness type
-	Status  string // Filter by status (active, archived)
-	Page    apiclient.PageOptions
+	Name      string // Filter by exact template name
+	Search    string // Full-text search on name/description
+	Scope     string // Filter by scope (global, project, user)
+	ProjectID string // Filter by project
+	Harness   string // Filter by harness type
+	Status    string // Filter by status (active, archived)
+	Page      apiclient.PageOptions
 }
 
 // ListTemplatesResponse is the response from listing templates.
@@ -88,9 +89,39 @@ type CreateTemplateRequest struct {
 	Name       string          `json:"name"`
 	Harness    string          `json:"harness,omitempty"`
 	Scope      string          `json:"scope"`
-	GroveID    string          `json:"groveId,omitempty"`
+	ProjectID  string          `json:"projectId,omitempty"`
 	Config     *TemplateConfig `json:"config,omitempty"`
 	Visibility string          `json:"visibility,omitempty"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (r *CreateTemplateRequest) UnmarshalJSON(data []byte) error {
+	type Alias CreateTemplateRequest
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (r CreateTemplateRequest) MarshalJSON() ([]byte, error) {
+	type Alias CreateTemplateRequest
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(r),
+		GroveID: r.ProjectID,
+	})
 }
 
 // UpdateTemplateRequest is the request for updating a template.
@@ -102,9 +133,39 @@ type UpdateTemplateRequest struct {
 
 // CloneTemplateRequest is the request for cloning a template.
 type CloneTemplateRequest struct {
-	Name    string `json:"name"`
-	Scope   string `json:"scope"`
-	GroveID string `json:"groveId,omitempty"`
+	Name      string `json:"name"`
+	Scope     string `json:"scope"`
+	ProjectID string `json:"projectId"`
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (r *CloneTemplateRequest) UnmarshalJSON(data []byte) error {
+	type Alias CloneTemplateRequest
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ProjectID == "" && aux.GroveID != "" {
+		r.ProjectID = aux.GroveID
+	}
+	return nil
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (r CloneTemplateRequest) MarshalJSON() ([]byte, error) {
+	type Alias CloneTemplateRequest
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId,omitempty"`
+	}{
+		Alias:   Alias(r),
+		GroveID: r.ProjectID,
+	})
 }
 
 // FileUploadRequest describes a file to upload.
@@ -175,8 +236,9 @@ func (s *templateService) List(ctx context.Context, opts *ListTemplatesOptions) 
 		if opts.Scope != "" {
 			query.Set("scope", opts.Scope)
 		}
-		if opts.GroveID != "" {
-			query.Set("groveId", opts.GroveID)
+		if opts.ProjectID != "" {
+			query.Set("projectId", opts.ProjectID)
+			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.Harness != "" {
 			query.Set("harness", opts.Harness)
@@ -187,7 +249,7 @@ func (s *templateService) List(ctx context.Context, opts *ListTemplatesOptions) 
 		opts.Page.ToQuery(query)
 	}
 
-	resp, err := s.c.transport.GetWithQuery(ctx, "/api/v1/templates", query, nil)
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/templates", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +276,7 @@ func (s *templateService) List(ctx context.Context, opts *ListTemplatesOptions) 
 
 // Get returns a single template by ID.
 func (s *templateService) Get(ctx context.Context, templateID string) (*Template, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/templates/"+templateID, nil)
+	resp, err := s.c.get(ctx, "/api/v1/templates/"+templateID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +285,7 @@ func (s *templateService) Get(ctx context.Context, templateID string) (*Template
 
 // Create creates a new template.
 func (s *templateService) Create(ctx context.Context, req *CreateTemplateRequest) (*CreateTemplateResponse, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/templates", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/templates", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +294,7 @@ func (s *templateService) Create(ctx context.Context, req *CreateTemplateRequest
 
 // Update updates a template.
 func (s *templateService) Update(ctx context.Context, templateID string, req *UpdateTemplateRequest) (*Template, error) {
-	resp, err := s.c.transport.Patch(ctx, "/api/v1/templates/"+templateID, req, nil)
+	resp, err := s.c.patch(ctx, "/api/v1/templates/"+templateID, req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -241,7 +303,7 @@ func (s *templateService) Update(ctx context.Context, templateID string, req *Up
 
 // Delete removes a template.
 func (s *templateService) Delete(ctx context.Context, templateID string) error {
-	resp, err := s.c.transport.Delete(ctx, "/api/v1/templates/"+templateID, nil)
+	resp, err := s.c.delete(ctx, "/api/v1/templates/"+templateID, nil)
 	if err != nil {
 		return err
 	}
@@ -250,7 +312,7 @@ func (s *templateService) Delete(ctx context.Context, templateID string) error {
 
 // Clone creates a copy of a template.
 func (s *templateService) Clone(ctx context.Context, templateID string, req *CloneTemplateRequest) (*Template, error) {
-	resp, err := s.c.transport.Post(ctx, "/api/v1/templates/"+templateID+"/clone", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/templates/"+templateID+"/clone", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +326,7 @@ func (s *templateService) RequestUploadURLs(ctx context.Context, templateID stri
 	}{
 		Files: files,
 	}
-	resp, err := s.c.transport.Post(ctx, "/api/v1/templates/"+templateID+"/upload", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/templates/"+templateID+"/upload", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +338,7 @@ func (s *templateService) Finalize(ctx context.Context, templateID string, manif
 	req := FinalizeRequest{
 		Manifest: manifest,
 	}
-	resp, err := s.c.transport.Post(ctx, "/api/v1/templates/"+templateID+"/finalize", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/templates/"+templateID+"/finalize", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +347,7 @@ func (s *templateService) Finalize(ctx context.Context, templateID string, manif
 
 // RequestDownloadURLs requests signed URLs for downloading template files.
 func (s *templateService) RequestDownloadURLs(ctx context.Context, templateID string) (*DownloadResponse, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/templates/"+templateID+"/download", nil)
+	resp, err := s.c.get(ctx, "/api/v1/templates/"+templateID+"/download", nil)
 	if err != nil {
 		return nil, err
 	}

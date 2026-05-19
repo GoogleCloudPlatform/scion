@@ -200,6 +200,9 @@ func loadConfig(path string) (*bridge.Config, error) {
 	var missing []string
 	expanded := os.Expand(string(data), func(name string) string {
 		v, ok := os.LookupEnv(name)
+		if !ok && name == "SCION_PROJECT_ID" {
+			v, ok = os.LookupEnv("SCION_GROVE_ID")
+		}
 		if !ok {
 			missing = append(missing, name)
 		}
@@ -212,6 +215,11 @@ func loadConfig(path string) (*bridge.Config, error) {
 	var cfg bridge.Config
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+
+	// Backward compatibility: merge legacy 'groves' into 'projects' if 'projects' is empty.
+	if len(cfg.Projects) == 0 && len(cfg.Groves) > 0 {
+		cfg.Projects = cfg.Groves
 	}
 
 	if cfg.Timeouts.SendMessage == 0 {

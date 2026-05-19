@@ -10,7 +10,7 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/grove"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/google/uuid"
 )
@@ -26,8 +26,8 @@ type Agent struct {
 	Name string `json:"name,omitempty"`
 	// Template holds the value of the "template" field.
 	Template string `json:"template,omitempty"`
-	// GroveID holds the value of the "grove_id" field.
-	GroveID uuid.UUID `json:"grove_id,omitempty"`
+	// ProjectID holds the value of the "project_id" field.
+	ProjectID uuid.UUID `json:"project_id,omitempty"`
 	// Status holds the value of the "status" field.
 	Status agent.Status `json:"status,omitempty"`
 	// CreatedBy holds the value of the "created_by" field.
@@ -50,8 +50,8 @@ type Agent struct {
 
 // AgentEdges holds the relations/edges for other nodes in the graph.
 type AgentEdges struct {
-	// Grove holds the value of the grove edge.
-	Grove *Grove `json:"grove,omitempty"`
+	// Project holds the value of the project edge.
+	Project *Project `json:"project,omitempty"`
 	// Creator holds the value of the creator edge.
 	Creator *User `json:"creator,omitempty"`
 	// Owner holds the value of the owner edge.
@@ -65,15 +65,15 @@ type AgentEdges struct {
 	loadedTypes [5]bool
 }
 
-// GroveOrErr returns the Grove value or an error if the edge
+// ProjectOrErr returns the Project value or an error if the edge
 // was not loaded in eager-loading, or loaded but was not found.
-func (e AgentEdges) GroveOrErr() (*Grove, error) {
-	if e.Grove != nil {
-		return e.Grove, nil
+func (e AgentEdges) ProjectOrErr() (*Project, error) {
+	if e.Project != nil {
+		return e.Project, nil
 	} else if e.loadedTypes[0] {
-		return nil, &NotFoundError{label: grove.Label}
+		return nil, &NotFoundError{label: project.Label}
 	}
-	return nil, &NotLoadedError{edge: "grove"}
+	return nil, &NotLoadedError{edge: "project"}
 }
 
 // CreatorOrErr returns the Creator value or an error if the edge
@@ -129,7 +129,7 @@ func (*Agent) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullString)
 		case agent.FieldCreated, agent.FieldUpdated:
 			values[i] = new(sql.NullTime)
-		case agent.FieldID, agent.FieldGroveID:
+		case agent.FieldID, agent.FieldProjectID:
 			values[i] = new(uuid.UUID)
 		default:
 			values[i] = new(sql.UnknownType)
@@ -170,11 +170,11 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.Template = value.String
 			}
-		case agent.FieldGroveID:
+		case agent.FieldProjectID:
 			if value, ok := values[i].(*uuid.UUID); !ok {
-				return fmt.Errorf("unexpected type %T for field grove_id", values[i])
+				return fmt.Errorf("unexpected type %T for field project_id", values[i])
 			} else if value != nil {
-				_m.GroveID = *value
+				_m.ProjectID = *value
 			}
 		case agent.FieldStatus:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -233,9 +233,9 @@ func (_m *Agent) Value(name string) (ent.Value, error) {
 	return _m.selectValues.Get(name)
 }
 
-// QueryGrove queries the "grove" edge of the Agent entity.
-func (_m *Agent) QueryGrove() *GroveQuery {
-	return NewAgentClient(_m.config).QueryGrove(_m)
+// QueryProject queries the "project" edge of the Agent entity.
+func (_m *Agent) QueryProject() *ProjectQuery {
+	return NewAgentClient(_m.config).QueryProject(_m)
 }
 
 // QueryCreator queries the "creator" edge of the Agent entity.
@@ -290,8 +290,8 @@ func (_m *Agent) String() string {
 	builder.WriteString("template=")
 	builder.WriteString(_m.Template)
 	builder.WriteString(", ")
-	builder.WriteString("grove_id=")
-	builder.WriteString(fmt.Sprintf("%v", _m.GroveID))
+	builder.WriteString("project_id=")
+	builder.WriteString(fmt.Sprintf("%v", _m.ProjectID))
 	builder.WriteString(", ")
 	builder.WriteString("status=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Status))

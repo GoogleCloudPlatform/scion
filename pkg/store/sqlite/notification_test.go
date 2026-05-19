@@ -29,38 +29,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// createTestGroveAndAgent is a helper that creates a grove and agent for notification tests.
-func createTestGroveAndAgent(t *testing.T, s *SQLiteStore) (groveID, agentID string) {
+// createTestProjectAndAgent is a helper that creates a project and agent for notification tests.
+func createTestProjectAndAgent(t *testing.T, s *SQLiteStore) (projectID, agentID string) {
 	t.Helper()
 	ctx := context.Background()
 
-	groveID = api.NewUUID()
-	grove := &store.Grove{
-		ID:         groveID,
-		Name:       "Notification Test Grove",
-		Slug:       "notif-grove-" + groveID[:8],
+	projectID = api.NewUUID()
+	project := &store.Project{
+		ID:         projectID,
+		Name:       "Notification Test Project",
+		Slug:       "notif-project-" + projectID[:8],
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	agentID = api.NewUUID()
 	agent := &store.Agent{
 		ID:         agentID,
 		Slug:       "notif-agent-" + agentID[:8],
 		Name:       "Notification Test Agent",
-		GroveID:    groveID,
+		ProjectID:  projectID,
 		Phase:      string(state.PhaseRunning),
 		Visibility: store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	return groveID, agentID
+	return projectID, agentID
 }
 
 func TestNotificationSubscriptionCRUD(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID, agentID := createTestGroveAndAgent(t, s)
+	projectID, agentID := createTestProjectAndAgent(t, s)
 
 	subID := uuid.New().String()
 	sub := &store.NotificationSubscription{
@@ -69,7 +69,7 @@ func TestNotificationSubscriptionCRUD(t *testing.T) {
 		AgentID:           agentID,
 		SubscriberType:    store.SubscriberTypeAgent,
 		SubscriberID:      "lead-agent",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED"},
 		CreatedBy:         "lead-agent",
 	}
@@ -101,11 +101,11 @@ func TestNotificationSubscriptionCRUD(t *testing.T) {
 	assert.Equal(t, agentID, subs[0].AgentID)
 	assert.Equal(t, store.SubscriberTypeAgent, subs[0].SubscriberType)
 	assert.Equal(t, "lead-agent", subs[0].SubscriberID)
-	assert.Equal(t, groveID, subs[0].GroveID)
+	assert.Equal(t, projectID, subs[0].ProjectID)
 	assert.Equal(t, []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED"}, subs[0].TriggerActivities)
 
-	// Get by grove
-	subs, err = s.GetNotificationSubscriptionsByGrove(ctx, groveID)
+	// Get by project
+	subs, err = s.GetNotificationSubscriptionsByProject(ctx, projectID)
 	require.NoError(t, err)
 	require.Len(t, subs, 1)
 	assert.Equal(t, subID, subs[0].ID)
@@ -127,7 +127,7 @@ func TestNotificationSubscriptionCRUD(t *testing.T) {
 func TestNotificationSubscriptionScopeDefault(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID, agentID := createTestGroveAndAgent(t, s)
+	projectID, agentID := createTestProjectAndAgent(t, s)
 
 	// Create subscription without explicit scope — should default to "agent"
 	sub := &store.NotificationSubscription{
@@ -135,7 +135,7 @@ func TestNotificationSubscriptionScopeDefault(t *testing.T) {
 		AgentID:           agentID,
 		SubscriberType:    store.SubscriberTypeAgent,
 		SubscriberID:      "default-scope-agent",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedBy:         "test",
 	}
@@ -147,46 +147,46 @@ func TestNotificationSubscriptionScopeDefault(t *testing.T) {
 	assert.Equal(t, store.SubscriptionScopeAgent, got.Scope)
 }
 
-func TestGroveScopedSubscription(t *testing.T) {
+func TestProjectScopedSubscription(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID, agentID := createTestGroveAndAgent(t, s)
+	projectID, agentID := createTestProjectAndAgent(t, s)
 
-	// Create a grove-scoped subscription
-	groveSub := &store.NotificationSubscription{
+	// Create a project-scoped subscription
+	projectSub := &store.NotificationSubscription{
 		ID:                uuid.New().String(),
-		Scope:             store.SubscriptionScopeGrove,
+		Scope:             store.SubscriptionScopeProject,
 		SubscriberType:    store.SubscriberTypeUser,
-		SubscriberID:      "user-grove-watcher",
-		GroveID:           groveID,
+		SubscriberID:      "user-project-watcher",
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT"},
-		CreatedBy:         "user-grove-watcher",
+		CreatedBy:         "user-project-watcher",
 	}
-	require.NoError(t, s.CreateNotificationSubscription(ctx, groveSub))
+	require.NoError(t, s.CreateNotificationSubscription(ctx, projectSub))
 
-	// Create an agent-scoped subscription in the same grove
+	// Create an agent-scoped subscription in the same project
 	agentSub := &store.NotificationSubscription{
 		ID:                uuid.New().String(),
 		Scope:             store.SubscriptionScopeAgent,
 		AgentID:           agentID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "user-agent-watcher",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedBy:         "user-agent-watcher",
 	}
 	require.NoError(t, s.CreateNotificationSubscription(ctx, agentSub))
 
-	// GetNotificationSubscriptionsByGroveScope should return only grove-scoped
-	groveSubs, err := s.GetNotificationSubscriptionsByGroveScope(ctx, groveID)
+	// GetNotificationSubscriptionsByProjectScope should return only project-scoped
+	projectSubs, err := s.GetNotificationSubscriptionsByProjectScope(ctx, projectID)
 	require.NoError(t, err)
-	require.Len(t, groveSubs, 1)
-	assert.Equal(t, groveSub.ID, groveSubs[0].ID)
-	assert.Equal(t, store.SubscriptionScopeGrove, groveSubs[0].Scope)
-	assert.Empty(t, groveSubs[0].AgentID)
+	require.Len(t, projectSubs, 1)
+	assert.Equal(t, projectSub.ID, projectSubs[0].ID)
+	assert.Equal(t, store.SubscriptionScopeProject, projectSubs[0].Scope)
+	assert.Empty(t, projectSubs[0].AgentID)
 
-	// GetNotificationSubscriptionsByGrove should return both
-	allSubs, err := s.GetNotificationSubscriptionsByGrove(ctx, groveID)
+	// GetNotificationSubscriptionsByProject should return both
+	allSubs, err := s.GetNotificationSubscriptionsByProject(ctx, projectID)
 	require.NoError(t, err)
 	assert.Len(t, allSubs, 2)
 
@@ -200,15 +200,15 @@ func TestGroveScopedSubscription(t *testing.T) {
 func TestGetSubscriptionsForSubscriber(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID, agentID := createTestGroveAndAgent(t, s)
+	projectID, agentID := createTestProjectAndAgent(t, s)
 
-	// Create grove-scoped subscription for user
+	// Create project-scoped subscription for user
 	sub1 := &store.NotificationSubscription{
 		ID:                uuid.New().String(),
-		Scope:             store.SubscriptionScopeGrove,
+		Scope:             store.SubscriptionScopeProject,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "sub-user",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedBy:         "sub-user",
 	}
@@ -221,7 +221,7 @@ func TestGetSubscriptionsForSubscriber(t *testing.T) {
 		AgentID:           agentID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "sub-user",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedBy:         "sub-user",
 	}
@@ -234,7 +234,7 @@ func TestGetSubscriptionsForSubscriber(t *testing.T) {
 		AgentID:           agentID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "other-user",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedBy:         "other-user",
 	}
@@ -259,7 +259,7 @@ func TestGetSubscriptionsForSubscriber(t *testing.T) {
 func TestSubscriptionUniqueConstraint(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID, agentID := createTestGroveAndAgent(t, s)
+	projectID, agentID := createTestProjectAndAgent(t, s)
 
 	// Create first subscription
 	sub1 := &store.NotificationSubscription{
@@ -268,7 +268,7 @@ func TestSubscriptionUniqueConstraint(t *testing.T) {
 		AgentID:           agentID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "unique-user",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedBy:         "unique-user",
 	}
@@ -281,7 +281,7 @@ func TestSubscriptionUniqueConstraint(t *testing.T) {
 		AgentID:           agentID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "unique-user",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT"},
 		CreatedBy:         "unique-user",
 	}
@@ -291,29 +291,29 @@ func TestSubscriptionUniqueConstraint(t *testing.T) {
 	// Same subscriber with different scope should succeed
 	sub3 := &store.NotificationSubscription{
 		ID:                uuid.New().String(),
-		Scope:             store.SubscriptionScopeGrove,
+		Scope:             store.SubscriptionScopeProject,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "unique-user",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedBy:         "unique-user",
 	}
 	require.NoError(t, s.CreateNotificationSubscription(ctx, sub3))
 }
 
-func TestGroveScopedValidation(t *testing.T) {
+func TestProjectScopedValidation(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID, _ := createTestGroveAndAgent(t, s)
+	projectID, _ := createTestProjectAndAgent(t, s)
 
-	// grove-scoped with agent_id should clear agent_id
+	// project-scoped with agent_id should clear agent_id
 	sub := &store.NotificationSubscription{
 		ID:                uuid.New().String(),
-		Scope:             store.SubscriptionScopeGrove,
+		Scope:             store.SubscriptionScopeProject,
 		AgentID:           "should-be-cleared",
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "validation-user",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedBy:         "validation-user",
 	}
@@ -327,7 +327,7 @@ func TestGroveScopedValidation(t *testing.T) {
 		AgentID:           "",
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "validation-user2",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedBy:         "validation-user2",
 	}
@@ -346,7 +346,7 @@ func TestNotificationSubscriptionFKConstraint(t *testing.T) {
 		AgentID:           "non-existent-agent",
 		SubscriberType:    store.SubscriberTypeAgent,
 		SubscriberID:      "lead-agent",
-		GroveID:           "some-grove",
+		ProjectID:         "some-project",
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedBy:         "lead-agent",
 	}
@@ -359,7 +359,7 @@ func TestNotificationSubscriptionFKConstraint(t *testing.T) {
 func TestNotificationSubscriptionCascadeDelete(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID, agentID := createTestGroveAndAgent(t, s)
+	projectID, agentID := createTestProjectAndAgent(t, s)
 
 	// Create subscription
 	subID := uuid.New().String()
@@ -369,7 +369,7 @@ func TestNotificationSubscriptionCascadeDelete(t *testing.T) {
 		AgentID:           agentID,
 		SubscriberType:    store.SubscriberTypeAgent,
 		SubscriberID:      "lead-agent",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedBy:         "lead-agent",
 	}
@@ -381,7 +381,7 @@ func TestNotificationSubscriptionCascadeDelete(t *testing.T) {
 		ID:             notifID,
 		SubscriptionID: subID,
 		AgentID:        agentID,
-		GroveID:        groveID,
+		ProjectID:      projectID,
 		SubscriberType: store.SubscriberTypeAgent,
 		SubscriberID:   "lead-agent",
 		Status:         "COMPLETED",
@@ -412,7 +412,7 @@ func TestNotificationSubscriptionCascadeDelete(t *testing.T) {
 func TestBulkDeleteSubscriptions(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID, agentID := createTestGroveAndAgent(t, s)
+	projectID, agentID := createTestProjectAndAgent(t, s)
 
 	// Create multiple subscriptions
 	for i := 0; i < 3; i++ {
@@ -422,7 +422,7 @@ func TestBulkDeleteSubscriptions(t *testing.T) {
 			AgentID:           agentID,
 			SubscriberType:    store.SubscriberTypeAgent,
 			SubscriberID:      "subscriber-" + uuid.New().String()[:8],
-			GroveID:           groveID,
+			ProjectID:         projectID,
 			TriggerActivities: []string{"COMPLETED"},
 			CreatedBy:         "test",
 		}
@@ -451,7 +451,7 @@ func TestBulkDeleteSubscriptions(t *testing.T) {
 func TestNotificationCRUD(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID, agentID := createTestGroveAndAgent(t, s)
+	projectID, agentID := createTestProjectAndAgent(t, s)
 
 	// Create subscription first
 	subID := uuid.New().String()
@@ -461,7 +461,7 @@ func TestNotificationCRUD(t *testing.T) {
 		AgentID:           agentID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "user-123",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT"},
 		CreatedBy:         "user-123",
 	}
@@ -473,7 +473,7 @@ func TestNotificationCRUD(t *testing.T) {
 		ID:             notifID,
 		SubscriptionID: subID,
 		AgentID:        agentID,
-		GroveID:        groveID,
+		ProjectID:      projectID,
 		SubscriberType: store.SubscriberTypeUser,
 		SubscriberID:   "user-123",
 		Status:         "COMPLETED",
@@ -513,7 +513,7 @@ func TestNotificationCRUD(t *testing.T) {
 func TestNotificationFiltering(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID, agentID := createTestGroveAndAgent(t, s)
+	projectID, agentID := createTestProjectAndAgent(t, s)
 
 	subID := uuid.New().String()
 	sub := &store.NotificationSubscription{
@@ -522,7 +522,7 @@ func TestNotificationFiltering(t *testing.T) {
 		AgentID:           agentID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "filter-user",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedBy:         "filter-user",
 	}
@@ -533,7 +533,7 @@ func TestNotificationFiltering(t *testing.T) {
 		ID:             uuid.New().String(),
 		SubscriptionID: subID,
 		AgentID:        agentID,
-		GroveID:        groveID,
+		ProjectID:      projectID,
 		SubscriberType: store.SubscriberTypeUser,
 		SubscriberID:   "filter-user",
 		Status:         "COMPLETED",
@@ -544,7 +544,7 @@ func TestNotificationFiltering(t *testing.T) {
 		ID:             uuid.New().String(),
 		SubscriptionID: subID,
 		AgentID:        agentID,
-		GroveID:        groveID,
+		ProjectID:      projectID,
 		SubscriberType: store.SubscriberTypeUser,
 		SubscriberID:   "filter-user",
 		Status:         "COMPLETED",
@@ -574,7 +574,7 @@ func TestNotificationFiltering(t *testing.T) {
 func TestMarkNotificationDispatched(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID, agentID := createTestGroveAndAgent(t, s)
+	projectID, agentID := createTestProjectAndAgent(t, s)
 
 	subID := uuid.New().String()
 	sub := &store.NotificationSubscription{
@@ -583,7 +583,7 @@ func TestMarkNotificationDispatched(t *testing.T) {
 		AgentID:           agentID,
 		SubscriberType:    store.SubscriberTypeAgent,
 		SubscriberID:      "dispatch-target",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedBy:         "test",
 	}
@@ -594,7 +594,7 @@ func TestMarkNotificationDispatched(t *testing.T) {
 		ID:             notifID,
 		SubscriptionID: subID,
 		AgentID:        agentID,
-		GroveID:        groveID,
+		ProjectID:      projectID,
 		SubscriberType: store.SubscriberTypeAgent,
 		SubscriberID:   "dispatch-target",
 		Status:         "COMPLETED",
@@ -626,7 +626,7 @@ func TestMarkNotificationDispatched(t *testing.T) {
 func TestAcknowledgeAllNotifications(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID, agentID := createTestGroveAndAgent(t, s)
+	projectID, agentID := createTestProjectAndAgent(t, s)
 
 	subID := uuid.New().String()
 	sub := &store.NotificationSubscription{
@@ -635,7 +635,7 @@ func TestAcknowledgeAllNotifications(t *testing.T) {
 		AgentID:           agentID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "ack-all-user",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedBy:         "ack-all-user",
 	}
@@ -647,7 +647,7 @@ func TestAcknowledgeAllNotifications(t *testing.T) {
 			ID:             uuid.New().String(),
 			SubscriptionID: subID,
 			AgentID:        agentID,
-			GroveID:        groveID,
+			ProjectID:      projectID,
 			SubscriberType: store.SubscriberTypeUser,
 			SubscriberID:   "ack-all-user",
 			Status:         "COMPLETED",
@@ -683,7 +683,7 @@ func TestAcknowledgeAllNotifications(t *testing.T) {
 func TestGetLastNotificationStatus(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
-	groveID, agentID := createTestGroveAndAgent(t, s)
+	projectID, agentID := createTestProjectAndAgent(t, s)
 
 	subID := uuid.New().String()
 	sub := &store.NotificationSubscription{
@@ -692,7 +692,7 @@ func TestGetLastNotificationStatus(t *testing.T) {
 		AgentID:           agentID,
 		SubscriberType:    store.SubscriberTypeAgent,
 		SubscriberID:      "last-status-agent",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT"},
 		CreatedBy:         "test",
 	}
@@ -708,7 +708,7 @@ func TestGetLastNotificationStatus(t *testing.T) {
 		ID:             uuid.New().String(),
 		SubscriptionID: subID,
 		AgentID:        agentID,
-		GroveID:        groveID,
+		ProjectID:      projectID,
 		SubscriberType: store.SubscriberTypeAgent,
 		SubscriberID:   "last-status-agent",
 		Status:         "WAITING_FOR_INPUT",
@@ -726,7 +726,7 @@ func TestGetLastNotificationStatus(t *testing.T) {
 		ID:             uuid.New().String(),
 		SubscriptionID: subID,
 		AgentID:        agentID,
-		GroveID:        groveID,
+		ProjectID:      projectID,
 		SubscriberType: store.SubscriberTypeAgent,
 		SubscriberID:   "last-status-agent",
 		Status:         "COMPLETED",
@@ -772,14 +772,14 @@ func TestGetNotificationsByAgent(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// Create grove and two agents
-	groveID, agent1ID := createTestGroveAndAgent(t, s)
+	// Create project and two agents
+	projectID, agent1ID := createTestProjectAndAgent(t, s)
 	agent2ID := api.NewUUID()
 	agent2 := &store.Agent{
 		ID:         agent2ID,
 		Slug:       "notif-agent2-" + agent2ID[:8],
 		Name:       "Second Agent",
-		GroveID:    groveID,
+		ProjectID:  projectID,
 		Phase:      string(state.PhaseRunning),
 		Visibility: store.VisibilityPrivate,
 	}
@@ -793,7 +793,7 @@ func TestGetNotificationsByAgent(t *testing.T) {
 		AgentID:           agent1ID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "user-by-agent",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedBy:         "user-by-agent",
 	}
@@ -806,7 +806,7 @@ func TestGetNotificationsByAgent(t *testing.T) {
 		AgentID:           agent2ID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      "user-by-agent",
-		GroveID:           groveID,
+		ProjectID:         projectID,
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedBy:         "user-by-agent",
 	}
@@ -817,7 +817,7 @@ func TestGetNotificationsByAgent(t *testing.T) {
 		ID:             uuid.New().String(),
 		SubscriptionID: sub1ID,
 		AgentID:        agent1ID,
-		GroveID:        groveID,
+		ProjectID:      projectID,
 		SubscriberType: store.SubscriberTypeUser,
 		SubscriberID:   "user-by-agent",
 		Status:         "COMPLETED",
@@ -828,7 +828,7 @@ func TestGetNotificationsByAgent(t *testing.T) {
 		ID:             uuid.New().String(),
 		SubscriptionID: sub1ID,
 		AgentID:        agent1ID,
-		GroveID:        groveID,
+		ProjectID:      projectID,
 		SubscriberType: store.SubscriberTypeUser,
 		SubscriberID:   "user-by-agent",
 		Status:         "COMPLETED",
@@ -844,7 +844,7 @@ func TestGetNotificationsByAgent(t *testing.T) {
 		ID:             uuid.New().String(),
 		SubscriptionID: sub2ID,
 		AgentID:        agent2ID,
-		GroveID:        groveID,
+		ProjectID:      projectID,
 		SubscriberType: store.SubscriberTypeUser,
 		SubscriberID:   "user-by-agent",
 		Status:         "COMPLETED",

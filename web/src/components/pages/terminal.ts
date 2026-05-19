@@ -74,7 +74,7 @@ export class ScionPageTerminal extends LitElement {
   private agentName = '';
 
   @state()
-  private groveId = '';
+  private projectId = '';
 
   @state()
   private loading = true;
@@ -324,7 +324,7 @@ export class ScionPageTerminal extends LitElement {
 
       const agent = (await response.json()) as Agent;
       this.agentName = agent.name;
-      this.groveId = agent.groveId ?? '';
+      this.projectId = agent.projectId ?? '';
       this.agentPhase = agent.phase;
       this.agentActivity = agent.activity ?? '';
       dispatchPageTitle(this, 'Terminal', agent.name || this.agentId);
@@ -727,7 +727,7 @@ export class ScionPageTerminal extends LitElement {
     if (this.loading) {
       return html`
         <div class="toolbar">
-          ${this.groveId ? html`<a href="/groves/${this.groveId}" class="back-link">&larr; Back to Grove</a>` : ''}
+          ${this.projectId ? html`<a href="/projects/${this.projectId}" class="back-link">&larr; Back to Project</a>` : ''}
           <a href="/agents/${this.agentId}" class="back-link">
             &larr; Back to Agent
           </a>
@@ -742,7 +742,7 @@ export class ScionPageTerminal extends LitElement {
     if (this.error && !this.terminal) {
       return html`
         <div class="toolbar">
-          ${this.groveId ? html`<a href="/groves/${this.groveId}" class="back-link">&larr; Back to Grove</a>` : ''}
+          ${this.projectId ? html`<a href="/projects/${this.projectId}" class="back-link">&larr; Back to Project</a>` : ''}
           <a href="/agents/${this.agentId}" class="back-link">
             &larr; Back to Agent
           </a>
@@ -763,7 +763,7 @@ export class ScionPageTerminal extends LitElement {
 
     return html`
       <div class="toolbar">
-        ${this.groveId ? html`<a href="/groves/${this.groveId}" class="back-link">&larr; Back to Grove</a>` : ''}
+        ${this.projectId ? html`<a href="/projects/${this.projectId}" class="back-link">&larr; Back to Project</a>` : ''}
         <a href="/agents/${this.agentId}" class="back-link">
           &larr; Back to Agent
         </a>

@@ -211,7 +211,7 @@ func TestWorkspaceGetStatus(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(WorkspaceStatusResponse{
 			Slug:       "agent-status",
-			GroveID:    "grove-xyz",
+			ProjectID:  "grove-xyz",
 			StorageURI: "gs://bucket/workspaces/grove-xyz/agent-status/",
 			LastSync: &WorkspaceSyncInfo{
 				Direction:   "from",
@@ -232,8 +232,8 @@ func TestWorkspaceGetStatus(t *testing.T) {
 	if resp.Slug != "agent-status" {
 		t.Errorf("expected agent ID 'agent-status', got %q", resp.Slug)
 	}
-	if resp.GroveID != "grove-xyz" {
-		t.Errorf("expected grove ID 'grove-xyz', got %q", resp.GroveID)
+	if resp.ProjectID != "grove-xyz" {
+		t.Errorf("expected project ID 'grove-xyz', got %q", resp.ProjectID)
 	}
 	if resp.StorageURI == "" {
 		t.Error("expected non-empty storage URI")
@@ -509,8 +509,8 @@ func TestWorkspaceGetStatus_NoLastSync(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(WorkspaceStatusResponse{
 			Slug:       "agent-new",
-			GroveID:    "grove-1",
-			StorageURI: "gs://bucket/workspaces/grove-1/agent-new/",
+			ProjectID:  "project-1",
+			StorageURI: "gs://bucket/workspaces/project-1/agent-new/",
 			LastSync:   nil, // No sync yet
 		})
 	}))

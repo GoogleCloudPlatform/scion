@@ -157,7 +157,7 @@ func TestUnifiedAuthMiddleware_AgentToken(t *testing.T) {
 		t.Fatalf("failed to create agent token service: %v", err)
 	}
 
-	agentToken, err := agentTokenSvc.GenerateAgentToken("agent-456", "grove-789", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	agentToken, err := agentTokenSvc.GenerateAgentToken("agent-456", "project-789", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
@@ -351,7 +351,7 @@ func TestIdentityFromContext(t *testing.T) {
 	t.Run("agent identity", func(t *testing.T) {
 		agent := &AgentTokenClaims{}
 		agent.Subject = "agent-123"
-		agent.GroveID = "grove-456"
+		agent.ProjectID = "project-456"
 		ctx := context.WithValue(context.Background(), agentContextKey{}, agent)
 		identity := GetIdentityFromContext(ctx)
 		if identity == nil {

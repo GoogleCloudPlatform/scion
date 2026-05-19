@@ -25,7 +25,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import type { Grove } from '../../shared/types.js';
+import type { Project } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 
@@ -33,7 +33,7 @@ interface AccessToken {
   id: string;
   name: string;
   prefix: string;
-  groveId: string;
+  projectId: string;
   scopes: string[];
   revoked: boolean;
   expiresAt?: string | null;
@@ -42,10 +42,10 @@ interface AccessToken {
 }
 
 const AVAILABLE_SCOPES = [
-  { value: 'grove:read', label: 'grove:read', description: 'Read grove metadata' },
+  { value: 'project:read', label: 'project:read', description: 'Read project metadata' },
   { value: 'agent:dispatch', label: 'agent:dispatch', description: 'Dispatch agents (create + start)' },
   { value: 'agent:read', label: 'agent:read', description: 'Read agent status/metadata' },
-  { value: 'agent:list', label: 'agent:list', description: 'List agents in the grove' },
+  { value: 'agent:list', label: 'agent:list', description: 'List agents in the project' },
   { value: 'agent:create', label: 'agent:create', description: 'Create agents' },
   { value: 'agent:start', label: 'agent:start', description: 'Start/restart agents' },
   { value: 'agent:stop', label: 'agent:stop', description: 'Stop agents' },
@@ -59,13 +59,13 @@ const AVAILABLE_SCOPES = [
 export class ScionTokenList extends LitElement {
   @state() private loading = true;
   @state() private tokens: AccessToken[] = [];
-  @state() private groves: Grove[] = [];
+  @state() private projects: Project[] = [];
   @state() private error: string | null = null;
 
   // Create dialog
   @state() private createDialogOpen = false;
   @state() private createName = '';
-  @state() private createGroveId = '';
+  @state() private createProjectId = '';
   @state() private createScopes: Set<string> = new Set();
   @state() private createExpiry = '90';
   @state() private createLoading = false;
@@ -201,7 +201,7 @@ export class ScionTokenList extends LitElement {
         margin-bottom: 0.375rem;
       }
 
-      .grove-name {
+      .project-name {
         font-size: 0.8125rem;
         color: var(--scion-text-muted, #64748b);
       }
@@ -222,23 +222,23 @@ export class ScionTokenList extends LitElement {
     this.error = null;
 
     try {
-      const [tokensRes, grovesRes] = await Promise.all([
+      const [tokensRes, projectsRes] = await Promise.all([
         apiFetch('/api/v1/auth/tokens'),
-        apiFetch('/api/v1/groves'),
+        apiFetch('/api/v1/projects'),
       ]);
 
       if (!tokensRes.ok) {
         throw new Error(await extractApiError(tokensRes, 'Failed to load tokens'));
       }
-      if (!grovesRes.ok) {
-        throw new Error(await extractApiError(grovesRes, 'Failed to load groves'));
+      if (!projectsRes.ok) {
+        throw new Error(await extractApiError(projectsRes, 'Failed to load projects'));
       }
 
       const tokensData = (await tokensRes.json()) as { items?: AccessToken[] };
-      const grovesData = (await grovesRes.json()) as { groves?: Grove[] };
+      const projectsData = (await projectsRes.json()) as { projects?: Project[] };
 
       this.tokens = tokensData.items || [];
-      this.groves = grovesData.groves || [];
+      this.projects = projectsData.projects || [];
     } catch (err) {
       console.error('Failed to load token data:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load data';
@@ -247,9 +247,9 @@ export class ScionTokenList extends LitElement {
     }
   }
 
-  private getGroveName(groveId: string): string {
-    const grove = this.groves.find((g) => g.id === groveId);
-    return grove?.name || grove?.slug || groveId;
+  private getProjectName(projectId: string): string {
+    const project = this.projects.find((p) => p.id === projectId);
+    return project?.name || project?.slug || projectId;
   }
 
   private getTokenStatus(token: AccessToken): 'revoked' | 'expired' | 'active' {
@@ -262,7 +262,7 @@ export class ScionTokenList extends LitElement {
 
   private openCreateDialog(): void {
     this.createName = '';
-    this.createGroveId = this.groves.length === 1 ? this.groves[0].id : '';
+    this.createProjectId = this.projects.length === 1 ? this.projects[0].id : '';
     this.createScopes = new Set();
     this.createExpiry = '90';
     this.createError = null;
@@ -291,10 +291,11 @@ export class ScionTokenList extends LitElement {
       this.createError = 'Name is required';
       return;
     }
-    if (!this.createGroveId) {
-      this.createError = 'Grove is required';
+    if (!this.createProjectId) {
+      this.createError = 'Project is required';
       return;
     }
+
     if (this.createScopes.size === 0) {
       this.createError = 'At least one scope is required';
       return;
@@ -313,7 +314,7 @@ export class ScionTokenList extends LitElement {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name,
-          groveId: this.createGroveId,
+          projectId: this.createProjectId,
           scopes: Array.from(this.createScopes),
           expiresAt: expiresAt.toISOString(),
         }),
@@ -498,7 +499,7 @@ export class ScionTokenList extends LitElement {
         <h3>No Access Tokens</h3>
         <p>
           Create personal access tokens to authenticate CI/CD pipelines
-          and automation tools with your groves.
+          and automation tools with your projects.
         </p>
         <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
           <sl-icon slot="prefix" name="plus-lg"></sl-icon>
@@ -516,7 +517,7 @@ export class ScionTokenList extends LitElement {
             <tr>
               <th>Name</th>
               <th>Status</th>
-              <th class="hide-mobile">Grove</th>
+              <th class="hide-mobile">Project</th>
               <th class="hide-mobile">Scopes</th>
               <th class="hide-mobile">Created</th>
               <th class="hide-mobile">Last Used</th>
@@ -545,7 +546,7 @@ export class ScionTokenList extends LitElement {
             </div>
             <div>
               ${token.name}
-              <div class="grove-name">${token.prefix}</div>
+              <div class="project-name">${token.prefix}</div>
             </div>
           </div>
         </td>
@@ -557,7 +558,7 @@ export class ScionTokenList extends LitElement {
               : html`<span class="status-active">Active</span>`}
         </td>
         <td class="hide-mobile">
-          <span class="grove-name">${this.getGroveName(token.groveId)}</span>
+          <span class="project-name">${this.getProjectName(token.projectId)}</span>
         </td>
         <td class="hide-mobile">
           <div class="scopes-cell">
@@ -620,17 +621,18 @@ export class ScionTokenList extends LitElement {
           ></sl-input>
 
           <sl-select
-            label="Grove"
-            placeholder="Select a grove"
-            value=${this.createGroveId}
+            label="Project"
+            placeholder="Select a project"
+            value=${this.createProjectId}
             @sl-change=${(e: Event) => {
-              this.createGroveId = (e.target as HTMLSelectElement).value;
+              this.createProjectId = (e.target as HTMLSelectElement).value;
             }}
             required
           >
-            ${this.groves.map(
-              (grove) =>
-                html`<sl-option value=${grove.id}>${grove.name || grove.slug || grove.id}</sl-option>`
+
+            ${this.projects.map(
+              (project) =>
+                html`<sl-option value=${project.id}>${project.name || project.slug || project.id}</sl-option>`
             )}
           </sl-select>
 

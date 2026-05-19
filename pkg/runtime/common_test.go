@@ -1310,7 +1310,7 @@ func TestWriteFileSecrets_DeduplicatesByTarget(t *testing.T) {
 // from .design/hub-shared-workspace-isolation.md: when an agent is launched
 // in a shared-workspace grove (workspace == repo root), the assembled run
 // args must not bind-mount any host path under <grove>/.scion/agents/ into
-// the container. Per-agent state lives at the external grove-configs path
+// the container. Per-agent state lives at the external project-configs path
 // instead, so siblings cannot read it via /workspace.
 func TestSharedWorkspace_NoAgentStateInMounts(t *testing.T) {
 	tmpDir := t.TempDir()

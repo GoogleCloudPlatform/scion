@@ -18,7 +18,7 @@
  * Broker detail page component
  *
  * Displays a single runtime broker with its info, capabilities,
- * profiles, and agents grouped by grove.
+ * profiles, and agents grouped by project.
  */
 
 import { LitElement, html, css } from 'lit';
@@ -32,9 +32,9 @@ import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import '../shared/status-badge.js';
 
-interface BrokerGroveInfo {
-  groveId: string;
-  groveName: string;
+interface BrokerProjectInfo {
+  projectId: string;
+  projectName: string;
   gitRemote?: string;
   agentCount: number;
   localPath?: string;
@@ -55,7 +55,7 @@ export class ScionPageBrokerDetail extends LitElement {
   private broker: RuntimeBroker | null = null;
 
   @state()
-  private groves: BrokerGroveInfo[] = [];
+  private projects: BrokerProjectInfo[] = [];
 
   @state()
   private agents: Agent[] = [];
@@ -234,11 +234,11 @@ export class ScionPageBrokerDetail extends LitElement {
       opacity: 0.7;
     }
 
-    .grove-section {
+    .project-section {
       margin-bottom: 1.5rem;
     }
 
-    .grove-section-header {
+    .project-section-header {
       display: flex;
       align-items: center;
       gap: 0.75rem;
@@ -247,27 +247,27 @@ export class ScionPageBrokerDetail extends LitElement {
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }
 
-    .grove-section-header h3 {
+    .project-section-header h3 {
       font-size: 1rem;
       font-weight: 600;
       color: var(--scion-text, #1e293b);
       margin: 0;
     }
 
-    .grove-section-header a {
+    .project-section-header a {
       color: inherit;
       text-decoration: none;
     }
 
-    .grove-section-header a:hover {
+    .project-section-header a:hover {
       color: var(--scion-primary, #3b82f6);
     }
 
-    .grove-section-header sl-icon {
+    .project-section-header sl-icon {
       color: var(--scion-primary, #3b82f6);
     }
 
-    .grove-agent-count {
+    .project-agent-count {
       font-size: 0.75rem;
       color: var(--scion-text-muted, #64748b);
       background: var(--scion-bg-subtle, #f1f5f9);
@@ -465,9 +465,9 @@ export class ScionPageBrokerDetail extends LitElement {
     this.error = null;
 
     try {
-      const [brokerResponse, grovesResponse, agentsResponse] = await Promise.all([
+      const [brokerResponse, projectsResponse, agentsResponse] = await Promise.all([
         apiFetch(`/api/v1/runtime-brokers/${this.brokerId}`),
-        apiFetch(`/api/v1/runtime-brokers/${this.brokerId}/groves`),
+        apiFetch(`/api/v1/runtime-brokers/${this.brokerId}/projects`),
         apiFetch(`/api/v1/agents?runtimeBrokerId=${this.brokerId}`),
       ]);
 
@@ -478,11 +478,11 @@ export class ScionPageBrokerDetail extends LitElement {
       this.broker = (await brokerResponse.json()) as RuntimeBroker;
       dispatchPageTitle(this, this.broker.name || this.brokerId, 'Brokers');
 
-      if (grovesResponse.ok) {
-        const grovesData = (await grovesResponse.json()) as { groves?: BrokerGroveInfo[] };
-        this.groves = grovesData.groves || [];
+      if (projectsResponse.ok) {
+        const projectsData = (await projectsResponse.json()) as { projects?: BrokerProjectInfo[] };
+        this.projects = projectsData.projects || [];
       } else {
-        this.groves = [];
+        this.projects = [];
       }
 
       if (agentsResponse.ok) {
@@ -559,8 +559,8 @@ export class ScionPageBrokerDetail extends LitElement {
     }
   }
 
-  private getAgentsForGrove(groveId: string): Agent[] {
-    return this.agents.filter((a) => a.groveId === groveId);
+  private getAgentsForProject(projectId: string): Agent[] {
+    return this.agents.filter((a) => a.projectId === projectId);
   }
 
   override render() {
@@ -606,8 +606,8 @@ export class ScionPageBrokerDetail extends LitElement {
 
       <div class="stats-row">
         <div class="stat">
-          <span class="stat-label">Groves</span>
-          <span class="stat-value">${this.groves.length}</span>
+          <span class="stat-label">Projects</span>
+          <span class="stat-value">${this.projects.length}</span>
         </div>
         <div class="stat">
           <span class="stat-label">Agents</span>
@@ -635,7 +635,7 @@ export class ScionPageBrokerDetail extends LitElement {
       ${this.broker.profiles && this.broker.profiles.length > 0
         ? this.renderProfiles(this.broker.profiles)
         : ''}
-      ${this.renderGroveSections()}
+      ${this.renderProjectSections()}
     `;
   }
 
@@ -674,17 +674,17 @@ export class ScionPageBrokerDetail extends LitElement {
     `;
   }
 
-  private renderGroveSections() {
-    if (this.groves.length === 0) {
+  private renderProjectSections() {
+    if (this.projects.length === 0) {
       return html`
         <div class="section">
           <div class="section-header">
-            <h2>Groves</h2>
+            <h2>Projects</h2>
           </div>
           <div class="empty-state">
             <sl-icon name="folder2-open"></sl-icon>
-            <h2>No Groves</h2>
-            <p>This broker is not currently providing for any groves.</p>
+            <h2>No Projects</h2>
+            <p>This broker is not currently providing for any projects.</p>
           </div>
         </div>
       `;
@@ -693,31 +693,31 @@ export class ScionPageBrokerDetail extends LitElement {
     return html`
       <div class="section">
         <div class="section-header">
-          <h2>Groves</h2>
+          <h2>Projects</h2>
         </div>
-        ${this.groves.map((grove) => this.renderGroveSection(grove))}
+        ${this.projects.map((project) => this.renderProjectSection(project))}
       </div>
     `;
   }
 
-  private renderGroveSection(grove: BrokerGroveInfo) {
-    const groveAgents = this.getAgentsForGrove(grove.groveId);
+  private renderProjectSection(project: BrokerProjectInfo) {
+    const projectAgents = this.getAgentsForProject(project.projectId);
 
     return html`
-      <div class="grove-section">
-        <div class="grove-section-header">
+      <div class="project-section">
+        <div class="project-section-header">
           <sl-icon name="folder-fill"></sl-icon>
           <h3>
-            <a href="/groves/${grove.groveId}">${grove.groveName || grove.groveId}</a>
+            <a href="/projects/${project.projectId}">${project.projectName || project.projectId}</a>
           </h3>
-          <span class="grove-agent-count"
-            >${groveAgents.length} agent${groveAgents.length !== 1 ? 's' : ''}</span
+          <span class="project-agent-count"
+            >${projectAgents.length} agent${projectAgents.length !== 1 ? 's' : ''}</span
           >
         </div>
-        ${groveAgents.length > 0
+        ${projectAgents.length > 0
           ? html`
               <div class="agent-grid">
-                ${groveAgents.map((agent) => this.renderAgentCard(agent))}
+                ${projectAgents.map((agent) => this.renderAgentCard(agent))}
               </div>
             `
           : ''}

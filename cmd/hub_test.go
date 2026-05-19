@@ -236,7 +236,7 @@ func TestGetHubEnabledScope_GroveHasOwnSetting(t *testing.T) {
 	}
 
 	scope := getHubEnabledScope(groveDir, false, settings)
-	assert.Equal(t, "grove", scope.Scope)
+	assert.Equal(t, "project", scope.Scope)
 	assert.False(t, scope.Inherited)
 	assert.True(t, scope.Enabled)
 }
@@ -302,7 +302,7 @@ func TestGetHubEnabledScope_DefaultWhenNothingSet(t *testing.T) {
 	assert.False(t, scope.Enabled)
 }
 
-func TestGetHubEndpointScope_FromGrove(t *testing.T) {
+func TestGetHubEndpointScope_FromProject(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("SCION_HUB_ENDPOINT", "")
@@ -327,7 +327,7 @@ func TestGetHubEndpointScope_FromGrove(t *testing.T) {
 	}
 
 	scope := getHubEndpointScope(groveDir, false, settings)
-	assert.Equal(t, "grove", scope.Source)
+	assert.Equal(t, "project", scope.Source)
 	assert.False(t, scope.Inherited)
 	assert.Equal(t, "https://grove-hub.example.com", scope.Endpoint)
 }

@@ -31,7 +31,7 @@ import (
 // provisionCapturingManager and isolated cwd/$HOME. Harness-config dirs
 // written via writeHarnessConfig land in $HOME/.scion/harness-configs/
 // (the global dir resolved by config.GetGlobalDir), which is the lookup
-// path used by createAgent when the request has no grovePath — matching
+// path used by createAgent when the request has no projectPath — matching
 // the broker's behavior for hub-dispatched agents on a remote broker.
 //
 // Returns the server, manager, and the global .scion dir so tests can

@@ -21,14 +21,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// handleGroveSharedDirs handles GET/POST on /api/v1/groves/{groveId}/shared-dirs.
-func (s *Server) handleGroveSharedDirs(w http.ResponseWriter, r *http.Request, groveID string) {
+// handleProjectSharedDirs handles GET/POST on /api/v1/projects/{projectId}/shared-dirs.
+func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
 
-	grove, err := s.store.GetGrove(ctx, groveID)
+	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
-			NotFound(w, "Grove")
+			NotFound(w, "Project")
 			return
 		}
 		writeErrorFromErr(w, err, "")
@@ -46,9 +46,9 @@ func (s *Server) handleGroveSharedDirs(w http.ResponseWriter, r *http.Request, g
 		// Read access check
 		if userIdent, ok := identity.(UserIdentity); ok {
 			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type:    "grove",
-				ID:      grove.ID,
-				OwnerID: grove.OwnerID,
+				Type:    "project",
+				ID:      project.ID,
+				OwnerID: project.OwnerID,
 			}, ActionRead)
 			if !decision.Allowed {
 				Forbidden(w)
@@ -56,7 +56,7 @@ func (s *Server) handleGroveSharedDirs(w http.ResponseWriter, r *http.Request, g
 			}
 		}
 
-		dirs := grove.SharedDirs
+		dirs := project.SharedDirs
 		if dirs == nil {
 			dirs = []api.SharedDir{}
 		}
@@ -68,9 +68,9 @@ func (s *Server) handleGroveSharedDirs(w http.ResponseWriter, r *http.Request, g
 		// Write access check
 		if userIdent, ok := identity.(UserIdentity); ok {
 			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type:    "grove",
-				ID:      grove.ID,
-				OwnerID: grove.OwnerID,
+				Type:    "project",
+				ID:      project.ID,
+				OwnerID: project.OwnerID,
 			}, ActionUpdate)
 			if !decision.Allowed {
 				Forbidden(w)
@@ -94,20 +94,20 @@ func (s *Server) handleGroveSharedDirs(w http.ResponseWriter, r *http.Request, g
 		}
 
 		// Check for duplicates
-		for _, d := range grove.SharedDirs {
+		for _, d := range project.SharedDirs {
 			if d.Name == newDir.Name {
 				BadRequest(w, "Shared directory "+newDir.Name+" already exists")
 				return
 			}
 		}
 
-		grove.SharedDirs = append(grove.SharedDirs, newDir)
-		if err := s.store.UpdateGrove(ctx, grove); err != nil {
+		project.SharedDirs = append(project.SharedDirs, newDir)
+		if err := s.store.UpdateProject(ctx, project); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
 
-		s.events.PublishGroveUpdated(ctx, grove)
+		s.events.PublishProjectUpdated(ctx, project)
 		writeJSON(w, http.StatusCreated, newDir)
 
 	default:
@@ -115,14 +115,14 @@ func (s *Server) handleGroveSharedDirs(w http.ResponseWriter, r *http.Request, g
 	}
 }
 
-// handleGroveSharedDirByName handles DELETE on /api/v1/groves/{groveId}/shared-dirs/{name}.
-func (s *Server) handleGroveSharedDirByName(w http.ResponseWriter, r *http.Request, groveID, name string) {
+// handleProjectSharedDirByName handles DELETE on /api/v1/projects/{projectId}/shared-dirs/{name}.
+func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Request, projectID, name string) {
 	ctx := r.Context()
 
-	grove, err := s.store.GetGrove(ctx, groveID)
+	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
-			NotFound(w, "Grove")
+			NotFound(w, "Project")
 			return
 		}
 		writeErrorFromErr(w, err, "")
@@ -138,9 +138,9 @@ func (s *Server) handleGroveSharedDirByName(w http.ResponseWriter, r *http.Reque
 	// Write access check
 	if userIdent, ok := identity.(UserIdentity); ok {
 		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:    "grove",
-			ID:      grove.ID,
-			OwnerID: grove.OwnerID,
+			Type:    "project",
+			ID:      project.ID,
+			OwnerID: project.OwnerID,
 		}, ActionUpdate)
 		if !decision.Allowed {
 			Forbidden(w)
@@ -154,8 +154,8 @@ func (s *Server) handleGroveSharedDirByName(w http.ResponseWriter, r *http.Reque
 	switch r.Method {
 	case http.MethodDelete:
 		found := false
-		updated := make([]api.SharedDir, 0, len(grove.SharedDirs))
-		for _, d := range grove.SharedDirs {
+		updated := make([]api.SharedDir, 0, len(project.SharedDirs))
+		for _, d := range project.SharedDirs {
 			if d.Name == name {
 				found = true
 				continue
@@ -168,13 +168,13 @@ func (s *Server) handleGroveSharedDirByName(w http.ResponseWriter, r *http.Reque
 			return
 		}
 
-		grove.SharedDirs = updated
-		if err := s.store.UpdateGrove(ctx, grove); err != nil {
+		project.SharedDirs = updated
+		if err := s.store.UpdateProject(ctx, project); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
 
-		s.events.PublishGroveUpdated(ctx, grove)
+		s.events.PublishProjectUpdated(ctx, project)
 		w.WriteHeader(http.StatusNoContent)
 
 	default:

@@ -28,18 +28,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// scopeInferSentinel is used as NoOptDefVal for --grove and --broker flags,
-// allowing bare flag usage (e.g. --grove) to infer scope from settings.
+// scopeInferSentinel is used as NoOptDefVal for --project and --broker flags,
+// allowing bare flag usage (e.g. --project) to infer scope from settings.
 const scopeInferSentinel = "\x00"
 
 var (
-	envGroveScope  string
-	envBrokerScope string
-	envScope       string
-	envOutputJSON  bool
-	envAlways      bool
-	envAsNeeded    bool
-	envSecret      bool
+	envProjectScope string
+	envBrokerScope  string
+	envScope        string
+	envOutputJSON   bool
+	envAlways       bool
+	envAsNeeded     bool
+	envSecret       bool
 )
 
 // hubEnvCmd is the parent command for environment variable operations
@@ -51,22 +51,22 @@ var hubEnvCmd = &cobra.Command{
 Environment variables can be scoped to:
   - Hub: Available to all agents across the entire hub (admin-only writes)
   - User (default): Available to all your agents
-  - Grove: Available to agents in a specific grove
+  - Project: Available to agents in a specific project
   - Broker: Available to agents running on a specific broker
 
 Variables are resolved hierarchically when an agent starts:
-  hub -> user -> grove -> broker -> agent config
+  hub -> user -> project -> broker -> agent config
 
 Examples:
   # Set a user-scoped variable (two formats)
   scion hub env set API_URL=https://api.example.com
   scion hub env set API_URL https://api.example.com
 
-  # Set a grove-scoped variable (infer grove from current directory)
-  scion hub env set --grove API_URL=https://api.example.com
+  # Set a project-scoped variable (infer project from current directory)
+  scion hub env set --project API_URL=https://api.example.com
 
-  # Set a grove-scoped variable for a specific grove (by name, slug, or ID)
-  scion hub env set --grove=my-grove API_URL=https://api.example.com
+  # Set a project-scoped variable for a specific project (by name, slug, or ID)
+  scion hub env set --project=my-project API_URL=https://api.example.com
 
   # List all user variables
   scion hub env get
@@ -84,7 +84,7 @@ var hubEnvSetCmd = &cobra.Command{
 	Short: "Set an environment variable",
 	Long: `Set an environment variable in the Hub.
 
-By default, variables are scoped to the current user. Use --grove or --broker
+By default, variables are scoped to the current user. Use --project or --broker
 to set variables at different scopes.
 
 The value can be provided as a single argument in KEY=VALUE format, or as
@@ -93,7 +93,7 @@ two separate arguments.
 Examples:
   scion hub env set API_URL=https://api.example.com
   scion hub env set API_URL https://api.example.com
-  scion hub env set --grove LOG_LEVEL=debug
+  scion hub env set --project LOG_LEVEL=debug
   scion hub env set --host DATABASE_HOST localhost`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: runEnvSet,
@@ -111,8 +111,8 @@ With a key, returns the specific variable.
 Examples:
   scion hub env get                    # List all user variables
   scion hub env get API_URL            # Get specific variable
-  scion hub env get --grove            # List grove variables
-  scion hub env get --grove API_URL    # Get grove variable`,
+  scion hub env get --project          # List project variables
+  scion hub env get --project API_URL  # Get project variable`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runEnvGet,
 }
@@ -123,14 +123,14 @@ var hubEnvListCmd = &cobra.Command{
 	Short: "List environment variables",
 	Long: `List all environment variables for a scope from the Hub.
 
-By default, lists user-scoped variables. Use --grove or --broker
+By default, lists user-scoped variables. Use --project or --broker
 to list variables at different scopes.
 
 Examples:
-  scion hub env list                    # List all user variables
-  scion hub env list --grove            # List current grove variables
-  scion hub env list --grove=my-grove   # List variables for a specific grove
-  scion hub env list --json             # Output as JSON`,
+  scion hub env list                      # List all user variables
+  scion hub env list --project            # List current project variables
+  scion hub env list --project=my-project # List variables for a specific project
+  scion hub env list --json               # Output as JSON`,
 	Args: cobra.NoArgs,
 	RunE: runEnvList,
 }
@@ -143,7 +143,7 @@ var hubEnvClearCmd = &cobra.Command{
 
 Examples:
   scion hub env clear API_URL
-  scion hub env clear --grove API_URL
+  scion hub env clear --project API_URL
   scion hub env clear --broker API_URL`,
 	Args: cobra.ExactArgs(1),
 	RunE: runEnvClear,
@@ -157,13 +157,19 @@ func init() {
 	hubEnvCmd.AddCommand(hubEnvClearCmd)
 
 	// Add scope flags to all subcommands.
-	// --scope selects the scope level (hub, user). --grove/--broker select their
+	// --scope selects the scope level (hub, user). --project/--broker select their
 	// respective scopes and support both bare usage (infer from settings) and
-	// explicit name/ID via --grove=<name|id>.
+	// explicit name/ID via --project=<name|id>.
 	for _, cmd := range []*cobra.Command{hubEnvSetCmd, hubEnvGetCmd, hubEnvListCmd, hubEnvClearCmd} {
 		cmd.Flags().StringVar(&envScope, "scope", "", "Scope level: hub, user (default: user)")
-		cmd.Flags().StringVar(&envGroveScope, "grove", "", "Grove scope (bare flag infers current grove, or use --grove=<name|id>)")
+		cmd.Flags().StringVar(&envProjectScope, "project", "", "Project scope (bare flag infers current project, or use --project=<name|id>)")
+		cmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
+
+		cmd.Flags().StringVar(&envProjectScope, "grove", "", "Deprecated alias for --project")
 		cmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
+		_ = cmd.Flags().MarkDeprecated("grove", "use --project instead")
+		_ = cmd.Flags().MarkHidden("grove")
+
 		cmd.Flags().StringVar(&envBrokerScope, "broker", "", "Broker scope (bare flag infers current broker, or use --broker=<name|id>)")
 		cmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 	}
@@ -183,6 +189,7 @@ func init() {
 // (name/slug to UUID) via resolveScopeID.
 func resolveEnvScope(cmd *cobra.Command, settings *config.Settings) (scope, scopeID string, err error) {
 	scopeSet := cmd.Flags().Changed("scope")
+	projectSet := cmd.Flags().Changed("project")
 	groveSet := cmd.Flags().Changed("grove")
 	brokerSet := cmd.Flags().Changed("broker")
 
@@ -191,14 +198,14 @@ func resolveEnvScope(cmd *cobra.Command, settings *config.Settings) (scope, scop
 	if scopeSet {
 		setCount++
 	}
-	if groveSet {
+	if projectSet || groveSet {
 		setCount++
 	}
 	if brokerSet {
 		setCount++
 	}
 	if setCount > 1 {
-		return "", "", fmt.Errorf("cannot specify more than one of --scope, --grove, and --broker")
+		return "", "", fmt.Errorf("cannot specify more than one of --scope, --project, and --broker")
 	}
 
 	if scopeSet {
@@ -212,21 +219,21 @@ func resolveEnvScope(cmd *cobra.Command, settings *config.Settings) (scope, scop
 		}
 	}
 
-	if groveSet {
-		scope = "grove"
-		groveVal := envGroveScope
-		if groveVal == scopeInferSentinel {
-			groveVal = ""
+	if projectSet || groveSet {
+		scope = "project"
+		projectVal := envProjectScope
+		if projectVal == scopeInferSentinel {
+			projectVal = ""
 		}
-		if groveVal != "" {
+		if projectVal != "" {
 			// Explicit value — may be a name, slug, or UUID (resolved later)
-			scopeID = groveVal
+			scopeID = projectVal
 		} else {
 			// Infer from settings
-			if settings.Hub != nil && settings.Hub.GroveID != "" {
-				scopeID = settings.Hub.GroveID
+			if settings.Hub != nil && settings.Hub.ProjectID != "" {
+				scopeID = settings.Hub.ProjectID
 			} else {
-				return "", "", fmt.Errorf("cannot infer grove ID: not linked with Hub. Use 'scion hub link' first or provide explicit grove ID")
+				return "", "", fmt.Errorf("cannot infer project ID: not linked with Hub. Use 'scion hub link' first or provide explicit project ID")
 			}
 		}
 		return scope, scopeID, nil
@@ -268,12 +275,12 @@ func resolveScopeID(ctx context.Context, client hubclient.Client, scope, scopeID
 		return scopeID, nil
 	}
 	switch scope {
-	case "grove":
-		grove, err := resolveGroveByNameOrID(ctx, client, scopeID)
+	case "project":
+		project, err := resolveProjectByNameOrID(ctx, client, scopeID)
 		if err != nil {
 			return "", err
 		}
-		return grove.ID, nil
+		return project.ID, nil
 	case "runtime_broker":
 		broker, err := resolveBrokerByNameOrID(ctx, client, scopeID)
 		if err != nil {
@@ -309,9 +316,9 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("key cannot contain spaces, tabs, newlines, or '='")
 	}
 
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -354,11 +361,12 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 	// When --secret flag is set, redirect to the Secret API instead of Env API
 	if envSecret {
 		secretReq := &hubclient.SetSecretRequest{
-			Value:   value,
-			Scope:   scope,
-			ScopeID: scopeID,
-			Type:    "environment",
-			Target:  key,
+			Value:         value,
+			Scope:         scope,
+			ScopeID:       scopeID,
+			InjectionMode: injectionMode,
+			Type:          "environment",
+			Target:        key,
 		}
 
 		secretResp, err := client.Secrets().Set(ctx, key, secretReq)
@@ -370,7 +378,18 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 		if secretResp.Created {
 			action = "Created"
 		}
-		fmt.Printf("%s %s=******** (scope: %s) (secret)\n", action, key, scope)
+
+		// Build annotation string
+		annotations := " (secret)"
+		if secretResp.Secret != nil {
+			if secretResp.Secret.InjectionMode == "always" {
+				annotations += " (always)"
+			} else {
+				annotations += " (as-needed)"
+			}
+		}
+
+		fmt.Printf("%s %s=******** (scope: %s)%s\n", action, key, scope, annotations)
 		return nil
 	}
 
@@ -413,9 +432,9 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 }
 
 func runEnvGet(cmd *cobra.Command, args []string) error {
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -473,9 +492,9 @@ func runEnvGet(cmd *cobra.Command, args []string) error {
 }
 
 func runEnvList(cmd *cobra.Command, _ []string) error {
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -554,9 +573,9 @@ func formatEnvAnnotations(v *hubclient.EnvVar) string {
 func runEnvClear(cmd *cobra.Command, args []string) error {
 	key := args[0]
 
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)

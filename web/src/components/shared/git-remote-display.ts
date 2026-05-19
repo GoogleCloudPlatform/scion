@@ -21,19 +21,19 @@
  * - Workspace mode: folder (shared) or robot (clone per agent)
  * - GitHub App status badge
  *
- * Used in both grove detail and grove list views.
+ * Used in both project detail and project list views.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
-import type { Grove } from '../../shared/types.js';
+import type { Project } from '../../shared/types.js';
 import { isSharedWorkspace } from '../../shared/types.js';
 
 @customElement('scion-git-remote-display')
 export class ScionGitRemoteDisplay extends LitElement {
   @property({ type: Object })
-  grove: Grove | null = null;
+  project: Project | null = null;
 
   /** When true, prevents click events from propagating (useful inside clickable cards). */
   @property({ type: Boolean, attribute: 'stop-propagation' })
@@ -85,25 +85,25 @@ export class ScionGitRemoteDisplay extends LitElement {
   }
 
   override render() {
-    if (!this.grove) return nothing;
+    if (!this.project) return nothing;
 
-    const grove = this.grove;
+    const project = this.project;
 
-    if (!grove.gitRemote) {
-      return html`${grove.groveType === 'linked' ? 'Linked grove' : 'Hub workspace'}`;
+    if (!project.gitRemote) {
+      return html`${project.projectType === 'linked' ? 'Linked project' : 'Hub workspace'}`;
     }
 
-    const ghLink = ScionGitRemoteDisplay.gitHubLink(grove.gitRemote);
+    const ghLink = ScionGitRemoteDisplay.gitHubLink(project.gitRemote);
     const urlContent = ghLink
       ? html`<a href="${ghLink.url}" target="_blank" rel="noopener noreferrer" @click=${this.handleLinkClick}>${ghLink.display}</a>`
-      : grove.gitRemote;
+      : project.gitRemote;
 
-    const shared = isSharedWorkspace(grove);
+    const shared = isSharedWorkspace(project);
     const workspaceModeIcon = shared
       ? html`<sl-tooltip content="Shared workspace"><sl-icon name="folder-fill" class="decorator-icon"></sl-icon></sl-tooltip>`
       : html`<sl-tooltip content="Clone per agent"><sl-icon name="robot" class="decorator-icon"></sl-icon></sl-tooltip>`;
 
-    const githubIcon = grove.githubInstallationId != null
+    const githubIcon = project.githubInstallationId != null
       ? html`<sl-tooltip content="GitHub App installed"><sl-icon name="github" class="decorator-icon"></sl-icon></sl-tooltip>`
       : nothing;
 

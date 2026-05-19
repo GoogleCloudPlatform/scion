@@ -40,9 +40,9 @@ const (
 	BrokerAuthEventRotate BrokerAuthEventType = "rotate"
 	// BrokerAuthEventRevoke is logged when a broker secret is revoked.
 	BrokerAuthEventRevoke BrokerAuthEventType = "revoke"
-	// BrokerAuthEventLink is logged when a broker is linked to a grove.
+	// BrokerAuthEventLink is logged when a broker is linked to a project.
 	BrokerAuthEventLink BrokerAuthEventType = "link"
-	// BrokerAuthEventUnlink is logged when a broker is unlinked from a grove.
+	// BrokerAuthEventUnlink is logged when a broker is unlinked from a project.
 	BrokerAuthEventUnlink BrokerAuthEventType = "unlink"
 )
 
@@ -59,7 +59,7 @@ const (
 type GCPTokenEvent struct {
 	EventType           GCPTokenEventType `json:"eventType"`
 	AgentID             string            `json:"agentId"`
-	GroveID             string            `json:"groveId"`
+	ProjectID           string            `json:"projectId"`
 	ServiceAccountEmail string            `json:"serviceAccountEmail"`
 	ServiceAccountID    string            `json:"serviceAccountId"`
 	Success             bool              `json:"success"`
@@ -82,12 +82,42 @@ type BrokerAuthEvent struct {
 	Details    map[string]string   `json:"details,omitempty"`
 }
 
+// InviteAuditEventType defines the type of invite/allow-list audit event.
+type InviteAuditEventType string
+
+const (
+	InviteAuditAllowListAdd     InviteAuditEventType = "allow_list_add"
+	InviteAuditAllowListRemove  InviteAuditEventType = "allow_list_remove"
+	InviteAuditAllowListBulkAdd InviteAuditEventType = "allow_list_bulk_add"
+	InviteAuditInviteCreated    InviteAuditEventType = "invite_created"
+	InviteAuditInviteRedeemed   InviteAuditEventType = "invite_redeemed"
+	InviteAuditInviteRevoked    InviteAuditEventType = "invite_revoked"
+	InviteAuditInviteDeleted    InviteAuditEventType = "invite_deleted"
+	InviteAuditLoginDenied      InviteAuditEventType = "login_denied"
+)
+
+// InviteAuditEvent represents an auditable event for the invite/allow-list system.
+type InviteAuditEvent struct {
+	EventType  InviteAuditEventType `json:"eventType"`
+	Email      string               `json:"email,omitempty"`
+	InviteID   string               `json:"inviteId,omitempty"`
+	ActorID    string               `json:"actorId,omitempty"`
+	ActorEmail string               `json:"actorEmail,omitempty"`
+	Success    bool                 `json:"success"`
+	FailReason string               `json:"failReason,omitempty"`
+	Count      int                  `json:"count,omitempty"`
+	Timestamp  time.Time            `json:"timestamp"`
+	Details    map[string]string    `json:"details,omitempty"`
+}
+
 // AuditLogger defines the interface for logging audit events.
 type AuditLogger interface {
 	// LogBrokerAuthEvent logs a broker authentication event.
 	LogBrokerAuthEvent(ctx context.Context, event *BrokerAuthEvent) error
 	// LogGCPTokenEvent logs a GCP token generation event.
 	LogGCPTokenEvent(ctx context.Context, event *GCPTokenEvent) error
+	// LogInviteAuditEvent logs an invite/allow-list audit event.
+	LogInviteAuditEvent(ctx context.Context, event *InviteAuditEvent) error
 }
 
 // LogAuditLogger is a simple implementation that logs to the standard logger.
@@ -112,6 +142,45 @@ func (l *LogAuditLogger) LogBrokerAuthEvent(ctx context.Context, event *BrokerAu
 	return nil
 }
 
+// LogInviteAuditEvent logs an invite/allow-list audit event to the standard logger.
+func (l *LogAuditLogger) LogInviteAuditEvent(ctx context.Context, event *InviteAuditEvent) error {
+	level := slog.LevelInfo
+	if !event.Success {
+		level = slog.LevelWarn
+	}
+
+	attrs := []slog.Attr{
+		slog.String("event_type", string(event.EventType)),
+		slog.Bool("success", event.Success),
+	}
+
+	if event.Email != "" {
+		attrs = append(attrs, slog.String("email", event.Email))
+	}
+	if event.InviteID != "" {
+		attrs = append(attrs, slog.String("invite_id", event.InviteID))
+	}
+	if event.ActorID != "" {
+		attrs = append(attrs, slog.String("actor_id", event.ActorID))
+	}
+	if event.ActorEmail != "" {
+		attrs = append(attrs, slog.String("actor_email", event.ActorEmail))
+	}
+	if event.FailReason != "" {
+		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
+	}
+	if event.Count > 0 {
+		attrs = append(attrs, slog.Int("count", event.Count))
+	}
+	for k, v := range event.Details {
+		attrs = append(attrs, slog.String(k, v))
+	}
+
+	slog.LogAttrs(ctx, level, "authz: "+string(event.EventType), attrs...)
+
+	return nil
+}
+
 // LogGCPTokenEvent logs a GCP token generation event to the standard logger.
 func (l *LogAuditLogger) LogGCPTokenEvent(ctx context.Context, event *GCPTokenEvent) error {
 	level := slog.LevelInfo
@@ -123,7 +192,7 @@ func (l *LogAuditLogger) LogGCPTokenEvent(ctx context.Context, event *GCPTokenEv
 		slog.String("event_type", string(event.EventType)),
 		slog.Bool("success", event.Success),
 		slog.String("agent_id", event.AgentID),
-		slog.String("grove_id", event.GroveID),
+		slog.String("project_id", event.ProjectID),
 		slog.String("sa_email", event.ServiceAccountEmail),
 	}
 
@@ -292,8 +361,8 @@ func LogDeregisterEvent(ctx context.Context, logger AuditLogger, brokerID, broke
 	_ = logger.LogBrokerAuthEvent(ctx, event)
 }
 
-// LogLinkEvent logs a grove link event (broker linked to grove).
-func LogLinkEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName, groveID, actorID, ipAddress string) {
+// LogLinkEvent logs a project link event (broker linked to project).
+func LogLinkEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName, projectID, actorID, ipAddress string) {
 	if logger == nil {
 		return
 	}
@@ -308,15 +377,15 @@ func LogLinkEvent(ctx context.Context, logger AuditLogger, brokerID, brokerName,
 		ActorType:  "user",
 		Timestamp:  time.Now(),
 		Details: map[string]string{
-			"groveId": groveID,
+			"projectId": projectID,
 		},
 	}
 
 	_ = logger.LogBrokerAuthEvent(ctx, event)
 }
 
-// LogUnlinkEvent logs a grove unlink event (broker unlinked from grove).
-func LogUnlinkEvent(ctx context.Context, logger AuditLogger, brokerID, groveID, actorID, ipAddress string) {
+// LogUnlinkEvent logs a project unlink event (broker unlinked from project).
+func LogUnlinkEvent(ctx context.Context, logger AuditLogger, brokerID, projectID, actorID, ipAddress string) {
 	if logger == nil {
 		return
 	}
@@ -330,7 +399,7 @@ func LogUnlinkEvent(ctx context.Context, logger AuditLogger, brokerID, groveID, 
 		ActorType: "user",
 		Timestamp: time.Now(),
 		Details: map[string]string{
-			"groveId": groveID,
+			"projectId": projectID,
 		},
 	}
 
@@ -338,7 +407,7 @@ func LogUnlinkEvent(ctx context.Context, logger AuditLogger, brokerID, groveID, 
 }
 
 // LogGCPTokenGeneration logs a GCP token generation event.
-func LogGCPTokenGeneration(ctx context.Context, logger AuditLogger, eventType GCPTokenEventType, agentID, groveID, saEmail, saID string, success bool, failReason string) {
+func LogGCPTokenGeneration(ctx context.Context, logger AuditLogger, eventType GCPTokenEventType, agentID, projectID, saEmail, saID string, success bool, failReason string) {
 	if logger == nil {
 		return
 	}
@@ -346,7 +415,7 @@ func LogGCPTokenGeneration(ctx context.Context, logger AuditLogger, eventType GC
 	event := &GCPTokenEvent{
 		EventType:           eventType,
 		AgentID:             agentID,
-		GroveID:             groveID,
+		ProjectID:           projectID,
 		ServiceAccountEmail: saEmail,
 		ServiceAccountID:    saID,
 		Success:             success,
@@ -355,4 +424,41 @@ func LogGCPTokenGeneration(ctx context.Context, logger AuditLogger, eventType GC
 	}
 
 	_ = logger.LogGCPTokenEvent(ctx, event)
+}
+
+// LogInviteAudit logs an invite/allow-list audit event.
+func LogInviteAudit(ctx context.Context, logger AuditLogger, eventType InviteAuditEventType, email, inviteID, actorID, actorEmail string, details map[string]string) {
+	if logger == nil {
+		return
+	}
+
+	event := &InviteAuditEvent{
+		EventType:  eventType,
+		Email:      email,
+		InviteID:   inviteID,
+		ActorID:    actorID,
+		ActorEmail: actorEmail,
+		Success:    true,
+		Timestamp:  time.Now(),
+		Details:    details,
+	}
+
+	_ = logger.LogInviteAuditEvent(ctx, event)
+}
+
+// LogInviteAuditFailure logs a failed invite/allow-list audit event.
+func LogInviteAuditFailure(ctx context.Context, logger AuditLogger, eventType InviteAuditEventType, email, failReason string) {
+	if logger == nil {
+		return
+	}
+
+	event := &InviteAuditEvent{
+		EventType:  eventType,
+		Email:      email,
+		Success:    false,
+		FailReason: failReason,
+		Timestamp:  time.Now(),
+	}
+
+	_ = logger.LogInviteAuditEvent(ctx, event)
 }

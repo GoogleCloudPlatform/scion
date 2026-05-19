@@ -26,10 +26,15 @@ import (
 const (
 	DotScion  = ".scion"
 	GlobalDir = ".scion"
+
+	ProjectConfigsDir = "project-configs"
+	ProjectsDir       = "projects"
+	GroveConfigsDir   = "grove-configs"
+	GrovesDir         = "groves"
 )
 
 // FindProjectRoot walks up the directory tree to find the .scion directory or marker file.
-// When .scion is a file (grove marker), it resolves to the external grove-config path.
+// When .scion is a file (project marker), it resolves to the external project-config path.
 // In hub context (SCION_HUB_ENDPOINT set), if no .scion is found on the filesystem,
 // returns a synthetic path based on CWD so that settings loading can proceed using
 // environment variables for hub connectivity.
@@ -50,19 +55,19 @@ func FindProjectRoot() (string, bool) {
 				}
 				return p, true
 			}
-			// .scion is a file (grove marker) — resolve to external path
-			if resolved, err := ResolveGroveMarker(p); err == nil {
+			// .scion is a file (project marker) — resolve to external path
+			if resolved, err := ResolveProjectMarker(p); err == nil {
 				// Verify the resolved external path actually exists on this
 				// filesystem. Inside a container the marker may reference a
-				// host-side grove-config directory that doesn't exist locally.
+				// host-side project-config directory that doesn't exist locally.
 				if _, statErr := os.Stat(resolved); statErr == nil {
 					return resolved, true
 				}
 			}
 			// Marker file exists but external path can't be resolved
-			// (e.g., inside a container where ~/.scion/grove-configs/ doesn't exist).
+			// (e.g., inside a container where ~/.scion/project-configs/ doesn't exist).
 			// In hub context, return a synthetic path — the CLI will use the
-			// Hub API and env vars rather than filesystem-based grove data.
+			// Hub API and env vars rather than filesystem-based project data.
 			if IsHubContext() {
 				return filepath.Join(filepath.Dir(p), DotScion), true
 			}
@@ -78,7 +83,7 @@ func FindProjectRoot() (string, bool) {
 	// Hub context fallback: if hub endpoint is available via env vars,
 	// the CLI is running inside a hub-connected container. Return a
 	// synthetic .scion path so that settings loading proceeds using
-	// env vars (SCION_HUB_ENDPOINT, SCION_GROVE_ID, etc.) for hub connectivity.
+	// env vars (SCION_HUB_ENDPOINT, SCION_PROJECT_ID, etc.) for hub connectivity.
 	if IsHubContext() {
 		return filepath.Join(wd, DotScion), true
 	}
@@ -87,9 +92,9 @@ func FindProjectRoot() (string, bool) {
 }
 
 // GetResolvedProjectDir returns the active .scion directory based on precedence.
-// This is a convenience wrapper around ResolveGrovePath that discards the isGlobal flag.
+// This is a convenience wrapper around ResolveProjectPath that discards the isGlobal flag.
 func GetResolvedProjectDir(explicitPath string) (string, error) {
-	path, _, err := ResolveGrovePath(explicitPath)
+	path, _, err := ResolveProjectPath(explicitPath)
 	return path, err
 }
 
@@ -107,8 +112,8 @@ func GetProjectDir() (string, error) {
 	return filepath.Join(wd, DotScion), nil
 }
 
-// GetGroveName returns the slugified name of the grove.
-func GetGroveName(projectDir string) string {
+// GetProjectName returns the slugified name of the project.
+func GetProjectName(projectDir string) string {
 	abs, err := filepath.Abs(projectDir)
 	if err != nil {
 		return "unknown"
@@ -121,7 +126,7 @@ func GetGroveName(projectDir string) string {
 	}
 
 	baseName := filepath.Base(parent)
-	// Check for external grove-config directory pattern (slug__shortuuid)
+	// Check for external project-config directory pattern (slug__shortuuid)
 	if slug := ExtractSlugFromExternalDir(baseName); slug != "" {
 		return slug
 	}
@@ -129,7 +134,7 @@ func GetGroveName(projectDir string) string {
 	return api.Slugify(baseName)
 }
 
-// GetTargetProjectDir returns the directory where a grove should be initialized.
+// GetTargetProjectDir returns the directory where a project should be initialized.
 func GetTargetProjectDir() (string, error) {
 	// 1. Root of the current git repo if run inside a repo
 	if util.IsGitRepo() {
@@ -155,12 +160,12 @@ func GetGlobalDir() (string, error) {
 	return filepath.Join(home, GlobalDir), nil
 }
 
-// GetGroveConfigDir returns the directory where grove config files (settings.yaml,
-// templates/) live. For git groves with split storage (grove-id file exists), this
-// is the external path under ~/.scion/grove-configs/. For all other groves
+// GetProjectConfigDir returns the directory where project config files (settings.yaml,
+// templates/) live. For git projects with split storage (project-id file exists), this
+// is the external path under ~/.scion/project-configs/. For all other projects
 // (non-git, global), projectDir is returned as-is since it is already the config dir.
-func GetGroveConfigDir(projectDir string) string {
-	if extDir, err := GetGitGroveExternalConfigDir(projectDir); err == nil && extDir != "" {
+func GetProjectConfigDir(projectDir string) string {
+	if extDir, err := GetGitProjectExternalConfigDir(projectDir); err == nil && extDir != "" {
 		return extDir
 	}
 	return projectDir
@@ -206,11 +211,11 @@ func GetGlobalAgentsDir() (string, error) {
 	return filepath.Join(g, "agents"), nil
 }
 
-// ResolveGrovePath resolves a grove path to an absolute path and indicates if it's the global grove.
+// ResolveProjectPath resolves a grove path to an absolute path and indicates if it's the global grove.
 // If path is empty, it attempts to find the project grove or falls back to global.
 // If path is "global" or "home", it returns the global grove path.
 // Returns the absolute path, whether it's the global grove, and any error.
-func ResolveGrovePath(path string) (string, bool, error) {
+func ResolveProjectPath(path string) (string, bool, error) {
 	if path == "" {
 		// Try to find project grove first
 		if p, ok := FindProjectRoot(); ok {
@@ -253,7 +258,7 @@ func ResolveGrovePath(path string) (string, bool, error) {
 				}
 			} else {
 				// .scion is a marker file — resolve to external path
-				if resolved, err := ResolveGroveMarker(candidate); err == nil {
+				if resolved, err := ResolveProjectMarker(candidate); err == nil {
 					abs = resolved
 				}
 			}
@@ -261,7 +266,7 @@ func ResolveGrovePath(path string) (string, bool, error) {
 	} else {
 		// Path ends in .scion — check if it's a marker file (not a directory)
 		if info, err := os.Stat(abs); err == nil && !info.IsDir() {
-			if resolved, err := ResolveGroveMarker(abs); err == nil {
+			if resolved, err := ResolveProjectMarker(abs); err == nil {
 				abs = resolved
 			}
 		} else if err == nil && info.IsDir() {
@@ -276,11 +281,11 @@ func ResolveGrovePath(path string) (string, bool, error) {
 	return abs, isGlobal, nil
 }
 
-// RequireGrovePath resolves a grove path, erroring if no project is found and global is not specified.
+// RequireProjectPath resolves a grove path, erroring if no project is found and global is not specified.
 // This is used by commands that require an explicit grove context.
 // If path is empty and no project grove is found, returns an error suggesting --global.
 // Returns the absolute path, whether it's the global grove, and any error.
-func RequireGrovePath(path string) (string, bool, error) {
+func RequireProjectPath(path string) (string, bool, error) {
 	// Explicit global request
 	if path == "global" || path == "home" {
 		g, err := GetGlobalDir()
@@ -306,7 +311,7 @@ func RequireGrovePath(path string) (string, bool, error) {
 					}
 				} else {
 					// .scion is a marker file — resolve to external path
-					if resolved, err := ResolveGroveMarker(candidate); err == nil {
+					if resolved, err := ResolveProjectMarker(candidate); err == nil {
 						abs = resolved
 					}
 				}
@@ -314,7 +319,7 @@ func RequireGrovePath(path string) (string, bool, error) {
 		} else {
 			// Path ends in .scion — check if it's a marker file
 			if info, err := os.Stat(abs); err == nil && !info.IsDir() {
-				if resolved, err := ResolveGroveMarker(abs); err == nil {
+				if resolved, err := ResolveProjectMarker(abs); err == nil {
 					abs = resolved
 				}
 			} else if err == nil && info.IsDir() {

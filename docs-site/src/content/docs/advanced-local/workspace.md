@@ -81,32 +81,32 @@ In non-git projects (where no `.git` directory is found):
 
 ## 4. Hub-Managed Workspaces
 
-When a Scion Hub is enabled, workspace strategy changes depending on the grove type. The Hub supports three types of remote workspaces:
+When a Scion Hub is enabled, workspace strategy changes depending on the project type. The Hub supports three types of remote workspaces:
 
-### Hub-Native Groves (no git repository)
-Hub-Native groves allow you to create project workspaces directly through the Hub API and Web Dashboard **without an external Git repository**.
+### Hub-Native Projects (no git repository)
+Hub-Native projects allow you to create project workspaces directly through the Hub API and Web Dashboard **without an external Git repository**.
 - The Hub automatically initializes a seeded `.scion` structure.
 - Workspace files are managed locally by the Hub and its distributed runtime brokers.
-- You can directly download individual workspace files or generate ZIP archives of entire groves using the Hub API or Web Dashboard, making it easy to export your data.
+- You can directly download individual workspace files or generate ZIP archives of entire projects using the Hub API or Web Dashboard, making it easy to export your data.
 
-### Git Groves (clone-based, Hub-managed)
-Groves created from a remote git repository URL use **clone-based provisioning**: the agent's workspace is initialized from the repository at startup.
+### Git Projects (clone-based, Hub-managed)
+Projects created from a remote git repository URL use **clone-based provisioning**: the agent's workspace is initialized from the repository at startup.
 
 ```bash
-# Create a git grove from a URL (Hub-managed)
-scion hub grove create https://github.com/org/repo.git
+# Create a git project from a URL (Hub-managed)
+scion hub project create https://github.com/org/repo.git
 ```
 
-#### How Git Groves Work
+#### How Git Projects Work
 
-1. The Hub stores the git remote URL and default branch as grove metadata.
+1. The Hub stores the git remote URL and default branch as project metadata.
 2. When an agent starts, the Runtime Broker injects `SCION_GIT_CLONE_URL`, `SCION_GIT_BRANCH`, and `SCION_GIT_DEPTH` as environment variables.
 3. The `sciontool init` process inside the container uses a `git init` + `git fetch` strategy to provision the workspace into `/workspace`. This approach handles workspaces that may already contain `.scion` metadata or `.scion-volumes` directories, and properly clears stale artifacts before initialization.
 4. A feature branch `scion/<agent-name>` is created and checked out automatically.
 
-#### Grove ID Format
+#### Project ID Format
 
-Git-backed groves use **deterministic UUID v5** identifiers derived from the namespace and the normalized git URL. This ensures the same repository always produces the same grove ID regardless of the access protocol (e.g., `https://` vs `git@`). Hub-native groves use random UUID v4 identifiers.
+Git-backed projects use **deterministic UUID v5** identifiers derived from the namespace and the normalized git URL. This ensures the same repository always produces the same project ID regardless of the access protocol (e.g., `https://` vs `git@`). Hub-native projects use random UUID v4 identifiers.
 
 #### Agent Branch Strategy
 
@@ -114,7 +114,7 @@ Each agent gets its own branch named `scion/<agent-name>`. This prevents conflic
 
 #### Shallow Clones
 
-By default, git groves use a shallow clone with `depth=1` for fast startup. If an agent needs full history (e.g., for `git log` or `git blame`), it can fetch the rest:
+By default, git projects use a shallow clone with `depth=1` for fast startup. If an agent needs full history (e.g., for `git log` or `git blame`), it can fetch the rest:
 
 ```bash
 git fetch --unshallow
@@ -128,22 +128,22 @@ git fetch --unshallow
 | `SCION_GIT_BRANCH` | Branch to clone | `main` |
 | `SCION_GIT_DEPTH` | Clone depth | `1` |
 
-Authentication is handled via the `GITHUB_TOKEN` environment variable, injected from the grove's secrets or your local environment through the env-gather flow.
+Authentication is handled via the `GITHUB_TOKEN` environment variable, injected from the project's secrets or your local environment through the env-gather flow.
 
-### Linked Groves (clone-based, even when the repo is local)
+### Linked Projects (clone-based, even when the repo is local)
 
-When you link an existing local git project to a Hub (`scion hub link`), the grove becomes **Hub-managed**. Once linked, **all agents started via the Hub use clone-based provisioning**, even if the broker machine already has the repository checked out locally.
+When you link an existing local git project to a Hub (`scion hub link`), the project becomes **Hub-managed**. Once linked, **all agents started via the Hub use clone-based provisioning**, even if the broker machine already has the repository checked out locally.
 
-This is intentional: the Hub enforces a consistent, unambiguous workspace strategy for all git-based groves. Local worktrees are a local-mode feature only.
+This is intentional: the Hub enforces a consistent, unambiguous workspace strategy for all git-based projects. Local worktrees are a local-mode feature only.
 
 **What this means in practice:**
 
 - **SSH credentials are not used** for workspace provisioning. Even if your machine has SSH keys configured for the repo, agents always clone via HTTPS using `GITHUB_TOKEN`.
-- **A `GITHUB_TOKEN` is required.** Set it as a grove or user secret on the Hub, or ensure it is present in your local environment (the env-gather flow will collect it):
+- **A `GITHUB_TOKEN` is required.** Set it as a project or user secret on the Hub, or ensure it is present in your local environment (the env-gather flow will collect it):
   ```bash
-  scion hub secret set --grove my-project GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+  scion hub secret set --project my-project GITHUB_TOKEN=ghp_xxxxxxxxxxxx
   ```
-- **The CLI will tell you** when this mode is in effect. When starting an agent via a Hub-linked git grove, you will see:
+- **The CLI will tell you** when this mode is in effect. When starting an agent via a Hub-linked git project, you will see:
   ```
   Using hub, cloning repo https://github.com/org/repo.git
     (Hub mode uses HTTPS clone with GITHUB_TOKEN; local worktrees are not used)
@@ -160,9 +160,9 @@ scion start my-agent --no-hub "fix the bug"
 
 ---
 
-## 5. Grove Shared Directories
+## 5. Project Shared Directories
 
-Grove Shared Directories provide a persistent, mutable storage layer that can be shared between multiple agents within a single grove. This is ideal for sharing build artifacts, shared caches, or state files without relying on version control or the Hub database.
+Project Shared Directories provide a persistent, mutable storage layer that can be shared between multiple agents within a single project. This is ideal for sharing build artifacts, shared caches, or state files without relying on version control or the Hub database.
 
 ### Managing Shared Directories
 
@@ -172,7 +172,7 @@ You can manage shared directories using the `scion shared-dir` CLI commands:
 # Create a new shared directory
 scion shared-dir create <name>
 
-# List shared directories in the current grove
+# List shared directories in the current project
 scion shared-dir list
 
 # View details about a specific shared directory
@@ -184,7 +184,7 @@ scion shared-dir remove <name>
 
 ### Mounting Shared Directories
 
-When an agent is created in a grove that has shared directories, they are automatically mounted into the agent's container. 
+When an agent is created in a project that has shared directories, they are automatically mounted into the agent's container. 
 
 By default, they are available at two locations within the agent:
 - **Standard Path:** `/scion-volumes/<name>`
@@ -192,11 +192,11 @@ By default, they are available at two locations within the agent:
 
 ### Web Dashboard File Viewer
 
-You can browse the contents of Shared Directories and view file previews directly from the Hub's Web Dashboard. In the grove view, navigate to the Shared Directories tab to inspect files, view sizes, and review content previews without needing to attach to an agent.
+You can browse the contents of Shared Directories and view file previews directly from the Hub's Web Dashboard. In the project view, navigate to the Shared Directories tab to inspect files, view sizes, and review content previews without needing to attach to an agent.
 
 ### Storage Backends
 - **Local Workstations:** Backed by directories on the host filesystem.
-- **Kubernetes:** Backed by PersistentVolumeClaims (PVCs) with grove-scoped lifecycle management, ensuring data persists across pod restarts and can be accessed by any agent in the grove.
+- **Kubernetes:** Backed by PersistentVolumeClaims (PVCs) with project-scoped lifecycle management, ensuring data persists across pod restarts and can be accessed by any agent in the project.
 
 ---
 

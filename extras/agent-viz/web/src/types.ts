@@ -19,8 +19,8 @@ export interface PlaybackManifest {
   timeRange: { start: string; end: string };
   agents: AgentInfo[];
   files: FileNode[];
-  groveId: string;
-  groveName: string;
+  projectId: string;
+  projectName: string;
   maxDepth: number;
 }
 

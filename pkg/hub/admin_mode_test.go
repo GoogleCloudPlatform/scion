@@ -150,8 +150,8 @@ func TestAdminModeMiddleware_AgentIdentity(t *testing.T) {
 	mw := adminModeMiddleware(state)(passthrough)
 
 	agent := &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:  jwt.Claims{Subject: "agent-1"},
-		GroveID: "grove-1",
+		Claims:    jwt.Claims{Subject: "agent-1"},
+		ProjectID: "project-1",
 	}}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
 	req = req.WithContext(contextWithIdentity(req.Context(), agent))

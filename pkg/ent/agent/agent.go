@@ -22,8 +22,8 @@ const (
 	FieldName = "name"
 	// FieldTemplate holds the string denoting the template field in the database.
 	FieldTemplate = "template"
-	// FieldGroveID holds the string denoting the grove_id field in the database.
-	FieldGroveID = "grove_id"
+	// FieldProjectID holds the string denoting the project_id field in the database.
+	FieldProjectID = "project_id"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
 	// FieldCreatedBy holds the string denoting the created_by field in the database.
@@ -38,8 +38,8 @@ const (
 	FieldCreated = "created"
 	// FieldUpdated holds the string denoting the updated field in the database.
 	FieldUpdated = "updated"
-	// EdgeGrove holds the string denoting the grove edge name in mutations.
-	EdgeGrove = "grove"
+	// EdgeProject holds the string denoting the project edge name in mutations.
+	EdgeProject = "project"
 	// EdgeCreator holds the string denoting the creator edge name in mutations.
 	EdgeCreator = "creator"
 	// EdgeOwner holds the string denoting the owner edge name in mutations.
@@ -50,13 +50,13 @@ const (
 	EdgePolicyBindings = "policy_bindings"
 	// Table holds the table name of the agent in the database.
 	Table = "agents"
-	// GroveTable is the table that holds the grove relation/edge.
-	GroveTable = "agents"
-	// GroveInverseTable is the table name for the Grove entity.
-	// It exists in this package in order to avoid circular dependency with the "grove" package.
-	GroveInverseTable = "groves"
-	// GroveColumn is the table column denoting the grove relation/edge.
-	GroveColumn = "grove_id"
+	// ProjectTable is the table that holds the project relation/edge.
+	ProjectTable = "agents"
+	// ProjectInverseTable is the table name for the Project entity.
+	// It exists in this package in order to avoid circular dependency with the "project" package.
+	ProjectInverseTable = "projects"
+	// ProjectColumn is the table column denoting the project relation/edge.
+	ProjectColumn = "project_id"
 	// CreatorTable is the table that holds the creator relation/edge.
 	CreatorTable = "agents"
 	// CreatorInverseTable is the table name for the User entity.
@@ -93,7 +93,7 @@ var Columns = []string{
 	FieldSlug,
 	FieldName,
 	FieldTemplate,
-	FieldGroveID,
+	FieldProjectID,
 	FieldStatus,
 	FieldCreatedBy,
 	FieldOwnerID,
@@ -188,9 +188,9 @@ func ByTemplate(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldTemplate, opts...).ToFunc()
 }
 
-// ByGroveID orders the results by the grove_id field.
-func ByGroveID(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldGroveID, opts...).ToFunc()
+// ByProjectID orders the results by the project_id field.
+func ByProjectID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldProjectID, opts...).ToFunc()
 }
 
 // ByStatus orders the results by the status field.
@@ -228,10 +228,10 @@ func ByUpdated(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldUpdated, opts...).ToFunc()
 }
 
-// ByGroveField orders the results by grove field.
-func ByGroveField(field string, opts ...sql.OrderTermOption) OrderOption {
+// ByProjectField orders the results by project field.
+func ByProjectField(field string, opts ...sql.OrderTermOption) OrderOption {
 	return func(s *sql.Selector) {
-		sqlgraph.OrderByNeighborTerms(s, newGroveStep(), sql.OrderByField(field, opts...))
+		sqlgraph.OrderByNeighborTerms(s, newProjectStep(), sql.OrderByField(field, opts...))
 	}
 }
 
@@ -276,11 +276,11 @@ func ByPolicyBindings(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
 		sqlgraph.OrderByNeighborTerms(s, newPolicyBindingsStep(), append([]sql.OrderTerm{term}, terms...)...)
 	}
 }
-func newGroveStep() *sqlgraph.Step {
+func newProjectStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
-		sqlgraph.To(GroveInverseTable, FieldID),
-		sqlgraph.Edge(sqlgraph.M2O, true, GroveTable, GroveColumn),
+		sqlgraph.To(ProjectInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.M2O, true, ProjectTable, ProjectColumn),
 	)
 }
 func newCreatorStep() *sqlgraph.Step {

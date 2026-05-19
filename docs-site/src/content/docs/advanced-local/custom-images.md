@@ -136,7 +136,7 @@ When `image_registry` is set, Scion transforms the default image reference:
 
 ### Setting It
 
-**Globally** (applies to all groves):
+**Globally** (applies to all projects):
 
 ```bash
 scion config set image_registry ghcr.io/myorg

@@ -40,7 +40,7 @@ Then checks for any git worktree checked out to the specified branch.`,
 		var targetPath string
 
 		// 1. Check for Agent
-		projectDir, _ := config.GetResolvedProjectDir(grovePath)
+		projectDir, _ := config.GetResolvedProjectDir(projectPath)
 
 		// Check project grove
 		if projectDir != "" {

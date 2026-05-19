@@ -22,7 +22,8 @@ type Config struct {
 	Hub       HubConfig       `yaml:"hub"`
 	Plugin    PluginConfig    `yaml:"plugin"`
 	Auth      AuthConfig      `yaml:"auth"`
-	Groves    []GroveConfig   `yaml:"groves"`
+	Projects  []ProjectConfig `yaml:"projects"`
+	Groves    []ProjectConfig `yaml:"groves,omitempty"` // Legacy field for backward compatibility
 	State     StateConfig     `yaml:"state"`
 	Timeouts  TimeoutConfig   `yaml:"timeouts"`
 	Logging   LoggingConfig   `yaml:"logging"`
@@ -64,13 +65,16 @@ type AuthConfig struct {
 	APIKey string `yaml:"api_key"`
 }
 
-// GroveConfig configures a grove exposed via the bridge.
-type GroveConfig struct {
+// ProjectConfig configures a project exposed via the bridge.
+type ProjectConfig struct {
 	Slug            string   `yaml:"slug"`
 	DefaultTemplate string   `yaml:"default_template"`
 	AutoProvision   bool     `yaml:"auto_provision"`
 	ExposedAgents   []string `yaml:"exposed_agents"`
 }
+
+// GroveConfig is a legacy alias for ProjectConfig.
+type GroveConfig = ProjectConfig
 
 // StateConfig holds local state database settings.
 type StateConfig struct {

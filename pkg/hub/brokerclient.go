@@ -44,33 +44,33 @@ func (c *AuthenticatedBrokerClient) CreateAgent(ctx context.Context, brokerID, b
 }
 
 // StartAgent starts an agent on a remote runtime broker with HMAC authentication.
-func (c *AuthenticatedBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID, task, grovePath, groveSlug, harnessConfig string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace bool) (*RemoteAgentResponse, error) {
-	return c.transport.StartAgent(ctx, brokerID, brokerEndpoint, agentID, groveID, task, grovePath, groveSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace)
+func (c *AuthenticatedBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace bool) (*RemoteAgentResponse, error) {
+	return c.transport.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace)
 }
 
 // StopAgent stops an agent on a remote runtime broker with HMAC authentication.
-func (c *AuthenticatedBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string) error {
-	return c.transport.StopAgent(ctx, brokerID, brokerEndpoint, agentID, groveID)
+func (c *AuthenticatedBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
+	return c.transport.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID)
 }
 
 // RestartAgent restarts an agent on a remote runtime broker with HMAC authentication.
-func (c *AuthenticatedBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, resolvedEnv map[string]string) error {
-	return c.transport.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, groveID, resolvedEnv)
+func (c *AuthenticatedBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string) error {
+	return c.transport.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv)
 }
 
 // DeleteAgent deletes an agent from a remote runtime broker with HMAC authentication.
-func (c *AuthenticatedBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
-	return c.transport.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, groveID, deleteFiles, removeBranch, softDelete, deletedAt)
+func (c *AuthenticatedBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
+	return c.transport.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, deleteFiles, removeBranch, softDelete, deletedAt)
 }
 
 // MessageAgent sends a message to an agent on a remote runtime broker with HMAC authentication.
-func (c *AuthenticatedBrokerClient) MessageAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
-	return c.transport.MessageAgent(ctx, brokerID, brokerEndpoint, agentID, groveID, message, interrupt, structuredMsg)
+func (c *AuthenticatedBrokerClient) MessageAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
+	return c.transport.MessageAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, message, interrupt, structuredMsg)
 }
 
 // CheckAgentPrompt checks if an agent has a non-empty prompt.md file on a remote runtime broker.
-func (c *AuthenticatedBrokerClient) CheckAgentPrompt(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string) (bool, error) {
-	return c.transport.CheckAgentPrompt(ctx, brokerID, brokerEndpoint, agentID, groveID)
+func (c *AuthenticatedBrokerClient) CheckAgentPrompt(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) (bool, error) {
+	return c.transport.CheckAgentPrompt(ctx, brokerID, brokerEndpoint, agentID, projectID)
 }
 
 // CreateAgentWithGather creates an agent and handles 202 env-gather responses.
@@ -79,18 +79,18 @@ func (c *AuthenticatedBrokerClient) CreateAgentWithGather(ctx context.Context, b
 }
 
 // GetAgentLogs retrieves agent.log content from a remote runtime broker with HMAC authentication.
-func (c *AuthenticatedBrokerClient) GetAgentLogs(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, tail int) (string, error) {
-	return c.transport.GetAgentLogs(ctx, brokerID, brokerEndpoint, agentID, groveID, tail)
+func (c *AuthenticatedBrokerClient) GetAgentLogs(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, tail int) (string, error) {
+	return c.transport.GetAgentLogs(ctx, brokerID, brokerEndpoint, agentID, projectID, tail)
 }
 
 // ExecAgent executes a command in an agent on a remote runtime broker with HMAC authentication.
-func (c *AuthenticatedBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, groveID string, command []string, timeout int) (string, int, error) {
-	return c.transport.ExecAgent(ctx, brokerID, brokerEndpoint, agentID, groveID, command, timeout)
+func (c *AuthenticatedBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, command []string, timeout int) (string, int, error) {
+	return c.transport.ExecAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, command, timeout)
 }
 
-// CleanupGrove asks a broker to remove its local hub-native grove directory with HMAC authentication.
-func (c *AuthenticatedBrokerClient) CleanupGrove(ctx context.Context, brokerID, brokerEndpoint, groveSlug string) error {
-	return c.transport.CleanupGrove(ctx, brokerID, brokerEndpoint, groveSlug)
+// CleanupProject asks a broker to remove its local hub-native project directory with HMAC authentication.
+func (c *AuthenticatedBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug string) error {
+	return c.transport.CleanupProject(ctx, brokerID, brokerEndpoint, projectSlug)
 }
 
 // FinalizeEnv sends gathered env vars to a broker to complete agent creation.

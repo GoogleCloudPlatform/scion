@@ -35,7 +35,7 @@ export class ScionViewToggle extends LitElement {
   view: ViewMode = 'grid';
 
   /**
-   * localStorage key for persistence (e.g. 'scion-view-groves')
+   * localStorage key for persistence (e.g. 'scion-view-projects')
    */
   @property({ type: String })
   storageKey = '';

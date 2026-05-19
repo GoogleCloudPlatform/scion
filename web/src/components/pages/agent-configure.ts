@@ -117,10 +117,10 @@ export class ScionPageAgentConfigure extends LitElement {
     return this.gcpServiceAccounts.filter((sa) => sa.verified);
   }
 
-  private async loadGCPServiceAccounts(groveId: string): Promise<void> {
+  private async loadGCPServiceAccounts(projectId: string): Promise<void> {
     this.gcpServiceAccounts = [];
     try {
-      const res = await apiFetch(`/api/v1/groves/${groveId}/gcp-service-accounts`);
+      const res = await apiFetch(`/api/v1/projects/${projectId}/gcp-service-accounts`);
       if (res.ok) {
         const data = (await res.json()) as { items?: GCPServiceAccount[] } | GCPServiceAccount[];
         this.gcpServiceAccounts = Array.isArray(data) ? data : data.items || [];
@@ -407,7 +407,7 @@ export class ScionPageAgentConfigure extends LitElement {
         return;
       }
 
-      void this.loadGCPServiceAccounts(this.agent.groveId);
+      void this.loadGCPServiceAccounts(this.agent.projectId);
       this.populateForm();
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to load agent';
@@ -906,7 +906,7 @@ export class ScionPageAgentConfigure extends LitElement {
                   `
                 : html`
                     <div class="hint" style="margin-top: 0;">
-                      No verified service accounts available. Register and verify service accounts in grove settings.
+                      No verified service accounts available. Register and verify service accounts in project settings.
                     </div>
                   `}
             </div>

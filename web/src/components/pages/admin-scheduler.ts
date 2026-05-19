@@ -18,7 +18,7 @@
  * Admin Scheduler page component
  *
  * Read-only view of the Hub scheduler: recurring handlers, event handlers,
- * and recent scheduled events across all groves.
+ * and recent scheduled events across all projects.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -41,7 +41,7 @@ interface SchedulerInfo {
 
 interface ScheduledEvent {
   id: string;
-  groveId: string;
+  projectId: string;
   eventType: string;
   fireAt: string;
   status: string;
@@ -53,7 +53,7 @@ interface ScheduledEvent {
 
 interface RecurringSchedule {
   id: string;
-  groveId: string;
+  projectId: string;
   name: string;
   cronExpr: string;
   eventType: string;
@@ -92,7 +92,7 @@ export class ScionPageAdminScheduler extends LitElement {
   private allSchedules: RecurringSchedule[] = [];
 
   @state()
-  private groveMap: Map<string, { name: string; slug: string }> = new Map();
+  private projectMap: Map<string, { name: string; slug: string }> = new Map();
 
   static override styles = css`
     :host {
@@ -216,13 +216,13 @@ export class ScionPageAdminScheduler extends LitElement {
       font-size: 0.8125rem;
     }
 
-    .grove-link {
+    .project-link {
       color: var(--scion-primary, #3b82f6);
       text-decoration: none;
       font-weight: 500;
     }
 
-    .grove-link:hover {
+    .project-link:hover {
       text-decoration: underline;
     }
 
@@ -391,9 +391,9 @@ export class ScionPageAdminScheduler extends LitElement {
     this.error = null;
 
     try {
-      const [response, grovesResponse] = await Promise.all([
+      const [response, projectsResponse] = await Promise.all([
         apiFetch('/api/v1/admin/scheduler'),
-        apiFetch('/api/v1/groves'),
+        apiFetch('/api/v1/projects'),
       ]);
 
       if (!response.ok) {
@@ -404,15 +404,15 @@ export class ScionPageAdminScheduler extends LitElement {
       this.data = data;
       this.allSchedules = data.recurringSchedules ?? [];
 
-      // Build grove ID -> name/slug lookup map
-      if (grovesResponse.ok) {
-        const grovesBody = (await grovesResponse.json()) as { groves: { id: string; name: string; slug?: string }[] };
-        const grovesData = grovesBody.groves ?? [];
+      // Build project ID -> name/slug lookup map
+      if (projectsResponse.ok) {
+        const projectsBody = (await projectsResponse.json()) as { projects: { id: string; name: string; slug?: string }[] };
+        const projectsData = projectsBody.projects ?? [];
         const map = new Map<string, { name: string; slug: string }>();
-        for (const g of grovesData) {
-          map.set(g.id, { name: g.name, slug: g.slug ?? g.id });
+        for (const p of projectsData) {
+          map.set(p.id, { name: p.name, slug: p.slug ?? p.id });
         }
-        this.groveMap = map;
+        this.projectMap = map;
       }
     } catch (err) {
       console.error('Failed to load scheduler status:', err);
@@ -473,13 +473,13 @@ export class ScionPageAdminScheduler extends LitElement {
     }
   }
 
-  private renderGroveCell(groveId: string) {
-    const grove = this.groveMap.get(groveId);
-    if (grove) {
-      return html`<a class="grove-link" href="/groves/${encodeURIComponent(grove.slug)}">${grove.name}</a>`;
+  private renderProjectCell(projectId: string) {
+    const project = this.projectMap.get(projectId);
+    if (project) {
+      return html`<a class="project-link" href="/projects/${encodeURIComponent(project.slug)}">${project.name}</a>`;
     }
-    // Fallback to truncated ID if grove not found
-    return html`<span class="mono">${groveId.length > 12 ? groveId.slice(0, 12) + '...' : groveId}</span>`;
+    // Fallback to truncated ID if project not found
+    return html`<span class="mono">${projectId.length > 12 ? projectId.slice(0, 12) + '...' : projectId}</span>`;
   }
 
   private formatInterval(minutes: number): string {
@@ -493,7 +493,7 @@ export class ScionPageAdminScheduler extends LitElement {
     this.cancellingId = evt.id;
     try {
       const response = await apiFetch(
-        `/api/v1/groves/${encodeURIComponent(evt.groveId)}/scheduled-events/${encodeURIComponent(evt.id)}`,
+        `/api/v1/projects/${encodeURIComponent(evt.projectId)}/scheduled-events/${encodeURIComponent(evt.id)}`,
         { method: 'DELETE' }
       );
       if (!response.ok) {
@@ -664,7 +664,7 @@ export class ScionPageAdminScheduler extends LitElement {
     return html`
       <div class="section">
         <h2 class="section-title">Scheduled Events</h2>
-        <p class="section-description">Recent one-shot scheduled events across all groves.</p>
+        <p class="section-description">Recent one-shot scheduled events across all projects.</p>
         ${events.length === 0
           ? html`<div class="empty-inline">No scheduled events.</div>`
           : html`
@@ -675,7 +675,7 @@ export class ScionPageAdminScheduler extends LitElement {
                       <th>Type</th>
                       <th>Status</th>
                       <th>Fire At</th>
-                      <th class="hide-mobile">Grove</th>
+                      <th class="hide-mobile">Project</th>
                       <th class="hide-mobile">Created</th>
                       <th class="hide-mobile">Error</th>
                       <th>Actions</th>
@@ -695,7 +695,7 @@ export class ScionPageAdminScheduler extends LitElement {
     return html`
       <div class="section">
         <h2 class="section-title">Recurring Schedules</h2>
-        <p class="section-description">User-defined recurring schedules across all groves.</p>
+        <p class="section-description">User-defined recurring schedules across all projects.</p>
         ${this.allSchedules.length === 0
           ? html`<div class="empty-inline">No recurring schedules.</div>`
           : html`
@@ -708,7 +708,7 @@ export class ScionPageAdminScheduler extends LitElement {
                       <th>Cron</th>
                       <th>Status</th>
                       <th>Next Run</th>
-                      <th class="hide-mobile">Grove</th>
+                      <th class="hide-mobile">Project</th>
                       <th class="hide-mobile">Runs</th>
                       <th class="hide-mobile">Last Run</th>
                     </tr>
@@ -729,7 +729,7 @@ export class ScionPageAdminScheduler extends LitElement {
                             </span>
                           </td>
                           <td class="hide-mobile">
-                            ${this.renderGroveCell(sched.groveId)}
+                            ${this.renderProjectCell(sched.projectId)}
                           </td>
                           <td class="hide-mobile">
                             <span class="meta-text">
@@ -774,7 +774,7 @@ export class ScionPageAdminScheduler extends LitElement {
         <td><span class="status-badge ${evt.status}">${evt.status}</span></td>
         <td><span class="meta-text">${fireTimeDisplay}</span></td>
         <td class="hide-mobile">
-          ${this.renderGroveCell(evt.groveId)}
+          ${this.renderProjectCell(evt.projectId)}
         </td>
         <td class="hide-mobile">
           <span class="meta-text">${this.formatRelativeTime(evt.createdAt)}</span>

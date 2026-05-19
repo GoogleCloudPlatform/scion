@@ -36,8 +36,8 @@ type inboundMessageRequest struct {
 // Authentication: Requires broker HMAC authentication (X-Scion-Broker-ID header
 // validated by BrokerAuthMiddleware).
 //
-// The topic string is parsed to extract the grove ID and agent slug using the
-// standard topic format: scion.grove.<grove-id>.agent.<agent-slug>.messages
+// The topic string is parsed to extract the project ID and agent slug using the
+// standard topic format: scion.project.<projectID>.agent.<agentSlug>.messages
 func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
@@ -79,18 +79,18 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse topic to extract grove ID and agent slug
-	groveID, agentSlug, err := parseAgentMessageTopic(req.Topic)
+	// Parse topic to extract project ID and agent slug
+	projectID, agentSlug, err := parseAgentMessageTopic(req.Topic)
 	if err != nil {
 		BadRequest(w, "invalid topic: "+err.Error())
 		return
 	}
 
 	// Look up the agent
-	agent, err := s.store.GetAgentBySlug(r.Context(), groveID, agentSlug)
+	agent, err := s.store.GetAgentBySlug(r.Context(), projectID, agentSlug)
 	if err != nil {
 		log.Warn("Agent not found for inbound message",
-			"grove_id", groveID, "agent_slug", agentSlug, "error", err)
+			"project_id", projectID, "agent_slug", agentSlug, "error", err)
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -112,7 +112,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Info("Inbound message delivered",
-		"grove_id", groveID,
+		"project_id", projectID,
 		"agent_id", agent.ID,
 		"agent_slug", agentSlug,
 		"sender", req.Message.Sender,
@@ -124,7 +124,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		logAttrs := []any{
 			"agent_id", agent.ID,
 			"agent_name", agent.Name,
-			"grove_id", agent.GroveID,
+			"project_id", agent.ProjectID,
 			"source", "broker-inbound",
 			"broker_id", broker.ID(),
 			"plugin_name", pluginName,
@@ -139,16 +139,16 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// parseAgentMessageTopic extracts the grove ID and agent slug from a topic string.
-// Expected format: scion.grove.<grove-id>.agent.<agent-slug>.messages
-func parseAgentMessageTopic(topic string) (groveID, agentSlug string, err error) {
+// parseAgentMessageTopic extracts the project ID and agent slug from a topic string.
+// Expected format: scion.project.<projectID>.agent.<agentSlug>.messages
+func parseAgentMessageTopic(topic string) (projectID, agentSlug string, err error) {
 	parts := strings.Split(topic, ".")
-	// scion.grove.<groveID>.agent.<agentSlug>.messages = 6 parts
+	// scion.project.<projectID>.agent.<agentSlug>.messages = 6 parts
 	if len(parts) != 6 {
-		return "", "", fmt.Errorf("expected format scion.grove.<groveId>.agent.<agentSlug>.messages, got %d segments", len(parts))
+		return "", "", fmt.Errorf("expected format scion.project.<projectId>.agent.<agentSlug>.messages, got %d segments", len(parts))
 	}
-	if parts[0] != "scion" || parts[1] != "grove" || parts[3] != "agent" || parts[5] != "messages" {
-		return "", "", fmt.Errorf("expected format scion.grove.<groveId>.agent.<agentSlug>.messages")
+	if parts[0] != "scion" || parts[1] != "project" || parts[3] != "agent" || parts[5] != "messages" {
+		return "", "", fmt.Errorf("expected format scion.project.<projectId>.agent.<agentSlug>.messages")
 	}
 	return parts[2], parts[4], nil
 }

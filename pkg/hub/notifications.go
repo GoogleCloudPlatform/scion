@@ -68,8 +68,8 @@ func (nd *NotificationDispatcher) SetBrokerProxy(p *MessageBrokerProxy) {
 
 // Start subscribes to agent status and deletion events and spawns goroutines to process them.
 func (nd *NotificationDispatcher) Start() {
-	statusCh, unsubStatus := nd.events.Subscribe("grove.>.agent.status")
-	deletedCh, unsubDeleted := nd.events.Subscribe("grove.>.agent.deleted")
+	statusCh, unsubStatus := nd.events.Subscribe("project.>.agent.status")
+	deletedCh, unsubDeleted := nd.events.Subscribe("project.>.agent.deleted")
 
 	nd.wg.Add(1)
 	go func() {
@@ -118,7 +118,7 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 	ctx := context.Background()
 
 	// Collect subscriptions from both scopes: agent-scoped first (more specific),
-	// then grove-scoped.
+	// then project-scoped.
 	agentSubs, err := nd.store.GetNotificationSubscriptions(ctx, statusEvt.AgentID)
 	if err != nil {
 		nd.log.Error("Failed to get agent notification subscriptions",
@@ -126,15 +126,15 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 		return
 	}
 
-	groveSubs, err := nd.store.GetNotificationSubscriptionsByGroveScope(ctx, statusEvt.GroveID)
+	projectSubs, err := nd.store.GetNotificationSubscriptionsByProjectScope(ctx, statusEvt.ProjectID)
 	if err != nil {
-		nd.log.Error("Failed to get grove notification subscriptions",
-			"grove_id", statusEvt.GroveID, "error", err)
+		nd.log.Error("Failed to get project notification subscriptions",
+			"project_id", statusEvt.ProjectID, "error", err)
 		// Continue with agent-scoped only
-		groveSubs = nil
+		projectSubs = nil
 	}
 
-	allSubs := append(agentSubs, groveSubs...)
+	allSubs := append(agentSubs, projectSubs...)
 	if len(allSubs) == 0 {
 		return
 	}
@@ -198,14 +198,14 @@ func (nd *NotificationDispatcher) handleDeletedEvent(evt Event) {
 		agentSubs = nil
 	}
 
-	groveSubs, err := nd.store.GetNotificationSubscriptionsByGroveScope(ctx, deletedEvt.GroveID)
+	projectSubs, err := nd.store.GetNotificationSubscriptionsByProjectScope(ctx, deletedEvt.ProjectID)
 	if err != nil {
-		nd.log.Error("Failed to get grove notification subscriptions for deleted event",
-			"groveID", deletedEvt.GroveID, "error", err)
-		groveSubs = nil
+		nd.log.Error("Failed to get project notification subscriptions for deleted event",
+			"projectID", deletedEvt.ProjectID, "error", err)
+		projectSubs = nil
 	}
 
-	allSubs := append(agentSubs, groveSubs...)
+	allSubs := append(agentSubs, projectSubs...)
 	if len(allSubs) == 0 {
 		return
 	}
@@ -228,10 +228,10 @@ func (nd *NotificationDispatcher) handleDeletedEvent(evt Event) {
 
 		// Build a synthetic status event for storeAndDispatch
 		statusEvt := AgentStatusEvent{
-			AgentID:  deletedEvt.AgentID,
-			GroveID:  deletedEvt.GroveID,
-			Phase:    "stopped",
-			Activity: "DELETED",
+			AgentID:   deletedEvt.AgentID,
+			ProjectID: deletedEvt.ProjectID,
+			Phase:     "stopped",
+			Activity:  "DELETED",
 		}
 		nd.storeAndDispatch(ctx, sub, statusEvt)
 	}
@@ -247,7 +247,7 @@ func (nd *NotificationDispatcher) storeAndDispatch(ctx context.Context, sub *sto
 	}
 
 	// Skip stale status events that predate this subscription. This prevents
-	// retroactive notifications when a new grove-scoped subscription is created
+	// retroactive notifications when a new project-scoped subscription is created
 	// and existing agents' statuses are re-reported.
 	if !sub.CreatedAt.IsZero() {
 		activityTime := agent.LastActivityEvent
@@ -274,7 +274,7 @@ func (nd *NotificationDispatcher) storeAndDispatch(ctx context.Context, sub *sto
 		ID:             api.NewUUID(),
 		SubscriptionID: sub.ID,
 		AgentID:        evt.AgentID,
-		GroveID:        sub.GroveID,
+		ProjectID:      sub.ProjectID,
 		SubscriberType: sub.SubscriberType,
 		SubscriberID:   sub.SubscriberID,
 		Status:         strings.ToUpper(effectiveStatus),
@@ -299,11 +299,16 @@ func (nd *NotificationDispatcher) storeAndDispatch(ctx context.Context, sub *sto
 		nd.log.Info("Notification dispatched to user via SSE",
 			"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
 
-		// Persist an inbox message for the web UI and fall back to the
-		// channel registry for external delivery. Notifications are NOT
-		// routed through the broker plugin so that only explicit
-		// "scion message" commands produce chat messages.
+		// Persist an inbox message for the web UI.
 		nd.createInboxMessage(ctx, sub, notif, agent)
+
+		// Route through the broker so external integrations (Telegram,
+		// Discord) receive state-change messages as rich cards.
+		if nd.brokerProxy != nil {
+			nd.dispatchToBroker(ctx, sub, notif, agent.ID, agent.Slug)
+		}
+
+		// Channel registry is a fallback for deployments without a broker.
 		nd.dispatchToChannels(ctx, sub, notif, agent.ID, agent.Slug)
 	default:
 		nd.log.Warn("Unknown subscriber type", "type", sub.SubscriberType)
@@ -314,10 +319,10 @@ func (nd *NotificationDispatcher) storeAndDispatch(ctx context.Context, sub *sto
 // structured message. The sender is the watched agent (agent:<slug>), and
 // the type is state-change or input-needed based on the notification status.
 func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *store.NotificationSubscription, notif *store.Notification, watchedAgentID, watchedSlug string) {
-	subscriber, err := nd.store.GetAgentBySlug(ctx, sub.GroveID, sub.SubscriberID)
+	subscriber, err := nd.store.GetAgentBySlug(ctx, sub.ProjectID, sub.SubscriberID)
 	if err != nil {
 		nd.log.Warn("Subscriber agent not found, skipping dispatch",
-			"subscriberID", sub.SubscriberID, "groveID", sub.GroveID, "error", err)
+			"subscriberID", sub.SubscriberID, "projectID", sub.ProjectID, "error", err)
 		return
 	}
 
@@ -364,7 +369,7 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 			logAttrs := []any{
 				"agent_id", subscriber.ID,
 				"agent_name", subscriber.Name,
-				"grove_id", subscriber.GroveID,
+				"project_id", subscriber.ProjectID,
 				"notification_id", notif.ID,
 			}
 			logAttrs = append(logAttrs, structuredMsg.LogAttrs()...)
@@ -423,7 +428,7 @@ func (nd *NotificationDispatcher) dispatchToBroker(ctx context.Context, sub *sto
 	structuredMsg.RecipientID = sub.SubscriberID
 	structuredMsg.Status = strings.ToUpper(notif.Status)
 
-	if err := nd.brokerProxy.PublishUserMessage(ctx, sub.GroveID, sub.SubscriberID, structuredMsg); err != nil {
+	if err := nd.brokerProxy.PublishUserMessage(ctx, sub.ProjectID, sub.SubscriberID, structuredMsg); err != nil {
 		nd.log.Error("Failed to dispatch notification through broker",
 			"subscriberID", sub.SubscriberID, "notificationID", notif.ID, "error", err)
 	} else {
@@ -448,7 +453,7 @@ func (nd *NotificationDispatcher) createInboxMessage(ctx context.Context, sub *s
 
 	storeMsg := &store.Message{
 		ID:          api.NewUUID(),
-		GroveID:     notif.GroveID,
+		ProjectID:   notif.ProjectID,
 		Sender:      "agent:" + agent.Slug,
 		SenderID:    agent.ID,
 		Recipient:   "user:" + sub.SubscriberID,

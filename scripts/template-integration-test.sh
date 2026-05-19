@@ -190,7 +190,7 @@ start_server() {
     mkdir -p "$TEST_DIR/cache/templates"
 
     # Build command as array for proper handling
-    local cmd=("$TEST_DIR/scion" "server" "start"
+    local cmd=("$TEST_DIR/scion" "server" "start" "--foreground" "--production"
         "--enable-hub"
         "--enable-runtime-broker"
         "--dev-auth"
@@ -410,7 +410,7 @@ test_phase1_hub_api() {
 
     # Test 1.5: Delete template
     log_info "Test 1.5: Delete template..."
-    local delete_status=$(curl -s -o /dev/null -w "%{http_code}" \
+    local delete_status=$(curl -s -o /dev/null -w "%{http_code}" -H "$AUTH" \
         -X DELETE "$base_url/api/v1/templates/$template_id?deleteFiles=true" \
         -H "$AUTH")
 
@@ -476,7 +476,7 @@ test_phase2_upload_flow() {
 
         local local_file="$template_dir/$path"
         if [[ -f "$local_file" ]]; then
-            local upload_status=$(curl -s -o /dev/null -w "%{http_code}" \
+            local upload_status=$(curl -s -o /dev/null -w "%{http_code}" -H "$AUTH" \
                 -X "$method" "$url" \
                 -H "Content-Type: application/octet-stream" \
                 --data-binary "@$local_file")
@@ -550,7 +550,7 @@ test_phase2_upload_flow() {
     log_info "Test 2.5: Downloading file..."
     local first_file_url=$(echo "$download_response" | jq -r '.files[0].url')
     mkdir -p "$TEST_DIR/downloads"
-    local download_status=$(curl -s -o "$TEST_DIR/downloads/test-file" -w "%{http_code}" "$first_file_url")
+    local download_status=$(curl -s -o "$TEST_DIR/downloads/test-file" -w "%{http_code}" -H "$AUTH" "$first_file_url")
 
     if [[ "$download_status" == "200" ]]; then
         log_success "File downloaded successfully"
@@ -597,14 +597,14 @@ test_phase3_runtime_integration() {
 
     # Test 3.1: Verify Runtime Host info
     log_info "Test 3.1: Checking Runtime Host info..."
-    local info_response=$(curl -s "$runtime_url/api/v1/info")
+    local info_response=$(curl -s -H "$AUTH" "$runtime_url/api/v1/info")
     local host_type=$(echo "$info_response" | jq -r '.type // "unknown"')
     log_success "Runtime Host type: $host_type"
 
     # Test 3.2: Create agent with template (triggers hydration)
     # In the agnostic model, harness-config is specified separately from template
     log_info "Test 3.2: Creating agent with template (triggers hydration)..."
-    local agent_response=$(curl -s -X POST "$runtime_url/api/v1/agents" \
+    local agent_response=$(curl -s -H "$AUTH" -X POST "$runtime_url/api/v1/agents" \
         -H "Content-Type: application/json" \
         -d "{
             \"name\": \"phase3-test-agent\",
@@ -648,7 +648,7 @@ test_phase3_runtime_integration() {
     log_info "Test 3.4: Testing error handling..."
 
     # Try to create agent with non-existent template
-    local error_response=$(curl -s -X POST "$runtime_url/api/v1/agents" \
+    local error_response=$(curl -s -H "$AUTH" -X POST "$runtime_url/api/v1/agents" \
         -H "Content-Type: application/json" \
         -d '{
             "name": "error-test-agent",
@@ -665,7 +665,7 @@ test_phase3_runtime_integration() {
     # Cleanup agent if created
     if [[ -n "$agent_id" ]]; then
         log_info "Cleaning up test agent..."
-        curl -s -X DELETE "$runtime_url/api/v1/agents/$agent_id" > /dev/null 2>&1 || true
+        curl -s -H "$AUTH" -X DELETE "$runtime_url/api/v1/agents/$agent_id" > /dev/null 2>&1 || true
     fi
 
     log_success "Phase 3 tests completed successfully"

@@ -24,9 +24,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
-// GCPServiceAccountService handles GCP service account operations for a grove.
+// GCPServiceAccountService handles GCP service account operations for a project.
 type GCPServiceAccountService interface {
-	// List returns all GCP service accounts for the grove.
+	// List returns all GCP service accounts for the project.
 	List(ctx context.Context) ([]GCPServiceAccount, error)
 
 	// Get returns a specific GCP service account by ID.
@@ -51,7 +51,7 @@ type GCPServiceAccount struct {
 	Scope              string    `json:"scope"`
 	ScopeID            string    `json:"scopeId"`
 	Email              string    `json:"email"`
-	ProjectID          string    `json:"projectId"`
+	ProjectID          string    `json:"projectId"` // GCP Project ID
 	DisplayName        string    `json:"displayName"`
 	DefaultScopes      []string  `json:"defaultScopes,omitempty"`
 	Verified           bool      `json:"verified"`
@@ -81,16 +81,16 @@ type MintGCPServiceAccountRequest struct {
 
 // gcpServiceAccountService is the implementation of GCPServiceAccountService.
 type gcpServiceAccountService struct {
-	c       *client
-	groveID string
+	c         *client
+	projectID string
 }
 
 func (s *gcpServiceAccountService) basePath() string {
-	return fmt.Sprintf("/api/v1/groves/%s/gcp-service-accounts", s.groveID)
+	return fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", s.projectID)
 }
 
 func (s *gcpServiceAccountService) List(ctx context.Context) ([]GCPServiceAccount, error) {
-	resp, err := s.c.transport.Get(ctx, s.basePath(), nil)
+	resp, err := s.c.get(ctx, s.basePath(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +107,7 @@ func (s *gcpServiceAccountService) List(ctx context.Context) ([]GCPServiceAccoun
 
 func (s *gcpServiceAccountService) Get(ctx context.Context, id string) (*GCPServiceAccount, error) {
 	path := fmt.Sprintf("%s/%s", s.basePath(), id)
-	resp, err := s.c.transport.Get(ctx, path, nil)
+	resp, err := s.c.get(ctx, path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +115,7 @@ func (s *gcpServiceAccountService) Get(ctx context.Context, id string) (*GCPServ
 }
 
 func (s *gcpServiceAccountService) Create(ctx context.Context, req *CreateGCPServiceAccountRequest) (*GCPServiceAccount, error) {
-	resp, err := s.c.transport.Post(ctx, s.basePath(), req, nil)
+	resp, err := s.c.post(ctx, s.basePath(), req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -124,13 +124,13 @@ func (s *gcpServiceAccountService) Create(ctx context.Context, req *CreateGCPSer
 
 func (s *gcpServiceAccountService) Delete(ctx context.Context, id string) error {
 	path := fmt.Sprintf("%s/%s", s.basePath(), id)
-	_, err := s.c.transport.Delete(ctx, path, nil)
+	_, err := s.c.delete(ctx, path, nil)
 	return err
 }
 
 func (s *gcpServiceAccountService) Verify(ctx context.Context, id string) (*GCPServiceAccount, error) {
 	path := fmt.Sprintf("%s/%s/verify", s.basePath(), id)
-	resp, err := s.c.transport.Post(ctx, path, nil, nil)
+	resp, err := s.c.post(ctx, path, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +139,7 @@ func (s *gcpServiceAccountService) Verify(ctx context.Context, id string) (*GCPS
 
 func (s *gcpServiceAccountService) Mint(ctx context.Context, req *MintGCPServiceAccountRequest) (*GCPServiceAccount, error) {
 	path := fmt.Sprintf("%s/mint", s.basePath())
-	resp, err := s.c.transport.Post(ctx, path, req, nil)
+	resp, err := s.c.post(ctx, path, req, nil)
 	if err != nil {
 		return nil, err
 	}

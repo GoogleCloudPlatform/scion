@@ -86,27 +86,27 @@ func TestAuthzRemediation_ListEndpointsFilterUnauthorizedItems(t *testing.T) {
 	}
 	require.NoError(t, s.CreateUser(ctx, hiddenUser))
 
-	visibleGrove := &store.Grove{
-		ID:        "grove-visible-authz",
-		Slug:      "grove-visible-authz",
-		Name:      "Visible Grove",
+	visibleProject := &store.Project{
+		ID:        "project-visible-authz",
+		Slug:      "project-visible-authz",
+		Name:      "Visible Project",
 		OwnerID:   "owner-outside-user",
 		CreatedBy: "owner-outside-user",
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	require.NoError(t, s.CreateGrove(ctx, visibleGrove))
+	require.NoError(t, s.CreateProject(ctx, visibleProject))
 
-	hiddenGrove := &store.Grove{
-		ID:        "grove-hidden-authz",
-		Slug:      "grove-hidden-authz",
-		Name:      "Hidden Grove",
+	hiddenProject := &store.Project{
+		ID:        "project-hidden-authz",
+		Slug:      "project-hidden-authz",
+		Name:      "Hidden Project",
 		OwnerID:   "owner-outside-user",
 		CreatedBy: "owner-outside-user",
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	require.NoError(t, s.CreateGrove(ctx, hiddenGrove))
+	require.NoError(t, s.CreateProject(ctx, hiddenProject))
 
 	visibleBroker := &store.RuntimeBroker{
 		ID:        "broker-visible-authz",
@@ -127,37 +127,37 @@ func TestAuthzRemediation_ListEndpointsFilterUnauthorizedItems(t *testing.T) {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, hiddenBroker))
 
 	visibleAgent := &store.Agent{
-		ID:      "agent-visible-authz",
-		Slug:    "agent-visible-authz",
-		Name:    "Visible Agent",
-		GroveID: visibleGrove.ID,
-		OwnerID: "owner-outside-user",
-		Phase:   string(state.PhaseRunning),
+		ID:        "agent-visible-authz",
+		Slug:      "agent-visible-authz",
+		Name:      "Visible Agent",
+		ProjectID: visibleProject.ID,
+		OwnerID:   "owner-outside-user",
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, visibleAgent))
 
 	hiddenAgent := &store.Agent{
-		ID:      "agent-hidden-authz",
-		Slug:    "agent-hidden-authz",
-		Name:    "Hidden Agent",
-		GroveID: hiddenGrove.ID,
-		OwnerID: "owner-outside-user",
-		Phase:   string(state.PhaseRunning),
+		ID:        "agent-hidden-authz",
+		Slug:      "agent-hidden-authz",
+		Name:      "Hidden Agent",
+		ProjectID: hiddenProject.ID,
+		OwnerID:   "owner-outside-user",
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, hiddenAgent))
 
-	grantUserActionOnResource(t, s, member.ID, "grove", visibleGrove.ID, ActionRead)
+	grantUserActionOnResource(t, s, member.ID, "project", visibleProject.ID, ActionRead)
 	grantUserActionOnResource(t, s, member.ID, "agent", visibleAgent.ID, ActionRead)
 	grantUserActionOnResource(t, s, member.ID, "broker", visibleBroker.ID, ActionRead)
 	grantUserActionOnResource(t, s, member.ID, "user", visibleUser.ID, ActionRead)
 
-	rec := doRequestAsUser(t, srv, member, http.MethodGet, "/api/v1/groves", nil)
+	rec := doRequestAsUser(t, srv, member, http.MethodGet, "/api/v1/projects", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var grovesResp ListGrovesResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&grovesResp))
-	require.Len(t, grovesResp.Groves, 1)
-	assert.Equal(t, visibleGrove.ID, grovesResp.Groves[0].ID)
-	assert.Equal(t, 1, grovesResp.TotalCount)
+	var projectsResp ListProjectsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&projectsResp))
+	require.Len(t, projectsResp.Projects, 1)
+	assert.Equal(t, visibleProject.ID, projectsResp.Projects[0].Project.ID)
+	assert.Equal(t, 1, projectsResp.TotalCount)
 
 	rec = doRequestAsUser(t, srv, member, http.MethodGet, "/api/v1/agents", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -198,24 +198,24 @@ func TestAuthzRemediation_AgentAndWorkspaceRoutesEnforceResourcePermissions(t *t
 	}
 	require.NoError(t, s.CreateUser(ctx, member))
 
-	grove := &store.Grove{
-		ID:        "grove-workspace-authz",
-		Slug:      "grove-workspace-authz",
-		Name:      "Workspace Grove",
+	project := &store.Project{
+		ID:        "project-workspace-authz",
+		Slug:      "project-workspace-authz",
+		Name:      "Workspace Project",
 		OwnerID:   "owner-outside-user",
 		CreatedBy: "owner-outside-user",
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
-	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:      "agent-workspace-authz",
-		Slug:    "agent-workspace-authz",
-		Name:    "Workspace Agent",
-		GroveID: grove.ID,
-		OwnerID: "owner-outside-user",
-		Phase:   string(state.PhaseStopped),
+		ID:        "agent-workspace-authz",
+		Slug:      "agent-workspace-authz",
+		Name:      "Workspace Agent",
+		ProjectID: project.ID,
+		OwnerID:   "owner-outside-user",
+		Phase:     string(state.PhaseStopped),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 

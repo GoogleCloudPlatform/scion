@@ -30,7 +30,7 @@ import (
 )
 
 var (
-	secretGroveScope   string
+	secretProjectScope string
 	secretBrokerScope  string
 	secretScope        string
 	secretOutputJSON   bool
@@ -51,11 +51,11 @@ They are injected into agents at runtime but never exposed via the API.
 Secrets can be scoped to:
   - Hub: Available to all agents across the entire hub (admin-only writes)
   - User (default): Available to all your agents
-  - Grove: Available to agents in a specific grove
+  - Project: Available to agents in a specific project
   - Broker: Available to agents running on a specific broker
 
 Secrets are resolved hierarchically when an agent starts:
-  hub -> user -> grove -> broker -> agent config
+  hub -> user -> project -> broker -> agent config
 
 Examples:
   # Set a user-scoped secret
@@ -64,8 +64,8 @@ Examples:
   # Set a hub-scoped secret
   scion hub secret set --scope hub ANTHROPIC_API_KEY sk-...
 
-  # Set a grove-scoped secret (infer grove from current directory)
-  scion hub secret set --grove DATABASE_PASSWORD mypassword
+  # Set a project-scoped secret (infer project from current directory)
+  scion hub secret set --project DATABASE_PASSWORD mypassword
 
   # List all user secrets (metadata only, no values)
   scion hub secret get
@@ -86,7 +86,7 @@ var hubSecretSetCmd = &cobra.Command{
 The value is stored securely and can never be retrieved after creation.
 Only metadata (key, scope, creation time) can be viewed.
 
-By default, secrets are scoped to the current user. Use --grove or --broker
+By default, secrets are scoped to the current user. Use --project or --broker
 to set secrets at different scopes.
 
 Secret types control how the value is projected into agent containers:
@@ -100,7 +100,7 @@ For file secrets, prefix the value with @ to read from a file:
 Examples:
   scion hub secret set API_KEY sk-abc123
   scion hub secret set --scope hub API_KEY sk-abc123
-  scion hub secret set --grove DATABASE_PASSWORD mypassword
+  scion hub secret set --project DATABASE_PASSWORD mypassword
   scion hub secret set --type variable CONFIG_JSON '{"key":"val"}'
   scion hub secret set --type file --target /home/scion/.ssh/id_rsa SSH_KEY @~/.ssh/id_rsa`,
 	Args: cobra.ExactArgs(2),
@@ -122,8 +122,8 @@ With a key, returns metadata for the specific secret.
 Examples:
   scion hub secret get                    # List all user secrets
   scion hub secret get API_KEY            # Get specific secret metadata
-  scion hub secret get --grove            # List grove secrets
-  scion hub secret get --grove API_KEY    # Get grove secret metadata`,
+  scion hub secret get --project          # List project secrets
+  scion hub secret get --project API_KEY  # Get project secret metadata`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runSecretGet,
 }
@@ -137,12 +137,12 @@ var hubSecretListCmd = &cobra.Command{
 Secret values are never returned. This command only shows metadata
 such as the key name, scope, type, version, and timestamps.
 
-By default, lists user-scoped secrets. Use --grove or --broker
+By default, lists user-scoped secrets. Use --project or --broker
 to list secrets at different scopes.
 
 Examples:
   scion hub secret list                    # List all user secrets
-  scion hub secret list --grove            # List grove secrets
+  scion hub secret list --project          # List project secrets
   scion hub secret list --json             # Output as JSON`,
 	Args: cobra.NoArgs,
 	RunE: runSecretList,
@@ -156,7 +156,7 @@ var hubSecretClearCmd = &cobra.Command{
 
 Examples:
   scion hub secret clear API_KEY
-  scion hub secret clear --grove API_KEY
+  scion hub secret clear --project API_KEY
   scion hub secret clear --broker API_KEY`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSecretClear,
@@ -170,13 +170,19 @@ func init() {
 	hubSecretCmd.AddCommand(hubSecretClearCmd)
 
 	// Add scope flags to all subcommands.
-	// --scope selects the scope level (hub, user). --grove/--broker select their
+	// --scope selects the scope level (hub, user). --project/--broker select their
 	// respective scopes and support both bare usage (infer from settings) and
-	// explicit name/ID via --grove=<name|id>.
+	// explicit name/ID via --project=<name|id>.
 	for _, cmd := range []*cobra.Command{hubSecretSetCmd, hubSecretGetCmd, hubSecretListCmd, hubSecretClearCmd} {
 		cmd.Flags().StringVar(&secretScope, "scope", "", "Scope level: hub, user (default: user)")
-		cmd.Flags().StringVar(&secretGroveScope, "grove", "", "Grove scope (bare flag infers current grove, or use --grove=<name|id>)")
+		cmd.Flags().StringVar(&secretProjectScope, "project", "", "Project scope (bare flag infers current project, or use --project=<name|id>)")
+		cmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
+
+		cmd.Flags().StringVar(&secretProjectScope, "grove", "", "Deprecated alias for --project")
 		cmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
+		_ = cmd.Flags().MarkDeprecated("grove", "use --project instead")
+		_ = cmd.Flags().MarkHidden("grove")
+
 		cmd.Flags().StringVar(&secretBrokerScope, "broker", "", "Broker scope (bare flag infers current broker, or use --broker=<name|id>)")
 		cmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 	}
@@ -191,11 +197,12 @@ func init() {
 }
 
 // resolveSecretScope determines the scope and scopeID based on flags.
-// When --grove or --broker is used bare (no value), scopeID is inferred from settings.
+// When --project or --broker is used bare (no value), scopeID is inferred from settings.
 // When a value is provided, it is returned as-is and may need further resolution
 // (name/slug to UUID) via resolveScopeID.
 func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, scopeID string, err error) {
 	scopeSet := cmd.Flags().Changed("scope")
+	projectSet := cmd.Flags().Changed("project")
 	groveSet := cmd.Flags().Changed("grove")
 	brokerSet := cmd.Flags().Changed("broker")
 
@@ -204,14 +211,14 @@ func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, s
 	if scopeSet {
 		setCount++
 	}
-	if groveSet {
+	if projectSet || groveSet {
 		setCount++
 	}
 	if brokerSet {
 		setCount++
 	}
 	if setCount > 1 {
-		return "", "", fmt.Errorf("cannot specify more than one of --scope, --grove, and --broker")
+		return "", "", fmt.Errorf("cannot specify more than one of --scope, --project, and --broker")
 	}
 
 	if scopeSet {
@@ -225,23 +232,23 @@ func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, s
 		}
 	}
 
-	if groveSet {
-		scope = "grove"
-		groveVal := secretGroveScope
-		if groveVal == scopeInferSentinel {
-			groveVal = ""
+	if projectSet || groveSet {
+		scope = "project"
+		projectVal := secretProjectScope
+		if projectVal == scopeInferSentinel {
+			projectVal = ""
 		}
-		if groveVal != "" {
+		if projectVal != "" {
 			// Explicit value — may be a name, slug, or UUID (resolved later)
-			scopeID = groveVal
+			scopeID = projectVal
 		} else {
-			// Infer from settings: try explicit hub link first, then local grove ID
-			if settings.Hub != nil && settings.Hub.GroveID != "" {
-				scopeID = settings.Hub.GroveID
-			} else if settings.GroveID != "" {
-				scopeID = settings.GroveID
+			// Infer from settings: try explicit hub link first, then local project ID
+			if settings.Hub != nil && settings.Hub.ProjectID != "" {
+				scopeID = settings.Hub.ProjectID
+			} else if settings.ProjectID != "" {
+				scopeID = settings.ProjectID
 			} else {
-				return "", "", fmt.Errorf("cannot infer grove ID: not linked with Hub. Use 'scion hub link' first or provide explicit grove ID")
+				return "", "", fmt.Errorf("cannot infer project ID: not linked with Hub. Use 'scion hub link' first or provide explicit project ID")
 			}
 		}
 		return scope, scopeID, nil
@@ -320,9 +327,9 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -377,9 +384,9 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 }
 
 func runSecretGet(cmd *cobra.Command, args []string) error {
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -451,9 +458,9 @@ func runSecretGet(cmd *cobra.Command, args []string) error {
 }
 
 func runSecretList(cmd *cobra.Command, _ []string) error {
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
@@ -521,9 +528,9 @@ func runSecretList(cmd *cobra.Command, _ []string) error {
 func runSecretClear(cmd *cobra.Command, args []string) error {
 	key := args[0]
 
-	resolvedPath, _, err := config.ResolveGrovePath(grovePath)
+	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return fmt.Errorf("failed to resolve grove path: %w", err)
+		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)

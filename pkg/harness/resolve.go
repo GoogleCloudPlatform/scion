@@ -34,7 +34,7 @@ import (
 // which preserves built-in behavior.
 type ResolveOptions struct {
 	Name          string                    // harness-config name (e.g. "claude")
-	GrovePath     string                    // optional grove path for resolution
+	ProjectPath   string                    // optional project path for resolution
 	TemplatePaths []string                  // optional template dirs (highest priority)
 	ProfileName   string                    // active profile (for settings overlay)
 	Settings      *config.VersionedSettings // optional settings overlay
@@ -66,7 +66,7 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 		return nil, fmt.Errorf("harness.Resolve requires a name")
 	}
 
-	hcDir, hcErr := config.FindHarnessConfigDir(opts.Name, opts.GrovePath, opts.TemplatePaths...)
+	hcDir, hcErr := config.FindHarnessConfigDir(opts.Name, opts.ProjectPath, opts.TemplatePaths...)
 
 	entry := config.HarnessConfigEntry{Harness: opts.Name}
 	if hcDir != nil {

@@ -9,8 +9,8 @@ Scion is a container-based orchestration tool for managing concurrent LLM-based 
 
 ## Core Concepts
 
-### Groves
-A **grove** is the grouping construct for agents, represented by the `.scion` directory. Each project can have its own grove, and there's also a global grove in `~/.scion/`.
+### Projects
+A **project** is the grouping construct for agents, represented by the `.scion` directory. Each project can have its own project, and there's also a global project in `~/.scion/`.
 
 ### Agents
 An **agent** is an isolated LLM instance running in a container with its own workspace (git worktree), credentials, and configuration.
@@ -30,10 +30,10 @@ A **harness** is the LLM interface (Gemini CLI, Claude Code, etc.) that the agen
 ### Initialization
 
 ```bash
-# Initialize a grove in the current project (creates .scion directory)
+# Initialize a project in the current project (creates .scion directory)
 scion init
 
-# Initialize the global grove
+# Initialize the global project
 scion init --global
 ```
 
@@ -59,10 +59,10 @@ scion start <agent-name> "task" --workspace /path/to/workspace
 ### Listing Agents
 
 ```bash
-# List agents in the current grove
+# List agents in the current project
 scion list
 
-# List all agents across all groves
+# List all agents across all projects
 scion list --all
 
 # Output as JSON
@@ -73,7 +73,7 @@ Output columns:
 - NAME: Agent name
 - TEMPLATE: Template used (gemini, claude, etc.)
 - RUNTIME: Execution runtime (docker, container, k8s)
-- GROVE: Grove name
+- PROJECT: Project name
 - AGENT STATUS: Agent state
 - SESSION: Session status
 - CONTAINER: Container status
@@ -90,10 +90,10 @@ scion message <agent-name> "Your message here"
 # Send message with interrupt (stops current work first)
 scion message <agent-name> "Urgent task" --interrupt
 
-# Broadcast message to all agents in current grove
+# Broadcast message to all agents in current project
 scion message --broadcast "Stop and report status"
 
-# Broadcast to all agents across all groves
+# Broadcast to all agents across all projects
 scion message --all "Global announcement"
 ```
 
@@ -177,7 +177,7 @@ scion config list
 # Get a specific setting
 scion config get <key>
 
-# Set a local setting (in current grove)
+# Set a local setting (in current project)
 scion config set <key> <value>
 
 # Set a global setting
@@ -227,8 +227,8 @@ scion delete my-agent --preserve-branch
 
 These flags work with most commands:
 
-- `--grove, -g <path>`: Specify a grove directory
-- `--global`: Use the global grove (~/.scion/)
+- `--project, -g <path>`: Specify a project directory
+- `--global`: Use the global project (~/.scion/)
 - `--profile, -p <name>`: Use a specific configuration profile
 - `--format <type>`: Output format (json, plain) - currently for list only
 

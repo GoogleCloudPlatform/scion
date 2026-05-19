@@ -24,11 +24,11 @@ var machineInitForce bool
 // initCmd represents the init command
 var initCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Initialize a new grove",
-	Long: `Initialize a new grove by creating the .scion directory structure
+	Short: "Initialize a new project",
+	Long: `Initialize a new project by creating the .scion directory structure
 and seeding the default template.
 
-This is an alias for 'scion grove init'.
+This is an alias for 'scion project init'.
 
 By default, it initializes in:
 - The root of the current git repo if run inside a repo
@@ -36,12 +36,12 @@ By default, it initializes in:
 
 With --global or --machine, it performs full machine-level setup
 (seeds harness-configs, templates, settings) in the user's home folder.`,
-	RunE: groveInitCmd.RunE,
+	RunE: projectInitCmd.RunE,
 }
 
 func init() {
 	rootCmd.AddCommand(initCmd)
-	initCmd.Flags().BoolVar(&globalInit, "global", false, "Initialize the global grove in the home directory")
+	initCmd.Flags().BoolVar(&globalInit, "global", false, "Initialize the global project in the home directory")
 	initCmd.Flags().BoolVar(&machineInit, "machine", false, "Perform full machine-level setup (seeds harness-configs, templates, settings)")
 	initCmd.Flags().BoolVar(&machineInitForce, "force", false, "Force overwrite existing templates and harness-configs with embedded defaults")
 	initCmd.Flags().StringVar(&initImageRegistry, "image-registry", "", "Container image registry path (e.g., ghcr.io/myorg)")

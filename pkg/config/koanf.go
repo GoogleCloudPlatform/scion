@@ -34,9 +34,9 @@ import (
 // LoadSettingsKoanf loads settings using Koanf with provider priority:
 // 1. Embedded defaults (YAML) with OS-specific runtime adjustment
 // 2. Global settings file (~/.scion/settings.yaml or .json)
-// 3. Grove settings file (.scion/settings.yaml or .json)
+// 3. Project settings file (.scion/settings.yaml or .json)
 // 4. Environment variables (SCION_ prefix, top-level only)
-func LoadSettingsKoanf(grovePath string) (*Settings, error) {
+func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 	k := koanf.New(".")
 
 	// 1. Load embedded defaults (YAML with fallback to JSON)
@@ -53,11 +53,11 @@ func LoadSettingsKoanf(grovePath string) (*Settings, error) {
 		}
 	}
 
-	// 3. Load grove settings
-	effectiveGrovePath := resolveEffectiveGrovePath(grovePath)
-	// Only load grove settings if it's different from global (avoid double-loading)
-	if effectiveGrovePath != "" && effectiveGrovePath != globalDir {
-		if err := loadSettingsFile(k, effectiveGrovePath); err != nil {
+	// 3. Load project settings
+	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
+	// Only load project settings if it's different from global (avoid double-loading)
+	if effectiveProjectPath != "" && effectiveProjectPath != globalDir {
+		if err := loadSettingsFile(k, effectiveProjectPath); err != nil {
 			return nil, err
 		}
 	}
@@ -79,14 +79,18 @@ func LoadSettingsKoanf(grovePath string) (*Settings, error) {
 		if strings.HasPrefix(key, "bucket_") {
 			return "bucket." + strings.TrimPrefix(key, "bucket_")
 		}
+		// Handle legacy grove_id
+		if key == "grove_id" {
+			return "project_id"
+		}
 		// Handle nested hub keys
 		if strings.HasPrefix(key, "hub_") {
 			subkey := strings.TrimPrefix(key, "hub_")
 			// Convert snake_case to camelCase for specific keys
 			switch subkey {
-			case "grove_id":
-				// SCION_HUB_GROVE_ID maps to top-level grove_id, not hub.grove_id
-				return "grove_id"
+			case "grove_id", "project_id":
+				// SCION_HUB_GROVE_ID or SCION_HUB_PROJECT_ID maps to top-level project_id, not hub.projectId
+				return "project_id"
 			case "api_key":
 				return "hub.apiKey"
 			case "broker_id":
@@ -101,38 +105,46 @@ func LoadSettingsKoanf(grovePath string) (*Settings, error) {
 	}), nil)
 
 	// Normalize v1 settings keys to legacy keyspace.
-	// In v1 format, grove_id is stored as hub.grove_id (snake_case), but the
-	// legacy Settings struct expects it at the top level (grove_id). The
-	// HubClientConfig struct uses koanf tag "groveId" (camelCase), so the
+	// In v1 format, project_id (legacy grove_id) is stored as hub.grove_id (snake_case),
+	// but the legacy Settings struct expects it at the top level (project_id). The
+	// HubClientConfig struct uses koanf tag "projectId" (camelCase), so the
 	// v1 key hub.grove_id doesn't match either location without remapping.
 	// Always remap (unconditionally) because after the koanf merge chain,
-	// hub.grove_id reflects the most specific (grove-level) value and must
-	// take precedence over any top-level grove_id inherited from global.
-	if k.Exists("hub.grove_id") {
+	// hub.grove_id reflects the most specific (project-level) value and must
+	// take precedence over any top-level project_id inherited from global.
+	// Support both hub.grove_id and hub.project_id from v1 settings.
+	hubProjectID := ""
+	if k.Exists("hub.project_id") {
+		hubProjectID = k.String("hub.project_id")
+	} else if k.Exists("hub.grove_id") {
+		hubProjectID = k.String("hub.grove_id")
+	}
+
+	if hubProjectID != "" {
 		_ = k.Load(confmap.Provider(map[string]interface{}{
-			"grove_id": k.String("hub.grove_id"),
+			"project_id": hubProjectID,
 		}, "."), nil)
-		// Also remap to hub.groveId (camelCase) so the legacy
-		// HubClientConfig.GroveID field (koanf tag "groveId") is populated.
-		// Without this, GetHubGroveID() returns "" for V1 settings, causing
-		// EnsureHubReady to fall back to the local grove_id and loop on
-		// grove registration when the hub grove ID differs from the local ID.
-		if !k.Exists("hub.groveId") {
+		// Also remap to hub.projectId (camelCase) so the legacy
+		// HubClientConfig.ProjectID field (koanf tag "projectId") is populated.
+		// Without this, GetHubProjectID() returns "" for V1 settings, causing
+		// EnsureHubReady to fall back to the local project_id and loop on
+		// project registration when the hub project ID differs from the local ID.
+		if !k.Exists("hub.projectId") {
 			_ = k.Load(confmap.Provider(map[string]interface{}{
-				"hub.groveId": k.String("hub.grove_id"),
+				"hub.projectId": hubProjectID,
 			}, "."), nil)
 		}
 	}
 
-	// For git groves, the grove_id is stored in a grove-id file inside the
+	// For git projects, the project_id is stored in a project-id file inside the
 	// .scion directory rather than in the settings file. Read it here so that
-	// it overrides any grove_id inherited from global settings. The original
-	// grovePath points to the .scion directory (before resolveEffectiveGrovePath
+	// it overrides any project_id inherited from global settings. The original
+	// projectPath points to the .scion directory (before resolveEffectiveProjectPath
 	// redirects to the external config dir).
-	if grovePath != "" && grovePath != globalDir {
-		if groveID, err := ReadGroveID(grovePath); err == nil && groveID != "" {
+	if projectPath != "" && projectPath != globalDir {
+		if projectID, err := ReadProjectID(projectPath); err == nil && projectID != "" {
 			_ = k.Load(confmap.Provider(map[string]interface{}{
-				"grove_id": groveID,
+				"project_id": projectID,
 			}, "."), nil)
 		}
 	}
@@ -172,8 +184,8 @@ func LoadSettingsKoanf(grovePath string) (*Settings, error) {
 
 // LoadSettingsFromDir loads settings from a single directory's settings file
 // without applying embedded defaults, global settings, or environment variables.
-// This is useful when you need to read just one grove's settings file in isolation,
-// for example to get the grove's hub.endpoint without the broker's own env vars
+// This is useful when you need to read just one project's settings file in isolation,
+// for example to get the project's hub.endpoint without the broker's own env vars
 // overriding it.
 func LoadSettingsFromDir(dir string) (*Settings, error) {
 	k := koanf.New(".")
@@ -241,10 +253,11 @@ func GetDefaultSettingsDataYAML() ([]byte, error) {
 	return getDefaultSettingsYAMLForRuntime("container")
 }
 
-// GetGroveDefaultSettingsYAML returns the embedded grove-level default settings YAML.
-// Unlike the full default settings, grove settings do not include profiles or runtimes;
+// GetProjectDefaultSettingsYAML returns the embedded project-level default settings YAML.
+// Unlike the full default settings, project settings do not include profiles or runtimes;
 // those are managed at the global/broker level (~/.scion/settings.yaml).
-func GetGroveDefaultSettingsYAML() ([]byte, error) {
+func GetProjectDefaultSettingsYAML() ([]byte, error) {
+
 	return EmbedsFS.ReadFile("embeds/default_grove_settings.yaml")
 }
 

@@ -271,12 +271,12 @@ func getDefaultHubURL() string {
 	}
 
 	// Try to load from settings
-	grovePath, _, err := config.ResolveGrovePath("")
+	projectPath, _, err := config.ResolveProjectPath("")
 	if err != nil {
 		return ""
 	}
 
-	settings, err := config.LoadSettings(grovePath)
+	settings, err := config.LoadSettings(projectPath)
 	if err != nil {
 		return ""
 	}

@@ -33,7 +33,7 @@ func TestAgentTokenService_GenerateAndValidate(t *testing.T) {
 	require.NoError(t, err)
 
 	// Generate a token
-	token, err := service.GenerateAgentToken("agent-123", "grove-456", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	token, err := service.GenerateAgentToken("agent-123", "project-456", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 	require.NoError(t, err)
 	assert.NotEmpty(t, token)
 
@@ -41,7 +41,7 @@ func TestAgentTokenService_GenerateAndValidate(t *testing.T) {
 	claims, err := service.ValidateAgentToken(token)
 	require.NoError(t, err)
 	assert.Equal(t, "agent-123", claims.Subject)
-	assert.Equal(t, "grove-456", claims.GroveID)
+	assert.Equal(t, "project-456", claims.ProjectID)
 	assert.Contains(t, claims.Scopes, ScopeAgentStatusUpdate)
 	assert.Equal(t, AgentTokenIssuer, claims.Issuer)
 }
@@ -53,7 +53,7 @@ func TestAgentTokenService_DefaultScopes(t *testing.T) {
 	require.NoError(t, err)
 
 	// Generate a token with no scopes specified
-	token, err := service.GenerateAgentToken("agent-123", "grove-456", nil, nil)
+	token, err := service.GenerateAgentToken("agent-123", "project-456", nil, nil)
 	require.NoError(t, err)
 
 	// Validate the token has default scope
@@ -70,7 +70,7 @@ func TestAgentTokenService_ExpiredToken(t *testing.T) {
 	require.NoError(t, err)
 
 	// Generate an expired token
-	token, err := service.GenerateAgentToken("agent-123", "grove-456", nil, nil)
+	token, err := service.GenerateAgentToken("agent-123", "project-456", nil, nil)
 	require.NoError(t, err)
 
 	// Validation should fail
@@ -91,7 +91,7 @@ func TestAgentTokenService_InvalidSignature(t *testing.T) {
 	require.NoError(t, err)
 
 	// Generate with service1
-	token, err := service1.GenerateAgentToken("agent-123", "grove-456", nil, nil)
+	token, err := service1.GenerateAgentToken("agent-123", "project-456", nil, nil)
 	require.NoError(t, err)
 
 	// Validate with service2 should fail
@@ -107,7 +107,7 @@ func TestAgentTokenClaims_HasScope(t *testing.T) {
 
 	assert.True(t, claims.HasScope(ScopeAgentStatusUpdate))
 	assert.True(t, claims.HasScope(ScopeAgentLogAppend))
-	assert.False(t, claims.HasScope(ScopeGroveSecretRead))
+	assert.False(t, claims.HasScope(ScopeProjectSecretRead))
 }
 
 func TestAgentTokenService_AgentCreateAndLifecycleScopes(t *testing.T) {
@@ -118,7 +118,7 @@ func TestAgentTokenService_AgentCreateAndLifecycleScopes(t *testing.T) {
 	require.NoError(t, err)
 
 	// Generate a token with agent create and lifecycle scopes
-	token, err := service.GenerateAgentToken("agent-sub", "grove-parent", []AgentTokenScope{
+	token, err := service.GenerateAgentToken("agent-sub", "project-parent", []AgentTokenScope{
 		ScopeAgentStatusUpdate,
 		ScopeAgentCreate,
 		ScopeAgentLifecycle,
@@ -130,11 +130,11 @@ func TestAgentTokenService_AgentCreateAndLifecycleScopes(t *testing.T) {
 	claims, err := service.ValidateAgentToken(token)
 	require.NoError(t, err)
 	assert.Equal(t, "agent-sub", claims.Subject)
-	assert.Equal(t, "grove-parent", claims.GroveID)
+	assert.Equal(t, "project-parent", claims.ProjectID)
 	assert.True(t, claims.HasScope(ScopeAgentStatusUpdate))
 	assert.True(t, claims.HasScope(ScopeAgentCreate))
 	assert.True(t, claims.HasScope(ScopeAgentLifecycle))
-	assert.False(t, claims.HasScope(ScopeGroveSecretRead))
+	assert.False(t, claims.HasScope(ScopeProjectSecretRead))
 }
 
 func TestAgentTokenService_RandomKeyGeneration(t *testing.T) {
@@ -144,7 +144,7 @@ func TestAgentTokenService_RandomKeyGeneration(t *testing.T) {
 	assert.NotNil(t, service)
 
 	// Generate and validate should work
-	token, err := service.GenerateAgentToken("agent-123", "grove-456", nil, nil)
+	token, err := service.GenerateAgentToken("agent-123", "project-456", nil, nil)
 	require.NoError(t, err)
 
 	claims, err := service.ValidateAgentToken(token)
@@ -159,7 +159,7 @@ func TestAgentAuthMiddleware(t *testing.T) {
 	require.NoError(t, err)
 
 	// Generate a valid token
-	token, err := service.GenerateAgentToken("agent-123", "grove-456", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	token, err := service.GenerateAgentToken("agent-123", "project-456", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 	require.NoError(t, err)
 
 	// Create a test handler that checks for agent context
@@ -228,7 +228,7 @@ func TestRequireAgentScope(t *testing.T) {
 	require.NoError(t, err)
 
 	// Generate a token with only status update scope
-	token, err := service.GenerateAgentToken("agent-123", "grove-456", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	token, err := service.GenerateAgentToken("agent-123", "project-456", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 	require.NoError(t, err)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -248,7 +248,7 @@ func TestRequireAgentScope(t *testing.T) {
 	})
 
 	t.Run("missing required scope", func(t *testing.T) {
-		wrapped := service.AgentAuthMiddleware(RequireAgentScope(ScopeGroveSecretRead)(handler))
+		wrapped := service.AgentAuthMiddleware(RequireAgentScope(ScopeProjectSecretRead)(handler))
 
 		req := httptest.NewRequest(http.MethodGet, "/test", nil)
 		req.Header.Set("X-Scion-Agent-Token", token)
@@ -279,7 +279,7 @@ func TestAgentTokenService_RefreshToken(t *testing.T) {
 	require.NoError(t, err)
 
 	// Generate a token
-	originalToken, err := service.GenerateAgentToken("agent-123", "grove-456",
+	originalToken, err := service.GenerateAgentToken("agent-123", "project-456",
 		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentTokenRefresh}, nil)
 	require.NoError(t, err)
 
@@ -294,7 +294,7 @@ func TestAgentTokenService_RefreshToken(t *testing.T) {
 	claims, err := service.ValidateAgentToken(newToken)
 	require.NoError(t, err)
 	assert.Equal(t, "agent-123", claims.Subject)
-	assert.Equal(t, "grove-456", claims.GroveID)
+	assert.Equal(t, "project-456", claims.ProjectID)
 	assert.True(t, claims.HasScope(ScopeAgentStatusUpdate))
 	assert.True(t, claims.HasScope(ScopeAgentTokenRefresh))
 }
@@ -307,7 +307,7 @@ func TestAgentTokenService_RefreshExpiredToken(t *testing.T) {
 	require.NoError(t, err)
 
 	// Generate an expired token
-	expiredToken, err := service.GenerateAgentToken("agent-123", "grove-456", nil, nil)
+	expiredToken, err := service.GenerateAgentToken("agent-123", "project-456", nil, nil)
 	require.NoError(t, err)
 
 	// Refresh should fail for expired token
@@ -323,7 +323,7 @@ func TestAgentTokenService_GenerateAgentTokenWithExpiry(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	token, expiry, err := service.GenerateAgentTokenWithExpiry("agent-123", "grove-456",
+	token, expiry, err := service.GenerateAgentTokenWithExpiry("agent-123", "project-456",
 		[]AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 	require.NoError(t, err)
 	assert.NotEmpty(t, token)
@@ -347,7 +347,7 @@ func TestGetAgentFromContext(t *testing.T) {
 
 	t.Run("agent in context", func(t *testing.T) {
 		claims := &AgentTokenClaims{
-			GroveID: "grove-123",
+			ProjectID: "project-123",
 		}
 		ctx := context.WithValue(context.Background(), agentContextKey{}, claims)
 		retrieved := GetAgentFromContext(ctx)
@@ -368,7 +368,7 @@ func TestHasScopePrefix(t *testing.T) {
 	})
 
 	t.Run("non-matching prefix", func(t *testing.T) {
-		assert.False(t, claims.HasScopePrefix("grove:gcp:wrong:"))
+		assert.False(t, claims.HasScopePrefix("project:gcp:wrong:"))
 	})
 
 	t.Run("exact scope match", func(t *testing.T) {
@@ -382,7 +382,7 @@ func TestHasScopePrefix(t *testing.T) {
 
 func TestGCPTokenScopeForSA(t *testing.T) {
 	scope := GCPTokenScopeForSA("my-sa-id")
-	assert.Equal(t, AgentTokenScope("grove:gcp:token:my-sa-id"), scope)
+	assert.Equal(t, AgentTokenScope("project:gcp:token:my-sa-id"), scope)
 }
 
 func TestGCPTokenScope_InToken(t *testing.T) {
@@ -396,7 +396,7 @@ func TestGCPTokenScope_InToken(t *testing.T) {
 	gcpScope := GCPTokenScopeForSA(saID)
 	scopes := []AgentTokenScope{ScopeAgentStatusUpdate, gcpScope}
 
-	token, err := service.GenerateAgentToken("agent-1", "grove-1", scopes, nil)
+	token, err := service.GenerateAgentToken("agent-1", "project-1", scopes, nil)
 	require.NoError(t, err)
 
 	claims, err := service.ValidateAgentToken(token)

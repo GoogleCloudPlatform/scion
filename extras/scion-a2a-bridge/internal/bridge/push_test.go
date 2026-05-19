@@ -76,7 +76,7 @@ func TestPushDispatcherSendsWebhook(t *testing.T) {
 
 	now := time.Now()
 	store.CreateTask(&state.Task{
-		ID: "task-1", ContextID: "ctx-1", GroveID: "g1", AgentSlug: "a1",
+		ID: "task-1", ContextID: "ctx-1", ProjectID: "g1", AgentSlug: "a1",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 	store.SetPushConfig(&state.PushNotificationConfig{
@@ -218,7 +218,7 @@ func TestPushDispatcherDeletesOnPermanentError(t *testing.T) {
 
 	now := time.Now()
 	store.CreateTask(&state.Task{
-		ID: "task-1", ContextID: "ctx-1", GroveID: "g1", AgentSlug: "a1",
+		ID: "task-1", ContextID: "ctx-1", ProjectID: "g1", AgentSlug: "a1",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 	store.SetPushConfig(&state.PushNotificationConfig{
@@ -268,7 +268,7 @@ func TestPushDispatcherKeepsConfigOnServerError(t *testing.T) {
 
 	now := time.Now()
 	store.CreateTask(&state.Task{
-		ID: "task-2", ContextID: "ctx-2", GroveID: "g1", AgentSlug: "a1",
+		ID: "task-2", ContextID: "ctx-2", ProjectID: "g1", AgentSlug: "a1",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 	store.SetPushConfig(&state.PushNotificationConfig{
@@ -351,7 +351,7 @@ func TestBridgePushConfigCRUD(t *testing.T) {
 
 	now := time.Now()
 	b.store.CreateTask(&state.Task{
-		ID: "task-1", ContextID: "ctx-1", GroveID: "g1", AgentSlug: "a1",
+		ID: "task-1", ContextID: "ctx-1", ProjectID: "g1", AgentSlug: "a1",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 

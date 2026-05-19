@@ -249,6 +249,15 @@ func (s *Server) reloadSettings() map[string]interface{} {
 		applied = append(applied, "admin_emails")
 	}
 
+	// Reload user access mode
+	if gc.Auth.UserAccessMode != "" {
+		s.config.UserAccessMode = gc.Auth.UserAccessMode
+		applied = append(applied, "user_access_mode")
+	} else if s.config.UserAccessMode != "" {
+		s.config.UserAccessMode = ""
+		applied = append(applied, "user_access_mode")
+	}
+
 	// Reload log level
 	if gc.LogLevel != "" {
 		var level slog.Level

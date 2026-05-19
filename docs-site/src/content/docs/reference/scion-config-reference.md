@@ -26,17 +26,17 @@ Telemetry settings control agent observability — trace collection, cloud forwa
 - [Orchestrator Settings — Telemetry](/scion/reference/orchestrator-settings/#telemetry-configuration-telemetry)
 - [Metrics & OpenTelemetry Guide](/scion/hub-admin/metrics/)
 
-## Grove Settings
+## Project Settings
 
-In a Hub-managed architecture, Grove Settings are maintained by the Hub database and managed via the Web Dashboard or API, rather than a local file. These settings define constraints and capabilities for agents operating within a specific project.
+In a Hub-managed architecture, Project Settings are maintained by the Hub database and managed via the Web Dashboard or API, rather than a local file. These settings define constraints and capabilities for agents operating within a specific project.
 
 Key configuration areas include:
 
-- **General Settings**: The grove's description, default branch, and external Git repository URLs for template synchronization.
-- **Agent Limits**: Defines maximum resource constraints for agents in the grove, including maximum concurrency, runtime duration limits, and maximum workspace storage. These values pre-populate the agent creation form.
-- **Resources & Plugins**: Defines authorized Runtime Brokers and configures Message Broker plugins for the grove.
+- **General Settings**: The project's description, default branch, and external Git repository URLs for template synchronization.
+- **Agent Limits**: Defines maximum resource constraints for agents in the project, including maximum concurrency, runtime duration limits, and maximum workspace storage. These values pre-populate the agent creation form.
+- **Resources & Plugins**: Defines authorized Runtime Brokers and configures Message Broker plugins for the project.
 
-When a grove is exported or managed locally in a standalone environment, some of these settings may be serialized into `.scion/state.yaml` or related project files.
+When a project is exported or managed locally in a standalone environment, some of these settings may be serialized into `.scion/state.yaml` or related project files.
 
 ## Configuration Hierarchy
 
@@ -44,7 +44,7 @@ Scion resolves settings in the following order (highest priority first):
 
 1.  **CLI Flags**: (e.g., `scion start --profile remote`)
 2.  **Environment Variables**: `SCION_*` overrides.
-3.  **Grove Settings**: `.scion/settings.yaml` (Project level).
+3.  **Project Settings**: `.scion/settings.yaml` (Project level).
 4.  **Global Settings**: `~/.scion/settings.yaml` (User level).
 5.  **Defaults**: System built-ins.
 

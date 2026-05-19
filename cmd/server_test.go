@@ -42,7 +42,7 @@ func TestRegisterGlobalGroveAndBroker_DedupByName(t *testing.T) {
 	settings := &config.Settings{}
 
 	// First registration: creates broker with ID "broker-1" and name "test-broker"
-	effectiveID, err := registerGlobalGroveAndBroker(ctx, s, "broker-1", "test-broker", "http://localhost:9800", nil, true, settings)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, "broker-1", "test-broker", "http://localhost:9800", nil, true, settings)
 	require.NoError(t, err)
 	assert.Equal(t, "broker-1", effectiveID)
 
@@ -54,7 +54,7 @@ func TestRegisterGlobalGroveAndBroker_DedupByName(t *testing.T) {
 
 	// Second registration with a DIFFERENT ID but SAME name.
 	// This simulates a restart where the broker ID was lost/regenerated.
-	effectiveID, err = registerGlobalGroveAndBroker(ctx, s, "broker-2", "test-broker", "http://localhost:9800", nil, true, settings)
+	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, "broker-2", "test-broker", "http://localhost:9800", nil, true, settings)
 	require.NoError(t, err)
 
 	// Should return the original broker-1 ID (dedup by name)
@@ -77,12 +77,12 @@ func TestRegisterGlobalGroveAndBroker_SameIDNoDedup(t *testing.T) {
 	settings := &config.Settings{}
 
 	// First registration
-	effectiveID, err := registerGlobalGroveAndBroker(ctx, s, "broker-1", "test-broker", "http://localhost:9800", nil, true, settings)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, "broker-1", "test-broker", "http://localhost:9800", nil, true, settings)
 	require.NoError(t, err)
 	assert.Equal(t, "broker-1", effectiveID)
 
 	// Second registration with the same ID (normal restart case)
-	effectiveID, err = registerGlobalGroveAndBroker(ctx, s, "broker-1", "test-broker", "http://localhost:9800", nil, false, settings)
+	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, "broker-1", "test-broker", "http://localhost:9800", nil, false, settings)
 	require.NoError(t, err)
 	assert.Equal(t, "broker-1", effectiveID)
 
@@ -99,12 +99,12 @@ func TestRegisterGlobalGroveAndBroker_NewBrokerNewName(t *testing.T) {
 	settings := &config.Settings{}
 
 	// Register first broker
-	effectiveID, err := registerGlobalGroveAndBroker(ctx, s, "broker-1", "broker-alpha", "http://localhost:9800", nil, true, settings)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, "broker-1", "broker-alpha", "http://localhost:9800", nil, true, settings)
 	require.NoError(t, err)
 	assert.Equal(t, "broker-1", effectiveID)
 
 	// Register a genuinely different broker (different ID AND different name)
-	effectiveID, err = registerGlobalGroveAndBroker(ctx, s, "broker-2", "broker-beta", "http://localhost:9801", nil, true, settings)
+	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, "broker-2", "broker-beta", "http://localhost:9801", nil, true, settings)
 	require.NoError(t, err)
 	assert.Equal(t, "broker-2", effectiveID)
 
@@ -121,13 +121,13 @@ func TestRegisterGlobalGroveAndBroker_DedupCaseInsensitive(t *testing.T) {
 	settings := &config.Settings{}
 
 	// Register broker with lowercase name
-	effectiveID, err := registerGlobalGroveAndBroker(ctx, s, "broker-1", "scion-demo", "http://localhost:9800", nil, true, settings)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, "broker-1", "scion-demo", "http://localhost:9800", nil, true, settings)
 	require.NoError(t, err)
 	assert.Equal(t, "broker-1", effectiveID)
 
 	// Register with different ID and mixed-case name
 	// GetRuntimeBrokerByName uses LOWER() for case-insensitive match
-	effectiveID, err = registerGlobalGroveAndBroker(ctx, s, "broker-2", "Scion-Demo", "http://localhost:9800", nil, true, settings)
+	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, "broker-2", "Scion-Demo", "http://localhost:9800", nil, true, settings)
 	require.NoError(t, err)
 	assert.Equal(t, "broker-1", effectiveID, "should match case-insensitively")
 }

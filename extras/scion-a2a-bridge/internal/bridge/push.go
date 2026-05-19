@@ -83,8 +83,8 @@ func init() {
 		{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)},
 		{IP: net.IPv4(224, 0, 0, 0), Mask: net.CIDRMask(4, 32)},
 		{IP: net.IPv4(255, 255, 255, 255), Mask: net.CIDRMask(32, 32)},
-		{IP: net.IPv4(192, 0, 0, 0), Mask: net.CIDRMask(24, 32)},   // IETF Protocol Assignments
-		{IP: net.IPv4(192, 0, 2, 0), Mask: net.CIDRMask(24, 32)},   // TEST-NET-1
+		{IP: net.IPv4(192, 0, 0, 0), Mask: net.CIDRMask(24, 32)},    // IETF Protocol Assignments
+		{IP: net.IPv4(192, 0, 2, 0), Mask: net.CIDRMask(24, 32)},    // TEST-NET-1
 		{IP: net.IPv4(198, 51, 100, 0), Mask: net.CIDRMask(24, 32)}, // TEST-NET-2
 		{IP: net.IPv4(203, 0, 113, 0), Mask: net.CIDRMask(24, 32)},  // TEST-NET-3
 		{IP: net.IPv4(198, 18, 0, 0), Mask: net.CIDRMask(15, 32)},   // Benchmarking

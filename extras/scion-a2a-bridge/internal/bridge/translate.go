@@ -81,8 +81,8 @@ type TaskResult struct {
 // MapActivityToTaskState maps a Scion agent activity string to an A2A task state.
 func MapActivityToTaskState(activity string) string {
 	switch strings.ToUpper(activity) {
-	case "IDLE":
-		return TaskStateCompleted
+	case "WORKING":
+		return TaskStateWorking
 	case "THINKING", "EXECUTING":
 		return TaskStateWorking
 	case "WAITING_FOR_INPUT":

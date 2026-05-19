@@ -76,8 +76,8 @@ func TestActivityIsValid(t *testing.T) {
 		activity Activity
 		want     bool
 	}{
-		// All 9 valid activities.
-		{ActivityIdle, true},
+		// All 10 valid activities.
+		{ActivityWorking, true},
 		{ActivityThinking, true},
 		{ActivityExecuting, true},
 		{ActivityWaitingForInput, true},
@@ -86,6 +86,7 @@ func TestActivityIsValid(t *testing.T) {
 		{ActivityLimitsExceeded, true},
 		{ActivityStalled, true},
 		{ActivityOffline, true},
+		{ActivityCrashed, true},
 		// Empty is valid (omitempty / non-running phase).
 		{"", true},
 		// Legacy values that should NOT be valid.
@@ -112,8 +113,8 @@ func TestActivityIsValid(t *testing.T) {
 }
 
 func TestActivityValidate(t *testing.T) {
-	if err := ActivityIdle.Validate(); err != nil {
-		t.Errorf("ActivityIdle.Validate() returned unexpected error: %v", err)
+	if err := ActivityWorking.Validate(); err != nil {
+		t.Errorf("ActivityWorking.Validate() returned unexpected error: %v", err)
 	}
 	if err := Activity("").Validate(); err != nil {
 		t.Errorf("Activity(\"\").Validate() returned unexpected error: %v", err)
@@ -138,7 +139,8 @@ func TestActivityIsSticky(t *testing.T) {
 		{ActivityBlocked, true},
 		{ActivityCompleted, true},
 		{ActivityLimitsExceeded, true},
-		{ActivityIdle, false},
+		{ActivityCrashed, true},
+		{ActivityWorking, false},
 		{ActivityThinking, false},
 		{ActivityExecuting, false},
 		{ActivityStalled, false},
@@ -166,13 +168,14 @@ func TestActivityIsPlatformSet(t *testing.T) {
 	}{
 		{ActivityStalled, true},
 		{ActivityOffline, true},
-		{ActivityIdle, false},
+		{ActivityWorking, false},
 		{ActivityThinking, false},
 		{ActivityExecuting, false},
 		{ActivityWaitingForInput, false},
 		{ActivityBlocked, false},
 		{ActivityCompleted, false},
 		{ActivityLimitsExceeded, false},
+		{ActivityCrashed, false},
 		{"", false},
 	}
 
@@ -184,6 +187,37 @@ func TestActivityIsPlatformSet(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if got := tt.activity.IsPlatformSet(); got != tt.want {
 				t.Errorf("Activity(%q).IsPlatformSet() = %v, want %v", tt.activity, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestActivityIsTerminal(t *testing.T) {
+	tests := []struct {
+		activity Activity
+		want     bool
+	}{
+		{ActivityCrashed, true},
+		{ActivityLimitsExceeded, true},
+		{ActivityWorking, false},
+		{ActivityThinking, false},
+		{ActivityExecuting, false},
+		{ActivityWaitingForInput, false},
+		{ActivityBlocked, false},
+		{ActivityCompleted, false},
+		{ActivityStalled, false},
+		{ActivityOffline, false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		name := string(tt.activity)
+		if name == "" {
+			name = "(empty)"
+		}
+		t.Run(name, func(t *testing.T) {
+			if got := tt.activity.IsTerminal(); got != tt.want {
+				t.Errorf("Activity(%q).IsTerminal() = %v, want %v", tt.activity, got, tt.want)
 			}
 		})
 	}
@@ -226,6 +260,16 @@ func TestDisplayStatus(t *testing.T) {
 			want:  "stopped",
 		},
 		{
+			name:  "stopped with crashed returns crashed",
+			state: AgentState{Phase: PhaseStopped, Activity: ActivityCrashed},
+			want:  "crashed",
+		},
+		{
+			name:  "stopped with limits_exceeded returns limits_exceeded",
+			state: AgentState{Phase: PhaseStopped, Activity: ActivityLimitsExceeded},
+			want:  "limits_exceeded",
+		},
+		{
 			name:  "error returns phase",
 			state: AgentState{Phase: PhaseError},
 			want:  "error",
@@ -254,7 +298,7 @@ func TestAgentStateValidate(t *testing.T) {
 	}{
 		{
 			name:    "valid running with activity",
-			state:   AgentState{Phase: PhaseRunning, Activity: ActivityIdle},
+			state:   AgentState{Phase: PhaseRunning, Activity: ActivityWorking},
 			wantErr: false,
 		},
 		{
@@ -279,12 +323,22 @@ func TestAgentStateValidate(t *testing.T) {
 		},
 		{
 			name:    "invalid: activity with suspended phase",
-			state:   AgentState{Phase: PhaseSuspended, Activity: ActivityIdle},
+			state:   AgentState{Phase: PhaseSuspended, Activity: ActivityWorking},
 			wantErr: true,
 		},
 		{
-			name:    "invalid: activity with non-running phase",
-			state:   AgentState{Phase: PhaseStopped, Activity: ActivityIdle},
+			name:    "valid: terminal activity with stopped phase",
+			state:   AgentState{Phase: PhaseStopped, Activity: ActivityCrashed},
+			wantErr: false,
+		},
+		{
+			name:    "valid: limits_exceeded with stopped phase",
+			state:   AgentState{Phase: PhaseStopped, Activity: ActivityLimitsExceeded},
+			wantErr: false,
+		},
+		{
+			name:    "invalid: non-terminal activity with stopped phase",
+			state:   AgentState{Phase: PhaseStopped, Activity: ActivityWorking},
 			wantErr: true,
 		},
 		{
@@ -429,8 +483,8 @@ func TestPhasesEnumeration(t *testing.T) {
 
 func TestActivitiesEnumeration(t *testing.T) {
 	activities := Activities()
-	if len(activities) != 9 {
-		t.Fatalf("Activities() returned %d items, want 9", len(activities))
+	if len(activities) != 10 {
+		t.Fatalf("Activities() returned %d items, want 10", len(activities))
 	}
 
 	// Verify all returned activities are valid.

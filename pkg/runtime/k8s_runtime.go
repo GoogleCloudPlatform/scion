@@ -671,9 +671,18 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 		return nil
 	}
 
-	groveName := config.Labels["scion.grove"]
-	if groveName == "" {
-		return fmt.Errorf("cannot create shared dir PVCs: missing scion.grove label")
+	projectID := config.Labels["scion.project_id"]
+	if projectID == "" {
+		projectID = config.Labels["scion.grove_id"]
+	}
+
+	projectName := config.Labels["scion.project"]
+	if projectName == "" {
+		projectName = config.Labels["scion.grove"]
+	}
+
+	if projectName == "" {
+		return fmt.Errorf("cannot create shared dir PVCs: missing scion.project or scion.grove label")
 	}
 
 	storageClass := ""
@@ -693,9 +702,9 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 	}
 
 	for _, sd := range config.SharedDirs {
-		pvcName := sharedDirPVCName(groveName, sd.Name)
+		pvcName := sharedDirPVCName(projectName, sd.Name)
 
-		// Check if PVC already exists (grove-scoped, may have been created by another agent)
+		// Check if PVC already exists (project-scoped, may have been created by another agent)
 		_, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
 		if err == nil {
 			runtimeLog.Info("Shared dir PVC already exists, reusing", "pvc", pvcName, "shared_dir", sd.Name)
@@ -708,7 +717,8 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 				Name:      pvcName,
 				Namespace: namespace,
 				Labels: map[string]string{
-					"scion.grove":      groveName,
+					"scion.project":    projectName,
+					"scion.grove":      projectName,
 					"scion.shared-dir": sd.Name,
 				},
 			},
@@ -720,6 +730,11 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 					},
 				},
 			},
+		}
+
+		if projectID != "" {
+			pvc.Labels["scion.project_id"] = projectID
+			pvc.Labels["scion.grove_id"] = projectID
 		}
 
 		if storageClass != "" {
@@ -1591,7 +1606,19 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 	if len(labelFilter) > 0 {
 		var selectors []string
 		for k, v := range labelFilter {
-			selectors = append(selectors, fmt.Sprintf("%s=%s", k, v))
+			key := k
+			// Translate project filter keys to grove variants for the K8s selector.
+			// Since new pods have both labels and old pods only have grove labels,
+			// filtering by the grove variant finds both.
+			switch k {
+			case "scion.project":
+				key = "scion.grove"
+			case "scion.project_id":
+				key = "scion.grove_id"
+			case "scion.project_path":
+				key = "scion.grove_path"
+			}
+			selectors = append(selectors, fmt.Sprintf("%s=%s", key, v))
 		}
 		selector = strings.Join(selectors, ",")
 	} else {
@@ -1645,9 +1672,15 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			}
 		}
 
-		grovePath := p.Annotations["scion.grove_path"]
-		if grovePath == "" {
-			grovePath = p.Labels["scion.grove_path"]
+		projectPath := p.Annotations["scion.project_path"]
+		if projectPath == "" {
+			projectPath = p.Labels["scion.project_path"]
+		}
+		if projectPath == "" {
+			projectPath = p.Annotations["scion.grove_path"]
+		}
+		if projectPath == "" {
+			projectPath = p.Labels["scion.grove_path"]
 		}
 
 		var agentImage string
@@ -1659,12 +1692,22 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 		}
 
 		agents = append(agents, api.AgentInfo{
-			ContainerID:     p.Name, // Pod name serves as the container identifier
-			Name:            p.Labels["scion.name"],
-			Template:        p.Labels["scion.template"],
-			Grove:           p.Labels["scion.grove"],
-			GroveID:         p.Labels["scion.grove_id"],
-			GrovePath:       grovePath,
+			ContainerID: p.Name, // Pod name serves as the container identifier
+			Name:        p.Labels["scion.name"],
+			Template:    p.Labels["scion.template"],
+			Project: func() string {
+				if p := p.Labels["scion.project"]; p != "" {
+					return p
+				}
+				return p.Labels["scion.grove"]
+			}(),
+			ProjectID: func() string {
+				if p := p.Labels["scion.project_id"]; p != "" {
+					return p
+				}
+				return p.Labels["scion.grove_id"]
+			}(),
+			ProjectPath:     projectPath,
 			Labels:          p.Labels,
 			Annotations:     p.Annotations,
 			ContainerStatus: status,

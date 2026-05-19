@@ -11,7 +11,7 @@ When running Scion in **Solo Mode** (local-only), your configuration focuses on 
 
 Scion looks for `settings.yaml` in two places:
 1.  **Global**: `~/.scion/settings.yaml` (Apply to all projects)
-2.  **Grove**: `.scion/settings.yaml` (Apply to the current project)
+2.  **Project**: `.scion/settings.yaml` (Apply to the current project)
 
 ## Core Concepts
 

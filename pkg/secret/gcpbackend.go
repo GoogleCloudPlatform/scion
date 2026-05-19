@@ -243,7 +243,7 @@ func (b *GCPBackend) GetMeta(ctx context.Context, name, scope, scopeID string) (
 	return fromStoreSecretMeta(s), nil
 }
 
-func (b *GCPBackend) Resolve(ctx context.Context, userID, groveID, brokerID string, opts *ResolveOpts) ([]SecretWithValue, error) {
+func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID string, opts *ResolveOpts) ([]SecretWithValue, error) {
 	merged := make(map[string]SecretWithValue)
 
 	type scopeEntry struct {
@@ -257,8 +257,8 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, groveID, brokerID stri
 	if userID != "" {
 		scopes = append(scopes, scopeEntry{scope: store.ScopeUser, scopeID: userID})
 	}
-	if groveID != "" {
-		scopes = append(scopes, scopeEntry{scope: store.ScopeGrove, scopeID: groveID})
+	if projectID != "" {
+		scopes = append(scopes, scopeEntry{scope: store.ScopeProject, scopeID: projectID})
 	}
 	if brokerID != "" {
 		scopes = append(scopes, scopeEntry{scope: store.ScopeRuntimeBroker, scopeID: brokerID})
@@ -280,8 +280,16 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, groveID, brokerID stri
 				continue
 			}
 
-			smName := b.gcpSecretName(s.Key, sc.scope, sc.scopeID)
-			value, err := b.accessLatestVersion(ctx, smName)
+			var value string
+			var secretRef string
+			if smPath, ok := extractGCPSMPath(s.SecretRef); ok {
+				value, err = b.accessLatestVersionByPath(ctx, smPath)
+				secretRef = smPath
+			} else {
+				smName := b.gcpSecretName(s.Key, sc.scope, sc.scopeID)
+				value, err = b.accessLatestVersion(ctx, smName)
+				secretRef = fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName)
+			}
 			if err != nil {
 				continue
 			}
@@ -305,7 +313,7 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, groveID, brokerID stri
 					ScopeID:       sc.scopeID,
 					Description:   s.Description,
 					InjectionMode: s.InjectionMode,
-					SecretRef:     fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName),
+					SecretRef:     secretRef,
 					AllowProgeny:  s.AllowProgeny,
 					Version:       s.Version,
 					Created:       s.Created,
@@ -340,9 +348,17 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, groveID, brokerID stri
 				continue
 			}
 
-			// Read value from GCP SM
-			smName := b.gcpSecretName(s.Key, s.Scope, s.ScopeID)
-			value, err := b.accessLatestVersion(ctx, smName)
+			// Read value from GCP SM, preferring stored SecretRef
+			var value string
+			var secretRef string
+			if smPath, ok := extractGCPSMPath(s.SecretRef); ok {
+				value, err = b.accessLatestVersionByPath(ctx, smPath)
+				secretRef = smPath
+			} else {
+				smName := b.gcpSecretName(s.Key, s.Scope, s.ScopeID)
+				value, err = b.accessLatestVersion(ctx, smName)
+				secretRef = fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName)
+			}
 			if err != nil {
 				continue
 			}
@@ -366,7 +382,7 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, groveID, brokerID stri
 					ScopeID:       s.ScopeID,
 					Description:   s.Description,
 					InjectionMode: s.InjectionMode,
-					SecretRef:     fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName),
+					SecretRef:     secretRef,
 					AllowProgeny:  s.AllowProgeny,
 					Version:       s.Version,
 					Created:       s.Created,

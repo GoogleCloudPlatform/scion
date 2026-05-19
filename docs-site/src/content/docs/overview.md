@@ -9,7 +9,7 @@ Scion is an experimental multi-agent orchestration testbed designed to manage co
 Scion uses a flexible configuration system based on **Profiles**, **Runtimes**, and **Harnesses**. This allows you to define different environments (e.g., local Docker vs. remote Kubernetes) and switch between them easily.
 
 - **Global Settings**: `~/.scion/settings.yaml` (User-wide defaults)
-- **Grove Settings**: `.scion/settings.yaml` (Project overrides)
+- **Project Settings**: `.scion/settings.yaml` (Project overrides)
 
 For detailed information on configuring Scion, see the [Orchestrator Settings Reference](/scion/reference/orchestrator-settings/) and [Agent Configuration Reference](/scion/reference/agent-config/).
 To learn about the different agent tools supported by Scion, see [Supported Harnesses](/scion/supported-harnesses/).
@@ -35,5 +35,5 @@ Runtime Broker -> Agent Container: Execute Task
 Agent Container -> Scion CLI: Progress Updates
 ```
 
-- **scion**: A host-side CLI that orchestrates the lifecycle of agents. It manages the "Grove" (the project workspace) and provides tools for template management (`scion templates`).
+- **scion**: A host-side CLI that orchestrates the lifecycle of agents. It manages the "Project" (the project workspace) and provides tools for template management (`scion templates`).
 - **Agents**: Isolated runtime containers (e.g., Docker) running the agent software (like Gemini CLI, Claude Code, or OpenAI Codex).

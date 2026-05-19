@@ -48,7 +48,7 @@ var logsCmd = &cobra.Command{
 		}
 
 		// Check if Hub is enabled
-		hubCtx, err := CheckHubAvailabilityWithOptions(grovePath, true)
+		hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
 		if err != nil {
 			return err
 		}
@@ -60,7 +60,7 @@ var logsCmd = &cobra.Command{
 		}
 
 		// Local mode: read from filesystem
-		rt := runtime.GetRuntime(grovePath, profile)
+		rt := runtime.GetRuntime(projectPath, profile)
 
 		// Find the agent to get its grove path
 		agents, err := rt.List(context.Background(), map[string]string{
@@ -75,11 +75,11 @@ var logsCmd = &cobra.Command{
 		}
 
 		a := agents[0]
-		if a.GrovePath == "" {
-			return fmt.Errorf("agent %s has no grove path configured", agentName)
+		if a.ProjectPath == "" {
+			return fmt.Errorf("agent %s has no project path configured", agentName)
 		}
 
-		agentLogPath := filepath.Join(a.GrovePath, "agents", agentName, "home", "agent.log")
+		agentLogPath := filepath.Join(a.ProjectPath, "agents", agentName, "home", "agent.log")
 		if _, err := os.Stat(agentLogPath); os.IsNotExist(err) {
 			return fmt.Errorf("log file not found: %s\n\nThe agent may not have started yet or does not produce logs", agentLogPath)
 		}
@@ -104,7 +104,7 @@ func init() {
 func getHubLogs(ctx context.Context, hubCtx *HubContext, agentName string) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
-	client := hubCtx.Client.GroveAgents(hubCtx.GroveID)
+	client := hubCtx.Client.ProjectAgents(hubCtx.ProjectID)
 
 	logs, err := client.GetLogs(ctx, agentName, &hubclient.GetLogsOptions{
 		Tail: logsTail,

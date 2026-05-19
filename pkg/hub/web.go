@@ -127,6 +127,8 @@ type WebServerConfig struct {
 	AuthorizedDomains []string
 	// AdminEmails is the list of bootstrap admin emails (bypass domain check).
 	AdminEmails []string
+	// UserAccessMode controls login-time access evaluation ("open", "domain_restricted", "invite_only").
+	UserAccessMode string
 	// AdminMode restricts access to admin users only (maintenance mode).
 	AdminMode bool
 	// MaintenanceMessage is the custom message shown during admin mode.
@@ -288,7 +290,7 @@ var spaShellTemplate = `<!DOCTYPE html>
         scion-breadcrumb:not(:defined),
         scion-status-badge:not(:defined),
         scion-page-home:not(:defined),
-        scion-page-groves:not(:defined),
+        scion-page-projects:not(:defined),
         scion-page-agents:not(:defined),
         scion-page-404:not(:defined) {
             display: block;
@@ -325,7 +327,7 @@ var spaShellTemplate = `<!DOCTYPE html>
     </script>
 </head>
 <body>
-    <div id="app">{{if .IsLoginPage}}<scion-login-page></scion-login-page>{{else}}<scion-app></scion-app>{{end}}</div>
+    <div id="app">{{if .IsLoginPage}}<scion-login-page></scion-login-page>{{else if .IsInvitePage}}<scion-page-invite></scion-page-invite>{{else}}<scion-app></scion-app>{{end}}</div>
 
     <!-- Client entry point -->
     <script type="module" src="/assets/main.js"></script>
@@ -385,6 +387,7 @@ var noAssetsPage = `<!DOCTYPE html>
 type spaShellData struct {
 	ShoelaceVersion string
 	IsLoginPage     bool
+	IsInvitePage    bool
 	// InitialData is safe-for-HTML JSON embedded in the __SCION_DATA__ script tag.
 	// It is typed as template.JS so html/template does not escape it further.
 	InitialData template.JS
@@ -780,13 +783,13 @@ func resolveAPIPath(urlPath string) string {
 	switch {
 	case p == "/agents":
 		return "/api/v1/agents"
-	case p == "/groves":
-		return "/api/v1/groves"
+	case p == "/projects", p == "/groves":
+		return "/api/v1/projects"
 	case strings.HasPrefix(p, "/agents/") && strings.Count(p, "/") == 2:
 		// /agents/{id} -> /api/v1/agents/{id}
 		return "/api/v1" + p
-	case strings.HasPrefix(p, "/groves/") && strings.Count(p, "/") == 2:
-		// /groves/{id} -> /api/v1/groves/{id}
+	case strings.HasPrefix(p, "/projects/") && strings.Count(p, "/") == 2:
+		// /projects/{id} -> /api/v1/projects/{id}
 		return "/api/v1" + p
 	default:
 		return ""
@@ -909,6 +912,7 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 		data := spaShellData{
 			ShoelaceVersion: shoelaceVersion,
 			IsLoginPage:     r.URL.Path == "/login",
+			IsInvitePage:    r.URL.Path == "/invite",
 			InitialData:     ws.prefetchPageData(r),
 		}
 		if err := ws.shellTmpl.Execute(w, data); err != nil {
@@ -1004,7 +1008,7 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			eventID++
 			// Wrap subject + data into the shape the client expects:
 			//   event: update
-			//   data: {"subject":"grove.xxx.agent.created","data":{...}}
+			//   data: {"subject":"project.xxx.agent.created","data":{...}}
 			// The client's SSEClient listens for event type "update" and
 			// the StateManager parses the subject to route the event.
 			fmt.Fprintf(w, "id: %d\nevent: update\ndata: {\"subject\":%q,\"data\":%s}\n\n",
@@ -1078,6 +1082,8 @@ func isPublicRoute(path string) bool {
 		// Let them pass through the Web session auth layer untouched.
 		return true
 	case path == "/login":
+		return true
+	case path == "/invite":
 		return true
 	case isRootLevelStaticFile(path): // e.g. /favicon.ico, /scion-notification-icon.png
 		return true
@@ -1359,9 +1365,9 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Check email authorization
-	if !isEmailAuthorized(userInfo.Email, ws.config.AuthorizedDomains, ws.config.AdminEmails) {
-		slog.Warn("Unauthorized email domain", "email", userInfo.Email)
+	// Check if user is authorized (admin bypass, domain check, access mode)
+	if !checkUserAuthorized(ctx, userInfo.Email, ws.config.AuthorizedDomains, ws.config.AdminEmails, ws.config.UserAccessMode, ws.store) {
+		slog.Warn("Unauthorized user", "email", userInfo.Email)
 		http.Redirect(w, r, "/login?error=unauthorized_domain", http.StatusFound)
 		return
 	}

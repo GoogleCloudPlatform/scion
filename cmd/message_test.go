@@ -29,19 +29,19 @@ import (
 
 // messageTestState captures and restores package-level vars for test isolation.
 type messageTestState struct {
-	grovePath string
-	noHub     bool
+	projectPath string
+	noHub       bool
 }
 
 func saveMessageTestState() messageTestState {
 	return messageTestState{
-		grovePath: grovePath,
-		noHub:     noHub,
+		projectPath: projectPath,
+		noHub:       noHub,
 	}
 }
 
 func (s messageTestState) restore() {
-	grovePath = s.grovePath
+	projectPath = s.projectPath
 	noHub = s.noHub
 }
 
@@ -57,7 +57,7 @@ type sentMessage struct {
 	StructuredMsg *messages.StructuredMessage
 }
 
-func newMessageMockHubServer(t *testing.T, groveID string, runningAgents []hubclient.Agent) (*httptest.Server, *[]sentMessage) {
+func newMessageMockHubServer(t *testing.T, projectID string, runningAgents []hubclient.Agent) (*httptest.Server, *[]sentMessage) {
 	t.Helper()
 	var sent []sentMessage
 	var mu sync.Mutex
@@ -69,22 +69,26 @@ func newMessageMockHubServer(t *testing.T, groveID string, runningAgents []hubcl
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
-		case r.Method == http.MethodGet && (r.URL.Path == "/api/v1/groves/"+groveID+"/agents" || r.URL.Path == "/api/v1/agents"):
+		case r.Method == http.MethodGet && (r.URL.Path == "/api/v1/groves/"+projectID+"/agents" || r.URL.Path == "/api/v1/projects/"+projectID+"/agents" || r.URL.Path == "/api/v1/agents"):
 			// List agents endpoint
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": runningAgents,
 			})
 
 		case r.Method == http.MethodPost:
-			// Extract agent name from path: /api/v1/groves/<groveID>/agents/<name>/message
+			// Extract agent name from path: /api/v1/projects/<projectID>/agents/<name>/message
+			// or /api/v1/groves/<projectID>/agents/<name>/message (legacy)
 			// or /api/v1/agents/<name>/message
 			var agentName string
-			grovePrefix := "/api/v1/groves/" + groveID + "/agents/"
+			projectPrefix := "/api/v1/projects/" + projectID + "/agents/"
+			grovePrefix := "/api/v1/groves/" + projectID + "/agents/"
 			globalPrefix := "/api/v1/agents/"
 			path := r.URL.Path
-			if len(path) > len(grovePrefix) && path[:len(grovePrefix)] == grovePrefix {
+			if len(path) > len(projectPrefix) && path[:len(projectPrefix)] == projectPrefix {
+				rest := path[len(projectPrefix):]
+				agentName = rest[:len(rest)-len("/message")]
+			} else if len(path) > len(grovePrefix) && path[:len(grovePrefix)] == grovePrefix {
 				rest := path[len(grovePrefix):]
-				// rest is "<name>/message"
 				agentName = rest[:len(rest)-len("/message")]
 			} else if len(path) > len(globalPrefix) && path[:len(globalPrefix)] == globalPrefix {
 				rest := path[len(globalPrefix):]
@@ -128,20 +132,20 @@ func TestSendMessageViaHub_SingleAgent(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-single"
-	server, sent := newMessageMockHubServer(t, groveID, nil)
+	projectID := "grove-msg-single"
+	server, sent := newMessageMockHubServer(t, projectID, nil)
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		GroveID:  groveID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
-	err = sendMessageViaHub(hubCtx, "my-agent", "hello world", false, false, false, false)
+	err = sendMessageViaHub(hubCtx, "my-agent", "hello world", false, false, false, false, false)
 	require.NoError(t, err)
 
 	require.Len(t, *sent, 1)
@@ -158,17 +162,17 @@ func TestSendMessageViaHub_SingleAgentInterrupt(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-int"
-	server, sent := newMessageMockHubServer(t, groveID, nil)
+	projectID := "grove-msg-int"
+	server, sent := newMessageMockHubServer(t, projectID, nil)
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		GroveID:  groveID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	// Set interrupt flag for this test
@@ -176,7 +180,7 @@ func TestSendMessageViaHub_SingleAgentInterrupt(t *testing.T) {
 	msgInterrupt = true
 	defer func() { msgInterrupt = origInterrupt }()
 
-	err = sendMessageViaHub(hubCtx, "my-agent", "urgent", true, false, false, false)
+	err = sendMessageViaHub(hubCtx, "my-agent", "urgent", true, false, false, false, false)
 	require.NoError(t, err)
 
 	require.Len(t, *sent, 1)
@@ -191,22 +195,22 @@ func TestSendMessageViaHub_Broadcast(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-broadcast"
+	projectID := "grove-msg-broadcast"
 	agents := []hubclient.Agent{
 		{Name: "agent-1", Status: "running"},
 		{Name: "agent-2", Status: "running"},
 		{Name: "agent-3", Status: "running"},
 	}
-	server, sent := newMessageMockHubServer(t, groveID, agents)
+	server, sent := newMessageMockHubServer(t, projectID, agents)
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		GroveID:  groveID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	// Set broadcast flag for structured message construction
@@ -214,7 +218,7 @@ func TestSendMessageViaHub_Broadcast(t *testing.T) {
 	msgBroadcast = true
 	defer func() { msgBroadcast = origBroadcast }()
 
-	err = sendMessageViaHub(hubCtx, "", "broadcast msg", false, true, false, false)
+	err = sendMessageViaHub(hubCtx, "", "broadcast msg", false, true, false, false, false)
 	require.NoError(t, err)
 
 	require.Len(t, *sent, 3)
@@ -233,20 +237,20 @@ func TestSendMessageViaHub_BroadcastNoAgents(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-empty"
-	server, sent := newMessageMockHubServer(t, groveID, []hubclient.Agent{})
+	projectID := "grove-msg-empty"
+	server, sent := newMessageMockHubServer(t, projectID, []hubclient.Agent{})
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		GroveID:  groveID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
-	err = sendMessageViaHub(hubCtx, "", "hello", false, true, false, false)
+	err = sendMessageViaHub(hubCtx, "", "hello", false, true, false, false, false)
 	require.NoError(t, err)
 
 	// No messages should be sent
@@ -257,12 +261,12 @@ func TestSendMessageViaHub_All(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-all"
+	projectID := "grove-msg-all"
 	agents := []hubclient.Agent{
-		{Name: "grove1-agent", Status: "running", GroveID: "grove-a"},
-		{Name: "grove2-agent", Status: "running", GroveID: "grove-b"},
+		{Name: "grove1-agent", Status: "running", ProjectID: "grove-a"},
+		{Name: "grove2-agent", Status: "running", ProjectID: "grove-b"},
 	}
-	server, sent := newMessageMockHubServer(t, groveID, agents)
+	server, sent := newMessageMockHubServer(t, projectID, agents)
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
@@ -274,7 +278,7 @@ func TestSendMessageViaHub_All(t *testing.T) {
 		Endpoint: server.URL,
 	}
 
-	err = sendMessageViaHub(hubCtx, "", "all msg", false, false, true, false)
+	err = sendMessageViaHub(hubCtx, "", "all msg", false, false, true, false, false)
 	require.NoError(t, err)
 
 	require.Len(t, *sent, 2)
@@ -287,7 +291,7 @@ func TestSendMessageViaHub_SingleAgentError(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-err"
+	projectID := "grove-msg-err"
 
 	// Server that returns 500 for message requests
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -310,12 +314,12 @@ func TestSendMessageViaHub_SingleAgentError(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		GroveID:  groveID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
-	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false, false)
+	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false, false, false)
 	require.Error(t, err, "single-agent message failure should return an error")
 }
 
@@ -382,7 +386,7 @@ func TestSendMessageViaHub_BroadcastPartialFailure(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-partial"
+	projectID := "grove-msg-partial"
 	agents := []hubclient.Agent{
 		{Name: "good-agent", Status: "running"},
 		{Name: "bad-agent", Status: "running"},
@@ -400,9 +404,17 @@ func TestSendMessageViaHub_BroadcastPartialFailure(t *testing.T) {
 		case r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{"agents": agents})
 		case r.Method == http.MethodPost:
-			prefix := "/api/v1/groves/" + groveID + "/agents/"
-			rest := r.URL.Path[len(prefix):]
-			agentName := rest[:len(rest)-len("/message")]
+			projectPrefix := "/api/v1/projects/" + projectID + "/agents/"
+			grovePrefix := "/api/v1/groves/" + projectID + "/agents/"
+			var agentName string
+			path := r.URL.Path
+			if len(path) > len(projectPrefix) && path[:len(projectPrefix)] == projectPrefix {
+				rest := path[len(projectPrefix):]
+				agentName = rest[:len(rest)-len("/message")]
+			} else if len(path) > len(grovePrefix) && path[:len(grovePrefix)] == grovePrefix {
+				rest := path[len(grovePrefix):]
+				agentName = rest[:len(rest)-len("/message")]
+			}
 
 			if agentName == "bad-agent" {
 				w.WriteHeader(http.StatusInternalServerError)
@@ -438,13 +450,13 @@ func TestSendMessageViaHub_BroadcastPartialFailure(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		GroveID:  groveID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	// Broadcast should not return an error on partial failure
-	err = sendMessageViaHub(hubCtx, "", "test", false, true, false, false)
+	err = sendMessageViaHub(hubCtx, "", "test", false, true, false, false, false)
 	require.NoError(t, err)
 
 	// Only the good agent should have received the message
@@ -507,11 +519,11 @@ func TestBuildStructuredMessage(t *testing.T) {
 	assert.Equal(t, []string{"file1.go", "file2.go"}, msg.Attachments)
 }
 
-func TestSendMessageViaHub_NotifyDefault(t *testing.T) {
+func TestSendMessageViaHub_NotifyFlag(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-notify"
+	projectID := "grove-msg-notify"
 
 	var notifyReceived bool
 	var mu sync.Mutex
@@ -542,13 +554,12 @@ func TestSendMessageViaHub_NotifyDefault(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		GroveID:  groveID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
-	// Default behavior (no --no-notify): notify should be true
-	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false, true)
+	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false, true, false)
 	require.NoError(t, err)
 
 	mu.Lock()
@@ -560,7 +571,7 @@ func TestSendMessageViaHub_NoNotifyFlag(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-no-notify"
+	projectID := "grove-msg-no-notify"
 
 	var notifyReceived bool
 	var mu sync.Mutex
@@ -591,17 +602,18 @@ func TestSendMessageViaHub_NoNotifyFlag(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		GroveID:  groveID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	// Explicit --no-notify: notify should be false
-	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false, false)
+	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false, false, false)
 	require.NoError(t, err)
 
 	mu.Lock()
 	assert.False(t, notifyReceived, "notify should be false when --no-notify is used")
+
 	mu.Unlock()
 }
 
@@ -609,7 +621,7 @@ func TestSendOutboundMessageViaHub(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	groveID := "grove-msg-outbound"
+	projectID := "grove-msg-outbound"
 
 	var receivedMsg *hubclient.OutboundMessageRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -617,7 +629,7 @@ func TestSendOutboundMessageViaHub(t *testing.T) {
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/groves/"+groveID+"/agents/my-agent/outbound-message":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/groves/"+projectID+"/agents/my-agent/outbound-message":
 			var msg hubclient.OutboundMessageRequest
 			json.NewDecoder(r.Body).Decode(&msg)
 			receivedMsg = &msg
@@ -632,9 +644,9 @@ func TestSendOutboundMessageViaHub(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		GroveID:  groveID,
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
 	}
 
 	t.Setenv("SCION_AGENT_NAME", "my-agent")
@@ -663,9 +675,9 @@ func TestSendOutboundMessageViaHub_RequiresAgentContext(t *testing.T) {
 	require.NoError(t, err)
 
 	hubCtx := &HubContext{
-		Client:   client,
-		Endpoint: server.URL,
-		GroveID:  "grove-test",
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: "grove-test",
 	}
 
 	t.Setenv("SCION_AGENT_NAME", "")
@@ -716,8 +728,305 @@ func TestUserRecipientFlagValidation(t *testing.T) {
 	}
 }
 
-func TestNoNotifyFlagRegistered(t *testing.T) {
-	f := messageCmd.Flags().Lookup("no-notify")
-	require.NotNil(t, f, "--no-notify flag should be registered")
-	assert.Equal(t, "false", f.DefValue, "--no-notify should default to false (notify enabled)")
+func TestSetRecipientFlagValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		raw       bool
+		broadcast bool
+		all       bool
+		in        string
+		notify    bool
+		wantErr   string
+	}{
+		{
+			name:    "set with raw not allowed",
+			args:    []string{"set[agent:a,agent:b]", "hello"},
+			raw:     true,
+			wantErr: "--raw cannot be used with set[] recipients",
+		},
+		{
+			name:      "set with broadcast not allowed",
+			args:      []string{"set[agent:a,agent:b]", "hello"},
+			broadcast: true,
+			wantErr:   "set[] recipients cannot be combined with --broadcast or --all",
+		},
+		{
+			name:    "set with all not allowed",
+			args:    []string{"set[agent:a,agent:b]", "hello"},
+			all:     true,
+			wantErr: "set[] recipients cannot be combined with --broadcast or --all",
+		},
+		{
+			name:    "set with in not allowed",
+			args:    []string{"set[agent:a,agent:b]", "hello"},
+			in:      "30m",
+			wantErr: "--in/--at cannot be used with set[] recipients",
+		},
+		{
+			name:    "set with notify not allowed",
+			args:    []string{"set[agent:a,agent:b]", "hello"},
+			notify:  true,
+			wantErr: "--notify cannot be used with set[] recipients",
+		},
+		{
+			name:    "invalid set",
+			args:    []string{"set[agent:a]", "hello"},
+			wantErr: "invalid set recipient",
+		},
+		{
+			name:    "empty set",
+			args:    []string{"set[]", "hello"},
+			wantErr: "invalid set recipient",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origRaw := msgRaw
+			origBroadcast, origAll := msgBroadcast, msgAll
+			origIn := msgIn
+			origNotify := msgNotify
+			defer func() {
+				msgRaw = origRaw
+				msgBroadcast = origBroadcast
+				msgAll = origAll
+				msgIn = origIn
+				msgNotify = origNotify
+			}()
+
+			msgRaw = tc.raw
+			msgBroadcast = tc.broadcast
+			msgAll = tc.all
+			msgIn = tc.in
+			msgNotify = tc.notify
+
+			err := messageCmd.RunE(messageCmd, tc.args)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+func TestWakeFlagValidation(t *testing.T) {
+	tests := []struct {
+		name     string
+		setup    func()
+		teardown func()
+		args     []string // cobra args; nil means use default ["agent1", "hello"]
+		errMsg   string
+	}{
+		{
+			name:     "wake with broadcast",
+			setup:    func() { msgWake = true; msgBroadcast = true },
+			teardown: func() { msgWake = false; msgBroadcast = false },
+			args:     []string{"hello"},
+			errMsg:   "--wake cannot be combined with --broadcast or --all",
+		},
+		{
+			name:     "wake with all",
+			setup:    func() { msgWake = true; msgAll = true },
+			teardown: func() { msgWake = false; msgAll = false },
+			args:     []string{"hello"},
+			errMsg:   "--wake cannot be combined with --broadcast or --all",
+		},
+		{
+			name:     "wake with in",
+			setup:    func() { msgWake = true; msgIn = "5m" },
+			teardown: func() { msgWake = false; msgIn = "" },
+			errMsg:   "--wake cannot be combined with --in or --at",
+		},
+		{
+			name:     "wake with at",
+			setup:    func() { msgWake = true; msgAt = "2026-01-01T00:00:00Z" },
+			teardown: func() { msgWake = false; msgAt = "" },
+			errMsg:   "--wake cannot be combined with --in or --at",
+		},
+		{
+			name:     "wake with raw",
+			setup:    func() { msgWake = true; msgRaw = true },
+			teardown: func() { msgWake = false; msgRaw = false },
+			errMsg:   "--wake cannot be combined with --raw",
+		},
+		{
+			name:     "wake with user recipient",
+			setup:    func() { msgWake = true },
+			teardown: func() { msgWake = false },
+			args:     []string{"user:alice", "hello"},
+			errMsg:   "--wake cannot be used with user recipients",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup()
+			defer tc.teardown()
+
+			args := tc.args
+			if args == nil {
+				args = []string{"agent1", "hello"}
+			}
+
+			err := messageCmd.RunE(messageCmd, args)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.errMsg)
+		})
+	}
+}
+
+func TestSendSetMessageViaHub(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "grove-msg-set"
+	agents := []hubclient.Agent{
+		{Name: "agent-a", Status: "running"},
+		{Name: "agent-b", Status: "running"},
+	}
+	server, sent := newMessageMockHubServer(t, projectID, agents)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	recipients := []messages.SetRecipient{
+		{Kind: messages.RecipientAgent, Name: "agent-a"},
+		{Kind: messages.RecipientAgent, Name: "agent-b"},
+	}
+
+	err = sendSetMessageViaHub(hubCtx, recipients, "set hello", false)
+	require.NoError(t, err)
+
+	require.Len(t, *sent, 2)
+	names := make([]string, len(*sent))
+	for i, s := range *sent {
+		names[i] = s.AgentName
+		assert.Equal(t, "set hello", s.Message)
+		require.NotNil(t, s.StructuredMsg)
+		assert.NotEmpty(t, s.StructuredMsg.Metadata["group_id"])
+	}
+	assert.ElementsMatch(t, []string{"agent-a", "agent-b"}, names)
+}
+
+func TestSendSetMessageViaHub_RequiresHub(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	// set[] without Hub should fail at the RunE level, not get to sendSetMessageViaHub
+	origBroadcast, origAll := msgBroadcast, msgAll
+	defer func() { msgBroadcast = origBroadcast; msgAll = origAll }()
+	msgBroadcast = false
+	msgAll = false
+
+	err := messageCmd.RunE(messageCmd, []string{"set[agent:a,agent:b]", "hello"})
+	// When Hub is not configured, this should fail with "set[] recipients require Hub mode".
+	// When Hub is configured but test agents don't exist, delivery fails.
+	// Either way, an error must be returned — never silent nil.
+	require.Error(t, err)
+}
+
+func TestSendMessageViaHub_WakePassedThrough(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "grove-msg-wake"
+
+	var wakeReceived bool
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost:
+			var body struct {
+				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
+				Interrupt         bool                        `json:"interrupt"`
+				Notify            bool                        `json:"notify"`
+				Wake              bool                        `json:"wake"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			wakeReceived = body.Wake
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	// Send with wake=true
+	err = sendMessageViaHub(hubCtx, "my-agent", "hello", false, false, false, false, true)
+	require.NoError(t, err)
+
+	mu.Lock()
+	assert.True(t, wakeReceived, "wake should be true when passed through")
+	mu.Unlock()
+}
+
+func TestNotifyFlagValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		notify    bool
+		broadcast bool
+		all       bool
+		wantErr   string
+	}{
+		{
+			name:      "notify with broadcast not allowed",
+			notify:    true,
+			broadcast: true,
+			wantErr:   "--notify cannot be combined with --broadcast or --all",
+		},
+		{
+			name:    "notify with all not allowed",
+			notify:  true,
+			all:     true,
+			wantErr: "--notify cannot be combined with --broadcast or --all",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origNotify := msgNotify
+			origBroadcast, origAll := msgBroadcast, msgAll
+			defer func() {
+				msgNotify = origNotify
+				msgBroadcast = origBroadcast
+				msgAll = origAll
+			}()
+
+			msgNotify = tc.notify
+			msgBroadcast = tc.broadcast
+			msgAll = tc.all
+
+			var args []string
+			if tc.broadcast || tc.all {
+				args = []string{"hello"}
+			} else {
+				args = []string{"agent1", "hello"}
+			}
+
+			err := messageCmd.RunE(messageCmd, args)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
 }

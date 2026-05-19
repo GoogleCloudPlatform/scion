@@ -275,11 +275,11 @@ func eventToPhaseActivity(event *hooks.Event) *eventResult {
 		return &eventResult{phase: state.PhaseStarting, isPhase: true}
 
 	case hooks.EventPostStart:
-		return &eventResult{phase: state.PhaseRunning, activity: state.ActivityIdle, isPhase: true}
+		return &eventResult{phase: state.PhaseRunning, activity: state.ActivityWorking, isPhase: true}
 
 	case hooks.EventSessionStart:
-		// session-start clears sticky — treated as activity-only (idle)
-		return &eventResult{activity: state.ActivityIdle}
+		// session-start clears sticky — treated as activity-only (working)
+		return &eventResult{activity: state.ActivityWorking}
 
 	case hooks.EventPromptSubmit, hooks.EventAgentStart:
 		return &eventResult{activity: state.ActivityThinking}
@@ -288,13 +288,13 @@ func eventToPhaseActivity(event *hooks.Event) *eventResult {
 		return &eventResult{activity: state.ActivityThinking}
 
 	case hooks.EventModelEnd:
-		return &eventResult{activity: state.ActivityIdle}
+		return &eventResult{activity: state.ActivityWorking}
 
 	case hooks.EventToolStart:
 		return &eventResult{activity: state.ActivityExecuting}
 
 	case hooks.EventToolEnd, hooks.EventAgentEnd:
-		return &eventResult{activity: state.ActivityIdle}
+		return &eventResult{activity: state.ActivityWorking}
 
 	case hooks.EventResponseComplete:
 		return &eventResult{activity: state.ActivityCompleted}

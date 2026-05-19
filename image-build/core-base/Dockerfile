@@ -119,6 +119,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     lsb-release \
     chromium \
+    dbus-x11 \
+    gnome-keyring \
+    libsecret-1-0 \
+    libsecret-tools \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

@@ -88,8 +88,8 @@ type SyncToFinalizeResponse struct {
 type WorkspaceStatusResponse struct {
 	// Slug is the agent's URL-safe identifier.
 	Slug string `json:"slug"`
-	// GroveID is the grove ID.
-	GroveID string `json:"groveId"`
+	// ProjectID is the project ID.
+	ProjectID string `json:"projectId"`
 	// StorageURI is the GCS URI for the workspace storage.
 	StorageURI string `json:"storageUri"`
 	// LastSync contains information about the last sync operation.
@@ -122,7 +122,7 @@ func (s *workspaceService) SyncFrom(ctx context.Context, agentID string, opts *S
 		}
 	}
 
-	resp, err := s.c.transport.Post(ctx, "/api/v1/agents/"+agentID+"/workspace/sync-from", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/agents/"+agentID+"/workspace/sync-from", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +137,7 @@ func (s *workspaceService) SyncTo(ctx context.Context, agentID string, files []t
 		Files: files,
 	}
 
-	resp, err := s.c.transport.Post(ctx, "/api/v1/agents/"+agentID+"/workspace/sync-to", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/agents/"+agentID+"/workspace/sync-to", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +152,7 @@ func (s *workspaceService) FinalizeSyncTo(ctx context.Context, agentID string, m
 		Manifest: manifest,
 	}
 
-	resp, err := s.c.transport.Post(ctx, "/api/v1/agents/"+agentID+"/workspace/sync-to/finalize", req, nil)
+	resp, err := s.c.post(ctx, "/api/v1/agents/"+agentID+"/workspace/sync-to/finalize", req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +161,7 @@ func (s *workspaceService) FinalizeSyncTo(ctx context.Context, agentID string, m
 
 // GetStatus returns the current workspace sync status for an agent.
 func (s *workspaceService) GetStatus(ctx context.Context, agentID string) (*WorkspaceStatusResponse, error) {
-	resp, err := s.c.transport.Get(ctx, "/api/v1/agents/"+agentID+"/workspace", nil)
+	resp, err := s.c.get(ctx, "/api/v1/agents/"+agentID+"/workspace", nil)
 	if err != nil {
 		return nil, err
 	}

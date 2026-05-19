@@ -108,9 +108,9 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.Bridge.ExternalURL == "" {
 		return fmt.Errorf("bridge.external_url is required")
 	}
-	for _, g := range cfg.Groves {
+	for _, g := range cfg.Projects {
 		if strings.Contains(g.Slug, ":") {
-			return fmt.Errorf("grove slug %q must not contain ':'", g.Slug)
+			return fmt.Errorf("project slug %q must not contain ':'", g.Slug)
 		}
 		for _, a := range g.ExposedAgents {
 			if strings.Contains(a, ":") {
@@ -161,8 +161,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /.well-known/agent-card.json", s.handleWellKnownAgentCard)
 
 	// Per-agent routes.
-	mux.HandleFunc("GET /groves/{groveSlug}/agents/{agentSlug}/.well-known/agent-card.json", s.handleAgentCard)
-	mux.HandleFunc("POST /groves/{groveSlug}/agents/{agentSlug}/jsonrpc", s.handleJSONRPC)
+	mux.HandleFunc("GET /projects/{projectSlug}/agents/{agentSlug}/.well-known/agent-card.json", s.handleAgentCard)
+	mux.HandleFunc("POST /projects/{projectSlug}/agents/{agentSlug}/jsonrpc", s.handleJSONRPC)
+
+	// Legacy per-agent routes (backward compatibility for "grove" naming).
+	mux.HandleFunc("GET /groves/{projectSlug}/agents/{agentSlug}/.well-known/agent-card.json", s.handleAgentCard)
+	mux.HandleFunc("POST /groves/{projectSlug}/agents/{agentSlug}/jsonrpc", s.handleJSONRPC)
 
 	// Health, readiness, and metrics.
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -240,23 +244,23 @@ func (s *Server) handleWellKnownAgentCard(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
-	groveSlug := r.PathValue("groveSlug")
+	projectSlug := r.PathValue("projectSlug")
 	agentSlug := r.PathValue("agentSlug")
 
-	if !slugRE.MatchString(groveSlug) || !slugRE.MatchString(agentSlug) {
+	if !slugRE.MatchString(projectSlug) || !slugRE.MatchString(agentSlug) {
 		http.Error(w, "invalid slug", http.StatusBadRequest)
 		return
 	}
 
-	groveCfg := s.bridge.GetGroveConfig(groveSlug)
-	if groveCfg == nil {
-		http.Error(w, "grove not found", http.StatusNotFound)
+	projectCfg := s.bridge.GetProjectConfig(projectSlug)
+	if projectCfg == nil {
+		http.Error(w, "project not found", http.StatusNotFound)
 		return
 	}
 
-	if len(groveCfg.ExposedAgents) > 0 {
+	if len(projectCfg.ExposedAgents) > 0 {
 		found := false
-		for _, a := range groveCfg.ExposedAgents {
+		for _, a := range projectCfg.ExposedAgents {
 			if a == agentSlug {
 				found = true
 				break
@@ -268,7 +272,7 @@ func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	card := s.bridge.GenerateAgentCard(r.Context(), groveSlug, agentSlug)
+	card := s.bridge.GenerateAgentCard(r.Context(), projectSlug, agentSlug)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
@@ -278,15 +282,15 @@ func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
-	groveSlug := r.PathValue("groveSlug")
+	projectSlug := r.PathValue("projectSlug")
 	agentSlug := r.PathValue("agentSlug")
 
-	if !slugRE.MatchString(groveSlug) || !slugRE.MatchString(agentSlug) {
+	if !slugRE.MatchString(projectSlug) || !slugRE.MatchString(agentSlug) {
 		s.writeRPCError(w, nil, ErrCodeInvalidParams, "invalid slug format")
 		return
 	}
 
-	if err := s.bridge.AuthorizeExposed(groveSlug, agentSlug); err != nil {
+	if err := s.bridge.AuthorizeExposed(projectSlug, agentSlug); err != nil {
 		s.writeRPCError(w, nil, ErrCodeInvalidParams, "agent not found")
 		return
 	}
@@ -312,35 +316,35 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 
 	s.log.Debug("JSON-RPC request",
 		"method", req.Method,
-		"grove", groveSlug,
+		"project", projectSlug,
 		"agent", agentSlug,
 	)
 
 	switch req.Method {
 	case "message/send":
-		s.handleSendMessage(w, r, req, groveSlug, agentSlug)
+		s.handleSendMessage(w, r, req, projectSlug, agentSlug)
 	case "message/stream":
-		s.handleStreamMessage(w, r, req, groveSlug, agentSlug)
+		s.handleStreamMessage(w, r, req, projectSlug, agentSlug)
 	case "tasks/get":
-		s.handleGetTask(w, r, req, groveSlug, agentSlug)
+		s.handleGetTask(w, r, req, projectSlug, agentSlug)
 	case "tasks/list":
-		s.handleListTasks(w, r, req, groveSlug, agentSlug)
+		s.handleListTasks(w, r, req, projectSlug, agentSlug)
 	case "tasks/cancel":
-		s.handleCancelTask(w, r, req, groveSlug, agentSlug)
+		s.handleCancelTask(w, r, req, projectSlug, agentSlug)
 	case "tasks/pushNotification/set":
-		s.handleSetPushNotification(w, r, req, groveSlug, agentSlug)
+		s.handleSetPushNotification(w, r, req, projectSlug, agentSlug)
 	case "tasks/pushNotification/get":
-		s.handleGetPushNotification(w, r, req, groveSlug, agentSlug)
+		s.handleGetPushNotification(w, r, req, projectSlug, agentSlug)
 	case "tasks/pushNotification/delete":
-		s.handleDeletePushNotification(w, r, req, groveSlug, agentSlug)
+		s.handleDeletePushNotification(w, r, req, projectSlug, agentSlug)
 	case "tasks/resubscribe":
-		s.handleResubscribe(w, r, req, groveSlug, agentSlug)
+		s.handleResubscribe(w, r, req, projectSlug, agentSlug)
 	default:
 		s.writeRPCError(w, req.ID, ErrCodeMethodNotFound, fmt.Sprintf("method %q not found", req.Method))
 	}
 }
 
-func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
+func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, projectSlug, agentSlug string) {
 	var params SendMessageParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid SendMessage params", "error", err)
@@ -362,9 +366,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, req J
 		blocking = *params.Configuration.Blocking
 	}
 
-	result, err := s.bridge.SendMessage(r.Context(), groveSlug, agentSlug, params.ContextID, params.Message.Parts, blocking)
+	result, err := s.bridge.SendMessage(r.Context(), projectSlug, agentSlug, params.ContextID, params.Message.Parts, blocking)
 	if err != nil {
-		s.log.Error("SendMessage failed", "error", err, "grove", groveSlug, "agent", agentSlug)
+		s.log.Error("SendMessage failed", "error", err, "project", projectSlug, "agent", agentSlug)
 		switch {
 		case errors.Is(err, ErrAgentNotFound):
 			s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "agent not found")
@@ -379,7 +383,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, req J
 	s.writeRPCResult(w, req.ID, result)
 }
 
-func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
+func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, projectSlug, agentSlug string) {
 	var params TaskQueryParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid GetTask params", "error", err)
@@ -392,7 +396,7 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request, req JSONR
 		return
 	}
 
-	task, err := s.bridge.AuthorizeTask(params.ID, groveSlug, agentSlug)
+	task, err := s.bridge.AuthorizeTask(params.ID, projectSlug, agentSlug)
 	if err != nil {
 		s.log.Error("GetTask failed", "error", err, "taskID", params.ID)
 		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
@@ -410,7 +414,7 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request, req JSONR
 	})
 }
 
-func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
+func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, projectSlug, agentSlug string) {
 	var params TaskQueryParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid ListTasks params", "error", err)
@@ -423,7 +427,7 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request, req JSO
 		return
 	}
 
-	authorized, authErr := s.bridge.AuthorizeContext(params.ContextID, groveSlug, agentSlug)
+	authorized, authErr := s.bridge.AuthorizeContext(params.ContextID, projectSlug, agentSlug)
 	if authErr != nil {
 		s.log.Error("AuthorizeContext failed", "error", authErr, "contextID", params.ContextID)
 		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
@@ -444,7 +448,7 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request, req JSO
 	s.writeRPCResult(w, req.ID, tasks)
 }
 
-func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
+func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, projectSlug, agentSlug string) {
 	var params TaskQueryParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid CancelTask params", "error", err)
@@ -457,7 +461,7 @@ func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request, req JS
 		return
 	}
 
-	task, err := s.bridge.AuthorizeTask(params.ID, groveSlug, agentSlug)
+	task, err := s.bridge.AuthorizeTask(params.ID, projectSlug, agentSlug)
 	if err != nil {
 		s.log.Error("CancelTask auth failed", "error", err, "taskID", params.ID)
 		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
@@ -482,9 +486,9 @@ func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request, req JS
 	s.writeRPCResult(w, req.ID, result)
 }
 
-func (s *Server) handleStreamMessage(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
+func (s *Server) handleStreamMessage(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, projectSlug, agentSlug string) {
 	s.log.Warn("message/stream request received — MVP limitation: streaming treats the first content message as terminal; multi-turn agents will break",
-		"grove", groveSlug, "agent", agentSlug)
+		"project", projectSlug, "agent", agentSlug)
 
 	var params SendMessageParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
@@ -502,9 +506,9 @@ func (s *Server) handleStreamMessage(w http.ResponseWriter, r *http.Request, req
 		return
 	}
 
-	taskID, events, cleanup, err := s.bridge.SendStreamingMessage(r.Context(), groveSlug, agentSlug, params.ContextID, params.Message.Parts)
+	taskID, events, cleanup, err := s.bridge.SendStreamingMessage(r.Context(), projectSlug, agentSlug, params.ContextID, params.Message.Parts)
 	if err != nil {
-		s.log.Error("SendStreamingMessage failed", "error", err, "grove", groveSlug, "agent", agentSlug)
+		s.log.Error("SendStreamingMessage failed", "error", err, "project", projectSlug, "agent", agentSlug)
 		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
 		return
 	}
@@ -513,7 +517,7 @@ func (s *Server) handleStreamMessage(w http.ResponseWriter, r *http.Request, req
 	s.writeSSEStream(w, r, taskID, events)
 }
 
-func (s *Server) handleResubscribe(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
+func (s *Server) handleResubscribe(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, projectSlug, agentSlug string) {
 	var params TaskQueryParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid Resubscribe params", "error", err)
@@ -526,7 +530,7 @@ func (s *Server) handleResubscribe(w http.ResponseWriter, r *http.Request, req J
 		return
 	}
 
-	task, err := s.bridge.AuthorizeTask(params.ID, groveSlug, agentSlug)
+	task, err := s.bridge.AuthorizeTask(params.ID, projectSlug, agentSlug)
 	if err != nil {
 		s.log.Error("Resubscribe auth failed", "error", err, "taskID", params.ID)
 		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
@@ -621,7 +625,7 @@ type PushNotificationParams struct {
 	AuthCredentials string `json:"authCredentials,omitempty"`
 }
 
-func (s *Server) handleSetPushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
+func (s *Server) handleSetPushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, projectSlug, agentSlug string) {
 	var params PushNotificationParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid SetPushNotification params", "error", err)
@@ -629,7 +633,7 @@ func (s *Server) handleSetPushNotification(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	task, err := s.bridge.AuthorizeTask(params.TaskID, groveSlug, agentSlug)
+	task, err := s.bridge.AuthorizeTask(params.TaskID, projectSlug, agentSlug)
 	if err != nil {
 		s.log.Error("SetPushNotification auth failed", "error", err, "taskID", params.TaskID)
 		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
@@ -657,7 +661,7 @@ func (s *Server) handleSetPushNotification(w http.ResponseWriter, r *http.Reques
 	s.writeRPCResult(w, req.ID, cfg)
 }
 
-func (s *Server) handleGetPushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
+func (s *Server) handleGetPushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, projectSlug, agentSlug string) {
 	var params PushNotificationParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid GetPushNotification params", "error", err)
@@ -665,7 +669,7 @@ func (s *Server) handleGetPushNotification(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	task, err := s.bridge.AuthorizeTask(params.TaskID, groveSlug, agentSlug)
+	task, err := s.bridge.AuthorizeTask(params.TaskID, projectSlug, agentSlug)
 	if err != nil {
 		s.log.Error("GetPushNotification auth failed", "error", err, "taskID", params.TaskID)
 		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
@@ -686,7 +690,7 @@ func (s *Server) handleGetPushNotification(w http.ResponseWriter, r *http.Reques
 	s.writeRPCResult(w, req.ID, configs)
 }
 
-func (s *Server) handleDeletePushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, groveSlug, agentSlug string) {
+func (s *Server) handleDeletePushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, projectSlug, agentSlug string) {
 	var params PushNotificationParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.log.Warn("invalid DeletePushNotification params", "error", err)
@@ -699,7 +703,7 @@ func (s *Server) handleDeletePushNotification(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	task, err := s.bridge.AuthorizeTask(params.TaskID, groveSlug, agentSlug)
+	task, err := s.bridge.AuthorizeTask(params.TaskID, projectSlug, agentSlug)
 	if err != nil {
 		s.log.Error("DeletePushNotification auth failed", "error", err, "taskID", params.TaskID)
 		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
@@ -766,9 +770,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Per-agent card: exactly /groves/{slug}/agents/{slug}/.well-known/agent-card.json
+		// Per-agent card: exactly /projects/{slug}/agents/{slug}/.well-known/agent-card.json
+		// or legacy /groves/{slug}/agents/{slug}/.well-known/agent-card.json
 		segments := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
-		if len(segments) == 6 && segments[0] == "groves" && segments[2] == "agents" && segments[4] == ".well-known" && segments[5] == "agent-card.json" {
+		if len(segments) == 6 && (segments[0] == "projects" || segments[0] == "groves") && segments[2] == "agents" && segments[4] == ".well-known" && segments[5] == "agent-card.json" {
 			next.ServeHTTP(w, r)
 			return
 		}
