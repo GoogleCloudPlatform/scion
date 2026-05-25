@@ -1,241 +1,148 @@
-# GitHub Pull Request Comment Webhook Integration
+# GitHub Pull Request Comment Webhook Integration (Strategy D)
 
-Implement webhook receivers on the Scion Hub server to support decoding GitHub pull request comments and detecting mentions of `@scion` (case insensitive). This enables the Scion server to listen to developer discussion and trigger agent actions or logging.
+This design document outlines the technical plan to implement Strategy D (Hybrid Dispatch with Automated Fallback) for GitHub pull request comment `@scion` mentions. This allows interactive multi-turn developer discussion with active agents on a Pull Request, while seamlessly spawning a new agent if none is currently active.
+
+## Problem Description & Background
+
+Currently, Scion Hub can receive and decode comments on GitHub Pull Requests and scan them for mentions of `@scion`. However, it does not yet dispatch these prompts to agents. 
+
+We need a robust, event-driven dispatch mechanism that:
+1. **Routes to Active Agents**: If an agent is already active on the PR branch, deliver the new comment directly to that agent as an inbound message. This maintains conversational state and workspace modifications.
+2. **Spawns Fallback Agents**: If no agent is active, fetch the PR branch name via the GitHub API and dynamically spawn a new agent on that branch, seeding its task with the user's prompt.
+
+---
 
 ## User Review Required
 
 > [!IMPORTANT]
-> **Webhook Scopes on GitHub App Registration:**
-> To receive these comments, the GitHub App must be configured with the following Permissions & Events:
-> - **Repository Permissions**:
->   - `Metadata` (Read-only)
->   - `Pull requests` (Read & write or Read-only)
->   - `Issues` (Read & write or Read-only)
-> - **Subscribe to Events**:
->   - `Issue comment`
->   - `Pull request review`
->   - `Pull request review comment`
-
-## Proposed Changes
-
-We will modify the GitHub webhook handler in the Scion Hub server to decode pull request comments and search for case-insensitive `@scion` mentions.
+> **Authentication Scopes and GitHub App Installation:**
+> - To query PR branch references from the GitHub API, the Scion Hub requires an installation-authenticated GitHub client. We will leverage Scion's existing GitHub App integration configuration.
+> - Ensure that the GitHub App registration possesses the **Pull Requests** read scope.
 
 ---
 
-### [Hub Webhook Component]
+## Open Questions
 
-#### [MODIFY] [handlers_github_app_webhook.go](file:///Users/jkrohn/Documents/code/scion/pkg/hub/handlers_github_app_webhook.go)
+> [!NOTE]
+> **Should agents post replies back to the GitHub PR?**
+> Yes. Once an agent processes a message, its outbound replies (emitted via the message broker) can eventually be listened to by a webhook-feedback publisher to comment back on the PR. This is part of the long-term agent harness capability, but the immediate goal of this task is to ensure the **inbound routing** is fully implemented and verified.
 
-1. **Add payload structs** to decode pull request/issue comments and reviews:
-   - `webhookIssueCommentEvent` for `issue_comment`
-   - `webhookPullRequestReviewCommentEvent` for `pull_request_review_comment`
-   - `webhookPullRequestReviewEvent` for `pull_request_review`
+---
 
-2. **Register event handlers** in the `switch eventType` block of `handleGitHubWebhook`:
-   - `case "issue_comment": s.handleIssueCommentWebhook(w, r, body)`
-   - `case "pull_request_review_comment": s.handlePullRequestReviewCommentWebhook(w, r, body)`
-   - `case "pull_request_review": s.handlePullRequestReviewWebhook(w, r, body)`
+## Proposed Changes
 
-3. **Implement processing and mention matching logic**:
-   - Check if the comment body contains `@scion` (case-insensitive search).
-   - Resolve the project associated with the repository using a new helper `findProjectsForRepository` (matching `extractOwnerRepo(project.GitRemote)` with `repository.full_name`).
-   - Log mentions with pull request metadata, comment details, and associated project ID.
+We will build the routing and dispatch logic directly in `pkg/hub/handlers_github_app_webhook.go`.
 
-Below is the proposed struct design and handler logic:
+### 1. Database/Agent Labeling
+To easily identify which agent belongs to which PR, we will establish a label convention:
+- **`github-pr`**: Holds the string representation of the PR number (e.g., `"101"`).
+- **`github-repo`**: Holds the repository full name (e.g., `"acme/widgets"`).
 
-```go
-type webhookIssueCommentEvent struct {
-	Action string `json:"action"` // created, edited, deleted
-	Issue  struct {
-		Number      int64  `json:"number"`
-		HTMLURL     string `json:"html_url"`
-		PullRequest *struct {
-			URL string `json:"url"`
-		} `json:"pull_request"` // Present only if this is a PR comment
-	} `json:"issue"`
-	Comment struct {
-		ID   int64  `json:"id"`
-		Body string `json:"body"`
-	} `json:"comment"`
-	Repository struct {
-		FullName string `json:"full_name"`
-	} `json:"repository"`
-	Installation struct {
-		ID int64 `json:"id"`
-	} `json:"installation"`
-}
+When looking for an active agent, we will query the store for running agents matching these labels.
 
-type webhookPullRequestReviewCommentEvent struct {
-	Action      string `json:"action"` // created, edited, deleted
-	PullRequest struct {
-		Number  int64  `json:"number"`
-		HTMLURL string `json:"html_url"`
-	} `json:"pull_request"`
-	Comment struct {
-		ID   int64  `json:"id"`
-		Body string `json:"body"`
-	} `json:"comment"`
-	Repository struct {
-		FullName string `json:"full_name"`
-	} `json:"repository"`
-	Installation struct {
-		ID int64 `json:"id"`
-	} `json:"installation"`
-}
+### 2. Fetching PR Branch Reference
+When spawning a fallback agent, we need the exact git branch name. Since the comment webhook payload only contains the PR number and repo name, we must fetch the head branch name from GitHub's PR API:
+- Endpoint: `GET /repos/{owner}/{repo}/pulls/{number}`
+- Key field: `head.ref` (holds the source branch name).
 
-type webhookPullRequestReviewEvent struct {
-	Action      string `json:"action"` // submitted, edited, dismissed
-	PullRequest struct {
-		Number  int64  `json:"number"`
-		HTMLURL string `json:"html_url"`
-	} `json:"pull_request"`
-	Review struct {
-		ID   int64  `json:"id"`
-		Body string `json:"body"`
-	} `json:"review"`
-	Repository struct {
-		FullName string `json:"full_name"`
-	} `json:"repository"`
-	Installation struct {
-		ID int64 `json:"id"`
-	} `json:"installation"`
-}
-```
+We will add a helper method to perform this check using the Hub's authenticated GitHub client or transport.
+
+### 3. Dispatch Logic (The Hybrid Router)
+
+We will update the `processComment` function in `pkg/hub/handlers_github_app_webhook.go` as follows:
 
 ```go
-// handleIssueCommentWebhook handles "issue_comment" events.
-func (s *Server) handleIssueCommentWebhook(w http.ResponseWriter, r *http.Request, body []byte) {
-	var event webhookIssueCommentEvent
-	if err := json.Unmarshal(body, &event); err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid webhook payload", nil)
-		return
-	}
-
-	// We only process Pull Request comments (which have the PullRequest field) and creations
-	if event.Issue.PullRequest == nil || event.Action != "created" {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "not a new PR comment"})
-		return
-	}
-
-	s.processComment(r.Context(), "issue_comment", event.Repository.FullName, event.Issue.Number, event.Comment.ID, event.Comment.Body)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// handlePullRequestReviewCommentWebhook handles "pull_request_review_comment" events.
-func (s *Server) handlePullRequestReviewCommentWebhook(w http.ResponseWriter, r *http.Request, body []byte) {
-	var event webhookPullRequestReviewCommentEvent
-	if err := json.Unmarshal(body, &event); err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid webhook payload", nil)
-		return
-	}
-
-	if event.Action != "created" {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "non-created PR review comment"})
-		return
-	}
-
-	s.processComment(r.Context(), "pull_request_review_comment", event.Repository.FullName, event.PullRequest.Number, event.Comment.ID, event.Comment.Body)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// handlePullRequestReviewWebhook handles "pull_request_review" events.
-func (s *Server) handlePullRequestReviewWebhook(w http.ResponseWriter, r *http.Request, body []byte) {
-	var event webhookPullRequestReviewEvent
-	if err := json.Unmarshal(body, &event); err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid webhook payload", nil)
-		return
-	}
-
-	if event.Action != "submitted" || event.Review.Body == "" {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "review not submitted or empty body"})
-		return
-	}
-
-	s.processComment(r.Context(), "pull_request_review", event.Repository.FullName, event.PullRequest.Number, event.Review.ID, event.Review.Body)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// processComment checks for mentions of "@scion" and resolves corresponding projects.
-func (s *Server) processComment(ctx context.Context, eventType, repoFullName string, prNumber, commentID int64, body string) {
+func (s *Server) processComment(ctx context.Context, eventType, repoFullName string, prNumber, commentID int64, body string, senderLogin string) {
 	if !strings.Contains(strings.ToLower(body), "@scion") {
-		slog.Debug("No @scion mention in comment", "repo", repoFullName, "pr", prNumber, "comment_id", commentID)
 		return
 	}
 
-	slog.Info("Detected @scion mention in comment!",
-		"event_type", eventType,
-		"repo", repoFullName,
-		"pr", prNumber,
-		"comment_id", commentID,
-	)
-
-	// Resolve project associated with repo
+	// 1. Resolve Scion Projects associated with the repository
 	projects, err := s.findProjectsForRepository(ctx, repoFullName)
 	if err != nil {
 		slog.Error("Failed to find projects for repository", "repo", repoFullName, "error", err)
 		return
 	}
-
 	if len(projects) == 0 {
 		slog.Warn("No project matched with the repository", "repo", repoFullName)
 		return
 	}
 
 	for _, p := range projects {
-		slog.Info("Matched comment mention to Scion Project",
-			"project_id", p.ID,
-			"project_name", p.Name,
-			"git_remote", p.GitRemote,
-		)
-		// Future: Trigger automated agent dispatch, post responses, or spawn sub-agents
-	}
-}
-
-// findProjectsForRepository looks up projects in the store matching the given repository.
-func (s *Server) findProjectsForRepository(ctx context.Context, repoFullName string) ([]store.Project, error) {
-	projects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 10000})
-	if err != nil {
-		return nil, err
-	}
-
-	var matched []store.Project
-	repoLower := strings.ToLower(repoFullName)
-	for _, project := range projects.Items {
-		if project.GitRemote == "" {
+		// 2. Look for an active (running) agent labeled with this PR
+		activeAgent, err := s.findActiveAgentForPR(ctx, p.ID, prNumber)
+		if err != nil {
+			slog.Error("Failed to query active agents for PR", "project", p.ID, "pr", prNumber, "error", err)
 			continue
 		}
-		ownerRepo := extractOwnerRepo(project.GitRemote)
-		if strings.ToLower(ownerRepo) == repoLower {
-			matched = append(matched, project)
+
+		if activeAgent != nil {
+			// --- PATH A: Route to existing active agent ---
+			slog.Info("Routing GitHub mention to active agent", "agent_id", activeAgent.ID, "pr", prNumber)
+			
+			msg := &messages.StructuredMessage{
+				Sender:      "user:github-" + senderLogin,
+				Recipient:   "agent:" + activeAgent.Slug,
+				RecipientID: activeAgent.ID,
+				Msg:         body,
+				Type:        messages.TypeInstruction,
+				CreatedAt:   time.Now(),
+			}
+			
+			// Publish to the message broker proxy
+			if err := s.messageBrokerProxy.PublishMessage(ctx, p.ID, msg); err != nil {
+				slog.Error("Failed to publish PR comment to agent", "agent_id", activeAgent.ID, "error", err)
+			}
+		} else {
+			// --- PATH B: Spawn a new agent fallback ---
+			slog.Info("No active agent found. Spawning dynamic fallback agent", "project", p.ID, "pr", prNumber)
+			
+			// A: Fetch the head branch name from GitHub
+			branch, err := s.fetchPRHeadBranch(ctx, repoFullName, prNumber)
+			if err != nil {
+				slog.Error("Failed to fetch branch ref from GitHub", "repo", repoFullName, "pr", prNumber, "error", err)
+				continue
+			}
+
+			// B: Construct a new agent creation request
+			req := CreateAgentRequest{
+				Name:      fmt.Sprintf("pr-%d-agent-%d", prNumber, time.Now().Unix()),
+				ProjectID: p.ID,
+				Branch:    branch,
+				Task:      body,
+				Labels: map[string]string{
+					"github-pr":   strconv.FormatInt(prNumber, 10),
+					"github-repo": repoFullName,
+				},
+			}
+
+			// C: Provision and start the agent
+			// We will invoke s.createAgentInProject internally
+			go func(proj store.Project, r CreateAgentRequest) {
+				// Run in background with fresh context to avoid blocking the webhook response
+				bgCtx := context.Background()
+				slog.Info("Starting dynamic agent dispatch", "name", r.Name, "branch", r.Branch)
+				// Internal invocation of agent creation
+			}(p, req)
 		}
 	}
-	return matched, nil
 }
 ```
 
 ---
 
-### [Testing and Verification]
-
-#### [MODIFY] [handlers_github_app_webhook_test.go](file:///Users/jkrohn/Documents/code/scion/pkg/hub/handlers_github_app_webhook_test.go)
-
-Add comprehensive unit tests in `handlers_github_app_webhook_test.go` verifying:
-1. **Successful detection of "@scion" mentions** in `issue_comment`, `pull_request_review_comment`, and `pull_request_review` events (e.g. "@SCION please help", "Hey @Scion, check this").
-2. **Proper mapping** from matching repository full name to the corresponding database `Project`.
-3. **No-op / exclusion cases**:
-   - Comments without a mention of `@scion`.
-   - Non-PR issue comments (e.g. regular issues) if appropriate.
-   - Comments with other actions (e.g. `edited` or `deleted`).
-
 ## Verification Plan
 
 ### Automated Tests
-Run unit tests to verify correctness:
+We will implement and extend our table-driven test suites in `pkg/hub/handlers_github_app_webhook_test.go`:
+1. **Active Agent Routing Test**: Mock an existing running agent in the store with `github-pr: "101"` label and verify that an incoming comment is successfully published to `messageBrokerProxy`.
+2. **Dynamic Fallback Spawning Test**: Mock a scenario with no active agents, stub the GitHub API branch-fetching client, and verify that `createAgentInProject` is initiated with the correct branch, labels, and prompt.
+
+### Verification Commands
 ```bash
-go test -v ./pkg/hub -run "TestHandleGitHubWebhook_CommentMention"
+# Run Hub unit tests
+go test -v ./pkg/hub -run "TestHandleGitHubWebhook"
+
+# Perform Go CI checks (format, lint, vet)
+make ci
 ```
-Verify the entire package tests pass:
-```bash
-go test -v ./pkg/hub
-```
-Run `make ci` to verify formatting, vet, and general code safety.
