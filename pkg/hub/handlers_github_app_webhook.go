@@ -21,12 +21,14 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -86,6 +88,18 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 
 	case "installation_repositories":
 		s.handleInstallationRepositoriesWebhook(w, r, body)
+		return
+
+	case "issue_comment":
+		s.handleIssueCommentWebhook(w, r, body)
+		return
+
+	case "pull_request_review_comment":
+		s.handlePullRequestReviewCommentWebhook(w, r, body)
+		return
+
+	case "pull_request_review":
+		s.handlePullRequestReviewWebhook(w, r, body)
 		return
 
 	default:
@@ -835,4 +849,308 @@ func (s *Server) MintGitHubAppTokenForProject(ctx context.Context, project *stor
 	}
 
 	return s.mintGitHubAppToken(ctx, project)
+}
+
+type webhookIssueCommentEvent struct {
+	Action string `json:"action"` // created, edited, deleted
+	Issue  struct {
+		Number      int64  `json:"number"`
+		HTMLURL     string `json:"html_url"`
+		PullRequest *struct {
+			URL string `json:"url"`
+		} `json:"pull_request"`
+	} `json:"issue"`
+	Comment struct {
+		ID   int64  `json:"id"`
+		Body string `json:"body"`
+	} `json:"comment"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+	Sender struct {
+		Login string `json:"login"`
+	} `json:"sender"`
+	Installation struct {
+		ID int64 `json:"id"`
+	} `json:"installation"`
+}
+
+type webhookPullRequestReviewCommentEvent struct {
+	Action      string `json:"action"` // created, edited, deleted
+	PullRequest struct {
+		Number  int64  `json:"number"`
+		HTMLURL string `json:"html_url"`
+	} `json:"pull_request"`
+	Comment struct {
+		ID   int64  `json:"id"`
+		Body string `json:"body"`
+	} `json:"comment"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+	Sender struct {
+		Login string `json:"login"`
+	} `json:"sender"`
+	Installation struct {
+		ID int64 `json:"id"`
+	} `json:"installation"`
+}
+
+type webhookPullRequestReviewEvent struct {
+	Action      string `json:"action"` // submitted, edited, dismissed
+	PullRequest struct {
+		Number  int64  `json:"number"`
+		HTMLURL string `json:"html_url"`
+	} `json:"pull_request"`
+	Review struct {
+		ID   int64  `json:"id"`
+		Body string `json:"body"`
+	} `json:"review"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+	Sender struct {
+		Login string `json:"login"`
+	} `json:"sender"`
+	Installation struct {
+		ID int64 `json:"id"`
+	} `json:"installation"`
+}
+
+// handleIssueCommentWebhook handles "issue_comment" events.
+func (s *Server) handleIssueCommentWebhook(w http.ResponseWriter, r *http.Request, body []byte) {
+	var event webhookIssueCommentEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid webhook payload", nil)
+		return
+	}
+
+	if event.Issue.PullRequest == nil || event.Action != "created" {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "not a new PR comment"})
+		return
+	}
+
+	s.processComment(r.Context(), "issue_comment", event.Repository.FullName, event.Issue.Number, event.Comment.ID, event.Comment.Body, event.Sender.Login)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handlePullRequestReviewCommentWebhook handles "pull_request_review_comment" events.
+func (s *Server) handlePullRequestReviewCommentWebhook(w http.ResponseWriter, r *http.Request, body []byte) {
+	var event webhookPullRequestReviewCommentEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid webhook payload", nil)
+		return
+	}
+
+	if event.Action != "created" {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "non-created PR review comment"})
+		return
+	}
+
+	s.processComment(r.Context(), "pull_request_review_comment", event.Repository.FullName, event.PullRequest.Number, event.Comment.ID, event.Comment.Body, event.Sender.Login)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handlePullRequestReviewWebhook handles "pull_request_review" events.
+func (s *Server) handlePullRequestReviewWebhook(w http.ResponseWriter, r *http.Request, body []byte) {
+	var event webhookPullRequestReviewEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid webhook payload", nil)
+		return
+	}
+
+	if event.Action != "submitted" || event.Review.Body == "" {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "review not submitted or empty body"})
+		return
+	}
+
+	s.processComment(r.Context(), "pull_request_review", event.Repository.FullName, event.PullRequest.Number, event.Review.ID, event.Review.Body, event.Sender.Login)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// processComment checks for mentions of "@scion" and resolves corresponding projects.
+func (s *Server) processComment(ctx context.Context, eventType, repoFullName string, prNumber, commentID int64, body string, senderLogin string) {
+	if !strings.Contains(strings.ToLower(body), "@scion") {
+		slog.Debug("No @scion mention in comment", "repo", repoFullName, "pr", prNumber, "comment_id", commentID)
+		return
+	}
+
+	slog.Info("Detected @scion mention in comment!",
+		"event_type", eventType,
+		"repo", repoFullName,
+		"pr", prNumber,
+		"comment_id", commentID,
+		"sender", senderLogin,
+	)
+
+	// Resolve project associated with repo
+	projects, err := s.findProjectsForRepository(ctx, repoFullName)
+	if err != nil {
+		slog.Error("Failed to find projects for repository", "repo", repoFullName, "error", err)
+		return
+	}
+
+	if len(projects) == 0 {
+		slog.Warn("No project matched with the repository", "repo", repoFullName)
+		return
+	}
+
+	for _, p := range projects {
+		slog.Info("Matched comment mention to Scion Project",
+			"project_id", p.ID,
+			"project_name", p.Name,
+			"git_remote", p.GitRemote,
+		)
+
+		// 1. Look for an active (running) agent labeled with this PR
+		activeAgent, err := s.findActiveAgentForPR(ctx, p.ID, prNumber, repoFullName)
+		if err != nil {
+			slog.Error("Failed to query active agents for PR", "project", p.ID, "pr", prNumber, "error", err)
+			continue
+		}
+
+		if activeAgent != nil {
+			// --- PATH A: Route to existing active agent ---
+			slog.Info("Routing GitHub mention to active agent", "agent_id", activeAgent.ID, "pr", prNumber)
+
+			msg := &messages.StructuredMessage{
+				Version:     messages.Version,
+				Timestamp:   time.Now().UTC().Format(time.RFC3339),
+				Sender:      "user:github-" + senderLogin,
+				Recipient:   "agent:" + activeAgent.Slug,
+				RecipientID: activeAgent.ID,
+				Msg:         body,
+				Type:        messages.TypeInstruction,
+			}
+
+			// Publish to the message broker proxy
+			if s.messageBrokerProxy != nil {
+				if err := s.messageBrokerProxy.PublishMessage(ctx, p.ID, msg); err != nil {
+					slog.Error("Failed to publish PR comment to agent", "agent_id", activeAgent.ID, "error", err)
+				}
+			} else {
+				slog.Error("Message broker proxy not initialized on Server")
+			}
+		} else {
+			// --- PATH B: Spawn a new agent fallback ---
+			slog.Info("No active agent found. Spawning dynamic fallback agent", "project", p.ID, "pr", prNumber)
+
+			// Resolve branch ref in a background goroutine so we don't block the webhook response
+			go func(proj store.Project, prNum int64, repoFull, sender string, prompt string) {
+				bgCtx := context.Background()
+
+				// A: Fetch the head branch name from GitHub
+				branch, err := s.fetchPRHeadBranch(bgCtx, proj, repoFull, prNum)
+				if err != nil {
+					slog.Error("Failed to fetch branch ref from GitHub", "repo", repoFull, "pr", prNum, "error", err)
+					return
+				}
+
+				// B: Construct a new agent creation request
+				req := CreateAgentRequest{
+					Name:      fmt.Sprintf("pr-%d-agent-%d", prNum, time.Now().Unix()),
+					ProjectID: proj.ID,
+					Branch:    branch,
+					Task:      prompt,
+					Labels: map[string]string{
+						"github-pr":   strconv.FormatInt(prNum, 10),
+						"github-repo": repoFull,
+					},
+				}
+
+				// C: Provision and start the agent
+				slog.Info("Starting dynamic agent dispatch", "name", req.Name, "branch", req.Branch)
+				w := httptest.NewRecorder()
+				r := httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
+
+				createdBy := "system:github-webhook"
+				creatorName := "GitHub Webhook"
+				notifySubscriberType := store.SubscriberTypeUser
+				notifySubscriberID := ""
+				ancestry := []string{"system:github-webhook"}
+
+				s.createAgentInProject(w, r, req, proj.ID, createdBy, creatorName, ancestry, notifySubscriberType, notifySubscriberID)
+
+				if w.Code >= 400 {
+					slog.Error("Failed to spawn dynamic agent from webhook", "project_id", proj.ID, "status", w.Code, "body", w.Body.String())
+				} else {
+					slog.Info("Successfully spawned dynamic agent from webhook", "project_id", proj.ID, "agent_name", req.Name)
+				}
+			}(p, prNumber, repoFullName, senderLogin, body)
+		}
+	}
+}
+
+// findActiveAgentForPR queries the store for running agents matching the PR number and repo labels.
+func (s *Server) findActiveAgentForPR(ctx context.Context, projectID string, prNumber int64, repoFullName string) (*store.Agent, error) {
+	result, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: projectID, Phase: "running"}, store.ListOptions{Limit: 1000})
+	if err != nil {
+		return nil, err
+	}
+
+	prStr := strconv.FormatInt(prNumber, 10)
+	repoLower := strings.ToLower(repoFullName)
+
+	for i := range result.Items {
+		agent := &result.Items[i]
+		if agent.Labels != nil {
+			agentPR := agent.Labels["github-pr"]
+			agentRepo := strings.ToLower(agent.Labels["github-repo"])
+			if agentPR == prStr && agentRepo == repoLower {
+				return agent, nil
+			}
+		}
+	}
+
+	return nil, nil
+}
+
+// fetchPRHeadBranch calls the internal getGitHubAppClient to fetch the PR metadata and retrieve the head branch name.
+func (s *Server) fetchPRHeadBranch(ctx context.Context, project store.Project, repoFullName string, prNumber int64) (string, error) {
+	if project.GitHubInstallationID == nil {
+		return "", fmt.Errorf("project %s has no GitHub App installation ID", project.ID)
+	}
+
+	client, err := s.getGitHubAppClient()
+	if err != nil {
+		return "", fmt.Errorf("failed to get GitHub App client: %w", err)
+	}
+
+	parts := strings.SplitN(repoFullName, "/", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid repository full name: %s", repoFullName)
+	}
+	owner, repo := parts[0], parts[1]
+
+	pr, err := client.GetPullRequest(ctx, *project.GitHubInstallationID, owner, repo, prNumber)
+	if err != nil {
+		return "", err
+	}
+
+	if pr.Head.Ref == "" {
+		return "", fmt.Errorf("empty head branch ref in pull request response")
+	}
+
+	return pr.Head.Ref, nil
+}
+
+// findProjectsForRepository looks up projects in the store matching the given repository.
+func (s *Server) findProjectsForRepository(ctx context.Context, repoFullName string) ([]store.Project, error) {
+	projects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 10000})
+	if err != nil {
+		return nil, err
+	}
+
+	var matched []store.Project
+	repoLower := strings.ToLower(repoFullName)
+	for _, project := range projects.Items {
+		if project.GitRemote == "" {
+			continue
+		}
+		ownerRepo := extractOwnerRepo(project.GitRemote)
+		if strings.ToLower(ownerRepo) == repoLower {
+			matched = append(matched, project)
+		}
+	}
+	return matched, nil
 }
