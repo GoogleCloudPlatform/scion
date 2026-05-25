@@ -88,6 +88,18 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		s.handleInstallationRepositoriesWebhook(w, r, body)
 		return
 
+	case "issue_comment":
+		s.handleIssueCommentWebhook(w, r, body)
+		return
+
+	case "pull_request_review_comment":
+		s.handlePullRequestReviewCommentWebhook(w, r, body)
+		return
+
+	case "pull_request_review":
+		s.handlePullRequestReviewWebhook(w, r, body)
+		return
+
 	default:
 		// Ignore unhandled event types
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "event": eventType})
@@ -835,4 +847,168 @@ func (s *Server) MintGitHubAppTokenForProject(ctx context.Context, project *stor
 	}
 
 	return s.mintGitHubAppToken(ctx, project)
+}
+
+type webhookIssueCommentEvent struct {
+	Action string `json:"action"` // created, edited, deleted
+	Issue  struct {
+		Number      int64  `json:"number"`
+		HTMLURL     string `json:"html_url"`
+		PullRequest *struct {
+			URL string `json:"url"`
+		} `json:"pull_request"`
+	} `json:"issue"`
+	Comment struct {
+		ID   int64  `json:"id"`
+		Body string `json:"body"`
+	} `json:"comment"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+	Installation struct {
+		ID int64 `json:"id"`
+	} `json:"installation"`
+}
+
+type webhookPullRequestReviewCommentEvent struct {
+	Action      string `json:"action"` // created, edited, deleted
+	PullRequest struct {
+		Number  int64  `json:"number"`
+		HTMLURL string `json:"html_url"`
+	} `json:"pull_request"`
+	Comment struct {
+		ID   int64  `json:"id"`
+		Body string `json:"body"`
+	} `json:"comment"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+	Installation struct {
+		ID int64 `json:"id"`
+	} `json:"installation"`
+}
+
+type webhookPullRequestReviewEvent struct {
+	Action      string `json:"action"` // submitted, edited, dismissed
+	PullRequest struct {
+		Number  int64  `json:"number"`
+		HTMLURL string `json:"html_url"`
+	} `json:"pull_request"`
+	Review struct {
+		ID   int64  `json:"id"`
+		Body string `json:"body"`
+	} `json:"review"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+	Installation struct {
+		ID int64 `json:"id"`
+	} `json:"installation"`
+}
+
+// handleIssueCommentWebhook handles "issue_comment" events.
+func (s *Server) handleIssueCommentWebhook(w http.ResponseWriter, r *http.Request, body []byte) {
+	var event webhookIssueCommentEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid webhook payload", nil)
+		return
+	}
+
+	if event.Issue.PullRequest == nil || event.Action != "created" {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "not a new PR comment"})
+		return
+	}
+
+	s.processComment(r.Context(), "issue_comment", event.Repository.FullName, event.Issue.Number, event.Comment.ID, event.Comment.Body)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handlePullRequestReviewCommentWebhook handles "pull_request_review_comment" events.
+func (s *Server) handlePullRequestReviewCommentWebhook(w http.ResponseWriter, r *http.Request, body []byte) {
+	var event webhookPullRequestReviewCommentEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid webhook payload", nil)
+		return
+	}
+
+	if event.Action != "created" {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "non-created PR review comment"})
+		return
+	}
+
+	s.processComment(r.Context(), "pull_request_review_comment", event.Repository.FullName, event.PullRequest.Number, event.Comment.ID, event.Comment.Body)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handlePullRequestReviewWebhook handles "pull_request_review" events.
+func (s *Server) handlePullRequestReviewWebhook(w http.ResponseWriter, r *http.Request, body []byte) {
+	var event webhookPullRequestReviewEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid webhook payload", nil)
+		return
+	}
+
+	if event.Action != "submitted" || event.Review.Body == "" {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "review not submitted or empty body"})
+		return
+	}
+
+	s.processComment(r.Context(), "pull_request_review", event.Repository.FullName, event.PullRequest.Number, event.Review.ID, event.Review.Body)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// processComment checks for mentions of "@scion" and resolves corresponding projects.
+func (s *Server) processComment(ctx context.Context, eventType, repoFullName string, prNumber, commentID int64, body string) {
+	if !strings.Contains(strings.ToLower(body), "@scion") {
+		slog.Debug("No @scion mention in comment", "repo", repoFullName, "pr", prNumber, "comment_id", commentID)
+		return
+	}
+
+	slog.Info("Detected @scion mention in comment!",
+		"event_type", eventType,
+		"repo", repoFullName,
+		"pr", prNumber,
+		"comment_id", commentID,
+	)
+
+	// Resolve project associated with repo
+	projects, err := s.findProjectsForRepository(ctx, repoFullName)
+	if err != nil {
+		slog.Error("Failed to find projects for repository", "repo", repoFullName, "error", err)
+		return
+	}
+
+	if len(projects) == 0 {
+		slog.Warn("No project matched with the repository", "repo", repoFullName)
+		return
+	}
+
+	for _, p := range projects {
+		slog.Info("Matched comment mention to Scion Project",
+			"project_id", p.ID,
+			"project_name", p.Name,
+			"git_remote", p.GitRemote,
+		)
+	}
+}
+
+// findProjectsForRepository looks up projects in the store matching the given repository.
+func (s *Server) findProjectsForRepository(ctx context.Context, repoFullName string) ([]store.Project, error) {
+	projects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 10000})
+	if err != nil {
+		return nil, err
+	}
+
+	var matched []store.Project
+	repoLower := strings.ToLower(repoFullName)
+	for _, project := range projects.Items {
+		if project.GitRemote == "" {
+			continue
+		}
+		ownerRepo := extractOwnerRepo(project.GitRemote)
+		if strings.ToLower(ownerRepo) == repoLower {
+			matched = append(matched, project)
+		}
+	}
+	return matched, nil
 }

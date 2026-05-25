@@ -770,6 +770,202 @@ func TestWebhook_PublishesProjectUpdatedOnAutoMatch(t *testing.T) {
 	}
 }
 
+func TestHandleGitHubWebhook_CommentMention(t *testing.T) {
+	srv, s := webhookTestServer(t)
+	ctx := context.Background()
+
+	// Create a project with a matching git remote
+	project := &store.Project{
+		ID:        "proj-mention-1",
+		Name:      "Proj Mention 1",
+		Slug:      "proj-mention-1",
+		GitRemote: "https://github.com/acme/widgets.git",
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	tests := []struct {
+		name          string
+		eventType     string
+		payload       map[string]interface{}
+		expectedCode  int
+		expectIgnored bool
+	}{
+		{
+			name:      "issue comment with mention on PR",
+			eventType: "issue_comment",
+			payload: map[string]interface{}{
+				"action": "created",
+				"issue": map[string]interface{}{
+					"number": 101,
+					"pull_request": map[string]interface{}{
+						"url": "https://api.github.com/repos/acme/widgets/pulls/101",
+					},
+				},
+				"comment": map[string]interface{}{
+					"id":   111,
+					"body": "Hey @scion, please look at this!",
+				},
+				"repository": map[string]interface{}{
+					"full_name": "acme/widgets",
+				},
+			},
+			expectedCode: http.StatusOK,
+		},
+		{
+			name:      "issue comment on PR case insensitive mention",
+			eventType: "issue_comment",
+			payload: map[string]interface{}{
+				"action": "created",
+				"issue": map[string]interface{}{
+					"number": 101,
+					"pull_request": map[string]interface{}{
+						"url": "https://api.github.com/repos/acme/widgets/pulls/101",
+					},
+				},
+				"comment": map[string]interface{}{
+					"id":   112,
+					"body": "Please review @SCION",
+				},
+				"repository": map[string]interface{}{
+					"full_name": "acme/widgets",
+				},
+			},
+			expectedCode: http.StatusOK,
+		},
+		{
+			name:      "issue comment without mention",
+			eventType: "issue_comment",
+			payload: map[string]interface{}{
+				"action": "created",
+				"issue": map[string]interface{}{
+					"number": 101,
+					"pull_request": map[string]interface{}{
+						"url": "https://api.github.com/repos/acme/widgets/pulls/101",
+					},
+				},
+				"comment": map[string]interface{}{
+					"id":   113,
+					"body": "No mention here.",
+				},
+				"repository": map[string]interface{}{
+					"full_name": "acme/widgets",
+				},
+			},
+			expectedCode: http.StatusOK,
+		},
+		{
+			name:      "issue comment not on PR",
+			eventType: "issue_comment",
+			payload: map[string]interface{}{
+				"action": "created",
+				"issue": map[string]interface{}{
+					"number": 101,
+				},
+				"comment": map[string]interface{}{
+					"id":   114,
+					"body": "Hey @scion on a normal issue",
+				},
+				"repository": map[string]interface{}{
+					"full_name": "acme/widgets",
+				},
+			},
+			expectedCode:  http.StatusOK,
+			expectIgnored: true,
+		},
+		{
+			name:      "pull request review comment",
+			eventType: "pull_request_review_comment",
+			payload: map[string]interface{}{
+				"action": "created",
+				"pull_request": map[string]interface{}{
+					"number": 102,
+				},
+				"comment": map[string]interface{}{
+					"id":   222,
+					"body": "Line comment for @scion",
+				},
+				"repository": map[string]interface{}{
+					"full_name": "acme/widgets",
+				},
+			},
+			expectedCode: http.StatusOK,
+		},
+		{
+			name:      "pull request review comment non-create",
+			eventType: "pull_request_review_comment",
+			payload: map[string]interface{}{
+				"action": "edited",
+				"pull_request": map[string]interface{}{
+					"number": 102,
+				},
+				"comment": map[string]interface{}{
+					"id":   222,
+					"body": "Line comment for @scion edited",
+				},
+				"repository": map[string]interface{}{
+					"full_name": "acme/widgets",
+				},
+			},
+			expectedCode:  http.StatusOK,
+			expectIgnored: true,
+		},
+		{
+			name:      "pull request review submitted with mention",
+			eventType: "pull_request_review",
+			payload: map[string]interface{}{
+				"action": "submitted",
+				"pull_request": map[string]interface{}{
+					"number": 103,
+				},
+				"review": map[string]interface{}{
+					"id":   333,
+					"body": "Review comment for @scion",
+				},
+				"repository": map[string]interface{}{
+					"full_name": "acme/widgets",
+				},
+			},
+			expectedCode: http.StatusOK,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payloadBytes := mustJSON(t, tc.payload)
+			sig := signWebhookPayload(payloadBytes, "test-webhook-secret")
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(payloadBytes))
+			req.Header.Set("X-GitHub-Event", tc.eventType)
+			req.Header.Set("X-Hub-Signature-256", sig)
+
+			rec := httptest.NewRecorder()
+			srv.handleGitHubWebhook(rec, req)
+
+			if rec.Code != tc.expectedCode {
+				t.Errorf("expected status %d, got %d: %s", tc.expectedCode, rec.Code, rec.Body.String())
+			}
+
+			if tc.expectIgnored {
+				var resp map[string]string
+				json.Unmarshal(rec.Body.Bytes(), &resp)
+				if resp["status"] != "ignored" {
+					t.Errorf("expected status ignored, got %v", resp)
+				}
+			} else if tc.expectedCode == http.StatusOK {
+				var resp map[string]string
+				json.Unmarshal(rec.Body.Bytes(), &resp)
+				if resp["status"] != "ok" {
+					t.Errorf("expected status ok, got %v", resp)
+				}
+			}
+		})
+	}
+}
+
 func mustJSON(t *testing.T, v interface{}) []byte {
 	t.Helper()
 	data, err := json.Marshal(v)
