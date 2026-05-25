@@ -198,12 +198,14 @@ func (e *PullImagesExecutor) Run(ctx context.Context, logger io.Writer, params m
 		fmt.Fprintf(logger, "Pulling %s ...\n", image)
 		log.Debug("Pulling image", "image", image)
 
+		log.Debug("Executing Command runtimeBin", "runtimeBin", runtimeBin, "image", image)
+
 		cmd := exec.CommandContext(ctx, runtimeBin, "image", "pull", image)
 		cmd.Stdout = logger
 		cmd.Stderr = logger
 		if err := cmd.Run(); err != nil {
 			fmt.Fprintf(logger, "  ERROR: %v\n\n", err)
-			log.Error("Image pull failed", "image", image, "error", err)
+			log.Error("Image pull failed", "image", image, "runtimeBin", runtimeBin, "error", err)
 			lastErr = err
 			continue
 		}
