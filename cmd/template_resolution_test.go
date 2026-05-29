@@ -47,7 +47,7 @@ func TestParseTemplateScope(t *testing.T) {
 			expectedName:  "claude",
 		},
 		{
-			name:          "grove scope prefix (normalized to project)",
+			name:          "legacy grove scope prefix (normalized to project)",
 			input:         "grove:custom-template",
 			expectedScope: "project",
 			expectedName:  "custom-template",
@@ -309,7 +309,7 @@ func TestDetectHarnessType(t *testing.T) {
 }
 
 func TestBrokerHasLocalAccess(t *testing.T) {
-	const projectID = "grove-123"
+	const projectID = "proj-123"
 	const brokerID = "broker-456"
 
 	t.Run("returns true when broker has local path", func(t *testing.T) {
@@ -426,13 +426,13 @@ func TestBrokerHasLocalAccess(t *testing.T) {
 		}
 	})
 
-	t.Run("returns false when no grove ID", func(t *testing.T) {
+	t.Run("returns false when no project ID", func(t *testing.T) {
 		hubCtx := &HubContext{
 			BrokerID: brokerID,
 		}
 
 		if brokerHasLocalAccess(context.Background(), hubCtx, "") {
-			t.Error("expected brokerHasLocalAccess to return false when no grove ID is provided")
+			t.Error("expected brokerHasLocalAccess to return false when no project ID is provided")
 		}
 	})
 
