@@ -184,13 +184,13 @@ func init() {
 }
 
 // resolveEnvScope determines the scope and scopeID based on flags.
-// When --grove or --broker is used bare (no value), scopeID is inferred from settings.
+// When --project or --broker is used bare (no value), scopeID is inferred from settings.
 // When a value is provided, it is returned as-is and may need further resolution
 // (name/slug to UUID) via resolveScopeID.
 func resolveEnvScope(cmd *cobra.Command, settings *config.Settings) (scope, scopeID string, err error) {
 	scopeSet := cmd.Flags().Changed("scope")
 	projectSet := cmd.Flags().Changed("project")
-	groveSet := cmd.Flags().Changed("grove")
+	projectAliasSet := cmd.Flags().Changed("grove")
 	brokerSet := cmd.Flags().Changed("broker")
 
 	// Enforce mutual exclusivity
@@ -198,7 +198,7 @@ func resolveEnvScope(cmd *cobra.Command, settings *config.Settings) (scope, scop
 	if scopeSet {
 		setCount++
 	}
-	if projectSet || groveSet {
+	if projectSet || projectAliasSet {
 		setCount++
 	}
 	if brokerSet {
@@ -219,7 +219,7 @@ func resolveEnvScope(cmd *cobra.Command, settings *config.Settings) (scope, scop
 		}
 	}
 
-	if projectSet || groveSet {
+	if projectSet || projectAliasSet {
 		scope = "project"
 		projectVal := envProjectScope
 		if projectVal == scopeInferSentinel {

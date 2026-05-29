@@ -18,8 +18,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// GlobalGroveName is the special name for the default grove when hub and runtime-broker run together
-const GlobalGroveName = "global"
+// GlobalProjectName is the special name for the default project when hub and runtime-broker run together
+const GlobalProjectName = "global"
 
 var (
 	serverConfigPath    string
@@ -80,7 +80,7 @@ For production deployments, use --production to require explicit component
 selection and bind to 0.0.0.0 by default.
 
 The server provides:
-- Hub API: Central registry for groves, agents, and templates (standalone: port 9810)
+- Hub API: Central registry for projects, agents, and templates (standalone: port 9810)
 - Runtime Broker API: Agent lifecycle management on compute nodes (port 9800)
 - Web Frontend: Browser-based UI (port 8080)
 
@@ -259,7 +259,7 @@ func init() {
 	serverStartCmd.Flags().BoolVar(&simulateRemoteBroker, "simulate-remote-broker", false, "Skip co-located optimizations to test full remote broker code path")
 
 	// Runtime Broker auto-provide flag
-	serverStartCmd.Flags().BoolVar(&serverAutoProvide, "auto-provide", false, "Automatically add runtime broker as provider for new groves")
+	serverStartCmd.Flags().BoolVar(&serverAutoProvide, "auto-provide", false, "Automatically add runtime broker as provider for new projects")
 
 	// Web Frontend flags
 	serverStartCmd.Flags().BoolVar(&enableWeb, "enable-web", false, "Enable the web frontend")

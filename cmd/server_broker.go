@@ -26,24 +26,24 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// registerGlobalGroveAndBroker creates the global project and registers this
+// registerGlobalProjectAndBroker creates the global project and registers this
 // runtime broker as a provider. This enables automatic agent handoff.
 // Returns the effective broker ID, which may differ from the input if an
 // existing broker was found by name (deduplication).
 func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID, brokerName, endpoint string, rt runtime.Runtime, autoProvide bool, settings *config.Settings) (string, error) {
 	// Check if global project already exists
-	globalGrove, err := s.GetProjectBySlug(ctx, GlobalGroveName)
+	globalProject, err := s.GetProjectBySlug(ctx, GlobalProjectName)
 	if err != nil && err != store.ErrNotFound {
 		return brokerID, fmt.Errorf("failed to check for global project: %w", err)
 	}
 
 	// Create global project if it doesn't exist (without DefaultRuntimeBrokerID yet)
 	projectNeedsDefaultBroker := false
-	if globalGrove == nil {
-		globalGrove = &store.Project{
+	if globalProject == nil {
+		globalProject = &store.Project{
 			ID:         api.NewUUID(),
 			Name:       "Global",
-			Slug:       GlobalGroveName,
+			Slug:       GlobalProjectName,
 			Visibility: store.VisibilityPrivate,
 			Labels: map[string]string{
 				"scion.io/system": "true",
@@ -51,11 +51,11 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 			},
 		}
 
-		if err := s.CreateProject(ctx, globalGrove); err != nil {
+		if err := s.CreateProject(ctx, globalProject); err != nil {
 			return brokerID, fmt.Errorf("failed to create global project: %w", err)
 		}
 		projectNeedsDefaultBroker = true
-	} else if globalGrove.DefaultRuntimeBrokerID == "" {
+	} else if globalProject.DefaultRuntimeBrokerID == "" {
 		projectNeedsDefaultBroker = true
 	}
 
@@ -125,8 +125,8 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 
 	// Now that the runtime broker exists, set it as the default for the project
 	if projectNeedsDefaultBroker {
-		globalGrove.DefaultRuntimeBrokerID = brokerID
-		if err := s.UpdateProject(ctx, globalGrove); err != nil {
+		globalProject.DefaultRuntimeBrokerID = brokerID
+		if err := s.UpdateProject(ctx, globalProject); err != nil {
 			log.Printf("Warning: failed to set default runtime broker for global project: %v", err)
 		}
 	}
@@ -140,7 +140,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 
 	// Add runtime broker as provider to global project
 	provider := &store.ProjectProvider{
-		ProjectID:  globalGrove.ID,
+		ProjectID:  globalProject.ID,
 		BrokerID:   brokerID,
 		BrokerName: brokerName,
 		LocalPath:  globalPath, // ~/.scion for the global project
@@ -154,7 +154,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 			return brokerID, fmt.Errorf("failed to add project provider: %w", err)
 		}
 		// Update provider status
-		if err := s.UpdateProviderStatus(ctx, globalGrove.ID, brokerID, store.BrokerStatusOnline); err != nil {
+		if err := s.UpdateProviderStatus(ctx, globalProject.ID, brokerID, store.BrokerStatusOnline); err != nil {
 			log.Printf("Warning: failed to update provider status: %v", err)
 		}
 	}

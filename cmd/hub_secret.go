@@ -203,7 +203,7 @@ func init() {
 func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, scopeID string, err error) {
 	scopeSet := cmd.Flags().Changed("scope")
 	projectSet := cmd.Flags().Changed("project")
-	groveSet := cmd.Flags().Changed("grove")
+	projectAliasSet := cmd.Flags().Changed("grove")
 	brokerSet := cmd.Flags().Changed("broker")
 
 	// Enforce mutual exclusivity
@@ -211,7 +211,7 @@ func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, s
 	if scopeSet {
 		setCount++
 	}
-	if projectSet || groveSet {
+	if projectSet || projectAliasSet {
 		setCount++
 	}
 	if brokerSet {
@@ -232,7 +232,7 @@ func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, s
 		}
 	}
 
-	if projectSet || groveSet {
+	if projectSet || projectAliasSet {
 		scope = "project"
 		projectVal := secretProjectScope
 		if projectVal == scopeInferSentinel {
