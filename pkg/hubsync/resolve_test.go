@@ -96,14 +96,14 @@ func TestIsHubProjectRef_PathSeparator(t *testing.T) {
 	assert.False(t, IsHubProjectRef("path/to/project"))
 }
 
-func TestResolveGroveOnHub_ByUUID(t *testing.T) {
+func TestResolveProjectOnHub_ByUUID(t *testing.T) {
 	projectID := "550e8400-e29b-41d4-a716-446655440000"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/groves/"+projectID {
 			json.NewEncoder(w).Encode(hubclient.Project{
 				ID:   projectID,
 				Name: "Test Project",
-				Slug: "test-grove",
+				Slug: "test-project",
 			})
 			return
 		}
@@ -114,13 +114,13 @@ func TestResolveGroveOnHub_ByUUID(t *testing.T) {
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 
-	grove, err := resolveProjectOnHub(context.Background(), client, projectID)
+	project, err := resolveProjectOnHub(context.Background(), client, projectID)
 	require.NoError(t, err)
-	assert.Equal(t, projectID, grove.ID)
-	assert.Equal(t, "Test Project", grove.Name)
+	assert.Equal(t, projectID, project.ID)
+	assert.Equal(t, "Test Project", project.Name)
 }
 
-func TestResolveGroveOnHub_BySlug(t *testing.T) {
+func TestResolveProjectOnHub_BySlug(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/groves" {
 			slug := r.URL.Query().Get("slug")
@@ -147,13 +147,13 @@ func TestResolveGroveOnHub_BySlug(t *testing.T) {
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 
-	grove, err := resolveProjectOnHub(context.Background(), client, "my-project")
+	project, err := resolveProjectOnHub(context.Background(), client, "my-project")
 	require.NoError(t, err)
-	assert.Equal(t, "abc-123", grove.ID)
-	assert.Equal(t, "my-project", grove.Slug)
+	assert.Equal(t, "abc-123", project.ID)
+	assert.Equal(t, "my-project", project.Slug)
 }
 
-func TestResolveGroveOnHub_ByName(t *testing.T) {
+func TestResolveProjectOnHub_ByName(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/groves" {
 			name := r.URL.Query().Get("name")
@@ -188,12 +188,12 @@ func TestResolveGroveOnHub_ByName(t *testing.T) {
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 
-	grove, err := resolveProjectOnHub(context.Background(), client, "My Project")
+	project, err := resolveProjectOnHub(context.Background(), client, "My Project")
 	require.NoError(t, err)
-	assert.Equal(t, "abc-456", grove.ID)
+	assert.Equal(t, "abc-456", project.ID)
 }
 
-func TestResolveGroveOnHub_ByGitURL(t *testing.T) {
+func TestResolveProjectOnHub_ByGitURL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/groves" {
 			gitRemote := r.URL.Query().Get("gitRemote")
@@ -219,12 +219,12 @@ func TestResolveGroveOnHub_ByGitURL(t *testing.T) {
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 
-	grove, err := resolveProjectOnHub(context.Background(), client, "https://github.com/org/repo.git")
+	project, err := resolveProjectOnHub(context.Background(), client, "https://github.com/org/repo.git")
 	require.NoError(t, err)
-	assert.Equal(t, "git-grove-1", grove.ID)
+	assert.Equal(t, "git-grove-1", project.ID)
 }
 
-func TestResolveGroveOnHub_NotFound(t *testing.T) {
+func TestResolveProjectOnHub_NotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/groves" {
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -245,7 +245,7 @@ func TestResolveGroveOnHub_NotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found")
 }
 
-func TestResolveGroveOnHub_MultipleByName(t *testing.T) {
+func TestResolveProjectOnHub_MultipleByName(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/groves" {
 			slug := r.URL.Query().Get("slug")

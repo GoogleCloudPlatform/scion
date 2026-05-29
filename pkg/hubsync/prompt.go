@@ -113,40 +113,40 @@ func ShowSyncPlan(result *SyncResult, autoConfirm bool) bool {
 	return ConfirmAction("Proceed with sync?", true, autoConfirm)
 }
 
-// ShowLinkPrompt displays the grove link prompt.
+// ShowLinkPrompt displays the project link prompt.
 // Returns true if the user confirms, false otherwise.
-func ShowLinkPrompt(groveName string, autoConfirm bool) bool {
+func ShowLinkPrompt(projectName string, autoConfirm bool) bool {
 	fmt.Println()
-	fmt.Printf("Grove '%s' is not linked to the Hub.\n", groveName)
-	return ConfirmAction("Link grove with Hub?", true, autoConfirm)
+	fmt.Printf("Project '%s' is not linked to the Hub.\n", projectName)
+	return ConfirmAction("Link project with Hub?", true, autoConfirm)
 }
 
 // ShowInitLinkPrompt displays the post-init link prompt.
 // Returns true if the user confirms, false otherwise.
 func ShowInitLinkPrompt(autoConfirm bool) bool {
-	return ConfirmAction("Grove initialized. Link to Hub?", true, autoConfirm)
+	return ConfirmAction("Project initialized. Link to Hub?", true, autoConfirm)
 }
 
 // ShowInitProvidePrompt displays a confirmation to add this broker as a provider.
 // Returns true if the user confirms, false otherwise.
-func ShowInitProvidePrompt(brokerName, groveName string, autoConfirm bool) bool {
+func ShowInitProvidePrompt(brokerName, projectName string, autoConfirm bool) bool {
 	fmt.Printf("This host (%s) is registered as a broker.\n", brokerName)
-	return ConfirmAction(fmt.Sprintf("Add as provider for '%s'?", groveName), true, autoConfirm)
+	return ConfirmAction(fmt.Sprintf("Add as provider for '%s'?", projectName), true, autoConfirm)
 }
 
-// ProjectChoice represents the user's choice when matching groves exist.
+// ProjectChoice represents the user's choice when matching projects exist.
 type ProjectChoice int
 
 const (
 	// ProjectChoiceCancel means the user cancelled the operation.
 	ProjectChoiceCancel ProjectChoice = iota
-	// ProjectChoiceLink means the user chose to link to an existing grove.
+	// ProjectChoiceLink means the user chose to link to an existing project.
 	ProjectChoiceLink
-	// ProjectChoiceRegisterNew means the user chose to register a new grove.
+	// ProjectChoiceRegisterNew means the user chose to register a new project.
 	ProjectChoiceRegisterNew
 )
 
-// ProjectMatch holds information about a matching grove for display.
+// ProjectMatch holds information about a matching project for display.
 type ProjectMatch struct {
 	ID        string
 	Name      string
@@ -154,14 +154,14 @@ type ProjectMatch struct {
 	GitRemote string
 }
 
-// ShowMatchingProjectsPrompt displays matching groves and asks the user to choose.
-// The "Register as new grove" option is always shown, allowing multiple groves
+// ShowMatchingProjectsPrompt displays matching projects and asks the user to choose.
+// The "Register as new project" option is always shown, allowing multiple projects
 // per git remote. When nextSlug is non-empty, it is displayed as the proposed
-// slug for a new grove.
-// Returns the choice and the selected grove ID if linking.
+// slug for a new project.
+// Returns the choice and the selected project ID if linking.
 func ShowMatchingProjectsPrompt(projectName string, matches []ProjectMatch, nextSlug string, autoConfirm bool) (ProjectChoice, string) {
 	fmt.Println()
-	fmt.Printf("Found %d existing grove(s) with the name '%s' on the Hub:\n", len(matches), projectName)
+	fmt.Printf("Found %d existing project(s) with the name '%s' on the Hub:\n", len(matches), projectName)
 	fmt.Println()
 
 	for i, m := range matches {
@@ -172,9 +172,9 @@ func ShowMatchingProjectsPrompt(projectName string, matches []ProjectMatch, next
 		}
 	}
 	if nextSlug != "" {
-		fmt.Printf("  [%d] Register as a new grove (will be created as '%s')\n", len(matches)+1, nextSlug)
+		fmt.Printf("  [%d] Register as a new project (will be created as '%s')\n", len(matches)+1, nextSlug)
 	} else {
-		fmt.Printf("  [%d] Register as a new grove\n", len(matches)+1)
+		fmt.Printf("  [%d] Register as a new project\n", len(matches)+1)
 	}
 	fmt.Println()
 
@@ -219,7 +219,7 @@ func ShowMatchingProjectsPrompt(projectName string, matches []ProjectMatch, next
 }
 
 // NextSlugFromMatches computes a proposed next serial slug from a list of
-// existing grove matches. This is a client-side estimate for display purposes;
+// existing project matches. This is a client-side estimate for display purposes;
 // the server computes the authoritative slug at creation time.
 func NextSlugFromMatches(baseSlug string, matches []ProjectMatch) string {
 	maxSerial := 0
@@ -262,21 +262,21 @@ func ShowBrokerRegistrationPrompt(endpoint string, autoConfirm bool) bool {
 }
 
 // ShowBrokerDeregistrationPrompt displays the broker deregistration warning.
-// Shows list of groves the broker contributes to.
+// Shows list of projects the broker contributes to.
 // Returns true if the user confirms, false otherwise.
-func ShowBrokerDeregistrationPrompt(brokerID string, groves []string, autoConfirm bool) bool {
+func ShowBrokerDeregistrationPrompt(brokerID string, projects []string, autoConfirm bool) bool {
 	fmt.Println()
 	fmt.Println("This will remove this host's broker registration from the Hub.")
 	fmt.Printf("Broker ID: %s\n", brokerID)
 	fmt.Println()
 
-	if len(groves) > 0 {
-		fmt.Printf("This broker contributes to %d grove(s):\n", len(groves))
-		for _, g := range groves {
-			fmt.Printf("  - %s\n", g)
+	if len(projects) > 0 {
+		fmt.Printf("This broker contributes to %d project(s):\n", len(projects))
+		for _, p := range projects {
+			fmt.Printf("  - %s\n", p)
 		}
 		fmt.Println()
-		fmt.Println("The broker will be removed from ALL groves it contributes to.")
+		fmt.Println("The broker will be removed from ALL projects it contributes to.")
 	}
 
 	fmt.Println()
@@ -284,11 +284,11 @@ func ShowBrokerDeregistrationPrompt(brokerID string, groves []string, autoConfir
 	return ConfirmAction("Continue with deregistration?", false, autoConfirm)
 }
 
-// ShowProjectLinkPrompt displays the grove link confirmation.
+// ShowProjectLinkPrompt displays the project link confirmation.
 // Returns true if the user confirms, false otherwise.
-func ShowProjectLinkPrompt(groveName, endpoint string, autoConfirm bool) bool {
+func ShowProjectLinkPrompt(projectName, endpoint string, autoConfirm bool) bool {
 	fmt.Println()
-	fmt.Printf("This will link grove '%s' to the Hub.\n", groveName)
+	fmt.Printf("This will link project '%s' to the Hub.\n", projectName)
 	fmt.Printf("Hub endpoint: %s\n", endpoint)
 	fmt.Println()
 	fmt.Println("When linked:")
@@ -299,45 +299,45 @@ func ShowProjectLinkPrompt(groveName, endpoint string, autoConfirm bool) bool {
 	return ConfirmAction("Continue with linking?", true, autoConfirm)
 }
 
-// ShowProjectUnlinkPrompt displays the grove unlink confirmation.
+// ShowProjectUnlinkPrompt displays the project unlink confirmation.
 // Returns true if the user confirms, false otherwise.
-func ShowProjectUnlinkPrompt(groveName string, autoConfirm bool) bool {
+func ShowProjectUnlinkPrompt(projectName string, autoConfirm bool) bool {
 	fmt.Println()
-	fmt.Printf("This will unlink grove '%s' from the Hub locally.\n", groveName)
+	fmt.Printf("This will unlink project '%s' from the Hub locally.\n", projectName)
 	fmt.Println()
-	fmt.Println("The grove and its agents will remain on the Hub for other brokers.")
-	fmt.Println("You can re-link this grove later with 'scion hub link'.")
+	fmt.Println("The project and its agents will remain on the Hub for other brokers.")
+	fmt.Println("You can re-link this project later with 'scion hub link'.")
 	fmt.Println()
 	// Default NO - user should be sure they want to unlink
 	return ConfirmAction("Continue with unlinking?", false, autoConfirm)
 }
 
-// LinkOrDisableChoice represents the user's choice when grove is not linked.
+// LinkOrDisableChoice represents the user's choice when project is not linked.
 type LinkOrDisableChoice int
 
 const (
 	// LinkOrDisableCancel means the user cancelled the operation.
 	LinkOrDisableCancel LinkOrDisableChoice = iota
-	// LinkOrDisableLink means the user chose to link the grove.
+	// LinkOrDisableLink means the user chose to link the project.
 	LinkOrDisableLink
 	// LinkOrDisableDisable means the user chose to disable Hub.
 	LinkOrDisableDisable
 )
 
-// ShowProjectLinkOrDisablePrompt displays a prompt when Hub is enabled but grove is not linked.
+// ShowProjectLinkOrDisablePrompt displays a prompt when Hub is enabled but project is not linked.
 // Returns the user's choice.
-func ShowProjectLinkOrDisablePrompt(groveName string, autoConfirm bool) LinkOrDisableChoice {
+func ShowProjectLinkOrDisablePrompt(projectName string, autoConfirm bool) LinkOrDisableChoice {
 	fmt.Println()
-	fmt.Println("Hub is enabled but this grove is not linked.")
+	fmt.Println("Hub is enabled but this project is not linked.")
 	fmt.Println()
 	fmt.Println("Choose an option:")
-	fmt.Println("  [1] Link and sync grove now")
-	fmt.Println("  [2] Disable Hub for this grove")
+	fmt.Println("  [1] Link and sync project now")
+	fmt.Println("  [2] Disable Hub for this project")
 	fmt.Println()
 
 	if autoConfirm {
 		// Auto-confirm defaults to linking
-		fmt.Println("Auto-selecting: Link and sync grove")
+		fmt.Println("Auto-selecting: Link and sync project")
 		return LinkOrDisableLink
 	}
 
@@ -374,23 +374,23 @@ func ShowProjectLinkOrDisablePrompt(groveName string, autoConfirm bool) LinkOrDi
 // ShowSyncAfterLinkPrompt asks if user wants to sync agents after linking.
 // Returns true if the user confirms, false otherwise.
 func ShowSyncAfterLinkPrompt(autoConfirm bool) bool {
-	return ConfirmAction("Grove linked. Sync agents now?", true, autoConfirm)
+	return ConfirmAction("Project linked. Sync agents now?", true, autoConfirm)
 }
 
-// ShowLinkBeforeRegisterPrompt asks if user wants to link grove before registering broker.
+// ShowLinkBeforeRegisterPrompt asks if user wants to link project before registering broker.
 // Returns true if the user confirms, false otherwise.
-func ShowLinkBeforeRegisterPrompt(groveName string, autoConfirm bool) bool {
+func ShowLinkBeforeRegisterPrompt(projectName string, autoConfirm bool) bool {
 	fmt.Println()
-	fmt.Printf("Grove '%s' is not linked to the Hub.\n", groveName)
+	fmt.Printf("Project '%s' is not linked to the Hub.\n", projectName)
 	return ConfirmAction("Link it first?", true, autoConfirm)
 }
 
-// ShowProjectProviderPrompt asks if user wants to add the broker as a provider to the grove.
+// ShowProjectProviderPrompt asks if user wants to add the broker as a provider to the project.
 // Returns true if the user confirms, false otherwise.
-func ShowProjectProviderPrompt(groveName string, autoConfirm bool) bool {
+func ShowProjectProviderPrompt(projectName string, autoConfirm bool) bool {
 	fmt.Println()
-	fmt.Printf("Add this broker as a provider to grove '%s'?\n", groveName)
-	fmt.Println("This will allow the broker to execute agents for this grove.")
+	fmt.Printf("Add this broker as a provider to project '%s'?\n", projectName)
+	fmt.Println("This will allow the broker to execute agents for this project.")
 	return ConfirmAction("Continue?", true, autoConfirm)
 }
 
@@ -398,26 +398,26 @@ func ShowProjectProviderPrompt(groveName string, autoConfirm bool) bool {
 // Returns true if the user wants to check, false otherwise.
 func ShowCheckHubAnywayPrompt(autoConfirm bool) bool {
 	fmt.Println()
-	fmt.Println("Hub integration is disabled for this grove.")
+	fmt.Println("Hub integration is disabled for this project.")
 	return ConfirmAction("Check Hub status anyway?", false, autoConfirm)
 }
 
 // ShowCleanUnlinkPrompt asks if user wants to unlink from Hub before cleaning.
 // Returns true if the user confirms, false otherwise.
-func ShowCleanUnlinkPrompt(groveName string, autoConfirm bool) bool {
+func ShowCleanUnlinkPrompt(projectName string, autoConfirm bool) bool {
 	fmt.Println()
-	fmt.Println("The grove will be unlinked from the Hub locally.")
-	fmt.Println("The grove and its agents will remain on the Hub for other brokers.")
+	fmt.Println("The project will be unlinked from the Hub locally.")
+	fmt.Println("The project and its agents will remain on the Hub for other brokers.")
 	return ConfirmAction("Unlink from Hub before cleaning?", true, autoConfirm)
 }
 
-// ShowCleanConfirmPrompt displays the final confirmation for cleaning a grove.
+// ShowCleanConfirmPrompt displays the final confirmation for cleaning a project.
 // Returns true if the user confirms, false otherwise.
-func ShowCleanConfirmPrompt(groveName, grovePath string, isGlobal bool, autoConfirm bool) bool {
+func ShowCleanConfirmPrompt(projectName, projectPath string, isGlobal bool, autoConfirm bool) bool {
 	fmt.Println()
 	fmt.Println("This will permanently remove the scion configuration:")
-	fmt.Printf("  Grove: %s\n", groveName)
-	fmt.Printf("  Path:  %s\n", grovePath)
+	fmt.Printf("  Project: %s\n", projectName)
+	fmt.Printf("  Path:    %s\n", projectPath)
 	if isGlobal {
 		fmt.Println("  Type:  global")
 	} else {
@@ -427,34 +427,34 @@ func ShowCleanConfirmPrompt(groveName, grovePath string, isGlobal bool, autoConf
 	fmt.Println("This action cannot be undone. Agent configurations will be lost.")
 	fmt.Println()
 	// Default NO for safety - destructive operation
-	return ConfirmAction("Remove scion grove?", false, autoConfirm)
+	return ConfirmAction("Remove scion project?", false, autoConfirm)
 }
 
-// ShowProvidePrompt asks if user wants to add the broker as a provider for a grove.
+// ShowProvidePrompt asks if user wants to add the broker as a provider for a project.
 // Returns true if the user confirms, false otherwise.
-func ShowProvidePrompt(groveName, brokerName string, autoConfirm bool) bool {
+func ShowProvidePrompt(projectName, brokerName string, autoConfirm bool) bool {
 	fmt.Println()
-	fmt.Printf("Add broker '%s' as a provider for grove '%s'?\n", brokerName, groveName)
+	fmt.Printf("Add broker '%s' as a provider for project '%s'?\n", brokerName, projectName)
 	fmt.Println()
-	fmt.Println("This will allow the broker to execute agents for this grove.")
+	fmt.Println("This will allow the broker to execute agents for this project.")
 	return ConfirmAction("Continue?", true, autoConfirm)
 }
 
-// ShowChangeDefaultBrokerPrompt asks if user wants to change the default broker for a grove.
+// ShowChangeDefaultBrokerPrompt asks if user wants to change the default broker for a project.
 // Returns true if the user confirms, false otherwise.
-func ShowChangeDefaultBrokerPrompt(groveName, currentBrokerName, newBrokerName string, autoConfirm bool) bool {
+func ShowChangeDefaultBrokerPrompt(projectName, currentBrokerName, newBrokerName string, autoConfirm bool) bool {
 	fmt.Println()
-	fmt.Printf("Grove '%s' already has a default broker: '%s'\n", groveName, currentBrokerName)
+	fmt.Printf("Project '%s' already has a default broker: '%s'\n", projectName, currentBrokerName)
 	return ConfirmAction(fmt.Sprintf("Change default broker to '%s'?", newBrokerName), false, autoConfirm)
 }
 
-// ShowWithdrawPrompt asks if user wants to remove the broker as a provider from a grove.
+// ShowWithdrawPrompt asks if user wants to remove the broker as a provider from a project.
 // Returns true if the user confirms, false otherwise.
-func ShowWithdrawPrompt(groveName, brokerName string, autoConfirm bool) bool {
+func ShowWithdrawPrompt(projectName, brokerName string, autoConfirm bool) bool {
 	fmt.Println()
-	fmt.Printf("Remove broker '%s' as a provider from grove '%s'?\n", brokerName, groveName)
+	fmt.Printf("Remove broker '%s' as a provider from project '%s'?\n", brokerName, projectName)
 	fmt.Println()
-	fmt.Println("The broker will no longer be able to execute agents for this grove.")
+	fmt.Println("The broker will no longer be able to execute agents for this project.")
 	fmt.Println("Existing agents on this broker will continue running but cannot be")
 	fmt.Println("managed through the Hub until the broker is re-added as a provider.")
 	fmt.Println()
@@ -468,11 +468,11 @@ type ProjectProviders interface {
 	ProviderNames() []string
 }
 
-// ShowProjectDeletePrompt displays the grove deletion confirmation.
+// ShowProjectDeletePrompt displays the project deletion confirmation.
 // Returns true if the user confirms, false otherwise.
-func ShowProjectDeletePrompt(groveName string, agentCount int, providers ProjectProviders, autoConfirm bool) bool {
+func ShowProjectDeletePrompt(projectName string, agentCount int, providers ProjectProviders, autoConfirm bool) bool {
 	fmt.Println()
-	fmt.Printf("This will permanently delete grove '%s' from the Hub.\n", groveName)
+	fmt.Printf("This will permanently delete project '%s' from the Hub.\n", projectName)
 	fmt.Println()
 	fmt.Println("The following will be removed:")
 	if agentCount > 0 {
@@ -490,24 +490,24 @@ func ShowProjectDeletePrompt(groveName string, agentCount int, providers Project
 	fmt.Println("This action cannot be undone.")
 	fmt.Println()
 	// Default NO for safety - destructive operation
-	return ConfirmAction("Delete this grove?", false, autoConfirm)
+	return ConfirmAction("Delete this project?", false, autoConfirm)
 }
 
 // ShowBrokerDeletePrompt displays the broker deletion confirmation.
-// groveNames is a list of grove names the broker provides for.
+// projectNames is a list of project names the broker provides for.
 // Returns true if the user confirms, false otherwise.
-func ShowBrokerDeletePrompt(brokerName string, groveNames []string, autoConfirm bool) bool {
+func ShowBrokerDeletePrompt(brokerName string, projectNames []string, autoConfirm bool) bool {
 	fmt.Println()
 	fmt.Printf("This will permanently delete broker '%s' from the Hub.\n", brokerName)
 	fmt.Println()
 
-	if len(groveNames) > 0 {
-		fmt.Printf("This broker provides for %d grove(s):\n", len(groveNames))
-		for _, name := range groveNames {
+	if len(projectNames) > 0 {
+		fmt.Printf("This broker provides for %d project(s):\n", len(projectNames))
+		for _, name := range projectNames {
 			fmt.Printf("  - %s\n", name)
 		}
 		fmt.Println()
-		fmt.Println("The broker will be removed as a provider from all groves.")
+		fmt.Println("The broker will be removed as a provider from all projects.")
 	}
 
 	fmt.Println()

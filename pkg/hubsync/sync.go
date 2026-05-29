@@ -146,7 +146,7 @@ type EnsureHubReadyOptions struct {
 	// NoHub disables Hub integration for this invocation.
 	NoHub bool
 	// EndpointOverride is the explicit Hub endpoint supplied by the caller.
-	// It takes precedence over grove/global settings for this invocation.
+	// It takes precedence over project/global settings for this invocation.
 	EndpointOverride string
 	// SkipSync skips agent synchronization check.
 	SkipSync bool
@@ -167,9 +167,9 @@ type EnsureHubReadyOptions struct {
 // 2. Load settings
 // 3. Check hub.local_only setting
 // 4. Check hub.enabled setting
-// 5. Ensure grove_id exists (generate if missing)
+// 5. Ensure project_id exists (generate if missing)
 // 6. Check Hub connectivity
-// 7. Check grove registration (prompt to register if not)
+// 7. Check project registration (prompt to register if not)
 // 8. Compare and sync agents (unless SkipSync is true)
 func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext, error) {
 	debugf("EnsureHubReady: projectPath=%s, opts=%+v", projectPath, opts)
@@ -177,27 +177,27 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// Check if --no-hub flag is set
 	if opts.NoHub {
 		if projectPath != "" && IsHubProjectRef(projectPath) {
-			return nil, fmt.Errorf("cannot use --no-hub with a hub grove reference (%s)\n\n"+
-				"Hub grove references (slugs, names, git URLs) require hub connectivity.", projectPath)
+			return nil, fmt.Errorf("cannot use --no-hub with a hub project reference (%s)\n\n"+
+				"Hub project references (slugs, names, git URLs) require hub connectivity.", projectPath)
 		}
 		debugf("NoHub flag set, returning nil")
 		return nil, nil
 	}
 
-	// Check if projectPath is a hub grove reference (slug, name, UUID, or git URL)
+	// Check if projectPath is a hub project reference (slug, name, UUID, or git URL)
 	if projectPath != "" && IsHubProjectRef(projectPath) {
 		return resolveHubProjectRef(projectPath, opts)
 	}
 
-	// Resolve grove path
+	// Resolve project path
 	resolvedPath, isGlobal, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve grove path: %w", err)
+		return nil, fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
-	// Clean up stale broker credentials from grove settings.
-	// These should only exist in global settings, not grove-specific settings.
-	// Earlier versions incorrectly wrote them to grove settings.
+	// Clean up stale broker credentials from project settings.
+	// These should only exist in global settings, not project-specific settings.
+	// Earlier versions incorrectly wrote them to project settings.
 	if !isGlobal {
 		cleanupProjectBrokerCredentials(resolvedPath)
 	}
@@ -209,7 +209,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 
 	// Check if hub.local_only is set
 	if settings.IsHubLocalOnly() {
-		return nil, fmt.Errorf("this grove is configured for local-only mode (hub.local_only=true)\n\n" +
+		return nil, fmt.Errorf("this project is configured for local-only mode (hub.local_only=true)\n\n" +
 			"To perform this operation:\n" +
 			"  - Use --no-hub flag to skip Hub integration\n" +
 			"  - Or set hub.local_only=false to enable Hub sync checks")
@@ -225,7 +225,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	}
 
 	// When running inside a hub-connected container, always skip sync checks —
-	// containers cannot register groves or reconcile agents.
+	// containers cannot register projects or reconcile agents.
 	if hubContext {
 		opts.SkipSync = true
 	}
@@ -236,7 +236,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		endpoint = getEndpoint(settings)
 	}
 	// In hub context, settings loading may not pick up the env var (e.g. if the
-	// grove path resolves to a synthetic or tmpfs directory without a settings file
+	// project path resolves to a synthetic or tmpfs directory without a settings file
 	// and koanf doesn't populate the pointer struct). Fall back to the env var.
 	if endpoint == "" && hubContext {
 		endpoint = os.Getenv("SCION_HUB_ENDPOINT")
@@ -248,34 +248,34 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		return nil, wrapHubError(fmt.Errorf("Hub is enabled but no endpoint configured.\n\nConfigure via: scion config set hub.endpoint <url>"))
 	}
 
-	// Ensure grove_id exists.
+	// Ensure project_id exists.
 	// In hub context, SCION_GROVE_ID takes priority over settings.ProjectID
-	// because the dispatcher sets it to the authoritative grove for this
+	// because the dispatcher sets it to the authoritative project for this
 	// agent. The workspace may contain a cloned repo whose .scion/settings
-	// has a different grove_id (e.g. template-sync from an external repo).
-	var groveID string
+	// has a different project_id (e.g. template-sync from an external repo).
+	var projectID string
 	if hubContext {
-		groveID = os.Getenv("SCION_GROVE_ID")
-		if groveID == "" {
-			groveID = os.Getenv("SCION_PROJECT_ID")
+		projectID = os.Getenv("SCION_GROVE_ID")
+		if projectID == "" {
+			projectID = os.Getenv("SCION_PROJECT_ID")
 		}
 	}
-	if groveID == "" {
-		groveID = settings.ProjectID
+	if projectID == "" {
+		projectID = settings.ProjectID
 	}
-	if groveID == "" {
+	if projectID == "" {
 		if hubContext {
 			// Inside a container without SCION_GROVE_ID — we can't generate
-			// and persist a grove ID. The Hub client can still be constructed
-			// for cross-grove operations like list --all.
-			debugf("hub context without grove_id — grove-scoped operations may fail")
+			// and persist a project ID. The Hub client can still be constructed
+			// for cross-project operations like list --all.
+			debugf("hub context without project_id — project-scoped operations may fail")
 		} else {
-			// Generate grove_id for groves that don't have one
-			groveID = config.GenerateProjectIDForDir(filepath.Dir(resolvedPath))
-			if err := config.UpdateSetting(resolvedPath, "grove_id", groveID, isGlobal); err != nil {
-				return nil, fmt.Errorf("failed to save grove_id: %w", err)
+			// Generate project_id for projects that don't have one
+			projectID = config.GenerateProjectIDForDir(filepath.Dir(resolvedPath))
+			if err := config.UpdateSetting(resolvedPath, "grove_id", projectID, isGlobal); err != nil {
+				return nil, fmt.Errorf("failed to save project_id: %w", err)
 			}
-			// Reload settings to get the updated grove_id
+			// Reload settings to get the updated project_id
 			settings, err = config.LoadSettings(resolvedPath)
 			if err != nil {
 				return nil, fmt.Errorf("failed to reload settings: %w", err)
@@ -303,10 +303,10 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		brokerID = settings.Hub.BrokerID
 	}
 
-	// Prefer hub.groveId (explicit link to a hub grove) over grove_id
+	// Prefer hub.groveId (explicit link to a hub project) over project_id
 	// (deterministic local identity). For hub API calls, we need the ID
-	// the hub knows the grove by.
-	effectiveProjectID := groveID
+	// the hub knows the project by.
+	effectiveProjectID := projectID
 	if hgid := settings.GetHubProjectID(); hgid != "" {
 		effectiveProjectID = hgid
 	}
@@ -321,53 +321,53 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		IsGlobal:    isGlobal,
 	}
 
-	debugf("HubContext created: endpoint=%s, groveID=%s (local=%s), brokerID=%s, grovePath=%s, isGlobal=%v",
-		endpoint, effectiveProjectID, groveID, brokerID, resolvedPath, isGlobal)
+	debugf("HubContext created: endpoint=%s, projectID=%s (local=%s), brokerID=%s, projectPath=%s, isGlobal=%v",
+		endpoint, effectiveProjectID, projectID, brokerID, resolvedPath, isGlobal)
 
-	// Inside a hub-connected container, skip grove registration, provider path,
+	// Inside a hub-connected container, skip project registration, provider path,
 	// and sync checks — the container should only query the Hub API, not manage
-	// grove state. Return the context directly.
+	// project state. Return the context directly.
 	if hubContext {
 		return hubCtx, nil
 	}
 
-	// Check grove registration
+	// Check project registration
 	registered, err := isProjectRegistered(ctx, hubCtx)
 	if err != nil {
 		return nil, wrapHubError(err)
 	}
 
 	if !registered {
-		// Get grove name for the prompt
-		groveName := getProjectName(resolvedPath, isGlobal)
+		// Get project name for the prompt
+		projectName := getProjectName(resolvedPath, isGlobal)
 
 		// Check for an exact ID match on the Hub first.
-		// A grove with the same UUID is definitively the same grove,
+		// A project with the same UUID is definitively the same project,
 		// regardless of name differences (e.g., when running inside a
-		// container where the grove name resolves to "workspace").
+		// container where the project name resolves to "workspace").
 		idMatchProject := findProjectByID(ctx, hubCtx)
 
 		if idMatchProject != nil {
-			// Exact ID match found - this is the same grove, no prompt needed
-			debugf("Found grove with exact matching ID on Hub: %s (name: %s)", idMatchProject.ID, idMatchProject.Name)
-			fmt.Printf("Linked to existing grove: %s (ID: %s)\n", idMatchProject.Name, idMatchProject.ID)
+			// Exact ID match found - this is the same project, no prompt needed
+			debugf("Found project with exact matching ID on Hub: %s (name: %s)", idMatchProject.ID, idMatchProject.Name)
+			fmt.Printf("Linked to existing project: %s (ID: %s)\n", idMatchProject.Name, idMatchProject.ID)
 		} else {
 			// No ID match - fall back to name-based matching
-			matches, err := findMatchingProjects(ctx, hubCtx, groveName)
+			matches, err := findMatchingProjects(ctx, hubCtx, projectName)
 			if err != nil {
-				debugf("Warning: failed to search for matching groves: %v", err)
+				debugf("Warning: failed to search for matching projects: %v", err)
 				// Continue with registration - the hub will handle matching
 			}
 
 			if len(matches) > 0 {
-				// Check if any name-based match has the same ID as our local grove.
+				// Check if any name-based match has the same ID as our local project.
 				// This is a defensive check for cases where the ID-based lookup
 				// above failed transiently but the list endpoint succeeded.
 				idMatched := false
 				for _, m := range matches {
 					if m.ID == hubCtx.ProjectID {
 						debugf("Found exact ID match in name-based results: %s", m.ID)
-						fmt.Printf("Linked to existing grove: %s (ID: %s)\n", m.Name, m.ID)
+						fmt.Printf("Linked to existing project: %s (ID: %s)\n", m.Name, m.ID)
 						idMatched = true
 						break
 					}
@@ -375,39 +375,39 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 
 				if !idMatched {
 					// No ID match - ask user what to do
-					baseSlug := api.Slugify(groveName)
+					baseSlug := api.Slugify(projectName)
 					nextSlug := NextSlugFromMatches(baseSlug, matches)
-					choice, selectedID := ShowMatchingProjectsPrompt(groveName, matches, nextSlug, opts.AutoConfirm)
+					choice, selectedID := ShowMatchingProjectsPrompt(projectName, matches, nextSlug, opts.AutoConfirm)
 					switch choice {
 					case ProjectChoiceCancel:
 						return nil, fmt.Errorf("registration cancelled")
 					case ProjectChoiceLink:
-						// Store the hub grove ID separately — don't overwrite
-						// the deterministic local grove_id.
+						// Store the hub project ID separately — don't overwrite
+						// the deterministic local project_id.
 						if err := config.UpdateSetting(resolvedPath, "hub.groveId", selectedID, isGlobal); err != nil {
-							return nil, fmt.Errorf("failed to save hub grove ID: %w", err)
+							return nil, fmt.Errorf("failed to save hub project ID: %w", err)
 						}
 						hubCtx.ProjectID = selectedID
 						debugf("Stored hub.groveId: %s", selectedID)
 					case ProjectChoiceRegisterNew:
-						// Register as new grove with the existing local grove_id.
+						// Register as new project with the existing local project_id.
 						// The hub will assign its own ID if needed.
-						debugf("Registering new grove with existing grove_id: %s", hubCtx.ProjectID)
+						debugf("Registering new project with existing project_id: %s", hubCtx.ProjectID)
 					}
 				}
 			} else {
-				// No matching groves - ask for confirmation
-				if !ShowLinkPrompt(groveName, opts.AutoConfirm) {
-					return nil, fmt.Errorf("grove must be linked to Hub to perform this operation\n\n" +
-						"Link this grove: scion hub link\n" +
+				// No matching projects - ask for confirmation
+				if !ShowLinkPrompt(projectName, opts.AutoConfirm) {
+					return nil, fmt.Errorf("project must be linked to Hub to perform this operation\n\n" +
+						"Link this project: scion hub link\n" +
 						"Or use local-only mode: scion --no-hub <command>")
 				}
 			}
 		}
 
-		// Register the grove
-		if err := registerProject(context.Background(), hubCtx, groveName, isGlobal); err != nil {
-			return nil, wrapHubError(fmt.Errorf("failed to register grove: %w", err))
+		// Register the project
+		if err := registerProject(context.Background(), hubCtx, projectName, isGlobal); err != nil {
+			return nil, wrapHubError(fmt.Errorf("failed to register project: %w", err))
 		}
 		// Reload settings to get updated broker ID and hub.groveId
 		settings, err = config.LoadSettings(resolvedPath)
@@ -415,7 +415,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 			return nil, fmt.Errorf("failed to reload settings: %w", err)
 		}
 		hubCtx.Settings = settings
-		// Prefer hub.groveId (explicit link) over grove_id (deterministic local ID)
+		// Prefer hub.groveId (explicit link) over project_id (deterministic local ID)
 		if hgid := settings.GetHubProjectID(); hgid != "" {
 			hubCtx.ProjectID = hgid
 		} else {
@@ -467,7 +467,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 			} else if !hasOnlineBroker {
 				// No brokers available - print warning and skip sync
 				fmt.Println()
-				fmt.Println("Warning: No runtime brokers are available for this grove.")
+				fmt.Println("Warning: No runtime brokers are available for this project.")
 				fmt.Println("Agent sync cannot be performed without an online broker.")
 				fmt.Println()
 				fmt.Println("Local agents not synced to Hub:")
@@ -500,14 +500,14 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	return hubCtx, nil
 }
 
-// checkBrokerAvailability checks if there are any online brokers for the grove.
+// checkBrokerAvailability checks if there are any online brokers for the project.
 func checkBrokerAvailability(ctx context.Context, hubCtx *HubContext) (bool, error) {
 	ctxTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	resp, err := hubCtx.Client.Projects().ListProviders(ctxTimeout, hubCtx.ProjectID)
 	if err != nil {
-		return false, fmt.Errorf("failed to list grove providers: %w", err)
+		return false, fmt.Errorf("failed to list project providers: %w", err)
 	}
 
 	for _, provider := range resp.Providers {
@@ -523,11 +523,11 @@ func checkBrokerAvailability(ctx context.Context, hubCtx *HubContext) (bool, err
 // Uses hubTime if non-zero (preferred), otherwise falls back to local time.
 var lastSyncedAtMu sync.Mutex
 
-func UpdateLastSyncedAt(grovePath string, hubTime time.Time, isGlobal bool) {
+func UpdateLastSyncedAt(projectPath string, hubTime time.Time, isGlobal bool) {
 	_ = isGlobal // retained for API compatibility
 
-	if strings.TrimSpace(grovePath) == "" {
-		debugf("Warning: skipping lastSyncedAt update: empty grove path")
+	if strings.TrimSpace(projectPath) == "" {
+		debugf("Warning: skipping lastSyncedAt update: empty project path")
 		return
 	}
 
@@ -541,7 +541,7 @@ func UpdateLastSyncedAt(grovePath string, hubTime time.Time, isGlobal bool) {
 	lastSyncedAtMu.Lock()
 	defer lastSyncedAtMu.Unlock()
 
-	currentState, err := config.LoadProjectState(grovePath)
+	currentState, err := config.LoadProjectState(projectPath)
 	if err != nil {
 		debugf("Warning: failed to load current state.yaml for watermark update: %v", err)
 		currentState = &config.ProjectState{}
@@ -558,7 +558,7 @@ func UpdateLastSyncedAt(grovePath string, hubTime time.Time, isGlobal bool) {
 
 	currentState.LastSyncedAt = ts.Format(time.RFC3339Nano)
 
-	if err := saveProjectStateAtomic(grovePath, currentState); err != nil {
+	if err := saveProjectStateAtomic(projectPath, currentState); err != nil {
 		debugf("Warning: failed to save lastSyncedAt to state.yaml: %v", err)
 	}
 }
@@ -567,15 +567,15 @@ func UpdateLastSyncedAt(grovePath string, hubTime time.Time, isGlobal bool) {
 // synced with the hub. This is used to detect agents that were deleted from the
 // hub: a local-only agent whose name appears in SyncedAgents was previously
 // registered and has since been removed hub-side.
-func UpdateSyncedAgents(grovePath string, agents []string) {
-	if strings.TrimSpace(grovePath) == "" {
+func UpdateSyncedAgents(projectPath string, agents []string) {
+	if strings.TrimSpace(projectPath) == "" {
 		return
 	}
 
 	lastSyncedAtMu.Lock()
 	defer lastSyncedAtMu.Unlock()
 
-	currentState, err := config.LoadProjectState(grovePath)
+	currentState, err := config.LoadProjectState(projectPath)
 	if err != nil {
 		debugf("Warning: failed to load state.yaml for synced agents update: %v", err)
 		currentState = &config.ProjectState{}
@@ -591,21 +591,21 @@ func UpdateSyncedAgents(grovePath string, agents []string) {
 	}
 	currentState.SyncedAgents = sorted
 
-	if err := saveProjectStateAtomic(grovePath, currentState); err != nil {
+	if err := saveProjectStateAtomic(projectPath, currentState); err != nil {
 		debugf("Warning: failed to save synced agents to state.yaml: %v", err)
 	}
 }
 
 // AddSyncedAgent adds a single agent name to the synced agents list in state.yaml.
-func AddSyncedAgent(grovePath, agentName string) {
-	if strings.TrimSpace(grovePath) == "" || strings.TrimSpace(agentName) == "" {
+func AddSyncedAgent(projectPath, agentName string) {
+	if strings.TrimSpace(projectPath) == "" || strings.TrimSpace(agentName) == "" {
 		return
 	}
 
 	lastSyncedAtMu.Lock()
 	defer lastSyncedAtMu.Unlock()
 
-	currentState, err := config.LoadProjectState(grovePath)
+	currentState, err := config.LoadProjectState(projectPath)
 	if err != nil {
 		currentState = &config.ProjectState{}
 	}
@@ -617,21 +617,21 @@ func AddSyncedAgent(grovePath, agentName string) {
 	}
 	currentState.SyncedAgents = append(currentState.SyncedAgents, agentName)
 
-	if err := saveProjectStateAtomic(grovePath, currentState); err != nil {
+	if err := saveProjectStateAtomic(projectPath, currentState); err != nil {
 		debugf("Warning: failed to add synced agent to state.yaml: %v", err)
 	}
 }
 
 // RemoveSyncedAgent removes a single agent name from the synced agents list in state.yaml.
-func RemoveSyncedAgent(grovePath, agentName string) {
-	if strings.TrimSpace(grovePath) == "" || strings.TrimSpace(agentName) == "" {
+func RemoveSyncedAgent(projectPath, agentName string) {
+	if strings.TrimSpace(projectPath) == "" || strings.TrimSpace(agentName) == "" {
 		return
 	}
 
 	lastSyncedAtMu.Lock()
 	defer lastSyncedAtMu.Unlock()
 
-	currentState, err := config.LoadProjectState(grovePath)
+	currentState, err := config.LoadProjectState(projectPath)
 	if err != nil {
 		return
 	}
@@ -644,16 +644,16 @@ func RemoveSyncedAgent(grovePath, agentName string) {
 	}
 	currentState.SyncedAgents = filtered
 
-	if err := saveProjectStateAtomic(grovePath, currentState); err != nil {
+	if err := saveProjectStateAtomic(projectPath, currentState); err != nil {
 		debugf("Warning: failed to remove synced agent from state.yaml: %v", err)
 	}
 }
 
-// CompareAgents compares local agents with all Hub agents in the grove.
+// CompareAgents compares local agents with all Hub agents in the project.
 func CompareAgents(ctx context.Context, hubCtx *HubContext) (*SyncResult, error) {
 	result := &SyncResult{}
 
-	debugf("CompareAgents starting: groveID=%s, brokerID=%s, grovePath=%s",
+	debugf("CompareAgents starting: projectID=%s, brokerID=%s, projectPath=%s",
 		hubCtx.ProjectID, hubCtx.BrokerID, hubCtx.ProjectPath)
 
 	// Get local agents
@@ -663,7 +663,7 @@ func CompareAgents(ctx context.Context, hubCtx *HubContext) (*SyncResult, error)
 	}
 	debugf("Local agents found: %v", localAgents)
 
-	// Get all Hub agents in the grove (not filtered by broker ID).
+	// Get all Hub agents in the project (not filtered by broker ID).
 	// We fetch all agents so that agents created from the Hub UI or assigned
 	// to a different/stale broker identity are visible during comparison.
 	ctxTimeout, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -703,17 +703,17 @@ func CompareAgents(ctx context.Context, hubCtx *HubContext) (*SyncResult, error)
 	var lastSyncedAtStr string
 
 	// Try state.yaml first
-	groveState, err := config.LoadProjectState(hubCtx.ProjectPath)
-	if err == nil && groveState.LastSyncedAt != "" {
-		lastSyncedAtStr = groveState.LastSyncedAt
+	projectState, err := config.LoadProjectState(hubCtx.ProjectPath)
+	if err == nil && projectState.LastSyncedAt != "" {
+		lastSyncedAtStr = projectState.LastSyncedAt
 		debugf("lastSyncedAt from state.yaml: %s", lastSyncedAtStr)
 	}
 
 	// Build set of previously synced agents from state.yaml.
 	// Agents in this set were registered on the hub during a prior sync cycle.
 	// If they are local-only now, it means they were deleted from the hub.
-	previouslySynced := make(map[string]bool, len(groveState.SyncedAgents))
-	for _, name := range groveState.SyncedAgents {
+	previouslySynced := make(map[string]bool, len(projectState.SyncedAgents))
+	for _, name := range projectState.SyncedAgents {
 		previouslySynced[name] = true
 	}
 
@@ -804,14 +804,14 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 	ctxTimeout, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	debugf("ExecuteSync starting: groveID=%s, brokerID=%s", hubCtx.ProjectID, hubCtx.BrokerID)
+	debugf("ExecuteSync starting: projectID=%s, brokerID=%s", hubCtx.ProjectID, hubCtx.BrokerID)
 
 	// Register local agents on Hub
 	// Note: We don't specify a runtime broker ID - the hub will resolve it based on
-	// available grove providers (single provider = auto-select, multiple = error)
+	// available project providers (single provider = auto-select, multiple = error)
 	for _, name := range result.ToRegister {
 		fmt.Printf("Registering agent '%s' on Hub...\n", name)
-		debugf("Creating agent: name=%s, groveID=%s (hub will resolve runtime broker)", name, hubCtx.ProjectID)
+		debugf("Creating agent: name=%s, projectID=%s (hub will resolve runtime broker)", name, hubCtx.ProjectID)
 		req := &hubclient.CreateAgentRequest{
 			Name:      name,
 			ProjectID: hubCtx.ProjectID,
@@ -877,7 +877,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 				req.RuntimeBrokerID, _ = brokerMap["id"].(string)
 			} else {
 				// Multiple brokers - selection prompt
-				fmt.Printf("\nMultiple runtime brokers available for grove:\n")
+				fmt.Printf("\nMultiple runtime brokers available for project:\n")
 				for i, h := range availableBrokers {
 					brokerMap, _ := h.(map[string]interface{})
 					brokerName, _ := brokerMap["name"].(string)
@@ -921,9 +921,9 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 	// Remove Hub agents that are not on this broker
 	for _, ref := range result.ToRemove {
 		fmt.Printf("Removing agent '%s' from Hub...\n", ref.Name)
-		debugf("Deleting agent via grove-scoped endpoint: name=%s, id=%s, groveID=%s",
+		debugf("Deleting agent via project-scoped endpoint: name=%s, id=%s, projectID=%s",
 			ref.Name, ref.ID, hubCtx.ProjectID)
-		// Use grove-scoped endpoint which supports both ID and slug lookup
+		// Use project-scoped endpoint which supports both ID and slug lookup
 		if err := hubCtx.Client.Projects().DeleteAgent(ctxTimeout, hubCtx.ProjectID, ref.ID, nil); err != nil {
 			debugf("Failed to remove agent '%s' (id=%s): %v", ref.Name, ref.ID, err)
 			return fmt.Errorf("failed to remove agent '%s': %w", ref.Name, err)
@@ -977,8 +977,8 @@ func collectSyncedAgentNames(result *SyncResult) []string {
 }
 
 // GetLocalAgents returns agent names from .scion/agents/.
-func GetLocalAgents(grovePath string) ([]string, error) {
-	agentsDir := filepath.Join(grovePath, "agents")
+func GetLocalAgents(projectPath string) ([]string, error) {
+	agentsDir := filepath.Join(projectPath, "agents")
 
 	entries, err := os.ReadDir(agentsDir)
 	if err != nil {
@@ -1008,8 +1008,8 @@ func GetLocalAgents(grovePath string) ([]string, error) {
 
 // getLocalAgentInfo reads local agent config files to extract template and harness info.
 // Returns nil if the info cannot be read.
-func getLocalAgentInfo(grovePath, agentName string) *api.AgentInfo {
-	agentDir := filepath.Join(grovePath, "agents", agentName)
+func getLocalAgentInfo(projectPath, agentName string) *api.AgentInfo {
+	agentDir := filepath.Join(projectPath, "agents", agentName)
 
 	// Try agent-info.json first (written by the container at runtime)
 	agentInfoPath := filepath.Join(agentDir, "home", "agent-info.json")
@@ -1086,8 +1086,8 @@ func applyFileTimestampFallback(info *api.AgentInfo, path string) {
 	info.Created = mtime
 }
 
-func saveProjectStateAtomic(grovePath string, state *config.ProjectState) error {
-	statePath := filepath.Join(grovePath, "state.yaml")
+func saveProjectStateAtomic(projectPath string, state *config.ProjectState) error {
+	statePath := filepath.Join(projectPath, "state.yaml")
 	if err := os.MkdirAll(filepath.Dir(statePath), 0755); err != nil {
 		return err
 	}
@@ -1117,10 +1117,10 @@ func saveProjectStateAtomic(grovePath string, state *config.ProjectState) error 
 	return os.Rename(tmpPath, statePath)
 }
 
-// isProjectRegistered checks if the grove is registered with the Hub.
-// ensureProviderPath checks if the local broker is a provider for the grove
+// isProjectRegistered checks if the project is registered with the Hub.
+// ensureProviderPath checks if the local broker is a provider for the project
 // and ensures its local_path is set. Auto-provide creates provider records without
-// a local_path, which causes agents to be provisioned in the global grove.
+// a local_path, which causes agents to be provisioned in the global project.
 func ensureProviderPath(ctx context.Context, hubCtx *HubContext) error {
 	if hubCtx.BrokerID == "" || hubCtx.ProjectID == "" || hubCtx.ProjectPath == "" {
 		return nil
@@ -1168,35 +1168,35 @@ func isProjectRegistered(ctx context.Context, hubCtx *HubContext) (bool, error) 
 	ctxTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	// Try to get the grove by ID
+	// Try to get the project by ID
 	_, err := hubCtx.Client.Projects().Get(ctxTimeout, hubCtx.ProjectID)
 	if err != nil {
 		if apiclient.IsNotFoundError(err) {
 			return false, nil
 		}
-		return false, fmt.Errorf("failed to check grove registration: %w", err)
+		return false, fmt.Errorf("failed to check project registration: %w", err)
 	}
 
 	return true, nil
 }
 
-// findProjectByID attempts to find a grove on the Hub with the exact same ID
-// as the local grove. This check runs before name-based matching to handle
-// cases where the grove name differs (e.g., "workspace" inside a container)
-// but the grove_id is the same. Returns nil if no match is found.
+// findProjectByID attempts to find a project on the Hub with the exact same ID
+// as the local project. This check runs before name-based matching to handle
+// cases where the project name differs (e.g., "workspace" inside a container)
+// but the project_id is the same. Returns nil if no match is found.
 func findProjectByID(ctx context.Context, hubCtx *HubContext) *hubclient.Project {
 	ctxTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	grove, err := hubCtx.Client.Projects().Get(ctxTimeout, hubCtx.ProjectID)
+	project, err := hubCtx.Client.Projects().Get(ctxTimeout, hubCtx.ProjectID)
 	if err != nil {
-		debugf("findProjectByID: no grove found with ID %s: %v", hubCtx.ProjectID, err)
+		debugf("findProjectByID: no project found with ID %s: %v", hubCtx.ProjectID, err)
 		return nil
 	}
-	return grove
+	return project
 }
 
-// findMatchingProjects finds groves with the same name on the Hub.
+// findMatchingProjects finds projects with the same name on the Hub.
 func findMatchingProjects(ctx context.Context, hubCtx *HubContext, projectName string) ([]ProjectMatch, error) {
 	ctxTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -1205,7 +1205,7 @@ func findMatchingProjects(ctx context.Context, hubCtx *HubContext, projectName s
 		Name: projectName,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to search for matching groves: %w", err)
+		return nil, fmt.Errorf("failed to search for matching projects: %w", err)
 	}
 
 	var matches []ProjectMatch
@@ -1221,8 +1221,8 @@ func findMatchingProjects(ctx context.Context, hubCtx *HubContext, projectName s
 	return matches, nil
 }
 
-// registerProject registers the grove with the Hub.
-func registerProject(ctx context.Context, hubCtx *HubContext, groveName string, isGlobal bool) error {
+// registerProject registers the project with the Hub.
+func registerProject(ctx context.Context, hubCtx *HubContext, projectName string, isGlobal bool) error {
 	ctxTimeout, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -1240,7 +1240,7 @@ func registerProject(ctx context.Context, hubCtx *HubContext, groveName string, 
 
 	req := &hubclient.RegisterProjectRequest{
 		ID:        hubCtx.ProjectID,
-		Name:      groveName,
+		Name:      projectName,
 		GitRemote: util.NormalizeGitRemote(gitRemote),
 		Path:      hubCtx.ProjectPath,
 		Broker: &hubclient.BrokerInfo{
@@ -1255,7 +1255,7 @@ func registerProject(ctx context.Context, hubCtx *HubContext, groveName string, 
 	}
 
 	// Save the broker token and ID to GLOBAL settings only.
-	// These are broker-level credentials, not grove-specific.
+	// These are broker-level credentials, not project-specific.
 	globalDir, globalErr := config.GetGlobalDir()
 	if globalErr != nil {
 		fmt.Printf("Warning: failed to get global directory: %v\n", globalErr)
@@ -1273,16 +1273,16 @@ func registerProject(ctx context.Context, hubCtx *HubContext, groveName string, 
 	}
 
 	if resp.Created {
-		fmt.Printf("Created new grove: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
+		fmt.Printf("Created new project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	} else {
-		fmt.Printf("Linked to existing grove: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
+		fmt.Printf("Linked to existing project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	}
-	// Store the hub grove ID separately if it differs from the local grove_id.
-	// Don't overwrite grove_id — for git groves it's a deterministic UUID v5
+	// Store the hub project ID separately if it differs from the local project_id.
+	// Don't overwrite project_id — for git projects it's a deterministic UUID v5
 	// and changing it shifts the external config directory, orphaning settings.
 	if resp.Project.ID != hubCtx.ProjectID {
 		if err := config.UpdateSetting(hubCtx.ProjectPath, "hub.groveId", resp.Project.ID, isGlobal); err != nil {
-			fmt.Printf("Warning: failed to save hub grove ID: %v\n", err)
+			fmt.Printf("Warning: failed to save hub project ID: %v\n", err)
 		} else {
 			hubCtx.ProjectID = resp.Project.ID
 		}
@@ -1294,8 +1294,8 @@ func registerProject(ctx context.Context, hubCtx *HubContext, groveName string, 
 	return nil
 }
 
-// getProjectName returns a human-readable grove name.
-func getProjectName(grovePath string, isGlobal bool) string {
+// getProjectName returns a human-readable project name.
+func getProjectName(projectPath string, isGlobal bool) string {
 	if isGlobal {
 		return "global"
 	}
@@ -1303,7 +1303,7 @@ func getProjectName(grovePath string, isGlobal bool) string {
 	if gitRemote != "" {
 		return util.ExtractRepoName(gitRemote)
 	}
-	return config.GetProjectName(grovePath)
+	return config.GetProjectName(projectPath)
 }
 
 // getEndpoint returns the Hub endpoint from settings.
@@ -1403,14 +1403,14 @@ func containsIgnoreCase(s, substr string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
 }
 
-// cleanupProjectBrokerCredentials removes stale broker credentials from grove settings.
-// These should only exist in global settings, not grove-specific.
-// Earlier versions of scion incorrectly wrote them to grove settings.
+// cleanupProjectBrokerCredentials removes stale broker credentials from project settings.
+// These should only exist in global settings, not project-specific.
+// Earlier versions of scion incorrectly wrote them to project settings.
 //
 // For legacy files: removes hub.brokerId and hub.brokerToken
 // For v1 files: removes server.broker.broker_id and server.broker.broker_token
-func cleanupProjectBrokerCredentials(grovePath string) {
-	settingsPath := config.GetSettingsPath(grovePath)
+func cleanupProjectBrokerCredentials(projectPath string) {
+	settingsPath := config.GetSettingsPath(projectPath)
 	if settingsPath == "" {
 		return
 	}
@@ -1430,9 +1430,9 @@ func cleanupProjectBrokerCredentials(grovePath string) {
 			return
 		}
 
-		vs, err := config.LoadSingleFileVersioned(grovePath)
+		vs, err := config.LoadSingleFileVersioned(projectPath)
 		if err != nil {
-			debugf("Warning: failed to load v1 grove settings: %v", err)
+			debugf("Warning: failed to load v1 project settings: %v", err)
 			return
 		}
 
@@ -1444,19 +1444,19 @@ func cleanupProjectBrokerCredentials(grovePath string) {
 		if vs.Server.Broker.BrokerID != "" {
 			vs.Server.Broker.BrokerID = ""
 			modified = true
-			debugf("Removed stale server.broker.broker_id from grove settings")
+			debugf("Removed stale server.broker.broker_id from project settings")
 		}
 		if vs.Server.Broker.BrokerToken != "" {
 			vs.Server.Broker.BrokerToken = ""
 			modified = true
-			debugf("Removed stale server.broker.broker_token from grove settings")
+			debugf("Removed stale server.broker.broker_token from project settings")
 		}
 
 		if !modified {
 			return
 		}
 
-		if err := config.SaveVersionedSettings(grovePath, vs); err != nil {
+		if err := config.SaveVersionedSettings(projectPath, vs); err != nil {
 			debugf("Warning: failed to write cleaned v1 settings: %v", err)
 		}
 		return
@@ -1475,12 +1475,12 @@ func cleanupProjectBrokerCredentials(grovePath string) {
 
 	if isYAML {
 		if err := yaml.Unmarshal(data, &settings); err != nil {
-			debugf("Warning: failed to parse grove settings YAML: %v", err)
+			debugf("Warning: failed to parse project settings YAML: %v", err)
 			return
 		}
 	} else {
 		if err := util.UnmarshalJSONC(data, &settings); err != nil {
-			debugf("Warning: failed to parse grove settings JSON: %v", err)
+			debugf("Warning: failed to parse project settings JSON: %v", err)
 			return
 		}
 	}
@@ -1494,12 +1494,12 @@ func cleanupProjectBrokerCredentials(grovePath string) {
 	if _, hasHostId := hubSection["brokerId"]; hasHostId {
 		delete(hubSection, "brokerId")
 		modified = true
-		debugf("Removed stale hub.brokerId from grove settings")
+		debugf("Removed stale hub.brokerId from project settings")
 	}
 	if _, hasHostToken := hubSection["brokerToken"]; hasHostToken {
 		delete(hubSection, "brokerToken")
 		modified = true
-		debugf("Removed stale hub.brokerToken from grove settings")
+		debugf("Removed stale hub.brokerToken from project settings")
 	}
 
 	if !modified {
