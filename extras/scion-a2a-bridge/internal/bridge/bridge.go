@@ -272,9 +272,9 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 			b.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
 		}
 		// Subscribe to legacy grove topic as well during transition.
-		grovePattern := fmt.Sprintf("scion.grove.%s.user.%s.messages", agentCtx.ProjectID, b.config.Hub.User)
-		if err := b.broker.RequestSubscription(grovePattern); err != nil {
-			b.log.Warn("failed to request legacy subscription", "pattern", grovePattern, "error", err)
+		legacyPattern := fmt.Sprintf("scion.grove.%s.user.%s.messages", agentCtx.ProjectID, b.config.Hub.User)
+		if err := b.broker.RequestSubscription(legacyPattern); err != nil {
+			b.log.Warn("failed to request legacy subscription", "pattern", legacyPattern, "error", err)
 		}
 	}
 

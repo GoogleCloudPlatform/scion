@@ -33,12 +33,12 @@ type UserMapping struct {
 	RegisteredBy   string // "auto" or "manual"
 }
 
-// SpaceLink associates a platform space/channel with a grove.
+// SpaceLink associates a platform space/channel with a project.
 type SpaceLink struct {
 	SpaceID      string
 	Platform     string
-	GroveID      string
-	GroveSlug    string
+	ProjectID    string
+	ProjectSlug  string
 	LinkedBy     string
 	LinkedAt     time.Time
 	DefaultAgent string
@@ -49,7 +49,7 @@ type AgentSubscription struct {
 	PlatformUserID string
 	Platform       string
 	AgentID        string
-	GroveID        string
+	ProjectID      string
 	Activities     string // Comma-separated; empty = all
 	SubscribedAt   time.Time
 }
@@ -264,7 +264,7 @@ func (s *Store) GetSpaceLink(spaceID, platform string) (*SpaceLink, error) {
 		`SELECT space_id, platform, grove_id, grove_slug, linked_by, linked_at, default_agent
 		 FROM space_links WHERE space_id = ? AND platform = ?`,
 		spaceID, platform,
-	).Scan(&l.SpaceID, &l.Platform, &l.GroveID, &l.GroveSlug, &l.LinkedBy, &l.LinkedAt, &l.DefaultAgent)
+	).Scan(&l.SpaceID, &l.Platform, &l.ProjectID, &l.ProjectSlug, &l.LinkedBy, &l.LinkedAt, &l.DefaultAgent)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -279,7 +279,7 @@ func (s *Store) SetSpaceLink(l *SpaceLink) error {
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO space_links (space_id, platform, grove_id, grove_slug, linked_by, linked_at, default_agent)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		l.SpaceID, l.Platform, l.GroveID, l.GroveSlug, l.LinkedBy, l.LinkedAt, l.DefaultAgent,
+		l.SpaceID, l.Platform, l.ProjectID, l.ProjectSlug, l.LinkedBy, l.LinkedAt, l.DefaultAgent,
 	)
 	if err != nil {
 		return fmt.Errorf("set space link: %w", err)
@@ -312,7 +312,7 @@ func (s *Store) ListSpaceLinks() ([]SpaceLink, error) {
 	var links []SpaceLink
 	for rows.Next() {
 		var l SpaceLink
-		if err := rows.Scan(&l.SpaceID, &l.Platform, &l.GroveID, &l.GroveSlug, &l.LinkedBy, &l.LinkedAt, &l.DefaultAgent); err != nil {
+		if err := rows.Scan(&l.SpaceID, &l.Platform, &l.ProjectID, &l.ProjectSlug, &l.LinkedBy, &l.LinkedAt, &l.DefaultAgent); err != nil {
 			return nil, fmt.Errorf("scan space link: %w", err)
 		}
 		links = append(links, l)
@@ -340,13 +340,13 @@ func (s *Store) ClearDefaultAgent(spaceID, platform string) error {
 // --- Agent Subscriptions ---
 
 // GetAgentSubscription returns the subscription for the given user, agent, and grove, or nil, nil if not found.
-func (s *Store) GetAgentSubscription(platformUserID, platform, agentID, groveID string) (*AgentSubscription, error) {
+func (s *Store) GetAgentSubscription(platformUserID, platform, agentID, projectID string) (*AgentSubscription, error) {
 	sub := &AgentSubscription{}
 	err := s.db.QueryRow(
 		`SELECT platform_user_id, platform, agent_id, grove_id, activities, subscribed_at
 		 FROM agent_subscriptions WHERE platform_user_id = ? AND platform = ? AND agent_id = ? AND grove_id = ?`,
-		platformUserID, platform, agentID, groveID,
-	).Scan(&sub.PlatformUserID, &sub.Platform, &sub.AgentID, &sub.GroveID, &sub.Activities, &sub.SubscribedAt)
+		platformUserID, platform, agentID, projectID,
+	).Scan(&sub.PlatformUserID, &sub.Platform, &sub.AgentID, &sub.ProjectID, &sub.Activities, &sub.SubscribedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -361,7 +361,7 @@ func (s *Store) SetAgentSubscription(sub *AgentSubscription) error {
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO agent_subscriptions (platform_user_id, platform, agent_id, grove_id, activities, subscribed_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		sub.PlatformUserID, sub.Platform, sub.AgentID, sub.GroveID, sub.Activities, sub.SubscribedAt,
+		sub.PlatformUserID, sub.Platform, sub.AgentID, sub.ProjectID, sub.Activities, sub.SubscribedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("set agent subscription: %w", err)
@@ -370,10 +370,10 @@ func (s *Store) SetAgentSubscription(sub *AgentSubscription) error {
 }
 
 // DeleteAgentSubscription removes an agent subscription scoped to a specific grove.
-func (s *Store) DeleteAgentSubscription(platformUserID, platform, agentID, groveID string) error {
+func (s *Store) DeleteAgentSubscription(platformUserID, platform, agentID, projectID string) error {
 	_, err := s.db.Exec(
 		`DELETE FROM agent_subscriptions WHERE platform_user_id = ? AND platform = ? AND agent_id = ? AND grove_id = ?`,
-		platformUserID, platform, agentID, groveID,
+		platformUserID, platform, agentID, projectID,
 	)
 	if err != nil {
 		return fmt.Errorf("delete agent subscription: %w", err)
@@ -382,11 +382,11 @@ func (s *Store) DeleteAgentSubscription(platformUserID, platform, agentID, grove
 }
 
 // ListAgentSubscriptions returns all subscriptions for the given agent and grove.
-func (s *Store) ListAgentSubscriptions(agentID, groveID string) ([]AgentSubscription, error) {
+func (s *Store) ListAgentSubscriptions(agentID, projectID string) ([]AgentSubscription, error) {
 	rows, err := s.db.Query(
 		`SELECT platform_user_id, platform, agent_id, grove_id, activities, subscribed_at
 		 FROM agent_subscriptions WHERE agent_id = ? AND grove_id = ?`,
-		agentID, groveID,
+		agentID, projectID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list agent subscriptions: %w", err)
@@ -396,7 +396,7 @@ func (s *Store) ListAgentSubscriptions(agentID, groveID string) ([]AgentSubscrip
 	var subs []AgentSubscription
 	for rows.Next() {
 		var sub AgentSubscription
-		if err := rows.Scan(&sub.PlatformUserID, &sub.Platform, &sub.AgentID, &sub.GroveID, &sub.Activities, &sub.SubscribedAt); err != nil {
+		if err := rows.Scan(&sub.PlatformUserID, &sub.Platform, &sub.AgentID, &sub.ProjectID, &sub.Activities, &sub.SubscribedAt); err != nil {
 			return nil, fmt.Errorf("scan agent subscription: %w", err)
 		}
 		subs = append(subs, sub)
@@ -419,7 +419,7 @@ func (s *Store) ListUserSubscriptions(platformUserID, platform string) ([]AgentS
 	var subs []AgentSubscription
 	for rows.Next() {
 		var sub AgentSubscription
-		if err := rows.Scan(&sub.PlatformUserID, &sub.Platform, &sub.AgentID, &sub.GroveID, &sub.Activities, &sub.SubscribedAt); err != nil {
+		if err := rows.Scan(&sub.PlatformUserID, &sub.Platform, &sub.AgentID, &sub.ProjectID, &sub.Activities, &sub.SubscribedAt); err != nil {
 			return nil, fmt.Errorf("scan user subscription: %w", err)
 		}
 		subs = append(subs, sub)

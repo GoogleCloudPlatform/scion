@@ -19,10 +19,10 @@ func newTestStore(t *testing.T) *Store {
 	return s
 }
 
-func TestSetAgentSubscription_CrossGroveIsolation(t *testing.T) {
+func TestSetAgentSubscription_CrossProjectIsolation(t *testing.T) {
 	s := newTestStore(t)
 
-	// Same user subscribes to same-named agent in two groves.
+	// Same user subscribes to same-named agent in two projects.
 	subA := &AgentSubscription{
 		PlatformUserID: "user-1",
 		Platform:       "googlechat",
@@ -69,10 +69,10 @@ func TestSetAgentSubscription_CrossGroveIsolation(t *testing.T) {
 	}
 }
 
-func TestDeleteAgentSubscription_GroveScoped(t *testing.T) {
+func TestDeleteAgentSubscription_ProjectScoped(t *testing.T) {
 	s := newTestStore(t)
 
-	// Same user, same agent, two groves.
+	// Same user, same agent, two projects.
 	subA := &AgentSubscription{
 		PlatformUserID: "user-1",
 		Platform:       "googlechat",
@@ -134,7 +134,7 @@ func TestDeleteAgentSubscription_GroveScoped(t *testing.T) {
 	}
 }
 
-func TestListAgentSubscriptions_GroveScoped(t *testing.T) {
+func TestListAgentSubscriptions_ProjectScoped(t *testing.T) {
 	s := newTestStore(t)
 
 	for _, sub := range []*AgentSubscription{
@@ -209,7 +209,7 @@ func TestMigrateAgentSubscriptionsPK_PreservesData(t *testing.T) {
 		t.Errorf("activities = %q, want %q", got.Activities, "COMPLETED")
 	}
 
-	// Verify that cross-grove now works (old PK would have clobbered).
+	// Verify that cross-project now works (old PK would have clobbered).
 	if err := s2.SetAgentSubscription(&AgentSubscription{
 		PlatformUserID: "user-1",
 		Platform:       "googlechat",
@@ -217,13 +217,13 @@ func TestMigrateAgentSubscriptionsPK_PreservesData(t *testing.T) {
 		ProjectID:      "grove-B",
 		Activities:     "ERROR",
 	}); err != nil {
-		t.Fatalf("set cross-grove sub: %v", err)
+		t.Fatalf("set cross-project sub: %v", err)
 	}
 
 	gotA, _ := s2.GetAgentSubscription("user-1", "googlechat", "deploy", "grove-A")
 	gotB, _ := s2.GetAgentSubscription("user-1", "googlechat", "deploy", "grove-B")
 	if gotA == nil || gotB == nil {
-		t.Fatal("cross-grove subscriptions should coexist after migration")
+		t.Fatal("cross-project subscriptions should coexist after migration")
 	}
 }
 

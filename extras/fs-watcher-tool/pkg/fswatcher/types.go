@@ -39,7 +39,7 @@ type Event struct {
 
 // Config holds the watcher configuration parsed from CLI flags.
 type Config struct {
-	Grove      string
+	Project    string
 	WatchDirs  []string
 	LogFile    string
 	LabelKey   string

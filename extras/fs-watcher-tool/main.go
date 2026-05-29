@@ -40,7 +40,7 @@ func (s *stringSlice) Set(v string) error {
 
 func main() {
 	var (
-		grove      string
+		project    string
 		watchDirs  stringSlice
 		logFile    string
 		labelKey   string
@@ -51,7 +51,7 @@ func main() {
 		debug      bool
 	)
 
-	flag.StringVar(&grove, "grove", "", "Grove ID — auto-discover agent directories via Docker labels")
+	flag.StringVar(&project, "grove", "", "Project ID — auto-discover agent directories via Docker labels")
 	flag.Var(&watchDirs, "watch", "Directory to watch explicitly (repeatable)")
 	flag.StringVar(&logFile, "log", "-", "Output log file path (- for stdout)")
 	flag.StringVar(&labelKey, "label-key", "scion.name", "Docker label key to use as agent ID")
@@ -62,7 +62,7 @@ func main() {
 	flag.BoolVar(&debug, "debug", false, "Enable verbose debug logging to stderr")
 	flag.Parse()
 
-	if grove == "" && len(watchDirs) == 0 {
+	if project == "" && len(watchDirs) == 0 {
 		fmt.Fprintln(os.Stderr, "error: at least one of --grove or --watch is required")
 		flag.Usage()
 		os.Exit(1)
@@ -74,7 +74,7 @@ func main() {
 	}
 
 	cfg := fswatcher.Config{
-		Grove:      grove,
+		Project:    project,
 		WatchDirs:  watchDirs,
 		LogFile:    logFile,
 		LabelKey:   labelKey,
@@ -149,26 +149,26 @@ func run(cfg fswatcher.Config) error {
 	roots := make([]string, len(cfg.WatchDirs))
 	copy(roots, cfg.WatchDirs)
 
-	var groveDiscovery *fswatcher.GroveDiscovery
-	if cfg.Grove != "" {
-		groveDiscovery = fswatcher.NewProjectDiscovery(dockerClient, cfg.Grove, cfg.Debug)
-		groveDirs, err := groveDiscovery.Discover(ctx)
+	var projectDiscovery *fswatcher.ProjectDiscovery
+	if cfg.Project != "" {
+		projectDiscovery = fswatcher.NewProjectDiscovery(dockerClient, cfg.Project, cfg.Debug)
+		projectDirs, err := projectDiscovery.Discover(ctx)
 		if err != nil {
-			return fmt.Errorf("grove discovery: %w", err)
+			return fmt.Errorf("project discovery: %w", err)
 		}
-		roots = append(roots, groveDirs...)
+		roots = append(roots, projectDirs...)
 	}
 
-	if len(roots) == 0 && groveDiscovery == nil {
+	if len(roots) == 0 && projectDiscovery == nil {
 		return fmt.Errorf("no directories to watch (no --watch paths specified)")
 	}
 	if len(roots) == 0 {
-		log.Printf("no agent containers running yet for grove %q; waiting for containers to start", cfg.Grove)
+		log.Printf("no agent containers running yet for project %q; waiting for containers to start", cfg.Project)
 	}
 
 	if cfg.Debug {
-		log.Printf("[config] grove=%q, label-key=%q, debounce=%s, cache-ttl=%s",
-			cfg.Grove, cfg.LabelKey, cfg.Debounce, cfg.CacheTTL)
+		log.Printf("[config] project=%q, label-key=%q, debounce=%s, cache-ttl=%s",
+			cfg.Project, cfg.LabelKey, cfg.Debounce, cfg.CacheTTL)
 		log.Printf("[config] ignore patterns: %v", cfg.Ignore)
 		if cfg.FilterFile != "" {
 			log.Printf("[config] filter file: %s", cfg.FilterFile)
@@ -182,11 +182,11 @@ func run(cfg fswatcher.Config) error {
 	// Build and start watcher.
 	watcher := fswatcher.NewWatcher(cfg, roots, filter, resolver, logger)
 
-	// Subscribe to container events for cache updates and dynamic grove discovery.
+	// Subscribe to container events for cache updates and dynamic project discovery.
 	var onStart func(string)
-	if groveDiscovery != nil {
+	if projectDiscovery != nil {
 		onStart = func(containerID string) {
-			dir, err := groveDiscovery.DiscoverForContainer(ctx, containerID)
+			dir, err := projectDiscovery.DiscoverForContainer(ctx, containerID)
 			if err != nil || dir == "" {
 				return
 			}
@@ -194,7 +194,7 @@ func run(cfg fswatcher.Config) error {
 			if err != nil {
 				log.Printf("warning: failed to add watch for new container dir %s: %v", dir, err)
 			} else if added && cfg.Debug {
-				log.Printf("[grove] added watch for new container dir: %s", dir)
+				log.Printf("[project] added watch for new container dir: %s", dir)
 			}
 		}
 	}

@@ -46,7 +46,7 @@ func NewNotificationRelay(store *state.Store, messenger Messenger, log *slog.Log
 //
 // Expected topic:
 //
-//	scion.grove.<groveID>.user.<userID>.messages  — user-targeted message
+//	scion.grove.<projectID>.user.<userID>.messages  — user-targeted message
 func (n *NotificationRelay) HandleBrokerMessage(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	// Strip the "scion." prefix used by the broker topic hierarchy.
 	normalized := strings.TrimPrefix(topic, "scion.")
@@ -61,8 +61,8 @@ func (n *NotificationRelay) HandleBrokerMessage(ctx context.Context, topic strin
 	// commands). All other topics (agent-to-agent, broadcasts, etc.) are
 	// dropped so that harness terminal output does not leak into chat.
 	if parts[0] == "grove" && len(parts) >= 5 && parts[2] == "user" {
-		groveID := parts[1]
-		return n.handleUserMessage(ctx, groveID, msg)
+		projectID := parts[1]
+		return n.handleUserMessage(ctx, projectID, msg)
 	}
 
 	n.log.Debug("ignoring non-user-targeted topic", "topic", topic)
@@ -70,15 +70,15 @@ func (n *NotificationRelay) HandleBrokerMessage(ctx context.Context, topic strin
 }
 
 // handleAgentNotification renders an agent status notification as a card in linked spaces.
-func (n *NotificationRelay) handleAgentNotification(ctx context.Context, groveID string, msg *messages.StructuredMessage) error {
-	// Find all spaces linked to this grove
+func (n *NotificationRelay) handleAgentNotification(ctx context.Context, projectID string, msg *messages.StructuredMessage) error {
+	// Find all spaces linked to this project
 	links, err := n.store.ListSpaceLinks()
 	if err != nil {
 		return fmt.Errorf("listing space links: %w", err)
 	}
 
 	for _, link := range links {
-		if link.GroveID != groveID {
+		if link.ProjectID != projectID {
 			continue
 		}
 
@@ -100,7 +100,7 @@ func (n *NotificationRelay) handleAgentNotification(ctx context.Context, groveID
 		if _, err := n.messenger.SendCard(ctx, link.SpaceID, card); err != nil {
 			n.log.Error("failed to send notification card",
 				"space_id", link.SpaceID,
-				"grove_id", groveID,
+				"project_id", projectID,
 				"error", err,
 			)
 			// Continue to other spaces
@@ -112,10 +112,10 @@ func (n *NotificationRelay) handleAgentNotification(ctx context.Context, groveID
 
 // handleUserMessage relays a user-targeted message to chat.
 // It maps the Hub user ID (RecipientID) back to a chat platform user and delivers
-// the message to all spaces linked to the grove. Direct messages from agents do
+// the message to all spaces linked to the project. Direct messages from agents do
 // not require the user to have any subscriptions — subscriptions only control
 // @mentions in agent notification broadcasts.
-func (n *NotificationRelay) handleUserMessage(ctx context.Context, groveID string, msg *messages.StructuredMessage) error {
+func (n *NotificationRelay) handleUserMessage(ctx context.Context, projectID string, msg *messages.StructuredMessage) error {
 	if msg.RecipientID == "" {
 		n.log.Debug("user message has no recipient ID, skipping relay")
 		return nil
@@ -131,7 +131,7 @@ func (n *NotificationRelay) handleUserMessage(ctx context.Context, groveID strin
 			"sender", msg.Sender,
 			"recipient_id", msg.RecipientID,
 		)
-		return n.handleAgentNotification(ctx, groveID, msg)
+		return n.handleAgentNotification(ctx, projectID, msg)
 	}
 
 	// Look up the chat platform user for this Hub user
@@ -152,14 +152,14 @@ func (n *NotificationRelay) handleUserMessage(ctx context.Context, groveID strin
 		agentSlug = agentSlug[idx+1:]
 	}
 
-	// Find spaces linked to the grove from the message topic
+	// Find spaces linked to the project from the message topic
 	links, err := n.store.ListSpaceLinks()
 	if err != nil {
 		return fmt.Errorf("listing space links: %w", err)
 	}
 
 	for _, link := range links {
-		if link.GroveID != groveID || link.Platform != mapping.Platform {
+		if link.ProjectID != projectID || link.Platform != mapping.Platform {
 			continue
 		}
 
@@ -321,7 +321,7 @@ func (n *NotificationRelay) getSubscriberMentions(msg *messages.StructuredMessag
 		agentSlug = agentSlug[idx+1:]
 	}
 
-	subs, err := n.store.ListAgentSubscriptions(agentSlug, link.GroveID)
+	subs, err := n.store.ListAgentSubscriptions(agentSlug, link.ProjectID)
 	if err != nil {
 		n.log.Error("listing agent subscriptions", "error", err)
 		return ""
@@ -368,8 +368,8 @@ func (n *NotificationRelay) buildMentions(recipientPlatformID, agentSlug string,
 	seen := map[string]bool{recipientPlatformID: true}
 	mentions := []string{fmt.Sprintf("<%s>", recipientPlatformID)}
 
-	// Add subscribers for this agent/grove, skipping the recipient to avoid duplication
-	subs, err := n.store.ListAgentSubscriptions(agentSlug, link.GroveID)
+	// Add subscribers for this agent/project, skipping the recipient to avoid duplication
+	subs, err := n.store.ListAgentSubscriptions(agentSlug, link.ProjectID)
 	if err != nil {
 		n.log.Error("listing agent subscriptions for mentions", "error", err)
 		return strings.Join(mentions, " ")

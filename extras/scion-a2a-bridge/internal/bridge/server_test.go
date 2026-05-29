@@ -50,7 +50,7 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server, *state.Store) {
 			Scheme: "apiKey",
 			APIKey: "test-api-key",
 		},
-		Projects: []GroveConfig{
+		Projects: []ProjectConfig{
 			{
 				Slug:          "test-grove",
 				ExposedAgents: []string{"test-agent"},
@@ -214,7 +214,7 @@ func TestPerAgentCardUnknownProject(t *testing.T) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("status = %d, want 404 for unknown grove", resp.StatusCode)
+		t.Errorf("status = %d, want 404 for unknown project", resp.StatusCode)
 	}
 }
 
@@ -316,7 +316,7 @@ func TestCancelTaskSuccess(t *testing.T) {
 			Provider:    ProviderConfig{Organization: "Test Org", URL: "https://test.example.com"},
 		},
 		Auth: AuthConfig{Scheme: "apiKey", APIKey: "test-api-key"},
-		Projects: []GroveConfig{
+		Projects: []ProjectConfig{
 			{Slug: "test-grove", ExposedAgents: []string{"test-agent"}},
 		},
 	}
@@ -367,7 +367,7 @@ func TestCancelTaskAlreadyTerminal(t *testing.T) {
 	cfg := &Config{
 		Bridge:   BridgeConfig{ExternalURL: "https://a2a.test.example.com"},
 		Auth:     AuthConfig{Scheme: "apiKey", APIKey: "test-api-key"},
-		Projects: []GroveConfig{{Slug: "test-grove", ExposedAgents: []string{"test-agent"}}},
+		Projects: []ProjectConfig{{Slug: "test-grove", ExposedAgents: []string{"test-agent"}}},
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -687,10 +687,10 @@ func TestAuthorizeTaskReturnsNilNil(t *testing.T) {
 		t.Errorf("AuthorizeTask(nonexistent) = (%v, %v), want (nil, nil)", task, err)
 	}
 
-	// Task exists but wrong grove returns (nil, nil) — no existence leak.
+	// Task exists but wrong project returns (nil, nil) — no existence leak.
 	task, err = b.AuthorizeTask("owned-task", "grove-b", "agent-x")
 	if task != nil || err != nil {
-		t.Errorf("AuthorizeTask(wrong grove) = (%v, %v), want (nil, nil)", task, err)
+		t.Errorf("AuthorizeTask(wrong project) = (%v, %v), want (nil, nil)", task, err)
 	}
 
 	// Task exists but wrong agent returns (nil, nil).
@@ -699,7 +699,7 @@ func TestAuthorizeTaskReturnsNilNil(t *testing.T) {
 		t.Errorf("AuthorizeTask(wrong agent) = (%v, %v), want (nil, nil)", task, err)
 	}
 
-	// Correct grove and agent returns the task.
+	// Correct project and agent returns the task.
 	task, err = b.AuthorizeTask("owned-task", "grove-a", "agent-x")
 	if err != nil {
 		t.Fatalf("AuthorizeTask(correct owner) error: %v", err)
@@ -739,12 +739,12 @@ func TestJSONRPCDeniesNonExposedAgent(t *testing.T) {
 			}
 		})
 
-		t.Run("unknown-grove/"+method, func(t *testing.T) {
+		t.Run("unknown-project/"+method, func(t *testing.T) {
 			rpcResp := doRPC(t, ts, "/projects/unknown-grove/agents/test-agent/jsonrpc",
 				method, map[string]string{"id": "x"}, "test-api-key")
 
 			if rpcResp.Error == nil {
-				t.Fatalf("expected error for unknown grove on %s", method)
+				t.Fatalf("expected error for unknown project on %s", method)
 			}
 			if rpcResp.Error.Code != ErrCodeInvalidParams {
 				t.Errorf("error code = %d, want %d", rpcResp.Error.Code, ErrCodeInvalidParams)

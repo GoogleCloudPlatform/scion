@@ -79,7 +79,7 @@ func NewWatcher(cfg Config, roots []string, filter *Filter, resolver *Resolver, 
 	}
 }
 
-// AddRoot adds a new watch directory at runtime (used for dynamic grove discovery).
+// AddRoot adds a new watch directory at runtime (used for dynamic project discovery).
 func (w *Watcher) AddRoot(dir string) (bool, error) {
 	w.mu.Lock()
 	for _, r := range w.roots {

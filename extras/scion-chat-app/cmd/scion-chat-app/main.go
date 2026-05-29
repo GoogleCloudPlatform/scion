@@ -156,7 +156,7 @@ func main() {
 	}
 	log.Info("hub client initialized", "endpoint", cfg.Hub.Endpoint, "admin_user", cfg.Hub.User)
 
-	// Verify hub connectivity by minting a token and listing groves.
+	// Verify hub connectivity by minting a token and listing projects.
 	verifyHubConnectivity(context.Background(), log, minter, signingKey, cfg.Hub.User, cfg.Hub.Endpoint, adminClient)
 
 	// Create identity mapper.
@@ -238,7 +238,7 @@ func main() {
 	relay := chatapp.NewNotificationRelay(store, messenger, log.With("component", "notifications"))
 	broker.SetHandler(relay.HandleBrokerMessage)
 
-	// Load existing space-grove links and request broker subscriptions.
+	// Load existing space-project links and request broker subscriptions.
 	links, err := store.ListSpaceLinks()
 	if err != nil {
 		log.Error("failed to load space links", "error", err)
@@ -246,15 +246,15 @@ func main() {
 		for _, link := range links {
 			// Subscribe only to user-targeted messages so that agent-to-agent
 			// traffic and broadcasts do not leak into chat.
-			pattern := fmt.Sprintf("scion.grove.%s.user.>", link.GroveID)
+			pattern := fmt.Sprintf("scion.grove.%s.user.>", link.ProjectID)
 			if err := broker.RequestSubscription(pattern); err != nil {
-				log.Warn("failed to request subscription for grove",
-					"grove_id", link.GroveID,
+				log.Warn("failed to request subscription for project",
+					"project_id", link.ProjectID,
 					"error", err,
 				)
 			}
 		}
-		log.Info("loaded existing space-grove links", "count", len(links))
+		log.Info("loaded existing space-project links", "count", len(links))
 	}
 
 	// Start platform servers.
@@ -303,7 +303,7 @@ func main() {
 
 // verifyHubConnectivity performs a startup connectivity check against the hub.
 // It mints a fresh admin JWT, logs the token details for debugging, and
-// attempts to list groves. This catches signing key mismatches early, before
+// attempts to list projects. This catches signing key mismatches early, before
 // any chat-event-driven flow exercises the auth path.
 func verifyHubConnectivity(ctx context.Context, log *slog.Logger, minter *identity.TokenMinter, signingKey []byte, hubUser, hubEndpoint string, adminClient hubclient.Client) {
 	log = log.With("component", "hub-verify")
@@ -391,22 +391,22 @@ func verifyHubConnectivity(ctx context.Context, log *slog.Logger, minter *identi
 	}
 
 	// Step 5: Also exercise the typed client to confirm the hubclient layer works.
-	log.Info("hub-verify: listing groves via hubclient...")
+	log.Info("hub-verify: listing projects via hubclient...")
 	listCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	grovesResp, err := adminClient.Groves().List(listCtx, nil)
+	projectsResp, err := adminClient.Projects().List(listCtx, nil)
 	if err != nil {
-		log.Error("hub-verify: hubclient.Groves().List() failed", "error", err)
+		log.Error("hub-verify: hubclient.Projects().List() failed", "error", err)
 		log.Error("=== hub connectivity check: FAILED ===")
 		return
 	}
 
-	log.Info("hub-verify: hubclient grove list succeeded",
-		"grove_count", len(grovesResp.Groves),
+	log.Info("hub-verify: hubclient project list succeeded",
+		"project_count", len(projectsResp.Projects),
 	)
-	for i, g := range grovesResp.Groves {
-		log.Info("hub-verify: grove",
+	for i, g := range projectsResp.Projects {
+		log.Info("hub-verify: project",
 			"index", i,
 			"id", g.ID,
 			"name", g.Name,

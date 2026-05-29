@@ -233,7 +233,7 @@ func (r *CommandRouter) handleMessage(ctx context.Context, event *ChatEvent) err
 		return fmt.Errorf("getting space link: %w", err)
 	}
 	if link == nil {
-		return r.reply(ctx, event, "This space is not linked to a grove. Use `/scionAdmin link <grove-slug>` to link it.")
+		return r.reply(ctx, event, "This space is not linked to a project. Use `/scionAdmin link <project-slug>` to link it.")
 	}
 
 	// Try to resolve the user
@@ -304,7 +304,7 @@ func (r *CommandRouter) handleDialogSubmit(ctx context.Context, event *ChatEvent
 			return fmt.Errorf("getting space link: %w", err)
 		}
 		if link == nil {
-			return r.reply(ctx, event, "This space is not linked to a grove.")
+			return r.reply(ctx, event, "This space is not linked to a project.")
 		}
 
 		client, err := r.clientForUser(ctx, event)
@@ -312,7 +312,7 @@ func (r *CommandRouter) handleDialogSubmit(ctx context.Context, event *ChatEvent
 			return r.reply(ctx, event, "Authentication required. Use `/scionAdmin register` first.")
 		}
 
-		if err := client.GroveAgents(link.GroveID).SendMessage(ctx, agentID, responseText, false); err != nil {
+		if err := client.ProjectAgents(link.ProjectID).SendMessage(ctx, agentID, responseText, false); err != nil {
 			return r.reply(ctx, event, fmt.Sprintf("Failed to send response to agent: %v", err))
 		}
 		return r.reply(ctx, event, fmt.Sprintf("Response sent to agent `%s`.", agentID))
@@ -339,7 +339,7 @@ func (r *CommandRouter) handleAgentAction(ctx context.Context, event *ChatEvent,
 		return fmt.Errorf("getting space link: %w", err)
 	}
 	if link == nil {
-		return r.reply(ctx, event, "This space is not linked to a grove.")
+		return r.reply(ctx, event, "This space is not linked to a project.")
 	}
 
 	client, err := r.clientForUser(ctx, event)
@@ -347,7 +347,7 @@ func (r *CommandRouter) handleAgentAction(ctx context.Context, event *ChatEvent,
 		return r.reply(ctx, event, "Authentication required. Use `/scionAdmin register` first.")
 	}
 
-	agents := client.GroveAgents(link.GroveID)
+	agents := client.ProjectAgents(link.ProjectID)
 
 	switch verb {
 	case "start":
@@ -399,7 +399,7 @@ func (r *CommandRouter) handleSpaceJoin(ctx context.Context, event *ChatEvent) e
 		r.log.Debug("space join via @mention, deferring to subsequent event")
 		return nil
 	}
-	return r.reply(ctx, event, "Hello! I'm Scion Bot. Use `/scionAdmin link <grove-slug>` to connect this space to a grove, then `/scionAdmin help` for available commands.")
+	return r.reply(ctx, event, "Hello! I'm Scion Bot. Use `/scionAdmin link <project-slug>` to connect this space to a project, then `/scionAdmin help` for available commands.")
 }
 
 // handleSpaceRemove is called when the bot is removed from a space.
@@ -424,29 +424,29 @@ func (r *CommandRouter) cmdList(ctx context.Context, event *ChatEvent, args []st
 		return textResponse(event, "Authentication required. Use `/scionAdmin register` first."), nil
 	}
 
-	// Fetch current grove info from hub to ensure we display the latest slug.
-	grove, err := client.Groves().Get(ctx, link.GroveID)
+	// Fetch current project info from hub to ensure we display the latest slug.
+	proj, err := client.Projects().Get(ctx, link.ProjectID)
 	if err != nil {
-		return textResponse(event, fmt.Sprintf("Failed to get grove info: %v", err)), nil
+		return textResponse(event, fmt.Sprintf("Failed to get project info: %v", err)), nil
 	}
-	if grove.Slug != link.GroveSlug {
-		link.GroveSlug = grove.Slug
+	if proj.Slug != link.ProjectSlug {
+		link.ProjectSlug = proj.Slug
 		if storeErr := r.store.SetSpaceLink(link); storeErr != nil {
-			r.log.Warn("failed to update cached grove slug", "error", storeErr)
+			r.log.Warn("failed to update cached project slug", "error", storeErr)
 		}
 	}
 
-	agents, err := client.GroveAgents(link.GroveID).List(ctx, nil)
+	agents, err := client.ProjectAgents(link.ProjectID).List(ctx, nil)
 	if err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to list agents: %v", err)), nil
 	}
 
 	if len(agents.Agents) == 0 {
-		return textResponse(event, fmt.Sprintf("No agents in grove `%s`.", grove.Slug)), nil
+		return textResponse(event, fmt.Sprintf("No agents in project `%s`.", proj.Slug)), nil
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("*Agents in %s:*\n", grove.Slug))
+	sb.WriteString(fmt.Sprintf("*Agents in %s:*\n", proj.Slug))
 	for _, a := range agents.Agents {
 		status := a.Activity
 		if status == "" {
@@ -479,7 +479,7 @@ func (r *CommandRouter) cmdStatus(ctx context.Context, event *ChatEvent, args []
 		return textResponse(event, "Authentication required. Use `/scionAdmin register` first."), nil
 	}
 
-	agent, err := client.GroveAgents(link.GroveID).Get(ctx, args[0])
+	agent, err := client.ProjectAgents(link.ProjectID).Get(ctx, args[0])
 	if err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to get agent: %v", err)), nil
 	}
@@ -487,7 +487,7 @@ func (r *CommandRouter) cmdStatus(ctx context.Context, event *ChatEvent, args []
 	card := Card{
 		Header: CardHeader{
 			Title:    agent.Name,
-			Subtitle: fmt.Sprintf("Grove: %s | %s", link.GroveSlug, agent.Activity),
+			Subtitle: fmt.Sprintf("Project: %s | %s", link.ProjectSlug, agent.Activity),
 		},
 		Sections: []CardSection{
 			{
@@ -524,7 +524,7 @@ func (r *CommandRouter) cmdStart(ctx context.Context, event *ChatEvent, args []s
 		return textResponse(event, "Authentication required. Use `/scionAdmin register` first."), nil
 	}
 
-	if err := client.GroveAgents(link.GroveID).Start(ctx, args[0]); err != nil {
+	if err := client.ProjectAgents(link.ProjectID).Start(ctx, args[0]); err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to start agent: %v", err)), nil
 	}
 	return textResponse(event, fmt.Sprintf("Agent `%s` started.", args[0])), nil
@@ -545,7 +545,7 @@ func (r *CommandRouter) cmdStop(ctx context.Context, event *ChatEvent, args []st
 		return textResponse(event, "Authentication required. Use `/scionAdmin register` first."), nil
 	}
 
-	if err := client.GroveAgents(link.GroveID).Stop(ctx, args[0]); err != nil {
+	if err := client.ProjectAgents(link.ProjectID).Stop(ctx, args[0]); err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to stop agent: %v", err)), nil
 	}
 	return textResponse(event, fmt.Sprintf("Agent `%s` stopped.", args[0])), nil
@@ -566,7 +566,7 @@ func (r *CommandRouter) cmdCreate(ctx context.Context, event *ChatEvent, args []
 		return textResponse(event, "Authentication required. Use `/scionAdmin register` first."), nil
 	}
 
-	createResp, err := client.GroveAgents(link.GroveID).Create(ctx, &hubclient.CreateAgentRequest{
+	createResp, err := client.ProjectAgents(link.ProjectID).Create(ctx, &hubclient.CreateAgentRequest{
 		Name: args[0],
 	})
 	if err != nil {
@@ -577,7 +577,7 @@ func (r *CommandRouter) cmdCreate(ctx context.Context, event *ChatEvent, args []
 
 func (r *CommandRouter) cmdLink(ctx context.Context, event *ChatEvent, args []string) (*EventResponse, error) {
 	if len(args) == 0 {
-		return textResponse(event, "Usage: `/scionAdmin link <grove-slug>`"), nil
+		return textResponse(event, "Usage: `/scionAdmin link <project-slug>`"), nil
 	}
 
 	mapping, err := r.idMapper.ResolveOrAutoRegister(ctx, &eventUserLookup{event}, event.UserID, event.Platform)
@@ -590,23 +590,23 @@ func (r *CommandRouter) cmdLink(ctx context.Context, event *ChatEvent, args []st
 		return textResponse(event, fmt.Sprintf("Failed to create client: %v", err)), nil
 	}
 
-	// Look up the grove by slug
-	groveList, err := client.Groves().List(ctx, &hubclient.ListGrovesOptions{Slug: args[0]})
+	// Look up the project by slug
+	projectList, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{Slug: args[0]})
 	if err != nil {
-		return textResponse(event, fmt.Sprintf("Failed to look up grove `%s`: %v", args[0], err)), nil
+		return textResponse(event, fmt.Sprintf("Failed to look up project `%s`: %v", args[0], err)), nil
 	}
-	if len(groveList.Groves) == 0 {
-		return textResponse(event, fmt.Sprintf("Grove `%s` not found. Use the grove slug, not the ID.", args[0])), nil
+	if len(projectList.Projects) == 0 {
+		return textResponse(event, fmt.Sprintf("Project `%s` not found. Use the project slug, not the ID.", args[0])), nil
 	}
-	grove := &groveList.Groves[0]
+	proj := &projectList.Projects[0]
 
 	// Save the link
 	link := &state.SpaceLink{
-		SpaceID:   event.SpaceID,
-		Platform:  event.Platform,
-		GroveID:   grove.ID,
-		GroveSlug: grove.Slug,
-		LinkedBy:  mapping.HubUserID,
+		SpaceID:     event.SpaceID,
+		Platform:    event.Platform,
+		ProjectID:   proj.ID,
+		ProjectSlug: proj.Slug,
+		LinkedBy:    mapping.HubUserID,
 	}
 	if err := r.store.SetSpaceLink(link); err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to save link: %v", err)), nil
@@ -615,13 +615,13 @@ func (r *CommandRouter) cmdLink(ctx context.Context, event *ChatEvent, args []st
 	// Subscribe only to user-targeted messages so that agent-to-agent
 	// traffic and broadcasts do not leak into chat.
 	if r.broker != nil {
-		pattern := fmt.Sprintf("scion.grove.%s.user.>", grove.ID)
+		pattern := fmt.Sprintf("scion.grove.%s.user.>", proj.ID)
 		if err := r.broker.RequestSubscription(pattern); err != nil {
-			r.log.Warn("failed to request grove subscription", "grove_id", grove.ID, "error", err)
+			r.log.Warn("failed to request project subscription", "project_id", proj.ID, "error", err)
 		}
 	}
 
-	return textResponse(event, fmt.Sprintf("This space is now linked to grove `%s`.", grove.Slug)), nil
+	return textResponse(event, fmt.Sprintf("This space is now linked to project `%s`.", proj.Slug)), nil
 }
 
 func (r *CommandRouter) cmdUnlink(ctx context.Context, event *ChatEvent, args []string) (*EventResponse, error) {
@@ -630,21 +630,21 @@ func (r *CommandRouter) cmdUnlink(ctx context.Context, event *ChatEvent, args []
 		return nil, fmt.Errorf("getting space link: %w", err)
 	}
 	if link == nil {
-		return textResponse(event, "This space is not linked to any grove."), nil
+		return textResponse(event, "This space is not linked to any project."), nil
 	}
 
 	// Cancel broker subscription (must match the pattern used during link).
 	if r.broker != nil {
-		pattern := fmt.Sprintf("scion.grove.%s.user.>", link.GroveID)
+		pattern := fmt.Sprintf("scion.grove.%s.user.>", link.ProjectID)
 		if err := r.broker.CancelSubscription(pattern); err != nil {
-			r.log.Warn("failed to cancel grove subscription", "grove_id", link.GroveID, "error", err)
+			r.log.Warn("failed to cancel project subscription", "project_id", link.ProjectID, "error", err)
 		}
 	}
 
 	if err := r.store.DeleteSpaceLink(event.SpaceID, event.Platform); err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to unlink: %v", err)), nil
 	}
-	return textResponse(event, fmt.Sprintf("Unlinked from grove `%s`.", link.GroveSlug)), nil
+	return textResponse(event, fmt.Sprintf("Unlinked from project `%s`.", link.ProjectSlug)), nil
 }
 
 func (r *CommandRouter) cmdRegister(ctx context.Context, event *ChatEvent, args []string) (*EventResponse, error) {
@@ -797,7 +797,7 @@ func (r *CommandRouter) showDeleteConfirmation(ctx context.Context, event *ChatE
 		return textResponse(event, "Authentication required. Use `/scionAdmin register` first."), nil
 	}
 
-	agent, err := client.GroveAgents(link.GroveID).Get(ctx, agentSlug)
+	agent, err := client.ProjectAgents(link.ProjectID).Get(ctx, agentSlug)
 	if err != nil {
 		return textResponse(event, fmt.Sprintf("Agent `%s` not found: %v", agentSlug, err)), nil
 	}
@@ -835,7 +835,7 @@ func (r *CommandRouter) executeDelete(ctx context.Context, event *ChatEvent, age
 		return fmt.Errorf("getting space link: %w", err)
 	}
 	if link == nil {
-		return r.reply(ctx, event, "This space is not linked to a grove.")
+		return r.reply(ctx, event, "This space is not linked to a project.")
 	}
 
 	client, err := r.clientForUser(ctx, event)
@@ -843,7 +843,7 @@ func (r *CommandRouter) executeDelete(ctx context.Context, event *ChatEvent, age
 		return r.reply(ctx, event, "Authentication required. Use `/scionAdmin register` first.")
 	}
 
-	if err := client.GroveAgents(link.GroveID).Delete(ctx, agentID, nil); err != nil {
+	if err := client.ProjectAgents(link.ProjectID).Delete(ctx, agentID, nil); err != nil {
 		return r.reply(ctx, event, fmt.Sprintf("Failed to delete agent: %v", err))
 	}
 	return r.reply(ctx, event, fmt.Sprintf("Agent `%s` deleted.", agentID))
@@ -865,7 +865,7 @@ func (r *CommandRouter) cmdLogs(ctx context.Context, event *ChatEvent, args []st
 	}
 
 	opts := &hubclient.GetLogsOptions{Tail: 50}
-	logs, err := client.GroveAgents(link.GroveID).GetLogs(ctx, args[0], opts)
+	logs, err := client.ProjectAgents(link.ProjectID).GetLogs(ctx, args[0], opts)
 	if err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to get logs for `%s`: %v", args[0], err)), nil
 	}
@@ -900,7 +900,7 @@ func (r *CommandRouter) cmdSubscribe(ctx context.Context, event *ChatEvent, args
 			PlatformUserID: event.UserID,
 			Platform:       event.Platform,
 			AgentID:        agentSlug,
-			GroveID:        link.GroveID,
+			ProjectID:        link.ProjectID,
 			Activities:     activities,
 		}
 		if err := r.store.SetAgentSubscription(sub); err != nil {
@@ -910,7 +910,7 @@ func (r *CommandRouter) cmdSubscribe(ctx context.Context, event *ChatEvent, args
 	}
 
 	// Show activity filter dialog with checkboxes
-	filterID := fmt.Sprintf("subscribe.filter.%s.%s", link.GroveID, agentSlug)
+	filterID := fmt.Sprintf("subscribe.filter.%s.%s", link.ProjectID, agentSlug)
 	card := Card{
 		Header: CardHeader{
 			Title:    "Subscribe to Agent Notifications",
@@ -950,12 +950,12 @@ func (r *CommandRouter) cmdSubscribe(ctx context.Context, event *ChatEvent, args
 
 // handleSubscribeFilter processes the subscription activity filter dialog submission.
 func (r *CommandRouter) handleSubscribeFilter(ctx context.Context, event *ChatEvent) error {
-	// ActionID format: subscribe.filter.<groveID>.<agentSlug>
+	// ActionID format: subscribe.filter.<projectID>.<agentSlug>
 	parts := strings.SplitN(event.ActionID, ".", 4)
 	if len(parts) < 4 {
 		return r.reply(ctx, event, "Invalid subscription filter action.")
 	}
-	groveID := parts[2]
+	projectID := parts[2]
 	agentSlug := parts[3]
 
 	// Collect selected activities from dialog data
@@ -968,7 +968,7 @@ func (r *CommandRouter) handleSubscribeFilter(ctx context.Context, event *ChatEv
 		PlatformUserID: event.UserID,
 		Platform:       event.Platform,
 		AgentID:        agentSlug,
-		GroveID:        groveID,
+		ProjectID:        projectID,
 		Activities:     activities,
 	}
 	if err := r.store.SetAgentSubscription(sub); err != nil {
@@ -994,7 +994,7 @@ func (r *CommandRouter) cmdUnsubscribe(ctx context.Context, event *ChatEvent, ar
 		return linkResp, nil
 	}
 
-	if err := r.store.DeleteAgentSubscription(event.UserID, event.Platform, args[0], link.GroveID); err != nil {
+	if err := r.store.DeleteAgentSubscription(event.UserID, event.Platform, args[0], link.ProjectID); err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to unsubscribe: %v", err)), nil
 	}
 	return textResponse(event, fmt.Sprintf("Unsubscribed from notifications for agent `%s`.", args[0])), nil
@@ -1039,7 +1039,7 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 
 	// Try to resolve the first arg as an agent. If it doesn't match and a
 	// default agent is configured, treat the entire input as the message text.
-	agent, err := client.GroveAgents(link.GroveID).Get(ctx, agentSlug)
+	agent, err := client.ProjectAgents(link.ProjectID).Get(ctx, agentSlug)
 	if err != nil {
 		if link.DefaultAgent == "" {
 			return textResponse(event, fmt.Sprintf("Agent `%s` not found: %v", agentSlug, err)), nil
@@ -1047,12 +1047,12 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 		r.log.Warn("agent slug lookup failed, falling back to default agent",
 			"original_slug", agentSlug,
 			"default_agent", link.DefaultAgent,
-			"grove_id", link.GroveID,
+			"project_id", link.ProjectID,
 			"error", err,
 		)
 		agentSlug = link.DefaultAgent
 		messageText = strings.Join(remaining, " ")
-		agent, err = client.GroveAgents(link.GroveID).Get(ctx, agentSlug)
+		agent, err = client.ProjectAgents(link.ProjectID).Get(ctx, agentSlug)
 		if err != nil {
 			return textResponse(event, fmt.Sprintf("Default agent `%s` not found: %v", agentSlug, err)), nil
 		}
@@ -1068,7 +1068,7 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 		msg.Msg = fmt.Sprintf("[thread:%s] %s", threadID, msg.Msg)
 	}
 
-	if err := client.GroveAgents(link.GroveID).SendStructuredMessage(ctx, agentSlug, msg, false, false, false); err != nil {
+	if err := client.ProjectAgents(link.ProjectID).SendStructuredMessage(ctx, agentSlug, msg, false, false, false); err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to send message to `%s`: %v", agentSlug, err)), nil
 	}
 
@@ -1106,7 +1106,7 @@ func (r *CommandRouter) cmdSetDefault(ctx context.Context, event *ChatEvent, arg
 		return textResponse(event, "Authentication required. Use `/scionAdmin register` first."), nil
 	}
 
-	agent, err := client.GroveAgents(link.GroveID).Get(ctx, args[0])
+	agent, err := client.ProjectAgents(link.ProjectID).Get(ctx, args[0])
 	if err != nil {
 		return textResponse(event, fmt.Sprintf("Agent `%s` not found: %v", args[0], err)), nil
 	}
@@ -1130,9 +1130,9 @@ func (r *CommandRouter) cmdInfo(ctx context.Context, event *ChatEvent, args []st
 		registeredEmail = mapping.HubUserEmail
 	}
 
-	// Grove linkage state
+	// Project linkage state
 	linkStatus := "Not linked"
-	groveSlug := ""
+	projectSlug := ""
 	var link *state.SpaceLink
 	link, err = r.store.GetSpaceLink(event.SpaceID, event.Platform)
 	if err != nil {
@@ -1140,7 +1140,7 @@ func (r *CommandRouter) cmdInfo(ctx context.Context, event *ChatEvent, args []st
 	}
 	if link != nil {
 		linkStatus = "Linked"
-		groveSlug = link.GroveSlug
+		projectSlug = link.ProjectSlug
 	}
 
 	// Build info card
@@ -1150,18 +1150,18 @@ func (r *CommandRouter) cmdInfo(ctx context.Context, event *ChatEvent, args []st
 	if registeredEmail != "" {
 		widgets = append(widgets, Widget{Type: WidgetKeyValue, Label: "Hub Email", Content: registeredEmail})
 	}
-	widgets = append(widgets, Widget{Type: WidgetKeyValue, Label: "Grove Link", Content: linkStatus})
-	if groveSlug != "" {
-		widgets = append(widgets, Widget{Type: WidgetKeyValue, Label: "Grove", Content: groveSlug})
+	widgets = append(widgets, Widget{Type: WidgetKeyValue, Label: "Project Link", Content: linkStatus})
+	if projectSlug != "" {
+		widgets = append(widgets, Widget{Type: WidgetKeyValue, Label: "Project", Content: projectSlug})
 	}
 
-	// If linked and registered, fetch agent count from the grove
+	// If linked and registered, fetch agent count from the project
 	if link != nil && mapping != nil {
 		client, clientErr := r.idMapper.ClientFor(ctx, mapping)
 		if clientErr == nil {
-			groveList, groveErr := client.Groves().List(ctx, &hubclient.ListGrovesOptions{Slug: link.GroveSlug})
-			if groveErr == nil && len(groveList.Groves) > 0 {
-				widgets = append(widgets, Widget{Type: WidgetKeyValue, Label: "Agents", Content: fmt.Sprintf("%d", groveList.Groves[0].AgentCount)})
+			projectList, projectErr := client.Projects().List(ctx, &hubclient.ListProjectsOptions{Slug: link.ProjectSlug})
+			if projectErr == nil && len(projectList.Projects) > 0 {
+				widgets = append(widgets, Widget{Type: WidgetKeyValue, Label: "Agents", Content: fmt.Sprintf("%d", projectList.Projects[0].AgentCount)})
 			}
 		}
 	}
@@ -1207,7 +1207,7 @@ func (r *CommandRouter) cmdAdminHelp(ctx context.Context, event *ChatEvent) (*Ev
 	help := `*Scion Admin Commands:*
 
 *Agent Management:*
-• ` + "`/scionAdmin list`" + ` — List agents in linked grove
+• ` + "`/scionAdmin list`" + ` — List agents in linked project
 • ` + "`/scionAdmin status <agent>`" + ` — Show agent status
 • ` + "`/scionAdmin start <agent>`" + ` — Start an agent
 • ` + "`/scionAdmin stop <agent>`" + ` — Stop an agent
@@ -1217,8 +1217,8 @@ func (r *CommandRouter) cmdAdminHelp(ctx context.Context, event *ChatEvent) (*Ev
 • ` + "`/scionAdmin set-default <agent>`" + ` — Set default agent for ` + "`/scion`" + ` messages (clear with ` + "`clear`" + `)
 
 *Space & Identity:*
-• ` + "`/scionAdmin info`" + ` — Show registration, grove link, and agent info
-• ` + "`/scionAdmin link <grove-slug>`" + ` — Link this space to a grove
+• ` + "`/scionAdmin info`" + ` — Show registration, project link, and agent info
+• ` + "`/scionAdmin link <project-slug>`" + ` — Link this space to a project
 • ` + "`/scionAdmin unlink`" + ` — Unlink this space
 • ` + "`/scionAdmin register`" + ` — Register your chat account
 • ` + "`/scionAdmin unregister`" + ` — Unregister your account
@@ -1267,14 +1267,14 @@ func cardResponse(event *ChatEvent, card *Card) *EventResponse {
 	}
 }
 
-// requireSpaceLink checks that the space is linked to a grove, returning an error response if not.
+// requireSpaceLink checks that the space is linked to a project, returning an error response if not.
 func (r *CommandRouter) requireSpaceLink(ctx context.Context, event *ChatEvent) (*state.SpaceLink, *EventResponse) {
 	link, err := r.store.GetSpaceLink(event.SpaceID, event.Platform)
 	if err != nil {
-		return nil, textResponse(event, fmt.Sprintf("Failed to check grove link: %v", err))
+		return nil, textResponse(event, fmt.Sprintf("Failed to check project link: %v", err))
 	}
 	if link == nil {
-		return nil, textResponse(event, "This space is not linked to a grove. Use `/scionAdmin link <grove-slug>` first.")
+		return nil, textResponse(event, "This space is not linked to a project. Use `/scionAdmin link <project-slug>` first.")
 	}
 	return link, nil
 }
