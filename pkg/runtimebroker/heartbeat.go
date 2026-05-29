@@ -57,7 +57,7 @@ type HeartbeatService struct {
 	manager           agent.Manager
 	auxiliaryManagers func() []agent.Manager // optional: returns managers for non-default runtimes
 	version           string
-	groveFilter       func(groveID string) bool // returns true if this grove belongs to this hub
+	projectFilter     func(projectID string) bool // returns true if this project belongs to this hub
 	log               *slog.Logger
 
 	mu     sync.Mutex
@@ -68,8 +68,8 @@ type HeartbeatService struct {
 // NewHeartbeatService creates a new heartbeat service.
 // The client must be an authenticated hubclient.RuntimeBrokerService.
 // The manager is used to gather agent status information.
-// The groveFilter, if non-nil, restricts which groves are included in heartbeats.
-func NewHeartbeatService(client hubclient.RuntimeBrokerService, brokerID string, interval time.Duration, manager agent.Manager, groveFilter func(string) bool, log *slog.Logger) *HeartbeatService {
+// The projectFilter, if non-nil, restricts which projects are included in heartbeats.
+func NewHeartbeatService(client hubclient.RuntimeBrokerService, brokerID string, interval time.Duration, manager agent.Manager, projectFilter func(string) bool, log *slog.Logger) *HeartbeatService {
 	if interval < MinHeartbeatInterval {
 		interval = MinHeartbeatInterval
 	}
@@ -79,7 +79,7 @@ func NewHeartbeatService(client hubclient.RuntimeBrokerService, brokerID string,
 		brokerID:    brokerID,
 		interval:    interval,
 		manager:     manager,
-		groveFilter: groveFilter,
+		projectFilter: projectFilter,
 		log:         log,
 	}
 }
@@ -176,18 +176,18 @@ func (s *HeartbeatService) buildHeartbeat() *hubclient.BrokerHeartbeat {
 		Status: status,
 	}
 
-	// If we have a manager, gather per-grove agent counts
+	// If we have a manager, gather per-project agent counts
 	if s.manager != nil {
-		groveAgents := s.gatherProjectAgents()
-		if len(groveAgents) > 0 {
-			heartbeat.Projects = groveAgents
+		projectAgents := s.gatherProjectAgents()
+		if len(projectAgents) > 0 {
+			heartbeat.Projects = projectAgents
 		}
 	}
 
 	return heartbeat
 }
 
-// gatherProjectAgents collects agent information grouped by grove.
+// gatherProjectAgents collects agent information grouped by project.
 func (s *HeartbeatService) gatherProjectAgents() []hubclient.ProjectHeartbeat {
 	if s.manager == nil {
 		return nil
@@ -220,15 +220,15 @@ func (s *HeartbeatService) gatherProjectAgents() []hubclient.ProjectHeartbeat {
 		}
 	}
 
-	// Group agents by grove
-	groveMap := make(map[string][]hubclient.AgentHeartbeat)
+	// Group agents by project
+	projectMap := make(map[string][]hubclient.AgentHeartbeat)
 	for _, ag := range agents {
-		groveID := ag.ProjectID
-		if groveID == "" {
-			groveID = ag.Project
+		projectID := ag.ProjectID
+		if projectID == "" {
+			projectID = ag.Project
 		}
-		if groveID == "" {
-			groveID = "default"
+		if projectID == "" {
+			projectID = "default"
 		}
 
 		// Compute legacy Status using DisplayStatus logic:
@@ -246,23 +246,23 @@ func (s *HeartbeatService) gatherProjectAgents() []hubclient.ProjectHeartbeat {
 		if ag.Detail != nil && ag.Detail.Message != "" {
 			agentHB.Message = ag.Detail.Message
 		}
-		groveMap[groveID] = append(groveMap[groveID], agentHB)
+		projectMap[projectID] = append(projectMap[projectID], agentHB)
 	}
 
-	// Convert to slice, applying grove filter
-	var groves []hubclient.ProjectHeartbeat
-	for groveID, agentList := range groveMap {
-		if s.groveFilter != nil && !s.groveFilter(groveID) {
+	// Convert to slice, applying project filter
+	var projects []hubclient.ProjectHeartbeat
+	for projectID, agentList := range projectMap {
+		if s.projectFilter != nil && !s.projectFilter(projectID) {
 			continue
 		}
-		groves = append(groves, hubclient.ProjectHeartbeat{
-			ProjectID:  groveID,
+		projects = append(projects, hubclient.ProjectHeartbeat{
+			ProjectID:  projectID,
 			AgentCount: len(agentList),
 			Agents:     agentList,
 		})
 	}
 
-	return groves
+	return projects
 }
 
 // ForceHeartbeat sends an immediate heartbeat, bypassing the interval.

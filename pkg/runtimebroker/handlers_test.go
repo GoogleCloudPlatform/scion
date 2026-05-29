@@ -719,7 +719,7 @@ runtimes:
 	mgr := &mockManager{
 		agents: []api.AgentInfo{
 			{
-				ID:          "mygrove--foo", // grove-prefixed container name
+				ID:          "mygrove--foo", // project-prefixed container name
 				ContainerID: "mygrove--foo",
 				Name:        "foo",
 				Slug:        "",
@@ -1325,27 +1325,27 @@ func TestStartAgentEndpoint(t *testing.T) {
 }
 
 // TestCreateAgentHubEndpointFromProjectSettings tests that hub endpoint is resolved
-// from the grove's settings.yaml when projectPath is provided.
+// from the project's settings.yaml when projectPath is provided.
 func TestCreateAgentHubEndpointFromProjectSettings(t *testing.T) {
-	t.Run("request hub endpoint takes priority over grove settings", func(t *testing.T) {
+	t.Run("request hub endpoint takes priority over project settings", func(t *testing.T) {
 		srv, mgr := newTestServerWithEnvCapture()
 
-		// Create a grove directory with settings.yaml containing hub.endpoint
-		groveDir := filepath.Join(t.TempDir(), ".scion")
-		if err := os.MkdirAll(groveDir, 0755); err != nil {
-			t.Fatalf("failed to create grove dir: %v", err)
+		// Create a project directory with settings.yaml containing hub.endpoint
+		projectDir := filepath.Join(t.TempDir(), ".scion")
+		if err := os.MkdirAll(projectDir, 0755); err != nil {
+			t.Fatalf("failed to create project dir: %v", err)
 		}
 		settingsContent := `hub:
   endpoint: "https://scionhub.loophole.site"
 `
-		if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
 			t.Fatalf("failed to write settings: %v", err)
 		}
 
 		body := `{
 			"name": "grove-endpoint-agent",
 			"hubEndpoint": "http://localhost:9810",
-			"grovePath": "` + groveDir + `",
+			"grovePath": "` + projectDir + `",
 			"config": {"template": "claude"}
 		}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1362,7 +1362,7 @@ func TestCreateAgentHubEndpointFromProjectSettings(t *testing.T) {
 			t.Fatal("expected environment variables to be set")
 		}
 
-		// Request hub endpoint takes priority over grove settings (grove settings
+		// Request hub endpoint takes priority over project settings (project settings
 		// are only a fallback when no endpoint is provided by dispatch/broker).
 		if got := mgr.lastEnv["SCION_HUB_ENDPOINT"]; got != "http://localhost:9810" {
 			t.Errorf("expected SCION_HUB_ENDPOINT='http://localhost:9810' from request, got %q", got)
@@ -1372,23 +1372,23 @@ func TestCreateAgentHubEndpointFromProjectSettings(t *testing.T) {
 		}
 	})
 
-	t.Run("grove settings used when request hub endpoint empty", func(t *testing.T) {
+	t.Run("project settings used when request hub endpoint empty", func(t *testing.T) {
 		srv, mgr := newTestServerWithEnvCapture()
 
-		groveDir := filepath.Join(t.TempDir(), ".scion")
-		if err := os.MkdirAll(groveDir, 0755); err != nil {
-			t.Fatalf("failed to create grove dir: %v", err)
+		projectDir := filepath.Join(t.TempDir(), ".scion")
+		if err := os.MkdirAll(projectDir, 0755); err != nil {
+			t.Fatalf("failed to create project dir: %v", err)
 		}
 		settingsContent := `hub:
   endpoint: "https://hub.example.com"
 `
-		if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
 			t.Fatalf("failed to write settings: %v", err)
 		}
 
 		body := `{
 			"name": "grove-fallback-agent",
-			"grovePath": "` + groveDir + `",
+			"grovePath": "` + projectDir + `",
 			"config": {"template": "claude"}
 		}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1402,11 +1402,11 @@ func TestCreateAgentHubEndpointFromProjectSettings(t *testing.T) {
 		}
 
 		if got := mgr.lastEnv["SCION_HUB_ENDPOINT"]; got != "https://hub.example.com" {
-			t.Errorf("expected SCION_HUB_ENDPOINT='https://hub.example.com' from grove settings, got %q", got)
+			t.Errorf("expected SCION_HUB_ENDPOINT='https://hub.example.com' from project settings, got %q", got)
 		}
 	})
 
-	t.Run("no grove path falls back to request endpoint", func(t *testing.T) {
+	t.Run("no project path falls back to request endpoint", func(t *testing.T) {
 		srv, mgr := newTestServerWithEnvCapture()
 
 		body := `{
@@ -1430,28 +1430,28 @@ func TestCreateAgentHubEndpointFromProjectSettings(t *testing.T) {
 	})
 }
 
-// TestCreateAgentProjectHubEndpointSuppressedWhenDisabled tests that grove endpoint
+// TestCreateAgentProjectHubEndpointSuppressedWhenDisabled tests that project endpoint
 // is suppressed when hub.enabled=false, while dispatcher-provided endpoint still works.
 func TestCreateAgentProjectHubEndpointSuppressedWhenDisabled(t *testing.T) {
-	t.Run("grove hub endpoint suppressed when hub disabled", func(t *testing.T) {
+	t.Run("project hub endpoint suppressed when hub disabled", func(t *testing.T) {
 		srv, mgr := newTestServerWithEnvCapture()
 
-		// Create a grove directory with hub.enabled=false but endpoint configured
-		groveDir := filepath.Join(t.TempDir(), ".scion")
-		if err := os.MkdirAll(groveDir, 0755); err != nil {
-			t.Fatalf("failed to create grove dir: %v", err)
+		// Create a project directory with hub.enabled=false but endpoint configured
+		projectDir := filepath.Join(t.TempDir(), ".scion")
+		if err := os.MkdirAll(projectDir, 0755); err != nil {
+			t.Fatalf("failed to create project dir: %v", err)
 		}
 		settingsContent := `hub:
   enabled: false
   endpoint: "https://scionhub.loophole.site"
 `
-		if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
 			t.Fatalf("failed to write settings: %v", err)
 		}
 
 		body := `{
 			"name": "grove-disabled-agent",
-			"grovePath": "` + groveDir + `",
+			"grovePath": "` + projectDir + `",
 			"config": {"template": "claude"}
 		}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1470,26 +1470,26 @@ func TestCreateAgentProjectHubEndpointSuppressedWhenDisabled(t *testing.T) {
 
 		// Project endpoint should NOT be used when hub.enabled=false
 		if _, exists := mgr.lastEnv["SCION_HUB_ENDPOINT"]; exists {
-			t.Error("expected SCION_HUB_ENDPOINT to NOT be set when grove has hub.enabled=false")
+			t.Error("expected SCION_HUB_ENDPOINT to NOT be set when project has hub.enabled=false")
 		}
 		if _, exists := mgr.lastEnv["SCION_HUB_URL"]; exists {
-			t.Error("expected SCION_HUB_URL to NOT be set when grove has hub.enabled=false")
+			t.Error("expected SCION_HUB_URL to NOT be set when project has hub.enabled=false")
 		}
 	})
 
-	t.Run("dispatcher endpoint still works when grove hub disabled", func(t *testing.T) {
+	t.Run("dispatcher endpoint still works when project hub disabled", func(t *testing.T) {
 		srv, mgr := newTestServerWithEnvCapture()
 
-		// Create a grove directory with hub.enabled=false
-		groveDir := filepath.Join(t.TempDir(), ".scion")
-		if err := os.MkdirAll(groveDir, 0755); err != nil {
-			t.Fatalf("failed to create grove dir: %v", err)
+		// Create a project directory with hub.enabled=false
+		projectDir := filepath.Join(t.TempDir(), ".scion")
+		if err := os.MkdirAll(projectDir, 0755); err != nil {
+			t.Fatalf("failed to create project dir: %v", err)
 		}
 		settingsContent := `hub:
   enabled: false
   endpoint: "https://scionhub.loophole.site"
 `
-		if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
 			t.Fatalf("failed to write settings: %v", err)
 		}
 
@@ -1497,7 +1497,7 @@ func TestCreateAgentProjectHubEndpointSuppressedWhenDisabled(t *testing.T) {
 		body := `{
 			"name": "dispatcher-endpoint-agent",
 			"hubEndpoint": "https://hub.authoritative.com",
-			"grovePath": "` + groveDir + `",
+			"grovePath": "` + projectDir + `",
 			"config": {"template": "claude"}
 		}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1522,8 +1522,8 @@ func TestCreateAgentProjectHubEndpointSuppressedWhenDisabled(t *testing.T) {
 }
 
 // TestCreateAgentHubNativeProjectSettingsEndpoint tests that createAgent with a
-// hub-native grove (ProjectSlug set, no ProjectPath) correctly resolves the grove
-// path and uses grove settings hub.endpoint from the .scion subdirectory.
+// hub-native project (ProjectSlug set, no ProjectPath) correctly resolves the project
+// path and uses project settings hub.endpoint from the .scion subdirectory.
 func TestCreateAgentHubNativeProjectSettingsEndpoint(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
@@ -1536,8 +1536,7 @@ func TestCreateAgentHubNativeProjectSettingsEndpoint(t *testing.T) {
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
 
-	// Set up a hub-native grove directory at the expected path.
-	// The slug "my-hub-grove" will resolve to ~/.scion.groves/my-hub-grove.
+	// Set up a hub-native project directory at the expected path.
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		t.Fatalf("failed to get global dir: %v", err)
@@ -1549,7 +1548,7 @@ func TestCreateAgentHubNativeProjectSettingsEndpoint(t *testing.T) {
 	}
 	t.Cleanup(func() { os.RemoveAll(projectPath) })
 
-	// Place settings.yaml in the .scion subdirectory (hub-native grove layout)
+	// Place settings.yaml in the .scion subdirectory (hub-native project layout)
 	settingsContent := "hub:\n  endpoint: https://hub.external.example.com\n"
 	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
 		t.Fatalf("failed to write settings.yaml: %v", err)
@@ -1576,7 +1575,7 @@ func TestCreateAgentHubNativeProjectSettingsEndpoint(t *testing.T) {
 		t.Fatal("expected environment variables to be set")
 	}
 
-	// Request hub endpoint takes priority over grove settings (grove settings
+	// Request hub endpoint takes priority over project settings (project settings
 	// are only a fallback when no endpoint is provided by dispatch/broker).
 	if got := mgr.lastEnv["SCION_HUB_ENDPOINT"]; got != "http://localhost:9810" {
 		t.Errorf("expected SCION_HUB_ENDPOINT='http://localhost:9810' from request, got %q", got)
@@ -1587,28 +1586,28 @@ func TestCreateAgentHubNativeProjectSettingsEndpoint(t *testing.T) {
 }
 
 // TestResolveProjectSettingsDir tests the helper function that resolves the
-// settings directory for both linked and hub-native groves.
+// settings directory for both linked and hub-native projects.
 func TestResolveProjectSettingsDir(t *testing.T) {
-	t.Run("linked grove - settings at projectPath directly", func(t *testing.T) {
-		// Linked grove: projectPath = /path/to/project/.scion, settings.yaml is there
-		groveDir := filepath.Join(t.TempDir(), ".scion")
-		if err := os.MkdirAll(groveDir, 0755); err != nil {
-			t.Fatalf("failed to create grove dir: %v", err)
+	t.Run("linked project - settings at projectPath directly", func(t *testing.T) {
+		// Linked project: projectPath = /path/to/project/.scion, settings.yaml is there
+		projectDir := filepath.Join(t.TempDir(), ".scion")
+		if err := os.MkdirAll(projectDir, 0755); err != nil {
+			t.Fatalf("failed to create project dir: %v", err)
 		}
-		if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte("hub:\n  endpoint: https://example.com\n"), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte("hub:\n  endpoint: https://example.com\n"), 0644); err != nil {
 			t.Fatalf("failed to write settings.yaml: %v", err)
 		}
 
-		result := resolveProjectSettingsDir(groveDir)
-		if result != groveDir {
-			t.Errorf("expected %q, got %q", groveDir, result)
+		result := resolveProjectSettingsDir(projectDir)
+		if result != projectDir {
+			t.Errorf("expected %q, got %q", projectDir, result)
 		}
 	})
 
-	t.Run("hub-native grove - settings in .scion subdirectory", func(t *testing.T) {
-		// Hub-native grove: projectPath = ~/.scion.groves/<slug>, settings in .scion/
-		groveDir := t.TempDir()
-		scionDir := filepath.Join(groveDir, ".scion")
+	t.Run("hub-native project - settings in .scion subdirectory", func(t *testing.T) {
+		// Hub-native project: projectPath = ~/.scion.groves/<slug>, settings in .scion/
+		projectDir := t.TempDir()
+		scionDir := filepath.Join(projectDir, ".scion")
 		if err := os.MkdirAll(scionDir, 0755); err != nil {
 			t.Fatalf("failed to create .scion dir: %v", err)
 		}
@@ -1616,17 +1615,17 @@ func TestResolveProjectSettingsDir(t *testing.T) {
 			t.Fatalf("failed to write settings.yaml: %v", err)
 		}
 
-		result := resolveProjectSettingsDir(groveDir)
+		result := resolveProjectSettingsDir(projectDir)
 		if result != scionDir {
 			t.Errorf("expected %q (with .scion), got %q", scionDir, result)
 		}
 	})
 
 	t.Run("no settings file - returns original path", func(t *testing.T) {
-		groveDir := t.TempDir()
-		result := resolveProjectSettingsDir(groveDir)
-		if result != groveDir {
-			t.Errorf("expected %q (original path), got %q", groveDir, result)
+		projectDir := t.TempDir()
+		result := resolveProjectSettingsDir(projectDir)
+		if result != projectDir {
+			t.Errorf("expected %q (original path), got %q", projectDir, result)
 		}
 	})
 }
@@ -1673,7 +1672,7 @@ func TestCreateAgentContainerHubEndpointOverride(t *testing.T) {
 		}
 	})
 
-	t.Run("container endpoint overrides localhost even with grove settings", func(t *testing.T) {
+	t.Run("container endpoint overrides localhost even with project settings", func(t *testing.T) {
 		cfg := DefaultServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
@@ -1685,9 +1684,9 @@ func TestCreateAgentContainerHubEndpointOverride(t *testing.T) {
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 		srv := New(cfg, mgr, rt)
 
-		// Create a grove directory with settings.yaml containing hub.endpoint
-		groveDir := filepath.Join(t.TempDir(), ".scion")
-		if err := os.MkdirAll(groveDir, 0755); err != nil {
+		// Create a project directory with settings.yaml containing hub.endpoint
+		projectDir := filepath.Join(t.TempDir(), ".scion")
+		if err := os.MkdirAll(projectDir, 0755); err != nil {
 			t.Fatal(err)
 		}
 		settingsContent := `schema_version: "1"
@@ -1695,7 +1694,7 @@ hub:
   enabled: true
   endpoint: "https://tunnel.example.com"
 `
-		if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1703,7 +1702,7 @@ hub:
 			"name": "test-agent",
 			"hubEndpoint": "http://localhost:8080",
 			"grovePath": %q
-		}`, groveDir)
+		}`, projectDir)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
@@ -1715,7 +1714,7 @@ hub:
 		}
 
 		// ContainerHubEndpoint override applies last to localhost endpoints;
-		// grove settings are only a fallback when no dispatch/broker endpoint exists.
+		// project settings are only a fallback when no dispatch/broker endpoint exists.
 		if got := mgr.lastEnv["SCION_HUB_ENDPOINT"]; got != "http://host.containers.internal:8080" {
 			t.Errorf("expected SCION_HUB_ENDPOINT='http://host.containers.internal:8080' from container bridge override, got %q", got)
 		}
@@ -1788,10 +1787,10 @@ hub:
 		}
 		srv := New(cfg, mgr, rt)
 
-		// Create a grove dir with kubernetes settings so resolveManagerForOpts
+		// Create a project dir with kubernetes settings so resolveManagerForOpts
 		// matches the "kubernetes" runtime without trying to create a real manager.
-		groveDir := filepath.Join(t.TempDir(), ".scion")
-		os.MkdirAll(groveDir, 0755)
+		projectDir := filepath.Join(t.TempDir(), ".scion")
+		os.MkdirAll(projectDir, 0755)
 		k8sSettings := `schema_version: "1"
 profiles:
   local:
@@ -1800,13 +1799,13 @@ runtimes:
   kubernetes:
     type: kubernetes
 `
-		os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(k8sSettings), 0644)
+		os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(k8sSettings), 0644)
 
 		body := fmt.Sprintf(`{
 			"name": "test-agent",
 			"hubEndpoint": "http://localhost:8080",
 			"grovePath": %q
-		}`, groveDir)
+		}`, projectDir)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
@@ -2144,7 +2143,7 @@ func TestResolveManagerForOpts_ProfileNotInSettings(t *testing.T) {
 }
 
 func TestResolveManagerForOpts_ProfileWithDifferentRuntime(t *testing.T) {
-	// Create a temp grove directory with settings that specify a different runtime
+	// Create a temp project directory with settings that specify a different runtime
 	tmpDir := t.TempDir()
 	projectPath := filepath.Join(tmpDir, ".scion")
 	if err := os.MkdirAll(projectPath, 0755); err != nil {
@@ -2183,7 +2182,7 @@ runtimes:
 }
 
 func TestResolveManagerForOpts_ProfileWithSameRuntime(t *testing.T) {
-	// Create a temp grove directory with settings that specify the same runtime as the broker
+	// Create a temp project directory with settings that specify the same runtime as the broker
 	tmpDir := t.TempDir()
 	projectPath := filepath.Join(tmpDir, ".scion")
 	if err := os.MkdirAll(projectPath, 0755); err != nil {
@@ -2272,7 +2271,7 @@ func TestCreateAgentWithoutProfile(t *testing.T) {
 }
 
 func TestProjectSlugWorkspacePath(t *testing.T) {
-	// Verify the workspace directory path for hub-native groves uses
+	// Verify the workspace directory path for hub-native projects uses
 	// ~/.scion.groves/<slug>/ instead of the worktree-based path.
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
@@ -2322,10 +2321,10 @@ func TestCreateAgentRequest_ProjectSlugField(t *testing.T) {
 }
 
 func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
-	// When ProjectSlug is set and ProjectPath is empty (hub-native grove with no
+	// When ProjectSlug is set and ProjectPath is empty (hub-native project with no
 	// local provider path), the handler should resolve ProjectPath to the
 	// conventional ~/.scion.groves/<slug>/ path so the agent is created in the
-	// correct grove instead of the broker's local grove.
+	// correct project instead of the broker's local project.
 	srv, mgr := newTestServerWithProvisionCapture()
 
 	body := `{
@@ -2364,7 +2363,7 @@ func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
 
 func TestCreateAgentProjectSlugNotUsedWhenProjectPathSet(t *testing.T) {
 	// When both ProjectPath and ProjectSlug are set, ProjectPath takes precedence
-	// (the broker has a local provider path for this grove).
+	// (the broker has a local provider path for this project).
 	srv, mgr := newTestServerWithProvisionCapture()
 
 	body := `{
@@ -2398,10 +2397,10 @@ func TestCreateAgentProjectSlugNotUsedWhenProjectPathSet(t *testing.T) {
 }
 
 // TestStartAgentProjectSettingsFallbackHubEndpoint verifies that the startAgent
-// handler uses grove settings hub.endpoint only as a fallback when no broker
+// handler uses project settings hub.endpoint only as a fallback when no broker
 // config or dispatch endpoint is available.
 func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
-	t.Run("linked grove with settings at projectPath", func(t *testing.T) {
+	t.Run("linked project with settings at projectPath", func(t *testing.T) {
 		cfg := DefaultServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
@@ -2413,17 +2412,17 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 		srv := New(cfg, mgr, rt)
 
-		// Linked grove: projectPath ends in .scion, settings.yaml is directly there
-		groveDir := filepath.Join(t.TempDir(), ".scion")
-		if err := os.MkdirAll(groveDir, 0755); err != nil {
-			t.Fatalf("failed to create grove dir: %v", err)
+		// Linked project: projectPath ends in .scion, settings.yaml is directly there
+		projectDir := filepath.Join(t.TempDir(), ".scion")
+		if err := os.MkdirAll(projectDir, 0755); err != nil {
+			t.Fatalf("failed to create project dir: %v", err)
 		}
 		settingsContent := "hub:\n  endpoint: https://hub.production.example.com\n"
-		if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
 			t.Fatalf("failed to write settings.yaml: %v", err)
 		}
 
-		body := fmt.Sprintf(`{"grovePath": %q}`, groveDir)
+		body := fmt.Sprintf(`{"grovePath": %q}`, projectDir)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
@@ -2438,7 +2437,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 			t.Fatal("expected Start to be called")
 		}
 
-		// Broker config HubEndpoint takes priority over grove settings
+		// Broker config HubEndpoint takes priority over project settings
 		if got := mgr.lastOpts.Env["SCION_HUB_ENDPOINT"]; got != "http://localhost:9810" {
 			t.Errorf("expected SCION_HUB_ENDPOINT='http://localhost:9810' from broker config, got %q", got)
 		}
@@ -2447,7 +2446,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 		}
 	})
 
-	t.Run("hub-native grove with settings in .scion subdirectory", func(t *testing.T) {
+	t.Run("hub-native project with settings in .scion subdirectory", func(t *testing.T) {
 		cfg := DefaultServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
@@ -2459,10 +2458,10 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 		srv := New(cfg, mgr, rt)
 
-		// Hub-native grove: projectPath is the workspace parent (~/.scion.groves/<slug>),
+		// Hub-native project: projectPath is the workspace parent (~/.scion.groves/<slug>),
 		// settings.yaml lives in the .scion subdirectory
-		groveDir := t.TempDir()
-		scionDir := filepath.Join(groveDir, ".scion")
+		projectDir := t.TempDir()
+		scionDir := filepath.Join(projectDir, ".scion")
 		if err := os.MkdirAll(scionDir, 0755); err != nil {
 			t.Fatalf("failed to create .scion dir: %v", err)
 		}
@@ -2471,7 +2470,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 			t.Fatalf("failed to write settings.yaml: %v", err)
 		}
 
-		body := fmt.Sprintf(`{"grovePath": %q}`, groveDir)
+		body := fmt.Sprintf(`{"grovePath": %q}`, projectDir)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
@@ -2486,7 +2485,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 			t.Fatal("expected Start to be called")
 		}
 
-		// Broker config HubEndpoint takes priority over grove settings
+		// Broker config HubEndpoint takes priority over project settings
 		if got := mgr.lastOpts.Env["SCION_HUB_ENDPOINT"]; got != "http://localhost:9810" {
 			t.Errorf("expected SCION_HUB_ENDPOINT='http://localhost:9810' from broker config, got %q", got)
 		}
@@ -2497,7 +2496,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 }
 
 // TestStartAgentBrokerConfigUsedWhenNoProjectSettings verifies that the broker's
-// config HubEndpoint is used as fallback when grove settings don't specify one.
+// config HubEndpoint is used as fallback when project settings don't specify one.
 func TestStartAgentBrokerConfigUsedWhenNoProjectSettings(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
@@ -2510,14 +2509,14 @@ func TestStartAgentBrokerConfigUsedWhenNoProjectSettings(t *testing.T) {
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
 
-	// Create a temp grove dir with settings.yaml but no hub endpoint
-	groveDir := t.TempDir()
+	// Create a temp project dir with settings.yaml but no hub endpoint
+	projectDir := t.TempDir()
 	settingsContent := "harnesses:\n  claude:\n    model: sonnet\n"
-	if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
 		t.Fatalf("failed to write settings.yaml: %v", err)
 	}
 
-	body := fmt.Sprintf(`{"grovePath": %q}`, groveDir)
+	body := fmt.Sprintf(`{"grovePath": %q}`, projectDir)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/start", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -2532,7 +2531,7 @@ func TestStartAgentBrokerConfigUsedWhenNoProjectSettings(t *testing.T) {
 		t.Fatal("expected Start to be called")
 	}
 
-	// Without grove settings hub.endpoint, broker config should be used
+	// Without project settings hub.endpoint, broker config should be used
 	if got := mgr.lastOpts.Env["SCION_HUB_ENDPOINT"]; got != "http://localhost:9810" {
 		t.Errorf("expected SCION_HUB_ENDPOINT='http://localhost:9810' from broker config, got %q", got)
 	}
@@ -2719,7 +2718,7 @@ func TestStartAgentBrokerIDEnv(t *testing.T) {
 
 func TestStartAgentProjectSlugResolvesProjectPath(t *testing.T) {
 	// When the startAgent handler receives projectSlug with no projectPath
-	// (hub-native grove), it should resolve ProjectPath from the slug.
+	// (hub-native project), it should resolve ProjectPath from the slug.
 	srv, mgr := newTestServerWithProvisionCapture()
 
 	// Start uses the agent name from the URL path
@@ -2839,15 +2838,15 @@ func TestCreateAgentProjectSlugInitializesScionDir(t *testing.T) {
 	defer restoreGit()
 
 	// When ProjectSlug is set and the broker has no .scion subdirectory for
-	// the hub-native grove, the handler should create it so that
-	// ResolveProjectPath resolves to groves/<slug>/.scion (not groves/<slug>).
+	// the hub-native project, the handler should create it so that
+	// ResolveProjectPath resolves to projects/<slug>/.scion (not projects/<slug>).
 	// This prevents agents from being created at the wrong directory level.
 
-	// Use a temporary directory to simulate the grove workspace.
+	// Use a temporary directory to simulate the project workspace.
 	tmpDir := t.TempDir()
 	projectPath := filepath.Join(tmpDir, "test-grove")
 	if err := os.MkdirAll(projectPath, 0755); err != nil {
-		t.Fatalf("failed to create test grove dir: %v", err)
+		t.Fatalf("failed to create test project dir: %v", err)
 	}
 
 	// Verify .scion does NOT exist yet
@@ -2892,14 +2891,14 @@ func TestCreateAgentProjectSlugInitializesScionDir(t *testing.T) {
 func TestDeleteProject_RemovesDirectory(t *testing.T) {
 	srv := newTestServer(t)
 
-	// Create a temporary groves directory structure
+	// Create a temporary projects directory structure
 	tmpHome := t.TempDir()
-	grovesDir := filepath.Join(tmpHome, ".scion", "projects")
-	groveDir := filepath.Join(grovesDir, "test-grove")
-	scionDir := filepath.Join(groveDir, ".scion")
+	projectsDir := filepath.Join(tmpHome, ".scion", "projects")
+	projectDir := filepath.Join(projectsDir, "test-grove")
+	scionDir := filepath.Join(projectDir, ".scion")
 
 	if err := os.MkdirAll(scionDir, 0o755); err != nil {
-		t.Fatalf("failed to create test grove dir: %v", err)
+		t.Fatalf("failed to create test project dir: %v", err)
 	}
 
 	// Write a dummy file so we can verify deletion
@@ -2920,8 +2919,8 @@ func TestDeleteProject_RemovesDirectory(t *testing.T) {
 	}
 
 	// Verify directory was removed
-	if _, err := os.Stat(groveDir); !os.IsNotExist(err) {
-		t.Errorf("expected grove directory to be removed, but it still exists")
+	if _, err := os.Stat(projectDir); !os.IsNotExist(err) {
+		t.Errorf("expected project directory to be removed, but it still exists")
 	}
 }
 
@@ -2929,10 +2928,10 @@ func TestDeleteProject_NonExistent_Returns204(t *testing.T) {
 	srv := newTestServer(t)
 
 	tmpHome := t.TempDir()
-	// Create the groves parent but NOT the specific grove directory
-	grovesDir := filepath.Join(tmpHome, ".scion", "projects")
-	if err := os.MkdirAll(grovesDir, 0o755); err != nil {
-		t.Fatalf("failed to create groves dir: %v", err)
+	// Create the projects parent but NOT the specific project directory
+	projectsDir := filepath.Join(tmpHome, ".scion", "projects")
+	if err := os.MkdirAll(projectsDir, 0o755); err != nil {
+		t.Fatalf("failed to create projects dir: %v", err)
 	}
 
 	t.Setenv("HOME", tmpHome)
@@ -2942,7 +2941,7 @@ func TestDeleteProject_NonExistent_Returns204(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNoContent {
-		t.Errorf("expected 204 for non-existent grove, got %d: %s", rec.Code, rec.Body.String())
+		t.Errorf("expected 204 for non-existent project, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -2966,7 +2965,7 @@ func TestFindAgentInHubNativeProjects(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Create hub-native grove structure with an agent directory
+	// Create hub-native project structure with an agent directory
 	projectSlug := "my-project"
 	scionDir := filepath.Join(tmpHome, ".scion", "projects", projectSlug, ".scion")
 	agentDir := filepath.Join(scionDir, "agents", "test-agent")
@@ -2974,7 +2973,7 @@ func TestFindAgentInHubNativeProjects(t *testing.T) {
 		t.Fatalf("failed to create agent dir: %v", err)
 	}
 
-	// Should find the agent in the hub-native grove
+	// Should find the agent in the hub-native project
 	result := findAgentInHubNativeProjects("test-agent")
 	if result != scionDir {
 		t.Errorf("expected %q, got %q", scionDir, result)
@@ -2986,17 +2985,17 @@ func TestFindAgentInHubNativeProjects(t *testing.T) {
 		t.Errorf("expected empty string for nonexistent agent, got %q", result)
 	}
 
-	// Should handle missing groves directory gracefully
+	// Should handle missing projects directory gracefully
 	t.Setenv("HOME", t.TempDir())
 	result = findAgentInHubNativeProjects("test-agent")
 	if result != "" {
-		t.Errorf("expected empty string when groves dir missing, got %q", result)
+		t.Errorf("expected empty string when projects dir missing, got %q", result)
 	}
 }
 
 func TestDeleteAgent_HubNativeProject_NoContainer(t *testing.T) {
-	// Verify that deleting an agent in a hub-native grove resolves the correct
-	// grove path even when the container doesn't exist (e.g. created-only
+	// Verify that deleting an agent in a hub-native project resolves the correct
+	// project path even when the container doesn't exist (e.g. created-only
 	// agent, pruned container).
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
@@ -3011,7 +3010,7 @@ func TestDeleteAgent_HubNativeProject_NoContainer(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Create hub-native grove with an agent directory and config file
+	// Create hub-native project with an agent directory and config file
 	projectSlug := "hub-grove"
 	scionDir := filepath.Join(tmpHome, ".scion", "projects", projectSlug, ".scion")
 	agentName := "orphaned-agent"
@@ -3035,7 +3034,7 @@ func TestDeleteAgent_HubNativeProject_NoContainer(t *testing.T) {
 		t.Errorf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Verify the mock manager's Delete was called with the correct grove path
+	// Verify the mock manager's Delete was called with the correct project path
 	if mgr.deleteCalls != 1 {
 		t.Fatalf("expected 1 Delete call, got %d", mgr.deleteCalls)
 	}
@@ -3079,7 +3078,7 @@ func TestIsLocalhostEndpoint(t *testing.T) {
 // (e.g. auth resolution error), the broker cleans up provisioned agent files so
 // they don't become orphans that trigger spurious hub sync-registration.
 func TestCreateAgentStartFailure_CleansUpFiles(t *testing.T) {
-	// Create a temp directory to act as the grove path with agent files
+	// Create a temp directory to act as the project path with agent files
 	tmpDir := t.TempDir()
 	projectPath := filepath.Join(tmpDir, ".scion")
 	agentDir := filepath.Join(projectPath, "agents", "fail-agent")

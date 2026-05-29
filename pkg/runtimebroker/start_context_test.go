@@ -284,7 +284,7 @@ func TestBuildStartContext_GitClone(t *testing.T) {
 	if sc.Opts.Env["SCION_AGENT_BRANCH"] != "feature-1" {
 		t.Errorf("expected SCION_AGENT_BRANCH='feature-1', got %q", sc.Opts.Env["SCION_AGENT_BRANCH"])
 	}
-	// Git clone mode should clear workspace but preserve grove path
+	// Git clone mode should clear workspace but preserve project path
 	// so ProvisionAgent can resolve the correct agent directory.
 	if sc.Opts.Workspace != "" {
 		t.Errorf("expected Workspace to be empty in git clone mode, got %q", sc.Opts.Workspace)
@@ -333,10 +333,10 @@ func TestBuildStartContext_HubNativeProjectWritesMarker(t *testing.T) {
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
-	// Simulate a hub-native grove: ProjectSlug set, ProjectPath pre-resolved
+	// Simulate a hub-native project: ProjectSlug set, ProjectPath pre-resolved
 	// (as the createAgent handler does for env-gather), and ProjectID from hub.
-	grovesDir := t.TempDir()
-	projectPath := filepath.Join(grovesDir, "web-demo")
+	projectsDir := t.TempDir()
+	projectPath := filepath.Join(projectsDir, "web-demo")
 
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
 		Name:        "agent-1",
@@ -354,25 +354,25 @@ func TestBuildStartContext_HubNativeProjectWritesMarker(t *testing.T) {
 		t.Fatal(".scion marker file was not created")
 	}
 
-	// Verify grove-id was written via marker
+	// Verify project-id was written via marker
 	marker, err := config.ReadProjectMarker(scionPath)
 	if err != nil {
 		t.Fatalf("failed to read .scion marker: %v", err)
 	}
 	if marker.ProjectID != "6d868c0f-b862-49e0-a44b-3555a3887ee3" {
-		t.Errorf("expected grove-id '6d868c0f-b862-49e0-a44b-3555a3887ee3', got %q", marker.ProjectID)
+		t.Errorf("expected project-id '6d868c0f-b862-49e0-a44b-3555a3887ee3', got %q", marker.ProjectID)
 	}
 	if marker.ProjectSlug != "web-demo" {
-		t.Errorf("expected grove-slug 'web-demo', got %q", marker.ProjectSlug)
+		t.Errorf("expected project-slug 'web-demo', got %q", marker.ProjectSlug)
 	}
 
 	// Verify external project-configs directories were created
 	extPath, err := marker.ExternalProjectPath()
 	if err != nil {
-		t.Fatalf("failed to get external grove path: %v", err)
+		t.Fatalf("failed to get external project path: %v", err)
 	}
 	if extPath == "" {
-		t.Fatal("expected non-empty external grove path")
+		t.Fatal("expected non-empty external project path")
 	}
 	extAgents := filepath.Join(extPath, "agents")
 	if _, err := os.Stat(extAgents); os.IsNotExist(err) {
@@ -403,14 +403,14 @@ func TestBuildStartContext_HubNativeProjectSlugResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Verify grove-id was written via marker file
+	// Verify project-id was written via marker file
 	scionPath := filepath.Join(sc.Opts.ProjectPath, ".scion")
 	marker, err := config.ReadProjectMarker(scionPath)
 	if err != nil {
 		t.Fatalf("failed to read .scion marker: %v", err)
 	}
 	if marker.ProjectID != "aabbccdd-1234-5678-9012-abcdef123456" {
-		t.Errorf("expected grove-id from hub, got %q", marker.ProjectID)
+		t.Errorf("expected project-id from hub, got %q", marker.ProjectID)
 	}
 }
 
@@ -419,7 +419,7 @@ func TestBuildStartContext_HubNativeProjectPreservesExistingProjectID(t *testing
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
-	// Pre-create .scion as a directory with an existing grove-id (git grove)
+	// Pre-create .scion as a directory with an existing project-id (git project)
 	projectPath := filepath.Join(t.TempDir(), "existing-grove")
 	scionDir := filepath.Join(projectPath, ".scion")
 	if err := os.MkdirAll(scionDir, 0755); err != nil {
@@ -440,13 +440,13 @@ func TestBuildStartContext_HubNativeProjectPreservesExistingProjectID(t *testing
 		t.Fatal(err)
 	}
 
-	// Verify existing grove-id was NOT overwritten (directory-based path)
+	// Verify existing project-id was NOT overwritten (directory-based path)
 	projectID, err := config.ReadProjectID(scionDir)
 	if err != nil {
-		t.Fatalf("failed to read grove-id: %v", err)
+		t.Fatalf("failed to read project-id: %v", err)
 	}
 	if projectID != existingID {
-		t.Errorf("expected existing grove-id %q to be preserved, got %q", existingID, projectID)
+		t.Errorf("expected existing project-id %q to be preserved, got %q", existingID, projectID)
 	}
 }
 
@@ -455,7 +455,7 @@ func TestBuildStartContext_HubNativeProjectPreservesExistingMarker(t *testing.T)
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
-	// Pre-create .scion as a marker file (hub-native grove)
+	// Pre-create .scion as a marker file (hub-native project)
 	projectPath := filepath.Join(t.TempDir(), "existing-grove")
 	if err := os.MkdirAll(projectPath, 0755); err != nil {
 		t.Fatal(err)
@@ -486,7 +486,7 @@ func TestBuildStartContext_HubNativeProjectPreservesExistingMarker(t *testing.T)
 		t.Fatalf("failed to read marker: %v", err)
 	}
 	if marker.ProjectID != existingID {
-		t.Errorf("expected existing grove-id %q to be preserved, got %q", existingID, marker.ProjectID)
+		t.Errorf("expected existing project-id %q to be preserved, got %q", existingID, marker.ProjectID)
 	}
 }
 

@@ -72,7 +72,7 @@ runtimes:
 	}
 
 	// Global .scion dir — where the broker resolves harness-configs when no
-	// grove path is supplied.
+	// project path is supplied.
 	globalScion := filepath.Join(homeDir, ".scion")
 	if err := os.MkdirAll(globalScion, 0755); err != nil {
 		t.Fatal(err)

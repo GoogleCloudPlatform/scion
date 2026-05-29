@@ -332,12 +332,12 @@ func TestHeartbeatService_ProjectFilter(t *testing.T) {
 		},
 	}
 
-	// Filter: only include grove-hub1 groves
-	groveFilter := func(projectID string) bool {
+	// Filter: only include grove-hub1 projects
+	projectFilter := func(projectID string) bool {
 		return projectID == "grove-hub1"
 	}
 
-	svc := NewHeartbeatService(client, "test-host", time.Hour, manager, groveFilter, slog.Default())
+	svc := NewHeartbeatService(client, "test-host", time.Hour, manager, projectFilter, slog.Default())
 	err := svc.ForceHeartbeat(context.Background())
 	if err != nil {
 		t.Fatalf("ForceHeartbeat failed: %v", err)
@@ -352,7 +352,7 @@ func TestHeartbeatService_ProjectFilter(t *testing.T) {
 
 	// Should only include grove-hub1 (2 agents), not grove-hub2 or grove-shared
 	if len(heartbeat.Projects) != 1 {
-		t.Errorf("Expected 1 grove in heartbeat (filtered), got %d", len(heartbeat.Projects))
+		t.Errorf("Expected 1 project in heartbeat (filtered), got %d", len(heartbeat.Projects))
 	}
 
 	if len(heartbeat.Projects) > 0 && heartbeat.Projects[0].ProjectID != "grove-hub1" {
@@ -373,7 +373,7 @@ func TestHeartbeatService_NilProjectFilter(t *testing.T) {
 		},
 	}
 
-	// Nil filter: include all groves
+	// Nil filter: include all projects
 	svc := NewHeartbeatService(client, "test-host", time.Hour, manager, nil, slog.Default())
 	err := svc.ForceHeartbeat(context.Background())
 	if err != nil {
@@ -387,7 +387,7 @@ func TestHeartbeatService_NilProjectFilter(t *testing.T) {
 
 	heartbeat := calls[0].Heartbeat
 	if len(heartbeat.Projects) != 2 {
-		t.Errorf("Expected 2 groves with nil filter, got %d", len(heartbeat.Projects))
+		t.Errorf("Expected 2 projects with nil filter, got %d", len(heartbeat.Projects))
 	}
 }
 
@@ -471,7 +471,7 @@ func TestGlobalProjectRejection_MultiHub(t *testing.T) {
 		t.Fatal("expected multi-hub mode with 2 connections")
 	}
 
-	// Try to create an agent with empty projectID (global grove)
+	// Try to create an agent with empty projectID (global project)
 	body := `{"name": "global-agent", "config": {"template": "claude"}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -480,7 +480,7 @@ func TestGlobalProjectRejection_MultiHub(t *testing.T) {
 	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusConflict {
-		t.Errorf("expected status %d for global grove in multi-hub mode, got %d: %s",
+		t.Errorf("expected status %d for global project in multi-hub mode, got %d: %s",
 			http.StatusConflict, w.Code, w.Body.String())
 	}
 
@@ -500,7 +500,7 @@ func TestGlobalProjectRejection_MultiHub(t *testing.T) {
 }
 
 func TestGlobalProjectRejection_SingleHub_Allowed(t *testing.T) {
-	// Single-hub mode: global grove should be allowed
+	// Single-hub mode: global project should be allowed
 	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
 	srv := newTestServerWithInMemoryCreds(creds)
 
@@ -517,7 +517,7 @@ func TestGlobalProjectRejection_SingleHub_Allowed(t *testing.T) {
 
 	// In single-hub mode, empty projectID should NOT be rejected
 	if w.Code == http.StatusConflict {
-		t.Error("single-hub mode should not reject global grove agents")
+		t.Error("single-hub mode should not reject global project agents")
 	}
 }
 
@@ -546,15 +546,15 @@ func TestGlobalProjectRejection_WithProjectID_MultiHub(t *testing.T) {
 
 	// Should NOT be rejected (has explicit projectID and projectPath)
 	if w.Code == http.StatusConflict {
-		t.Errorf("expected non-global grove to be allowed in multi-hub mode, got %d: %s",
+		t.Errorf("expected non-global project to be allowed in multi-hub mode, got %d: %s",
 			w.Code, w.Body.String())
 	}
 }
 
 func TestGlobalProjectRejection_GitProjectWithProjectID_NoPath_MultiHub(t *testing.T) {
-	// Multi-hub mode: a git-based grove has a projectID but no projectPath or
+	// Multi-hub mode: a git-based project has a projectID but no projectPath or
 	// projectSlug (the broker resolves workspace from the git remote). This
-	// should NOT be treated as the global grove.
+	// should NOT be treated as the global project.
 	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
 	srv := newTestServerWithInMemoryCreds(creds)
 
@@ -575,9 +575,9 @@ func TestGlobalProjectRejection_GitProjectWithProjectID_NoPath_MultiHub(t *testi
 
 	srv.Handler().ServeHTTP(w, req)
 
-	// Should NOT be rejected — projectID is set, so this is not the global grove
+	// Should NOT be rejected — projectID is set, so this is not the global project
 	if w.Code == http.StatusConflict {
-		t.Errorf("expected git-based grove (projectID set, no path) to be allowed in multi-hub mode, got %d: %s",
+		t.Errorf("expected git-based project (projectID set, no path) to be allowed in multi-hub mode, got %d: %s",
 			w.Code, w.Body.String())
 	}
 }
@@ -1252,7 +1252,7 @@ func TestColocated_CredentialWatcher_AddRemoteAlongsideLocal(t *testing.T) {
 }
 
 func TestColocated_GlobalProjectRejection_ComboMode(t *testing.T) {
-	// In combo mode with local + remote, multi-hub mode should reject global grove.
+	// In combo mode with local + remote, multi-hub mode should reject global project.
 	localCreds := makeTestCreds("local", "broker-1", "http://localhost:8080")
 	srv := newTestServerWithInMemoryCreds(localCreds)
 
@@ -1270,7 +1270,7 @@ func TestColocated_GlobalProjectRejection_ComboMode(t *testing.T) {
 		t.Fatal("expected multi-hub mode with local + remote")
 	}
 
-	// Try to create a global grove agent
+	// Try to create a global project agent
 	body := `{"name": "global-agent", "config": {"template": "claude"}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -1279,7 +1279,7 @@ func TestColocated_GlobalProjectRejection_ComboMode(t *testing.T) {
 	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusConflict {
-		t.Errorf("expected status %d for global grove in combo multi-hub mode, got %d: %s",
+		t.Errorf("expected status %d for global project in combo multi-hub mode, got %d: %s",
 			http.StatusConflict, w.Code, w.Body.String())
 	}
 }

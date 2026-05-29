@@ -230,20 +230,20 @@ func TestHeartbeatService_IncludesAgentInfo(t *testing.T) {
 
 	heartbeat := calls[0].Heartbeat
 	if len(heartbeat.Projects) != 2 {
-		t.Errorf("Expected 2 groves in heartbeat, got %d", len(heartbeat.Projects))
+		t.Errorf("Expected 2 projects in heartbeat, got %d", len(heartbeat.Projects))
 	}
 
 	// Check grove counts
-	groveCounts := make(map[string]int)
+	projectCounts := make(map[string]int)
 	for _, g := range heartbeat.Projects {
-		groveCounts[g.ProjectID] = g.AgentCount
+		projectCounts[g.ProjectID] = g.AgentCount
 	}
 
-	if groveCounts["grove-1"] != 2 {
-		t.Errorf("Expected grove-1 to have 2 agents, got %d", groveCounts["grove-1"])
+	if projectCounts["grove-1"] != 2 {
+		t.Errorf("Expected grove-1 to have 2 agents, got %d", projectCounts["grove-1"])
 	}
-	if groveCounts["grove-2"] != 1 {
-		t.Errorf("Expected grove-2 to have 1 agent, got %d", groveCounts["grove-2"])
+	if projectCounts["grove-2"] != 1 {
+		t.Errorf("Expected grove-2 to have 1 agent, got %d", projectCounts["grove-2"])
 	}
 }
 
@@ -284,17 +284,17 @@ func TestHeartbeatService_IncludesPhaseActivity(t *testing.T) {
 
 	heartbeat := calls[0].Heartbeat
 	if len(heartbeat.Projects) != 1 {
-		t.Fatalf("Expected 1 grove in heartbeat, got %d", len(heartbeat.Projects))
+		t.Fatalf("Expected 1 project in heartbeat, got %d", len(heartbeat.Projects))
 	}
 
-	grove := heartbeat.Projects[0]
-	if len(grove.Agents) != 3 {
-		t.Fatalf("Expected 3 agents, got %d", len(grove.Agents))
+	project := heartbeat.Projects[0]
+	if len(project.Agents) != 3 {
+		t.Fatalf("Expected 3 agents, got %d", len(project.Agents))
 	}
 
 	// Build a map by slug for easy lookup
 	agentMap := make(map[string]hubclient.AgentHeartbeat)
-	for _, a := range grove.Agents {
+	for _, a := range project.Agents {
 		agentMap[a.Slug] = a
 	}
 
@@ -433,16 +433,16 @@ func TestHeartbeatService_IncludesAuxiliaryRuntimes(t *testing.T) {
 
 	heartbeat := calls[0].Heartbeat
 	if len(heartbeat.Projects) != 1 {
-		t.Fatalf("Expected 1 grove, got %d", len(heartbeat.Projects))
+		t.Fatalf("Expected 1 project, got %d", len(heartbeat.Projects))
 	}
 
-	grove := heartbeat.Projects[0]
-	if grove.AgentCount != 2 {
-		t.Errorf("Expected 2 agents (docker + k8s), got %d", grove.AgentCount)
+	project := heartbeat.Projects[0]
+	if project.AgentCount != 2 {
+		t.Errorf("Expected 2 agents (docker + k8s), got %d", project.AgentCount)
 	}
 
 	agentMap := make(map[string]hubclient.AgentHeartbeat)
-	for _, ag := range grove.Agents {
+	for _, ag := range project.Agents {
 		agentMap[ag.Slug] = ag
 	}
 	if _, ok := agentMap["k8s-agent"]; !ok {

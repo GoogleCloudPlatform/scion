@@ -27,7 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
-// newTestServerWithProjectPath creates a test server with a temporary grove path
+// newTestServerWithProjectPath creates a test server with a temporary project path
 // that has versioned settings with declared env vars.
 func newTestServerWithProjectPath(t *testing.T, settingsYAML string) (*Server, *envCapturingManager, string) {
 	t.Helper()
@@ -38,10 +38,10 @@ func newTestServerWithProjectPath(t *testing.T, settingsYAML string) (*Server, *
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
 
-	// Create temp grove directory with settings
+	// Create temp project directory with settings
 	// LoadEffectiveSettings expects a dir that contains settings.yaml directly
-	groveDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -49,7 +49,7 @@ func newTestServerWithProjectPath(t *testing.T, settingsYAML string) (*Server, *
 	// Each template needs a scion-agent.yaml that sets harness_config so that
 	// provisioning doesn't fall back to the embedded default (gemini).
 	for _, tpl := range []string{"claude", "gemini", "default"} {
-		tplDir := filepath.Join(groveDir, "templates", tpl)
+		tplDir := filepath.Join(projectDir, "templates", tpl)
 		if err := os.MkdirAll(tplDir, 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -63,7 +63,7 @@ func newTestServerWithProjectPath(t *testing.T, settingsYAML string) (*Server, *
 	// The on-disk directory name is "harness-configs" (with hyphen).
 	// Each needs a config.yaml with harness and image fields.
 	for _, hc := range []string{"claude", "gemini"} {
-		hcDir := filepath.Join(groveDir, "harness-configs", hc)
+		hcDir := filepath.Join(projectDir, "harness-configs", hc)
 		if err := os.MkdirAll(hcDir, 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -84,7 +84,7 @@ func newTestServerWithProjectPath(t *testing.T, settingsYAML string) (*Server, *
 	// NameFunc returns "docker" so resolveManagerForOpts matches the settings-resolved runtime.
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
-	return New(cfg, mgr, rt), mgr, groveDir
+	return New(cfg, mgr, rt), mgr, projectDir
 }
 
 // TestEnvGather_AllSatisfied tests the fast path: all required env keys are provided
@@ -101,13 +101,13 @@ profiles:
   default:
     runtime: mock
 `
-	srv, mgr, groveDir := newTestServerWithProjectPath(t, settings)
+	srv, mgr, projectDir := newTestServerWithProjectPath(t, settings)
 
 	body := `{
 		"name": "test-agent",
 		"id": "agent-uuid-123",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"resolvedEnv": {"API_KEY": "sk-test-key", "ANTHROPIC_API_KEY": "sk-ant-key"},
 		"config": {"template": "claude", "profile": "default"}
 	}`
@@ -145,13 +145,13 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
+	srv, _, projectDir := newTestServerWithProjectPath(t, settings)
 
 	body := `{
 		"name": "test-agent-gather",
 		"id": "agent-uuid-456",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"resolvedEnv": {"API_KEY": "sk-from-hub"},
 		"config": {"template": "claude", "profile": "default"}
 	}`
@@ -214,7 +214,7 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
+	srv, _, projectDir := newTestServerWithProjectPath(t, settings)
 
 	// Set the keys in the broker's own environment — these should NOT be used
 	t.Setenv("BROKER_LOCAL_KEY", "broker-value")
@@ -224,7 +224,7 @@ profiles:
 		"name": "test-agent-broker-env",
 		"id": "agent-uuid-789",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -275,14 +275,14 @@ profiles:
   default:
     runtime: mock
 `
-	srv, mgr, groveDir := newTestServerWithProjectPath(t, settings)
+	srv, mgr, projectDir := newTestServerWithProjectPath(t, settings)
 
 	// Phase 1: Create agent with gather — should get 202
 	createBody := `{
 		"name": "test-agent-finalize",
 		"id": "agent-uuid-fin",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(createBody))
@@ -334,14 +334,14 @@ profiles:
   default:
     runtime: mock
 `
-	srv, mgr, groveDir := newTestServerWithProjectPath(t, settings)
+	srv, mgr, projectDir := newTestServerWithProjectPath(t, settings)
 	mgr.startErr = os.ErrPermission
 
 	createBody := `{
 		"name": "test-agent-retry",
 		"id": "agent-uuid-retry",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(createBody))
@@ -383,12 +383,12 @@ profiles:
   default:
     runtime: mock
 `
-	groveDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(settings), 0644); err != nil {
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settings), 0644); err != nil {
 		t.Fatal(err)
 	}
 	for _, tpl := range []string{"claude", "default"} {
-		tplDir := filepath.Join(groveDir, "templates", tpl)
+		tplDir := filepath.Join(projectDir, "templates", tpl)
 		if err := os.MkdirAll(tplDir, 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -396,7 +396,7 @@ profiles:
 			t.Fatal(err)
 		}
 	}
-	hcDir := filepath.Join(groveDir, "harness-configs", "claude")
+	hcDir := filepath.Join(projectDir, "harness-configs", "claude")
 	if err := os.MkdirAll(hcDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +419,7 @@ profiles:
 		"name": "test-agent-restart",
 		"id": "agent-uuid-restart",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(createBody))
@@ -454,7 +454,7 @@ func TestCreateAgent_IdempotentByRequestID(t *testing.T) {
 	cfg.Debug = true
 	cfg.StateDir = t.TempDir()
 	cfg.ForceRuntime = "mock"
-	groveDir := t.TempDir()
+	projectDir := t.TempDir()
 	settingsYAML := `schema_version: "1"
 active_profile: local
 profiles:
@@ -464,14 +464,14 @@ runtimes:
     mock:
         type: mock
 `
-	if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create templates with scion-agent.yaml so harness-config resolution
 	// finds a harness_config value instead of falling through to the
 	// embedded default ("gemini") which has no on-disk directory.
-	tplDir := filepath.Join(groveDir, "templates", "claude")
+	tplDir := filepath.Join(projectDir, "templates", "claude")
 	if err := os.MkdirAll(tplDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -480,7 +480,7 @@ runtimes:
 	}
 
 	// Create harness-config directory so FindHarnessConfigDir can resolve it.
-	hcDir := filepath.Join(groveDir, "harness-configs", "claude")
+	hcDir := filepath.Join(projectDir, "harness-configs", "claude")
 	if err := os.MkdirAll(hcDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -497,7 +497,7 @@ runtimes:
 		"id": "agent-uuid-idem",
 		"grovePath": %q,
 		"config": {"template": "claude"}
-	}`, groveDir)
+	}`, projectDir)
 	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 	req1.Header.Set("Content-Type", "application/json")
 	w1 := httptest.NewRecorder()
@@ -521,7 +521,7 @@ runtimes:
 	}
 }
 
-// newTestServerWithHarnessConfig creates a test server with a temporary grove path
+// newTestServerWithHarnessConfig creates a test server with a temporary project path
 // that has a harness-config directory and optional settings YAML.
 func newTestServerWithHarnessConfig(t *testing.T, harnessConfigName, configYAML, settingsYAML string) (*Server, *envCapturingManager, string) {
 	t.Helper()
@@ -532,10 +532,10 @@ func newTestServerWithHarnessConfig(t *testing.T, harnessConfigName, configYAML,
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
 
-	groveDir := t.TempDir()
+	projectDir := t.TempDir()
 
 	// Create harness-configs/<name>/config.yaml
-	hcDir := filepath.Join(groveDir, "harness-configs", harnessConfigName)
+	hcDir := filepath.Join(projectDir, "harness-configs", harnessConfigName)
 	if err := os.MkdirAll(hcDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -545,7 +545,7 @@ func newTestServerWithHarnessConfig(t *testing.T, harnessConfigName, configYAML,
 
 	// Write settings.yaml if provided
 	if settingsYAML != "" {
-		if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -561,14 +561,14 @@ func newTestServerWithHarnessConfig(t *testing.T, harnessConfigName, configYAML,
 	// NameFunc returns "docker" so resolveManagerForOpts matches the settings-resolved runtime.
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
-	return New(cfg, mgr, rt), mgr, groveDir
+	return New(cfg, mgr, rt), mgr, projectDir
 }
 
 // TestEnvGather_SettingsEmptyEnv tests that env-gather extracts required keys
 // from settings-defined empty-value env entries.
 func TestEnvGather_SettingsEmptyEnv(t *testing.T) {
 	// Settings declares ANTHROPIC_API_KEY as empty (needs gathering)
-	srv, _, groveDir := newTestServerWithHarnessConfig(t, "claude",
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
 		"harness: claude\nimage: test-image\nuser: scion\n",
 		`
 schema_version: "1"
@@ -586,7 +586,7 @@ profiles:
 		"name": "test-agent-settings-env",
 		"id": "agent-uuid-se",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -622,7 +622,7 @@ profiles:
 // project-related keys declared as empty in settings.
 func TestEnvGather_SettingsEmptyEnvVertexAI(t *testing.T) {
 	// Settings declares GOOGLE_CLOUD_PROJECT as empty (needs gathering)
-	srv, _, groveDir := newTestServerWithHarnessConfig(t, "gemini",
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "gemini",
 		"harness: gemini\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n",
 		`
 schema_version: "1"
@@ -640,7 +640,7 @@ profiles:
 		"name": "test-agent-gemini-vertex",
 		"id": "agent-uuid-gv",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"config": {"template": "gemini", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -674,7 +674,7 @@ profiles:
 // for auth_selected_type takes precedence over the on-disk harness-config value.
 func TestEnvGather_SettingsAuthTypeOverride(t *testing.T) {
 	// On-disk config says api-key, but settings profile overrides to auth-file
-	srv, mgr, groveDir := newTestServerWithHarnessConfig(t, "gemini",
+	srv, mgr, projectDir := newTestServerWithHarnessConfig(t, "gemini",
 		"harness: gemini\nimage: test-image\nuser: scion\nauth_selected_type: api-key\n",
 		`
 schema_version: "1"
@@ -690,7 +690,7 @@ profiles:
 		"name": "test-agent-override",
 		"id": "agent-uuid-ov",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"config": {"template": "gemini", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -713,7 +713,7 @@ profiles:
 // and a file-type secret like OAUTH_CREDS is available, the system detects that auth-file
 // can be used and does not require GEMINI_API_KEY.
 func TestEnvGather_FileSecretSatisfiesAuth(t *testing.T) {
-	srv, mgr, groveDir := newTestServerWithHarnessConfig(t, "gemini",
+	srv, mgr, projectDir := newTestServerWithHarnessConfig(t, "gemini",
 		"harness: gemini\nimage: test-image\nuser: scion\n",
 		`
 schema_version: "1"
@@ -726,7 +726,7 @@ profiles:
 		"name": "test-agent-oauth",
 		"id": "agent-uuid-oauth",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"resolvedSecrets": [
 			{"name": "GEMINI_OAUTH_CREDS", "type": "file", "target": "/home/gemini/.gemini/oauth_creds.json", "value": "{}", "source": "user"}
 		],
@@ -762,13 +762,13 @@ profiles:
   default:
     runtime: mock
 `
-	srv, mgr, groveDir := newTestServerWithProjectPath(t, settings)
+	srv, mgr, projectDir := newTestServerWithProjectPath(t, settings)
 
 	body := `{
 		"name": "test-agent-no-gather",
 		"id": "agent-uuid-no-gather",
 		"gatherEnv": false,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -804,13 +804,13 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
+	srv, _, projectDir := newTestServerWithProjectPath(t, settings)
 
 	body := `{
 		"name": "test-agent-secret-upgrade",
 		"id": "agent-uuid-secret",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"resolvedSecrets": [
 			{"name": "API_KEY", "type": "environment", "target": "API_KEY", "value": "secret-api-key", "source": "user"},
 			{"name": "ANTHROPIC_API_KEY", "type": "environment", "target": "ANTHROPIC_API_KEY", "value": "secret-ant-key", "source": "user"}
@@ -846,13 +846,13 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
+	srv, _, projectDir := newTestServerWithProjectPath(t, settings)
 
 	body := `{
 		"name": "test-agent-partial-secret",
 		"id": "agent-uuid-partial",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"resolvedSecrets": [
 			{"name": "API_KEY", "type": "environment", "target": "API_KEY", "value": "secret-api-key", "source": "user"}
 		],
@@ -921,13 +921,13 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
+	srv, _, projectDir := newTestServerWithProjectPath(t, settings)
 
 	body := `{
 		"name": "test-agent-harness-secrets",
 		"id": "agent-uuid-hs",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"resolvedEnv": {"ANTHROPIC_API_KEY": "sk-ant-key"},
 		"config": {"template": "claude", "profile": "default"}
 	}`
@@ -989,7 +989,7 @@ profiles:
       - key: PROFILE_SECRET
         description: "Secret required by this profile"
 `
-	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
+	srv, _, projectDir := newTestServerWithProjectPath(t, settings)
 
 	// Satisfy harness key via broker env
 	t.Setenv("ANTHROPIC_API_KEY", "broker-ant-key")
@@ -998,7 +998,7 @@ profiles:
 		"name": "test-agent-profile-secrets",
 		"id": "agent-uuid-ps",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1041,7 +1041,7 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
+	srv, _, projectDir := newTestServerWithProjectPath(t, settings)
 
 	// Satisfy harness key via broker env
 	t.Setenv("ANTHROPIC_API_KEY", "broker-ant-key")
@@ -1050,7 +1050,7 @@ profiles:
 		"name": "test-agent-req-secrets",
 		"id": "agent-uuid-rs",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"requiredSecrets": [
 			{"key": "HUB_TEMPLATE_KEY", "description": "Key from Hub template"}
 		],
@@ -1116,14 +1116,14 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
+	srv, _, projectDir := newTestServerWithProjectPath(t, settings)
 
 	// Satisfy harness key and SATISFIED_KEY via resolved secrets
 	body := `{
 		"name": "test-agent-si-needed",
 		"id": "agent-uuid-sin",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"resolvedEnv": {"ANTHROPIC_API_KEY": "sk-ant-key"},
 		"resolvedSecrets": [
 			{"name": "SATISFIED_KEY", "type": "environment", "target": "SATISFIED_KEY", "value": "satisfied-val", "source": "user"}
@@ -1180,7 +1180,7 @@ profiles:
         description: "Profile token"
         type: variable
 `
-	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
+	srv, _, projectDir := newTestServerWithProjectPath(t, settings)
 
 	// Satisfy harness key via broker env
 	t.Setenv("ANTHROPIC_API_KEY", "broker-ant-key")
@@ -1189,7 +1189,7 @@ profiles:
 		"name": "test-agent-type-prop",
 		"id": "agent-uuid-tp",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1255,7 +1255,7 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
+	srv, _, projectDir := newTestServerWithProjectPath(t, settings)
 
 	// Satisfy harness key via broker env
 	t.Setenv("ANTHROPIC_API_KEY", "broker-ant-key")
@@ -1264,7 +1264,7 @@ profiles:
 		"name": "test-agent-type-tmpl",
 		"id": "agent-uuid-tt",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"requiredSecrets": [
 			{"key": "TMPL_FILE_SECRET", "description": "Template file secret", "type": "file"},
 			{"key": "TMPL_ENV_SECRET", "description": "Template env secret", "type": "environment"}
@@ -1326,7 +1326,7 @@ profiles:
       - key: SHARED_KEY
         description: "From profile"
 `
-	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
+	srv, _, projectDir := newTestServerWithProjectPath(t, settings)
 
 	// Satisfy harness key via broker env
 	t.Setenv("ANTHROPIC_API_KEY", "broker-ant-key")
@@ -1335,7 +1335,7 @@ profiles:
 		"name": "test-agent-merge",
 		"id": "agent-uuid-merge",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"config": {"template": "claude", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1371,7 +1371,7 @@ profiles:
 // resolution falls back to settings defaults (default_harness_config) and
 // image resolution succeeds.
 func TestEnvGather_FinalizeEnv_EmptyTemplate(t *testing.T) {
-	groveDir := t.TempDir()
+	projectDir := t.TempDir()
 
 	// Settings with default_harness_config that points to "claude"
 	settingsYAML := `
@@ -1386,13 +1386,13 @@ profiles:
   default:
     runtime: mock
 `
-	if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create "default" template WITHOUT harness_config so the fallback to
 	// settings.default_harness_config is exercised.
-	defaultTplDir := filepath.Join(groveDir, "templates", "default")
+	defaultTplDir := filepath.Join(projectDir, "templates", "default")
 	if err := os.MkdirAll(defaultTplDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1401,7 +1401,7 @@ profiles:
 	}
 
 	// Create "claude" harness-config directory with image
-	claudeHCDir := filepath.Join(groveDir, "harness-configs", "claude")
+	claudeHCDir := filepath.Join(projectDir, "harness-configs", "claude")
 	if err := os.MkdirAll(claudeHCDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1425,7 +1425,7 @@ profiles:
 		"name": "test-agent-empty-tpl",
 		"id": "agent-uuid-empty-tpl",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"config": {"profile": "default"}
 	}`
 	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(createBody))
@@ -1474,13 +1474,13 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
+	srv, _, projectDir := newTestServerWithProjectPath(t, settings)
 
 	body := `{
 		"name": "test-agent-harness-config",
 		"id": "agent-uuid-hc",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"config": {"template": "default", "harnessConfig": "gemini", "profile": "default"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1527,14 +1527,14 @@ profiles:
   default:
     runtime: mock
 `
-	srv, mgr, groveDir := newTestServerWithProjectPath(t, settings)
+	srv, mgr, projectDir := newTestServerWithProjectPath(t, settings)
 
 	// Phase 1: Create agent with gatherEnv and explicit harnessConfig — should get 202
 	createBody := `{
 		"name": "test-agent-hc-preserve",
 		"id": "agent-uuid-hcp",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"config": {"template": "claude", "harnessConfig": "claude", "profile": "default"}
 	}`
 	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(createBody))
@@ -1569,7 +1569,7 @@ profiles:
 // an ADC file secret returns 202 with gcloud-adc in needs
 // and SecretInfo showing type=file.
 func TestEnvGather_VertexAI_RequiresADCFile(t *testing.T) {
-	srv, _, groveDir := newTestServerWithHarnessConfig(t, "claude",
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
 		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n",
 		`
 schema_version: "1"
@@ -1587,7 +1587,7 @@ profiles:
 		"name": "test-agent-vertex-adc",
 		"id": "agent-uuid-vadc",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"resolvedEnv": {
 			"GOOGLE_CLOUD_PROJECT": "my-project",
 			"GOOGLE_CLOUD_REGION": "us-central1"
@@ -1644,7 +1644,7 @@ profiles:
 // file-type resolved secret for ADC passes through without returning 202
 // for gcloud-adc.
 func TestEnvGather_VertexAI_ADCSatisfied(t *testing.T) {
-	srv, _, groveDir := newTestServerWithHarnessConfig(t, "claude",
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
 		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n",
 		`
 schema_version: "1"
@@ -1661,7 +1661,7 @@ profiles:
 		"name": "test-agent-vertex-adc-sat",
 		"id": "agent-uuid-vadcs",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"resolvedEnv": {
 			"GOOGLE_CLOUD_PROJECT": "my-project",
 			"GOOGLE_CLOUD_REGION": "us-central1"
@@ -1695,7 +1695,7 @@ profiles:
 // vertex-ai auth and requires project/region instead of an API key.
 func TestEnvGather_AutoDetectVertexAI_FromGACEnvVar(t *testing.T) {
 	// No auth_selected_type set — auto-detect should kick in
-	srv, _, groveDir := newTestServerWithHarnessConfig(t, "claude",
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
 		"harness: claude\nimage: test-image\nuser: scion\n",
 		`
 schema_version: "1"
@@ -1712,7 +1712,7 @@ profiles:
 		"name": "test-agent-autodetect-gac",
 		"id": "agent-uuid-adgac",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"resolvedEnv": {
 			"GOOGLE_APPLICATION_CREDENTIALS": "/path/to/service-account.json"
 		},
@@ -1755,7 +1755,7 @@ profiles:
 // satisfied when GOOGLE_APPLICATION_CREDENTIALS env var is provided instead
 // of a gcloud-adc file secret.
 func TestEnvGather_VertexAI_ADCSatisfiedByEnvVar(t *testing.T) {
-	srv, _, groveDir := newTestServerWithHarnessConfig(t, "claude",
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
 		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n",
 		`
 schema_version: "1"
@@ -1773,7 +1773,7 @@ profiles:
 		"name": "test-agent-vertex-gac",
 		"id": "agent-uuid-vgac",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"resolvedEnv": {
 			"GOOGLE_CLOUD_PROJECT": "my-project",
 			"GOOGLE_CLOUD_REGION": "us-central1",
@@ -1807,7 +1807,7 @@ profiles:
 // auth type defaulted to api-key, requiring ANTHROPIC_API_KEY and blocking
 // non-admin users who only have GCP credentials.
 func TestEnvGather_AutoDetectVertexAI_FromGCPProject(t *testing.T) {
-	srv, _, groveDir := newTestServerWithHarnessConfig(t, "claude",
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
 		"harness: claude\nimage: test-image\nuser: scion\n",
 		`
 schema_version: "1"
@@ -1823,7 +1823,7 @@ profiles:
 		"name": "test-agent-autodetect-gcp",
 		"id": "agent-uuid-adgcp",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"resolvedEnv": {
 			"GOOGLE_CLOUD_PROJECT": "my-hub-project"
 		},
@@ -1867,7 +1867,7 @@ profiles:
 // from GOOGLE_CLOUD_PROJECT without checking whether an API key was also present,
 // causing env-gather to require gcloud-adc even though api-key auth was viable.
 func TestEnvGather_AutoDetect_APIKeyWinsOverGCPProject(t *testing.T) {
-	srv, _, groveDir := newTestServerWithHarnessConfig(t, "gemini",
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "gemini",
 		"harness: gemini\nimage: test-image\nuser: scion\n",
 		`
 schema_version: "1"
@@ -1883,7 +1883,7 @@ profiles:
 		"name": "test-agent-apikey-gcp",
 		"id": "agent-uuid-apikey-gcp",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"resolvedEnv": {
 			"GOOGLE_CLOUD_PROJECT": "my-project",
 			"GOOGLE_CLOUD_REGION": "us-central1",
@@ -1911,7 +1911,7 @@ profiles:
 // TestEnvGather_AutoDetect_ClaudeAPIKeyWinsOverGCPProject tests the same
 // api-key priority for the claude harness.
 func TestEnvGather_AutoDetect_ClaudeAPIKeyWinsOverGCPProject(t *testing.T) {
-	srv, _, groveDir := newTestServerWithHarnessConfig(t, "claude",
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
 		"harness: claude\nimage: test-image\nuser: scion\n",
 		`
 schema_version: "1"
@@ -1927,7 +1927,7 @@ profiles:
 		"name": "test-agent-claude-apikey-gcp",
 		"id": "agent-uuid-claude-apikey-gcp",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"resolvedEnv": {
 			"GOOGLE_CLOUD_PROJECT": "my-project",
 			"GOOGLE_CLOUD_REGION": "us-central1"
@@ -1958,7 +1958,7 @@ func TestEnvGather_HarnessAuthOverride(t *testing.T) {
 	// Set up a gemini harness config with no auth_selected_type (auto-detect).
 	// Provide an OAuth file secret so auto-detect would normally pick auth-file.
 	// But --harness-auth api-key should override to api-key, requiring GEMINI_API_KEY.
-	srv, _, groveDir := newTestServerWithHarnessConfig(t, "gemini",
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "gemini",
 		"harness: gemini\nimage: test-image\nuser: scion\n",
 		`
 schema_version: "1"
@@ -1971,7 +1971,7 @@ profiles:
 		"name": "test-agent-harness-auth",
 		"id": "agent-uuid-ha",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"resolvedSecrets": [
 			{"name": "GEMINI_OAUTH_CREDS", "type": "file", "target": "/home/gemini/.gemini/oauth_creds.json", "value": "{}", "source": "user"}
 		],
@@ -2010,7 +2010,7 @@ profiles:
 // overrides auto-detect and requires vertex-ai credentials even when an API key
 // would otherwise be detected as sufficient.
 // TestEnvGather_NoProjectPath_GlobalFallback tests that when projectPath is empty
-// (e.g. hub-only git groves), the broker falls back to the global ~/.scion
+// (e.g. hub-only git projects), the broker falls back to the global ~/.scion
 // directory for settings resolution, so auth env keys are still detected.
 func TestEnvGather_NoProjectPath_GlobalFallback(t *testing.T) {
 	// Set up a fake HOME with global .scion settings
@@ -2109,14 +2109,14 @@ profiles:
   default:
     runtime: mock
 `
-	srv, _, groveDir := newTestServerWithProjectPath(t, settings)
+	srv, _, projectDir := newTestServerWithProjectPath(t, settings)
 
 	// Send a request with a resolved secret that has Name but no Target
 	body := `{
 		"name": "test-agent-target-fallback",
 		"id": "agent-uuid-target-fb",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"config": {"template": "gemini", "profile": "default"},
 		"resolvedSecrets": [
 			{"name": "GEMINI_API_KEY", "type": "environment", "value": "sk-test", "target": ""},
@@ -2137,7 +2137,7 @@ profiles:
 }
 
 func TestEnvGather_HarnessAuthOverrideVertexAI(t *testing.T) {
-	srv, _, groveDir := newTestServerWithHarnessConfig(t, "gemini",
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "gemini",
 		"harness: gemini\nimage: test-image\nuser: scion\n",
 		`
 schema_version: "1"
@@ -2150,7 +2150,7 @@ profiles:
 		"name": "test-agent-harness-auth-vertex",
 		"id": "agent-uuid-hav",
 		"gatherEnv": true,
-		"grovePath": "` + groveDir + `",
+		"grovePath": "` + projectDir + `",
 		"config": {"template": "gemini", "profile": "default", "harnessAuth": "vertex-ai"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))

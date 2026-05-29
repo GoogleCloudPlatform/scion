@@ -36,27 +36,27 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 )
 
-// matchesAgent checks whether an agent matches the given id and optional groveID.
-// When groveID is provided, it must match for uniqueness across groves.
-// When groveID is empty, matching falls back to name/containerID/slug only
+// matchesAgent checks whether an agent matches the given id and optional projectID.
+// When projectID is provided, it must match for uniqueness across projects.
+// When projectID is empty, matching falls back to name/containerID/slug only
 // (backward compatible with solo/CLI mode and pre-existing containers).
-func matchesAgent(a api.AgentInfo, id, groveID string) bool {
+func matchesAgent(a api.AgentInfo, id, projectID string) bool {
 	nameMatch := a.Name == id || a.ContainerID == id || a.Slug == id
 	if !nameMatch {
 		return false
 	}
-	if groveID == "" {
+	if projectID == "" {
 		return true
 	}
 	// Check grove_id label first (authoritative), then ProjectID field
 	if labelProjectID := a.Labels["scion.grove_id"]; labelProjectID != "" {
-		return labelProjectID == groveID
+		return labelProjectID == projectID
 	}
 	if a.ProjectID != "" {
-		return a.ProjectID == groveID
+		return a.ProjectID == projectID
 	}
-	// No grove_id on container — match anyway for backward compatibility
-	// with containers created before grove_id labeling was added.
+	// No project_id on container — match anyway for backward compatibility
+	// with containers created before project_id labeling was added.
 	return true
 }
 
@@ -216,8 +216,8 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	// Add optional filters — support both projectId and legacy groveId.
 	if projectID := query.Get("projectId"); projectID != "" {
 		filter["scion.project_id"] = projectID
-	} else if groveID := query.Get("groveId"); groveID != "" {
-		filter["scion.project_id"] = groveID
+	} else if projectID := query.Get("groveId"); projectID != "" {
+		filter["scion.project_id"] = projectID
 	}
 	if status := query.Get("status"); status != "" {
 		filter["status"] = status
@@ -294,7 +294,6 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	createStart := time.Now()
 
 	var req CreateAgentRequest
 	if err := readJSON(r, &req); err != nil {
@@ -366,10 +365,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Debug log incoming request
 	if s.config.Debug {
-		s.agentLifecycleLog.Debug("Creating agent", "agent_id", req.ID, "grove_id", req.ProjectID, "name", req.Name, "slug", req.Slug)
+		s.agentLifecycleLog.Debug("Creating agent", "agent_id", req.ID, "project_id", req.ProjectID, "name", req.Name, "slug", req.Slug)
 		s.agentLifecycleLog.Debug("Hub credentials",
 			"agent_id", req.ID,
-			"grove_id", req.ProjectID,
+			"project_id", req.ProjectID,
 			"hubEndpoint", req.HubEndpoint,
 			"hasToken", req.AgentToken != "",
 			"slug", req.Slug,
@@ -377,7 +376,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		if req.Config != nil {
 			s.agentLifecycleLog.Debug("Agent configuration",
 				"agent_id", req.ID,
-				"grove_id", req.ProjectID,
+				"project_id", req.ProjectID,
 				"template", req.Config.Template,
 				"image", req.Config.Image,
 				"templateID", req.Config.TemplateID,
@@ -385,7 +384,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Resolve grove path early for env-gather (needs settings access before buildStartContext)
+	// Resolve project path early for env-gather (needs settings access before buildStartContext)
 	if req.ProjectSlug != "" && req.ProjectPath == "" {
 		globalDir, err := config.GetGlobalDir()
 		if err != nil {
@@ -395,16 +394,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		projectsPath := filepath.Join(globalDir, "projects", req.ProjectSlug)
 		if !hasWorkspaceContent(projectsPath) {
-			grovesPath := filepath.Join(globalDir, "groves", req.ProjectSlug)
-			if hasWorkspaceContent(grovesPath) {
-				projectsPath = grovesPath
+			// fallback to groves/ for backward compatibility
+			legacyPath := filepath.Join(globalDir, "groves", req.ProjectSlug)
+			if hasWorkspaceContent(legacyPath) {
+				projectsPath = legacyPath
 			}
 		}
 		req.ProjectPath = projectsPath
 	}
 
 	// Env-gather: if GatherEnv is true, evaluate env completeness before building full context.
-	// This needs the resolved grove path and merged env to determine which keys are missing.
+	// This needs the resolved project path and merged env to determine which keys are missing.
 	if req.GatherEnv {
 		// Build a preliminary merged env for env-gather evaluation
 		env := make(map[string]string)
@@ -424,7 +424,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		if s.config.Debug {
 			s.envSecretLog.Debug("Env-gather: evaluating env completeness",
 				"gatherEnv", req.GatherEnv,
-				"grovePath", req.ProjectPath,
+				"projectPath", req.ProjectPath,
 				"requiredKeys", len(required),
 				"required", required,
 			)
@@ -530,17 +530,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Debug log grove path
+	// Debug log project path
 	if s.config.Debug && req.ProjectPath != "" {
-		s.agentLifecycleLog.Debug("Using grove path from Hub", "agent_id", req.ID, "path", req.ProjectPath)
+		s.agentLifecycleLog.Debug("Using project path from Hub", "agent_id", req.ID, "path", req.ProjectPath)
 	}
 
-	// Reject global groves in multi-hub mode
+	// Reject global project in multi-hub mode
 	if s.isMultiHubMode() && s.isGlobalProject(req.ProjectID, req.ProjectPath) {
 		writeJSON(w, http.StatusConflict, map[string]interface{}{
 			"error": map[string]string{
 				"code":    "global_grove_disabled",
-				"message": "Global grove is disabled when broker is connected to multiple hubs",
+				"message": "Global project is disabled when broker is connected to multiple hubs",
 			},
 		})
 		return
@@ -548,7 +548,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Phase 3 broker policy: refuse container-script harness dispatches
 	// unless the broker has opted in. We check before buildStartContext so
-	// the failure happens before the broker mounts grove state, downloads
+	// the failure happens before the broker mounts project state, downloads
 	// workspaces, or projects secrets.
 	if name, entry, ok := s.lookupHarnessConfigForPolicy(req); ok {
 		if d := s.evaluateHarnessConfigPolicy(name, entry); !d.OK {
@@ -558,10 +558,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build unified start context (grove path, env, template, git-clone, secrets, manager)
-	s.agentLifecycleLog.Info("Agent dispatch: pre-flight complete",
-		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(createStart).String())
-	buildCtxStart := time.Now()
+	// Build unified start context (project path, env, template, git-clone, secrets, manager)
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:            req.Name,
 		AgentID:         req.ID,
@@ -594,12 +591,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	opts := sc.Opts
-	s.agentLifecycleLog.Info("Agent dispatch: buildStartContext complete",
-		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(buildCtxStart).String())
 
 	// If WorkspaceStoragePath is set, download workspace from GCS (non-git bootstrap)
 	if req.WorkspaceStoragePath != "" {
-		// For hub-native groves (ProjectSlug set), use the conventional path
+		// For hub-native projects (ProjectSlug set), use the conventional path
 		// ~/.scion.groves/<slug>/ instead of the worktree-based path.
 		var workspaceDir string
 		if req.ProjectSlug != "" {
@@ -611,9 +606,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			}
 			workspaceDir = filepath.Join(globalDir, "projects", req.ProjectSlug)
 			if !hasWorkspaceContent(workspaceDir) {
-				grovesPath := filepath.Join(globalDir, "groves", req.ProjectSlug)
-				if hasWorkspaceContent(grovesPath) {
-					workspaceDir = grovesPath
+				// fallback to groves/ for backward compatibility
+				legacyPath := filepath.Join(globalDir, "groves", req.ProjectSlug)
+				if hasWorkspaceContent(legacyPath) {
+					workspaceDir = legacyPath
 				}
 			}
 		} else {
@@ -637,7 +633,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				"bucket", bucket,
 				"storagePath", req.WorkspaceStoragePath+"/files",
 				"workspaceDir", workspaceDir,
-				"groveSlug", req.ProjectSlug,
+				"projectSlug", req.ProjectSlug,
 			)
 		}
 
@@ -652,17 +648,16 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// agent directory. The explicit workspace takes precedence over the
 		// worktree logic in ProvisionAgent, so no worktree will be created.
 
-		// Write a .scion.grove marker into the workspace so in-container CLI
-		// can discover the grove context and use the Hub API.
+		// Write a workspace marker so in-container CLI
+		// can discover the project context and use the Hub API.
 		if req.ProjectID != "" && req.ProjectSlug != "" {
 			if writeErr := config.WriteWorkspaceMarker(workspaceDir, req.ProjectID, req.ProjectSlug, req.ProjectSlug); writeErr != nil {
-				s.agentLifecycleLog.Warn("Failed to write workspace marker", "agent_id", req.ID, "grove_id", req.ProjectID, "error", writeErr)
+				s.agentLifecycleLog.Warn("Failed to write workspace marker", "agent_id", req.ID, "project_id", req.ProjectID, "error", writeErr)
 			}
 		}
 	}
 
 	// Branch based on provision-only flag
-	startOpStart := time.Now()
 	if req.ProvisionOnly {
 		// Provision only: set up dirs, worktree, templates without starting the container
 		cfg, err := sc.Manager.Provision(ctx, opts)
@@ -673,7 +668,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.agentLifecycleLog.Info("Agent provisioned",
-			"agent_id", req.ID, "grove_id", req.ProjectID,
+			"agent_id", req.ID, "project_id", req.ProjectID,
 			"name", req.Name, "slug", req.Slug,
 			"phase", string(state.PhaseCreated))
 
@@ -712,7 +707,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
 
 		s.agentLifecycleLog.Error("Agent create failed",
-			"agent_id", req.ID, "grove_id", req.ProjectID,
+			"agent_id", req.ID, "project_id", req.ProjectID,
 			"name", req.Name, "slug", req.Slug,
 			"error", err)
 
@@ -720,22 +715,18 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		if opts.ProjectPath != "" {
 			if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil {
 				s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",
-					"agent_id", req.ID, "grove_id", req.ProjectID, "agent", opts.Name, "error", cleanupErr)
+					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name, "error", cleanupErr)
 			} else {
 				s.agentLifecycleLog.Info("Cleaned up provisioned agent files after start failure",
-					"agent_id", req.ID, "grove_id", req.ProjectID, "agent", opts.Name)
+					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
 			}
 		}
 		RuntimeError(w, "Failed to create agent: "+err.Error())
 		return
 	}
 
-	s.agentLifecycleLog.Info("Agent dispatch: start complete",
-		"agent_id", req.ID, "name", req.Name,
-		"startElapsed", time.Since(startOpStart).String(),
-		"totalElapsed", time.Since(createStart).String())
 	s.agentLifecycleLog.Info("Agent created",
-		"agent_id", req.ID, "grove_id", req.ProjectID,
+		"agent_id", req.ID, "project_id", req.ProjectID,
 		"name", req.Name, "slug", req.Slug,
 		"phase", string(state.PhaseRunning),
 		"container_status", agentInfo.ContainerStatus)
@@ -743,7 +734,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// Log auth resolution info visible in broker logs
 	for _, w := range agentInfo.Warnings {
 		if strings.HasPrefix(w, "Auth:") {
-			s.agentLifecycleLog.Info("Agent auth resolution", "agent_id", req.ID, "grove_id", req.ProjectID, "agent", req.Name, "result", w)
+			s.agentLifecycleLog.Info("Agent auth resolution", "agent_id", req.ID, "project_id", req.ProjectID, "agent", req.Name, "result", w)
 		}
 	}
 
@@ -838,11 +829,11 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id, groveID string) {
+func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
 	// Resolve the correct manager (checks auxiliary runtimes if needed)
-	mgr := s.resolveManagerForAgent(ctx, id, groveID)
+	mgr := s.resolveManagerForAgent(ctx, id, projectID)
 
 	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"})
 	if err != nil {
@@ -851,7 +842,7 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id, groveID st
 	}
 
 	for _, agent := range agents {
-		if matchesAgent(agent, id, groveID) {
+		if matchesAgent(agent, id, projectID) {
 			writeJSON(w, http.StatusOK, AgentInfoToResponse(agent))
 			return
 		}
@@ -860,7 +851,7 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id, groveID st
 	NotFound(w, "Agent")
 }
 
-func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, groveID string) {
+func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 	query := r.URL.Query()
 
@@ -869,15 +860,15 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, groveID
 	softDelete := query.Get("softDelete") == "true"
 
 	// Resolve the correct manager for this agent (may be on an auxiliary runtime)
-	mgr := s.resolveManagerForAgent(ctx, id, groveID)
+	mgr := s.resolveManagerForAgent(ctx, id, projectID)
 
-	// Get the agent's grove path and grove ID before stopping (needed for file deletion and logging)
-	var grovePath, agentProjectID string
+	// Get the agent's project path and project ID before stopping (needed for file deletion and logging)
+	var projectPath, agentProjectID string
 	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"})
 	if err == nil {
 		for _, a := range agents {
-			if matchesAgent(a, id, groveID) {
-				grovePath = a.ProjectPath
+			if matchesAgent(a, id, projectID) {
+				projectPath = a.ProjectPath
 				agentProjectID = a.ProjectID
 				if agentProjectID == "" {
 					agentProjectID = a.Project
@@ -887,35 +878,35 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, groveID
 		}
 	}
 
-	// If no grove path was found (container missing or no annotation), check
-	// hub-native grove directories for the agent's files. Without this,
-	// agents in hub-native groves (~/.scion.groves/<slug>/) are silently
+	// If no project path was found (container missing or no annotation), check
+	// hub-native project directories for the agent's files. Without this,
+	// agents in hub-native projects (~/.scion.projects/<slug>/) are silently
 	// skipped during file cleanup because the default filesystem scan only
 	// checks the CWD-resolved project dir and global ~/.scion.
-	if grovePath == "" && deleteFiles {
+	if projectPath == "" && deleteFiles {
 		if resolved := findAgentInHubNativeProjects(id); resolved != "" {
-			grovePath = resolved
-			s.agentLifecycleLog.Debug("Resolved agent grove path from hub-native groves",
-				"agent_id", id, "path", grovePath)
+			projectPath = resolved
+			s.agentLifecycleLog.Debug("Resolved agent project path from hub-native projects",
+				"agent_id", id, "path", projectPath)
 		}
 	}
 
 	// If this is a soft-delete, mark agent-info.json with deleted status before cleanup
-	if softDelete && grovePath != "" {
+	if softDelete && projectPath != "" {
 		deletedAtStr := query.Get("deletedAt")
-		if err := agent.UpdateAgentConfig(id, grovePath, "deleted", "", ""); err != nil {
+		if err := agent.UpdateAgentConfig(id, projectPath, "deleted", "", ""); err != nil {
 			s.agentLifecycleLog.Warn("Failed to mark agent as deleted in agent-info.json", "agent_id", id, "error", err)
 		}
 		if deletedAtStr != "" {
 			if deletedAt, err := time.Parse(time.RFC3339, deletedAtStr); err == nil {
-				if err := agent.UpdateAgentDeletedAt(id, grovePath, deletedAt); err != nil {
+				if err := agent.UpdateAgentDeletedAt(id, projectPath, deletedAt); err != nil {
 					s.agentLifecycleLog.Warn("Failed to write deletedAt to agent-info.json", "agent_id", id, "error", err)
 				}
 			}
 		}
 	}
 
-	_, err = mgr.Delete(ctx, id, deleteFiles, grovePath, removeBranch)
+	_, err = mgr.Delete(ctx, id, deleteFiles, projectPath, removeBranch)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			NotFound(w, "Agent")
@@ -927,18 +918,18 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, groveID
 
 	if softDelete {
 		s.agentLifecycleLog.Info("Agent soft-deleted",
-			"agent_id", id, "grove_id", agentProjectID,
+			"agent_id", id, "project_id", agentProjectID,
 			"delete_files", deleteFiles, "remove_branch", removeBranch)
 	} else {
 		s.agentLifecycleLog.Info("Agent deleted",
-			"agent_id", id, "grove_id", agentProjectID,
+			"agent_id", id, "project_id", agentProjectID,
 			"delete_files", deleteFiles, "remove_branch", removeBranch)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, groveID, action string) {
+func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, projectID, action string) {
 	method, ok := api.RuntimeBrokerAgentActionMethod(action)
 	if !ok {
 		NotFound(w, "Action")
@@ -951,32 +942,32 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, g
 
 	switch action {
 	case api.AgentActionStart:
-		s.startAgent(w, r, id, groveID)
+		s.startAgent(w, r, id, projectID)
 	case api.AgentActionStop:
-		s.stopAgent(w, r, id, groveID)
+		s.stopAgent(w, r, id, projectID)
 	case api.AgentActionSuspend:
-		s.stopAgent(w, r, id, groveID)
+		s.stopAgent(w, r, id, projectID)
 	case api.AgentActionRestart:
-		s.restartAgent(w, r, id, groveID)
+		s.restartAgent(w, r, id, projectID)
 	case api.AgentActionMessage:
-		s.sendMessage(w, r, id, groveID)
+		s.sendMessage(w, r, id, projectID)
 	case api.AgentActionExec:
 		s.execCommand(w, r, id)
 	case api.AgentActionLogs:
-		s.getLogs(w, r, id, groveID)
+		s.getLogs(w, r, id, projectID)
 	case api.AgentActionStats:
-		s.getStats(w, r, id, groveID)
+		s.getStats(w, r, id, projectID)
 	case api.AgentActionHasPrompt:
-		s.checkAgentPrompt(w, r, id, groveID)
+		s.checkAgentPrompt(w, r, id, projectID)
 	case api.AgentActionFinalizeEnv:
 		s.finalizeEnv(w, r, id)
 	}
 }
 
-func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID string) {
+func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
-	// Read optional task, grovePath, groveSlug, harnessConfig, and resolvedEnv from request body
+	// Read optional task, projectPath, projectSlug, harnessConfig, and resolvedEnv from request body
 	var startReq struct {
 		Task            string               `json:"task"`
 		ProjectPath     string               `json:"grovePath"`
@@ -986,7 +977,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 		ResolvedSecrets []api.ResolvedSecret `json:"resolvedSecrets,omitempty"`
 		InlineConfig    *api.ScionConfig     `json:"inlineConfig,omitempty"`
 		SharedDirs      []api.SharedDir      `json:"sharedDirs,omitempty"`
-		// SharedWorkspace must be re-sent on every start: hub-grove agents
+		// SharedWorkspace must be re-sent on every start: hub-project agents
 		// share a single git checkout instead of being given a worktree, and
 		// without this flag the broker would create a worktree on restart.
 		SharedWorkspace bool `json:"sharedWorkspace,omitempty"`
@@ -997,7 +988,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 		}
 	}
 
-	s.agentLifecycleLog.Debug("startAgent called", "agent_id", id, "task", startReq.Task, "grovePath", startReq.ProjectPath, "groveSlug", startReq.ProjectSlug, "harnessConfig", startReq.HarnessConfig, "resolvedEnvCount", len(startReq.ResolvedEnv))
+	s.agentLifecycleLog.Debug("startAgent called", "agent_id", id, "task", startReq.Task, "projectPath", startReq.ProjectPath, "projectSlug", startReq.ProjectSlug, "harnessConfig", startReq.HarnessConfig, "resolvedEnvCount", len(startReq.ResolvedEnv))
 
 	// Build config for buildStartContext (startAgent uses a subset of CreateAgentConfig)
 	var cfg *CreateAgentConfig
@@ -1026,7 +1017,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 	}
 	opts := sc.Opts
 
-	// If grove path wasn't in the request, fall back to looking up from an existing container
+	// If project path wasn't in the request, fall back to looking up from an existing container
 	if startReq.ProjectPath == "" && startReq.ProjectSlug == "" && opts.ProjectPath == "" {
 		agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
 		if err != nil {
@@ -1034,7 +1025,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 			return
 		}
 		for i := range agents {
-			if matchesAgent(agents[i], id, groveID) {
+			if matchesAgent(agents[i], id, projectID) {
 				if agents[i].ProjectPath != "" {
 					opts.ProjectPath = agents[i].ProjectPath
 				}
@@ -1072,7 +1063,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 	}
 
 	s.agentLifecycleLog.Info("Agent started",
-		"agent_id", id, "grove_id", agentInfo.ProjectID,
+		"agent_id", id, "project_id", agentInfo.ProjectID,
 		"name", agentInfo.Name, "slug", agentInfo.Slug,
 		"phase", string(state.PhaseRunning),
 		"container_status", agentInfo.ContainerStatus)
@@ -1094,8 +1085,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, groveID 
 // sharedWorkspace branches the path: shared-workspace agents store
 // scion-agent.json externally (~/.scion.project-configs/<slug>__<uuid>/.scion/
 // agents/<name>/) so siblings cannot read it via /workspace.
-func (s *Server) applyInlineConfigUpdate(agentName, grovePath string, inlineConfig *api.ScionConfig, sharedWorkspace bool) {
-	projectDir, err := config.GetResolvedProjectDir(grovePath)
+func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineConfig *api.ScionConfig, sharedWorkspace bool) {
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
 		s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to resolve project dir", "agent", agentName, "error", err)
 		return
@@ -1147,10 +1138,10 @@ func isContainerStopTolerable(err error) bool {
 		strings.Contains(msg, "exit status 125")
 }
 
-func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, groveID string) {
+func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
-	mgr := s.resolveManagerForAgent(ctx, id, groveID)
+	mgr := s.resolveManagerForAgent(ctx, id, projectID)
 	if err := mgr.Stop(ctx, id, ""); err != nil {
 		if isContainerStopTolerable(err) {
 			// Container doesn't exist, is already stopped, or podman/docker can't find it.
@@ -1176,7 +1167,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, groveID s
 	})
 }
 
-func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, groveID string) {
+func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
 	// Read optional resolvedEnv from request body (hub sends fresh auth token)
@@ -1189,15 +1180,15 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, groveI
 		}
 	}
 
-	// Look up agent to get its name and grove path
+	// Look up agent to get its name and project path
 	agentName := id
-	var grovePath string
+	var projectPath string
 	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
 	if err == nil {
 		for i := range agents {
-			if matchesAgent(agents[i], id, groveID) {
+			if matchesAgent(agents[i], id, projectID) {
 				agentName = agents[i].Name
-				grovePath = agents[i].ProjectPath
+				projectPath = agents[i].ProjectPath
 				break
 			}
 		}
@@ -1205,7 +1196,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, groveI
 
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:        agentName,
-		ProjectPath: grovePath,
+		ProjectPath: projectPath,
 		ResolvedEnv: restartReq.ResolvedEnv,
 		HTTPRequest: r,
 	})
@@ -1222,7 +1213,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, groveI
 	// Stop then start — tolerate stop errors since the container may already
 	// be exited and the subsequent start will handle cleanup.
 	// Use resolveManagerForAgent to find the agent on auxiliary runtimes.
-	stopMgr := s.resolveManagerForAgent(ctx, id, groveID)
+	stopMgr := s.resolveManagerForAgent(ctx, id, projectID)
 	if err := stopMgr.Stop(ctx, id, ""); err != nil {
 		if isContainerStopTolerable(err) {
 			s.agentLifecycleLog.Warn("Restart: stop target not found or already stopped, proceeding with start", "agent_id", id, "error", err)
@@ -1246,7 +1237,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, groveI
 	}
 
 	s.agentLifecycleLog.Info("Agent restarted",
-		"agent_id", id, "grove_id", agentInfo.ProjectID,
+		"agent_id", id, "project_id", agentInfo.ProjectID,
 		"name", agentInfo.Name, "slug", agentInfo.Slug,
 		"phase", string(state.PhaseRunning),
 		"container_status", agentInfo.ContainerStatus)
@@ -1260,7 +1251,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, groveI
 	})
 }
 
-func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, groveID string) {
+func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
 	var req MessageRequest
@@ -1280,13 +1271,13 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, groveID
 	}
 
 	// Resolve the correct manager for this agent (may be on an auxiliary runtime like K8s)
-	mgr := s.resolveManagerForAgent(ctx, id, groveID)
+	mgr := s.resolveManagerForAgent(ctx, id, projectID)
 
 	// Raw messages bypass the paste buffer and debounce, sending literal
 	// bytes via tmux send-keys with no trailing Enter keypresses.
 	isRaw := req.StructuredMessage != nil && req.StructuredMessage.Raw
 	if isRaw {
-		if err := mgr.MessageRaw(ctx, id, groveID, deliveryText); err != nil {
+		if err := mgr.MessageRaw(ctx, id, projectID, deliveryText); err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				NotFound(w, "Agent")
 				return
@@ -1295,7 +1286,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, groveID
 			return
 		}
 	} else {
-		if err := mgr.Message(ctx, id, groveID, deliveryText, req.Interrupt); err != nil {
+		if err := mgr.Message(ctx, id, projectID, deliveryText, req.Interrupt); err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				NotFound(w, "Agent")
 				return
@@ -1317,7 +1308,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, groveID
 	}
 	logAttrs := []any{"agent_id", id}
 	if req.ProjectID != "" {
-		logAttrs = append(logAttrs, "grove_id", req.ProjectID)
+		logAttrs = append(logAttrs, "project_id", req.ProjectID)
 	}
 	if req.StructuredMessage != nil {
 		logAttrs = append(logAttrs, req.StructuredMessage.LogAttrs()...)
@@ -1353,7 +1344,7 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id string) 
 	}
 
 	// Resolve the correct runtime for this agent (may be on an auxiliary runtime like K8s).
-	// Exec doesn't receive groveID from query params (internal operation).
+	// Exec doesn't receive projectID from query params (internal operation).
 	rt := s.resolveRuntimeForAgent(ctx, id, "")
 
 	output, err := rt.Exec(ctx, id, req.Command)
@@ -1372,11 +1363,11 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id string) 
 	})
 }
 
-func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, groveID string) {
+func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
 	// Resolve the correct manager for this agent (may be on an auxiliary runtime like K8s)
-	mgr := s.resolveManagerForAgent(ctx, id, groveID)
+	mgr := s.resolveManagerForAgent(ctx, id, projectID)
 
 	// Try to read agent.log from the filesystem first (preferred source).
 	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"})
@@ -1387,7 +1378,7 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, groveID str
 
 	var found *api.AgentInfo
 	for i := range agents {
-		if matchesAgent(agents[i], id, groveID) {
+		if matchesAgent(agents[i], id, projectID) {
 			found = &agents[i]
 			break
 		}
@@ -1416,7 +1407,7 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, groveID str
 	}
 
 	// Fallback: read container stdout logs (resolve runtime for auxiliary runtimes)
-	rt := s.resolveRuntimeForAgent(ctx, id, groveID)
+	rt := s.resolveRuntimeForAgent(ctx, id, projectID)
 	containerID := found.ContainerID
 	if containerID == "" {
 		containerID = id
@@ -1432,7 +1423,7 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, groveID str
 	w.Write([]byte(logs))
 }
 
-func (s *Server) getStats(w http.ResponseWriter, r *http.Request, id, groveID string) {
+func (s *Server) getStats(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	// TODO: Implement real stats from runtime
 	// For now, return placeholder data
 	writeJSON(w, http.StatusOK, StatsResponse{
@@ -1446,10 +1437,10 @@ type HasPromptResponse struct {
 	HasPrompt bool `json:"hasPrompt"`
 }
 
-func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, groveID string) {
+func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
-	// Find the agent to get its grove path
+	// Find the agent to get its project path
 	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
 	if err != nil {
 		RuntimeError(w, "Failed to list agents: "+err.Error())
@@ -1458,7 +1449,7 @@ func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, gr
 
 	var agent *api.AgentInfo
 	for i := range agents {
-		if matchesAgent(agents[i], id, groveID) {
+		if matchesAgent(agents[i], id, projectID) {
 			agent = &agents[i]
 			break
 		}
@@ -1470,7 +1461,7 @@ func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, gr
 	}
 
 	if agent.ProjectPath == "" {
-		// No grove path means we can't check prompt.md
+		// No project path means we can't check prompt.md
 		writeJSON(w, http.StatusOK, HasPromptResponse{HasPrompt: false})
 		return
 	}
@@ -1519,12 +1510,12 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 	if settingsPath == "" {
 		// Fall back to the broker's global .scion directory for settings
 		// resolution. This matches what agent.Start → GetResolvedProjectDir("")
-		// does when grovePath is empty (e.g., hub-only git groves without a
+		// does when projectPath is empty (e.g., hub-only git projects without a
 		// linked local path on the broker).
 		if globalDir, err := config.GetGlobalDir(); err == nil {
 			settingsPath = globalDir
 			if s.config.Debug {
-				s.envSecretLog.Debug("extractRequiredEnvKeys: grovePath empty, using global dir",
+				s.envSecretLog.Debug("extractRequiredEnvKeys: projectPath empty, using global dir",
 					"globalDir", globalDir,
 				)
 			}
@@ -1565,7 +1556,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 		s.envSecretLog.Debug("extractRequiredEnvKeys: harness resolution",
 			"harnessConfigName", harnessConfigName,
 			"hasSettings", settings != nil,
-			"grovePath", req.ProjectPath,
+			"projectPath", req.ProjectPath,
 		)
 	}
 	if harnessConfigName != "" {
@@ -1576,8 +1567,8 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 		// per-harness tables in pkg/harness/auth.go.
 		var authMeta *config.HarnessAuthMetadata
 
-		// Try on-disk harness-config directory first (check grovePath,
-		// then fall back to global dir for hub-dispatched agents without a local grove)
+		// Try on-disk harness-config directory first (check projectPath,
+		// then fall back to global dir for hub-dispatched agents without a local project)
 		harnessConfigSearchPath := req.ProjectPath
 		if harnessConfigSearchPath == "" {
 			harnessConfigSearchPath = settingsPath
@@ -2008,7 +1999,7 @@ func (s *Server) finalizeEnv(w http.ResponseWriter, r *http.Request, id string) 
 	if s.config.Debug {
 		s.envSecretLog.Debug("Finalize-env: StartOptions built from pending request",
 			"name", opts.Name,
-			"grovePath", opts.ProjectPath,
+			"projectPath", opts.ProjectPath,
 			"template", opts.Template,
 			"image", opts.Image,
 			"profile", opts.Profile,
@@ -2037,7 +2028,7 @@ func (s *Server) finalizeEnv(w http.ResponseWriter, r *http.Request, id string) 
 	s.pendingEnvGatherMu.Unlock()
 
 	s.agentLifecycleLog.Info("Agent created (finalize-env)",
-		"agent_id", origReq.ID, "grove_id", origReq.ProjectID,
+		"agent_id", origReq.ID, "project_id", origReq.ProjectID,
 		"name", origReq.Name, "slug", origReq.Slug,
 		"phase", string(state.PhaseRunning),
 		"container_status", agentInfo.ContainerStatus)
@@ -2055,12 +2046,12 @@ func (s *Server) finalizeEnv(w http.ResponseWriter, r *http.Request, id string) 
 // runtimes. This ensures stop/delete/restart operations target the correct
 // runtime when agents are launched on non-default runtimes (e.g. K8s pods
 // when the broker's default is Docker).
-// groveID scopes the lookup to a specific grove to prevent cross-grove collision.
-func (s *Server) resolveManagerForAgent(ctx context.Context, id, groveID string) agent.Manager {
+// projectID scopes the lookup to a specific project to prevent cross-project collision.
+func (s *Server) resolveManagerForAgent(ctx context.Context, id, projectID string) agent.Manager {
 	slug := strings.ToLower(id)
 	filter := map[string]string{"scion.name": slug}
-	if groveID != "" {
-		filter["scion.project_id"] = groveID
+	if projectID != "" {
+		filter["scion.project_id"] = projectID
 	}
 
 	// Try the default manager first
@@ -2084,10 +2075,10 @@ func (s *Server) resolveManagerForAgent(ctx context.Context, id, groveID string)
 		}
 	}
 
-	// If grove-scoped lookup found nothing, retry without grove filter.
+	// If project-scoped lookup found nothing, retry without project filter.
 	// This handles backward compatibility with containers that lack the
 	// scion.grove_id label (pre-existing agents or solo/CLI mode).
-	if groveID != "" {
+	if projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		agents, err = s.manager.List(ctx, fallbackFilter)
 		if err == nil && len(agents) > 0 {
@@ -2110,12 +2101,12 @@ func (s *Server) resolveManagerForAgent(ctx context.Context, id, groveID string)
 // existing agent by checking the default runtime first, then falling back
 // to auxiliary runtimes. This is needed for operations that call runtime
 // methods directly (e.g. Exec, GetLogs) rather than going through the manager.
-// groveID scopes the lookup to a specific grove to prevent cross-grove collision.
-func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, groveID string) scionrt.Runtime {
+// projectID scopes the lookup to a specific project to prevent cross-project collision.
+func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, projectID string) scionrt.Runtime {
 	slug := strings.ToLower(id)
 	filter := map[string]string{"scion.name": slug}
-	if groveID != "" {
-		filter["scion.project_id"] = groveID
+	if projectID != "" {
+		filter["scion.project_id"] = projectID
 	}
 
 	// Try the default manager first
@@ -2139,8 +2130,8 @@ func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, groveID string)
 		}
 	}
 
-	// Backward compatibility: retry without grove filter for pre-existing containers
-	if groveID != "" {
+	// Backward compatibility: retry without project filter for pre-existing containers
+	if projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		agents, err = s.manager.List(ctx, fallbackFilter)
 		if err == nil && len(agents) > 0 {
@@ -2158,13 +2149,13 @@ func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, groveID string)
 }
 
 // resolveManagerForOpts returns the appropriate agent.Manager for the given
-// start options. It loads the grove's settings to determine the effective
+// start options. It loads the project's settings to determine the effective
 // runtime. If the resolved runtime differs from the broker's default, a
 // temporary manager is created and cached. Otherwise the broker's shared
 // manager is returned.
 //
-// When opts.Profile is empty, the grove's active profile (from settings.yaml)
-// is used. This ensures the broker respects the grove's configured runtime
+// When opts.Profile is empty, the project's active profile (from settings.yaml)
+// is used. This ensures the broker respects the project's configured runtime
 // even when no explicit --profile flag is passed.
 func (s *Server) resolveManagerForOpts(opts api.StartOptions) agent.Manager {
 	if s.config.ForceRuntime != "" {
@@ -2230,19 +2221,19 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) agent.Manager {
 
 // Helper functions
 
-// resolveProjectSettingsDir returns the directory containing settings.yaml for a grove.
-// For linked groves, grovePath already points to the .scion directory.
-// For hub-native groves, grovePath is the workspace parent, so settings
+// resolveProjectSettingsDir returns the directory containing settings.yaml for a project.
+// For linked projects, projectPath already points to the .scion directory.
+// For hub-native projects, projectPath is the workspace parent, so settings
 // live in the .scion subdirectory.
-func resolveProjectSettingsDir(grovePath string) string {
-	if config.GetSettingsPath(grovePath) != "" {
-		return grovePath
+func resolveProjectSettingsDir(projectPath string) string {
+	if config.GetSettingsPath(projectPath) != "" {
+		return projectPath
 	}
-	candidate := filepath.Join(grovePath, ".scion")
+	candidate := filepath.Join(projectPath, ".scion")
 	if config.GetSettingsPath(candidate) != "" {
 		return candidate
 	}
-	return grovePath // fallback to original
+	return projectPath // fallback to original
 }
 
 // forceHeartbeatAll sends an immediate heartbeat on all hub connections so the
@@ -2278,7 +2269,7 @@ func agentInfoPtr(a AgentResponse) *AgentResponse {
 func (s *Server) handleProjectBySlug(w http.ResponseWriter, r *http.Request) {
 	slug := extractID(r, "/api/v1/projects")
 	if slug == "" {
-		NotFound(w, "grove")
+		NotFound(w, "project")
 		return
 	}
 
@@ -2290,7 +2281,7 @@ func (s *Server) handleProjectBySlug(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// deleteProject removes the local hub-native grove directory for the given slug.
+// deleteProject removes the local hub-native project directory for the given slug.
 // Returns 204 on success (including when the directory doesn't exist).
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug string) {
 	globalDir, err := config.GetGlobalDir()
@@ -2299,21 +2290,22 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		return
 	}
 
-	grovePath := filepath.Join(globalDir, "projects", slug)
-	if !hasWorkspaceContent(grovePath) {
+	projectPath := filepath.Join(globalDir, "projects", slug)
+	if !hasWorkspaceContent(projectPath) {
+		// fallback to groves/ for backward compatibility
 		oldPath := filepath.Join(globalDir, "groves", slug)
 		if hasWorkspaceContent(oldPath) {
-			grovePath = oldPath
+			projectPath = oldPath
 		}
 	}
 
 	// Path traversal protection: ensure the resolved path stays inside
 	// one of the two allowed base directories.
 	projectsBase := filepath.Join(globalDir, "projects")
-	grovesBase := filepath.Join(globalDir, "groves")
-	absProject, err := filepath.Abs(grovePath)
+	legacyBase := filepath.Join(globalDir, "groves")
+	absProject, err := filepath.Abs(projectPath)
 	if err != nil {
-		RuntimeError(w, "Failed to resolve grove path: "+err.Error())
+		RuntimeError(w, "Failed to resolve project path: "+err.Error())
 		return
 	}
 	absProjectsBase, err := filepath.Abs(projectsBase)
@@ -2321,41 +2313,41 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		RuntimeError(w, "Failed to resolve base path: "+err.Error())
 		return
 	}
-	absGrovesBase, err := filepath.Abs(grovesBase)
+	absLegacyBase, err := filepath.Abs(legacyBase)
 	if err != nil {
 		RuntimeError(w, "Failed to resolve base path: "+err.Error())
 		return
 	}
 	if !strings.HasPrefix(absProject, absProjectsBase+string(filepath.Separator)) &&
-		!strings.HasPrefix(absProject, absGrovesBase+string(filepath.Separator)) {
-		s.agentLifecycleLog.Warn("grove cleanup path traversal blocked", "slug", slug, "resolved", absProject)
+		!strings.HasPrefix(absProject, absLegacyBase+string(filepath.Separator)) {
+		s.agentLifecycleLog.Warn("project cleanup path traversal blocked", "slug", slug, "resolved", absProject)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	if _, err := os.Stat(grovePath); os.IsNotExist(err) {
+	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
 		// Already gone — idempotent success
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
-	if err := os.RemoveAll(grovePath); err != nil {
-		s.agentLifecycleLog.Warn("failed to remove grove directory", "slug", slug, "path", grovePath, "error", err)
-		RuntimeError(w, "Failed to remove grove directory: "+err.Error())
+	if err := os.RemoveAll(projectPath); err != nil {
+		s.agentLifecycleLog.Warn("failed to remove project directory", "slug", slug, "path", projectPath, "error", err)
+		RuntimeError(w, "Failed to remove project directory: "+err.Error())
 		return
 	}
 
-	s.agentLifecycleLog.Info("Removed hub-native grove directory", "slug", slug, "path", grovePath)
+	s.agentLifecycleLog.Info("Removed hub-native project directory", "slug", slug, "path", projectPath)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// findAgentInHubNativeProjects scans hub-native grove directories
-// (~/.scion.groves/<slug>/.scion/) for an agent directory matching the given
-// name. Returns the .scion.grove dir path if found, or empty string.
+// findAgentInHubNativeProjects scans hub-native project directories
+// (~/.scion.projects/<slug>/.scion/) for an agent directory matching the given
+// name. Returns the .scion dir path if found, or empty string.
 // This is used as a fallback when the container is missing and the agent's
-// grove path can't be determined from container labels.
+// project path can't be determined from container labels.
 //
-// Probes both the in-grove location (worktree-mode agents) and the external
+// Probes both the in-project location (worktree-mode agents) and the external
 // per-agent state dir under ~/.scion.project-configs/ (shared-workspace agents,
 // whose state lives external to the shared checkout).
 func findAgentInHubNativeProjects(agentName string) string {
@@ -2364,8 +2356,8 @@ func findAgentInHubNativeProjects(agentName string) string {
 		return ""
 	}
 	for _, dirName := range []string{"projects", "groves"} {
-		grovesDir := filepath.Join(globalDir, dirName)
-		entries, err := os.ReadDir(grovesDir)
+		baseDir := filepath.Join(globalDir, dirName)
+		entries, err := os.ReadDir(baseDir)
 		if err != nil {
 			continue
 		}
@@ -2373,12 +2365,12 @@ func findAgentInHubNativeProjects(agentName string) string {
 			if !entry.IsDir() {
 				continue
 			}
-			scionDir := filepath.Join(grovesDir, entry.Name(), ".scion")
+			scionDir := filepath.Join(baseDir, entry.Name(), ".scion")
 			agentDir := filepath.Join(scionDir, "agents", agentName)
 			if _, err := os.Stat(agentDir); err == nil {
 				return scionDir
 			}
-			// Shared-workspace agents have no in-grove agentDir — probe the
+			// Shared-workspace agents have no in-project agentDir — probe the
 			// external split-storage path.
 			if extDir, err := config.GetGitProjectExternalAgentsDir(scionDir); err == nil && extDir != "" {
 				if _, err := os.Stat(filepath.Join(extDir, agentName)); err == nil {

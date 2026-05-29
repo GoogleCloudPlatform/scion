@@ -58,8 +58,8 @@ func TestHubEndpointFromResolvedEnv(t *testing.T) {
 }
 
 func TestResolveHubEndpointForStartPrecedence(t *testing.T) {
-	groveDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte("hub:\n  endpoint: https://settings.example.com\n"), 0644); err != nil {
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte("hub:\n  endpoint: https://settings.example.com\n"), 0644); err != nil {
 		t.Fatalf("failed to write settings: %v", err)
 	}
 
@@ -75,26 +75,26 @@ func TestResolveHubEndpointForStartPrecedence(t *testing.T) {
 			name:        "resolved env wins over broker",
 			broker:      "https://broker.example.com",
 			resolved:    map[string]string{"SCION_HUB_ENDPOINT": "https://resolved.example.com"},
-			projectPath: groveDir,
+			projectPath: projectDir,
 			want:        "https://resolved.example.com",
 		},
 		{
 			name:        "broker fallback when resolved env absent",
 			broker:      "https://broker.example.com",
 			resolved:    map[string]string{"UNRELATED": "x"},
-			projectPath: groveDir,
+			projectPath: projectDir,
 			want:        "https://broker.example.com",
 		},
 		{
 			name:        "resolved env wins over settings",
 			resolved:    map[string]string{"SCION_HUB_URL": "https://resolved-legacy.example.com"},
-			projectPath: groveDir,
+			projectPath: projectDir,
 			want:        "https://resolved-legacy.example.com",
 		},
 		{
 			name:        "settings fallback when others absent",
 			resolved:    map[string]string{"UNRELATED": "x"},
-			projectPath: groveDir,
+			projectPath: projectDir,
 			want:        "https://settings.example.com",
 		},
 		{
@@ -117,8 +117,8 @@ func TestResolveHubEndpointForStartPrecedence(t *testing.T) {
 }
 
 func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
-	groveDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte("hub:\n  endpoint: https://settings.example.com\n"), 0644); err != nil {
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte("hub:\n  endpoint: https://settings.example.com\n"), 0644); err != nil {
 		t.Fatalf("failed to write settings: %v", err)
 	}
 
@@ -154,12 +154,12 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 		{
 			name:        "resolved env fallback",
 			resolved:    map[string]string{"SCION_HUB_ENDPOINT": "https://resolved.example.com"},
-			projectPath: groveDir,
+			projectPath: projectDir,
 			want:        "https://resolved.example.com",
 		},
 		{
 			name:        "settings fallback when others absent",
-			projectPath: groveDir,
+			projectPath: projectDir,
 			want:        "https://settings.example.com",
 		},
 		{

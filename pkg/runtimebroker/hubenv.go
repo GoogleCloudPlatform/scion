@@ -39,7 +39,7 @@ var safeEnvLogKeys = map[string]struct{}{
 	"SCION_TELEMETRY_ENABLED": {},
 }
 
-func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHubEndpoint string, resolvedEnv map[string]string, grovePath, containerHubEndpoint, runtimeName string) string {
+func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHubEndpoint string, resolvedEnv map[string]string, projectPath, containerHubEndpoint, runtimeName string) string {
 	hubEndpoint := reqHubEndpoint
 	if hubEndpoint == "" {
 		hubEndpoint = connectionHubEndpoint
@@ -51,7 +51,7 @@ func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHu
 		hubEndpoint = hubEndpointFromResolvedEnv(resolvedEnv)
 	}
 	if hubEndpoint == "" {
-		hubEndpoint = hubEndpointFromProjectSettings(grovePath)
+		hubEndpoint = hubEndpointFromProjectSettings(projectPath)
 	}
 	// A localhost endpoint from a remote hub dispatch refers to the hub
 	// machine's loopback, not this broker's. When we have a non-localhost
@@ -63,7 +63,7 @@ func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHu
 	return applyContainerBridgeOverride(hubEndpoint, containerHubEndpoint, runtimeName)
 }
 
-func resolveHubEndpointForStart(brokerHubEndpoint string, resolvedEnv map[string]string, grovePath, containerHubEndpoint, runtimeName string) string {
+func resolveHubEndpointForStart(brokerHubEndpoint string, resolvedEnv map[string]string, projectPath, containerHubEndpoint, runtimeName string) string {
 	// Prefer the Hub-dispatched endpoint from resolved env — the Hub knows
 	// its own public URL and injects it via SCION_HUB_ENDPOINT. The broker's
 	// own HubEndpoint config may be a localhost address (e.g. combo server)
@@ -73,7 +73,7 @@ func resolveHubEndpointForStart(brokerHubEndpoint string, resolvedEnv map[string
 		hubEndpoint = brokerHubEndpoint
 	}
 	if hubEndpoint == "" {
-		hubEndpoint = hubEndpointFromProjectSettings(grovePath)
+		hubEndpoint = hubEndpointFromProjectSettings(projectPath)
 	}
 	return applyContainerBridgeOverride(hubEndpoint, containerHubEndpoint, runtimeName)
 }
@@ -88,16 +88,16 @@ func hubEndpointFromResolvedEnv(resolvedEnv map[string]string) string {
 	return ""
 }
 
-func hubEndpointFromProjectSettings(grovePath string) string {
-	if grovePath == "" {
+func hubEndpointFromProjectSettings(projectPath string) string {
+	if projectPath == "" {
 		return ""
 	}
-	settingsDir := resolveProjectSettingsDir(grovePath)
-	groveSettings, err := config.LoadSettingsFromDir(settingsDir)
-	if err != nil || groveSettings.IsHubExplicitlyDisabled() {
+	settingsDir := resolveProjectSettingsDir(projectPath)
+	projectSettings, err := config.LoadSettingsFromDir(settingsDir)
+	if err != nil || projectSettings.IsHubExplicitlyDisabled() {
 		return ""
 	}
-	return groveSettings.GetHubEndpoint()
+	return projectSettings.GetHubEndpoint()
 }
 
 func applyContainerBridgeOverride(endpoint, containerHubEndpoint, runtimeName string) string {

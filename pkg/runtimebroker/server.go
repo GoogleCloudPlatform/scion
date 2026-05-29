@@ -766,7 +766,7 @@ func (s *Server) Start(ctx context.Context) error {
 		)
 	}
 
-	// Discover auxiliary runtimes (e.g. Kubernetes) from grove settings
+	// Discover auxiliary runtimes (e.g. Kubernetes) from project settings
 	// so that agents running on non-default runtimes can be found after
 	// a broker restart.
 	s.discoverAuxiliaryRuntimes()
@@ -854,22 +854,22 @@ func (s *Server) getAuxiliaryManagers() []agent.Manager {
 	return managers
 }
 
-// discoverAuxiliaryRuntimes scans grove settings for runtime profiles that
+// discoverAuxiliaryRuntimes scans project settings for runtime profiles that
 // resolve to a runtime different from the broker's default. Any discovered
 // non-default runtimes are registered as auxiliary runtimes so that agents
 // running on them (e.g. Kubernetes pods) can be found after a broker restart.
 func (s *Server) discoverAuxiliaryRuntimes() {
 	defaultRT := s.runtime.Name()
 
-	// Collect grove paths to scan
-	var grovePaths []string
+	// Collect project paths to scan
+	var projectPaths []string
 
-	// Hub-native groves: ~/.scion/{projects,groves}/<slug>/.scion/
+	// Hub-native projects: ~/.scion/{projects,groves}/<slug>/.scion/
 	globalDir, err := config.GetGlobalDir()
 	if err == nil {
 		for _, dirName := range []string{"projects", "groves"} {
-			grovesDir := filepath.Join(globalDir, dirName)
-			entries, err := os.ReadDir(grovesDir)
+			projectsDir := filepath.Join(globalDir, dirName)
+			entries, err := os.ReadDir(projectsDir)
 			if err != nil {
 				continue
 			}
@@ -877,9 +877,9 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 				if !e.IsDir() {
 					continue
 				}
-				scionDir := filepath.Join(grovesDir, e.Name(), ".scion")
+				scionDir := filepath.Join(projectsDir, e.Name(), ".scion")
 				if _, err := os.Stat(scionDir); err == nil {
-					grovePaths = append(grovePaths, scionDir)
+					projectPaths = append(projectPaths, scionDir)
 				}
 			}
 		}
@@ -887,12 +887,12 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 
 	// Current project dir
 	if pd, _ := config.GetResolvedProjectDir(""); pd != "" {
-		grovePaths = append(grovePaths, pd)
+		projectPaths = append(projectPaths, pd)
 	}
 
 	discovered := make(map[string]bool)
 
-	for _, gp := range grovePaths {
+	for _, gp := range projectPaths {
 		vs, _, _ := config.LoadEffectiveSettings(gp)
 		if vs == nil {
 			continue
@@ -917,7 +917,7 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 			s.auxiliaryRuntimes[resolved.Name()] = auxiliaryRuntime{Runtime: resolved, Manager: mgr}
 			s.auxiliaryRuntimesMu.Unlock()
 
-			slog.Info("Discovered auxiliary runtime from grove settings",
+			slog.Info("Discovered auxiliary runtime from project settings",
 				"runtime", resolved.Name(), "profile", profileName)
 		}
 	}
@@ -925,8 +925,8 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 
 // LookupContainerID implements AgentLookup interface.
 // It looks up an agent by slug and returns its container ID.
-// groveID scopes the lookup to prevent cross-grove collision.
-func (s *Server) LookupContainerID(ctx context.Context, slug, groveID string) (string, error) {
+// projectID scopes the lookup to prevent cross-project collision.
+func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) (string, error) {
 	if s.manager == nil {
 		return "", fmt.Errorf("agent manager not available")
 	}
@@ -934,8 +934,8 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, groveID string) (s
 	slug = strings.ToLower(slug)
 
 	filter := map[string]string{"scion.name": slug}
-	if groveID != "" {
-		filter["scion.grove_id"] = groveID
+	if projectID != "" {
+		filter["scion.grove_id"] = projectID
 	}
 
 	agents, err := s.manager.List(ctx, filter)
@@ -962,9 +962,9 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, groveID string) (s
 		}
 	}
 
-	// Backward compatibility: retry without grove filter for containers
+	// Backward compatibility: retry without project filter for containers
 	// that lack the scion.grove_id label (pre-existing agents or solo/CLI mode).
-	if len(agents) == 0 && groveID != "" {
+	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		agents, err = s.manager.List(ctx, fallbackFilter)
 		if err == nil && len(agents) == 0 {
@@ -1009,16 +1009,16 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, groveID string) (s
 
 // LookupAgent implements AgentLookup interface.
 // It looks up an agent by slug and returns detailed info including the runtime.
-// groveID scopes the lookup to prevent cross-grove collision.
-func (s *Server) LookupAgent(ctx context.Context, slug, groveID string) (*AgentLookupResult, error) {
+// projectID scopes the lookup to prevent cross-project collision.
+func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*AgentLookupResult, error) {
 	if s.manager == nil {
 		return nil, fmt.Errorf("agent manager not available")
 	}
 
 	slug = strings.ToLower(slug)
 	filter := map[string]string{"scion.name": slug}
-	if groveID != "" {
-		filter["scion.grove_id"] = groveID
+	if projectID != "" {
+		filter["scion.grove_id"] = projectID
 	}
 
 	// Try default manager first
@@ -1051,9 +1051,9 @@ func (s *Server) LookupAgent(ctx context.Context, slug, groveID string) (*AgentL
 		}
 	}
 
-	// Backward compatibility: retry without grove filter for containers
+	// Backward compatibility: retry without project filter for containers
 	// that lack the scion.grove_id label (pre-existing agents or solo/CLI mode).
-	if len(agents) == 0 && groveID != "" {
+	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		agents, err = s.manager.List(ctx, fallbackFilter)
 		if err == nil && len(agents) == 0 {
@@ -1248,8 +1248,8 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 	return nil
 }
 
-// buildProjectFilterForHub builds a grove filter function for a specific hub endpoint.
-// In multi-hub mode, each heartbeat should only report groves that belong to its hub.
+// buildProjectFilterForHub builds a project filter function for a specific hub endpoint.
+// In multi-hub mode, each heartbeat should only report projects that belong to its hub.
 // In single-hub mode or when only one connection exists, no filtering is applied.
 func (s *Server) buildProjectFilterForHub(hubEndpoint string) func(string) bool {
 	s.hubMu.RLock()
@@ -1261,12 +1261,12 @@ func (s *Server) buildProjectFilterForHub(hubEndpoint string) func(string) bool 
 		return nil
 	}
 
-	// Multi-hub mode: build a filter from grove settings
-	// Scan groves and check which ones have their hub.endpoint matching this connection
-	return func(groveID string) bool {
-		// For now, try to find the grove's settings to determine its hub endpoint.
-		// This requires the agent manager to provide grove paths.
-		// As a simple implementation, we scan agents and check their grove settings.
+	// Multi-hub mode: build a filter from project settings
+	// Scan projects and check which ones have their hub.endpoint matching this connection
+	return func(projectID string) bool {
+		// For now, try to find the project's settings to determine its hub endpoint.
+		// This requires the agent manager to provide project paths.
+		// As a simple implementation, we scan agents and check their project settings.
 		if s.manager == nil {
 			return true // Can't filter without a manager
 		}
@@ -1281,27 +1281,27 @@ func (s *Server) buildProjectFilterForHub(hubEndpoint string) func(string) bool 
 			if agProjectID == "" {
 				agProjectID = ag.Project
 			}
-			if agProjectID != groveID {
+			if agProjectID != projectID {
 				continue
 			}
 
-			// Found an agent in this grove, check its grove path settings
+			// Found an agent in this project, check its project path settings
 			if ag.ProjectPath == "" {
 				continue
 			}
 
-			groveSettings, err := config.LoadSettingsFromDir(ag.ProjectPath)
+			projectSettings, err := config.LoadSettingsFromDir(ag.ProjectPath)
 			if err != nil {
 				continue
 			}
 
-			ep := groveSettings.GetHubEndpoint()
+			ep := projectSettings.GetHubEndpoint()
 			if ep != "" {
 				return ep == hubEndpoint
 			}
 		}
 
-		// If we can't determine the grove's hub, include it (safe default)
+		// If we can't determine the project's hub, include it (safe default)
 		return true
 	}
 }
@@ -1313,12 +1313,12 @@ func (s *Server) isMultiHubMode() bool {
 	return len(s.hubConnections) > 1
 }
 
-// isGlobalProject returns true if the grove is the global grove.
+// isGlobalProject returns true if this is the global project.
 // A request with a specific (non-empty, non-"global") ProjectID is never the
-// global grove, even when grovePath is empty (e.g. git-based groves where the
+// global project, even when projectPath is empty (e.g. git-based projects where the
 // broker resolves the workspace from a git remote rather than a local path).
-func (s *Server) isGlobalProject(groveID, grovePath string) bool {
-	return groveID == "global" || (groveID == "" && grovePath == "")
+func (s *Server) isGlobalProject(projectID, projectPath string) bool {
+	return projectID == "global" || (projectID == "" && projectPath == "")
 }
 
 // resolveHydrator resolves the hydrator for a request, routing to the correct

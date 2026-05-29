@@ -24,7 +24,7 @@ import (
 // dispatch will use, returning the entry needed by
 // evaluateHarnessConfigPolicy. The resolution mirrors the logic in
 // extractRequiredEnvKeys: prefer the on-disk harness-config dir (in the
-// grove or global path), then fall back to any settings entry. ok is
+// project or global path), then fall back to any settings entry. ok is
 // false when no harness-config was specified or could be found, which
 // short-circuits the policy check (no policy applies).
 func (s *Server) lookupHarnessConfigForPolicy(req CreateAgentRequest) (string, config.HarnessConfigEntry, bool) {

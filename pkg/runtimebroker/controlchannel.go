@@ -43,7 +43,7 @@ type ControlChannelConfig struct {
 	SecretKey []byte
 	// Version is the runtime broker version string.
 	Version string
-	// Projects is a list of grove IDs this broker serves.
+	// Projects is a list of project IDs this broker serves.
 	Projects []string
 
 	// ReconnectBackoff configuration
@@ -90,13 +90,13 @@ type AgentLookupResult struct {
 // AgentLookup provides agent information for control channel operations.
 type AgentLookup interface {
 	// LookupContainerID returns the container ID for an agent by its slug/name.
-	// groveID scopes the lookup to a specific grove to prevent cross-grove
+	// projectID scopes the lookup to a specific project to prevent cross-project
 	// collision when multiple agents share the same slug. Pass empty string
 	// to fall back to name-only lookup (backward compat).
-	LookupContainerID(ctx context.Context, slug, groveID string) (containerID string, err error)
+	LookupContainerID(ctx context.Context, slug, projectID string) (containerID string, err error)
 	// LookupAgent returns detailed lookup info including the runtime that owns the agent.
-	// groveID scopes the lookup to a specific grove (same semantics as LookupContainerID).
-	LookupAgent(ctx context.Context, slug, groveID string) (*AgentLookupResult, error)
+	// projectID scopes the lookup to a specific project (same semantics as LookupContainerID).
+	LookupAgent(ctx context.Context, slug, projectID string) (*AgentLookupResult, error)
 	// RuntimeCommand returns the container runtime command (e.g., "docker", "container").
 	RuntimeCommand() string
 }

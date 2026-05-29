@@ -291,13 +291,13 @@ func (s *Server) getAgentWorkspacePath(ctx context.Context, agentID string) (str
 	}
 
 	var containerID string
-	var grovePath string
+	var projectPath string
 	var agentName string
 
 	for _, agent := range agents {
 		if agent.Name == agentID || agent.ContainerID == agentID || agent.Slug == agentID || strings.EqualFold(agent.Name, agentID) {
 			containerID = agent.ContainerID
-			grovePath = agent.ProjectPath
+			projectPath = agent.ProjectPath
 			agentName = agent.Name
 			break
 		}
@@ -319,13 +319,13 @@ func (s *Server) getAgentWorkspacePath(ctx context.Context, agentID string) (str
 	}
 
 	// Fall back to worktree location pattern
-	// Worktrees are typically at: {parent}/.scion_worktrees/{grove}/{agent}
-	if grovePath != "" && agentName != "" {
-		// Get grove's parent directory
-		groveParent := filepath.Dir(grovePath)
-		groveName := filepath.Base(groveParent)
+	// Worktrees are typically at: {parent}/.scion_worktrees/{project}/{agent}
+	if projectPath != "" && agentName != "" {
+		// Get project's parent directory
+		projectParent := filepath.Dir(projectPath)
+		projectName := filepath.Base(projectParent)
 
-		worktreePath := filepath.Join(groveParent, ".scion_worktrees", groveName, agentName)
+		worktreePath := filepath.Join(projectParent, ".scion_worktrees", projectName, agentName)
 		if _, statErr := os.Stat(worktreePath); statErr == nil {
 			return worktreePath, nil
 		}
@@ -554,14 +554,14 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 
 	if s.config.Debug {
 		slog.Debug("Project workspace upload requested",
-			"groveId", req.ProjectID,
+			"projectId", req.ProjectID,
 			"bucket", bucket,
 			"storagePath", req.StoragePath,
 			"workspacePath", req.WorkspacePath,
 		)
 	}
 
-	// Build manifest from grove workspace
+	// Build manifest from project workspace
 	manifest, err := s.buildWorkspaceManifest(req.WorkspacePath, req.ExcludePatterns)
 	if err != nil {
 		RuntimeError(w, "Failed to build workspace manifest: "+err.Error())
@@ -595,7 +595,7 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 
 	if s.config.Debug {
 		slog.Debug("Project workspace upload complete",
-			"groveId", req.ProjectID,
+			"projectId", req.ProjectID,
 			"files", resp.UploadedFiles,
 			"bytes", resp.UploadedBytes,
 		)
