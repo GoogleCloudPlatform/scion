@@ -73,7 +73,7 @@ func WithMetadata(ctx context.Context, attrs ...slog.Attr) context.Context {
 
 // Logger returns a logger enriched with request-scoped metadata from the context.
 // When called within an HTTP handler wrapped by RequestLogMiddleware, the returned
-// logger automatically includes request_id, trace_id, grove_id, and agent_id.
+// logger automatically includes request_id, trace_id, project_id, and agent_id.
 func Logger(ctx context.Context) *slog.Logger {
 	l := slog.Default()
 	if meta := RequestMetaFromContext(ctx); meta != nil {

@@ -104,7 +104,7 @@ func (h *GCPHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (h *GCPHandler) Handle(ctx context.Context, r slog.Record) error {
-	// Build labels dynamically, promoting agent_id/grove_id
+	// Build labels dynamically, promoting agent_id/project_id
 	labels := map[string]string{
 		"component": h.component,
 	}

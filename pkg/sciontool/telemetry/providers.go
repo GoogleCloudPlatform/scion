@@ -63,11 +63,11 @@ func buildResource(ctx context.Context) (*resource.Resource, error) {
 	if agentID := os.Getenv("SCION_AGENT_ID"); agentID != "" {
 		attrs = append(attrs, resource.WithAttributes(semconv.ServiceInstanceID(agentID)))
 	}
-	groveID := os.Getenv("SCION_GROVE_ID")
+	legacyProjectID := os.Getenv("SCION_GROVE_ID")
 	projectID := os.Getenv("SCION_PROJECT_ID")
-	if groveID != "" {
+	if legacyProjectID != "" {
 		attrs = append(attrs, resource.WithAttributes(
-			attribute.String("scion.grove.id", groveID),
+			attribute.String("scion.grove.id", legacyProjectID),
 		))
 	}
 	if projectID != "" {
@@ -76,13 +76,13 @@ func buildResource(ctx context.Context) (*resource.Resource, error) {
 		))
 	}
 	// Ensure both are set if either is available for transition
-	if groveID == "" && projectID != "" {
+	if legacyProjectID == "" && projectID != "" {
 		attrs = append(attrs, resource.WithAttributes(
 			attribute.String("scion.grove.id", projectID),
 		))
-	} else if projectID == "" && groveID != "" {
+	} else if projectID == "" && legacyProjectID != "" {
 		attrs = append(attrs, resource.WithAttributes(
-			attribute.String("scion.project.id", groveID),
+			attribute.String("scion.project.id", legacyProjectID),
 		))
 	}
 	if harness := os.Getenv("SCION_HARNESS"); harness != "" {

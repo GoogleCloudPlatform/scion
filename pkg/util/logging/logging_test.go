@@ -86,7 +86,7 @@ func TestGCPHandler_LabelsPromoteAgentProject(t *testing.T) {
 
 	logger.Info("test message",
 		AttrAgentID, "agent-abc",
-		AttrProjectID, "grove-xyz",
+		AttrProjectID, "project-xyz",
 	)
 
 	var data map[string]interface{}
@@ -96,11 +96,11 @@ func TestGCPHandler_LabelsPromoteAgentProject(t *testing.T) {
 	labels := data[GCPKeyLabels].(map[string]interface{})
 	assert.Equal(t, "test-component", labels["component"])
 	assert.Equal(t, "agent-abc", labels[AttrAgentID])
-	assert.Equal(t, "grove-xyz", labels[AttrProjectID])
+	assert.Equal(t, "project-xyz", labels[AttrProjectID])
 
 	// Also present in payload
 	assert.Equal(t, "agent-abc", data[AttrAgentID])
-	assert.Equal(t, "grove-xyz", data[AttrProjectID])
+	assert.Equal(t, "project-xyz", data[AttrProjectID])
 }
 
 func TestGCPHandler_LabelsFromWithAttrs(t *testing.T) {
@@ -110,7 +110,7 @@ func TestGCPHandler_LabelsFromWithAttrs(t *testing.T) {
 	// Simulate Logger(ctx) which uses slog.With()
 	childHandler := handler.WithAttrs([]slog.Attr{
 		slog.String(AttrAgentID, "pre-agent"),
-		slog.String(AttrProjectID, "pre-grove"),
+		slog.String(AttrProjectID, "pre-project"),
 	})
 	logger := slog.New(childHandler)
 
@@ -122,7 +122,7 @@ func TestGCPHandler_LabelsFromWithAttrs(t *testing.T) {
 
 	labels := data[GCPKeyLabels].(map[string]interface{})
 	assert.Equal(t, "pre-agent", labels[AttrAgentID])
-	assert.Equal(t, "pre-grove", labels[AttrProjectID])
+	assert.Equal(t, "pre-project", labels[AttrProjectID])
 }
 
 func TestGCPHandler_TraceCorrelationFields(t *testing.T) {

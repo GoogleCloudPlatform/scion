@@ -38,7 +38,7 @@ func TestGetRuntime(t *testing.T) {
 		// Ensure we are not picking up some random settings file
 		tmpHome := t.TempDir()
 		t.Setenv("HOME", tmpHome)
-		t.Setenv("SCION_GROVE", "") // Ensure no grove path influence
+		t.Setenv("SCION_GROVE", "") // Ensure no project path influence
 
 		r := GetRuntime("", "")
 		// On Linux, default "local" profile maps to DockerRuntime
@@ -114,14 +114,14 @@ func TestGetRuntime(t *testing.T) {
 		}
 	})
 
-	t.Run("Settings_Grove_Override", func(t *testing.T) {
+	t.Run("Settings_Project_Override", func(t *testing.T) {
 		tmpHome := t.TempDir()
 		t.Setenv("HOME", tmpHome)
 
-		// Create a fake grove project
+		// Create a fake project
 		projectPath := filepath.Join(tmpHome, "myproject")
-		groveScionDir := filepath.Join(projectPath, ".scion")
-		if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+		projectScionDir := filepath.Join(projectPath, ".scion")
+		if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 			t.Fatal(err)
 		}
 
@@ -136,27 +136,27 @@ func TestGetRuntime(t *testing.T) {
 		}
 
 		// Project says docker
-		if err := os.WriteFile(filepath.Join(groveScionDir, "settings.json"),
+		if err := os.WriteFile(filepath.Join(projectScionDir, "settings.json"),
 			[]byte(`{"active_profile": "local", "runtimes": {"docker": {}}, "profiles": {"local": {"runtime": "docker"}}}`), 0644); err != nil {
 			t.Fatal(err)
 		}
 
-		r := GetRuntime(groveScionDir, "")
+		r := GetRuntime(projectScionDir, "")
 		if _, ok := r.(*DockerRuntime); !ok {
-			t.Errorf("expected *DockerRuntime from grove override, got %T", r)
+			t.Errorf("expected *DockerRuntime from project override, got %T", r)
 		}
 	})
 
-	// Regression test: grove-level active_profile must override the global
+	// Regression test: project-level active_profile must override the global
 	// active_profile so that GetRuntime picks the correct runtime without
 	// the caller having to pass an explicit profile name.
-	t.Run("Settings_Grove_ActiveProfile_Override", func(t *testing.T) {
+	t.Run("Settings_Project_ActiveProfile_Override", func(t *testing.T) {
 		tmpHome := t.TempDir()
 		t.Setenv("HOME", tmpHome)
 
 		projectPath := filepath.Join(tmpHome, "myproject")
-		groveScionDir := filepath.Join(projectPath, ".scion")
-		if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+		projectScionDir := filepath.Join(projectPath, ".scion")
+		if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 			t.Fatal(err)
 		}
 
@@ -184,18 +184,18 @@ profiles:
 		}
 
 		// Project overrides active_profile to apple
-		groveSettings := `
+		projectSettings := `
 schema_version: "1"
 active_profile: apple
 `
-		if err := os.WriteFile(filepath.Join(groveScionDir, "settings.yaml"), []byte(groveSettings), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(projectSettings), 0644); err != nil {
 			t.Fatal(err)
 		}
 
-		// Call GetRuntime with empty profileName — should use grove's active_profile (apple → container)
-		r := GetRuntime(groveScionDir, "")
+		// Call GetRuntime with empty profileName — should use project's active_profile (apple → container)
+		r := GetRuntime(projectScionDir, "")
 		if _, ok := r.(*AppleContainerRuntime); !ok {
-			t.Errorf("expected *AppleContainerRuntime from grove active_profile override, got %T", r)
+			t.Errorf("expected *AppleContainerRuntime from project active_profile override, got %T", r)
 		}
 	})
 

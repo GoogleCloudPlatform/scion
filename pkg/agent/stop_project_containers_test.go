@@ -29,23 +29,23 @@ func TestStopProjectContainers_StopsMatchingContainers(t *testing.T) {
 		{
 			ContainerID: "container-1",
 			Name:        "agent-a",
-			Labels:      map[string]string{"scion.name": "agent-a", "scion.grove": "mygrove"},
+			Labels:      map[string]string{"scion.name": "agent-a", "scion.grove": "myproject"},
 		},
 		{
 			ContainerID: "container-2",
 			Name:        "agent-b",
-			Labels:      map[string]string{"scion.name": "agent-b", "scion.grove": "mygrove"},
+			Labels:      map[string]string{"scion.name": "agent-b", "scion.grove": "myproject"},
 		},
 		{
 			ContainerID: "container-3",
 			Name:        "other-agent",
-			Labels:      map[string]string{"scion.name": "other-agent", "scion.grove": "mygrove"},
+			Labels:      map[string]string{"scion.name": "other-agent", "scion.grove": "myproject"},
 		},
 	}
 
 	mock := &runtime.MockRuntime{
 		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
-			// The initial List call uses grove filter; Delete's internal List
+			// The initial List call uses project filter; Delete's internal List
 			// uses scion.name filter to find the container by ID.
 			if name, ok := filter["scion.name"]; ok {
 				for _, c := range allContainers {
@@ -64,7 +64,7 @@ func TestStopProjectContainers_StopsMatchingContainers(t *testing.T) {
 	}
 
 	mgr := NewManager(mock)
-	stopped := StopProjectContainers(context.Background(), mgr, "mygrove", []string{"agent-a", "agent-b"})
+	stopped := StopProjectContainers(context.Background(), mgr, "myproject", []string{"agent-a", "agent-b"})
 
 	if len(stopped) != 2 {
 		t.Fatalf("expected 2 stopped, got %d: %v", len(stopped), stopped)

@@ -57,14 +57,14 @@ func isTmuxShellNotFoundError(err error) bool {
 }
 
 func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
-	// Resolve grove name early so we can scope the container lookup below.
+	// Resolve project name early so we can scope the container lookup below.
 	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
 	if err != nil {
 		return nil, err
 	}
 	projectName := config.GetProjectName(projectDir)
 
-	// Determine the grove ID for label-based filtering. In broker/hosted mode
+	// Determine the project ID for label-based filtering. In broker/hosted mode
 	// this comes from the SCION_GROVE_ID env var injected by the hub dispatcher.
 	projectID := ""
 	if opts.Env != nil {
@@ -74,12 +74,12 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 	}
 
-	// 0. Check if container already exists (scoped to this grove)
+	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
 	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
 	if err == nil {
 		for _, a := range agents {
-			// Skip agents from a different grove
+			// Skip agents from a different project
 			if !matchAgentProject(a, projectName, projectID) {
 				continue
 			}
@@ -215,7 +215,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// Prefer opts.Template when it is an absolute path (e.g. hydrated
 		// template cache path from the broker). The display name stored in
 		// finalScionCfg.Info.Template (e.g. "web-dev") may not resolve in
-		// the grove, but the original opts.Template path points to the
+		// the project, but the original opts.Template path points to the
 		// actual template directory containing harness-configs/.
 		templateName := ""
 		if opts.Template != "" && filepath.IsAbs(opts.Template) {
@@ -562,7 +562,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 	opts.Env["SCION_CLI_MODE"] = "agent"
 
-	// Determine whether hub is explicitly disabled in grove settings.
+	// Determine whether hub is explicitly disabled in project settings.
 	// When disabled, we suppress hub env var injection from agent config
 	// and template env sections (but not from caller-provided opts.Env,
 	// which may come from an authoritative source like the runtime broker).
@@ -580,7 +580,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			opts.Env["SCION_MAX_DURATION"] = finalScionCfg.MaxDuration
 		}
 		// Agent-level hub endpoint takes highest priority, overriding
-		// grove settings and server config values passed via opts.Env.
+		// project settings and server config values passed via opts.Env.
 		if !hubDisabled && finalScionCfg.Hub != nil && finalScionCfg.Hub.Endpoint != "" {
 			opts.Env["SCION_HUB_ENDPOINT"] = finalScionCfg.Hub.Endpoint
 			opts.Env["SCION_HUB_URL"] = finalScionCfg.Hub.Endpoint
@@ -588,8 +588,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	// If hub endpoint not yet set from agent config or caller's opts.Env,
-	// check grove settings so locally-started agents in hub-connected
-	// groves also get hub connectivity.
+	// check project settings so locally-started agents in hub-connected
+	// projects also get hub connectivity.
 	if _, hubSet := opts.Env["SCION_HUB_ENDPOINT"]; !hubSet {
 		if projectSettings, err := config.LoadSettings(projectDir); err == nil {
 			if projectSettings.IsHubEnabled() {
@@ -628,7 +628,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// opts.Env and the scion config env section to prevent leakage
 	// through buildAgentEnv (which processes scionCfg.Env independently).
 	// In broker mode, never strip hub env vars — the broker handler is
-	// authoritative about hub connectivity and the grove settings on the
+	// authoritative about hub connectivity and the project settings on the
 	// broker host may not accurately reflect the hub-connected state.
 	if hubDisabled && !opts.BrokerMode {
 		delete(opts.Env, "SCION_HUB_ENDPOINT")
@@ -791,7 +791,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// Compute the container-side workspace path for volume mount targets.
 	containerWorkspace := runtime.ResolveContainerWorkspace(repoRoot, effectiveWorkspace, opts.GitClone)
 
-	// Inject shared directory volumes from grove settings or opts (hub-dispatched)
+	// Inject shared directory volumes from project settings or opts (hub-dispatched)
 	var effectiveSharedDirs []api.SharedDir
 	if settings != nil && len(settings.SharedDirs) > 0 {
 		effectiveSharedDirs = settings.SharedDirs
@@ -897,7 +897,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				"scion.harness_config": harnessConfigName,
 				"scion.harness_auth":   opts.HarnessAuth,
 			}
-			// Add project_id/grove_id label for project-scoped agent isolation.
+			// Add project_id label for project-scoped agent isolation.
 			// In broker/hosted mode this comes from the SCION_GROVE_ID or
 			// SCION_PROJECT_ID env var injected by the hub dispatcher.
 			if projectID := opts.Env["SCION_GROVE_ID"]; projectID != "" {
@@ -1002,7 +1002,7 @@ func filterWorkspaceVolume(volumes []api.VolumeMount) []api.VolumeMount {
 // It checks the project_id label first (authoritative in hosted mode), then
 // falls back to the project name label.
 func matchAgentProject(a api.AgentInfo, projectName, projectID string) bool {
-	// If we have a projectID, check the scion.project_id or scion.grove_id label (authoritative)
+	// If we have a projectID, check the scion.project_id or scion.grove_id label (authoritative, grove_id for backward compat)
 	if projectID != "" {
 		if labelProjectID := a.Labels["scion.project_id"]; labelProjectID != "" {
 			return labelProjectID == projectID
@@ -1031,7 +1031,7 @@ func matchAgentProject(a api.AgentInfo, projectName, projectID string) bool {
 }
 
 // containerName returns a project-scoped container name to prevent Docker name
-// collisions when agents with the same name exist in different groves.
+// collisions when agents with the same name exist in different projects.
 func containerName(projectName, agentName string) string {
 	if projectName != "" {
 		return projectName + "--" + agentName

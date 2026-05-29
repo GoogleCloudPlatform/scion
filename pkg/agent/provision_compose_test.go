@@ -25,7 +25,7 @@ import (
 )
 
 // setupCompositionTest creates a standard test environment with HOME, global .scion dir,
-// a project grove, and returns cleanup info.
+// a project directory, and returns cleanup info.
 func setupCompositionTest(t *testing.T) (tmpDir, globalScionDir, projectScionDir string) {
 	t.Helper()
 	tmpDir = t.TempDir()

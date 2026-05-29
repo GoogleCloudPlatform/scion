@@ -343,7 +343,7 @@ func (r *DockerRuntime) Sync(ctx context.Context, id string, direction SyncDirec
 
 func (r *DockerRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
 	// Resolve slug/name to actual container ID (container names include the
-	// grove prefix, e.g. "mygrove--agent", so the bare slug won't match).
+	// project prefix, e.g. "myproject--agent", so the bare slug won't match).
 	if agents, err := r.List(ctx, nil); err == nil {
 		id = resolveContainerID(agents, id)
 	}

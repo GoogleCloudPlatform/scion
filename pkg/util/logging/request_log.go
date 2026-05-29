@@ -130,11 +130,11 @@ func RequestMetaFromContext(ctx context.Context) *RequestMeta {
 	return meta
 }
 
-// SetRequestProjectID sets the grove ID on the request metadata in context.
-func SetRequestProjectID(ctx context.Context, groveID string) {
+// SetRequestProjectID sets the project ID on the request metadata in context.
+func SetRequestProjectID(ctx context.Context, projectID string) {
 	if meta := RequestMetaFromContext(ctx); meta != nil {
 		meta.mu.Lock()
-		meta.ProjectID = groveID
+		meta.ProjectID = projectID
 		meta.mu.Unlock()
 	}
 }
@@ -228,34 +228,34 @@ func NewRequestLogger(cfg RequestLoggerConfig) (*slog.Logger, func(), error) {
 	return slog.New(handler), cleanup, nil
 }
 
-// PathPattern defines a URL pattern for extracting grove/agent IDs.
+// PathPattern defines a URL pattern for extracting project/agent IDs.
 type PathPattern struct {
-	Prefix   string // e.g. "/api/v1/groves/"
-	GroveIdx int    // segment index after prefix for grove ID (-1 if N/A)
-	AgentIdx int    // segment index after prefix for agent ID (-1 if N/A)
+	Prefix     string // e.g. "/api/v1/groves/"
+	ProjectIdx int    // segment index after prefix for project ID (-1 if N/A)
+	AgentIdx   int    // segment index after prefix for agent ID (-1 if N/A)
 }
 
 // HubPathPatterns returns the URL patterns for the Hub API.
 func HubPathPatterns() []PathPattern {
 	return []PathPattern{
-		{Prefix: "/api/v1/projects/", GroveIdx: 0, AgentIdx: -1},
-		{Prefix: "/api/v1/groves/", GroveIdx: 0, AgentIdx: -1},
-		{Prefix: "/api/v1/agents/", GroveIdx: -1, AgentIdx: 0},
+		{Prefix: "/api/v1/projects/", ProjectIdx: 0, AgentIdx: -1},
+		{Prefix: "/api/v1/groves/", ProjectIdx: 0, AgentIdx: -1},
+		{Prefix: "/api/v1/agents/", ProjectIdx: -1, AgentIdx: 0},
 	}
 }
 
 // BrokerPathPatterns returns the URL patterns for the Broker API.
 func BrokerPathPatterns() []PathPattern {
 	return []PathPattern{
-		{Prefix: "/api/v1/projects/", GroveIdx: 0, AgentIdx: -1},
-		{Prefix: "/api/v1/groves/", GroveIdx: 0, AgentIdx: -1},
-		{Prefix: "/api/v1/agents/", GroveIdx: -1, AgentIdx: 0},
+		{Prefix: "/api/v1/projects/", ProjectIdx: 0, AgentIdx: -1},
+		{Prefix: "/api/v1/groves/", ProjectIdx: 0, AgentIdx: -1},
+		{Prefix: "/api/v1/agents/", ProjectIdx: -1, AgentIdx: 0},
 	}
 }
 
-// extractIDsFromPath extracts grove and agent IDs from the URL path
+// extractIDsFromPath extracts project and agent IDs from the URL path
 // using the provided patterns.
-func extractIDsFromPath(path string, patterns []PathPattern) (groveID, agentID string) {
+func extractIDsFromPath(path string, patterns []PathPattern) (projectID, agentID string) {
 	for _, p := range patterns {
 		if !strings.HasPrefix(path, p.Prefix) {
 			continue
@@ -263,8 +263,8 @@ func extractIDsFromPath(path string, patterns []PathPattern) (groveID, agentID s
 		remainder := path[len(p.Prefix):]
 		segments := strings.Split(strings.TrimSuffix(remainder, "/"), "/")
 
-		if p.GroveIdx >= 0 && p.GroveIdx < len(segments) && segments[p.GroveIdx] != "" {
-			groveID = segments[p.GroveIdx]
+		if p.ProjectIdx >= 0 && p.ProjectIdx < len(segments) && segments[p.ProjectIdx] != "" {
+			projectID = segments[p.ProjectIdx]
 		}
 		if p.AgentIdx >= 0 && p.AgentIdx < len(segments) && segments[p.AgentIdx] != "" {
 			agentID = segments[p.AgentIdx]
@@ -287,12 +287,12 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 			// Generate request ID if no trace header present
 			requestID := uuid.New().String()
 
-			// Best-effort extract grove/agent IDs from path
-			groveID, agentID := extractIDsFromPath(r.URL.Path, patterns)
+			// Best-effort extract project/agent IDs from path
+			projectID, agentID := extractIDsFromPath(r.URL.Path, patterns)
 
 			// Create request metadata and store in context
 			meta := &RequestMeta{
-				ProjectID: groveID,
+				ProjectID: projectID,
 				AgentID:   agentID,
 				RequestID: requestID,
 				TraceID:   traceID,

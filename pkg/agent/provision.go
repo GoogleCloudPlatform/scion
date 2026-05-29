@@ -43,7 +43,7 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		if root, err := util.RepoRootDir(filepath.Dir(projectDir)); err == nil {
 			repoRoot = root
 		}
-		// Check for external agent home (git grove split storage)
+		// Check for external agent home (git project split storage)
 		if extDir, err := config.GetGitProjectExternalAgentsDir(projectDir); err == nil && extDir != "" {
 			externalAgentDir = filepath.Join(extDir, agentName)
 		}
@@ -117,7 +117,7 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		util.Debugf("delete: removal completed in %v", time.Since(removeStart))
 	}
 
-	// Phase 3: remove the external per-agent state directory (git grove split
+	// Phase 3: remove the external per-agent state directory (git project split
 	// storage). For worktree-mode agents this contains only home/. For
 	// shared-workspace agents this also contains prompt.md and scion-agent.json
 	// (relocated to keep siblings from seeing them via the shared /workspace
@@ -146,13 +146,13 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 }
 
 // migrateLegacyAgentState moves prompt.md and scion-agent.json from the
-// legacy in-grove location to the external (shared-workspace) location for
+// legacy in-project location to the external (shared-workspace) location for
 // agents provisioned before per-agent state was relocated. The legacy
 // directory is removed if it ends up empty (it shouldn't contain anything
 // else for shared-workspace agents — there is no per-agent worktree).
 //
 // Best-effort: errors are logged but do not abort provisioning. A miss here
-// only means the in-grove copy lingers (still readable by siblings until the
+// only means the in-project copy lingers (still readable by siblings until the
 // agent re-provisions); it does not corrupt the new location.
 func migrateLegacyAgentState(legacyDir, externalDir string) {
 	moveFile := func(name string) {
@@ -162,7 +162,7 @@ func migrateLegacyAgentState(legacyDir, externalDir string) {
 		}
 		externalPath := filepath.Join(externalDir, name)
 		if _, err := os.Stat(externalPath); err == nil {
-			// External already populated — discard the in-grove residue.
+			// External already populated — discard the in-project residue.
 			_ = os.Remove(legacyPath)
 			return
 		}
@@ -271,7 +271,6 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 }
 
 func ProvisionAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, *api.ScionConfig, error) {
-	provisionStart := time.Now()
 	// 1. Prepare agent directories
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
@@ -303,7 +302,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			if err == nil && !strings.HasPrefix(rel, "..") {
 				agentsPath := filepath.Join(rel, "agents")
 				if !util.IsIgnored(root, agentsPath+"/") {
-					return "", "", nil, fmt.Errorf("security error: '%s/' must be in .gitignore when using a project-local grove", agentsPath)
+					return "", "", nil, fmt.Errorf("security error: '%s/' must be in .gitignore when using a project-local project", agentsPath)
 				}
 				// Note: .scion/agents/ is the security-critical path (checked above).
 				// .scion/ itself is intentionally NOT fully gitignored so that
@@ -316,13 +315,13 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	agentHome := config.GetAgentHomePath(projectDir, agentName)
 	// In worktree mode the workspace lives under agentDir so git's relative
 	// worktree pointers resolve correctly. In shared-workspace mode there is
-	// no per-agent workspace dir — the grove-wide checkout is mounted directly.
+	// no per-agent workspace dir — the project-wide checkout is mounted directly.
 	var agentWorkspace string
 	if !sharedWorkspace {
 		agentWorkspace = filepath.Join(agentDir, "workspace")
 	}
 
-	// Migrate any pre-existing in-grove state for shared-workspace agents to
+	// Migrate any pre-existing in-project state for shared-workspace agents to
 	// the external location so siblings stop seeing it via /workspace. This
 	// covers agents provisioned before the shared-workspace isolation change.
 	if sharedWorkspace {
@@ -424,7 +423,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		if projectName == "global" {
 			workspaceSource, _ = os.Getwd()
 		} else if settings != nil && settings.WorkspacePath != "" {
-			// Externalized grove: use workspace-path from settings
+			// Externalized project: use workspace-path from settings
 			workspaceSource = settings.WorkspacePath
 		} else {
 			workspaceSource = filepath.Dir(projectDir)
@@ -434,7 +433,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	// Worktree Creation (if needed)
 	if shouldCreateWorktree {
-		worktreeStart := time.Now()
 		// Remove existing workspace dir if it exists to allow worktree add
 		_ = util.MakeWritableRecursive(agentWorkspace)
 		os.RemoveAll(agentWorkspace)
@@ -456,15 +454,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		if err := util.CreateWorktree(agentWorkspace, worktreeBranch); err != nil {
 			return "", "", nil, fmt.Errorf("failed to create git worktree: %w", err)
 		}
-		util.Debugf("provision: worktree created in %s", time.Since(worktreeStart))
 
-		// Write a .scion grove marker into the worktree so in-container CLI
-		// can discover the grove context. Worktrees don't contain .scion
+		// Write a .scion project marker into the worktree so in-container CLI
+		// can discover the project context. Worktrees don't contain .scion
 		// (it's gitignored), so without this marker the CLI would report
 		// "not in a scion project" inside the container.
 		if projectID, err := config.ReadProjectID(projectDir); err == nil && projectID != "" {
-			groveSlug := api.Slugify(projectName)
-			if writeErr := config.WriteWorkspaceMarker(agentWorkspace, projectID, projectName, groveSlug); writeErr != nil {
+			projectSlug := api.Slugify(projectName)
+			if writeErr := config.WriteWorkspaceMarker(agentWorkspace, projectID, projectName, projectSlug); writeErr != nil {
 				util.Debugf("provision: failed to write workspace marker: %v", writeErr)
 			}
 		}
@@ -556,7 +553,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	finalScionCfg.HarnessConfig = harnessConfigName
 
 	// 2d. Compose agent home directory
-	homeCopyStart := time.Now()
 
 	// Step 1: Copy harness-config base home → agentHome
 	hcHome := filepath.Join(hcDir.Path, "home")
@@ -617,8 +613,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			}
 		}
 	}
-
-	util.Debugf("provision: home/skills copy completed in %s", time.Since(homeCopyStart))
 
 	// Step 4: Inject agent instructions
 
@@ -864,7 +858,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// 2f. Configure git credential helper for shared-workspace groves.
+	// 2f. Configure git credential helper for shared-workspace projects.
 	// The credential helper is written to $HOME/.gitconfig so it doesn't
 	// pollute the shared workspace. This pre-configures a basic credential
 	// helper using GITHUB_TOKEN env var. When GitHub App is enabled,
@@ -900,7 +894,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		fmt.Fprintf(os.Stderr, "Warning: failed to reload agent config after harness provisioning: %v\n", err)
 	}
 
-	util.Debugf("provision: total ProvisionAgent completed in %s", time.Since(provisionStart))
 	return agentHome, agentWorkspace, finalScionCfg, nil
 }
 
@@ -1112,7 +1105,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	// Only do this for existing, fully-provisioned agents (config file present).
 	// For new agents or stale directories, ProvisionAgent handles worktree creation.
 	// Skipped for shared-workspace agents (agentWorkspace == "") because they
-	// share the grove-wide checkout and have no per-agent worktree.
+	// share the project-wide checkout and have no per-agent worktree.
 	if agentWorkspace != "" && config.GetScionAgentConfigPath(agentDir) != "" {
 		if _, err := os.Stat(agentWorkspace); os.IsNotExist(err) {
 			if util.IsGitRepoDir(projectDir) {

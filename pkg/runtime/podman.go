@@ -282,7 +282,7 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 
 		if match {
 			// Prefer the scion.name label (slugified) over Podman container name,
-			// consistent with the Docker runtime. This ensures grove-scoped
+			// consistent with the Docker runtime. This ensures project-scoped
 			// container names don't leak into display/lookup paths.
 			name := labels["scion.name"]
 			if name == "" && len(c.Names) > 0 {
@@ -423,7 +423,7 @@ func (r *PodmanRuntime) Sync(ctx context.Context, id string, direction SyncDirec
 
 func (r *PodmanRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
 	// Resolve slug/name to actual container ID (container names include the
-	// grove prefix, e.g. "mygrove--agent", so the bare slug won't match).
+	// project prefix, e.g. "myproject--agent", so the bare slug won't match).
 	if agents, err := r.List(ctx, nil); err == nil {
 		id = resolveContainerID(agents, id)
 	}

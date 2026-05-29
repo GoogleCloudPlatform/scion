@@ -34,7 +34,7 @@ func TestResolveContainerID(t *testing.T) {
 		},
 		{
 			ContainerID: "def456abc789012",
-			Name:        "mygrove--other-agent",
+			Name:        "myproject--other-agent",
 		},
 		{
 			ContainerID: "fed987cba654321",
@@ -68,8 +68,8 @@ func TestResolveContainerID(t *testing.T) {
 			want: "abc123def456789",
 		},
 		{
-			name: "grove-prefixed container name",
-			id:   "mygrove--other-agent",
+			name: "project-prefixed container name",
+			id:   "myproject--other-agent",
 			want: "def456abc789012",
 		},
 		{
@@ -95,7 +95,7 @@ func TestResolveContainerID(t *testing.T) {
 }
 
 func TestResolveContainerID_SlugMatchesAgentName(t *testing.T) {
-	// Simulates the actual bug: container is named "grove--foo" but the
+	// Simulates the actual bug: container is named "project--foo" but the
 	// scion.name label (populated into AgentInfo.Name) is "foo".  The broker
 	// passes the slug "foo" to Exec; the runtime must resolve it.
 	agents := []api.AgentInfo{
@@ -1276,7 +1276,7 @@ func TestWriteFileSecrets_DeduplicatesByTarget(t *testing.T) {
 
 	secrets := []api.ResolvedSecret{
 		{Name: "user-cert", Type: "file", Target: "/tmp/my-secret.json", Value: "user-data", Source: "user"},
-		{Name: "grove-cert", Type: "file", Target: "/tmp/my-secret.json", Value: "grove-data", Source: "grove"},
+		{Name: "project-cert", Type: "file", Target: "/tmp/my-secret.json", Value: "project-data", Source: "project"},
 		{Name: "other-file", Type: "file", Target: "/tmp/other.json", Value: "other-data", Source: "user"},
 		{Name: "env-secret", Type: "environment", Target: "FOO", Value: "bar", Source: "user"},
 	}
@@ -1291,7 +1291,7 @@ func TestWriteFileSecrets_DeduplicatesByTarget(t *testing.T) {
 		t.Fatalf("expected 2 mount specs, got %d: %v", len(mounts), mounts)
 	}
 
-	// The /tmp/my-secret.json mount should use the grove-cert (last entry wins)
+	// The /tmp/my-secret.json mount should use the project-cert (last entry wins)
 	var mySecretMount string
 	for _, m := range mounts {
 		if strings.Contains(m, "/tmp/my-secret.json") {
@@ -1301,22 +1301,22 @@ func TestWriteFileSecrets_DeduplicatesByTarget(t *testing.T) {
 	if mySecretMount == "" {
 		t.Fatal("expected mount for /tmp/my-secret.json")
 	}
-	if !strings.Contains(mySecretMount, "grove-cert") {
-		t.Errorf("expected grove-cert to win for duplicate target, got: %s", mySecretMount)
+	if !strings.Contains(mySecretMount, "project-cert") {
+		t.Errorf("expected project-cert to win for duplicate target, got: %s", mySecretMount)
 	}
 }
 
 // TestSharedWorkspace_NoAgentStateInMounts asserts the structural invariant
 // from .design/hub-shared-workspace-isolation.md: when an agent is launched
-// in a shared-workspace grove (workspace == repo root), the assembled run
-// args must not bind-mount any host path under <grove>/.scion/agents/ into
+// in a shared-workspace project (workspace == repo root), the assembled run
+// args must not bind-mount any host path under <project>/.scion/agents/ into
 // the container. Per-agent state lives at the external project-configs path
 // instead, so siblings cannot read it via /workspace.
 func TestSharedWorkspace_NoAgentStateInMounts(t *testing.T) {
 	tmpDir := t.TempDir()
-	groveDir := filepath.Join(tmpDir, "grove")
-	if err := os.MkdirAll(filepath.Join(groveDir, ".scion", "agents", "agent-a"), 0755); err != nil {
-		t.Fatalf("mkdir in-grove agent dir: %v", err)
+	projectDir := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(filepath.Join(projectDir, ".scion", "agents", "agent-a"), 0755); err != nil {
+		t.Fatalf("mkdir in-project agent dir: %v", err)
 	}
 	// External per-agent state for the agent under test (where prompt.md and
 	// scion-agent.json are relocated to in shared-workspace mode).
@@ -1332,25 +1332,25 @@ func TestSharedWorkspace_NoAgentStateInMounts(t *testing.T) {
 		UnixUsername: "scion",
 		Image:        "scion-agent:latest",
 		// Shared-workspace shape: workspace == repo root. buildCommonRunArgs
-		// hits the relWorkspace == "." branch and mounts grove → /workspace.
-		RepoRoot:  groveDir,
-		Workspace: groveDir,
+		// hits the relWorkspace == "." branch and mounts project → /workspace.
+		RepoRoot:  projectDir,
+		Workspace: projectDir,
 		HomeDir:   homeDir,
 	})
 	if err != nil {
 		t.Fatalf("buildCommonRunArgs failed: %v", err)
 	}
 
-	forbidden := filepath.Join(groveDir, ".scion", "agents")
+	forbidden := filepath.Join(projectDir, ".scion", "agents")
 	for i, a := range args {
 		if strings.Contains(a, forbidden) {
 			t.Errorf("arg[%d] = %q references forbidden host path %s; per-agent state must live external (.design/hub-shared-workspace-isolation.md)", i, a, forbidden)
 		}
 	}
-	// Sanity: the grove itself should still be mounted at /workspace.
+	// Sanity: the project directory itself should still be mounted at /workspace.
 	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, fmt.Sprintf("%s:/workspace", groveDir)) {
-		t.Errorf("expected grove %s to be mounted at /workspace, args: %s", groveDir, joined)
+	if !strings.Contains(joined, fmt.Sprintf("%s:/workspace", projectDir)) {
+		t.Errorf("expected project dir %s to be mounted at /workspace, args: %s", projectDir, joined)
 	}
 }
 

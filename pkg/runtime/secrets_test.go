@@ -48,7 +48,7 @@ func TestWriteFileSecrets(t *testing.T) {
 			Type:   "file",
 			Target: "/home/scion/.ssh/id_rsa",
 			Value:  "raw-value-not-base64",
-			Source: "grove",
+			Source: "project",
 		},
 	}
 
@@ -162,7 +162,7 @@ func TestWriteFileSecrets_PreCreatesParentDirs(t *testing.T) {
 			Type:   "file",
 			Target: "~/.scion/telemetry-gcp-credentials.json",
 			Value:  base64.StdEncoding.EncodeToString([]byte("cred-data")),
-			Source: "grove",
+			Source: "project",
 		},
 		{
 			Name:   "nested-secret",
@@ -236,7 +236,7 @@ func TestWriteVariableSecrets(t *testing.T) {
 
 	secrets := []api.ResolvedSecret{
 		{Name: "CONFIG", Type: "variable", Target: "config", Value: `{"a":"b"}`, Source: "user"},
-		{Name: "TOKEN", Type: "variable", Target: "token", Value: "abc123", Source: "grove"},
+		{Name: "TOKEN", Type: "variable", Target: "token", Value: "abc123", Source: "project"},
 		{Name: "ENV_KEY", Type: "environment", Target: "ENV_KEY", Value: "val", Source: "user"},
 	}
 
@@ -297,7 +297,7 @@ func TestWriteSecretMap(t *testing.T) {
 
 	secrets := []api.ResolvedSecret{
 		{Name: "CERT", Type: "file", Target: "/etc/ssl/cert.pem", Value: "data", Source: "user"},
-		{Name: "KEY", Type: "file", Target: "/etc/ssl/key.pem", Value: "data", Source: "grove"},
+		{Name: "KEY", Type: "file", Target: "/etc/ssl/key.pem", Value: "data", Source: "project"},
 		{Name: "ENV", Type: "environment", Target: "ENV", Value: "val", Source: "user"},
 	}
 
@@ -490,7 +490,7 @@ func TestInsertVolumeFlags_SecretMountsBeforeImage(t *testing.T) {
 func TestBuildCommonRunArgs_EnvironmentSecrets(t *testing.T) {
 	secrets := []api.ResolvedSecret{
 		{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "sk-123", Source: "user"},
-		{Name: "DB_PASS", Type: "environment", Target: "DATABASE_PASSWORD", Value: "secret", Source: "grove"},
+		{Name: "DB_PASS", Type: "environment", Target: "DATABASE_PASSWORD", Value: "secret", Source: "project"},
 		{Name: "CONFIG", Type: "variable", Target: "config", Value: "json-data", Source: "user"},
 		{Name: "CERT", Type: "file", Target: "/etc/cert.pem", Value: "data", Source: "user"},
 	}

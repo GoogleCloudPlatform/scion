@@ -72,7 +72,7 @@ func TestInProcessBroker_WildcardSubscribe(t *testing.T) {
 	var mu sync.Mutex
 	var received []string
 
-	// Subscribe with wildcard — match all agent messages in grove g1
+	// Subscribe with wildcard — match all agent messages in project g1
 	_, err := b.Subscribe("scion.grove.g1.agent.*.messages", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
 		mu.Lock()
 		received = append(received, msg.Msg)
@@ -89,7 +89,7 @@ func TestInProcessBroker_WildcardSubscribe(t *testing.T) {
 	b.Publish(ctx, "scion.grove.g1.agent.a1.messages", msg1)
 	b.Publish(ctx, "scion.grove.g1.agent.a2.messages", msg2)
 
-	// Should NOT match a different grove
+	// Should NOT match a different project
 	msg3 := messages.NewInstruction("user:alice", "agent:a3", "msg3")
 	b.Publish(ctx, "scion.grove.g2.agent.a3.messages", msg3)
 
@@ -110,7 +110,7 @@ func TestInProcessBroker_GreaterThanWildcard(t *testing.T) {
 	var mu sync.Mutex
 	var received []string
 
-	// Subscribe with > wildcard — match everything under grove g1
+	// Subscribe with > wildcard — match everything under project g1
 	_, err := b.Subscribe("scion.grove.g1.>", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
 		mu.Lock()
 		received = append(received, topic)
@@ -141,7 +141,7 @@ func TestInProcessBroker_BroadcastTopic(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Two subscribers listening to the grove broadcast topic
+	// Two subscribers listening to the project broadcast topic
 	for i := 0; i < 2; i++ {
 		_, err := b.Subscribe("scion.grove.g1.broadcast", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
 			wg.Done()
@@ -277,7 +277,7 @@ func TestTopicHelpers(t *testing.T) {
 		expected string
 	}{
 		{"agent messages", TopicAgentMessages("g1", "myagent"), "scion.grove.g1.agent.myagent.messages"},
-		{"grove broadcast", TopicProjectBroadcast("g1"), "scion.grove.g1.broadcast"},
+		{"project broadcast", TopicProjectBroadcast("g1"), "scion.grove.g1.broadcast"},
 		{"global broadcast", TopicGlobalBroadcast(), "scion.global.broadcast"},
 		{"all agent messages", TopicAllAgentMessages("g1"), "scion.grove.g1.agent.*.messages"},
 	}

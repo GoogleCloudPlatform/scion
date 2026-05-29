@@ -27,13 +27,13 @@ import (
 )
 
 // GetRuntime returns the appropriate Runtime implementation based on environment,
-// agent configuration (if available via GetAgentSettings), and grove/global settings.
-func GetRuntime(grovePath string, profileName string) Runtime {
-	projectDir, _ := config.GetResolvedProjectDir(grovePath)
+// agent configuration (if available via GetAgentSettings), and project/global settings.
+func GetRuntime(projectPath string, profileName string) Runtime {
+	projectDir, _ := config.GetResolvedProjectDir(projectPath)
 	vs, warnings, _ := config.LoadEffectiveSettings(projectDir)
 	config.PrintDeprecationWarnings(warnings)
 
-	util.Debugf("GetRuntime: grovePath=%q, profileName=%q, projectDir=%q, hasSettings=%v", grovePath, profileName, projectDir, vs != nil)
+	util.Debugf("GetRuntime: projectPath=%q, profileName=%q, projectDir=%q, hasSettings=%v", projectPath, profileName, projectDir, vs != nil)
 
 	var rtConfig config.V1RuntimeConfig
 	var runtimeType string

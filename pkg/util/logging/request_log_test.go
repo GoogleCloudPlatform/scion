@@ -145,11 +145,11 @@ func TestSetRequestProjectID_AgentID(t *testing.T) {
 	meta := &RequestMeta{}
 	ctx := ContextWithRequestMeta(context.Background(), meta)
 
-	SetRequestProjectID(ctx, "my-grove")
+	SetRequestProjectID(ctx, "my-project")
 	SetRequestAgentID(ctx, "agent-42")
 
-	if meta.ProjectID != "my-grove" {
-		t.Errorf("expected ProjectID=my-grove, got %s", meta.ProjectID)
+	if meta.ProjectID != "my-project" {
+		t.Errorf("expected ProjectID=my-project, got %s", meta.ProjectID)
 	}
 	if meta.AgentID != "agent-42" {
 		t.Errorf("expected AgentID=agent-42, got %s", meta.AgentID)
@@ -216,7 +216,7 @@ func TestRequestLogMiddleware_ProducesCorrectJSON(t *testing.T) {
 		}),
 	)
 
-	req := httptest.NewRequest("GET", "/api/v1/groves/test-grove/agents", nil)
+	req := httptest.NewRequest("GET", "/api/v1/groves/test-project/agents", nil)
 	req.Header.Set("User-Agent", "scion-cli/0.1.0")
 	rec := httptest.NewRecorder()
 
@@ -251,8 +251,8 @@ func TestRequestLogMiddleware_ProducesCorrectJSON(t *testing.T) {
 	if entry["component"] != "hub" {
 		t.Errorf("expected component=hub, got %v", entry["component"])
 	}
-	if entry["project_id"] != "test-grove" {
-		t.Errorf("expected project_id=test-grove, got %v", entry["project_id"])
+	if entry["project_id"] != "test-project" {
+		t.Errorf("expected project_id=test-project, got %v", entry["project_id"])
 	}
 
 	// Check request_id is present (UUID)
@@ -339,7 +339,7 @@ func TestRequestLogMiddleware_HandlerEnrichment(t *testing.T) {
 	handler := RequestLogMiddleware(logger, "hub", nil)(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Handler enriches metadata after middleware parsed the URL
-			SetRequestProjectID(r.Context(), "enriched-grove")
+			SetRequestProjectID(r.Context(), "enriched-project")
 			SetRequestAgentID(r.Context(), "enriched-agent")
 			w.WriteHeader(http.StatusOK)
 		}),
@@ -351,8 +351,8 @@ func TestRequestLogMiddleware_HandlerEnrichment(t *testing.T) {
 	var entry map[string]any
 	json.Unmarshal(buf.Bytes(), &entry)
 
-	if entry["project_id"] != "enriched-grove" {
-		t.Errorf("expected project_id=enriched-grove, got %v", entry["project_id"])
+	if entry["project_id"] != "enriched-project" {
+		t.Errorf("expected project_id=enriched-project, got %v", entry["project_id"])
 	}
 	if entry["agent_id"] != "enriched-agent" {
 		t.Errorf("expected agent_id=enriched-agent, got %v", entry["agent_id"])
@@ -477,7 +477,7 @@ func TestLoggerContextEnrichment(t *testing.T) {
 	meta := &RequestMeta{
 		RequestID: "req-enriched",
 		TraceID:   "trace-enriched",
-		ProjectID: "grove-enriched",
+		ProjectID: "project-enriched",
 		AgentID:   "agent-enriched",
 	}
 	ctx := ContextWithRequestMeta(context.Background(), meta)
@@ -486,7 +486,7 @@ func TestLoggerContextEnrichment(t *testing.T) {
 	l.Info("test message")
 
 	output := buf.String()
-	for _, expected := range []string{"req-enriched", "trace-enriched", "grove-enriched", "agent-enriched"} {
+	for _, expected := range []string{"req-enriched", "trace-enriched", "project-enriched", "agent-enriched"} {
 		if !strings.Contains(output, expected) {
 			t.Errorf("expected output to contain %q, got: %s", expected, output)
 		}

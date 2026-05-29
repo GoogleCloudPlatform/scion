@@ -48,7 +48,7 @@ func TestBuildPod_FallbackSecrets_Environment(t *testing.T) {
 		UnixUsername: "scion",
 		ResolvedSecrets: []api.ResolvedSecret{
 			{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "sk-123", Source: "user"},
-			{Name: "DB_PASS", Type: "environment", Target: "DATABASE_PASSWORD", Value: "secret", Source: "grove"},
+			{Name: "DB_PASS", Type: "environment", Target: "DATABASE_PASSWORD", Value: "secret", Source: "project"},
 		},
 	}
 
@@ -355,7 +355,7 @@ func TestCreateAgentSecret(t *testing.T) {
 
 	labels := map[string]string{
 		"scion.name":  "test-agent",
-		"scion.grove": "test-grove",
+		"scion.grove": "test-project",
 		"app":         "other", // Non-scion label should not be copied
 	}
 
@@ -400,7 +400,7 @@ func TestCreateAgentSecret(t *testing.T) {
 	if secret.Labels["scion.name"] != "test-agent" {
 		t.Errorf("expected scion.name label propagated")
 	}
-	if secret.Labels["scion.grove"] != "test-grove" {
+	if secret.Labels["scion.grove"] != "test-project" {
 		t.Errorf("expected scion.grove label propagated")
 	}
 	if _, ok := secret.Labels["app"]; ok {

@@ -200,7 +200,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			//
 			// Sibling agents share this exact mount, so per-agent state must not
 			// live under <workspace>/.scion/agents/ on the broker — that path
-			// would be visible to every container in the grove. Provisioning
+			// would be visible to every container in the project. Provisioning
 			// relocates prompt.md and scion-agent.json to
 			// ~/.scion/project-configs/<slug>__<uuid>/.scion/agents/<name>/
 			// (config.GetAgentDir with sharedWorkspace=true), so there is
@@ -281,7 +281,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	addEnv("SCION_HOST_UID", fmt.Sprintf("%d", os.Getuid()))
 	addEnv("SCION_HOST_GID", fmt.Sprintf("%d", os.Getgid()))
 
-	// Phase 3 & 5: Project/Grove identity injection
+	// Phase 3 & 5: Project identity injection
 	addEnv("SCION_PROJECT", config.Project)
 	addEnv("SCION_GROVE", config.Project)
 	addEnv("SCION_PROJECT_ID", config.ProjectID)

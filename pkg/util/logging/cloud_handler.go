@@ -150,7 +150,7 @@ func (h *CloudHandler) Handle(_ context.Context, r slog.Record) error {
 	// Map slog level to Cloud Logging severity
 	severity := slogLevelToSeverity(r.Level)
 
-	// Build labels, promoting agent_id/grove_id from attrs
+	// Build labels, promoting agent_id/project_id from attrs
 	labels := map[string]string{
 		"component": h.component,
 	}

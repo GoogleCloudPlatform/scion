@@ -44,7 +44,7 @@ func TestMessageBuffer_SingleMessage(t *testing.T) {
 	})
 	defer buf.Close()
 
-	buf.Send("agent-1", "grove-a", "hello")
+	buf.Send("agent-1", "project-a", "hello")
 
 	select {
 	case <-done:
@@ -60,8 +60,8 @@ func TestMessageBuffer_SingleMessage(t *testing.T) {
 	if deliveries[0].agentID != "agent-1" {
 		t.Errorf("expected agent-1, got %s", deliveries[0].agentID)
 	}
-	if deliveries[0].projectID != "grove-a" {
-		t.Errorf("expected grove-a, got %s", deliveries[0].projectID)
+	if deliveries[0].projectID != "project-a" {
+		t.Errorf("expected project-a, got %s", deliveries[0].projectID)
 	}
 	if deliveries[0].message != "hello" {
 		t.Errorf("expected 'hello', got %q", deliveries[0].message)
@@ -85,11 +85,11 @@ func TestMessageBuffer_CoalescesRapidMessages(t *testing.T) {
 	defer buf.Close()
 
 	// Send three messages in rapid succession — all within the 200ms window.
-	buf.Send("agent-1", "grove-a", "msg-1")
+	buf.Send("agent-1", "project-a", "msg-1")
 	time.Sleep(50 * time.Millisecond)
-	buf.Send("agent-1", "grove-a", "msg-2")
+	buf.Send("agent-1", "project-a", "msg-2")
 	time.Sleep(50 * time.Millisecond)
-	buf.Send("agent-1", "grove-a", "msg-3")
+	buf.Send("agent-1", "project-a", "msg-3")
 
 	select {
 	case <-done:
@@ -124,8 +124,8 @@ func TestMessageBuffer_SeparateAgents(t *testing.T) {
 	})
 	defer buf.Close()
 
-	buf.Send("agent-1", "grove-a", "for-agent-1")
-	buf.Send("agent-2", "grove-a", "for-agent-2")
+	buf.Send("agent-1", "project-a", "for-agent-1")
+	buf.Send("agent-2", "project-a", "for-agent-2")
 
 	// Wait for both deliveries.
 	for i := 0; i < 2; i++ {
@@ -156,7 +156,7 @@ func TestMessageBuffer_SeparateAgents(t *testing.T) {
 }
 
 func TestMessageBuffer_SameAgentDifferentProjects(t *testing.T) {
-	// Same agent slug in different groves should be buffered independently.
+	// Same agent slug in different projects should be buffered independently.
 	var mu sync.Mutex
 	var deliveries []deliveryRecord
 	done := make(chan struct{}, 2)
@@ -170,8 +170,8 @@ func TestMessageBuffer_SameAgentDifferentProjects(t *testing.T) {
 	})
 	defer buf.Close()
 
-	buf.Send("manager", "grove-a", "for-grove-a")
-	buf.Send("manager", "grove-b", "for-grove-b")
+	buf.Send("manager", "project-a", "for-project-a")
+	buf.Send("manager", "project-b", "for-project-b")
 
 	for i := 0; i < 2; i++ {
 		select {
@@ -191,11 +191,11 @@ func TestMessageBuffer_SameAgentDifferentProjects(t *testing.T) {
 	for _, d := range deliveries {
 		got[d.projectID] = d.message
 	}
-	if got["grove-a"] != "for-grove-a" {
-		t.Errorf("grove-a got %q", got["grove-a"])
+	if got["project-a"] != "for-project-a" {
+		t.Errorf("project-a got %q", got["project-a"])
 	}
-	if got["grove-b"] != "for-grove-b" {
-		t.Errorf("grove-b got %q", got["grove-b"])
+	if got["project-b"] != "for-project-b" {
+		t.Errorf("project-b got %q", got["project-b"])
 	}
 }
 
@@ -269,8 +269,8 @@ func TestMessageBuffer_Close(t *testing.T) {
 	})
 
 	// Send messages with a very long delay (10s) so they won't auto-flush.
-	buf.Send("agent-1", "grove-a", "pending-1")
-	buf.Send("agent-2", "grove-a", "pending-2")
+	buf.Send("agent-1", "project-a", "pending-1")
+	buf.Send("agent-2", "project-a", "pending-2")
 
 	// Close should flush everything immediately.
 	buf.Close()

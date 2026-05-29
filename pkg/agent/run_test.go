@@ -564,7 +564,7 @@ func TestScionCreatorEnvVar(t *testing.T) {
 }
 
 func TestStartResumeNonExistentAgent(t *testing.T) {
-	// Create a temporary directory to act as the grove
+	// Create a temporary directory to act as the project
 	tmpDir := t.TempDir()
 
 	// Move to tmpDir to avoid being inside the project's git repo
@@ -648,7 +648,7 @@ profiles:
     runtime: docker
 `), 0644)
 
-	// Create project grove
+	// Create project directory
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	os.MkdirAll(projectScionDir, 0755)
@@ -719,7 +719,7 @@ profiles:
     runtime: docker
 `), 0644)
 
-	// Create project grove
+	// Create project directory
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	os.MkdirAll(projectScionDir, 0755)
@@ -757,7 +757,7 @@ func TestStartResolvesHarnessConfigUserFromAbsTemplateDir(t *testing.T) {
 	// template from the broker's template cache), the harness-config bundled
 	// inside the template must be found and its User field applied. Previously,
 	// the template path lookup in Start used the display name from agent-info.json
-	// which could not be resolved in the grove, causing FindHarnessConfigDir to
+	// which could not be resolved in the project, causing FindHarnessConfigDir to
 	// miss the template-bundled harness config and defaulting to user "root".
 	tmpDir := t.TempDir()
 
@@ -789,7 +789,7 @@ profiles:
     runtime: docker
 `), 0644)
 
-	// Create project grove
+	// Create project directory
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	os.MkdirAll(projectScionDir, 0755)
@@ -870,7 +870,7 @@ profiles:
     runtime: docker
 `), 0644)
 
-	// Create project grove
+	// Create project directory
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	os.MkdirAll(projectScionDir, 0755)
@@ -1652,7 +1652,7 @@ func TestBuildAgentEnv_TelemetryNoOverrideExplicit(t *testing.T) {
 }
 
 func TestBuildAgentEnv_HubEnvVarsSurviveMerge(t *testing.T) {
-	// Verify that hub env vars injected into opts.Env (from grove settings
+	// Verify that hub env vars injected into opts.Env (from project settings
 	// or dev token resolution) survive the buildAgentEnv merge.
 	scionCfg := &api.ScionConfig{}
 	extraEnv := map[string]string{
@@ -1793,7 +1793,7 @@ func TestFilterResolvedSecretsForResolvedAuth(t *testing.T) {
 }
 
 func TestStartInjectsHubEnvFromProjectSettings(t *testing.T) {
-	// When grove settings have hub enabled with an endpoint, Start() should
+	// When project settings have hub enabled with an endpoint, Start() should
 	// inject SCION_HUB_ENDPOINT and SCION_HUB_URL into the container env.
 	tmpDir := t.TempDir()
 
@@ -1833,7 +1833,7 @@ profiles:
     runtime: docker
 `), 0644)
 
-	// Create project grove with hub-enabled settings
+	// Create project directory with hub-enabled settings
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	os.MkdirAll(projectScionDir, 0755)
@@ -1900,7 +1900,7 @@ profiles:
 
 func TestStartPreservesExplicitHubEndpoint(t *testing.T) {
 	// When hub endpoint is already set in opts.Env (e.g. from broker dispatch),
-	// grove settings should NOT override it.
+	// project settings should NOT override it.
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
@@ -1931,13 +1931,13 @@ profiles:
     runtime: docker
 `), 0644)
 
-	// Create project grove with hub-enabled settings (different endpoint)
+	// Create project directory with hub-enabled settings (different endpoint)
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	os.MkdirAll(projectScionDir, 0755)
 	os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(`hub:
   enabled: true
-  endpoint: "http://grove-setting:9810"
+  endpoint: "http://project-setting:9810"
 `), 0644)
 
 	// Capture the RunConfig
@@ -1974,16 +1974,16 @@ profiles:
 		}
 	}
 
-	// Broker-dispatched endpoint should be preserved, not overwritten by grove settings
+	// Broker-dispatched endpoint should be preserved, not overwritten by project settings
 	if got := envMap["SCION_HUB_ENDPOINT"]; got != "http://broker-dispatch:9810" {
-		t.Errorf("SCION_HUB_ENDPOINT = %q, want %q (explicit should win over grove settings)", got, "http://broker-dispatch:9810")
+		t.Errorf("SCION_HUB_ENDPOINT = %q, want %q (explicit should win over project settings)", got, "http://broker-dispatch:9810")
 	}
 }
 
 func TestBuildAgentEnv_EnvKeyScionHubEndpointOverride(t *testing.T) {
 	// Unit test verifying that when scionCfg.Env has SCION_HUB_ENDPOINT and
 	// it's pre-applied to extraEnv (simulating the new run.go logic), the
-	// env-section value wins over the grove/broker value.
+	// env-section value wins over the project/broker value.
 	t.Run("env section SCION_HUB_ENDPOINT overrides all via pre-apply", func(t *testing.T) {
 		scionCfg := &api.ScionConfig{
 			Hub: &api.AgentHubConfig{
@@ -1995,7 +1995,7 @@ func TestBuildAgentEnv_EnvKeyScionHubEndpointOverride(t *testing.T) {
 		}
 
 		// Simulate the priority chain from Start():
-		// 1. CLI/grove settings sets initial value
+		// 1. CLI/project settings sets initial value
 		extraEnv := map[string]string{
 			"SCION_HUB_ENDPOINT": "http://localhost:8080",
 			"SCION_HUB_URL":      "http://localhost:8080",
@@ -2080,7 +2080,7 @@ func TestBuildAgentEnv_EnvKeyScionHubEndpointOverride(t *testing.T) {
 }
 
 func TestStartSuppressesHubEnvWhenHubDisabled(t *testing.T) {
-	// When grove settings have hub.enabled=false, hub env vars should NOT be
+	// When project settings have hub.enabled=false, hub env vars should NOT be
 	// injected into the container, even when hub.endpoint is configured and
 	// agent-level hub config or template env section specifies an endpoint.
 	tmpDir := t.TempDir()
@@ -2121,7 +2121,7 @@ profiles:
     runtime: docker
 `), 0644)
 
-	// Create project grove with hub explicitly DISABLED but endpoint configured
+	// Create project directory with hub explicitly DISABLED but endpoint configured
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	os.MkdirAll(projectScionDir, 0755)
@@ -2133,7 +2133,7 @@ profiles:
 	// Write a dev-token file (should NOT be used since hub is disabled)
 	os.WriteFile(filepath.Join(globalScionDir, "dev-token"), []byte("scion-dev-test-token-abc"), 0644)
 
-	t.Run("grove settings hub disabled suppresses hub env", func(t *testing.T) {
+	t.Run("project settings hub disabled suppresses hub env", func(t *testing.T) {
 		var capturedConfig runtime.RunConfig
 		mockRT := &runtime.MockRuntime{
 			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
@@ -2176,7 +2176,7 @@ profiles:
 	})
 
 	t.Run("agent-level hub endpoint suppressed when hub disabled", func(t *testing.T) {
-		// Agent scion-agent.json has hub.endpoint but grove says hub.enabled=false
+		// Agent scion-agent.json has hub.endpoint but project says hub.enabled=false
 		agentDir := filepath.Join(projectScionDir, "agents", "hub-disabled-agent")
 		os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
 		os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
@@ -2222,7 +2222,7 @@ profiles:
 	})
 
 	t.Run("template env section hub endpoint suppressed when hub disabled", func(t *testing.T) {
-		// Agent scion-agent.json has env.SCION_HUB_ENDPOINT but grove says hub.enabled=false
+		// Agent scion-agent.json has env.SCION_HUB_ENDPOINT but project says hub.enabled=false
 		agentDir := filepath.Join(projectScionDir, "agents", "hub-disabled-env")
 		os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
 		os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
@@ -2270,7 +2270,7 @@ profiles:
 
 func TestStartScionConfigEnvHubEndpointOverridesAll(t *testing.T) {
 	// Integration test verifying the full priority chain:
-	// grove settings -> hub.endpoint -> env.SCION_HUB_ENDPOINT
+	// project settings -> hub.endpoint -> env.SCION_HUB_ENDPOINT
 	// The env-key value should be the final one in the container env.
 	tmpDir := t.TempDir()
 
@@ -2310,13 +2310,13 @@ profiles:
     runtime: docker
 `), 0644)
 
-	// Create project grove with hub-enabled settings (priority 1)
+	// Create project directory with hub-enabled settings (priority 1)
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	os.MkdirAll(projectScionDir, 0755)
 	os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(`hub:
   enabled: true
-  endpoint: "http://grove-settings:9810"
+  endpoint: "http://project-settings:9810"
 `), 0644)
 
 	// Create agent with both hub.endpoint (priority 2) and
@@ -2366,7 +2366,7 @@ profiles:
 	}
 
 	// The env section value (priority 3) should be the final winner,
-	// overriding both grove settings (priority 1) and hub.endpoint (priority 2)
+	// overriding both project settings (priority 1) and hub.endpoint (priority 2)
 	if got := envMap["SCION_HUB_ENDPOINT"]; got != "http://host.docker.internal:8080" {
 		t.Errorf("SCION_HUB_ENDPOINT = %q, want %q (env section should override all)", got, "http://host.docker.internal:8080")
 	}
@@ -2451,7 +2451,7 @@ runtimes:
     type: docker
 `), 0644)
 
-	// Create project grove
+	// Create project directory
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	os.MkdirAll(projectScionDir, 0755)

@@ -47,14 +47,14 @@ type Manager interface {
 	List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error)
 
 	// Message sends a message to an agent's harness via tmux.
-	// projectID scopes delivery to a specific grove, preventing cross-grove
+	// projectID scopes delivery to a specific project, preventing cross-project
 	// collision when agents share the same slug.
 	Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error
 
 	// MessageRaw sends literal bytes to an agent's tmux session via send-keys
 	// with no trailing Enter keypresses, allowing control sequences like
 	// arrow keys and Escape to be used directly.
-	// projectID scopes delivery to a specific grove.
+	// projectID scopes delivery to a specific project.
 	MessageRaw(ctx context.Context, agentID, projectID string, keys string) error
 
 	// Watch returns a channel of status updates for an agent
@@ -132,18 +132,18 @@ func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles b
 	util.Debugf("delete: mgr.Delete container list completed in %v", time.Since(listStart))
 	containerExists := false
 	var targetID string
-	// Resolve grove name from projectPath (if provided) to scope the container lookup
-	deletionGroveName := ""
+	// Resolve project name from projectPath (if provided) to scope the container lookup
+	deletionProjectName := ""
 	if projectPath != "" {
 		if resolvedDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
-			deletionGroveName = config.GetProjectName(resolvedDir)
+			deletionProjectName = config.GetProjectName(resolvedDir)
 		}
 	}
 	if err == nil {
 		for _, a := range agents {
 			if a.Name == agentID || a.ContainerID == agentID || strings.TrimPrefix(a.Name, "/") == agentID || strings.EqualFold(a.Name, agentID) {
-				// If grove info is available, skip containers from a different grove
-				if deletionGroveName != "" && !matchAgentProject(a, deletionGroveName, "") {
+				// If project info is available, skip containers from a different project
+				if deletionProjectName != "" && !matchAgentProject(a, deletionProjectName, "") {
 					continue
 				}
 				containerExists = true
@@ -241,7 +241,7 @@ func (m *AgentManager) MessageRaw(ctx context.Context, agentID, projectID string
 // used both for interrupt messages (called directly) and for buffered
 // messages (called by the MessageBuffer when the debounce timer fires).
 func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
-	// 1. Find the agent, scoped to grove to prevent cross-grove delivery
+	// 1. Find the agent, scoped to project to prevent cross-project delivery
 	filter := map[string]string{"scion.name": strings.ToLower(agentID)}
 	if projectID != "" {
 		filter["scion.project_id"] = projectID

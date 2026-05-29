@@ -47,11 +47,11 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 		projectName = pn
 	}
 
-	var grovesToScan []string
+	var projectsToScan []string
 	if projectName != "" {
 		_ = projectName
 		// We need to resolve projectName to a path. This is currently not easy without searching.
-		// For now, if scion.project/grove is provided, we assume we only care about running ones
+		// For now, if scion.project is provided, we assume we only care about running ones
 		// OR we need to be passed a project path.
 	}
 
@@ -64,16 +64,16 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 		projectPath = filter["scion.grove_path"]
 	}
 	if projectPath != "" {
-		grovesToScan = append(grovesToScan, projectPath)
+		projectsToScan = append(projectsToScan, projectPath)
 	} else if len(filter) == 0 || (len(filter) == 1 && filter["scion.agent"] == "true") {
 		// Default: scan current resolved project dir and global dir
 		pd, _ := config.GetResolvedProjectDir("")
 		if pd != "" {
-			grovesToScan = append(grovesToScan, pd)
+			projectsToScan = append(projectsToScan, pd)
 		}
 		gd, _ := config.GetGlobalDir()
 		if gd != "" && gd != pd {
-			grovesToScan = append(grovesToScan, gd)
+			projectsToScan = append(projectsToScan, gd)
 		}
 	}
 
@@ -183,10 +183,10 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 		}
 	}
 
-	for _, gp := range grovesToScan {
-		// Walk both the in-grove agents dir (worktree-mode agents) and the
+	for _, gp := range projectsToScan {
+		// Walk both the in-project agents dir (worktree-mode agents) and the
 		// external split-storage agents dir (shared-workspace agents, whose
-		// state lives outside the grove tree per
+		// state lives outside the project tree per
 		// .design/hub-shared-workspace-isolation.md).
 		seenNames := make(map[string]bool)
 		dirsToScan := []string{filepath.Join(gp, "agents")}

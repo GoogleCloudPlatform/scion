@@ -514,7 +514,7 @@ func TestStatusHandler_PreservesExtraFields(t *testing.T) {
 		"template":      "my-template",
 		"harnessConfig": "claude",
 		"runtime":       "docker",
-		"grove":         "my-grove",
+		"grove":         "my-project",
 		"profile":       "default",
 		"name":          "agent-1",
 	}
@@ -534,7 +534,7 @@ func TestStatusHandler_PreservesExtraFields(t *testing.T) {
 	assert.Equal(t, "my-template", result["template"], "template field should be preserved")
 	assert.Equal(t, "claude", result["harnessConfig"], "harnessConfig field should be preserved")
 	assert.Equal(t, "docker", result["runtime"], "runtime field should be preserved")
-	assert.Equal(t, "my-grove", result["grove"], "grove field should be preserved")
+	assert.Equal(t, "my-project", result["grove"], "grove field should be preserved")
 	assert.Equal(t, "default", result["profile"], "profile field should be preserved")
 	assert.Equal(t, "agent-1", result["name"], "name field should be preserved")
 

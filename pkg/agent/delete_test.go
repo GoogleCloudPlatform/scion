@@ -124,10 +124,10 @@ func TestDeleteAgentFiles_CleansStaleWorktree(t *testing.T) {
 }
 
 // TestDeleteAgentFiles_CleansSharedWorkspaceExternalState verifies that for
-// shared-workspace git groves (whose per-agent state lives outside the grove
+// shared-workspace git projects (whose per-agent state lives outside the project
 // tree per .design/hub-shared-workspace-isolation.md), DeleteAgentFiles
 // removes the external <project-configs>/<slug>__<uuid>/.scion/agents/<name>
-// directory in addition to any in-grove residue.
+// directory in addition to any in-project residue.
 func TestDeleteAgentFiles_CleansSharedWorkspaceExternalState(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	tmpDir := t.TempDir()
@@ -140,7 +140,7 @@ func TestDeleteAgentFiles_CleansSharedWorkspaceExternalState(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	// Set up a project with .scion + grove-id (split-storage marker).
+	// Set up a project with .scion + project-id (split-storage marker).
 	projectDir := filepath.Join(tmpDir, "project")
 	os.MkdirAll(projectDir, 0755)
 	setupGitRepo(t, projectDir)

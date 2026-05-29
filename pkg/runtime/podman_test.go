@@ -268,7 +268,7 @@ echo '` + jsonOutput + `'
 		Command: mockPodman,
 	}
 
-	// Filter for grove1 only
+	// Filter for project1 only
 	agents, err := rt.List(context.Background(), map[string]string{"scion.grove": "grove1"})
 	if err != nil {
 		t.Fatalf("runtime.List failed: %v", err)

@@ -230,8 +230,8 @@ func TestProvisionWritesTaskToPromptMd(t *testing.T) {
 	rt := &runtime.MockRuntime{}
 	mgr := NewManager(rt)
 
-	// Resolve the actual grove directory (may be external for non-git groves)
-	resolvedGroveDir, _ := config.GetResolvedProjectDir(projectScionDir)
+	// Resolve the actual project directory (may be external for non-git projects)
+	resolvedProjectDir, _ := config.GetResolvedProjectDir(projectScionDir)
 
 	t.Run("with task", func(t *testing.T) {
 		opts := api.StartOptions{
@@ -246,7 +246,7 @@ func TestProvisionWritesTaskToPromptMd(t *testing.T) {
 			t.Fatalf("Provision failed: %v", err)
 		}
 
-		promptFile := filepath.Join(resolvedGroveDir, "agents", "agent-with-task", "prompt.md")
+		promptFile := filepath.Join(resolvedProjectDir, "agents", "agent-with-task", "prompt.md")
 		content, err := os.ReadFile(promptFile)
 		if err != nil {
 			t.Fatalf("failed to read prompt.md: %v", err)
@@ -268,7 +268,7 @@ func TestProvisionWritesTaskToPromptMd(t *testing.T) {
 			t.Fatalf("Provision failed: %v", err)
 		}
 
-		promptFile := filepath.Join(resolvedGroveDir, "agents", "agent-no-task", "prompt.md")
+		promptFile := filepath.Join(resolvedProjectDir, "agents", "agent-no-task", "prompt.md")
 		content, err := os.ReadFile(promptFile)
 		if err != nil {
 			t.Fatalf("failed to read prompt.md: %v", err)
@@ -297,7 +297,7 @@ func TestProvisionAgentNonGitWorkspace(t *testing.T) {
 		t.Fatalf("InitMachine failed: %v", err)
 	}
 
-	// Project-local grove
+	// Project-local directory
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	if err := config.InitProject(projectScionDir, getTestHarnesses()); err != nil {
@@ -340,7 +340,7 @@ func TestProvisionAgentNonGitWorkspace(t *testing.T) {
 		t.Error("expected /workspace volume mount not found in config")
 	}
 
-	// Global grove
+	// Global directory
 	if err := config.InitGlobal(getTestHarnesses()); err != nil {
 		t.Fatalf("InitGlobal failed: %v", err)
 	}
@@ -356,7 +356,7 @@ func TestProvisionAgentNonGitWorkspace(t *testing.T) {
 
 	_, ws, cfg, err = ProvisionAgent(context.Background(), "global-agent", "default", "", "", globalScionDir, "", "", "", "")
 	if err != nil {
-		t.Fatalf("ProvisionAgent failed for global grove: %v", err)
+		t.Fatalf("ProvisionAgent failed for global project: %v", err)
 	}
 
 	if ws != "" {
@@ -577,7 +577,7 @@ auth_selectedType: vertex-ai
 func TestProvisionAgentUsesProjectTemplate(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Move to tmpDir — this is NOT the grove's directory,
+	// Move to tmpDir — this is NOT the project's directory,
 	// simulating a broker process whose CWD doesn't contain .scion.
 	oldWd, _ := os.Getwd()
 	os.Chdir(tmpDir)
@@ -600,19 +600,19 @@ func TestProvisionAgentUsesProjectTemplate(t *testing.T) {
 		"env": {"SOURCE": "global"}
 	}`), 0644)
 
-	// Create a grove with its own version of the same template
+	// Create a project with its own version of the same template
 	projectDir := filepath.Join(tmpDir, "project")
 	projectPath := filepath.Join(projectDir, ".scion")
-	groveTplDir := filepath.Join(projectPath, "templates", "my-tpl")
-	os.MkdirAll(groveTplDir, 0755)
-	os.WriteFile(filepath.Join(groveTplDir, "scion-agent.json"), []byte(`{
+	projectTplDir := filepath.Join(projectPath, "templates", "my-tpl")
+	os.MkdirAll(projectTplDir, 0755)
+	os.WriteFile(filepath.Join(projectTplDir, "scion-agent.json"), []byte(`{
 		"default_harness_config": "grove-harness",
-		"env": {"SOURCE": "grove"}
+		"env": {"SOURCE": "project"}
 	}`), 0644)
 
-	// Provision agent using projectPath — the grove template should be used
+	// Provision agent using projectPath — the project template should be used
 	// even though CWD has no .scion directory.
-	agentName := "grove-tpl-agent"
+	agentName := "project-tpl-agent"
 	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "my-tpl", "", "", projectPath, "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
@@ -621,8 +621,8 @@ func TestProvisionAgentUsesProjectTemplate(t *testing.T) {
 	if cfg.Harness != "grove-harness" {
 		t.Errorf("expected harness 'grove-harness' (from harness-config), got %q", cfg.Harness)
 	}
-	if cfg.Env["SOURCE"] != "grove" {
-		t.Errorf("expected env[SOURCE] = 'grove', got %q", cfg.Env["SOURCE"])
+	if cfg.Env["SOURCE"] != "project" {
+		t.Errorf("expected env[SOURCE] = 'project', got %q", cfg.Env["SOURCE"])
 	}
 }
 
@@ -1126,7 +1126,7 @@ func TestGetAgentGitClone_ClearsExistingWorkspace(t *testing.T) {
 
 // TestProvisionAgent_SharedWorkspaceRelocatesAgentState verifies that when
 // SharedWorkspace context is set, the agent's prompt.md and scion-agent.json
-// land at the external project-configs path rather than inside the grove tree.
+// land at the external project-configs path rather than inside the project tree.
 // This is the structural fix from .design/hub-shared-workspace-isolation.md
 // — sibling agents must not see each other's state via /workspace.
 func TestProvisionAgent_SharedWorkspaceRelocatesAgentState(t *testing.T) {
@@ -1147,7 +1147,7 @@ func TestProvisionAgent_SharedWorkspaceRelocatesAgentState(t *testing.T) {
 	os.MkdirAll(tplDir, 0755)
 	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"gemini"}`), 0644)
 
-	// Project dir with .scion as a directory plus grove-id (split storage).
+	// Project dir with .scion as a directory plus project-id (split storage).
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	os.MkdirAll(projectScionDir, 0755)
@@ -1187,18 +1187,18 @@ func TestProvisionAgent_SharedWorkspaceRelocatesAgentState(t *testing.T) {
 		t.Errorf("prompt.md content = %q, want %q", string(taskBytes), "do the thing")
 	}
 
-	// In-grove agent dir must NOT exist for shared-workspace agents — that
+	// In-project agent dir must NOT exist for shared-workspace agents — that
 	// is the whole point of the isolation. (Empty-but-present would also
 	// leak the agent name to siblings.)
-	inGroveAgentDir := filepath.Join(projectScionDir, "agents", "shared-agent")
-	if _, err := os.Stat(inGroveAgentDir); err == nil {
-		t.Errorf("expected no in-grove agent dir at %s, but it exists", inGroveAgentDir)
+	inProjectAgentDir := filepath.Join(projectScionDir, "agents", "shared-agent")
+	if _, err := os.Stat(inProjectAgentDir); err == nil {
+		t.Errorf("expected no in-project agent dir at %s, but it exists", inProjectAgentDir)
 	}
 }
 
 // TestProvisionAgent_SharedWorkspaceMigratesLegacyState verifies that an
 // agent provisioned under the old layout (prompt.md / scion-agent.json
-// in-grove) gets its state moved to the external path on next provision.
+// in-project) gets its state moved to the external path on next provision.
 func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -1224,7 +1224,7 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 		t.Fatalf("WriteProjectID failed: %v", err)
 	}
 
-	// Seed legacy in-grove state from a pre-isolation provisioning.
+	// Seed legacy in-project state from a pre-isolation provisioning.
 	legacyDir := filepath.Join(projectScionDir, "agents", "legacy-agent")
 	if err := os.MkdirAll(legacyDir, 0755); err != nil {
 		t.Fatalf("mkdir legacyDir: %v", err)
@@ -1253,12 +1253,12 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 		t.Fatalf("Provision failed: %v", err)
 	}
 
-	// Legacy file must have been moved out — no prompt.md in the grove tree.
+	// Legacy file must have been moved out — no prompt.md in the project tree.
 	if _, err := os.Stat(filepath.Join(legacyDir, "prompt.md")); err == nil {
-		t.Errorf("legacy in-grove prompt.md still exists after migration")
+		t.Errorf("legacy in-project prompt.md still exists after migration")
 	}
 	if _, err := os.Stat(filepath.Join(legacyDir, "scion-agent.json")); err == nil {
-		t.Errorf("legacy in-grove scion-agent.json still exists after migration")
+		t.Errorf("legacy in-project scion-agent.json still exists after migration")
 	}
 
 	// External path must contain the migrated content.

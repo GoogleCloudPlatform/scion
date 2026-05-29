@@ -28,7 +28,7 @@ import (
 )
 
 func TestListEnrichesTemplateAndHarnessFromAgentInfo(t *testing.T) {
-	// Create a temp grove structure
+	// Create a temp project structure
 	tmpDir := t.TempDir()
 	projectPath := filepath.Join(tmpDir, ".scion")
 	agentName := "test-agent"

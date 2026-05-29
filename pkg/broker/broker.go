@@ -19,7 +19,7 @@
 // Topic hierarchy:
 //
 //	scion.grove.<grove-id>.agent.<agent-slug>.messages   - direct messages to an agent
-//	scion.grove.<grove-id>.broadcast                      - grove-wide broadcasts
+//	scion.grove.<grove-id>.broadcast                      - project-wide broadcasts
 //	scion.global.broadcast                                - global broadcasts
 package broker
 
@@ -55,8 +55,8 @@ type Subscription interface {
 // Topic helper functions for constructing well-known topic strings.
 
 // TopicAgentMessages returns the topic for direct messages to an agent.
-func TopicAgentMessages(groveID, agentSlug string) string {
-	return "scion.grove." + groveID + ".agent." + agentSlug + ".messages"
+func TopicAgentMessages(projectID, agentSlug string) string {
+	return "scion.grove." + projectID + ".agent." + agentSlug + ".messages"
 }
 
 // TopicProjectBroadcast returns the topic for project-wide broadcast messages.
@@ -70,18 +70,18 @@ func TopicGlobalBroadcast() string {
 }
 
 // TopicAllAgentMessages returns a wildcard pattern matching all agent message
-// topics in a grove.
-func TopicAllAgentMessages(groveID string) string {
-	return "scion.grove." + groveID + ".agent.*.messages"
+// topics in a project.
+func TopicAllAgentMessages(projectID string) string {
+	return "scion.grove." + projectID + ".agent.*.messages"
 }
 
-// TopicUserMessages returns the topic for messages directed at a specific user in a grove.
-func TopicUserMessages(groveID, userID string) string {
-	return "scion.grove." + groveID + ".user." + userID + ".messages"
+// TopicUserMessages returns the topic for messages directed at a specific user in a project.
+func TopicUserMessages(projectID, userID string) string {
+	return "scion.grove." + projectID + ".user." + userID + ".messages"
 }
 
 // TopicAllUserMessages returns a wildcard pattern matching all user message
-// topics in a grove.
-func TopicAllUserMessages(groveID string) string {
-	return "scion.grove." + groveID + ".user.*.messages"
+// topics in a project.
+func TopicAllUserMessages(projectID string) string {
+	return "scion.grove." + projectID + ".user.*.messages"
 }

@@ -43,7 +43,7 @@ type MessageBuffer struct {
 	bufferDelay time.Duration
 
 	// deliverFunc is the callback that performs actual message delivery via tmux.
-	// It receives the agent ID, grove ID, the concatenated message text, and the interrupt flag.
+	// It receives the agent ID, project ID, the concatenated message text, and the interrupt flag.
 	deliverFunc func(agentID, projectID string, message string, interrupt bool) error
 
 	mu      sync.Mutex
@@ -54,7 +54,7 @@ type MessageBuffer struct {
 type agentBuffer struct {
 	messages  []string    // accumulated messages waiting for delivery
 	timer     *time.Timer // debounce timer; fires to trigger delivery
-	projectID string      // grove scope for delivery
+	projectID string      // project scope for delivery
 }
 
 // NewMessageBuffer creates a new MessageBuffer with the given debounce delay
@@ -72,7 +72,7 @@ func NewMessageBuffer(delay time.Duration, deliverFunc func(agentID, projectID s
 // The message is added to the agent's buffer and the debounce timer is
 // started (or reset if already running). The actual delivery occurs
 // asynchronously once the timer fires.
-// projectID scopes delivery to a specific grove.
+// projectID scopes delivery to a specific project.
 func (mb *MessageBuffer) Send(agentID, projectID string, message string) {
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
@@ -86,7 +86,7 @@ func (mb *MessageBuffer) Send(agentID, projectID string, message string) {
 
 	// Append the message to the pending list.
 	buf.messages = append(buf.messages, message)
-	util.Debugf("msgbuffer: queued message for agent %s grove %s (%d pending)", agentID, projectID, len(buf.messages))
+	util.Debugf("msgbuffer: queued message for agent %s project %s (%d pending)", agentID, projectID, len(buf.messages))
 
 	// Reset or start the debounce timer. If a timer is already running,
 	// stop it first so we can restart with a fresh delay window.
@@ -121,7 +121,7 @@ func (mb *MessageBuffer) flush(agentID, key string) {
 	// Concatenate all buffered messages with double-newline separators so
 	// each original message remains visually distinct in the agent's input.
 	combined := strings.Join(pending, "\n\n")
-	util.Debugf("msgbuffer: flushing %d message(s) for agent %s grove %s", len(pending), agentID, projectID)
+	util.Debugf("msgbuffer: flushing %d message(s) for agent %s project %s", len(pending), agentID, projectID)
 
 	if err := mb.deliverFunc(agentID, projectID, combined, false); err != nil {
 		slog.Warn("msgbuffer: message delivery failed",

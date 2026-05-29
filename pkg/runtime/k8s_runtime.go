@@ -285,7 +285,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		}
 	}
 
-	// Create PVCs for shared directories (grove-scoped, reused across agents)
+	// Create PVCs for shared directories (project-scoped, reused across agents)
 	if len(config.SharedDirs) > 0 {
 		if err := r.createSharedDirPVCs(ctx, namespace, config); err != nil {
 			return "", fmt.Errorf("failed to create shared dir PVCs: %w", err)
@@ -654,18 +654,18 @@ func (r *KubernetesRuntime) createAuthFileSecret(ctx context.Context, namespace,
 	return nil
 }
 
-// sharedDirPVCName returns the deterministic PVC name for a grove shared directory.
-// PVCs are grove-scoped (not agent-scoped), so multiple agents share the same PVC.
-func sharedDirPVCName(groveName, dirName string) string {
-	return fmt.Sprintf("scion-shared-%s-%s", groveName, dirName)
+// sharedDirPVCName returns the deterministic PVC name for a project shared directory.
+// PVCs are project-scoped (not agent-scoped), so multiple agents share the same PVC.
+func sharedDirPVCName(projectName, dirName string) string {
+	return fmt.Sprintf("scion-shared-%s-%s", projectName, dirName)
 }
 
 // defaultSharedDirSize is the default PVC size when not specified in settings.
 const defaultSharedDirSize = "10Gi"
 
 // createSharedDirPVCs ensures PVCs exist for all declared shared directories.
-// PVCs are grove-scoped and persist across agent restarts. If a PVC already
-// exists (from a previous agent in the same grove), it is reused.
+// PVCs are project-scoped and persist across agent restarts. If a PVC already
+// exists (from a previous agent in the same project), it is reused.
 func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace string, config RunConfig) error {
 	if len(config.SharedDirs) == 0 {
 		return nil
@@ -750,19 +750,19 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 	return nil
 }
 
-// cleanupSharedDirPVCs removes PVCs for shared directories belonging to a grove.
-// This is called during grove deletion, not agent deletion, since PVCs are grove-scoped.
-func (r *KubernetesRuntime) cleanupSharedDirPVCs(ctx context.Context, namespace, groveName string) {
-	selector := fmt.Sprintf("scion.grove=%s,scion.shared-dir", groveName)
+// cleanupSharedDirPVCs removes PVCs for shared directories belonging to a project.
+// This is called during project deletion, not agent deletion, since PVCs are project-scoped.
+func (r *KubernetesRuntime) cleanupSharedDirPVCs(ctx context.Context, namespace, projectName string) {
+	selector := fmt.Sprintf("scion.grove=%s,scion.shared-dir", projectName)
 	pvcList, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: selector,
 	})
 	if err != nil {
-		runtimeLog.Warn("Failed to list shared dir PVCs for cleanup", "grove_id", groveName, "error", err)
+		runtimeLog.Warn("Failed to list shared dir PVCs for cleanup", "grove_id", projectName, "error", err)
 		return
 	}
 	for _, pvc := range pvcList.Items {
-		runtimeLog.Info("Deleting shared dir PVC", "pvc", pvc.Name, "grove_id", groveName)
+		runtimeLog.Info("Deleting shared dir PVC", "pvc", pvc.Name, "grove_id", projectName)
 		if err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Delete(ctx, pvc.Name, metav1.DeleteOptions{}); err != nil {
 			runtimeLog.Warn("Failed to delete shared dir PVC", "pvc", pvc.Name, "error", err)
 		}
@@ -1193,8 +1193,8 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 		sharedDirTargets[target] = true
 
-		groveName := config.Labels["scion.grove"]
-		pvcName := sharedDirPVCName(groveName, sd.Name)
+		projectName := config.Labels["scion.grove"]
+		pvcName := sharedDirPVCName(projectName, sd.Name)
 		volName := fmt.Sprintf("shared-dir-%d", i)
 
 		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
@@ -1607,9 +1607,9 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 		var selectors []string
 		for k, v := range labelFilter {
 			key := k
-			// Translate project filter keys to grove variants for the K8s selector.
+			// Translate project filter keys to grove label variants for the K8s selector.
 			// Since new pods have both labels and old pods only have grove labels,
-			// filtering by the grove variant finds both.
+			// filtering by the grove label variant finds both.
 			switch k {
 			case "scion.project":
 				key = "scion.grove"
@@ -1780,7 +1780,7 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 		return fmt.Errorf("agent '%s' pod not found. It may have been deleted.", id)
 	}
 
-	// Use the actual pod name (ContainerID) which may include a grove prefix
+	// Use the actual pod name (ContainerID) which may include a project prefix
 	// (e.g., "sciontest--hello" instead of just "hello")
 	podName = agent.ContainerID
 
