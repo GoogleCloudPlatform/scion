@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -258,6 +259,25 @@ func (s *Server) importTemplatesFromRemote(ctx context.Context, projectID, sourc
 	if err == nil && project != nil && project.GitHubInstallationID != nil {
 		if token, _, mintErr := s.MintGitHubAppTokenForProject(ctx, project); mintErr == nil && token != "" {
 			authToken = token
+		}
+	}
+
+	// Fall back to project GITHUB_TOKEN secret if no App token minted
+	if authToken == "" {
+		if sb := s.GetSecretBackend(); sb != nil {
+			sec, secErr := sb.Get(ctx, "GITHUB_TOKEN", store.ScopeProject, projectID)
+			if secErr == nil && sec != nil && sec.Value != "" {
+				authToken = sec.Value
+			} else if secErr != nil && !errors.Is(secErr, store.ErrNotFound) {
+				s.templateLog.Warn("Failed to retrieve GITHUB_TOKEN from secret backend", "projectID", projectID, "error", secErr)
+			}
+		} else {
+			secretVal, secretErr := s.store.GetSecretValue(ctx, "GITHUB_TOKEN", store.ScopeProject, projectID)
+			if secretErr == nil && secretVal != "" {
+				authToken = secretVal
+			} else if secretErr != nil && !errors.Is(secretErr, store.ErrNotFound) {
+				s.templateLog.Warn("Failed to retrieve GITHUB_TOKEN from database", "projectID", projectID, "error", secretErr)
+			}
 		}
 	}
 

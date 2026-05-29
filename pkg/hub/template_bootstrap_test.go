@@ -17,13 +17,21 @@
 package hub
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 )
@@ -982,4 +990,139 @@ func TestBootstrapTemplatesFromDir_BackfillsDefaultHarnessConfig(t *testing.T) {
 	if tmpl.DefaultHarnessConfig != "claude-web" {
 		t.Errorf("expected DefaultHarnessConfig 'claude-web' after backfill, got %q", tmpl.DefaultHarnessConfig)
 	}
+}
+
+func TestImportTemplatesFromRemote_WithProjectGithubToken(t *testing.T) {
+	srv, s, stor := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	projectID := "test-project-id"
+	project := &store.Project{
+		ID:        projectID,
+		Name:      "test-project",
+		Slug:      "test-project",
+		GitRemote: "https://github.com/chiefkarlin/scion-experiments",
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+
+	// Save GITHUB_TOKEN secret via local secret backend
+	secInput := &secret.SetSecretInput{
+		Name:       "GITHUB_TOKEN",
+		Value:      "my-secret-token-12345",
+		SecretType: secret.TypeEnvironment,
+		Scope:      secret.ScopeProject,
+		ScopeID:    projectID,
+	}
+	srv.SetSecretBackend(secret.NewLocalBackend(s, ""))
+	sb := srv.GetSecretBackend()
+	if sb == nil {
+		t.Fatal("secret backend is nil")
+	}
+	if _, _, err := sb.Set(ctx, secInput); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hijack the HTTP client's Transport to mock the tarball fetch
+	oldTransport := http.DefaultClient.Transport
+	defer func() { http.DefaultClient.Transport = oldTransport }()
+
+	var mu sync.Mutex
+	var capturedAuthHeader string
+	http.DefaultClient.Transport = &mockRoundTripper{
+		roundTrip: func(req *http.Request) (*http.Response, error) {
+			if req.URL.Host != "github.com" {
+				return nil, fmt.Errorf("unexpected request to host: %s", req.URL.Host)
+			}
+
+			mu.Lock()
+			capturedAuthHeader = req.Header.Get("Authorization")
+			mu.Unlock()
+
+			// Write a simple dummy tar.gz containing a test template directory structure
+			var buf bytes.Buffer
+			gzw := gzip.NewWriter(&buf)
+			tw := tar.NewWriter(gzw)
+
+			files := map[string]string{
+				"scion-experiments-main/templates/my-template/scion-agent.yaml": `
+schema_version: "1"
+description: "My test template"
+agent_instructions: agents.md
+system_prompt: system-prompt.md
+`,
+				"scion-experiments-main/templates/my-template/agents.md":        "# Agents instructions",
+				"scion-experiments-main/templates/my-template/system-prompt.md": "# System prompt",
+			}
+
+			for name, body := range files {
+				hdr := &tar.Header{
+					Name: name,
+					Mode: 0600,
+					Size: int64(len(body)),
+				}
+				if err := tw.WriteHeader(hdr); err != nil {
+					return nil, err
+				}
+				if _, err := tw.Write([]byte(body)); err != nil {
+					return nil, err
+				}
+			}
+			if err := tw.Close(); err != nil {
+				return nil, err
+			}
+			if err := gzw.Close(); err != nil {
+				return nil, err
+			}
+
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader(buf.Bytes())),
+			}, nil
+		},
+	}
+
+	// Import templates from remote URL matching path structure in tarball
+	imported, err := srv.importTemplatesFromRemote(ctx, projectID, "https://github.com/chiefkarlin/scion-experiments/tree/main/templates")
+	if err != nil {
+		t.Fatalf("importTemplatesFromRemote failed: %v", err)
+	}
+
+	// Assertions
+	if len(imported) != 1 || imported[0] != "my-template" {
+		t.Errorf("expected imported templates [my-template], got %v", imported)
+	}
+
+	mu.Lock()
+	headerVal := capturedAuthHeader
+	mu.Unlock()
+	if headerVal != "Bearer my-secret-token-12345" {
+		t.Errorf("expected Authorization header 'Bearer my-secret-token-12345', got %q", headerVal)
+	}
+
+	// Verify template was saved to store
+	result, err := s.ListTemplates(ctx, store.TemplateFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TotalCount != 1 {
+		t.Fatalf("expected 1 template in project store, got %d", result.TotalCount)
+	}
+	if result.Items[0].Name != "my-template" {
+		t.Errorf("expected template name 'my-template', got %q", result.Items[0].Name)
+	}
+
+	// Verify files uploaded to storage
+	if len(stor.objects) != 3 {
+		t.Errorf("expected 3 files uploaded to storage, got %d", len(stor.objects))
+	}
+}
+
+type mockRoundTripper struct {
+	roundTrip func(req *http.Request) (*http.Response, error)
+}
+
+func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return m.roundTrip(req)
 }
