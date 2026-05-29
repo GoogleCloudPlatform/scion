@@ -101,10 +101,10 @@ func TestLoadVersionedSettings_DefaultsOnly(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
-	vs, err := LoadVersionedSettings(groveDir)
+	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
 
 	assert.Equal(t, "1", vs.SchemaVersion)
@@ -123,8 +123,8 @@ func TestLoadVersionedSettings_GlobalOverride(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
@@ -136,7 +136,7 @@ default_template: claude
 `
 	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(globalSettings), 0644))
 
-	vs, err := LoadVersionedSettings(groveDir)
+	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
 
 	assert.Equal(t, "prod", vs.ActiveProfile)
@@ -150,8 +150,8 @@ func TestLoadVersionedSettings_GroveOverride(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
@@ -163,13 +163,13 @@ default_template: claude
 `
 	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(globalSettings), 0644))
 
-	groveSettings := `
+	projectSettings := `
 schema_version: "1"
 active_profile: staging
 `
-	require.NoError(t, os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(groveSettings), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(projectSettings), 0644))
 
-	vs, err := LoadVersionedSettings(groveDir)
+	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
 
 	assert.Equal(t, "staging", vs.ActiveProfile)
@@ -184,8 +184,8 @@ func TestLoadVersionedSettings_EnvOverrides(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	// Set environment variable overrides
 	os.Setenv("SCION_ACTIVE_PROFILE", "remote")
@@ -194,7 +194,7 @@ func TestLoadVersionedSettings_EnvOverrides(t *testing.T) {
 	os.Setenv("SCION_DEFAULT_TEMPLATE", "opencode")
 	defer os.Unsetenv("SCION_DEFAULT_TEMPLATE")
 
-	vs, err := LoadVersionedSettings(groveDir)
+	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
 
 	assert.Equal(t, "remote", vs.ActiveProfile)
@@ -208,8 +208,8 @@ func TestLoadVersionedSettings_HubEnvVars(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	// Test SCION_HUB_GROVE_ID maps correctly (regression test)
 	os.Setenv("SCION_HUB_GROVE_ID", "my-grove-id")
@@ -218,7 +218,7 @@ func TestLoadVersionedSettings_HubEnvVars(t *testing.T) {
 	os.Setenv("SCION_HUB_LOCAL_ONLY", "true")
 	defer os.Unsetenv("SCION_HUB_LOCAL_ONLY")
 
-	vs, err := LoadVersionedSettings(groveDir)
+	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
 
 	require.NotNil(t, vs.Hub)
@@ -232,8 +232,8 @@ func TestLoadVersionedSettings_CLIEnvVars(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	os.Setenv("SCION_CLI_AUTOHELP", "false")
 	defer os.Unsetenv("SCION_CLI_AUTOHELP")
@@ -241,7 +241,7 @@ func TestLoadVersionedSettings_CLIEnvVars(t *testing.T) {
 	os.Setenv("SCION_CLI_INTERACTIVE_DISABLED", "true")
 	defer os.Unsetenv("SCION_CLI_INTERACTIVE_DISABLED")
 
-	vs, err := LoadVersionedSettings(groveDir)
+	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
 
 	require.NotNil(t, vs.CLI)
@@ -254,8 +254,8 @@ func TestLoadVersionedSettings_JSONFallback(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
@@ -268,7 +268,7 @@ func TestLoadVersionedSettings_JSONFallback(t *testing.T) {
 	}`
 	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.json"), []byte(globalJSON), 0644))
 
-	vs, err := LoadVersionedSettings(groveDir)
+	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
 
 	assert.Equal(t, "json-profile", vs.ActiveProfile)
@@ -282,10 +282,10 @@ func TestLoadVersionedSettings_NewFields(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
-	groveSettings := `
+	projectSettings := `
 schema_version: "1"
 harness_configs:
   gemini-custom:
@@ -304,9 +304,9 @@ profiles:
     default_template: gemini
     default_harness_config: gemini-custom
 `
-	require.NoError(t, os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(groveSettings), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(projectSettings), 0644))
 
-	vs, err := LoadVersionedSettings(groveDir)
+	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
 
 	// Check new harness config fields
@@ -592,11 +592,11 @@ func TestLoadEffectiveSettings_VersionedFileRouting(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
-	// Write versioned grove settings
-	groveSettings := `
+	// Write versioned project settings
+	projectSettings := `
 schema_version: "1"
 active_profile: versioned-profile
 harness_configs:
@@ -605,9 +605,9 @@ harness_configs:
     image: example.com/gemini:latest
     user: scion
 `
-	require.NoError(t, os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(groveSettings), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(projectSettings), 0644))
 
-	vs, warnings, err := LoadEffectiveSettings(groveDir)
+	vs, warnings, err := LoadEffectiveSettings(projectDir)
 	require.NoError(t, err)
 
 	assert.Equal(t, "versioned-profile", vs.ActiveProfile)
@@ -621,11 +621,11 @@ func TestLoadEffectiveSettings_LegacyFileRouting(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
-	// Write legacy grove settings (has harnesses, no schema_version)
-	groveSettings := `
+	// Write legacy project settings (has harnesses, no schema_version)
+	projectSettings := `
 active_profile: legacy-profile
 harnesses:
   gemini:
@@ -635,9 +635,9 @@ profiles:
   legacy-profile:
     runtime: docker
 `
-	require.NoError(t, os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(groveSettings), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(projectSettings), 0644))
 
-	vs, warnings, err := LoadEffectiveSettings(groveDir)
+	vs, warnings, err := LoadEffectiveSettings(projectDir)
 	require.NoError(t, err)
 
 	assert.Equal(t, "legacy-profile", vs.ActiveProfile)
@@ -652,11 +652,11 @@ func TestLoadEffectiveSettings_NoUserFiles(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	// No settings files — should use defaults via legacy path
-	vs, warnings, err := LoadEffectiveSettings(groveDir)
+	vs, warnings, err := LoadEffectiveSettings(projectDir)
 	require.NoError(t, err)
 
 	assert.Equal(t, "local", vs.ActiveProfile)
@@ -737,16 +737,16 @@ func TestAdapterRoundTripConsistency(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	// Load via legacy path
-	legacySettings, err := LoadSettingsKoanf(groveDir)
+	legacySettings, err := LoadSettingsKoanf(projectDir)
 	require.NoError(t, err)
 	adapted, _ := AdaptLegacySettings(legacySettings)
 
 	// Load via versioned path
-	versioned, err := LoadVersionedSettings(groveDir)
+	versioned, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
 
 	// Compare shared fields
@@ -902,10 +902,10 @@ func TestDetectHierarchyFormat_GroveVersioned(t *testing.T) {
 	defer os.Chdir(originalWd)
 	os.Chdir(tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
-	// Global is legacy, grove is versioned
+	// Global is legacy, project is versioned
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
 
@@ -919,9 +919,9 @@ harnesses:
 	versionedSettings := `schema_version: "1"
 active_profile: custom
 `
-	require.NoError(t, os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(versionedSettings), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(versionedSettings), 0644))
 
-	assert.True(t, detectHierarchyFormat(groveDir))
+	assert.True(t, detectHierarchyFormat(projectDir))
 }
 
 // --- ResolveHarnessConfig tests ---
@@ -2586,8 +2586,8 @@ func TestUpdateSetting_PreservesV1Format(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	// Write a v1 versioned settings file
 	v1Content := `schema_version: "1"
@@ -2597,14 +2597,14 @@ hub:
   endpoint: https://hub.example.com
   grove_id: original-grove-id
 `
-	require.NoError(t, os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(v1Content), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Content), 0644))
 
 	// Call UpdateSetting with a key that would clobber the format in the old code
-	err := UpdateSetting(groveDir, "grove_id", "new-grove-id", false)
+	err := UpdateSetting(projectDir, "grove_id", "new-grove-id", false)
 	require.NoError(t, err)
 
 	// Read back the file and verify it's still v1 format
-	data, err := os.ReadFile(filepath.Join(groveDir, "settings.yaml"))
+	data, err := os.ReadFile(filepath.Join(projectDir, "settings.yaml"))
 	require.NoError(t, err)
 
 	version, _ := DetectSettingsFormat(data)
@@ -2630,18 +2630,18 @@ func TestUpdateSetting_V1HubEnabled(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	v1Content := `schema_version: "1"
 active_profile: local
 `
-	require.NoError(t, os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(v1Content), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Content), 0644))
 
-	err := UpdateSetting(groveDir, "hub.enabled", "true", false)
+	err := UpdateSetting(projectDir, "hub.enabled", "true", false)
 	require.NoError(t, err)
 
-	data, err := os.ReadFile(filepath.Join(groveDir, "settings.yaml"))
+	data, err := os.ReadFile(filepath.Join(projectDir, "settings.yaml"))
 	require.NoError(t, err)
 
 	version, _ := DetectSettingsFormat(data)
@@ -2661,21 +2661,21 @@ func TestUpdateSetting_V1BrokerIdMapsToServerBroker(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	v1Content := `schema_version: "1"
 active_profile: local
 hub:
   endpoint: https://hub.example.com
 `
-	require.NoError(t, os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(v1Content), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Content), 0644))
 
 	// Update hub.brokerId — in v1 this maps to server.broker.broker_id
-	err := UpdateSetting(groveDir, "hub.brokerId", "broker-123", false)
+	err := UpdateSetting(projectDir, "hub.brokerId", "broker-123", false)
 	require.NoError(t, err)
 
-	data, err := os.ReadFile(filepath.Join(groveDir, "settings.yaml"))
+	data, err := os.ReadFile(filepath.Join(projectDir, "settings.yaml"))
 	require.NoError(t, err)
 
 	version, _ := DetectSettingsFormat(data)
@@ -2701,18 +2701,18 @@ func TestUpdateSetting_V1BrokerTokenMapsToServerBroker(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	v1Content := `schema_version: "1"
 active_profile: local
 `
-	require.NoError(t, os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(v1Content), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Content), 0644))
 
-	err := UpdateSetting(groveDir, "hub.brokerToken", "token-xyz", false)
+	err := UpdateSetting(projectDir, "hub.brokerToken", "token-xyz", false)
 	require.NoError(t, err)
 
-	data, err := os.ReadFile(filepath.Join(groveDir, "settings.yaml"))
+	data, err := os.ReadFile(filepath.Join(projectDir, "settings.yaml"))
 	require.NoError(t, err)
 
 	var vs VersionedSettings
@@ -2730,22 +2730,22 @@ func TestUpdateSetting_V1DeprecatedKeysSkipSilently(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	v1Content := `schema_version: "1"
 active_profile: local
 `
-	require.NoError(t, os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(v1Content), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Content), 0644))
 
 	// These keys are deprecated in v1 and should be silently skipped
 	for _, key := range []string{"hub.token", "hub.apiKey", "hub.lastSyncedAt"} {
-		err := UpdateSetting(groveDir, key, "some-value", false)
+		err := UpdateSetting(projectDir, key, "some-value", false)
 		assert.NoError(t, err, "deprecated key %s should not error", key)
 	}
 
 	// File should be unchanged (besides schema_version being preserved)
-	data, err := os.ReadFile(filepath.Join(groveDir, "settings.yaml"))
+	data, err := os.ReadFile(filepath.Join(projectDir, "settings.yaml"))
 	require.NoError(t, err)
 
 	version, _ := DetectSettingsFormat(data)
@@ -2759,8 +2759,8 @@ func TestUpdateSetting_V1MultipleUpdatesPreserveFormat(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	v1Content := `schema_version: "1"
 active_profile: local
@@ -2770,16 +2770,16 @@ hub:
   endpoint: https://hub.example.com
   grove_id: grove-1
 `
-	require.NoError(t, os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(v1Content), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Content), 0644))
 
 	// Simulate what happens during hub operations: multiple sequential updates
-	require.NoError(t, UpdateSetting(groveDir, "grove_id", "new-grove-id", false))
-	require.NoError(t, UpdateSetting(groveDir, "hub.brokerId", "broker-abc", false))
-	require.NoError(t, UpdateSetting(groveDir, "hub.brokerToken", "token-xyz", false))
-	require.NoError(t, UpdateSetting(groveDir, "hub.enabled", "false", false))
+	require.NoError(t, UpdateSetting(projectDir, "grove_id", "new-grove-id", false))
+	require.NoError(t, UpdateSetting(projectDir, "hub.brokerId", "broker-abc", false))
+	require.NoError(t, UpdateSetting(projectDir, "hub.brokerToken", "token-xyz", false))
+	require.NoError(t, UpdateSetting(projectDir, "hub.enabled", "false", false))
 
 	// Read final state
-	data, err := os.ReadFile(filepath.Join(groveDir, "settings.yaml"))
+	data, err := os.ReadFile(filepath.Join(projectDir, "settings.yaml"))
 	require.NoError(t, err)
 
 	version, _ := DetectSettingsFormat(data)
@@ -2811,8 +2811,8 @@ func TestUpdateSetting_LegacyFormatAutoMigrates(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	// Write legacy format (no schema_version)
 	legacyContent := `active_profile: local
@@ -2820,13 +2820,13 @@ hub:
   endpoint: https://hub.example.com
   brokerId: old-broker
 `
-	require.NoError(t, os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(legacyContent), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(legacyContent), 0644))
 
 	// UpdateSetting should auto-migrate legacy to v1 and apply the update
-	err := UpdateSetting(groveDir, "grove_id", "my-grove-id", false)
+	err := UpdateSetting(projectDir, "grove_id", "my-grove-id", false)
 	require.NoError(t, err)
 
-	data, err := os.ReadFile(filepath.Join(groveDir, "settings.yaml"))
+	data, err := os.ReadFile(filepath.Join(projectDir, "settings.yaml"))
 	require.NoError(t, err)
 
 	// Should now be v1 format after auto-migration
@@ -3067,7 +3067,7 @@ func TestLoadVersionedSettings_TelemetryHierarchyMerge(t *testing.T) {
 		}
 	}
 
-	// Test that telemetry settings merge across global → grove (last write wins).
+	// Test that telemetry settings merge across global → project (last write wins).
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
@@ -3098,38 +3098,38 @@ telemetry:
 `
 	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(globalSettings), 0644))
 
-	// Create grove with overrides
-	groveDir := filepath.Join(tmpDir, "myproject")
-	groveScionDir := filepath.Join(groveDir, ".scion")
-	require.NoError(t, os.MkdirAll(groveScionDir, 0755))
-	os.Chdir(groveDir)
+	// Create project with overrides
+	projectDir := filepath.Join(tmpDir, "myproject")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	require.NoError(t, os.MkdirAll(projectScionDir, 0755))
+	os.Chdir(projectDir)
 
-	groveSettings := `schema_version: "1"
+	projectSettings := `schema_version: "1"
 telemetry:
   cloud:
     endpoint: "https://grove-otel.example.com"
   hub:
     enabled: false
 `
-	require.NoError(t, os.WriteFile(filepath.Join(groveScionDir, "settings.yaml"), []byte(groveSettings), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(projectSettings), 0644))
 
 	// Load merged settings
-	vs, err := LoadVersionedSettings(groveScionDir)
+	vs, err := LoadVersionedSettings(projectScionDir)
 	require.NoError(t, err)
 	require.NotNil(t, vs.Telemetry)
 
-	// Telemetry.enabled should come from global (not overridden by grove)
+	// Telemetry.enabled should come from global (not overridden by project)
 	require.NotNil(t, vs.Telemetry.Enabled)
 	assert.True(t, *vs.Telemetry.Enabled)
 
-	// Cloud endpoint should be overridden by grove
+	// Cloud endpoint should be overridden by project
 	require.NotNil(t, vs.Telemetry.Cloud)
 	assert.Equal(t, "https://grove-otel.example.com", vs.Telemetry.Cloud.Endpoint)
 
 	// Cloud protocol should come from global
 	assert.Equal(t, "grpc", vs.Telemetry.Cloud.Protocol)
 
-	// Hub.enabled should be overridden by grove
+	// Hub.enabled should be overridden by project
 	require.NotNil(t, vs.Telemetry.Hub)
 	require.NotNil(t, vs.Telemetry.Hub.Enabled)
 	assert.False(t, *vs.Telemetry.Hub.Enabled)

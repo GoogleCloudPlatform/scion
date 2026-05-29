@@ -139,13 +139,13 @@ func TestInitProject_NonGitCreatesMarkerAndExternalDir(t *testing.T) {
 		t.Fatalf("ReadProjectMarker failed: %v", err)
 	}
 	if marker.ProjectSlug == "" {
-		t.Error("marker should have a grove-slug")
+		t.Error("marker should have a project-slug")
 	}
 	if marker.ProjectID == "" {
-		t.Error("marker should have a grove-id")
+		t.Error("marker should have a project-id")
 	}
 
-	// Verify external grove directory was created
+	// Verify external project directory was created
 	externalPath, err := marker.ExternalProjectPath()
 	if err != nil {
 		t.Fatalf("ExternalProjectPath failed: %v", err)
@@ -155,14 +155,14 @@ func TestInitProject_NonGitCreatesMarkerAndExternalDir(t *testing.T) {
 	for _, sub := range []string{"templates", "agents"} {
 		p := filepath.Join(externalPath, sub)
 		if _, err := os.Stat(p); os.IsNotExist(err) {
-			t.Errorf("expected %s/ to exist in external grove", sub)
+			t.Errorf("expected %s/ to exist in external project", sub)
 		}
 	}
 
 	// Check settings.yaml with workspace_path
 	settingsPath := filepath.Join(externalPath, "settings.yaml")
 	if _, err := os.Stat(settingsPath); os.IsNotExist(err) {
-		t.Fatal("expected settings.yaml in external grove")
+		t.Fatal("expected settings.yaml in external project")
 	}
 	data, _ := os.ReadFile(settingsPath)
 	if !containsSubstring(string(data), "workspace_path") {
@@ -190,7 +190,7 @@ func TestInitProject_NonGitRejectsOldStyleDir(t *testing.T) {
 
 	err := InitProject(scionDir, GetMockHarnesses())
 	if err == nil {
-		t.Fatal("expected error for old-style non-git grove, got nil")
+		t.Fatal("expected error for old-style non-git project, got nil")
 	}
 	if !containsSubstring(err.Error(), "outdated") {
 		t.Errorf("expected error about outdated format, got: %v", err)
@@ -226,7 +226,7 @@ func TestInitProject_NonGitIdempotent(t *testing.T) {
 	// Read marker after second init — should be unchanged
 	marker2, _ := ReadProjectMarker(filepath.Join(projectDir, ".scion"))
 	if marker1.ProjectID != marker2.ProjectID {
-		t.Errorf("grove-id changed between inits: %q → %q", marker1.ProjectID, marker2.ProjectID)
+		t.Errorf("project-id changed between inits: %q → %q", marker1.ProjectID, marker2.ProjectID)
 	}
 }
 
@@ -251,13 +251,13 @@ func TestInitProject_GitCreatesProjectIDAndExternalDir(t *testing.T) {
 		t.Fatalf("InitProject failed: %v", err)
 	}
 
-	// Verify .scion is a directory (not a marker file, since it's a git grove)
+	// Verify .scion is a directory (not a marker file, since it's a git project)
 	info, err := os.Stat(scionDir)
 	if err != nil {
 		t.Fatalf(".scion does not exist: %v", err)
 	}
 	if !info.IsDir() {
-		t.Fatal("expected .scion to be a directory for git groves")
+		t.Fatal("expected .scion to be a directory for git projects")
 	}
 
 	// Verify grove-id file was created
@@ -298,10 +298,10 @@ func TestInitProject_GitCreatesProjectIDAndExternalDir(t *testing.T) {
 
 	// Verify templates/ lives in-repo (committable) and settings.yaml is NOT in-repo
 	if _, err := os.Stat(filepath.Join(scionDir, "templates")); os.IsNotExist(err) {
-		t.Error("expected templates/ to exist in-repo for git groves (committable)")
+		t.Error("expected templates/ to exist in-repo for git projects (committable)")
 	}
 	if _, err := os.Stat(filepath.Join(scionDir, "settings.yaml")); err == nil {
-		t.Error("settings.yaml should not exist in-repo for git groves")
+		t.Error("settings.yaml should not exist in-repo for git projects")
 	}
 
 	// Verify agents dir exists in-repo (for worktrees)
@@ -339,7 +339,7 @@ func TestInitProject_GitIdempotentProjectID(t *testing.T) {
 	projectID2, _ := ReadProjectID(scionDir)
 
 	if projectID1 != projectID2 {
-		t.Errorf("grove-id changed between inits: %q → %q", projectID1, projectID2)
+		t.Errorf("project-id changed between inits: %q → %q", projectID1, projectID2)
 	}
 }
 
@@ -373,15 +373,15 @@ func TestInitProject_CreatesEmptyTemplatesDir(t *testing.T) {
 		t.Fatalf("InitProject failed: %v", err)
 	}
 
-	// Templates always live in the in-repo .scion/templates/ (for git groves) or
-	// in the external config dir (for non-git groves). Since tests run inside a git repo,
+	// Templates always live in the in-repo .scion/templates/ (for git projects) or
+	// in the external config dir (for non-git projects). Since tests run inside a git repo,
 	// check tempDir directly.
 	templatesDir := filepath.Join(tempDir, "templates")
 	if info, err := os.Stat(templatesDir); err != nil || !info.IsDir() {
 		t.Fatalf("Expected templates/ directory to exist at %s", templatesDir)
 	}
 
-	// Verify that templates/default does NOT exist (default template lives in global grove only)
+	// Verify that templates/default does NOT exist (default template lives in global project only)
 	defaultDir := filepath.Join(tempDir, "templates", "default")
 	if _, err := os.Stat(defaultDir); !os.IsNotExist(err) {
 		t.Errorf("Expected templates/default to NOT exist at project level, but it does at %s", defaultDir)

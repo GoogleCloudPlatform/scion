@@ -132,7 +132,7 @@ func (vs *VersionedSettings) IsHubEnabled() bool {
 	return vs.Hub != nil && vs.Hub.Enabled != nil && *vs.Hub.Enabled
 }
 
-// IsHubLinked returns true if this grove has been explicitly linked to the Hub.
+// IsHubLinked returns true if this project has been explicitly linked to the Hub.
 func (vs *VersionedSettings) IsHubLinked() bool {
 	return vs.Hub != nil && vs.Hub.Linked != nil && *vs.Hub.Linked
 }
@@ -142,7 +142,7 @@ func (vs *VersionedSettings) IsHubExplicitlyDisabled() bool {
 	return vs.Hub != nil && vs.Hub.Enabled != nil && !*vs.Hub.Enabled
 }
 
-// IsHubLocalOnly returns true if the grove is configured for local-only mode.
+// IsHubLocalOnly returns true if the project is configured for local-only mode.
 func (vs *VersionedSettings) IsHubLocalOnly() bool {
 	return vs.Hub != nil && vs.Hub.LocalOnly != nil && *vs.Hub.LocalOnly
 }
@@ -167,8 +167,8 @@ func (vs *VersionedSettings) ResolveImageRegistry(profileName string) string {
 
 // RequireImageRegistry checks that image_registry is configured and returns an
 // actionable error if not. This is called early in command execution to fail fast.
-func RequireImageRegistry(grovePath, profileName string) error {
-	vs, _, err := LoadEffectiveSettings(grovePath)
+func RequireImageRegistry(projectPath, profileName string) error {
+	vs, _, err := LoadEffectiveSettings(projectPath)
 	if err != nil {
 		// Can't load settings — let other code handle this error
 		return nil
@@ -247,7 +247,7 @@ type VersionedSettings struct {
 
 // V1ServerConfig holds server-side configuration in the versioned settings format.
 // This mirrors GlobalConfig but uses snake_case koanf/yaml tags.
-// Only valid at the global level (~/.scion/settings.yaml), never in grove-level settings.
+// Only valid at the global level (~/.scion/settings.yaml), never in project-level settings.
 type V1ServerConfig struct {
 	// Mode selects the server operating mode: "workstation" (default) or "production".
 	// When set to "production", the server behaves as if --production were passed.
@@ -305,10 +305,6 @@ type V1MessageBrokerConfig struct {
 	Enabled bool `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	// Type selects the broker adapter: "inprocess" (default). Future: "nats", "redis".
 	Type string `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`
-	// Types lists multiple broker plugin names for fan-out mode.
-	// When non-empty, all listed plugins run concurrently via FanOutBroker.
-	// Falls back to Type (singular) for backward compatibility.
-	Types []string `json:"types,omitempty" yaml:"types,omitempty" koanf:"types"`
 }
 
 // V1PluginsConfig configures external plugin loading for message brokers and harnesses.
@@ -448,7 +444,7 @@ type V1CLIConfig struct {
 }
 
 // V1TelemetryConfig holds telemetry/observability settings.
-// Configurable at global or grove scope in settings.yaml, and overridable per-template/agent
+// Configurable at global or project scope in settings.yaml, and overridable per-template/agent
 // in scion-agent.yaml. See design doc section 10.2 for the full reference.
 type V1TelemetryConfig struct {
 	Enabled  *bool                    `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
@@ -1977,11 +1973,11 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 		if !dryRun {
 			state, err := LoadProjectState(dir)
 			if err != nil {
-				return nil, fmt.Errorf("failed to load grove state: %w", err)
+				return nil, fmt.Errorf("failed to load project state: %w", err)
 			}
 			state.LastSyncedAt = legacy.Hub.LastSyncedAt
 			if err := SaveProjectState(dir, state); err != nil {
-				return nil, fmt.Errorf("failed to save grove state: %w", err)
+				return nil, fmt.Errorf("failed to save project state: %w", err)
 			}
 		}
 	}

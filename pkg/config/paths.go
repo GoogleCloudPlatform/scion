@@ -211,13 +211,13 @@ func GetGlobalAgentsDir() (string, error) {
 	return filepath.Join(g, "agents"), nil
 }
 
-// ResolveProjectPath resolves a grove path to an absolute path and indicates if it's the global grove.
-// If path is empty, it attempts to find the project grove or falls back to global.
-// If path is "global" or "home", it returns the global grove path.
-// Returns the absolute path, whether it's the global grove, and any error.
+// ResolveProjectPath resolves a project path to an absolute path and indicates if it's the global project.
+// If path is empty, it attempts to find the project or falls back to global.
+// If path is "global" or "home", it returns the global project path.
+// Returns the absolute path, whether it's the global project, and any error.
 func ResolveProjectPath(path string) (string, bool, error) {
 	if path == "" {
-		// Try to find project grove first
+		// Try to find project root first
 		if p, ok := FindProjectRoot(); ok {
 			// Check if the found project root is actually the global directory
 			globalDir, _ := GetGlobalDir()
@@ -246,7 +246,7 @@ func ResolveProjectPath(path string) (string, bool, error) {
 
 	// If the path doesn't end with .scion, check if it contains a .scion entry.
 	// This allows users to pass a project root (e.g. /path/to/project) and have it
-	// resolve to /path/to/project/.scion, matching how FindProjectRoot discovers groves.
+	// resolve to /path/to/project/.scion, matching how FindProjectRoot discovers projects.
 	if filepath.Base(abs) != DotScion {
 		candidate := filepath.Join(abs, DotScion)
 		if info, err := os.Stat(candidate); err == nil {
@@ -281,10 +281,10 @@ func ResolveProjectPath(path string) (string, bool, error) {
 	return abs, isGlobal, nil
 }
 
-// RequireProjectPath resolves a grove path, erroring if no project is found and global is not specified.
-// This is used by commands that require an explicit grove context.
-// If path is empty and no project grove is found, returns an error suggesting --global.
-// Returns the absolute path, whether it's the global grove, and any error.
+// RequireProjectPath resolves a project path, erroring if no project is found and global is not specified.
+// This is used by commands that require an explicit project context.
+// If path is empty and no project is found, returns an error suggesting --global.
+// Returns the absolute path, whether it's the global project, and any error.
 func RequireProjectPath(path string) (string, bool, error) {
 	// Explicit global request
 	if path == "global" || path == "home" {
@@ -332,11 +332,11 @@ func RequireProjectPath(path string) (string, bool, error) {
 		return abs, isGlobal, nil
 	}
 
-	// No path specified - require project grove to exist
+	// No path specified - require project to exist
 	if p, ok := FindProjectRoot(); ok {
 		return p, false, nil
 	}
 
 	// No project found and no explicit path - error
-	return "", false, fmt.Errorf("not in a scion project. Use --global for global grove or run 'scion init' to create a project grove")
+	return "", false, fmt.Errorf("not in a scion project. Use --global for global project or run 'scion init' to create a project")
 }

@@ -84,7 +84,7 @@ func TestGenerateProjectIDForDir_NoGitRepo(t *testing.T) {
 	// GenerateProjectIDForDir should return a UUID
 	id := GenerateProjectIDForDir(tmpDir)
 	if id == "" {
-		t.Error("expected non-empty grove ID")
+		t.Error("expected non-empty project ID")
 	}
 
 	// Should look like a UUID (contains hyphens, ~36 chars)
@@ -118,15 +118,15 @@ func TestIsInsideProject(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", origHome)
 
-	// When in the grove directory
+	// When in the project directory
 	if err := os.Chdir(tmpProject); err != nil {
 		t.Fatal(err)
 	}
 	if !IsInsideProject() {
-		t.Error("expected IsInsideProject=true when in grove directory")
+		t.Error("expected IsInsideProject=true when in project directory")
 	}
 
-	// When in a subdirectory of the grove
+	// When in a subdirectory of the project
 	subDir := filepath.Join(tmpProject, "subdir")
 	if err := os.Mkdir(subDir, 0755); err != nil {
 		t.Fatal(err)
@@ -135,16 +135,16 @@ func TestIsInsideProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !IsInsideProject() {
-		t.Error("expected IsInsideProject=true when in subdirectory of grove")
+		t.Error("expected IsInsideProject=true when in subdirectory of project")
 	}
 
-	// When outside any grove
+	// When outside any project
 	outsideDir := t.TempDir()
 	if err := os.Chdir(outsideDir); err != nil {
 		t.Fatal(err)
 	}
 	if IsInsideProject() {
-		t.Error("expected IsInsideProject=false when outside any grove")
+		t.Error("expected IsInsideProject=false when outside any project")
 	}
 }
 
@@ -171,14 +171,14 @@ func TestGetEnclosingProjectPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// When in the subdirectory, should find the enclosing grove
+	// When in the subdirectory, should find the enclosing project
 	if err := os.Chdir(subDir); err != nil {
 		t.Fatal(err)
 	}
 
 	projectPath, rootDir, found := GetEnclosingProjectPath()
 	if !found {
-		t.Fatal("expected to find enclosing grove")
+		t.Fatal("expected to find enclosing project")
 	}
 
 	evalProjectPath, _ := filepath.EvalSymlinks(projectPath)
@@ -213,7 +213,7 @@ func TestGetEnclosingProjectPath_NotFound(t *testing.T) {
 
 	_, _, found := GetEnclosingProjectPath()
 	if found {
-		t.Error("expected found=false when no enclosing grove")
+		t.Error("expected found=false when no enclosing project")
 	}
 }
 
@@ -322,7 +322,7 @@ func TestInitProject_EmptyTemplatesDir(t *testing.T) {
 	mockRuntimeDetection(t, "docker")
 	mockIsGitRepo(t, true)
 
-	// Override HOME for global templates and external grove-config dirs
+	// Override HOME for global templates and external project-config dirs
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpDir)
 	defer os.Setenv("HOME", origHome)
@@ -334,15 +334,15 @@ func TestInitProject_EmptyTemplatesDir(t *testing.T) {
 		t.Fatalf("InitProject failed: %v", err)
 	}
 
-	// Templates always live in the in-repo projectDir (for git groves) or in the
-	// external config dir (for non-git groves). Since tests run inside a git repo,
+	// Templates always live in the in-repo projectDir (for git projects) or in the
+	// external config dir (for non-git projects). Since tests run inside a git repo,
 	// projectDir is used directly.
 	templatesDir := filepath.Join(projectDir, "templates")
 	if info, err := os.Stat(templatesDir); err != nil || !info.IsDir() {
 		t.Fatalf("expected templates/ directory to exist at %s", templatesDir)
 	}
 
-	// Verify templates/default/ does NOT exist (default template lives in global grove only)
+	// Verify templates/default/ does NOT exist (default template lives in global project only)
 	defaultTplDir := filepath.Join(projectDir, "templates", "default")
 	if _, err := os.Stat(defaultTplDir); !os.IsNotExist(err) {
 		t.Errorf("expected templates/default/ to NOT exist at project level, but it does at %s", defaultTplDir)
@@ -607,8 +607,8 @@ func TestInitProject_UsesDetectedRuntime(t *testing.T) {
 	}
 
 	// Project settings should not contain profiles or runtimes; those live in global settings.
-	// For git groves settings.yaml is in the external config dir; use GetProjectConfigDir
-	// to find the canonical location regardless of grove type.
+	// For git projects settings.yaml is in the external config dir; use GetProjectConfigDir
+	// to find the canonical location regardless of project type.
 	configDir := GetProjectConfigDir(projectDir)
 	data, err := os.ReadFile(filepath.Join(configDir, "settings.yaml"))
 	if err != nil {
@@ -621,10 +621,10 @@ func TestInitProject_UsesDetectedRuntime(t *testing.T) {
 	}
 
 	if len(settings.Profiles) != 0 {
-		t.Errorf("expected grove settings.yaml to have no profiles block, got %d profiles", len(settings.Profiles))
+		t.Errorf("expected project settings.yaml to have no profiles block, got %d profiles", len(settings.Profiles))
 	}
 	if len(settings.Runtimes) != 0 {
-		t.Errorf("expected grove settings.yaml to have no runtimes block, got %d runtimes", len(settings.Runtimes))
+		t.Errorf("expected project settings.yaml to have no runtimes block, got %d runtimes", len(settings.Runtimes))
 	}
 	if settings.ActiveProfile != "local" {
 		t.Errorf("expected active_profile 'local', got %q", settings.ActiveProfile)
@@ -809,7 +809,7 @@ func TestInitMachine_PreservesSettings(t *testing.T) {
 	}
 }
 
-func TestWriteGroveSettings_V1PlacesProjectIDUnderHub(t *testing.T) {
+func TestWriteProjectSettings_V1PlacesProjectIDUnderHub(t *testing.T) {
 	tmpDir := t.TempDir()
 	projectID := "test-grove-id-abc123"
 
@@ -830,9 +830,9 @@ func TestWriteGroveSettings_V1PlacesProjectIDUnderHub(t *testing.T) {
 		t.Fatalf("failed to parse settings YAML: %v", err)
 	}
 
-	// Verify schema_version is "1" (from default grove settings)
+	// Verify schema_version is "1" (from default project settings)
 	if v, _ := settingsMap["schema_version"].(string); v != "1" {
-		t.Skipf("default grove settings are not v1 format (schema_version=%q), skipping v1-specific test", v)
+		t.Skipf("default project settings are not v1 format (schema_version=%q), skipping v1-specific test", v)
 	}
 
 	// grove_id should NOT be at the top level

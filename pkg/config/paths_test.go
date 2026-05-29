@@ -97,8 +97,8 @@ func TestGetResolvedProjectDir(t *testing.T) {
 
 func TestGetResolvedProjectDir_WalkUp(t *testing.T) {
 	// Create structure:
-	// /tmp/grove/.scion
-	// /tmp/grove/subdir/deep
+	// /tmp/project/.scion
+	// /tmp/project/subdir/deep
 
 	tmpProject := t.TempDir()
 	scionDir := filepath.Join(tmpProject, ".scion")
@@ -314,7 +314,7 @@ func TestFindProjectRoot_MarkerWithHubFallback(t *testing.T) {
 		t.Fatal("expected FindProjectRoot to succeed with marker + hub context")
 	}
 
-	// External grove path doesn't exist on this filesystem, so with hub
+	// External project path doesn't exist on this filesystem, so with hub
 	// context we should fall back to the synthetic workspace .scion path.
 	expectedPath := filepath.Join(tmpDir, ".scion")
 	if got != expectedPath {
@@ -349,7 +349,7 @@ func TestRequireProjectPath_ProjectExists(t *testing.T) {
 		t.Fatalf("RequireProjectPath failed: %v", err)
 	}
 	if isGlobal {
-		t.Error("expected isGlobal=false for project grove")
+		t.Error("expected isGlobal=false for project")
 	}
 
 	evalGot, _ := filepath.EvalSymlinks(got)
@@ -362,7 +362,7 @@ func TestRequireProjectPath_ProjectExists(t *testing.T) {
 func TestResolveProjectPath_ExplicitProjectRoot(t *testing.T) {
 	// When passing a project root (not ending in .scion) that contains a .scion dir,
 	// ResolveProjectPath should resolve to the .scion subdirectory.
-	// This is the -g / --grove flag use case.
+	// This is the -g / --project flag use case.
 
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
@@ -389,7 +389,7 @@ func TestResolveProjectPath_ExplicitProjectRoot(t *testing.T) {
 		t.Errorf("ResolveProjectPath(%q) = %q, want %q", tmpProject, evalGot, evalExpected)
 	}
 	if isGlobal {
-		t.Error("expected isGlobal=false for project grove")
+		t.Error("expected isGlobal=false for project")
 	}
 }
 
@@ -469,13 +469,13 @@ func TestRequireProjectPath_ExplicitProjectRoot(t *testing.T) {
 		t.Errorf("RequireProjectPath(%q) = %q, want %q", tmpProject, evalGot, evalExpected)
 	}
 	if isGlobal {
-		t.Error("expected isGlobal=false for project grove")
+		t.Error("expected isGlobal=false for project")
 	}
 }
 
 func TestResolveProjectPath_GlobalViaWalkUp(t *testing.T) {
 	// Test that when FindProjectRoot walks up and finds ~/.scion,
-	// it is correctly identified as the global grove (isGlobal=true)
+	// it is correctly identified as the global project (isGlobal=true)
 
 	// Create a temp home with .scion
 	tmpHome := t.TempDir()
@@ -502,7 +502,7 @@ func TestResolveProjectPath_GlobalViaWalkUp(t *testing.T) {
 	}
 
 	// ResolveProjectPath should walk up and find ~/.scion,
-	// and recognize it as the global grove
+	// and recognize it as the global project
 	got, isGlobal, err := ResolveProjectPath("")
 	if err != nil {
 		t.Fatalf("ResolveProjectPath failed: %v", err)
@@ -515,12 +515,12 @@ func TestResolveProjectPath_GlobalViaWalkUp(t *testing.T) {
 		t.Errorf("expected path %q, got %q", evalGlobal, evalGot)
 	}
 	if !isGlobal {
-		t.Errorf("expected isGlobal=true when global grove found via walk-up, got false")
+		t.Errorf("expected isGlobal=true when global project found via walk-up, got false")
 	}
 }
 
 func TestResolveProjectPath_ProjectNotGlobal(t *testing.T) {
-	// Test that a project grove (not at ~/) is correctly identified as NOT global
+	// Test that a project (not at ~/) is correctly identified as NOT global
 
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
@@ -553,7 +553,7 @@ func TestResolveProjectPath_ProjectNotGlobal(t *testing.T) {
 		t.Errorf("expected path %q, got %q", evalProject, evalGot)
 	}
 	if isGlobal {
-		t.Errorf("expected isGlobal=false for project grove, got true")
+		t.Errorf("expected isGlobal=false for project, got true")
 	}
 }
 

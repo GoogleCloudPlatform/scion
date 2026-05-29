@@ -26,7 +26,7 @@ import (
 
 func TestEnsureSharedDirs(t *testing.T) {
 	tmpDir := t.TempDir()
-	// Simulate a non-git grove external config path:
+	// Simulate a non-git project external config path:
 	// ~/.scion/project-configs/test__abc12345/.scion/
 	projectDir := filepath.Join(tmpDir, "project-configs", "test__abc12345", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -162,17 +162,17 @@ func TestRemoveSharedDir(t *testing.T) {
 func TestGetSharedDirsBasePath_GitProject(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Simulate a git grove with split storage
+	// Simulate a git project with split storage
 	originalHome := os.Getenv("HOME")
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
 	// Create the external agents dir structure
-	groveConfigDir := filepath.Join(tmpDir, ".scion", "project-configs", "myproject__abc12345")
-	agentsDir := filepath.Join(groveConfigDir, "agents")
+	projectConfigDir := filepath.Join(tmpDir, ".scion", "project-configs", "myproject__abc12345")
+	agentsDir := filepath.Join(projectConfigDir, "agents")
 	require.NoError(t, os.MkdirAll(agentsDir, 0755))
 
-	// Create a git grove project dir with grove-id file
+	// Create a git project dir with grove-id file
 	projectDir := filepath.Join(tmpDir, "myproject", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 

@@ -27,14 +27,14 @@ func TestCLISettings(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove")
-	groveScionDir := filepath.Join(groveDir, ".scion")
-	if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	// 1. Test defaults (embedded)
-	s, err := LoadSettings(groveScionDir)
+	s, err := LoadSettings(projectScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettings failed: %v", err)
 	}
@@ -49,12 +49,12 @@ func TestCLISettings(t *testing.T) {
 	}
 
 	// 2. Test override via UpdateSetting
-	err = UpdateSetting(groveScionDir, "cli.autohelp", "false", false)
+	err = UpdateSetting(projectScionDir, "cli.autohelp", "false", false)
 	if err != nil {
 		t.Fatalf("UpdateSetting failed: %v", err)
 	}
 
-	s, err = LoadSettings(groveScionDir)
+	s, err = LoadSettings(projectScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettings failed: %v", err)
 	}

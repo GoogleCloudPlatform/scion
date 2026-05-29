@@ -458,7 +458,7 @@ func TestLoadConfigInvalidVolumes(t *testing.T) {
 }
 
 func TestFindTemplateInProjectPath(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "scion-test-grove-path-*")
+	tmpDir, err := os.MkdirTemp("", "scion-test-project-path-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,29 +481,29 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create a grove with its own template
+	// Create a project with its own template
 	projectPath := filepath.Join(tmpDir, "some-project", DotScion)
-	groveTemplatesDir := filepath.Join(projectPath, "templates")
-	groveTplDir := filepath.Join(groveTemplatesDir, "my-tpl")
-	if err := os.MkdirAll(groveTplDir, 0755); err != nil {
+	projectTemplatesDir := filepath.Join(projectPath, "templates")
+	projectTplDir := filepath.Join(projectTemplatesDir, "my-tpl")
+	if err := os.MkdirAll(projectTplDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	t.Run("grove template found when projectPath is provided", func(t *testing.T) {
+	t.Run("project template found when projectPath is provided", func(t *testing.T) {
 		tpl, err := FindTemplateInProjectPath("my-tpl", projectPath)
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
-		if tpl.Path != groveTplDir {
-			t.Errorf("expected path %q, got %q", groveTplDir, tpl.Path)
+		if tpl.Path != projectTplDir {
+			t.Errorf("expected path %q, got %q", projectTplDir, tpl.Path)
 		}
 		if tpl.Scope != "project" {
 			t.Errorf("expected scope 'project', got %q", tpl.Scope)
 		}
 	})
 
-	t.Run("falls back to global when grove has no template", func(t *testing.T) {
-		tpl, err := FindTemplateInProjectPath("my-tpl", filepath.Join(tmpDir, "empty-grove"))
+	t.Run("falls back to global when project has no template", func(t *testing.T) {
+		tpl, err := FindTemplateInProjectPath("my-tpl", filepath.Join(tmpDir, "empty-project"))
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
@@ -536,7 +536,7 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 		}
 	})
 
-	t.Run("absolute path bypasses grove resolution", func(t *testing.T) {
+	t.Run("absolute path bypasses project resolution", func(t *testing.T) {
 		tpl, err := FindTemplateInProjectPath(globalTplDir, projectPath)
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
@@ -551,7 +551,7 @@ func TestFindTemplateInProjectPath_GitGroveInRepoTemplates(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Simulate a git grove: in-repo .scion/ with grove-id and templates/ in-repo.
+	// Simulate a git project: in-repo .scion/ with grove-id and templates/ in-repo.
 	// Templates live in-repo so they can be committed to the repository.
 	projectDir := filepath.Join(t.TempDir(), "my-git-project", ".scion")
 	os.MkdirAll(projectDir, 0755)
@@ -578,7 +578,7 @@ func TestFindTemplateInProjectPath_GitGroveInRepoTemplates(t *testing.T) {
 }
 
 func TestGetTemplateChainInProject(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "scion-test-chain-grove-*")
+	tmpDir, err := os.MkdirTemp("", "scion-test-chain-project-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -592,10 +592,10 @@ func TestGetTemplateChainInProject(t *testing.T) {
 	defer os.Chdir(origWd)
 	os.Chdir(tmpDir)
 
-	// Create grove template
+	// Create project template
 	projectPath := filepath.Join(tmpDir, "project", DotScion)
-	groveTplDir := filepath.Join(projectPath, "templates", "test-tpl")
-	if err := os.MkdirAll(groveTplDir, 0755); err != nil {
+	projectTplDir := filepath.Join(projectPath, "templates", "test-tpl")
+	if err := os.MkdirAll(projectTplDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -606,8 +606,8 @@ func TestGetTemplateChainInProject(t *testing.T) {
 	if len(chain) != 1 {
 		t.Fatalf("expected chain length 1, got %d", len(chain))
 	}
-	if chain[0].Path != groveTplDir {
-		t.Errorf("expected path %q, got %q", groveTplDir, chain[0].Path)
+	if chain[0].Path != projectTplDir {
+		t.Errorf("expected path %q, got %q", projectTplDir, chain[0].Path)
 	}
 }
 
@@ -628,7 +628,7 @@ func TestGetTemplateChainInProjectWithDefault(t *testing.T) {
 
 	projectPath := filepath.Join(tmpDir, "project", DotScion)
 
-	// Create both default and custom templates in the grove
+	// Create both default and custom templates in the project
 	defaultTplDir := filepath.Join(projectPath, "templates", "default")
 	customTplDir := filepath.Join(projectPath, "templates", "custom")
 	if err := os.MkdirAll(defaultTplDir, 0755); err != nil {

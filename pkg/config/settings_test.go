@@ -24,21 +24,21 @@ import (
 )
 
 func TestLoadSettings(t *testing.T) {
-	// Create temporary directories for global and grove settings
+	// Create temporary directories for global and project settings
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove")
-	groveScionDir := filepath.Join(groveDir, ".scion")
-	if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	// 1. Test defaults
-	s, err := LoadSettings(groveScionDir)
+	s, err := LoadSettings(projectScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettings failed: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestLoadSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err = LoadSettings(groveScionDir)
+	s, err = LoadSettings(projectScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettings failed: %v", err)
 	}
@@ -83,22 +83,22 @@ func TestLoadSettings(t *testing.T) {
 	}
 
 	// 3. Test Project overrides
-	groveSettings := `{
+	projectSettings := `{
 		"active_profile": "local-dev",
 		"profiles": {
 			"local-dev": { "runtime": "local", "tmux": true }
 		}
 	}`
-	if err := os.WriteFile(filepath.Join(groveScionDir, "settings.json"), []byte(groveSettings), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.json"), []byte(projectSettings), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	s, err = LoadSettings(groveScionDir)
+	s, err = LoadSettings(projectScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettings failed: %v", err)
 	}
 	if s.ActiveProfile != "local-dev" {
-		t.Errorf("expected grove override active_profile 'local-dev', got '%s'", s.ActiveProfile)
+		t.Errorf("expected project override active_profile 'local-dev', got '%s'", s.ActiveProfile)
 	}
 	// Template should still be claude from global
 	if s.DefaultTemplate != "claude" {
@@ -112,20 +112,20 @@ func TestUpdateSetting(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove")
-	groveScionDir := filepath.Join(groveDir, ".scion")
-	if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	// Update local setting
-	err := UpdateSetting(groveScionDir, "active_profile", "kubernetes", false)
+	err := UpdateSetting(projectScionDir, "active_profile", "kubernetes", false)
 	if err != nil {
 		t.Fatalf("UpdateSetting failed: %v", err)
 	}
 
 	// Verify file content (now writes YAML)
-	content, err := os.ReadFile(filepath.Join(groveScionDir, "settings.yaml"))
+	content, err := os.ReadFile(filepath.Join(projectScionDir, "settings.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,11 +134,11 @@ func TestUpdateSetting(t *testing.T) {
 	}
 
 	// Update default_template
-	err = UpdateSetting(groveScionDir, "default_template", "my-template", false)
+	err = UpdateSetting(projectScionDir, "default_template", "my-template", false)
 	if err != nil {
 		t.Fatalf("UpdateSetting default_template failed: %v", err)
 	}
-	content, _ = os.ReadFile(filepath.Join(groveScionDir, "settings.yaml"))
+	content, _ = os.ReadFile(filepath.Join(projectScionDir, "settings.yaml"))
 	if !strings.Contains(string(content), "default_template: my-template") {
 		t.Errorf("expected file to contain default_template: my-template, got %s", string(content))
 	}
@@ -654,15 +654,15 @@ func TestHubSettingsLoadFromGlobal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create project grove directory (no hub settings)
-	groveDir := filepath.Join(tmpDir, "my-project")
-	groveScionDir := filepath.Join(groveDir, ".scion")
-	if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+	// Create project directory (no hub settings)
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Load settings from project grove (should inherit from global)
-	s, err := LoadSettings(groveScionDir)
+	// Load settings from project (should inherit from global)
+	s, err := LoadSettings(projectScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettings failed: %v", err)
 	}
@@ -739,14 +739,14 @@ func TestUpdateSettingHubConnections(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove")
-	groveScionDir := filepath.Join(groveDir, ".scion")
-	if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	// hub_connections.* keys are silently skipped in v1 format (not supported)
-	err := UpdateSetting(groveScionDir, "hub_connections.hub-prod.endpoint", "https://hub.prod.example.com", false)
+	err := UpdateSetting(projectScionDir, "hub_connections.hub-prod.endpoint", "https://hub.prod.example.com", false)
 	if err != nil {
 		t.Fatalf("UpdateSetting hub_connections should not error (silently skipped in v1): %v", err)
 	}
@@ -758,18 +758,18 @@ func TestUpdateSettingHubConnectionsInvalidKey(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveScionDir := filepath.Join(tmpDir, ".scion")
-	if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+	projectScionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	// In v1 format, hub_connections.* keys are silently skipped regardless of structure
-	err := UpdateSetting(groveScionDir, "hub_connections.hub-prod", "value", false)
+	err := UpdateSetting(projectScionDir, "hub_connections.hub-prod", "value", false)
 	if err != nil {
 		t.Errorf("hub_connections keys should be silently skipped in v1: %v", err)
 	}
 
-	err = UpdateSetting(groveScionDir, "hub_connections.hub-prod.unknown_field", "value", false)
+	err = UpdateSetting(projectScionDir, "hub_connections.hub-prod.unknown_field", "value", false)
 	if err != nil {
 		t.Errorf("hub_connections keys should be silently skipped in v1: %v", err)
 	}
@@ -823,8 +823,8 @@ func TestDeleteHubConnection(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveScionDir := filepath.Join(tmpDir, ".scion")
-	if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+	projectScionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -836,18 +836,18 @@ func TestDeleteHubConnection(t *testing.T) {
   hub-staging:
     endpoint: https://hub.staging.example.com
 `
-	if err := os.WriteFile(filepath.Join(groveScionDir, "settings.yaml"), []byte(legacyContent), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(legacyContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	// Delete one
-	err := DeleteHubConnection(groveScionDir, "hub-prod", false)
+	err := DeleteHubConnection(projectScionDir, "hub-prod", false)
 	if err != nil {
 		t.Fatalf("DeleteHubConnection failed: %v", err)
 	}
 
 	// Verify only staging remains
-	content, _ := os.ReadFile(filepath.Join(groveScionDir, "settings.yaml"))
+	content, _ := os.ReadFile(filepath.Join(projectScionDir, "settings.yaml"))
 	if strings.Contains(string(content), "hub-prod") {
 		t.Errorf("expected hub-prod to be deleted, got %s", string(content))
 	}
@@ -856,20 +856,20 @@ func TestDeleteHubConnection(t *testing.T) {
 	}
 
 	// Delete the last one
-	err = DeleteHubConnection(groveScionDir, "hub-staging", false)
+	err = DeleteHubConnection(projectScionDir, "hub-staging", false)
 	if err != nil {
 		t.Fatalf("DeleteHubConnection last failed: %v", err)
 	}
 
 	// Verify hub_connections is cleaned up
-	content, _ = os.ReadFile(filepath.Join(groveScionDir, "settings.yaml"))
+	content, _ = os.ReadFile(filepath.Join(projectScionDir, "settings.yaml"))
 	if strings.Contains(string(content), "hub_connections") {
 		t.Errorf("expected hub_connections to be cleaned up, got %s", string(content))
 	}
 }
 
 func TestUpdateSetting_SplitStorageWritesToExternalDir(t *testing.T) {
-	// When a grove has split storage (grove-id file), UpdateSetting should
+	// When a project has split storage (grove-id file), UpdateSetting should
 	// write to the external config dir (~/.scion/project-configs/…), not the
 	// local .scion/ directory, so that LoadSettingsKoanf reads the same values.
 	tmpHome := t.TempDir()

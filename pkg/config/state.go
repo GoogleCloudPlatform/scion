@@ -21,17 +21,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ProjectState holds runtime-managed state for a grove.
+// ProjectState holds runtime-managed state for a project.
 // This is stored in state.yaml, separate from user-editable configuration.
 type ProjectState struct {
 	LastSyncedAt string   `yaml:"last_synced_at,omitempty"`
 	SyncedAgents []string `yaml:"synced_agents,omitempty"`
 }
 
-// LoadProjectState reads grove state from state.yaml in the given grove path.
+// LoadProjectState reads project state from state.yaml in the given project path.
 // Returns an empty ProjectState if the file doesn't exist.
-func LoadProjectState(grovePath string) (*ProjectState, error) {
-	statePath := filepath.Join(grovePath, "state.yaml")
+func LoadProjectState(projectPath string) (*ProjectState, error) {
+	statePath := filepath.Join(projectPath, "state.yaml")
 
 	data, err := os.ReadFile(statePath)
 	if err != nil {
@@ -49,9 +49,9 @@ func LoadProjectState(grovePath string) (*ProjectState, error) {
 	return &state, nil
 }
 
-// SaveProjectState writes grove state to state.yaml in the given grove path.
-func SaveProjectState(grovePath string, state *ProjectState) error {
-	statePath := filepath.Join(grovePath, "state.yaml")
+// SaveProjectState writes project state to state.yaml in the given project path.
+func SaveProjectState(projectPath string, state *ProjectState) error {
+	statePath := filepath.Join(projectPath, "state.yaml")
 
 	if err := os.MkdirAll(filepath.Dir(statePath), 0755); err != nil {
 		return err

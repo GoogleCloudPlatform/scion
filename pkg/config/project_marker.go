@@ -91,9 +91,9 @@ func (m ProjectMarker) ExternalProjectPath() (string, error) {
 	}
 
 	// 2. Fallback to legacy grove-configs/
-	grovePath := filepath.Join(home, GlobalDir, GroveConfigsDir, m.DirName(), DotScion)
-	if _, err := os.Stat(grovePath); err == nil {
-		return grovePath, nil
+	legacyPath := filepath.Join(home, GlobalDir, GroveConfigsDir, m.DirName(), DotScion)
+	if _, err := os.Stat(legacyPath); err == nil {
+		return legacyPath, nil
 	}
 
 	// 3. Default to project-configs/

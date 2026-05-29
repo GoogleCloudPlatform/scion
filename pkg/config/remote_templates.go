@@ -773,13 +773,13 @@ func CleanRemoteTemplateCache() error {
 
 // TODO: Future enhancement - simple template names may resolve to remote storage when
 // operating with a remote hub system. The resolution could follow a pattern like:
-// <bucket-name>/<scion-prefix>/<grove-id>/templates/<template-name>
+// <bucket-name>/<scion-prefix>/<project-id>/templates/<template-name>
 // This would allow templates to be shared across a team or organization via
-// a central hub, using both the current grove's location as well as a global
+// a central hub, using both the current project's location as well as a global
 // location on the hub. The hub integration would need to provide:
-// - Grove ID resolution
+// - Project ID resolution
 // - Hub bucket/prefix configuration
-// - Fallback chain: local grove -> hub grove -> hub global -> error
+// - Fallback chain: local project -> hub project -> hub global -> error
 
 // ValidateRemoteURI performs basic validation on a remote template URI.
 func ValidateRemoteURI(uri string) error {

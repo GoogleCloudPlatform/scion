@@ -24,21 +24,21 @@ import (
 )
 
 func TestLoadSettingsKoanf(t *testing.T) {
-	// Create temporary directories for global and grove settings
+	// Create temporary directories for global and project settings
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove")
-	groveScionDir := filepath.Join(groveDir, ".scion")
-	if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	// 1. Test defaults
-	s, err := LoadSettingsKoanf(groveScionDir)
+	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettingsKoanf failed: %v", err)
 	}
@@ -57,9 +57,9 @@ func TestLoadSettingsKoanfWithYAML(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove")
-	groveScionDir := filepath.Join(groveDir, ".scion")
-	if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -84,7 +84,7 @@ profiles:
 		t.Fatal(err)
 	}
 
-	s, err := LoadSettingsKoanf(groveScionDir)
+	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettingsKoanf failed: %v", err)
 	}
@@ -106,9 +106,9 @@ func TestLoadSettingsKoanfWithProjectOverride(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove")
-	groveScionDir := filepath.Join(groveDir, ".scion")
-	if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -126,24 +126,24 @@ default_template: claude
 		t.Fatal(err)
 	}
 
-	// Create grove settings that override
-	groveSettingsYAML := `
+	// Create project settings that override
+	projectSettingsYAML := `
 active_profile: local-dev
 profiles:
   local-dev:
     runtime: docker
     tmux: true
 `
-	if err := os.WriteFile(filepath.Join(groveScionDir, "settings.yaml"), []byte(groveSettingsYAML), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(projectSettingsYAML), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	s, err := LoadSettingsKoanf(groveScionDir)
+	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettingsKoanf failed: %v", err)
 	}
 	if s.ActiveProfile != "local-dev" {
-		t.Errorf("expected grove override active_profile 'local-dev', got '%s'", s.ActiveProfile)
+		t.Errorf("expected project override active_profile 'local-dev', got '%s'", s.ActiveProfile)
 	}
 	// Template should still be claude from global
 	if s.DefaultTemplate != "claude" {
@@ -158,9 +158,9 @@ func TestLoadSettingsKoanfWithEnvOverride(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove")
-	groveScionDir := filepath.Join(groveDir, ".scion")
-	if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -171,7 +171,7 @@ func TestLoadSettingsKoanfWithEnvOverride(t *testing.T) {
 	os.Setenv("SCION_DEFAULT_TEMPLATE", "opencode")
 	defer os.Unsetenv("SCION_DEFAULT_TEMPLATE")
 
-	s, err := LoadSettingsKoanf(groveScionDir)
+	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettingsKoanf failed: %v", err)
 	}
@@ -190,9 +190,9 @@ func TestLoadSettingsKoanfWithBucketEnvOverride(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove")
-	groveScionDir := filepath.Join(groveDir, ".scion")
-	if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -206,7 +206,7 @@ func TestLoadSettingsKoanfWithBucketEnvOverride(t *testing.T) {
 	os.Setenv("SCION_BUCKET_PREFIX", "agents")
 	defer os.Unsetenv("SCION_BUCKET_PREFIX")
 
-	s, err := LoadSettingsKoanf(groveScionDir)
+	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettingsKoanf failed: %v", err)
 	}
@@ -297,9 +297,9 @@ func TestLoadSettingsKoanfV1ProjectID(t *testing.T) {
 		t.Cleanup(func() { os.Setenv("SCION_HUB_ENDPOINT", orig) })
 	}
 
-	groveDir := filepath.Join(tmpDir, "my-grove")
-	groveScionDir := filepath.Join(groveDir, ".scion")
-	if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -310,11 +310,11 @@ hub:
   endpoint: "http://localhost:9810"
   grove_id: "test-grove-uuid-1234"
 `
-	if err := os.WriteFile(filepath.Join(groveScionDir, "settings.yaml"), []byte(v1Settings), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(v1Settings), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	s, err := LoadSettingsKoanf(groveScionDir)
+	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettingsKoanf failed: %v", err)
 	}
@@ -343,9 +343,9 @@ func TestLoadSettingsKoanfV1ProjectIDHubWinsOverTopLevel(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove")
-	groveScionDir := filepath.Join(groveDir, ".scion")
-	if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -358,11 +358,11 @@ hub:
   enabled: true
   grove_id: "hub-level-id"
 `
-	if err := os.WriteFile(filepath.Join(groveScionDir, "settings.yaml"), []byte(legacySettings), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(legacySettings), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	s, err := LoadSettingsKoanf(groveScionDir)
+	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettingsKoanf failed: %v", err)
 	}
@@ -380,9 +380,9 @@ func TestLoadSettingsKoanfV1ProjectIDFromEnv(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove")
-	groveScionDir := filepath.Join(groveDir, ".scion")
-	if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -390,7 +390,7 @@ func TestLoadSettingsKoanfV1ProjectIDFromEnv(t *testing.T) {
 	os.Setenv("SCION_HUB_GROVE_ID", "env-grove-uuid")
 	defer os.Unsetenv("SCION_HUB_GROVE_ID")
 
-	s, err := LoadSettingsKoanf(groveScionDir)
+	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettingsKoanf failed: %v", err)
 	}
@@ -407,9 +407,9 @@ func TestLoadSettingsKoanfV1BrokerFields(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove")
-	groveScionDir := filepath.Join(groveDir, ".scion")
-	if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -424,11 +424,11 @@ server:
     broker_token: "test-broker-token"
     broker_nickname: "my-test-broker"
 `
-	if err := os.WriteFile(filepath.Join(groveScionDir, "settings.yaml"), []byte(v1Settings), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(v1Settings), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	s, err := LoadSettingsKoanf(groveScionDir)
+	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettingsKoanf failed: %v", err)
 	}
@@ -455,9 +455,9 @@ func TestLoadSettingsKoanfV1BrokerFieldsNoOverrideExisting(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove")
-	groveScionDir := filepath.Join(groveDir, ".scion")
-	if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -471,11 +471,11 @@ server:
     broker_id: "v1-broker-id"
     broker_token: "v1-token"
 `
-	if err := os.WriteFile(filepath.Join(groveScionDir, "settings.yaml"), []byte(settings), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settings), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	s, err := LoadSettingsKoanf(groveScionDir)
+	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettingsKoanf failed: %v", err)
 	}
@@ -496,9 +496,9 @@ func TestLoadSettingsKoanfWithJSONFallback(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", tmpDir)
 
-	groveDir := filepath.Join(tmpDir, "my-grove")
-	groveScionDir := filepath.Join(groveDir, ".scion")
-	if err := os.MkdirAll(groveScionDir, 0755); err != nil {
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -516,7 +516,7 @@ func TestLoadSettingsKoanfWithJSONFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := LoadSettingsKoanf(groveScionDir)
+	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettingsKoanf failed: %v", err)
 	}
@@ -529,11 +529,11 @@ func TestLoadSettingsKoanfWithJSONFallback(t *testing.T) {
 }
 
 // TestV1ProjectIDSurvivesUpdateSetting verifies that grove_id written by
-// writeGroveSettings in v1 format survives UpdateVersionedSetting round-trips.
+// writeProjectSettings in v1 format survives UpdateVersionedSetting round-trips.
 // This is a regression test for the bug where grove_id was written at the
 // top level (which VersionedSettings drops on unmarshal), then the first
 // UpdateSetting call (e.g. hub.endpoint) would strip it, causing the global
-// hub.grove_id to bleed into local groves.
+// hub.grove_id to bleed into local projects.
 func TestV1ProjectIDSurvivesUpdateSetting(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -550,7 +550,7 @@ func TestV1ProjectIDSurvivesUpdateSetting(t *testing.T) {
 	}
 
 	// Set up a global settings file with a different grove_id (simulating
-	// a previously linked global grove).
+	// a previously linked global project).
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
 	globalSettings := `schema_version: "1"
@@ -560,40 +560,40 @@ hub:
 `
 	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(globalSettings), 0644))
 
-	// Simulate writeGroveSettings: create a v1 grove settings file with
+	// Simulate writeProjectSettings: create a v1 project settings file with
 	// grove_id under hub.grove_id (the correct v1 location).
-	groveDir := filepath.Join(tmpDir, "my-project", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
-	groveSettings := `schema_version: "1"
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+	projectSettings := `schema_version: "1"
 active_profile: local
 default_template: default
 hub:
   grove_id: "local-grove-id-12345"
 workspace_path: /tmp/my-project
 `
-	require.NoError(t, os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(groveSettings), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(projectSettings), 0644))
 
 	// Verify the grove_id loads correctly before any updates.
-	s, err := LoadSettingsKoanf(groveDir)
+	s, err := LoadSettingsKoanf(projectDir)
 	require.NoError(t, err)
 	assert.Equal(t, "local-grove-id-12345", s.ProjectID, "grove_id should come from local settings, not global")
 
 	// Simulate what happens when the user runs "scion config set hub.endpoint"
 	// or "scion hub enable" — this calls UpdateSetting which round-trips
 	// through VersionedSettings.
-	require.NoError(t, UpdateSetting(groveDir, "hub.endpoint", "https://hub.new.example.com", false))
+	require.NoError(t, UpdateSetting(projectDir, "hub.endpoint", "https://hub.new.example.com", false))
 
 	// Reload and verify grove_id survived the round-trip.
-	s2, err := LoadSettingsKoanf(groveDir)
+	s2, err := LoadSettingsKoanf(projectDir)
 	require.NoError(t, err)
 	assert.Equal(t, "local-grove-id-12345", s2.ProjectID, "grove_id must survive UpdateSetting round-trip")
 	assert.Equal(t, "https://hub.new.example.com", s2.Hub.Endpoint, "hub endpoint should be updated")
 }
 
 func TestLoadSettingsKoanf_ProjectIDFileOverridesGlobal(t *testing.T) {
-	// Simulates a git grove where grove_id is stored in a grove-id file
+	// Simulates a git project where grove_id is stored in a grove-id file
 	// rather than in the settings file. The global settings have a different
-	// hub.grove_id that should NOT bleed into the project grove.
+	// hub.grove_id that should NOT bleed into the project.
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
@@ -607,7 +607,7 @@ func TestLoadSettingsKoanf_ProjectIDFileOverridesGlobal(t *testing.T) {
 		}
 	}
 
-	// Global settings with a grove_id (simulating a linked global grove)
+	// Global settings with a grove_id (simulating a linked global project)
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
 	globalSettings := `schema_version: "1"
@@ -619,25 +619,25 @@ hub:
 `
 	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(globalSettings), 0644))
 
-	// Git grove .scion directory with grove-id file but NO grove_id in settings
-	groveScionDir := filepath.Join(tmpDir, "my-project", ".scion")
-	require.NoError(t, os.MkdirAll(groveScionDir, 0755))
+	// Git project .scion directory with grove-id file but NO grove_id in settings
+	projectScionDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectScionDir, 0755))
 
 	// Write the grove-id file (as initInRepoProject does)
-	require.NoError(t, WriteProjectID(groveScionDir, "project-grove-id-from-file"))
+	require.NoError(t, WriteProjectID(projectScionDir, "project-grove-id-from-file"))
 
-	// Create a minimal grove settings file in the external config dir
-	// (simulating ensureGroveSettingsFile which doesn't include grove_id)
-	groveConfigDir, err := GetGitProjectExternalConfigDir(groveScionDir)
+	// Create a minimal project settings file in the external config dir
+	// (simulating ensureProjectSettingsFile which doesn't include grove_id)
+	projectConfigDir, err := GetGitProjectExternalConfigDir(projectScionDir)
 	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(groveConfigDir, 0755))
-	groveSettings := `schema_version: "1"
+	require.NoError(t, os.MkdirAll(projectConfigDir, 0755))
+	projectSettings := `schema_version: "1"
 active_profile: local
 `
-	require.NoError(t, os.WriteFile(filepath.Join(groveConfigDir, "settings.yaml"), []byte(groveSettings), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectConfigDir, "settings.yaml"), []byte(projectSettings), 0644))
 
-	// Load settings for the project grove
-	s, err := LoadSettingsKoanf(groveScionDir)
+	// Load settings for the project
+	s, err := LoadSettingsKoanf(projectScionDir)
 	require.NoError(t, err)
 
 	// The grove-id file should take precedence over global hub.grove_id
@@ -647,7 +647,7 @@ active_profile: local
 
 func TestLoadSettingsKoanf_GlobalProjectIDDoesNotBleedIntoProject(t *testing.T) {
 	// Verifies that when global settings have hub.grove_id set (from linking
-	// the global grove) and a project grove also has its own hub.grove_id,
+	// the global project) and a project also has its own hub.grove_id,
 	// the project's value is used — not the global's.
 	tmpDir := t.TempDir()
 
@@ -672,16 +672,16 @@ hub:
 `
 	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(globalSettings), 0644))
 
-	// Project grove settings with hub.grove_id (v1 format)
-	groveDir := filepath.Join(tmpDir, "my-project", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
-	groveSettings := `schema_version: "1"
+	// Project settings with hub.grove_id (v1 format)
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+	projectSettings := `schema_version: "1"
 hub:
   grove_id: "project-grove-id"
 `
-	require.NoError(t, os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(groveSettings), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(projectSettings), 0644))
 
-	s, err := LoadSettingsKoanf(groveDir)
+	s, err := LoadSettingsKoanf(projectDir)
 	require.NoError(t, err)
 
 	// Project's hub.grove_id should override global's top-level grove_id
@@ -693,7 +693,7 @@ func TestLoadSettingsKoanf_V1HubProjectIDPopulatesGetHubProjectID(t *testing.T) 
 	// Verifies that hub.grove_id (snake_case, V1 format) is remapped to
 	// hub.groveId (camelCase) so that GetHubProjectID() returns the correct
 	// value. Without this remapping, EnsureHubReady falls back to the local
-	// grove_id and loops on grove registration when the IDs differ.
+	// grove_id and loops on project registration when the IDs differ.
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
@@ -711,19 +711,19 @@ func TestLoadSettingsKoanf_V1HubProjectIDPopulatesGetHubProjectID(t *testing.T) 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
 
-	groveDir := filepath.Join(tmpDir, "my-project", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	// V1 format settings with hub.grove_id set (the hub grove ID)
-	groveSettings := `schema_version: "1"
+	projectSettings := `schema_version: "1"
 hub:
   enabled: true
   endpoint: "https://hub.example.com"
   grove_id: "hub-grove-uuid-972dd7f5"
 `
-	require.NoError(t, os.WriteFile(filepath.Join(groveDir, "settings.yaml"), []byte(groveSettings), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(projectSettings), 0644))
 
-	s, err := LoadSettingsKoanf(groveDir)
+	s, err := LoadSettingsKoanf(projectDir)
 	require.NoError(t, err)
 
 	// GetHubProjectID() must return the hub grove ID from V1's hub.grove_id
@@ -732,7 +732,7 @@ hub:
 }
 
 func TestLoadSettingsKoanf_V1HubProjectIDWithMarkerFile(t *testing.T) {
-	// When a git grove has both a grove-id marker file (local deterministic ID)
+	// When a git project has both a grove-id marker file (local deterministic ID)
 	// and hub.grove_id in V1 settings (hub grove ID), the two must be distinct:
 	// - settings.ProjectID should be the local ID (from the marker file)
 	// - settings.GetHubProjectID() should be the hub ID (from hub.grove_id)
@@ -753,33 +753,33 @@ func TestLoadSettingsKoanf_V1HubProjectIDWithMarkerFile(t *testing.T) {
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
 
-	groveScionDir := filepath.Join(tmpDir, "my-project", ".scion")
-	require.NoError(t, os.MkdirAll(groveScionDir, 0755))
+	projectScionDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectScionDir, 0755))
 
 	// Write grove-id marker file with local deterministic ID
-	require.NoError(t, WriteProjectID(groveScionDir, "local-deterministic-id"))
+	require.NoError(t, WriteProjectID(projectScionDir, "local-deterministic-id"))
 
-	// For git groves, settings are stored in the external config dir.
+	// For git projects, settings are stored in the external config dir.
 	// Write V1 settings with hub.grove_id pointing to a different hub grove.
-	groveConfigDir, err := GetGitProjectExternalConfigDir(groveScionDir)
+	projectConfigDir, err := GetGitProjectExternalConfigDir(projectScionDir)
 	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(groveConfigDir, 0755))
-	groveSettings := `schema_version: "1"
+	require.NoError(t, os.MkdirAll(projectConfigDir, 0755))
+	projectSettings := `schema_version: "1"
 hub:
   enabled: true
   endpoint: "https://hub.example.com"
   grove_id: "hub-grove-uuid-different"
 `
-	require.NoError(t, os.WriteFile(filepath.Join(groveConfigDir, "settings.yaml"), []byte(groveSettings), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectConfigDir, "settings.yaml"), []byte(projectSettings), 0644))
 
-	s, err := LoadSettingsKoanf(groveScionDir)
+	s, err := LoadSettingsKoanf(projectScionDir)
 	require.NoError(t, err)
 
 	// ProjectID should come from the marker file (local deterministic ID)
 	assert.Equal(t, "local-deterministic-id", s.ProjectID,
 		"ProjectID should come from grove-id marker file")
 
-	// GetHubProjectID() should return the hub grove ID from V1 settings
+	// GetHubProjectID() should return the hub project ID from V1 settings
 	assert.Equal(t, "hub-grove-uuid-different", s.GetHubProjectID(),
-		"GetHubProjectID() should return the hub grove ID, distinct from local grove_id")
+		"GetHubProjectID() should return the hub project ID, distinct from local grove_id")
 }

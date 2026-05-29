@@ -80,14 +80,14 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 }
 
 // FindHarnessConfigDir resolves a harness-config by name, checking template-level,
-// grove-level, then global directories.
+// project-level, then global directories.
 // Optional templatePaths specify template directories whose harness-configs/
 // subdirectories are checked first (highest precedence), per the harness-agnostic
 // template design (§3.4).
-func FindHarnessConfigDir(name string, grovePath string, templatePaths ...string) (*HarnessConfigDir, error) {
+func FindHarnessConfigDir(name string, projectPath string, templatePaths ...string) (*HarnessConfigDir, error) {
 	// Check template-level first (highest precedence).
 	// If the directory exists but is invalid (e.g. missing config.yaml),
-	// fall through to grove/global rather than returning an error.
+	// fall through to project/global rather than returning an error.
 	for _, tplPath := range templatePaths {
 		tplHarnessConfigDir := filepath.Join(tplPath, harnessConfigsDirName, name)
 		if info, err := os.Stat(tplHarnessConfigDir); err == nil && info.IsDir() {
@@ -97,11 +97,11 @@ func FindHarnessConfigDir(name string, grovePath string, templatePaths ...string
 		}
 	}
 
-	// Check grove-level
-	if grovePath != "" {
-		groveHarnessConfigDir := filepath.Join(grovePath, harnessConfigsDirName, name)
-		if info, err := os.Stat(groveHarnessConfigDir); err == nil && info.IsDir() {
-			if hcDir, err := LoadHarnessConfigDir(groveHarnessConfigDir); err == nil {
+	// Check project-level
+	if projectPath != "" {
+		projectHarnessConfigDir := filepath.Join(projectPath, harnessConfigsDirName, name)
+		if info, err := os.Stat(projectHarnessConfigDir); err == nil && info.IsDir() {
+			if hcDir, err := LoadHarnessConfigDir(projectHarnessConfigDir); err == nil {
 				return hcDir, nil
 			}
 		}
@@ -132,8 +132,8 @@ func FindHarnessConfigDir(name string, grovePath string, templatePaths ...string
 }
 
 // ListHarnessConfigDirs lists all available harness-configs.
-// Grove-level configs take precedence over global configs with the same name.
-func ListHarnessConfigDirs(grovePath string) ([]*HarnessConfigDir, error) {
+// Project-level configs take precedence over global configs with the same name.
+func ListHarnessConfigDirs(projectPath string) ([]*HarnessConfigDir, error) {
 	seen := make(map[string]*HarnessConfigDir)
 
 	// Load global configs first (lower precedence)
@@ -142,9 +142,9 @@ func ListHarnessConfigDirs(grovePath string) ([]*HarnessConfigDir, error) {
 		loadHarnessConfigsFromDir(filepath.Join(globalDir, harnessConfigsDirName), seen)
 	}
 
-	// Load grove-level configs (higher precedence, overwrites global)
-	if grovePath != "" {
-		loadHarnessConfigsFromDir(filepath.Join(grovePath, harnessConfigsDirName), seen)
+	// Load project-level configs (higher precedence, overwrites global)
+	if projectPath != "" {
+		loadHarnessConfigsFromDir(filepath.Join(projectPath, harnessConfigsDirName), seen)
 	}
 
 	// Sort by name for deterministic output

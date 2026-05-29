@@ -95,8 +95,8 @@ func DiscoverProjects() ([]ProjectInfo, error) {
 	projects = scanConfigDir(projects, projectConfigsDir, seenSlugs)
 
 	// 3. Scan legacy grove-configs directory
-	groveConfigsDir := filepath.Join(home, GlobalDir, GroveConfigsDir)
-	projects = scanConfigDir(projects, groveConfigsDir, seenSlugs)
+	legacyConfigsDir := filepath.Join(home, GlobalDir, GroveConfigsDir)
+	projects = scanConfigDir(projects, legacyConfigsDir, seenSlugs)
 
 	return projects, nil
 }
@@ -362,9 +362,9 @@ func RemoveProjectConfig(configPath string) error {
 		return err
 	}
 	projectConfigsDir := filepath.Join(home, GlobalDir, ProjectConfigsDir)
-	groveConfigsDir := filepath.Join(home, GlobalDir, GroveConfigsDir)
+	legacyConfigsDir := filepath.Join(home, GlobalDir, GroveConfigsDir)
 
-	if !strings.HasPrefix(parent, projectConfigsDir) && !strings.HasPrefix(parent, groveConfigsDir) {
+	if !strings.HasPrefix(parent, projectConfigsDir) && !strings.HasPrefix(parent, legacyConfigsDir) {
 		return os.ErrPermission
 	}
 

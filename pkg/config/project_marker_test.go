@@ -330,7 +330,7 @@ func TestGetGitProjectExternalAgentsDir(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Create a simulated git grove .scion dir with grove-id
+	// Create a simulated git project .scion dir with grove-id
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	os.MkdirAll(projectDir, 0755)
 	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
@@ -363,11 +363,11 @@ func TestGetGitProjectExternalAgentsDir_NoProjectID(t *testing.T) {
 	}
 }
 
-func TestGetAgentHomePath_GitGroveSplitStorage(t *testing.T) {
+func TestGetAgentHomePath_GitProjectSplitStorage(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Create a git grove with grove-id (split storage)
+	// Create a git project with grove-id (split storage)
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	os.MkdirAll(projectDir, 0755)
 	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
@@ -398,7 +398,7 @@ func TestGetAgentDir_SharedWorkspaceUsesExternal(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Git grove with grove-id (split storage)
+	// Git project with grove-id (split storage)
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	os.MkdirAll(projectDir, 0755)
 	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
@@ -414,7 +414,7 @@ func TestGetAgentDir_WorktreeModeStaysInProject(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Git grove with grove-id (split storage), but caller is NOT shared-workspace
+	// Git project with grove-id (split storage), but caller is NOT shared-workspace
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
 	os.MkdirAll(projectDir, 0755)
 	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
@@ -464,7 +464,7 @@ func TestResolveAgentDir_PrefersExternalWhenScionAgentJSONExists(t *testing.T) {
 	}
 }
 
-func TestResolveAgentDir_FallsBackToInGroveWhenExternalAbsent(t *testing.T) {
+func TestResolveAgentDir_FallsBackToInProjectWhenExternalAbsent(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
@@ -472,7 +472,7 @@ func TestResolveAgentDir_FallsBackToInGroveWhenExternalAbsent(t *testing.T) {
 	os.MkdirAll(projectDir, 0755)
 	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
-	// Worktree-mode layout: scion-agent.json lives in-grove, only home/ is external.
+	// Worktree-mode layout: scion-agent.json lives in-project, only home/ is external.
 	// (We do not create the external scion-agent.json.)
 	got := ResolveAgentDir(projectDir, "test-agent")
 	want := filepath.Join(projectDir, "agents", "test-agent")

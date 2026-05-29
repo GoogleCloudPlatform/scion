@@ -259,10 +259,10 @@ func mergeMaps(base, override map[string]string) map[string]string {
 }
 
 // LoadSettings loads and merges settings from the hierarchy using Koanf.
-// Priority: Env vars > Grove > Global > Defaults
+// Priority: Env vars > Project > Global > Defaults
 // Supports both YAML (.yaml/.yml) and JSON (.json) files, preferring YAML.
-func LoadSettings(grovePath string) (*Settings, error) {
-	return LoadSettingsKoanf(grovePath)
+func LoadSettings(projectPath string) (*Settings, error) {
+	return LoadSettingsKoanf(projectPath)
 }
 
 func mergeSettingsFromFile(base *Settings, path string) error {
@@ -470,7 +470,7 @@ func MergeSettings(base *Settings, data []byte) error {
 }
 
 // SaveSettings saves the settings to the specified location in YAML format.
-func SaveSettings(grovePath string, settings *Settings, global bool) error {
+func SaveSettings(projectPath string, settings *Settings, global bool) error {
 	var targetPath string
 	if global {
 		globalDir, err := GetGlobalDir()
@@ -479,10 +479,10 @@ func SaveSettings(grovePath string, settings *Settings, global bool) error {
 		}
 		targetPath = filepath.Join(globalDir, "settings.yaml")
 	} else {
-		if grovePath == "" {
-			return fmt.Errorf("grove path required for local settings")
+		if projectPath == "" {
+			return fmt.Errorf("project path required for local settings")
 		}
-		targetPath = filepath.Join(grovePath, "settings.yaml")
+		targetPath = filepath.Join(projectPath, "settings.yaml")
 	}
 
 	dir := filepath.Dir(targetPath)
@@ -500,7 +500,7 @@ func SaveSettings(grovePath string, settings *Settings, global bool) error {
 
 // SaveSettingsJSON saves the settings to the specified location in JSON format.
 // This is provided for backward compatibility.
-func SaveSettingsJSON(grovePath string, settings *Settings, global bool) error {
+func SaveSettingsJSON(projectPath string, settings *Settings, global bool) error {
 	var targetPath string
 	if global {
 		globalDir, err := GetGlobalDir()
@@ -509,10 +509,10 @@ func SaveSettingsJSON(grovePath string, settings *Settings, global bool) error {
 		}
 		targetPath = filepath.Join(globalDir, "settings.json")
 	} else {
-		if grovePath == "" {
-			return fmt.Errorf("grove path required for local settings")
+		if projectPath == "" {
+			return fmt.Errorf("project path required for local settings")
 		}
-		targetPath = filepath.Join(grovePath, "settings.json")
+		targetPath = filepath.Join(projectPath, "settings.json")
 	}
 
 	dir := filepath.Dir(targetPath)
@@ -532,7 +532,7 @@ func SaveSettingsJSON(grovePath string, settings *Settings, global bool) error {
 // It reads from existing settings file (YAML or JSON) and writes to YAML format.
 // If the existing file is in v1 versioned format (has schema_version), it delegates
 // to UpdateVersionedSetting to preserve the format.
-func UpdateSetting(grovePath string, key string, value string, global bool) error {
+func UpdateSetting(projectPath string, key string, value string, global bool) error {
 	var dir string
 	if global {
 		globalDir, err := GetGlobalDir()
@@ -541,22 +541,22 @@ func UpdateSetting(grovePath string, key string, value string, global bool) erro
 		}
 		dir = globalDir
 	} else {
-		if grovePath == "" {
-			return fmt.Errorf("grove path required for local settings")
+		if projectPath == "" {
+			return fmt.Errorf("project path required for local settings")
 		}
-		// Resolve through GetProjectConfigDir so that git groves with split
+		// Resolve through GetProjectConfigDir so that git projects with split
 		// storage write to the external config dir (~/.scion/project-configs/…)
 		// — the same location LoadSettingsKoanf reads from.
-		dir = GetProjectConfigDir(grovePath)
+		dir = GetProjectConfigDir(projectPath)
 
 		// Phase 5: Migrate .scion/grove-id to project-id if it exists.
 		// This ensures that subsequent reads prefer the new filename.
-		if grovePath != "" {
-			groveIDFile := filepath.Join(grovePath, "grove-id")
-			projectIDFile := filepath.Join(grovePath, "project-id")
-			if _, err := os.Stat(groveIDFile); err == nil {
+		if projectPath != "" {
+			legacyIDFile := filepath.Join(projectPath, "grove-id")
+			projectIDFile := filepath.Join(projectPath, "project-id")
+			if _, err := os.Stat(legacyIDFile); err == nil {
 				if _, err := os.Stat(projectIDFile); os.IsNotExist(err) {
-					_ = os.Rename(groveIDFile, projectIDFile)
+					_ = os.Rename(legacyIDFile, projectIDFile)
 				}
 			}
 		}
@@ -983,8 +983,8 @@ func (s *Settings) IsHubEnabled() bool {
 	return s.Hub.Enabled != nil && *s.Hub.Enabled
 }
 
-// IsHubLinked returns true if this grove has been explicitly linked to the Hub
-// via 'scion hub link'. A grove can be hub-enabled without being linked.
+// IsHubLinked returns true if this project has been explicitly linked to the Hub
+// via 'scion hub link'. A project can be hub-enabled without being linked.
 func (s *Settings) IsHubLinked() bool {
 	return s.Hub != nil && s.Hub.Linked != nil && *s.Hub.Linked
 }
@@ -995,7 +995,7 @@ func (s *Settings) IsHubExplicitlyDisabled() bool {
 	return s.Hub != nil && s.Hub.Enabled != nil && !*s.Hub.Enabled
 }
 
-// IsHubLocalOnly returns true if the grove is configured for local-only mode.
+// IsHubLocalOnly returns true if the project is configured for local-only mode.
 // When true, Hub sync checks will error with guidance to use --no-hub.
 func (s *Settings) IsHubLocalOnly() bool {
 	return s.Hub != nil && s.Hub.LocalOnly != nil && *s.Hub.LocalOnly
@@ -1003,7 +1003,7 @@ func (s *Settings) IsHubLocalOnly() bool {
 
 // DeleteHubConnection removes a hub connection entry from settings at the specified scope.
 // It loads the existing settings file, removes the named connection, and saves.
-func DeleteHubConnection(grovePath string, name string, global bool) error {
+func DeleteHubConnection(projectPath string, name string, global bool) error {
 	var dir string
 	if global {
 		globalDir, err := GetGlobalDir()
@@ -1012,13 +1012,13 @@ func DeleteHubConnection(grovePath string, name string, global bool) error {
 		}
 		dir = globalDir
 	} else {
-		if grovePath == "" {
-			return fmt.Errorf("grove path required for local settings")
+		if projectPath == "" {
+			return fmt.Errorf("project path required for local settings")
 		}
-		// Resolve through GetProjectConfigDir so that git groves with split
+		// Resolve through GetProjectConfigDir so that git projects with split
 		// storage write to the external config dir (~/.scion/project-configs/…)
 		// — the same location LoadSettingsKoanf reads from.
-		dir = GetProjectConfigDir(grovePath)
+		dir = GetProjectConfigDir(projectPath)
 	}
 
 	existingPath := GetSettingsPath(dir)
