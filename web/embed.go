@@ -25,5 +25,15 @@ import "embed"
 //go:embed all:dist/client
 var ClientAssets embed.FS
 
+// sentinel forces a compile-time error if the web assets have not been built.
+// If you see an error here, run 'make web' or build with '-tags no_embed_web'.
+//
+//go:embed dist/client/assets/main.js
+var sentinel []byte
+
 // AssetsEmbedded indicates whether client assets are embedded in the binary.
 var AssetsEmbedded = true
+
+func init() {
+	_ = sentinel // Mark as used
+}

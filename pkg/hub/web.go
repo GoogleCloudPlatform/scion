@@ -873,9 +873,20 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 }
 
 // hasWebAssets reports whether the server has web assets available to serve,
-// either from an embedded FS or a filesystem directory.
+// either from an embedded FS or a filesystem directory. It verifies the
+// presence of the core entry point (assets/main.js) to ensure the UI is
+// actually built and ready to serve.
 func (ws *WebServer) hasWebAssets() bool {
-	return ws.assets != nil || ws.assetsDisk != ""
+	if ws.assetsDisk != "" {
+		p := filepath.Join(ws.assetsDisk, "assets", "main.js")
+		_, err := os.Stat(p)
+		return err == nil
+	}
+	if ws.assets != nil {
+		_, err := fs.Stat(ws.assets, "assets/main.js")
+		return err == nil
+	}
+	return false
 }
 
 // spaHandler returns the SPA shell HTML for any route not matched by other handlers.

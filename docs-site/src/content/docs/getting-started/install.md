@@ -64,11 +64,13 @@ Ensure your `$GOPATH/bin` (typically `~/go/bin`) is in your system `$PATH`.
 If you have the repository cloned, you can use the provided `Makefile`:
 
 ```bash
-make build
-# This creates a 'scion' binary in the build directory.
-# You can move it to a directory in your PATH:
-sudo mv ./build/scion /usr/local/bin/
+make all
+# This builds the web frontend and installs the 'scion' binary
+# to ~/.local/bin/ with the UI assets embedded.
+# You can add ~/.local/bin/ to your PATH, or `mv` the binary to another directory in your PATH
 ```
+
+Alternatively, if you don't need the web UI, you can build the CLI-only version using the no_embed_web tag: go build -tags no_embed_web -o ./build/scion ./cmd/scion (the web UI will show a placeholder page).
 
 To verify your installation, run:
 

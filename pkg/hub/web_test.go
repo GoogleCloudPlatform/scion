@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/web"
 	"github.com/gorilla/securecookie"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,6 +41,15 @@ type mockWebStore struct {
 
 func newTestWebServer(t *testing.T, cfg WebServerConfig) *WebServer {
 	t.Helper()
+	// Ensure hasWebAssets() returns true for tests unless they explicitly want
+	// to test the "no assets" case.
+	if cfg.AssetsDir == "" && !web.AssetsEmbedded {
+		tmpDir := t.TempDir()
+		assetsDir := filepath.Join(tmpDir, "assets")
+		os.MkdirAll(assetsDir, 0755)
+		os.WriteFile(filepath.Join(assetsDir, "main.js"), []byte("// test"), 0644)
+		cfg.AssetsDir = tmpDir
+	}
 	return NewWebServer(cfg)
 }
 
@@ -53,7 +63,7 @@ func newDevAuthWebServer(t *testing.T, overrides ...func(*WebServerConfig)) *Web
 	for _, fn := range overrides {
 		fn(&cfg)
 	}
-	return NewWebServer(cfg)
+	return newTestWebServer(t, cfg)
 }
 
 func TestSPAShellHandler(t *testing.T) {
@@ -286,8 +296,13 @@ func TestSPAHandler_NoAssets_APIStillWorks(t *testing.T) {
 }
 
 func TestSPAHandler_WithAssets_ServesNormalShell(t *testing.T) {
+	tmpDir := t.TempDir()
+	assetsDir := filepath.Join(tmpDir, "assets")
+	os.MkdirAll(assetsDir, 0755)
+	os.WriteFile(filepath.Join(assetsDir, "main.js"), []byte("// test"), 0644)
+
 	ws := newDevAuthWebServer(t, func(cfg *WebServerConfig) {
-		cfg.AssetsDir = t.TempDir()
+		cfg.AssetsDir = tmpDir
 	})
 
 	req := httptest.NewRequest("GET", "/", nil)
