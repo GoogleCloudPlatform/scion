@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 )
@@ -913,4 +914,43 @@ func TestBootstrapTemplatesFromDir_BackfillsDefaultHarnessConfig(t *testing.T) {
 	if tmpl.DefaultHarnessConfig != "claude-web" {
 		t.Errorf("expected DefaultHarnessConfig 'claude-web' after backfill, got %q", tmpl.DefaultHarnessConfig)
 	}
+}
+
+func TestFallbackDiag(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	projectID := "test-project-id"
+	project := &store.Project{
+		ID:        projectID,
+		Name:      "test-project",
+		Slug:      "test-project",
+		GitRemote: "https://github.com/chiefkarlin/scion-experiments",
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+
+	// Save GITHUB_TOKEN secret in GHub database
+	secInput := &secret.SetSecretInput{
+		Name:       "GITHUB_TOKEN",
+		Value:      "my-secret-token-12345",
+		SecretType: secret.TypeEnvironment,
+		Scope:      secret.ScopeProject,
+		ScopeID:    projectID,
+	}
+	// Initialize and set secret backend on test server
+	srv.SetSecretBackend(secret.NewLocalBackend(s, ""))
+	sb := srv.GetSecretBackend()
+	if sb == nil {
+		t.Fatal("secret backend is nil")
+	}
+	if _, _, err := sb.Set(ctx, secInput); err != nil {
+		t.Fatal(err)
+	}
+
+	// Trigger importTemplatesFromRemote. It will try to fetch and fail,
+	// but we will see the console log output for GITHUB_TOKEN resolution!
+	_, err := srv.importTemplatesFromRemote(ctx, projectID, "https://github.com/chiefkarlin/scion-experiments/templates")
+	t.Logf("Import failed as expected: %v", err)
 }

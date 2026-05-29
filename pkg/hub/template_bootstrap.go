@@ -450,6 +450,19 @@ func (s *Server) importTemplatesFromRemote(ctx context.Context, projectID, sourc
 		}
 	}
 
+	// Fall back to project GITHUB_TOKEN secret if no App token minted
+	if authToken == "" {
+		if sb := s.GetSecretBackend(); sb != nil {
+			if sec, err := sb.Get(ctx, "GITHUB_TOKEN", store.ScopeProject, projectID); err == nil && sec != nil {
+				authToken = sec.Value
+			}
+		} else {
+			if val, err := s.store.GetSecretValue(ctx, "GITHUB_TOKEN", store.ScopeProject, projectID); err == nil {
+				authToken = val
+			}
+		}
+	}
+
 	// Fetch to a temporary directory
 	cachePath, err := config.FetchRemoteTemplate(ctx, sourceURL, authToken)
 	if err != nil {
