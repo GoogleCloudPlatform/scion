@@ -3255,8 +3255,8 @@ func TestBrokerHeartbeat_PropagatesTerminalActivityOnStoppedAgent(t *testing.T) 
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Project{ID: "grove-crash-hb", Name: "Crash HB Grove", Slug: "crash-hb-grove"}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	project := &store.Project{ID: "proj-crash-hb", Name: "Crash HB Project", Slug: "crash-hb-proj"}
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	broker := &store.RuntimeBroker{
 		ID: "broker-crash-hb", Name: "Crash HB Broker", Slug: "crash-hb-broker",
@@ -3266,7 +3266,7 @@ func TestBrokerHeartbeat_PropagatesTerminalActivityOnStoppedAgent(t *testing.T) 
 
 	agent := &store.Agent{
 		ID: "agent-crash-hb", Slug: "crash-hb-slug", Name: "Crash HB Agent",
-		ProjectID: grove.ID, RuntimeBrokerID: broker.ID,
+		ProjectID: project.ID, RuntimeBrokerID: broker.ID,
 		Phase: string(state.PhaseStopped),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -3277,7 +3277,7 @@ func TestBrokerHeartbeat_PropagatesTerminalActivityOnStoppedAgent(t *testing.T) 
 	hb := brokerHeartbeatRequest{
 		Status: "online",
 		Projects: []brokerProjectHeartbeat{{
-			ProjectID:  grove.ID,
+			ProjectID:  project.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,
@@ -3304,8 +3304,8 @@ func TestBrokerHeartbeat_DoesNotOverwriteTerminalActivityWithNonTerminal(t *test
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	grove := &store.Project{ID: "grove-term-guard", Name: "Term Guard Grove", Slug: "term-guard-grove"}
-	require.NoError(t, s.CreateProject(ctx, grove))
+	project := &store.Project{ID: "proj-term-guard", Name: "Term Guard Project", Slug: "term-guard-proj"}
+	require.NoError(t, s.CreateProject(ctx, project))
 
 	broker := &store.RuntimeBroker{
 		ID: "broker-term-guard", Name: "Term Guard Broker", Slug: "term-guard-broker",
@@ -3315,7 +3315,7 @@ func TestBrokerHeartbeat_DoesNotOverwriteTerminalActivityWithNonTerminal(t *test
 
 	agent := &store.Agent{
 		ID: "agent-term-guard", Slug: "term-guard-slug", Name: "Term Guard Agent",
-		ProjectID: grove.ID, RuntimeBrokerID: broker.ID,
+		ProjectID: project.ID, RuntimeBrokerID: broker.ID,
 		Phase:    string(state.PhaseStopped),
 		Activity: string(state.ActivityCrashed),
 	}
@@ -3325,7 +3325,7 @@ func TestBrokerHeartbeat_DoesNotOverwriteTerminalActivityWithNonTerminal(t *test
 	hb := brokerHeartbeatRequest{
 		Status: "online",
 		Projects: []brokerProjectHeartbeat{{
-			ProjectID:  grove.ID,
+			ProjectID:  project.ID,
 			AgentCount: 1,
 			Agents: []brokerAgentHeartbeat{{
 				Slug:     agent.Slug,

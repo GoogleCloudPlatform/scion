@@ -408,30 +408,30 @@ func (p *ChannelEventPublisher) PublishProjectDeleted(_ context.Context, project
 
 // PublishBrokerConnected publishes broker connection events, one per project the broker serves.
 func (p *ChannelEventPublisher) PublishBrokerConnected(_ context.Context, brokerID, brokerName string, projectIDs []string) {
-	for _, gid := range projectIDs {
+	for _, pid := range projectIDs {
 		evt := BrokerProjectEvent{
 			BrokerID:   brokerID,
 			BrokerName: brokerName,
-			ProjectID:  gid,
-			GroveID:    gid,
+			ProjectID:  pid,
+			GroveID:    pid,
 			Status:     "online",
 		}
-		p.publish("project."+gid+".broker.status", evt)
-		p.publish("grove."+gid+".broker.status", evt)
+		p.publish("project."+pid+".broker.status", evt)
+		p.publish("grove."+pid+".broker.status", evt)
 	}
 }
 
 // PublishBrokerDisconnected publishes broker disconnection events, one per project the broker serves.
 func (p *ChannelEventPublisher) PublishBrokerDisconnected(_ context.Context, brokerID string, projectIDs []string) {
-	for _, gid := range projectIDs {
+	for _, pid := range projectIDs {
 		evt := BrokerProjectEvent{
 			BrokerID:  brokerID,
-			ProjectID: gid,
-			GroveID:   gid,
+			ProjectID: pid,
+			GroveID:   pid,
 			Status:    "offline",
 		}
-		p.publish("project."+gid+".broker.status", evt)
-		p.publish("grove."+gid+".broker.status", evt)
+		p.publish("project."+pid+".broker.status", evt)
+		p.publish("grove."+pid+".broker.status", evt)
 	}
 }
 

@@ -506,9 +506,6 @@ type Server struct {
 
 	logQueryService *LogQueryService // Cloud Logging query service (nil = disabled)
 
-	// Telegram link service for code-based account linking (nil = disabled)
-	telegramLinkService *TelegramLinkService
-
 	// Channel registry for external notification delivery (nil = disabled)
 	channelRegistry *ChannelRegistry
 
@@ -635,9 +632,6 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize invite code service
 	srv.inviteService = NewInviteService(s, s)
-
-	// Initialize Telegram link service
-	srv.telegramLinkService = NewTelegramLinkService()
 
 	// Initialize OAuth service if configured
 	if cfg.OAuthConfig.IsConfigured() {
@@ -1968,9 +1962,6 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		if s.messageBrokerProxy != nil {
 			s.messageBrokerProxy.Stop()
 		}
-		if s.telegramLinkService != nil {
-			s.telegramLinkService.Close()
-		}
 		if s.events != nil {
 			s.events.Close()
 		}
@@ -2023,9 +2014,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/projects/", s.handleProjectRoutes)
 
 	// Aliases for /api/v1/groves -> /api/v1/projects (Phase 3)
-	s.mux.HandleFunc("/api/v1/groves", s.deprecateGroveEndpoint(s.handleProjects))
-	s.mux.HandleFunc("/api/v1/groves/register", s.deprecateGroveEndpoint(s.handleProjectRegister))
-	s.mux.HandleFunc("/api/v1/groves/", s.deprecateGroveEndpoint(s.handleProjectRoutes))
+	s.mux.HandleFunc("/api/v1/groves", s.deprecateLegacyEndpoint(s.handleProjects))
+	s.mux.HandleFunc("/api/v1/groves/register", s.deprecateLegacyEndpoint(s.handleProjectRegister))
+	s.mux.HandleFunc("/api/v1/groves/", s.deprecateLegacyEndpoint(s.handleProjectRoutes))
 
 	s.mux.HandleFunc("/api/v1/runtime-brokers", s.handleRuntimeBrokers)
 	s.mux.HandleFunc("/api/v1/runtime-brokers/", s.handleRuntimeBrokerRoutes)
@@ -2062,9 +2053,6 @@ func (s *Server) registerRoutes() {
 
 	// Broker plugin inbound message delivery
 	s.mux.HandleFunc("/api/v1/broker/inbound", s.handleBrokerInbound)
-
-	// Broker plugin project listing (fresh list for /setup flows)
-	s.mux.HandleFunc("/api/v1/broker/projects", s.handleBrokerProjects)
 
 	// Admin system endpoints
 	s.mux.HandleFunc("/api/v1/admin/maintenance", s.handleAdminMaintenance)
@@ -2104,11 +2092,6 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/github-app/installations/", s.handleGitHubAppInstallations)
 	s.mux.HandleFunc("/api/v1/github-app/installations/discover", s.handleGitHubAppDiscover)
 	s.mux.HandleFunc("/api/v1/github-app/sync-permissions", s.handleGitHubAppSyncPermissions)
-
-	// Telegram account linking endpoints
-	s.mux.HandleFunc("/api/v1/telegram/link", s.handleTelegramLink)
-	s.mux.HandleFunc("/api/v1/telegram/link/verify", s.handleTelegramLinkVerify)
-	s.mux.HandleFunc("/api/v1/telegram/link/status", s.handleTelegramLinkStatus)
 
 	// GitHub App webhook and setup callback (unauthenticated — uses webhook signature)
 	s.mux.HandleFunc("/api/v1/webhooks/github", s.handleGitHubWebhook)
@@ -2349,8 +2332,9 @@ func extractAction(r *http.Request, prefix string) (id, action string) {
 	return
 }
 
-// deprecateGroveEndpoint wraps an http.HandlerFunc with deprecation headers.
-func (s *Server) deprecateGroveEndpoint(h http.HandlerFunc) http.HandlerFunc {
+// deprecateLegacyEndpoint wraps an http.HandlerFunc with deprecation headers
+// for legacy /groves/ endpoints that have been renamed to /projects/.
+func (s *Server) deprecateLegacyEndpoint(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Deprecation", "true")
 		w.Header().Set("Sunset", "Sun, 01 Nov 2026 00:00:00 GMT")

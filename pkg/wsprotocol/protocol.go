@@ -290,13 +290,13 @@ func ParseEnvelope(data []byte) (*Envelope, error) {
 }
 
 // NewConnectMessage creates a connect message for a runtime broker.
-func NewConnectMessage(brokerID, version string, groves []string) *ConnectMessage {
+func NewConnectMessage(brokerID, version string, projectIDs []string) *ConnectMessage {
 	return &ConnectMessage{
 		Type:      TypeConnect,
 		BrokerID:  brokerID,
 		Version:   version,
-		Groves:    groves,
-		Projects:  groves,
+		Groves:    projectIDs,
+		Projects:  projectIDs,
 		Timestamp: time.Now().Unix(),
 	}
 }
