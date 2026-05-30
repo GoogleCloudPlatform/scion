@@ -200,46 +200,72 @@ func New(ctx context.Context, cfg Config) (Storage, error) {
 	}
 }
 
+// ResourceKind identifies a storable, file-based resource type. The grove→project
+// resource-storage refactor (§7.3) is collapsing the parallel template and
+// harness-config storage code onto a single kind-keyed implementation; this is
+// the first shared seam — the storage-path layout.
+type ResourceKind string
+
+const (
+	// ResourceKindTemplate is a provisioning template.
+	ResourceKindTemplate ResourceKind = "template"
+	// ResourceKindHarnessConfig is a harness configuration bundle.
+	ResourceKindHarnessConfig ResourceKind = "harness-config"
+)
+
+// resourcePrefix returns the top-level storage prefix for a resource kind.
+func resourcePrefix(kind ResourceKind) string {
+	switch kind {
+	case ResourceKindHarnessConfig:
+		return "harness-configs"
+	default:
+		return "templates"
+	}
+}
+
+// ResourceStoragePath returns the storage path for a file-based resource of the
+// given kind, organized by scope. This is the single source of truth for the
+// scope layout shared by all resource kinds; the per-kind helpers below delegate
+// to it.
+func ResourceStoragePath(kind ResourceKind, scope, scopeID, slug string) string {
+	prefix := resourcePrefix(kind)
+	switch scope {
+	case "global":
+		return prefix + "/global/" + slug
+	case "grove", "project":
+		return prefix + "/groves/" + scopeID + "/" + slug
+	case "user":
+		return prefix + "/users/" + scopeID + "/" + slug
+	default:
+		return prefix + "/" + slug
+	}
+}
+
+// ResourceStorageURI returns the full bucket URI for a file-based resource.
+func ResourceStorageURI(bucket string, kind ResourceKind, scope, scopeID, slug string) string {
+	return "gs://" + bucket + "/" + ResourceStoragePath(kind, scope, scopeID, slug) + "/"
+}
+
 // TemplateStoragePath returns the storage path for a template.
 // Templates are stored under the /templates prefix with scope-based organization.
 func TemplateStoragePath(scope, scopeID, templateSlug string) string {
-	switch scope {
-	case "global":
-		return "templates/global/" + templateSlug
-	case "grove", "project":
-		return "templates/groves/" + scopeID + "/" + templateSlug
-	case "user":
-		return "templates/users/" + scopeID + "/" + templateSlug
-	default:
-		return "templates/" + templateSlug
-	}
+	return ResourceStoragePath(ResourceKindTemplate, scope, scopeID, templateSlug)
 }
 
 // TemplateStorageURI returns the full storage URI for a template.
 func TemplateStorageURI(bucket, scope, scopeID, templateSlug string) string {
-	path := TemplateStoragePath(scope, scopeID, templateSlug)
-	return "gs://" + bucket + "/" + path + "/"
+	return ResourceStorageURI(bucket, ResourceKindTemplate, scope, scopeID, templateSlug)
 }
 
 // HarnessConfigStoragePath returns the storage path for a harness config.
 // Harness configs are stored under the /harness-configs prefix with scope-based organization.
 func HarnessConfigStoragePath(scope, scopeID, slug string) string {
-	switch scope {
-	case "global":
-		return "harness-configs/global/" + slug
-	case "grove", "project":
-		return "harness-configs/groves/" + scopeID + "/" + slug
-	case "user":
-		return "harness-configs/users/" + scopeID + "/" + slug
-	default:
-		return "harness-configs/" + slug
-	}
+	return ResourceStoragePath(ResourceKindHarnessConfig, scope, scopeID, slug)
 }
 
 // HarnessConfigStorageURI returns the full storage URI for a harness config.
 func HarnessConfigStorageURI(bucket, scope, scopeID, slug string) string {
-	path := HarnessConfigStoragePath(scope, scopeID, slug)
-	return "gs://" + bucket + "/" + path + "/"
+	return ResourceStorageURI(bucket, ResourceKindHarnessConfig, scope, scopeID, slug)
 }
 
 // WorkspaceStoragePath returns the storage path for an agent's workspace.

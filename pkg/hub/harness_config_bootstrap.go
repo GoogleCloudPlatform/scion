@@ -134,32 +134,7 @@ func (s *Server) bootstrapSingleHarnessConfigScoped(ctx context.Context, name, d
 		return err
 	}
 
-	var hcFiles []store.TemplateFile
-	for _, fi := range files {
-		objectPath := storagePath + "/" + fi.Path
-
-		f, err := os.Open(fi.FullPath)
-		if err != nil {
-			s.templateLog.Warn("harness config bootstrap: failed to open file, skipping",
-				"file", fi.Path, "error", err)
-			continue
-		}
-
-		_, err = stor.Upload(ctx, objectPath, f, storage.UploadOptions{})
-		f.Close()
-		if err != nil {
-			s.templateLog.Warn("harness config bootstrap: failed to upload file, skipping",
-				"file", fi.Path, "error", err)
-			continue
-		}
-
-		hcFiles = append(hcFiles, store.TemplateFile{
-			Path: fi.Path,
-			Size: fi.Size,
-			Hash: fi.Hash,
-			Mode: fi.Mode,
-		})
-	}
+	hcFiles, _ := uploadResourceFiles(ctx, stor, storagePath, files, s.templateLog, "harness config bootstrap")
 
 	contentHash := computeContentHash(hcFiles)
 	hc.Files = hcFiles
@@ -207,32 +182,7 @@ func (s *Server) syncExistingHarnessConfig(ctx context.Context, existing *store.
 		storagePath = storage.HarnessConfigStoragePath(existing.Scope, "", existing.Slug)
 	}
 
-	var uploadedFiles []store.TemplateFile
-	for _, fi := range files {
-		objectPath := storagePath + "/" + fi.Path
-
-		f, err := os.Open(fi.FullPath)
-		if err != nil {
-			s.templateLog.Warn("harness config bootstrap: failed to open file, skipping",
-				"file", fi.Path, "error", err)
-			continue
-		}
-
-		_, err = stor.Upload(ctx, objectPath, f, storage.UploadOptions{})
-		f.Close()
-		if err != nil {
-			s.templateLog.Warn("harness config bootstrap: failed to upload file, skipping",
-				"file", fi.Path, "error", err)
-			continue
-		}
-
-		uploadedFiles = append(uploadedFiles, store.TemplateFile{
-			Path: fi.Path,
-			Size: fi.Size,
-			Hash: fi.Hash,
-			Mode: fi.Mode,
-		})
-	}
+	uploadedFiles, _ := uploadResourceFiles(ctx, stor, storagePath, files, s.templateLog, "harness config bootstrap")
 
 	existing.Files = uploadedFiles
 	existing.ContentHash = newHash

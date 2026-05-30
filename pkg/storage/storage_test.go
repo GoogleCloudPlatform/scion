@@ -73,6 +73,69 @@ func TestTemplateStorageURI(t *testing.T) {
 	}
 }
 
+func TestResourceStoragePath(t *testing.T) {
+	tests := []struct {
+		name    string
+		kind    ResourceKind
+		scope   string
+		scopeID string
+		slug    string
+		want    string
+	}{
+		{"template global", ResourceKindTemplate, "global", "", "t1", "templates/global/t1"},
+		{"template project", ResourceKindTemplate, "project", "p-1", "t1", "templates/groves/p-1/t1"},
+		{"template grove (legacy)", ResourceKindTemplate, "grove", "g-1", "t1", "templates/groves/g-1/t1"},
+		{"template user", ResourceKindTemplate, "user", "u-1", "t1", "templates/users/u-1/t1"},
+		{"template default", ResourceKindTemplate, "weird", "", "t1", "templates/t1"},
+		{"harness-config global", ResourceKindHarnessConfig, "global", "", "h1", "harness-configs/global/h1"},
+		{"harness-config project", ResourceKindHarnessConfig, "project", "p-1", "h1", "harness-configs/groves/p-1/h1"},
+		{"harness-config grove (legacy)", ResourceKindHarnessConfig, "grove", "g-1", "h1", "harness-configs/groves/g-1/h1"},
+		{"harness-config user", ResourceKindHarnessConfig, "user", "u-1", "h1", "harness-configs/users/u-1/h1"},
+		{"harness-config default", ResourceKindHarnessConfig, "weird", "", "h1", "harness-configs/h1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ResourceStoragePath(tt.kind, tt.scope, tt.scopeID, tt.slug); got != tt.want {
+				t.Errorf("ResourceStoragePath(%q, %q, %q, %q) = %q, want %q",
+					tt.kind, tt.scope, tt.scopeID, tt.slug, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestResourceStoragePathWrappers pins the legacy per-kind path/URI helpers to
+// the shared kind-keyed implementation, so the refactor that made them thin
+// wrappers cannot silently change the on-storage layout for either kind.
+func TestResourceStoragePathWrappers(t *testing.T) {
+	const bucket = "b"
+	cases := []struct{ scope, scopeID, slug string }{
+		{"global", "", "x"},
+		{"project", "p-1", "x"},
+		{"grove", "g-1", "x"},
+		{"user", "u-1", "x"},
+		{"weird", "", "x"},
+	}
+	for _, c := range cases {
+		if got, want := TemplateStoragePath(c.scope, c.scopeID, c.slug),
+			ResourceStoragePath(ResourceKindTemplate, c.scope, c.scopeID, c.slug); got != want {
+			t.Errorf("TemplateStoragePath(%q,%q,%q) = %q, want %q", c.scope, c.scopeID, c.slug, got, want)
+		}
+		if got, want := HarnessConfigStoragePath(c.scope, c.scopeID, c.slug),
+			ResourceStoragePath(ResourceKindHarnessConfig, c.scope, c.scopeID, c.slug); got != want {
+			t.Errorf("HarnessConfigStoragePath(%q,%q,%q) = %q, want %q", c.scope, c.scopeID, c.slug, got, want)
+		}
+		if got, want := TemplateStorageURI(bucket, c.scope, c.scopeID, c.slug),
+			ResourceStorageURI(bucket, ResourceKindTemplate, c.scope, c.scopeID, c.slug); got != want {
+			t.Errorf("TemplateStorageURI = %q, want %q", got, want)
+		}
+		if got, want := HarnessConfigStorageURI(bucket, c.scope, c.scopeID, c.slug),
+			ResourceStorageURI(bucket, ResourceKindHarnessConfig, c.scope, c.scopeID, c.slug); got != want {
+			t.Errorf("HarnessConfigStorageURI = %q, want %q", got, want)
+		}
+	}
+}
+
 func TestWorkspaceStoragePath(t *testing.T) {
 	tests := []struct {
 		name      string

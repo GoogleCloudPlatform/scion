@@ -17,12 +17,15 @@ package hub
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
 // generateUploadURLs generates signed PUT URLs for a list of files under basePath.
@@ -88,6 +91,70 @@ type fileNotFoundError struct {
 
 func (e *fileNotFoundError) Error() string {
 	return "file not found: " + e.path
+}
+
+// uploadResourceFiles uploads a collected directory of resource files to the
+// storage backend under storagePath, one object per file. It returns the
+// manifest of successfully uploaded files and the set of object paths written
+// (used by callers that reconcile stale objects). Per-file open/upload failures
+// are logged and skipped — matching the bootstrap behavior this consolidates —
+// so the loop never fails as a whole. label prefixes the warn messages
+// ("template bootstrap" / "harness config bootstrap").
+//
+// This is shared bootstrap mechanics for the resource-storage refactor (§7.3):
+// templates and harness-configs both route their import/sync upload loop through
+// it, and it is the basis for a future ResourceStore.Bootstrap.
+func uploadResourceFiles(ctx context.Context, stor storage.Storage, storagePath string, files []transfer.FileInfo, log *slog.Logger, label string) ([]store.TemplateFile, map[string]struct{}) {
+	var uploaded []store.TemplateFile
+	written := make(map[string]struct{}, len(files))
+	for _, fi := range files {
+		objectPath := storagePath + "/" + fi.Path
+
+		f, err := os.Open(fi.FullPath)
+		if err != nil {
+			log.Warn(label+": failed to open file, skipping", "file", fi.Path, "error", err)
+			continue
+		}
+
+		_, err = stor.Upload(ctx, objectPath, f, storage.UploadOptions{})
+		f.Close()
+		if err != nil {
+			log.Warn(label+": failed to upload file, skipping", "file", fi.Path, "error", err)
+			continue
+		}
+
+		uploaded = append(uploaded, store.TemplateFile{
+			Path: fi.Path,
+			Size: fi.Size,
+			Hash: fi.Hash,
+			Mode: fi.Mode,
+		})
+		written[objectPath] = struct{}{}
+	}
+	return uploaded, written
+}
+
+// reconcileResourceStorage deletes objects under storagePath that are not in the
+// keep set, so files removed from a resource don't linger in storage after a
+// re-sync. List/delete failures are logged and skipped (best-effort), matching
+// the template reconcile behavior this consolidates. name is included in warn
+// messages to identify the resource.
+func reconcileResourceStorage(ctx context.Context, stor storage.Storage, storagePath, name string, keep map[string]struct{}, log *slog.Logger, label string) {
+	listResult, err := stor.List(ctx, storage.ListOptions{Prefix: storagePath + "/"})
+	if err != nil {
+		log.Warn(label+": failed to list storage for reconcile",
+			"resource", name, "prefix", storagePath, "error", err)
+		return
+	}
+	for _, obj := range listResult.Objects {
+		if _, keepObj := keep[obj.Name]; keepObj {
+			continue
+		}
+		if err := stor.Delete(ctx, obj.Name); err != nil {
+			log.Warn(label+": failed to delete stale object",
+				"resource", name, "object", obj.Name, "error", err)
+		}
+	}
 }
 
 // generateDownloadURLs generates signed GET URLs for files under basePath.

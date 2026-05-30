@@ -156,51 +156,11 @@ func (s *Server) syncExistingTemplate(ctx context.Context, existing *store.Templ
 		storagePath = storage.TemplateStoragePath(existing.Scope, existing.ScopeID, existing.Slug)
 	}
 
-	var uploadedFiles []store.TemplateFile
-	newPaths := make(map[string]struct{}, len(files))
-	for _, fi := range files {
-		objectPath := storagePath + "/" + fi.Path
-
-		f, err := os.Open(fi.FullPath)
-		if err != nil {
-			s.templateLog.Warn("template bootstrap: failed to open file, skipping",
-				"file", fi.Path, "error", err)
-			continue
-		}
-
-		_, err = stor.Upload(ctx, objectPath, f, storage.UploadOptions{})
-		f.Close()
-		if err != nil {
-			s.templateLog.Warn("template bootstrap: failed to upload file, skipping",
-				"file", fi.Path, "error", err)
-			continue
-		}
-
-		uploadedFiles = append(uploadedFiles, store.TemplateFile{
-			Path: fi.Path,
-			Size: fi.Size,
-			Hash: fi.Hash,
-			Mode: fi.Mode,
-		})
-		newPaths[objectPath] = struct{}{}
-	}
+	uploadedFiles, newPaths := uploadResourceFiles(ctx, stor, storagePath, files, s.templateLog, "template bootstrap")
 
 	// Reconcile storage: delete objects under the template's prefix that are
 	// no longer in the new manifest, so removed files don't linger.
-	if listResult, err := stor.List(ctx, storage.ListOptions{Prefix: storagePath + "/"}); err != nil {
-		s.templateLog.Warn("template bootstrap: failed to list storage for reconcile",
-			"template", existing.Name, "prefix", storagePath, "error", err)
-	} else {
-		for _, obj := range listResult.Objects {
-			if _, keep := newPaths[obj.Name]; keep {
-				continue
-			}
-			if err := stor.Delete(ctx, obj.Name); err != nil {
-				s.templateLog.Warn("template bootstrap: failed to delete stale object",
-					"template", existing.Name, "object", obj.Name, "error", err)
-			}
-		}
-	}
+	reconcileResourceStorage(ctx, stor, storagePath, existing.Name, newPaths, s.templateLog, "template bootstrap")
 
 	newHash := computeContentHash(uploadedFiles)
 	changed := newHash != existing.ContentHash
@@ -267,32 +227,7 @@ func (s *Server) bootstrapSingleTemplate(ctx context.Context, name, templatePath
 	}
 
 	// Upload each file to storage
-	var templateFiles []store.TemplateFile
-	for _, fi := range files {
-		objectPath := storagePath + "/" + fi.Path
-
-		f, err := os.Open(fi.FullPath)
-		if err != nil {
-			s.templateLog.Warn("template bootstrap: failed to open file, skipping",
-				"file", fi.Path, "error", err)
-			continue
-		}
-
-		_, err = stor.Upload(ctx, objectPath, f, storage.UploadOptions{})
-		f.Close()
-		if err != nil {
-			s.templateLog.Warn("template bootstrap: failed to upload file, skipping",
-				"file", fi.Path, "error", err)
-			continue
-		}
-
-		templateFiles = append(templateFiles, store.TemplateFile{
-			Path: fi.Path,
-			Size: fi.Size,
-			Hash: fi.Hash,
-			Mode: fi.Mode,
-		})
-	}
+	templateFiles, _ := uploadResourceFiles(ctx, stor, storagePath, files, s.templateLog, "template bootstrap")
 
 	// Compute content hash and activate the template
 	contentHash := computeContentHash(templateFiles)

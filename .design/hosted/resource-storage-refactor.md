@@ -3,9 +3,13 @@
 ## Status
 **Partially implemented** — 7.1 (single read path / remove co-located shortcut)
 and 7.2 (thin content-addressed cache, option (a)) have **landed**. 7.3 (shared
-resource-store abstraction), the harness-config consume path, skills onboarding,
-and 7.4 (identifier/layout cleanup) remain proposals. See the per-section
-**Status** notes below.
+resource-store abstraction) is **in progress**: its content-hash consolidation
+sub-item has landed (the hub no longer has a duplicate hash function — §7.3/§8),
+and the shared hub-side bootstrap **mechanics** (upload/reconcile/path helpers)
+have been extracted as a no-behavior-change first step; the `ResourceStore`/
+`ResourceResolver` interfaces themselves remain a proposal. The harness-config
+consume path, skills onboarding, and 7.4 (identifier/layout cleanup) remain
+proposals. See the per-section **Status** notes below.
 
 ## 1. Purpose
 
@@ -297,8 +301,19 @@ passes* drops to: collect-at-import (1) + verify-at-hydrate (1).
 
 ### 7.3. Generalize to a single resource-store abstraction
 
-> **Status: ⏳ Not started.** This is the next high-value step. Two
-> observations from the 7.1/7.2 work sharpen its priority:
+> **Status: 🔨 In progress.** A no-behavior-change **mechanics extraction** has
+> landed as the first step (mechanics-first, ahead of the interfaces): the
+> duplicated hub-side upload loop, the template stale-object reconcile loop, and
+> the parallel slug-scoped path functions are now shared, `kind`-keyed helpers
+> that templates and harness-configs both route through —
+> `storage.ResourceStoragePath`/`ResourceStorageURI` (keyed by a new
+> `storage.ResourceKind`) and `uploadResourceFiles`/`reconcileResourceStorage`
+> in `pkg/hub/storage_helpers.go`. The legacy `Template*`/`HarnessConfig*` path
+> functions are now thin wrappers. These are exactly the primitives a future
+> `ResourceStore.Bootstrap`/`SignedUpload`/`Finalize` will wrap. The
+> `ResourceStore`/`ResourceResolver` interfaces and the `ResourceRecord`
+> DB-model convergence are the **next** increment. Two observations from the
+> 7.1/7.2 work sharpen the remaining priority:
 > - **Harness-configs remain unusable from a remote broker.** With templates now
 >   resolving through the storage backend (7.1), the asymmetry in Section 4 is
 >   starker: harness-configs still have *no* broker-side consume path, so their
@@ -393,9 +408,13 @@ it after 7.1–7.3 land.
    the original plan slotted cache-slimming as step 4 (after the resolver), but
    it was low-risk to land directly alongside 7.1 with templates as the proving
    ground.
-3. ⏳ **Extract `ResourceStore` / `ResourceResolver`** (7.3) with templates as the
+3. 🔨 **Extract `ResourceStore` / `ResourceResolver`** (7.3) with templates as the
    first adopter; no behavior change. Validates the abstraction against the
    existing, most-complete path, and folds in the 7.1 `localObjectResolver` seam.
+   *In progress:* the shared hub-side bootstrap **mechanics** (kind-keyed
+   storage-path helpers + `uploadResourceFiles`/`reconcileResourceStorage`) have
+   been extracted and adopted by both template and harness-config bootstrap/sync;
+   the interfaces and `ResourceRecord` convergence are the remaining work.
 4. ⏳ **Onboard harness-configs** to the broker-side resolver (7.1/7.3) — the
    highest user-visible payoff: harness-configs become usable from any broker,
    matching templates.
