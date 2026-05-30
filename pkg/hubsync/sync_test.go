@@ -149,7 +149,7 @@ func TestEnsureHubReady_EndpointOverrideBeatsSettings(t *testing.T) {
 		t.Fatalf("Failed to create global dir: %v", err)
 	}
 
-	settingsContent := fmt.Sprintf(`grove_id: %s
+	settingsContent := fmt.Sprintf(`project_id: %s
 hub:
   enabled: true
   endpoint: http://localhost:8080
