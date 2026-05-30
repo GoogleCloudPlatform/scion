@@ -129,6 +129,16 @@ If a rebase or merge results in conflicts:
 3.  Stage changes: `git add <resolved-files>`.
 4.  Finalize: `GIT_EDITOR=true git rebase --continue`.
 
+### 5. Sandbox gotchas (Go toolchain, CI, worktrees)
+Learned the hard way; these are specific to running inside this container.
+
+* **Go version skew & `gofmt`:** the sandbox's Go toolchain is *newer* than the version CI pins. CI formats with `go-version-file: go.mod` (see `.github/workflows/ci.yml`), so the authoritative `gofmt` is whatever `go.mod`'s `go` directive specifies. For struct-field alignment (the common case) `gofmt` output is identical across versions, so `make fmt` is safe — but eyeball a formatting diff to confirm it is *pure alignment* before committing. `fmt-check` failures are usually genuine, not version noise: the grove→project rename widened struct fields (e.g. `groveId`→`projectId`) without re-running `gofmt`, leaving neighboring fields misaligned. Fix with `make fmt`.
+* **`go build ./...` fails with `error obtaining VCS status: exit status 128`** inside a worktree. Use `go build -buildvcs=false ./...`.
+* **Inspecting `main` without disturbing it:** you cannot `git worktree add` the `main` *branch* — it is already checked out in the primary repo dir (e.g. `/repo-root`), which may not even be a usable module root. To run or read code at main's tip, add a **detached** worktree at the commit SHA: `git worktree add --detach /tmp/check <main-sha>`, then `git worktree remove --force /tmp/check` when done. Prefer `git show main:path/to/file` for quick single-file reads.
+* **`golangci-lint` can OOM (exit 137)** over `./...` in the sandbox. Scope it to the packages you touched and lower GC pressure, e.g. `GOGC=40 golangci-lint run --new-from-rev=main --concurrency=1 ./pkg/foo/... ./cmd/...`. The `--new-from-rev=main` filter (what `make golangci-lint` uses) hides pre-existing issues so you only see what your change introduced.
+* **Leaked `SCION_*` env vars:** the container exports `SCION_PROJECT`, `SCION_GROVE`, `SCION_CREATOR`, etc. Tests that don't clear the environment can pick these up. They are rarely the real cause of a failure, but when a config/hub/sync test behaves oddly, rule them in or out with `env -u SCION_GROVE -u SCION_PROJECT … go test …`.
+* **Getting the latest `main`:** you cannot `git fetch`/`git pull` from a worktree. The human pulls `origin/main` into the primary repo dir; once they have, `git rebase main` from your branch sees the updated tip with no network access. A green local result can still hide a CI-only gap if `main` itself was committed red — when fixing a test, re-check whether the same test already fails on `main` (via a detached worktree) so you fix main's current version, not a stale local one.
+
 ## General workflow
 
 1.  Work on the given task until it is complete
@@ -138,6 +148,16 @@ If a rebase or merge results in conflicts:
 1.  When you are finished, rebase your branch on main, favoring main, running tests again if you had to resolve conflicts
 1.  Notify the user you have completed the task
 
+
+## Agent memory & durable notes (IMPORTANT)
+
+**Do not rely on any harness's built-in / native memory feature.** This applies to every harness (Claude, Gemini, etc.), not just one. The per-agent memory directory is **ephemeral — it is not persisted across container restarts**, so anything written there is silently lost between sessions and gives a false sense of continuity.
+
+**Persist durable guidance, learnings, and project notes only in committed project files** — this `agents.md`, the `.design/` docs, or other tracked files. If you discover something worth remembering for future sessions, write it here (or in the relevant design doc) and commit it.
+
+### Working learnings (migrated here from ephemeral agent memory)
+- **Lean forward on "project" over legacy "grove".** The grove→project rename is the product direction and is still ongoing — actively prefer `project` naming in new/edited code, tests, and fixtures (e.g. the settings key `project_id`, not legacy `grove_id`). When a test or fixture still uses a legacy `grove_id` key, updating it to `project_id` is the preferred fix over propping up legacy-key compat. Known gap: the legacy *top-level* `grove_id` *file* key no longer resolves to `project_id` in config loading (only `SCION_GROVE_ID` env and v1 `hub.grove_id` are remapped) — surfaced via two tests that were red on `main` and fixed by moving their fixtures to `project_id`.
+- **Proactively raise adjacent cleanup.** When doing a scoped task, surface other architecture/design improvements, drift risks, and simplifications you notice — with specifics (file/function, payoff, blast radius) so the human can decide. Raise them; don't implement them unprompted. The human treats you as a design collaborator, not just an executor.
 
 ## Final important request
 
