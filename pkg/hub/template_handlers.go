@@ -15,11 +15,8 @@
 package hub
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
 // SignedURLExpiry is the duration signed URLs are valid for.
@@ -785,20 +783,23 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 	writeJSON(w, http.StatusCreated, clone)
 }
 
-// computeContentHash computes a content hash from sorted file hashes.
+// computeContentHash computes the aggregate content hash for a set of resource
+// files. It is a thin adapter over transfer.ComputeContentHash — the single
+// canonical implementation also used by the broker-side hydrator, the transfer
+// collector, and the hubclient manifest builder. Routing every hub call site
+// through the same implementation guarantees the hub and the broker can never
+// compute divergent hashes for identical content (which would silently break
+// cache lookups). Per the resource-storage refactor (§7.3/§9), transfer owns
+// the canonical hash until a ResourceStore abstraction subsumes it.
 func computeContentHash(files []store.TemplateFile) string {
-	// Sort files by path for deterministic ordering
-	sorted := make([]store.TemplateFile, len(files))
-	copy(sorted, files)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Path < sorted[j].Path
-	})
-
-	// Concatenate hashes and compute final hash
-	hasher := sha256.New()
-	for _, file := range sorted {
-		hasher.Write([]byte(file.Hash))
+	fileInfos := make([]transfer.FileInfo, len(files))
+	for i, f := range files {
+		fileInfos[i] = transfer.FileInfo{
+			Path: f.Path,
+			Size: f.Size,
+			Hash: f.Hash,
+			Mode: f.Mode,
+		}
 	}
-
-	return "sha256:" + hex.EncodeToString(hasher.Sum(nil))
+	return transfer.ComputeContentHash(fileInfos)
 }
