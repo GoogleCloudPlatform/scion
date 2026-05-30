@@ -900,7 +900,7 @@ func (r *CommandRouter) cmdSubscribe(ctx context.Context, event *ChatEvent, args
 			PlatformUserID: event.UserID,
 			Platform:       event.Platform,
 			AgentID:        agentSlug,
-			ProjectID:        link.ProjectID,
+			ProjectID:      link.ProjectID,
 			Activities:     activities,
 		}
 		if err := r.store.SetAgentSubscription(sub); err != nil {
@@ -968,7 +968,7 @@ func (r *CommandRouter) handleSubscribeFilter(ctx context.Context, event *ChatEv
 		PlatformUserID: event.UserID,
 		Platform:       event.Platform,
 		AgentID:        agentSlug,
-		ProjectID:        projectID,
+		ProjectID:      projectID,
 		Activities:     activities,
 	}
 	if err := r.store.SetAgentSubscription(sub); err != nil {

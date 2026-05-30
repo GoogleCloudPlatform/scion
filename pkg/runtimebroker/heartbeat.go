@@ -92,12 +92,12 @@ func NewHeartbeatService(client hubclient.RuntimeBrokerService, brokerID string,
 	}
 
 	return &HeartbeatService{
-		client:      client,
-		brokerID:    brokerID,
-		interval:    interval,
-		manager:     manager,
+		client:        client,
+		brokerID:      brokerID,
+		interval:      interval,
+		manager:       manager,
 		projectFilter: projectFilter,
-		log:         log,
+		log:           log,
 	}
 }
 
