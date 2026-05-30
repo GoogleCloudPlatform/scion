@@ -77,13 +77,13 @@ func (f *fakeHubClient) ListAgents(_ context.Context, projectID string) ([]Agent
 type fakeTGServerV2 struct {
 	srv *httptest.Server
 
-	mu                 sync.Mutex
-	sentMessages       []sendMessageWithKeyboardRequest
-	editedTexts        []editMessageTextRequest
-	editedMarkups      []editMessageReplyMarkupRequest
-	answeredCallbacks  []answerCallbackQueryRequest
-	nextSendMessageID  int64
-	webhookURL         string
+	mu                sync.Mutex
+	sentMessages      []sendMessageWithKeyboardRequest
+	editedTexts       []editMessageTextRequest
+	editedMarkups     []editMessageReplyMarkupRequest
+	answeredCallbacks []answerCallbackQueryRequest
+	nextSendMessageID int64
+	webhookURL        string
 }
 
 func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {

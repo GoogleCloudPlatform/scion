@@ -73,14 +73,14 @@ type Store interface {
 
 // GroupLink represents a Telegram group chat linked to a Scion project.
 type GroupLink struct {
-	ChatID           int64
-	ChatTitle        string
-	ProjectID        string
-	ProjectSlug      string
-	DefaultAgent     string
-	LinkedBy         string
-	LinkedAt         time.Time
-	Active           bool
+	ChatID             int64
+	ChatTitle          string
+	ProjectID          string
+	ProjectSlug        string
+	DefaultAgent       string
+	LinkedBy           string
+	LinkedAt           time.Time
+	Active             bool
 	ShowAgentToAgent   bool
 	NotifyInGroup      bool
 	ShowAssistantReply bool

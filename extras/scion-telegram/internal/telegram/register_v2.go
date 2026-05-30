@@ -47,12 +47,12 @@ type RegistrationHandler struct {
 
 // pendingLinkReg holds state for an in-progress hub-based linking registration.
 type pendingLinkReg struct {
-	Code              string
-	TelegramUserID    string
-	TelegramUsername  string // captured at /register time for display
-	ChatID            int64
-	ExpiresAt         time.Time
-	pollCancel        context.CancelFunc
+	Code             string
+	TelegramUserID   string
+	TelegramUsername string // captured at /register time for display
+	ChatID           int64
+	ExpiresAt        time.Time
+	pollCancel       context.CancelFunc
 }
 
 // linkingCodeRequest is the JSON body sent to the hub to register a linking code.
@@ -74,7 +74,7 @@ type linkingUser struct {
 }
 
 const (
-	linkingCodeExpiry    = 15 * time.Minute
+	linkingCodeExpiry   = 15 * time.Minute
 	linkingPollInterval = 10 * time.Second
 	linkingCodeCharset  = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 	linkingCodeLength   = 6

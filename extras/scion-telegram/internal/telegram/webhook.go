@@ -36,7 +36,7 @@ const (
 // It validates the secret token, parses updates, and dispatches them to the
 // provided handler function.
 type WebhookServer struct {
-	listenAddr string
+	listenAddr  string
 	secretToken string
 	handler     func(update Update)
 	server      *http.Server

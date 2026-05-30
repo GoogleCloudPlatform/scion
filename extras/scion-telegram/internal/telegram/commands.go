@@ -46,7 +46,7 @@ type CommandHandler struct {
 	store          Store
 	api            *TelegramAPIClient
 	hubClient      HubClient
-	botUsername     string
+	botUsername    string
 	log            *slog.Logger
 	cachedProjects []ProjectOption
 }
@@ -60,7 +60,7 @@ func NewCommandHandler(store Store, api *TelegramAPIClient, hubClient HubClient,
 		store:       store,
 		api:         api,
 		hubClient:   hubClient,
-		botUsername:  botUsername,
+		botUsername: botUsername,
 		log:         log,
 	}
 }

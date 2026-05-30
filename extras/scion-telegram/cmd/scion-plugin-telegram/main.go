@@ -25,8 +25,8 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/extras/scion-telegram/internal/telegram"
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	goplugin "github.com/hashicorp/go-plugin"
 )
 

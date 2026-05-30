@@ -55,13 +55,13 @@ type deleteAgentRequest struct {
 
 // PlaybackManifest is sent once at connection start.
 type PlaybackManifest struct {
-	Type      string      `json:"type"`
-	TimeRange TimeRange   `json:"timeRange"`
-	Agents    []AgentInfo `json:"agents"`
-	Files     []FileNode  `json:"files"`
+	Type        string      `json:"type"`
+	TimeRange   TimeRange   `json:"timeRange"`
+	Agents      []AgentInfo `json:"agents"`
+	Files       []FileNode  `json:"files"`
 	ProjectID   string      `json:"projectId"`
 	ProjectName string      `json:"projectName"`
-	MaxDepth  int         `json:"maxDepth"`
+	MaxDepth    int         `json:"maxDepth"`
 }
 
 type TimeRange struct {
@@ -191,13 +191,13 @@ func ParseLogFile(path string, fsLogPath string, maxDepth int) (*ParseResult, er
 	projectID, projectName := extractProjectInfo(entries)
 
 	manifest := PlaybackManifest{
-		Type:      "manifest",
-		TimeRange: timeRange,
-		Agents:    agents,
-		Files:     []FileNode{}, // Files are added dynamically via events
+		Type:        "manifest",
+		TimeRange:   timeRange,
+		Agents:      agents,
+		Files:       []FileNode{}, // Files are added dynamically via events
 		ProjectID:   projectID,
 		ProjectName: projectName,
-		MaxDepth:  maxDepth,
+		MaxDepth:    maxDepth,
 	}
 
 	return &ParseResult{
