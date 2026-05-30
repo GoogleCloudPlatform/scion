@@ -73,6 +73,14 @@ func (s *LocalStorage) fullPath(objectPath string) string {
 	return filepath.Join(s.basePath, filepath.FromSlash(objectPath))
 }
 
+// ObjectFSPath returns the absolute on-disk path that backs the given object
+// path. Existence is not verified. This lets callers co-located with a local
+// backend read a resource directly from disk instead of downloading it through
+// the signed-URL/HTTP data path.
+func (s *LocalStorage) ObjectFSPath(objectPath string) string {
+	return s.fullPath(objectPath)
+}
+
 // GenerateSignedURL creates a "signed URL" for object access.
 // For local storage, this returns a file:// URL that's valid immediately.
 // This is primarily for testing the signed URL flow.

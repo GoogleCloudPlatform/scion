@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 )
 
@@ -762,10 +764,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, resp)
 }
 
-// hydrateTemplate fetches and caches a template from the Hub if template info is provided.
+// hydrateTemplate resolves a Hub template to a local directory for provisioning.
 // Returns the local template path, or empty string if no Hub template was specified.
-// For co-located connections with a TemplatesDir, it resolves the template directly
-// from the local filesystem, bypassing the Hub API round-trip entirely.
+//
+// Resolution always goes through the connection's storage backend — there is a
+// single read path for every topology. When the backend is the local filesystem
+// (co-located workstation mode) the broker reads the resource directly from the
+// backend's on-disk location; otherwise it hydrates from remote storage via
+// signed URLs and the content-addressed cache.
 func (s *Server) hydrateTemplate(ctx context.Context, cfg *CreateAgentConfig, conn *HubConnection) (string, error) {
 	// Check if we have template info from Hub
 	if cfg.TemplateID == "" && cfg.TemplateHash == "" {
@@ -773,15 +779,17 @@ func (s *Server) hydrateTemplate(ctx context.Context, cfg *CreateAgentConfig, co
 		return "", nil
 	}
 
-	// Co-located shortcut: resolve directly from the local templates directory.
-	// This means edits to ~/.scion/templates/<name> are picked up immediately
-	// without needing to re-sync through Hub storage and cache.
-	if conn.IsColocated && conn.TemplatesDir != "" && cfg.Template != "" {
-		localPath := filepath.Join(conn.TemplatesDir, cfg.Template)
-		if info, err := os.Stat(localPath); err == nil && info.IsDir() {
-			return localPath, nil
+	// Local-backend direct read: the backend is the filesystem, so resolution is
+	// a local path read — no HTTP, no cache.
+	if conn.LocalStorage != nil {
+		path, err := s.resolveLocalTemplate(ctx, cfg, conn)
+		if err != nil {
+			return "", err
 		}
-		// Fall through to hydration if local path doesn't exist
+		if path != "" {
+			return path, nil
+		}
+		// Not present in the backend yet — fall through to hydration.
 	}
 
 	hydrator := conn.Hydrator
@@ -800,6 +808,61 @@ func (s *Server) hydrateTemplate(ctx context.Context, cfg *CreateAgentConfig, co
 	}
 
 	return "", nil
+}
+
+// localObjectResolver is implemented by storage backends (the local filesystem
+// backend) that can map an object path to an absolute on-disk path.
+type localObjectResolver interface {
+	ObjectFSPath(objectPath string) string
+}
+
+// resolveLocalTemplate resolves a template directly from a co-located local
+// storage backend. It returns the on-disk directory backing the template, or an
+// empty string if the backend cannot serve it directly (caller then falls back
+// to hydration). Template metadata is fetched from the Hub to learn the
+// resource's scope/slug; over a co-located loopback connection this is a cheap
+// DB read.
+func (s *Server) resolveLocalTemplate(ctx context.Context, cfg *CreateAgentConfig, conn *HubConnection) (string, error) {
+	resolver, ok := conn.LocalStorage.(localObjectResolver)
+	if !ok || conn.HubClient == nil {
+		return "", nil
+	}
+
+	ref := cfg.TemplateID
+	if ref == "" {
+		ref = cfg.Template
+	}
+	if ref == "" {
+		return "", nil
+	}
+
+	tmpl, err := conn.HubClient.Templates().Get(ctx, ref)
+	if err != nil {
+		if templatecache.IsHubConnectivityError(err) {
+			return "", &templatecache.HubConnectivityError{Cause: err}
+		}
+		return "", fmt.Errorf("failed to get template metadata: %w", err)
+	}
+	if tmpl == nil {
+		return "", nil
+	}
+
+	objectPath := tmpl.StoragePath
+	if objectPath == "" {
+		scopeID := tmpl.ScopeID
+		if scopeID == "" {
+			scopeID = tmpl.ProjectID
+		}
+		objectPath = storage.TemplateStoragePath(tmpl.Scope, scopeID, tmpl.Slug)
+	}
+
+	dir := resolver.ObjectFSPath(objectPath)
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		// Backend doesn't have the files on disk; let the caller hydrate.
+		return "", nil
+	}
+	return dir, nil
 }
 
 func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {

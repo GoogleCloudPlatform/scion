@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -142,6 +143,13 @@ type ServerConfig struct {
 	// with access to projected secrets. Defaults to true; set false to block
 	// container-script dispatches on this broker.
 	AllowContainerScriptHarnesses bool
+
+	// ColocatedStorage is the storage backend of a Hub running co-located in the
+	// same process. When set and backed by the local filesystem, the broker
+	// resolves resources for the co-located connection by reading directly from
+	// disk instead of hydrating over HTTP. Leave nil for remote-only brokers or
+	// when the co-located Hub uses a non-local backend.
+	ColocatedStorage storage.Storage
 }
 
 // DefaultServerConfig returns the default server configuration.
@@ -347,11 +355,13 @@ func (s *Server) initHubIntegration() error {
 			// instead of the HTTP heartbeat service.
 			conn.IsColocated = true
 
-			// Set templates dir for direct filesystem resolution, bypassing
-			// the Hub API → storage → cache hydration round-trip.
-			homeDir, homeErr := os.UserHomeDir()
-			if homeErr == nil {
-				conn.TemplatesDir = filepath.Join(homeDir, ".scion", "templates")
+			// When the co-located Hub's storage backend is the local filesystem,
+			// resolve resources by reading directly from disk — the backend IS
+			// the source of truth, so no signed-URL/HTTP download or cache is
+			// needed. A non-local co-located backend (e.g. GCS) hydrates through
+			// the cache like any other broker.
+			if stor := s.config.ColocatedStorage; stor != nil && stor.Provider() == storage.ProviderLocal {
+				conn.LocalStorage = stor
 			}
 
 			s.hubMu.Lock()

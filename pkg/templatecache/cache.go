@@ -13,13 +13,18 @@
 // limitations under the License.
 
 // Package templatecache provides a content-addressable local cache for templates.
-// Runtime Brokers use this cache to store templates fetched from the Hub's cloud storage,
-// enabling efficient agent creation without repeated downloads.
+// Runtime Brokers use this cache to store templates fetched from a remote Hub's
+// cloud storage, avoiding repeated downloads on re-provision.
+//
+// The cache is a thin content-addressed store: entries are keyed solely by
+// content hash, so identical content referenced by different template IDs (or
+// the same template across versions that share files) is stored once. It is a
+// hosted/remote-broker concern only — when the Hub's storage backend is the
+// local filesystem the broker reads resources directly from disk and never
+// touches this cache.
 package templatecache
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -36,14 +41,11 @@ const (
 
 	// indexFileName is the name of the cache index file.
 	indexFileName = "index.json"
-
-	// manifestFileName is the name of the template manifest file within each cached template.
-	manifestFileName = "manifest.json"
 )
 
-// Cache provides content-addressable storage for templates.
-// It stores templates by their content hash, enabling cache hits
-// even when the same template is referenced by different IDs.
+// Cache provides content-addressable storage for templates. Templates are
+// stored under a directory named for their content hash, so a cache hit only
+// requires the hash.
 type Cache struct {
 	basePath string
 	maxSize  int64
@@ -53,8 +55,7 @@ type Cache struct {
 
 // CacheIndex tracks all cached templates and their metadata.
 type CacheIndex struct {
-	// Entries maps template ID to cache entry metadata.
-	// This allows lookup by template ID while storing by content hash.
+	// Entries maps content hash to cache entry metadata.
 	Entries map[string]*CacheEntry `json:"entries"`
 
 	// TotalSize is the current total size of all cached templates.
@@ -64,15 +65,12 @@ type CacheIndex struct {
 	MaxSize int64 `json:"maxSize"`
 }
 
-// CacheEntry contains metadata for a cached template.
+// CacheEntry contains metadata for a cached template, keyed by content hash.
 type CacheEntry struct {
-	// ContentHash is the content hash of the template (used for storage path).
-	ContentHash string `json:"contentHash"`
-
-	// LastUsed is the last time this template was accessed.
+	// LastUsed is the last time this entry was accessed (for LRU eviction).
 	LastUsed time.Time `json:"lastUsed"`
 
-	// Size is the total size of this template's files in bytes.
+	// Size is the total size of the entry's files in bytes.
 	Size int64 `json:"size"`
 }
 
@@ -91,219 +89,105 @@ func New(basePath string, maxSize int64) (*Cache, error) {
 	c := &Cache{
 		basePath: basePath,
 		maxSize:  maxSize,
-		index: &CacheIndex{
-			Entries:   make(map[string]*CacheEntry),
-			TotalSize: 0,
-			MaxSize:   maxSize,
-		},
+		index:    newIndex(maxSize),
 	}
 
-	// Load existing index if present
+	// Load existing index if present; start fresh on error.
 	if err := c.loadIndex(); err != nil {
-		// If index doesn't exist or is corrupt, start fresh
-		c.index = &CacheIndex{
-			Entries:   make(map[string]*CacheEntry),
-			TotalSize: 0,
-			MaxSize:   maxSize,
-		}
+		c.index = newIndex(maxSize)
 	}
 
 	return c, nil
 }
 
-// Get retrieves a cached template by ID and content hash.
-// Returns the path to the cached template directory and true if found and hash matches.
-// Returns empty string and false if not found or hash doesn't match.
-func (c *Cache) Get(templateID string, contentHash string) (string, bool) {
+func newIndex(maxSize int64) *CacheIndex {
+	return &CacheIndex{
+		Entries:   make(map[string]*CacheEntry),
+		TotalSize: 0,
+		MaxSize:   maxSize,
+	}
+}
+
+// Get retrieves a cached template by content hash. It returns the path to the
+// cached directory and true if the content is present on disk.
+func (c *Cache) Get(contentHash string) (string, bool) {
+	if contentHash == "" {
+		return "", false
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	entry, ok := c.index.Entries[templateID]
-	if !ok {
-		return "", false
-	}
-
-	// Verify content hash matches
-	if entry.ContentHash != contentHash {
-		return "", false
-	}
-
-	// Build path and verify it exists
 	templatePath := filepath.Join(c.basePath, contentHash)
-	if _, err := os.Stat(templatePath); os.IsNotExist(err) {
-		// Cache entry exists but files are missing, clean up
-		delete(c.index.Entries, templateID)
-		c.index.TotalSize -= entry.Size
+	if _, err := os.Stat(templatePath); err != nil {
+		// Files missing: drop any stale index entry so accounting stays honest.
+		if entry, ok := c.index.Entries[contentHash]; ok {
+			delete(c.index.Entries, contentHash)
+			c.index.TotalSize -= entry.Size
+			_ = c.saveIndex()
+		}
+		return "", false
+	}
+
+	if entry, ok := c.index.Entries[contentHash]; ok {
+		entry.LastUsed = time.Now()
 		_ = c.saveIndex()
-		return "", false
-	}
-
-	// Update last used time
-	entry.LastUsed = time.Now()
-	_ = c.saveIndex()
-
-	return templatePath, true
-}
-
-// GetByHash retrieves a cached template by content hash alone.
-// This is useful when we only have the hash (e.g., from template metadata).
-func (c *Cache) GetByHash(contentHash string) (string, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	templatePath := filepath.Join(c.basePath, contentHash)
-	if _, err := os.Stat(templatePath); os.IsNotExist(err) {
-		return "", false
 	}
 
 	return templatePath, true
 }
 
-// GetAnyVersion retrieves any cached version of a template by ID.
-// Unlike Get, this returns the cached version even if the content hash differs.
-// Returns the path, the cached content hash, and true if any version is cached.
-func (c *Cache) GetAnyVersion(templateID string) (string, string, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	entry, ok := c.index.Entries[templateID]
-	if !ok {
-		return "", "", false
-	}
-
-	// Build path and verify it exists
-	templatePath := filepath.Join(c.basePath, entry.ContentHash)
-	if _, err := os.Stat(templatePath); os.IsNotExist(err) {
-		return "", "", false
-	}
-
-	return templatePath, entry.ContentHash, true
-}
-
-// GetFileHashes returns a map of file paths to their hashes for a cached template.
-// This reads the actual files from the cache directory and computes their hashes.
-func (c *Cache) GetFileHashes(templatePath string) (map[string]string, error) {
-	hashes := make(map[string]string)
-
-	err := filepath.Walk(templatePath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-
-		// Get relative path
-		relPath, err := filepath.Rel(templatePath, path)
-		if err != nil {
-			return err
-		}
-
-		// Read file and compute hash
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-
-		hash := sha256.Sum256(content)
-		hashes[relPath] = "sha256:" + hex.EncodeToString(hash[:])
-		return nil
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	return hashes, nil
-}
-
-// Store stores template files in the cache.
-// files is a map of relative file paths to their content.
-// Returns the path to the stored template directory.
-func (c *Cache) Store(templateID string, contentHash string, files map[string][]byte) (string, error) {
+// Put stores template files in the cache under their content hash.
+// files maps relative file paths to their content. It returns the path to the
+// stored directory. If the content is already present, the existing directory
+// is reused and its last-used time refreshed.
+func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	templatePath := filepath.Join(c.basePath, contentHash)
 
-	// Check if already stored by hash
-	if _, err := os.Stat(templatePath); err == nil {
-		// Already exists, just update the entry
-		var totalSize int64
-		for _, content := range files {
-			totalSize += int64(len(content))
-		}
-
-		// Check if this templateID already has an entry
-		if existing, ok := c.index.Entries[templateID]; ok {
-			// Update existing entry
-			existing.ContentHash = contentHash
-			existing.LastUsed = time.Now()
-			existing.Size = totalSize
-		} else {
-			// Add new entry pointing to existing hash
-			c.index.Entries[templateID] = &CacheEntry{
-				ContentHash: contentHash,
-				LastUsed:    time.Now(),
-				Size:        totalSize,
-			}
-			// Only add to total if this is a new hash
-			// Check if any other entry uses this hash
-			hashUsed := false
-			for id, entry := range c.index.Entries {
-				if id != templateID && entry.ContentHash == contentHash {
-					hashUsed = true
-					break
-				}
-			}
-			if !hashUsed {
-				c.index.TotalSize += totalSize
-			}
-		}
-
-		_ = c.saveIndex()
-		return templatePath, nil
-	}
-
-	// Calculate total size
 	var totalSize int64
 	for _, content := range files {
 		totalSize += int64(len(content))
 	}
 
-	// Evict old entries if needed to make room
+	// Already present: just refresh the entry.
+	if _, err := os.Stat(templatePath); err == nil {
+		if _, ok := c.index.Entries[contentHash]; !ok {
+			c.index.Entries[contentHash] = &CacheEntry{}
+			c.index.TotalSize += totalSize
+		}
+		c.index.Entries[contentHash].LastUsed = time.Now()
+		c.index.Entries[contentHash].Size = totalSize
+		_ = c.saveIndex()
+		return templatePath, nil
+	}
+
+	// Evict old entries if needed to make room.
 	if err := c.evictIfNeeded(totalSize); err != nil {
 		return "", fmt.Errorf("failed to make room in cache: %w", err)
 	}
 
-	// Create template directory
 	if err := os.MkdirAll(templatePath, 0755); err != nil {
 		return "", fmt.Errorf("failed to create template directory: %w", err)
 	}
 
-	// Write files
 	for relativePath, content := range files {
 		filePath := filepath.Join(templatePath, relativePath)
-
-		// Ensure parent directory exists
 		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-			// Cleanup on failure
 			os.RemoveAll(templatePath)
 			return "", fmt.Errorf("failed to create directory for %s: %w", relativePath, err)
 		}
-
 		if err := os.WriteFile(filePath, content, 0644); err != nil {
-			// Cleanup on failure
 			os.RemoveAll(templatePath)
 			return "", fmt.Errorf("failed to write file %s: %w", relativePath, err)
 		}
 	}
 
-	// Update index
-	c.index.Entries[templateID] = &CacheEntry{
-		ContentHash: contentHash,
-		LastUsed:    time.Now(),
-		Size:        totalSize,
+	c.index.Entries[contentHash] = &CacheEntry{
+		LastUsed: time.Now(),
+		Size:     totalSize,
 	}
 	c.index.TotalSize += totalSize
 
@@ -314,55 +198,37 @@ func (c *Cache) Store(templateID string, contentHash string, files map[string][]
 	return templatePath, nil
 }
 
-// evictIfNeeded evicts old entries to make room for newSize bytes.
-// Must be called with lock held.
+// evictIfNeeded evicts least-recently-used entries to make room for newSize
+// bytes. Must be called with the lock held. Because entries are keyed by content
+// hash, each directory is owned by exactly one entry — no shared-hash refcounting.
 func (c *Cache) evictIfNeeded(newSize int64) error {
-	// Check if eviction is needed
 	if c.index.TotalSize+newSize <= c.maxSize {
 		return nil
 	}
 
-	// Build list of entries sorted by last used time (oldest first)
-	type entryWithID struct {
-		ID    string
+	type entryWithHash struct {
+		Hash  string
 		Entry *CacheEntry
 	}
-	var entries []entryWithID
-	for id, entry := range c.index.Entries {
-		entries = append(entries, entryWithID{ID: id, Entry: entry})
+	entries := make([]entryWithHash, 0, len(c.index.Entries))
+	for hash, entry := range c.index.Entries {
+		entries = append(entries, entryWithHash{Hash: hash, Entry: entry})
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].Entry.LastUsed.Before(entries[j].Entry.LastUsed)
 	})
 
-	// Evict until we have enough space
 	targetSize := c.maxSize - newSize
 	for _, e := range entries {
 		if c.index.TotalSize <= targetSize {
 			break
 		}
-
-		// Check if other entries share this hash
-		hashShared := false
-		for id, entry := range c.index.Entries {
-			if id != e.ID && entry.ContentHash == e.Entry.ContentHash {
-				hashShared = true
-				break
-			}
+		templatePath := filepath.Join(c.basePath, e.Hash)
+		if err := os.RemoveAll(templatePath); err != nil {
+			fmt.Printf("Warning: failed to remove cached template %s: %v\n", templatePath, err)
 		}
-
-		// Remove entry
-		delete(c.index.Entries, e.ID)
-
-		// Only remove files and decrement size if hash is not shared
-		if !hashShared {
-			templatePath := filepath.Join(c.basePath, e.Entry.ContentHash)
-			if err := os.RemoveAll(templatePath); err != nil {
-				// Log but continue
-				fmt.Printf("Warning: failed to remove cached template %s: %v\n", templatePath, err)
-			}
-			c.index.TotalSize -= e.Entry.Size
-		}
+		delete(c.index.Entries, e.Hash)
+		c.index.TotalSize -= e.Entry.Size
 	}
 
 	return nil
@@ -385,7 +251,6 @@ func (c *Cache) loadIndex() error {
 		return err
 	}
 
-	// Ensure Entries map is initialized
 	if index.Entries == nil {
 		index.Entries = make(map[string]*CacheEntry)
 	}
@@ -395,8 +260,7 @@ func (c *Cache) loadIndex() error {
 	return nil
 }
 
-// saveIndex persists the cache index to disk.
-// Must be called with lock held.
+// saveIndex persists the cache index to disk. Must be called with the lock held.
 func (c *Cache) saveIndex() error {
 	indexPath := filepath.Join(c.basePath, indexFileName)
 
@@ -413,7 +277,6 @@ func (c *Cache) Clear() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Remove all template directories
 	entries, err := os.ReadDir(c.basePath)
 	if err != nil {
 		return err
@@ -428,13 +291,7 @@ func (c *Cache) Clear() error {
 		}
 	}
 
-	// Reset index
-	c.index = &CacheIndex{
-		Entries:   make(map[string]*CacheEntry),
-		TotalSize: 0,
-		MaxSize:   c.maxSize,
-	}
-
+	c.index = newIndex(c.maxSize)
 	return c.saveIndex()
 }
 

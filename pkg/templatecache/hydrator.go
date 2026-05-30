@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"os"
 	"strings"
 	"syscall"
 	"time"
@@ -106,8 +105,9 @@ func NewHydrator(cache *Cache, hubClient hubclient.Client) *Hydrator {
 }
 
 // Hydrate fetches a template from the Hub and returns the local path.
-// If the template is already cached with a matching content hash, the cached version is used.
-// The templateRef can be a template ID, slug, or name.
+// If the template's content hash is already cached, the cached version is used.
+// Otherwise the whole resource is downloaded, hash-verified, and stored under
+// its content hash. The templateRef can be a template ID, slug, or name.
 func (h *Hydrator) Hydrate(ctx context.Context, templateRef string) (string, error) {
 	if h.hubClient == nil {
 		return "", fmt.Errorf("hub client not configured")
@@ -126,15 +126,9 @@ func (h *Hydrator) Hydrate(ctx context.Context, templateRef string) (string, err
 		return "", fmt.Errorf("template not found: %s", templateRef)
 	}
 
-	// Step 2: Check if already cached with matching content hash (fast path)
+	// Step 2: Content-addressed cache hit (fast path)
 	if template.ContentHash != "" {
-		if cachedPath, ok := h.cache.Get(template.ID, template.ContentHash); ok {
-			return cachedPath, nil
-		}
-		// Also check by hash alone in case it was cached under a different ID
-		if cachedPath, ok := h.cache.GetByHash(template.ContentHash); ok {
-			// Store reference under this template ID too
-			_, _ = h.cache.Store(template.ID, template.ContentHash, nil)
+		if cachedPath, ok := h.cache.Get(template.ContentHash); ok {
 			return cachedPath, nil
 		}
 	}
@@ -152,39 +146,9 @@ func (h *Hydrator) Hydrate(ctx context.Context, templateRef string) (string, err
 		return "", fmt.Errorf("template has no files: %s", templateRef)
 	}
 
-	// Step 4: Check for older cached version for incremental download
-	var cachedHashes map[string]string
-	var oldCachePath string
-	if oldPath, _, hasCachedVersion := h.cache.GetAnyVersion(template.ID); hasCachedVersion {
-		oldCachePath = oldPath
-		cachedHashes, err = h.cache.GetFileHashes(oldPath)
-		if err != nil {
-			// Can't read cached hashes, fall back to full download
-			cachedHashes = nil
-		}
-	}
-
-	// Step 5: Download files (only changed ones if we have a cached version)
-	files := make(map[string][]byte)
-	var downloadedCount, skippedCount int
-
+	// Step 4: Download the whole resource and verify each file's hash.
+	files := make(map[string][]byte, len(downloadResp.Files))
 	for _, fileInfo := range downloadResp.Files {
-		// Check if file is unchanged from cached version
-		if cachedHashes != nil {
-			if cachedHash, exists := cachedHashes[fileInfo.Path]; exists && cachedHash == fileInfo.Hash {
-				// File unchanged, read from cache instead of downloading
-				cachedFilePath := oldCachePath + "/" + fileInfo.Path
-				content, readErr := readFileFromPath(cachedFilePath)
-				if readErr == nil {
-					files[fileInfo.Path] = content
-					skippedCount++
-					continue
-				}
-				// If read fails, fall through to download
-			}
-		}
-
-		// Download the file
 		content, dlErr := h.hubClient.Templates().DownloadFile(ctx, fileInfo.URL)
 		if dlErr != nil {
 			if IsHubConnectivityError(dlErr) {
@@ -193,7 +157,6 @@ func (h *Hydrator) Hydrate(ctx context.Context, templateRef string) (string, err
 			return "", fmt.Errorf("failed to download file %s: %w", fileInfo.Path, dlErr)
 		}
 
-		// Verify hash if provided
 		if fileInfo.Hash != "" {
 			actualHash := transfer.HashBytes(content)
 			if actualHash != fileInfo.Hash {
@@ -203,23 +166,15 @@ func (h *Hydrator) Hydrate(ctx context.Context, templateRef string) (string, err
 		}
 
 		files[fileInfo.Path] = content
-		downloadedCount++
 	}
 
-	// Log incremental sync stats if we used cached files
-	if skippedCount > 0 {
-		// Incremental download succeeded
-		_ = skippedCount // Stats available for debugging if needed
-	}
-
-	// Step 6: Store in cache
+	// Step 5: Store in cache keyed by content hash.
 	contentHash := template.ContentHash
 	if contentHash == "" {
-		// Compute content hash if not provided
 		contentHash = h.computeContentHash(files)
 	}
 
-	newCachePath, storeErr := h.cache.Store(template.ID, contentHash, files)
+	newCachePath, storeErr := h.cache.Put(contentHash, files)
 	if storeErr != nil {
 		return "", fmt.Errorf("failed to cache template: %w", storeErr)
 	}
@@ -227,12 +182,12 @@ func (h *Hydrator) Hydrate(ctx context.Context, templateRef string) (string, err
 	return newCachePath, nil
 }
 
-// HydrateWithHash fetches a template, using the provided hash for cache lookup.
-// This is useful when the Hub dispatcher includes the content hash in the request.
+// HydrateWithHash fetches a template, using the provided hash for a fast cache
+// lookup. This is useful when the Hub dispatcher includes the content hash in
+// the request, letting the broker skip the metadata round-trip on a cache hit.
 func (h *Hydrator) HydrateWithHash(ctx context.Context, templateRef string, contentHash string) (string, error) {
-	// Check cache first using provided hash
 	if contentHash != "" {
-		if cachedPath, ok := h.cache.GetByHash(contentHash); ok {
+		if cachedPath, ok := h.cache.Get(contentHash); ok {
 			return cachedPath, nil
 		}
 	}
@@ -285,9 +240,4 @@ func (h *Hydrator) computeContentHash(files map[string][]byte) string {
 		})
 	}
 	return transfer.ComputeContentHash(fileInfos)
-}
-
-// readFileFromPath reads the entire contents of a file.
-func readFileFromPath(path string) ([]byte, error) {
-	return os.ReadFile(path)
 }

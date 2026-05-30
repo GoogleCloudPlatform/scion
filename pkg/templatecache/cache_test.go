@@ -51,27 +51,26 @@ func TestNew(t *testing.T) {
 	}
 }
 
-func TestStoreAndGet(t *testing.T) {
+func TestPutAndGet(t *testing.T) {
 	tmpDir := t.TempDir()
 	cache, err := New(tmpDir, DefaultMaxSize)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	templateID := "test-template-1"
 	contentHash := "abc123hash"
 	files := map[string][]byte{
 		"scion-agent.yaml":       []byte("harness: claude\n"),
 		"home/.claude/CLAUDE.md": []byte("# Test Template\n"),
 	}
 
-	// Store template
-	storedPath, err := cache.Store(templateID, contentHash, files)
+	// Store template by content hash
+	storedPath, err := cache.Put(contentHash, files)
 	if err != nil {
-		t.Fatalf("Store() error = %v", err)
+		t.Fatalf("Put() error = %v", err)
 	}
 	if storedPath == "" {
-		t.Fatal("Store() returned empty path")
+		t.Fatal("Put() returned empty path")
 	}
 
 	// Verify files were written
@@ -84,8 +83,8 @@ func TestStoreAndGet(t *testing.T) {
 		t.Errorf("File content mismatch: got %q", string(content))
 	}
 
-	// Get template
-	gotPath, ok := cache.Get(templateID, contentHash)
+	// Get by hash
+	gotPath, ok := cache.Get(contentHash)
 	if !ok {
 		t.Fatal("Get() returned false")
 	}
@@ -93,50 +92,70 @@ func TestStoreAndGet(t *testing.T) {
 		t.Errorf("Get() path = %v, want %v", gotPath, storedPath)
 	}
 
-	// Get with wrong hash should fail
-	_, ok = cache.Get(templateID, "wrong-hash")
+	// Get with unknown hash should fail
+	_, ok = cache.Get("wrong-hash")
 	if ok {
-		t.Error("Get() with wrong hash should return false")
+		t.Error("Get() with unknown hash should return false")
 	}
 
-	// Get non-existent template
-	_, ok = cache.Get("non-existent", contentHash)
+	// Get with empty hash should fail
+	_, ok = cache.Get("")
 	if ok {
-		t.Error("Get() for non-existent template should return false")
+		t.Error("Get() with empty hash should return false")
 	}
 }
 
-func TestGetByHash(t *testing.T) {
+func TestPutIdempotentByHash(t *testing.T) {
 	tmpDir := t.TempDir()
 	cache, err := New(tmpDir, DefaultMaxSize)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	contentHash := "unique-hash-456"
-	files := map[string][]byte{
-		"config.yaml": []byte("test: true\n"),
-	}
+	contentHash := "shared-content-hash"
+	files := map[string][]byte{"file.txt": []byte("shared content")}
 
-	// Store template
-	storedPath, err := cache.Store("template-id", contentHash, files)
+	// Storing the same hash twice yields the same path and a single entry.
+	path1, err := cache.Put(contentHash, files)
 	if err != nil {
-		t.Fatalf("Store() error = %v", err)
+		t.Fatalf("Put() error = %v", err)
+	}
+	path2, err := cache.Put(contentHash, files)
+	if err != nil {
+		t.Fatalf("Put() second call error = %v", err)
+	}
+	if path1 != path2 {
+		t.Errorf("Same content hash should share storage: %s != %s", path1, path2)
 	}
 
-	// Get by hash
-	gotPath, ok := cache.GetByHash(contentHash)
-	if !ok {
-		t.Fatal("GetByHash() returned false")
+	if stats := cache.Stats(); stats.EntryCount != 1 {
+		t.Errorf("Expected 1 entry for repeated hash, got %d", stats.EntryCount)
 	}
-	if gotPath != storedPath {
-		t.Errorf("GetByHash() path = %v, want %v", gotPath, storedPath)
+}
+
+func TestGetMissingFilesDropsEntry(t *testing.T) {
+	tmpDir := t.TempDir()
+	cache, err := New(tmpDir, DefaultMaxSize)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
 	}
 
-	// Get non-existent hash
-	_, ok = cache.GetByHash("non-existent-hash")
-	if ok {
-		t.Error("GetByHash() for non-existent hash should return false")
+	contentHash := "vanishing-hash"
+	path, err := cache.Put(contentHash, map[string][]byte{"file.txt": []byte("data")})
+	if err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+
+	// Simulate files disappearing out from under the cache.
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := cache.Get(contentHash); ok {
+		t.Error("Get() should return false when files are missing")
+	}
+	if stats := cache.Stats(); stats.EntryCount != 0 || stats.TotalSize != 0 {
+		t.Errorf("stale entry should be dropped, got count=%d size=%d", stats.EntryCount, stats.TotalSize)
 	}
 }
 
@@ -149,49 +168,35 @@ func TestEviction(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	// Store first template (500 bytes)
-	files1 := map[string][]byte{
-		"file.txt": make([]byte, 500),
-	}
-	_, err = cache.Store("template-1", "hash-1", files1)
-	if err != nil {
-		t.Fatalf("Store() error = %v", err)
+	files := func() map[string][]byte {
+		return map[string][]byte{"file.txt": make([]byte, 500)}
 	}
 
-	// Wait a bit to ensure different timestamps
+	// Store first template (500 bytes)
+	if _, err := cache.Put("hash-1", files()); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
 	time.Sleep(10 * time.Millisecond)
 
 	// Store second template (500 bytes)
-	files2 := map[string][]byte{
-		"file.txt": make([]byte, 500),
+	if _, err := cache.Put("hash-2", files()); err != nil {
+		t.Fatalf("Put() error = %v", err)
 	}
-	_, err = cache.Store("template-2", "hash-2", files2)
-	if err != nil {
-		t.Fatalf("Store() error = %v", err)
-	}
-
-	// Wait a bit
 	time.Sleep(10 * time.Millisecond)
 
 	// Store third template (500 bytes) - should trigger eviction of oldest
-	files3 := map[string][]byte{
-		"file.txt": make([]byte, 500),
-	}
-	_, err = cache.Store("template-3", "hash-3", files3)
-	if err != nil {
-		t.Fatalf("Store() error = %v", err)
+	if _, err := cache.Put("hash-3", files()); err != nil {
+		t.Fatalf("Put() error = %v", err)
 	}
 
 	// First template should be evicted (LRU)
-	_, ok := cache.Get("template-1", "hash-1")
-	if ok {
-		t.Error("template-1 should have been evicted")
+	if _, ok := cache.Get("hash-1"); ok {
+		t.Error("hash-1 should have been evicted")
 	}
 
 	// Third template should still exist
-	_, ok = cache.Get("template-3", "hash-3")
-	if !ok {
-		t.Error("template-3 should exist")
+	if _, ok := cache.Get("hash-3"); !ok {
+		t.Error("hash-3 should exist")
 	}
 }
 
@@ -204,13 +209,11 @@ func TestClear(t *testing.T) {
 
 	// Store some templates
 	files := map[string][]byte{"file.txt": []byte("test")}
-	_, err = cache.Store("t1", "h1", files)
-	if err != nil {
-		t.Fatalf("Store() error = %v", err)
+	if _, err := cache.Put("h1", files); err != nil {
+		t.Fatalf("Put() error = %v", err)
 	}
-	_, err = cache.Store("t2", "h2", files)
-	if err != nil {
-		t.Fatalf("Store() error = %v", err)
+	if _, err := cache.Put("h2", files); err != nil {
+		t.Fatalf("Put() error = %v", err)
 	}
 
 	// Verify cache is not empty
@@ -252,9 +255,8 @@ func TestStats(t *testing.T) {
 
 	// Store a template
 	files := map[string][]byte{"file.txt": []byte("hello world")}
-	_, err = cache.Store("test", "hash", files)
-	if err != nil {
-		t.Fatalf("Store() error = %v", err)
+	if _, err := cache.Put("hash", files); err != nil {
+		t.Fatalf("Put() error = %v", err)
 	}
 
 	// Check updated stats
@@ -280,9 +282,8 @@ func TestIndexPersistence(t *testing.T) {
 	}
 
 	files := map[string][]byte{"file.txt": []byte("test data")}
-	_, err = cache1.Store("template-persist", "hash-persist", files)
-	if err != nil {
-		t.Fatalf("Store() error = %v", err)
+	if _, err := cache1.Put("hash-persist", files); err != nil {
+		t.Fatalf("Put() error = %v", err)
 	}
 
 	// Create new cache instance pointing to same directory
@@ -292,52 +293,11 @@ func TestIndexPersistence(t *testing.T) {
 	}
 
 	// Should be able to find the previously stored template
-	path, ok := cache2.Get("template-persist", "hash-persist")
+	path, ok := cache2.Get("hash-persist")
 	if !ok {
 		t.Error("Index should persist across cache instances")
 	}
 	if path == "" {
 		t.Error("Path should not be empty")
-	}
-}
-
-func TestSharedContentHash(t *testing.T) {
-	tmpDir := t.TempDir()
-	cache, err := New(tmpDir, DefaultMaxSize)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	// Store template with a specific hash
-	contentHash := "shared-content-hash"
-	files := map[string][]byte{"file.txt": []byte("shared content")}
-
-	path1, err := cache.Store("template-a", contentHash, files)
-	if err != nil {
-		t.Fatalf("Store() error = %v", err)
-	}
-
-	// Store another template ID with same content hash
-	path2, err := cache.Store("template-b", contentHash, files)
-	if err != nil {
-		t.Fatalf("Store() error = %v", err)
-	}
-
-	// Both should point to the same path
-	if path1 != path2 {
-		t.Errorf("Templates with same hash should share storage: %s != %s", path1, path2)
-	}
-
-	// Both template IDs should work
-	gotPath1, ok := cache.Get("template-a", contentHash)
-	if !ok {
-		t.Error("Get() for template-a should succeed")
-	}
-	gotPath2, ok := cache.Get("template-b", contentHash)
-	if !ok {
-		t.Error("Get() for template-b should succeed")
-	}
-	if gotPath1 != gotPath2 {
-		t.Errorf("Both templates should return same path")
 	}
 }

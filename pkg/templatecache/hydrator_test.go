@@ -187,9 +187,9 @@ func TestHydrateWithHash(t *testing.T) {
 	// Pre-populate cache
 	files := map[string][]byte{"test.txt": []byte("cached content")}
 	contentHash := "known-hash"
-	cachedPath, err := cache.Store("tmpl-999", contentHash, files)
+	cachedPath, err := cache.Put(contentHash, files)
 	if err != nil {
-		t.Fatalf("Store() error = %v", err)
+		t.Fatalf("Put() error = %v", err)
 	}
 
 	// Create hydrator with mock that should not be called
@@ -396,7 +396,7 @@ func TestPrefetchTemplate(t *testing.T) {
 	}
 
 	// Verify it's cached
-	path, ok := cache.Get("tmpl-prefetch", "prefetch-hash")
+	path, ok := cache.Get("prefetch-hash")
 	if !ok {
 		t.Error("Template should be cached after prefetch")
 	}

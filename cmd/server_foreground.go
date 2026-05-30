@@ -1185,6 +1185,13 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		BrokerAuthStrictMode: true,
 	}
 
+	// In co-located mode, hand the broker the Hub's storage backend so that a
+	// local filesystem backend is read directly (zero-copy) instead of being
+	// hydrated over HTTP. A non-local backend is left for cache-based hydration.
+	if inMemoryCreds != nil && hubSrv != nil {
+		rhCfg.ColocatedStorage = hubSrv.GetStorage()
+	}
+
 	rhSrv := runtimebroker.New(rhCfg, mgr, rt)
 	rhSrv.SetRequestLogger(requestLogger)
 	if messageLogger != nil {

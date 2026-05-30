@@ -31,7 +31,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 )
 
 // makeTestCreds creates BrokerCredentials with a base64-encoded secret key.
@@ -1609,24 +1611,68 @@ func TestHandleHubConnections_ConnectionStatus(t *testing.T) {
 	}
 }
 
-func TestHydrateTemplate_ColocatedPassthrough(t *testing.T) {
-	// Create a temporary templates directory with a template
-	templatesDir := t.TempDir()
-	templateDir := filepath.Join(templatesDir, "my-template")
-	if err := os.MkdirAll(templateDir, 0755); err != nil {
-		t.Fatal(err)
+// stubTemplateService stubs hubclient.TemplateService, returning canned
+// metadata from Get. Unused methods are promoted from the embedded nil
+// interface and panic if called.
+type stubTemplateService struct {
+	hubclient.TemplateService
+	getFunc func(ctx context.Context, ref string) (*hubclient.Template, error)
+}
+
+func (s *stubTemplateService) Get(ctx context.Context, ref string) (*hubclient.Template, error) {
+	return s.getFunc(ctx, ref)
+}
+
+// stubHubClient stubs hubclient.Client, exposing only Templates().
+type stubHubClient struct {
+	hubclient.Client
+	templates hubclient.TemplateService
+}
+
+func (c *stubHubClient) Templates() hubclient.TemplateService { return c.templates }
+
+// newLocalStorageWithTemplate builds a local storage backend and, if writeFiles
+// is true, materializes the given global template's files on disk. It returns
+// the backend and the expected on-disk directory for the template.
+func newLocalStorageWithTemplate(t *testing.T, slug string, writeFiles bool) (storage.Storage, string) {
+	t.Helper()
+	stor, err := storage.NewLocal(storage.Config{
+		Provider:  storage.ProviderLocal,
+		LocalPath: t.TempDir(),
+		Bucket:    "local",
+	})
+	if err != nil {
+		t.Fatalf("NewLocal: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(templateDir, "file.txt"), []byte("content"), 0644); err != nil {
-		t.Fatal(err)
+	objectPath := storage.TemplateStoragePath("global", "", slug)
+	dir := stor.ObjectFSPath(objectPath)
+	if writeFiles {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("content"), 0644); err != nil {
+			t.Fatal(err)
+		}
 	}
+	return stor, dir
+}
+
+func TestHydrateTemplate_LocalStorageDirectRead(t *testing.T) {
+	stor, wantDir := newLocalStorageWithTemplate(t, "my-template", true)
 
 	srv := newTestServer(t)
 
-	// Create a co-located connection with TemplatesDir set
+	// Co-located connection backed by a local storage backend resolves the
+	// template directly from disk via metadata-derived storage path.
 	conn := &HubConnection{
 		Name:         "local",
 		IsColocated:  true,
-		TemplatesDir: templatesDir,
+		LocalStorage: stor,
+		HubClient: &stubHubClient{templates: &stubTemplateService{
+			getFunc: func(ctx context.Context, ref string) (*hubclient.Template, error) {
+				return &hubclient.Template{ID: "some-uuid", Slug: "my-template", Scope: "global"}, nil
+			},
+		}},
 	}
 
 	cfg := &CreateAgentConfig{
@@ -1634,27 +1680,31 @@ func TestHydrateTemplate_ColocatedPassthrough(t *testing.T) {
 		TemplateID: "some-uuid",
 	}
 
-	// Co-located passthrough should resolve directly to the local directory
 	path, err := srv.hydrateTemplate(context.Background(), cfg, conn)
 	if err != nil {
 		t.Fatalf("hydrateTemplate failed: %v", err)
 	}
-	if path != templateDir {
-		t.Errorf("expected path %q, got %q", templateDir, path)
+	if path != wantDir {
+		t.Errorf("expected path %q, got %q", wantDir, path)
 	}
 }
 
-func TestHydrateTemplate_ColocatedFallsBackWhenMissing(t *testing.T) {
-	templatesDir := t.TempDir()
-	// Don't create the template directory — it doesn't exist locally
+func TestHydrateTemplate_LocalStorageFallsBackWhenMissing(t *testing.T) {
+	// Backend has no files on disk for this template.
+	stor, _ := newLocalStorageWithTemplate(t, "nonexistent-template", false)
 
 	srv := newTestServer(t)
 
 	conn := &HubConnection{
 		Name:         "local",
 		IsColocated:  true,
-		TemplatesDir: templatesDir,
-		// No Hydrator set — should return empty string
+		LocalStorage: stor,
+		HubClient: &stubHubClient{templates: &stubTemplateService{
+			getFunc: func(ctx context.Context, ref string) (*hubclient.Template, error) {
+				return &hubclient.Template{ID: "some-uuid", Slug: "nonexistent-template", Scope: "global"}, nil
+			},
+		}},
+		// No Hydrator set — should return empty string after falling through.
 	}
 
 	cfg := &CreateAgentConfig{
@@ -1662,7 +1712,6 @@ func TestHydrateTemplate_ColocatedFallsBackWhenMissing(t *testing.T) {
 		TemplateID: "some-uuid",
 	}
 
-	// Should fall through to hydrator (which is nil), returning empty string
 	path, err := srv.hydrateTemplate(context.Background(), cfg, conn)
 	if err != nil {
 		t.Fatalf("hydrateTemplate failed: %v", err)
@@ -1672,22 +1721,13 @@ func TestHydrateTemplate_ColocatedFallsBackWhenMissing(t *testing.T) {
 	}
 }
 
-func TestHydrateTemplate_NonColocatedSkipsPassthrough(t *testing.T) {
-	// Create a templates directory with a template
-	templatesDir := t.TempDir()
-	templateDir := filepath.Join(templatesDir, "my-template")
-	if err := os.MkdirAll(templateDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
+func TestHydrateTemplate_RemoteWithoutHydratorReturnsEmpty(t *testing.T) {
 	srv := newTestServer(t)
 
-	// Non-colocated connection — should NOT use passthrough even with TemplatesDir set
+	// Remote connection: no LocalStorage and no Hydrator — nothing to resolve.
 	conn := &HubConnection{
-		Name:         "remote",
-		IsColocated:  false,
-		TemplatesDir: templatesDir,
-		// No Hydrator — should return empty
+		Name:        "remote",
+		IsColocated: false,
 	}
 
 	cfg := &CreateAgentConfig{
@@ -1700,6 +1740,6 @@ func TestHydrateTemplate_NonColocatedSkipsPassthrough(t *testing.T) {
 		t.Fatalf("hydrateTemplate failed: %v", err)
 	}
 	if path != "" {
-		t.Errorf("expected empty path for non-colocated connection, got %q", path)
+		t.Errorf("expected empty path for remote connection without hydrator, got %q", path)
 	}
 }
