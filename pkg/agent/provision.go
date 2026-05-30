@@ -271,6 +271,7 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 }
 
 func ProvisionAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, *api.ScionConfig, error) {
+	provisionStart := time.Now()
 	// 1. Prepare agent directories
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
@@ -433,6 +434,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	// Worktree Creation (if needed)
 	if shouldCreateWorktree {
+		worktreeStart := time.Now()
 		// Remove existing workspace dir if it exists to allow worktree add
 		_ = util.MakeWritableRecursive(agentWorkspace)
 		os.RemoveAll(agentWorkspace)
@@ -454,6 +456,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		if err := util.CreateWorktree(agentWorkspace, worktreeBranch); err != nil {
 			return "", "", nil, fmt.Errorf("failed to create git worktree: %w", err)
 		}
+		util.Debugf("provision: worktree created in %s", time.Since(worktreeStart))
 
 		// Write a .scion project marker into the worktree so in-container CLI
 		// can discover the project context. Worktrees don't contain .scion
@@ -553,6 +556,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	finalScionCfg.HarnessConfig = harnessConfigName
 
 	// 2d. Compose agent home directory
+	homeCopyStart := time.Now()
 
 	// Step 1: Copy harness-config base home → agentHome
 	hcHome := filepath.Join(hcDir.Path, "home")
@@ -613,6 +617,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			}
 		}
 	}
+	util.Debugf("provision: home/skills copy completed in %s", time.Since(homeCopyStart))
 
 	// Step 4: Inject agent instructions
 
@@ -894,6 +899,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		fmt.Fprintf(os.Stderr, "Warning: failed to reload agent config after harness provisioning: %v\n", err)
 	}
 
+	util.Debugf("provision: total ProvisionAgent completed in %s", time.Since(provisionStart))
 	return agentHome, agentWorkspace, finalScionCfg, nil
 }
 
