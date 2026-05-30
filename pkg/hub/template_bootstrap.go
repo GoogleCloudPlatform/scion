@@ -121,16 +121,7 @@ func (s *Server) syncExistingTemplate(ctx context.Context, existing *store.Templ
 	}
 
 	if !force {
-		var preview []store.TemplateFile
-		for _, fi := range files {
-			preview = append(preview, store.TemplateFile{
-				Path: fi.Path,
-				Size: fi.Size,
-				Hash: fi.Hash,
-				Mode: fi.Mode,
-			})
-		}
-		hashMatch := computeContentHash(preview) == existing.ContentHash
+		hashMatch := computeContentHash(toResourceFiles(files)) == existing.ContentHash
 
 		// Even when content hasn't changed, backfill DefaultHarnessConfig
 		// for templates imported before that field existed.

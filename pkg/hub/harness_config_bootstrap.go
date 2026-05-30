@@ -159,16 +159,7 @@ func (s *Server) syncExistingHarnessConfig(ctx context.Context, existing *store.
 		return false, err
 	}
 
-	var hcFiles []store.TemplateFile
-	for _, fi := range files {
-		hcFiles = append(hcFiles, store.TemplateFile{
-			Path: fi.Path,
-			Size: fi.Size,
-			Hash: fi.Hash,
-			Mode: fi.Mode,
-		})
-	}
-	newHash := computeContentHash(hcFiles)
+	newHash := computeContentHash(toResourceFiles(files))
 
 	if newHash == existing.ContentHash {
 		return false, nil

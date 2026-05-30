@@ -93,6 +93,24 @@ func (e *fileNotFoundError) Error() string {
 	return "file not found: " + e.path
 }
 
+// toResourceFiles converts a collected file list into the resource file manifest
+// shape stored on records. Use it where a manifest is needed without uploading —
+// e.g. building a content-hash preview during re-sync to decide whether anything
+// changed. (The upload helper builds the manifest incrementally, appending only
+// successfully uploaded files, so it does not use this.)
+func toResourceFiles(files []transfer.FileInfo) []store.TemplateFile {
+	out := make([]store.TemplateFile, len(files))
+	for i, fi := range files {
+		out[i] = store.TemplateFile{
+			Path: fi.Path,
+			Size: fi.Size,
+			Hash: fi.Hash,
+			Mode: fi.Mode,
+		}
+	}
+	return out
+}
+
 // uploadResourceFiles uploads a collected directory of resource files to the
 // storage backend under storagePath, one object per file. It returns the
 // manifest of successfully uploaded files and the set of object paths written
