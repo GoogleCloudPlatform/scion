@@ -17,7 +17,7 @@
 /**
  * Project creation page component
  *
- * Form for creating a new project, supporting both git-backed and hub-native modes.
+ * Form for creating a new project, supporting both git-backed and hub-managed modes.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -469,7 +469,7 @@ export class ScionPageProjectCreate extends LitElement {
               .value=${this.mode}
               @sl-change=${(e: Event) => this.onModeChange(e)}
             >
-              <sl-option value="hub">Hub Workspace</sl-option>
+              <sl-option value="hub">Hub-managed Workspace</sl-option>
               <sl-option value="git">Git Repository</sl-option>
             </sl-select>
             <div class="hint">

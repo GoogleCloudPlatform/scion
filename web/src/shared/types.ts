@@ -122,7 +122,7 @@ export type ProjectStatus = 'active' | 'inactive' | 'error';
 /**
  * Project type enumeration
  */
-export type ProjectType = 'linked' | 'hub-native';
+export type ProjectType = 'linked' | 'hub-managed';
 
 export interface GitHubAppProjectStatus {
   state: 'ok' | 'degraded' | 'error' | 'unchecked';

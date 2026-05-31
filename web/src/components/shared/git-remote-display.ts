@@ -90,7 +90,7 @@ export class ScionGitRemoteDisplay extends LitElement {
     const project = this.project;
 
     if (!project.gitRemote) {
-      return html`${project.projectType === 'linked' ? 'Linked project' : 'Hub workspace'}`;
+      return html`${project.projectType === 'linked' ? 'Linked project' : 'Hub-managed workspace'}`;
     }
 
     const ghLink = ScionGitRemoteDisplay.gitHubLink(project.gitRemote);
