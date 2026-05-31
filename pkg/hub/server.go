@@ -31,6 +31,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -652,6 +653,8 @@ type Server struct {
 
 	// Shared HTTP client for federation proxy calls (no redirect following).
 	federationClient *http.Client
+
+	imageBuildActive atomic.Bool
 }
 
 func newInstanceID() string {

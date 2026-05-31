@@ -453,6 +453,17 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if !s.imageBuildActive.CompareAndSwap(false, true) {
+		http.Error(w, "a build is already in progress", http.StatusConflict)
+		return
+	}
+	buildStarted := false
+	defer func() {
+		if !buildStarted {
+			s.imageBuildActive.Store(false)
+		}
+	}()
+
 	_, detectErr := config.DetectLocalRuntime()
 	if detectErr != nil {
 		writeError(w, http.StatusServiceUnavailable, ErrCodeInternalError, "no container runtime available", nil)
@@ -492,10 +503,12 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	buildStarted = true
 	jobID := api.NewUUID()
 	subject := "system.images." + jobID
 
 	go func() {
+		defer s.imageBuildActive.Store(false)
 		cmd := exec.CommandContext(s.ctx, buildScript, "--target", "harnesses")
 		cmd.Dir = filepath.Dir(buildScript)
 
