@@ -329,6 +329,18 @@ passes* drops to: collect-at-import (1) + verify-at-hydrate (1).
 >   asymmetry. A full `Template`/`HarnessConfig` → single DB-model convergence was
 >   intentionally **not** done (the adapter `ResourceRecord` delivers the
 >   abstraction at far lower blast radius); it can follow with 7.4 if desired.
+>
+> **Open follow-ups (next session):**
+> - `make ci` passes; `make ci-full` (golangci-lint) has **not** been run to
+>   completion. A scoped `golangci-lint --new-from-rev=main` surfaced one
+>   pre-existing `errcheck` on the unchecked `f.Close()` in
+>   `uploadResourceFiles` (`pkg/hub/storage_helpers.go`, carried over from the 3a
+>   extraction) — fix to `_ = f.Close()` and run `make ci-full` before opening a
+>   PR.
+> - Consider a dedicated harness-config `Resolver` unit test with a mock
+>   `HarnessConfigService` (Phase C reused the template Hydrator tests for the
+>   shared core; the harness-config adapter path is currently covered only by the
+>   broker fall-back guards, not an end-to-end download).
 
 Introduce one set of interfaces that templates, harness-configs, and skills all
 implement, replacing the per-type copies.
