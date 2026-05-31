@@ -643,6 +643,21 @@ func TestIsPartialMentionEntity_MultipleHyphens(t *testing.T) {
 	assert.True(t, isPartialMentionEntity("@my-cool-agent check", 0, 3))
 }
 
+func TestIsPartialMentionEntity_DotAfterEntity(t *testing.T) {
+	// "@agent.dev" — entity covers "@agent" (offset 0, length 6), next char is '.' followed by 'd'
+	assert.True(t, isPartialMentionEntity("@agent.dev hello", 0, 6))
+}
+
+func TestIsPartialMentionEntity_TrailingDot(t *testing.T) {
+	// "@agent." — entity covers "@agent", next char is '.' but nothing after it. Not partial.
+	assert.False(t, isPartialMentionEntity("@agent.", 0, 6))
+}
+
+func TestIsPartialMentionEntity_DotThenSpace(t *testing.T) {
+	// "@agent. hello" — entity covers "@agent", next char is '.' followed by space. Not partial.
+	assert.False(t, isPartialMentionEntity("@agent. hello", 0, 6))
+}
+
 // --- hasNonBotUserMention with hyphenated agent names ---
 
 func TestHasNonBotUserMention_HyphenatedAgentEntityAtStart(t *testing.T) {
