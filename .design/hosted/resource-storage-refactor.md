@@ -1,16 +1,15 @@
 # Resource Storage & Cache Refactor
 
 ## Status
-**Largely implemented** — 7.1 (single read path / remove co-located shortcut)
-and 7.2 (thin content-addressed cache, option (a)) have **landed**. 7.3 (shared
-resource-store abstraction) has now **landed**: the content-hash consolidation,
-the shared hub-side bootstrap **mechanics** (3a), the hub-side `ResourceStore`
-(`ResourceRecord` + per-kind persistence, 3b), and the broker-side kind-generic
-`Resolver` (the generalized `Hydrator` + `resolveLocalResource`) are all in.
-**Step 4 (harness-config consume path) has landed** — harness-configs now
-hydrate from the storage backend on any broker, exactly like templates, closing
-the Section 4 asymmetry. Skills onboarding (step 5) and 7.4 (identifier/layout
-cleanup) remain proposals. See the per-section **Status** notes below.
+
+The single, ordered work plan — and the **only** place status is tracked — is
+**§8 (Work plan & status)**. Sections 7.1–7.4 give the *design rationale* for
+each item and link to its step in §8; they no longer track status themselves.
+
+**We are here:** steps 1–4 have **landed** (single read path, thin
+content-addressed cache, the shared resource-store/resolver abstraction, and the
+harness-config consume path). Remaining: **step 5** (onboard skills) and
+**step 6** (optional identifier/layout cleanup).
 
 ## 1. Purpose
 
@@ -191,9 +190,7 @@ about.
 
 ### 7.1. Single read path through the storage backend; remove the co-located shortcut
 
-> **Status: ✅ Implemented.** The import-source-dir shortcut is gone and
-> provisioning resolves through the connection's storage backend in every
-> topology. See **Implementation notes** at the end of this subsection.
+> **Design rationale for §8 step 2.** Status is tracked there.
 
 Per the settled decision in Section 1.1, live-edit is not required in either
 mode, so:
@@ -247,8 +244,8 @@ its own item, orthogonal to this doc.
 
 ### 7.2. Collapse the cache to a thin content-addressed store (or drop it)
 
-> **Status: ✅ Implemented — option (a), thin CAS.** See **Implementation
-> notes** at the end of this subsection.
+> **Design rationale for §8 step 2** (landed as option (a), thin CAS). Status is
+> tracked there.
 
 The broker hydration cache is now a **hosted-mode-only concern**: in workstation
 mode the storage backend is local FS, so resolution is already a local read and
@@ -302,48 +299,7 @@ passes* drops to: collect-at-import (1) + verify-at-hydrate (1).
 
 ### 7.3. Generalize to a single resource-store abstraction
 
-> **Status: ✅ Landed.** All sub-items are in.
-> - **✅ Content-hash consolidation** (the `ResourceStore`-owns-the-hash item
->   below) — the hub's duplicate `computeContentHash` is gone; all call sites
->   delegate to `transfer.ComputeContentHash`.
-> - **✅ Shared bootstrap mechanics** (3a): the duplicated hub-side upload loop,
->   the template stale-object reconcile loop, the `FileInfo`→manifest conversion,
->   and the parallel slug-scoped path functions are shared, `kind`-keyed helpers
->   — `storage.ResourceStoragePath`/`ResourceStorageURI` (keyed by
->   `storage.ResourceKind`) and `toResourceFiles`/`uploadResourceFiles`/
->   `reconcileResourceStorage` in `pkg/hub/storage_helpers.go`.
-> - **✅ The interfaces themselves** (3b): the hub-side `ResourceStore`
->   (`pkg/hub/resource_store.go`) collapses the parallel `bootstrapSingle*`/
->   `syncExisting*` routines onto one kind-generic `Bootstrap`. Rather than a
->   risky DB-model union, a shared `ResourceRecord` is a *view* over the common
->   fields and a per-kind `resourcePersistence` bridges it to the concrete
->   `store.Template`/`store.HarnessConfig` (mutating the loaded model in place so
->   the typed `Config` payload survives). The broker-side `Resolver`
->   (`pkg/templatecache/resolver.go`) is the generalized download-and-cache
->   algorithm parameterized by a `resourceFetcher` over `hubclient.Templates()`/
->   `HarnessConfigs()`; `Hydrator` is now a thin template wrapper. The 7.1
->   `localObjectResolver` seam folded into the kind-aware `resolveLocalResource`
->   (one `ObjectFSPath` assertion for all kinds).
-> - **✅ Harness-configs are now usable from any broker** (step 4): they hydrate
->   from the storage backend through the shared `Resolver`, closing the Section 4
->   asymmetry. A full `Template`/`HarnessConfig` → single DB-model convergence was
->   intentionally **not** done (the adapter `ResourceRecord` delivers the
->   abstraction at far lower blast radius); it can follow with 7.4 if desired.
->
-> **Open follow-ups — ✅ resolved:**
-> - ✅ The unchecked `f.Close()` in `uploadResourceFiles`
->   (`pkg/hub/storage_helpers.go`) is now `_ = f.Close()`; a scoped
->   `golangci-lint --new-from-rev=main` over `./pkg/hub/...` and
->   `./pkg/templatecache/...` reports **0 issues**, and `make ci` is green. (Note:
->   `make ci-full` still fails, but only on a **pre-existing, unrelated**
->   web-typecheck error in `web/src/components/pages/profile-telegram.ts`
->   — `_linkedTelegramId` declared-but-never-read — which is byte-identical to
->   `main` and untouched by this branch.)
-> - ✅ A dedicated harness-config `Resolver` unit test landed
->   (`pkg/templatecache/resolver_test.go`) with a mock `HarnessConfigService`,
->   covering the end-to-end download path (metadata → URLs → download+verify →
->   cache), the content-addressed cache hit on re-resolve, the `ResolveWithHash`
->   fast path, not-found, hash-mismatch, and nil-hub-client cases.
+> **Design rationale for §8 steps 3–4.** Status is tracked there.
 
 Introduce one set of interfaces that templates, harness-configs, and skills all
 implement, replacing the per-type copies.
@@ -382,31 +338,56 @@ type ResourceResolver interface {
   GCS, closing the gap in Section 4. `LocalDirBackend` subsumes the 7.1
   `localObjectResolver`/`ObjectFSPath` seam.
 - **`ResourceStore` must own the one canonical content-hash function.**
-  > **Status: ✅ Pulled forward.** The hub's hand-rolled `computeContentHash`
-  > (`template_handlers.go`) was a *separate implementation* from the canonical
-  > `transfer.ComputeContentHash` used by the broker-side `Hydrator`, the
-  > `transfer` collector, and the `hubclient` manifest builder — and it diverged
-  > on empty input (the hub hashed an empty byte stream; `transfer` returns
-  > `""`). The hub function is now a thin adapter that converts
-  > `[]store.TemplateFile` → `[]transfer.FileInfo` and delegates to
-  > `transfer.ComputeContentHash`, so every call site shares one implementation
-  > and the hub/broker can no longer drift. A regression test
-  > (`pkg/hub/content_hash_test.go`) pins the adapter to `transfer` and the
-  > empty-input contract. Ownership lives in `transfer` until a `ResourceStore`
-  > abstraction subsumes it.
+  `Hydrator.computeContentHash` and the hub's `transfer.ComputeContentHash`
+  (collect/finalize) were originally *separate call sites* that had to stay
+  byte-identical or cache keys would silently diverge. Consolidating onto a
+  single implementation resolves the hash-canonicalization open question (§9) and
+  was cheap enough to pull forward ahead of the full abstraction. (Pulled forward
+  as part of §8 step 3 — see the as-built note below.)
 
-  Originally: `Hydrator.computeContentHash` and the hub's
-  `transfer.ComputeContentHash` (collect/finalize) were *separate call sites*
-  that had to stay byte-identical or cache keys would silently diverge.
-  Consolidating onto a single implementation resolves the hash-canonicalization
-  open question (§9) and was cheap enough to pull forward ahead of the full
-  abstraction.
+**Implementation notes (as landed — §8 steps 3–4):**
+
+- **Content-hash consolidation.** The hub's hand-rolled `computeContentHash`
+  (`template_handlers.go`) was a *separate implementation* from the canonical
+  `transfer.ComputeContentHash` used by the broker-side `Hydrator`, the
+  `transfer` collector, and the `hubclient` manifest builder — and it diverged on
+  empty input (the hub hashed an empty byte stream; `transfer` returns `""`). The
+  hub function is now a thin adapter that converts `[]store.TemplateFile` →
+  `[]transfer.FileInfo` and delegates to `transfer.ComputeContentHash`, so every
+  call site shares one implementation and the hub/broker can no longer drift. A
+  regression test (`pkg/hub/content_hash_test.go`) pins the adapter to `transfer`
+  and the empty-input contract. Ownership lives in `transfer` until a
+  `ResourceStore` abstraction subsumes it.
+- **Shared bootstrap mechanics (3a).** The duplicated hub-side upload loop, the
+  template stale-object reconcile loop, the `FileInfo`→manifest conversion, and
+  the parallel slug-scoped path functions are now shared, `kind`-keyed helpers —
+  `storage.ResourceStoragePath`/`ResourceStorageURI` (keyed by
+  `storage.ResourceKind`) and `toResourceFiles`/`uploadResourceFiles`/
+  `reconcileResourceStorage` in `pkg/hub/storage_helpers.go`.
+- **The interfaces themselves (3b).** The hub-side `ResourceStore`
+  (`pkg/hub/resource_store.go`) collapses the parallel `bootstrapSingle*`/
+  `syncExisting*` routines onto one kind-generic `Bootstrap`. Rather than a risky
+  DB-model union, a shared `ResourceRecord` is a *view* over the common fields and
+  a per-kind `resourcePersistence` bridges it to the concrete
+  `store.Template`/`store.HarnessConfig` (mutating the loaded model in place so
+  the typed `Config` payload survives). The broker-side `Resolver`
+  (`pkg/templatecache/resolver.go`) is the generalized download-and-cache
+  algorithm parameterized by a `resourceFetcher` over `hubclient.Templates()`/
+  `HarnessConfigs()`; `Hydrator` is now a thin template wrapper. The 7.1
+  `localObjectResolver` seam folded into the kind-aware `resolveLocalResource`
+  (one `ObjectFSPath` assertion for all kinds).
+- **Harness-configs usable from any broker (step 4).** They hydrate from the
+  storage backend through the shared `Resolver`, closing the Section 4 asymmetry.
+  A full `Template`/`HarnessConfig` → single DB-model convergence was
+  intentionally **not** done (the adapter `ResourceRecord` delivers the
+  abstraction at far lower blast radius); it can follow with 7.4 if desired.
 
 ### 7.4. Identifier cleanup (optional, higher blast radius)
 
-> **Status: ⏳ Not started.** Unchanged by the 7.1/7.2 work — GCS paths are
-> still slug-scoped, so a rename/scope change still orphans objects unless
-> reconcile runs. Stage after 7.3 as a dedicated migration.
+> **Design rationale for §8 step 6.** Status is tracked there.
+
+GCS paths are still slug-scoped, so a rename/scope change still orphans objects
+unless reconcile runs.
 
 Consider making the **GCS object path content-addressed or UID-addressed**
 instead of slug-scoped, so the source of truth is immutable and renames/scope
@@ -419,24 +400,30 @@ changes don't orphan objects:
 This is the cleanest long-term shape but touches storage layout migration; stage
 it after 7.1–7.3 land.
 
-## 8. Suggested sequencing
+## 8. Work plan & status
+
+This is the **single, ordered progression** for the refactor and the **only**
+status tracker. Each step links to its design rationale in §7.
 
 1. ✅ **Document + decide** (this doc): confirm GCS-as-truth, pick cache
    direction (chose **7.2a**), confirm the co-located live-edit shortcut is
    removed.
-2. ✅ **Remove the co-located shortcut / single read path** (7.1) and ✅ **slim
-   the cache** (7.2a). *Done together, for templates, ahead of the abstraction* —
-   the original plan slotted cache-slimming as step 4 (after the resolver), but
-   it was low-risk to land directly alongside 7.1 with templates as the proving
-   ground.
-3. ✅ **Extract `ResourceStore` / `ResourceResolver`** (7.3) with templates as the
-   first adopter; no behavior change. Validated the abstraction against the
-   existing, most-complete path, and folded in the 7.1 `localObjectResolver` seam.
+2. ✅ **Single read path + slim cache** (rationale: §7.1, §7.2). Removed the
+   co-located shortcut and slimmed the cache to a thin content-addressed store,
+   done together for templates ahead of the abstraction — low-risk to land
+   alongside §7.1 with templates as the proving ground. (The original plan
+   slotted cache-slimming later, after the resolver.)
+3. ✅ **Extract `ResourceStore` / `ResourceResolver`** (rationale: §7.3) with
+   templates as the first adopter; no behavior change. Validated the abstraction
+   against the existing, most-complete path, and folded in the §7.1
+   `localObjectResolver` seam.
    - ✅ **3a. Shared bootstrap mechanics** — kind-keyed storage-path helpers
      (`storage.ResourceStoragePath`/`ResourceStorageURI` + `ResourceKind`) and
      `toResourceFiles`/`uploadResourceFiles`/`reconcileResourceStorage` in
      `pkg/hub/storage_helpers.go`, adopted by both template and harness-config
-     bootstrap/sync. (Plus the earlier ✅ content-hash consolidation.)
+     bootstrap/sync. (Plus the earlier ✅ content-hash consolidation — the hub's
+     duplicate `computeContentHash` was removed; all call sites now delegate to
+     `transfer.ComputeContentHash`, eliminating the hub/broker drift risk.)
    - ✅ **3b. The interfaces themselves** — hub-side `ResourceStore` +
      `ResourceRecord` (adapter view, not a DB-model union) in
      `pkg/hub/resource_store.go`, and the broker-side kind-generic `Resolver` in
@@ -446,14 +433,25 @@ it after 7.1–7.3 land.
    now hydrate from the storage backend on any broker, matching templates
    (`hydrateHarnessConfig` + `StartOptions.HarnessConfigPath`; hub stamps
    `HarnessConfigID`/`Hash` in `populateAgentConfig`).
-5. ⏳ **Onboard skills** as the third `kind` — should be nearly free if 7.3 holds.
-6. ⏳ **(Optional)** identifier/layout cleanup (7.4) as a dedicated migration.
+   - ✅ **4a. Test & lint hardening** — fixed the carried-over `errcheck` on
+     `uploadResourceFiles`'s unchecked `f.Close()` (now `_ = f.Close()`; scoped
+     `golangci-lint --new-from-rev=main` over `./pkg/hub/...` and
+     `./pkg/templatecache/...` reports 0 issues), and added a dedicated
+     harness-config `Resolver` unit test (`pkg/templatecache/resolver_test.go`)
+     with a mock `HarnessConfigService` covering the end-to-end download path,
+     cache-hit re-resolve, `ResolveWithHash` fast path, not-found, hash-mismatch,
+     and nil-hub-client cases. `make ci` is green. (`make ci-full` still fails
+     only on a **pre-existing, unrelated** web-typecheck error in
+     `web/src/components/pages/profile-telegram.ts`, byte-identical to `main`.)
+5. ⏳ **Onboard skills** as the third `kind` — should be nearly free if §7.3
+   holds. (Skills scope/precedence semantics are an open question — see §9.)
+6. ⏳ **(Optional)** identifier/layout cleanup (rationale: §7.4) as a dedicated
+   migration.
 
-Out-of-band cleanup surfaced during the 7.1/7.2 work (orthogonal to this doc):
-co-located mode still talks to the hub over **loopback HTTP** rather than
-in-process (see 7.1 follow-up); and ✅ the canonical content-hash function is now
-**owned in one place** (`transfer.ComputeContentHash`; see 7.3) — the hub's
-duplicate was removed, eliminating the hub/broker drift risk.
+**Out-of-band cleanup** surfaced during this work but **orthogonal to this doc**
+(not part of the progression above): co-located mode still talks to the hub over
+**loopback HTTP** rather than in-process (see §7.1 follow-up). Worth tracking on
+its own; it benefits far more than resource resolution.
 
 ## 9. Open questions
 
