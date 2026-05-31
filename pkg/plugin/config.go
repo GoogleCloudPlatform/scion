@@ -13,23 +13,17 @@
 // limitations under the License.
 
 // Package plugin provides runtime plugin loading and management for scion.
-// It supports loading external message broker and harness implementations
-// as separate processes using hashicorp/go-plugin.
+// It supports loading external message broker implementations as separate
+// processes using hashicorp/go-plugin.
 package plugin
 
 const (
 	// PluginTypeBroker is the plugin type for message broker implementations.
 	PluginTypeBroker = "broker"
 
-	// PluginTypeHarness is the plugin type for harness implementations.
-	PluginTypeHarness = "harness"
-
 	// BrokerPluginProtocolVersion is the protocol version for broker plugins.
 	// Bump this when RPC method signatures, argument types, or semantics change.
 	BrokerPluginProtocolVersion = 1
-
-	// HarnessPluginProtocolVersion is the protocol version for harness plugins.
-	HarnessPluginProtocolVersion = 1
 
 	// MagicCookieKey is the magic cookie key for go-plugin handshake.
 	// This prevents users from accidentally executing plugin binaries.
@@ -44,8 +38,7 @@ const (
 
 // PluginsConfig holds configuration for all plugins, loaded from settings.
 type PluginsConfig struct {
-	Broker  map[string]PluginEntry `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
-	Harness map[string]PluginEntry `json:"harness,omitempty" yaml:"harness,omitempty" koanf:"harness"`
+	Broker map[string]PluginEntry `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
 }
 
 // PluginEntry holds configuration for a single plugin.

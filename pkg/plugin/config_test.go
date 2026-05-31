@@ -22,9 +22,7 @@ import (
 
 func TestPluginConstants(t *testing.T) {
 	assert.Equal(t, "broker", PluginTypeBroker)
-	assert.Equal(t, "harness", PluginTypeHarness)
 	assert.Equal(t, uint(1), uint(BrokerPluginProtocolVersion))
-	assert.Equal(t, uint(1), uint(HarnessPluginProtocolVersion))
 	assert.Equal(t, "SCION_PLUGIN", MagicCookieKey)
 	assert.Equal(t, "scion-plugin-v1", MagicCookieValue)
 	assert.Equal(t, "scion-plugin-", PluginBinaryPrefix)
@@ -40,22 +38,11 @@ func TestPluginsConfig(t *testing.T) {
 				},
 			},
 		},
-		Harness: map[string]PluginEntry{
-			"cursor": {
-				Config: map[string]string{
-					"image": "cursor-agent:latest",
-				},
-			},
-		},
 	}
 
 	assert.Len(t, cfg.Broker, 1)
 	assert.Equal(t, "/usr/local/bin/scion-plugin-nats", cfg.Broker["nats"].Path)
 	assert.Equal(t, "nats://localhost:4222", cfg.Broker["nats"].Config["url"])
-
-	assert.Len(t, cfg.Harness, 1)
-	assert.Empty(t, cfg.Harness["cursor"].Path)
-	assert.Equal(t, "cursor-agent:latest", cfg.Harness["cursor"].Config["image"])
 }
 
 func TestPluginsConfigFromEntries(t *testing.T) {
@@ -65,16 +52,10 @@ func TestPluginsConfigFromEntries(t *testing.T) {
 			Config: map[string]string{"url": "nats://localhost"},
 		},
 	}
-	harnessEntries := map[string]V1PluginEntryLike{
-		"cursor": {
-			Config: map[string]string{"image": "cursor:latest"},
-		},
-	}
 
-	cfg := PluginsConfigFromEntries(brokerEntries, harnessEntries)
+	cfg := PluginsConfigFromEntries(brokerEntries)
 	assert.Equal(t, "/path/to/nats", cfg.Broker["nats"].Path)
 	assert.Equal(t, "nats://localhost", cfg.Broker["nats"].Config["url"])
-	assert.Equal(t, "cursor:latest", cfg.Harness["cursor"].Config["image"])
 }
 
 func TestPluginEntry_SelfManaged(t *testing.T) {
@@ -100,7 +81,7 @@ func TestPluginsConfigFromEntries_SelfManaged(t *testing.T) {
 		},
 	}
 
-	cfg := PluginsConfigFromEntries(brokerEntries, nil)
+	cfg := PluginsConfigFromEntries(brokerEntries)
 	assert.True(t, cfg.Broker["googlechat"].SelfManaged)
 	assert.Equal(t, "localhost:9090", cfg.Broker["googlechat"].Address)
 	assert.Equal(t, "my-gcp-project", cfg.Broker["googlechat"].Config["project_id"])

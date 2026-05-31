@@ -272,7 +272,7 @@ type V1ServerConfig struct {
 	// enabling topic-based subscriptions and broadcast fan-out at the Hub level.
 	MessageBroker *V1MessageBrokerConfig `json:"message_broker,omitempty" yaml:"message_broker,omitempty" koanf:"message_broker"`
 
-	// Plugins configures external plugin loading for message brokers and harnesses.
+	// Plugins configures external plugin loading for message brokers.
 	// Plugins run as separate processes using hashicorp/go-plugin.
 	Plugins *V1PluginsConfig `json:"plugins,omitempty" yaml:"plugins,omitempty" koanf:"plugins"`
 
@@ -311,12 +311,10 @@ type V1MessageBrokerConfig struct {
 	Types []string `json:"types,omitempty" yaml:"types,omitempty" koanf:"types"`
 }
 
-// V1PluginsConfig configures external plugin loading for message brokers and harnesses.
+// V1PluginsConfig configures external plugin loading for message brokers.
 type V1PluginsConfig struct {
 	// Broker maps plugin names to their configuration for message broker plugins.
 	Broker map[string]V1PluginEntry `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
-	// Harness maps plugin names to their configuration for harness plugins.
-	Harness map[string]V1PluginEntry `json:"harness,omitempty" yaml:"harness,omitempty" koanf:"harness"`
 }
 
 // V1PluginEntry holds configuration for a single plugin.

@@ -137,18 +137,18 @@ func TestDiscoverPlugins_AutoDiscovery(t *testing.T) {
 	dir := t.TempDir()
 	logger := slog.Default()
 
-	// Create auto-discoverable plugins
-	harnessDir := filepath.Join(dir, "harness")
-	require.NoError(t, os.MkdirAll(harnessDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(harnessDir, "scion-plugin-cursor"), []byte("#!/bin/sh\n"), 0755))
+	// Create auto-discoverable broker plugin
+	brokerDir := filepath.Join(dir, "broker")
+	require.NoError(t, os.MkdirAll(brokerDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(brokerDir, "scion-plugin-nats"), []byte("#!/bin/sh\n"), 0755))
 
 	// Empty config - should auto-discover
 	cfg := PluginsConfig{}
 
 	discovered := DiscoverPlugins(cfg, dir, logger)
 	assert.Len(t, discovered, 1)
-	assert.Equal(t, "cursor", discovered[0].Name)
-	assert.Equal(t, PluginTypeHarness, discovered[0].Type)
+	assert.Equal(t, "nats", discovered[0].Name)
+	assert.Equal(t, PluginTypeBroker, discovered[0].Type)
 	assert.False(t, discovered[0].FromConfig)
 }
 
@@ -213,27 +213,6 @@ func TestDiscoverPlugins_SelfManaged(t *testing.T) {
 	assert.Equal(t, "localhost:9090", discovered[0].Address)
 	assert.Empty(t, discovered[0].Path) // No binary path for self-managed plugins
 	assert.True(t, discovered[0].FromConfig)
-}
-
-func TestDiscoverPlugins_SelfManagedHarness(t *testing.T) {
-	dir := t.TempDir()
-	logger := slog.Default()
-
-	cfg := PluginsConfig{
-		Harness: map[string]PluginEntry{
-			"external": {
-				SelfManaged: true,
-				Address:     "localhost:8080",
-			},
-		},
-	}
-
-	discovered := DiscoverPlugins(cfg, dir, logger)
-	require.Len(t, discovered, 1)
-	assert.Equal(t, "external", discovered[0].Name)
-	assert.Equal(t, PluginTypeHarness, discovered[0].Type)
-	assert.True(t, discovered[0].SelfManaged)
-	assert.Equal(t, "localhost:8080", discovered[0].Address)
 }
 
 func TestDiscoverPlugins_MixedModes(t *testing.T) {

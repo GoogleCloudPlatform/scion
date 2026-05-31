@@ -204,7 +204,6 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// 10b. Initialize plugin manager
 	pluginMgr := initPluginManager()
 	defer pluginMgr.Shutdown()
-	harness.SetPluginManager(pluginMgr)
 
 	// 11. Start Hub
 	var hubSrv *hub.Server
@@ -1274,19 +1273,10 @@ func initPluginManager() *scionplugin.Manager {
 
 	// Convert V1PluginsConfig to plugin.PluginsConfig
 	pluginsCfg := scionplugin.PluginsConfig{
-		Broker:  make(map[string]scionplugin.PluginEntry),
-		Harness: make(map[string]scionplugin.PluginEntry),
+		Broker: make(map[string]scionplugin.PluginEntry),
 	}
 	for name, entry := range vs.Server.Plugins.Broker {
 		pluginsCfg.Broker[name] = scionplugin.PluginEntry{
-			Path:        entry.Path,
-			Config:      entry.Config,
-			SelfManaged: entry.SelfManaged,
-			Address:     entry.Address,
-		}
-	}
-	for name, entry := range vs.Server.Plugins.Harness {
-		pluginsCfg.Harness[name] = scionplugin.PluginEntry{
 			Path:        entry.Path,
 			Config:      entry.Config,
 			SelfManaged: entry.SelfManaged,

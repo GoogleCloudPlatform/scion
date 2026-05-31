@@ -16,23 +16,7 @@ package harness
 
 import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 )
-
-// PluginManager is an optional interface for looking up harness plugins.
-// When set, the harness factory checks plugins after built-in harnesses.
-var pluginManager pluginHarnessProvider
-
-type pluginHarnessProvider interface {
-	HasPlugin(pluginType, name string) bool
-	GetHarness(name string) (api.Harness, error)
-}
-
-// SetPluginManager sets the plugin manager used for harness plugin lookup.
-// This should be called during server initialization before any harness creation.
-func SetPluginManager(mgr *scionplugin.Manager) {
-	pluginManager = mgr
-}
 
 func New(harnessName string) api.Harness {
 	switch harnessName {
@@ -45,13 +29,6 @@ func New(harnessName string) api.Harness {
 	case "codex":
 		return &Codex{}
 	default:
-		// Check plugin registry before falling back to Generic
-		if pluginManager != nil && pluginManager.HasPlugin(scionplugin.PluginTypeHarness, harnessName) {
-			h, err := pluginManager.GetHarness(harnessName)
-			if err == nil {
-				return h
-			}
-		}
 		return &Generic{}
 	}
 }

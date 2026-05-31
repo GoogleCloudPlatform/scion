@@ -26,7 +26,7 @@ import (
 // DiscoveredPlugin represents a plugin found during discovery.
 type DiscoveredPlugin struct {
 	Name        string
-	Type        string // "broker" or "harness"
+	Type        string // "broker" (additional types may be added in future)
 	Path        string // absolute path to the binary (empty for self-managed plugins)
 	Config      map[string]string
 	FromConfig  bool   // true if found via settings, false if auto-discovered
@@ -69,39 +69,13 @@ func DiscoverPlugins(cfg PluginsConfig, pluginsDir string, logger *slog.Logger) 
 		})
 	}
 
-	for name, entry := range cfg.Harness {
-		if entry.SelfManaged {
-			discovered = append(discovered, DiscoveredPlugin{
-				Name:        name,
-				Type:        PluginTypeHarness,
-				Config:      entry.Config,
-				FromConfig:  true,
-				SelfManaged: true,
-				Address:     entry.Address,
-			})
-			continue
-		}
-		path := resolvePluginPath(name, PluginTypeHarness, entry.Path, pluginsDir, logger)
-		if path == "" {
-			logger.Warn("Plugin binary not found", "type", PluginTypeHarness, "name", name)
-			continue
-		}
-		discovered = append(discovered, DiscoveredPlugin{
-			Name:       name,
-			Type:       PluginTypeHarness,
-			Path:       path,
-			Config:     entry.Config,
-			FromConfig: true,
-		})
-	}
-
 	// 2. Scan filesystem for plugins not already in settings
 	configuredNames := make(map[string]bool)
 	for _, d := range discovered {
 		configuredNames[d.Type+":"+d.Name] = true
 	}
 
-	for _, pluginType := range []string{PluginTypeBroker, PluginTypeHarness} {
+	for _, pluginType := range []string{PluginTypeBroker} {
 		scanDir := filepath.Join(pluginsDir, pluginType)
 		scanned := scanPluginDir(scanDir, pluginType, logger)
 		for _, sd := range scanned {

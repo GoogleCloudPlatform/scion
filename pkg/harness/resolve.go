@@ -20,7 +20,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 )
 
 // ResolveOptions selects how a harness is constructed.
@@ -48,18 +47,17 @@ type ResolvedHarness struct {
 	ConfigName     string
 	ConfigDir      *config.HarnessConfigDir
 	Config         config.HarnessConfigEntry
-	Implementation string // builtin | container-script | plugin | generic
+	Implementation string // builtin | container-script | generic
 }
 
 // Resolve constructs an api.Harness using the priority order from the design:
 //
 //  1. Explicit container-script harness (provisioner.type: container-script)
 //  2. Built-in Go harness for known harness types
-//  3. Go-plugin harness if registered
-//  4. Declarative generic harness (config.yaml only)
+//  3. Declarative generic harness (config.yaml only)
 //
 // For (1) the resolved harness-config dir must exist and contain provision.py
-// (the activation step in Phase 1 enforces this). For (2)-(4) the harness-
+// (the activation step in Phase 1 enforces this). For (2)-(3) the harness-
 // config dir is optional.
 func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 	if opts.Name == "" {
@@ -112,21 +110,7 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 		}, nil
 	}
 
-	// 3. Plugin
-	if pluginManager != nil && pluginManager.HasPlugin(scionplugin.PluginTypeHarness, entry.Harness) {
-		h, err := pluginManager.GetHarness(entry.Harness)
-		if err == nil && h != nil {
-			return &ResolvedHarness{
-				Harness:        h,
-				ConfigName:     opts.Name,
-				ConfigDir:      hcDir,
-				Config:         entry,
-				Implementation: "plugin",
-			}, nil
-		}
-	}
-
-	// 4. Declarative generic. If config.yaml has declarative metadata
+	// 3. Declarative generic. If config.yaml has declarative metadata
 	// (command/env_template/capabilities), use the declarative wrapper so
 	// callers get those fields. Otherwise fall back to the legacy Generic.
 	if hasDeclarativeMetadata(entry) {

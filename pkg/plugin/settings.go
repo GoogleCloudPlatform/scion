@@ -20,7 +20,7 @@ package plugin
 // Usage:
 //
 //	if vs.Server != nil && vs.Server.Plugins != nil {
-//	    cfg := plugin.PluginsConfigFromV1(vs.Server.Plugins.Broker, vs.Server.Plugins.Harness)
+//	    cfg := plugin.PluginsConfigFromEntries(vs.Server.Plugins.Broker)
 //	}
 type V1PluginEntryLike struct {
 	Path        string
@@ -29,17 +29,13 @@ type V1PluginEntryLike struct {
 	Address     string
 }
 
-// PluginsConfigFromEntries builds a PluginsConfig from generic entry maps.
-func PluginsConfigFromEntries(brokerEntries, harnessEntries map[string]V1PluginEntryLike) PluginsConfig {
+// PluginsConfigFromEntries builds a PluginsConfig from a broker entry map.
+func PluginsConfigFromEntries(brokerEntries map[string]V1PluginEntryLike) PluginsConfig {
 	cfg := PluginsConfig{
-		Broker:  make(map[string]PluginEntry),
-		Harness: make(map[string]PluginEntry),
+		Broker: make(map[string]PluginEntry),
 	}
 	for name, entry := range brokerEntries {
 		cfg.Broker[name] = PluginEntry(entry)
-	}
-	for name, entry := range harnessEntries {
-		cfg.Harness[name] = PluginEntry(entry)
 	}
 	return cfg
 }

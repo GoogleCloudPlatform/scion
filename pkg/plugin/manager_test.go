@@ -37,7 +37,6 @@ func TestManagerWithLogger(t *testing.T) {
 func TestManagerHasPlugin_NotLoaded(t *testing.T) {
 	mgr := NewManager(nil)
 	assert.False(t, mgr.HasPlugin(PluginTypeBroker, "nats"))
-	assert.False(t, mgr.HasPlugin(PluginTypeHarness, "cursor"))
 }
 
 func TestManagerGet_NotLoaded(t *testing.T) {
@@ -52,13 +51,6 @@ func TestManagerGetBroker_NotLoaded(t *testing.T) {
 	mgr := NewManager(nil)
 
 	_, err := mgr.GetBroker("nats")
-	assert.Error(t, err)
-}
-
-func TestManagerGetHarness_NotLoaded(t *testing.T) {
-	mgr := NewManager(nil)
-
-	_, err := mgr.GetHarness("cursor")
 	assert.Error(t, err)
 }
 

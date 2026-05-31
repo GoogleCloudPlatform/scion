@@ -22,7 +22,6 @@ import (
 	"os/exec"
 	"sync"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/broker"
 	goplugin "github.com/hashicorp/go-plugin"
 	"github.com/hashicorp/go-plugin/runner"
@@ -156,11 +155,6 @@ func (m *Manager) loadPlugin(dp DiscoveredPlugin) error {
 		pluginMap = map[string]goplugin.Plugin{
 			BrokerPluginName: &BrokerPlugin{HostCallbacks: m.brokerCallbacks},
 		}
-	case PluginTypeHarness:
-		protocolVersion = HarnessPluginProtocolVersion
-		pluginMap = map[string]goplugin.Plugin{
-			HarnessPluginName: &HarnessPlugin{},
-		}
 	default:
 		return fmt.Errorf("unknown plugin type: %s", dp.Type)
 	}
@@ -195,8 +189,6 @@ func (m *Manager) loadPlugin(dp DiscoveredPlugin) error {
 	switch dp.Type {
 	case PluginTypeBroker:
 		dispenseName = BrokerPluginName
-	case PluginTypeHarness:
-		dispenseName = HarnessPluginName
 	}
 
 	raw, err := rpcClient.Dispense(dispenseName)
@@ -330,8 +322,6 @@ func (m *Manager) Get(pluginType, name string) (interface{}, error) {
 	switch pluginType {
 	case PluginTypeBroker:
 		dispenseName = BrokerPluginName
-	case PluginTypeHarness:
-		dispenseName = HarnessPluginName
 	default:
 		return nil, fmt.Errorf("unknown plugin type: %s", pluginType)
 	}
@@ -374,21 +364,6 @@ func (m *Manager) GetBroker(name string) (broker.MessageBroker, error) {
 		return newReconnectingBrokerAdapter(m, name, adapter, m.logger), nil
 	}
 	return adapter, nil
-}
-
-// GetHarness returns an api.Harness backed by the named harness plugin.
-func (m *Manager) GetHarness(name string) (api.Harness, error) {
-	raw, err := m.Get(PluginTypeHarness, name)
-	if err != nil {
-		return nil, err
-	}
-
-	harnessClient, ok := raw.(*HarnessRPCClient)
-	if !ok {
-		return nil, fmt.Errorf("plugin %s is not a harness plugin", name)
-	}
-
-	return harnessClient, nil
 }
 
 // ConfigureBroker re-configures a loaded broker plugin by merging extra

@@ -15,13 +15,8 @@
 package harness
 
 import (
-	"context"
-	"embed"
-	"fmt"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -43,72 +38,7 @@ func TestNew_BuiltinHarnesses(t *testing.T) {
 }
 
 func TestNew_UnknownFallsToGeneric(t *testing.T) {
-	pluginManager = nil
 	h := New("unknown-harness")
-	assert.Equal(t, "generic", h.Name())
-}
-
-// mockPluginProvider implements pluginHarnessProvider for testing.
-type mockPluginProvider struct {
-	plugins map[string]api.Harness
-}
-
-func (m *mockPluginProvider) HasPlugin(pluginType, name string) bool {
-	if pluginType != scionplugin.PluginTypeHarness {
-		return false
-	}
-	_, ok := m.plugins[name]
-	return ok
-}
-
-func (m *mockPluginProvider) GetHarness(name string) (api.Harness, error) {
-	h, ok := m.plugins[name]
-	if !ok {
-		return nil, fmt.Errorf("not found")
-	}
-	return h, nil
-}
-
-// stubHarness is a minimal api.Harness for testing plugin lookup.
-type stubHarness struct{ name string }
-
-func (s *stubHarness) Name() string { return s.name }
-func (s *stubHarness) AdvancedCapabilities() api.HarnessAdvancedCapabilities {
-	return api.HarnessAdvancedCapabilities{}
-}
-func (s *stubHarness) GetEnv(string, string, string) map[string]string       { return nil }
-func (s *stubHarness) GetCommand(string, bool, []string) []string            { return nil }
-func (s *stubHarness) DefaultConfigDir() string                              { return "" }
-func (s *stubHarness) SkillsDir() string                                     { return "" }
-func (s *stubHarness) HasSystemPrompt(string) bool                           { return false }
-func (s *stubHarness) Provision(_ context.Context, _, _, _, _ string) error  { return nil }
-func (s *stubHarness) GetEmbedDir() string                                   { return "" }
-func (s *stubHarness) GetInterruptKey() string                               { return "" }
-func (s *stubHarness) GetHarnessEmbedsFS() (embed.FS, string)                { return embed.FS{}, "" }
-func (s *stubHarness) InjectAgentInstructions(string, []byte) error          { return nil }
-func (s *stubHarness) InjectSystemPrompt(string, []byte) error               { return nil }
-func (s *stubHarness) GetTelemetryEnv() map[string]string                    { return nil }
-func (s *stubHarness) ResolveAuth(api.AuthConfig) (*api.ResolvedAuth, error) { return nil, nil }
-
-func TestNew_PluginHarness(t *testing.T) {
-	provider := &mockPluginProvider{
-		plugins: map[string]api.Harness{
-			"cursor": &stubHarness{name: "cursor"},
-		},
-	}
-	pluginManager = provider
-	defer func() { pluginManager = nil }()
-
-	// Built-in harnesses should still work
-	h := New("claude")
-	assert.Equal(t, "claude", h.Name())
-
-	// Plugin harness should be found
-	h = New("cursor")
-	assert.Equal(t, "cursor", h.Name())
-
-	// Unknown plugin falls back to Generic
-	h = New("nonexistent")
 	assert.Equal(t, "generic", h.Name())
 }
 
