@@ -45,7 +45,7 @@ func (s messageTestState) restore() {
 	noHub = s.noHub
 }
 
-// messageMockServer creates a mock Hub server that handles grove-scoped
+// messageMockServer creates a mock Hub server that handles project-scoped
 // agent message and list requests. Returns the server, a pointer to a slice of
 // messages sent (as agent-name strings), and a configurable list of agents
 // returned by the list endpoint.
@@ -272,7 +272,7 @@ func TestSendMessageViaHub_All(t *testing.T) {
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 
-	// For --all mode, we use global agent service (no grove scoping)
+	// For --all mode, we use global agent service (no project scoping)
 	hubCtx := &HubContext{
 		Client:   client,
 		Endpoint: server.URL,

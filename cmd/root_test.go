@@ -327,7 +327,7 @@ hub:
 			r, w, _ := os.Pipe()
 			os.Stderr = w
 
-			// Call the function (use empty grove path as settings won't load in test env)
+			// Call the function (use empty project path as settings won't load in test env)
 			printDevAuthWarningIfNeeded("")
 
 			// Restore stderr and read output

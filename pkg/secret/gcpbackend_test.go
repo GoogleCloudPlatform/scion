@@ -425,16 +425,16 @@ func TestGCPBackend_Resolve(t *testing.T) {
 		byName[sv.Name] = sv
 	}
 
-	// API_KEY overridden by grove
+	// API_KEY overridden by project
 	apiKey, ok := byName["API_KEY"]
 	if !ok {
 		t.Fatal("expected API_KEY in resolved secrets")
 	}
 	if apiKey.Value != "grove-api-key" {
-		t.Errorf("expected grove API_KEY value %q, got %q", "grove-api-key", apiKey.Value)
+		t.Errorf("expected project API_KEY value %q, got %q", "grove-api-key", apiKey.Value)
 	}
 
-	// DB_PASS from grove
+	// DB_PASS from project
 	dbPass, ok := byName["DB_PASS"]
 	if !ok {
 		t.Fatal("expected DB_PASS in resolved secrets")

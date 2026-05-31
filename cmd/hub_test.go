@@ -215,17 +215,17 @@ func TestGetHubEnabledScope_GlobalScope(t *testing.T) {
 	assert.True(t, scope.Enabled)
 }
 
-func TestGetHubEnabledScope_GroveHasOwnSetting(t *testing.T) {
+func TestGetHubEnabledScope_ProjectHasOwnSetting(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("SCION_HUB_ENDPOINT", "")
 
-	// Create grove settings with hub.enabled
-	groveDir := filepath.Join(tmpDir, "grove-scion")
-	if err := os.MkdirAll(groveDir, 0755); err != nil {
+	// Create project settings with hub.enabled
+	projectDir := filepath.Join(tmpDir, "project-scion")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"),
+	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"),
 		[]byte("hub:\n  enabled: true\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestGetHubEnabledScope_GroveHasOwnSetting(t *testing.T) {
 		Hub: &config.HubClientConfig{Enabled: &enabled},
 	}
 
-	scope := getHubEnabledScope(groveDir, false, settings)
+	scope := getHubEnabledScope(projectDir, false, settings)
 	assert.Equal(t, "project", scope.Scope)
 	assert.False(t, scope.Inherited)
 	assert.True(t, scope.Enabled)
@@ -256,12 +256,12 @@ func TestGetHubEnabledScope_InheritedFromGlobal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create grove settings WITHOUT hub.enabled
-	groveDir := filepath.Join(tmpDir, "grove-scion")
-	if err := os.MkdirAll(groveDir, 0755); err != nil {
+	// Create project settings WITHOUT hub.enabled
+	projectDir := filepath.Join(tmpDir, "project-scion")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"),
+	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"),
 		[]byte("runtime: docker\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +271,7 @@ func TestGetHubEnabledScope_InheritedFromGlobal(t *testing.T) {
 		Hub: &config.HubClientConfig{Enabled: &enabled},
 	}
 
-	scope := getHubEnabledScope(groveDir, false, settings)
+	scope := getHubEnabledScope(projectDir, false, settings)
 	assert.Equal(t, "global", scope.Scope)
 	assert.True(t, scope.Inherited)
 	assert.True(t, scope.Enabled)
@@ -288,15 +288,15 @@ func TestGetHubEnabledScope_DefaultWhenNothingSet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create grove settings WITHOUT hub.enabled
-	groveDir := filepath.Join(tmpDir, "grove-scion")
-	if err := os.MkdirAll(groveDir, 0755); err != nil {
+	// Create project settings WITHOUT hub.enabled
+	projectDir := filepath.Join(tmpDir, "project-scion")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	settings := &config.Settings{}
 
-	scope := getHubEnabledScope(groveDir, false, settings)
+	scope := getHubEnabledScope(projectDir, false, settings)
 	assert.Equal(t, "default", scope.Scope)
 	assert.False(t, scope.Inherited)
 	assert.False(t, scope.Enabled)
@@ -312,24 +312,24 @@ func TestGetHubEndpointScope_FromProject(t *testing.T) {
 	hubEndpoint = ""
 	defer func() { hubEndpoint = origHubEndpoint }()
 
-	// Create grove settings with hub.endpoint
-	groveDir := filepath.Join(tmpDir, "grove-scion")
-	if err := os.MkdirAll(groveDir, 0755); err != nil {
+	// Create project settings with hub.endpoint
+	projectDir := filepath.Join(tmpDir, "project-scion")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"),
-		[]byte("hub:\n  endpoint: https://grove-hub.example.com\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"),
+		[]byte("hub:\n  endpoint: https://project-hub.example.com\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	settings := &config.Settings{
-		Hub: &config.HubClientConfig{Endpoint: "https://grove-hub.example.com"},
+		Hub: &config.HubClientConfig{Endpoint: "https://project-hub.example.com"},
 	}
 
-	scope := getHubEndpointScope(groveDir, false, settings)
+	scope := getHubEndpointScope(projectDir, false, settings)
 	assert.Equal(t, "project", scope.Source)
 	assert.False(t, scope.Inherited)
-	assert.Equal(t, "https://grove-hub.example.com", scope.Endpoint)
+	assert.Equal(t, "https://project-hub.example.com", scope.Endpoint)
 }
 
 func TestGetHubEndpointScope_InheritedFromGlobal(t *testing.T) {
@@ -351,12 +351,12 @@ func TestGetHubEndpointScope_InheritedFromGlobal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create grove settings WITHOUT hub.endpoint
-	groveDir := filepath.Join(tmpDir, "grove-scion")
-	if err := os.MkdirAll(groveDir, 0755); err != nil {
+	// Create project settings WITHOUT hub.endpoint
+	projectDir := filepath.Join(tmpDir, "project-scion")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(groveDir, "settings.yaml"),
+	if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"),
 		[]byte("runtime: docker\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +365,7 @@ func TestGetHubEndpointScope_InheritedFromGlobal(t *testing.T) {
 		Hub: &config.HubClientConfig{Endpoint: "https://global-hub.example.com"},
 	}
 
-	scope := getHubEndpointScope(groveDir, false, settings)
+	scope := getHubEndpointScope(projectDir, false, settings)
 	assert.Equal(t, "global", scope.Source)
 	assert.True(t, scope.Inherited)
 	assert.Equal(t, "https://global-hub.example.com", scope.Endpoint)
@@ -386,15 +386,15 @@ func TestGetHubEndpointScope_FromEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create grove settings WITHOUT hub.endpoint
-	groveDir := filepath.Join(tmpDir, "grove-scion")
-	if err := os.MkdirAll(groveDir, 0755); err != nil {
+	// Create project settings WITHOUT hub.endpoint
+	projectDir := filepath.Join(tmpDir, "project-scion")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	settings := &config.Settings{}
 
-	scope := getHubEndpointScope(groveDir, false, settings)
+	scope := getHubEndpointScope(projectDir, false, settings)
 	assert.Equal(t, "env", scope.Source)
 	assert.True(t, scope.Inherited)
 }

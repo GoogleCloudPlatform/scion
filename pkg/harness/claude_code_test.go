@@ -123,7 +123,7 @@ func TestClaudeCode_Provision_GitClone(t *testing.T) {
 	// Simulate host path that contains /.scion/agents/ — this triggers the
 	// worktree heuristic in the old code, producing /repo-root/.scion/agents/...
 	// instead of /workspace.
-	agentDir := filepath.Join(tmpDir, "grove", ".scion", "agents", "test-agent")
+	agentDir := filepath.Join(tmpDir, "project", ".scion", "agents", "test-agent")
 	agentHome := filepath.Join(agentDir, "home")
 	agentWorkspace := filepath.Join(agentDir, "workspace")
 	os.MkdirAll(agentHome, 0755)

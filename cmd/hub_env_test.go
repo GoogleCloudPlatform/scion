@@ -58,11 +58,11 @@ func (s envTestState) restore() {
 	envOutputJSON = s.envOutputJSON
 }
 
-// setupEnvProject creates a grove directory with settings pointing to the given hub endpoint.
+// setupEnvProject creates a project directory with settings pointing to the given hub endpoint.
 func setupEnvProject(t *testing.T, home, endpoint string) string {
 	t.Helper()
-	groveDir := filepath.Join(home, "project", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(home, "project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	settings := map[string]interface{}{
 		"grove_id": "test-grove",
@@ -73,9 +73,9 @@ func setupEnvProject(t *testing.T, home, endpoint string) string {
 	}
 	data, err := json.Marshal(settings)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(groveDir, "settings.json"), data, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
 
-	return groveDir
+	return projectDir
 }
 
 // newEnvListMockServer creates a mock Hub server that handles env list requests.
@@ -147,8 +147,8 @@ func TestRunEnvList_WithResults(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
-	groveDir := setupEnvProject(t, tmpHome, server.URL)
-	projectPath = groveDir
+	projectDir := setupEnvProject(t, tmpHome, server.URL)
+	projectPath = projectDir
 
 	envOutputJSON = false
 	envProjectScope = ""
@@ -169,8 +169,8 @@ func TestRunEnvList_Empty(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
-	groveDir := setupEnvProject(t, tmpHome, server.URL)
-	projectPath = groveDir
+	projectDir := setupEnvProject(t, tmpHome, server.URL)
+	projectPath = projectDir
 
 	envOutputJSON = false
 	envProjectScope = ""
@@ -195,8 +195,8 @@ func TestRunEnvList_JSON(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
-	groveDir := setupEnvProject(t, tmpHome, server.URL)
-	projectPath = groveDir
+	projectDir := setupEnvProject(t, tmpHome, server.URL)
+	projectPath = projectDir
 
 	envOutputJSON = true
 	envProjectScope = ""
@@ -213,12 +213,12 @@ func TestHubEnvListCmd_GroveFlagNoOptDefVal(t *testing.T) {
 	assert.Equal(t, scopeInferSentinel, f.NoOptDefVal, "--grove should have NoOptDefVal set to sentinel")
 }
 
-// setupEnvProjectWithHubProjectID creates a grove directory with settings that include
-// a hub grove ID, endpoint, and enabled flag.
+// setupEnvProjectWithHubProjectID creates a project directory with settings that include
+// a hub project ID, endpoint, and enabled flag.
 func setupEnvProjectWithHubProjectID(t *testing.T, home, endpoint, projectID string) string {
 	t.Helper()
-	groveDir := filepath.Join(home, "project", ".scion")
-	require.NoError(t, os.MkdirAll(groveDir, 0755))
+	projectDir := filepath.Join(home, "project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	settings := map[string]interface{}{
 		"grove_id": "test-grove",
@@ -230,12 +230,12 @@ func setupEnvProjectWithHubProjectID(t *testing.T, home, endpoint, projectID str
 	}
 	data, err := json.Marshal(settings)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(groveDir, "settings.json"), data, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
 
-	return groveDir
+	return projectDir
 }
 
-// newEnvProjectResolveMockServer creates a mock Hub server that handles both grove
+// newEnvProjectResolveMockServer creates a mock Hub server that handles both project
 // resolution (by slug/name) and env list requests.
 func newEnvProjectResolveMockServer(t *testing.T, projectID, projectName, projectSlug string, envVars []map[string]interface{}) *httptest.Server {
 	t.Helper()
@@ -307,8 +307,8 @@ func TestRunEnvList_BareGroveFlag(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
-	groveDir := setupEnvProjectWithHubProjectID(t, tmpHome, server.URL, groveUUID)
-	projectPath = groveDir
+	projectDir := setupEnvProjectWithHubProjectID(t, tmpHome, server.URL, groveUUID)
+	projectPath = projectDir
 
 	envOutputJSON = false
 	envBrokerScope = ""
@@ -338,8 +338,8 @@ func TestRunEnvList_GroveByName(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
-	groveDir := setupEnvProject(t, tmpHome, server.URL)
-	projectPath = groveDir
+	projectDir := setupEnvProject(t, tmpHome, server.URL)
+	projectPath = projectDir
 
 	envOutputJSON = false
 	envBrokerScope = ""
@@ -371,10 +371,10 @@ func TestResolveEnvScope_SentinelInfersFromSettings(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	os.Setenv("HOME", tmpHome)
-	groveDir := setupEnvProjectWithHubProjectID(t, tmpHome, "http://localhost:9999", groveUUID)
-	projectPath = groveDir
+	projectDir := setupEnvProjectWithHubProjectID(t, tmpHome, "http://localhost:9999", groveUUID)
+	projectPath = projectDir
 
-	settings, err := config.LoadSettings(groveDir)
+	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
 	scope, scopeID, err := resolveEnvScope(testCmd, settings)
@@ -399,10 +399,10 @@ func TestResolveEnvScope_ExplicitGroveValue(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	os.Setenv("HOME", tmpHome)
-	groveDir := setupEnvProject(t, tmpHome, "http://localhost:9999")
-	projectPath = groveDir
+	projectDir := setupEnvProject(t, tmpHome, "http://localhost:9999")
+	projectPath = projectDir
 
-	settings, err := config.LoadSettings(groveDir)
+	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
 	scope, scopeID, err := resolveEnvScope(testCmd, settings)
@@ -427,10 +427,10 @@ func TestResolveEnvScope_ScopeHub(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	os.Setenv("HOME", tmpHome)
-	groveDir := setupEnvProject(t, tmpHome, "http://localhost:9999")
-	projectPath = groveDir
+	projectDir := setupEnvProject(t, tmpHome, "http://localhost:9999")
+	projectPath = projectDir
 
-	settings, err := config.LoadSettings(groveDir)
+	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
 	scope, scopeID, err := resolveEnvScope(testCmd, settings)
@@ -456,10 +456,10 @@ func TestResolveEnvScope_ScopeConflictsWithProject(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	os.Setenv("HOME", tmpHome)
-	groveDir := setupEnvProject(t, tmpHome, "http://localhost:9999")
-	projectPath = groveDir
+	projectDir := setupEnvProject(t, tmpHome, "http://localhost:9999")
+	projectPath = projectDir
 
-	settings, err := config.LoadSettings(groveDir)
+	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
 	_, _, err = resolveEnvScope(testCmd, settings)
@@ -484,10 +484,10 @@ func TestResolveEnvScope_ScopeConflictsWithBroker(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	os.Setenv("HOME", tmpHome)
-	groveDir := setupEnvProject(t, tmpHome, "http://localhost:9999")
-	projectPath = groveDir
+	projectDir := setupEnvProject(t, tmpHome, "http://localhost:9999")
+	projectPath = projectDir
 
-	settings, err := config.LoadSettings(groveDir)
+	settings, err := config.LoadSettings(projectDir)
 	require.NoError(t, err)
 
 	_, _, err = resolveEnvScope(testCmd, settings)

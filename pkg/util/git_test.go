@@ -502,7 +502,7 @@ func TestNormalizeGitRemote(t *testing.T) {
 
 func TestNormalizeGitRemote_CrossProtocolConsistency(t *testing.T) {
 	// All of these refer to the same repository and must produce the same normalized form.
-	// (HashProjectID is no longer used for grove IDs, but is retained for deterministic identifiers.)
+	// (HashProjectID is retained for deterministic identifiers.)
 	variants := []string{
 		"git@github.com:ptone/gamegame.git",
 		"https://github.com/ptone/gamegame.git",

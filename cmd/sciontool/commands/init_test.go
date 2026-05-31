@@ -16,8 +16,8 @@ import (
 )
 
 // TestInitGroveDataIsolation is a canary test that verifies sciontool source code
-// does NOT import the pkg/config package, which contains grove path resolution logic.
-// This is a compile-time guarantee that in-container code cannot access grove data paths.
+// does NOT import the pkg/config package, which contains project path resolution logic.
+// This is a compile-time guarantee that in-container code cannot access project data paths.
 // If this test fails, it means someone added a pkg/config import to sciontool code,
 // which would break the agent isolation model.
 func TestInitProjectDataIsolation(t *testing.T) {
@@ -33,9 +33,9 @@ func TestInitProjectDataIsolation(t *testing.T) {
 	for _, line := range strings.Split(deps, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "github.com/GoogleCloudPlatform/scion/pkg/config" {
-			t.Fatal("sciontool must NOT import pkg/config (grove path resolution). " +
+			t.Fatal("sciontool must NOT import pkg/config (project path resolution). " +
 				"In-container code should use the Hub API or agent-local files, " +
-				"not filesystem-based grove data access.")
+				"not filesystem-based project data access.")
 		}
 	}
 }

@@ -30,15 +30,15 @@ func TestGetAgentNames(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", originalHome)
 
-	// Setup temp directory for grove
+	// Setup temp directory for project
 	tmpDir, err := os.MkdirTemp("", "scion-completion-test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDir)
 
-	groveDir := filepath.Join(tmpDir, ".scion")
-	agentsDir := filepath.Join(groveDir, "agents")
+	projectDir := filepath.Join(tmpDir, ".scion")
+	agentsDir := filepath.Join(projectDir, "agents")
 	err = os.MkdirAll(agentsDir, 0755)
 	if err != nil {
 		t.Fatal(err)
@@ -73,8 +73,8 @@ func TestGetAgentNames(t *testing.T) {
 	cmd.Flags().String("grove", "", "")
 	cmd.Flags().Bool("global", false, "")
 
-	// Test with explicit grove path
-	cmd.Flags().Set("grove", groveDir)
+	// Test with explicit project path
+	cmd.Flags().Set("grove", projectDir)
 
 	t.Run("Complete all agents", func(t *testing.T) {
 		names, _ := getAgentNames(cmd, []string{}, "")

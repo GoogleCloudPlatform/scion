@@ -369,13 +369,13 @@ func TestLocalBackend_Resolve(t *testing.T) {
 		byName[sv.Name] = sv
 	}
 
-	// API_KEY overridden by grove
+	// API_KEY overridden by project
 	apiKey, ok := byName["API_KEY"]
 	if !ok {
 		t.Fatal("expected API_KEY in resolved secrets")
 	}
 	if apiKey.Value != "grove-api-key" {
-		t.Errorf("expected grove API_KEY value %q, got %q", "grove-api-key", apiKey.Value)
+		t.Errorf("expected project API_KEY value %q, got %q", "grove-api-key", apiKey.Value)
 	}
 	if apiKey.Scope != ScopeProject {
 		t.Errorf("expected API_KEY scope %q, got %q", ScopeProject, apiKey.Scope)
@@ -393,7 +393,7 @@ func TestLocalBackend_Resolve(t *testing.T) {
 		t.Errorf("expected TLS_CERT target %q, got %q", "/etc/ssl/cert.pem", cert.Target)
 	}
 
-	// DB_PASS from grove
+	// DB_PASS from project
 	dbPass, ok := byName["DB_PASS"]
 	if !ok {
 		t.Fatal("expected DB_PASS in resolved secrets")
@@ -572,10 +572,10 @@ func TestLocalBackend_ResolveDuplicateTargetAcrossScopes(t *testing.T) {
 
 	// Project-level (higher scope) should win
 	if fileSecrets[0].Name != "my-key" {
-		t.Errorf("expected grove-level secret 'my-key' to win, got %q", fileSecrets[0].Name)
+		t.Errorf("expected project-level secret 'my-key' to win, got %q", fileSecrets[0].Name)
 	}
 	if fileSecrets[0].Value != "grove-cert-data" {
-		t.Errorf("expected grove-level value, got %q", fileSecrets[0].Value)
+		t.Errorf("expected project-level value, got %q", fileSecrets[0].Value)
 	}
 }
 
@@ -620,7 +620,7 @@ func TestLocalBackend_ResolveDuplicateEnvTargetAcrossScopes(t *testing.T) {
 		t.Fatalf("expected 1 env secret for FOO_VAR, got %d", len(envSecrets))
 	}
 	if envSecrets[0].Name != "grove-foo" {
-		t.Errorf("expected grove-level secret to win, got %q", envSecrets[0].Name)
+		t.Errorf("expected project-level secret to win, got %q", envSecrets[0].Name)
 	}
 }
 
@@ -747,7 +747,7 @@ func TestLocalBackend_ResolveProgeny_DeepAncestry(t *testing.T) {
 }
 
 // TestLocalBackend_ResolveProgeny_GroveOverridesProgeny verifies that
-// grove-scoped secrets with the same key take precedence over progeny secrets.
+// project-scoped secrets with the same key take precedence over progeny secrets.
 func TestLocalBackend_ResolveProgeny_GroveOverridesProgeny(t *testing.T) {
 	backend, s := createTestBackend(t)
 	ctx := context.Background()
@@ -797,7 +797,7 @@ func TestLocalBackend_ResolveProgeny_GroveOverridesProgeny(t *testing.T) {
 	}
 	// Project should win
 	if apiKey.Value != "grove-value" {
-		t.Errorf("expected grove override %q, got %q", "grove-value", apiKey.Value)
+		t.Errorf("expected project override %q, got %q", "grove-value", apiKey.Value)
 	}
 	if apiKey.Scope != ScopeProject {
 		t.Errorf("expected scope %q, got %q", ScopeProject, apiKey.Scope)

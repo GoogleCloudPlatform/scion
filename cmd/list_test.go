@@ -309,8 +309,8 @@ func TestDisplayAgentsEmpty(t *testing.T) {
 	buf.ReadFrom(r)
 	output := buf.String()
 
-	if !strings.Contains(output, "No active agents found in the current grove.") {
-		t.Errorf("expected empty grove message, got: %s", output)
+	if !strings.Contains(output, "No active agents found in the current project.") {
+		t.Errorf("expected empty project message, got: %s", output)
 	}
 }
 
@@ -331,8 +331,8 @@ func TestDisplayAgentsEmptyAll(t *testing.T) {
 	buf.ReadFrom(r)
 	output := buf.String()
 
-	if !strings.Contains(output, "No active agents found across any groves.") {
-		t.Errorf("expected all-groves empty message, got: %s", output)
+	if !strings.Contains(output, "No active agents found across any projects.") {
+		t.Errorf("expected all-projects empty message, got: %s", output)
 	}
 }
 

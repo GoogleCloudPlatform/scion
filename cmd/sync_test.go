@@ -124,11 +124,11 @@ func TestResolveLocalWorkspacePath_WorktreeExists(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Create grove directory structure
+	// Create project directory structure
 	projectName := "my-project"
-	groveDir := filepath.Join(tmpDir, projectName)
-	if err := os.MkdirAll(groveDir, 0755); err != nil {
-		t.Fatalf("failed to create grove dir: %v", err)
+	projectDir := filepath.Join(tmpDir, projectName)
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("failed to create project dir: %v", err)
 	}
 
 	// Create worktree directory
@@ -137,9 +137,9 @@ func TestResolveLocalWorkspacePath_WorktreeExists(t *testing.T) {
 		t.Fatalf("failed to create worktree dir: %v", err)
 	}
 
-	// Set projectPath to the grove directory
+	// Set projectPath to the project directory
 	oldProjectPath := projectPath
-	projectPath = groveDir
+	projectPath = projectDir
 	defer func() { projectPath = oldProjectPath }()
 
 	workspacePath, err := resolveLocalWorkspacePath("my-agent")
@@ -177,7 +177,7 @@ func TestResolveLocalWorkspacePath_FallbackToCurrent(t *testing.T) {
 }
 
 func TestResolveLocalWorkspacePath_EmptyProjectPath(t *testing.T) {
-	// Clear grove path
+	// Clear project path
 	oldProjectPath := projectPath
 	projectPath = ""
 	defer func() { projectPath = oldProjectPath }()

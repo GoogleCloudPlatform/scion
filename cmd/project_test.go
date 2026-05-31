@@ -34,7 +34,7 @@ func TestProjectInitNestedDetection(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	defer os.Setenv("HOME", origHome)
 
-	t.Run("allows nested grove inside project", func(t *testing.T) {
+	t.Run("allows nested project inside project", func(t *testing.T) {
 		// Create temp project with .scion
 		tmpHome := t.TempDir()
 		os.Setenv("HOME", tmpHome)
@@ -48,19 +48,19 @@ func TestProjectInitNestedDetection(t *testing.T) {
 		require.NoError(t, os.Mkdir(subDir, 0755))
 		require.NoError(t, os.Chdir(subDir))
 
-		// The enclosing grove check finds the parent grove
+		// The enclosing project check finds the parent project
 		_, rootDir, found := config.GetEnclosingProjectPath()
-		assert.True(t, found, "should find enclosing grove")
+		assert.True(t, found, "should find enclosing project")
 
 		wd, _ := os.Getwd()
-		// We're in a subdirectory, not the same as the grove root
+		// We're in a subdirectory, not the same as the project root
 		assert.NotEqual(t, filepath.Clean(wd), filepath.Clean(rootDir),
-			"should be in a subdirectory of the enclosing grove")
+			"should be in a subdirectory of the enclosing project")
 		// Nested init should be allowed — no error expected
 	})
 
-	t.Run("allows project grove when only global exists", func(t *testing.T) {
-		// Create a temp HOME with .scion (global grove)
+	t.Run("allows project when only global exists", func(t *testing.T) {
+		// Create a temp HOME with .scion (global project)
 		tmpHome := t.TempDir()
 		os.Setenv("HOME", tmpHome)
 
@@ -72,14 +72,14 @@ func TestProjectInitNestedDetection(t *testing.T) {
 		require.NoError(t, os.MkdirAll(projectDir, 0755))
 		require.NoError(t, os.Chdir(projectDir))
 
-		// The enclosing grove check will find ~/.scion
+		// The enclosing project check will find ~/.scion
 		projectPath, rootDir, found := config.GetEnclosingProjectPath()
-		assert.True(t, found, "should find global grove")
+		assert.True(t, found, "should find global project")
 
 		evalTmpHome, _ := filepath.EvalSymlinks(tmpHome)
 		assert.Equal(t, evalTmpHome, rootDir, "rootDir should be home directory")
 
-		// Check if this is the global grove
+		// Check if this is the global project
 		globalDir, err := config.GetGlobalDir()
 		assert.NoError(t, err)
 
@@ -87,15 +87,15 @@ func TestProjectInitNestedDetection(t *testing.T) {
 		evalProjectPath, _ := filepath.EvalSymlinks(projectPath)
 		evalGlobalDir, _ := filepath.EvalSymlinks(globalDir)
 		assert.Equal(t, evalProjectPath, evalGlobalDir,
-			"found grove should be the global grove - initialization should proceed")
+			"found project should be the global project - initialization should proceed")
 	})
 
-	t.Run("allows nested grove inside non-global project", func(t *testing.T) {
-		// Create temp HOME without global grove
+	t.Run("allows nested project inside non-global project", func(t *testing.T) {
+		// Create temp HOME without global project
 		tmpHome := t.TempDir()
 		os.Setenv("HOME", tmpHome)
 
-		// Create a project with .scion that is NOT the global grove
+		// Create a project with .scion that is NOT the global project
 		projectDir := filepath.Join(tmpHome, "projects", "existing-project")
 		require.NoError(t, os.MkdirAll(projectDir, 0755))
 		scionDir := filepath.Join(projectDir, ".scion")
@@ -106,9 +106,9 @@ func TestProjectInitNestedDetection(t *testing.T) {
 		require.NoError(t, os.MkdirAll(subDir, 0755))
 		require.NoError(t, os.Chdir(subDir))
 
-		// The enclosing grove check will find the project's .scion
+		// The enclosing project check will find the project's .scion
 		_, _, found := config.GetEnclosingProjectPath()
-		assert.True(t, found, "should find enclosing project grove")
+		assert.True(t, found, "should find enclosing project")
 
 		// Nested initialization is now allowed — no error expected
 	})

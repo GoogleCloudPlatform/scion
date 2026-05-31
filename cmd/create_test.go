@@ -52,12 +52,12 @@ func TestCreateAgent_DuplicateReturnsError(t *testing.T) {
 	os.Setenv("HOME", tmpHome)
 	noHub = true
 
-	// Set up grove directory with an existing agent
-	groveDir := filepath.Join(tmpHome, "project", ".scion")
-	require.NoError(t, os.MkdirAll(filepath.Join(groveDir, "agents"), 0755))
-	projectPath = groveDir
+	// Set up project directory with an existing agent
+	projectDir := filepath.Join(tmpHome, "project", ".scion")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "agents"), 0755))
+	projectPath = projectDir
 
-	createAgentDir(t, groveDir, "my-agent")
+	createAgentDir(t, projectDir, "my-agent")
 
 	// Attempt to create an agent with the same name — should fail
 	err := createCmd.RunE(createCmd, []string{"my-agent"})

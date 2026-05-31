@@ -187,7 +187,7 @@ func TestSubscriptionCreateEndToEnd(t *testing.T) {
 				t.Errorf("expected groveId %q, got %q", "grove-1", req.ProjectID)
 			}
 			if req.AgentID != "" {
-				t.Errorf("expected empty agentId for grove scope, got %q", req.AgentID)
+				t.Errorf("expected empty agentId for project scope, got %q", req.AgentID)
 			}
 
 			w.Header().Set("Content-Type", "application/json")

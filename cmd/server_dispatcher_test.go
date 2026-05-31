@@ -83,13 +83,13 @@ func TestDispatchAgentStart(t *testing.T) {
 
 	adapter := newAgentDispatcherAdapter(mgr, s, brokerID)
 
-	// Create test grove and broker
-	grove := &store.Project{
-		ID:   "grove-1",
-		Slug: "test-grove",
+	// Create test project and broker
+	project := &store.Project{
+		ID:   "proj-1",
+		Slug: "test-project",
 		Name: "Test Project",
 	}
-	err := s.CreateProject(ctx, grove)
+	err := s.CreateProject(ctx, project)
 	require.NoError(t, err)
 
 	broker := &store.RuntimeBroker{
@@ -100,9 +100,9 @@ func TestDispatchAgentStart(t *testing.T) {
 	require.NoError(t, err)
 
 	provider := &store.ProjectProvider{
-		ProjectID: grove.ID,
+		ProjectID: project.ID,
 		BrokerID:  brokerID,
-		LocalPath: "/tmp/fake/grove",
+		LocalPath: "/tmp/fake/project",
 	}
 	err = s.AddProjectProvider(ctx, provider)
 	require.NoError(t, err)
@@ -112,7 +112,7 @@ func TestDispatchAgentStart(t *testing.T) {
 		ID:        "agent-1",
 		Slug:      "test-agent",
 		Name:      "test-agent",
-		ProjectID: grove.ID,
+		ProjectID: project.ID,
 		Template:  "gemini",
 		Image:     "test-image",
 		Detached:  true,
@@ -133,7 +133,7 @@ func TestDispatchAgentStart(t *testing.T) {
 	assert.Equal(t, "test-agent", mgr.startOpts.Name)
 	assert.Equal(t, true, mgr.startOpts.Resume)
 	assert.Equal(t, "new task", mgr.startOpts.Task)
-	assert.Equal(t, "/tmp/fake/grove", mgr.startOpts.ProjectPath)
+	assert.Equal(t, "/tmp/fake/project", mgr.startOpts.ProjectPath)
 	assert.Equal(t, "gemini", mgr.startOpts.Template)
 	assert.Equal(t, "BAR", mgr.startOpts.Env["FOO"])
 
@@ -153,20 +153,20 @@ func TestDispatchAgentRestart(t *testing.T) {
 
 	adapter := newAgentDispatcherAdapter(mgr, s, brokerID)
 
-	// Create test grove and agent
-	grove := &store.Project{
-		ID:   "grove-1",
-		Slug: "test-grove",
+	// Create test project and agent
+	project := &store.Project{
+		ID:   "proj-1",
+		Slug: "test-project",
 		Name: "Test Project",
 	}
-	err := s.CreateProject(ctx, grove)
+	err := s.CreateProject(ctx, project)
 	require.NoError(t, err)
 
 	agent := &store.Agent{
 		ID:        "agent-1",
 		Slug:      "test-agent",
 		Name:      "test-agent",
-		ProjectID: grove.ID,
+		ProjectID: project.ID,
 	}
 	err = s.CreateAgent(ctx, agent)
 	require.NoError(t, err)
