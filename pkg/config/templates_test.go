@@ -1687,6 +1687,13 @@ func TestResolveModelAlias(t *testing.T) {
 }
 
 func TestWarnDeprecatedTemplateFields(t *testing.T) {
+	t.Run("nil config returns nil", func(t *testing.T) {
+		warnings := WarnDeprecatedTemplateFields(nil)
+		if warnings != nil {
+			t.Errorf("expected nil for nil config, got %v", warnings)
+		}
+	})
+
 	t.Run("no warnings for clean template", func(t *testing.T) {
 		cfg := &api.ScionConfig{
 			AgentInstructions:    "agents.md",

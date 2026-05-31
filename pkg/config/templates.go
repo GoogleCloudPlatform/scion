@@ -633,6 +633,9 @@ var KnownModelAliases = map[string]bool{
 // fields that should live in the harness-config rather than the template.
 // These fields are still accepted for backward compatibility but should be migrated.
 func WarnDeprecatedTemplateFields(cfg *api.ScionConfig) []string {
+	if cfg == nil {
+		return nil
+	}
 	var warnings []string
 	if cfg.Image != "" {
 		warnings = append(warnings, "template sets 'image' which is harness-specific; move it to your harness-config's config.yaml instead")
