@@ -2,7 +2,7 @@
 
 Scion is a container-based orchestration platform for running multiple LLM "deep agents" concurrently, each isolated in its own container, workspace, and credentials. This document fixes the preferred term for each domain concept so that code, docs, UI, and prompts share one vocabulary.
 
-> Two naming rules run throughout: the concept formerly called *grove* is now **project**, and bare **"broker"** is never used on its own — it is ambiguous across three distinct concepts (**Runtime Broker**, **Message Broker**, and the **Event Bus**), so it must always be qualified (see the disambiguation rule under [Hub & Hosted](#hub--hosted)). The codebase does not yet fully match either rule; see [Exceptions & Future Cleanup](#exceptions--future-cleanup) for the known gaps.
+> Two naming rules run throughout: the concept formerly called *grove* is now **project**, and bare **"broker"** is never used on its own — it is ambiguous across three distinct concepts (**Runtime Broker**, **Message Broker**, and the **Event Bus**), so it must always be qualified (see the disambiguation rule under [Hub & Hosted](#hub--hosted)). The codebase does not yet fully match either rule; the known gaps are tracked as GitHub issues.
 
 ## Orchestration
 
@@ -117,7 +117,7 @@ A Message Broker implementation shipped with Scion rather than loaded as a plugi
 _Avoid_: native broker, internal broker, default broker
 _See also_: Message Broker, Broker plugin
 
-> **Disambiguation rule:** Never use bare "broker" in prose, comments, docs, or new identifiers — always qualify it as **Runtime Broker** or **Message Broker**. Note that `pkg/broker` (NATS-style pub/sub) is *not* the Message Broker; it underpins the **Event Bus**. Existing bare usages in code are documented exceptions; see [Exceptions & Future Cleanup](#exceptions--future-cleanup).
+> **Disambiguation rule:** Never use bare "broker" in prose, comments, docs, or new identifiers — always qualify it as **Runtime Broker** or **Message Broker**. Note that `pkg/broker` (NATS-style pub/sub) is *not* the Message Broker; it underpins the **Event Bus**. Existing bare usages in code are tracked for cleanup as GitHub issues.
 
 **Event Bus**:
 The NATS-style pub/sub system (`pkg/broker`) that brokers and dispatches real-time change events to live web views via server-sent events, supporting the move to a more stateless Hub. Distinct from the Message Broker; currently a latent capability.
@@ -247,95 +247,3 @@ Terms that recur in the codebase and may warrant canonical entries, but are **no
 - **Service Account** — a GCP identity an agent can assume for Google Cloud auth, registered with the Hub.
 - **Webhook / GitHub App** — external event triggers (e.g. GitHub webhooks) that can dispatch agents.
 - **OAuth provider** — a configurable identity provider (Google, GitHub) for CLI and web authentication.
-
-## Exceptions & Future Cleanup
-
-Known places where the codebase does not yet match this glossary. These are **documented exceptions, not precedents** — always use the canonical term in new work.
-
-### grove → project
-
-"grove" was renamed to **project** but remains throughout the code as intentional backward-compat: JSON wire fields (`groveId`, `grove`), container labels (`scion.grove*`), env vars (`SCION_GROVE*`), NATS topics (`scion.grove.<id>.*`), SQL schema history, deprecated `--grove` CLI flags, and `/api/v1/groves/*` endpoints.
-
-- **Safe now:** internal variable/function names, comments, log messages, and design docs may be renamed `grove` → `project` freely.
-- **Future cleanup (needs coordination):** wire-format JSON tags, container labels, env vars, NATS topic prefix, and SQL schema should converge to `project` only at a breaking-change/version boundary.
-
-### Bare "broker" is ambiguous (three-way)
-
-"broker" is unqualified across three distinct concepts:
-
-- `scion broker` CLI command → **Runtime Broker**
-- `PluginTypeBroker` / broker plugins → **Message Broker** (the canonical messaging-integration system)
-- `pkg/broker` package (NATS-style pub/sub) → the **Event Bus** (see next item), *not* the Message Broker
-
-- **Safe now:** qualify "broker" in all new prose and identifiers; reserve **Message Broker** for the messaging-integration system only.
-- **Future cleanup (needs coordination):** rename `pkg/broker` to the **Event Bus** (e.g. `pkg/eventbus`), and consider qualifying the `scion broker` command, so bare "broker" no longer spans three meanings.
-
-### Event Bus: rename `pkg/broker`
-
-The NATS-style pub/sub in `pkg/broker` is the **Event Bus** — a latent capability for brokering and dispatching real-time change events to live web views (via server-sent events) as the Hub moves to a more stateless serving model. It is *not* the Message Broker and should not be called one.
-
-- **Future cleanup:** rename `pkg/broker` and its identifiers to **Event Bus** (e.g. `pkg/eventbus`) so the code reflects the term and is not confused with the Message Broker.
-
-### Reconcile `hub-native` / "Hub Workspace" → Hub-managed
-
-The same concept — a project whose workspace is created and managed in the hub-controlled broker FS — is called **`hub-native`** in code (`ProjectType = 'hub-native'`) and **"Hub Workspace"** in the web UI (new-project dialog `value="hub"`, `git-remote-display.ts`). Canonical term is now **Hub-managed project** (workspace: **Hub-managed workspace**).
-
-- **Future cleanup:** converge both to "hub-managed" — web `ProjectType`/labels (`web/src/shared/types.ts`, `project-create.ts`, `git-remote-display.ts`), Go identifiers/comments (`findAgentInHubNativeProjects`, `pkg/runtimebroker/handlers.go`, storage paths in `pkg/storage/storage.go`), and docs — keeping wire/string-value backward-compat where the type string crosses the API.
-
-### Remove harness plugins
-
-Harness configurations are no longer offered via plugin — only **Message Broker** plugins remain (and the plugin system may gain other types in future, but not harness). The harness plugin type still exists in code: `PluginTypeHarness` (`pkg/plugin/config.go`), its discovery/settings wiring (`pkg/plugin/discovery.go`, `settings.go`), `harness_plugin.go`, and the `plugin` branch of `Implementation` in `pkg/harness/resolve.go`.
-
-- **Future cleanup:** remove all harness-plugin code (`PluginTypeHarness` and the `plugin` harness implementation path), leaving the plugin system broker-only (plus room for future plugin types).
-
-### Migrate built-in provisioning → container-script
-
-The canonical harness provisioning model is the **Container-script provisioner**, which makes harness-configs extensible like templates. Some harness types still use the compiled-in **built-in** provisioner (`Implementation: builtin`, e.g. `pkg/harness/claude/embeds/config.yaml: type: builtin`); OpenCode has already moved to `container-script`.
-
-- **Future cleanup:** migrate the remaining built-in harness types to the container-script provisioning model so all harness provisioning is script-based and extensible, then retire the built-in provisioner path.
-
-### Reconcile project identity, type, and workspace axes
-
-The project model overloads several independent concepts and still carries a stale identity story:
-
-- **Identity is already random UUIDs**, but stale language implies a deterministic UUID v5 from the git remote (`pkg/config/settings.go:950-951`; `HashProjectID` in `pkg/util/git.go` is explicitly *no longer used for project IDs*). `Project.GitRemote` is non-unique — "multiple projects may share the same remote." Multiple projects per repo is **by design** (notably for git-backed Hub-managed shared workspaces).
-- **`ProjectType` is muddled:** the constants define only `linked` and `hub-native`, but `Project.ProjectType`'s comment lists "git", "linked", or "hub-native" — folding a git-backing flag into the type.
-- **Orthogonal axes are conflated:** (a) workspace ownership = **Linked** vs **Hub-managed**; (b) git-backing = has `GitRemote` or not; (c) workspace sharing = shared vs per-agent (`scion.dev/workspace-mode`). `IsSharedWorkspace()` returns true only for git + shared, yet Hub-managed plain projects *also* share one managed workspace — so "shared" is applied inconsistently.
-- **Git-backing is inferred at runtime, not declared:** code branches on the presence of a `.git` dir (`os.Stat(.../.git)` at `pkg/agent/provision.go:69`, `util.IsGitRepoDir` at `:288`, `util.IsGitRepo` via `pkg/config/init.go`). A plain workspace can silently "transform" into a git one when a repo is initialized inside it, producing mixed-mode agents in a single workspace.
-- **Workspace sharing isn't universal:** git worktrees are supported in local mode but not on Hub-managed projects, so the sharing options differ by ownership.
-
-- **Future cleanup / simplification:**
-  - Model three explicit, orthogonal attributes — **workspace ownership** (linked | hub-managed), **git-backing** (explicit boolean metadata), and **workspace sharing mode** — and drop the stray "git" `ProjectType` value plus all remaining deterministic-git-URL identity language.
-  - Make **git-backing explicit project metadata**; stop inferring it from a `.git` directory at runtime, so a workspace cannot change mode underfoot.
-  - Make **workspace sharing a single universal set of modes** for both local and Hub-managed projects — **Shared-plain**, **Worktree-per-agent**, **Clone-per-agent** — replacing the binary `scion.dev/workspace-mode` (shared | per-agent), and make "shared workspace" uniform across Hub-managed plain and git-shared projects. The mode is a **project-level setting chosen at creation, changeable post-creation, and overridable per agent**.
-
-### Message-group naming: `set` → `group`
-
-The **Message Group** concept is currently named "set" in code — `SetRecipient`, `sendSetMessageViaHub`, `setRecipient` (`cmd/message.go`, `pkg/messages`). "set" is not the canonical term.
-
-- **Future cleanup:** rename the "set" recipient/message types and helpers to "group" (e.g. `SetRecipient` → group recipient) so the code matches **Message Group**. Note this is only safe now that **Group** (hub users) and **Message Group** are clearly distinguished — the rename must not blur them.
-- **Related — `broadcast`:** the term "broadcast" (a message to all agents in a project, e.g. `BroadcastTopic` in `pkg/broker/broker.go`) sits alongside Message Group and direct messages. Review whether "broadcast" should be retained, redefined, or folded into the message-group vocabulary as part of the same cleanup.
-
-### `scion server` mode vocabulary
-
-The canonical server modes are **Workstation mode** (single-tenant, on your own machine) and **Hosted mode** (multi-user deployment). The `scion server` command group does not yet use this vocabulary consistently:
-
-- "local" still leaks in for the workstation case (e.g. "local server" at `cmd/server.go:100`).
-- The non-workstation mode is named "production" (`--production` flag, "Production mode" in help text in `cmd/server.go`).
-
-- **Future cleanup:** converge the `scion server` command group's mode terminology to the canonical set — `local` → `workstation`, and `production` → `hosted` (flag name, mode labels, help text, comments) — so the command vocabulary matches **Workstation mode** and **Hosted mode**, and neither is confused with **Local mode** (the no-server CLI workflow). A flag rename like `--production` → `--hosted` is a user-facing change and should keep a deprecated alias.
-
-### Templates → fully harness-agnostic
-
-A **Template** must contain nothing harness-specific (the `harness` field is already deprecated in `scion-agent.yaml`), but residual harness-specific bits remain:
-
-- `templates.md` still documents `image`/`model`/`auth` as template `config.yaml` params, yet the container image belongs to the **Harness-config** — a template should only *override* it.
-- Model selection should use a harness-agnostic **S / M / L size alias** rather than harness-specific model names. *(Tracked in an existing open issue.)*
-
-- **Future cleanup:** move the remaining harness-specific fields out of templates onto the harness-config, and adopt the agnostic model-size alias, so templates are strictly harness-agnostic.
-
-### Skills should be template-only
-
-A **Skill** should be contributed only by a **Template**, but provisioning currently also copies skills from the harness-config base layer: `pkg/agent/provision.go:596-605` copies `<harness-config>/skills`, then `:607-618` overlays each template's `skills`. `templates.md` likewise documents skills coming from both templates and harness-configs.
-
-- **Future cleanup:** make templates the sole source of skills — remove the harness-config skill-copy step (and update the docs) so skills are template-only and harness-agnostic, consistent with the [Agent Skills](https://agentskills.io/home) convention.
