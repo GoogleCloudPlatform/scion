@@ -532,6 +532,75 @@ func TestSyncExistingTemplate_PopulatesNewHashForLaterAgents(t *testing.T) {
 	}
 }
 
+// TestSyncExistingTemplate_PreservesTypedConfig guards the ResourceStore
+// record↔model round-trip: a content-changing sync must update Files/ContentHash
+// while leaving the template's typed Config payload (and other fields not
+// derived from the directory) intact. A naive collapse that reconstructs the
+// model from the shared ResourceRecord would null these out.
+func TestSyncExistingTemplate_PreservesTypedConfig(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	templatesDir := makeTemplateDir(t, "typed", map[string]string{
+		"file.txt": "v1",
+	})
+	templateDir := filepath.Join(templatesDir, "typed")
+
+	if err := srv.bootstrapSingleTemplate(ctx, "typed", templateDir, store.TemplateScopeGlobal, ""); err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+
+	// Attach a typed Config payload + other non-dir-derived fields, as a
+	// hub-side edit would.
+	existing, err := s.GetTemplateBySlug(ctx, "typed", store.TemplateScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing.Config = &store.TemplateConfig{Image: "custom-image:1", Model: "opus"}
+	existing.BaseTemplate = "base-xyz"
+	existing.DisplayName = "Typed Template"
+	if err := s.UpdateTemplate(ctx, existing); err != nil {
+		t.Fatal(err)
+	}
+	originalHash := existing.ContentHash
+
+	// Change content and sync.
+	if err := os.WriteFile(filepath.Join(templateDir, "file.txt"), []byte("v2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	existing, err = s.GetTemplateBySlug(ctx, "typed", store.TemplateScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := srv.syncExistingTemplate(ctx, existing, templateDir, false)
+	if err != nil {
+		t.Fatalf("sync failed: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected changed=true after content change")
+	}
+
+	got, err := s.GetTemplateBySlug(ctx, "typed", store.TemplateScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ContentHash == originalHash {
+		t.Error("expected ContentHash to change after sync")
+	}
+	if got.Config == nil {
+		t.Fatal("expected typed Config to survive sync, got nil")
+	}
+	if got.Config.Image != "custom-image:1" || got.Config.Model != "opus" {
+		t.Errorf("typed Config not preserved: got %+v", got.Config)
+	}
+	if got.BaseTemplate != "base-xyz" {
+		t.Errorf("expected BaseTemplate preserved, got %q", got.BaseTemplate)
+	}
+	if got.DisplayName != "Typed Template" {
+		t.Errorf("expected DisplayName preserved, got %q", got.DisplayName)
+	}
+}
+
 func TestDetectHarnessFromConfig_NameBased(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -194,6 +194,97 @@ func TestBootstrapHarnessConfigsFromDir_SkipsUnchanged(t *testing.T) {
 	}
 }
 
+// TestSyncHarnessConfig_PreservesTypedConfig guards the ResourceStore
+// record↔model round-trip for harness-configs: a content-changing sync must
+// leave the typed HarnessConfigData payload intact.
+func TestSyncHarnessConfig_PreservesTypedConfig(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	dir := makeHarnessConfigDir(t, "claude", map[string]string{
+		"config.yaml": "harness: claude\nimage: scion-claude:latest\nuser: scion\n",
+	})
+
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("first bootstrap failed: %v", err)
+	}
+
+	hc, err := s.GetHarnessConfigBySlug(ctx, "claude", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hc.Config = &store.HarnessConfigData{Image: "scion-claude:latest", Model: "opus"}
+	hc.DisplayName = "Claude Config"
+	if err := s.UpdateHarnessConfig(ctx, hc); err != nil {
+		t.Fatal(err)
+	}
+
+	// Change content and re-sync.
+	if err := os.WriteFile(filepath.Join(dir, "claude", "config.yaml"),
+		[]byte("harness: claude\nimage: scion-claude:v2\nuser: scion\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("second bootstrap failed: %v", err)
+	}
+
+	got, err := s.GetHarnessConfigBySlug(ctx, "claude", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Config == nil {
+		t.Fatal("expected typed Config to survive sync, got nil")
+	}
+	if got.Config.Model != "opus" {
+		t.Errorf("typed Config not preserved: got %+v", got.Config)
+	}
+	if got.DisplayName != "Claude Config" {
+		t.Errorf("expected DisplayName preserved, got %q", got.DisplayName)
+	}
+}
+
+// TestSyncHarnessConfig_ReconcilesRemovedFiles verifies harness-configs gained
+// stale-object reconcile on sync by routing through the shared ResourceStore
+// (previously harness-config sync left removed files lingering in storage).
+func TestSyncHarnessConfig_ReconcilesRemovedFiles(t *testing.T) {
+	srv, s, stor := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	dir := makeHarnessConfigDir(t, "claude", map[string]string{
+		"config.yaml":  "harness: claude\nimage: scion-claude:latest\nuser: scion\n",
+		"home/.bashrc": "# keep",
+		"home/.stale":  "remove me",
+	})
+
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("first bootstrap failed: %v", err)
+	}
+	hc, err := s.GetHarnessConfigBySlug(ctx, "claude", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stalePath := hc.StoragePath + "/home/.stale"
+	if _, ok := stor.objects[stalePath]; !ok {
+		t.Fatalf("expected %q in storage after bootstrap", stalePath)
+	}
+
+	// Remove a file and change another so the content hash differs.
+	if err := os.Remove(filepath.Join(dir, "claude", "home/.stale")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "claude", "home/.bashrc"), []byte("# changed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("second bootstrap failed: %v", err)
+	}
+
+	if _, ok := stor.objects[stalePath]; ok {
+		t.Errorf("expected stale object %q to be reconciled (deleted) from storage", stalePath)
+	}
+}
+
 func TestBootstrapHarnessConfigsFromDir_NonexistentDir(t *testing.T) {
 	srv, _, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()

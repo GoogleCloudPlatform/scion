@@ -23,7 +23,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
 // BootstrapHarnessConfigsFromDir imports or updates local harness configs from
@@ -107,81 +106,16 @@ func (s *Server) bootstrapSingleHarnessConfig(ctx context.Context, name, dirPath
 	return s.bootstrapSingleHarnessConfigScoped(ctx, name, dirPath, hcDir, stor, store.HarnessConfigScopeGlobal, "")
 }
 
-func (s *Server) bootstrapSingleHarnessConfigScoped(ctx context.Context, name, dirPath string, hcDir *config.HarnessConfigDir, stor storage.Storage, scope, scopeID string) error {
-	files, err := transfer.CollectFiles(dirPath, nil)
-	if err != nil {
-		return err
-	}
-
-	slug := api.Slugify(name)
-	storagePath := storage.HarnessConfigStoragePath(scope, scopeID, slug)
-
-	hc := &store.HarnessConfig{
-		ID:            api.NewUUID(),
-		Name:          name,
-		Slug:          slug,
-		Harness:       hcDir.Config.Harness,
-		Scope:         scope,
-		ScopeID:       scopeID,
-		Status:        store.HarnessConfigStatusPending,
-		StoragePath:   storagePath,
-		StorageBucket: stor.Bucket(),
-		StorageURI:    storage.HarnessConfigStorageURI(stor.Bucket(), scope, scopeID, slug),
-		Visibility:    store.VisibilityPublic,
-	}
-
-	if err := s.store.CreateHarnessConfig(ctx, hc); err != nil {
-		return err
-	}
-
-	hcFiles, _ := uploadResourceFiles(ctx, stor, storagePath, files, s.templateLog, "harness config bootstrap")
-
-	contentHash := computeContentHash(hcFiles)
-	hc.Files = hcFiles
-	hc.ContentHash = contentHash
-	hc.Status = store.HarnessConfigStatusActive
-
-	if err := s.store.UpdateHarnessConfig(ctx, hc); err != nil {
-		return err
-	}
-
-	s.templateLog.Info("harness config bootstrap: imported config",
-		"name", name, "files", len(hcFiles), "harness", hcDir.Config.Harness)
-	return nil
+// bootstrapSingleHarnessConfigScoped delegates to the shared ResourceStore
+// (§7.3). stor is unused — the store resolves the backend itself — but is kept
+// in the signature to match the bundled-import call sites.
+func (s *Server) bootstrapSingleHarnessConfigScoped(ctx context.Context, name, dirPath string, hcDir *config.HarnessConfigDir, _ storage.Storage, scope, scopeID string) error {
+	_, err := s.harnessConfigStore(hcDir.Config.Harness).Bootstrap(ctx, name, dirPath, scope, scopeID, false)
+	return err
 }
 
-// syncExistingHarnessConfig checks if a local harness config directory has
-// changed compared to what is stored in the database. If so, it re-uploads
-// the files and updates the database record. Returns true if an update occurred.
-func (s *Server) syncExistingHarnessConfig(ctx context.Context, existing *store.HarnessConfig, dirPath string, hcDir *config.HarnessConfigDir, stor storage.Storage) (bool, error) {
-	files, err := transfer.CollectFiles(dirPath, nil)
-	if err != nil {
-		return false, err
-	}
-
-	newHash := computeContentHash(toResourceFiles(files))
-
-	if newHash == existing.ContentHash {
-		return false, nil
-	}
-
-	s.templateLog.Info("harness config bootstrap: local config changed, re-syncing",
-		"config", existing.Name, "oldHash", existing.ContentHash, "newHash", newHash)
-
-	storagePath := existing.StoragePath
-	if storagePath == "" {
-		storagePath = storage.HarnessConfigStoragePath(existing.Scope, "", existing.Slug)
-	}
-
-	uploadedFiles, _ := uploadResourceFiles(ctx, stor, storagePath, files, s.templateLog, "harness config bootstrap")
-
-	existing.Files = uploadedFiles
-	existing.ContentHash = newHash
-	existing.Harness = hcDir.Config.Harness
-
-	if err := s.store.UpdateHarnessConfig(ctx, existing); err != nil {
-		return false, err
-	}
-
-	return true, nil
+// syncExistingHarnessConfig re-syncs a local harness config directory through
+// the shared ResourceStore. Returns true if the stored content changed.
+func (s *Server) syncExistingHarnessConfig(ctx context.Context, existing *store.HarnessConfig, dirPath string, hcDir *config.HarnessConfigDir, _ storage.Storage) (bool, error) {
+	return s.harnessConfigStore(hcDir.Config.Harness).Bootstrap(ctx, existing.Name, dirPath, existing.Scope, existing.ScopeID, false)
 }
