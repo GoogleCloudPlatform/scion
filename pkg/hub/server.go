@@ -577,13 +577,15 @@ type Server struct {
 	// Phase 3/4 supply the real local-tunnel ops; tests override for exactly-once.
 	execDispatch     func(ctx context.Context, d store.BrokerDispatch) (string, error)
 	deliverMsg       func(ctx context.Context, m *store.Message) error
-	maintenance      *MaintenanceState // Runtime maintenance mode state
-	hubID            string            // Unique hub instance ID for secret namespacing
-	instanceID       string            // Unique per-process ID (uuid); affinity key for broker dispatch
-	embeddedBrokerID string            // Broker ID when running in hub+broker combo mode
-	workstation      bool              // True when running in workstation (non-production) mode
-	scheduler        *Scheduler        // Unified scheduler for recurring tasks
-	cleanupOnce      sync.Once         // Ensures CleanupResources runs only once
+	maintenance      *MaintenanceState  // Runtime maintenance mode state
+	hubID            string             // Unique hub instance ID for secret namespacing
+	instanceID       string             // Unique per-process ID (uuid); affinity key for broker dispatch
+	embeddedBrokerID string             // Broker ID when running in hub+broker combo mode
+	workstation      bool               // True when running in workstation (non-production) mode
+	scheduler        *Scheduler         // Unified scheduler for recurring tasks
+	cleanupOnce      sync.Once          // Ensures CleanupResources runs only once
+	ctx              context.Context    // Server-lifetime context; cancelled on Shutdown
+	ctxCancel        context.CancelFunc // Cancels ctx
 
 	logQueryService *LogQueryService // Cloud Logging query service (nil = disabled)
 
@@ -670,6 +672,8 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		cfg.StalledThreshold = defaults.StalledThreshold
 	}
 
+	srvCtx, srvCancel := context.WithCancel(context.Background())
+
 	srv := &Server{
 		config:      cfg,
 		store:       s,
@@ -680,6 +684,8 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		hubID:       cfg.HubID,
 		instanceID:  newInstanceID(),
 		workstation: cfg.Workstation,
+		ctx:         srvCtx,
+		ctxCancel:   srvCancel,
 
 		// Subsystem loggers
 		agentLifecycleLog: logging.Subsystem("hub.agent-lifecycle"),
@@ -2346,6 +2352,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	slog.Info("Hub API server shutting down...")
 
+	// Cancel server-lifetime context to stop background goroutines
+	if s.ctxCancel != nil {
+		s.ctxCancel()
+	}
+
 	// Shutdown control channel first
 	if cc != nil {
 		cc.Shutdown()
@@ -2400,6 +2411,11 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		s.mu.RUnlock()
 
 		slog.Info("Cleaning up Hub resources...")
+
+		// Cancel server-lifetime context to stop background goroutines
+		if s.ctxCancel != nil {
+			s.ctxCancel()
+		}
 
 		if cc != nil {
 			cc.Shutdown()

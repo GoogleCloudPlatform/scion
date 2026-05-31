@@ -415,7 +415,7 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 	rt := runtime.GetRuntime("", "")
 
 	go func() {
-		if err := runtime.PullImages(context.Background(), rt, req.Harnesses, registry, func(pr runtime.PullResult) {
+		if err := runtime.PullImages(s.ctx, rt, req.Harnesses, registry, func(pr runtime.PullResult) {
 			s.events.PublishRaw("system.images."+jobID, pr)
 		}); err != nil {
 			s.events.PublishRaw("system.images."+jobID, map[string]string{
@@ -493,7 +493,7 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 	subject := "system.images." + jobID
 
 	go func() {
-		cmd := exec.CommandContext(context.Background(), buildScript, "--target", "harnesses")
+		cmd := exec.CommandContext(s.ctx, buildScript, "--target", "harnesses")
 		cmd.Dir = filepath.Dir(buildScript)
 
 		stdout, err := cmd.StdoutPipe()
