@@ -135,7 +135,7 @@ func uploadResourceFiles(ctx context.Context, stor storage.Storage, storagePath 
 		}
 
 		_, err = stor.Upload(ctx, objectPath, f, storage.UploadOptions{})
-		f.Close()
+		_ = f.Close()
 		if err != nil {
 			log.Warn(label+": failed to upload file, skipping", "file", fi.Path, "error", err)
 			continue

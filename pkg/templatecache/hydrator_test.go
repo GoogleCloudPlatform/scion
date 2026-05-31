@@ -90,7 +90,8 @@ func (m *mockTemplateService) DownloadFile(ctx context.Context, url string) ([]b
 
 // mockHubClient is a mock implementation of hubclient.Client.
 type mockHubClient struct {
-	templates hubclient.TemplateService
+	templates      hubclient.TemplateService
+	harnessConfigs hubclient.HarnessConfigService
 }
 
 func (m *mockHubClient) Agents() hubclient.AgentService                                   { return nil }
@@ -98,7 +99,7 @@ func (m *mockHubClient) ProjectAgents(projectID string) hubclient.AgentService  
 func (m *mockHubClient) Projects() hubclient.ProjectService                               { return nil }
 func (m *mockHubClient) RuntimeBrokers() hubclient.RuntimeBrokerService                   { return nil }
 func (m *mockHubClient) Templates() hubclient.TemplateService                             { return m.templates }
-func (m *mockHubClient) HarnessConfigs() hubclient.HarnessConfigService                   { return nil }
+func (m *mockHubClient) HarnessConfigs() hubclient.HarnessConfigService                   { return m.harnessConfigs }
 func (m *mockHubClient) Workspace() hubclient.WorkspaceService                            { return nil }
 func (m *mockHubClient) Users() hubclient.UserService                                     { return nil }
 func (m *mockHubClient) Env() hubclient.EnvService                                        { return nil }
