@@ -750,6 +750,22 @@ func IsBrokerModeFromContext(ctx context.Context) bool {
 	return v
 }
 
+type harnessConfigPathContextKey struct{}
+
+// ContextWithHarnessConfigPath records a pre-resolved local directory for the
+// agent's harness-config (e.g. one hydrated from the Hub's storage backend).
+// Provisioning uses it directly instead of searching the local filesystem.
+func ContextWithHarnessConfigPath(ctx context.Context, path string) context.Context {
+	return context.WithValue(ctx, harnessConfigPathContextKey{}, path)
+}
+
+// HarnessConfigPathFromContext returns the pre-resolved harness-config directory
+// from the context, or "" if none was set.
+func HarnessConfigPathFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(harnessConfigPathContextKey{}).(string)
+	return v
+}
+
 type StartOptions struct {
 	Name              string
 	Task              string
@@ -757,6 +773,7 @@ type StartOptions struct {
 	TemplateName      string // Human-friendly template slug (overrides Template for labels when hydration replaces Template with a cache path)
 	Profile           string
 	HarnessConfig     string
+	HarnessConfigPath string // Resolved local dir for the harness-config (set when hydrated from the Hub); bypasses on-disk FindHarnessConfigDir lookup
 	HarnessAuth       string // Late-binding override for auth_selected_type (api-key, oauth-token, auth-file, vertex-ai)
 	Image             string
 	ProjectPath       string

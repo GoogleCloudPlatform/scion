@@ -144,7 +144,7 @@ func TestPopulateAgentConfig_HubManagedProject_SetsWorkspace(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, project, nil)
+	srv.populateAgentConfig(context.Background(), agent, project, nil)
 
 	expectedPath, err := hubManagedProjectPath("hub-managed")
 	require.NoError(t, err)
@@ -169,7 +169,7 @@ func TestPopulateAgentConfig_HubManagedProject_RemoteBroker_WorkspaceSet(t *test
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, project, nil)
+	srv.populateAgentConfig(context.Background(), agent, project, nil)
 
 	// populateAgentConfig sets Workspace for hub-managed projects.
 	// For remote brokers, the createAgent handler later swaps this to
@@ -194,12 +194,88 @@ func TestPopulateAgentConfig_GitProject_NoWorkspace(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, project, nil)
+	srv.populateAgentConfig(context.Background(), agent, project, nil)
 
 	assert.Empty(t, agent.AppliedConfig.Workspace,
 		"Workspace should not be set for git-backed projects")
 	assert.NotNil(t, agent.AppliedConfig.GitClone,
 		"GitClone should be set for git-backed projects")
+}
+
+// TestPopulateAgentConfig_StampsHarnessConfigID verifies that populateAgentConfig
+// resolves the agent's harness-config name to a Hub record and stamps its ID and
+// content hash so the broker can hydrate it from storage (§7.3 step 4). Without
+// this the broker can only use harness-configs present on its local filesystem.
+func TestPopulateAgentConfig_StampsHarnessConfigID(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	hc := &store.HarnessConfig{
+		ID:          "hc-claude-1",
+		Name:        "claude",
+		Slug:        "claude",
+		Harness:     "claude",
+		Scope:       store.HarnessConfigScopeGlobal,
+		Status:      store.HarnessConfigStatusActive,
+		ContentHash: "deadbeef",
+	}
+	if err := st.CreateHarnessConfig(ctx, hc); err != nil {
+		t.Fatalf("create harness config: %v", err)
+	}
+
+	project := &store.Project{ID: "project-hc", Name: "HC Project", Slug: "hc-project"}
+	agent := &store.Agent{
+		ID: "agent-hc",
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+		},
+	}
+
+	srv.populateAgentConfig(ctx, agent, project, nil)
+
+	if agent.AppliedConfig.HarnessConfigID != "hc-claude-1" {
+		t.Errorf("expected HarnessConfigID 'hc-claude-1', got %q", agent.AppliedConfig.HarnessConfigID)
+	}
+	if agent.AppliedConfig.HarnessConfigHash != "deadbeef" {
+		t.Errorf("expected HarnessConfigHash 'deadbeef', got %q", agent.AppliedConfig.HarnessConfigHash)
+	}
+}
+
+// TestPopulateAgentConfig_HarnessConfigFromTemplateDefault verifies the fallback
+// path: when the agent has no explicit harness-config name, the template's
+// DefaultHarnessConfig is used to resolve and stamp the harness-config ID.
+func TestPopulateAgentConfig_HarnessConfigFromTemplateDefault(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	hc := &store.HarnessConfig{
+		ID:          "hc-web-1",
+		Name:        "claude-web",
+		Slug:        "claude-web",
+		Harness:     "claude",
+		Scope:       store.HarnessConfigScopeGlobal,
+		Status:      store.HarnessConfigStatusActive,
+		ContentHash: "cafef00d",
+	}
+	if err := st.CreateHarnessConfig(ctx, hc); err != nil {
+		t.Fatalf("create harness config: %v", err)
+	}
+
+	project := &store.Project{ID: "project-hc2", Name: "HC Project 2", Slug: "hc-project-2"}
+	template := &store.Template{ID: "tmpl-1", Slug: "t1", DefaultHarnessConfig: "claude-web"}
+	agent := &store.Agent{
+		ID:            "agent-hc2",
+		AppliedConfig: &store.AgentAppliedConfig{}, // no explicit harness-config
+	}
+
+	srv.populateAgentConfig(ctx, agent, project, template)
+
+	if agent.AppliedConfig.HarnessConfigID != "hc-web-1" {
+		t.Errorf("expected HarnessConfigID 'hc-web-1' from template default, got %q", agent.AppliedConfig.HarnessConfigID)
+	}
+	if agent.AppliedConfig.HarnessConfigHash != "cafef00d" {
+		t.Errorf("expected HarnessConfigHash 'cafef00d', got %q", agent.AppliedConfig.HarnessConfigHash)
+	}
 }
 
 func TestPopulateAgentConfig_TemplateTelemetryMerged(t *testing.T) {
@@ -233,7 +309,7 @@ func TestPopulateAgentConfig_TemplateTelemetryMerged(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, project, template)
+	srv.populateAgentConfig(context.Background(), agent, project, template)
 
 	require.NotNil(t, agent.AppliedConfig.InlineConfig,
 		"InlineConfig should be created to hold template telemetry")
@@ -284,7 +360,7 @@ func TestPopulateAgentConfig_InlineTelemetryNotOverwritten(t *testing.T) {
 		},
 	}
 
-	srv.populateAgentConfig(agent, project, template)
+	srv.populateAgentConfig(context.Background(), agent, project, template)
 
 	// Inline telemetry should NOT be overwritten by template telemetry
 	assert.Equal(t, "https://inline-otel.example.com",
@@ -316,7 +392,7 @@ func TestPopulateAgentConfig_HubTelemetryDefault(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, project, nil)
+	srv.populateAgentConfig(context.Background(), agent, project, nil)
 
 	require.NotNil(t, agent.AppliedConfig.InlineConfig,
 		"InlineConfig should be created to hold hub telemetry")
@@ -360,7 +436,7 @@ func TestPopulateAgentConfig_HubTelemetryNotOverwrittenByTemplate(t *testing.T) 
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, project, template)
+	srv.populateAgentConfig(context.Background(), agent, project, template)
 
 	// Template telemetry should win over hub telemetry
 	assert.Equal(t, "https://template-otel.example.com",
@@ -394,7 +470,7 @@ func TestPopulateAgentConfig_ProjectTelemetryEnabledOverride(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, project, nil)
+	srv.populateAgentConfig(context.Background(), agent, project, nil)
 
 	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry)
 	// Hub cloud config should still be present
@@ -423,7 +499,7 @@ func TestPopulateAgentConfig_ProjectTelemetryEnabledWithoutOtherConfig(t *testin
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, project, nil)
+	srv.populateAgentConfig(context.Background(), agent, project, nil)
 
 	require.NotNil(t, agent.AppliedConfig.InlineConfig)
 	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry)
@@ -1415,7 +1491,7 @@ func TestPopulateAgentConfig_SharedWorkspace_SetsWorkspaceNotClone(t *testing.T)
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, project, nil)
+	srv.populateAgentConfig(context.Background(), agent, project, nil)
 
 	expectedPath, err := hubManagedProjectPath("shared-ws")
 	require.NoError(t, err)
@@ -1445,7 +1521,7 @@ func TestPopulateAgentConfig_SharedWorkspace_DefaultsBranch(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent, project, nil)
+	srv.populateAgentConfig(context.Background(), agent, project, nil)
 
 	assert.Equal(t, "develop", agent.AppliedConfig.Branch,
 		"Branch should default to project's default-branch label for shared workspace")
@@ -1456,7 +1532,7 @@ func TestPopulateAgentConfig_SharedWorkspace_DefaultsBranch(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{Branch: "custom-branch"},
 	}
 
-	srv.populateAgentConfig(agent2, project, nil)
+	srv.populateAgentConfig(context.Background(), agent2, project, nil)
 
 	assert.Equal(t, "custom-branch", agent2.AppliedConfig.Branch,
 		"Explicit branch should not be overridden by shared workspace default")
@@ -1477,7 +1553,7 @@ func TestPopulateAgentConfig_SharedWorkspace_DefaultsBranch(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(agent3, projectNoLabel, nil)
+	srv.populateAgentConfig(context.Background(), agent3, projectNoLabel, nil)
 
 	assert.Equal(t, "main", agent3.AppliedConfig.Branch,
 		"Branch should default to 'main' when no default-branch label is set")

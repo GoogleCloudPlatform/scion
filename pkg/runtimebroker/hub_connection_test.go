@@ -393,6 +393,54 @@ func TestHeartbeatService_NilProjectFilter(t *testing.T) {
 	}
 }
 
+// TestHydrateHarnessConfig_NoHubInfoFallsBack verifies that when the dispatch
+// carries no Hub harness-config ID/hash, hydrateHarnessConfig returns ("", nil)
+// so provisioning falls back to the broker's on-disk harness-config search —
+// preserving behavior for agents that don't use Hub-managed harness-configs.
+func TestHydrateHarnessConfig_NoHubInfoFallsBack(t *testing.T) {
+	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
+	srv := newTestServerWithInMemoryCreds(creds)
+
+	srv.hubMu.RLock()
+	conn := srv.hubConnections["local"]
+	srv.hubMu.RUnlock()
+	if conn == nil {
+		t.Fatal("expected 'local' connection to exist")
+	}
+
+	cfg := &CreateAgentConfig{HarnessConfig: "claude"} // name only, no Hub ID/hash
+	path, err := srv.hydrateHarnessConfig(context.Background(), cfg, conn)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if path != "" {
+		t.Errorf("expected empty path (fall back to disk), got %q", path)
+	}
+}
+
+// TestHydrateHarnessConfig_NoResolverIsGraceful verifies that when a harness-config
+// ID is present but no resolver is configured (e.g. cache not initialized in
+// tests), hydrateHarnessConfig returns ("", nil) rather than erroring.
+func TestHydrateHarnessConfig_NoResolverIsGraceful(t *testing.T) {
+	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
+	srv := newTestServerWithInMemoryCreds(creds)
+
+	srv.hubMu.RLock()
+	conn := srv.hubConnections["local"]
+	srv.hubMu.RUnlock()
+	conn.HCResolver = nil
+	conn.LocalStorage = nil
+
+	cfg := &CreateAgentConfig{HarnessConfigID: "hc-1", HarnessConfigHash: "abc"}
+	path, err := srv.hydrateHarnessConfig(context.Background(), cfg, conn)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if path != "" {
+		t.Errorf("expected empty path when no resolver, got %q", path)
+	}
+}
+
 func TestResolveHydrator_WithConnectionHeader(t *testing.T) {
 	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
 	srv := newTestServerWithInMemoryCreds(creds)

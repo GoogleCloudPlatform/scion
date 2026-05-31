@@ -814,6 +814,48 @@ func (s *Server) hydrateTemplate(ctx context.Context, cfg *CreateAgentConfig, co
 	return "", nil
 }
 
+// hydrateHarnessConfig resolves a Hub harness-config to a local directory for
+// provisioning, mirroring hydrateTemplate. Returns the local directory path, or
+// an empty string when no Hub harness-config was specified (the broker then
+// falls back to its on-disk harness-config search). This is the §7.3 step-4
+// consume path that makes harness-configs usable from a broker that lacks the
+// config on its local filesystem.
+func (s *Server) hydrateHarnessConfig(ctx context.Context, cfg *CreateAgentConfig, conn *HubConnection) (string, error) {
+	if cfg.HarnessConfigID == "" && cfg.HarnessConfigHash == "" {
+		return "", nil
+	}
+
+	// Local-backend direct read (co-located workstation mode).
+	if conn.LocalStorage != nil {
+		ref := cfg.HarnessConfigID
+		if ref == "" {
+			ref = cfg.HarnessConfig
+		}
+		path, err := s.resolveLocalResource(ctx, storage.ResourceKindHarnessConfig, ref, conn)
+		if err != nil {
+			return "", err
+		}
+		if path != "" {
+			return path, nil
+		}
+		// Not present in the backend yet — fall through to hydration.
+	}
+
+	resolver := conn.HCResolver
+	if resolver == nil {
+		return "", nil
+	}
+
+	if cfg.HarnessConfigHash != "" && cfg.HarnessConfigID != "" {
+		return resolver.ResolveWithHash(ctx, cfg.HarnessConfigID, cfg.HarnessConfigHash)
+	}
+	if cfg.HarnessConfigID != "" {
+		return resolver.Resolve(ctx, cfg.HarnessConfigID)
+	}
+
+	return "", nil
+}
+
 // localObjectResolver is implemented by storage backends (the local filesystem
 // backend) that can map an object path to an absolute on-disk path. This is the
 // LocalDirBackend seam from §7.3: one assertion, used for every resource kind.

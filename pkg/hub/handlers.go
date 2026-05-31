@@ -706,7 +706,7 @@ func (s *Server) createAgentInProject(
 	// Apply project-level defaults (harness config, limits, resources) from annotations
 	applyProjectDefaults(agent.AppliedConfig, project)
 
-	s.populateAgentConfig(agent, project, resolvedTemplate)
+	s.populateAgentConfig(ctx, agent, project, resolvedTemplate)
 
 	if err := s.store.CreateAgent(ctx, agent); err != nil {
 		writeErrorFromErr(w, err, "")
@@ -8561,6 +8561,24 @@ func (s *Server) getHarnessConfigFromTemplate(template *store.Template, fallback
 	return fallback
 }
 
+// lookupHarnessConfigRecord resolves a harness-config reference (name or slug)
+// to its Hub record, checking project scope first then global — the same
+// precedence the broker uses for on-disk lookup. Returns nil if not found.
+func (s *Server) lookupHarnessConfigRecord(ctx context.Context, projectID, ref string) *store.HarnessConfig {
+	if ref == "" {
+		return nil
+	}
+	if projectID != "" {
+		if hc, err := s.store.GetHarnessConfigBySlug(ctx, ref, store.HarnessConfigScopeProject, projectID); err == nil && hc != nil {
+			return hc
+		}
+	}
+	if hc, err := s.store.GetHarnessConfigBySlug(ctx, ref, store.HarnessConfigScopeGlobal, ""); err == nil && hc != nil {
+		return hc
+	}
+	return nil
+}
+
 // buildAppliedConfig constructs an AgentAppliedConfig from a CreateAgentRequest.
 // When req.Config is a ScionConfig, its fields are extracted into the applied config
 // and the full ScionConfig is preserved as InlineConfig for threading to the broker.
@@ -8603,7 +8621,7 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, harnessConfig string
 // template-derived fields after the initial config block has been set up.
 // It populates GitClone config from project labels for git-anchored projects, and
 // sets template ID, hash, and hub access scopes from the resolved template.
-func (s *Server) populateAgentConfig(agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
+func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
 	if agent.AppliedConfig == nil {
 		return
 	}
@@ -8683,6 +8701,25 @@ func (s *Server) populateAgentConfig(agent *store.Agent, project *store.Project,
 					agent.AppliedConfig.InlineConfig.Telemetry = resolvedTemplate.Config.Telemetry
 				}
 			}
+		}
+	}
+
+	// Resolve the harness-config name to a Hub record so the broker can hydrate
+	// it from the configured storage backend, mirroring template hydration.
+	// Without this a remote broker can only use harness-configs that happen to
+	// exist on its local filesystem (see resource-storage-refactor §4/§7.3 step 4).
+	hcRef := agent.AppliedConfig.HarnessConfig
+	if hcRef == "" && resolvedTemplate != nil {
+		hcRef = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
+	}
+	if hcRef != "" {
+		projectID := ""
+		if project != nil {
+			projectID = project.ID
+		}
+		if hc := s.lookupHarnessConfigRecord(ctx, projectID, hcRef); hc != nil {
+			agent.AppliedConfig.HarnessConfigID = hc.ID
+			agent.AppliedConfig.HarnessConfigHash = hc.ContentHash
 		}
 	}
 

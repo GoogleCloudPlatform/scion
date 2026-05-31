@@ -230,6 +230,9 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 	if opts.SharedWorkspace {
 		ctx = api.ContextWithSharedWorkspace(ctx)
 	}
+	if opts.HarnessConfigPath != "" {
+		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
+	}
 	// Inject harness auth override into inline config so it is applied
 	// before harness Provision() runs (which reads auth_selectedType to
 	// decide which env vars to inject into scion-agent.json).
@@ -268,6 +271,17 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 	}
 
 	return cfg, nil
+}
+
+// resolveHarnessConfigDir returns the harness-config directory for an agent,
+// preferring a Hub-hydrated path recorded on the context (§7.3 step 4) over the
+// on-disk FindHarnessConfigDir search. This lets a broker that lacks the
+// harness-config locally use the copy fetched from the Hub's storage backend.
+func resolveHarnessConfigDir(ctx context.Context, name, projectPath string, templatePaths ...string) (*config.HarnessConfigDir, error) {
+	if hcPath := api.HarnessConfigPathFromContext(ctx); hcPath != "" {
+		return config.LoadHarnessConfigDir(hcPath)
+	}
+	return config.FindHarnessConfigDir(name, projectPath, templatePaths...)
 }
 
 func ProvisionAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, *api.ScionConfig, error) {
@@ -517,7 +531,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	for _, tpl := range chain {
 		templatePaths = append(templatePaths, tpl.Path)
 	}
-	hcDir, err := config.FindHarnessConfigDir(harnessConfigName, projectPath, templatePaths...)
+	hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectPath, templatePaths...)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to find harness-config %q: %w", harnessConfigName, err)
 	}

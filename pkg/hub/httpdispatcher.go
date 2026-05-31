@@ -300,19 +300,21 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			}
 		}
 		req.Config = &RemoteAgentConfig{
-			Template:        agent.Template,
-			Image:           agent.AppliedConfig.Image,
-			HarnessConfig:   agent.AppliedConfig.HarnessConfig,
-			HarnessAuth:     agent.AppliedConfig.HarnessAuth,
-			Task:            agent.AppliedConfig.Task,
-			Workspace:       workspace,
-			Profile:         agent.AppliedConfig.Profile,
-			Branch:          agent.AppliedConfig.Branch,
-			TemplateID:      agent.AppliedConfig.TemplateID,
-			TemplateHash:    agent.AppliedConfig.TemplateHash,
-			GitClone:        gitClone,
-			SharedWorkspace: projectInfo.sharedWorkspace,
-			GCPIdentity:     remoteGCPIdentity,
+			Template:          agent.Template,
+			Image:             agent.AppliedConfig.Image,
+			HarnessConfig:     agent.AppliedConfig.HarnessConfig,
+			HarnessAuth:       agent.AppliedConfig.HarnessAuth,
+			Task:              agent.AppliedConfig.Task,
+			Workspace:         workspace,
+			Profile:           agent.AppliedConfig.Profile,
+			Branch:            agent.AppliedConfig.Branch,
+			TemplateID:        agent.AppliedConfig.TemplateID,
+			TemplateHash:      agent.AppliedConfig.TemplateHash,
+			HarnessConfigID:   agent.AppliedConfig.HarnessConfigID,
+			HarnessConfigHash: agent.AppliedConfig.HarnessConfigHash,
+			GitClone:          gitClone,
+			SharedWorkspace:   projectInfo.sharedWorkspace,
+			GCPIdentity:       remoteGCPIdentity,
 		}
 		req.ResolvedEnv = agent.AppliedConfig.Env
 

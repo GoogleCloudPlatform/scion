@@ -53,6 +53,7 @@ type HubConnection struct {
 
 	HubClient      hubclient.Client
 	Hydrator       *templatecache.Hydrator
+	HCResolver     *templatecache.Resolver // harness-config hydrator
 	Heartbeat      *HeartbeatService
 	ControlChannel *ControlChannelClient
 
@@ -228,6 +229,9 @@ func (hc *HubConnection) Reinitialize(ctx context.Context, server *Server, creds
 	// Rebuild hydrator using shared cache
 	if server.cache != nil {
 		hc.Hydrator = templatecache.NewHydrator(server.cache, client)
+	}
+	if server.hcCache != nil {
+		hc.HCResolver = templatecache.NewHarnessConfigResolver(server.hcCache, client)
 	}
 
 	slog.Info("Hub connection reinitialized", "name", hc.Name, "brokerID", creds.BrokerID)

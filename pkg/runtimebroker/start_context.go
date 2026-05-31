@@ -400,6 +400,27 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// --- Harness-config hydration ---
+	// Resolve a Hub-managed harness-config to a local directory so provisioning
+	// can use it even on a broker that lacks the config on its local filesystem.
+	if hubConn != nil && in.Config != nil {
+		hcPath, err := s.hydrateHarnessConfig(ctx, in.Config, hubConn)
+		if err != nil {
+			return nil, &startContextError{
+				Status:      http.StatusInternalServerError,
+				Message:     "Failed to hydrate harness-config: " + err.Error(),
+				IsHubError:  true,
+				OriginalErr: err,
+			}
+		}
+		if hcPath != "" {
+			opts.HarnessConfigPath = hcPath
+			if s.config.Debug {
+				s.agentLifecycleLog.Debug("Using hydrated harness-config", "agent_id", in.AgentID, "path", hcPath)
+			}
+		}
+	}
+
 	if templateSlug != "" {
 		opts.TemplateName = templateSlug
 	}

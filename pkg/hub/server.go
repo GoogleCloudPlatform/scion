@@ -411,6 +411,15 @@ type RemoteAgentConfig struct {
 	// If the cached template's hash matches, it can be used without re-downloading.
 	TemplateHash string `json:"templateHash,omitempty"`
 
+	// HarnessConfigID is the Hub harness-config ID for hydration on the broker.
+	// When set, the broker fetches the harness-config from the Hub's storage
+	// backend rather than requiring it on the broker's local filesystem.
+	HarnessConfigID string `json:"harnessConfigId,omitempty"`
+
+	// HarnessConfigHash is the content hash of the harness-config for cache
+	// validation, mirroring TemplateHash.
+	HarnessConfigHash string `json:"harnessConfigHash,omitempty"`
+
 	// GitClone specifies git clone parameters for git-anchored projects.
 	// When set, the runtime broker skips workspace mounting and injects env vars
 	// so sciontool can clone the repo inside the container.
@@ -1695,7 +1704,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// Apply project-level defaults (harness config, limits, resources) from annotations
 		applyProjectDefaults(agent.AppliedConfig, project)
 
-		s.populateAgentConfig(agent, project, nil)
+		s.populateAgentConfig(ctx, agent, project, nil)
 
 		if err := s.store.CreateAgent(ctx, agent); err != nil {
 			return fmt.Errorf("failed to create agent %q: %w", slug, err)

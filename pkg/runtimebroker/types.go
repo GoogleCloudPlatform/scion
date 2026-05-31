@@ -393,6 +393,15 @@ type CreateAgentConfig struct {
 	// If the cached template's hash matches, it can be used without re-downloading.
 	TemplateHash string `json:"templateHash,omitempty"`
 
+	// HarnessConfigID is the Hub harness-config ID for cache lookup/hydration.
+	// When set, the broker fetches the harness-config from the Hub's storage
+	// backend instead of requiring it on the broker's local filesystem.
+	HarnessConfigID string `json:"harnessConfigId,omitempty"`
+
+	// HarnessConfigHash is the content hash of the harness-config for cache
+	// validation, mirroring TemplateHash.
+	HarnessConfigHash string `json:"harnessConfigHash,omitempty"`
+
 	// GitClone specifies git clone parameters for git-anchored projects.
 	// When set, the broker skips workspace mounting and injects env vars
 	// so sciontool can clone the repo inside the container.

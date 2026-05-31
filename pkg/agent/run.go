@@ -120,6 +120,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if opts.GitClone != nil {
 		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
 	}
+	if opts.HarnessConfigPath != "" {
+		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
+	}
 
 	// Build inline config for GetAgent by merging the dispatch InlineConfig
 	// (which carries volumes, env, image, etc. from templates/harness configs)
@@ -236,7 +239,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				}
 			}
 		}
-		if hcDir, err := config.FindHarnessConfigDir(harnessConfigName, projectDir, templatePaths...); err == nil {
+		if hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectDir, templatePaths...); err == nil {
 			if hcDir.Config.Image != "" {
 				resolvedImage = hcDir.Config.Image
 				util.Debugf("image resolution: from on-disk harness-config image=%s path=%s", resolvedImage, hcDir.Path)
