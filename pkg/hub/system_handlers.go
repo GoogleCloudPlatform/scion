@@ -175,7 +175,31 @@ func (s *Server) handlePutRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := config.UpdateSetting("", "active_profile", req.Runtime, true); err != nil {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "cannot determine config directory", nil)
+		return
+	}
+
+	vs, err := config.LoadSingleFileVersioned(globalDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to load settings", nil)
+		return
+	}
+
+	activeProfile := vs.ActiveProfile
+	if activeProfile == "" {
+		activeProfile = "default"
+	}
+
+	if vs.Profiles == nil {
+		vs.Profiles = make(map[string]config.V1ProfileConfig)
+	}
+	profile := vs.Profiles[activeProfile]
+	profile.Runtime = req.Runtime
+	vs.Profiles[activeProfile] = profile
+
+	if err := config.SaveVersionedSettings(globalDir, vs); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save runtime setting", nil)
 		return
 	}
