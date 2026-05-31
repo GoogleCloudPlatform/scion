@@ -50,7 +50,7 @@ var listCmd = &cobra.Command{
 		// Check if Hub should be used
 		hubCtx, err := CheckHubAvailability(projectPath)
 		if err != nil {
-			// Check if this is because Hub is enabled but grove not linked
+			// Check if this is because Hub is enabled but project not linked
 			if handleUnlinkedProjectPrompt(cmd, args) {
 				// User chose to link or disable - retry
 				hubCtx, err = CheckHubAvailability(projectPath)
@@ -81,8 +81,8 @@ func listAgentsLocal() error {
 	}
 
 	if listAll {
-		// Cross-grove listing might need a way to find all groves.
-		// For now, mgr.List handles current grove and what's provided in filters.
+		// Cross-project listing might need a way to find all projects.
+		// For now, mgr.List handles current project and what's provided in filters.
 	} else {
 		projectDir, _ := config.GetResolvedProjectDir(projectPath)
 		if projectDir != "" {
@@ -112,7 +112,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 	agentSvc := hubCtx.Client.Agents()
 
 	if !listAll {
-		// Get the grove ID for the current project
+		// Get the project ID for the current project
 		projectID, err := GetProjectID(hubCtx)
 		if err != nil {
 			return wrapHubError(err)
@@ -135,7 +135,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 	// Update agent name cache for completion
 	updateAgentNameCache(resp.Agents)
 
-	// Client-side enrichment: fetch broker/grove names if not provided by Hub
+	// Client-side enrichment: fetch broker/project names if not provided by Hub
 	enrichAgentsClientSide(ctx, hubCtx.Client, agents)
 
 	return displayAgents(agents, listAll, true)
@@ -164,11 +164,11 @@ func enrichAgentsClientSide(ctx context.Context, client hubclient.Client, agents
 		}
 	}
 
-	// Fetch grove names
+	// Fetch project names
 	projectNames := make(map[string]string)
 	for id := range projectIDs {
-		if grove, err := client.Projects().Get(ctx, id); err == nil {
-			projectNames[id] = grove.Name
+		if project, err := client.Projects().Get(ctx, id); err == nil {
+			projectNames[id] = project.Name
 		}
 	}
 
@@ -298,9 +298,9 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 
 	if len(agents) == 0 {
 		if all {
-			fmt.Println("No active agents found across any groves.")
+			fmt.Println("No active agents found across any projects.")
 		} else {
-			fmt.Println("No active agents found in the current grove.")
+			fmt.Println("No active agents found in the current project.")
 		}
 		return nil
 	}
@@ -394,10 +394,10 @@ func formatLastActivity(status string, t time.Time) string {
 	return fmt.Sprintf("%s, %s", status, timePart)
 }
 
-// handleUnlinkedProjectPrompt checks if the error is due to an unlinked grove and prompts the user.
+// handleUnlinkedProjectPrompt checks if the error is due to an unlinked project and prompts the user.
 // Returns true if the user made a choice that might resolve the issue (link or disable).
 func handleUnlinkedProjectPrompt(cmd *cobra.Command, args []string) bool {
-	// Resolve grove path to check settings
+	// Resolve project path to check settings
 	resolvedPath, isGlobal, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return false
@@ -408,12 +408,12 @@ func handleUnlinkedProjectPrompt(cmd *cobra.Command, args []string) bool {
 		return false
 	}
 
-	// Only handle this case if Hub is enabled but grove is not linked
+	// Only handle this case if Hub is enabled but project is not linked
 	if !settings.IsHubEnabled() {
 		return false
 	}
 
-	// Check if grove is actually registered on the Hub
+	// Check if project is actually registered on the Hub
 	endpoint := GetHubEndpoint(settings)
 	if endpoint == "" {
 		return false
@@ -432,7 +432,7 @@ func handleUnlinkedProjectPrompt(cmd *cobra.Command, args []string) bool {
 		return false // Hub not reachable, different error
 	}
 
-	// Check if grove is registered — prefer hub.groveId over grove_id
+	// Check if project is registered — prefer hub.groveId over grove_id
 	projectID := settings.GetHubProjectID()
 	if projectID == "" {
 		projectID = settings.ProjectID
@@ -443,10 +443,10 @@ func handleUnlinkedProjectPrompt(cmd *cobra.Command, args []string) bool {
 
 	linked, err := isProjectLinkedToHub(ctx, client, projectID)
 	if err != nil || linked {
-		return false // Error checking or grove is already linked
+		return false // Error checking or project is already linked
 	}
 
-	// Get grove name for display
+	// Get project name for display
 	var projectName string
 	if isGlobal {
 		projectName = "global"
@@ -461,24 +461,24 @@ func handleUnlinkedProjectPrompt(cmd *cobra.Command, args []string) bool {
 	case hubsync.LinkOrDisableLink:
 		// Run the link command
 		if err := runHubLink(cmd, args); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to link grove: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Failed to link project: %v\n", err)
 			return false
 		}
 		return true
 	case hubsync.LinkOrDisableDisable:
-		// Disable Hub for this grove
+		// Disable Hub for this project
 		if err := config.UpdateSetting(resolvedPath, "hub.enabled", "false", isGlobal); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to disable Hub: %v\n", err)
 			return false
 		}
-		statusln("Hub integration disabled for this grove.")
+		statusln("Hub integration disabled for this project.")
 		return true
 	default:
 		return false
 	}
 }
 
-// isProjectLinkedToHub checks if a grove is linked to the Hub.
+// isProjectLinkedToHub checks if a project is linked to the Hub.
 func isProjectLinkedToHub(ctx context.Context, client hubclient.Client, projectID string) (bool, error) {
 	if projectID == "" {
 		return false, nil
@@ -556,7 +556,7 @@ func updateAgentNameCache(agents []hubclient.Agent) {
 		}
 	}
 
-	// Generate cache key for the current grove path
+	// Generate cache key for the current project path
 	resolvedPath, _ := config.GetResolvedProjectDir(projectPath)
 	if resolvedPath == "" {
 		return
@@ -570,7 +570,7 @@ func updateAgentNameCache(agents []hubclient.Agent) {
 
 func init() {
 	rootCmd.AddCommand(listCmd)
-	listCmd.Flags().BoolVarP(&listAll, "all", "a", false, "List all agents across all groves")
+	listCmd.Flags().BoolVarP(&listAll, "all", "a", false, "List all agents across all projects")
 	listCmd.Flags().BoolVar(&listDeleted, "deleted", false, "Include soft-deleted agents in listing")
 	listCmd.Flags().BoolVarP(&listRunning, "running", "r", false, "Only show agents that are not stopped or errored")
 	listCmd.Flags().BoolVarP(&sortByTime, "time", "t", false, "Sort by last activity, most recent first")
