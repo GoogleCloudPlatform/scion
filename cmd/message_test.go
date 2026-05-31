@@ -981,6 +981,75 @@ func TestSendMessageViaHub_WakePassedThrough(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestBareEmailRecipientReturnsError(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantErr     string
+		wantSuggest string
+	}{
+		{
+			name:        "bare email returns error with suggestion",
+			args:        []string{"alice@example.com", "hello"},
+			wantErr:     `looks like an email address but is missing the "user:" prefix`,
+			wantSuggest: "user:alice@example.com",
+		},
+		{
+			name:        "bare email with subdomain",
+			args:        []string{"bob@corp.example.com", "check this out"},
+			wantErr:     `looks like an email address but is missing the "user:" prefix`,
+			wantSuggest: "user:bob@corp.example.com",
+		},
+		{
+			name:    "user-prefixed email is accepted (no error at parse stage)",
+			args:    []string{"user:alice@example.com", "hello"},
+			wantErr: "", // no parse error — fails later for other reasons (Hub, etc.)
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Reset flags to defaults
+			origRaw := msgRaw
+			origIn := msgIn
+			origBroadcast, origAll := msgBroadcast, msgAll
+			origNotify := msgNotify
+			origWake := msgWake
+			defer func() {
+				msgRaw = origRaw
+				msgIn = origIn
+				msgBroadcast = origBroadcast
+				msgAll = origAll
+				msgNotify = origNotify
+				msgWake = origWake
+			}()
+			msgRaw = false
+			msgIn = ""
+			msgBroadcast = false
+			msgAll = false
+			msgNotify = false
+			msgWake = false
+
+			err := messageCmd.RunE(messageCmd, tc.args)
+
+			if tc.wantErr == "" {
+				// We expect no error at the recipient parsing stage.
+				// The command will still fail (Hub not configured, etc.)
+				// but NOT with our email-specific error.
+				if err != nil {
+					assert.NotContains(t, err.Error(), "looks like an email address")
+				}
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				if tc.wantSuggest != "" {
+					assert.Contains(t, err.Error(), tc.wantSuggest)
+				}
+			}
+		})
+	}
+}
+
 func TestNotifyFlagValidation(t *testing.T) {
 	tests := []struct {
 		name      string
