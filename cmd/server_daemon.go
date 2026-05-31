@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
 
@@ -360,13 +361,27 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 
 // printWorkstationQuickstart prints the first-run quickstart information
 // including the developer token and web UI URL after a workstation-mode daemon starts.
+// When the machine hasn't been onboarded yet, it prints and opens the /onboarding URL.
 func printWorkstationQuickstart(globalDir string, host string, wPort int, webEnabled, devAuth bool) {
 	if webEnabled {
 		displayHost := host
 		if displayHost == "0.0.0.0" || displayHost == "" {
 			displayHost = "127.0.0.1"
 		}
-		fmt.Printf("Web UI:  http://%s:%d\n", displayHost, wPort)
+
+		// Point to /onboarding when the machine hasn't been set up yet
+		path := ""
+		if config.GetSettingsPath(globalDir) == "" {
+			path = "/onboarding"
+		}
+
+		url := fmt.Sprintf("http://%s:%d%s", displayHost, wPort, path)
+		fmt.Printf("Web UI:  %s\n", url)
+
+		// Auto-open the browser in interactive terminals
+		if os.Getenv("SCION_NO_BROWSER") == "" && util.IsTerminal() && !util.IsHeadlessEnvironment() {
+			_ = util.OpenBrowser(url)
+		}
 	}
 
 	if devAuth {
