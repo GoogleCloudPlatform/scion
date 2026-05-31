@@ -18,6 +18,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import '../shared/dir-browser.js';
 
 const ONBOARDING_STATUS_KEY = 'onboardingStatus';
 const TOTAL_STEPS = 6;
@@ -80,6 +81,15 @@ export class ScionPageOnboarding extends LitElement {
   @state() private buildExpanded = false;
   @state() private runtimeAvailable = false;
   private imageEventSource: EventSource | null = null;
+
+  // Step 5: Workspace
+  @state() private workspaceMode: 'choose' | 'hub' | 'linked' = 'choose';
+  @state() private wsProjectName = '';
+  @state() private wsLocalPath = '';
+  @state() private wsPathValidation: { resolved: string; exists: boolean; isDir: boolean; isGit: boolean; isManaged: boolean; alreadyLinked: boolean; error?: string } | null = null;
+  @state() private wsValidatingPath = false;
+  @state() private wsCreating = false;
+  @state() private wsEmbeddedBrokerID = '';
 
   static override styles = css`
     :host {
@@ -387,6 +397,75 @@ export class ScionPageOnboarding extends LitElement {
       display: flex;
       gap: 0.5rem;
       margin-bottom: 1rem;
+    }
+
+    .ws-cards {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .ws-card {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 1rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      cursor: pointer;
+      transition: border-color 0.15s;
+    }
+
+    .ws-card:hover {
+      border-color: var(--scion-primary, #3b82f6);
+    }
+
+    .ws-card sl-icon {
+      font-size: 1.5rem;
+      color: var(--scion-primary, #3b82f6);
+      flex-shrink: 0;
+    }
+
+    .ws-card .ws-card-text {
+      flex: 1;
+    }
+
+    .ws-card .ws-card-title {
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      font-size: 0.9375rem;
+    }
+
+    .ws-card .ws-card-desc {
+      font-size: 0.8125rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-top: 0.125rem;
+    }
+
+    .ws-validation {
+      font-size: 0.8125rem;
+      margin-top: 0.375rem;
+      padding: 0.5rem 0.75rem;
+      border-radius: var(--scion-radius, 0.5rem);
+    }
+
+    .ws-validation.valid {
+      background: var(--sl-color-success-50, #f0fdf4);
+      border: 1px solid var(--sl-color-success-200, #bbf7d0);
+      color: var(--sl-color-success-700, #15803d);
+    }
+
+    .ws-validation.warning {
+      background: var(--sl-color-warning-50, #fefce8);
+      border: 1px solid var(--sl-color-warning-200, #fef08a);
+      color: var(--sl-color-warning-700, #a16207);
+    }
+
+    .ws-validation.error {
+      background: var(--sl-color-danger-50, #fef2f2);
+      border: 1px solid var(--sl-color-danger-200, #fecaca);
+      color: var(--sl-color-danger-700, #b91c1c);
     }
   `;
 
@@ -991,14 +1070,41 @@ export class ScionPageOnboarding extends LitElement {
     } catch { /* ignore */ }
   }
 
-  // ── Step 5: First Workspace (placeholder) ──
+  // ── Step 5: First Workspace ──
 
   private renderWorkspacePlaceholder() {
+    if (this.workspaceMode === 'hub') return this.renderWsHub();
+    if (this.workspaceMode === 'linked') return this.renderWsLinked();
+    return this.renderWsChoose();
+  }
+
+  private renderWsChoose() {
     return html`
       <h2>First Workspace</h2>
-      <div class="placeholder-content">
-        <sl-icon name="folder-plus"></sl-icon>
-        <p>Workspace creation will be available in a future update.</p>
+      <p>Create your first project to get started.</p>
+
+      <div class="ws-cards">
+        <div class="ws-card" @click=${() => { this.workspaceMode = 'hub'; }}>
+          <sl-icon name="cloud"></sl-icon>
+          <div class="ws-card-text">
+            <div class="ws-card-title">Hub-native project</div>
+            <div class="ws-card-desc">A workspace managed by the Hub. No git repository required.</div>
+          </div>
+        </div>
+        <div class="ws-card" @click=${() => { window.location.href = '/projects/new'; }}>
+          <sl-icon name="git"></sl-icon>
+          <div class="ws-card-text">
+            <div class="ws-card-title">Link a git repo</div>
+            <div class="ws-card-desc">Connect to an existing git repository for source-controlled workspaces.</div>
+          </div>
+        </div>
+        <div class="ws-card" @click=${() => { this.workspaceMode = 'linked'; void this.loadWsBrokerID(); }}>
+          <sl-icon name="folder-symlink"></sl-icon>
+          <div class="ws-card-text">
+            <div class="ws-card-title">Add local directory</div>
+            <div class="ws-card-desc">Link a local directory. It stays where it is and is operated on in place.</div>
+          </div>
+        </div>
       </div>
 
       <div class="footer">
@@ -1008,6 +1114,186 @@ export class ScionPageOnboarding extends LitElement {
         </div>
       </div>
     `;
+  }
+
+  private renderWsHub() {
+    return html`
+      <h2>Create Hub Workspace</h2>
+      <p>Give your project a name.</p>
+
+      <div class="form-group">
+        <label>Project Name</label>
+        <sl-input
+          placeholder="my-project"
+          .value=${this.wsProjectName}
+          @sl-input=${(e: Event) => { this.wsProjectName = (e.target as HTMLInputElement).value; }}
+        ></sl-input>
+      </div>
+
+      <div class="footer">
+        <sl-button variant="text" @click=${() => { this.workspaceMode = 'choose'; }}>Back</sl-button>
+        <div class="footer-right">
+          <sl-button variant="default" @click=${() => { this.currentStep = 6; }}>Skip for now</sl-button>
+          <sl-button
+            variant="primary"
+            ?loading=${this.wsCreating}
+            ?disabled=${!this.wsProjectName.trim()}
+            @click=${this.handleWsHubCreate}
+          >Create & Continue</sl-button>
+        </div>
+      </div>
+    `;
+  }
+
+  private async handleWsHubCreate(): Promise<void> {
+    this.error = null;
+    this.wsCreating = true;
+    try {
+      const res = await apiFetch('/api/v1/projects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: this.wsProjectName.trim(), visibility: 'private' }),
+      });
+      if (!res.ok) {
+        this.error = await extractApiError(res, 'Failed to create project');
+        return;
+      }
+      this.currentStep = 6;
+    } catch {
+      this.error = 'Failed to connect to the server.';
+    } finally {
+      this.wsCreating = false;
+    }
+  }
+
+  private renderWsLinked() {
+    const pathOk = this.wsPathValidation && !this.wsPathValidation.error && this.wsPathValidation.exists && this.wsPathValidation.isDir;
+
+    return html`
+      <h2>Add Local Directory</h2>
+      <p>Browse to or enter the path of a local directory.</p>
+
+      <div class="form-group">
+        <label>Project Name</label>
+        <sl-input
+          placeholder="my-project"
+          .value=${this.wsProjectName}
+          @sl-input=${(e: Event) => { this.wsProjectName = (e.target as HTMLInputElement).value; }}
+        ></sl-input>
+      </div>
+
+      <div class="form-group">
+        <label>Directory</label>
+        <scion-dir-browser
+          @path-selected=${(e: CustomEvent<{ path: string }>) => {
+            this.wsLocalPath = e.detail.path;
+            void this.wsValidatePath(e.detail.path);
+          }}
+        ></scion-dir-browser>
+      </div>
+
+      ${this.wsLocalPath ? html`
+        <div class="form-group">
+          <label>Selected Path</label>
+          <sl-input readonly .value=${this.wsLocalPath}></sl-input>
+        </div>
+      ` : nothing}
+
+      ${this.wsValidatingPath
+        ? html`<div class="ws-validation valid" style="display:flex;align-items:center;gap:0.5rem;">
+            <sl-spinner style="font-size:0.875rem;"></sl-spinner> Validating…
+          </div>`
+        : this.wsPathValidation
+          ? html`
+              ${this.wsPathValidation.error
+                ? html`<div class="ws-validation error">${this.wsPathValidation.error}</div>`
+                : !this.wsPathValidation.exists
+                  ? html`<div class="ws-validation error">Path does not exist.</div>`
+                  : !this.wsPathValidation.isDir
+                    ? html`<div class="ws-validation error">Not a directory.</div>`
+                    : html`<div class="ws-validation valid">Path is valid: ${this.wsPathValidation.resolved}</div>
+                        ${this.wsPathValidation.isGit ? html`<div class="ws-validation warning" style="margin-top:0.25rem;">This is a git repository.</div>` : nothing}
+                        ${this.wsPathValidation.alreadyLinked ? html`<div class="ws-validation warning" style="margin-top:0.25rem;">Already linked to another project.</div>` : nothing}
+                      `}
+            `
+          : nothing}
+
+      <div class="footer">
+        <sl-button variant="text" @click=${() => { this.workspaceMode = 'choose'; }}>Back</sl-button>
+        <div class="footer-right">
+          <sl-button variant="default" @click=${() => { this.currentStep = 6; }}>Skip for now</sl-button>
+          <sl-button
+            variant="primary"
+            ?loading=${this.wsCreating}
+            ?disabled=${!pathOk || !this.wsProjectName.trim()}
+            @click=${this.handleWsLinkedCreate}
+          >Create & Continue</sl-button>
+        </div>
+      </div>
+    `;
+  }
+
+  private async loadWsBrokerID(): Promise<void> {
+    if (this.wsEmbeddedBrokerID) return;
+    try {
+      const res = await apiFetch('/api/v1/system/status');
+      if (!res.ok) return;
+      const data = (await res.json()) as { embeddedBrokerID?: string };
+      if (data.embeddedBrokerID) this.wsEmbeddedBrokerID = data.embeddedBrokerID;
+    } catch { /* ignore */ }
+  }
+
+  private async wsValidatePath(path: string): Promise<void> {
+    this.wsValidatingPath = true;
+    this.wsPathValidation = null;
+    try {
+      const res = await apiFetch('/api/v1/system/fs/validate-path', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+      if (!res.ok) return;
+      this.wsPathValidation = (await res.json()) as typeof this.wsPathValidation;
+    } catch { /* ignore */ }
+    finally { this.wsValidatingPath = false; }
+  }
+
+  private async handleWsLinkedCreate(): Promise<void> {
+    if (!this.wsEmbeddedBrokerID) {
+      this.error = 'No embedded broker available.';
+      return;
+    }
+    this.error = null;
+    this.wsCreating = true;
+    try {
+      const projRes = await apiFetch('/api/v1/projects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: this.wsProjectName.trim(), visibility: 'private' }),
+      });
+      if (!projRes.ok) {
+        this.error = await extractApiError(projRes, 'Failed to create project');
+        return;
+      }
+      const projData = (await projRes.json()) as { project?: { id: string }; id?: string };
+      const projectId = projData.project?.id || projData.id;
+      if (!projectId) { this.error = 'No project ID in response'; return; }
+
+      const provRes = await apiFetch(`/api/v1/projects/${projectId}/providers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brokerId: this.wsEmbeddedBrokerID, localPath: this.wsPathValidation!.resolved }),
+      });
+      if (!provRes.ok) {
+        this.error = await extractApiError(provRes, 'Project created but failed to link directory. You can retry.');
+        return;
+      }
+      this.currentStep = 6;
+    } catch {
+      this.error = 'Failed to connect to the server.';
+    } finally {
+      this.wsCreating = false;
+    }
   }
 
   // ── Step 6: Done ──
