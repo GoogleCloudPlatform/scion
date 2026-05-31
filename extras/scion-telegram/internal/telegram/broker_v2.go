@@ -24,9 +24,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
-	"net/http"
 	"regexp"
 	"slices"
 	"strconv"
@@ -289,7 +289,7 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 				projects = append(projects, ProjectOption{ID: id, Slug: slug})
 			}
 			b.commands.SetProjects(projects)
-				b.callbacks.SetProjects(projects)
+			b.callbacks.SetProjects(projects)
 		}
 	}
 
@@ -1735,7 +1735,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			Metadata: map[string]string{
 				"telegram_chat_id":    strconv.FormatInt(chatID, 10),
 				"telegram_message_id": strconv.FormatInt(tgMsg.MessageID, 10),
-				"project_id":         link.ProjectID,
+				"project_id":          link.ProjectID,
 			},
 		}
 
