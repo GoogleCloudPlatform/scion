@@ -193,7 +193,7 @@ func IsHubContext() bool {
 // WriteWorkspaceMarker writes a minimal .scion marker file into a workspace
 // directory so that in-container CLI can discover the project context.
 // This is called during agent provisioning for git projects (where the worktree
-// doesn't contain .scion because it's gitignored) and for hub-native projects.
+// doesn't contain .scion because it's gitignored) and for hub-managed projects.
 func WriteWorkspaceMarker(workspacePath string, projectID, projectName, projectSlug string) error {
 	if projectID == "" || projectSlug == "" {
 		return fmt.Errorf("project-id and project-slug are required for workspace marker")

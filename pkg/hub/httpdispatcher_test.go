@@ -537,7 +537,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithProjectProviderPath(t *test
 	memStore := createTestStore(t)
 
 	// Create the project with a GitRemote so it is treated as a linked project
-	// (not hub-native). This ensures buildCreateRequest looks up the
+	// (not hub-managed). This ensures buildCreateRequest looks up the
 	// provider's LocalPath instead of sending a projectSlug.
 	project := &store.Project{
 		ID:        "project-1",
@@ -1171,16 +1171,16 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIdentity(t *testing
 	}
 }
 
-func TestHTTPAgentDispatcher_DispatchAgentStart_HubNativeProject(t *testing.T) {
+func TestHTTPAgentDispatcher_DispatchAgentStart_HubManagedProject(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
 
-	// Create a hub-native project (no git remote)
+	// Create a hub-managed project (no git remote)
 	project := &store.Project{
 		ID:   "project-hub",
 		Name: "My Hub Project",
 		Slug: "my-hub-project",
-		// No GitRemote — this is a hub-native project
+		// No GitRemote — this is a hub-managed project
 	}
 	if err := memStore.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -1219,7 +1219,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_HubNativeProject(t *testing.T) {
 	}
 	// No local provider path — projectPath should be empty
 	if mockClient.lastProjectPath != "" {
-		t.Errorf("expected empty projectPath for hub-native project, got %q", mockClient.lastProjectPath)
+		t.Errorf("expected empty projectPath for hub-managed project, got %q", mockClient.lastProjectPath)
 	}
 	// ProjectSlug should be set so the broker can resolve the path
 	if mockClient.lastProjectSlug != "my-hub-project" {
@@ -1830,16 +1830,16 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProfile(t *testing.T)
 	}
 }
 
-func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProjectSlug_HubNative(t *testing.T) {
+func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProjectSlug_HubManaged(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
 
-	// Create a hub-native project (no GitRemote)
+	// Create a hub-managed project (no GitRemote)
 	project := &store.Project{
-		ID:   "project-hub-native",
+		ID:   "project-hub-managed",
 		Name: "Hub Native Project",
-		Slug: "hub-native-project",
-		// No GitRemote = hub-native
+		Slug: "hub-managed-project",
+		// No GitRemote = hub-managed
 	}
 	if err := memStore.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -1863,7 +1863,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProjectSlug_HubNative
 		ID:              "agent-1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-hub-native",
+		ProjectID:       "project-hub-managed",
 		RuntimeBrokerID: "host-1",
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -1878,8 +1878,8 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProjectSlug_HubNative
 	if !mockClient.createCalled {
 		t.Fatal("expected CreateAgent to be called")
 	}
-	if mockClient.lastCreateReq.ProjectSlug != "hub-native-project" {
-		t.Errorf("expected ProjectSlug 'hub-native-project', got '%s'", mockClient.lastCreateReq.ProjectSlug)
+	if mockClient.lastCreateReq.ProjectSlug != "hub-managed-project" {
+		t.Errorf("expected ProjectSlug 'hub-managed-project', got '%s'", mockClient.lastCreateReq.ProjectSlug)
 	}
 }
 
@@ -1989,7 +1989,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoProjectSlug_LocalPathProject(
 	memStore := createTestStore(t)
 
 	// Create a linked project with a local provider path.
-	// This project has a GitRemote so it is treated as a linked project (not hub-native).
+	// This project has a GitRemote so it is treated as a linked project (not hub-managed).
 	// Even though the broker has the repo locally, all hub-linked projects with a
 	// git remote use clone-based provisioning (HTTPS + GitHub token).
 	project := &store.Project{
@@ -2059,7 +2059,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoProjectSlug_LocalPathProject(
 	}
 
 	// A non-git project with a local provider path should NOT have ProjectSlug set.
-	// ProjectSlug is only for hub-native projects (no local path on the broker).
+	// ProjectSlug is only for hub-managed projects (no local path on the broker).
 	if mockClient.lastCreateReq.ProjectSlug != "" {
 		t.Errorf("expected empty ProjectSlug for local-path project, got '%s'", mockClient.lastCreateReq.ProjectSlug)
 	}
@@ -2070,7 +2070,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoProjectSlug_LocalPathProject(
 	}
 
 	// Config.Workspace should be cleared when a local provider path exists,
-	// because the workspace is derived from the project path, not the hub-native convention.
+	// because the workspace is derived from the project path, not the hub-managed convention.
 	if mockClient.lastCreateReq.Config == nil {
 		t.Fatal("expected config to be present")
 	}
@@ -2091,7 +2091,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoProjectSlug_LocalPathProject(
 
 // TestHTTPAgentDispatcher_DispatchAgentCreate_LinkedProjectNoGitRemote verifies
 // that a linked project without a git remote (registered via CLI link, not via
-// git URL) uses the provider's LocalPath rather than being treated as hub-native.
+// git URL) uses the provider's LocalPath rather than being treated as hub-managed.
 func TestHTTPAgentDispatcher_DispatchAgentCreate_LinkedProjectNoGitRemote(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
@@ -2102,7 +2102,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_LinkedProjectNoGitRemote(t *tes
 		ID:   "project-linked-no-git",
 		Name: "Linked No Git Project",
 		Slug: "linked-no-git",
-		// No GitRemote — looks like hub-native, but has a provider path
+		// No GitRemote — looks like hub-managed, but has a provider path
 	}
 	if err := memStore.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -2155,7 +2155,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_LinkedProjectNoGitRemote(t *tes
 		t.Fatal("expected CreateAgent to be called")
 	}
 
-	// Provider path must take precedence — should NOT be treated as hub-native
+	// Provider path must take precedence — should NOT be treated as hub-managed
 	if mockClient.lastCreateReq.ProjectSlug != "" {
 		t.Errorf("expected empty ProjectSlug for linked project with provider path, got '%s'", mockClient.lastCreateReq.ProjectSlug)
 	}

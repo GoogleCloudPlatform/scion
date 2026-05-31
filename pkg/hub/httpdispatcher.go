@@ -282,7 +282,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		workspace := agent.AppliedConfig.Workspace
 		gitClone := agent.AppliedConfig.GitClone
 		// When the broker has a local provider path for this project, clear
-		// the hub-native workspace path — the broker will derive its own
+		// the hub-managed workspace path — the broker will derive its own
 		// workspace location from the project path. However, keep GitClone
 		// config: all hub-linked projects with a git remote use clone-based
 		// provisioning (HTTPS + GitHub token) rather than worktree-based,
@@ -502,7 +502,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectPath(ctx context.Context, ag
 
 func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, agent *store.Agent) projectDispatchInfo {
 	// Look up the local path for this project on the target runtime broker.
-	// A provider LocalPath (linked project) takes precedence over hub-native
+	// A provider LocalPath (linked project) takes precedence over hub-managed
 	// slug resolution, even for projects without a git remote. Only when there
 	// is no provider path and no git remote do we fall back to projectSlug so
 	// the broker resolves the conventional ~/.scion/projects/<slug> path.
@@ -535,7 +535,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 		}
 	}
 	// If no provider path was found, let the broker resolve the path via
-	// slug. This applies to both hub-native projects (no git remote) and
+	// slug. This applies to both hub-managed projects (no git remote) and
 	// git-anchored projects — the broker needs a project identity to create
 	// agent directories under ~/.scion/projects/<slug>/ rather than falling
 	// back to the global project.

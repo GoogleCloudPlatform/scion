@@ -864,7 +864,7 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 	// Collect project paths to scan
 	var projectPaths []string
 
-	// Hub-native projects: ~/.scion/{projects,groves}/<slug>/.scion/
+	// Hub-managed projects: ~/.scion/{projects,groves}/<slug>/.scion/
 	globalDir, err := config.GetGlobalDir()
 	if err == nil {
 		for _, dirName := range []string{"projects", "groves"} {

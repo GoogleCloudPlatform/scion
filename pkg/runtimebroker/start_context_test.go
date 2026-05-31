@@ -328,12 +328,12 @@ func TestBuildStartContext_AttachMode(t *testing.T) {
 	}
 }
 
-func TestBuildStartContext_HubNativeProjectWritesMarker(t *testing.T) {
+func TestBuildStartContext_HubManagedProjectWritesMarker(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
-	// Simulate a hub-native project: ProjectSlug set, ProjectPath pre-resolved
+	// Simulate a hub-managed project: ProjectSlug set, ProjectPath pre-resolved
 	// (as the createAgent handler does for env-gather), and ProjectID from hub.
 	projectsDir := t.TempDir()
 	projectPath := filepath.Join(projectsDir, "web-demo")
@@ -385,7 +385,7 @@ func TestBuildStartContext_HubNativeProjectWritesMarker(t *testing.T) {
 	}
 }
 
-func TestBuildStartContext_HubNativeProjectSlugResolution(t *testing.T) {
+func TestBuildStartContext_HubManagedProjectSlugResolution(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
@@ -414,7 +414,7 @@ func TestBuildStartContext_HubNativeProjectSlugResolution(t *testing.T) {
 	}
 }
 
-func TestBuildStartContext_HubNativeProjectPreservesExistingProjectID(t *testing.T) {
+func TestBuildStartContext_HubManagedProjectPreservesExistingProjectID(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
@@ -450,12 +450,12 @@ func TestBuildStartContext_HubNativeProjectPreservesExistingProjectID(t *testing
 	}
 }
 
-func TestBuildStartContext_HubNativeProjectPreservesExistingMarker(t *testing.T) {
+func TestBuildStartContext_HubManagedProjectPreservesExistingMarker(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
-	// Pre-create .scion as a marker file (hub-native project)
+	// Pre-create .scion as a marker file (hub-managed project)
 	projectPath := filepath.Join(t.TempDir(), "existing-grove")
 	if err := os.MkdirAll(projectPath, 0755); err != nil {
 		t.Fatal(err)

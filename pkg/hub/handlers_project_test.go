@@ -37,8 +37,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestHubNativeProjectPath(t *testing.T) {
-	path, err := hubNativeProjectPath("my-test-project")
+func TestHubManagedProjectPath(t *testing.T) {
+	path, err := hubManagedProjectPath("my-test-project")
 	require.NoError(t, err)
 
 	homeDir, err := os.UserHomeDir()
@@ -48,7 +48,7 @@ func TestHubNativeProjectPath(t *testing.T) {
 	assert.Equal(t, expected, path)
 }
 
-func TestHubNativeProjectPath_EmptyProjectsFallsBackToGroves(t *testing.T) {
+func TestHubManagedProjectPath_EmptyProjectsFallsBackToGroves(t *testing.T) {
 	// Use a temp directory as HOME to avoid polluting real ~/.scion
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
@@ -66,13 +66,13 @@ func TestHubNativeProjectPath_EmptyProjectsFallsBackToGroves(t *testing.T) {
 	require.NoError(t, os.MkdirAll(grovesDir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(grovesDir, "README.md"), []byte("# workspace"), 0644))
 
-	// hubNativeProjectPath should fall back to groves/ since projects/ has no real content
-	path, err := hubNativeProjectPath(slug)
+	// hubManagedProjectPath should fall back to groves/ since projects/ has no real content
+	path, err := hubManagedProjectPath(slug)
 	require.NoError(t, err)
 	assert.Equal(t, grovesDir, path, "should fall back to groves path when projects dir only contains infrastructure dirs")
 }
 
-func TestCreateProject_HubNative_NoGitRemote(t *testing.T) {
+func TestCreateProject_HubManaged_NoGitRemote(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := CreateProjectRequest{
@@ -86,18 +86,18 @@ func TestCreateProject_HubNative_NoGitRemote(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
 	assert.Equal(t, "Hub Native Project", project.Name)
-	assert.Equal(t, "hub-native-project", project.Slug)
-	assert.Empty(t, project.GitRemote, "hub-native project should have no git remote")
+	assert.Equal(t, "hub-managed-project", project.Slug)
+	assert.Empty(t, project.GitRemote, "hub-managed project should have no git remote")
 
 	// Verify the filesystem was initialized
-	workspacePath, err := hubNativeProjectPath(project.Slug)
+	workspacePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
 
 	scionDir := filepath.Join(workspacePath, ".scion")
 	settingsPath := filepath.Join(scionDir, "settings.yaml")
 
 	_, err = os.Stat(settingsPath)
-	assert.NoError(t, err, "settings.yaml should exist for hub-native project")
+	assert.NoError(t, err, "settings.yaml should exist for hub-managed project")
 
 	// Cleanup
 	t.Cleanup(func() {
@@ -122,21 +122,21 @@ func TestCreateProject_GitBacked_NoFilesystemInit(t *testing.T) {
 	assert.Equal(t, "github.com/test/repo", project.GitRemote)
 
 	// Verify no filesystem was created for git-backed project
-	workspacePath, err := hubNativeProjectPath(project.Slug)
+	workspacePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
 
 	_, err = os.Stat(workspacePath)
 	assert.True(t, os.IsNotExist(err), "no workspace directory should be created for git-backed projects")
 }
 
-func TestPopulateAgentConfig_HubNativeProject_SetsWorkspace(t *testing.T) {
+func TestPopulateAgentConfig_HubManagedProject_SetsWorkspace(t *testing.T) {
 	srv, _ := testServer(t)
 
 	project := &store.Project{
-		ID:   "project-hub-native",
+		ID:   "project-hub-managed",
 		Name: "Hub Native",
-		Slug: "hub-native",
-		// No GitRemote — hub-native project
+		Slug: "hub-managed",
+		// No GitRemote — hub-managed project
 	}
 
 	agent := &store.Agent{
@@ -146,22 +146,22 @@ func TestPopulateAgentConfig_HubNativeProject_SetsWorkspace(t *testing.T) {
 
 	srv.populateAgentConfig(agent, project, nil)
 
-	expectedPath, err := hubNativeProjectPath("hub-native")
+	expectedPath, err := hubManagedProjectPath("hub-managed")
 	require.NoError(t, err)
 	assert.Equal(t, expectedPath, agent.AppliedConfig.Workspace,
-		"Workspace should be set for hub-native projects")
+		"Workspace should be set for hub-managed projects")
 	assert.Nil(t, agent.AppliedConfig.GitClone,
-		"GitClone should not be set for hub-native projects")
+		"GitClone should not be set for hub-managed projects")
 }
 
-func TestPopulateAgentConfig_HubNativeProject_RemoteBroker_WorkspaceSet(t *testing.T) {
+func TestPopulateAgentConfig_HubManagedProject_RemoteBroker_WorkspaceSet(t *testing.T) {
 	srv, _ := testServer(t)
 
 	project := &store.Project{
-		ID:   "project-hub-native-remote",
+		ID:   "project-hub-managed-remote",
 		Name: "Hub Native Remote",
-		Slug: "hub-native-remote",
-		// No GitRemote — hub-native project
+		Slug: "hub-managed-remote",
+		// No GitRemote — hub-managed project
 	}
 
 	agent := &store.Agent{
@@ -171,10 +171,10 @@ func TestPopulateAgentConfig_HubNativeProject_RemoteBroker_WorkspaceSet(t *testi
 
 	srv.populateAgentConfig(agent, project, nil)
 
-	// populateAgentConfig sets Workspace for hub-native projects.
+	// populateAgentConfig sets Workspace for hub-managed projects.
 	// For remote brokers, the createAgent handler later swaps this to
 	// WorkspaceStoragePath. Here we verify the initial workspace is set.
-	expectedPath, err := hubNativeProjectPath("hub-native-remote")
+	expectedPath, err := hubManagedProjectPath("hub-managed-remote")
 	require.NoError(t, err)
 	assert.Equal(t, expectedPath, agent.AppliedConfig.Workspace)
 }
@@ -432,10 +432,10 @@ func TestPopulateAgentConfig_ProjectTelemetryEnabledWithoutOtherConfig(t *testin
 		"Project TelemetryEnabled=true should create telemetry config with Enabled=true")
 }
 
-// TestCreateAgent_HubNativeProject_ExplicitBroker_AutoLinks tests that creating an agent
-// in a hub-native project with an explicitly selected broker auto-links the broker as a
+// TestCreateAgent_HubManagedProject_ExplicitBroker_AutoLinks tests that creating an agent
+// in a hub-managed project with an explicitly selected broker auto-links the broker as a
 // provider, even if it wasn't previously registered as one.
-func TestCreateAgent_HubNativeProject_ExplicitBroker_AutoLinks(t *testing.T) {
+func TestCreateAgent_HubManagedProject_ExplicitBroker_AutoLinks(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -448,12 +448,12 @@ func TestCreateAgent_HubNativeProject_ExplicitBroker_AutoLinks(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	// Create a hub-native project (no git remote, no default broker, no providers)
+	// Create a hub-managed project (no git remote, no default broker, no providers)
 	project := &store.Project{
 		ID:   "project-hub-autolink",
 		Slug: "hub-autolink",
 		Name: "Hub Autolink Project",
-		// No GitRemote — hub-native
+		// No GitRemote — hub-managed
 		// No DefaultRuntimeBrokerID
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
@@ -488,9 +488,9 @@ func TestCreateAgent_HubNativeProject_ExplicitBroker_AutoLinks(t *testing.T) {
 		"Broker should be set as the default for the project")
 }
 
-// TestCreateProject_HubNative_AutoProvide tests that creating a hub-native project
+// TestCreateProject_HubManaged_AutoProvide tests that creating a hub-managed project
 // auto-links brokers with auto_provide enabled.
-func TestCreateProject_HubNative_AutoProvide(t *testing.T) {
+func TestCreateProject_HubManaged_AutoProvide(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -504,7 +504,7 @@ func TestCreateProject_HubNative_AutoProvide(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	// Create a hub-native project via the API
+	// Create a hub-managed project via the API
 	body := CreateProjectRequest{
 		Name: "Auto Provide Project",
 	}
@@ -514,7 +514,7 @@ func TestCreateProject_HubNative_AutoProvide(t *testing.T) {
 
 	var project store.Project
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
-	assert.Empty(t, project.GitRemote, "should be hub-native")
+	assert.Empty(t, project.GitRemote, "should be hub-managed")
 
 	// Verify the auto-provide broker was linked
 	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
@@ -540,20 +540,20 @@ func TestCreateProject_HubNative_AutoProvide(t *testing.T) {
 	assert.Equal(t, broker.ID, resp.Agent.RuntimeBrokerID,
 		"Agent should use the auto-provided default broker")
 
-	// Cleanup hub-native project filesystem
-	workspacePath, err := hubNativeProjectPath(project.Slug)
+	// Cleanup hub-managed project filesystem
+	workspacePath, err := hubManagedProjectPath(project.Slug)
 	if err == nil {
 		t.Cleanup(func() { os.RemoveAll(workspacePath) })
 	}
 }
 
-// TestCreateAgent_HubNativeProject_NoProviders_NoBroker tests that creating an agent
-// in a hub-native project with no providers and no explicit broker returns an appropriate error.
-func TestDeleteProject_HubNative_RemovesFilesystem(t *testing.T) {
+// TestCreateAgent_HubManagedProject_NoProviders_NoBroker tests that creating an agent
+// in a hub-managed project with no providers and no explicit broker returns an appropriate error.
+func TestDeleteProject_HubManaged_RemovesFilesystem(t *testing.T) {
 	srv, s := testServer(t)
 
-	// Create a hub-native project via the API (initializes filesystem)
-	project, workspacePath := createTestHubNativeProject(t, srv, "FS Delete Test")
+	// Create a hub-managed project via the API (initializes filesystem)
+	project, workspacePath := createTestHubManagedProject(t, srv, "FS Delete Test")
 
 	// Verify filesystem exists before deletion
 	_, err := os.Stat(workspacePath)
@@ -652,11 +652,11 @@ func TestDeleteProject_AlwaysCascadeDeletesAgents(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
-func TestCreateAgent_HubNativeProject_NoProviders_NoBroker(t *testing.T) {
+func TestCreateAgent_HubManagedProject_NoProviders_NoBroker(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a hub-native project with no providers
+	// Create a hub-managed project with no providers
 	project := &store.Project{
 		ID:   "project-hub-noproviders",
 		Slug: "hub-noproviders",
@@ -675,11 +675,11 @@ func TestCreateAgent_HubNativeProject_NoProviders_NoBroker(t *testing.T) {
 		"Should fail when no providers exist and no broker is specified")
 }
 
-// TestAutoLinkProviders_HubNativeProject_NoLocalPath verifies that autoLinkProviders
-// does NOT set LocalPath on the provider for hub-native projects. The hub's local
+// TestAutoLinkProviders_HubManagedProject_NoLocalPath verifies that autoLinkProviders
+// does NOT set LocalPath on the provider for hub-managed projects. The hub's local
 // path is not valid for remote brokers — instead, projectSlug is sent so each
 // broker resolves the path on its own filesystem.
-func TestAutoLinkProviders_HubNativeProject_NoLocalPath(t *testing.T) {
+func TestAutoLinkProviders_HubManagedProject_NoLocalPath(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -693,7 +693,7 @@ func TestAutoLinkProviders_HubNativeProject_NoLocalPath(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	// Create a hub-native project via the API — this triggers autoLinkProviders
+	// Create a hub-managed project via the API — this triggers autoLinkProviders
 	body := CreateProjectRequest{
 		Name: "LocalPath Auto Project",
 	}
@@ -703,17 +703,17 @@ func TestAutoLinkProviders_HubNativeProject_NoLocalPath(t *testing.T) {
 
 	var project store.Project
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
-	assert.Empty(t, project.GitRemote, "should be hub-native")
+	assert.Empty(t, project.GitRemote, "should be hub-managed")
 
 	// Verify the auto-linked provider does NOT have LocalPath set
 	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	require.NoError(t, err, "Auto-provide broker should be linked as a provider")
 	assert.Equal(t, "auto-provide", provider.LinkedBy)
 	assert.Empty(t, provider.LocalPath,
-		"LocalPath should NOT be set for hub-native project auto-linked provider")
+		"LocalPath should NOT be set for hub-managed project auto-linked provider")
 
-	// Cleanup hub-native project filesystem
-	workspacePath, err := hubNativeProjectPath(project.Slug)
+	// Cleanup hub-managed project filesystem
+	workspacePath, err := hubManagedProjectPath(project.Slug)
 	if err == nil {
 		t.Cleanup(func() { os.RemoveAll(workspacePath) })
 	}
@@ -754,19 +754,19 @@ func TestAutoLinkProviders_GitProject_NoLocalPath(t *testing.T) {
 		"LocalPath should NOT be set for git-backed project providers")
 }
 
-// TestDeleteProject_HubNative_DispatchesCleanupToBrokers verifies that deleting a
-// hub-native project dispatches CleanupProject to each provider broker (except the
+// TestDeleteProject_HubManaged_DispatchesCleanupToBrokers verifies that deleting a
+// hub-managed project dispatches CleanupProject to each provider broker (except the
 // embedded/co-located broker).
-func TestDeleteProject_HubNative_DispatchesCleanupToBrokers(t *testing.T) {
+func TestDeleteProject_HubManaged_DispatchesCleanupToBrokers(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a hub-native project
+	// Create a hub-managed project
 	project := &store.Project{
 		ID:   "project-cleanup-dispatch",
 		Slug: "cleanup-dispatch",
 		Name: "Cleanup Dispatch Project",
-		// No GitRemote — hub-native
+		// No GitRemote — hub-managed
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
@@ -818,13 +818,13 @@ func TestDeleteProject_HubNative_DispatchesCleanupToBrokers(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
-// TestDeleteProject_HubNative_SkipsEmbeddedBroker verifies that the embedded broker
+// TestDeleteProject_HubManaged_SkipsEmbeddedBroker verifies that the embedded broker
 // (co-located hub+broker) is not called for cleanup since the hub handles its own copy.
-func TestDeleteProject_HubNative_SkipsEmbeddedBroker(t *testing.T) {
+func TestDeleteProject_HubManaged_SkipsEmbeddedBroker(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a hub-native project
+	// Create a hub-managed project
 	project := &store.Project{
 		ID:   "project-cleanup-embedded",
 		Slug: "cleanup-embedded",
@@ -922,10 +922,10 @@ func TestDeleteProject_GitBacked_NoCleanupDispatched(t *testing.T) {
 	assert.Equal(t, 0, mockClient.cleanupCalls, "CleanupProject should not be called for git-backed projects")
 }
 
-// TestResolveRuntimeBroker_HubNativeProject_NoLocalPath verifies that when a broker
-// is auto-linked during agent creation for a hub-native project, LocalPath is NOT
+// TestResolveRuntimeBroker_HubManagedProject_NoLocalPath verifies that when a broker
+// is auto-linked during agent creation for a hub-managed project, LocalPath is NOT
 // set. Remote brokers resolve the path themselves via projectSlug.
-func TestResolveRuntimeBroker_HubNativeProject_NoLocalPath(t *testing.T) {
+func TestResolveRuntimeBroker_HubManagedProject_NoLocalPath(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -938,7 +938,7 @@ func TestResolveRuntimeBroker_HubNativeProject_NoLocalPath(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	// Create a hub-native project with no providers
+	// Create a hub-managed project with no providers
 	project := &store.Project{
 		ID:   "project-resolve-localpath",
 		Slug: "resolve-localpath",
@@ -961,12 +961,12 @@ func TestResolveRuntimeBroker_HubNativeProject_NoLocalPath(t *testing.T) {
 	require.NoError(t, err, "Broker should have been auto-linked")
 	assert.Equal(t, "agent-create", provider.LinkedBy)
 	assert.Empty(t, provider.LocalPath,
-		"LocalPath should NOT be set when auto-linking during agent creation for hub-native project")
+		"LocalPath should NOT be set when auto-linking during agent creation for hub-managed project")
 }
 
 // TestProjectRegisterPreservesProviderLocalPath verifies that re-registering a
 // project from a local checkout does not overwrite an existing provider's empty
-// localPath. This prevents a hub-native git project (where agents clone from a
+// localPath. This prevents a hub-managed git project (where agents clone from a
 // URL) from being accidentally converted into a linked project.
 func TestProjectRegisterPreservesProviderLocalPath(t *testing.T) {
 	srv, s := testServer(t)
@@ -981,7 +981,7 @@ func TestProjectRegisterPreservesProviderLocalPath(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
-	// Step 1: Register project (creates it) — this is the initial hub-native creation.
+	// Step 1: Register project (creates it) — this is the initial hub-managed creation.
 	// The broker is linked WITH a localPath (simulating CLI-initiated creation).
 	body := map[string]interface{}{
 		"name":      "preserve-path-project",
@@ -1003,7 +1003,7 @@ func TestProjectRegisterPreservesProviderLocalPath(t *testing.T) {
 	assert.Equal(t, "/original/path/.scion", provider.LocalPath,
 		"newly created project should have localPath from registration")
 
-	// Now simulate converting to hub-native: clear localPath directly
+	// Now simulate converting to hub-managed: clear localPath directly
 	// (as autoLinkProviders would do, or via admin action)
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID:  projectID,
@@ -1011,7 +1011,7 @@ func TestProjectRegisterPreservesProviderLocalPath(t *testing.T) {
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
 		LinkedBy:   "auto-provide",
-		// LocalPath intentionally empty — hub-native provider
+		// LocalPath intentionally empty — hub-managed provider
 	}))
 
 	// Verify localPath is now empty
@@ -1366,7 +1366,7 @@ func TestCreateProject_SharedWorkspace_SetsLabelAndInitFilesystem(t *testing.T) 
 	assert.True(t, project.IsSharedWorkspace(), "project should report as shared workspace")
 
 	// Verify workspace was cloned (it's a git repo)
-	workspacePath, err := hubNativeProjectPath(project.Slug)
+	workspacePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { os.RemoveAll(workspacePath) })
 
@@ -1417,7 +1417,7 @@ func TestPopulateAgentConfig_SharedWorkspace_SetsWorkspaceNotClone(t *testing.T)
 
 	srv.populateAgentConfig(agent, project, nil)
 
-	expectedPath, err := hubNativeProjectPath("shared-ws")
+	expectedPath, err := hubManagedProjectPath("shared-ws")
 	require.NoError(t, err)
 	assert.Equal(t, expectedPath, agent.AppliedConfig.Workspace,
 		"Workspace should be set for shared-workspace git projects")
@@ -1515,7 +1515,7 @@ func TestCloneSharedWorkspaceProject_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify the workspace was created with a git repo
-	workspacePath, err := hubNativeProjectPath(project.Slug)
+	workspacePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { os.RemoveAll(workspacePath) })
 
@@ -1551,7 +1551,7 @@ func TestCloneSharedWorkspaceProject_Failure_CleansUp(t *testing.T) {
 	assert.Contains(t, err.Error(), "shared workspace clone failed")
 
 	// Verify the workspace directory was cleaned up
-	workspacePath, pathErr := hubNativeProjectPath(project.Slug)
+	workspacePath, pathErr := hubManagedProjectPath(project.Slug)
 	require.NoError(t, pathErr)
 	_, statErr := os.Stat(workspacePath)
 	assert.True(t, os.IsNotExist(statErr), "workspace directory should be cleaned up on clone failure")
@@ -1700,7 +1700,7 @@ func TestCreateProject_AutoAssociatesGitHubInstallation(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
 	// Clean up the cloned workspace
-	workspacePath, err := hubNativeProjectPath(project.Slug)
+	workspacePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { os.RemoveAll(workspacePath) })
 

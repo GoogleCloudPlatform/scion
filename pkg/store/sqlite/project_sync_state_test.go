@@ -85,7 +85,7 @@ func TestProjectSyncStateCRUD(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, states, 2)
 
-	// Delete hub-native state
+	// Delete hub-managed state
 	err = s.DeleteProjectSyncState(ctx, projectID, "")
 	require.NoError(t, err)
 

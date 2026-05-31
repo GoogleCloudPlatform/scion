@@ -226,7 +226,7 @@ func (d *agentDispatcherAdapter) DispatchAgentDelete(ctx context.Context, hubAge
 		}
 	}
 
-	// For hub-native groves the provider LocalPath is typically empty.
+	// For hub-managed projects the provider LocalPath is typically empty.
 	// Resolve from the grove slug so file cleanup can find the agent
 	// directory at ~/.scion/groves/<slug>/.scion/agents/<name>.
 	if projectPath == "" && hubAgent.ProjectID != "" && deleteFiles {

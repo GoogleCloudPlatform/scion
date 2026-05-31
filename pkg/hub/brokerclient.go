@@ -88,7 +88,7 @@ func (c *AuthenticatedBrokerClient) ExecAgent(ctx context.Context, brokerID, bro
 	return c.transport.ExecAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, command, timeout)
 }
 
-// CleanupProject asks a broker to remove its local hub-native project directory with HMAC authentication.
+// CleanupProject asks a broker to remove its local hub-managed project directory with HMAC authentication.
 func (c *AuthenticatedBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug string) error {
 	return c.transport.CleanupProject(ctx, brokerID, brokerEndpoint, projectSlug)
 }

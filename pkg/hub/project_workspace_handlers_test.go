@@ -63,10 +63,10 @@ func doMultipartRequest(t *testing.T, srv *Server, method, path string, files ma
 	return rec
 }
 
-// createTestHubNativeProject creates a hub-native project (no git remote) via the API
+// createTestHubManagedProject creates a hub-managed project (no git remote) via the API
 // and returns the project and its workspace path. Cleans up the workspace and any
 // external project-config directory on test completion.
-func createTestHubNativeProject(t *testing.T, srv *Server, name string) (*store.Project, string) {
+func createTestHubManagedProject(t *testing.T, srv *Server, name string) (*store.Project, string) {
 	t.Helper()
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: name})
@@ -75,7 +75,7 @@ func createTestHubNativeProject(t *testing.T, srv *Server, name string) (*store.
 	var project store.Project
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
-	workspacePath, err := hubNativeProjectPath(project.Slug)
+	workspacePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -94,7 +94,7 @@ func createTestHubNativeProject(t *testing.T, srv *Server, name string) (*store.
 }
 
 // resolveTestSharedDirPath resolves the project-configs shared dir path for a test
-// hub-native project. This matches the path that resolveHubProjectSharedDirPath uses
+// hub-managed project. This matches the path that resolveHubProjectSharedDirPath uses
 // in production: it reads the .scion marker to find the project-configs directory.
 func resolveTestSharedDirPath(t *testing.T, workspacePath, dirName string) string {
 	t.Helper()
@@ -127,7 +127,7 @@ func createTestGitProject(t *testing.T, srv *Server, name, remote string) *store
 
 func TestProjectWorkspaceList_EmptyWorkspace(t *testing.T) {
 	srv, _ := testServer(t)
-	project, _ := createTestHubNativeProject(t, srv, "WS List Empty")
+	project, _ := createTestHubManagedProject(t, srv, "WS List Empty")
 
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
@@ -143,7 +143,7 @@ func TestProjectWorkspaceList_EmptyWorkspace(t *testing.T) {
 
 func TestProjectWorkspaceList_WithFiles(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS List Files")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS List Files")
 
 	// Create some test files
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "hello.txt"), []byte("hello world"), 0644))
@@ -166,7 +166,7 @@ func TestProjectWorkspaceList_WithFiles(t *testing.T) {
 
 func TestProjectWorkspaceList_IncludesScionDir(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS List Scion")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS List Scion")
 
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "visible.txt"), []byte("yes"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, ".scion", "extra.txt"), []byte("also visible"), 0644))
@@ -206,7 +206,7 @@ func TestProjectWorkspaceList_GitProjectRejected(t *testing.T) {
 
 func TestProjectWorkspaceUpload_SingleFile(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS Upload Single")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Upload Single")
 
 	files := map[string][]byte{
 		"readme.txt": []byte("hello from upload"),
@@ -229,7 +229,7 @@ func TestProjectWorkspaceUpload_SingleFile(t *testing.T) {
 
 func TestProjectWorkspaceUpload_MultipleFiles(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS Upload Multi")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Upload Multi")
 
 	files := map[string][]byte{
 		"a.txt": []byte("file a"),
@@ -253,7 +253,7 @@ func TestProjectWorkspaceUpload_MultipleFiles(t *testing.T) {
 
 func TestProjectWorkspaceUpload_NestedPath(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS Upload Nested")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Upload Nested")
 
 	files := map[string][]byte{
 		"src/main.go": []byte("package main"),
@@ -269,7 +269,7 @@ func TestProjectWorkspaceUpload_NestedPath(t *testing.T) {
 
 func TestProjectWorkspaceUpload_PathTraversalRejected(t *testing.T) {
 	srv, _ := testServer(t)
-	project, _ := createTestHubNativeProject(t, srv, "WS Upload Traversal")
+	project, _ := createTestHubManagedProject(t, srv, "WS Upload Traversal")
 
 	files := map[string][]byte{
 		"../escape.txt": []byte("bad"),
@@ -280,7 +280,7 @@ func TestProjectWorkspaceUpload_PathTraversalRejected(t *testing.T) {
 
 func TestProjectWorkspaceUpload_NoFilesRejected(t *testing.T) {
 	srv, _ := testServer(t)
-	project, _ := createTestHubNativeProject(t, srv, "WS Upload Empty")
+	project, _ := createTestHubManagedProject(t, srv, "WS Upload Empty")
 
 	// Send an empty multipart form
 	var buf bytes.Buffer
@@ -313,7 +313,7 @@ func TestProjectWorkspaceUpload_GitProjectRejected(t *testing.T) {
 
 func TestProjectWorkspaceDelete_Success(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS Delete OK")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Delete OK")
 
 	// Create a file to delete
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "doomed.txt"), []byte("bye"), 0644))
@@ -328,7 +328,7 @@ func TestProjectWorkspaceDelete_Success(t *testing.T) {
 
 func TestProjectWorkspaceDelete_NotFound(t *testing.T) {
 	srv, _ := testServer(t)
-	project, _ := createTestHubNativeProject(t, srv, "WS Delete NF")
+	project, _ := createTestHubManagedProject(t, srv, "WS Delete NF")
 
 	rec := doRequest(t, srv, http.MethodDelete, fmt.Sprintf("/api/v1/projects/%s/workspace/files/nonexistent.txt", project.ID), nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
@@ -336,7 +336,7 @@ func TestProjectWorkspaceDelete_NotFound(t *testing.T) {
 
 func TestProjectWorkspaceDelete_CleansEmptyDirs(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS Delete Clean")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Delete Clean")
 
 	// Create a nested file
 	nestedDir := filepath.Join(workspacePath, "deep", "nested")
@@ -362,7 +362,7 @@ func TestProjectWorkspaceDelete_CleansEmptyDirs(t *testing.T) {
 
 func TestProjectWorkspaceDownload_Success(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS Download OK")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Download OK")
 
 	content := []byte("hello download")
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "readme.txt"), content, 0644))
@@ -377,7 +377,7 @@ func TestProjectWorkspaceDownload_Success(t *testing.T) {
 
 func TestProjectWorkspaceDownload_NestedFile(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS Download Nested")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Download Nested")
 
 	require.NoError(t, os.MkdirAll(filepath.Join(workspacePath, "src"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "src", "main.go"), []byte("package main"), 0644))
@@ -391,7 +391,7 @@ func TestProjectWorkspaceDownload_NestedFile(t *testing.T) {
 
 func TestProjectWorkspaceDownload_NotFound(t *testing.T) {
 	srv, _ := testServer(t)
-	project, _ := createTestHubNativeProject(t, srv, "WS Download NF")
+	project, _ := createTestHubManagedProject(t, srv, "WS Download NF")
 
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/workspace/files/nonexistent.txt", project.ID), nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
@@ -399,7 +399,7 @@ func TestProjectWorkspaceDownload_NotFound(t *testing.T) {
 
 func TestProjectWorkspaceDownload_InlineView(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS Download Inline")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Download Inline")
 
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "readme.txt"), []byte("inline content"), 0644))
 
@@ -417,7 +417,7 @@ func TestProjectWorkspaceDownload_InlineView(t *testing.T) {
 
 func TestProjectWorkspaceDownload_FormatJSON(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS Download JSON")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Download JSON")
 
 	content := "# Hello\n\nThis is markdown."
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "readme.md"), []byte(content), 0644))
@@ -436,7 +436,7 @@ func TestProjectWorkspaceDownload_FormatJSON(t *testing.T) {
 
 func TestProjectWorkspaceDownload_FormatJSON_BinaryRejected(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS Download JSON Bin")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Download JSON Bin")
 
 	// Write binary content (invalid UTF-8)
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "image.bin"), []byte{0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF, 0xFE}, 0644))
@@ -448,7 +448,7 @@ func TestProjectWorkspaceDownload_FormatJSON_BinaryRejected(t *testing.T) {
 
 func TestProjectWorkspaceDownload_FormatJSON_TooLarge(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS Download JSON Big")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Download JSON Big")
 
 	// Write a file larger than 1MB
 	bigContent := make([]byte, maxEditableFileSize+1)
@@ -468,7 +468,7 @@ func TestProjectWorkspaceDownload_FormatJSON_TooLarge(t *testing.T) {
 
 func TestProjectWorkspaceArchive_Success(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS Archive OK")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Archive OK")
 
 	// Create some test files
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "hello.txt"), []byte("hello world"), 0644))
@@ -501,7 +501,7 @@ func TestProjectWorkspaceArchive_Success(t *testing.T) {
 
 func TestProjectWorkspaceArchive_EmptyWorkspace(t *testing.T) {
 	srv, _ := testServer(t)
-	project, _ := createTestHubNativeProject(t, srv, "WS Archive Empty")
+	project, _ := createTestHubManagedProject(t, srv, "WS Archive Empty")
 
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/workspace/archive", project.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -522,7 +522,7 @@ func TestProjectWorkspaceArchive_GitProjectRejected(t *testing.T) {
 
 func TestProjectWorkspaceArchive_MethodNotAllowed(t *testing.T) {
 	srv, _ := testServer(t)
-	project, _ := createTestHubNativeProject(t, srv, "WS Archive Method")
+	project, _ := createTestHubManagedProject(t, srv, "WS Archive Method")
 
 	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/workspace/archive", project.ID), nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
@@ -534,7 +534,7 @@ func TestProjectWorkspaceArchive_MethodNotAllowed(t *testing.T) {
 
 func TestProjectWorkspaceWrite_CreateNewFile(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS Write New")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Write New")
 
 	body := ProjectWorkspaceWriteRequest{Content: "# New File\n\nHello!"}
 	rec := doRequest(t, srv, http.MethodPut, fmt.Sprintf("/api/v1/projects/%s/workspace/files/docs/readme.md", project.ID), body)
@@ -553,7 +553,7 @@ func TestProjectWorkspaceWrite_CreateNewFile(t *testing.T) {
 
 func TestProjectWorkspaceWrite_OverwriteExisting(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS Write Overwrite")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Write Overwrite")
 
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "config.yaml"), []byte("old: true"), 0644))
 
@@ -568,7 +568,7 @@ func TestProjectWorkspaceWrite_OverwriteExisting(t *testing.T) {
 
 func TestProjectWorkspaceWrite_ConflictDetection(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS Write Conflict")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Write Conflict")
 
 	filePath := filepath.Join(workspacePath, "data.txt")
 	require.NoError(t, os.WriteFile(filePath, []byte("original"), 0644))
@@ -590,7 +590,7 @@ func TestProjectWorkspaceWrite_ConflictDetection(t *testing.T) {
 
 func TestProjectWorkspaceWrite_PathTraversalRejected(t *testing.T) {
 	srv, _ := testServer(t)
-	project, _ := createTestHubNativeProject(t, srv, "WS Write Traversal")
+	project, _ := createTestHubManagedProject(t, srv, "WS Write Traversal")
 
 	// Go's HTTP mux normalizes paths with "../" segments before they reach
 	// the handler (returns 307 Redirect to the cleaned path). To test the
@@ -613,7 +613,7 @@ func TestProjectWorkspaceWrite_PathTraversalRejected(t *testing.T) {
 
 func TestProjectWorkspace_RequiresAuth(t *testing.T) {
 	srv, _ := testServer(t)
-	project, _ := createTestHubNativeProject(t, srv, "WS Auth")
+	project, _ := createTestHubManagedProject(t, srv, "WS Auth")
 
 	endpoints := []struct {
 		method string
@@ -638,7 +638,7 @@ func TestProjectWorkspace_RequiresAuth(t *testing.T) {
 
 func TestProjectWorkspace_MethodNotAllowed(t *testing.T) {
 	srv, _ := testServer(t)
-	project, _ := createTestHubNativeProject(t, srv, "WS Method")
+	project, _ := createTestHubManagedProject(t, srv, "WS Method")
 
 	tests := []struct {
 		method string
@@ -704,7 +704,7 @@ func TestValidateWorkspaceFilePath(t *testing.T) {
 
 func TestProjectWorkspace_UploadListDelete_Integration(t *testing.T) {
 	srv, _ := testServer(t)
-	project, _ := createTestHubNativeProject(t, srv, "WS Integration")
+	project, _ := createTestHubManagedProject(t, srv, "WS Integration")
 
 	// Get baseline count (includes .scion files from project init)
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID), nil)
@@ -754,7 +754,7 @@ func TestProjectWorkspace_UploadListDelete_Integration(t *testing.T) {
 
 func TestProjectWorkspace_SlugFormatProjectID(t *testing.T) {
 	srv, _ := testServer(t)
-	project, _ := createTestHubNativeProject(t, srv, "WS Slug Format")
+	project, _ := createTestHubManagedProject(t, srv, "WS Slug Format")
 
 	// Use {uuid}__{slug} format for project ID
 	compositeID := project.ID + "__" + project.Slug
@@ -777,7 +777,7 @@ func addSharedDirToProject(t *testing.T, srv *Server, projectID, dirName string)
 
 func TestSharedDirFiles_ListEmpty(t *testing.T) {
 	srv, _ := testServer(t)
-	project, _ := createTestHubNativeProject(t, srv, "SD List Empty")
+	project, _ := createTestHubManagedProject(t, srv, "SD List Empty")
 
 	addSharedDirToProject(t, srv, project.ID, "build-cache")
 
@@ -792,7 +792,7 @@ func TestSharedDirFiles_ListEmpty(t *testing.T) {
 
 func TestSharedDirFiles_UploadAndList(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "SD Upload List")
+	project, workspacePath := createTestHubManagedProject(t, srv, "SD Upload List")
 
 	addSharedDirToProject(t, srv, project.ID, "artifacts")
 
@@ -821,7 +821,7 @@ func TestSharedDirFiles_UploadAndList(t *testing.T) {
 
 func TestSharedDirFiles_Download(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "SD Download")
+	project, workspacePath := createTestHubManagedProject(t, srv, "SD Download")
 
 	addSharedDirToProject(t, srv, project.ID, "data")
 
@@ -837,7 +837,7 @@ func TestSharedDirFiles_Download(t *testing.T) {
 
 func TestSharedDirFiles_Delete(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "SD Delete")
+	project, workspacePath := createTestHubManagedProject(t, srv, "SD Delete")
 
 	addSharedDirToProject(t, srv, project.ID, "temp")
 
@@ -856,7 +856,7 @@ func TestSharedDirFiles_Delete(t *testing.T) {
 
 func TestSharedDirFiles_UndeclaredDirRejected(t *testing.T) {
 	srv, _ := testServer(t)
-	project, _ := createTestHubNativeProject(t, srv, "SD Undeclared")
+	project, _ := createTestHubManagedProject(t, srv, "SD Undeclared")
 
 	// Try to access files in a shared dir that hasn't been declared
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/shared-dirs/nonexistent/files", project.ID), nil)
@@ -904,7 +904,7 @@ func TestSharedDirFiles_GitProjectWithEmbeddedBroker(t *testing.T) {
 
 	// Initialize a hub workspace so the .scion marker exists for path resolution.
 	// This simulates a shared-workspace project that was cloned by the hub.
-	workspacePath, err := hubNativeProjectPath(project.Slug)
+	workspacePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
 	scionDir := filepath.Join(workspacePath, config.DotScion)
 	require.NoError(t, config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}))
@@ -965,7 +965,7 @@ func TestSharedDirFiles_GitProjectMultipleProviders(t *testing.T) {
 	}))
 
 	// Initialize a hub workspace so the .scion marker exists for path resolution
-	workspacePath, err := hubNativeProjectPath(project.Slug)
+	workspacePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
 	scionDir := filepath.Join(workspacePath, config.DotScion)
 	require.NoError(t, config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}))
@@ -1023,7 +1023,7 @@ func createTestSharedWorkspaceProject(t *testing.T, srv *Server, name, remote st
 	var project store.Project
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
-	workspacePath, err := hubNativeProjectPath(project.Slug)
+	workspacePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -1079,8 +1079,8 @@ func TestProjectWorkspaceArchive_SharedWorkspaceAllowed(t *testing.T) {
 func TestProjectWorkspacePull_RequiresSharedWorkspace(t *testing.T) {
 	srv, _ := testServer(t)
 
-	// Create a regular hub-native project (not shared-workspace)
-	project, _ := createTestHubNativeProject(t, srv, "Pull NonShared")
+	// Create a regular hub-managed project (not shared-workspace)
+	project, _ := createTestHubManagedProject(t, srv, "Pull NonShared")
 
 	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/workspace/pull", project.ID), nil)
 	assert.Equal(t, http.StatusConflict, rec.Code, "pull should be rejected for non-shared-workspace projects")
@@ -1273,7 +1273,7 @@ func TestWalkDirSearcher_SortByModTimeDesc(t *testing.T) {
 
 func TestProjectWorkspaceList_SearchQuery(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS Search Query")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Search Query")
 
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "main.go"), []byte("go"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "README.md"), []byte("md"), 0644))
@@ -1295,7 +1295,7 @@ func TestProjectWorkspaceList_SearchQuery(t *testing.T) {
 
 func TestProjectWorkspaceList_LimitParam(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS Limit Param")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Limit Param")
 
 	for i := range 10 {
 		require.NoError(t, os.WriteFile(filepath.Join(workspacePath, fmt.Sprintf("f%02d.txt", i)), []byte("x"), 0644))
@@ -1315,7 +1315,7 @@ func TestProjectWorkspaceList_LimitParam(t *testing.T) {
 
 func TestProjectWorkspaceList_HasMoreFalseWhenFewFiles(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WS HasMore False")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS HasMore False")
 
 	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "only.txt"), []byte("x"), 0644))
 
@@ -1330,7 +1330,7 @@ func TestProjectWorkspaceList_HasMoreFalseWhenFewFiles(t *testing.T) {
 
 func TestSharedDirFiles_SearchQuery(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "SD Search Query")
+	project, workspacePath := createTestHubManagedProject(t, srv, "SD Search Query")
 	addSharedDirToProject(t, srv, project.ID, "cache")
 
 	sharedDirPath := resolveTestSharedDirPath(t, workspacePath, "cache")

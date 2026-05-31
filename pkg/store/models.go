@@ -166,12 +166,12 @@ type AgentAppliedConfig struct {
 // Project type constants.
 // Type reflects how the project was established on the Hub:
 //   - "linked": A pre-existing local project linked to the Hub
-//   - "hub-native": Created via the Hub (web UI or API)
+//   - "hub-managed": Created via the Hub (web UI or API)
 //
 // Whether a project is git-backed is orthogonal and indicated by the GitRemote field.
 const (
-	ProjectTypeLinked    = "linked"     // Broker-linked project (local project linked to hub)
-	ProjectTypeHubNative = "hub-native" // Hub-native workspace
+	ProjectTypeLinked     = "linked"      // Broker-linked project (local project linked to hub)
+	ProjectTypeHubManaged = "hub-managed" // Hub-managed workspace
 )
 
 // Workspace mode constants for git projects.
@@ -225,7 +225,7 @@ type Project struct {
 	// Computed fields (not stored, populated on read)
 	AgentCount        int    `json:"agentCount,omitempty"`
 	ActiveBrokerCount int    `json:"activeBrokerCount,omitempty"`
-	ProjectType       string `json:"projectType,omitempty"` // "git", "linked", or "hub-native"
+	ProjectType       string `json:"projectType,omitempty"` // "linked" or "hub-managed"
 	OwnerName         string `json:"ownerName,omitempty"`   // Enriched: resolved from OwnerID
 }
 

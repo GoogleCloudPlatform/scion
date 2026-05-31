@@ -61,7 +61,7 @@ func createTestLinkedProject(t *testing.T, srv *Server, s store.Store, name, rem
 	}))
 
 	// Set up the hub-side cache directory
-	cachePath, err := hubNativeProjectPath(project.Slug)
+	cachePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
 	t.Cleanup(func() { os.RemoveAll(cachePath) })
 
@@ -72,9 +72,9 @@ func createTestLinkedProject(t *testing.T, srv *Server, s store.Store, name, rem
 // resolveProjectWebDAVPath Tests
 // ============================================================================
 
-func TestResolveProjectWebDAVPath_HubNativeProject(t *testing.T) {
+func TestResolveProjectWebDAVPath_HubManagedProject(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubNativeProject(t, srv, "WebDAV HubNative")
+	project, workspacePath := createTestHubManagedProject(t, srv, "WebDAV HubManaged")
 
 	path, err := srv.resolveProjectWebDAVPath(context.Background(), project)
 	require.NoError(t, err)
@@ -89,7 +89,7 @@ func TestResolveProjectWebDAVPath_LinkedProject_CacheDir(t *testing.T) {
 	path, err := srv.resolveProjectWebDAVPath(context.Background(), project)
 	require.NoError(t, err)
 
-	expectedCache, err := hubNativeProjectPath(project.Slug)
+	expectedCache, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
 	assert.Equal(t, expectedCache, path)
 }
@@ -125,9 +125,9 @@ func TestResolveProjectWebDAVPath_LinkedProject_EmbeddedBroker(t *testing.T) {
 // isLinkedProject Tests
 // ============================================================================
 
-func TestIsLinkedProject_HubNative(t *testing.T) {
+func TestIsLinkedProject_HubManaged(t *testing.T) {
 	srv, _ := testServer(t)
-	project, _ := createTestHubNativeProject(t, srv, "IsLinked HubNative")
+	project, _ := createTestHubManagedProject(t, srv, "IsLinked HubManaged")
 
 	assert.False(t, srv.isLinkedProject(context.Background(), project))
 }
@@ -182,7 +182,7 @@ func TestProjectCacheStatus_CacheExists(t *testing.T) {
 	project, _ := createTestLinkedProject(t, srv, s, "Cache Status With", "https://github.com/org/cache-with.git")
 
 	// Create the cache directory with some files
-	cachePath, err := hubNativeProjectPath(project.Slug)
+	cachePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(cachePath, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(cachePath, "cached.txt"), []byte("cached"), 0644))
@@ -216,7 +216,7 @@ func TestProjectWebDAV_LinkedProject_ServesFromCache(t *testing.T) {
 	project, _ := createTestLinkedProject(t, srv, s, "WebDAV Linked Serve", "https://github.com/org/dav-linked.git")
 
 	// Populate the cache directory
-	cachePath, err := hubNativeProjectPath(project.Slug)
+	cachePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(cachePath, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(cachePath, "hello.txt"), []byte("hello from cache"), 0644))
@@ -247,7 +247,7 @@ func TestProjectWorkspaceList_LinkedProject(t *testing.T) {
 	project, _ := createTestLinkedProject(t, srv, s, "WS List Linked", "https://github.com/org/ws-list.git")
 
 	// Populate the cache
-	cachePath, err := hubNativeProjectPath(project.Slug)
+	cachePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(cachePath, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(cachePath, "file1.txt"), []byte("one"), 0644))
@@ -267,13 +267,13 @@ func TestProjectWorkspaceList_LinkedProject(t *testing.T) {
 // Cache Refresh Endpoint Tests
 // ============================================================================
 
-func TestProjectCacheRefresh_HubNativeProject_Conflict(t *testing.T) {
+func TestProjectCacheRefresh_HubManagedProject_Conflict(t *testing.T) {
 	srv, _ := testServer(t)
-	project, _ := createTestHubNativeProject(t, srv, "Cache Refresh HubNative")
+	project, _ := createTestHubManagedProject(t, srv, "Cache Refresh HubManaged")
 
 	rec := doRequest(t, srv, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/workspace/cache/refresh", project.ID), nil)
-	// Hub-native projects should return conflict (they don't need cache refresh)
+	// Hub-managed projects should return conflict (they don't need cache refresh)
 	assert.Equal(t, http.StatusConflict, rec.Code)
 }
 

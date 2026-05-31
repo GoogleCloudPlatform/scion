@@ -778,7 +778,7 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
-	// Hub-native/shared-workspace project remote broker support: if the project has
+	// Hub-managed/shared-workspace project remote broker support: if the project has
 	// a managed workspace and the workspace path is set, upload it to GCS so
 	// a remote broker can download it.
 	if (project.GitRemote == "" || project.IsSharedWorkspace()) && agent.AppliedConfig != nil && agent.AppliedConfig.Workspace != "" {
@@ -795,7 +795,7 @@ func (s *Server) createAgentInProject(
 			if stor != nil {
 				storagePath := storage.ProjectWorkspaceStoragePath(project.ID)
 				if err := gcp.SyncToGCS(ctx, agent.AppliedConfig.Workspace, stor.Bucket(), storagePath+"/files"); err != nil {
-					s.agentLifecycleLog.Warn("Failed to upload hub-native project workspace to GCS",
+					s.agentLifecycleLog.Warn("Failed to upload hub-managed project workspace to GCS",
 						"agent_id", agent.ID,
 						"project_id", project.ID, "error", err)
 				} else {
@@ -2866,7 +2866,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	case api.AgentActionStop:
 		newPhase = string(state.PhaseStopped)
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
-			// Before stopping, sync workspace back for hub-native projects on remote brokers.
+			// Before stopping, sync workspace back for hub-managed projects on remote brokers.
 			// This is best-effort: failures are logged but don't block the stop.
 			s.syncWorkspaceOnStop(ctx, agent)
 			dispatchErr = dispatcher.DispatchAgentStop(ctx, agent)
@@ -3479,7 +3479,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Initialize filesystem workspace for hub-native projects and shared-workspace git projects.
+	// Initialize filesystem workspace for hub-managed projects and shared-workspace git projects.
 	if project.IsSharedWorkspace() {
 		// Shared-workspace git project: clone the repository into the workspace.
 		// Clone failure is a creation failure — clean up the project record.
@@ -3516,8 +3516,8 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if project.GitRemote == "" {
-		// Hub-native project (no git remote): create workspace directory.
-		if err := s.initHubNativeProject(project); err != nil {
+		// Hub-managed project (no git remote): create workspace directory.
+		if err := s.initHubManagedProject(project); err != nil {
 			slog.Warn("failed to initialize project workspace",
 				"project_id", project.ID, "slug", project.Slug, "error", err)
 		}
@@ -3733,8 +3733,8 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 	}
 }
 
-// hubNativeProjectPath returns the filesystem path for a hub-native project workspace.
-func hubNativeProjectPath(slug string) (string, error) {
+// hubManagedProjectPath returns the filesystem path for a hub-managed project workspace.
+func hubManagedProjectPath(slug string) (string, error) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get global dir: %w", err)
@@ -3769,12 +3769,12 @@ func hasWorkspaceContent(dir string) bool {
 	return false
 }
 
-// initHubNativeProject initializes the filesystem workspace for a hub-native project.
+// initHubManagedProject initializes the filesystem workspace for a hub-managed project.
 // It creates the workspace directory and seeds the .scion project structure with
-// hub connection settings. Unlike regular projects, hub-native projects store
+// hub connection settings. Unlike regular projects, hub-managed projects store
 // settings directly in the .scion directory (no split storage or marker files).
-func (s *Server) initHubNativeProject(project *store.Project) error {
-	workspacePath, err := hubNativeProjectPath(project.Slug)
+func (s *Server) initHubManagedProject(project *store.Project) error {
+	workspacePath, err := hubManagedProjectPath(project.Slug)
 	if err != nil {
 		return err
 	}
@@ -3788,7 +3788,7 @@ func (s *Server) initHubNativeProject(project *store.Project) error {
 		return fmt.Errorf("failed to create .scion directory: %w", err)
 	}
 
-	// Seed default settings.yaml directly in scionDir. Hub-native projects
+	// Seed default settings.yaml directly in scionDir. Hub-managed projects
 	// bypass InitProject (which uses split storage for git repos) and keep
 	// all configuration in-place.
 	settingsPath := filepath.Join(scionDir, "settings.yaml")
@@ -3811,7 +3811,7 @@ func (s *Server) initHubNativeProject(project *store.Project) error {
 	}
 	for key, value := range settingsUpdates {
 		if err := config.UpdateSetting(scionDir, key, value, false); err != nil {
-			slog.Warn("failed to update hub-native project setting",
+			slog.Warn("failed to update hub-managed project setting",
 				"project_id", project.ID, "key", key, "error", err.Error())
 		}
 	}
@@ -3820,11 +3820,11 @@ func (s *Server) initHubNativeProject(project *store.Project) error {
 }
 
 // cloneSharedWorkspaceProject performs the host-side git clone for a shared-workspace
-// git project. It clones the repository into the hub-native workspace path and
+// git project. It clones the repository into the hub-managed workspace path and
 // seeds the .scion project structure on top. If the clone fails, the workspace
 // directory is cleaned up and an error is returned.
 func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store.Project) error {
-	workspacePath, err := hubNativeProjectPath(project.Slug)
+	workspacePath, err := hubManagedProjectPath(project.Slug)
 	if err != nil {
 		return err
 	}
@@ -3956,7 +3956,7 @@ func (s *Server) resolveCloneToken(ctx context.Context, project *store.Project) 
 	return ""
 }
 
-// syncWorkspaceOnStop triggers a best-effort workspace sync-back for hub-native projects
+// syncWorkspaceOnStop triggers a best-effort workspace sync-back for hub-managed projects
 // on remote brokers before the agent is stopped. It uploads the workspace from the
 // broker to GCS via the control channel, then downloads from GCS to the Hub filesystem.
 func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
@@ -3966,7 +3966,7 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 
 	project, err := s.store.GetProject(ctx, agent.ProjectID)
 	if err != nil || (project.GitRemote != "" && !project.IsSharedWorkspace()) {
-		return // Not hub-native/shared-workspace or project not found
+		return // Not hub-managed/shared-workspace or project not found
 	}
 
 	// Check if broker is co-located (embedded or has local path)
@@ -4000,7 +4000,7 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 	}
 
 	// Download from GCS to Hub filesystem
-	workspacePath, err := hubNativeProjectPath(project.Slug)
+	workspacePath, err := hubManagedProjectPath(project.Slug)
 	if err != nil {
 		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: failed to get project path", "agent_id", agent.ID, "error", err)
 		return
@@ -4173,7 +4173,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 
 		// Add as project provider. When the project already existed and the
 		// broker is already a provider, preserve the existing localPath to
-		// avoid converting a hub-native git project into a linked project.
+		// avoid converting a hub-managed git project into a linked project.
 		localPath := req.Path
 		if !created {
 			if existingProvider, err := s.store.GetProjectProvider(ctx, project.ID, broker.ID); err == nil {
@@ -4269,7 +4269,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 
 		// Add as project provider. When the project already existed and the
 		// broker is already a provider, preserve the existing localPath to
-		// avoid converting a hub-native git project into a linked project.
+		// avoid converting a hub-managed git project into a linked project.
 		localPath := req.Path
 		if !created {
 			if existingProvider, err := s.store.GetProjectProvider(ctx, project.ID, broker.ID); err == nil {
@@ -5210,7 +5210,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	// Clean up project-scoped harness configs (best-effort), including storage files.
 	s.deleteProjectHarnessConfigs(ctx, id)
 
-	// For hub-native and shared-workspace projects, notify provider brokers to clean up
+	// For hub-managed and shared-workspace projects, notify provider brokers to clean up
 	// their local project directories. This must run before DeleteProject because
 	// the cascade deletes the project_providers we need to enumerate.
 	if project.GitRemote == "" || project.IsSharedWorkspace() {
@@ -5222,11 +5222,11 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 
-	// For hub-native and shared-workspace projects, remove the filesystem directory.
+	// For hub-managed and shared-workspace projects, remove the filesystem directory.
 	if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
-		if projectPath, err := hubNativeProjectPath(project.Slug); err == nil {
+		if projectPath, err := hubManagedProjectPath(project.Slug); err == nil {
 			if err := util.RemoveAllSafe(projectPath); err != nil {
-				slog.Warn("failed to remove hub-native project directory",
+				slog.Warn("failed to remove hub-managed project directory",
 					"project_id", id, "slug", project.Slug, "path", projectPath, "error", err)
 			}
 		}
@@ -5362,7 +5362,7 @@ func (s *Server) deleteProjectHarnessConfigs(ctx context.Context, projectID stri
 }
 
 // cleanupBrokerProjectDirectories notifies provider brokers to remove their local
-// copies of a hub-native project directory. This is best-effort: failures are
+// copies of a hub-managed project directory. This is best-effort: failures are
 // logged but do not block project deletion. The embedded broker is skipped
 // because the hub already cleans up its own filesystem copy.
 func (s *Server) cleanupBrokerProjectDirectories(ctx context.Context, project *store.Project) {
@@ -8618,9 +8618,9 @@ func (s *Server) populateAgentConfig(agent *store.Agent, project *store.Project,
 		}
 	}
 
-	// Populate workspace path for hub-native projects and shared-workspace git projects.
+	// Populate workspace path for hub-managed projects and shared-workspace git projects.
 	if project != nil && (project.GitRemote == "" || project.IsSharedWorkspace()) {
-		workspacePath, err := hubNativeProjectPath(project.Slug)
+		workspacePath, err := hubManagedProjectPath(project.Slug)
 		if err == nil {
 			agent.AppliedConfig.Workspace = workspacePath
 		}
@@ -8959,7 +8959,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		"totalProviders", len(allProviders),
 		"onlineProviders", len(availableBrokers),
 		"defaultBroker", project.DefaultRuntimeBrokerID,
-		"isHubNative", project.GitRemote == "")
+		"isHubManaged", project.GitRemote == "")
 
 	// Convert to summary for error responses, marking and prioritizing the default broker
 	brokerSummaries := make([]RuntimeBrokerSummary, 0, len(availableBrokers))
@@ -8998,7 +8998,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 
 		// Broker is not yet a provider — try to auto-link it.
 		// The user explicitly selected this broker, so we honor that by linking it
-		// to the project as a provider. This is common for hub-native projects where
+		// to the project as a provider. This is common for hub-managed projects where
 		// providers aren't established via CLI registration.
 		broker, err := s.findBrokerByIDOrSlug(ctx, requestedBrokerID)
 		if err == nil && broker != nil {

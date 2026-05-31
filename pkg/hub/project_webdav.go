@@ -46,7 +46,7 @@ var syncExcludeExtensions = []string{
 // It mounts at /api/v1/projects/{projectId}/dav/ and serves the project's workspace
 // directory with file exclusion filters applied.
 //
-// For hub-native and shared-workspace projects, it serves the workspace directly.
+// For hub-managed and shared-workspace projects, it serves the workspace directly.
 // For linked projects (workspace on a remote broker), it serves from the hub's
 // cached copy. The cache is populated via the cache/refresh or cache/notify
 // endpoints (Phase 3: Linked Project Relay).
@@ -118,7 +118,7 @@ func (s *Server) updateProjectSyncState(projectID, workspacePath string) {
 	now := time.Now()
 	state := &store.ProjectSyncState{
 		ProjectID:    projectID,
-		BrokerID:     "", // hub-native
+		BrokerID:     "", // hub-managed
 		LastSyncTime: &now,
 		FileCount:    fileCount,
 		TotalBytes:   totalBytes,
@@ -130,13 +130,13 @@ func (s *Server) updateProjectSyncState(projectID, workspacePath string) {
 }
 
 // resolveProjectWebDAVPath determines the filesystem path to serve via WebDAV
-// for a given project. For hub-native and shared-workspace projects, this is the
+// for a given project. For hub-managed and shared-workspace projects, this is the
 // hub-managed workspace directory. For linked projects (workspace on a remote
 // broker), this is the hub's cached copy of that workspace.
 func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Project) (string, error) {
-	// Hub-native projects (no git remote) always have a managed workspace
+	// Hub-managed projects (no git remote) always have a managed workspace
 	if project.GitRemote == "" {
-		path, err := hubNativeProjectPath(project.Slug)
+		path, err := hubManagedProjectPath(project.Slug)
 		if err != nil {
 			return "", fmt.Errorf("failed to resolve project path")
 		}
@@ -145,7 +145,7 @@ func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Pr
 
 	// Shared-workspace git projects have a managed workspace on the hub
 	if project.IsSharedWorkspace() {
-		path, err := hubNativeProjectPath(project.Slug)
+		path, err := hubManagedProjectPath(project.Slug)
 		if err != nil {
 			return "", fmt.Errorf("failed to resolve project path")
 		}
@@ -174,7 +174,7 @@ func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Pr
 
 	// Remote linked project: serve from the hub's cached copy.
 	// The cache is populated via cache/refresh or cache/notify endpoints.
-	cachePath, err := hubNativeProjectPath(project.Slug)
+	cachePath, err := hubManagedProjectPath(project.Slug)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve project cache path")
 	}

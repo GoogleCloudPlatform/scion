@@ -880,7 +880,7 @@ func TestErrRuntimeBrokerError(t *testing.T) {
 	}
 }
 
-func TestSyncHubNativeWorkspaceBack_SkipsGitProject(t *testing.T) {
+func TestSyncHubManagedWorkspaceBack_SkipsGitProject(t *testing.T) {
 	srv, st := testWorkspaceServer(t)
 	ctx := context.Background()
 
@@ -901,20 +901,20 @@ func TestSyncHubNativeWorkspaceBack_SkipsGitProject(t *testing.T) {
 	}
 
 	// This should return without doing anything for git-backed projects
-	srv.syncHubNativeWorkspaceBack(ctx, agent, "workspaces/project-git-sync/agent-sync-1")
+	srv.syncHubManagedWorkspaceBack(ctx, agent, "workspaces/project-git-sync/agent-sync-1")
 	// No panic/error = success
 }
 
-func TestSyncHubNativeWorkspaceBack_SkipsColocatedBroker(t *testing.T) {
+func TestSyncHubManagedWorkspaceBack_SkipsColocatedBroker(t *testing.T) {
 	srv, st := testWorkspaceServer(t)
 	ctx := context.Background()
 
-	// Create a hub-native project
+	// Create a hub-managed project
 	project := &store.Project{
 		ID:   "project-colo-sync",
 		Slug: "project-colo-sync",
 		Name: "Hub Native Colo",
-		// No GitRemote = hub-native
+		// No GitRemote = hub-managed
 	}
 	if err := st.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -949,11 +949,11 @@ func TestSyncHubNativeWorkspaceBack_SkipsColocatedBroker(t *testing.T) {
 	}
 
 	// Should skip sync because broker has local path
-	srv.syncHubNativeWorkspaceBack(ctx, agent, "workspaces/project-colo-sync/project-workspace")
+	srv.syncHubManagedWorkspaceBack(ctx, agent, "workspaces/project-colo-sync/project-workspace")
 	// No panic/error = success
 }
 
-func TestSyncHubNativeWorkspaceBack_NoProjectID(t *testing.T) {
+func TestSyncHubManagedWorkspaceBack_NoProjectID(t *testing.T) {
 	srv, _ := testWorkspaceServer(t)
 	ctx := context.Background()
 
@@ -963,6 +963,6 @@ func TestSyncHubNativeWorkspaceBack_NoProjectID(t *testing.T) {
 	}
 
 	// Should return immediately
-	srv.syncHubNativeWorkspaceBack(ctx, agent, "some-path")
+	srv.syncHubManagedWorkspaceBack(ctx, agent, "some-path")
 	// No panic/error = success
 }

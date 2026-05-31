@@ -61,7 +61,7 @@ func TestCreateAgent_SkipsGCSSyncForEmbeddedBroker(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a project (hub-native: no git remote)
+	// Create a project (hub-managed: no git remote)
 	project := &store.Project{
 		ID:   "project-embedded-test",
 		Name: "embedded-test",
@@ -103,7 +103,7 @@ func TestCreateAgent_SkipsGCSSyncForEmbeddedBroker(t *testing.T) {
 	// Mark the broker as the embedded broker
 	srv.SetEmbeddedBrokerID(brokerID)
 
-	// Create agent request for the hub-native project
+	// Create agent request for the hub-managed project
 	reqBody := CreateAgentRequest{
 		Name:      "test-agent",
 		ProjectID: project.ID,

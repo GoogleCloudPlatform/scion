@@ -218,7 +218,7 @@ func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Resolve workspace path — supports hub-native, shared-workspace, and linked projects
+	// Resolve workspace path — supports hub-managed, shared-workspace, and linked projects
 	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
 	if err != nil {
 		Conflict(w, err.Error())
@@ -528,7 +528,7 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Resolve workspace path — supports hub-native, shared-workspace, and linked projects
+	// Resolve workspace path — supports hub-managed, shared-workspace, and linked projects
 	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
 	if err != nil {
 		Conflict(w, err.Error())
@@ -792,10 +792,10 @@ type sharedDirResolution struct {
 // matching the path used by agent provisioning (config.GetSharedDirPath).
 // For git-based projects with a co-located broker that has a LocalPath, the path is
 // resolved via config.GetSharedDirPath(localPath, dirName). Otherwise, the path is
-// resolved via the .scion marker in the hub-native workspace directory.
+// resolved via the .scion marker in the hub-managed workspace directory.
 func (s *Server) resolveSharedDirPath(ctx context.Context, project *store.Project, dirName string) (*sharedDirResolution, error) {
 	if project.GitRemote == "" {
-		// Hub-native project: resolve via the .scion marker in the workspace directory
+		// Hub-managed project: resolve via the .scion marker in the workspace directory
 		// to find the project-configs path where shared dirs actually live.
 		sdPath, err := resolveHubProjectSharedDirPath(project.Slug, dirName)
 		if err != nil {
@@ -858,7 +858,7 @@ func (s *Server) resolveSharedDirPath(ctx context.Context, project *store.Projec
 // marker (or project-id for git clones) to find the external project-configs path,
 // then returns the shared-dirs/<name> subdirectory within it.
 func resolveHubProjectSharedDirPath(projectSlug, dirName string) (string, error) {
-	workspacePath, err := hubNativeProjectPath(projectSlug)
+	workspacePath, err := hubManagedProjectPath(projectSlug)
 	if err != nil {
 		return "", err
 	}
@@ -911,7 +911,7 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	workspacePath, err := hubNativeProjectPath(project.Slug)
+	workspacePath, err := hubManagedProjectPath(project.Slug)
 	if err != nil {
 		InternalError(w)
 		return

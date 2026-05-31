@@ -1521,10 +1521,10 @@ func TestCreateAgentProjectHubEndpointSuppressedWhenDisabled(t *testing.T) {
 	})
 }
 
-// TestCreateAgentHubNativeProjectSettingsEndpoint tests that createAgent with a
-// hub-native project (ProjectSlug set, no ProjectPath) correctly resolves the project
+// TestCreateAgentHubManagedProjectSettingsEndpoint tests that createAgent with a
+// hub-managed project (ProjectSlug set, no ProjectPath) correctly resolves the project
 // path and uses project settings hub.endpoint from the .scion subdirectory.
-func TestCreateAgentHubNativeProjectSettingsEndpoint(t *testing.T) {
+func TestCreateAgentHubManagedProjectSettingsEndpoint(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
@@ -1536,7 +1536,7 @@ func TestCreateAgentHubNativeProjectSettingsEndpoint(t *testing.T) {
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
 
-	// Set up a hub-native project directory at the expected path.
+	// Set up a hub-managed project directory at the expected path.
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		t.Fatalf("failed to get global dir: %v", err)
@@ -1548,7 +1548,7 @@ func TestCreateAgentHubNativeProjectSettingsEndpoint(t *testing.T) {
 	}
 	t.Cleanup(func() { os.RemoveAll(projectPath) })
 
-	// Place settings.yaml in the .scion subdirectory (hub-native project layout)
+	// Place settings.yaml in the .scion subdirectory (hub-managed project layout)
 	settingsContent := "hub:\n  endpoint: https://hub.external.example.com\n"
 	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
 		t.Fatalf("failed to write settings.yaml: %v", err)
@@ -1556,7 +1556,7 @@ func TestCreateAgentHubNativeProjectSettingsEndpoint(t *testing.T) {
 
 	// Send createAgent request with projectSlug but no projectPath
 	body := `{
-		"name": "hub-native-agent",
+		"name": "hub-managed-agent",
 		"groveSlug": "settings-test-grove",
 		"hubEndpoint": "http://localhost:9810",
 		"config": {"template": "claude"}
@@ -1586,7 +1586,7 @@ func TestCreateAgentHubNativeProjectSettingsEndpoint(t *testing.T) {
 }
 
 // TestResolveProjectSettingsDir tests the helper function that resolves the
-// settings directory for both linked and hub-native projects.
+// settings directory for both linked and hub-managed projects.
 func TestResolveProjectSettingsDir(t *testing.T) {
 	t.Run("linked project - settings at projectPath directly", func(t *testing.T) {
 		// Linked project: projectPath = /path/to/project/.scion, settings.yaml is there
@@ -1604,8 +1604,8 @@ func TestResolveProjectSettingsDir(t *testing.T) {
 		}
 	})
 
-	t.Run("hub-native project - settings in .scion subdirectory", func(t *testing.T) {
-		// Hub-native project: projectPath = ~/.scion.groves/<slug>, settings in .scion/
+	t.Run("hub-managed project - settings in .scion subdirectory", func(t *testing.T) {
+		// Hub-managed project: projectPath = ~/.scion.groves/<slug>, settings in .scion/
 		projectDir := t.TempDir()
 		scionDir := filepath.Join(projectDir, ".scion")
 		if err := os.MkdirAll(scionDir, 0755); err != nil {
@@ -2271,7 +2271,7 @@ func TestCreateAgentWithoutProfile(t *testing.T) {
 }
 
 func TestProjectSlugWorkspacePath(t *testing.T) {
-	// Verify the workspace directory path for hub-native projects uses
+	// Verify the workspace directory path for hub-managed projects uses
 	// ~/.scion.groves/<slug>/ instead of the worktree-based path.
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
@@ -2321,16 +2321,16 @@ func TestCreateAgentRequest_ProjectSlugField(t *testing.T) {
 }
 
 func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
-	// When ProjectSlug is set and ProjectPath is empty (hub-native project with no
+	// When ProjectSlug is set and ProjectPath is empty (hub-managed project with no
 	// local provider path), the handler should resolve ProjectPath to the
 	// conventional ~/.scion.groves/<slug>/ path so the agent is created in the
 	// correct project instead of the broker's local project.
 	srv, mgr := newTestServerWithProvisionCapture()
 
 	body := `{
-		"name": "hub-native-agent",
+		"name": "hub-managed-agent",
 		"id": "agent-uuid-123",
-		"slug": "hub-native-agent",
+		"slug": "hub-managed-agent",
 		"groveId": "grove-abc",
 		"groveSlug": "my-hub-grove",
 		"provisionOnly": true,
@@ -2446,7 +2446,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 		}
 	})
 
-	t.Run("hub-native project with settings in .scion subdirectory", func(t *testing.T) {
+	t.Run("hub-managed project with settings in .scion subdirectory", func(t *testing.T) {
 		cfg := DefaultServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
@@ -2458,7 +2458,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 		srv := New(cfg, mgr, rt)
 
-		// Hub-native project: projectPath is the workspace parent (~/.scion.groves/<slug>),
+		// Hub-managed project: projectPath is the workspace parent (~/.scion.groves/<slug>),
 		// settings.yaml lives in the .scion subdirectory
 		projectDir := t.TempDir()
 		scionDir := filepath.Join(projectDir, ".scion")
@@ -2718,12 +2718,12 @@ func TestStartAgentBrokerIDEnv(t *testing.T) {
 
 func TestStartAgentProjectSlugResolvesProjectPath(t *testing.T) {
 	// When the startAgent handler receives projectSlug with no projectPath
-	// (hub-native project), it should resolve ProjectPath from the slug.
+	// (hub-managed project), it should resolve ProjectPath from the slug.
 	srv, mgr := newTestServerWithProvisionCapture()
 
 	// Start uses the agent name from the URL path
 	body := `{"groveSlug": "my-hub-grove"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/hub-native-agent/start", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/hub-managed-agent/start", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -2838,7 +2838,7 @@ func TestCreateAgentProjectSlugInitializesScionDir(t *testing.T) {
 	defer restoreGit()
 
 	// When ProjectSlug is set and the broker has no .scion subdirectory for
-	// the hub-native project, the handler should create it so that
+	// the hub-managed project, the handler should create it so that
 	// ResolveProjectPath resolves to projects/<slug>/.scion (not projects/<slug>).
 	// This prevents agents from being created at the wrong directory level.
 
@@ -2961,11 +2961,11 @@ func TestDeleteProject_PathTraversal_Blocked(t *testing.T) {
 	}
 }
 
-func TestFindAgentInHubNativeProjects(t *testing.T) {
+func TestFindAgentInHubManagedProjects(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Create hub-native project structure with an agent directory
+	// Create hub-managed project structure with an agent directory
 	projectSlug := "my-project"
 	scionDir := filepath.Join(tmpHome, ".scion", "projects", projectSlug, ".scion")
 	agentDir := filepath.Join(scionDir, "agents", "test-agent")
@@ -2973,28 +2973,28 @@ func TestFindAgentInHubNativeProjects(t *testing.T) {
 		t.Fatalf("failed to create agent dir: %v", err)
 	}
 
-	// Should find the agent in the hub-native project
-	result := findAgentInHubNativeProjects("test-agent")
+	// Should find the agent in the hub-managed project
+	result := findAgentInHubManagedProjects("test-agent")
 	if result != scionDir {
 		t.Errorf("expected %q, got %q", scionDir, result)
 	}
 
 	// Should not find a non-existent agent
-	result = findAgentInHubNativeProjects("nonexistent-agent")
+	result = findAgentInHubManagedProjects("nonexistent-agent")
 	if result != "" {
 		t.Errorf("expected empty string for nonexistent agent, got %q", result)
 	}
 
 	// Should handle missing projects directory gracefully
 	t.Setenv("HOME", t.TempDir())
-	result = findAgentInHubNativeProjects("test-agent")
+	result = findAgentInHubManagedProjects("test-agent")
 	if result != "" {
 		t.Errorf("expected empty string when projects dir missing, got %q", result)
 	}
 }
 
-func TestDeleteAgent_HubNativeProject_NoContainer(t *testing.T) {
-	// Verify that deleting an agent in a hub-native project resolves the correct
+func TestDeleteAgent_HubManagedProject_NoContainer(t *testing.T) {
+	// Verify that deleting an agent in a hub-managed project resolves the correct
 	// project path even when the container doesn't exist (e.g. created-only
 	// agent, pruned container).
 	cfg := DefaultServerConfig()
@@ -3010,7 +3010,7 @@ func TestDeleteAgent_HubNativeProject_NoContainer(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Create hub-native project with an agent directory and config file
+	// Create hub-managed project with an agent directory and config file
 	projectSlug := "hub-grove"
 	scionDir := filepath.Join(tmpHome, ".scion", "projects", projectSlug, ".scion")
 	agentName := "orphaned-agent"

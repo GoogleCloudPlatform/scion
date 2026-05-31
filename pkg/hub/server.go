@@ -258,7 +258,7 @@ type RuntimeBrokerClient interface {
 	// brokerID is used for HMAC authentication lookup.
 	// task is an optional task string to pass to the agent on start.
 	// projectPath is the local filesystem path to the project on the broker.
-	// projectSlug is the project slug for hub-native projects (no local provider path).
+	// projectSlug is the project slug for hub-managed projects (no local provider path).
 	// resolvedEnv contains environment variables resolved from Hub storage (API keys, etc.).
 	// harnessConfig is the harness config name to use for the agent (e.g. "claude", "gemini").
 	// resolvedSecrets contains type-aware secrets (including file-type) for auth resolution.
@@ -314,7 +314,7 @@ type RuntimeBrokerClient interface {
 	// Returns the command output, exit code, and any error.
 	ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, command []string, timeout int) (string, int, error)
 
-	// CleanupProject asks a broker to remove its local hub-native project directory.
+	// CleanupProject asks a broker to remove its local hub-managed project directory.
 	// brokerID is used for HMAC authentication lookup.
 	// 404 responses are tolerated for idempotency.
 	CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug string) error
@@ -362,7 +362,7 @@ type RemoteCreateAgentRequest struct {
 	// Only populated when GatherEnv is true.
 	EnvSources map[string]string `json:"envSources,omitempty"`
 
-	// ProjectSlug is the project slug for hub-native projects.
+	// ProjectSlug is the project slug for hub-managed projects.
 	// When set, the broker creates the workspace at ~/.scion/projects/<slug>/
 	// instead of the default worktree-based path.
 	ProjectSlug string `json:"projectSlug,omitempty"`

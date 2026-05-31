@@ -2267,7 +2267,7 @@ func (s *SQLiteStore) GetProject(ctx context.Context, id string) (*store.Project
 }
 
 // populateProjectType sets the computed ProjectType field based on how the project was established.
-// Type is "linked" (pre-existing local project linked to Hub) or "hub-native" (created via Hub).
+// Type is "linked" (pre-existing local project linked to Hub) or "hub-managed" (created via Hub).
 // Whether a project is git-backed is orthogonal — indicated by the GitRemote field.
 func (s *SQLiteStore) populateProjectType(ctx context.Context, project *store.Project) {
 	// Check if any provider has a local_path not under ~/.scion/projects/ (i.e. broker-linked)
@@ -2279,7 +2279,7 @@ func (s *SQLiteStore) populateProjectType(ctx context.Context, project *store.Pr
 		project.ProjectType = store.ProjectTypeLinked
 		return
 	}
-	project.ProjectType = store.ProjectTypeHubNative
+	project.ProjectType = store.ProjectTypeHubManaged
 }
 
 func (s *SQLiteStore) GetProjectBySlug(ctx context.Context, slug string) (*store.Project, error) {

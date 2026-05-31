@@ -284,9 +284,9 @@ func (s *Server) handleWorkspaceSyncFrom(w http.ResponseWriter, r *http.Request,
 		})
 	}
 
-	// For hub-native projects on remote brokers, also sync workspace back
+	// For hub-managed projects on remote brokers, also sync workspace back
 	// to the Hub filesystem so the local copy stays up-to-date.
-	s.syncHubNativeWorkspaceBack(ctx, agent, storagePath)
+	s.syncHubManagedWorkspaceBack(ctx, agent, storagePath)
 
 	writeJSON(w, http.StatusOK, SyncFromResponse{
 		Manifest:     uploadResp.Manifest,
@@ -655,22 +655,22 @@ func (e *brokerError) Error() string {
 	return e.msg
 }
 
-// syncHubNativeWorkspaceBack downloads workspace files from GCS to the Hub's local
-// filesystem for hub-native projects on remote brokers. This keeps the Hub's copy
+// syncHubManagedWorkspaceBack downloads workspace files from GCS to the Hub's local
+// filesystem for hub-managed projects on remote brokers. This keeps the Hub's copy
 // (~/.scion/projects/<slug>/) in sync after workspace changes on a remote broker.
 // This is a best-effort operation: errors are logged but do not fail the caller.
-func (s *Server) syncHubNativeWorkspaceBack(ctx context.Context, agent *store.Agent, storagePath string) {
+func (s *Server) syncHubManagedWorkspaceBack(ctx context.Context, agent *store.Agent, storagePath string) {
 	if agent.ProjectID == "" {
 		return
 	}
 
 	project, err := s.store.GetProject(ctx, agent.ProjectID)
 	if err != nil {
-		s.workspaceLog.Warn("syncHubNativeWorkspaceBack: failed to get project", "agent_id", agent.ID, "project_id", agent.ProjectID, "error", err)
+		s.workspaceLog.Warn("syncHubManagedWorkspaceBack: failed to get project", "agent_id", agent.ID, "project_id", agent.ProjectID, "error", err)
 		return
 	}
 
-	// Only applies to hub-native and shared-workspace projects
+	// Only applies to hub-managed and shared-workspace projects
 	if project.GitRemote != "" && !project.IsSharedWorkspace() {
 		return
 	}
@@ -691,19 +691,19 @@ func (s *Server) syncHubNativeWorkspaceBack(ctx context.Context, agent *store.Ag
 		return
 	}
 
-	workspacePath, err := hubNativeProjectPath(project.Slug)
+	workspacePath, err := hubManagedProjectPath(project.Slug)
 	if err != nil {
-		s.workspaceLog.Warn("syncHubNativeWorkspaceBack: failed to get project path", "error", err)
+		s.workspaceLog.Warn("syncHubManagedWorkspaceBack: failed to get project path", "error", err)
 		return
 	}
 
-	// Use the project-level storage path for hub-native projects
+	// Use the project-level storage path for hub-managed projects
 	projectStoragePath := storage.ProjectWorkspaceStoragePath(project.ID)
 	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), projectStoragePath+"/files", workspacePath); err != nil {
-		s.workspaceLog.Warn("syncHubNativeWorkspaceBack: GCS download failed",
+		s.workspaceLog.Warn("syncHubManagedWorkspaceBack: GCS download failed",
 			"project_id", project.ID, "storagePath", projectStoragePath, "error", err)
 	} else {
-		s.workspaceLog.Info("syncHubNativeWorkspaceBack: workspace synced to Hub filesystem",
+		s.workspaceLog.Info("syncHubManagedWorkspaceBack: workspace synced to Hub filesystem",
 			"project_id", project.ID, "path", workspacePath)
 	}
 }

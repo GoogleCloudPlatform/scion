@@ -168,7 +168,7 @@ func (s *Server) handleProjectCacheRefresh(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Hub-native projects don't need cache refresh — they are the source of truth
+	// Hub-managed projects don't need cache refresh — they are the source of truth
 	if project.GitRemote == "" && !s.isLinkedProject(ctx, project) {
 		Conflict(w, "Cache refresh is only applicable to linked projects with remote workspaces")
 		return
@@ -215,7 +215,7 @@ func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request
 	}
 
 	// Check if a cache exists on disk
-	cachePath, err := hubNativeProjectPath(project.Slug)
+	cachePath, err := hubManagedProjectPath(project.Slug)
 	if err != nil {
 		InternalError(w)
 		return
@@ -274,7 +274,7 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 	}
 
 	// Download the latest workspace from GCS to local cache
-	cachePath, err := hubNativeProjectPath(project.Slug)
+	cachePath, err := hubManagedProjectPath(project.Slug)
 	if err != nil {
 		InternalError(w)
 		return
@@ -363,7 +363,7 @@ func (s *Server) refreshProjectCacheFromBroker(ctx context.Context, project *sto
 	}
 
 	// Download from GCS to local cache
-	cachePath, err := hubNativeProjectPath(project.Slug)
+	cachePath, err := hubManagedProjectPath(project.Slug)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve cache path: %w", err)
 	}
@@ -459,7 +459,7 @@ func (s *Server) findConnectedProvider(ctx context.Context, project *store.Proje
 
 // hasProjectCache returns true if the hub has a cached copy of the project workspace.
 func hasProjectCache(slug string) bool {
-	cachePath, err := hubNativeProjectPath(slug)
+	cachePath, err := hubManagedProjectPath(slug)
 	if err != nil {
 		return false
 	}

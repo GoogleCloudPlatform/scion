@@ -78,7 +78,7 @@ type startContextInputs struct {
 
 // buildStartContext unifies the common startup logic shared by createAgent,
 // startAgent, restartAgent, and finalizeEnv:
-//   - Hub-native project path resolution (ProjectSlug → ~/.scion.projects/<slug>/)
+//   - Hub-managed project path resolution (ProjectSlug → ~/.scion.projects/<slug>/)
 //   - Merged env assembly (resolved env + config env + auth + hub endpoint + broker identity)
 //   - Template hydration
 //   - Git-clone env injection
@@ -89,7 +89,7 @@ type startContextInputs struct {
 // The caller may further customize the returned startContext before calling
 // mgr.Start or mgr.Provision.
 func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (*startContext, error) {
-	// --- Hub-native project path resolution ---
+	// --- Hub-managed project path resolution ---
 	if in.ProjectSlug != "" && in.ProjectPath == "" {
 		globalDir, err := config.GetGlobalDir()
 		if err != nil {
@@ -105,12 +105,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 		in.ProjectPath = projectsPath
 		if s.config.Debug {
-			s.agentLifecycleLog.Debug("Resolved hub-native project path from slug",
+			s.agentLifecycleLog.Debug("Resolved hub-managed project path from slug",
 				"agent_id", in.AgentID, "slug", in.ProjectSlug, "path", in.ProjectPath)
 		}
 	}
 
-	// Ensure hub-native projects have a .scion marker with project-id for
+	// Ensure hub-managed projects have a .scion marker with project-id for
 	// external split storage. When the hub dispatches to a broker without a
 	// LocalPath (e.g. auto-provided embedded broker for a linked project), the
 	// broker creates the workspace at ~/.scion.projects/<slug>/. Without a
@@ -118,7 +118,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// Writing the hub's project ID enables split storage so agent homes go to
 	// ~/.scion.project-configs/<slug>__<uuid>/.scion/agents/ instead.
 	//
-	// The .scion path may be a marker file (hub-native/workspace marker) or
+	// The .scion path may be a marker file (hub-managed/workspace marker) or
 	// a directory (git project). This block handles both forms.
 	//
 	// This block also handles the case where the createAgent handler already
@@ -136,7 +136,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 					_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
 				}
 				if s.config.Debug {
-					s.agentLifecycleLog.Debug("Hub-native project has marker with split storage",
+					s.agentLifecycleLog.Debug("Hub-managed project has marker with split storage",
 						"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", marker.ProjectID, "path", scionPath)
 				}
 			}
@@ -145,7 +145,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			if in.ProjectID != "" {
 				if existingID, err := config.ReadProjectID(scionPath); err != nil || existingID == "" {
 					if wErr := config.WriteProjectID(scionPath, in.ProjectID); wErr != nil {
-						s.agentLifecycleLog.Warn("Failed to write project-id for hub-native project",
+						s.agentLifecycleLog.Warn("Failed to write project-id for hub-managed project",
 							"agent_id", in.AgentID, "project_id", in.ProjectID, "error", wErr)
 					} else {
 						if extAgents, err := config.GetGitProjectExternalAgentsDir(scionPath); err == nil && extAgents != "" {
@@ -164,7 +164,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		} else if in.ProjectID != "" {
 			// .scion doesn't exist — create project dir and write a marker file
 			if err := os.MkdirAll(in.ProjectPath, 0755); err != nil {
-				s.agentLifecycleLog.Warn("Failed to create project dir for hub-native project",
+				s.agentLifecycleLog.Warn("Failed to create project dir for hub-managed project",
 					"agent_id", in.AgentID, "slug", in.ProjectSlug, "path", in.ProjectPath, "error", err)
 			} else {
 				marker := &config.ProjectMarker{
@@ -173,7 +173,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 					ProjectSlug: in.ProjectSlug,
 				}
 				if wErr := config.WriteProjectMarker(scionPath, marker); wErr != nil {
-					s.agentLifecycleLog.Warn("Failed to write .scion marker for hub-native project",
+					s.agentLifecycleLog.Warn("Failed to write .scion marker for hub-managed project",
 						"agent_id", in.AgentID, "project_id", in.ProjectID, "error", wErr)
 				} else {
 					if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
@@ -181,7 +181,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 						_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
 					}
 					if s.config.Debug {
-						s.agentLifecycleLog.Debug("Initialized hub-native project with split storage",
+						s.agentLifecycleLog.Debug("Initialized hub-managed project with split storage",
 							"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", in.ProjectID, "path", scionPath)
 					}
 				}

@@ -1090,7 +1090,7 @@ type ProjectSyncStateStore interface {
 	UpsertProjectSyncState(ctx context.Context, state *ProjectSyncState) error
 
 	// GetProjectSyncState retrieves sync state for a project and optional broker.
-	// Pass empty brokerID for hub-native project state.
+	// Pass empty brokerID for hub-managed project state.
 	// Returns ErrNotFound if no sync state exists.
 	GetProjectSyncState(ctx context.Context, projectID, brokerID string) (*ProjectSyncState, error)
 

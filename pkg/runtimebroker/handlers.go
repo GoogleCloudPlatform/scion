@@ -600,7 +600,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// If WorkspaceStoragePath is set, download workspace from GCS (non-git bootstrap)
 	if req.WorkspaceStoragePath != "" {
-		// For hub-native projects (ProjectSlug set), use the conventional path
+		// For hub-managed projects (ProjectSlug set), use the conventional path
 		// ~/.scion.groves/<slug>/ instead of the worktree-based path.
 		var workspaceDir string
 		if req.ProjectSlug != "" {
@@ -890,14 +890,14 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	}
 
 	// If no project path was found (container missing or no annotation), check
-	// hub-native project directories for the agent's files. Without this,
-	// agents in hub-native projects (~/.scion.projects/<slug>/) are silently
+	// hub-managed project directories for the agent's files. Without this,
+	// agents in hub-managed projects (~/.scion.projects/<slug>/) are silently
 	// skipped during file cleanup because the default filesystem scan only
 	// checks the CWD-resolved project dir and global ~/.scion.
 	if projectPath == "" && deleteFiles {
-		if resolved := findAgentInHubNativeProjects(id); resolved != "" {
+		if resolved := findAgentInHubManagedProjects(id); resolved != "" {
 			projectPath = resolved
-			s.agentLifecycleLog.Debug("Resolved agent project path from hub-native projects",
+			s.agentLifecycleLog.Debug("Resolved agent project path from hub-managed projects",
 				"agent_id", id, "path", projectPath)
 		}
 	}
@@ -2234,7 +2234,7 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) agent.Manager {
 
 // resolveProjectSettingsDir returns the directory containing settings.yaml for a project.
 // For linked projects, projectPath already points to the .scion directory.
-// For hub-native projects, projectPath is the workspace parent, so settings
+// For hub-managed projects, projectPath is the workspace parent, so settings
 // live in the .scion subdirectory.
 func resolveProjectSettingsDir(projectPath string) string {
 	if config.GetSettingsPath(projectPath) != "" {
@@ -2292,7 +2292,7 @@ func (s *Server) handleProjectBySlug(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// deleteProject removes the local hub-native project directory for the given slug.
+// deleteProject removes the local hub-managed project directory for the given slug.
 // Returns 204 on success (including when the directory doesn't exist).
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug string) {
 	globalDir, err := config.GetGlobalDir()
@@ -2348,11 +2348,11 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		return
 	}
 
-	s.agentLifecycleLog.Info("Removed hub-native project directory", "slug", slug, "path", projectPath)
+	s.agentLifecycleLog.Info("Removed hub-managed project directory", "slug", slug, "path", projectPath)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// findAgentInHubNativeProjects scans hub-native project directories
+// findAgentInHubManagedProjects scans hub-managed project directories
 // (~/.scion.projects/<slug>/.scion/) for an agent directory matching the given
 // name. Returns the .scion dir path if found, or empty string.
 // This is used as a fallback when the container is missing and the agent's
@@ -2361,7 +2361,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 // Probes both the in-project location (worktree-mode agents) and the external
 // per-agent state dir under ~/.scion.project-configs/ (shared-workspace agents,
 // whose state lives external to the shared checkout).
-func findAgentInHubNativeProjects(agentName string) string {
+func findAgentInHubManagedProjects(agentName string) string {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		return ""
