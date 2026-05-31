@@ -2591,6 +2591,10 @@ func (s *Server) registerRoutes() {
 
 	// Workstation-only system endpoints
 	s.mux.Handle("/api/v1/system/identity", s.requireWorkstation(http.HandlerFunc(s.handleSystemIdentity)))
+	s.mux.Handle("/api/v1/system/status", s.requireWorkstation(http.HandlerFunc(s.handleSystemStatus)))
+	s.mux.Handle("/api/v1/system/check", s.requireWorkstation(http.HandlerFunc(s.handleSystemCheck)))
+	s.mux.Handle("/api/v1/system/runtime", s.requireWorkstation(http.HandlerFunc(s.handleSystemRuntime)))
+	s.mux.Handle("/api/v1/system/init", s.requireWorkstation(http.HandlerFunc(s.handleSystemInit)))
 }
 
 // applyMiddleware wraps the handler with middleware.
