@@ -19,8 +19,10 @@ A template typically contains:
 A harness-config defines the runtime environment and tool-specific settings. It includes the base files required by the underlying tool (e.g., `.claude.json` for Claude, `.gemini/settings.json` for Gemini).
 
 Harness-configs live in `~/.scion/harness-configs/` and contain:
-- `config.yaml`: Runtime parameters (container image, model, auth).
+- `config.yaml`: Runtime parameters (container image, model, model aliases, auth).
 - `home/`: Base files that are copied to the agent's home directory.
+
+> **Important**: Harness-specific settings — container image, concrete model names, and authentication type — belong in the harness-config, not in the template. Templates should remain harness-agnostic so they can work across different LLM backends.
 
 ### 3. Composition
 When you create an agent, Scion composes the final environment by layering:
@@ -115,15 +117,53 @@ scion templates delete my-old-template
 
 Harness-configs are directories stored in `~/.scion/harness-configs/` (global) or `.scion/harness-configs/` (project-level).
 
-### Customizing a Harness-Config
-To change the default model or add custom hooks for a specific harness, edit the files directly in the harness-config directory.
+### Model Size Aliases
 
-**Example: Changing the Gemini model**
+Templates can use abstract **model size aliases** (`small`, `medium`, `large`) in their `model` field instead of concrete, provider-specific model names. Each harness-config defines how these aliases map to real models via the `model_aliases` field:
+
+```yaml
+# ~/.scion/harness-configs/claude/config.yaml
+harness: claude
+image: scion-claude:latest
+model_aliases:
+  small: haiku
+  medium: sonnet
+  large: opus
+```
+
+```yaml
+# ~/.scion/harness-configs/gemini/config.yaml
+harness: gemini
+image: scion-gemini:latest
+model_aliases:
+  small: gemini-flash-lite
+  medium: gemini-flash
+  large: gemini-pro
+```
+
+A template can then use the alias:
+
+```yaml
+# .scion/templates/docs-writer/scion-agent.yaml
+schema_version: "1"
+description: "Documentation writer"
+model: large    # resolved to "opus" with Claude, "gemini-pro" with Gemini
+```
+
+This keeps templates portable across harnesses. Concrete model names still work and are passed through unchanged for backward compatibility, but they tie the template to a specific harness.
+
+### Customizing a Harness-Config
+To change the default model or customize model aliases for a specific harness, edit the files directly in the harness-config directory.
+
+**Example: Changing the Gemini model alias mapping**
 Edit `~/.scion/harness-configs/gemini/config.yaml`:
 
 ```yaml
 harness: gemini
-model: gemini-1.5-pro
+model_aliases:
+  small: gemini-flash-lite
+  medium: gemini-flash
+  large: gemini-2-pro    # upgraded from gemini-pro
 # ...
 ```
 
