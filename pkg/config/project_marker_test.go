@@ -486,6 +486,7 @@ func TestIsHubContext(t *testing.T) {
 	t.Setenv("SCION_HUB_ENDPOINT", "")
 	t.Setenv("SCION_HUB_URL", "")
 	t.Setenv("SCION_GROVE_ID", "")
+	t.Setenv("SCION_PROJECT_ID", "")
 
 	if IsHubContext() {
 		t.Error("expected IsHubContext() = false when no hub env vars are set")

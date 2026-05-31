@@ -64,7 +64,7 @@ func TestDiscoverProjects_GlobalOnly(t *testing.T) {
 
 func TestDiscoverProjects_ExternalProject(t *testing.T) {
 	// Unset Hub environment variables to avoid pollution
-	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_OTEL_ENDPOINT", "SCION_OTEL_PROTOCOL"} {
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_OTEL_ENDPOINT", "SCION_OTEL_PROTOCOL", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
 			os.Unsetenv(e)
 			defer os.Setenv(e, val)
@@ -129,7 +129,7 @@ func TestDiscoverProjects_ExternalProject(t *testing.T) {
 
 func TestDiscoverProjects_OrphanedExternal(t *testing.T) {
 	// Unset Hub environment variables to avoid pollution
-	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_OTEL_ENDPOINT", "SCION_OTEL_PROTOCOL"} {
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_OTEL_ENDPOINT", "SCION_OTEL_PROTOCOL", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
 			os.Unsetenv(e)
 			defer os.Setenv(e, val)
@@ -350,7 +350,7 @@ func TestProjectInfo_AgentsDir(t *testing.T) {
 
 func TestDiscoverProjects_StaleExternalAfterMarkerRecreate(t *testing.T) {
 	// Unset Hub environment variables to avoid pollution
-	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_OTEL_ENDPOINT", "SCION_OTEL_PROTOCOL"} {
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_OTEL_ENDPOINT", "SCION_OTEL_PROTOCOL", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
 			os.Unsetenv(e)
 			defer os.Setenv(e, val)
@@ -540,15 +540,17 @@ func TestDiscoverProjects_GitProjectWithExternalConfigUsesWorkspaceMarkerProject
 		t.Fatalf("mkdir .scion: %v", err)
 	}
 
-	if projectID, ok := os.LookupEnv("SCION_GROVE_ID"); ok {
-		if err := os.Unsetenv("SCION_GROVE_ID"); err != nil {
-			t.Fatalf("Unsetenv SCION_GROVE_ID failed: %v", err)
-		}
-		defer func() {
-			if err := os.Setenv("SCION_GROVE_ID", projectID); err != nil {
-				t.Fatalf("restore SCION_GROVE_ID failed: %v", err)
+	for _, envName := range []string{"SCION_GROVE_ID", "SCION_PROJECT_ID"} {
+		if val, ok := os.LookupEnv(envName); ok {
+			if err := os.Unsetenv(envName); err != nil {
+				t.Fatalf("Unsetenv %s failed: %v", envName, err)
 			}
-		}()
+			defer func(name, v string) {
+				if err := os.Setenv(name, v); err != nil {
+					t.Fatalf("restore %s failed: %v", name, err)
+				}
+			}(envName, val)
+		}
 	}
 
 	projectDir := filepath.Join(tmpHome, ".scion", "project-configs", "newrepo__ccdd1122")

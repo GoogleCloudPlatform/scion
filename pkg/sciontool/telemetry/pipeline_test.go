@@ -6,7 +6,6 @@ package telemetry
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -17,8 +16,7 @@ import (
 func TestNew_Disabled(t *testing.T) {
 	// Clear env and disable telemetry
 	clearTelemetryEnv()
-	os.Setenv(EnvEnabled, "false")
-	defer clearTelemetryEnv()
+	t.Setenv(EnvEnabled, "false")
 
 	pipeline := New()
 	if pipeline != nil {
@@ -28,8 +26,7 @@ func TestNew_Disabled(t *testing.T) {
 
 func TestNew_Enabled(t *testing.T) {
 	clearTelemetryEnv()
-	os.Setenv(EnvEnabled, "true")
-	defer clearTelemetryEnv()
+	t.Setenv(EnvEnabled, "true")
 
 	pipeline := New()
 	if pipeline == nil {
@@ -44,12 +41,11 @@ func TestNew_Enabled(t *testing.T) {
 
 func TestPipeline_StartStop(t *testing.T) {
 	clearTelemetryEnv()
-	// Use non-standard ports to avoid conflicts
-	os.Setenv(EnvEnabled, "true")
-	os.Setenv(EnvCloudEnabled, "false") // Disable cloud to avoid GCP auth issues in tests
-	os.Setenv(EnvGRPCPort, "54317")
-	os.Setenv(EnvHTTPPort, "54318")
-	defer clearTelemetryEnv()
+	// Use port 0 to let the OS assign ephemeral ports, avoiding conflicts
+	t.Setenv(EnvEnabled, "true")
+	t.Setenv(EnvCloudEnabled, "false")
+	t.Setenv(EnvGRPCPort, "0")
+	t.Setenv(EnvHTTPPort, "0")
 
 	pipeline := New()
 	if pipeline == nil {
@@ -85,11 +81,10 @@ func TestPipeline_StartStop(t *testing.T) {
 
 func TestPipeline_DoubleStart(t *testing.T) {
 	clearTelemetryEnv()
-	os.Setenv(EnvEnabled, "true")
-	os.Setenv(EnvCloudEnabled, "false")
-	os.Setenv(EnvGRPCPort, "54319")
-	os.Setenv(EnvHTTPPort, "54320")
-	defer clearTelemetryEnv()
+	t.Setenv(EnvEnabled, "true")
+	t.Setenv(EnvCloudEnabled, "false")
+	t.Setenv(EnvGRPCPort, "0")
+	t.Setenv(EnvHTTPPort, "0")
 
 	pipeline := New()
 	if pipeline == nil {
@@ -147,8 +142,8 @@ func TestNewWithConfig(t *testing.T) {
 	// enabled config
 	cfg = &Config{
 		Enabled:  true,
-		GRPCPort: 54321,
-		HTTPPort: 54322,
+		GRPCPort: 0,
+		HTTPPort: 0,
 	}
 	pipeline := NewWithConfig(cfg)
 	if pipeline == nil {
@@ -159,8 +154,8 @@ func TestNewWithConfig(t *testing.T) {
 func TestPipeline_HandleMetrics_NilExporter(t *testing.T) {
 	cfg := &Config{
 		Enabled:  true,
-		GRPCPort: 54323,
-		HTTPPort: 54324,
+		GRPCPort: 0,
+		HTTPPort: 0,
 	}
 	pipeline := NewWithConfig(cfg)
 	if pipeline == nil {
@@ -179,8 +174,8 @@ func TestPipeline_HandleMetrics_NilExporter(t *testing.T) {
 func TestPipeline_HandleMetrics_Empty(t *testing.T) {
 	cfg := &Config{
 		Enabled:  true,
-		GRPCPort: 54325,
-		HTTPPort: 54326,
+		GRPCPort: 0,
+		HTTPPort: 0,
 	}
 	pipeline := NewWithConfig(cfg)
 	if pipeline == nil {
@@ -196,11 +191,10 @@ func TestPipeline_HandleMetrics_Empty(t *testing.T) {
 
 func TestPipeline_MetricHandlerRegistered(t *testing.T) {
 	clearTelemetryEnv()
-	os.Setenv(EnvEnabled, "true")
-	os.Setenv(EnvCloudEnabled, "false")
-	os.Setenv(EnvGRPCPort, "54327")
-	os.Setenv(EnvHTTPPort, "54328")
-	defer clearTelemetryEnv()
+	t.Setenv(EnvEnabled, "true")
+	t.Setenv(EnvCloudEnabled, "false")
+	t.Setenv(EnvGRPCPort, "0")
+	t.Setenv(EnvHTTPPort, "0")
 
 	pipeline := New()
 	if pipeline == nil {
@@ -229,8 +223,8 @@ func TestPipeline_MetricHandlerRegistered(t *testing.T) {
 func TestPipeline_HandleLogs_NilExporter(t *testing.T) {
 	cfg := &Config{
 		Enabled:  true,
-		GRPCPort: 54329,
-		HTTPPort: 54330,
+		GRPCPort: 0,
+		HTTPPort: 0,
 	}
 	pipeline := NewWithConfig(cfg)
 	if pipeline == nil {
@@ -249,8 +243,8 @@ func TestPipeline_HandleLogs_NilExporter(t *testing.T) {
 func TestPipeline_HandleLogs_Empty(t *testing.T) {
 	cfg := &Config{
 		Enabled:  true,
-		GRPCPort: 54331,
-		HTTPPort: 54332,
+		GRPCPort: 0,
+		HTTPPort: 0,
 	}
 	pipeline := NewWithConfig(cfg)
 	if pipeline == nil {
@@ -266,11 +260,10 @@ func TestPipeline_HandleLogs_Empty(t *testing.T) {
 
 func TestPipeline_LogHandlerRegistered(t *testing.T) {
 	clearTelemetryEnv()
-	os.Setenv(EnvEnabled, "true")
-	os.Setenv(EnvCloudEnabled, "false")
-	os.Setenv(EnvGRPCPort, "54333")
-	os.Setenv(EnvHTTPPort, "54334")
-	defer clearTelemetryEnv()
+	t.Setenv(EnvEnabled, "true")
+	t.Setenv(EnvCloudEnabled, "false")
+	t.Setenv(EnvGRPCPort, "0")
+	t.Setenv(EnvHTTPPort, "0")
 
 	pipeline := New()
 	if pipeline == nil {
