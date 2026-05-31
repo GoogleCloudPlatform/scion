@@ -638,6 +638,30 @@ server:
 	}
 }
 
+func TestLoadServerMode_Normalization(t *testing.T) {
+	// Verify that LoadServerMode() normalizes the legacy "production" value
+	// to "hosted" at the public API level.
+	tmpDir := t.TempDir()
+	originalHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", originalHome)
+	os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(globalScionDir, 0755); err != nil {
+		t.Fatalf("failed to create global scion dir: %v", err)
+	}
+
+	settingsContent := "schema_version: \"1\"\nserver:\n  mode: production\n"
+	if err := os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
+		t.Fatalf("failed to write settings.yaml: %v", err)
+	}
+
+	mode := LoadServerMode()
+	if mode != "hosted" {
+		t.Errorf("expected normalized mode 'hosted', got %q", mode)
+	}
+}
+
 func TestLoadServerMode_Workstation(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.yaml")
