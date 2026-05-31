@@ -161,18 +161,24 @@ func (b *InProcessEventBus) Close() error {
 }
 
 // unsubscribe removes a subscriber and shuts down its dispatch goroutine.
+// The write lock is released before waiting for the goroutine to finish
+// so that slow handlers do not block Publish or Subscribe callers.
 func (b *InProcessEventBus) unsubscribe(target *subscriber) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
+	found := false
 	for i, sub := range b.subscribers {
 		if sub == target {
 			b.subscribers = append(b.subscribers[:i], b.subscribers[i+1:]...)
-			close(sub.ch)
-			<-sub.done
-			b.log.Debug("Subscription removed", "pattern", sub.pattern)
-			return
+			found = true
+			break
 		}
+	}
+	b.mu.Unlock()
+
+	if found {
+		close(target.ch)
+		<-target.done
+		b.log.Debug("Subscription removed", "pattern", target.pattern)
 	}
 }
 

@@ -326,6 +326,7 @@ func (c *BrokerRPCClient) HealthCheck() (*HealthStatus, error) {
 // arrive via the hub API instead (see broker-plugins.md design doc).
 type BrokerPluginAdapter struct {
 	rpcClient *BrokerRPCClient
+	mu        sync.Mutex
 	subs      map[string]*pluginSubscription
 }
 
@@ -352,7 +353,9 @@ func (a *BrokerPluginAdapter) Subscribe(pattern string, handler eventbus.EventHa
 		adapter: a,
 		pattern: pattern,
 	}
+	a.mu.Lock()
 	a.subs[pattern] = sub
+	a.mu.Unlock()
 	return sub, nil
 }
 
@@ -365,7 +368,9 @@ func (a *BrokerPluginAdapter) Close() error {
 // reconnectingSub use this to avoid leaking entries in the subs map.
 func (a *BrokerPluginAdapter) unsubscribePattern(pattern string) error {
 	err := a.rpcClient.Unsubscribe(pattern)
+	a.mu.Lock()
 	delete(a.subs, pattern)
+	a.mu.Unlock()
 	return err
 }
 

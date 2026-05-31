@@ -18,6 +18,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -198,9 +199,9 @@ func TestInProcessEventBus_Unsubscribe(t *testing.T) {
 	b := newTestEventBus()
 	defer b.Close()
 
-	callCount := 0
+	var callCount atomic.Int32
 	sub, err := b.Subscribe("scion.grove.g1.broadcast", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
-		callCount++
+		callCount.Add(1)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -210,8 +211,8 @@ func TestInProcessEventBus_Unsubscribe(t *testing.T) {
 	b.Publish(context.Background(), "scion.grove.g1.broadcast", msg)
 	time.Sleep(50 * time.Millisecond)
 
-	if callCount != 1 {
-		t.Fatalf("expected 1 call before unsubscribe, got %d", callCount)
+	if callCount.Load() != 1 {
+		t.Fatalf("expected 1 call before unsubscribe, got %d", callCount.Load())
 	}
 
 	sub.Unsubscribe()
@@ -219,8 +220,8 @@ func TestInProcessEventBus_Unsubscribe(t *testing.T) {
 	b.Publish(context.Background(), "scion.grove.g1.broadcast", msg)
 	time.Sleep(50 * time.Millisecond)
 
-	if callCount != 1 {
-		t.Fatalf("expected no additional calls after unsubscribe, got %d", callCount)
+	if callCount.Load() != 1 {
+		t.Fatalf("expected no additional calls after unsubscribe, got %d", callCount.Load())
 	}
 }
 
