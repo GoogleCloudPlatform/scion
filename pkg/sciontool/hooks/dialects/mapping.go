@@ -51,6 +51,9 @@ func (d *MappingDialect) Name() string {
 // override those defaults.
 func (d *MappingDialect) Parse(data map[string]interface{}) (*hooks.Event, error) {
 	rawName := getString(data, d.spec.EventNameField)
+	if rawName == "" {
+		return nil, fmt.Errorf("event name field %q missing or empty in input data", d.spec.EventNameField)
+	}
 
 	normalizedName := rawName
 	var entry *MappingEntrySpec
@@ -156,6 +159,22 @@ func applyFieldPath(data map[string]interface{}, field, path string, ed *hooks.E
 		if v := resolveFieldPath(data, path); v != "" {
 			ed.FilePath = v
 		}
+	case "assistant_text":
+		if v := resolveFieldPath(data, path); v != "" {
+			ed.AssistantText = v
+		}
+	case "input_tokens":
+		if v := resolveFieldPathInt64(data, path); v > 0 {
+			ed.InputTokens = v
+		}
+	case "output_tokens":
+		if v := resolveFieldPathInt64(data, path); v > 0 {
+			ed.OutputTokens = v
+		}
+	case "cached_tokens":
+		if v := resolveFieldPathInt64(data, path); v > 0 {
+			ed.CachedTokens = v
+		}
 	case "success":
 		if val, found := resolveFieldPathBool(data, path); found {
 			ed.Success = val
@@ -205,6 +224,24 @@ func resolveFieldPathBool(data map[string]interface{}, path string) (bool, bool)
 		return b, true
 	}
 	return false, false
+}
+
+// resolveFieldPathInt64 walks a dotted path and returns an int64 value.
+// JSON numbers arrive as float64, so both float64 and integer types are handled.
+func resolveFieldPathInt64(data map[string]interface{}, path string) int64 {
+	val := walkPath(data, path)
+	if val == nil {
+		return 0
+	}
+	switch v := val.(type) {
+	case float64:
+		return int64(v)
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	}
+	return 0
 }
 
 // walkPath navigates nested maps following a dotted path like ".toolCall.name".

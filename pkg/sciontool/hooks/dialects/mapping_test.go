@@ -186,6 +186,95 @@ func TestMappingDialect_Parse_FieldExtraction(t *testing.T) {
 	})
 }
 
+func TestMappingDialect_Parse_MissingEventName(t *testing.T) {
+	md := NewMappingDialect(MappingDialectSpec{
+		Dialect:        "test",
+		EventNameField: "hook_event_name",
+		Mappings:       map[string]MappingEntrySpec{},
+	})
+
+	t.Run("missing event name field returns error", func(t *testing.T) {
+		_, err := md.Parse(map[string]interface{}{
+			"some_other_field": "value",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "hook_event_name")
+		assert.Contains(t, err.Error(), "missing or empty")
+	})
+
+	t.Run("empty event name returns error", func(t *testing.T) {
+		_, err := md.Parse(map[string]interface{}{
+			"hook_event_name": "",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "missing or empty")
+	})
+
+	t.Run("non-string event name returns error", func(t *testing.T) {
+		_, err := md.Parse(map[string]interface{}{
+			"hook_event_name": 42,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "missing or empty")
+	})
+}
+
+func TestMappingDialect_Parse_AssistantTextField(t *testing.T) {
+	spec := MappingDialectSpec{
+		Dialect:        "test",
+		EventNameField: "event",
+		Mappings: map[string]MappingEntrySpec{
+			"AgentStop": {
+				Event: hooks.EventAgentEnd,
+				Fields: map[string]string{
+					"assistant_text": ".response.text",
+				},
+			},
+		},
+	}
+	md := NewMappingDialect(spec)
+
+	event, err := md.Parse(map[string]interface{}{
+		"event": "AgentStop",
+		"response": map[string]interface{}{
+			"text": "Here is the answer.",
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Here is the answer.", event.Data.AssistantText)
+}
+
+func TestMappingDialect_Parse_TokenFieldMappings(t *testing.T) {
+	spec := MappingDialectSpec{
+		Dialect:        "test",
+		EventNameField: "event",
+		Mappings: map[string]MappingEntrySpec{
+			"ModelDone": {
+				Event: hooks.EventModelEnd,
+				Fields: map[string]string{
+					"input_tokens":  ".stats.promptTokens",
+					"output_tokens": ".stats.completionTokens",
+					"cached_tokens": ".stats.cachedTokens",
+				},
+			},
+		},
+	}
+	md := NewMappingDialect(spec)
+
+	event, err := md.Parse(map[string]interface{}{
+		"event": "ModelDone",
+		"stats": map[string]interface{}{
+			"promptTokens":     float64(200),
+			"completionTokens": float64(75),
+			"cachedTokens":     float64(50),
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(200), event.Data.InputTokens)
+	assert.Equal(t, int64(75), event.Data.OutputTokens)
+	assert.Equal(t, int64(50), event.Data.CachedTokens)
+}
+
 func TestMappingDialect_Parse_TokenExtraction(t *testing.T) {
 	md := NewMappingDialect(MappingDialectSpec{
 		Dialect:        "test",
