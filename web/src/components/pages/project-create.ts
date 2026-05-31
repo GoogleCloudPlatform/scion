@@ -23,11 +23,22 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import { extractApiError } from '../../client/api.js';
+import { apiFetch, extractApiError } from '../../client/api.js';
 import '../shared/status-badge.js';
+import '../shared/dir-browser.js';
 
-type ProjectMode = 'git' | 'hub';
+type ProjectMode = 'git' | 'hub' | 'linked';
 type GitWorkspaceMode = 'per-agent' | 'worktree-per-agent' | 'shared';
+
+interface ValidatePathResponse {
+  resolved: string;
+  exists: boolean;
+  isDir: boolean;
+  isGit: boolean;
+  isManaged: boolean;
+  alreadyLinked: boolean;
+  error?: string;
+}
 
 @customElement('scion-page-project-create')
 export class ScionPageProjectCreate extends LitElement {
@@ -75,9 +86,28 @@ export class ScionPageProjectCreate extends LitElement {
   @state()
   private githubAppUrl: string | null = null;
 
+  // Linked-mode state
+  @state()
+  private localPath = '';
+
+  @state()
+  private pathValidation: ValidatePathResponse | null = null;
+
+  @state()
+  private validatingPath = false;
+
+  @state()
+  private browseDialogOpen = false;
+
+  @state()
+  private embeddedBrokerID = '';
+
+  private pathCheckTimer: ReturnType<typeof setTimeout> | null = null;
+
   override connectedCallback(): void {
     super.connectedCallback();
     this.checkGitHubApp();
+    void this.loadEmbeddedBrokerID();
   }
 
   private async checkGitHubApp(): Promise<void> {
@@ -91,6 +121,57 @@ export class ScionPageProjectCreate extends LitElement {
     } catch {
       // Non-fatal
     }
+  }
+
+  private async loadEmbeddedBrokerID(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/system/status');
+      if (!res.ok) return;
+      const data = (await res.json()) as { embeddedBrokerID?: string };
+      if (data.embeddedBrokerID) {
+        this.embeddedBrokerID = data.embeddedBrokerID;
+      }
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  private onLocalPathInput(e: Event): void {
+    this.localPath = (e.target as HTMLElement & { value: string }).value;
+
+    if (this.pathCheckTimer) {
+      clearTimeout(this.pathCheckTimer);
+    }
+    const path = this.localPath.trim();
+    if (path.length > 1) {
+      this.pathCheckTimer = setTimeout(() => void this.validateLocalPath(path), 500);
+    } else {
+      this.pathValidation = null;
+    }
+  }
+
+  private async validateLocalPath(path: string): Promise<void> {
+    this.validatingPath = true;
+    this.pathValidation = null;
+    try {
+      const res = await apiFetch('/api/v1/system/fs/validate-path', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+      if (!res.ok) return;
+      this.pathValidation = (await res.json()) as ValidatePathResponse;
+    } catch {
+      // Best-effort
+    } finally {
+      this.validatingPath = false;
+    }
+  }
+
+  private onDirBrowserPathSelected(e: CustomEvent<{ path: string }>): void {
+    this.localPath = e.detail.path;
+    this.browseDialogOpen = false;
+    void this.validateLocalPath(e.detail.path);
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
@@ -260,6 +341,45 @@ export class ScionPageProjectCreate extends LitElement {
       font-size: 0.925rem;
       color: var(--scion-text, #1e293b);
     }
+
+    .path-input-row {
+      display: flex;
+      gap: 0.5rem;
+      align-items: flex-start;
+    }
+
+    .path-input-row sl-input {
+      flex: 1;
+    }
+
+    .path-input-row sl-button {
+      margin-top: 0;
+    }
+
+    .validation-result {
+      font-size: 0.8125rem;
+      margin-top: 0.375rem;
+      padding: 0.5rem 0.75rem;
+      border-radius: var(--scion-radius, 0.5rem);
+    }
+
+    .validation-result.valid {
+      background: var(--sl-color-success-50, #f0fdf4);
+      border: 1px solid var(--sl-color-success-200, #bbf7d0);
+      color: var(--sl-color-success-700, #15803d);
+    }
+
+    .validation-result.warning {
+      background: var(--sl-color-warning-50, #fefce8);
+      border: 1px solid var(--sl-color-warning-200, #fef08a);
+      color: var(--sl-color-warning-700, #a16207);
+    }
+
+    .validation-result.error {
+      background: var(--sl-color-danger-50, #fef2f2);
+      border: 1px solid var(--sl-color-danger-200, #fecaca);
+      color: var(--sl-color-danger-700, #b91c1c);
+    }
   `;
 
   private slugify(text: string): string {
@@ -364,6 +484,21 @@ export class ScionPageProjectCreate extends LitElement {
       return;
     }
 
+    if (this.mode === 'linked') {
+      if (!this.localPath.trim()) {
+        this.error = 'Local directory path is required.';
+        return;
+      }
+      if (!this.pathValidation || this.pathValidation.error || !this.pathValidation.exists || !this.pathValidation.isDir) {
+        this.error = 'Please select a valid directory path.';
+        return;
+      }
+      if (!this.embeddedBrokerID) {
+        this.error = 'No embedded broker available. Ensure the server is running in workstation mode.';
+        return;
+      }
+    }
+
     this.submitting = true;
     this.error = null;
 
@@ -424,9 +559,27 @@ export class ScionPageProjectCreate extends LitElement {
       }
 
       // Backend returns 200 for an existing project, 201 for newly created
-      if (response.status === 200) {
+      if (response.status === 200 && this.mode !== 'linked') {
         this.existingProjectId = projectId;
         return;
+      }
+
+      // Two-step linked create: add provider after project creation
+      if (this.mode === 'linked') {
+        const providerRes = await fetch(`/api/v1/projects/${projectId}/providers`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            brokerId: this.embeddedBrokerID,
+            localPath: this.pathValidation!.resolved,
+          }),
+        });
+        if (!providerRes.ok) {
+          this.error = await extractApiError(providerRes, 'Project created but failed to link directory. You can retry.');
+          this.submitting = false;
+          return;
+        }
       }
 
       // Navigate to the newly created project
@@ -474,11 +627,14 @@ export class ScionPageProjectCreate extends LitElement {
             >
               <sl-option value="hub">Hub-managed Workspace</sl-option>
               <sl-option value="git">Git Repository</sl-option>
+              <sl-option value="linked">Local Directory (linked)</sl-option>
             </sl-select>
             <div class="hint">
               ${this.mode === 'hub'
                 ? 'A workspace managed by the Hub. No git repository required.'
-                : 'Link to an existing git repository for source-controlled workspaces.'}
+                : this.mode === 'linked'
+                  ? 'Link a local directory. The directory stays where it is and is operated on in place.'
+                  : 'Link to an existing git repository for source-controlled workspaces.'}
             </div>
           </div>
 
@@ -578,6 +734,70 @@ export class ScionPageProjectCreate extends LitElement {
               `
             : nothing}
 
+          ${this.mode === 'linked'
+            ? html`
+                <div class="form-field">
+                  <label for="localPath">Local Directory Path</label>
+                  <div class="path-input-row">
+                    <sl-input
+                      id="localPath"
+                      placeholder="/home/user/projects/my-project"
+                      .value=${this.localPath}
+                      @sl-input=${(e: Event) => this.onLocalPathInput(e)}
+                    ></sl-input>
+                    <sl-button variant="default" @click=${() => { this.browseDialogOpen = true; }}>
+                      Browse…
+                    </sl-button>
+                  </div>
+                  <div class="hint">
+                    Absolute path to a local directory. The directory is operated on in place.
+                  </div>
+                </div>
+
+                ${this.validatingPath
+                  ? html`<div class="validation-result valid" style="display: flex; align-items: center; gap: 0.5rem;">
+                      <sl-spinner style="font-size: 0.875rem;"></sl-spinner> Validating path…
+                    </div>`
+                  : this.pathValidation
+                    ? html`
+                        ${this.pathValidation.error
+                          ? html`<div class="validation-result error">
+                              <sl-icon name="exclamation-triangle"></sl-icon>
+                              ${this.pathValidation.error}
+                            </div>`
+                          : !this.pathValidation.exists
+                            ? html`<div class="validation-result error">
+                                <sl-icon name="exclamation-triangle"></sl-icon>
+                                Path does not exist.
+                              </div>`
+                            : !this.pathValidation.isDir
+                              ? html`<div class="validation-result error">
+                                  <sl-icon name="exclamation-triangle"></sl-icon>
+                                  Path is not a directory.
+                                </div>`
+                              : html`
+                                  <div class="validation-result valid">
+                                    <sl-icon name="check-circle"></sl-icon>
+                                    Path resolved to: ${this.pathValidation.resolved}
+                                  </div>
+                                  ${this.pathValidation.isGit
+                                    ? html`<div class="validation-result warning" style="margin-top: 0.25rem;">
+                                        <sl-icon name="info-circle"></sl-icon>
+                                        This is a git repository. Agents will operate on the working tree.
+                                      </div>`
+                                    : nothing}
+                                  ${this.pathValidation.alreadyLinked
+                                    ? html`<div class="validation-result warning" style="margin-top: 0.25rem;">
+                                        <sl-icon name="info-circle"></sl-icon>
+                                        This directory is already linked to another project.
+                                      </div>`
+                                    : nothing}
+                                `}
+                      `
+                    : nothing}
+              `
+            : nothing}
+
           <div class="form-field">
             <label for="name">Name</label>
             <sl-input
@@ -650,6 +870,17 @@ export class ScionPageProjectCreate extends LitElement {
           </div>
         </div>
       </div>
+
+      <sl-dialog
+        label="Browse Directory"
+        ?open=${this.browseDialogOpen}
+        @sl-after-hide=${() => { this.browseDialogOpen = false; }}
+        style="--width: 36rem;"
+      >
+        <scion-dir-browser
+          @path-selected=${(e: CustomEvent<{ path: string }>) => this.onDirBrowserPathSelected(e)}
+        ></scion-dir-browser>
+      </sl-dialog>
 
       <sl-dialog
         label="Project Already Exists"
