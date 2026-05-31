@@ -7,12 +7,14 @@ The single, ordered work plan — and the **only** place status is tracked — i
 each item and link to its step in §8; they no longer track status themselves.
 
 **We are here:** steps 1–4 have **landed** (single read path, thin
-content-addressed cache, the shared resource-store/resolver abstraction, and the
-harness-config consume path). **Step 5 (onboard skills) is deferred** — skills
-are now subsumed by a larger forthcoming "skill bank" feature, which will decide
-skill scope/precedence/sharing semantics on its own terms; this refactor will be
-revisited only to adopt whatever resource shape that feature settles on.
-Remaining in scope here: **step 6** (optional identifier/layout cleanup).
+content-addressed cache, the shared resource-store/resolver abstraction, the
+harness-config consume path, and the harness-config web UI — see step 4b).
+**Step 5 (onboard skills) is deferred** — skills are now subsumed by a larger
+forthcoming "skill bank" feature, which will decide skill scope/precedence/sharing
+semantics on its own terms; this refactor will be revisited only to adopt whatever
+resource shape that feature settles on. Remaining in scope here: **step 4c**
+(harness-config import, deferred to a future session) and **step 6** (optional
+identifier/layout cleanup).
 
 ## 1. Purpose
 
@@ -446,6 +448,25 @@ status tracker. Each step links to its design rationale in §7.
      and nil-hub-client cases. `make ci` is green. (`make ci-full` still fails
      only on a **pre-existing, unrelated** web-typecheck error in
      `web/src/components/pages/profile-telegram.ts`, byte-identical to `main`.)
+   - ✅ **4b. Web UI for harness-configs** — harness-configs are now browsable and
+     editable in the web frontend, matching templates: a `harness-config-detail`
+     page reusing the shared file-browser/editor, a **Harness Configs** tab in
+     Project Settings → Resources, and hub-scope (global) management on the
+     renamed **Hub Resources** page (`/settings`). Capability parity was added so
+     editing is gated like templates (`harness_config` in
+     `ResourceActions`/`ScopeActions`; `getHarnessConfig`/list now return
+     `_capabilities`). Also fixed a harness-config store-filter gap so
+     `scope=project`+`projectId` narrows to one project (it previously matched all
+     projects, unlike the template filter).
+   - ⏳ **4c. Harness-config import (next session).** Templates can be **imported**
+     into the Hub from a Git URL or workspace path (`import-templates` endpoint +
+     the import UI in Project Settings); harness-configs have **no equivalent
+     import path**, so today they can only be created via CLI/bootstrap and the web
+     UI offers *list + edit only* (no create/import). Add an
+     `import-harness-configs` hub endpoint mirroring `import-templates`
+     (`pkg/hub/handlers.go` import handler + bootstrap reuse) and the matching
+     import controls on the Harness Configs tab, to close the last
+     template/harness-config parity gap. **Deferred to a future session.**
 5. ⏸️ **Onboard skills** as the third `kind` — **deferred.** Skills are now
    folded into a larger forthcoming **"skill bank"** feature, which owns the
    open skills scope/precedence/sharing semantics (see §9) and will define its
