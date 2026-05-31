@@ -42,7 +42,7 @@ Then checks for any git worktree checked out to the specified branch.`,
 		// 1. Check for Agent
 		projectDir, _ := config.GetResolvedProjectDir(projectPath)
 
-		// Check project grove
+		// Check project directory
 		if projectDir != "" {
 			agentDir := filepath.Join(projectDir, "agents", name)
 			workspace := filepath.Join(agentDir, "workspace")
@@ -51,7 +51,7 @@ Then checks for any git worktree checked out to the specified branch.`,
 			}
 		}
 
-		// Check global grove if not found
+		// Check global directory if not found
 		if targetPath == "" {
 			globalAgentsDir, _ := config.GetGlobalAgentsDir()
 			if globalAgentsDir != "" {

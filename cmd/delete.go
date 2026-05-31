@@ -79,7 +79,7 @@ var deleteCmd = &cobra.Command{
 				return deleteStoppedViaHub(hubCtx)
 			}
 
-			// Require an explicit grove context — error if not in a grove (unless --global)
+			// Require an explicit project context — error if not in a project (unless --global)
 			resolvedGrove, _, err := config.RequireProjectPath(projectPath)
 			if err != nil {
 				return err
@@ -206,7 +206,7 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 
-		// Use grove-scoped client which supports agent lookup by name/slug
+		// Use project-scoped client which supports agent lookup by name/slug
 		if err := hubCtx.Client.ProjectAgents(hubCtx.ProjectID).Delete(ctx, agentName, opts); err != nil {
 			cancel()
 			errs = append(errs, fmt.Sprintf("%s: %v", agentName, wrapHubError(err)))
@@ -227,7 +227,7 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 		branchDeleted, err := agent.DeleteAgentFiles(agentName, projectPath, !preserveBranch)
 		if err != nil {
 			statusf("Warning: Hub record deleted but local cleanup failed for '%s': %v\n", agentName, err)
-			statusf("Run 'scion --no-hub delete %s' to retry targeted cleanup, or 'scion clean' to reset the grove.\n", agentName)
+			statusf("Run 'scion --no-hub delete %s' to retry targeted cleanup, or 'scion clean' to reset the project.\n", agentName)
 		}
 
 		// Keep sync watermark current after a successful Hub delete. If hub server

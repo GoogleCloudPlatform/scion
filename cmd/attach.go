@@ -50,7 +50,7 @@ If the agent was started with tmux support, this will attach to the tmux session
 			return attachViaHub(hubCtx, agentName)
 		}
 
-		// Try to resolve grove info for better error messages
+		// Try to resolve project info for better error messages
 		projectDir, _ := config.GetResolvedProjectDir(projectPath)
 		projectName := config.GetProjectName(projectDir)
 		targetProjectPath := projectPath
@@ -65,7 +65,7 @@ If the agent was started with tmux support, this will attach to the tmux session
 		}
 
 		if !found {
-			// If user didn't specify a grove, try global fallback
+			// If user didn't specify a project, try global fallback
 			if projectPath == "" {
 				globalDir, _ := config.GetGlobalDir()
 				if globalDir != "" && globalDir != projectDir {
@@ -88,8 +88,8 @@ If the agent was started with tmux support, this will attach to the tmux session
 
 		rt := runtime.GetRuntime(targetProjectPath, profile)
 
-		// Use grove-scoped lookup to find the exact container,
-		// preventing cross-grove collision when agents share a name.
+		// Use project-scoped lookup to find the exact container,
+		// preventing cross-project collision when agents share a name.
 		filter := map[string]string{"scion.name": agentName, "scion.project": projectName}
 		agents, listErr := rt.List(context.Background(), filter)
 		attachID := agentName
@@ -100,7 +100,7 @@ If the agent was started with tmux support, this will attach to the tmux session
 		fmt.Printf("Attaching to agent '%s' (project: %s)...\n", agentName, projectName)
 		err = rt.Attach(context.Background(), attachID)
 		if err != nil {
-			// If the error is "not found", we can augment it with grove info
+			// If the error is "not found", we can augment it with project info
 			if err.Error() == fmt.Sprintf("agent '%s' not found", attachID) ||
 				err.Error() == fmt.Sprintf("agent '%s' container not found. It may have exited and been removed.", attachID) {
 				return fmt.Errorf("agent '%s' not found in project '%s'", agentName, projectName)
@@ -119,7 +119,7 @@ func init() {
 func attachViaHub(hubCtx *HubContext, agentName string) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
-	// Get the grove ID for this project
+	// Get the project ID for this project
 	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)

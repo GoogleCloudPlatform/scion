@@ -65,7 +65,7 @@ func init() {
 }
 
 func runClean(cmd *cobra.Command, args []string) error {
-	// Resolve grove path
+	// Resolve project path
 	gp := projectPath
 	if gp == "" && globalMode {
 		gp = "global"
@@ -81,7 +81,7 @@ func runClean(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no scion project found at %s", resolvedPath)
 	}
 
-	// Get grove name for display
+	// Get project name for display
 	var projectName string
 	if isGlobal {
 		projectName = "global"
@@ -130,7 +130,7 @@ func runClean(cmd *cobra.Command, args []string) error {
 				if healthErr == nil {
 					hubReachable = true
 
-					// Check if grove is registered on Hub
+					// Check if project is registered on Hub
 					lookupID := settings.GetHubProjectID()
 					if lookupID == "" {
 						lookupID = settings.ProjectID
