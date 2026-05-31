@@ -1022,6 +1022,10 @@ export class ScionPageOnboarding extends LitElement {
               this.cleanupImageEvents();
             }
           }
+        } else if (d['status'] === 'error') {
+          this.error = (d['error'] as string) || 'An error occurred during image pull.';
+          this.imagePulling = false;
+          this.cleanupImageEvents();
         }
 
         if (mode === 'build' && d['type'] === 'log') {
