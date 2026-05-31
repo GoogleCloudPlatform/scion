@@ -8852,7 +8852,10 @@ func (s *Server) handleExistingAgent(
 			return existingAgentErrored
 		}
 
-		if req.Task != "" && existingAgent.AppliedConfig != nil {
+		if existingAgent.AppliedConfig == nil {
+			existingAgent.AppliedConfig = &store.AgentAppliedConfig{}
+		}
+		if req.Task != "" {
 			existingAgent.AppliedConfig.Task = req.Task
 			existingAgent.AppliedConfig.Attach = req.Attach
 		}
