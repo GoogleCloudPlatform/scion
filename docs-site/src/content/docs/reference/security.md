@@ -17,7 +17,7 @@ Scion operates in multiple contexts, each with specific security requirements. A
 | **CLI (Hub Commands)** | Terminal | OAuth 2.0 + Device Flow | `~/.scion/credentials.json` |
 | **Agent (sciontool)** | Container | Hub-issued JWT | Env Var (`SCION_HUB_TOKEN`) |
 | **Runtime Broker** | Compute Node | HMAC Signature | `~/.scion/broker-credentials.json` |
-| **Development** | Any | Dev Token (Bearer) | `~/.scion/dev-token` |
+| **Development** | Any | Developer Token (Bearer) | `~/.scion/dev-token` |
 
 ### 1.2 User Authentication (OAuth 2.0)
 
@@ -151,6 +151,6 @@ These are infrastructure-level secrets established during broker registration an
 ## 5. Development Security
 
 To facilitate local development, Scion provides a **Development Authentication** mode.
-- **Dev Token**: A persistent token starting with `scion_dev_` stored in `~/.scion/dev-token`.
+- **Developer Token**: A persistent token starting with `scion_dev_` stored in `~/.scion/dev-token`.
 - **Constraints**: Dev mode is disabled by default and requires `localhost` binding if TLS is not used.
 - **Warning**: The server logs clear warnings when operating in Dev Mode.

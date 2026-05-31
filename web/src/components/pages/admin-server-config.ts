@@ -1769,7 +1769,7 @@ export class ScionPageAdminServerConfig extends LitElement {
             <span class="hint">Requires restart. NOT for production use.</span>
           </div>
           <div class="form-field full-width">
-            <label>Dev Token</label>
+            <label>Developer Token</label>
             <span class="hint"
               >${this.authDevToken === '********'
                 ? 'Value is masked. Clear to auto-generate.'

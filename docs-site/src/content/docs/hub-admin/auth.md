@@ -94,7 +94,7 @@ Or via environment variable:
 export SCION_SERVER_AUTH_DEVMODE=true
 ```
 
-### Using the Dev Token
+### Using the Developer Token
 When the Hub starts with `devMode: true`, it writes the token to `~/.scion/dev-token`.
 - **CLI**: The `scion` CLI automatically looks for this file.
 - **Web**: The Web Dashboard automatically uses this token for the "Development User" login when `SCION_DEV_AUTH_ENABLED=true` is set.

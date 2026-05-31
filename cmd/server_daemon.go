@@ -359,7 +359,7 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 }
 
 // printWorkstationQuickstart prints the first-run quickstart information
-// including the dev token and web UI URL after a workstation-mode daemon starts.
+// including the developer token and web UI URL after a workstation-mode daemon starts.
 func printWorkstationQuickstart(globalDir string, host string, wPort int, webEnabled, devAuth bool) {
 	if webEnabled {
 		displayHost := host
@@ -376,7 +376,7 @@ func printWorkstationQuickstart(globalDir string, host string, wPort int, webEna
 			token := strings.TrimSpace(string(data))
 			if token != "" {
 				fmt.Println()
-				fmt.Println("Dev token (for CLI authentication):")
+				fmt.Println("Developer token (for CLI authentication):")
 				fmt.Printf("  export SCION_DEV_TOKEN=%s\n", token)
 			}
 		}

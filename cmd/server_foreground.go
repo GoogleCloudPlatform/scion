@@ -476,7 +476,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			log.Printf("Web UI: http://%s:%d", displayHost, webPort)
 		}
 		if devAuthToken != "" {
-			log.Printf("Dev token: export SCION_DEV_TOKEN=%s", devAuthToken)
+			log.Printf("Developer token: export SCION_DEV_TOKEN=%s", devAuthToken)
 		}
 	}
 
@@ -844,7 +844,7 @@ func initDevAuth(cfg *config.GlobalConfig, globalDir string) (string, error) {
 	os.Setenv("SCION_AUTH_TOKEN", devAuthToken)
 
 	log.Println("WARNING: Development authentication enabled - not for production use")
-	log.Printf("Dev token: %s", devAuthToken)
+	log.Printf("Developer token: %s", devAuthToken)
 	log.Printf("To authenticate CLI commands, run:")
 	log.Printf("  export SCION_DEV_TOKEN=%s", devAuthToken)
 

@@ -26,7 +26,7 @@ hub:
 
 ### Authentication
 
-**Note:** Authentication is not required in workstation mode, it uses a machine specific dev-token, and is only listening on localhost.
+**Note:** Authentication is not required in workstation mode, it uses a machine specific developer token, and is only listening on localhost.
 
 Once the endpoint is configured, authenticate your CLI:
 
