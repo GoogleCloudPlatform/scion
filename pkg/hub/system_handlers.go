@@ -147,9 +147,12 @@ func (s *Server) handleGetRuntime(w http.ResponseWriter, r *http.Request) {
 	globalDir, err := config.GetGlobalDir()
 	if err == nil {
 		if vs, loadErr := config.LoadSingleFileVersioned(globalDir); loadErr == nil && vs != nil {
-			configured = vs.ActiveProfile
+			activeProfile := vs.ActiveProfile
+			if activeProfile == "" {
+				activeProfile = "default"
+			}
 			if vs.Profiles != nil {
-				if profile, ok := vs.Profiles[vs.ActiveProfile]; ok {
+				if profile, ok := vs.Profiles[activeProfile]; ok {
 					configured = profile.Runtime
 				}
 			}

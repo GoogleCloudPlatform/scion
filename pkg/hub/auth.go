@@ -259,7 +259,6 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				if cfg.UserTokenSvc == nil {
 					// Fall back to dev auth if user tokens not configured
 					if cfg.DevAuthEnabled && apiclient.ValidateDevToken(token, cfg.DevAuthToken) {
-						devUser := devUser
 						ctx = context.WithValue(ctx, userContextKey{}, devUser)
 						ctx = contextWithIdentity(ctx, devUser)
 						ctx = contextWithAuthType(ctx, AuthTypeDevToken)
