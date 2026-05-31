@@ -1921,12 +1921,14 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 
 // OutboundMessageRequest is the request body for POST /api/v1/agents/{id}/outbound-message.
 type OutboundMessageRequest struct {
-	Recipient   string   `json:"recipient,omitempty"`
-	RecipientID string   `json:"recipient_id,omitempty"`
-	Msg         string   `json:"msg"`
-	Type        string   `json:"type,omitempty"`
-	Urgent      bool     `json:"urgent,omitempty"`
-	Attachments []string `json:"attachments,omitempty"`
+	Recipient   string            `json:"recipient,omitempty"`
+	RecipientID string            `json:"recipient_id,omitempty"`
+	Msg         string            `json:"msg"`
+	Type        string            `json:"type,omitempty"`
+	Urgent      bool              `json:"urgent,omitempty"`
+	Attachments []string          `json:"attachments,omitempty"`
+	Visibility  string            `json:"visibility,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
 // handleAgentOutboundMessage handles POST /api/v1/agents/{id}/outbound-message.
@@ -2051,6 +2053,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Type:        storeMsg.Type,
 		Urgent:      storeMsg.Urgent,
 		Attachments: req.Attachments,
+		Visibility:  req.Visibility,
+		Metadata:    req.Metadata,
 	}
 
 	// Route through broker when available; otherwise persist and publish
