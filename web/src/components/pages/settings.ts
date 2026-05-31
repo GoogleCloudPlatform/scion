@@ -15,19 +15,25 @@
  */
 
 /**
- * Hub settings page component
+ * Hub Resources page component
  *
- * Displays hub-scoped environment variables and secrets.
+ * Displays hub-scoped resources (environment variables, secrets) and the
+ * global file-based resources (templates, harness configs). Structured to
+ * mirror the project settings Resources section for consistency.
  */
 
 import { LitElement, html, css } from 'lit';
-import { customElement } from 'lit/decorators.js';
+import { customElement, state } from 'lit/decorators.js';
 
 import '../shared/env-var-list.js';
 import '../shared/secret-list.js';
+import '../shared/resource-list.js';
 
 @customElement('scion-page-settings')
 export class ScionPageSettings extends LitElement {
+  @state()
+  private activeTab = 'env-vars';
+
   static override styles = css`
     :host {
       display: block;
@@ -51,26 +57,115 @@ export class ScionPageSettings extends LitElement {
       color: var(--scion-text, #1e293b);
       margin: 0;
     }
+
+    .section {
+      background: var(--scion-surface, #ffffff);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius-lg, 0.75rem);
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .section h2 {
+      font-size: 1.125rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      margin: 0 0 0.25rem 0;
+    }
+
+    .section > p {
+      font-size: 0.875rem;
+      color: var(--scion-text-muted, #64748b);
+      margin: 0 0 1rem 0;
+    }
+
+    .tab-intro {
+      font-size: 0.875rem;
+      color: var(--scion-text-muted, #64748b);
+      margin: 0 0 1rem 0;
+    }
+
+    sl-tab-group {
+      --indicator-color: var(--scion-primary, #3b82f6);
+    }
+
+    sl-tab-group::part(base) {
+      background: transparent;
+    }
+
+    sl-tab-panel::part(base) {
+      padding: 1.5rem 0 0 0;
+    }
   `;
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    // Deep-link a specific tab via ?tab= (e.g. ?tab=templates), used by the
+    // resource detail pages' "back" links.
+    if (typeof window !== 'undefined') {
+      const tab = new URLSearchParams(window.location.search).get('tab');
+      if (tab) {
+        this.activeTab = tab;
+      }
+    }
+  }
 
   override render() {
     return html`
       <div class="header">
         <sl-icon name="gear"></sl-icon>
-        <h1>Hub Settings</h1>
+        <h1>Hub Resources</h1>
       </div>
 
-      <scion-env-var-list
-        scope="hub"
-        apiBasePath="/api/v1"
-        compact
-      ></scion-env-var-list>
+      <div class="section">
+        <h2>Resources</h2>
+        <p>Hub-scoped resources available to all projects and agents.</p>
 
-      <scion-secret-list
-        scope="hub"
-        apiBasePath="/api/v1"
-        compact
-      ></scion-secret-list>
+        <sl-tab-group
+          @sl-tab-show=${(e: CustomEvent) => {
+            this.activeTab = (e.detail as { name: string }).name;
+          }}
+        >
+          <sl-tab slot="nav" panel="env-vars" ?active=${this.activeTab === 'env-vars'}
+            >Environment Variables</sl-tab
+          >
+          <sl-tab slot="nav" panel="secrets" ?active=${this.activeTab === 'secrets'}>Secrets</sl-tab>
+          <sl-tab slot="nav" panel="templates" ?active=${this.activeTab === 'templates'}
+            >Templates</sl-tab
+          >
+          <sl-tab slot="nav" panel="harness-configs" ?active=${this.activeTab === 'harness-configs'}
+            >Harness Configs</sl-tab
+          >
+
+          <sl-tab-panel name="env-vars">
+            <scion-env-var-list scope="hub" apiBasePath="/api/v1" compact></scion-env-var-list>
+          </sl-tab-panel>
+
+          <sl-tab-panel name="secrets">
+            <scion-secret-list scope="hub" apiBasePath="/api/v1" compact></scion-secret-list>
+          </sl-tab-panel>
+
+          <sl-tab-panel name="templates">
+            <p class="tab-intro">Global agent templates. Open one to browse and edit its files.</p>
+            <scion-resource-list
+              kind="template"
+              scope="global"
+              detailBasePath="/settings"
+            ></scion-resource-list>
+          </sl-tab-panel>
+
+          <sl-tab-panel name="harness-configs">
+            <p class="tab-intro">
+              Global harness configurations. Open one to browse and edit its files.
+            </p>
+            <scion-resource-list
+              kind="harness-config"
+              scope="global"
+              detailBasePath="/settings"
+            ></scion-resource-list>
+          </sl-tab-panel>
+        </sl-tab-group>
+      </div>
     `;
   }
 }

@@ -60,7 +60,7 @@ const NAV_SECTIONS: NavSection[] = [
 const ADMIN_SECTION: NavSection = {
   title: 'Admin',
   items: [
-    { path: '/settings', label: 'Hub Settings', icon: 'gear' },
+    { path: '/settings', label: 'Hub Resources', icon: 'gear' },
     { path: '/admin/server-config', label: 'Server Config', icon: 'sliders' },
     { path: '/admin/scheduler', label: 'Scheduler', icon: 'clock' },
     { path: '/admin/users', label: 'Users', icon: 'people' },

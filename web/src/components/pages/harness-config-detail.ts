@@ -15,29 +15,31 @@
  */
 
 /**
- * Template detail page component
+ * Harness-config detail page component
  *
- * Displays a template's metadata and file browser with inline editing.
- * Route: /projects/{projectId}/templates/{templateId}
+ * Displays a harness-config's metadata and a file browser with inline editing.
+ * Mirrors the template detail page. Works at both project scope
+ * (/projects/{id}/harness-configs/{id}) and hub/global scope
+ * (/settings/harness-configs/{id}).
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData, Template } from '../../shared/types.js';
+import type { PageData, HarnessConfig } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import '../shared/file-browser.js';
 import '../shared/file-editor.js';
-import { TemplateFileBrowserDataSource } from '../shared/file-browser.js';
+import { HarnessConfigFileBrowserDataSource } from '../shared/file-browser.js';
 import type { FileBrowserDataSource } from '../shared/file-browser.js';
-import { TemplateFileEditorDataSource } from '../shared/file-editor.js';
+import { HarnessConfigFileEditorDataSource } from '../shared/file-editor.js';
 import type { FileEditorDataSource } from '../shared/file-editor.js';
 import '../shared/hash-display.js';
 
-@customElement('scion-page-template-detail')
-export class ScionPageTemplateDetail extends LitElement {
+@customElement('scion-page-harness-config-detail')
+export class ScionPageHarnessConfigDetail extends LitElement {
   @property({ type: Object })
   pageData: PageData | null = null;
 
@@ -45,13 +47,13 @@ export class ScionPageTemplateDetail extends LitElement {
   projectId = '';
 
   @property({ type: String })
-  templateId = '';
+  harnessConfigId = '';
 
   @state()
   private loading = true;
 
   @state()
-  private template: Template | null = null;
+  private harnessConfig: HarnessConfig | null = null;
 
   @state()
   private error: string | null = null;
@@ -98,16 +100,16 @@ export class ScionPageTemplateDetail extends LitElement {
       color: var(--sl-color-primary-600);
     }
 
-    .template-header {
+    .resource-header {
       margin-bottom: 1.5rem;
     }
-    .template-title {
+    .resource-title {
       display: flex;
       align-items: center;
       gap: 0.75rem;
       margin: 0 0 0.5rem;
     }
-    .template-title h1 {
+    .resource-title h1 {
       margin: 0;
       font-size: 1.5rem;
       font-weight: 600;
@@ -121,19 +123,19 @@ export class ScionPageTemplateDetail extends LitElement {
       font-size: 0.75rem;
       font-weight: 500;
     }
-    .template-description {
+    .resource-description {
       color: var(--sl-color-neutral-600);
       font-size: 0.875rem;
       margin: 0;
     }
-    .template-meta-row {
+    .resource-meta-row {
       display: flex;
       gap: 1rem;
       margin-top: 0.5rem;
       font-size: 0.75rem;
       color: var(--sl-color-neutral-500);
     }
-    .template-meta-row .hash-meta {
+    .resource-meta-row .hash-meta {
       display: inline-flex;
       align-items: baseline;
       gap: 0.25rem;
@@ -169,58 +171,67 @@ export class ScionPageTemplateDetail extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     if (typeof window !== 'undefined') {
-      const projectMatch = window.location.pathname.match(/\/projects\/([^/]+)\/templates\/([^/]+)/);
+      const projectMatch = window.location.pathname.match(
+        /\/projects\/([^/]+)\/harness-configs\/([^/]+)/
+      );
       if (projectMatch) {
         this.projectId = projectMatch[1];
-        this.templateId = projectMatch[2];
+        this.harnessConfigId = projectMatch[2];
       } else {
-        // Hub (global) scope: /settings/templates/{id}
-        const hubMatch = window.location.pathname.match(/\/settings\/templates\/([^/]+)/);
+        // Hub (global) scope: /settings/harness-configs/{id}
+        const hubMatch = window.location.pathname.match(/\/settings\/harness-configs\/([^/]+)/);
         if (hubMatch) {
           this.projectId = '';
-          this.templateId = hubMatch[1];
+          this.harnessConfigId = hubMatch[1];
         }
       }
     }
-    void this.loadTemplate();
+    void this.loadHarnessConfig();
   }
 
   /** Back-navigation links — project scope returns to project settings, hub scope to Hub Resources. */
   private backLinks(): Array<{ href: string; label: string }> {
     if (this.projectId) {
       return [
-        { href: `/projects/${this.projectId}/settings?tab=templates`, label: 'Templates' },
+        {
+          href: `/projects/${this.projectId}/settings?tab=harness-configs`,
+          label: 'Harness Configs',
+        },
         { href: `/projects/${this.projectId}/settings`, label: 'Project Settings' },
       ];
     }
-    return [{ href: '/settings?tab=templates', label: 'Hub Resources' }];
+    return [{ href: '/settings?tab=harness-configs', label: 'Hub Resources' }];
   }
 
-  private async loadTemplate(): Promise<void> {
-    if (!this.templateId) return;
+  private async loadHarnessConfig(): Promise<void> {
+    if (!this.harnessConfigId) return;
     this.loading = true;
     this.error = null;
 
     try {
-      const response = await apiFetch(`/api/v1/templates/${this.templateId}`);
+      const response = await apiFetch(`/api/v1/harness-configs/${this.harnessConfigId}`);
       if (!response.ok) {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
-      this.template = (await response.json()) as Template;
-      dispatchPageTitle(this, this.template.displayName || this.template.name || this.templateId, 'Templates');
+      this.harnessConfig = (await response.json()) as HarnessConfig;
+      dispatchPageTitle(
+        this,
+        this.harnessConfig.displayName || this.harnessConfig.name || this.harnessConfigId,
+        'Harness Configs'
+      );
 
       // Create data sources
-      this.fileBrowserDataSource = new TemplateFileBrowserDataSource(this.templateId);
-      this.fileEditorDataSource = new TemplateFileEditorDataSource(this.templateId);
+      this.fileBrowserDataSource = new HarnessConfigFileBrowserDataSource(this.harnessConfigId);
+      this.fileEditorDataSource = new HarnessConfigFileEditorDataSource(this.harnessConfigId);
     } catch (err) {
-      console.error('Failed to load template:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to load template';
+      console.error('Failed to load harness config:', err);
+      this.error = err instanceof Error ? err.message : 'Failed to load harness config';
     } finally {
       this.loading = false;
     }
   }
 
-  // ── File editing event handlers (mirror project-detail pattern) ──
+  // ── File editing event handlers (mirror template-detail pattern) ──
 
   private handleFileEditRequested(e: CustomEvent<{ path: string }>): void {
     this.editingFilePath = e.detail.path;
@@ -247,9 +258,9 @@ export class ScionPageTemplateDetail extends LitElement {
   }
 
   private refreshFileBrowser(): void {
-    const browser = this.shadowRoot?.querySelector(
-      'scion-file-browser'
-    ) as import('../shared/file-browser.js').ScionFileBrowser | null;
+    const browser = this.shadowRoot?.querySelector('scion-file-browser') as
+      | import('../shared/file-browser.js').ScionFileBrowser
+      | null;
     browser?.loadFiles();
   }
 
@@ -264,11 +275,11 @@ export class ScionPageTemplateDetail extends LitElement {
         <div class="error-state">
           <sl-icon name="exclamation-triangle"></sl-icon>
           <p>${this.error}</p>
-          <sl-button size="small" @click=${() => this.loadTemplate()}>Retry</sl-button>
+          <sl-button size="small" @click=${() => this.loadHarnessConfig()}>Retry</sl-button>
         </div>
       `;
     }
-    if (!this.template) return nothing;
+    if (!this.harnessConfig) return nothing;
 
     return html`
       <div class="back-links">
@@ -282,26 +293,31 @@ export class ScionPageTemplateDetail extends LitElement {
         )}
       </div>
 
-      ${this.renderHeader()}
-      ${this.renderFilesSection()}
+      ${this.renderHeader()} ${this.renderFilesSection()}
     `;
   }
 
   private renderHeader() {
-    const t = this.template!;
+    const hc = this.harnessConfig!;
     return html`
-      <div class="template-header">
-        <div class="template-title">
-          <sl-icon name="file-earmark-code" style="font-size: 1.25rem; color: var(--sl-color-neutral-500);"></sl-icon>
-          <h1>${t.displayName || t.name}</h1>
-          ${t.harness ? html`<span class="harness-badge">${t.harness}</span>` : ''}
+      <div class="resource-header">
+        <div class="resource-title">
+          <sl-icon
+            name="sliders"
+            style="font-size: 1.25rem; color: var(--sl-color-neutral-500);"
+          ></sl-icon>
+          <h1>${hc.displayName || hc.name}</h1>
+          ${hc.harness ? html`<span class="harness-badge">${hc.harness}</span>` : ''}
         </div>
-        ${t.description ? html`<p class="template-description">${t.description}</p>` : ''}
-        <div class="template-meta-row">
-          <span>Scope: ${t.scope}</span>
-          <span>Status: ${t.status}</span>
-          ${t.contentHash
-            ? html`<span class="hash-meta">Hash: <scion-hash-display .hash=${t.contentHash} max-width="14ch"></scion-hash-display></span>`
+        ${hc.description ? html`<p class="resource-description">${hc.description}</p>` : ''}
+        <div class="resource-meta-row">
+          <span>Scope: ${hc.scope}</span>
+          <span>Status: ${hc.status}</span>
+          ${hc.contentHash
+            ? html`<span class="hash-meta"
+                >Hash:
+                <scion-hash-display .hash=${hc.contentHash} max-width="14ch"></scion-hash-display
+              ></span>`
             : ''}
         </div>
       </div>
@@ -309,12 +325,12 @@ export class ScionPageTemplateDetail extends LitElement {
   }
 
   private renderFilesSection() {
-    const isEditable = can(this.template?._capabilities, 'update');
+    const isEditable = can(this.harnessConfig?._capabilities, 'update');
     const isEditorOpen = this.editingFilePath !== null;
 
     return html`
       <div class="files-section">
-        <h2>Template Files</h2>
+        <h2>Harness Config Files</h2>
 
         ${isEditorOpen
           ? html`
@@ -344,5 +360,11 @@ export class ScionPageTemplateDetail extends LitElement {
             `}
       </div>
     `;
+  }
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    'scion-page-harness-config-detail': ScionPageHarnessConfigDetail;
   }
 }

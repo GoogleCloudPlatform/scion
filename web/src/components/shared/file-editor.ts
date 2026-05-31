@@ -148,6 +148,39 @@ export class TemplateFileEditorDataSource implements FileEditorDataSource {
   }
 }
 
+/**
+ * Editor data source for harness-config files.
+ *
+ * Mirrors {@link TemplateFileEditorDataSource}; harness-configs share the
+ * template file API shape (see pkg/hub/harness_config_file_handlers.go).
+ */
+export class HarnessConfigFileEditorDataSource implements FileEditorDataSource {
+  private readonly basePath: string;
+
+  constructor(harnessConfigId: string) {
+    this.basePath = `/api/v1/harness-configs/${harnessConfigId}/files`;
+  }
+
+  async getFileContent(path: string): Promise<FileContentResponse> {
+    const res = await apiFetch(`${this.basePath}/${encodeFilePath(path)}`);
+    if (!res.ok) throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+    return (await res.json()) as FileContentResponse;
+  }
+
+  async saveFileContent(path: string, content: string, _expectedModTime?: string): Promise<{ modTime: string }> {
+    const body: Record<string, string> = { content };
+
+    const res = await apiFetch(`${this.basePath}/${encodeFilePath(path)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+    const data = (await res.json()) as { modTime: string };
+    return { modTime: data.modTime };
+  }
+}
+
 // ────────────────────────────────────────────────────────────
 // Component
 // ────────────────────────────────────────────────────────────

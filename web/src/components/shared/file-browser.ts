@@ -296,6 +296,65 @@ export class TemplateFileBrowserDataSource implements FileBrowserDataSource {
   }
 }
 
+/**
+ * Data source for harness-config files.
+ * API base: /api/v1/harness-configs/{harnessConfigId}/files
+ *
+ * Mirrors {@link TemplateFileBrowserDataSource} — harness-configs share the
+ * template file API shape (see pkg/hub/harness_config_file_handlers.go).
+ */
+export class HarnessConfigFileBrowserDataSource implements FileBrowserDataSource {
+  private readonly basePath: string;
+
+  constructor(harnessConfigId: string) {
+    this.basePath = `/api/v1/harness-configs/${harnessConfigId}/files`;
+  }
+
+  // Harness-config file sets are small; always load all files and rely on local filtering only.
+  async listFiles(): Promise<FileListResult> {
+    const response = await apiFetch(this.basePath);
+    if (!response.ok) {
+      throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+    }
+    return (await response.json()) as FileListResult;
+  }
+
+  async deleteFile(path: string): Promise<void> {
+    const response = await apiFetch(`${this.basePath}/${encodeFilePath(path)}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok && response.status !== 204) {
+      throw new Error(await extractApiError(response, `Delete failed: HTTP ${response.status}`));
+    }
+  }
+
+  async uploadFiles(files: FileList): Promise<void> {
+    const formData = new FormData();
+    for (let i = 0; i < files.length; i++) {
+      formData.append(files[i].name, files[i]);
+    }
+    const response = await apiFetch(this.basePath, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!response.ok) {
+      throw new Error(await extractApiError(response, `Upload failed: HTTP ${response.status}`));
+    }
+  }
+
+  getDownloadUrl(path: string): string {
+    return `${this.basePath}/${encodeFilePath(path)}`;
+  }
+
+  getPreviewUrl(path: string): string {
+    return `${this.basePath}/${encodeFilePath(path)}?view=true`;
+  }
+
+  getArchiveUrl(): string | null {
+    return null;
+  }
+}
+
 // ────────────────────────────────────────────────────────────
 // Component
 // ────────────────────────────────────────────────────────────

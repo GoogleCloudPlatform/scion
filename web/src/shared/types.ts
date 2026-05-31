@@ -453,6 +453,23 @@ export interface TemplateFileInfo {
   mode?: string;
 }
 
+export interface HarnessConfig {
+  id: string;
+  name: string;
+  slug: string;
+  displayName?: string;
+  description?: string;
+  harness: string;
+  status: string;
+  scope: string;
+  scopeId?: string;
+  contentHash?: string;
+  files?: TemplateFileInfo[];
+  created?: string;
+  updated?: string;
+  _capabilities?: Capabilities;
+}
+
 /**
  * Runtime Broker status enumeration
  */
