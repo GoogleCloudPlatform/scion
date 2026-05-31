@@ -193,7 +193,7 @@ export class ScionDirBrowser extends LitElement {
         return;
       }
       const data = (await res.json()) as DirListResponse;
-      this.currentPath = data.path;
+      this.currentPath = data.path.replace(/\\/g, '/');
       this.entries = data.entries ?? [];
     } catch {
       this.error = 'Failed to connect to the server.';
@@ -217,7 +217,16 @@ export class ScionDirBrowser extends LitElement {
 
   private navigateToBreadcrumb(index: number): void {
     const segments = this.currentPath.split('/').filter(Boolean);
-    const path = '/' + segments.slice(0, index + 1).join('/');
+    const subSegments = segments.slice(0, index + 1);
+    let path = '';
+    if (subSegments[0] && /^[a-zA-Z]:$/.test(subSegments[0])) {
+      path = subSegments.join('/');
+      if (subSegments.length === 1) {
+        path += '/';
+      }
+    } else {
+      path = '/' + subSegments.join('/');
+    }
     void this.navigate(path);
   }
 
@@ -283,7 +292,7 @@ export class ScionDirBrowser extends LitElement {
           <div class="empty-state">Empty directory</div>
         ` : html`
           <div class="entry-list">
-            ${segments.length > 0 ? html`
+            ${!(segments.length === 0 || (segments.length === 1 && /^[a-zA-Z]:$/.test(segments[0]))) ? html`
               <div class="entry" @click=${() => this.navigateUp()}>
                 <sl-icon name="arrow-up"></sl-icon>
                 <span class="name">..</span>
