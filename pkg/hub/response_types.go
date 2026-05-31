@@ -123,6 +123,14 @@ type TemplateWithCapabilities struct {
 	Cap *Capabilities `json:"_capabilities,omitempty"`
 }
 
+// HarnessConfigWithCapabilities wraps a store.HarnessConfig with capability annotations.
+// Unlike templates there is no legacy field aliasing, so the embedded struct's default
+// JSON marshaling is sufficient.
+type HarnessConfigWithCapabilities struct {
+	store.HarnessConfig
+	Cap *Capabilities `json:"_capabilities,omitempty"`
+}
+
 // MarshalJSON implements custom marshaling to avoid shadowing of fields by the embedded store.Template.
 func (t TemplateWithCapabilities) MarshalJSON() ([]byte, error) {
 	type TemplateAlias store.Template

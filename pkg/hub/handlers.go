@@ -6235,9 +6235,10 @@ type ListTemplatesResponse struct {
 
 // ListHarnessConfigsResponse is the response for listing harness configs.
 type ListHarnessConfigsResponse struct {
-	HarnessConfigs []store.HarnessConfig `json:"harnessConfigs"`
-	NextCursor     string                `json:"nextCursor,omitempty"`
-	TotalCount     int                   `json:"totalCount"`
+	HarnessConfigs []HarnessConfigWithCapabilities `json:"harnessConfigs"`
+	NextCursor     string                          `json:"nextCursor,omitempty"`
+	TotalCount     int                             `json:"totalCount"`
+	Capabilities   *Capabilities                   `json:"_capabilities,omitempty"`
 }
 
 func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {

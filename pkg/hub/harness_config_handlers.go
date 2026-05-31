@@ -100,10 +100,34 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Compute per-item and scope capabilities (mirrors listTemplatesV2).
+	identity := GetIdentityFromContext(ctx)
+	items := make([]HarnessConfigWithCapabilities, len(result.Items))
+	if identity != nil {
+		resources := make([]Resource, len(result.Items))
+		for i := range result.Items {
+			resources[i] = harnessConfigResource(&result.Items[i])
+		}
+		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "harness_config")
+		for i := range result.Items {
+			items[i] = HarnessConfigWithCapabilities{HarnessConfig: result.Items[i], Cap: caps[i]}
+		}
+	} else {
+		for i := range result.Items {
+			items[i] = HarnessConfigWithCapabilities{HarnessConfig: result.Items[i]}
+		}
+	}
+
+	var scopeCap *Capabilities
+	if identity != nil {
+		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "harness_config")
+	}
+
 	writeJSON(w, http.StatusOK, ListHarnessConfigsResponse{
-		HarnessConfigs: result.Items,
+		HarnessConfigs: items,
 		NextCursor:     result.NextCursor,
 		TotalCount:     result.TotalCount,
+		Capabilities:   scopeCap,
 	})
 }
 
@@ -241,12 +265,19 @@ func (s *Server) handleHarnessConfigCRUD(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *Server) getHarnessConfig(w http.ResponseWriter, r *http.Request, id string) {
-	hc, err := s.store.GetHarnessConfig(r.Context(), id)
+	ctx := r.Context()
+	hc, err := s.store.GetHarnessConfig(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	writeJSON(w, http.StatusOK, hc)
+
+	resp := HarnessConfigWithCapabilities{HarnessConfig: *hc}
+	if identity := GetIdentityFromContext(ctx); identity != nil {
+		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, harnessConfigResource(hc))
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, id string) {

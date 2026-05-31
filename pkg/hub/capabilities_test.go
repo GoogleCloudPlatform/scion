@@ -339,6 +339,23 @@ func TestResourceBuilders(t *testing.T) {
 		assert.Equal(t, "u1", r.OwnerID)
 	})
 
+	t.Run("harnessConfigResource", func(t *testing.T) {
+		hc := &store.HarnessConfig{ID: "hc1", OwnerID: "u1"}
+		r := harnessConfigResource(hc)
+		assert.Equal(t, "harness_config", r.Type)
+		assert.Equal(t, "hc1", r.ID)
+		assert.Equal(t, "u1", r.OwnerID)
+		assert.Empty(t, r.ParentType)
+	})
+
+	t.Run("harnessConfigResource project-scoped", func(t *testing.T) {
+		hc := &store.HarnessConfig{ID: "hc2", OwnerID: "u1", Scope: store.HarnessConfigScopeProject, ScopeID: "p1"}
+		r := harnessConfigResource(hc)
+		assert.Equal(t, "harness_config", r.Type)
+		assert.Equal(t, "project", r.ParentType)
+		assert.Equal(t, "p1", r.ParentID)
+	})
+
 	t.Run("groupResource", func(t *testing.T) {
 		g := &store.Group{ID: "grp1", OwnerID: "u1"}
 		r := groupResource(g)

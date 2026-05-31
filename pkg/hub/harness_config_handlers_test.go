@@ -140,6 +140,46 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 	}
 }
 
+// TestHarnessConfigListByScopeAndProject verifies that combining scope=project
+// with a projectId narrows results to that single project (the case used by the
+// web resource list). Without the dedicated filter branch this would return
+// every project's configs.
+func TestHarnessConfigListByScopeAndProject(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	for _, hc := range []*store.HarnessConfig{
+		{ID: "hc_g", Slug: "g", Name: "G", Harness: "claude", Scope: "global",
+			Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive, Created: now, Updated: now},
+		{ID: "hc_a", Slug: "a", Name: "A", Harness: "claude", Scope: "project", ScopeID: "project_abc",
+			Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive, Created: now, Updated: now},
+		{ID: "hc_b", Slug: "b", Name: "B", Harness: "claude", Scope: "project", ScopeID: "project_xyz",
+			Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive, Created: now, Updated: now},
+	} {
+		if err := s.CreateHarnessConfig(ctx, hc); err != nil {
+			t.Fatalf("failed to create harness config %s: %v", hc.ID, err)
+		}
+	}
+
+	// scope=project + projectId should return only that project's configs.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs?scope=project&projectId=project_abc", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp ListHarnessConfigsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.HarnessConfigs) != 1 || resp.HarnessConfigs[0].ID != "hc_a" {
+		ids := make([]string, len(resp.HarnessConfigs))
+		for i, hc := range resp.HarnessConfigs {
+			ids[i] = hc.ID
+		}
+		t.Errorf("expected only [hc_a], got %v", ids)
+	}
+}
+
 func TestHarnessConfigCreate(t *testing.T) {
 	srv, _ := testServer(t)
 
@@ -289,4 +329,71 @@ func TestHarnessConfigPatch(t *testing.T) {
 	if result.Description != "Updated description" {
 		t.Errorf("expected description 'Updated description', got %q", result.Description)
 	}
+}
+
+func TestHarnessConfigExposesCapabilities(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	hc := &store.HarnessConfig{
+		ID:         "hc_caps1",
+		Slug:       "caps-hc",
+		Name:       "Caps HC",
+		Harness:    "claude",
+		Scope:      "global",
+		Visibility: store.VisibilityPublic,
+		Status:     store.HarnessConfigStatusActive,
+		Created:    time.Now(),
+		Updated:    time.Now(),
+	}
+	if err := s.CreateHarnessConfig(ctx, hc); err != nil {
+		t.Fatalf("failed to create harness config: %v", err)
+	}
+
+	// GET exposes per-item capabilities (dev token is admin → all actions).
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs/hc_caps1", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var got HarnessConfigWithCapabilities
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if got.Cap == nil {
+		t.Fatalf("expected _capabilities on GET response, got nil")
+	}
+	if !hasAction(got.Cap, ActionUpdate) {
+		t.Errorf("expected admin to have update capability, got %v", got.Cap.Actions)
+	}
+
+	// List exposes per-item and scope capabilities.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var listResp ListHarnessConfigsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&listResp); err != nil {
+		t.Fatalf("failed to decode list response: %v", err)
+	}
+	if listResp.Capabilities == nil || !hasAction(listResp.Capabilities, ActionList) {
+		t.Errorf("expected scope-level list capability, got %v", listResp.Capabilities)
+	}
+	if len(listResp.HarnessConfigs) != 1 || listResp.HarnessConfigs[0].Cap == nil {
+		t.Fatalf("expected one harness config with capabilities")
+	}
+	if !hasAction(listResp.HarnessConfigs[0].Cap, ActionUpdate) {
+		t.Errorf("expected per-item update capability, got %v", listResp.HarnessConfigs[0].Cap.Actions)
+	}
+}
+
+func hasAction(c *Capabilities, action Action) bool {
+	if c == nil {
+		return false
+	}
+	for _, a := range c.Actions {
+		if a == string(action) {
+			return true
+		}
+	}
+	return false
 }

@@ -31,6 +31,7 @@ var ResourceActions = map[string][]Action{
 	"agent":               {ActionRead, ActionUpdate, ActionDelete, ActionStart, ActionStop, ActionMessage, ActionAttach},
 	"project":             {ActionRead, ActionUpdate, ActionDelete, ActionManage, ActionRegister},
 	"template":            {ActionRead, ActionUpdate, ActionDelete},
+	"harness_config":      {ActionRead, ActionUpdate, ActionDelete},
 	"group":               {ActionRead, ActionUpdate, ActionDelete, ActionAddMember, ActionRemoveMember},
 	"user":                {ActionRead, ActionUpdate},
 	"policy":              {ActionRead, ActionUpdate, ActionDelete},
@@ -43,6 +44,7 @@ var ScopeActions = map[string][]Action{
 	"agent":               {ActionCreate, ActionList, ActionStopAll},
 	"project":             {ActionCreate, ActionList},
 	"template":            {ActionCreate, ActionList},
+	"harness_config":      {ActionCreate, ActionList},
 	"group":               {ActionCreate, ActionList},
 	"policy":              {ActionCreate, ActionList},
 	"broker":              {ActionCreate, ActionList},
@@ -79,6 +81,22 @@ func templateResource(t *store.Template) Resource {
 		ID:      t.ID,
 		OwnerID: t.OwnerID,
 	}
+}
+
+// harnessConfigResource constructs a Resource from a store.HarnessConfig for capability computation.
+func harnessConfigResource(hc *store.HarnessConfig) Resource {
+	r := Resource{
+		Type:    "harness_config",
+		ID:      hc.ID,
+		OwnerID: hc.OwnerID,
+	}
+	// Project-scoped harness configs are children of the project, so project
+	// owner/admin bypass applies (mirrors gcpServiceAccountResource).
+	if hc.Scope == store.HarnessConfigScopeProject && hc.ScopeID != "" {
+		r.ParentType = "project"
+		r.ParentID = hc.ScopeID
+	}
+	return r
 }
 
 // groupResource constructs a Resource from a store.Group for capability computation.

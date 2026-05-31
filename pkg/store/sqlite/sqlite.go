@@ -3393,6 +3393,10 @@ func (s *SQLiteStore) ListHarnessConfigs(ctx context.Context, filter store.Harne
 		// When projectId is set without scope, return global + project-scoped configs for this project
 		conditions = append(conditions, "(scope = 'global' OR (scope = 'project' AND scope_id = ?))")
 		args = append(args, filter.ProjectID)
+	} else if filter.ProjectID != "" {
+		// projectId combined with an explicit scope filter — narrow to that project.
+		conditions = append(conditions, "scope_id = ?")
+		args = append(args, filter.ProjectID)
 	}
 	if filter.Harness != "" {
 		conditions = append(conditions, "harness = ?")
