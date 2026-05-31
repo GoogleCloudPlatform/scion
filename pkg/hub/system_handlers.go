@@ -415,9 +415,14 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 	rt := runtime.GetRuntime("", "")
 
 	go func() {
-		_ = runtime.PullImages(context.Background(), rt, req.Harnesses, registry, func(pr runtime.PullResult) {
+		if err := runtime.PullImages(context.Background(), rt, req.Harnesses, registry, func(pr runtime.PullResult) {
 			s.events.PublishRaw("system.images."+jobID, pr)
-		})
+		}); err != nil {
+			s.events.PublishRaw("system.images."+jobID, map[string]string{
+				"status": "error",
+				"error":  err.Error(),
+			})
+		}
 	}()
 
 	writeJSON(w, http.StatusOK, imagePullResponse{JobID: jobID})
@@ -470,13 +475,15 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	wd, err := os.Getwd()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "cannot determine working directory", nil)
+	var buildScript string
+	if root := os.Getenv("SCION_ROOT"); root != "" {
+		buildScript = filepath.Join(root, "image-build", "scripts", "build-images.sh")
+	} else if exe, err := os.Executable(); err == nil {
+		buildScript = filepath.Join(filepath.Dir(exe), "..", "image-build", "scripts", "build-images.sh")
+	} else {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "cannot determine install location: set SCION_ROOT or ensure the binary path is resolvable", nil)
 		return
 	}
-
-	buildScript := filepath.Join(wd, "image-build", "scripts", "build-images.sh")
 	if _, err := os.Stat(buildScript); err != nil {
 		writeError(w, http.StatusNotFound, ErrCodeNotFound, "build script not found at "+buildScript, nil)
 		return
@@ -487,7 +494,7 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 
 	go func() {
 		cmd := exec.CommandContext(context.Background(), buildScript, "--target", "harnesses")
-		cmd.Dir = wd
+		cmd.Dir = filepath.Dir(buildScript)
 
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {

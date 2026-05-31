@@ -94,7 +94,8 @@ func ClassifyPath(ctx context.Context, s store.Store, path, managedRoot string) 
 	}
 
 	if s != nil && pc.IsDir {
-		result, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 500})
+		// Cap at 10000 projects; installations with more will not detect duplicates beyond this limit.
+		result, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 10000})
 		if err == nil && result != nil {
 			for _, proj := range result.Items {
 				providers, err := s.GetProjectProviders(ctx, proj.ID)

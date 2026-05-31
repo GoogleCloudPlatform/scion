@@ -112,7 +112,7 @@ export class ScionPageProjectCreate extends LitElement {
 
   private async checkGitHubApp(): Promise<void> {
     try {
-      const res = await fetch('/api/v1/github-app', { credentials: 'include' });
+      const res = await apiFetch('/api/v1/github-app');
       if (!res.ok) return;
       const data = (await res.json()) as { configured: boolean; installation_url?: string };
       if (data.configured && data.installation_url) {
@@ -454,9 +454,8 @@ export class ScionPageProjectCreate extends LitElement {
 
   private async checkExistingProjects(gitUrl: string): Promise<void> {
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `/api/v1/projects?gitRemote=${encodeURIComponent(gitUrl)}`,
-        { credentials: 'include' },
       );
       if (!response.ok) return;
       const data = (await response.json()) as {
@@ -540,9 +539,8 @@ export class ScionPageProjectCreate extends LitElement {
         }
       }
 
-      const response = await fetch('/api/v1/projects', {
+      const response = await apiFetch('/api/v1/projects', {
         method: 'POST',
-        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
@@ -566,9 +564,8 @@ export class ScionPageProjectCreate extends LitElement {
 
       // Two-step linked create: add provider after project creation
       if (this.mode === 'linked') {
-        const providerRes = await fetch(`/api/v1/projects/${projectId}/providers`, {
+        const providerRes = await apiFetch(`/api/v1/projects/${projectId}/providers`, {
           method: 'POST',
-          credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             brokerId: this.embeddedBrokerID,
