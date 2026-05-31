@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
 // HubConnectivityError indicates the Hub is unreachable.
@@ -90,18 +89,21 @@ func IsHubConnectivityError(err error) bool {
 	return false
 }
 
-// Hydrator fetches templates from Hub storage and caches them locally.
+// Hydrator fetches templates from Hub storage and caches them locally. It is a
+// thin template-kind wrapper around the kind-generic Resolver (resolver.go);
+// its public API is preserved for existing call sites.
 type Hydrator struct {
-	cache     *Cache
-	hubClient hubclient.Client
+	r *Resolver
 }
 
-// NewHydrator creates a new template hydrator.
+// NewHydrator creates a new template hydrator. A nil hubClient yields a resolver
+// that reports "hub client not configured" rather than panicking.
 func NewHydrator(cache *Cache, hubClient hubclient.Client) *Hydrator {
-	return &Hydrator{
-		cache:     cache,
-		hubClient: hubClient,
+	var f resourceFetcher
+	if hubClient != nil {
+		f = &templateFetcher{client: hubClient}
 	}
+	return &Hydrator{r: NewResolver(cache, f, "template")}
 }
 
 // Hydrate fetches a template from the Hub and returns the local path.
@@ -109,97 +111,20 @@ func NewHydrator(cache *Cache, hubClient hubclient.Client) *Hydrator {
 // Otherwise the whole resource is downloaded, hash-verified, and stored under
 // its content hash. The templateRef can be a template ID, slug, or name.
 func (h *Hydrator) Hydrate(ctx context.Context, templateRef string) (string, error) {
-	if h.hubClient == nil {
-		return "", fmt.Errorf("hub client not configured")
-	}
-
-	// Step 1: Get template metadata from Hub
-	template, err := h.hubClient.Templates().Get(ctx, templateRef)
-	if err != nil {
-		if IsHubConnectivityError(err) {
-			return "", &HubConnectivityError{Cause: err}
-		}
-		return "", fmt.Errorf("failed to get template metadata: %w", err)
-	}
-
-	if template == nil {
-		return "", fmt.Errorf("template not found: %s", templateRef)
-	}
-
-	// Step 2: Content-addressed cache hit (fast path)
-	if template.ContentHash != "" {
-		if cachedPath, ok := h.cache.Get(template.ContentHash); ok {
-			return cachedPath, nil
-		}
-	}
-
-	// Step 3: Request download URLs from Hub (includes per-file hashes)
-	downloadResp, err := h.hubClient.Templates().RequestDownloadURLs(ctx, template.ID)
-	if err != nil {
-		if IsHubConnectivityError(err) {
-			return "", &HubConnectivityError{Cause: err}
-		}
-		return "", fmt.Errorf("failed to get download URLs: %w", err)
-	}
-
-	if len(downloadResp.Files) == 0 {
-		return "", fmt.Errorf("template has no files: %s", templateRef)
-	}
-
-	// Step 4: Download the whole resource and verify each file's hash.
-	files := make(map[string][]byte, len(downloadResp.Files))
-	for _, fileInfo := range downloadResp.Files {
-		content, dlErr := h.hubClient.Templates().DownloadFile(ctx, fileInfo.URL)
-		if dlErr != nil {
-			if IsHubConnectivityError(dlErr) {
-				return "", &HubConnectivityError{Cause: dlErr}
-			}
-			return "", fmt.Errorf("failed to download file %s: %w", fileInfo.Path, dlErr)
-		}
-
-		if fileInfo.Hash != "" {
-			actualHash := transfer.HashBytes(content)
-			if actualHash != fileInfo.Hash {
-				return "", fmt.Errorf("hash mismatch for file %s: expected %s, got %s",
-					fileInfo.Path, fileInfo.Hash, actualHash)
-			}
-		}
-
-		files[fileInfo.Path] = content
-	}
-
-	// Step 5: Store in cache keyed by content hash.
-	contentHash := template.ContentHash
-	if contentHash == "" {
-		contentHash = h.computeContentHash(files)
-	}
-
-	newCachePath, storeErr := h.cache.Put(contentHash, files)
-	if storeErr != nil {
-		return "", fmt.Errorf("failed to cache template: %w", storeErr)
-	}
-
-	return newCachePath, nil
+	return h.r.Resolve(ctx, templateRef)
 }
 
 // HydrateWithHash fetches a template, using the provided hash for a fast cache
 // lookup. This is useful when the Hub dispatcher includes the content hash in
 // the request, letting the broker skip the metadata round-trip on a cache hit.
 func (h *Hydrator) HydrateWithHash(ctx context.Context, templateRef string, contentHash string) (string, error) {
-	if contentHash != "" {
-		if cachedPath, ok := h.cache.Get(contentHash); ok {
-			return cachedPath, nil
-		}
-	}
-
-	// Fall back to full hydration
-	return h.Hydrate(ctx, templateRef)
+	return h.r.ResolveWithHash(ctx, templateRef, contentHash)
 }
 
 // PrefetchTemplate downloads and caches a template without returning the path.
 // This is useful for warming the cache in the background.
 func (h *Hydrator) PrefetchTemplate(ctx context.Context, templateRef string) error {
-	_, err := h.Hydrate(ctx, templateRef)
+	_, err := h.r.Resolve(ctx, templateRef)
 	return err
 }
 
@@ -228,16 +153,4 @@ func DefaultHydratorConfig() HydratorConfig {
 		CacheMaxSize:    DefaultMaxSize,
 		DownloadTimeout: 5 * time.Minute,
 	}
-}
-
-// computeContentHash computes an aggregate hash of all template files.
-func (h *Hydrator) computeContentHash(files map[string][]byte) string {
-	var fileInfos []transfer.FileInfo
-	for path, content := range files {
-		fileInfos = append(fileInfos, transfer.FileInfo{
-			Path: path,
-			Hash: transfer.HashBytes(content),
-		})
-	}
-	return transfer.ComputeContentHash(fileInfos)
 }

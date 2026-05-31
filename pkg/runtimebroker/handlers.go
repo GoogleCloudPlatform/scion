@@ -782,7 +782,11 @@ func (s *Server) hydrateTemplate(ctx context.Context, cfg *CreateAgentConfig, co
 	// Local-backend direct read: the backend is the filesystem, so resolution is
 	// a local path read — no HTTP, no cache.
 	if conn.LocalStorage != nil {
-		path, err := s.resolveLocalTemplate(ctx, cfg, conn)
+		ref := cfg.TemplateID
+		if ref == "" {
+			ref = cfg.Template
+		}
+		path, err := s.resolveLocalResource(ctx, storage.ResourceKindTemplate, ref, conn)
 		if err != nil {
 			return "", err
 		}
@@ -811,58 +815,84 @@ func (s *Server) hydrateTemplate(ctx context.Context, cfg *CreateAgentConfig, co
 }
 
 // localObjectResolver is implemented by storage backends (the local filesystem
-// backend) that can map an object path to an absolute on-disk path.
+// backend) that can map an object path to an absolute on-disk path. This is the
+// LocalDirBackend seam from §7.3: one assertion, used for every resource kind.
 type localObjectResolver interface {
 	ObjectFSPath(objectPath string) string
 }
 
-// resolveLocalTemplate resolves a template directly from a co-located local
-// storage backend. It returns the on-disk directory backing the template, or an
-// empty string if the backend cannot serve it directly (caller then falls back
-// to hydration). Template metadata is fetched from the Hub to learn the
+// resolveLocalResource resolves a resource of the given kind directly from a
+// co-located local storage backend. It returns the on-disk directory backing the
+// resource, or an empty string if the backend cannot serve it directly (caller
+// then falls back to hydration). Metadata is fetched from the Hub to learn the
 // resource's scope/slug; over a co-located loopback connection this is a cheap
 // DB read.
-func (s *Server) resolveLocalTemplate(ctx context.Context, cfg *CreateAgentConfig, conn *HubConnection) (string, error) {
+func (s *Server) resolveLocalResource(ctx context.Context, kind storage.ResourceKind, ref string, conn *HubConnection) (string, error) {
 	resolver, ok := conn.LocalStorage.(localObjectResolver)
-	if !ok || conn.HubClient == nil {
+	if !ok || conn.HubClient == nil || ref == "" {
 		return "", nil
 	}
 
-	ref := cfg.TemplateID
-	if ref == "" {
-		ref = cfg.Template
-	}
-	if ref == "" {
-		return "", nil
-	}
-
-	tmpl, err := conn.HubClient.Templates().Get(ctx, ref)
+	objectPath, err := s.resourceObjectPath(ctx, kind, ref, conn)
 	if err != nil {
-		if templatecache.IsHubConnectivityError(err) {
-			return "", &templatecache.HubConnectivityError{Cause: err}
-		}
-		return "", fmt.Errorf("failed to get template metadata: %w", err)
+		return "", err
 	}
-	if tmpl == nil {
-		return "", nil
-	}
-
-	objectPath := tmpl.StoragePath
 	if objectPath == "" {
-		scopeID := tmpl.ScopeID
-		if scopeID == "" {
-			scopeID = tmpl.ProjectID
-		}
-		objectPath = storage.TemplateStoragePath(tmpl.Scope, scopeID, tmpl.Slug)
+		return "", nil
 	}
 
 	dir := resolver.ObjectFSPath(objectPath)
-	info, err := os.Stat(dir)
-	if err != nil || !info.IsDir() {
+	info, statErr := os.Stat(dir)
+	if statErr != nil || !info.IsDir() {
 		// Backend doesn't have the files on disk; let the caller hydrate.
 		return "", nil
 	}
 	return dir, nil
+}
+
+// resourceObjectPath fetches resource metadata over the hub connection and
+// returns its storage object path, falling back to the kind-keyed scope layout
+// when the record carries no explicit StoragePath.
+func (s *Server) resourceObjectPath(ctx context.Context, kind storage.ResourceKind, ref string, conn *HubConnection) (string, error) {
+	switch kind {
+	case storage.ResourceKindHarnessConfig:
+		hc, err := conn.HubClient.HarnessConfigs().Get(ctx, ref)
+		if err != nil {
+			return "", wrapResourceMetaErr(err, "harness-config")
+		}
+		if hc == nil {
+			return "", nil
+		}
+		if hc.StoragePath != "" {
+			return hc.StoragePath, nil
+		}
+		return storage.ResourceStoragePath(kind, hc.Scope, hc.ScopeID, hc.Slug), nil
+	default:
+		tmpl, err := conn.HubClient.Templates().Get(ctx, ref)
+		if err != nil {
+			return "", wrapResourceMetaErr(err, "template")
+		}
+		if tmpl == nil {
+			return "", nil
+		}
+		if tmpl.StoragePath != "" {
+			return tmpl.StoragePath, nil
+		}
+		scopeID := tmpl.ScopeID
+		if scopeID == "" {
+			scopeID = tmpl.ProjectID
+		}
+		return storage.ResourceStoragePath(kind, tmpl.Scope, scopeID, tmpl.Slug), nil
+	}
+}
+
+// wrapResourceMetaErr normalizes a hub metadata-fetch error, preserving the
+// HubConnectivityError signal used by the provision path.
+func wrapResourceMetaErr(err error, label string) error {
+	if templatecache.IsHubConnectivityError(err) {
+		return &templatecache.HubConnectivityError{Cause: err}
+	}
+	return fmt.Errorf("failed to get %s metadata: %w", label, err)
 }
 
 func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
