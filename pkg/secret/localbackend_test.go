@@ -746,9 +746,9 @@ func TestLocalBackend_ResolveProgeny_DeepAncestry(t *testing.T) {
 	}
 }
 
-// TestLocalBackend_ResolveProgeny_GroveOverridesProgeny verifies that
+// TestLocalBackend_ResolveProgeny_ProjectOverridesProgeny verifies that
 // project-scoped secrets with the same key take precedence over progeny secrets.
-func TestLocalBackend_ResolveProgeny_GroveOverridesProgeny(t *testing.T) {
+func TestLocalBackend_ResolveProgeny_ProjectOverridesProgeny(t *testing.T) {
 	backend, s := createTestBackend(t)
 	ctx := context.Background()
 

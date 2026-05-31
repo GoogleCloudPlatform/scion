@@ -15,7 +15,7 @@ import (
 	"testing"
 )
 
-// TestInitGroveDataIsolation is a canary test that verifies sciontool source code
+// TestInitProjectDataIsolation is a canary test that verifies sciontool source code
 // does NOT import the pkg/config package, which contains project path resolution logic.
 // This is a compile-time guarantee that in-container code cannot access project data paths.
 // If this test fails, it means someone added a pkg/config import to sciontool code,
