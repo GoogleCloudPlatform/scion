@@ -63,6 +63,9 @@ func PullImages(ctx context.Context, rt Runtime, harnesses []string, registry st
 	}
 
 	for _, img := range images {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		exists, err := rt.ImageExists(ctx, img)
 		if err != nil {
 			onEvent(PullResult{Image: img, Status: "error", Error: err.Error()})
