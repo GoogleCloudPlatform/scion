@@ -181,7 +181,7 @@ All `--grove` flags are properly deprecated with `MarkDeprecated` + `MarkHidden`
 | Path Pattern | Used For | Files |
 |---|---|---|
 | `grove-configs/` | Legacy project configs dir | `pkg/config/paths.go:32`, `pkg/config/project_marker.go:93`, `pkg/config/project_discovery.go:97,359`, `pkg/config/shared_dirs.go:47` |
-| `.scion.groves/<slug>/` | Hub-native project workspace | `pkg/runtimebroker/start_context.go:81,100,115`, `pkg/runtimebroker/handlers.go:603,892` |
+| `.scion.groves/<slug>/` | Hub-managed project workspace | `pkg/runtimebroker/start_context.go:81,100,115`, `pkg/runtimebroker/handlers.go:603,892` |
 | `grove-id` | Legacy project ID file | `pkg/config/project_marker.go:219-231`, `pkg/config/settings.go:552-557` |
 | `grove-workspace` | Shared workspace path segment | `pkg/storage/storage.go:255` |
 | `groves/` | Legacy projects directory | `pkg/config/paths.go:33`, `pkg/runtimebroker/server.go:870`, `pkg/runtimebroker/start_context.go:100` |

@@ -1,4 +1,4 @@
-# Hub-Native Groves: Filesystem-Based Workspaces on the Hub
+# Hub-Managed Groves: Filesystem-Based Workspaces on the Hub
 
 **Created:** 2026-02-23
 **Status:** Partially-implemented
@@ -13,7 +13,7 @@ Today, groves are created in two ways:
 1. **Local-first**: Run `scion grove init` inside a local git checkout, optionally register with the Hub.
 2. **Git-URL-first**: Create a grove on the Hub from a remote git URL (per `git-groves.md`). Agents clone the repo at startup.
 
-This document proposes a third mode: **Hub-native groves** — groves whose workspace is a plain directory on the Hub server's filesystem, with no backing git repository. These groves are created entirely through the web interface (or Hub API), enabling users to spin up agent workspaces without any local machine, CLI, or git hosting involvement.
+This document proposes a third mode: **Hub-managed groves** — groves whose workspace is a plain directory on the Hub server's filesystem, with no backing git repository. These groves are created entirely through the web interface (or Hub API), enabling users to spin up agent workspaces without any local machine, CLI, or git hosting involvement.
 
 ### Motivation
 
@@ -39,7 +39,7 @@ This document proposes a third mode: **Hub-native groves** — groves whose work
 
 ## 2. Filesystem Layout
 
-Hub-native groves are stored under the global Scion directory on the Hub server:
+Hub-managed groves are stored under the global Scion directory on the Hub server:
 
 ```
 ~/.scion/groves/
@@ -68,7 +68,7 @@ The grove directory name is derived from the grove slug. Since slugs are already
 
 ### 3.1 Conceptual Steps
 
-Creating a hub-native grove is equivalent to:
+Creating a hub-managed grove is equivalent to:
 
 ```bash
 mkdir -p ~/.scion/groves/<slug>
@@ -108,13 +108,13 @@ The Hub server imports `pkg/config` and calls `InitProject(targetDir, harnesses)
 
 **Rejected alternatives:**
 - **Hub shells out to `scion` CLI** — Subprocess error handling is less ergonomic, and interactive prompts would need to be bypassed. Not worth the indirection.
-- **Dedicated minimal handler** — Risk of parallel code paths diverging from local behavior. Could be a later evolution if hub-native groves develop distinct requirements.
+- **Dedicated minimal handler** — Risk of parallel code paths diverging from local behavior. Could be a later evolution if hub-managed groves develop distinct requirements.
 
 ---
 
 ## 4. Agent Workspace Provisioning
 
-When an agent is created against a hub-native grove, the workspace must be made available to the agent container. Hub-native groves should be treated the same as any local non-git grove — matching existing solo-mode behavior.
+When an agent is created against a hub-managed grove, the workspace must be made available to the agent container. Hub-managed groves should be treated the same as any local non-git grove — matching existing solo-mode behavior.
 
 ### 4.1 Colocated Broker: Direct Bind-Mount
 
@@ -146,41 +146,41 @@ On the remote broker, the workspace is created at the same conventional path (`~
 
 **Decision: Infer from absence of GitRemote (no schema change).**
 
-If `GitRemote == ""`, the grove is hub-native. The workspace path is derived conventionally from `~/.scion/groves/<slug>`. No new fields needed.
+If `GitRemote == ""`, the grove is hub-managed. The workspace path is derived conventionally from `~/.scion/groves/<slug>`. No new fields needed.
 
-Hub-native groves should be treated as much as possible like any local non-git grove on any broker, except at a conventional path location (`~/.scion/groves/<slug>`) instead of an arbitrary pre-existing path that gets stored when a broker is linked.
+Hub-managed groves should be treated as much as possible like any local non-git grove on any broker, except at a conventional path location (`~/.scion/groves/<slug>`) instead of an arbitrary pre-existing path that gets stored when a broker is linked.
 
 Labels can be added for metadata if needed without a migration.
 
-### 5.2 Grove ID for Hub-Native Groves
+### 5.2 Grove ID for Hub-Managed Groves
 
-Git-anchored groves use a deterministic hash of the normalized git URL. Hub-native groves have no URL to hash, so they should use a generated UUID — which is already the fallback in `GenerateGroveID()` when no git remote is found.
+Git-anchored groves use a deterministic hash of the normalized git URL. Hub-managed groves have no URL to hash, so they should use a generated UUID — which is already the fallback in `GenerateGroveID()` when no git remote is found.
 
 ### 5.3 populateAgentConfig Changes
 
-The existing `populateAgentConfig()` in `pkg/hub/handlers.go:4397` populates `GitClone` config when `grove.GitRemote != ""`. For hub-native groves, it should instead set the `Workspace` field to the grove's filesystem path (for colocated brokers) or set `WorkspaceStoragePath` (for remote brokers after sync upload).
+The existing `populateAgentConfig()` in `pkg/hub/handlers.go:4397` populates `GitClone` config when `grove.GitRemote != ""`. For hub-managed groves, it should instead set the `Workspace` field to the grove's filesystem path (for colocated brokers) or set `WorkspaceStoragePath` (for remote brokers after sync upload).
 
 ---
 
 ## 6. Resolved Questions
 
-### Q1: Should hub-native groves auto-initialize a git repo?
+### Q1: Should hub-managed groves auto-initialize a git repo?
 
-**Decision: No, not for now.** Hub-native groves should mirror the behavior of other non-git workspaces. Auto-initializing git is a potential future improvement, possibly as an optional argument at creation time.
+**Decision: No, not for now.** Hub-managed groves should mirror the behavior of other non-git workspaces. Auto-initializing git is a potential future improvement, possibly as an optional argument at creation time.
 
 ### Q2: How should the Hub server discover its own URL for `hub enable`?
 
 **Decision: Read from `~/.scion/settings.yaml`.** The Hub server's own endpoint URL can be retrieved from the global settings file, which is already configured when the Hub is set up.
 
-### Q3: What happens when a hub-native grove is deleted?
+### Q3: What happens when a hub-managed grove is deleted?
 
 **Decision: Full cleanup.** The grove record is deleted from the database, and the filesystem directory at `~/.scion/groves/<slug>/` is removed. When `deleteAgents=true` is passed, agent deletions are dispatched to their runtime brokers before the grove record is deleted (so containers are stopped and agent files are cleaned up). Database cascade handles removal of agent, template, and provider records.
 
-### Q4: Should hub-native groves be promotable to git-remote groves?
+### Q4: Should hub-managed groves be promotable to git-remote groves?
 
-**Decision: Deferred.** This is a strong candidate for a future improvement — converting a hub-native grove to a git-anchored grove by initializing git, adding a remote, pushing, and updating the grove record. Not in initial scope.
+**Decision: Deferred.** This is a strong candidate for a future improvement — converting a hub-managed grove to a git-anchored grove by initializing git, adding a remote, pushing, and updating the grove record. Not in initial scope.
 
-### Q5: Can multiple Hubs serve the same hub-native grove?
+### Q5: Can multiple Hubs serve the same hub-managed grove?
 
 **Decision: No.** The grove lives on one Hub's filesystem. This is a single-Hub feature by nature. Remote brokers can serve agents for it via sync, but the source of truth is one Hub's disk.
 
@@ -190,7 +190,7 @@ The existing `populateAgentConfig()` in `pkg/hub/handlers.go:4397` populates `Gi
 
 ### Q7: Workspace seeding / initial content
 
-**Decision: Start empty.** Hub-native groves are created with an empty workspace. Content can be added via the existing CLI sync mechanism. File upload and starter templates are deferred to a later phase.
+**Decision: Start empty.** Hub-managed groves are created with an empty workspace. Content can be added via the existing CLI sync mechanism. File upload and starter templates are deferred to a later phase.
 
 ---
 
@@ -201,9 +201,9 @@ The existing `populateAgentConfig()` in `pkg/hub/handlers.go:4397` populates `Gi
 The grove creation form should include a **distinct mode selector** for choosing the grove type:
 
 - **Git Repository** — Existing flow: user provides a git URL.
-- **Hub Workspace** — New flow: no git URL, creates a hub-native grove.
+- **Hub-managed Workspace** — New flow: no git URL, creates a hub-managed grove.
 
-The Hub Workspace form should allow the user to specify:
+The Hub-managed Workspace form should allow the user to specify:
 - Grove name (required).
 - Slug (auto-derived, optionally overridden).
 - Visibility (private/team/public).
@@ -212,13 +212,13 @@ The Hub Workspace form should allow the user to specify:
 
 Grove type should be visually distinguishable via a **small glyph on the grove card component**:
 - **Git-based groves**: branching icon with mouseover helptext "Git based grove".
-- **Hub-native groves**: folder icon with mouseover helptext "Folder based grove".
+- **Hub-managed groves**: folder icon with mouseover helptext "Folder based grove".
 
-The grove detail view should omit the git remote / clone URL section for hub-native groves.
+The grove detail view should omit the git remote / clone URL section for hub-managed groves.
 
 ### 7.3 File Browser
 
-A web-based file browser for hub-native grove workspaces is a natural follow-on feature but is **out of scope** for this design. Noted as a motivating future use case.
+A web-based file browser for hub-managed grove workspaces is a natural follow-on feature but is **out of scope** for this design. Noted as a motivating future use case.
 
 ---
 
@@ -245,14 +245,14 @@ When bind-mounting grove directories into agent containers, standard container i
 
 ## 9. Implementation Phases
 
-### Phase 1: Minimal Hub-Native Grove
+### Phase 1: Minimal Hub-Managed Grove
 completed
 
 - Hub API accepts grove creation with no `gitRemote`.
 - Hub creates `~/.scion/groves/<slug>/` directory with `InitProject()`.
 - Writes hub settings into `.scion/settings.yaml` (hub endpoint read from global settings).
 - Colocated broker bind-mounts the grove directory for agents (shared mount, matching solo-mode).
-- Web UI grove creation form with distinct mode selector for git vs hub workspace.
+- Web UI grove creation form with distinct mode selector for git vs hub-managed workspace.
 - Grove card glyph distinguishing git-based and folder-based groves.
 
 ### Phase 2: Remote Broker Support
@@ -266,20 +266,20 @@ completed
 ### Phase 3: Workspace Content Seeding
 completed
 
-- Web UI allows uploading initial files into a hub-native grove.
+- Web UI allows uploading initial files into a hub-managed grove.
 - Hub API endpoint for uploading files to a grove's workspace.
 - Optional starter templates for common project types.
 
 ### Phase 4: Grove Promotion
 pending
 
-- Convert a hub-native grove to a git-anchored grove.
+- Convert a hub-managed grove to a git-anchored grove.
 - Initialize git, add remote, push existing content.
 - Update grove record with `GitRemote`.
 
 ### Future Improvements
 
-- **Optional git init at creation**: Allow an optional `--git` argument when creating hub-native groves to auto-initialize a git repository.
+- **Optional git init at creation**: Allow an optional `--git` argument when creating hub-managed groves to auto-initialize a git repository.
 - ~~**Filesystem purge/prune**: Hub admin/maintenance tooling to clean up filesystem directories for soft-deleted groves.~~ (Implemented: grove deletion now removes filesystem directories.)
 - **Storage quotas**: Per-user and per-grove disk usage limits for multi-tenant deployments.
 - **Web file browser**: Browse and edit grove workspace files through the web UI.
@@ -290,7 +290,7 @@ pending
 
 | Design | Relationship |
 |--------|-------------|
-| `git-groves.md` | Complementary — git groves use clone, hub-native groves use local filesystem. Same grove API, different workspace strategy. |
-| `sync-design.md` | Hub-native groves use workspace sync for remote broker support (Phase 2). |
-| `hosted-architecture.md` | Hub-native groves fit the grove-centric model. The Hub is both state server and workspace host. |
-| `secrets.md` | Hub-native groves use the same secret management. No git tokens needed, but API keys and other secrets still apply. |
+| `git-groves.md` | Complementary — git groves use clone, hub-managed groves use local filesystem. Same grove API, different workspace strategy. |
+| `sync-design.md` | Hub-managed groves use workspace sync for remote broker support (Phase 2). |
+| `hosted-architecture.md` | Hub-managed groves fit the grove-centric model. The Hub is both state server and workspace host. |
+| `secrets.md` | Hub-managed groves use the same secret management. No git tokens needed, but API keys and other secrets still apply. |

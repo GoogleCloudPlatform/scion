@@ -120,7 +120,7 @@ The Hub provides a comprehensive UI for configuring project-level settings, ensu
 
 The Project Settings UI is organized into three primary tabs:
 
-- **General**: Configure the project's display name, description, and template sync settings. For git-backed projects, you can specify default branches. For hub-native projects, you can configure external git repositories to load templates from.
+- **General**: Configure the project's display name, description, and template sync settings. For git-backed projects, you can specify default branches. For hub-managed projects, you can configure external git repositories to load templates from.
 - **Limits**: Define constraints on agent execution to prevent resource exhaustion.
   - **Hub-level Defaults**: Administrators can configure global default limits that apply to all projects.
   - **Project-level Limits**: Overrides can be set per-project.
@@ -131,7 +131,7 @@ The Project Settings UI is organized into three primary tabs:
 
 ### Template Synchronization
 
-Projects support loading templates from external Git repositories, which is especially useful for non-Git-backed (hub-native) projects. The UI accepts bare host/org/repo URLs (e.g., `github.com/org/repo`) and automatically normalizes them, appending `/.scion/templates/` unless a deeper path is specified. This synchronization can be manually triggered via the UI to immediately pull the latest templates.
+Projects support loading templates from external Git repositories, which is especially useful for non-Git-backed (hub-managed) projects. The UI accepts bare host/org/repo URLs (e.g., `github.com/org/repo`) and automatically normalizes them, appending `/.scion/templates/` unless a deeper path is specified. This synchronization can be manually triggered via the UI to immediately pull the latest templates.
 
 ## Server Maintenance & Updates
 

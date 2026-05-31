@@ -58,10 +58,10 @@ All `.scion` configuration folders (other than the special global `~/.scion/`) a
 
 ```
 ~/.scion/grove-configs/<grove-slug>__<short-uuid>/.scion/    # All grove configs
-~/.scion/groves/<grove-name>/                                 # Hub-native workspaces only (pure workspace holder)
+~/.scion/groves/<grove-name>/                                 # Hub-managed workspaces only (pure workspace holder)
 ```
 
-This separation means `~/.scion/groves/` is a "pure" workspaces directory, and all configs are isolated from workspace content — whether those workspaces are hub-native (created via hub→broker) or linked by a user from the broker filesystem to a hub.
+This separation means `~/.scion/groves/` is a "pure" workspaces directory, and all configs are isolated from workspace content — whether those workspaces are hub-managed (created via hub→broker) or linked by a user from the broker filesystem to a hub.
 
 ### Grove Path Naming
 
@@ -270,7 +270,7 @@ Audited all in-container CLI operations to verify they route through the Hub API
 | Worktree compatibility | N/A | Preserved (worktrees stay in-repo) |
 | Code complexity | Medium (~10 resolution sites) | Medium (provisioning + cleanup) |
 | Template committability | Templates in external config | Templates in `.scion/templates/` (in git) |
-| Hub model convergence | Good (unifies with hub-native) | Partial |
+| Hub model convergence | Good (unifies with hub-managed) | Partial |
 | Defense model | Structural (data not present) | Structural (data not present) |
 
 ---

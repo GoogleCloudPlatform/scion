@@ -97,13 +97,13 @@ After evaluating several approaches (see [Appendix: Rejected Approaches](#append
 5. The agent creation form is **populated by available grove templates**
 
 **Why this works universally**:
-- The agent container has the grove's filesystem mounted (whether linked, git-cloned, or hub-native)
+- The agent container has the grove's filesystem mounted (whether linked, git-cloned, or hub-managed)
 - The `scion` CLI inside the container has access to all local templates
 - No special git access or broker APIs needed from the Hub
 
 **Container choice**: The dummy agent uses the `scion-base` container image (which includes the `scion` CLI) with the generic harness setting. It only needs Hub auth and endpoint environment variables — not a full LLM harness. The agent should be immediately deleted after the sync completes.
 
-**Hub-native groves**: These are the simplest case — templates are managed entirely on the Hub. No container-based sync is needed. Future improvements may add direct template creation/editing in the web UI, but for now hub-native grove templates are also managed via CLI and synced.
+**Hub-managed groves**: These are the simplest case — templates are managed entirely on the Hub. No container-based sync is needed. Future improvements may add direct template creation/editing in the web UI, but for now hub-managed grove templates are also managed via CLI and synced.
 
 ---
 
@@ -133,7 +133,7 @@ After evaluating several approaches (see [Appendix: Rejected Approaches](#append
 
 **Resolution**: The in-container sync approach (Section 3.2) works here — after cloning the repo, the dummy agent has access to the in-repo templates, and `scion templates sync --all` uploads everything it finds.
 
-### 4.3 Hub-Native Groves
+### 4.3 Hub-Managed Groves
 
 **Simplest case**: Templates are managed entirely on the Hub. The web UI creates/edits templates at grove scope directly. No filesystem variance to reconcile, no need for the in-container sync flow.
 
@@ -226,8 +226,8 @@ The web UI needs to:
 - Display read-only template list in grove settings
 - Populate agent creation form with Hub-synced grove-scoped templates only
 
-### Phase 3: Future — Hub-Native Template Editing (deferred)
-- Web UI support for creating/editing grove templates directly (hub-native groves first)
+### Phase 3: Future — Hub-Managed Template Editing (deferred)
+- Web UI support for creating/editing grove templates directly (hub-managed groves first)
 - Template content editor with file management
 - No container needed — direct Hub storage operations
 
@@ -274,6 +274,6 @@ Combined broker inventory reporting with lazy on-demand sync. Not selected in fa
 - [Hosted Templates](hosted/hosted-templates.md) - Hub template storage and management
 - [Decoupling Templates](decouple-templates.md) - Template/harness separation analysis
 - [Git Groves](hosted/git-groves.md) - Git grove architecture
-- [Hub Groves](hosted/hub-groves.md) - Hub-native grove design
+- [Hub Groves](hosted/hub-groves.md) - Hub-managed grove design
 - [Settings Externalization](../commit d0507b1) - Recent change moving git grove config external (template portion to be reverted)
 - [Agnostic Template Design](agnostic-template-design.md) - Harness-agnostic template system

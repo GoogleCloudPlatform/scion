@@ -85,7 +85,7 @@ Useful for debugging specific operational areas; lower log volume or less freque
 | `broker.heartbeat` | `pkg/runtimebroker/heartbeat.go` | Periodic status reports to hub. Very noisy at DEBUG level — filtering by subsystem prevents it from overwhelming other broker logs. |
 | `hub.env-secrets` | `pkg/hub/handlers.go` (env/secret handlers) | Environment variable and secret management. Sensitive operations worth isolating. |
 | `broker.env-secrets` | `pkg/runtimebroker/handlers.go` (finalizeEnv, secret resolution) | Broker-side environment gathering and finalization — multi-step process with detailed debug logging. |
-| `hub.templates` | `pkg/hub/template_handlers.go`, `template_bootstrap.go`, `harness_config_handlers.go` | Template CRUD, hydration, and hub-native grove bootstrap. |
+| `hub.templates` | `pkg/hub/template_handlers.go`, `template_bootstrap.go`, `harness_config_handlers.go` | Template CRUD, hydration, and hub-managed grove bootstrap. |
 | `hub.workspace` | `pkg/hub/workspace_handlers.go`, `grove_workspace_handlers.go` | Git worktree sync operations. Failures here can be subtle and hard to trace. |
 
 ### Tier 3: Lower Priority

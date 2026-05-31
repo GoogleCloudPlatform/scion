@@ -1,6 +1,6 @@
 # Release Notes (Feb 27, 2026)
 
-This release focuses on refining the hub-native grove experience, enhancing the web terminal's usability, and introducing new workspace management capabilities via the Hub API.
+This release focuses on refining the hub-managed grove experience, enhancing the web terminal's usability, and introducing new workspace management capabilities via the Hub API.
 
 ## 🚀 Features
 * **Workspace Management:** Added new Hub API endpoints for downloading individual workspace files and generating ZIP archives of entire groves, facilitating easier data export and backup.
@@ -9,7 +9,7 @@ This release focuses on refining the hub-native grove experience, enhancing the 
 * **Iconography Standardization:** Established a centralized icon reference system and updated the web interface to use consistent iconography for resources like groves, templates, and brokers.
 
 ## 🐛 Fixes
-* **Hub-Native Path Resolution:** Resolved several critical issues where hub-native groves incorrectly inherited local filesystem paths from the Hub server. Broker-side initialization of `.scion` directories and explicit path mapping now ensure consistent workspace behavior across distributed brokers.
+* **Hub-Managed Path Resolution:** Resolved several critical issues where hub-managed groves incorrectly inherited local filesystem paths from the Hub server. Broker-side initialization of `.scion` directories and explicit path mapping now ensure consistent workspace behavior across distributed brokers.
 * **Terminal & Clipboard UX:** Enabled native clipboard copy/paste support in the web terminal and relaxed availability checks to allow terminal access during agent startup and transition states.
 * **Real-time Data Integrity:** Fixed a bug in the frontend state manager where SSE delta updates could merge incorrectly; the manager is now reliably seeded with full REST data upon page load.
 * **Slug & Case Sensitivity:** Normalized agent slug lookups to lowercase and implemented stricter name validation to prevent routing collisions and inconsistent dispatcher behavior.

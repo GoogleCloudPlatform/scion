@@ -12,7 +12,7 @@ This release marks a major milestone with the completion of the canonical agent 
 * **Real-time Debug Observability:** Introduced a full-height debug panel in the Web UI, providing a real-time stream of SSE events and internal state transitions for advanced troubleshooting and observability.
 * **Enhanced Web UI Feedback:** Added emoji-based status badges to agent cards and list views, providing more intuitive visual indicators of agent health and activity.
 * **Broker Authorization & Identity:** Strengthened security by enforcing dispatch authorization checks and resolving creator identities for all registered runtime brokers.
-* **Automated Grove Cleanup:** Hardened the hub-native grove lifecycle by implementing cascaded directory cleanup on remote brokers whenever a grove is deleted via the Hub.
+* **Automated Grove Cleanup:** Hardened the hub-managed grove lifecycle by implementing cascaded directory cleanup on remote brokers whenever a grove is deleted via the Hub.
 * **CLI Enhancements:** Added a new `-n/--num-lines` flag to the `scion look` command, enabling tailored views of agent terminal output.
 
 ## 🐛 Fixes

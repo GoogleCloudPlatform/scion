@@ -87,7 +87,7 @@ Project created:
 ```
 
 :::note[Project ID Format]
-Git-backed projects use **deterministic UUID v5** identifiers, derived from the namespace and normalized git URL. This ensures the same repository always produces the same project ID regardless of protocol (`https://` vs `git@`). Hub-native projects (without a git repository) use random UUID v4 identifiers.
+Git-backed projects use **deterministic UUID v5** identifiers, derived from the namespace and normalized git URL. This ensures the same repository always produces the same project ID regardless of protocol (`https://` vs `git@`). Hub-managed projects (without a git repository) use random UUID v4 identifiers.
 :::
 
 ### Optional Flags

@@ -14,7 +14,7 @@ This release introduces a major new GCP Identity implementation allowing agents 
 
 ### 🐛 Fixes
 * **Grove & Membership Synchronization:** Resolved multiple issues with grove linking and membership backfills, including fixing unique constraints on grove IDs, ensuring proper legacy owner role assignments, and correctly including auto-provide brokers (consolidated from commits 4af2662, 307fb85, cb22a18, 79cc591, 1f6f16f, e14ec95).
-* **Storage & ID Consistency:** Fixed global grove ID bleed-through issues and unified agent split storage paths under `.scion/` for deterministic behavior across hub-native and external groves. Ensured cascading cleanups of templates and configs when a grove is deleted (consolidated from commits fea4588, 6bb2348, a97ebd7, 023a089, 6eaf8dc, 221c736, 75bfcc0, c9d8ddf).
+* **Storage & ID Consistency:** Fixed global grove ID bleed-through issues and unified agent split storage paths under `.scion/` for deterministic behavior across hub-managed and external groves. Ensured cascading cleanups of templates and configs when a grove is deleted (consolidated from commits fea4588, 6bb2348, a97ebd7, 023a089, 6eaf8dc, 221c736, 75bfcc0, c9d8ddf).
 * **GCP Validation & Logging:** Improved debug logging for 4xx errors and enhanced GCP Service Account validation messages, including returning capabilities in the list API response (consolidated from commits e060664, d65dc09).
 * **Container Lifecycle Management:** Ensured agent containers are gracefully stopped before removal to prevent shared-directory mount errors (commit 8a0fabc).
 * **Template Synchronization:** Fixed an issue where template synchronization was blocked by setting a default image for the generic harness config (commit 816c960).
@@ -60,7 +60,7 @@ This release significantly hardens the agent workspace provisioning process for 
 This release introduces the foundational infrastructure for the Scion plugin system, adds comprehensive support for syncing grove-level templates, and unifies all Grove IDs to a standard UUID format.
 
 :::danger[BREAKING CHANGES]
-* **Grove ID Format Unification:** All Grove IDs have been standardized to a unified UUID format. Git-backed groves now use a deterministic UUID v5 (based on the namespace and normalized URL) instead of a 16-character hex hash, while non-git and hub-native groves continue using UUID v4. Existing git-backed groves may need to be re-linked, and any integrations relying on the old hex format must be updated (commit e896693).
+* **Grove ID Format Unification:** All Grove IDs have been standardized to a unified UUID format. Git-backed groves now use a deterministic UUID v5 (based on the namespace and normalized URL) instead of a 16-character hex hash, while non-git and hub-managed groves continue using UUID v4. Existing git-backed groves may need to be re-linked, and any integrations relying on the old hex format must be updated (commit e896693).
 
 :::
 
@@ -138,7 +138,7 @@ This release focuses on improving agent lifecycle flexibility and enhancing the 
 * **Authentication & Secret Injection:** Corrected a bug where environment-type secrets were not properly injected into the execution environment during authentication resolution.
 * **Grove & Workspace Management:**
     * **Multi-Hub Compatibility:** Fixed a regression where git-based groves were incorrectly rejected in multi-hub environments.
-    * **Cleanup & Resolution:** Improved hub-native grove path resolution during agent deletion and enhanced detection of orphaned grove configurations.
+    * **Cleanup & Resolution:** Improved hub-managed grove path resolution during agent deletion and enhanced detection of orphaned grove configurations.
 * **Configuration & Compatibility:**
     * **Legacy Key Support:** Updated `config get` to support legacy v1 settings keys like `image_registry`.
     * **Fallback Logic:** Improved `env-gather` and harness configuration to correctly fall back to global settings when local context is missing.
@@ -371,7 +371,7 @@ This release marks a major milestone with the completion of the canonical agent 
 * **Real-time Debug Observability:** Introduced a full-height debug panel in the Web UI, providing a real-time stream of SSE events and internal state transitions for advanced troubleshooting and observability.
 * **Enhanced Web UI Feedback:** Added emoji-based status badges to agent cards and list views, providing more intuitive visual indicators of agent health and activity.
 * **Broker Authorization & Identity:** Strengthened security by enforcing dispatch authorization checks and resolving creator identities for all registered runtime brokers.
-* **Automated Grove Cleanup:** Hardened the hub-native grove lifecycle by implementing cascaded directory cleanup on remote brokers whenever a grove is deleted via the Hub.
+* **Automated Grove Cleanup:** Hardened the hub-managed grove lifecycle by implementing cascaded directory cleanup on remote brokers whenever a grove is deleted via the Hub.
 * **CLI Enhancements:** Added a new `-n/--num-lines` flag to the `scion look` command, enabling tailored views of agent terminal output.
 
 ### 🐛 Fixes
@@ -381,7 +381,7 @@ This release marks a major milestone with the completion of the canonical agent 
 
 ## Feb 27, 2026
 
-This release focuses on refining the hub-native grove experience, enhancing the web terminal's usability, and introducing new workspace management capabilities via the Hub API.
+This release focuses on refining the hub-managed grove experience, enhancing the web terminal's usability, and introducing new workspace management capabilities via the Hub API.
 
 ### 🚀 Features
 * **Workspace Management:** Added new Hub API endpoints for downloading individual workspace files and generating ZIP archives of entire groves, facilitating easier data export and backup.
@@ -390,7 +390,7 @@ This release focuses on refining the hub-native grove experience, enhancing the 
 * **Iconography Standardization:** Established a centralized icon reference system and updated the web interface to use consistent iconography for resources like groves, templates, and brokers.
 
 ### 🐛 Fixes
-* **Hub-Native Path Resolution:** Resolved several critical issues where hub-native groves incorrectly inherited local filesystem paths from the Hub server. Broker-side initialization of `.scion` directories and explicit path mapping now ensure consistent workspace behavior across distributed brokers.
+* **Hub-Managed Path Resolution:** Resolved several critical issues where hub-managed groves incorrectly inherited local filesystem paths from the Hub server. Broker-side initialization of `.scion` directories and explicit path mapping now ensure consistent workspace behavior across distributed brokers.
 * **Terminal & Clipboard UX:** Enabled native clipboard copy/paste support in the web terminal and relaxed availability checks to allow terminal access during agent startup and transition states.
 * **Real-time Data Integrity:** Fixed a bug in the frontend state manager where SSE delta updates could merge incorrectly; the manager is now reliably seeded with full REST data upon page load.
 * **Slug & Case Sensitivity:** Normalized agent slug lookups to lowercase and implemented stricter name validation to prevent routing collisions and inconsistent dispatcher behavior.
@@ -411,7 +411,7 @@ This release introduces a robust capability-based access control system, a dedic
 
 ### 🐛 Fixes
 * **Filesystem Session Store:** Replaced cookie-based session storage with a filesystem-backed store to resolve "400 Bad Request" errors caused by cookie size limits (4096 bytes) during large JWT/OAuth exchanges.
-* **Hub-Native Grove Reliability:** Fixed critical 503 errors and path resolution issues during agent creation in hub-native groves by correctly propagating grove slugs to runtime brokers.
+* **Hub-Managed Grove Reliability:** Fixed critical 503 errors and path resolution issues during agent creation in hub-managed groves by correctly propagating grove slugs to runtime brokers.
 * **Agent Deletion Cleanup:** Hardened the agent deletion flow to ensure that stopping and removing an agent in the Hub correctly dispatches cleanup commands to the associated runtime broker and removes local workspace files.
 * **Environment Validation:** Improved agent startup safety by treating missing required environment variables as fatal errors (422), preventing agents from starting in incomplete states.
 * **Terminal Responsiveness:** Resolved several layout bugs in the web terminal, ensuring it correctly resizes with the viewport and fits within the application shell.
@@ -430,13 +430,13 @@ This release focuses on hardening the agent provisioning pipeline, streamlining 
 * **Agent Provisioning & Creation:** Resolved multiple issues in the Hub-dispatched agent creation flow, including a 403 authorization fix, rejection of duplicate agent names, and a critical fix for container image resolution.
 * **Instruction Injection Logic:** Improved the reliability of agent instructions by implementing auto-detection for `agents.md` and ensuring stale instruction files (e.g., lowercase `claude.md`) are removed during provisioning.
 * **Web UI & Auth Persistence:** Fixed a bug where the authenticated user wasn't correctly fetched on page load, ensuring the profile and sign-out options are always visible in the header.
-* **Pathing & Scoping:** Corrected path resolution logic to prevent local-path groves from incorrectly using hub-native paths, and refined the `scion delete --stopped` command to strictly scope to the active grove.
+* **Pathing & Scoping:** Corrected path resolution logic to prevent local-path groves from incorrectly using hub-managed paths, and refined the `scion delete --stopped` command to strictly scope to the active grove.
 * **Environment Gathering:** Fixed a regression in the `env-gather` finalize-env flow to ensure the template slug is correctly preserved throughout the entire provisioning pipeline.
 * **Configuration Schema:** Added `task_flag` support to the settings schema and Hub configuration, improving the tracking and validation of agent task states.
 
 ## Feb 24, 2026
 
-This release introduces a robust policy-based authorization system, a comprehensive agent notification framework, and significant enhancements to hub-native groves and schema validation.
+This release introduces a robust policy-based authorization system, a comprehensive agent notification framework, and significant enhancements to hub-managed groves and schema validation.
 
 :::danger[BREAKING CHANGES]
 * **Policy-Based Authorization:** Strictly enforced authorization for agent operations. Agent creation now requires grove membership, while interaction (PTY, messaging) and deletion are restricted to the agent's owner (creator) or system administrators.
@@ -447,7 +447,7 @@ This release introduces a robust policy-based authorization system, a comprehens
 * **Agent Notifications System:** Launched a multi-phase notification framework enabling real-time subscriptions to agent status events. This includes a new notification dispatcher, Hub API endpoints, and a `--notify` flag in the CLI for status tracking.
 * **Harness-Agnostic Templates:** Introduced support for role-based, harness-agnostic agent templates. New fields for `agent_instructions`, `system_prompt`, and `default_harness_config` allow templates to be defined by their role rather than specific LLM implementations.
 * **GKE Security Enhancements:** Added a dedicated `gke` runtime configuration option to enable GKE-specific features like Workload Identity, streamlining secure deployments on Google Kubernetes Engine.
-* **Hub-Native Workspace Management:** Advanced hub-native grove capabilities (Phase 3) with new support for direct workspace file management via the Hub API, reducing reliance on external Git repositories.
+* **Hub-Managed Workspace Management:** Advanced hub-managed grove capabilities (Phase 3) with new support for direct workspace file management via the Hub API, reducing reliance on external Git repositories.
 * **ADK Agent Integration:** Added a specialized example and Docker template for Agent Development Kit (ADK) agents, facilitating the development of custom autonomous agents within the Scion ecosystem.
 * **Infrastructure & Models:** Upgraded the default agent model to `gemini-3-flash-preview` and introduced Cloud Build configurations for automated image delivery.
 
@@ -459,12 +459,12 @@ This release introduces a robust policy-based authorization system, a comprehens
 
 ## Feb 23, 2026
 
-This period focused on major architectural expansions, introducing multi-hub connectivity for runtime brokers and "hub-native" groves that decouple workspace management from external Git repositories.
+This period focused on major architectural expansions, introducing multi-hub connectivity for runtime brokers and "hub-managed" groves that decouple workspace management from external Git repositories.
 
 ### 🚀 Features
 * **Multi-Hub Broker Architecture:** Completed a major refactor of the Runtime Broker to support simultaneous connections to multiple Hubs. This includes a new multi-credential store, per-connection heartbeat management, and a "combo mode" that allows a broker to be co-located with one Hub while serving others remotely.
-* **Hub-Native Groves:** Launched "Hub-Native" groves, enabling the creation of project workspaces directly through the Hub API and Web UI without an external Git repository. These groves are automatically initialized with a seeded `.scion` structure and managed locally by the Hub.
-* **Streamlined Workspace Creation:** Introduced a new grove creation interface in the Web UI that supports both Git-based repositories and Hub-native workspaces, including direct Git URL support for quick onboarding.
+* **Hub-Managed Groves:** Launched "Hub-Managed" groves, enabling the creation of project workspaces directly through the Hub API and Web UI without an external Git repository. These groves are automatically initialized with a seeded `.scion` structure and managed locally by the Hub.
+* **Streamlined Workspace Creation:** Introduced a new grove creation interface in the Web UI that supports both Git-based repositories and Hub-managed workspaces, including direct Git URL support for quick onboarding.
 * **Improved Agent Configuration:** Enhanced the agent creation form with optimized dropdowns and more intuitive labeling, including renaming "Harness" to "Type" for better clarity.
 
 ### 🐛 Fixes

@@ -136,7 +136,7 @@ All icons use the Shoelace `<sl-icon>` component, which provides [Bootstrap Icon
 | Variant | Icon Name | Usage |
 |---------|-----------|-------|
 | **Git-backed project** | `diagram-3` | Project lists, project detail header |
-| **Hub workspace** | `folder-fill` | Project lists, project detail header |
+| **Hub-managed workspace** | `folder-fill` | Project lists, project detail header |
 | **Empty state** | `folder2-open` | No-projects placeholder |
 
 ### Profile & Config Icons

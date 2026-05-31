@@ -15,7 +15,7 @@ This release focuses on improving agent lifecycle flexibility and enhancing the 
 * **Authentication & Secret Injection:** Corrected a bug where environment-type secrets were not properly injected into the execution environment during authentication resolution.
 * **Grove & Workspace Management:**
     * **Multi-Hub Compatibility:** Fixed a regression where git-based groves were incorrectly rejected in multi-hub environments.
-    * **Cleanup & Resolution:** Improved hub-native grove path resolution during agent deletion and enhanced detection of orphaned grove configurations.
+    * **Cleanup & Resolution:** Improved hub-managed grove path resolution during agent deletion and enhanced detection of orphaned grove configurations.
 * **Configuration & Compatibility:**
     * **Legacy Key Support:** Updated `config get` to support legacy v1 settings keys like `image_registry`.
     * **Fallback Logic:** Improved `env-gather` and harness configuration to correctly fall back to global settings when local context is missing.

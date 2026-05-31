@@ -87,7 +87,7 @@ All icons in the web frontend use the Shoelace `<sl-icon>` component (Bootstrap 
 These terms may be used in shorthand with prompts
 
 - **hub-broker, combo server** References running the server command with both the hub function and the broker function running in the same invocation.
-- **hub-native, hub-project** A special variant of a project/project space, that is created on a hub server for use by agents dispatched from clients. These live in ~/.scion/projects/<hub-project-name> on any broker that is a provider to the hub project. This is in contrast to the arbitrary local path on a broker for a linked project.
+- **hub-managed, hub-project** A special variant of a project/project space, that is created on a hub server for use by agents dispatched from clients. These live in ~/.scion/projects/<hub-project-name> on any broker that is a provider to the hub project. This is in contrast to the arbitrary local path on a broker for a linked project.
 - **agent-home** The directory that gets mounted as the home folder of the container user in the agent container
 - **linked-project** A project and project folder that pre-existed on a broker machine, and is linked as a hub resource project for visibility, metadata, and agent management across other brokers that may have such a linked project. May be based on name or git-URI
 

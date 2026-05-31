@@ -38,7 +38,7 @@ Each grove has its own set of agents, templates, and settings. Agents in one gro
 
 - Merging or synchronizing work between groves sharing the same repository.
 - Cross-grove agent visibility or communication.
-- Changing the hub-native (non-git) grove model.
+- Changing the hub-managed (non-git) grove model.
 
 ---
 
@@ -87,7 +87,7 @@ Since SQLite doesn't support `ALTER TABLE ... DROP CONSTRAINT`, the migration wi
 
 **New behavior:** Grove IDs are always randomly generated UUIDs (`uuid.New()`), regardless of whether the grove has a git remote.
 
-**Rationale:** Deterministic IDs were designed to enforce the 1:1 mapping. With multiple groves per URL, deterministic IDs would cause collisions. Random UUIDs are already used for hub-native groves and work correctly.
+**Rationale:** Deterministic IDs were designed to enforce the 1:1 mapping. With multiple groves per URL, deterministic IDs would cause collisions. Random UUIDs are already used for hub-managed groves and work correctly.
 
 **`HashGroveID()` is retained** but repurposed: it is no longer used for grove ID generation. It may still be useful for other deterministic identifiers (e.g., cache keys), so it is not removed. Callers that used it for grove ID generation are updated.
 
@@ -96,7 +96,7 @@ Since SQLite doesn't support `ALTER TABLE ... DROP CONSTRAINT`, the migration wi
 ### 3.3 Enforce Unique Slugs with Serial Numbering
 
 Slugs must remain unique because they are used in:
-- Filesystem paths (`~/.scion/groves/<slug>/` for hub-native, `~/.scion/grove-configs/<slug>__<uuid>/` for external)
+- Filesystem paths (`~/.scion/groves/<slug>/` for hub-managed, `~/.scion/grove-configs/<slug>__<uuid>/` for external)
 - API routing (`/api/v1/groves/<slug-or-id>/...`)
 - CLI references (`scion start agent --grove <slug>`)
 
@@ -167,7 +167,7 @@ All three workspace strategies (represented as three modes at the model layer) c
 
 - **Per-agent clone** (`GitClone` set, `SharedWorkspace=false`): Each agent in a git grove clones the repository independently inside its container. This is the default for git groves.
 - **Shared workspace clone** (`GitClone` unset, `SharedWorkspace=true`, `Workspace` set): A single shared git clone is mounted by all agents in the grove, rather than each agent cloning independently.
-- **Hub-native workspace** (`GitClone` unset, `SharedWorkspace=false`, `Workspace` set): Non-git groves with a hub-managed filesystem.
+- **Hub-managed workspace** (`GitClone` unset, `SharedWorkspace=false`, `Workspace` set): Non-git groves with a hub-managed filesystem.
 
 The workspace strategy is determined by grove configuration (specifically the `scion.dev/workspace-mode` label), not by the number of groves sharing a URL. Multiple groves sharing the same git remote may each independently choose their own workspace strategy.
 
@@ -272,7 +272,7 @@ GetInstallationForRepository(ctx context.Context, repoFullName string) (*GitHubI
 **Cons:**
 - The sequence number itself needs coordination (what if two clients try to create grove #2 simultaneously?).
 - Deterministic creation was valuable precisely because it avoided coordination — adding a sequence number undermines the benefit.
-- Random UUIDs are simpler and already proven (hub-native groves use them).
+- Random UUIDs are simpler and already proven (hub-managed groves use them).
 
 **Decision:** Rejected. Random UUIDs are simpler and sufficient.
 

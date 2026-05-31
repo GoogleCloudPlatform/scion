@@ -19,7 +19,7 @@ The `strings.HasPrefix` check now validates the resolved grove path against BOTH
 ## Test Updates
 
 Three tests were asserting the old `"groves"` default path. Since the fallback logic now returns `"projects"` when neither directory exists on disk (the common case in test environments), these were updated:
-- `TestHubNativeGrovePath` in `pkg/hub/handlers_grove_test.go`
+- `TestHubManagedGrovePath` in `pkg/hub/handlers_grove_test.go`
 - `TestCreateAgentGroveSlugResolvesGrovePath` in `pkg/runtimebroker/handlers_test.go`
 - `TestStartAgentGroveSlugResolvesGrovePath` in `pkg/runtimebroker/handlers_test.go`
 
@@ -27,4 +27,4 @@ Three tests were asserting the old `"groves"` default path. Since the fallback l
 
 - `go build ./...` — passes
 - `go vet ./...` — passes
-- All targeted tests pass: `TestDeleteGrove_PathTraversal_Blocked`, `TestCreateAgentGroveSlugResolvesGrovePath`, `TestStartAgentGroveSlugResolvesGrovePath`, `TestHubNativeGrovePath`, `TestFindAgentInHubNativeGroves`
+- All targeted tests pass: `TestDeleteGrove_PathTraversal_Blocked`, `TestCreateAgentGroveSlugResolvesGrovePath`, `TestStartAgentGroveSlugResolvesGrovePath`, `TestHubManagedGrovePath`, `TestFindAgentInHubManagedGroves`

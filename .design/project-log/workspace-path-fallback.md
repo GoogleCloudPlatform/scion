@@ -9,9 +9,9 @@ The grove-to-project rename (V50 SQL migration) renamed database tables and colu
 
 ## Solution
 
-Applied a filesystem fallback pattern to all 6 code paths that resolve hub-native project/grove paths. The pattern is: try `projects/` first, if it doesn't exist check `groves/`, default to `projects/`. This matches the existing pattern already used in `ExternalProjectPath()` (`pkg/config/project_marker.go`).
+Applied a filesystem fallback pattern to all 6 code paths that resolve hub-managed project/grove paths. The pattern is: try `projects/` first, if it doesn't exist check `groves/`, default to `projects/`. This matches the existing pattern already used in `ExternalProjectPath()` (`pkg/config/project_marker.go`).
 
-For directory-scanning functions (`findAgentInHubNativeGroves`, `discoverAuxiliaryRuntimes`), both `projects/` and `groves/` directories are scanned and results merged.
+For directory-scanning functions (`findAgentInHubManagedGroves`, `discoverAuxiliaryRuntimes`), both `projects/` and `groves/` directories are scanned and results merged.
 
 ## Files Changed
 
@@ -22,7 +22,7 @@ For directory-scanning functions (`findAgentInHubNativeGroves`, `discoverAuxilia
 | `pkg/runtimebroker/handlers.go` | `createAgent()` line ~390 | Added fallback for `req.GrovePath` resolution |
 | `pkg/runtimebroker/handlers.go` | `createAgent()` line ~598 | Added fallback for `workspaceDir` resolution |
 | `pkg/runtimebroker/handlers.go` | `deleteGrove()` | Added fallback + updated path traversal check to use `filepath.Dir()` |
-| `pkg/runtimebroker/handlers.go` | `findAgentInHubNativeGroves()` | Scans both `projects/` and `groves/` directories |
+| `pkg/runtimebroker/handlers.go` | `findAgentInHubManagedGroves()` | Scans both `projects/` and `groves/` directories |
 | `pkg/runtimebroker/server.go` | `discoverAuxiliaryRuntimes()` | Scans both `projects/` and `groves/` directories |
 
 ## Notes

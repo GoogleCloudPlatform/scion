@@ -12,7 +12,7 @@ This release introduces a robust capability-based access control system, a dedic
 
 ## 🐛 Fixes
 * **Filesystem Session Store:** Replaced cookie-based session storage with a filesystem-backed store to resolve "400 Bad Request" errors caused by cookie size limits (4096 bytes) during large JWT/OAuth exchanges.
-* **Hub-Native Grove Reliability:** Fixed critical 503 errors and path resolution issues during agent creation in hub-native groves by correctly propagating grove slugs to runtime brokers.
+* **Hub-Managed Grove Reliability:** Fixed critical 503 errors and path resolution issues during agent creation in hub-managed groves by correctly propagating grove slugs to runtime brokers.
 * **Agent Deletion Cleanup:** Hardened the agent deletion flow to ensure that stopping and removing an agent in the Hub correctly dispatches cleanup commands to the associated runtime broker and removes local workspace files.
 * **Environment Validation:** Improved agent startup safety by treating missing required environment variables as fatal errors (422), preventing agents from starting in incomplete states.
 * **Terminal Responsiveness:** Resolved several layout bugs in the web terminal, ensuring it correctly resizes with the viewport and fits within the application shell.

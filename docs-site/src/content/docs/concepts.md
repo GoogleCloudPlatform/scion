@@ -12,7 +12,7 @@ An **Agent** is an isolated process running an LLM + Harness loop (aka Agent) ag
 ### Project
 A **Project** (or **Group**) is a project workspace where agents live. It corresponds to a `.scion` directory on the filesystem. It can exist at the project level (generally located at the root of a git repository), or globally in the users home folder.
 
-Every project has a unique **Project ID**. Git-backed projects use deterministic **UUID v5** identifiers (derived from the namespace and normalized git URL), ensuring the same repository always maps to the same ID regardless of protocol. Hub-native projects use random **UUID v4** identifiers.
+Every project has a unique **Project ID**. Git-backed projects use deterministic **UUID v5** identifiers (derived from the namespace and normalized git URL), ensuring the same repository always maps to the same ID regardless of protocol. Hub-managed projects use random **UUID v4** identifiers.
 
 ### Hub
 The **Hub** is the central control plane of a hosted Scion architecture. It acts as the "brain" of the system, coordinating state across multiple users, projects, and runtime brokers.

@@ -15,8 +15,8 @@ Consider these scenarios the current design doesn't address well:
 
 1. **Multi-broker grove**: A linked grove exists on Broker A and Broker B. A developer makes changes on Broker A and wants them reflected on Broker B before dispatching agents there.
 2. **Local-to-hub bootstrap**: A developer has a local project directory and wants to push the full grove workspace to the hub for remote agents — not tied to any specific agent.
-3. **Hub-native grove download**: A hub-native grove's workspace was populated by agents. The developer wants to pull the current state to their local machine.
-4. **Non-git groves**: Hub-native groves have no git remote. There's no git-based mechanism to propagate changes — file-level sync is the only option.
+3. **Hub-managed grove download**: A hub-managed grove's workspace was populated by agents. The developer wants to pull the current state to their local machine.
+4. **Non-git groves**: Hub-managed groves have no git remote. There's no git-based mechanism to propagate changes — file-level sync is the only option.
 
 ### 1.1 Key Insight
 
@@ -211,7 +211,7 @@ Divergence is resolved naturally:
 
 ### 4.6 Hub-Hosted vs Broker-Hosted Workspaces
 
-For **hub-native groves**, the workspace files live on the hub's filesystem. WebDAV serves them directly — zero relay needed.
+For **hub-managed groves**, the workspace files live on the hub's filesystem. WebDAV serves them directly — zero relay needed.
 
 For **linked groves**, the workspace lives on a broker. The hub must relay WebDAV operations to the broker that owns the workspace. Two sub-approaches:
 
@@ -322,7 +322,7 @@ The hub tracks sync state per grove:
 ```sql
 CREATE TABLE grove_sync_state (
     grove_id        TEXT NOT NULL,
-    broker_id       TEXT,              -- NULL for hub-native groves
+    broker_id       TEXT,              -- NULL for hub-managed groves
     last_sync_time  TIMESTAMP,
     last_commit_sha TEXT,              -- for git history sync
     file_count      INTEGER,
@@ -412,7 +412,7 @@ CREATE TABLE grove_sync_state (
 
 - ✅ Implement WebDAV handler using `golang.org/x/net/webdav`
 - ✅ Mount at `/api/v1/groves/{id}/dav/` with grove-scoped authorization
-- ✅ Serve hub-native grove workspaces directly from filesystem
+- ✅ Serve hub-managed grove workspaces directly from filesystem
 - ✅ File exclusion filter (`.git/`, `.scion/`, `node_modules/`, `*.env`)
 - ✅ Add `grove_sync_state` table for tracking sync metadata
 - ✅ Add `GET /api/v1/groves/{id}/sync/status` endpoint
@@ -446,7 +446,7 @@ CREATE TABLE grove_sync_state (
 ## 10. References
 
 - [Hosted Workspace Sync Design](hosted/sync-design.md) — existing agent-scoped sync (GCS signed URLs)
-- [Hub-Native Groves](hosted/hub-groves.md) — non-git grove workspaces
+- [Hub-Managed Groves](hosted/hub-groves.md) — non-git grove workspaces
 - [Git-Anchored Groves](hosted/git-groves.md) — git-backed grove creation and cloning
 - [Multi-Hub Broker](hosted/multi-hub-broker.md) — broker identity and grove-to-hub mapping
 - [Git Workspace Hybrid](git-workspace-hybrid.md) — hybrid git/file workspace approaches

@@ -33,7 +33,7 @@ A helper utility bundled with Scion that is injected into agent containers to pr
 A versioned blueprint for an agent, defining its base image, system prompt, tools, and initial state.
 
 ### Project ID
-A unique identifier for a project. Git-backed projects use deterministic **UUID v5** identifiers derived from the normalized git URL. Hub-native projects use random **UUID v4** identifiers.
+A unique identifier for a project. Git-backed projects use deterministic **UUID v5** identifiers derived from the normalized git URL. Hub-managed projects use random **UUID v4** identifiers.
 
 ### Plugin
 An extension module built on `hashicorp/go-plugin` that provides additional capabilities (e.g., message broker or agent harness implementations) without modifying the Scion core.

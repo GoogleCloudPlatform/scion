@@ -102,16 +102,16 @@ These can also be managed via the web UI at either the user scope (under the pro
 
 See the [Secret & Environment Management guide](/scion/hub-user/secrets/) for details on scoping and projection modes.
 
-## Remote & Hub-Native Projects
+## Remote & Hub-Managed Projects
 
 Instead of linking a local directory, you can create projects directly on the Hub. This decouples agent execution from your local machine, allowing for remote-only development.
 
-### Hub-Native Projects
-Hub-Native projects allow you to create project workspaces without any external Git repository. The Hub manages the workspace files directly, and you can download or ZIP the workspace via the Web Dashboard.
+### Hub-Managed Projects
+Hub-Managed projects allow you to create project workspaces without any external Git repository. The Hub manages the workspace files directly, and you can download or ZIP the workspace via the Web Dashboard.
 
 ```bash
-# Target a Hub-Native project remotely by its slug:
-scion start my-agent --project my-hub-native-slug "do some work"
+# Target a Hub-Managed project remotely by its slug:
+scion start my-agent --project my-hub-managed-slug "do some work"
 ```
 
 ### Git Projects

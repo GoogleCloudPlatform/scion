@@ -10,7 +10,7 @@ This release introduces a major new GCP Identity implementation allowing agents 
 
 ## 🐛 Fixes
 * **Grove & Membership Synchronization:** Resolved multiple issues with grove linking and membership backfills, including fixing unique constraints on grove IDs, ensuring proper legacy owner role assignments, and correctly including auto-provide brokers (consolidated from commits 4af2662, 307fb85, cb22a18, 79cc591, 1f6f16f, e14ec95).
-* **Storage & ID Consistency:** Fixed global grove ID bleed-through issues and unified agent split storage paths under `.scion/` for deterministic behavior across hub-native and external groves. Ensured cascading cleanups of templates and configs when a grove is deleted (consolidated from commits fea4588, 6bb2348, a97ebd7, 023a089, 6eaf8dc, 221c736, 75bfcc0, c9d8ddf).
+* **Storage & ID Consistency:** Fixed global grove ID bleed-through issues and unified agent split storage paths under `.scion/` for deterministic behavior across hub-managed and external groves. Ensured cascading cleanups of templates and configs when a grove is deleted (consolidated from commits fea4588, 6bb2348, a97ebd7, 023a089, 6eaf8dc, 221c736, 75bfcc0, c9d8ddf).
 * **GCP Validation & Logging:** Improved debug logging for 4xx errors and enhanced GCP Service Account validation messages, including returning capabilities in the list API response (consolidated from commits e060664, d65dc09).
 * **Container Lifecycle Management:** Ensured agent containers are gracefully stopped before removal to prevent shared-directory mount errors (commit 8a0fabc).
 * **Template Synchronization:** Fixed an issue where template synchronization was blocked by setting a default image for the generic harness config (commit 816c960).

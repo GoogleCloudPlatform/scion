@@ -161,7 +161,7 @@ These four changes will materially improve robustness, reliability, and future d
   - values must be redacted in broker debug logs
 
 ### Why Local Settings Are Sometimes Ignored
-In Hub-connected container flows, local grove settings may not represent the active Hub endpoint (for example, combo/hub-native routing or remote broker dispatch). In that mode, dispatch/broker authoritative inputs intentionally take precedence over stale local settings.
+In Hub-connected container flows, local grove settings may not represent the active Hub endpoint (for example, combo/hub-managed routing or remote broker dispatch). In that mode, dispatch/broker authoritative inputs intentionally take precedence over stale local settings.
 
 ## Troubleshooting Matrix
 

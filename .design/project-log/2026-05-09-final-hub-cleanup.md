@@ -22,7 +22,7 @@ Renamed remaining internal Go functions in `pkg/hub/` from "Grove" to "Project" 
 
 ### Test Fixes and Adjustments
 - **pkg/hub/response_types.go**: Fixed `ProjectWithCapabilities` to use anonymous embedding of `store.Project`. This restored the original JSON structure (fields at top level instead of under a `"project"` key), which was breaking several GET handlers and their tests.
-- **pkg/hub/handlers_project_test.go**: Updated `TestCreateProject_HubNative_NoGitRemote` to expect the slug `hub-native-project` instead of `hub-native-grove`, reflecting the name change from "Hub Native Grove" to "Hub Native Project".
+- **pkg/hub/handlers_project_test.go**: Updated `TestCreateProject_HubManaged_NoGitRemote` to expect the slug `hub-managed-project` instead of `hub-managed-grove`, reflecting the name change from "Hub Native Grove" to "Hub Native Project".
 - **pkg/hub/messagebroker_test.go**:
     - Updated assertions to expect 2 persisted messages in certain tests. This is due to `PublishUserMessage` performing local delivery (persistence) AND the `InProcessBroker` triggering the subscription handler (which also performs persistence). This behavior became reliable after fixing the project bootstrap logic.
     - Updated all test names and variable names to use "Project" instead of "Grove".

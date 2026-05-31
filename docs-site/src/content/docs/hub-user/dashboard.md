@@ -20,7 +20,7 @@ The dashboard features an integrated notification framework with real-time SSE d
 
 ### Projects
 View and manage your registered projects.
-- **Create/Register Project**: Create a Hub-Native workspace directly on the Hub, or connect a new remote Git repository. Includes a confirmation dialog when creating a project for an existing git repository.
+- **Create/Register Project**: Create a Hub-Managed workspace directly on the Hub, or connect a new remote Git repository. Includes a confirmation dialog when creating a project for an existing git repository.
 - **Project Settings**: Centralized configuration interface for managing project-scoped environment variables and secrets, including "Injection Mode" controls (Always vs. As-Needed). The settings page features a streamlined flow with a "Done" button and hides unnecessary registration options for git-backed projects.
 - **Workspace & File Management**: Access the comprehensive **inline file editor** to view and modify files directly in the browser, featuring integrated Markdown preview capabilities. The file browser supports **fuzzy and regex-based filtering** for fast navigation. You can also download individual workspace files or generate ZIP archives of entire projects directly from the UI.
 - **Template Management**: Direct server-side importing of templates with immediate UI feedback. Includes full template file browsing, editing, and upload capabilities directly within the dashboard.

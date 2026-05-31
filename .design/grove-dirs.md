@@ -83,7 +83,7 @@ This location is:
 - Per-grove (naturally scoped)
 - Persistent across agent restarts and reprovisioning
 
-For hub-native groves, shared dirs live at `~/.scion/grove-configs/<hub-grove>/shared-dirs/<name>/` on each broker — the same grove-configs path used for agent homes. The `~/.scion/groves/<hub-grove>/` path is reserved for hub-native workspaces, not configuration state.
+For hub-managed groves, shared dirs live at `~/.scion/grove-configs/<hub-grove>/shared-dirs/<name>/` on each broker — the same grove-configs path used for agent homes. The `~/.scion/groves/<hub-grove>/` path is reserved for hub-managed workspaces, not configuration state.
 
 ## Mount Target Strategy
 

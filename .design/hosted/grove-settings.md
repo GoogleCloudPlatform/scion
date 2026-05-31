@@ -159,7 +159,7 @@ This ensures a single source of truth per grove and avoids any divergence betwee
 
 For **linked groves**, grove settings live on the broker's filesystem (`.scion/settings.yaml`). The hub stores the values and syncs them to the broker, which owns the file on disk.
 
-For **hub-native groves**, settings live in `~/.scion/groves/<slug>/.scion/settings.yaml` on each provider broker. The hub writes these directly during grove provisioning.
+For **hub-managed groves**, settings live in `~/.scion/groves/<slug>/.scion/settings.yaml` on each provider broker. The hub writes these directly during grove provisioning.
 
 ## UI Design
 

@@ -23,17 +23,17 @@ Replaced all `os.IsNotExist`-based fallback checks with a content-aware `hasWork
    - `handleStartAgent` workspace directory resolution (line ~601)
    - `deleteGrove` path resolution (line ~2283)
 
-4. **`pkg/hub/handlers_grove_test.go`** — Added `TestHubNativeGrovePath_EmptyProjectsFallsBackToGroves` which creates a `projects/` dir with only `shared-dirs/` and `.scion/`, a `groves/` dir with real content, and verifies the fallback returns the groves path.
+4. **`pkg/hub/handlers_grove_test.go`** — Added `TestHubManagedGrovePath_EmptyProjectsFallsBackToGroves` which creates a `projects/` dir with only `shared-dirs/` and `.scion/`, a `groves/` dir with real content, and verifies the fallback returns the groves path.
 
 ### Design Decisions
 
 - **Duplicated `hasWorkspaceContent` across packages** rather than extracting to a shared utility. The function is small (15 lines) and the two packages (`hub` and `runtimebroker`) have no shared internal utility package. Duplication is acceptable here.
-- **Did NOT modify `server.go`** — the `findAgentInHubNativeGroves` and `discoverAuxiliaryRuntimes` functions already iterate both directories correctly.
+- **Did NOT modify `server.go`** — the `findAgentInHubManagedGroves` and `discoverAuxiliaryRuntimes` functions already iterate both directories correctly.
 
 ## Verification
 
 - `go build ./...` passes
 - `go vet ./pkg/hub/ ./pkg/runtimebroker/` passes
-- All existing `TestHubNative*` tests pass
+- All existing `TestHubManaged*` tests pass
 - New empty-directory fallback test passes
 - Pre-existing `TestMessageBrokerProxy_*` failures are unrelated (reproduce on base branch)

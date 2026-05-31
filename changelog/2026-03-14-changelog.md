@@ -3,7 +3,7 @@
 This release introduces the foundational infrastructure for the Scion plugin system, adds comprehensive support for syncing grove-level templates, and unifies all Grove IDs to a standard UUID format.
 
 ## ⚠️ BREAKING CHANGES
-* **Grove ID Format Unification:** All Grove IDs have been standardized to a unified UUID format. Git-backed groves now use a deterministic UUID v5 (based on the namespace and normalized URL) instead of a 16-character hex hash, while non-git and hub-native groves continue using UUID v4. Existing git-backed groves may need to be re-linked, and any integrations relying on the old hex format must be updated (commit e896693).
+* **Grove ID Format Unification:** All Grove IDs have been standardized to a unified UUID format. Git-backed groves now use a deterministic UUID v5 (based on the namespace and normalized URL) instead of a 16-character hex hash, while non-git and hub-managed groves continue using UUID v4. Existing git-backed groves may need to be re-linked, and any integrations relying on the old hex format must be updated (commit e896693).
 
 ## 🚀 Features
 * **Plugin System Infrastructure:** Introduced the core architecture for a new Scion plugin system using `hashicorp/go-plugin`, complete with reference implementations for message broker and agent harness plugins (consolidated from commits 6c543d0, b1a5ae1, 22991ec).

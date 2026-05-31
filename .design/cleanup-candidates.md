@@ -76,7 +76,7 @@ The runtime broker's agent creation path builds an `api.StartOptions` struct and
 | `finalizeEnv` | `handlers.go:1932-2086` | Env-gather completion: env merge → hydrate template → git-clone → start |
 
 Each handler independently:
-1. Resolves the hub-native grove path from `GroveSlug` (identical `~/.scion/groves/<slug>` block, duplicated at lines 323-350 and 1032-1054)
+1. Resolves the hub-managed grove path from `GroveSlug` (identical `~/.scion/groves/<slug>` block, duplicated at lines 323-350 and 1032-1054)
 2. Builds the merged env map with hub endpoint, broker name, debug flag, auth tokens
 3. Translates `SCION_TELEMETRY_ENABLED` into `TelemetryOverride`
 4. Hydrates templates from Hub
@@ -108,7 +108,7 @@ func (s *Server) buildStartContext(ctx context.Context, r *http.Request, req Cre
 ```
 
 This function encapsulates:
-- Hub-native grove path resolution
+- Hub-managed grove path resolution
 - Env merging (resolved env + config env + auth tokens + hub endpoint + broker identity + debug)
 - Template hydration
 - Git-clone env injection

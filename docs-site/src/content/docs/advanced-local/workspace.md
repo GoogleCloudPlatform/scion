@@ -83,8 +83,8 @@ In non-git projects (where no `.git` directory is found):
 
 When a Scion Hub is enabled, workspace strategy changes depending on the project type. The Hub supports three types of remote workspaces:
 
-### Hub-Native Projects (no git repository)
-Hub-Native projects allow you to create project workspaces directly through the Hub API and Web Dashboard **without an external Git repository**.
+### Hub-Managed Projects (no git repository)
+Hub-Managed projects allow you to create project workspaces directly through the Hub API and Web Dashboard **without an external Git repository**.
 - The Hub automatically initializes a seeded `.scion` structure.
 - Workspace files are managed locally by the Hub and its distributed runtime brokers.
 - You can directly download individual workspace files or generate ZIP archives of entire projects using the Hub API or Web Dashboard, making it easy to export your data.
@@ -106,7 +106,7 @@ scion hub project create https://github.com/org/repo.git
 
 #### Project ID Format
 
-Git-backed projects use **deterministic UUID v5** identifiers derived from the namespace and the normalized git URL. This ensures the same repository always produces the same project ID regardless of the access protocol (e.g., `https://` vs `git@`). Hub-native projects use random UUID v4 identifiers.
+Git-backed projects use **deterministic UUID v5** identifiers derived from the namespace and the normalized git URL. This ensures the same repository always produces the same project ID regardless of the access protocol (e.g., `https://` vs `git@`). Hub-managed projects use random UUID v4 identifiers.
 
 #### Agent Branch Strategy
 
