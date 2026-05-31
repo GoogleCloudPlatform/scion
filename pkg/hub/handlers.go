@@ -207,6 +207,11 @@ type CreateAgentRequest struct {
 	// GatherEnv enables the env-gather flow where the broker evaluates env
 	// completeness and may return a 202 requiring the CLI to supply missing values.
 	GatherEnv bool `json:"gatherEnv,omitempty"`
+	// Resume signals that the caller wants to resume an existing stopped agent
+	// in-place rather than deleting and recreating it. When true and the
+	// existing agent is in PhaseStopped, the agent record is preserved and
+	// the broker is asked to restart the container.
+	Resume bool `json:"resume,omitempty"`
 	// Notify subscribes the creating agent/user to status notifications for the new agent.
 	Notify bool `json:"notify,omitempty"`
 	// CleanupMode controls stale-existing-agent cleanup behavior during create:
@@ -8761,10 +8766,12 @@ func (s *Server) createNotifySubscription(ctx context.Context, agentID, projectI
 // already exists when a create/start request arrives.
 //
 // Phases:
-//  1. Stale cleanup (running/stopped/error + not provision-only): dispatch delete, remove from DB → deleted
-//  2. Env-gather re-provisioning (provisioning + GatherEnv): dispatch delete, remove from DB → deleted
-//  3. Restart (created/provisioning/pending + not provision-only): recover broker ID, update config, dispatch start → started
-//  4. Otherwise: none (caller decides what to do)
+//  0. Resume from suspended (suspended): recover broker, dispatch start, update in-place → started
+//  1. Resume from stopped (stopped + Resume flag): recover broker, dispatch start, update in-place → started
+//  2. Stale cleanup (running/stopped/error + not resume + not provision-only): dispatch delete, remove from DB → deleted
+//  3. Env-gather re-provisioning (provisioning + GatherEnv): dispatch delete, remove from DB → deleted
+//  4. Restart (created/provisioning/pending + not provision-only): recover broker ID, update config, dispatch start → started
+//  5. Otherwise: none (caller decides what to do)
 func (s *Server) handleExistingAgent(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -8817,6 +8824,47 @@ func (s *Server) handleExistingAgent(
 		}
 		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
 			s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
+		}
+
+		if req.Notify {
+			s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
+		}
+
+		s.enrichAgent(ctx, existingAgent, project, nil)
+		writeJSON(w, http.StatusOK, CreateAgentResponse{
+			Agent: existingAgent,
+		})
+		return existingAgentStarted
+	}
+
+	// Stopped agents resumed in-place when the caller explicitly requests resume.
+	// This preserves the agent ID, metadata, and template association. The broker
+	// will recreate the container but the hub-level record stays the same.
+	if !req.ProvisionOnly && req.Resume && existingAgent.Phase == string(state.PhaseStopped) {
+		if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
+			existingAgent.RuntimeBrokerID = runtimeBrokerID
+		}
+
+		dispatcher := s.GetDispatcher()
+		if dispatcher == nil || existingAgent.RuntimeBrokerID == "" {
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				"cannot resume agent: no runtime broker available", nil)
+			return existingAgentErrored
+		}
+
+		if req.Task != "" && existingAgent.AppliedConfig != nil {
+			existingAgent.AppliedConfig.Task = req.Task
+			existingAgent.AppliedConfig.Attach = req.Attach
+		}
+
+		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task); err != nil {
+			RuntimeError(w, "Failed to resume stopped agent: "+err.Error())
+			return existingAgentErrored
+		}
+
+		existingAgent.Phase = string(state.PhaseRunning)
+		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
+			s.agentLifecycleLog.Warn("Failed to update agent status after resume from stopped", "agent_id", existingAgent.ID, "error", err)
 		}
 
 		if req.Notify {
