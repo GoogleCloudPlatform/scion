@@ -53,7 +53,7 @@ func (d *agentDispatcherAdapter) DispatchAgentCreate(ctx context.Context, hubAge
 	projectPath := d.resolveProjectPath(ctx, hubAgent.ProjectID)
 	opts := d.buildStartOptions(hubAgent, projectPath, false)
 
-	// Ensure grove ID label is present for tracking
+	// Ensure project ID label is present for tracking
 	if hubAgent.Labels == nil {
 		hubAgent.Labels = make(map[string]string)
 	}
@@ -87,7 +87,7 @@ func (d *agentDispatcherAdapter) DispatchAgentStart(ctx context.Context, hubAgen
 	projectPath := d.resolveProjectPath(ctx, hubAgent.ProjectID)
 	opts := d.buildStartOptions(hubAgent, projectPath, true)
 
-	// Ensure grove ID label is present for tracking
+	// Ensure project ID label is present for tracking
 	if hubAgent.Labels == nil {
 		hubAgent.Labels = make(map[string]string)
 	}
@@ -148,7 +148,7 @@ func (d *agentDispatcherAdapter) DispatchAgentRestart(ctx context.Context, hubAg
 	projectPath := d.resolveProjectPath(ctx, hubAgent.ProjectID)
 	opts := d.buildStartOptions(hubAgent, projectPath, true)
 
-	// Ensure grove ID label is present for tracking
+	// Ensure project ID label is present for tracking
 	if hubAgent.Labels == nil {
 		hubAgent.Labels = make(map[string]string)
 	}
@@ -215,7 +215,7 @@ func (d *agentDispatcherAdapter) resolveProjectPath(ctx context.Context, project
 // DispatchAgentDelete implements hub.AgentDispatcher.
 // It removes an agent from the runtime broker.
 func (d *agentDispatcherAdapter) DispatchAgentDelete(ctx context.Context, hubAgent *store.Agent, deleteFiles, removeBranch, _ bool, _ time.Time) error {
-	// Look up the local path for this grove on this runtime broker
+	// Look up the local path for this project on this runtime broker
 	var projectPath string
 	if hubAgent.ProjectID != "" && d.brokerID != "" {
 		provider, err := d.store.GetProjectProvider(ctx, hubAgent.ProjectID, d.brokerID)
@@ -227,7 +227,7 @@ func (d *agentDispatcherAdapter) DispatchAgentDelete(ctx context.Context, hubAge
 	}
 
 	// For hub-managed projects the provider LocalPath is typically empty.
-	// Resolve from the grove slug so file cleanup can find the agent
+	// Resolve from the project slug so file cleanup can find the agent
 	// directory at ~/.scion/groves/<slug>/.scion/agents/<name>.
 	if projectPath == "" && hubAgent.ProjectID != "" && deleteFiles {
 		grove, err := d.store.GetProject(ctx, hubAgent.ProjectID)

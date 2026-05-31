@@ -278,7 +278,7 @@ func runInit(args []string) int {
 		}
 	}
 
-	// Clone git workspace if configured (hub-first git groves)
+	// Clone git workspace if configured (hub-first git projects)
 	if err := gitCloneWorkspace(targetUID, targetGID, agentHome); err != nil {
 		log.Error("Git clone failed: %v", err)
 
@@ -303,7 +303,7 @@ func runInit(args []string) int {
 		return 1
 	}
 
-	// Configure git credentials for shared-workspace groves (git-workspace hybrid).
+	// Configure git credentials for shared-workspace projects (git-workspace hybrid).
 	// The workspace is pre-cloned on the host; agents need credentials to push/pull.
 	if os.Getenv("SCION_SHARED_WORKSPACE") == "true" {
 		configureSharedWorkspaceGit(agentHome)
@@ -1162,7 +1162,7 @@ func isUIDMapped(uid int) bool {
 }
 
 // gitCloneWorkspace clones a git repository into /workspace when SCION_GIT_CLONE_URL
-// is set. This supports hub-first git groves where the repository must be cloned
+// is set. This supports hub-first git projects where the repository must be cloned
 // before the harness starts. When uid > 0, all git commands run as the specified
 // user so that the resulting files are owned by the scion user rather than root.
 // agentHome is the scion user's home directory, used to write the credential
@@ -1349,7 +1349,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string) error {
 
 	// Configure credential helper in the agent user's $HOME/.gitconfig (not
 	// the workspace .git/config). This keeps credentials out of the workspace,
-	// matching the pattern used by shared-workspace groves. We use the
+	// matching the pattern used by shared-workspace projects. We use the
 	// resolved agentHome rather than os.Getenv("HOME") because init runs as
 	// root (HOME=/root) but the harness runs as the scion user.
 	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
@@ -1430,7 +1430,7 @@ func ensureWorkspaceOwnership(workspacePath string, uid, gid, currentEUID int, c
 }
 
 // configureSharedWorkspaceGit sets up git credentials for shared-workspace
-// (git-workspace hybrid) groves. The workspace is a pre-cloned git repo shared
+// (git-workspace hybrid) projects. The workspace is a pre-cloned git repo shared
 // by all agents; each agent gets its own credential helper in $HOME/.gitconfig
 // so credentials don't pollute the shared workspace.
 func configureSharedWorkspaceGit(agentHome string) {
