@@ -1837,7 +1837,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProjectSlug_HubManage
 	// Create a hub-managed project (no GitRemote)
 	project := &store.Project{
 		ID:   "project-hub-managed",
-		Name: "Hub Native Project",
+		Name: "Hub Managed Project",
 		Slug: "hub-managed-project",
 		// No GitRemote = hub-managed
 	}

@@ -76,7 +76,7 @@ func TestCreateProject_HubManaged_NoGitRemote(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := CreateProjectRequest{
-		Name: "Hub Native Project",
+		Name: "Hub Managed Project",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body)
@@ -85,7 +85,7 @@ func TestCreateProject_HubManaged_NoGitRemote(t *testing.T) {
 	var project store.Project
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
-	assert.Equal(t, "Hub Native Project", project.Name)
+	assert.Equal(t, "Hub Managed Project", project.Name)
 	assert.Equal(t, "hub-managed-project", project.Slug)
 	assert.Empty(t, project.GitRemote, "hub-managed project should have no git remote")
 
@@ -134,7 +134,7 @@ func TestPopulateAgentConfig_HubManagedProject_SetsWorkspace(t *testing.T) {
 
 	project := &store.Project{
 		ID:   "project-hub-managed",
-		Name: "Hub Native",
+		Name: "Hub Managed",
 		Slug: "hub-managed",
 		// No GitRemote — hub-managed project
 	}
