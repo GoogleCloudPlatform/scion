@@ -86,6 +86,13 @@ All icons in the web frontend use the Shoelace `<sl-icon>` component (Bootstrap 
 
 > **Canonical engineering glossary:** See [`GLOSSARY.md`](./GLOSSARY.md) at the repo root for the canonical, opinionated terminology used throughout the codebase — the preferred term for each concept and the synonyms to avoid. Prefer these terms in new code, comments, and docs.
 
+These terms may be used in shorthand with prompts
+
+- **hub-broker, combo server** References running the server command with both the hub function and the broker function running in the same invocation.
+- **hub-native, hub-project** A special variant of a project/project space, that is created on a hub server for use by agents dispatched from clients. These live in ~/.scion/projects/<hub-project-name> on any broker that is a provider to the hub project. This is in contrast to the arbitrary local path on a broker for a linked project.
+- **agent-home** The directory that gets mounted as the home folder of the container user in the agent container
+- **linked-project** A project and project folder that pre-existed on a broker machine, and is linked as a hub resource project for visibility, metadata, and agent management across other brokers that may have such a linked project. May be based on name or git-URI
+
 ## Project use of the scion cli itself
 Do not commit changes in the project's own `.scion` folder to git as part of committing progress on code and docs. These are managed and committed manually when template defaults are intentionally updated.
 
