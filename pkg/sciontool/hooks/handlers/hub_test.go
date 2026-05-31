@@ -728,6 +728,148 @@ func TestHubHandler_AssistantTextForwarding(t *testing.T) {
 	})
 }
 
+// TestHubHandler_AssistantTextVisibilityTagging tests that automatic
+// assistant-reply messages are tagged with "verbose" visibility and
+// include content classification metadata.
+func TestHubHandler_AssistantTextVisibilityTagging(t *testing.T) {
+	t.Run("tags outbound message with verbose visibility", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		origHome := os.Getenv("HOME")
+		os.Setenv("HOME", tmpHome)
+		defer os.Setenv("HOME", origHome)
+
+		var mu sync.Mutex
+		var outboundPayload map[string]interface{}
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			var payload map[string]interface{}
+			json.NewDecoder(r.Body).Decode(&payload)
+
+			if _, ok := payload["msg"]; ok {
+				outboundPayload = payload
+			}
+
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{}`))
+		}))
+		defer server.Close()
+
+		os.Setenv("SCION_HUB_ENDPOINT", server.URL)
+		os.Setenv("SCION_AUTH_TOKEN", "test-token")
+		os.Setenv("SCION_AGENT_ID", "test-agent-id")
+		defer func() {
+			os.Unsetenv("SCION_HUB_ENDPOINT")
+			os.Unsetenv("SCION_HUB_URL")
+			os.Unsetenv("SCION_AUTH_TOKEN")
+			os.Unsetenv("SCION_AGENT_ID")
+		}()
+
+		handler := NewHubHandler()
+		if handler == nil {
+			t.Fatal("Expected handler to be created")
+		}
+
+		err := handler.Handle(&hooks.Event{
+			Name: hooks.EventAgentEnd,
+			Data: hooks.EventData{AssistantText: "Agent response"},
+		})
+		if err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		if outboundPayload == nil {
+			t.Fatal("Expected outbound message to be sent")
+		}
+		if outboundPayload["visibility"] != "verbose" {
+			t.Errorf("Expected visibility 'verbose', got %v", outboundPayload["visibility"])
+		}
+		metadata, ok := outboundPayload["metadata"].(map[string]interface{})
+		if !ok {
+			t.Fatal("Expected metadata to be present")
+		}
+		if metadata["source"] != "hook" {
+			t.Errorf("Expected metadata source 'hook', got %v", metadata["source"])
+		}
+	})
+
+	t.Run("sets has_thinking metadata when thinking content was filtered", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		origHome := os.Getenv("HOME")
+		os.Setenv("HOME", tmpHome)
+		defer os.Setenv("HOME", origHome)
+
+		var mu sync.Mutex
+		var outboundPayload map[string]interface{}
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			var payload map[string]interface{}
+			json.NewDecoder(r.Body).Decode(&payload)
+
+			if _, ok := payload["msg"]; ok {
+				outboundPayload = payload
+			}
+
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{}`))
+		}))
+		defer server.Close()
+
+		os.Setenv("SCION_HUB_ENDPOINT", server.URL)
+		os.Setenv("SCION_AUTH_TOKEN", "test-token")
+		os.Setenv("SCION_AGENT_ID", "test-agent-id")
+		defer func() {
+			os.Unsetenv("SCION_HUB_ENDPOINT")
+			os.Unsetenv("SCION_HUB_URL")
+			os.Unsetenv("SCION_AUTH_TOKEN")
+			os.Unsetenv("SCION_AGENT_ID")
+		}()
+
+		handler := NewHubHandler()
+		if handler == nil {
+			t.Fatal("Expected handler to be created")
+		}
+
+		err := handler.Handle(&hooks.Event{
+			Name: hooks.EventAgentEnd,
+			Data: hooks.EventData{
+				AssistantText: "Filtered response",
+				AssistantContent: &hooks.AssistantContent{
+					Blocks: []hooks.ContentBlock{
+						{Type: hooks.ContentBlockThinking, Text: "I need to think..."},
+						{Type: hooks.ContentBlockText, Text: "Filtered response"},
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		if outboundPayload == nil {
+			t.Fatal("Expected outbound message to be sent")
+		}
+		metadata, ok := outboundPayload["metadata"].(map[string]interface{})
+		if !ok {
+			t.Fatal("Expected metadata to be present")
+		}
+		if metadata["has_thinking"] != "true" {
+			t.Errorf("Expected has_thinking 'true', got %v", metadata["has_thinking"])
+		}
+	})
+}
+
 // TestTruncateMessage tests the truncation helper function.
 func TestTruncateMessage(t *testing.T) {
 	tests := []struct {

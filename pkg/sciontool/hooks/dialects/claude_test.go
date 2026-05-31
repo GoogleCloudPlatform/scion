@@ -337,6 +337,229 @@ func TestClaudeDialect_ParseFilePath(t *testing.T) {
 	})
 }
 
+// --- Content-type filtering tests ---
+
+func TestExtractAssistantContentFromPayload_PlainString(t *testing.T) {
+	d := NewClaudeDialect()
+	event, err := d.Parse(map[string]interface{}{
+		"hook_event_name":        "Stop",
+		"last_assistant_message": "Hello, here is my response.",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Hello, here is my response.", event.Data.AssistantText)
+	require.NotNil(t, event.Data.AssistantContent)
+	assert.Len(t, event.Data.AssistantContent.Blocks, 1)
+	assert.Equal(t, hooks.ContentBlockText, event.Data.AssistantContent.Blocks[0].Type)
+	assert.False(t, event.Data.AssistantContent.HasThinking())
+}
+
+func TestExtractAssistantContentFromPayload_JSONArrayBlocks(t *testing.T) {
+	// last_assistant_message is a JSON-encoded array of content blocks.
+	d := NewClaudeDialect()
+	blocksJSON := `[{"type":"thinking","thinking":"Let me reason about this..."},{"type":"text","text":"Here is my answer."}]`
+	event, err := d.Parse(map[string]interface{}{
+		"hook_event_name":        "Stop",
+		"last_assistant_message": blocksJSON,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Here is my answer.", event.Data.AssistantText,
+		"AssistantText should contain only text blocks, not thinking")
+	require.NotNil(t, event.Data.AssistantContent)
+	assert.Len(t, event.Data.AssistantContent.Blocks, 2)
+	assert.Equal(t, hooks.ContentBlockThinking, event.Data.AssistantContent.Blocks[0].Type)
+	assert.Equal(t, "Let me reason about this...", event.Data.AssistantContent.Blocks[0].Text)
+	assert.Equal(t, hooks.ContentBlockText, event.Data.AssistantContent.Blocks[1].Type)
+	assert.Equal(t, "Here is my answer.", event.Data.AssistantContent.Blocks[1].Text)
+	assert.True(t, event.Data.AssistantContent.HasThinking())
+}
+
+func TestExtractAssistantContentFromPayload_NativeArray(t *testing.T) {
+	// last_assistant_message is already parsed as []interface{} (native array).
+	d := NewClaudeDialect()
+	event, err := d.Parse(map[string]interface{}{
+		"hook_event_name": "Stop",
+		"last_assistant_message": []interface{}{
+			map[string]interface{}{"type": "thinking", "thinking": "Deep reasoning here"},
+			map[string]interface{}{"type": "text", "text": "User-visible output"},
+			map[string]interface{}{"type": "tool_use", "name": "Bash"},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "User-visible output", event.Data.AssistantText,
+		"Only text blocks should appear in AssistantText")
+	require.NotNil(t, event.Data.AssistantContent)
+	assert.Len(t, event.Data.AssistantContent.Blocks, 3)
+	assert.Equal(t, hooks.ContentBlockThinking, event.Data.AssistantContent.Blocks[0].Type)
+	assert.Equal(t, hooks.ContentBlockText, event.Data.AssistantContent.Blocks[1].Type)
+	assert.Equal(t, hooks.ContentBlockToolUse, event.Data.AssistantContent.Blocks[2].Type)
+	assert.True(t, event.Data.AssistantContent.HasThinking())
+}
+
+func TestExtractAssistantContentFromPayload_ThinkingOnlyBlocks(t *testing.T) {
+	// Edge case: only thinking blocks, no text blocks.
+	d := NewClaudeDialect()
+	blocksJSON := `[{"type":"thinking","thinking":"I need to think about this carefully"}]`
+	event, err := d.Parse(map[string]interface{}{
+		"hook_event_name":        "Stop",
+		"last_assistant_message": blocksJSON,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, event.Data.AssistantText,
+		"AssistantText should be empty when only thinking blocks exist")
+	// When text is empty, AssistantContent is not set since the whole extraction returns ""
+}
+
+func TestExtractAssistantContentFromPayload_MultipleTextBlocks(t *testing.T) {
+	d := NewClaudeDialect()
+	blocksJSON := `[{"type":"thinking","thinking":"Planning..."},{"type":"text","text":"Part 1"},{"type":"tool_use","name":"Read"},{"type":"text","text":"Part 2"}]`
+	event, err := d.Parse(map[string]interface{}{
+		"hook_event_name":        "Stop",
+		"last_assistant_message": blocksJSON,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Part 1Part 2", event.Data.AssistantText,
+		"Multiple text blocks should be concatenated")
+	require.NotNil(t, event.Data.AssistantContent)
+	assert.Len(t, event.Data.AssistantContent.Blocks, 4)
+}
+
+func TestExtractAssistantContentFromPayload_EmptyString(t *testing.T) {
+	d := NewClaudeDialect()
+	event, err := d.Parse(map[string]interface{}{
+		"hook_event_name":        "Stop",
+		"last_assistant_message": "",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, event.Data.AssistantText)
+	assert.Nil(t, event.Data.AssistantContent)
+}
+
+func TestExtractAssistantContentFromPayload_InvalidJSON(t *testing.T) {
+	// A string that starts with '[' but isn't valid JSON should be
+	// treated as a plain text block.
+	d := NewClaudeDialect()
+	event, err := d.Parse(map[string]interface{}{
+		"hook_event_name":        "Stop",
+		"last_assistant_message": "[not valid json at all",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "[not valid json at all", event.Data.AssistantText)
+	require.NotNil(t, event.Data.AssistantContent)
+	assert.Len(t, event.Data.AssistantContent.Blocks, 1)
+	assert.Equal(t, hooks.ContentBlockText, event.Data.AssistantContent.Blocks[0].Type)
+}
+
+func TestExtractAssistantContentFromPayload_JSONArrayNoTypeField(t *testing.T) {
+	// A valid JSON array that doesn't have "type" fields should be
+	// treated as a plain text block (not a content block array).
+	d := NewClaudeDialect()
+	event, err := d.Parse(map[string]interface{}{
+		"hook_event_name":        "Stop",
+		"last_assistant_message": `["just","a","list"]`,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, `["just","a","list"]`, event.Data.AssistantText)
+}
+
+func TestExtractFinalAssistantContentFromTranscript_WithThinking(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "transcript.jsonl")
+	content := `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}` + "\n" +
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Let me think..."},{"type":"text","text":"Hello!"}]}}` + "\n"
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	d := NewClaudeDialect()
+	event, err := d.Parse(map[string]interface{}{
+		"hook_event_name": "Stop",
+		"transcript_path": path,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Hello!", event.Data.AssistantText,
+		"Thinking should be filtered from AssistantText via transcript path")
+	require.NotNil(t, event.Data.AssistantContent)
+	assert.True(t, event.Data.AssistantContent.HasThinking())
+	assert.Len(t, event.Data.AssistantContent.Blocks, 2)
+}
+
+func TestAssistantContent_TextOnly(t *testing.T) {
+	content := &hooks.AssistantContent{
+		Blocks: []hooks.ContentBlock{
+			{Type: hooks.ContentBlockThinking, Text: "reasoning"},
+			{Type: hooks.ContentBlockText, Text: "visible"},
+			{Type: hooks.ContentBlockToolUse, Text: "Bash"},
+			{Type: hooks.ContentBlockText, Text: " output"},
+		},
+	}
+	assert.Equal(t, "visible output", content.TextOnly())
+}
+
+func TestAssistantContent_TextOnly_EmptyContent(t *testing.T) {
+	var nilContent *hooks.AssistantContent
+	assert.Equal(t, "", nilContent.TextOnly())
+
+	emptyContent := &hooks.AssistantContent{}
+	assert.Equal(t, "", emptyContent.TextOnly())
+}
+
+func TestAssistantContent_HasThinking(t *testing.T) {
+	assert.False(t, (*hooks.AssistantContent)(nil).HasThinking())
+	assert.False(t, (&hooks.AssistantContent{}).HasThinking())
+	assert.False(t, (&hooks.AssistantContent{
+		Blocks: []hooks.ContentBlock{{Type: hooks.ContentBlockText, Text: "hi"}},
+	}).HasThinking())
+	assert.True(t, (&hooks.AssistantContent{
+		Blocks: []hooks.ContentBlock{
+			{Type: hooks.ContentBlockThinking, Text: "reasoning"},
+			{Type: hooks.ContentBlockText, Text: "answer"},
+		},
+	}).HasThinking())
+}
+
+// TestClaudeDialect_BackwardCompatibility verifies that the existing
+// behavior is preserved: plain-string last_assistant_message without
+// thinking content still works exactly as before.
+func TestClaudeDialect_BackwardCompatibility(t *testing.T) {
+	d := NewClaudeDialect()
+
+	t.Run("plain string still works", func(t *testing.T) {
+		event, err := d.Parse(map[string]interface{}{
+			"hook_event_name":        "Stop",
+			"last_assistant_message": "Simple response text",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "Simple response text", event.Data.AssistantText)
+	})
+
+	t.Run("transcript fallback still works", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "t.jsonl")
+		content := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"From transcript"}]}}` + "\n"
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+		event, err := d.Parse(map[string]interface{}{
+			"hook_event_name": "Stop",
+			"transcript_path": path,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "From transcript", event.Data.AssistantText)
+	})
+
+	t.Run("payload still preferred over transcript", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "t.jsonl")
+		content := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"from transcript"}]}}` + "\n"
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+		event, err := d.Parse(map[string]interface{}{
+			"hook_event_name":        "Stop",
+			"last_assistant_message": "from payload",
+			"transcript_path":        path,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "from payload", event.Data.AssistantText)
+	})
+}
+
 func TestClaudeDialect_ParseTokens(t *testing.T) {
 	d := NewClaudeDialect()
 
