@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/broker"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -43,7 +43,7 @@ const brokerCallbackTimeout = 30 * time.Second
 //   - Manages subscriptions based on agent lifecycle events (created/deleted)
 //   - Handles broadcast fan-out from a single broker publish to individual agent deliveries
 type MessageBrokerProxy struct {
-	broker        broker.MessageBroker
+	bus           eventbus.EventBus
 	store         store.Store
 	events        *ChannelEventPublisher
 	getDispatcher func() AgentDispatcher
@@ -51,8 +51,8 @@ type MessageBrokerProxy struct {
 	messageLog    *slog.Logger
 
 	mu                  sync.Mutex
-	subscriptions       map[string][]broker.Subscription // projectID -> active subscriptions
-	pluginSubscriptions map[string]broker.Subscription   // pattern -> plugin-initiated subscription
+	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
+	pluginSubscriptions map[string]eventbus.Subscription   // pattern -> plugin-initiated subscription
 	subscribedTopics    map[string]bool                  // dedup guard for project-level subscriptions
 	stopCh              chan struct{}
 	stopOnce            sync.Once
@@ -61,20 +61,20 @@ type MessageBrokerProxy struct {
 
 // NewMessageBrokerProxy creates a new MessageBrokerProxy.
 func NewMessageBrokerProxy(
-	b broker.MessageBroker,
+	b eventbus.EventBus,
 	s store.Store,
 	events *ChannelEventPublisher,
 	getDispatcher func() AgentDispatcher,
 	log *slog.Logger,
 ) *MessageBrokerProxy {
 	return &MessageBrokerProxy{
-		broker:              b,
+		bus:                 b,
 		store:               s,
 		events:              events,
 		getDispatcher:       getDispatcher,
 		log:                 log,
-		subscriptions:       make(map[string][]broker.Subscription),
-		pluginSubscriptions: make(map[string]broker.Subscription),
+		subscriptions:       make(map[string][]eventbus.Subscription),
+		pluginSubscriptions: make(map[string]eventbus.Subscription),
 		subscribedTopics:    make(map[string]bool),
 		stopCh:              make(chan struct{}),
 	}
@@ -185,10 +185,10 @@ func (p *MessageBrokerProxy) RequestSubscription(pattern string) error {
 	}
 
 	// With FanOutBroker, all plugin spokes receive Publish() calls directly
-	// for every message. Re-publishing via p.broker.Publish() here would
+	// for every message. Re-publishing via p.bus.Publish() here would
 	// loop back through InProcessBroker's own subscribers, creating a
 	// feedback storm. The subscription is tracked for accounting only.
-	sub, err := p.broker.Subscribe(pattern, func(_ context.Context, _ string, _ *messages.StructuredMessage) {})
+	sub, err := p.bus.Subscribe(pattern, func(_ context.Context, _ string, _ *messages.StructuredMessage) {})
 	if err != nil {
 		return fmt.Errorf("failed to subscribe for plugin pattern %q: %w", pattern, err)
 	}
@@ -222,16 +222,16 @@ func (p *MessageBrokerProxy) CancelSubscription(pattern string) error {
 // the message's recipient. This is the entry point for Hub handlers to route
 // messages through the broker instead of direct dispatch.
 func (p *MessageBrokerProxy) PublishMessage(ctx context.Context, projectID string, msg *messages.StructuredMessage) error {
-	topic := broker.TopicAgentMessages(projectID, recipientSlug(msg.Recipient))
-	return p.broker.Publish(ctx, topic, msg)
+	topic := eventbus.TopicAgentMessages(projectID, recipientSlug(msg.Recipient))
+	return p.bus.Publish(ctx, topic, msg)
 }
 
 // PublishBroadcast publishes a broadcast message to the project or global broadcast topic.
 func (p *MessageBrokerProxy) PublishBroadcast(ctx context.Context, projectID string, msg *messages.StructuredMessage) error {
 	if projectID == "" {
-		return p.broker.Publish(ctx, broker.TopicGlobalBroadcast(), msg)
+		return p.bus.Publish(ctx, eventbus.TopicGlobalBroadcast(), msg)
 	}
-	return p.broker.Publish(ctx, broker.TopicProjectBroadcast(projectID), msg)
+	return p.bus.Publish(ctx, eventbus.TopicProjectBroadcast(projectID), msg)
 }
 
 // PublishUserMessage publishes a message to the user-targeted broker topic.
@@ -239,8 +239,8 @@ func (p *MessageBrokerProxy) PublishBroadcast(ctx context.Context, projectID str
 // subscription in subscribeProjectUserMessages — do not call deliverToUser()
 // here to avoid double-delivery.
 func (p *MessageBrokerProxy) PublishUserMessage(ctx context.Context, projectID, userID string, msg *messages.StructuredMessage) error {
-	topic := broker.TopicUserMessages(projectID, userID)
-	return p.broker.Publish(ctx, topic, msg)
+	topic := eventbus.TopicUserMessages(projectID, userID)
+	return p.bus.Publish(ctx, topic, msg)
 }
 
 // PublishToGroup fans out a message to a parsed group of recipients, delegating
@@ -328,7 +328,7 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 
 // subscribeAgent creates a broker subscription for an individual agent's message topic.
 func (p *MessageBrokerProxy) subscribeAgent(projectID, agentSlug string) {
-	topic := broker.TopicAgentMessages(projectID, agentSlug)
+	topic := eventbus.TopicAgentMessages(projectID, agentSlug)
 
 	p.mu.Lock()
 	if p.subscribedTopics[topic] {
@@ -338,7 +338,7 @@ func (p *MessageBrokerProxy) subscribeAgent(projectID, agentSlug string) {
 	p.subscribedTopics[topic] = true
 	p.mu.Unlock()
 
-	sub, err := p.broker.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
+	sub, err := p.bus.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
 		ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
 		defer cancel()
 		p.deliverToAgent(ctx, projectID, agentSlug, msg)
@@ -359,7 +359,7 @@ func (p *MessageBrokerProxy) subscribeAgent(projectID, agentSlug string) {
 // subscribeProjectBroadcast creates a broker subscription for project-wide broadcasts
 // that fans out to all running agents in the project.
 func (p *MessageBrokerProxy) subscribeProjectBroadcast(projectID string) {
-	topic := broker.TopicProjectBroadcast(projectID)
+	topic := eventbus.TopicProjectBroadcast(projectID)
 
 	p.mu.Lock()
 	if p.subscribedTopics[topic] {
@@ -369,7 +369,7 @@ func (p *MessageBrokerProxy) subscribeProjectBroadcast(projectID string) {
 	p.subscribedTopics[topic] = true
 	p.mu.Unlock()
 
-	sub, err := p.broker.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
+	sub, err := p.bus.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
 		ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
 		defer cancel()
 		p.fanOutToProject(ctx, projectID, msg)
@@ -392,7 +392,7 @@ func (p *MessageBrokerProxy) subscribeProjectBroadcast(projectID string) {
 // store and published as a user.message SSE event for connected browser clients.
 // The subscription uses a wildcard to cover all users in the project.
 func (p *MessageBrokerProxy) subscribeProjectUserMessages(projectID string) {
-	topic := broker.TopicAllUserMessages(projectID)
+	topic := eventbus.TopicAllUserMessages(projectID)
 
 	p.mu.Lock()
 	if p.subscribedTopics[topic] {
@@ -402,7 +402,7 @@ func (p *MessageBrokerProxy) subscribeProjectUserMessages(projectID string) {
 	p.subscribedTopics[topic] = true
 	p.mu.Unlock()
 
-	sub, err := p.broker.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
+	sub, err := p.bus.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
 		ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
 		defer cancel()
 		p.deliverToUser(ctx, projectID, t, msg)
@@ -465,9 +465,9 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 
 // subscribeGlobalBroadcast creates a broker subscription for global broadcasts.
 func (p *MessageBrokerProxy) subscribeGlobalBroadcast() {
-	topic := broker.TopicGlobalBroadcast()
+	topic := eventbus.TopicGlobalBroadcast()
 
-	_, err := p.broker.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
+	_, err := p.bus.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
 		ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
 		defer cancel()
 		p.fanOutGlobal(ctx, msg)

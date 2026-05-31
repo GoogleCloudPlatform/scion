@@ -26,7 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/broker"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
@@ -114,7 +114,7 @@ func (b *recordingBroker) Publish(_ context.Context, topic string, msg *messages
 	return nil
 }
 
-func (b *recordingBroker) Subscribe(_ string, _ broker.MessageHandler) (broker.Subscription, error) {
+func (b *recordingBroker) Subscribe(_ string, _ eventbus.EventHandler) (eventbus.Subscription, error) {
 	return &noopSubscription{}, nil
 }
 

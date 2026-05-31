@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package broker
+package eventbus
 
 import (
 	"context"
@@ -31,7 +31,7 @@ const (
 // subscriber holds a handler function and its dispatch goroutine channel.
 type subscriber struct {
 	pattern string
-	handler MessageHandler
+	handler EventHandler
 	ch      chan publishedMessage
 	done    chan struct{}
 }
@@ -45,42 +45,42 @@ type publishedMessage struct {
 	msg   *messages.StructuredMessage
 }
 
-// inProcessSubscription implements Subscription for the InProcessBroker.
+// inProcessSubscription implements Subscription for the InProcessEventBus.
 type inProcessSubscription struct {
-	broker *InProcessBroker
-	sub    *subscriber
+	bus *InProcessEventBus
+	sub *subscriber
 }
 
 func (s *inProcessSubscription) Unsubscribe() error {
-	s.broker.unsubscribe(s.sub)
+	s.bus.unsubscribe(s.sub)
 	return nil
 }
 
-// InProcessBroker is an in-process message broker that routes messages using
+// InProcessEventBus is an in-process event bus that routes messages using
 // Go channels with NATS-style subject pattern matching. Suitable for single-node
 // deployments with no external dependencies.
-type InProcessBroker struct {
+type InProcessEventBus struct {
 	mu          sync.RWMutex
 	subscribers []*subscriber
 	closed      bool
 	log         *slog.Logger
 }
 
-// NewInProcessBroker creates a new in-process message broker.
-func NewInProcessBroker(log *slog.Logger) *InProcessBroker {
-	return &InProcessBroker{
+// NewInProcessEventBus creates a new in-process event bus.
+func NewInProcessEventBus(log *slog.Logger) *InProcessEventBus {
+	return &InProcessEventBus{
 		log: log,
 	}
 }
 
 // Publish sends a message to all subscribers whose patterns match the topic.
 // Publishing is non-blocking: messages are dropped if a subscriber's buffer is full.
-func (b *InProcessBroker) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
+func (b *InProcessEventBus) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
 	if b.closed {
-		return ErrBrokerClosed
+		return ErrEventBusClosed
 	}
 
 	pm := publishedMessage{ctx: ctx, topic: topic, msg: msg}
@@ -101,12 +101,12 @@ func (b *InProcessBroker) Publish(ctx context.Context, topic string, msg *messag
 
 // Subscribe registers a handler for messages matching the given pattern.
 // Each subscriber gets a dedicated goroutine for dispatch to avoid blocking the publisher.
-func (b *InProcessBroker) Subscribe(pattern string, handler MessageHandler) (Subscription, error) {
+func (b *InProcessEventBus) Subscribe(pattern string, handler EventHandler) (Subscription, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if b.closed {
-		return nil, ErrBrokerClosed
+		return nil, ErrEventBusClosed
 	}
 
 	sub := &subscriber{
@@ -132,11 +132,11 @@ func (b *InProcessBroker) Subscribe(pattern string, handler MessageHandler) (Sub
 	b.subscribers = append(b.subscribers, sub)
 	b.log.Debug("Subscription registered", "pattern", pattern)
 
-	return &inProcessSubscription{broker: b, sub: sub}, nil
+	return &inProcessSubscription{bus: b, sub: sub}, nil
 }
 
-// Close shuts down the broker and all subscriber goroutines.
-func (b *InProcessBroker) Close() error {
+// Close shuts down the event bus and all subscriber goroutines.
+func (b *InProcessEventBus) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -156,12 +156,12 @@ func (b *InProcessBroker) Close() error {
 	}
 
 	b.subscribers = nil
-	b.log.Info("In-process message broker closed")
+	b.log.Info("In-process event bus closed")
 	return nil
 }
 
 // unsubscribe removes a subscriber and shuts down its dispatch goroutine.
-func (b *InProcessBroker) unsubscribe(target *subscriber) {
+func (b *InProcessEventBus) unsubscribe(target *subscriber) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 

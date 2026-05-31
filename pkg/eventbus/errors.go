@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package broker
+package eventbus
 
 import "errors"
 
-// ErrBrokerClosed is returned when attempting to publish or subscribe on a closed broker.
-var ErrBrokerClosed = errors.New("message broker is closed")
+// ErrEventBusClosed is returned when attempting to publish or subscribe on a closed event bus.
+var ErrEventBusClosed = errors.New("event bus is closed")

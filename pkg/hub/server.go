@@ -32,7 +32,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/broker"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -1298,7 +1298,7 @@ func (s *Server) StartNotificationDispatcher() {
 // ChannelEventPublisher is available. The broker enables pub/sub message
 // routing with topic-based subscriptions and broadcast fan-out.
 // Safe to call multiple times; subsequent calls are no-ops.
-func (s *Server) StartMessageBroker(b broker.MessageBroker) {
+func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

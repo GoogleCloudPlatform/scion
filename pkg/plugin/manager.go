@@ -22,7 +22,7 @@ import (
 	"os/exec"
 	"sync"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/broker"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	goplugin "github.com/hashicorp/go-plugin"
 	"github.com/hashicorp/go-plugin/runner"
 )
@@ -345,10 +345,10 @@ func (m *Manager) Reconnect(pluginType, name string) error {
 	return m.loadPlugin(dp)
 }
 
-// GetBroker returns a broker.MessageBroker backed by the named broker plugin.
+// GetBroker returns an eventbus.EventBus backed by the named broker plugin.
 // For self-managed plugins, it returns a reconnecting adapter that automatically
 // re-establishes the connection if the plugin process restarts.
-func (m *Manager) GetBroker(name string) (broker.MessageBroker, error) {
+func (m *Manager) GetBroker(name string) (eventbus.EventBus, error) {
 	raw, err := m.Get(PluginTypeBroker, name)
 	if err != nil {
 		return nil, err

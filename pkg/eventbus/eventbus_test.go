@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package broker
+package eventbus
 
 import (
 	"context"
@@ -24,12 +24,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
-func newTestBroker() *InProcessBroker {
-	return NewInProcessBroker(slog.Default())
+func newTestEventBus() *InProcessEventBus {
+	return NewInProcessEventBus(slog.Default())
 }
 
-func TestInProcessBroker_PublishSubscribe(t *testing.T) {
-	b := newTestBroker()
+func TestInProcessEventBus_PublishSubscribe(t *testing.T) {
+	b := newTestEventBus()
 	defer b.Close()
 
 	var received *messages.StructuredMessage
@@ -65,8 +65,8 @@ func TestInProcessBroker_PublishSubscribe(t *testing.T) {
 	}
 }
 
-func TestInProcessBroker_WildcardSubscribe(t *testing.T) {
-	b := newTestBroker()
+func TestInProcessEventBus_WildcardSubscribe(t *testing.T) {
+	b := newTestEventBus()
 	defer b.Close()
 
 	var mu sync.Mutex
@@ -103,8 +103,8 @@ func TestInProcessBroker_WildcardSubscribe(t *testing.T) {
 	}
 }
 
-func TestInProcessBroker_GreaterThanWildcard(t *testing.T) {
-	b := newTestBroker()
+func TestInProcessEventBus_GreaterThanWildcard(t *testing.T) {
+	b := newTestEventBus()
 	defer b.Close()
 
 	var mu sync.Mutex
@@ -134,8 +134,8 @@ func TestInProcessBroker_GreaterThanWildcard(t *testing.T) {
 	}
 }
 
-func TestInProcessBroker_BroadcastTopic(t *testing.T) {
-	b := newTestBroker()
+func TestInProcessEventBus_BroadcastTopic(t *testing.T) {
+	b := newTestEventBus()
 	defer b.Close()
 
 	var wg sync.WaitGroup
@@ -158,12 +158,12 @@ func TestInProcessBroker_BroadcastTopic(t *testing.T) {
 	wg.Wait()
 }
 
-// TestInProcessBroker_PropagatesPublisherContext verifies that the context
+// TestInProcessEventBus_PropagatesPublisherContext verifies that the context
 // passed to Publish is delivered to the subscriber handler. Regression for a
 // bug where the dispatcher replaced the real ctx with context.Background(),
 // preventing handlers from honoring cancellation or carrying publisher values.
-func TestInProcessBroker_PropagatesPublisherContext(t *testing.T) {
-	b := newTestBroker()
+func TestInProcessEventBus_PropagatesPublisherContext(t *testing.T) {
+	b := newTestEventBus()
 	defer b.Close()
 
 	type ctxKey string
@@ -194,8 +194,8 @@ func TestInProcessBroker_PropagatesPublisherContext(t *testing.T) {
 	}
 }
 
-func TestInProcessBroker_Unsubscribe(t *testing.T) {
-	b := newTestBroker()
+func TestInProcessEventBus_Unsubscribe(t *testing.T) {
+	b := newTestEventBus()
 	defer b.Close()
 
 	callCount := 0
@@ -224,8 +224,8 @@ func TestInProcessBroker_Unsubscribe(t *testing.T) {
 	}
 }
 
-func TestInProcessBroker_CloseStopsDelivery(t *testing.T) {
-	b := newTestBroker()
+func TestInProcessEventBus_CloseStopsDelivery(t *testing.T) {
+	b := newTestEventBus()
 
 	callCount := 0
 	_, err := b.Subscribe("scion.>", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
@@ -239,18 +239,18 @@ func TestInProcessBroker_CloseStopsDelivery(t *testing.T) {
 
 	err = b.Publish(context.Background(), "scion.grove.g1.broadcast",
 		messages.NewInstruction("u:a", "g:g1", "after close"))
-	if err != ErrBrokerClosed {
-		t.Fatalf("expected ErrBrokerClosed, got %v", err)
+	if err != ErrEventBusClosed {
+		t.Fatalf("expected ErrEventBusClosed, got %v", err)
 	}
 
 	_, err = b.Subscribe("scion.>", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {})
-	if err != ErrBrokerClosed {
-		t.Fatalf("expected ErrBrokerClosed on Subscribe after Close, got %v", err)
+	if err != ErrEventBusClosed {
+		t.Fatalf("expected ErrEventBusClosed on Subscribe after Close, got %v", err)
 	}
 }
 
-func TestInProcessBroker_NoMatchNoDelivery(t *testing.T) {
-	b := newTestBroker()
+func TestInProcessEventBus_NoMatchNoDelivery(t *testing.T) {
+	b := newTestEventBus()
 	defer b.Close()
 
 	callCount := 0

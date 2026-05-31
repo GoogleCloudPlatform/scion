@@ -12,16 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package broker provides the message broker abstraction for Scion's messaging system.
-// The broker routes structured messages between agents, users, and system components
-// using topic-based publish/subscribe with NATS-style subject matching.
+// Package eventbus provides the event bus abstraction for Scion's real-time
+// pub/sub system. The event bus routes structured messages between agents,
+// users, and system components using topic-based publish/subscribe with
+// NATS-style subject matching.
+//
+// This package was formerly named pkg/broker. It was renamed to avoid
+// confusion with the unrelated Message Broker plugin system
+// (pkg/plugin/broker_plugin.go) and the Runtime Broker CLI command.
 //
 // Topic hierarchy:
 //
 //	scion.grove.<grove-id>.agent.<agent-slug>.messages   - direct messages to an agent
 //	scion.grove.<grove-id>.broadcast                      - project-wide broadcasts
 //	scion.global.broadcast                                - global broadcasts
-package broker
+package eventbus
 
 import (
 	"context"
@@ -29,23 +34,23 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
-// MessageBroker abstracts message routing and delivery.
+// EventBus abstracts message routing and delivery.
 // Implementations range from in-process (Go channels) to external systems (NATS, Redis).
-type MessageBroker interface {
+type EventBus interface {
 	// Publish sends a structured message to a topic.
 	Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error
 
 	// Subscribe registers a handler for messages matching a topic pattern.
 	// Patterns use NATS-style wildcards: * matches a single token, > matches the remainder.
 	// Returns a Subscription that can be used to unsubscribe.
-	Subscribe(pattern string, handler MessageHandler) (Subscription, error)
+	Subscribe(pattern string, handler EventHandler) (Subscription, error)
 
-	// Close shuts down the broker and releases resources.
+	// Close shuts down the event bus and releases resources.
 	Close() error
 }
 
-// MessageHandler is a callback function invoked when a message is received on a subscribed topic.
-type MessageHandler func(ctx context.Context, topic string, msg *messages.StructuredMessage)
+// EventHandler is a callback function invoked when a message is received on a subscribed topic.
+type EventHandler func(ctx context.Context, topic string, msg *messages.StructuredMessage)
 
 // Subscription represents an active subscription that can be cancelled.
 type Subscription interface {

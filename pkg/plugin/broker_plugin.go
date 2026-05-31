@@ -21,7 +21,7 @@ import (
 	"net/rpc"
 	"sync"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/broker"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	goplugin "github.com/hashicorp/go-plugin"
 )
@@ -321,8 +321,8 @@ func (c *BrokerRPCClient) HealthCheck() (*HealthStatus, error) {
 
 // --- Host-side adapter: wraps BrokerRPCClient as broker.MessageBroker ---
 
-// BrokerPluginAdapter wraps a BrokerRPCClient to satisfy the broker.MessageBroker interface.
-// Subscribe's MessageHandler callback is not forwarded to the plugin — inbound messages
+// BrokerPluginAdapter wraps a BrokerRPCClient to satisfy the eventbus.EventBus interface.
+// Subscribe's EventHandler callback is not forwarded to the plugin — inbound messages
 // arrive via the hub API instead (see broker-plugins.md design doc).
 type BrokerPluginAdapter struct {
 	rpcClient *BrokerRPCClient
@@ -344,7 +344,7 @@ func (a *BrokerPluginAdapter) Publish(ctx context.Context, topic string, msg *me
 // Subscribe tells the plugin to start listening on the external broker for the given pattern.
 // The handler callback is stored locally but not forwarded — inbound delivery happens
 // via the hub API endpoint (POST /api/v1/broker/inbound).
-func (a *BrokerPluginAdapter) Subscribe(pattern string, handler broker.MessageHandler) (broker.Subscription, error) {
+func (a *BrokerPluginAdapter) Subscribe(pattern string, handler eventbus.EventHandler) (eventbus.Subscription, error) {
 	if err := a.rpcClient.Subscribe(pattern); err != nil {
 		return nil, fmt.Errorf("plugin subscribe failed: %w", err)
 	}
@@ -360,7 +360,7 @@ func (a *BrokerPluginAdapter) Close() error {
 	return a.rpcClient.Close()
 }
 
-// pluginSubscription implements broker.Subscription for plugin brokers.
+// pluginSubscription implements eventbus.Subscription for plugin brokers.
 type pluginSubscription struct {
 	adapter *BrokerPluginAdapter
 	pattern string
@@ -385,7 +385,7 @@ type reconnectingBrokerAdapter struct {
 	logger     *slog.Logger
 	mu         sync.Mutex
 	current    *BrokerPluginAdapter
-	activeSubs map[string]broker.MessageHandler // tracked for re-subscribe after reconnect
+	activeSubs map[string]eventbus.EventHandler // tracked for re-subscribe after reconnect
 	closed     bool
 }
 
@@ -395,7 +395,7 @@ func newReconnectingBrokerAdapter(manager *Manager, name string, initial *Broker
 		name:       name,
 		logger:     logger.With("component", "reconnecting-broker", "plugin", name),
 		current:    initial,
-		activeSubs: make(map[string]broker.MessageHandler),
+		activeSubs: make(map[string]eventbus.EventHandler),
 	}
 }
 
@@ -451,7 +451,7 @@ func (a *reconnectingBrokerAdapter) Publish(ctx context.Context, topic string, m
 	return a.current.Publish(ctx, topic, msg)
 }
 
-func (a *reconnectingBrokerAdapter) Subscribe(pattern string, handler broker.MessageHandler) (broker.Subscription, error) {
+func (a *reconnectingBrokerAdapter) Subscribe(pattern string, handler eventbus.EventHandler) (eventbus.Subscription, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.closed {
@@ -484,7 +484,7 @@ func (a *reconnectingBrokerAdapter) Close() error {
 	return a.current.Close()
 }
 
-// reconnectingSub implements broker.Subscription and tracks unsubscribes in
+// reconnectingSub implements eventbus.Subscription and tracks unsubscribes in
 // the reconnecting adapter's activeSubs map.
 type reconnectingSub struct {
 	adapter *reconnectingBrokerAdapter

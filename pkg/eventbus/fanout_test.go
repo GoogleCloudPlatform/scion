@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package broker
+package eventbus
 
 import (
 	"context"
@@ -26,10 +26,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
-// stubBroker is a minimal MessageBroker for testing fan-out behavior.
-type stubBroker struct {
+// stubEventBus is a minimal EventBus for testing fan-out behavior.
+type stubEventBus struct {
 	publishFunc   func(ctx context.Context, topic string, msg *messages.StructuredMessage) error
-	subscribeFunc func(pattern string, handler MessageHandler) (Subscription, error)
+	subscribeFunc func(pattern string, handler EventHandler) (Subscription, error)
 	closeFunc     func() error
 
 	mu        sync.Mutex
@@ -37,15 +37,15 @@ type stubBroker struct {
 	closed    bool
 }
 
-func newStubBroker() *stubBroker {
-	s := &stubBroker{}
+func newStubEventBus() *stubEventBus {
+	s := &stubEventBus{}
 	s.publishFunc = func(_ context.Context, _ string, msg *messages.StructuredMessage) error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.published = append(s.published, msg)
 		return nil
 	}
-	s.subscribeFunc = func(_ string, _ MessageHandler) (Subscription, error) {
+	s.subscribeFunc = func(_ string, _ EventHandler) (Subscription, error) {
 		return &stubSubscription{}, nil
 	}
 	s.closeFunc = func() error {
@@ -57,15 +57,15 @@ func newStubBroker() *stubBroker {
 	return s
 }
 
-func (s *stubBroker) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
+func (s *stubEventBus) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	return s.publishFunc(ctx, topic, msg)
 }
 
-func (s *stubBroker) Subscribe(pattern string, handler MessageHandler) (Subscription, error) {
+func (s *stubEventBus) Subscribe(pattern string, handler EventHandler) (Subscription, error) {
 	return s.subscribeFunc(pattern, handler)
 }
 
-func (s *stubBroker) Close() error {
+func (s *stubEventBus) Close() error {
 	return s.closeFunc()
 }
 
@@ -73,15 +73,15 @@ type stubSubscription struct{}
 
 func (s *stubSubscription) Unsubscribe() error { return nil }
 
-func TestFanOutBroker_PublishFansOutToAll(t *testing.T) {
-	b1 := newStubBroker()
-	b2 := newStubBroker()
-	b3 := newStubBroker()
+func TestFanOutEventBus_PublishFansOutToAll(t *testing.T) {
+	b1 := newStubEventBus()
+	b2 := newStubEventBus()
+	b3 := newStubEventBus()
 
-	fan := NewFanOutBroker([]NamedBroker{
-		{Name: "b1", Broker: b1},
-		{Name: "b2", Broker: b2},
-		{Name: "b3", Broker: b3},
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: "b1", Bus: b1},
+		{Name: "b2", Bus: b2},
+		{Name: "b3", Bus: b3},
 	}, slog.Default())
 
 	msg := messages.NewInstruction("user:alice", "agent:bot", "hello")
@@ -89,7 +89,7 @@ func TestFanOutBroker_PublishFansOutToAll(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	for _, sb := range []*stubBroker{b1, b2, b3} {
+	for _, sb := range []*stubEventBus{b1, b2, b3} {
 		sb.mu.Lock()
 		if len(sb.published) != 1 {
 			t.Errorf("expected 1 message, got %d", len(sb.published))
@@ -98,16 +98,16 @@ func TestFanOutBroker_PublishFansOutToAll(t *testing.T) {
 	}
 }
 
-func TestFanOutBroker_ObserverErrorNotReturned(t *testing.T) {
-	critical := newStubBroker()
-	observer := newStubBroker()
+func TestFanOutEventBus_ObserverErrorNotReturned(t *testing.T) {
+	critical := newStubEventBus()
+	observer := newStubEventBus()
 	observer.publishFunc = func(_ context.Context, _ string, _ *messages.StructuredMessage) error {
 		return errors.New("observer failed")
 	}
 
-	fan := NewFanOutBroker([]NamedBroker{
-		{Name: "critical", Broker: critical},
-		{Name: "observer", Broker: observer, Observer: true},
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: "critical", Bus: critical},
+		{Name: "observer", Bus: observer, Observer: true},
 	}, slog.Default())
 
 	msg := messages.NewInstruction("user:alice", "agent:bot", "hello")
@@ -117,62 +117,62 @@ func TestFanOutBroker_ObserverErrorNotReturned(t *testing.T) {
 	}
 }
 
-func TestFanOutBroker_CriticalErrorReturned(t *testing.T) {
-	failing := newStubBroker()
+func TestFanOutEventBus_CriticalErrorReturned(t *testing.T) {
+	failing := newStubEventBus()
 	failing.publishFunc = func(_ context.Context, _ string, _ *messages.StructuredMessage) error {
 		return errors.New("critical failed")
 	}
-	ok := newStubBroker()
+	ok := newStubEventBus()
 
-	fan := NewFanOutBroker([]NamedBroker{
-		{Name: "failing", Broker: failing},
-		{Name: "ok", Broker: ok},
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: "failing", Bus: failing},
+		{Name: "ok", Bus: ok},
 	}, slog.Default())
 
 	msg := messages.NewInstruction("user:alice", "agent:bot", "hello")
 	err := fan.Publish(context.Background(), "test.topic", msg)
 	if err == nil {
-		t.Fatal("expected error from critical broker")
+		t.Fatal("expected error from critical event bus")
 	}
 	if !errors.Is(err, err) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// The ok broker should still have received the message.
+	// The ok event bus should still have received the message.
 	ok.mu.Lock()
 	if len(ok.published) != 1 {
-		t.Errorf("ok broker should have received message, got %d", len(ok.published))
+		t.Errorf("ok event bus should have received message, got %d", len(ok.published))
 	}
 	ok.mu.Unlock()
 }
 
-func TestFanOutBroker_CloseCallsAllChildren(t *testing.T) {
-	b1 := newStubBroker()
-	b2 := newStubBroker()
+func TestFanOutEventBus_CloseCallsAllChildren(t *testing.T) {
+	b1 := newStubEventBus()
+	b2 := newStubEventBus()
 
-	fan := NewFanOutBroker([]NamedBroker{
-		{Name: "b1", Broker: b1},
-		{Name: "b2", Broker: b2},
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: "b1", Bus: b1},
+		{Name: "b2", Bus: b2},
 	}, slog.Default())
 
 	if err := fan.Close(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	for name, sb := range map[string]*stubBroker{"b1": b1, "b2": b2} {
+	for name, sb := range map[string]*stubEventBus{"b1": b1, "b2": b2} {
 		sb.mu.Lock()
 		if !sb.closed {
-			t.Errorf("broker %s was not closed", name)
+			t.Errorf("event bus %s was not closed", name)
 		}
 		sb.mu.Unlock()
 	}
 }
 
-func TestFanOutBroker_ConcurrentPublish(t *testing.T) {
+func TestFanOutEventBus_ConcurrentPublish(t *testing.T) {
 	var started atomic.Int32
 	gate := make(chan struct{})
 
-	slow := newStubBroker()
+	slow := newStubEventBus()
 	slow.publishFunc = func(_ context.Context, _ string, msg *messages.StructuredMessage) error {
 		started.Add(1)
 		<-gate
@@ -182,7 +182,7 @@ func TestFanOutBroker_ConcurrentPublish(t *testing.T) {
 		return nil
 	}
 
-	fast := newStubBroker()
+	fast := newStubEventBus()
 	fast.publishFunc = func(_ context.Context, _ string, msg *messages.StructuredMessage) error {
 		started.Add(1)
 		<-gate
@@ -192,9 +192,9 @@ func TestFanOutBroker_ConcurrentPublish(t *testing.T) {
 		return nil
 	}
 
-	fan := NewFanOutBroker([]NamedBroker{
-		{Name: "slow", Broker: slow},
-		{Name: "fast", Broker: fast},
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: "slow", Bus: slow},
+		{Name: "fast", Bus: fast},
 	}, slog.Default())
 
 	done := make(chan error, 1)
@@ -225,22 +225,22 @@ func TestFanOutBroker_ConcurrentPublish(t *testing.T) {
 		t.Fatal("timed out waiting for publish to complete")
 	}
 
-	for name, sb := range map[string]*stubBroker{"slow": slow, "fast": fast} {
+	for name, sb := range map[string]*stubEventBus{"slow": slow, "fast": fast} {
 		sb.mu.Lock()
 		if len(sb.published) != 1 {
-			t.Errorf("broker %s: expected 1 message, got %d", name, len(sb.published))
+			t.Errorf("event bus %s: expected 1 message, got %d", name, len(sb.published))
 		}
 		sb.mu.Unlock()
 	}
 }
 
-func TestFanOutBroker_Subscribe(t *testing.T) {
-	b1 := newStubBroker()
-	b2 := newStubBroker()
+func TestFanOutEventBus_Subscribe(t *testing.T) {
+	b1 := newStubEventBus()
+	b2 := newStubEventBus()
 
-	fan := NewFanOutBroker([]NamedBroker{
-		{Name: "b1", Broker: b1},
-		{Name: "b2", Broker: b2},
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: "b1", Bus: b1},
+		{Name: "b2", Bus: b2},
 	}, slog.Default())
 
 	sub, err := fan.Subscribe("test.>", func(_ context.Context, _ string, _ *messages.StructuredMessage) {})

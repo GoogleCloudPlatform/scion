@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/broker"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
@@ -163,7 +163,7 @@ func TestMessageBrokerProxy_DirectMessage(t *testing.T) {
 	events := NewChannelEventPublisher()
 	defer events.Close()
 
-	b := broker.NewInProcessBroker(slog.Default())
+	b := eventbus.NewInProcessEventBus(slog.Default())
 	defer b.Close()
 
 	dispatcher := &brokerMockDispatcher{}
@@ -202,7 +202,7 @@ func TestMessageBrokerProxy_ProjectBroadcast(t *testing.T) {
 	events := NewChannelEventPublisher()
 	defer events.Close()
 
-	b := broker.NewInProcessBroker(slog.Default())
+	b := eventbus.NewInProcessEventBus(slog.Default())
 	defer b.Close()
 
 	dispatcher := &brokerMockDispatcher{}
@@ -244,7 +244,7 @@ func TestMessageBrokerProxy_BroadcastSkipsSender(t *testing.T) {
 	events := NewChannelEventPublisher()
 	defer events.Close()
 
-	b := broker.NewInProcessBroker(slog.Default())
+	b := eventbus.NewInProcessEventBus(slog.Default())
 	defer b.Close()
 
 	dispatcher := &brokerMockDispatcher{}
@@ -279,7 +279,7 @@ func TestMessageBrokerProxy_EnsureProjectSubscriptions(t *testing.T) {
 	events := NewChannelEventPublisher()
 	defer events.Close()
 
-	b := broker.NewInProcessBroker(slog.Default())
+	b := eventbus.NewInProcessEventBus(slog.Default())
 	defer b.Close()
 
 	dispatcher := &brokerMockDispatcher{}
@@ -311,7 +311,7 @@ func TestMessageBrokerProxy_DeliverToAgentPersistence(t *testing.T) {
 	events := NewChannelEventPublisher()
 	defer events.Close()
 
-	b := broker.NewInProcessBroker(slog.Default())
+	b := eventbus.NewInProcessEventBus(slog.Default())
 	defer b.Close()
 
 	dispatcher := &brokerMockDispatcher{}
@@ -362,7 +362,7 @@ func TestMessageBrokerProxy_UserMessageDelivery(t *testing.T) {
 	events := NewChannelEventPublisher()
 	defer events.Close()
 
-	b := broker.NewInProcessBroker(slog.Default())
+	b := eventbus.NewInProcessEventBus(slog.Default())
 	defer b.Close()
 
 	dispatcher := &brokerMockDispatcher{}
@@ -424,7 +424,7 @@ func TestMessageBrokerProxy_EnsureProjectSubscriptionsIncludesUserMessages(t *te
 	events := NewChannelEventPublisher()
 	defer events.Close()
 
-	b := broker.NewInProcessBroker(slog.Default())
+	b := eventbus.NewInProcessEventBus(slog.Default())
 	defer b.Close()
 
 	dispatcher := &brokerMockDispatcher{}
@@ -467,7 +467,7 @@ func TestMessageBrokerProxy_PluginSubscription(t *testing.T) {
 	events := NewChannelEventPublisher()
 	defer events.Close()
 
-	b := broker.NewInProcessBroker(slog.Default())
+	b := eventbus.NewInProcessEventBus(slog.Default())
 	defer b.Close()
 
 	dispatcher := &brokerMockDispatcher{}
@@ -477,7 +477,7 @@ func TestMessageBrokerProxy_PluginSubscription(t *testing.T) {
 	defer proxy.Stop()
 
 	// Plugin requests a subscription for the project
-	pattern := broker.TopicAgentMessages(projectID, "*")
+	pattern := eventbus.TopicAgentMessages(projectID, "*")
 	if err := proxy.RequestSubscription(pattern); err != nil {
 		t.Fatalf("RequestSubscription failed: %v", err)
 	}
@@ -498,7 +498,7 @@ func TestMessageBrokerProxy_PluginSubscriptionDedup(t *testing.T) {
 	events := NewChannelEventPublisher()
 	defer events.Close()
 
-	b := broker.NewInProcessBroker(slog.Default())
+	b := eventbus.NewInProcessEventBus(slog.Default())
 	defer b.Close()
 
 	dispatcher := &brokerMockDispatcher{}
@@ -532,7 +532,7 @@ func TestMessageBrokerProxy_PluginSubscriptionCancel(t *testing.T) {
 	events := NewChannelEventPublisher()
 	defer events.Close()
 
-	b := broker.NewInProcessBroker(slog.Default())
+	b := eventbus.NewInProcessEventBus(slog.Default())
 	defer b.Close()
 
 	dispatcher := &brokerMockDispatcher{}
@@ -570,7 +570,7 @@ func TestMessageBrokerProxy_PluginSubscriptionCleanupOnStop(t *testing.T) {
 	events := NewChannelEventPublisher()
 	defer events.Close()
 
-	b := broker.NewInProcessBroker(slog.Default())
+	b := eventbus.NewInProcessEventBus(slog.Default())
 	defer b.Close()
 
 	dispatcher := &brokerMockDispatcher{}
@@ -603,7 +603,7 @@ func TestMessageBrokerProxy_StartBootstrapsExistingProjects(t *testing.T) {
 	events := NewChannelEventPublisher()
 	defer events.Close()
 
-	b := broker.NewInProcessBroker(slog.Default())
+	b := eventbus.NewInProcessEventBus(slog.Default())
 	defer b.Close()
 
 	dispatcher := &brokerMockDispatcher{}
@@ -660,7 +660,7 @@ func TestMessageBrokerProxy_ProjectSubscriptionDedup(t *testing.T) {
 	events := NewChannelEventPublisher()
 	defer events.Close()
 
-	b := broker.NewInProcessBroker(slog.Default())
+	b := eventbus.NewInProcessEventBus(slog.Default())
 	defer b.Close()
 
 	dispatcher := &brokerMockDispatcher{}
@@ -706,7 +706,7 @@ func TestMessageBrokerProxy_PublishToGroup(t *testing.T) {
 	events := NewChannelEventPublisher()
 	defer events.Close()
 
-	b := broker.NewInProcessBroker(slog.Default())
+	b := eventbus.NewInProcessEventBus(slog.Default())
 	defer b.Close()
 
 	dispatcher := &brokerMockDispatcher{}

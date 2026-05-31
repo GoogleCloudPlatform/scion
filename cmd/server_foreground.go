@@ -34,7 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/broker"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
@@ -296,11 +296,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// Initialize message broker from versioned settings.
 		// Uses FanOutBroker to support multiple simultaneous broker plugins.
 		if vs, err := config.LoadVersionedSettings(""); err == nil && vs.Server != nil && vs.Server.MessageBroker != nil && vs.Server.MessageBroker.Enabled {
-			var namedBrokers []broker.NamedBroker
+			var namedBuses []eventbus.NamedEventBus
 
-			// InProcessBroker is always present for local pub/sub routing.
-			inproc := broker.NewInProcessBroker(logging.Subsystem("hub.broker.inprocess"))
-			namedBrokers = append(namedBrokers, broker.NamedBroker{Name: "inprocess", Broker: inproc})
+			// InProcessEventBus is always present for local pub/sub routing.
+			inproc := eventbus.NewInProcessEventBus(logging.Subsystem("hub.eventbus.inprocess"))
+			namedBuses = append(namedBuses, eventbus.NamedEventBus{Name: "inprocess", Bus: inproc})
 
 			// Resolve the list of plugin broker types.
 			brokerTypes := vs.Server.MessageBroker.Types
@@ -377,15 +377,15 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 				}
 
 				observer := isObserverBroker(pluginMgr, bt)
-				namedBrokers = append(namedBrokers, broker.NamedBroker{
-					Name: bt, Broker: b, Observer: observer,
+				namedBuses = append(namedBuses, eventbus.NamedEventBus{
+					Name: bt, Bus: b, Observer: observer,
 				})
 				log.Printf("Message broker spoke added: name=%s observer=%v", bt, observer)
 			}
 
-			fanout := broker.NewFanOutBroker(namedBrokers, logging.Subsystem("hub.broker.fanout"))
+			fanout := eventbus.NewFanOutEventBus(namedBuses, logging.Subsystem("hub.eventbus.fanout"))
 			hubSrv.StartMessageBroker(fanout)
-			log.Printf("Message broker started: fan-out with %d spoke(s)", len(namedBrokers))
+			log.Printf("Message broker started: fan-out with %d spoke(s)", len(namedBuses))
 
 			// Wire the broker proxy as the host callbacks target for broker plugins.
 			if proxy := hubSrv.GetMessageBrokerProxy(); proxy != nil {
