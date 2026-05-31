@@ -874,11 +874,11 @@ func TestWakeFlagValidation(t *testing.T) {
 	}
 }
 
-func TestSendSetMessageViaHub(t *testing.T) {
+func TestSendGroupMessageViaHub(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	projectID := "grove-msg-set"
+	projectID := "grove-msg-group"
 	agents := []hubclient.Agent{
 		{Name: "agent-a", Status: "running"},
 		{Name: "agent-b", Status: "running"},
@@ -895,30 +895,30 @@ func TestSendSetMessageViaHub(t *testing.T) {
 		ProjectID: projectID,
 	}
 
-	recipients := []messages.SetRecipient{
+	recipients := []messages.GroupRecipient{
 		{Kind: messages.RecipientAgent, Name: "agent-a"},
 		{Kind: messages.RecipientAgent, Name: "agent-b"},
 	}
 
-	err = sendSetMessageViaHub(hubCtx, recipients, "set hello", false)
+	err = sendGroupMessageViaHub(hubCtx, recipients, "group hello", false)
 	require.NoError(t, err)
 
 	require.Len(t, *sent, 2)
 	names := make([]string, len(*sent))
 	for i, s := range *sent {
 		names[i] = s.AgentName
-		assert.Equal(t, "set hello", s.Message)
+		assert.Equal(t, "group hello", s.Message)
 		require.NotNil(t, s.StructuredMsg)
 		assert.NotEmpty(t, s.StructuredMsg.Metadata["group_id"])
 	}
 	assert.ElementsMatch(t, []string{"agent-a", "agent-b"}, names)
 }
 
-func TestSendSetMessageViaHub_RequiresHub(t *testing.T) {
+func TestSendGroupMessageViaHub_RequiresHub(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	// set[] without Hub should fail at the RunE level, not get to sendSetMessageViaHub
+	// set[] without Hub should fail at the RunE level, not get to sendGroupMessageViaHub
 	origBroadcast, origAll := msgBroadcast, msgAll
 	defer func() { msgBroadcast = origBroadcast; msgAll = origAll }()
 	msgBroadcast = false

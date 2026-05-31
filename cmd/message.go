@@ -66,11 +66,11 @@ Examples:
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var agentName string
 		var userRecipient string
-		var setRecipients []messages.SetRecipient
+		var groupRecipients []messages.GroupRecipient
 		var message string
 
 		if msgBroadcast || msgAll {
-			if len(args) > 0 && messages.IsSetRecipient(args[0]) {
+			if len(args) > 0 && messages.IsGroupRecipient(args[0]) {
 				return fmt.Errorf("set[] recipients cannot be combined with --broadcast or --all")
 			}
 			message = strings.Join(args, " ")
@@ -81,12 +81,12 @@ Examples:
 			recipient := args[0]
 			message = strings.Join(args[1:], " ")
 
-			if messages.IsSetRecipient(recipient) {
-				parsed, err := messages.ParseSetRecipient(recipient)
+			if messages.IsGroupRecipient(recipient) {
+				parsed, err := messages.ParseGroupRecipient(recipient)
 				if err != nil {
-					return fmt.Errorf("invalid set recipient: %w", err)
+					return fmt.Errorf("invalid group recipient: %w", err)
 				}
-				setRecipients = parsed
+				groupRecipients = parsed
 			} else if strings.HasPrefix(recipient, "user:") {
 				userRecipient = recipient
 			} else if strings.Contains(recipient, "@") && !strings.HasPrefix(recipient, "agent:") {
@@ -140,8 +140,8 @@ Examples:
 			}
 		}
 
-		// Validate set[] recipient restrictions
-		if len(setRecipients) > 0 {
+		// Validate group recipient restrictions
+		if len(groupRecipients) > 0 {
 			if msgBroadcast || msgAll {
 				return fmt.Errorf("set[] recipients cannot be combined with --broadcast or --all")
 			}
@@ -180,8 +180,8 @@ Examples:
 		// Check if Hub should be used
 		var hubCtx *HubContext
 		var err error
-		if len(setRecipients) > 0 {
-			// Set recipients: skip sync (multiple recipients, no single agent)
+		if len(groupRecipients) > 0 {
+			// Group recipients: skip sync (multiple recipients, no single agent)
 			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
 		} else if userRecipient != "" {
 			// User recipient: skip sync (no agent involved)
@@ -200,8 +200,8 @@ Examples:
 			return err
 		}
 
-		// Set recipients require Hub mode
-		if len(setRecipients) > 0 && hubCtx == nil {
+		// Group recipients require Hub mode
+		if len(groupRecipients) > 0 && hubCtx == nil {
 			return fmt.Errorf("set[] recipients require Hub mode (use 'scion hub enable' first)")
 		}
 
@@ -223,9 +223,9 @@ Examples:
 			return fmt.Errorf("--notify requires Hub mode (use 'scion hub enable' first)")
 		}
 
-		// Set-targeted messages: fan out to each recipient
-		if len(setRecipients) > 0 {
-			return sendSetMessageViaHub(hubCtx, setRecipients, message, msgInterrupt)
+		// Group-targeted messages: fan out to each recipient
+		if len(groupRecipients) > 0 {
+			return sendGroupMessageViaHub(hubCtx, groupRecipients, message, msgInterrupt)
 		}
 
 		// User-targeted messages: route to outbound-message endpoint
@@ -531,7 +531,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 	return nil
 }
 
-func sendSetMessageViaHub(hubCtx *HubContext, recipients []messages.SetRecipient, message string, interrupt bool) error {
+func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecipient, message string, interrupt bool) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
@@ -560,7 +560,7 @@ func sendSetMessageViaHub(hubCtx *HubContext, recipients []messages.SetRecipient
 
 	for i, r := range recipients {
 		wg.Add(1)
-		go func(idx int, recip messages.SetRecipient) {
+		go func(idx int, recip messages.GroupRecipient) {
 			defer wg.Done()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
@@ -627,14 +627,14 @@ func sendSetMessageViaHub(hubCtx *HubContext, recipients []messages.SetRecipient
 	}
 
 	if !isJSONOutput() {
-		fmt.Printf("Set delivery complete: %d/%d delivered.\n", delivered, len(recipients))
+		fmt.Printf("Group delivery complete: %d/%d delivered.\n", delivered, len(recipients))
 	}
 
 	if delivered == 0 {
-		return fmt.Errorf("set delivery failed: 0/%d recipients received the message", len(recipients))
+		return fmt.Errorf("group delivery failed: 0/%d recipients received the message", len(recipients))
 	}
 	if delivered < len(recipients) {
-		return fmt.Errorf("set delivery partially failed: %d/%d delivered", delivered, len(recipients))
+		return fmt.Errorf("group delivery partially failed: %d/%d delivered", delivered, len(recipients))
 	}
 	return nil
 }

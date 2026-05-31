@@ -2286,9 +2286,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	// Detect set[] recipient for multi-target fan-out.
-	if structuredMsg != nil && messages.IsSetRecipient(structuredMsg.Recipient) {
-		s.handleSetMessage(w, r, id, structuredMsg, plainMessage, req.Interrupt)
+	// Detect group recipient for multi-target fan-out.
+	if structuredMsg != nil && messages.IsGroupRecipient(structuredMsg.Recipient) {
+		s.handleGroupMessage(w, r, id, structuredMsg, plainMessage, req.Interrupt)
 		return
 	}
 
@@ -2400,7 +2400,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			AgentID:     agent.ID,
 			CreatedAt:   time.Now(),
 		}
-		// Propagate GroupID from metadata so CLI-originated set[] messages
+		// Propagate GroupID from metadata so CLI-originated group messages
 		// preserve correlation in the store.
 		if structuredMsg.Metadata != nil {
 			if gid, ok := structuredMsg.Metadata["group_id"]; ok {
@@ -2466,28 +2466,29 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	w.WriteHeader(http.StatusOK)
 }
 
-// SetMessageRecipientResult represents the delivery status for one recipient in a set[] delivery.
-type SetMessageRecipientResult struct {
+// GroupMessageRecipientResult holds the delivery status for a single recipient
+// in a message group fan-out.
+type GroupMessageRecipientResult struct {
 	Recipient string `json:"recipient"`
 	Status    string `json:"status"`
 	Error     string `json:"error,omitempty"`
 }
 
-// SetMessageResponse is the JSON response for a set[] message delivery.
-type SetMessageResponse struct {
-	GroupID   string                      `json:"group_id"`
-	Delivered int                         `json:"delivered"`
-	Failed    int                         `json:"failed"`
-	Results   []SetMessageRecipientResult `json:"results"`
+// GroupMessageResponse is the JSON response for a group message delivery.
+type GroupMessageResponse struct {
+	GroupID   string                        `json:"group_id"`
+	Delivered int                           `json:"delivered"`
+	Failed    int                           `json:"failed"`
+	Results   []GroupMessageRecipientResult `json:"results"`
 }
 
-// handleSetMessage fans out a structured message to multiple recipients parsed from set[].
-func (s *Server) handleSetMessage(w http.ResponseWriter, r *http.Request, anchorID string, msg *messages.StructuredMessage, plainMessage string, interrupt bool) {
+// handleGroupMessage fans out a structured message to multiple recipients in a message group.
+func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anchorID string, msg *messages.StructuredMessage, plainMessage string, interrupt bool) {
 	ctx := r.Context()
 
-	recipients, err := messages.ParseSetRecipient(msg.Recipient)
+	recipients, err := messages.ParseGroupRecipient(msg.Recipient)
 	if err != nil {
-		ValidationError(w, "invalid set[] recipient: "+err.Error(), nil)
+		ValidationError(w, "invalid group recipient: "+err.Error(), nil)
 		return
 	}
 
@@ -2503,10 +2504,10 @@ func (s *Server) handleSetMessage(w http.ResponseWriter, r *http.Request, anchor
 	for i, r := range recipients {
 		recipientStrs[i] = r.String()
 	}
-	recipientsSet := messages.FormatSetRecipients(msg.Sender, recipientStrs)
+	recipientsSet := messages.FormatGroupRecipients(msg.Sender, recipientStrs)
 
 	groupID := api.NewUUID()
-	results := make([]SetMessageRecipientResult, len(recipients))
+	results := make([]GroupMessageRecipientResult, len(recipients))
 	delivered := 0
 
 	dispatcher := s.GetDispatcher()
@@ -2518,7 +2519,7 @@ func (s *Server) handleSetMessage(w http.ResponseWriter, r *http.Request, anchor
 		case messages.RecipientAgent:
 			agent, err := s.store.GetAgentBySlug(ctx, projectID, api.Slugify(recip.Name))
 			if err != nil {
-				results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "agent not found: " + recip.Name}
+				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "agent not found: " + recip.Name}
 				continue
 			}
 
@@ -2542,20 +2543,20 @@ func (s *Server) handleSetMessage(w http.ResponseWriter, r *http.Request, anchor
 				CreatedAt:   time.Now(),
 			}
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
-				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
+				s.messageLog.Error("Failed to persist group message", "recipient", recipStr, "error", err)
 			}
 			s.events.PublishUserMessage(ctx, storeMsg)
 
 			if dispatcher != nil && agent.RuntimeBrokerID != "" {
 				if err := dispatcher.DispatchAgentMessage(ctx, agent, plainMessage, interrupt, &agentMsg); err != nil {
-					results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
+					results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
 					continue
 				}
 			} else if dispatcher == nil {
-				results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "dispatcher not available"}
+				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "dispatcher not available"}
 				continue
 			} else {
-				results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "agent has no runtime broker"}
+				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "agent has no runtime broker"}
 				continue
 			}
 
@@ -2565,13 +2566,13 @@ func (s *Server) handleSetMessage(w http.ResponseWriter, r *http.Request, anchor
 					observerMsg := agentMsg
 					observerMsg.ObserverOnly = true
 					if err := bp.PublishMessage(ctx, projectID, &observerMsg); err != nil {
-						s.messageLog.Error("Failed to publish set[] observer message",
+						s.messageLog.Error("Failed to publish group observer message",
 							"recipient", recipStr, "error", err)
 					}
 				}
 			}
 
-			results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "delivered"}
+			results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "delivered"}
 			delivered++
 
 		case messages.RecipientUser:
@@ -2604,7 +2605,7 @@ func (s *Server) handleSetMessage(w http.ResponseWriter, r *http.Request, anchor
 			}
 
 			if userID == "" {
-				results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "user not found: " + recip.Name}
+				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "user not found: " + recip.Name}
 				continue
 			}
 
@@ -2628,16 +2629,16 @@ func (s *Server) handleSetMessage(w http.ResponseWriter, r *http.Request, anchor
 				CreatedAt:   time.Now(),
 			}
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
-				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
+				s.messageLog.Error("Failed to persist group message", "recipient", recipStr, "error", err)
 			}
 			s.events.PublishUserMessage(ctx, storeMsg)
 
-			results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "delivered"}
+			results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "delivered"}
 			delivered++
 		}
 	}
 
-	s.logMessage("set message dispatched",
+	s.logMessage("group message dispatched",
 		"project_id", projectID,
 		"group_id", groupID,
 		"total", len(recipients),
@@ -2645,7 +2646,7 @@ func (s *Server) handleSetMessage(w http.ResponseWriter, r *http.Request, anchor
 		"failed", len(recipients)-delivered,
 	)
 
-	resp := SetMessageResponse{
+	resp := GroupMessageResponse{
 		GroupID:   groupID,
 		Delivered: delivered,
 		Failed:    len(recipients) - delivered,

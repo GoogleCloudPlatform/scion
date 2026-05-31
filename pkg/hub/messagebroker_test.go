@@ -697,11 +697,11 @@ func TestMessageBrokerProxy_ProjectSubscriptionDedup(t *testing.T) {
 	}
 }
 
-func TestMessageBrokerProxy_PublishToSet(t *testing.T) {
+func TestMessageBrokerProxy_PublishToGroup(t *testing.T) {
 	s := newBrokerTestStore(t)
 	projectID := setupBrokerTestProject(t, s)
-	setupBrokerTestAgent(t, s, projectID, "set-agent-a", "running")
-	setupBrokerTestAgent(t, s, projectID, "set-agent-b", "running")
+	setupBrokerTestAgent(t, s, projectID, "group-agent-a", "running")
+	setupBrokerTestAgent(t, s, projectID, "group-agent-b", "running")
 
 	events := NewChannelEventPublisher()
 	defer events.Close()
@@ -715,20 +715,20 @@ func TestMessageBrokerProxy_PublishToSet(t *testing.T) {
 	proxy.Start()
 	defer proxy.Stop()
 
-	proxy.subscribeAgent(projectID, "set-agent-a")
-	proxy.subscribeAgent(projectID, "set-agent-b")
+	proxy.subscribeAgent(projectID, "group-agent-a")
+	proxy.subscribeAgent(projectID, "group-agent-b")
 
-	msg := messages.NewInstruction("user:alice", "", "hello set")
+	msg := messages.NewInstruction("user:alice", "", "hello group")
 
-	recipients := []messages.SetRecipient{
-		{Kind: messages.RecipientAgent, Name: "set-agent-a"},
-		{Kind: messages.RecipientAgent, Name: "set-agent-b"},
+	recipients := []messages.GroupRecipient{
+		{Kind: messages.RecipientAgent, Name: "group-agent-a"},
+		{Kind: messages.RecipientAgent, Name: "group-agent-b"},
 	}
 
-	errs := proxy.PublishToSet(context.Background(), projectID, recipients, msg)
+	errs := proxy.PublishToGroup(context.Background(), projectID, recipients, msg)
 	for k, err := range errs {
 		if err != nil {
-			t.Errorf("PublishToSet error for %s: %v", k, err)
+			t.Errorf("PublishToGroup error for %s: %v", k, err)
 		}
 	}
 
@@ -736,18 +736,18 @@ func TestMessageBrokerProxy_PublishToSet(t *testing.T) {
 
 	dispatched := dispatcher.getMessages()
 	if len(dispatched) != 2 {
-		t.Fatalf("expected 2 dispatched messages from PublishToSet, got %d", len(dispatched))
+		t.Fatalf("expected 2 dispatched messages from PublishToGroup, got %d", len(dispatched))
 	}
 
 	slugs := map[string]bool{}
 	for _, d := range dispatched {
 		slugs[d.agentSlug] = true
-		if d.msg != "hello set" {
-			t.Errorf("expected msg 'hello set', got %q", d.msg)
+		if d.msg != "hello group" {
+			t.Errorf("expected msg 'hello group', got %q", d.msg)
 		}
 	}
-	if !slugs["set-agent-a"] || !slugs["set-agent-b"] {
-		t.Errorf("expected both set-agent-a and set-agent-b to receive messages, got %v", slugs)
+	if !slugs["group-agent-a"] || !slugs["group-agent-b"] {
+		t.Errorf("expected both group-agent-a and group-agent-b to receive messages, got %v", slugs)
 	}
 }
 

@@ -243,9 +243,9 @@ func (p *MessageBrokerProxy) PublishUserMessage(ctx context.Context, projectID, 
 	return p.broker.Publish(ctx, topic, msg)
 }
 
-// PublishToSet fans out a message to a parsed set of recipients, delegating
+// PublishToGroup fans out a message to a parsed group of recipients, delegating
 // to PublishMessage for agents and PublishUserMessage for users.
-func (p *MessageBrokerProxy) PublishToSet(ctx context.Context, projectID string, recipients []messages.SetRecipient, msg *messages.StructuredMessage) map[string]error {
+func (p *MessageBrokerProxy) PublishToGroup(ctx context.Context, projectID string, recipients []messages.GroupRecipient, msg *messages.StructuredMessage) map[string]error {
 	errs := make(map[string]error, len(recipients))
 	for _, r := range recipients {
 		recipMsg := *msg

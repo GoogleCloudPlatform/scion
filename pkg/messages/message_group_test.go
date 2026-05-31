@@ -19,7 +19,7 @@ import (
 	"testing"
 )
 
-func TestIsSetRecipient(t *testing.T) {
+func TestIsGroupRecipient(t *testing.T) {
 	tests := []struct {
 		input string
 		want  bool
@@ -34,23 +34,33 @@ func TestIsSetRecipient(t *testing.T) {
 		{"", false},
 	}
 	for _, tt := range tests {
-		got := IsSetRecipient(tt.input)
+		got := IsGroupRecipient(tt.input)
 		if got != tt.want {
-			t.Errorf("IsSetRecipient(%q) = %v, want %v", tt.input, got, tt.want)
+			t.Errorf("IsGroupRecipient(%q) = %v, want %v", tt.input, got, tt.want)
 		}
 	}
 }
 
-func TestParseSetRecipient_Valid(t *testing.T) {
+func TestIsSetRecipient_DeprecatedAlias(t *testing.T) {
+	// Verify the deprecated alias still works
+	if !IsSetRecipient("set[agent:a,agent:b]") {
+		t.Error("IsSetRecipient should return true for valid group recipient")
+	}
+	if IsSetRecipient("agent:foo") {
+		t.Error("IsSetRecipient should return false for non-group recipient")
+	}
+}
+
+func TestParseGroupRecipient_Valid(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
-		want  []SetRecipient
+		want  []GroupRecipient
 	}{
 		{
 			name:  "two agents",
 			input: "set[agent:reviewer,agent:deploy-bot]",
-			want: []SetRecipient{
+			want: []GroupRecipient{
 				{Kind: RecipientAgent, Name: "reviewer"},
 				{Kind: RecipientAgent, Name: "deploy-bot"},
 			},
@@ -58,7 +68,7 @@ func TestParseSetRecipient_Valid(t *testing.T) {
 		{
 			name:  "mixed agent and user",
 			input: "set[agent:reviewer,user:alice@example.com]",
-			want: []SetRecipient{
+			want: []GroupRecipient{
 				{Kind: RecipientAgent, Name: "reviewer"},
 				{Kind: RecipientUser, Name: "alice@example.com"},
 			},
@@ -66,7 +76,7 @@ func TestParseSetRecipient_Valid(t *testing.T) {
 		{
 			name:  "bare names default to agent",
 			input: "set[reviewer,deploy-bot]",
-			want: []SetRecipient{
+			want: []GroupRecipient{
 				{Kind: RecipientAgent, Name: "reviewer"},
 				{Kind: RecipientAgent, Name: "deploy-bot"},
 			},
@@ -74,7 +84,7 @@ func TestParseSetRecipient_Valid(t *testing.T) {
 		{
 			name:  "bare email defaults to user",
 			input: "set[agent:bot,alice@example.com]",
-			want: []SetRecipient{
+			want: []GroupRecipient{
 				{Kind: RecipientAgent, Name: "bot"},
 				{Kind: RecipientUser, Name: "alice@example.com"},
 			},
@@ -82,7 +92,7 @@ func TestParseSetRecipient_Valid(t *testing.T) {
 		{
 			name:  "user prefix without email",
 			input: "set[user:alice,agent:bot]",
-			want: []SetRecipient{
+			want: []GroupRecipient{
 				{Kind: RecipientUser, Name: "alice"},
 				{Kind: RecipientAgent, Name: "bot"},
 			},
@@ -90,7 +100,7 @@ func TestParseSetRecipient_Valid(t *testing.T) {
 		{
 			name:  "whitespace trimmed",
 			input: "set[ agent:a , agent:b , user:c ]",
-			want: []SetRecipient{
+			want: []GroupRecipient{
 				{Kind: RecipientAgent, Name: "a"},
 				{Kind: RecipientAgent, Name: "b"},
 				{Kind: RecipientUser, Name: "c"},
@@ -99,7 +109,7 @@ func TestParseSetRecipient_Valid(t *testing.T) {
 		{
 			name:  "deduplication",
 			input: "set[agent:a,agent:b,agent:a]",
-			want: []SetRecipient{
+			want: []GroupRecipient{
 				{Kind: RecipientAgent, Name: "a"},
 				{Kind: RecipientAgent, Name: "b"},
 			},
@@ -107,7 +117,7 @@ func TestParseSetRecipient_Valid(t *testing.T) {
 		{
 			name:  "three recipients all types",
 			input: "set[agent:reviewer,user:alice@example.com,deploy-bot]",
-			want: []SetRecipient{
+			want: []GroupRecipient{
 				{Kind: RecipientAgent, Name: "reviewer"},
 				{Kind: RecipientUser, Name: "alice@example.com"},
 				{Kind: RecipientAgent, Name: "deploy-bot"},
@@ -117,7 +127,7 @@ func TestParseSetRecipient_Valid(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ParseSetRecipient(tt.input)
+			got, err := ParseGroupRecipient(tt.input)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -133,19 +143,19 @@ func TestParseSetRecipient_Valid(t *testing.T) {
 	}
 }
 
-func TestParseSetRecipient_Errors(t *testing.T) {
+func TestParseGroupRecipient_Errors(t *testing.T) {
 	tests := []struct {
 		name    string
 		input   string
 		wantErr string
 	}{
 		{
-			name:    "not a set",
+			name:    "not a group",
 			input:   "agent:foo",
-			wantErr: "not a set recipient",
+			wantErr: "not a group recipient",
 		},
 		{
-			name:    "empty set",
+			name:    "empty group",
 			input:   "set[]",
 			wantErr: "empty set[]",
 		},
@@ -188,7 +198,7 @@ func TestParseSetRecipient_Errors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := ParseSetRecipient(tt.input)
+			_, err := ParseGroupRecipient(tt.input)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -199,13 +209,13 @@ func TestParseSetRecipient_Errors(t *testing.T) {
 	}
 }
 
-func TestParseSetRecipient_MaxLimit(t *testing.T) {
-	parts := make([]string, MaxSetRecipients+1)
+func TestParseGroupRecipient_MaxLimit(t *testing.T) {
+	parts := make([]string, MaxGroupRecipients+1)
 	for i := range parts {
 		parts[i] = "agent:a" + strings.Repeat("x", 3) + string(rune('a'+i%26)) + string(rune('a'+i/26))
 	}
 	input := "set[" + strings.Join(parts, ",") + "]"
-	_, err := ParseSetRecipient(input)
+	_, err := ParseGroupRecipient(input)
 	if err == nil {
 		t.Fatal("expected error for exceeding max recipients")
 	}
@@ -214,7 +224,7 @@ func TestParseSetRecipient_MaxLimit(t *testing.T) {
 	}
 }
 
-func TestFormatSetRecipients(t *testing.T) {
+func TestFormatGroupRecipients(t *testing.T) {
 	tests := []struct {
 		name       string
 		sender     string
@@ -249,20 +259,20 @@ func TestFormatSetRecipients(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := FormatSetRecipients(tt.sender, tt.recipients)
+			got := FormatGroupRecipients(tt.sender, tt.recipients)
 			if got != tt.want {
-				t.Errorf("FormatSetRecipients() = %q, want %q", got, tt.want)
+				t.Errorf("FormatGroupRecipients() = %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestFormatSetRecipients_Roundtrip(t *testing.T) {
+func TestFormatGroupRecipients_Roundtrip(t *testing.T) {
 	sender := "user:alice"
 	recipients := []string{"agent:coder", "agent:reviewer"}
-	formatted := FormatSetRecipients(sender, recipients)
+	formatted := FormatGroupRecipients(sender, recipients)
 
-	parsed, err := ParseSetRecipient(formatted)
+	parsed, err := ParseGroupRecipient(formatted)
 	if err != nil {
 		t.Fatalf("roundtrip parse failed: %v", err)
 	}
@@ -280,13 +290,36 @@ func TestFormatSetRecipients_Roundtrip(t *testing.T) {
 	}
 }
 
-func TestSetRecipientString(t *testing.T) {
-	r := SetRecipient{Kind: RecipientAgent, Name: "reviewer"}
+func TestGroupRecipientString(t *testing.T) {
+	r := GroupRecipient{Kind: RecipientAgent, Name: "reviewer"}
 	if r.String() != "agent:reviewer" {
 		t.Errorf("String() = %q, want %q", r.String(), "agent:reviewer")
 	}
-	r = SetRecipient{Kind: RecipientUser, Name: "alice"}
+	r = GroupRecipient{Kind: RecipientUser, Name: "alice"}
 	if r.String() != "user:alice" {
 		t.Errorf("String() = %q, want %q", r.String(), "user:alice")
+	}
+}
+
+// TestDeprecatedAliases verifies backward-compatible aliases work correctly.
+func TestDeprecatedAliases(t *testing.T) {
+	// ParseSetRecipient should work as alias for ParseGroupRecipient
+	parsed, err := ParseSetRecipient("set[agent:a,agent:b]")
+	if err != nil {
+		t.Fatalf("ParseSetRecipient alias failed: %v", err)
+	}
+	if len(parsed) != 2 {
+		t.Fatalf("expected 2 recipients, got %d", len(parsed))
+	}
+
+	// FormatSetRecipients should work as alias for FormatGroupRecipients
+	formatted := FormatSetRecipients("user:alice", []string{"agent:a"})
+	if formatted != "set[user:alice,agent:a]" {
+		t.Errorf("FormatSetRecipients alias = %q, want %q", formatted, "set[user:alice,agent:a]")
+	}
+
+	// MaxSetRecipients should equal MaxGroupRecipients
+	if MaxSetRecipients != MaxGroupRecipients {
+		t.Errorf("MaxSetRecipients (%d) != MaxGroupRecipients (%d)", MaxSetRecipients, MaxGroupRecipients)
 	}
 }
