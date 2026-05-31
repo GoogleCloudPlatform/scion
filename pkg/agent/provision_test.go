@@ -881,7 +881,7 @@ func TestProvisionAgent_CopiesSkillsDir(t *testing.T) {
 	}
 }
 
-func TestProvisionAgent_SkillsDirOverlay(t *testing.T) {
+func TestProvisionAgent_SkillsAreTemplateOnly(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
@@ -896,7 +896,7 @@ func TestProvisionAgent_SkillsDirOverlay(t *testing.T) {
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
 	os.MkdirAll(globalTemplatesDir, 0755)
 
-	// Create a harness-config for gemini with its own skills
+	// Create a harness-config for gemini with its own skills (should be ignored)
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "gemini")
 	os.MkdirAll(hcDir, 0755)
 	configYAML := "harness: gemini\nimage: test-image:latest\n"
@@ -926,12 +926,13 @@ func TestProvisionAgent_SkillsDirOverlay(t *testing.T) {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
 
-	// Both skills should exist (overlay/merge behavior)
+	// Harness-config skills should NOT be copied (skills are template-only)
 	baseSkillPath := filepath.Join(agentHome, ".gemini", "skills", "base-skill", "SKILL.md")
-	if _, err := os.Stat(baseSkillPath); err != nil {
-		t.Errorf("expected base skill from harness-config at %s, got error: %v", baseSkillPath, err)
+	if _, err := os.Stat(baseSkillPath); err == nil {
+		t.Errorf("harness-config skill should not be copied, but found at %s", baseSkillPath)
 	}
 
+	// Template skills should still be copied
 	tplSkillPath := filepath.Join(agentHome, ".gemini", "skills", "tpl-skill", "SKILL.md")
 	if _, err := os.Stat(tplSkillPath); err != nil {
 		t.Errorf("expected template skill at %s, got error: %v", tplSkillPath, err)

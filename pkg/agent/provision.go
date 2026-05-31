@@ -593,17 +593,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if skillsDir != "" {
 		skillsDest := filepath.Join(agentHome, skillsDir)
 
-		// Copy skills from harness-config base layer
-		hcSkills := filepath.Join(hcDir.Path, "skills")
-		if info, err := os.Stat(hcSkills); err == nil && info.IsDir() {
-			if err := os.MkdirAll(skillsDest, 0755); err != nil {
-				return "", "", nil, fmt.Errorf("failed to create skills dir: %w", err)
-			}
-			if err := util.CopyDir(hcSkills, skillsDest); err != nil {
-				return "", "", nil, fmt.Errorf("failed to copy harness-config skills: %w", err)
-			}
-		}
-
 		// Copy skills from each template in the chain (overlay behavior)
 		for _, tpl := range chain {
 			tplSkills := filepath.Join(tpl.Path, "skills")

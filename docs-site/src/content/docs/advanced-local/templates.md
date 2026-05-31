@@ -149,11 +149,11 @@ If you mess up a harness-config, you can restore the factory defaults:
 scion harness-config reset gemini
 ```
 
-## Harness Skills
+## Skills
 
-Templates and harness-configs can define **skills** — reusable instruction snippets that are automatically merged and mounted into the appropriate harness-specific directory during agent provisioning.
+Templates can define **skills** — reusable, harness-agnostic instruction snippets that are automatically mounted into the appropriate harness-specific directory during agent provisioning.
 
-When an agent is created, Scion collects skills from both the template and the harness-config, then mounts them into the correct location for the harness:
+When an agent is created, Scion collects skills from each template in the chain and mounts them into the correct location for the harness:
 
 | Harness | Skills Directory |
 | :--- | :--- |
@@ -164,19 +164,18 @@ This allows you to package domain-specific expertise (e.g., coding standards, re
 
 ### Defining Skills in a Template
 
-Add skill files to the template's `home/` directory under the harness-specific path:
+Place skill files in the template's `skills/` directory:
 
 ```text
 my-template/
 ├── scion-agent.yaml
 ├── agents.md
-└── home/
-    └── .claude/
-        └── skills/
-            └── code-standards.md
+└── skills/
+    └── my-skill/
+        └── SKILL.md
 ```
 
-Skills from both the template and the harness-config are merged at provisioning time, so you can define common skills in the harness-config and role-specific skills in individual templates.
+When multiple templates are chained, skills from later templates overlay earlier ones.
 
 ### The `team-creation` Skill
 
