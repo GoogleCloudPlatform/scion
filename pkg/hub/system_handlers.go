@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -189,13 +190,14 @@ func (s *Server) handlePutRuntime(w http.ResponseWriter, r *http.Request) {
 // --- 2.3: Onboarding Status ---
 
 type OnboardingStatus struct {
-	Initialized     bool `json:"initialized"`
-	IdentitySet     bool `json:"identitySet"`
-	RuntimeOK       bool `json:"runtimeOK"`
-	HarnessesSeeded bool `json:"harnessesSeeded"`
-	ImagesPresent   bool `json:"imagesPresent"`
-	HasWorkspace    bool `json:"hasWorkspace"`
-	Complete        bool `json:"complete"`
+	Initialized      bool   `json:"initialized"`
+	IdentitySet      bool   `json:"identitySet"`
+	RuntimeOK        bool   `json:"runtimeOK"`
+	HarnessesSeeded  bool   `json:"harnessesSeeded"`
+	ImagesPresent    bool   `json:"imagesPresent"`
+	HasWorkspace     bool   `json:"hasWorkspace"`
+	Complete         bool   `json:"complete"`
+	EmbeddedBrokerID string `json:"embeddedBrokerID,omitempty"`
 }
 
 func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
@@ -248,6 +250,8 @@ func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 
 	// Complete: all required steps done (ImagesPresent is optional)
 	status.Complete = status.Initialized && status.IdentitySet && status.RuntimeOK && status.HarnessesSeeded
+
+	status.EmbeddedBrokerID = s.GetEmbeddedBrokerID()
 
 	return status
 }
@@ -488,6 +492,214 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 	}()
 
 	writeJSON(w, http.StatusOK, imagePullResponse{JobID: jobID})
+}
+
+// --- 5.2: Filesystem Endpoints ---
+
+type fsListEntry struct {
+	Name  string `json:"name"`
+	IsDir bool   `json:"isDir"`
+	IsGit bool   `json:"isGit,omitempty"`
+}
+
+type fsListResponse struct {
+	Path    string        `json:"path"`
+	Entries []fsListEntry `json:"entries"`
+}
+
+func (s *Server) handleFSList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	if err := assertLoopback(r); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		return
+	}
+
+	dirPath := r.URL.Query().Get("path")
+	if dirPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "cannot determine home directory", nil)
+			return
+		}
+		dirPath = home
+	}
+
+	resolved, err := filepath.EvalSymlinks(dirPath)
+	if err != nil {
+		resolved = filepath.Clean(dirPath)
+	} else {
+		resolved = filepath.Clean(resolved)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "cannot determine home directory", nil)
+		return
+	}
+	if !strings.HasPrefix(resolved, home) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "path must be within the home directory", nil)
+		return
+	}
+
+	rawEntries, err := os.ReadDir(resolved)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, "directory not found", nil)
+			return
+		}
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "cannot read directory", nil)
+		return
+	}
+
+	var entries []fsListEntry
+	for _, e := range rawEntries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		entry := fsListEntry{
+			Name:  name,
+			IsDir: e.IsDir(),
+		}
+		if e.IsDir() {
+			gitPath := filepath.Join(resolved, name, ".git")
+			if _, err := os.Stat(gitPath); err == nil {
+				entry.IsGit = true
+			}
+		}
+		entries = append(entries, entry)
+	}
+
+	writeJSON(w, http.StatusOK, fsListResponse{
+		Path:    resolved,
+		Entries: entries,
+	})
+}
+
+type fsMkdirRequest struct {
+	Parent string `json:"parent"`
+	Name   string `json:"name"`
+}
+
+type fsMkdirResponse struct {
+	Path string `json:"path"`
+}
+
+func (s *Server) handleFSMkdir(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	if err := assertLoopback(r); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		return
+	}
+
+	var req fsMkdirRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "invalid request body")
+		return
+	}
+
+	if req.Parent == "" || req.Name == "" {
+		ValidationError(w, "parent and name are required", nil)
+		return
+	}
+
+	if strings.ContainsAny(req.Name, "/\\") || req.Name == "." || req.Name == ".." {
+		ValidationError(w, "name must not contain path separators or be . or ..", nil)
+		return
+	}
+
+	resolved, err := filepath.EvalSymlinks(req.Parent)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError, "parent directory does not exist", nil)
+		return
+	}
+	resolved = filepath.Clean(resolved)
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "cannot determine home directory", nil)
+		return
+	}
+	if !strings.HasPrefix(resolved, home) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "parent must be within the home directory", nil)
+		return
+	}
+
+	managedRoot, _ := managedProjectRoot()
+	if managedRoot != "" {
+		cleanManaged := filepath.Clean(managedRoot)
+		if strings.HasPrefix(resolved, cleanManaged+string(filepath.Separator)) || resolved == cleanManaged {
+			ValidationError(w, "cannot create directories inside the Scion managed directory", nil)
+			return
+		}
+	}
+
+	newPath := filepath.Join(resolved, req.Name)
+	if err := os.Mkdir(newPath, 0755); err != nil {
+		if os.IsExist(err) {
+			writeError(w, http.StatusConflict, ErrCodeConflict, "directory already exists", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to create directory", nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, fsMkdirResponse{Path: newPath})
+}
+
+type fsValidatePathRequest struct {
+	Path string `json:"path"`
+}
+
+type fsValidatePathResponse struct {
+	PathClass
+	Error string `json:"error,omitempty"`
+}
+
+func (s *Server) handleFSValidatePath(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	if err := assertLoopback(r); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		return
+	}
+
+	var req fsValidatePathRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "invalid request body")
+		return
+	}
+
+	if req.Path == "" {
+		ValidationError(w, "path is required", nil)
+		return
+	}
+
+	managedRoot, _ := managedProjectRoot()
+
+	pc, err := ClassifyPath(r.Context(), s.store, req.Path, managedRoot)
+	if err != nil {
+		slog.Warn("fs/validate-path: classify error", "path", req.Path, "error", err)
+	}
+
+	resp := fsValidatePathResponse{PathClass: pc}
+
+	if pc.IsManaged {
+		resp.Error = "This path is inside the Scion managed directory and cannot be linked"
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // trimOutput removes a trailing newline from command output.
