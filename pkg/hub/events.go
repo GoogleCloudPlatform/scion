@@ -50,6 +50,7 @@ type EventPublisher interface {
 	// remainder. The returned channel is buffered; implementations may drop
 	// events on a full buffer (backpressure).
 	Subscribe(patterns ...string) (<-chan Event, func())
+	PublishRaw(subject string, data interface{})
 	Close()
 }
 
@@ -71,6 +72,7 @@ func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message
 func (noopEventPublisher) PublishAllowListChanged(_ context.Context, _, _ string)            {}
 func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _, _ string)            {}
 func (noopEventPublisher) PublishDispatchDone(_ context.Context, _ string)                   {}
+func (noopEventPublisher) PublishRaw(_ string, _ interface{})                                {}
 func (noopEventPublisher) Close()                                                            {}
 
 // Subscribe on the no-op publisher returns a nil channel (which blocks forever
@@ -311,6 +313,11 @@ func (p *ChannelEventPublisher) publish(subject string, event interface{}) {
 			}
 		}
 	}
+}
+
+// PublishRaw publishes an arbitrary event on the given subject.
+func (p *ChannelEventPublisher) PublishRaw(subject string, data interface{}) {
+	p.publish(subject, data)
 }
 
 // Close marks the publisher as closed and closes all subscriber channels.

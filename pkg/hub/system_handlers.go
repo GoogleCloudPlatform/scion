@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -329,6 +330,67 @@ func (s *Server) handleSystemInit(w http.ResponseWriter, r *http.Request) {
 		OK:          true,
 		Initialized: true,
 	})
+}
+
+// --- 4.1: Image Pull ---
+
+type imagePullRequest struct {
+	Harnesses []string `json:"harnesses"`
+}
+
+type imagePullResponse struct {
+	JobID string `json:"jobId"`
+}
+
+func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	if err := assertLoopback(r); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		return
+	}
+
+	var req imagePullRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "invalid request body")
+		return
+	}
+
+	if len(req.Harnesses) == 0 {
+		ValidationError(w, "at least one harness must be specified", nil)
+		return
+	}
+
+	allowed := map[string]bool{"claude": true, "gemini": true, "codex": true, "opencode": true}
+	for _, h := range req.Harnesses {
+		if !allowed[h] {
+			ValidationError(w, fmt.Sprintf("unknown harness %q", h), nil)
+			return
+		}
+	}
+
+	var registry string
+	globalDir, err := config.GetGlobalDir()
+	if err == nil {
+		if vs, loadErr := config.LoadSingleFileVersioned(globalDir); loadErr == nil && vs != nil {
+			registry = vs.ResolveImageRegistry("")
+		}
+	}
+
+	jobID := api.NewUUID()
+
+	rt := runtime.GetRuntime("", "")
+
+	go func() {
+		_ = runtime.PullImages(context.Background(), rt, req.Harnesses, registry, func(pr runtime.PullResult) {
+			s.events.PublishRaw("system.images."+jobID, pr)
+		})
+	}()
+
+	writeJSON(w, http.StatusOK, imagePullResponse{JobID: jobID})
 }
 
 // trimOutput removes a trailing newline from command output.
