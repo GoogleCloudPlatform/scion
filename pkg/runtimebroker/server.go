@@ -962,11 +962,14 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 		}
 	}
 
-	// Backward compatibility: retry without project filter for containers
-	// that lack the scion.grove_id label (pre-existing agents or solo/CLI mode).
+	// Backward compatibility: retry without project filter, but only accept
+	// containers that lack a project label (pre-existing agents or solo/CLI
+	// mode). A container labeled for a different project must not match a
+	// project-scoped request, or same-slug agents across projects would collide.
 	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		agents, err = s.manager.List(ctx, fallbackFilter)
+		agents = agentsWithoutProjectLabel(agents)
 		if err == nil && len(agents) == 0 {
 			s.auxiliaryRuntimesMu.RLock()
 			auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
@@ -977,6 +980,9 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 
 			for rtName, aux := range auxRuntimes {
 				auxAgents, auxErr := aux.Manager.List(ctx, fallbackFilter)
+				if auxErr == nil {
+					auxAgents = agentsWithoutProjectLabel(auxAgents)
+				}
 				if auxErr == nil && len(auxAgents) > 0 {
 					agents = auxAgents
 					slog.Debug("Agent found via auxiliary runtime (fallback)", "slug", slug, "runtime", rtName)
@@ -1051,11 +1057,14 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 		}
 	}
 
-	// Backward compatibility: retry without project filter for containers
-	// that lack the scion.grove_id label (pre-existing agents or solo/CLI mode).
+	// Backward compatibility: retry without project filter, but only accept
+	// containers that lack a project label (pre-existing agents or solo/CLI
+	// mode). A container labeled for a different project must not match a
+	// project-scoped request, or same-slug agents across projects would collide.
 	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		agents, err = s.manager.List(ctx, fallbackFilter)
+		agents = agentsWithoutProjectLabel(agents)
 		if err == nil && len(agents) == 0 {
 			s.auxiliaryRuntimesMu.RLock()
 			auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
@@ -1066,6 +1075,9 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 
 			for rtName, aux := range auxRuntimes {
 				auxAgents, auxErr := aux.Manager.List(ctx, fallbackFilter)
+				if auxErr == nil {
+					auxAgents = agentsWithoutProjectLabel(auxAgents)
+				}
 				if auxErr == nil && len(auxAgents) > 0 {
 					agents = auxAgents
 					runtimeName = rtName

@@ -123,6 +123,69 @@ func TestStopAgent_ProjectScopedDisambiguation(t *testing.T) {
 	}
 }
 
+// TestExecCommand_NotFoundWhenOnlyInOtherProject verifies that exec does NOT
+// fall back to a same-slug agent in a different project. Asking to exec
+// "coordinator" in grove-B when only grove-A has one must 404 and never invoke
+// the runtime — the core cross-project collision the review feedback targeted.
+func TestExecCommand_NotFoundWhenOnlyInOtherProject(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-A",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+		},
+	}
+	execCalled := false
+	rt := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		ExecFunc: func(_ context.Context, _ string, _ []string) (string, error) {
+			execCalled = true
+			return "", nil
+		},
+	}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	body, _ := json.Marshal(map[string]any{"command": []string{"echo", "hi"}})
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/exec?projectId=grove-B", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleAgentByID(w, r)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d (%s)", w.Code, w.Body.String())
+	}
+	if execCalled {
+		t.Error("exec must not run against a same-slug agent in a different project")
+	}
+}
+
+// TestStopAgent_NotFoundInProjectIsNoOp verifies that stopping a slug not
+// present in the requested project is an idempotent no-op (202) and does NOT
+// stop a same-slug agent that exists in a different project.
+func TestStopAgent_NotFoundInProjectIsNoOp(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-A",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+		},
+	}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=grove-B", nil)
+	w := httptest.NewRecorder()
+	srv.handleAgentByID(w, r)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 (idempotent no-op), got %d (%s)", w.Code, w.Body.String())
+	}
+	if mgr.stopCalls != 0 {
+		t.Errorf("Stop was called %d time(s); must not stop a same-slug agent in another project", mgr.stopCalls)
+	}
+}
+
 // TestExecCommand_NotFoundInProject verifies that exec returns 404 when the
 // slug does not resolve to any agent in the requested project (and there is no
 // legacy unlabeled container to fall back to).

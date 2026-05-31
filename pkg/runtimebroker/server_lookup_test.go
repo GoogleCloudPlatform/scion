@@ -501,6 +501,30 @@ func TestLookupAgent_ProjectScopedDisambiguation(t *testing.T) {
 	}
 }
 
+func TestLookupContainerID_DifferentProjectNotMatchedViaFallback(t *testing.T) {
+	// A labeled container in grove-aaa must NOT be returned for a grove-bbb
+	// request via the backward-compat fallback — that would be a cross-project
+	// collision. The fallback is only for genuinely unlabeled containers.
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-aaa",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-aaa"},
+		},
+	}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	if _, err := srv.LookupContainerID(context.Background(), "coordinator", "grove-bbb"); err == nil {
+		t.Error("expected error: a different project's labeled agent must not match via fallback")
+	}
+
+	if _, err := srv.LookupAgent(context.Background(), "coordinator", "grove-bbb"); err == nil {
+		t.Error("expected error from LookupAgent: different project's labeled agent must not match via fallback")
+	}
+}
+
 func TestLookupAgent_ProjectFallbackForLegacyContainers(t *testing.T) {
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{
