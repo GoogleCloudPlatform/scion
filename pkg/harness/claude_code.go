@@ -188,7 +188,7 @@ func (c *ClaudeCode) provisionClaudeJSON(ctx context.Context, agentHome, agentWo
 		// keep default "/workspace"
 	} else if idx := strings.Index(agentWorkspace, "/.scion/agents/"); idx >= 0 {
 		// Derive the container workspace path from the agent directory structure.
-		// The host path is like .../grove/.scion/agents/<name>/workspace and maps
+		// The host path is like .../project/.scion/agents/<name>/workspace and maps
 		// to /repo-root/.scion/agents/<name>/workspace inside the container.
 		containerWorkspace = "/repo-root" + agentWorkspace[idx:]
 	} else if repoRoot, err := util.RepoRoot(); err == nil {

@@ -160,7 +160,7 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 
 	// Progeny secret resolution: when the caller is an agent with ancestry,
 	// include user-scoped secrets marked allowProgeny whose creator is in the
-	// ancestry chain. These are added at user-scope precedence — grove/broker
+	// ancestry chain. These are added at user-scope precedence — project/broker
 	// secrets with the same key will already have overridden them.
 	if opts != nil && len(opts.AgentAncestry) > 0 {
 		progenySecrets, err := b.store.ListProgenySecrets(ctx, opts.AgentAncestry)

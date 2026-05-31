@@ -393,7 +393,7 @@ type CreateAgentConfig struct {
 	// If the cached template's hash matches, it can be used without re-downloading.
 	TemplateHash string `json:"templateHash,omitempty"`
 
-	// GitClone specifies git clone parameters for git-anchored groves.
+	// GitClone specifies git clone parameters for git-anchored projects.
 	// When set, the broker skips workspace mounting and injects env vars
 	// so sciontool can clone the repo inside the container.
 	GitClone *api.GitCloneConfig `json:"gitClone,omitempty"`
@@ -403,7 +403,7 @@ type CreateAgentConfig struct {
 	// worktree/clone creation and configures per-agent git credentials.
 	SharedWorkspace bool `json:"sharedWorkspace,omitempty"`
 
-	// SharedDirs contains grove-level shared directory declarations.
+	// SharedDirs contains project-level shared directory declarations.
 	SharedDirs []api.SharedDir `json:"sharedDirs,omitempty"`
 
 	// GCPIdentity holds the GCP identity assignment for the agent.

@@ -556,7 +556,7 @@ func ExtractOrgRepo(gitURL string) (org, repo string) {
 }
 
 // CloneSharedWorkspace clones a git repository into the specified workspace path
-// for use as a shared workspace grove. It configures git identity and optionally
+// for use as a shared workspace project. It configures git identity and optionally
 // uses a token for authentication.
 //
 // If the requested branch does not exist on the remote, the clone falls back to

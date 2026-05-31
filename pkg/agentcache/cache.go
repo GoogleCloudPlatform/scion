@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package agentcache provides a simple cache for agent names used by shell completion.
-// The cache stores agent names per grove to ensure fast completions even when the
+// The cache stores agent names per project to ensure fast completions even when the
 // Hub API is slow or unavailable.
 package agentcache
 
@@ -31,7 +31,7 @@ const (
 	cacheSubdir = "cache/agent-names"
 )
 
-// CacheEntry represents a cached list of agent names for a grove.
+// CacheEntry represents a cached list of agent names for a project.
 type CacheEntry struct {
 	// Agents is the list of agent names.
 	Agents []string `json:"agents"`
@@ -48,9 +48,9 @@ func getCacheDir() (string, error) {
 	return filepath.Join(home, ".scion", cacheSubdir), nil
 }
 
-// GenerateCacheKey creates a unique, filesystem-safe key for a grove path.
-func GenerateCacheKey(grovePath string) string {
-	hash := sha256.Sum256([]byte(grovePath))
+// GenerateCacheKey creates a unique, filesystem-safe key for a project path.
+func GenerateCacheKey(projectPath string) string {
+	hash := sha256.Sum256([]byte(projectPath))
 	return hex.EncodeToString(hash[:8]) // Use first 8 bytes for a shorter filename
 }
 

@@ -27,7 +27,7 @@ func TestGenerateCacheKey(t *testing.T) {
 	}{
 		{"simple path", "/home/user/project/.scion"},
 		{"path with spaces", "/home/user/my project/.scion"},
-		{"global grove", "/home/user/.scion"},
+		{"global project", "/home/user/.scion"},
 	}
 
 	for _, tt := range tests {

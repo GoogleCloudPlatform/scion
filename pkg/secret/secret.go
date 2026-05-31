@@ -82,7 +82,7 @@ type SetSecretInput struct {
 	Value         string // Plaintext secret value
 	SecretType    string // environment, variable, file
 	Target        string // Projection target
-	Scope         string // user, grove, runtime_broker
+	Scope         string // user, project, runtime_broker
 	ScopeID       string // ID of the scoped entity
 	Description   string // Optional description
 	InjectionMode string // "always" or "as_needed"

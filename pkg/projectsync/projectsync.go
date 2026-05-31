@@ -47,7 +47,7 @@ type Options struct {
 	LocalPath string
 	// HubEndpoint is the base Hub API URL (e.g. "https://hub.example.com").
 	HubEndpoint string
-	// ProjectID is the grove identifier on the hub.
+	// ProjectID is the project identifier on the hub.
 	ProjectID string
 	// AuthToken is the bearer token for hub authentication.
 	AuthToken string

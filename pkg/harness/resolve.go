@@ -26,7 +26,7 @@ import (
 //
 // Production callers that already know the resolved harness-config name should
 // pass it as Name. The resolver looks up the harness-config directory through
-// the same precedence used by config.FindHarnessConfigDir (template, grove,
+// the same precedence used by config.FindHarnessConfigDir (template, project,
 // global) and merges any settings overrides via VersionedSettings.
 //
 // Legacy callers without harness-config context can use the harness.New shim,
