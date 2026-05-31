@@ -963,7 +963,7 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, p
 	case api.AgentActionMessage:
 		s.sendMessage(w, r, id, projectID)
 	case api.AgentActionExec:
-		s.execCommand(w, r, id)
+		s.execCommand(w, r, id, projectID)
 	case api.AgentActionLogs:
 		s.getLogs(w, r, id, projectID)
 	case api.AgentActionStats:
@@ -1149,11 +1149,30 @@ func isContainerStopTolerable(err error) bool {
 		strings.Contains(msg, "exit status 125")
 }
 
+// projectScopedTarget resolves an agent slug to its project-scoped container
+// identifier (container ID for docker/podman, pod name for k8s) via
+// LookupContainerID. When multiple projects on this broker have an agent with
+// the same slug, this ensures single-container operations act on the agent in
+// the requested project rather than whichever the slug matches first. It
+// returns the original id unchanged when the agent cannot be resolved, so
+// callers degrade to the legacy slug-based behavior rather than failing.
+func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) string {
+	if containerID, err := s.LookupContainerID(ctx, id, projectID); err == nil && containerID != "" {
+		return containerID
+	}
+	return id
+}
+
 func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
 	mgr := s.resolveManagerForAgent(ctx, id, projectID)
-	if err := mgr.Stop(ctx, id, ""); err != nil {
+
+	// Resolve the project-scoped container so that same-slug agents in
+	// different projects on this broker don't collide. Falls back to the bare
+	// slug when the agent can't be resolved, keeping stop idempotent.
+	target := s.projectScopedTarget(ctx, id, projectID)
+	if err := mgr.Stop(ctx, target, ""); err != nil {
 		if isContainerStopTolerable(err) {
 			// Container doesn't exist, is already stopped, or podman/docker can't find it.
 			// Treat as success so the hub can update its state.
@@ -1225,7 +1244,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// be exited and the subsequent start will handle cleanup.
 	// Use resolveManagerForAgent to find the agent on auxiliary runtimes.
 	stopMgr := s.resolveManagerForAgent(ctx, id, projectID)
-	if err := stopMgr.Stop(ctx, id, ""); err != nil {
+	stopTarget := s.projectScopedTarget(ctx, id, projectID)
+	if err := stopMgr.Stop(ctx, stopTarget, ""); err != nil {
 		if isContainerStopTolerable(err) {
 			s.agentLifecycleLog.Warn("Restart: stop target not found or already stopped, proceeding with start", "agent_id", id, "error", err)
 		} else {
@@ -1333,7 +1353,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 	w.WriteHeader(http.StatusOK)
 }
 
-func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
 	var req ExecRequest
@@ -1355,10 +1375,24 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id string) 
 	}
 
 	// Resolve the correct runtime for this agent (may be on an auxiliary runtime like K8s).
-	// Exec doesn't receive projectID from query params (internal operation).
-	rt := s.resolveRuntimeForAgent(ctx, id, "")
+	// projectID scopes the lookup so that, when multiple projects on this broker
+	// have an agent with the same slug, we operate on the agent in the requested
+	// project rather than whichever the runtime happens to match by slug first.
+	rt := s.resolveRuntimeForAgent(ctx, id, projectID)
 
-	output, err := rt.Exec(ctx, id, req.Command)
+	// Resolve the project-scoped container identifier (container ID for
+	// docker/podman, pod name for k8s) and exec against that rather than the
+	// bare slug. Without this, rt.Exec resolves the slug to a container across
+	// all projects and can target the wrong agent — e.g. "scion look
+	// coordinator" in project A showing project B's terminal. Mirrors the
+	// project-scoped lookup used by the PTY attach handler.
+	target, err := s.LookupContainerID(ctx, id, projectID)
+	if err != nil {
+		NotFound(w, "Agent")
+		return
+	}
+
+	output, err := rt.Exec(ctx, target, req.Command)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			NotFound(w, "Agent")

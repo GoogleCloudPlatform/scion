@@ -43,6 +43,7 @@ type mockManager struct {
 	lastStartOpts         api.StartOptions
 	lastDeleteProjectPath string
 	lastDeleteAgentID     string
+	lastStopAgentID       string
 }
 
 func (m *mockManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
@@ -66,6 +67,7 @@ func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.Ag
 
 func (m *mockManager) Stop(ctx context.Context, agentID string, projectPath string) error {
 	m.stopCalls++
+	m.lastStopAgentID = agentID
 	return m.stopErr
 }
 
