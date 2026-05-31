@@ -23,8 +23,25 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
+
+// heartbeatAgentKey returns a key that uniquely identifies an agent within the
+// broker for deduplication purposes. It combines the agent's slug (name) with
+// its project ID so agents that share a slug across different projects are not
+// collapsed into one entry. This matches the dedup key used by the agent-list
+// handler (see runtimebroker/handlers.go).
+func heartbeatAgentKey(a api.AgentInfo) string {
+	pid := a.ProjectID
+	if pid == "" {
+		pid = a.Labels["scion.project_id"]
+	}
+	if pid == "" {
+		pid = a.Labels["scion.grove_id"]
+	}
+	return a.Name + "\x00" + pid
+}
 
 const (
 	// DefaultHeartbeatInterval is the default interval between heartbeats.
@@ -200,11 +217,18 @@ func (s *HeartbeatService) gatherProjectAgents() []hubclient.ProjectHeartbeat {
 		return nil
 	}
 
-	// Also include agents from auxiliary runtimes (e.g. Kubernetes)
+	// Also include agents from auxiliary runtimes (e.g. Kubernetes).
+	// Dedup by name+projectID (not name alone) to prevent collision across
+	// projects while still deduplicating the same agent found on multiple
+	// runtimes. Keying by name alone would drop an auxiliary-runtime agent
+	// whenever a different project has a default-runtime agent with the same
+	// slug — that agent would then never be reported in heartbeats and its
+	// status on the Hub would go stale (e.g. stuck at "starting"). This
+	// mirrors the dedup key used by the agent-list handler.
 	if s.auxiliaryManagers != nil {
 		seen := make(map[string]bool)
 		for _, ag := range agents {
-			seen[ag.Name] = true
+			seen[heartbeatAgentKey(ag)] = true
 		}
 		for _, auxMgr := range s.auxiliaryManagers() {
 			auxAgents, auxErr := auxMgr.List(context.Background(), nil)
@@ -212,8 +236,9 @@ func (s *HeartbeatService) gatherProjectAgents() []hubclient.ProjectHeartbeat {
 				continue
 			}
 			for _, ag := range auxAgents {
-				if !seen[ag.Name] {
-					seen[ag.Name] = true
+				k := heartbeatAgentKey(ag)
+				if !seen[k] {
+					seen[k] = true
 					agents = append(agents, ag)
 				}
 			}

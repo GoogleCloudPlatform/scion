@@ -449,3 +449,99 @@ func TestHeartbeatService_IncludesAuxiliaryRuntimes(t *testing.T) {
 		t.Error("Expected k8s-agent from auxiliary runtime in heartbeat")
 	}
 }
+
+// TestHeartbeatService_AuxiliaryRuntimeSlugCollisionAcrossProjects is a
+// regression test for cross-project agent slug collisions. When a
+// default-runtime agent and an auxiliary-runtime agent share the same slug but
+// belong to different projects, both must be reported in the heartbeat.
+// Previously the auxiliary agent was deduplicated away by slug alone, so its
+// status never reached the Hub and it appeared stuck at its last-known phase
+// (e.g. "starting") forever.
+func TestHeartbeatService_AuxiliaryRuntimeSlugCollisionAcrossProjects(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+
+	// Default-runtime "coordinator" lives in grove-1.
+	defaultMgr := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "coordinator", ProjectID: "grove-1", Phase: "running", Activity: "thinking"},
+		},
+	}
+
+	// Auxiliary-runtime "coordinator" lives in a different project, grove-2.
+	auxMgr := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "coordinator", ProjectID: "grove-2", Phase: "running", Activity: "working"},
+		},
+	}
+
+	svc := NewHeartbeatService(client, "test-host", time.Hour, defaultMgr, nil, slog.Default())
+	svc.auxiliaryManagers = func() []agent.Manager { return []agent.Manager{auxMgr} }
+
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat failed: %v", err)
+	}
+
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 {
+		t.Fatalf("Expected 1 heartbeat call, got %d", len(calls))
+	}
+
+	heartbeat := calls[0].Heartbeat
+	if len(heartbeat.Projects) != 2 {
+		t.Fatalf("Expected 2 projects (grove-1 and grove-2), got %d", len(heartbeat.Projects))
+	}
+
+	// Both projects must report their "coordinator" agent with its own status.
+	byProject := make(map[string][]hubclient.AgentHeartbeat)
+	for _, p := range heartbeat.Projects {
+		byProject[p.ProjectID] = p.Agents
+	}
+
+	g1 := byProject["grove-1"]
+	if len(g1) != 1 || g1[0].Slug != "coordinator" || g1[0].Activity != "thinking" {
+		t.Errorf("grove-1 coordinator missing or wrong status: %+v", g1)
+	}
+
+	g2 := byProject["grove-2"]
+	if len(g2) != 1 || g2[0].Slug != "coordinator" || g2[0].Activity != "working" {
+		t.Errorf("grove-2 coordinator missing or wrong status (dropped by slug-only dedup?): %+v", g2)
+	}
+}
+
+// TestHeartbeatService_AuxiliaryRuntimeDedupSameAgent verifies the dedup still
+// collapses the *same* agent (same slug and project) reported by both the
+// default and auxiliary managers, so it is not double-counted.
+func TestHeartbeatService_AuxiliaryRuntimeDedupSameAgent(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+
+	defaultMgr := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "coordinator", ProjectID: "grove-1", Phase: "running"},
+		},
+	}
+	auxMgr := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "coordinator", ProjectID: "grove-1", Phase: "running"},
+		},
+	}
+
+	svc := NewHeartbeatService(client, "test-host", time.Hour, defaultMgr, nil, slog.Default())
+	svc.auxiliaryManagers = func() []agent.Manager { return []agent.Manager{auxMgr} }
+
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat failed: %v", err)
+	}
+
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 {
+		t.Fatalf("Expected 1 heartbeat call, got %d", len(calls))
+	}
+
+	heartbeat := calls[0].Heartbeat
+	if len(heartbeat.Projects) != 1 {
+		t.Fatalf("Expected 1 project, got %d", len(heartbeat.Projects))
+	}
+	if got := heartbeat.Projects[0].AgentCount; got != 1 {
+		t.Errorf("Expected the same agent to be deduplicated to 1, got %d", got)
+	}
+}
