@@ -772,12 +772,12 @@ func TestSetRecipientFlagValidation(t *testing.T) {
 		{
 			name:    "invalid set",
 			args:    []string{"set[agent:a]", "hello"},
-			wantErr: "invalid set recipient",
+			wantErr: "invalid group recipient",
 		},
 		{
 			name:    "empty set",
 			args:    []string{"set[]", "hello"},
-			wantErr: "invalid set recipient",
+			wantErr: "invalid group recipient",
 		},
 	}
 
