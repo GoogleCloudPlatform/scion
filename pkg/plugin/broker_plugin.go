@@ -360,6 +360,15 @@ func (a *BrokerPluginAdapter) Close() error {
 	return a.rpcClient.Close()
 }
 
+// unsubscribePattern sends the RPC unsubscribe call and removes the pattern
+// from the adapter's tracking map. Both pluginSubscription and
+// reconnectingSub use this to avoid leaking entries in the subs map.
+func (a *BrokerPluginAdapter) unsubscribePattern(pattern string) error {
+	err := a.rpcClient.Unsubscribe(pattern)
+	delete(a.subs, pattern)
+	return err
+}
+
 // pluginSubscription implements eventbus.Subscription for plugin brokers.
 type pluginSubscription struct {
 	adapter *BrokerPluginAdapter
@@ -367,11 +376,7 @@ type pluginSubscription struct {
 }
 
 func (s *pluginSubscription) Unsubscribe() error {
-	if err := s.adapter.rpcClient.Unsubscribe(s.pattern); err != nil {
-		return err
-	}
-	delete(s.adapter.subs, s.pattern)
-	return nil
+	return s.adapter.unsubscribePattern(s.pattern)
 }
 
 // --- Reconnecting adapter for self-managed broker plugins ---
@@ -496,7 +501,8 @@ func (s *reconnectingSub) Unsubscribe() error {
 	defer s.adapter.mu.Unlock()
 	delete(s.adapter.activeSubs, s.pattern)
 	// Best-effort unsubscribe on current connection; if it's dead, the
-	// subscription is already gone.
-	_ = s.adapter.current.rpcClient.Unsubscribe(s.pattern)
+	// subscription is already gone. Uses unsubscribePattern to also clean
+	// up the BrokerPluginAdapter's subs map, preventing leaked entries.
+	_ = s.adapter.current.unsubscribePattern(s.pattern)
 	return nil
 }

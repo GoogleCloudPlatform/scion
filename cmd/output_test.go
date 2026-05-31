@@ -260,6 +260,8 @@ func TestInteractiveOnlyCommands(t *testing.T) {
 		"scion logs",
 		"scion runtime-broker start",
 		"scion runtime-broker stop",
+		"scion broker start",
+		"scion broker stop",
 		"scion server start",
 		"scion cdw",
 		"scion message",
