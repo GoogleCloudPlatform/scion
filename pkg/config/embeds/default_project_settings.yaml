@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Scion Grove Configuration (v1)
+# Scion Project Configuration (v1)
 #
-# Settings merge order: defaults -> global (~/.scion/) -> grove (.scion/)
-# Grove-level settings control per-project preferences like active profile,
+# Settings merge order: defaults -> global (~/.scion/) -> project (.scion/)
+# Project-level settings control per-project preferences like active profile,
 # default template, and hub connection details.
 #
 # Runtime profiles and runtimes are managed at the global/broker level
@@ -23,7 +23,7 @@
 
 schema_version: "1"
 
-# Active profile to use for this grove (profile must be defined in global settings)
+# Active profile to use for this project (profile must be defined in global settings)
 # Env: SCION_ACTIVE_PROFILE
 active_profile: local
 

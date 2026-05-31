@@ -258,7 +258,7 @@ func GetDefaultSettingsDataYAML() ([]byte, error) {
 // those are managed at the global/broker level (~/.scion/settings.yaml).
 func GetProjectDefaultSettingsYAML() ([]byte, error) {
 
-	return EmbedsFS.ReadFile("embeds/default_grove_settings.yaml")
+	return EmbedsFS.ReadFile("embeds/default_project_settings.yaml")
 }
 
 // GetSettingsPath returns the path to the settings file in a directory,
