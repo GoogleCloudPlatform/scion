@@ -15,9 +15,20 @@
 harness: claude
 image: scion-claude:latest
 user: scion
+# provisioner.type is container-script so the container-side provision.py
+# handles auth resolution, API key pre-approval, project path setup, MCP
+# server translation, and other harness-native config writes. Existing
+# installations that still have type: builtin can run
+# `scion harness-config upgrade claude --activate-script` to migrate.
 provisioner:
-  type: builtin
+  type: container-script
   interface_version: 1
+  command: ["python3", "/home/scion/.scion/harness/provision.py"]
+  timeout: 30s
+  lifecycle_events:
+    - pre-start
+  required_image_tools:
+    - python3
 config_dir: .claude
 skills_dir: .claude/skills
 interrupt_key: Escape
@@ -52,6 +63,10 @@ capabilities:
     auth_file: { support: "yes" }
     oauth_token: { support: "yes" }
     vertex_ai: { support: "yes" }
+  mcp:
+    stdio: { support: "yes" }
+    sse: { support: "yes" }
+    streamable_http: { support: "yes" }
 no_auth:
   behavior: drop-to-shell
   message: |
