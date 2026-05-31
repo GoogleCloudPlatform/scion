@@ -66,12 +66,12 @@ func completeAgentNames(cmd *cobra.Command, args []string, toComplete string) ([
 		}
 	}
 
-	// Helper to scan a grove directory for local agents
-	scanProject := func(groveDir string) {
-		if groveDir == "" {
+	// Helper to scan a project directory for local agents
+	scanProject := func(projectDir string) {
+		if projectDir == "" {
 			return
 		}
-		agentsDir := filepath.Join(groveDir, "agents")
+		agentsDir := filepath.Join(projectDir, "agents")
 		entries, err := os.ReadDir(agentsDir)
 		if err != nil {
 			return
@@ -92,7 +92,7 @@ func completeAgentNames(cmd *cobra.Command, args []string, toComplete string) ([
 		}
 	}
 
-	// Try to get grove from flag if specified by user in the command line so far
+	// Try to get project path from flag if specified by user in the command line so far
 	currentProjectPath, _ := cmd.Flags().GetString("grove")
 
 	// If global flag is set
@@ -103,10 +103,10 @@ func completeAgentNames(cmd *cobra.Command, args []string, toComplete string) ([
 
 	resolvedPath, _ := config.GetResolvedProjectDir(currentProjectPath)
 
-	// 1. Scan local/current grove
+	// 1. Scan local/current project
 	scanProject(resolvedPath)
 
-	// 2. Scan global grove if not already scanned
+	// 2. Scan global project if not already scanned
 	globalDir, _ := config.GetGlobalDir()
 	if globalDir != "" && globalDir != resolvedPath {
 		scanProject(globalDir)
@@ -144,7 +144,7 @@ func fetchHubAgentsForCompletion(projectPath string) []string {
 		return nil
 	}
 
-	// Generate cache key for this grove
+	// Generate cache key for this project
 	cacheKey := agentcache.GenerateCacheKey(projectPath)
 
 	// Try to fetch from Hub with short timeout
@@ -199,7 +199,7 @@ func fetchHubAgents(ctx context.Context, endpoint string, settings *config.Setti
 		return nil, err
 	}
 
-	// Determine grove ID for filtering
+	// Determine project ID for filtering
 	var agentService hubclient.AgentService
 	if settings.Hub != nil && settings.Hub.ProjectID != "" {
 		agentService = client.ProjectAgents(settings.Hub.ProjectID)

@@ -102,7 +102,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// When --global is set, change to the home directory so the server
-	// operates from the global grove context regardless of where it was launched.
+	// operates from the global project context regardless of where it was launched.
 	if globalMode {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -114,15 +114,15 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		log.Printf("Global mode: changed working directory to %s", home)
 	}
 
-	// Warn if running from within a project grove instead of the global (~/.scion) grove.
+	// Warn if running from within a project directory instead of the global (~/.scion) context.
 	if projectDir, ok := config.FindProjectRoot(); ok {
 		if projectDir != globalDir {
 			parentDir := filepath.Dir(projectDir)
-			fmt.Fprintf(os.Stderr, "\n%s%s WARNING: Server is running from a project grove context (%s)%s\n",
+			fmt.Fprintf(os.Stderr, "\n%s%s WARNING: Server is running from a project directory context (%s)%s\n",
 				util.Bold, util.Yellow, parentDir, util.Reset)
-			fmt.Fprintf(os.Stderr, "%s%s          The runtime broker will use this grove's templates and settings.%s\n",
+			fmt.Fprintf(os.Stderr, "%s%s          The runtime broker will use this project's templates and settings.%s\n",
 				util.Bold, util.Yellow, util.Reset)
-			fmt.Fprintf(os.Stderr, "%s%s          For machine-wide operation, run the server from outside any project grove.%s\n\n",
+			fmt.Fprintf(os.Stderr, "%s%s          For machine-wide operation, run the server from outside any project directory.%s\n\n",
 				util.Bold, util.Yellow, util.Reset)
 		}
 	}
@@ -176,7 +176,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Load settings early so both Hub and Broker can use grove-level hub.endpoint.
+	// Load settings early so both Hub and Broker can use project-level hub.endpoint.
 	brokerSettings, err := config.LoadSettings("")
 	if err != nil {
 		log.Printf("Warning: failed to load settings: %v", err)
@@ -707,7 +707,7 @@ func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Setting
 	if !enableHub {
 		hubEndpoint := brokerSettings.GetHubEndpoint()
 		if hubEndpoint != "" && enableDebug {
-			log.Printf("Hub endpoint resolved from grove settings: %s", hubEndpoint)
+			log.Printf("Hub endpoint resolved from project settings: %s", hubEndpoint)
 		}
 		return hubEndpoint
 	}
@@ -1101,7 +1101,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 
 		effectiveID, regErr := registerGlobalProjectAndBroker(ctx, s, brokerID, brokerName, rhEndpoint, rt, serverAutoProvide, brokerSettings)
 		if regErr != nil {
-			log.Printf("Warning: failed to register global grove: %v", regErr)
+			log.Printf("Warning: failed to register global project: %v", regErr)
 		} else {
 			colocatedBrokerRegistered = true
 			if effectiveID != brokerID {
@@ -1111,7 +1111,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 					log.Printf("Warning: failed to persist deduplicated broker ID: %v", err)
 				}
 			}
-			log.Printf("Registered global grove with runtime broker %s (endpoint: %s, autoProvide: %v)", brokerName, rhEndpoint, serverAutoProvide)
+			log.Printf("Registered global project with runtime broker %s (endpoint: %s, autoProvide: %v)", brokerName, rhEndpoint, serverAutoProvide)
 			hubSrv.SetEmbeddedBrokerID(brokerID)
 		}
 
@@ -1227,7 +1227,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			}
 		}()
 	} else if simulateRemoteBroker && enableHub && cfg.RuntimeBroker.Enabled {
-		log.Printf("Simulating remote broker: skipping automatic global grove registration")
+		log.Printf("Simulating remote broker: skipping automatic global project registration")
 	}
 
 	return nil
