@@ -947,7 +947,7 @@ func (s *Settings) GetHubEndpoint() string {
 
 // GetHubProjectID returns the hub-side project ID if configured.
 // This is the ID of the project on the Hub, which may differ from the local
-// project_id stored in .scion/settings.json.
+// project_id stored in the project settings file.
 func (s *Settings) GetHubProjectID() string {
 	if s.Hub != nil {
 		return s.Hub.ProjectID
