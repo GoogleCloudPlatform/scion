@@ -1858,6 +1858,13 @@ func (b *TelegramBrokerV2) resolveUserMentions(ctx context.Context, tgMsg *TGMes
 			if !ok {
 				continue
 			}
+			// Skip if the entity is a partial match — Telegram may truncate
+			// at a hyphen in agent names like "@agent-dev", creating an entity
+			// covering only "@agent". Replacing partial text would corrupt the
+			// message (e.g., "user:email-dev" instead of "@agent-dev").
+			if isPartialMentionEntity(tgMsg.Text, ent.Offset, ent.Length) {
+				continue
+			}
 			username := strings.TrimPrefix(mention, "@")
 			if username == "" {
 				continue

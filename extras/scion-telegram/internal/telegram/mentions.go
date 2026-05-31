@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // resolveTargetAgents determines which agents a message should be routed to.
@@ -133,6 +134,22 @@ func utf16CodeUnits(r rune) int {
 		return 2 // supplementary plane → surrogate pair
 	}
 	return 1
+}
+
+// isPartialMentionEntity checks whether a Telegram mention entity covers only
+// part of a longer token in the message text. This happens when agent names
+// contain characters not valid in Telegram usernames (e.g., hyphens): Telegram
+// creates a mention entity for just the valid-username prefix (e.g., "@agent"
+// for "@agent-dev"). Returns true if the character immediately after the entity
+// in the text is a valid agent-slug character (letter, digit, hyphen, or
+// underscore), indicating the entity is a partial match.
+func isPartialMentionEntity(text string, entOffset, entLength int) bool {
+	_, end, ok := utf16ByteRange(text, entOffset, entLength)
+	if !ok || end >= len(text) {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(text[end:])
+	return r == '-' || r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
 // isBotMentioned checks Telegram's structured entities for a mention matching the bot's username.
@@ -257,6 +274,12 @@ func hasNonBotUserMention(msg *TGMessage, botUsername string, knownAgents []stri
 		case "mention":
 			mention, ok := utf16Extract(msg.Text, ent.Offset, ent.Length)
 			if !ok {
+				continue
+			}
+			// Skip if the entity is a partial match — Telegram may truncate
+			// at a hyphen because hyphens are not valid in Telegram usernames.
+			// For example, "@agent-dev" produces an entity covering only "@agent".
+			if isPartialMentionEntity(msg.Text, ent.Offset, ent.Length) {
 				continue
 			}
 			username := strings.ToLower(strings.TrimPrefix(mention, "@"))

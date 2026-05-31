@@ -591,6 +591,97 @@ func TestHasNonBotUserMention_CaseInsensitive(t *testing.T) {
 	assert.False(t, hasNonBotUserMention(msg, "ScionHubBot", []string{"coder"}))
 }
 
+// --- isPartialMentionEntity tests ---
+
+func TestIsPartialMentionEntity_HyphenAfterEntity(t *testing.T) {
+	// "@agent-dev" — entity covers "@agent" (offset 0, length 6), next char is '-'
+	assert.True(t, isPartialMentionEntity("@agent-dev hello", 0, 6))
+}
+
+func TestIsPartialMentionEntity_UnderscoreAfterEntity(t *testing.T) {
+	// "@agent_dev" — entity covers "@agent" (offset 0, length 6), next char is '_'
+	assert.True(t, isPartialMentionEntity("@agent_dev hello", 0, 6))
+}
+
+func TestIsPartialMentionEntity_LetterAfterEntity(t *testing.T) {
+	// In theory, if Telegram truncated mid-word.
+	assert.True(t, isPartialMentionEntity("@agentdev hello", 0, 4))
+}
+
+func TestIsPartialMentionEntity_SpaceAfterEntity(t *testing.T) {
+	// "@agent hello" — entity covers "@agent", next char is space. Not partial.
+	assert.False(t, isPartialMentionEntity("@agent hello", 0, 6))
+}
+
+func TestIsPartialMentionEntity_EndOfString(t *testing.T) {
+	// "@agent" — entity covers entire string. Not partial.
+	assert.False(t, isPartialMentionEntity("@agent", 0, 6))
+}
+
+func TestIsPartialMentionEntity_CommaAfterEntity(t *testing.T) {
+	// "@agent, hello" — entity covers "@agent", next char is comma. Not partial.
+	assert.False(t, isPartialMentionEntity("@agent, hello", 0, 6))
+}
+
+func TestIsPartialMentionEntity_MidTextHyphen(t *testing.T) {
+	// "hey @agent-dev" — entity at offset 4 covers "@agent", next char is '-'
+	assert.True(t, isPartialMentionEntity("hey @agent-dev", 4, 6))
+}
+
+func TestIsPartialMentionEntity_EmojiBeforeHyphenatedMention(t *testing.T) {
+	// "🎉 @agent-dev" — emoji is 2 UTF-16 code units, space is 1. Entity at offset 3.
+	assert.True(t, isPartialMentionEntity("🎉 @agent-dev", 3, 6))
+}
+
+func TestIsPartialMentionEntity_DigitAfterEntity(t *testing.T) {
+	// "@agent2dev" — entity covers "@agent", next char is '2' (digit).
+	assert.True(t, isPartialMentionEntity("@agent2dev hello", 0, 6))
+}
+
+func TestIsPartialMentionEntity_MultipleHyphens(t *testing.T) {
+	// "@my-cool-agent" — entity covers "@my" (offset 0, length 3), next char is '-'
+	assert.True(t, isPartialMentionEntity("@my-cool-agent check", 0, 3))
+}
+
+// --- hasNonBotUserMention with hyphenated agent names ---
+
+func TestHasNonBotUserMention_HyphenatedAgentEntityAtStart(t *testing.T) {
+	// Telegram creates entity for "@agent" but the user typed "@agent-dev".
+	// Since the entity is partial (next char is '-'), it should NOT be treated
+	// as a non-bot user mention.
+	msg := &TGMessage{
+		Text: "@agent-dev hello",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 6}, // covers "@agent"
+		},
+	}
+	assert.False(t, hasNonBotUserMention(msg, "ScionHubBot", []string{"agent-dev"}))
+}
+
+func TestHasNonBotUserMention_HyphenatedNonAgentEntityAtStart(t *testing.T) {
+	// Same partial entity, but agent-dev is not known. Still should not be
+	// classified as a user mention since the entity is partial.
+	msg := &TGMessage{
+		Text: "@agent-dev hello",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 6}, // covers "@agent"
+		},
+	}
+	assert.False(t, hasNonBotUserMention(msg, "ScionHubBot", []string{"coder"}))
+}
+
+func TestHasNonBotUserMention_NonPartialUserMention(t *testing.T) {
+	// "@alice hello" — entity covers "@alice" and next char is space.
+	// This is a genuine user mention, not partial.
+	msg := &TGMessage{
+		Text: "@alice hello",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 6}, // covers "@alice"
+		},
+	}
+	assert.True(t, hasNonBotUserMention(msg, "ScionHubBot", []string{"coder"}))
+}
+
 // --- entityMentionSet tests ---
 
 func TestEntityMentionSet_RealUserMention(t *testing.T) {
@@ -763,4 +854,88 @@ func TestTypoDetection_MixedTypoAndRealUser(t *testing.T) {
 		}
 	}
 	assert.Equal(t, []string{"@agent-typo"}, typos)
+}
+
+// --- Comprehensive hyphenated agent name tests ---
+
+func TestResolveTargetAgents_HyphenatedAgent(t *testing.T) {
+	msg := &TGMessage{
+		Text: "@deploy-agent run the deploy",
+	}
+	result, isAll := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "deploy-agent"})
+	assert.Equal(t, []string{"deploy-agent"}, result)
+	assert.False(t, isAll)
+}
+
+func TestResolveTargetAgents_HyphenatedAgentWithEntity(t *testing.T) {
+	// Telegram creates a partial entity for "@deploy" but the user typed "@deploy-agent".
+	msg := &TGMessage{
+		Text: "@deploy-agent run the deploy",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 7}, // covers "@deploy"
+		},
+	}
+	result, isAll := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "deploy-agent"})
+	assert.Equal(t, []string{"deploy-agent"}, result)
+	assert.False(t, isAll)
+}
+
+func TestResolveTargetAgents_MultipleHyphens(t *testing.T) {
+	msg := &TGMessage{
+		Text: "@my-cool-agent help me",
+	}
+	result, isAll := resolveTargetAgents(msg, "ScionHubBot", "coder", []string{"coder", "my-cool-agent"})
+	assert.Equal(t, []string{"my-cool-agent"}, result)
+	assert.False(t, isAll)
+}
+
+func TestExtractAgentMentions_MultipleHyphens(t *testing.T) {
+	agents, hasAll := extractAgentMentions("@my-cool-agent check", []string{"my-cool-agent", "coder"})
+	assert.False(t, hasAll)
+	assert.Equal(t, []string{"my-cool-agent"}, agents)
+}
+
+func TestExtractAgentMentions_HyphenatedWithTrailingPunctuation(t *testing.T) {
+	agents, hasAll := extractAgentMentions("@deploy-agent, please check", []string{"deploy-agent", "coder"})
+	assert.False(t, hasAll)
+	assert.Equal(t, []string{"deploy-agent"}, agents)
+}
+
+func TestExtractAgentMentions_MultipleHyphenatedAgents(t *testing.T) {
+	agents, hasAll := extractAgentMentions("@deploy-agent @code-reviewer check", []string{"deploy-agent", "code-reviewer", "coder"})
+	assert.False(t, hasAll)
+	assert.Equal(t, []string{"deploy-agent", "code-reviewer"}, agents)
+}
+
+func TestExtractAgentMentions_WithDot(t *testing.T) {
+	agents, hasAll := extractAgentMentions("@agent.dev check", []string{"agent.dev", "coder"})
+	assert.False(t, hasAll)
+	assert.Equal(t, []string{"agent.dev"}, agents)
+}
+
+func TestStripMentions_HyphenatedAgent(t *testing.T) {
+	result := stripMentions("@ScionHubBot @deploy-agent please review this", "ScionHubBot", []string{"deploy-agent"})
+	assert.Equal(t, "please review this", result)
+}
+
+func TestStripMentions_HyphenatedAgentWithTrailingPunctuation(t *testing.T) {
+	result := stripMentions("@deploy-agent, please help", "ScionHubBot", []string{"deploy-agent"})
+	assert.Equal(t, ", please help", result)
+}
+
+func TestStripMentions_MultipleHyphenatedAgents(t *testing.T) {
+	result := stripMentions("@deploy-agent @code-reviewer check this", "ScionHubBot", []string{"deploy-agent", "code-reviewer"})
+	assert.Equal(t, "check this", result)
+}
+
+func TestExtractUnresolvedMentions_HyphenatedKnownAgent(t *testing.T) {
+	// Known hyphenated agent should NOT appear in unresolved.
+	result := extractUnresolvedMentions("@deploy-agent hello", "ScionHubBot", []string{"deploy-agent"})
+	assert.Nil(t, result)
+}
+
+func TestExtractUnresolvedMentions_HyphenatedUnknownAgent(t *testing.T) {
+	// Unknown hyphenated agent should appear in unresolved with full name.
+	result := extractUnresolvedMentions("@deploy-agent hello", "ScionHubBot", []string{"coder"})
+	assert.Equal(t, []string{"deploy-agent"}, result)
 }
