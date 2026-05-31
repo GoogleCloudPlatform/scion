@@ -430,6 +430,6 @@ func suspendAgentViaHub(hubCtx *HubContext, agentName string) error {
 }
 
 func init() {
-	suspendCmd.Flags().BoolVarP(&suspendAll, "all", "a", false, "Suspend all running agents in the current grove")
+	suspendCmd.Flags().BoolVarP(&suspendAll, "all", "a", false, "Suspend all running agents in the current project")
 	rootCmd.AddCommand(suspendCmd)
 }

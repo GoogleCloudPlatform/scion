@@ -188,7 +188,7 @@ Examples:
 			// User recipient: skip sync (no agent involved)
 			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
 		} else if msgAll {
-			// Cross-grove operation: skip sync
+			// Cross-project operation: skip sync
 			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
 		} else if msgBroadcast {
 			// Grove-scoped broadcast: no specific agent
@@ -420,8 +420,8 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 		return nil
 	}
 
-	// Global broadcast (--all): fan-out at client level across groves.
-	// Each grove doesn't have a global broadcast endpoint, so we list all
+	// Global broadcast (--all): fan-out at client level across projects.
+	// Each project doesn't have a global broadcast endpoint, so we list all
 	// running agents and send individually.
 	if all {
 		agentSvc := hubCtx.Client.Agents()
@@ -681,8 +681,8 @@ func scheduleMessageViaHub(hubCtx *HubContext, agentName string, message string,
 
 func init() {
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
-	messageCmd.Flags().BoolVarP(&msgBroadcast, "broadcast", "b", false, "Send the message to all running agents in the current grove")
-	messageCmd.Flags().BoolVarP(&msgAll, "all", "a", false, "Send the message to all running agents across all groves")
+	messageCmd.Flags().BoolVarP(&msgBroadcast, "broadcast", "b", false, "Send the message to all running agents in the current project")
+	messageCmd.Flags().BoolVarP(&msgAll, "all", "a", false, "Send the message to all running agents across all projects")
 	messageCmd.Flags().StringVar(&msgIn, "in", "", "Schedule message delivery after a duration (e.g. 30m, 1h)")
 	messageCmd.Flags().StringVar(&msgAt, "at", "", "Schedule message delivery at an absolute time (ISO 8601, e.g. 2026-02-28T14:00:00Z)")
 	messageCmd.Flags().BoolVar(&msgPlain, "plain", false, "Mark for plain-text delivery (message still flows as structured JSON internally)")

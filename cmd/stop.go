@@ -122,7 +122,7 @@ var stopCmd = &cobra.Command{
 	},
 }
 
-// stopAllAgents stops all running agents in the current grove using the local runtime.
+// stopAllAgents stops all running agents in the current project using the local runtime.
 func stopAllAgents() error {
 	rt := runtime.GetRuntime(projectPath, profile)
 	mgr := agent.NewManager(rt)
@@ -288,7 +288,7 @@ func stopAllAgents() error {
 	return nil
 }
 
-// stopAllAgentsViaHub stops all running agents in the current grove via the Hub.
+// stopAllAgentsViaHub stops all running agents in the current project via the Hub.
 func stopAllAgentsViaHub(hubCtx *HubContext) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
@@ -468,13 +468,13 @@ func stopAgentViaHub(hubCtx *HubContext, agentName string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Get the grove ID for this project
+	// Get the project ID for this project
 	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
 
-	// Use grove-scoped client to allow lookup by name/slug
+	// Use project-scoped client to allow lookup by name/slug
 	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
 	if err := agentSvc.Stop(ctx, agentName); err != nil {
@@ -522,6 +522,6 @@ func stopAgentViaHub(hubCtx *HubContext, agentName string) error {
 
 func init() {
 	stopCmd.Flags().BoolVar(&stopRm, "rm", false, "Remove the agent after stopping")
-	stopCmd.Flags().BoolVarP(&stopAll, "all", "a", false, "Stop all running agents in the current grove")
+	stopCmd.Flags().BoolVarP(&stopAll, "all", "a", false, "Stop all running agents in the current project")
 	rootCmd.AddCommand(stopCmd)
 }

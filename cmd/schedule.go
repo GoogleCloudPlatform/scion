@@ -50,7 +50,7 @@ var scheduleCmd = &cobra.Command{
 	Long:  `List, inspect, create, and cancel scheduled events for the current project.`,
 }
 
-// scheduleListCmd lists scheduled events for the current grove.
+// scheduleListCmd lists scheduled events for the current project.
 var scheduleListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List scheduled events",
