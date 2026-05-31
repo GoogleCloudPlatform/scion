@@ -22,11 +22,18 @@ The visualization above replays the actual telemetry collected from messages and
 
 ## Quick Start
 
-Sadly - as an open source project we are not yet able to provide pre-built binaries or containers. You will need to [build images](https://googlecloudplatform.github.io/scion/getting-started/install/#build-container-images) first.
+### Workstation Quick Start (Homebrew)
 
-### Install
+```bash
+brew install scion
+scion server start
+```
 
-See the full [Installation Guide](https://googlecloudplatform.github.io/scion/getting-started/install/), or install from source, requires golang:
+Your browser will open to the onboarding wizard at `http://127.0.0.1:9810/onboarding`, which walks you through machine setup, runtime detection, harness selection, and creating your first project.
+
+### Install from Source
+
+See the full [Installation Guide](https://googlecloudplatform.github.io/scion/getting-started/install/), or install from source (requires Go 1.22+):
 
 ```bash
 go install github.com/GoogleCloudPlatform/scion/cmd/scion@latest
@@ -34,7 +41,9 @@ go install github.com/GoogleCloudPlatform/scion/cmd/scion@latest
 
 ### Initialize your machine and a Project (project)
 
-Navigate to your project and create a Scion project (the `.scion` directory that holds agent config) - use the registry where you built images:
+> **Tip:** If you used `scion server start` above, the onboarding wizard handles machine initialization automatically — you can skip this section.
+
+Navigate to your project and create a Scion project (the `.scion` directory that holds agent config):
 
 ```bash
 scion init --machine
@@ -44,7 +53,7 @@ scion init
 
 > **Tip:** Add `.scion/agents` to your `.gitignore` to avoid issues with nested git worktrees.
 
-Scion auto-detects your OS and configures the default runtime (Docker on Linux/Windows, Container on macOS). Override this in `.scion/settings.json`.
+Scion auto-detects your OS and configures the default runtime (Docker on Linux/Windows, Container on macOS). Override this in `.scion/settings.yaml`.
 
 **NOTE** Currently this project is early and experimental. Most of the concepts are settled in, but many features may not be fully implemented, anything might break or change and the future is not set. Local use is relatively stable, Hub based workflows now highly usable, Kubernetes runtime support still has rough edges.
 
