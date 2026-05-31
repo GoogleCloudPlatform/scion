@@ -72,6 +72,15 @@ export class ScionPageOnboarding extends LitElement {
   // Step 3: Harnesses
   @state() private selectedHarnesses = new Set<string>();
 
+  // Step 4: Images
+  @state() private imageStatuses = new Map<string, { status: string; error?: string }>();
+  @state() private imagePulling = false;
+  @state() private imageBuilding = false;
+  @state() private buildLogs: string[] = [];
+  @state() private buildExpanded = false;
+  @state() private runtimeAvailable = false;
+  private imageEventSource: EventSource | null = null;
+
   static override styles = css`
     :host {
       display: flex;
@@ -282,11 +291,113 @@ export class ScionPageOnboarding extends LitElement {
     .loading-state sl-spinner {
       font-size: 2rem;
     }
+
+    .image-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .image-item {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.625rem 1rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      font-size: 0.875rem;
+    }
+
+    .image-item .image-name {
+      flex: 1;
+      font-family: monospace;
+      color: var(--scion-text, #1e293b);
+    }
+
+    .image-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.125rem 0.5rem;
+      border-radius: 9999px;
+      text-transform: uppercase;
+      letter-spacing: 0.025em;
+    }
+
+    .image-status.queued {
+      background: var(--sl-color-neutral-100, #f1f5f9);
+      color: var(--sl-color-neutral-600, #475569);
+    }
+
+    .image-status.pulling {
+      background: var(--sl-color-primary-100, #dbeafe);
+      color: var(--sl-color-primary-700, #1d4ed8);
+    }
+
+    .image-status.done,
+    .image-status.exists {
+      background: var(--sl-color-success-100, #dcfce7);
+      color: var(--sl-color-success-700, #15803d);
+    }
+
+    .image-status.error {
+      background: var(--sl-color-danger-100, #fee2e2);
+      color: var(--sl-color-danger-700, #b91c1c);
+    }
+
+    .image-status sl-spinner {
+      font-size: 0.75rem;
+    }
+
+    .build-section {
+      margin-top: 1.25rem;
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+      padding-top: 1rem;
+    }
+
+    .build-log-toggle {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      cursor: pointer;
+      font-size: 0.8rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-top: 0.75rem;
+    }
+
+    .build-log {
+      margin-top: 0.5rem;
+      max-height: 16rem;
+      overflow-y: auto;
+      background: var(--sl-color-neutral-50, #f8fafc);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+      padding: 0.75rem;
+      font-family: monospace;
+      font-size: 0.75rem;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .image-actions {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
   `;
 
   override connectedCallback(): void {
     super.connectedCallback();
     void this.initialize();
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.cleanupImageEvents();
   }
 
   private async initialize(): Promise<void> {
@@ -363,7 +474,7 @@ export class ScionPageOnboarding extends LitElement {
       case 1: return this.renderSystemCheck();
       case 2: return this.renderRuntime();
       case 3: return this.renderHarnesses();
-      case 4: return this.renderImagesPlaceholder();
+      case 4: return this.renderImages();
       case 5: return this.renderWorkspacePlaceholder();
       case 6: return this.renderDone();
       default: return nothing;
@@ -641,28 +752,243 @@ export class ScionPageOnboarding extends LitElement {
         return;
       }
       this.currentStep = 4;
+      void this.loadImagesStep();
     } finally {
       this.stepLoading = false;
     }
   }
 
-  // ── Step 4: Images (placeholder) ──
+  // ── Step 4: Images ──
 
-  private renderImagesPlaceholder() {
+  private renderImages() {
+    const harnesses = [...this.selectedHarnesses];
+    if (harnesses.length === 0) {
+      return html`
+        <h2>Container Images</h2>
+        <p>No harnesses selected. You can go back to select harnesses or skip this step.</p>
+        <div class="footer">
+          <sl-button variant="text" @click=${() => { this.currentStep = 3; }}>Back</sl-button>
+          <div class="footer-right">
+            <sl-button variant="default" @click=${() => { this.currentStep = 5; }}>Skip for now</sl-button>
+          </div>
+        </div>
+      `;
+    }
+
+    const allDone = harnesses.length > 0 && harnesses.every(h => {
+      const s = this.imageStatuses.get(h);
+      return s && (s.status === 'done' || s.status === 'exists');
+    });
+
     return html`
       <h2>Container Images</h2>
-      <div class="placeholder-content">
-        <sl-icon name="box-seam"></sl-icon>
-        <p>Image management will be available in a future update.</p>
+      <p>Pull or build the container images for your selected harnesses.</p>
+
+      <div class="image-list">
+        ${harnesses.map(h => {
+          const s = this.imageStatuses.get(h);
+          const status = s?.status ?? 'pending';
+          return html`
+            <div class="image-item">
+              <span class="image-name">scion-${h}:latest</span>
+              ${status === 'pending' ? nothing : html`
+                <span class="image-status ${status}">
+                  ${status === 'pulling' ? html`<sl-spinner></sl-spinner>` : nothing}
+                  ${status === 'done' || status === 'exists' ? '✓' : nothing}
+                  ${status === 'error' ? '✗' : nothing}
+                  ${status}
+                </span>
+              `}
+            </div>
+          `;
+        })}
       </div>
+
+      <div class="image-actions">
+        <sl-button
+          variant="primary"
+          size="small"
+          ?loading=${this.imagePulling}
+          ?disabled=${this.imagePulling || this.imageBuilding}
+          @click=${this.handlePullImages}
+        >Pull images</sl-button>
+
+        ${this.runtimeAvailable ? html`
+          <sl-button
+            variant="default"
+            size="small"
+            ?loading=${this.imageBuilding}
+            ?disabled=${this.imagePulling || this.imageBuilding}
+            @click=${this.handleBuildImages}
+          >Build locally</sl-button>
+        ` : nothing}
+      </div>
+
+      ${this.buildLogs.length > 0 ? html`
+        <div class="build-section">
+          <div class="build-log-toggle" @click=${() => { this.buildExpanded = !this.buildExpanded; }}>
+            <sl-icon name=${this.buildExpanded ? 'chevron-down' : 'chevron-right'}></sl-icon>
+            Build output (${this.buildLogs.length} lines)
+          </div>
+          ${this.buildExpanded ? html`
+            <div class="build-log">${this.buildLogs.join('\n')}</div>
+          ` : nothing}
+        </div>
+      ` : nothing}
 
       <div class="footer">
         <sl-button variant="text" @click=${() => { this.currentStep = 3; }}>Back</sl-button>
         <div class="footer-right">
-          <sl-button variant="default" @click=${() => { this.currentStep = 5; }}>Skip for now</sl-button>
+          <sl-button variant="default" @click=${() => { this.cleanupImageEvents(); this.currentStep = 5; }}>
+            Skip for now
+          </sl-button>
+          ${allDone ? html`
+            <sl-button variant="primary" @click=${() => { this.cleanupImageEvents(); this.currentStep = 5; }}>
+              Next
+            </sl-button>
+          ` : nothing}
         </div>
       </div>
     `;
+  }
+
+  private async handlePullImages(): Promise<void> {
+    this.error = null;
+    this.imagePulling = true;
+    const harnesses = [...this.selectedHarnesses];
+
+    const statuses = new Map(this.imageStatuses);
+    for (const h of harnesses) {
+      statuses.set(h, { status: 'queued' });
+    }
+    this.imageStatuses = statuses;
+
+    try {
+      const res = await apiFetch('/api/v1/system/images/pull', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ harnesses }),
+      });
+      if (!res.ok) {
+        this.error = await extractApiError(res, 'Failed to start image pull');
+        this.imagePulling = false;
+        return;
+      }
+      const data = (await res.json()) as { jobId: string };
+      this.subscribeToImageJob(data.jobId, 'pull');
+    } catch {
+      this.error = 'Failed to connect to the server.';
+      this.imagePulling = false;
+    }
+  }
+
+  private async handleBuildImages(): Promise<void> {
+    this.error = null;
+    this.imageBuilding = true;
+    this.buildLogs = [];
+    this.buildExpanded = true;
+
+    try {
+      const res = await apiFetch('/api/v1/system/images/build', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ harnesses: [...this.selectedHarnesses] }),
+      });
+      if (!res.ok) {
+        this.error = await extractApiError(res, 'Failed to start image build');
+        this.imageBuilding = false;
+        return;
+      }
+      const data = (await res.json()) as { jobId: string };
+      this.subscribeToImageJob(data.jobId, 'build');
+    } catch {
+      this.error = 'Failed to connect to the server.';
+      this.imageBuilding = false;
+    }
+  }
+
+  private subscribeToImageJob(jobId: string, mode: 'pull' | 'build'): void {
+    this.cleanupImageEvents();
+
+    const url = `/events?sub=${encodeURIComponent('system.images.' + jobId)}`;
+    const es = new EventSource(url);
+    this.imageEventSource = es;
+
+    let doneCount = 0;
+    const totalImages = this.selectedHarnesses.size;
+
+    es.addEventListener('update', (event: Event) => {
+      try {
+        const wrapper = JSON.parse((event as MessageEvent).data) as { subject: string; data: Record<string, unknown> };
+        const d = wrapper.data;
+
+        if (mode === 'pull' && d['image']) {
+          const image = d['image'] as string;
+          const status = d['status'] as string;
+          const error = d['error'] as string | undefined;
+
+          const harness = this.imageNameToHarness(image);
+          if (harness) {
+            const next = new Map(this.imageStatuses);
+            const entry: { status: string; error?: string } = { status };
+            if (error) entry.error = error;
+            next.set(harness, entry);
+            this.imageStatuses = next;
+          }
+
+          if (status === 'done' || status === 'exists' || status === 'error') {
+            doneCount++;
+            if (doneCount >= totalImages) {
+              this.imagePulling = false;
+              this.cleanupImageEvents();
+            }
+          }
+        }
+
+        if (mode === 'build' && d['type'] === 'log') {
+          const line = d['line'] as string;
+          this.buildLogs = [...this.buildLogs, line];
+
+          if (line === 'build complete' || line.startsWith('build failed:')) {
+            this.imageBuilding = false;
+            this.cleanupImageEvents();
+          }
+        }
+      } catch (err) {
+        console.error('[Onboarding] Failed to parse image event:', err);
+      }
+    });
+
+    es.onerror = () => {
+      if (mode === 'pull') this.imagePulling = false;
+      if (mode === 'build') this.imageBuilding = false;
+      this.cleanupImageEvents();
+    };
+  }
+
+  private imageNameToHarness(image: string): string | null {
+    const harnessNames = ['claude', 'gemini', 'codex', 'opencode'];
+    for (const h of harnessNames) {
+      if (image.includes(`scion-${h}`)) return h;
+    }
+    return null;
+  }
+
+  private cleanupImageEvents(): void {
+    if (this.imageEventSource) {
+      this.imageEventSource.close();
+      this.imageEventSource = null;
+    }
+  }
+
+  private async loadImagesStep(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/system/runtime');
+      if (res.ok) {
+        const data = (await res.json()) as RuntimeResponse;
+        this.runtimeAvailable = data.available;
+      }
+    } catch { /* ignore */ }
   }
 
   // ── Step 5: First Workspace (placeholder) ──
