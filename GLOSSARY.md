@@ -21,7 +21,7 @@ A namespace and collection of agents and configuration, represented by a `.scion
 _Avoid_: grove, group, repo, workspace
 
 **Template**:
-A harness-agnostic folder resource defining a generic agent — system prompt, agent instructions, skills, and a default harness-config pointer — with nothing specific to any one harness.
+A harness-agnostic folder resource defining a generic agent — its system prompt, agent instructions, skills, services, and more — containing nothing specific to any one harness. A default harness-config may optionally be named, but is not required.
 _Avoid_: role, blueprint, profile, config
 
 **Harness**:
@@ -33,7 +33,7 @@ A named, reusable snapshot of settings for a particular harness — which harnes
 _Avoid_: harness, harness adapter, integration, plugin
 
 **Skill**:
-A reusable instruction snippet contributed by a template or harness-config and mounted into the harness's skills directory at provisioning.
+A reusable, harness-agnostic instruction snippet contributed by a template and mounted into the harness's skills directory at provisioning. Follows the open [Agent Skills](https://agentskills.io/home) convention.
 _Avoid_: prompt snippet, macro, plugin
 
 **Plugin**:
@@ -69,22 +69,34 @@ _Avoid_: home mount, config dir
 ### Hub & Hosted
 
 **Hub**:
-The centralized control plane of a hosted deployment, owning identity, auth, project registration, and state, and dispatching commands to runtime brokers.
-_Avoid_: server, control plane, master, coordinator
+The control plane of Scion — it owns identity, auth, project registration, and state, exposes the APIs and notifications that agents and users interact with, and dispatches commands to runtime brokers. Present in both workstation and hosted mode, not only hosted.
+_Avoid_: server, master, coordinator
 
 **Runtime Broker**:
 A compute node (laptop, VM, or cluster) that registers with a Hub to offer execution capacity and runs the agents dispatched to it. Always write in full; "broker" alone is forbidden because it collides with Message Broker.
 _Avoid_: broker, node, runner, worker
 
 **Message Broker**:
-The NATS-based backend that routes messages between agents and users over `scion.*` topics. Always write in full; "broker" alone is forbidden because it collides with Runtime Broker.
+The pluggable system that brokers messages between Scion actors (agents and users) and messaging surfaces — built-in brokers such as the web UI Messages view, and broker plugins to external systems like Telegram and Google Chat (Discord and Slack planned). Backs the `scion message` command. Always write in full; "broker" alone is forbidden because it collides with Runtime Broker.
 _Avoid_: broker, message bus, queue, pub/sub
 
-> **Disambiguation rule:** Never use bare "broker" in prose, comments, docs, or new identifiers — always qualify it as **Runtime Broker** or **Message Broker**. Existing bare usages in code are documented exceptions; see [Exceptions & Future Cleanup](#exceptions--future-cleanup).
+**Broker plugin**:
+A Message Broker implementation for a specific external messaging system (e.g. Telegram, Google Chat), loaded through the broker plugin interface (`PluginTypeBroker`).
+_Avoid_: connector, bridge, adapter
 
-**Hub-native project**:
-A project created on a Hub for dispatched agents, living at `~/.scion/projects/<name>` on each providing broker, identified by a random UUID v4.
-_Avoid_: hub-project, hosted project, cloud project
+**Built-in broker**:
+A Message Broker implementation shipped with Scion rather than loaded as a plugin — for example the broker that surfaces messages in the web UI's Messages view.
+_Avoid_: native broker, internal broker, default broker
+
+> **Disambiguation rule:** Never use bare "broker" in prose, comments, docs, or new identifiers — always qualify it as **Runtime Broker** or **Message Broker**. Note that `pkg/broker` (NATS-style pub/sub) is *not* the Message Broker; it underpins the **Event Bus**. Existing bare usages in code are documented exceptions; see [Exceptions & Future Cleanup](#exceptions--future-cleanup).
+
+**Event Bus**:
+The NATS-style pub/sub system (`pkg/broker`) that brokers and dispatches real-time change events to live web views via server-sent events, supporting the move to a more stateless Hub. Distinct from the Message Broker; currently a latent capability.
+_Avoid_: message broker, broker, change feed, live sync, event stream
+
+**Hub-managed project**:
+A project whose workspace is created and managed by Scion in the hub-controlled part of the broker filesystem (`~/.scion/projects/<slug>/`), shared across the project's agents — as opposed to a Linked project that points at a pre-existing path. Identified by a random UUID v4. The workspace itself is the **Hub-managed workspace**.
+_Avoid_: hub-native, hub-native project, hub workspace, hub-project, hosted project, cloud project
 
 **Linked project**:
 A project that already existed on a broker machine and is linked to a Hub for cross-broker visibility, identified by a deterministic UUID v5 from its git URL.
@@ -117,7 +129,7 @@ _Avoid_: group, set, group chat, room, thread
 ### Identity & State
 
 **Project ID**:
-A project's unique identifier: UUID v5 derived from the normalized git URL for git-backed projects, random UUID v4 for hub-native projects.
+A project's unique identifier: UUID v5 derived from the normalized git URL for git-backed projects, random UUID v4 for hub-managed projects.
 _Avoid_: grove ID, project key, repo ID, slug
 
 **Ancestry chain**:
@@ -169,15 +181,28 @@ Known places where the codebase does not yet match this glossary. These are **do
 - **Safe now:** internal variable/function names, comments, log messages, and design docs may be renamed `grove` → `project` freely.
 - **Future cleanup (needs coordination):** wire-format JSON tags, container labels, env vars, NATS topic prefix, and SQL schema should converge to `project` only at a breaking-change/version boundary.
 
-### Bare "broker" is ambiguous
+### Bare "broker" is ambiguous (three-way)
 
-The two broker concepts collide on the unqualified word, and the two existing bare usages point in **opposite directions**:
+"broker" is unqualified across three distinct concepts:
 
 - `scion broker` CLI command → **Runtime Broker**
-- `pkg/broker` package → **Message Broker**
+- `PluginTypeBroker` / broker plugins → **Message Broker** (the canonical messaging-integration system)
+- `pkg/broker` package (NATS-style pub/sub) → the **Event Bus** (see next item), *not* the Message Broker
 
-- **Safe now:** all new prose, comments, docs, and identifiers must qualify the term as **Runtime Broker** or **Message Broker**.
-- **Future cleanup (needs coordination):** consider renaming `pkg/broker` → `pkg/messagebroker` and/or the `scion broker` command to a qualified form so no bare "broker" remains.
+- **Safe now:** qualify "broker" in all new prose and identifiers; reserve **Message Broker** for the messaging-integration system only.
+- **Future cleanup (needs coordination):** rename `pkg/broker` to the **Event Bus** (e.g. `pkg/eventbus`), and consider qualifying the `scion broker` command, so bare "broker" no longer spans three meanings.
+
+### Event Bus: rename `pkg/broker`
+
+The NATS-style pub/sub in `pkg/broker` is the **Event Bus** — a latent capability for brokering and dispatching real-time change events to live web views (via server-sent events) as the Hub moves to a more stateless serving model. It is *not* the Message Broker and should not be called one.
+
+- **Future cleanup:** rename `pkg/broker` and its identifiers to **Event Bus** (e.g. `pkg/eventbus`) so the code reflects the term and is not confused with the Message Broker.
+
+### Reconcile `hub-native` / "Hub Workspace" → Hub-managed
+
+The same concept — a project whose workspace is created and managed in the hub-controlled broker FS — is called **`hub-native`** in code (`ProjectType = 'hub-native'`) and **"Hub Workspace"** in the web UI (new-project dialog `value="hub"`, `git-remote-display.ts`). Canonical term is now **Hub-managed project** (workspace: **Hub-managed workspace**).
+
+- **Future cleanup:** converge both to "hub-managed" — web `ProjectType`/labels (`web/src/shared/types.ts`, `project-create.ts`, `git-remote-display.ts`), Go identifiers/comments (`findAgentInHubNativeProjects`, `pkg/runtimebroker/handlers.go`, storage paths in `pkg/storage/storage.go`), and docs — keeping wire/string-value backward-compat where the type string crosses the API.
 
 ### Message-group naming: `set` → `group`
 
@@ -203,3 +228,9 @@ A **Template** must contain nothing harness-specific (the `harness` field is alr
 - Model selection should use a harness-agnostic **S / M / L size alias** rather than harness-specific model names. *(Tracked in an existing open issue.)*
 
 - **Future cleanup:** move the remaining harness-specific fields out of templates onto the harness-config, and adopt the agnostic model-size alias, so templates are strictly harness-agnostic.
+
+### Skills should be template-only
+
+A **Skill** should be contributed only by a **Template**, but provisioning currently also copies skills from the harness-config base layer: `pkg/agent/provision.go:596-605` copies `<harness-config>/skills`, then `:607-618` overlays each template's `skills`. `templates.md` likewise documents skills coming from both templates and harness-configs.
+
+- **Future cleanup:** make templates the sole source of skills — remove the harness-config skill-copy step (and update the docs) so skills are template-only and harness-agnostic, consistent with the [Agent Skills](https://agentskills.io/home) convention.
