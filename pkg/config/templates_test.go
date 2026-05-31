@@ -1653,6 +1653,122 @@ func TestFriendlyTemplateName(t *testing.T) {
 	}
 }
 
+func TestResolveModelAlias(t *testing.T) {
+	aliases := map[string]string{
+		"small":  "haiku",
+		"medium": "sonnet",
+		"large":  "opus",
+	}
+
+	tests := []struct {
+		name     string
+		model    string
+		aliases  map[string]string
+		expected string
+	}{
+		{"alias resolves to concrete name", "large", aliases, "opus"},
+		{"small alias", "small", aliases, "haiku"},
+		{"medium alias", "medium", aliases, "sonnet"},
+		{"concrete model passes through", "gemini-pro", aliases, "gemini-pro"},
+		{"empty model passes through", "", aliases, ""},
+		{"nil aliases passes through", "large", nil, "large"},
+		{"unmapped alias passes through", "large", map[string]string{"small": "haiku"}, "large"},
+		{"concrete model name with alias-like substring", "small-model", aliases, "small-model"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveModelAlias(tt.model, tt.aliases)
+			if got != tt.expected {
+				t.Errorf("ResolveModelAlias(%q, ...) = %q, want %q", tt.model, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestWarnDeprecatedTemplateFields(t *testing.T) {
+	t.Run("no warnings for clean template", func(t *testing.T) {
+		cfg := &api.ScionConfig{
+			AgentInstructions:    "agents.md",
+			SystemPrompt:         "system-prompt.md",
+			DefaultHarnessConfig: "gemini",
+		}
+		warnings := WarnDeprecatedTemplateFields(cfg)
+		if len(warnings) != 0 {
+			t.Errorf("expected no warnings, got %v", warnings)
+		}
+	})
+
+	t.Run("no warning for size alias model", func(t *testing.T) {
+		cfg := &api.ScionConfig{Model: "large"}
+		warnings := WarnDeprecatedTemplateFields(cfg)
+		if len(warnings) != 0 {
+			t.Errorf("expected no warnings for model alias 'large', got %v", warnings)
+		}
+	})
+
+	t.Run("warns about image", func(t *testing.T) {
+		cfg := &api.ScionConfig{Image: "custom-image:v1"}
+		warnings := WarnDeprecatedTemplateFields(cfg)
+		if len(warnings) != 1 {
+			t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+		}
+		if !strings.Contains(warnings[0], "image") {
+			t.Errorf("expected warning about image, got %q", warnings[0])
+		}
+	})
+
+	t.Run("warns about auth_selectedType", func(t *testing.T) {
+		cfg := &api.ScionConfig{AuthSelectedType: "api-key"}
+		warnings := WarnDeprecatedTemplateFields(cfg)
+		if len(warnings) != 1 {
+			t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+		}
+		if !strings.Contains(warnings[0], "auth_selectedType") {
+			t.Errorf("expected warning about auth_selectedType, got %q", warnings[0])
+		}
+	})
+
+	t.Run("warns about concrete model name", func(t *testing.T) {
+		cfg := &api.ScionConfig{Model: "gemini-pro"}
+		warnings := WarnDeprecatedTemplateFields(cfg)
+		if len(warnings) != 1 {
+			t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+		}
+		if !strings.Contains(warnings[0], "concrete model name") {
+			t.Errorf("expected warning about concrete model, got %q", warnings[0])
+		}
+	})
+
+	t.Run("multiple deprecated fields produce multiple warnings", func(t *testing.T) {
+		cfg := &api.ScionConfig{
+			Image:            "custom:v1",
+			Model:            "gemini-pro",
+			AuthSelectedType: "api-key",
+		}
+		warnings := WarnDeprecatedTemplateFields(cfg)
+		if len(warnings) != 3 {
+			t.Errorf("expected 3 warnings, got %d: %v", len(warnings), warnings)
+		}
+	})
+}
+
+func TestKnownModelAliases(t *testing.T) {
+	expected := []string{"small", "medium", "large"}
+	for _, alias := range expected {
+		if !KnownModelAliases[alias] {
+			t.Errorf("expected %q to be a known model alias", alias)
+		}
+	}
+
+	notAliases := []string{"tiny", "xl", "gemini-pro", "opus", ""}
+	for _, name := range notAliases {
+		if KnownModelAliases[name] {
+			t.Errorf("expected %q to NOT be a known model alias", name)
+		}
+	}
+}
+
 func TestResolveContentInChain(t *testing.T) {
 	t.Run("file in parent template is found when missing from child", func(t *testing.T) {
 		parentDir := t.TempDir()
