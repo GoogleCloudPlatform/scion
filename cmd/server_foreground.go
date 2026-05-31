@@ -89,11 +89,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		if err := config.InitGlobal(harness.All()); err != nil {
 			return fmt.Errorf("failed to initialize global config: %w", err)
 		}
-	} else if productionMode {
-		// In production mode, refresh the default template and harness-configs
+	} else if hostedMode {
+		// In hosted mode, refresh the default template and harness-configs
 		// from the binary's embeds on every start. This ensures a binary upgrade
 		// automatically propagates new defaults without manual re-init.
-		// Only done in production to avoid overwriting local customizations
+		// Only done in hosted mode to avoid overwriting local customizations
 		// during development; admins should use non-default names for custom
 		// templates.
 		if err := config.UpdateDefaultTemplates(true, harness.All()); err != nil {
@@ -138,8 +138,8 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// Log server mode
-	if productionMode {
-		log.Println("Server mode: production")
+	if hostedMode {
+		log.Println("Server mode: hosted")
 	} else {
 		log.Printf("Server mode: workstation (binding to %s)", cfg.Hub.Host)
 	}
@@ -397,7 +397,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// 15. Print startup banner
-	if !productionMode {
+	if !hostedMode {
 		log.Println("Scion server ready (workstation mode)")
 		if enableWeb {
 			displayHost := cfg.Hub.Host
@@ -428,7 +428,7 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 	if os.Getenv("K_SERVICE") != "" {
 		useGCP = true
 	}
-	if !productionMode && os.Getenv("SCION_LOG_GCP") == "" {
+	if !hostedMode && os.Getenv("SCION_LOG_GCP") == "" {
 		useGCP = false
 	}
 
@@ -518,15 +518,15 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 		return nil, fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	// Check if production mode is set in config
-	if !cmd.Flags().Changed("production") {
-		if cfg.Mode == "production" {
-			productionMode = true
+	// Check if hosted mode is set in config
+	if !cmd.Flags().Changed("hosted") && !cmd.Flags().Changed("production") {
+		if cfg.Mode == "hosted" || cfg.Mode == "production" {
+			hostedMode = true
 		}
 	}
 
 	// Apply workstation defaults
-	if !productionMode {
+	if !hostedMode {
 		applyWorkstationDefaults(cmd)
 		cfg.RuntimeBroker.Enabled = enableRuntimeBroker
 		cfg.Auth.Enabled = enableDevAuth
@@ -566,15 +566,15 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 		cfg.Storage.LocalPath = storageDir
 	}
 
-	// Standalone broker in production mode: default to loopback when host
+	// Standalone broker in hosted mode: default to loopback when host
 	// is not explicitly set. The broker needs to start on loopback so that
 	// `scion broker register` can reach it locally before HMAC keys exist.
-	if productionMode && !cmd.Flags().Changed("host") && cfg.RuntimeBroker.Enabled && !enableHub {
+	if hostedMode && !cmd.Flags().Changed("host") && cfg.RuntimeBroker.Enabled && !enableHub {
 		cfg.RuntimeBroker.Host = "127.0.0.1"
 	}
 
 	// Fallback to legacy environment variable
-	if cfg.Storage.Bucket == "" && productionMode {
+	if cfg.Storage.Bucket == "" && hostedMode {
 		if val := os.Getenv("SCION_HUB_STORAGE_BUCKET"); val != "" {
 			cfg.Storage.Bucket = val
 			if cfg.Storage.Provider == "local" || cfg.Storage.Provider == "" {

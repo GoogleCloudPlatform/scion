@@ -589,12 +589,12 @@ func TestApplyEnvOverridesCommaSeparatedLists(t *testing.T) {
 	}
 }
 
-func TestLoadServerMode_Production(t *testing.T) {
+func TestLoadServerMode_Hosted(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.yaml")
 	err := os.WriteFile(settingsPath, []byte(`schema_version: "1"
 server:
-  mode: production
+  mode: hosted
   hub:
     port: 9810
 `), 0644)
@@ -608,8 +608,33 @@ server:
 	if !found {
 		t.Fatal("expected to find server config in settings.yaml")
 	}
+	if gc.Mode != "hosted" {
+		t.Errorf("expected mode 'hosted', got %q", gc.Mode)
+	}
+}
+
+func TestLoadServerMode_LegacyProduction(t *testing.T) {
+	// The legacy value "production" should still be parsed from config.
+	// LoadServerMode normalizes it to "hosted", but loadServerFromSettingsFile
+	// returns the raw value.
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.yaml")
+	err := os.WriteFile(settingsPath, []byte(`schema_version: "1"
+server:
+  mode: production
+  hub:
+    port: 9810
+`), 0644)
+	if err != nil {
+		t.Fatalf("failed to write settings.yaml: %v", err)
+	}
+
+	gc, found := loadServerFromSettingsFile(dir)
+	if !found {
+		t.Fatal("expected to find server config in settings.yaml")
+	}
 	if gc.Mode != "production" {
-		t.Errorf("expected mode 'production', got %q", gc.Mode)
+		t.Errorf("expected raw mode 'production' (legacy), got %q", gc.Mode)
 	}
 }
 

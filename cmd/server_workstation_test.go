@@ -37,7 +37,7 @@ func resetServerFlags() {
 	enableDebug = false
 	serverAutoProvide = false
 	serverStartForeground = false
-	productionMode = false
+	hostedMode = false
 	hubHost = "0.0.0.0"
 	hubPort = 9810
 	runtimeBrokerPort = 9800
@@ -57,7 +57,7 @@ func TestWorkstationModeDefaults(t *testing.T) {
 	require.NoError(t, serverStartCmd.ParseFlags([]string{}))
 
 	// Simulate the workstation defaults logic from runServerStartOrDaemon
-	if !productionMode {
+	if !hostedMode {
 		if !serverStartCmd.Flags().Changed("enable-hub") {
 			enableHub = true
 		}
@@ -86,20 +86,20 @@ func TestWorkstationModeDefaults(t *testing.T) {
 	assert.Equal(t, "127.0.0.1", hubHost, "host should default to loopback in workstation mode")
 }
 
-func TestProductionModeNoDefaults(t *testing.T) {
+func TestHostedModeNoDefaults(t *testing.T) {
 	t.Cleanup(resetServerFlags)
 
 	resetServerFlags()
-	require.NoError(t, serverStartCmd.ParseFlags([]string{"--production"}))
+	require.NoError(t, serverStartCmd.ParseFlags([]string{"--hosted"}))
 
-	// In production mode, no defaults are applied
-	assert.True(t, productionMode, "production flag should be set")
-	assert.False(t, enableHub, "hub should not be enabled by default in production mode")
-	assert.False(t, enableRuntimeBroker, "runtime broker should not be enabled by default in production mode")
-	assert.False(t, enableWeb, "web should not be enabled by default in production mode")
-	assert.False(t, enableDevAuth, "dev-auth should not be enabled by default in production mode")
-	assert.False(t, serverAutoProvide, "auto-provide should not be enabled by default in production mode")
-	assert.Equal(t, "0.0.0.0", hubHost, "host should default to 0.0.0.0 in production mode")
+	// In hosted mode, no defaults are applied
+	assert.True(t, hostedMode, "hosted flag should be set")
+	assert.False(t, enableHub, "hub should not be enabled by default in hosted mode")
+	assert.False(t, enableRuntimeBroker, "runtime broker should not be enabled by default in hosted mode")
+	assert.False(t, enableWeb, "web should not be enabled by default in hosted mode")
+	assert.False(t, enableDevAuth, "dev-auth should not be enabled by default in hosted mode")
+	assert.False(t, serverAutoProvide, "auto-provide should not be enabled by default in hosted mode")
+	assert.Equal(t, "0.0.0.0", hubHost, "host should default to 0.0.0.0 in hosted mode")
 }
 
 func TestWorkstationModeExplicitOverrides(t *testing.T) {
@@ -109,7 +109,7 @@ func TestWorkstationModeExplicitOverrides(t *testing.T) {
 	resetServerFlags()
 	require.NoError(t, serverStartCmd.ParseFlags([]string{"--enable-web=false", "--host=0.0.0.0"}))
 
-	if !productionMode {
+	if !hostedMode {
 		if !serverStartCmd.Flags().Changed("enable-hub") {
 			enableHub = true
 		}
@@ -137,36 +137,36 @@ func TestWorkstationModeExplicitOverrides(t *testing.T) {
 	assert.Equal(t, "0.0.0.0", hubHost, "host should be 0.0.0.0 (explicit override)")
 }
 
-func TestProductionModeWithExplicitFlags(t *testing.T) {
+func TestHostedModeWithExplicitFlags(t *testing.T) {
 	t.Cleanup(resetServerFlags)
 
 	resetServerFlags()
 	require.NoError(t, serverStartCmd.ParseFlags([]string{
-		"--production",
+		"--hosted",
 		"--enable-hub",
 		"--enable-web",
 		"--dev-auth",
 	}))
 
-	assert.True(t, productionMode, "production flag should be set")
+	assert.True(t, hostedMode, "hosted flag should be set")
 	assert.True(t, enableHub, "hub should be enabled (explicit)")
 	assert.False(t, enableRuntimeBroker, "runtime broker should not be enabled (not explicitly set)")
 	assert.True(t, enableWeb, "web should be enabled (explicit)")
 	assert.True(t, enableDevAuth, "dev-auth should be enabled (explicit)")
-	assert.Equal(t, "0.0.0.0", hubHost, "host should default to 0.0.0.0 in production mode")
+	assert.Equal(t, "0.0.0.0", hubHost, "host should default to 0.0.0.0 in hosted mode")
 }
 
-func TestBrokerDelegationUsesProductionMode(t *testing.T) {
+func TestBrokerDelegationUsesHostedMode(t *testing.T) {
 	t.Cleanup(resetServerFlags)
 
-	// Simulate what broker start does: parse --production --enable-runtime-broker
+	// Simulate what broker start does: parse --hosted --enable-runtime-broker
 	resetServerFlags()
 	require.NoError(t, serverStartCmd.ParseFlags([]string{
-		"--production",
+		"--hosted",
 		"--enable-runtime-broker",
 	}))
 
-	assert.True(t, productionMode, "production flag should be set")
+	assert.True(t, hostedMode, "hosted flag should be set")
 	assert.True(t, enableRuntimeBroker, "runtime broker should be enabled")
 	assert.False(t, enableHub, "hub should NOT be enabled (broker-only)")
 	assert.False(t, enableWeb, "web should NOT be enabled (broker-only)")
@@ -174,27 +174,27 @@ func TestBrokerDelegationUsesProductionMode(t *testing.T) {
 
 func TestBrokerDelegationDefaultsToLoopback(t *testing.T) {
 	// Verify the standalone broker loopback logic:
-	// When productionMode=true, host not changed, broker enabled, hub disabled,
+	// When hostedMode=true, host not changed, broker enabled, hub disabled,
 	// the broker host should be forced to loopback.
 	t.Cleanup(resetServerFlags)
 	resetServerFlags()
 
-	productionMode = true
+	hostedMode = true
 	enableRuntimeBroker = true
 	enableHub = false
 
-	// Simulate the reconciliation logic: in production mode with broker-only,
+	// Simulate the reconciliation logic: in hosted mode with broker-only,
 	// if host wasn't explicitly set, default broker to loopback.
 	cfg := config.DefaultGlobalConfig()
 	cfg.RuntimeBroker.Enabled = enableRuntimeBroker
 	hostChanged := false // simulates !cmd.Flags().Changed("host")
 
-	if productionMode && !hostChanged && cfg.RuntimeBroker.Enabled && !enableHub {
+	if hostedMode && !hostChanged && cfg.RuntimeBroker.Enabled && !enableHub {
 		cfg.RuntimeBroker.Host = "127.0.0.1"
 	}
 
 	assert.Equal(t, "127.0.0.1", cfg.RuntimeBroker.Host,
-		"standalone broker in production mode should default to loopback")
+		"standalone broker in hosted mode should default to loopback")
 }
 
 func TestBrokerDelegationExplicitHostKeepsValue(t *testing.T) {
@@ -202,7 +202,7 @@ func TestBrokerDelegationExplicitHostKeepsValue(t *testing.T) {
 	t.Cleanup(resetServerFlags)
 	resetServerFlags()
 
-	productionMode = true
+	hostedMode = true
 	enableRuntimeBroker = true
 	enableHub = false
 
@@ -210,7 +210,7 @@ func TestBrokerDelegationExplicitHostKeepsValue(t *testing.T) {
 	cfg.RuntimeBroker.Enabled = enableRuntimeBroker
 	hostChanged := true // simulates cmd.Flags().Changed("host")
 
-	if productionMode && !hostChanged && cfg.RuntimeBroker.Enabled && !enableHub {
+	if hostedMode && !hostChanged && cfg.RuntimeBroker.Enabled && !enableHub {
 		cfg.RuntimeBroker.Host = "127.0.0.1"
 	}
 
@@ -304,11 +304,11 @@ func TestGenerateSystemdUnit(t *testing.T) {
 	assert.Contains(t, output, "[Unit]")
 	assert.Contains(t, output, "Scion Workstation Server")
 	assert.Contains(t, output, "ExecStart=/usr/local/bin/scion server start --foreground")
-	assert.NotContains(t, output, "--production")
+	assert.NotContains(t, output, "--hosted")
 	assert.Contains(t, output, "[Install]")
 }
 
-func TestGenerateSystemdUnit_Production(t *testing.T) {
+func TestGenerateSystemdUnit_Hosted(t *testing.T) {
 	if goruntime.GOOS != "linux" {
 		t.Skip("systemd tests only run on linux")
 	}
@@ -327,8 +327,8 @@ func TestGenerateSystemdUnit_Production(t *testing.T) {
 	io.Copy(&buf, r)
 	output := buf.String()
 
-	assert.Contains(t, output, "Scion Server (Production)")
-	assert.Contains(t, output, "--production")
+	assert.Contains(t, output, "Scion Server (Hosted)")
+	assert.Contains(t, output, "--hosted")
 }
 
 func TestGenerateLaunchdPlist(t *testing.T) {
@@ -353,7 +353,7 @@ func TestGenerateLaunchdPlist(t *testing.T) {
 	assert.Contains(t, output, "io.scion.server")
 	assert.Contains(t, output, "<string>/usr/local/bin/scion</string>")
 	assert.Contains(t, output, "<string>--foreground</string>")
-	assert.NotContains(t, output, "--production")
+	assert.NotContains(t, output, "--hosted")
 }
 
 func TestRunServerInstall(t *testing.T) {

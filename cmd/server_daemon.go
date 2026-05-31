@@ -48,17 +48,17 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 			pid, daemon.GetLogPathComponent(serverDaemonComponent, globalDir))
 	}
 
-	// Check if production mode is set in config (settings.yaml server.mode)
-	if !cmd.Flags().Changed("production") {
-		if mode := config.LoadServerMode(); mode == "production" {
-			productionMode = true
+	// Check if hosted mode is set in config (settings.yaml server.mode)
+	if !cmd.Flags().Changed("hosted") && !cmd.Flags().Changed("production") {
+		if mode := config.LoadServerMode(); mode == "hosted" || mode == "production" {
+			hostedMode = true
 		}
 	}
 
-	// Apply workstation defaults when not in production mode.
+	// Apply workstation defaults when not in hosted mode.
 	// Workstation mode enables all components, dev-auth, auto-provide,
 	// and binds to loopback (127.0.0.1) for single-user security.
-	if !productionMode {
+	if !hostedMode {
 		applyWorkstationDefaults(cmd)
 	}
 
@@ -75,8 +75,8 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 
 	// Build args for the daemon process — pass through all flags
 	daemonArgs := []string{"server", "start", "--foreground"}
-	if productionMode {
-		daemonArgs = append(daemonArgs, "--production")
+	if hostedMode {
+		daemonArgs = append(daemonArgs, "--hosted")
 	}
 	if enableHub {
 		daemonArgs = append(daemonArgs, "--enable-hub")
@@ -124,8 +124,8 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 
 	// Start daemon
 	mode := "workstation"
-	if productionMode {
-		mode = "production"
+	if hostedMode {
+		mode = "hosted"
 	}
 	fmt.Printf("Starting server as daemon (%s mode)...\n", mode)
 	if err := daemon.StartComponent(serverDaemonComponent, executable, daemonArgs, globalDir); err != nil {
@@ -150,7 +150,7 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 
 	// Print quickstart info for workstation mode
-	if !productionMode {
+	if !hostedMode {
 		printWorkstationQuickstart(globalDir, hubHost, webPort, enableWeb, enableDevAuth)
 	}
 

@@ -187,8 +187,9 @@ type OAuthConfig struct {
 // GlobalConfig holds the complete server configuration.
 // This is distinct from hub.ServerConfig which only holds HTTP server settings.
 type GlobalConfig struct {
-	// Mode selects the server operating mode: "workstation" (default) or "production".
-	// When set to "production" in settings.yaml, the server behaves as if --production were passed.
+	// Mode selects the server operating mode: "workstation" (default) or "hosted".
+	// When set to "hosted" in settings.yaml, the server behaves as if --hosted were passed.
+	// The legacy value "production" is also accepted for backward compatibility.
 	Mode string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 
 	// Hub API server settings
@@ -608,7 +609,7 @@ func applyEnvOverrides(gc *GlobalConfig) error {
 }
 
 // LoadServerMode reads just the server mode from settings.yaml without loading the full config.
-// Returns "production" if mode is explicitly set to "production", empty string otherwise.
+// Returns "hosted" if mode is set to "hosted" (or legacy "production"), empty string otherwise.
 func LoadServerMode() string {
 	globalDir, err := GetGlobalDir()
 	if err != nil {
@@ -637,6 +638,10 @@ func LoadServerMode() string {
 	}
 
 	mode, _ := serverMap["mode"].(string)
+	// Normalize legacy "production" value to "hosted".
+	if mode == "production" {
+		return "hosted"
+	}
 	return mode
 }
 

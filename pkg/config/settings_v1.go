@@ -249,8 +249,9 @@ type VersionedSettings struct {
 // This mirrors GlobalConfig but uses snake_case koanf/yaml tags.
 // Only valid at the global level (~/.scion/settings.yaml), never in project-level settings.
 type V1ServerConfig struct {
-	// Mode selects the server operating mode: "workstation" (default) or "production".
-	// When set to "production", the server behaves as if --production were passed.
+	// Mode selects the server operating mode: "workstation" (default) or "hosted".
+	// When set to "hosted", the server behaves as if --hosted were passed.
+	// The legacy value "production" is also accepted for backward compatibility.
 	Mode      string             `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 	Env       string             `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
 	Hub       *V1ServerHubConfig `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`

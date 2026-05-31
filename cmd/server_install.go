@@ -37,23 +37,23 @@ func runServerInstall(cmd *cobra.Command, args []string) error {
 
 	switch goos := goruntime.GOOS; goos {
 	case "linux":
-		return generateSystemdUnit(executable, serverInstallProduction)
+		return generateSystemdUnit(executable, serverInstallHosted)
 	case "darwin":
-		return generateLaunchdPlist(executable, serverInstallProduction)
+		return generateLaunchdPlist(executable, serverInstallHosted)
 	default:
 		return fmt.Errorf("unsupported platform %q; only linux (systemd) and darwin (launchd) are supported", goos)
 	}
 }
 
-func generateSystemdUnit(executable string, production bool) error {
+func generateSystemdUnit(executable string, hosted bool) error {
 	args := "server start --foreground"
-	if production {
-		args = "server start --foreground --production"
+	if hosted {
+		args = "server start --foreground --hosted"
 	}
 
 	description := "Scion Workstation Server"
-	if production {
-		description = "Scion Server (Production)"
+	if hosted {
+		description = "Scion Server (Hosted)"
 	}
 
 	unit := fmt.Sprintf(`[Unit]
@@ -82,10 +82,10 @@ WantedBy=default.target
 	return nil
 }
 
-func generateLaunchdPlist(executable string, production bool) error {
+func generateLaunchdPlist(executable string, hosted bool) error {
 	args := []string{executable, "server", "start", "--foreground"}
-	if production {
-		args = append(args, "--production")
+	if hosted {
+		args = append(args, "--hosted")
 	}
 
 	// Build ProgramArguments XML entries

@@ -57,8 +57,8 @@ var (
 	// Server daemon flags
 	serverStartForeground bool
 
-	// Production mode flag
-	productionMode bool
+	// Hosted mode flag (replaces former "production" mode)
+	hostedMode bool
 )
 
 const (
@@ -74,9 +74,9 @@ var serverCmd = &cobra.Command{
 
 By default, the server runs in workstation mode: all components are enabled,
 dev-auth is on, and the server binds to 127.0.0.1 (loopback only). This is
-the zero-configuration path for single-user, local development.
+the zero-configuration path for single-user development.
 
-For production deployments, use --production to require explicit component
+For multi-user deployments, use --hosted to require explicit component
 selection and bind to 0.0.0.0 by default.
 
 The server provides:
@@ -97,12 +97,12 @@ var serverStartCmd = &cobra.Command{
 By default, the server runs in workstation mode: all components (Hub, Broker,
 Web) are enabled, dev-auth is on, auto-provide is enabled, and the server
 binds to 127.0.0.1 (loopback only). Just run 'scion server start' to get a
-fully functional local server with no flags needed.
+fully functional workstation server with no flags needed.
 
 The server starts as a background daemon by default. Use --foreground to run
 in the current terminal session (useful for systemd/launchd integration).
 
-For production deployments, use --production to switch to explicit mode where
+For multi-user deployments, use --hosted to switch to hosted mode where
 no components are enabled by default and the server binds to 0.0.0.0.
 
 Explicit flags always override workstation defaults. For example,
@@ -124,11 +124,11 @@ Examples:
   # Workstation mode but expose on all interfaces
   scion server start --host 0.0.0.0
 
-  # Production mode with explicit components
-  scion server start --production --enable-hub --enable-runtime-broker --enable-web
+  # Hosted mode with explicit components
+  scion server start --hosted --enable-hub --enable-runtime-broker --enable-web
 
-  # Production mode, Hub with Web Frontend only
-  scion server start --production --enable-hub --enable-web`,
+  # Hosted mode, Hub with Web Frontend only
+  scion server start --hosted --enable-hub --enable-web`,
 	RunE: runServerStartOrDaemon,
 }
 
@@ -196,7 +196,7 @@ the Scion server as a managed system service.
 
 The generated file uses --foreground mode so the service manager handles
 lifecycle, logging, and restart. Workstation mode defaults apply unless
---production is specified.
+--hosted is specified.
 
 On Linux, generates a systemd unit file.
 On macOS, generates a launchd plist file.
@@ -216,7 +216,7 @@ Examples:
 	RunE: runServerInstall,
 }
 
-var serverInstallProduction bool
+var serverInstallHosted bool
 
 func init() {
 	rootCmd.AddCommand(serverCmd)
@@ -228,7 +228,9 @@ func init() {
 
 	// Server start flags
 	serverStartCmd.Flags().BoolVar(&serverStartForeground, "foreground", false, "Run in foreground instead of as daemon")
-	serverStartCmd.Flags().BoolVar(&productionMode, "production", false, "Production mode: no components enabled by default, binds to 0.0.0.0")
+	serverStartCmd.Flags().BoolVar(&hostedMode, "hosted", false, "Hosted mode: no components enabled by default, binds to 0.0.0.0")
+	serverStartCmd.Flags().BoolVar(&hostedMode, "production", false, "Deprecated: use --hosted instead")
+	_ = serverStartCmd.Flags().MarkDeprecated("production", "use --hosted instead")
 	serverStartCmd.Flags().StringVarP(&serverConfigPath, "config", "c", "", "Path to server configuration file")
 
 	// Hub API flags
@@ -275,5 +277,7 @@ func init() {
 	serverStatusCmd.Flags().BoolVar(&serverStatusJSON, "json", false, "Output in JSON format")
 
 	// Install flags
-	serverInstallCmd.Flags().BoolVar(&serverInstallProduction, "production", false, "Generate service file for production mode")
+	serverInstallCmd.Flags().BoolVar(&serverInstallHosted, "hosted", false, "Generate service file for hosted mode")
+	serverInstallCmd.Flags().BoolVar(&serverInstallHosted, "production", false, "Deprecated: use --hosted instead")
+	_ = serverInstallCmd.Flags().MarkDeprecated("production", "use --hosted instead")
 }

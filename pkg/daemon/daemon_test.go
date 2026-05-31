@@ -210,7 +210,7 @@ func TestArgsFileName(t *testing.T) {
 func TestSaveLoadArgs(t *testing.T) {
 	dir := t.TempDir()
 
-	args := []string{"server", "start", "--foreground", "--production", "--enable-hub"}
+	args := []string{"server", "start", "--foreground", "--hosted", "--enable-hub"}
 	err := SaveArgs("server", dir, args)
 	require.NoError(t, err)
 
@@ -256,7 +256,7 @@ func TestSaveLoadArgs_ComponentIsolation(t *testing.T) {
 	dir := t.TempDir()
 
 	serverArgs := []string{"server", "start", "--foreground", "--enable-hub"}
-	brokerArgs := []string{"server", "start", "--foreground", "--production", "--enable-runtime-broker"}
+	brokerArgs := []string{"server", "start", "--foreground", "--hosted", "--enable-runtime-broker"}
 
 	err := SaveArgs("server", dir, serverArgs)
 	require.NoError(t, err)

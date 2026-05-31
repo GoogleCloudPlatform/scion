@@ -1443,10 +1443,17 @@ func TestConvertV1ServerToGlobalConfig_Basic(t *testing.T) {
 
 func TestConvertV1ServerToGlobalConfig_Mode(t *testing.T) {
 	v1 := &V1ServerConfig{
-		Mode: "production",
+		Mode: "hosted",
 	}
 	gc := ConvertV1ServerToGlobalConfig(v1)
-	assert.Equal(t, "production", gc.Mode)
+	assert.Equal(t, "hosted", gc.Mode)
+
+	// Legacy "production" value should pass through (backward compat)
+	v1Legacy := &V1ServerConfig{
+		Mode: "production",
+	}
+	gcLegacy := ConvertV1ServerToGlobalConfig(v1Legacy)
+	assert.Equal(t, "production", gcLegacy.Mode)
 
 	// Empty mode should leave it empty (workstation default)
 	v1Empty := &V1ServerConfig{}
@@ -1456,14 +1463,14 @@ func TestConvertV1ServerToGlobalConfig_Mode(t *testing.T) {
 
 func TestConvertGlobalToV1ServerConfig_Mode(t *testing.T) {
 	gc := DefaultGlobalConfig()
-	gc.Mode = "production"
+	gc.Mode = "hosted"
 
 	v1 := ConvertGlobalToV1ServerConfig(&gc)
-	assert.Equal(t, "production", v1.Mode)
+	assert.Equal(t, "hosted", v1.Mode)
 
 	// Round-trip
 	gc2 := ConvertV1ServerToGlobalConfig(v1)
-	assert.Equal(t, "production", gc2.Mode)
+	assert.Equal(t, "hosted", gc2.Mode)
 }
 
 func TestConvertV1ServerToGlobalConfig_Nil(t *testing.T) {
