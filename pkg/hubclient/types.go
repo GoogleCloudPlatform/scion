@@ -557,4 +557,5 @@ type HarnessConfigData struct {
 	Args             []string          `json:"args,omitempty"`
 	Env              map[string]string `json:"env,omitempty"`
 	AuthSelectedType string            `json:"authSelectedType,omitempty"`
+	ModelAliases     map[string]string `json:"modelAliases,omitempty"`
 }

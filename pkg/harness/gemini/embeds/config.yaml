@@ -24,6 +24,10 @@ interrupt_key: Escape
 instructions_file: .gemini/GEMINI.md
 system_prompt_file: .gemini/system_prompt.md
 system_prompt_mode: native
+model_aliases:
+  small: gemini-flash-lite
+  medium: gemini-flash
+  large: gemini-pro
 command:
   base: ["gemini", "--yolo"]
   resume_flag: "--resume"

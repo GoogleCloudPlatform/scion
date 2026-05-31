@@ -62,7 +62,8 @@
     },
     "image": {
       "type": "string",
-      "description": "Override container image."
+      "description": "Deprecated: container image override. Move to harness-config config.yaml instead. Retained for backward compatibility as an override.",
+      "x-deprecated-by": "1"
     },
     "user": {
       "type": "string",
@@ -70,7 +71,7 @@
     },
     "model": {
       "type": "string",
-      "description": "LLM model identifier."
+      "description": "Model size alias (small, medium, large) or concrete model name. Prefer size aliases for portability — they are resolved to harness-specific model names at provision time via the harness-config's model_aliases map. Concrete names are passed through unchanged but tie the template to a specific harness."
     },
     "args": {
       "type": "array",
@@ -96,7 +97,8 @@
     "auth_selectedType": {
       "type": "string",
       "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai"],
-      "description": "Authentication mechanism to use (e.g., api-key, oauth-token, vertex-ai, auth-file)."
+      "description": "Deprecated: authentication mechanism override. Move to harness-config config.yaml instead. Retained for backward compatibility as an override.",
+      "x-deprecated-by": "1"
     },
     "hub": {
       "type": "object",

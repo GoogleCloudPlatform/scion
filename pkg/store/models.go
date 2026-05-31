@@ -532,6 +532,7 @@ type HarnessConfigData struct {
 	Env              map[string]string    `json:"env,omitempty"`
 	AuthSelectedType string               `json:"authSelectedType,omitempty"`
 	Secrets          []api.RequiredSecret `json:"secrets,omitempty"`
+	ModelAliases     map[string]string    `json:"modelAliases,omitempty"`
 }
 
 // HarnessConfigStatus constants

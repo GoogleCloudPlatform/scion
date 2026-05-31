@@ -622,6 +622,46 @@ func ValidateAgnosticTemplate(cfg *api.ScionConfig) error {
 	return nil
 }
 
+// KnownModelAliases is the canonical set of recognized model size aliases.
+var KnownModelAliases = map[string]bool{
+	"small":  true,
+	"medium": true,
+	"large":  true,
+}
+
+// WarnDeprecatedTemplateFields returns deprecation warnings for harness-specific
+// fields that should live in the harness-config rather than the template.
+// These fields are still accepted for backward compatibility but should be migrated.
+func WarnDeprecatedTemplateFields(cfg *api.ScionConfig) []string {
+	var warnings []string
+	if cfg.Image != "" {
+		warnings = append(warnings, "template sets 'image' which is harness-specific; move it to your harness-config's config.yaml instead")
+	}
+	if cfg.AuthSelectedType != "" {
+		warnings = append(warnings, "template sets 'auth_selectedType' which is harness-specific; move it to your harness-config's config.yaml instead")
+	}
+	if cfg.Model != "" && !KnownModelAliases[cfg.Model] {
+		warnings = append(warnings, fmt.Sprintf("template sets 'model' to a concrete model name %q; consider using a size alias (small, medium, large) for portability across harnesses", cfg.Model))
+	}
+	return warnings
+}
+
+// ResolveModelAlias resolves a model size alias to a concrete model name
+// using the given alias map. If the model is not a known alias or the alias
+// map does not contain a mapping, the model string is returned unchanged.
+func ResolveModelAlias(model string, aliases map[string]string) string {
+	if model == "" || aliases == nil {
+		return model
+	}
+	if !KnownModelAliases[model] {
+		return model // concrete model name, pass through
+	}
+	if concrete, ok := aliases[model]; ok {
+		return concrete
+	}
+	return model // alias not mapped, pass through
+}
+
 func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 	if base == nil {
 		base = &api.ScionConfig{}

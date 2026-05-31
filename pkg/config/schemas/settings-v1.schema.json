@@ -277,6 +277,11 @@
           "items": { "$ref": "#/$defs/requiredSecret" },
           "description": "Required secrets for this harness configuration."
         },
+        "model_aliases": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Maps abstract model size aliases (e.g. small, medium, large) to concrete harness-specific model names. Templates use the alias; it is resolved at provision time."
+        },
         "provisioner": {
           "$ref": "#/$defs/harnessProvisioner",
           "description": "Provisioning implementation metadata. Presence of a script file alone does not activate container-script behavior."

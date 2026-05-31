@@ -555,6 +555,18 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	finalScionCfg.Harness = hcDir.Config.Harness
 	finalScionCfg.HarnessConfig = harnessConfigName
 
+	// Warn about deprecated harness-specific fields in template config
+	config.PrintDeprecationWarnings(config.WarnDeprecatedTemplateFields(finalScionCfg))
+
+	// Resolve model size aliases (small/medium/large → concrete model name)
+	if finalScionCfg.Model != "" && hcDir.Config.ModelAliases != nil {
+		resolved := config.ResolveModelAlias(finalScionCfg.Model, hcDir.Config.ModelAliases)
+		if resolved != finalScionCfg.Model {
+			util.Debugf("ProvisionAgent: resolved model alias %q → %q", finalScionCfg.Model, resolved)
+			finalScionCfg.Model = resolved
+		}
+	}
+
 	// 2d. Compose agent home directory
 	homeCopyStart := time.Now()
 

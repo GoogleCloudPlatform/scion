@@ -548,6 +548,11 @@ type HarnessConfigEntry struct {
 	AuthSelectedType string               `json:"auth_selected_type,omitempty" yaml:"auth_selected_type,omitempty" koanf:"auth_selected_type"`
 	Secrets          []api.RequiredSecret `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
 
+	// ModelAliases maps abstract size aliases (e.g. "small", "medium", "large")
+	// to concrete, harness-specific model names. Templates use the alias in their
+	// model field; the alias is resolved to the concrete name at provision time.
+	ModelAliases map[string]string `json:"model_aliases,omitempty" yaml:"model_aliases,omitempty" koanf:"model_aliases"`
+
 	Provisioner      *HarnessProvisionerConfig        `json:"provisioner,omitempty" yaml:"provisioner,omitempty" koanf:"provisioner"`
 	ConfigDir        string                           `json:"config_dir,omitempty" yaml:"config_dir,omitempty" koanf:"config_dir"`
 	SkillsDir        string                           `json:"skills_dir,omitempty" yaml:"skills_dir,omitempty" koanf:"skills_dir"`

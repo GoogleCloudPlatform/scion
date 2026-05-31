@@ -24,6 +24,10 @@ interrupt_key: Escape
 instructions_file: .claude/CLAUDE.md
 system_prompt_file: .claude/system-prompt.md
 system_prompt_mode: native
+model_aliases:
+  small: haiku
+  medium: sonnet
+  large: opus
 env:
   ANTHROPIC_MODEL: "opus"
   ANTHROPIC_SMALL_FAST_MODEL: "haiku"
