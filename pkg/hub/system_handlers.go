@@ -540,7 +540,8 @@ func (s *Server) handleFSList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "cannot determine home directory", nil)
 		return
 	}
-	if !strings.HasPrefix(resolved, home) {
+	sep := string(filepath.Separator)
+	if resolved != home && !strings.HasPrefix(resolved, home+sep) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "path must be within the home directory", nil)
 		return
 	}
@@ -628,7 +629,8 @@ func (s *Server) handleFSMkdir(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "cannot determine home directory", nil)
 		return
 	}
-	if !strings.HasPrefix(resolved, home) {
+	sep := string(filepath.Separator)
+	if resolved != home && !strings.HasPrefix(resolved, home+sep) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "parent must be within the home directory", nil)
 		return
 	}

@@ -364,6 +364,17 @@ func TestFSList_OutsideHome(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("expected 403 for path outside home, got %d: %s", rec.Code, rec.Body.String())
 	}
+
+	// Sibling-prefix bypass: a path like /home/alice-backup must not pass
+	// when home is /home/alice.
+	siblingDir := tmpHome + "-backup"
+	if err := os.MkdirAll(siblingDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	rec = doWorkstationRequest(t, srv, http.MethodGet, "/api/v1/system/fs/list?path="+siblingDir, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for sibling-prefix path, got %d: %s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestFSList_DefaultsToHome(t *testing.T) {
