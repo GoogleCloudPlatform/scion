@@ -35,6 +35,8 @@ type AuthConfig struct {
 	DevAuthEnabled bool
 	// DevAuthToken is the valid development token
 	DevAuthToken string
+	// DevUserCfg holds identity overrides for the development user
+	DevUserCfg DevUserConfig
 	// AgentTokenSvc handles agent JWT validation
 	AgentTokenSvc *AgentTokenService
 	// UserTokenSvc handles user JWT validation
@@ -80,6 +82,7 @@ const (
 func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 	// Parse trusted proxy CIDRs
 	trustedNets := parseTrustedProxies(cfg.TrustedProxies)
+	devUser := NewDevUser(cfg.DevUserCfg)
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
@@ -226,7 +229,6 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						"invalid development token", nil)
 					return
 				}
-				devUser := &DevUser{id: DevUserID}
 				ctx = context.WithValue(ctx, userContextKey{}, devUser)
 				ctx = contextWithIdentity(ctx, devUser)
 				ctx = contextWithAuthType(ctx, AuthTypeDevToken)
@@ -257,7 +259,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				if cfg.UserTokenSvc == nil {
 					// Fall back to dev auth if user tokens not configured
 					if cfg.DevAuthEnabled && apiclient.ValidateDevToken(token, cfg.DevAuthToken) {
-						devUser := &DevUser{id: DevUserID}
+						devUser := devUser
 						ctx = context.WithValue(ctx, userContextKey{}, devUser)
 						ctx = contextWithIdentity(ctx, devUser)
 						ctx = contextWithAuthType(ctx, AuthTypeDevToken)

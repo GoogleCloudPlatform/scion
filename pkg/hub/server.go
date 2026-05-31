@@ -181,6 +181,8 @@ type ServerConfig struct {
 	// Workstation indicates non-production, single-user mode (e.g. local laptop).
 	// When true, /api/v1/system/* and other workstation-only endpoints are enabled.
 	Workstation bool
+	// DevUserConfig holds optional identity overrides for the development user.
+	DevUserConfig DevUserConfig
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
@@ -898,6 +900,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		Mode:               "production",
 		DevAuthEnabled:     cfg.DevAuthToken != "",
 		DevAuthToken:       cfg.DevAuthToken,
+		DevUserCfg:         cfg.DevUserConfig,
 		AgentTokenSvc:      srv.agentTokenService,
 		UserTokenSvc:       srv.userTokenService,
 		UATSvc:             srv.uatService,
@@ -2585,6 +2588,9 @@ func (s *Server) registerRoutes() {
 	// GitHub App webhook and setup callback (unauthenticated — uses webhook signature)
 	s.mux.HandleFunc("/api/v1/webhooks/github", s.handleGitHubWebhook)
 	s.mux.HandleFunc("/github-app/setup", s.handleGitHubAppSetup)
+
+	// Workstation-only system endpoints
+	s.mux.Handle("/api/v1/system/identity", s.requireWorkstation(http.HandlerFunc(s.handleSystemIdentity)))
 }
 
 // applyMiddleware wraps the handler with middleware.

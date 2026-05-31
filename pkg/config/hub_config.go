@@ -210,6 +210,12 @@ type DevAuthConfig struct {
 	// Transport holds transport-layer auth settings for agent outbound requests.
 	// Controls which transport tokens the hub issues to agents (dispatch + refresh).
 	Transport *TransportAuthConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
+	// Username is the dev user's login name (defaults to OS username).
+	Username string `json:"username,omitempty" yaml:"username,omitempty" koanf:"username"`
+	// DisplayName is the dev user's display name (defaults to OS full name).
+	DisplayName string `json:"displayName,omitempty" yaml:"displayName,omitempty" koanf:"displayName"`
+	// Email is the dev user's email (defaults to <username>@localhost).
+	Email string `json:"email,omitempty" yaml:"email,omitempty" koanf:"email"`
 }
 
 // TransportAuthConfig holds transport-layer (outer/platform) auth settings.

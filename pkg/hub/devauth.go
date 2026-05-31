@@ -16,8 +16,10 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
+	osuser "os/user"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -27,9 +29,52 @@ import (
 // Deterministic so that references in the database remain stable across restarts.
 const DevUserID = "be67fbc9-c869-5d43-b15d-c28ca3e8d355"
 
+// DevUserConfig holds optional identity overrides for the development user.
+type DevUserConfig struct {
+	Username    string
+	DisplayName string
+	Email       string
+}
+
 // DevUser represents the pseudo-user for development authentication.
 type DevUser struct {
-	id string
+	id          string
+	username    string
+	displayName string
+	email       string
+}
+
+// NewDevUser creates a DevUser with the stable UUID, applying config overrides
+// and falling back to the current OS user for unset fields.
+func NewDevUser(cfg DevUserConfig) *DevUser {
+	u := &DevUser{id: DevUserID}
+
+	u.username = cfg.Username
+	u.displayName = cfg.DisplayName
+	u.email = cfg.Email
+
+	if u.username == "" || u.displayName == "" {
+		if osUser, err := osuser.Current(); err == nil {
+			if u.username == "" {
+				u.username = osUser.Username
+			}
+			if u.displayName == "" {
+				u.displayName = osUser.Name
+			}
+		}
+	}
+
+	if u.displayName == "" {
+		u.displayName = "Development User"
+	}
+	if u.username == "" {
+		u.username = "dev"
+	}
+	if u.email == "" {
+		u.email = fmt.Sprintf("%s@localhost", u.username)
+	}
+
+	return u
 }
 
 // ID returns the user ID.
@@ -38,11 +83,14 @@ func (u *DevUser) ID() string { return u.id }
 // Type returns the identity type ("dev").
 func (u *DevUser) Type() string { return "dev" }
 
+// Username returns the user's login name.
+func (u *DevUser) Username() string { return u.username }
+
 // Email returns the user email.
-func (u *DevUser) Email() string { return "dev@localhost" }
+func (u *DevUser) Email() string { return u.email }
 
 // DisplayName returns the user display name.
-func (u *DevUser) DisplayName() string { return "Development User" }
+func (u *DevUser) DisplayName() string { return u.displayName }
 
 // Role returns the user role.
 func (u *DevUser) Role() string { return "admin" }
@@ -53,12 +101,13 @@ type userContextKey struct{}
 // DevAuthMiddleware creates middleware that validates development tokens.
 // If the token is valid, it adds a DevUser to the request context.
 // Use DevAuthMiddlewareWithDebug for verbose logging of auth failures.
-func DevAuthMiddleware(validToken string) func(http.Handler) http.Handler {
-	return DevAuthMiddlewareWithDebug(validToken, false)
+func DevAuthMiddleware(validToken string, userCfg DevUserConfig) func(http.Handler) http.Handler {
+	return DevAuthMiddlewareWithDebug(validToken, userCfg, false)
 }
 
 // DevAuthMiddlewareWithDebug creates middleware with optional debug logging.
-func DevAuthMiddlewareWithDebug(validToken string, debug bool) func(http.Handler) http.Handler {
+func DevAuthMiddlewareWithDebug(validToken string, userCfg DevUserConfig, debug bool) func(http.Handler) http.Handler {
+	devUser := NewDevUser(userCfg)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Skip auth for health endpoints
@@ -141,7 +190,7 @@ func DevAuthMiddlewareWithDebug(validToken string, debug bool) func(http.Handler
 			}
 
 			// Add dev user context
-			ctx := context.WithValue(r.Context(), userContextKey{}, &DevUser{id: DevUserID})
+			ctx := context.WithValue(r.Context(), userContextKey{}, devUser)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
