@@ -58,7 +58,7 @@ func TestOpenCodeInjectSystemPrompt(t *testing.T) {
 		t.Fatalf("InjectSystemPrompt failed: %v", err)
 	}
 
-	target := filepath.Join(agentHome, "AGENTS.md")
+	target := filepath.Join(agentHome, o.DefaultConfigDir(), "AGENTS.md")
 	data, err := os.ReadFile(target)
 	if err != nil {
 		t.Fatalf("expected file at %s: %v", target, err)

@@ -108,7 +108,11 @@ func (o *OpenCode) GetTelemetryEnv() map[string]string {
 }
 
 func (o *OpenCode) InjectAgentInstructions(agentHome string, content []byte) error {
-	target := filepath.Join(agentHome, "AGENTS.md")
+	dir := filepath.Join(agentHome, o.DefaultConfigDir())
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+	target := filepath.Join(dir, "AGENTS.md")
 	return os.WriteFile(target, content, 0644)
 }
 
@@ -184,7 +188,11 @@ func (o *OpenCode) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error) {
 
 func (o *OpenCode) InjectSystemPrompt(agentHome string, content []byte) error {
 	// OpenCode has no native system prompt support — downgrade by prepending to AGENTS.md
-	agentsPath := filepath.Join(agentHome, "AGENTS.md")
+	dir := filepath.Join(agentHome, o.DefaultConfigDir())
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+	agentsPath := filepath.Join(dir, "AGENTS.md")
 	header := fmt.Sprintf("# System Prompt\n\n%s\n\n---\n\n", string(content))
 
 	existing, err := os.ReadFile(agentsPath)
