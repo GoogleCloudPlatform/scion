@@ -911,11 +911,13 @@ func ReadTokenFile() string {
 
 // OutboundMessage is the payload for sending an agent-to-human outbound message.
 type OutboundMessage struct {
-	Recipient   string `json:"recipient,omitempty"`
-	RecipientID string `json:"recipient_id,omitempty"`
-	Msg         string `json:"msg"`
-	Type        string `json:"type,omitempty"`
-	Urgent      bool   `json:"urgent,omitempty"`
+	Recipient   string            `json:"recipient,omitempty"`
+	RecipientID string            `json:"recipient_id,omitempty"`
+	Msg         string            `json:"msg"`
+	Type        string            `json:"type,omitempty"`
+	Urgent      bool              `json:"urgent,omitempty"`
+	Visibility  string            `json:"visibility,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
 // SendOutboundMessage sends an outbound message from the agent to a human inbox.

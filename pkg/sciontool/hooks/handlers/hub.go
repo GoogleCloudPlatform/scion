@@ -129,6 +129,12 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		// store as an outbound agent→user reply. This is what makes
 		// assistant responses show up in the Messages tab. Best-effort:
 		// failure here must not break the status update flow below.
+		//
+		// Content-type filtering: AssistantText is pre-filtered by the
+		// dialect layer (thinking/reasoning blocks stripped). The
+		// message is tagged with "verbose" visibility so chat consumers
+		// can distinguish automatic assistant replies from explicit
+		// agent→user messages.
 		if event.Name == hooks.EventAgentEnd && event.Data.AssistantText != "" {
 			text := event.Data.AssistantText
 			// Guard against very large assistant responses (e.g. full file
@@ -138,15 +144,26 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 				text = text[:maxAssistantTextBytes] + "\n[truncated]"
 			}
 
+			// Build metadata tags for content classification.
+			metadata := map[string]string{
+				"source": "hook",
+			}
+			if event.Data.AssistantContent != nil && event.Data.AssistantContent.HasThinking() {
+				metadata["has_thinking"] = "true"
+			}
+
 			msgCtx, msgCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer msgCancel()
 			if msgErr := h.client.SendOutboundMessage(msgCtx, hub.OutboundMessage{
-				Msg:  text,
-				Type: "assistant-reply",
+				Msg:        text,
+				Type:       "assistant-reply",
+				Visibility: "verbose",
+				Metadata:   metadata,
 			}); msgErr != nil {
 				log.Error("Hub: outbound assistant reply failed: %v", msgErr)
 			} else {
-				log.Debug("Hub: Forwarded assistant reply to message store (%d bytes)", len(text))
+				log.Debug("Hub: Forwarded assistant reply to message store (%d bytes, thinking_filtered=%v)",
+					len(text), event.Data.AssistantContent != nil && event.Data.AssistantContent.HasThinking())
 			}
 		}
 

@@ -47,6 +47,26 @@ const (
 	TypeGroupSet       = "group-set"
 )
 
+// Visibility constants control which consumers see a message.
+// Downstream consumers (chat apps, web UI, broker plugins) filter
+// messages by visibility level to avoid surfacing raw agent output
+// (e.g. thinking traces) in normal chat views.
+const (
+	// VisibilityNormal — always shown. Used for explicit agent→user
+	// messages (scion message, ask_user) and user→agent instructions.
+	VisibilityNormal = "normal"
+
+	// VisibilityVerbose — shown in verbose mode. Used for automatic
+	// assistant replies from hook events (agent turn output without
+	// thinking content).
+	VisibilityVerbose = "verbose"
+
+	// VisibilityFull — shown only in full-fidelity mode. Used for
+	// content that includes thinking/reasoning traces and raw tool
+	// output. Intended for ACP streams and debugging interfaces.
+	VisibilityFull = "full"
+)
+
 // validTypes is the set of valid message types.
 var validTypes = map[string]bool{
 	TypeInstruction:    true,
@@ -75,6 +95,11 @@ type StructuredMessage struct {
 	Status       string            `json:"status,omitempty"`
 	Attachments  []string          `json:"attachments,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
+
+	// Visibility controls which consumers see this message.
+	// One of VisibilityNormal, VisibilityVerbose, or VisibilityFull.
+	// Empty defaults to VisibilityNormal for backward compatibility.
+	Visibility string `json:"visibility,omitempty"`
 }
 
 // ValidateType returns an error if the message type is not in the closed enum.
