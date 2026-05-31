@@ -70,11 +70,13 @@ func TestGetAgentNames(t *testing.T) {
 
 	// Mock command
 	cmd := &cobra.Command{}
-	cmd.Flags().String("grove", "", "")
+	cmd.Flags().String("project", "", "")
 	cmd.Flags().Bool("global", false, "")
 
 	// Test with explicit project path
-	cmd.Flags().Set("grove", projectDir)
+	if err := cmd.Flags().Set("project", projectDir); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Run("Complete all agents", func(t *testing.T) {
 		names, _ := getAgentNames(cmd, []string{}, "")

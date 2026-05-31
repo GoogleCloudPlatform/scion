@@ -36,9 +36,6 @@ export class ScionPageProfileTelegram extends LitElement {
   @state()
   private _message = '';
 
-  @state()
-  private _linkedTelegramId = '';
-
   override connectedCallback(): void {
     super.connectedCallback();
     const params = new URLSearchParams(window.location.search);
@@ -63,13 +60,8 @@ export class ScionPageProfileTelegram extends LitElement {
       });
 
       if (resp.ok) {
-        const data = (await resp.json()) as {
-          status: string;
-          telegramUserId: string;
-          user: { id: string; email: string };
-        };
+        await resp.json();
         this._status = 'success';
-        this._linkedTelegramId = data.telegramUserId;
         this._message = 'Telegram account linked successfully! You can close this page and return to Telegram.';
         this._code = '';
       } else {
@@ -222,13 +214,8 @@ export class ScionPageProfileTelegram extends LitElement {
       });
 
       if (resp.ok) {
-        const data = (await resp.json()) as {
-          status: string;
-          telegramUserId: string;
-          user: { id: string; email: string };
-        };
+        await resp.json();
         this._status = 'success';
-        this._linkedTelegramId = data.telegramUserId;
         this._message = 'Telegram account linked successfully! You can close this page and return to Telegram.';
         this._code = '';
       } else {

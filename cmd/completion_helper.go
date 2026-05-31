@@ -93,7 +93,7 @@ func completeAgentNames(cmd *cobra.Command, args []string, toComplete string) ([
 	}
 
 	// Try to get project path from flag if specified by user in the command line so far
-	currentProjectPath, _ := cmd.Flags().GetString("grove")
+	currentProjectPath, _ := cmd.Flags().GetString("project")
 
 	// If global flag is set
 	global, _ := cmd.Flags().GetBool("global")
