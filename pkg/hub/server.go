@@ -2596,6 +2596,7 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("/api/v1/system/runtime", s.requireWorkstation(http.HandlerFunc(s.handleSystemRuntime)))
 	s.mux.Handle("/api/v1/system/init", s.requireWorkstation(http.HandlerFunc(s.handleSystemInit)))
 	s.mux.Handle("/api/v1/system/images/pull", s.requireWorkstation(http.HandlerFunc(s.handleSystemImagesPull)))
+	s.mux.Handle("/api/v1/system/images/build", s.requireWorkstation(http.HandlerFunc(s.handleSystemImagesBuild)))
 }
 
 // applyMiddleware wraps the handler with middleware.

@@ -15,8 +15,10 @@
 package hub
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -388,6 +390,101 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 		_ = runtime.PullImages(context.Background(), rt, req.Harnesses, registry, func(pr runtime.PullResult) {
 			s.events.PublishRaw("system.images."+jobID, pr)
 		})
+	}()
+
+	writeJSON(w, http.StatusOK, imagePullResponse{JobID: jobID})
+}
+
+// --- 4.2: Image Build ---
+
+type imageBuildRequest struct {
+	Harnesses []string `json:"harnesses"`
+}
+
+type imageBuildLogEvent struct {
+	Type string `json:"type"` // "log"
+	Line string `json:"line"`
+}
+
+func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	if err := assertLoopback(r); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		return
+	}
+
+	_, detectErr := config.DetectLocalRuntime()
+	if detectErr != nil {
+		writeError(w, http.StatusServiceUnavailable, ErrCodeInternalError, "no container runtime available", nil)
+		return
+	}
+
+	var req imageBuildRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "invalid request body")
+		return
+	}
+
+	if len(req.Harnesses) == 0 {
+		ValidationError(w, "at least one harness must be specified", nil)
+		return
+	}
+
+	allowed := map[string]bool{"claude": true, "gemini": true, "codex": true, "opencode": true}
+	for _, h := range req.Harnesses {
+		if !allowed[h] {
+			ValidationError(w, fmt.Sprintf("unknown harness %q", h), nil)
+			return
+		}
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "cannot determine working directory", nil)
+		return
+	}
+
+	buildScript := filepath.Join(wd, "image-build", "scripts", "build-images.sh")
+	if _, err := os.Stat(buildScript); err != nil {
+		writeError(w, http.StatusNotFound, ErrCodeNotFound, "build script not found at "+buildScript, nil)
+		return
+	}
+
+	jobID := api.NewUUID()
+	subject := "system.images." + jobID
+
+	go func() {
+		cmd := exec.CommandContext(context.Background(), buildScript, "--target", "harnesses")
+		cmd.Dir = wd
+
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			slog.Error("build: stdout pipe failed", "error", err)
+			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "error: " + err.Error()})
+			return
+		}
+		cmd.Stderr = cmd.Stdout
+
+		if err := cmd.Start(); err != nil {
+			slog.Error("build: start failed", "error", err)
+			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "error: " + err.Error()})
+			return
+		}
+
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: scanner.Text()})
+		}
+
+		if err := cmd.Wait(); err != nil {
+			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "build failed: " + err.Error()})
+		} else {
+			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "build complete"})
+		}
 	}()
 
 	writeJSON(w, http.StatusOK, imagePullResponse{JobID: jobID})
