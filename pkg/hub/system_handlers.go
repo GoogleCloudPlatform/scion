@@ -42,7 +42,7 @@ type DiagnosticResult struct {
 
 type systemCheckResponse struct {
 	Results []DiagnosticResult `json:"results"`
-	Ready   bool              `json:"ready"`
+	Ready   bool               `json:"ready"`
 }
 
 func GatherDiagnostics(ctx context.Context, cfg *config.VersionedSettings) []DiagnosticResult {
