@@ -84,6 +84,8 @@ All icons in the web frontend use the Shoelace `<sl-icon>` component (Bootstrap 
 
 ## Short hand gossary and project development terminology
 
+> **Canonical engineering glossary:** See [`GLOSSARY.md`](./GLOSSARY.md) at the repo root for the canonical, opinionated terminology used throughout the codebase — the preferred term for each concept and the synonyms to avoid. Prefer these terms in new code, comments, and docs.
+
 These terms may be used in shorthand with prompts
 
 - **hub-broker, combo server** References running the server command with both the hub function and the broker function running in the same invocation.
