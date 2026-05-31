@@ -8,8 +8,11 @@ each item and link to its step in §8; they no longer track status themselves.
 
 **We are here:** steps 1–4 have **landed** (single read path, thin
 content-addressed cache, the shared resource-store/resolver abstraction, and the
-harness-config consume path). Remaining: **step 5** (onboard skills) and
-**step 6** (optional identifier/layout cleanup).
+harness-config consume path). **Step 5 (onboard skills) is deferred** — skills
+are now subsumed by a larger forthcoming "skill bank" feature, which will decide
+skill scope/precedence/sharing semantics on its own terms; this refactor will be
+revisited only to adopt whatever resource shape that feature settles on.
+Remaining in scope here: **step 6** (optional identifier/layout cleanup).
 
 ## 1. Purpose
 
@@ -443,8 +446,13 @@ status tracker. Each step links to its design rationale in §7.
      and nil-hub-client cases. `make ci` is green. (`make ci-full` still fails
      only on a **pre-existing, unrelated** web-typecheck error in
      `web/src/components/pages/profile-telegram.ts`, byte-identical to `main`.)
-5. ⏳ **Onboard skills** as the third `kind` — should be nearly free if §7.3
-   holds. (Skills scope/precedence semantics are an open question — see §9.)
+5. ⏸️ **Onboard skills** as the third `kind` — **deferred.** Skills are now
+   folded into a larger forthcoming **"skill bank"** feature, which owns the
+   open skills scope/precedence/sharing semantics (see §9) and will define its
+   own resource shape. The §7.3 abstraction was deliberately built to make a
+   third `kind` nearly free, so adopting skills should be cheap **once the skill
+   bank settles its model** — at which point this step is picked back up to wire
+   skills through `ResourceStore`/`Resolver`. Tracked under skill-bank, not here.
 6. ⏳ **(Optional)** identifier/layout cleanup (rationale: §7.4) as a dedicated
    migration.
 
@@ -477,7 +485,9 @@ its own; it benefits far more than resource resolution.
 - **Skills specifics**: do skills need scope/precedence semantics identical to
   templates/harness-configs, or their own (e.g. per-agent vs per-project)? This
   affects whether `scope`/`scopeID` stays in the shared record or moves to a
-  per-kind policy.
+  per-kind policy. **Now owned by the forthcoming "skill bank" feature** (see
+  §8 step 5, deferred) — that feature decides these semantics, and this refactor
+  adopts the result rather than answering it here.
 
 ## 10. Related documents
 
