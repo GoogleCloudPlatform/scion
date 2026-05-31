@@ -61,8 +61,5 @@ func (s *Server) handleSystemIdentity(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, systemIdentityResponse{
-		DisplayName: req.DisplayName,
-		Email:       req.Email,
-	})
+	writeJSON(w, http.StatusOK, systemIdentityResponse(req))
 }

@@ -53,7 +53,7 @@ func testWorkstationServer(t *testing.T) (*Server, *sqlite.SQLiteStore) {
 		t.Fatalf("New() failed: %v", err)
 	}
 	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() { srv.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	return srv, s
 }
 
