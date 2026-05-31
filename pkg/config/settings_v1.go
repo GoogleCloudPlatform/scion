@@ -2031,6 +2031,32 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 		}
 		vs.Server.Broker.BrokerNickname = value
 
+	// --- Server auth identity ---
+	case "server.auth.display_name":
+		if vs.Server == nil {
+			vs.Server = &V1ServerConfig{}
+		}
+		if vs.Server.Auth == nil {
+			vs.Server.Auth = &V1AuthConfig{}
+		}
+		vs.Server.Auth.DisplayName = value
+	case "server.auth.email":
+		if vs.Server == nil {
+			vs.Server = &V1ServerConfig{}
+		}
+		if vs.Server.Auth == nil {
+			vs.Server.Auth = &V1AuthConfig{}
+		}
+		vs.Server.Auth.Email = value
+	case "server.auth.username":
+		if vs.Server == nil {
+			vs.Server = &V1ServerConfig{}
+		}
+		if vs.Server.Auth == nil {
+			vs.Server.Auth = &V1AuthConfig{}
+		}
+		vs.Server.Auth.Username = value
+
 	// --- Deprecated keys: skip silently in v1 ---
 	case "hub.token", "hub.apiKey", "hub.lastSyncedAt":
 		// These fields don't exist in v1 — skip without error
