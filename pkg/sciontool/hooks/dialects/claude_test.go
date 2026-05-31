@@ -397,6 +397,10 @@ func TestExtractAssistantContentFromPayload_NativeArray(t *testing.T) {
 
 func TestExtractAssistantContentFromPayload_ThinkingOnlyBlocks(t *testing.T) {
 	// Edge case: only thinking blocks, no text blocks.
+	// AssistantText should be empty (no user-visible text), but
+	// AssistantContent must still be populated so downstream consumers
+	// can access the thinking blocks and the code doesn't fall back to
+	// the racy transcript path.
 	d := NewClaudeDialect()
 	blocksJSON := `[{"type":"thinking","thinking":"I need to think about this carefully"}]`
 	event, err := d.Parse(map[string]interface{}{
@@ -406,7 +410,10 @@ func TestExtractAssistantContentFromPayload_ThinkingOnlyBlocks(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, event.Data.AssistantText,
 		"AssistantText should be empty when only thinking blocks exist")
-	// When text is empty, AssistantContent is not set since the whole extraction returns ""
+	require.NotNil(t, event.Data.AssistantContent,
+		"AssistantContent must be populated even with no text blocks")
+	assert.Len(t, event.Data.AssistantContent.Blocks, 1)
+	assert.Equal(t, hooks.ContentBlockThinking, event.Data.AssistantContent.Blocks[0].Type)
 }
 
 func TestExtractAssistantContentFromPayload_MultipleTextBlocks(t *testing.T) {

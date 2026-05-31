@@ -116,12 +116,12 @@ func (d *ClaudeDialect) Parse(data map[string]interface{}) (*hooks.Event, error)
 	// strictly a fallback, not the primary path.
 	if event.Name == hooks.EventAgentEnd {
 		text, content := extractAssistantContentFromPayload(data)
-		if text != "" {
+		if content != nil {
 			event.Data.AssistantText = text
 			event.Data.AssistantContent = content
 		} else if path := getString(data, "transcript_path"); path != "" {
 			text, content := extractFinalAssistantContentFromTranscript(path)
-			if text != "" {
+			if content != nil {
 				event.Data.AssistantText = text
 				event.Data.AssistantContent = content
 			}
