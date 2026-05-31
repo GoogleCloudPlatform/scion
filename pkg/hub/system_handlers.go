@@ -690,6 +690,10 @@ type fsValidatePathResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
+// handleFSValidatePath classifies a candidate path for linked-grove creation.
+// Intentionally no home-directory fence: linked groves may reference directories
+// anywhere on disk (e.g. external drives, /opt projects). Safety is enforced by
+// ClassifyPath's managed-path overlap check and the assertLoopback guard.
 func (s *Server) handleFSValidatePath(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
