@@ -803,16 +803,17 @@ func sanitizeGitOutput(output, token string) string {
 	return strings.ReplaceAll(output, token, "***")
 }
 
-// scionNamespace is a fixed UUID v5 namespace for deriving deterministic grove IDs.
+// scionNamespace is a fixed UUID v5 namespace used by HashProjectID for
+// deterministic identifier derivation (e.g. cache keys).
 var scionNamespace = uuid.MustParse("a1b8e4f0-7c3d-4a1e-9f2b-6d5c8e7a0b1f")
 
-// HashProjectID computes a deterministic ID from a normalized identity string.
-// It uses UUID v5 (SHA-1 based) with a fixed Scion namespace to produce a valid
-// UUID that is deterministic for a given input.
+// HashProjectID computes a deterministic identifier from a normalized input
+// string.  It uses UUID v5 (SHA-1 based) with a fixed Scion namespace to
+// produce a valid UUID that is stable for a given input.
 //
-// NOTE: This function is no longer used for grove ID generation (grove IDs are
-// now random UUIDs). It is retained for other deterministic identifier needs
-// such as cache keys.
+// NOTE: Project IDs are random UUIDs (see config.GenerateProjectID).  This
+// function is NOT used for project-ID generation — it is retained for other
+// deterministic identifier needs such as cache keys.
 func HashProjectID(normalized string) string {
 	return uuid.NewSHA1(scionNamespace, []byte(normalized)).String()
 }

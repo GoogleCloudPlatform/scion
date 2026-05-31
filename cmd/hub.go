@@ -2289,9 +2289,9 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("failed to save project_id: %w", err)
 			}
 		} else if hubProject != nil {
-			// The lookup ID (either from a deterministic project_id collision or
-			// an inherited global hub.projectId) matched a different project on the
-			// Hub. This is not a genuine link for THIS project — ignore the match
+			// The lookup ID (either from a project_id collision or an inherited
+			// global hub.projectId) matched a different project on the Hub.
+			// This is not a genuine link for THIS project — ignore the match
 			// and proceed to register or link by name.
 			util.Debugf("Project ID %s matched hub project '%s' but is not an explicit link for local project '%s'; ignoring",
 				hubLookupID, hubProject.Name, projectName)
@@ -2331,7 +2331,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 					util.Debugf("Failed to register during link (non-fatal): %v", err)
 				}
 				// Store the hub project ID separately — don't overwrite the
-				// deterministic local project_id (which drives config-dir paths).
+				// local project_id (which drives config-dir paths).
 				if err := config.UpdateSetting(resolvedPath, "hub.projectId", selectedID, isGlobal); err != nil {
 					return fmt.Errorf("failed to save hub project ID: %w", err)
 				}

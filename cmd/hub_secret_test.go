@@ -236,7 +236,7 @@ func TestResolveSecretScope_ScopeHub(t *testing.T) {
 
 func TestResolveSecretScope_ProjectFallbackToProjectID(t *testing.T) {
 	// When --grove is set without value and settings.Hub.ProjectID is empty,
-	// it should fall back to settings.ProjectID (the top-level deterministic project ID).
+	// it should fall back to settings.ProjectID (the top-level project ID).
 	orig := saveSecretTestState()
 	defer orig.restore()
 

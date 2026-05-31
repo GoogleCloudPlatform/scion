@@ -383,7 +383,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 						return nil, fmt.Errorf("registration cancelled")
 					case ProjectChoiceLink:
 						// Store the hub project ID separately — don't overwrite
-						// the deterministic local project_id.
+						// the local project_id.
 						if err := config.UpdateSetting(resolvedPath, "hub.groveId", selectedID, isGlobal); err != nil {
 							return nil, fmt.Errorf("failed to save hub project ID: %w", err)
 						}
@@ -1278,8 +1278,8 @@ func registerProject(ctx context.Context, hubCtx *HubContext, projectName string
 		fmt.Printf("Linked to existing project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	}
 	// Store the hub project ID separately if it differs from the local project_id.
-	// Don't overwrite project_id — for git projects it's a deterministic UUID v5
-	// and changing it shifts the external config directory, orphaning settings.
+	// Don't overwrite project_id — changing it shifts the external config
+	// directory, orphaning settings.
 	if resp.Project.ID != hubCtx.ProjectID {
 		if err := config.UpdateSetting(hubCtx.ProjectPath, "hub.groveId", resp.Project.ID, isGlobal); err != nil {
 			fmt.Printf("Warning: failed to save hub project ID: %v\n", err)
