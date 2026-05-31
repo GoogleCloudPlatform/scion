@@ -128,6 +128,7 @@ interface RouteConfig {
 const ROUTES: RouteConfig[] = [
   { pattern: /^\/login$/, tag: 'scion-login-page', load: () => import('../components/pages/login.js') },
   { pattern: /^\/invite$/, tag: 'scion-page-invite', load: () => import('../components/pages/invite.js') },
+  { pattern: /^\/onboarding$/, tag: 'scion-page-onboarding', load: () => import('../components/pages/onboarding.js') },
   { pattern: /^\/$/, tag: 'scion-page-home', load: () => import('../components/pages/home.js') },
   { pattern: /^\/projects$/, tag: 'scion-page-projects', load: () => import('../components/pages/projects.js') },
   { pattern: /^\/agents$/, tag: 'scion-page-agents', load: () => import('../components/pages/agents.js') },
@@ -170,7 +171,7 @@ const ROUTES: RouteConfig[] = [
 /**
  * Routes that render without the app shell (full-page layout)
  */
-const STANDALONE_ROUTES = new Set(['scion-login-page', 'scion-page-invite']);
+const STANDALONE_ROUTES = new Set(['scion-login-page', 'scion-page-invite', 'scion-page-onboarding']);
 
 /**
  * Routes that render inside the profile shell instead of the main app shell
@@ -226,6 +227,23 @@ async function init(): Promise<void> {
   ]);
 
   console.info('[Scion] Components defined, setting up router...');
+
+  // First-run redirect: if the system hasn't completed onboarding, navigate to /onboarding
+  const skipRedirectPaths = ['/onboarding', '/login', '/invite'];
+  if (!skipRedirectPaths.includes(window.location.pathname)) {
+    try {
+      const statusRes = await fetch('/api/v1/system/status', { credentials: 'include' });
+      if (statusRes.ok) {
+        const status = await statusRes.json();
+        if (!status.complete) {
+          sessionStorage.setItem('onboardingStatus', JSON.stringify(status));
+          window.history.replaceState({}, '', '/onboarding');
+        }
+      }
+    } catch {
+      // System status endpoint unavailable (non-workstation mode) — skip redirect
+    }
+  }
 
   // Render the initial page based on current URL
   await renderRoute(window.location.pathname);
