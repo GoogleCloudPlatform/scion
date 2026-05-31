@@ -258,8 +258,8 @@ func TestInteractiveOnlyCommands(t *testing.T) {
 	expectedCommands := []string{
 		"scion attach",
 		"scion logs",
-		"scion broker start",
-		"scion broker stop",
+		"scion runtime-broker start",
+		"scion runtime-broker stop",
 		"scion server start",
 		"scion cdw",
 		"scion message",

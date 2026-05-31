@@ -2738,7 +2738,7 @@ func listBrokersForProject(ctx context.Context, client hubclient.Client, project
 	if len(resp.Brokers) == 0 {
 		fmt.Println()
 		fmt.Println("Warning: This project has no active runtime brokers.")
-		fmt.Println("Register one with 'scion broker register'")
+		fmt.Println("Register one with 'scion runtime-broker register'")
 		return
 	}
 

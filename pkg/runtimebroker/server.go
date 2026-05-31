@@ -651,7 +651,7 @@ func (s *Server) validateBrokerAuthStartup() error {
 		}
 		slog.Warn("Runtime Broker starting in hub mode without HMAC keys — pending registration",
 			"host", s.config.Host,
-			"hint", "run 'scion broker register' to complete setup",
+			"hint", "run 'scion runtime-broker register' to complete setup",
 		)
 		return nil
 	}
