@@ -517,6 +517,9 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 		for scanner.Scan() {
 			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: scanner.Text()})
 		}
+		if err := scanner.Err(); err != nil {
+			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "error reading build log: " + err.Error()})
+		}
 
 		if err := cmd.Wait(); err != nil {
 			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "build failed: " + err.Error()})
