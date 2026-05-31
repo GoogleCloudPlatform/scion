@@ -62,7 +62,7 @@ var logsCmd = &cobra.Command{
 		// Local mode: read from filesystem
 		rt := runtime.GetRuntime(projectPath, profile)
 
-		// Find the agent to get its grove path
+		// Find the agent to get its project path
 		agents, err := rt.List(context.Background(), map[string]string{
 			"scion.agent": "true",
 			"scion.name":  agentName,

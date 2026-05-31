@@ -39,10 +39,10 @@ var configListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all effective settings",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Resolve grove path
+		// Resolve project path
 		projectDir, err := config.GetResolvedProjectDir(projectPath)
-		// If we are not in a grove, we might only show global settings or defaults
-		// We handle the case where grove resolution fails gracefully for global listing?
+		// If we are not in a project, we might only show global settings or defaults
+		// We handle the case where project resolution fails gracefully for global listing?
 		// But LoadSettings expects projectPath. If empty, it loads Global + Defaults.
 
 		var effective *config.Settings
@@ -168,7 +168,7 @@ var configValidateCmd = &cobra.Command{
 	Short: "Validate settings files against the schema",
 	Long: `Validate settings files against the JSON Schema for the declared schema version.
 
-Checks both global (~/.scion/settings.yaml) and grove-level (.scion/settings.yaml)
+Checks both global (~/.scion/settings.yaml) and project-level (.scion/settings.yaml)
 settings files. Reports whether each file uses the versioned or legacy format,
 and lists any schema validation errors found.
 
@@ -206,7 +206,7 @@ against the schema — they use the pre-versioned format.`,
 			filePaths = append(filePaths, struct {
 				dir   string
 				label string
-			}{projectDir, "grove"})
+			}{projectDir, "project"})
 		}
 
 		for _, fp := range filePaths {
@@ -321,7 +321,7 @@ var configMigrateCmd = &cobra.Command{
 	Short: "Migrate configuration to the versioned format",
 	Long: `Migrate configuration files to the versioned settings format.
 
-Migrates legacy settings.yaml files (global and grove-level) to the versioned
+Migrates legacy settings.yaml files (global and project-level) to the versioned
 format with schema_version. If a server.yaml exists alongside the settings file,
 it is automatically merged under the 'server' key.
 
@@ -358,11 +358,11 @@ func runSettingsMigration() error {
 	}
 	dirs = append(dirs, dirEntry{dir: globalDir, label: "global"})
 
-	// Include grove dir if applicable and --global was not specified
+	// Include project dir if applicable and --global was not specified
 	if !configMigrateGlobal {
 		projectDir, err := config.GetResolvedProjectDir(projectPath)
 		if err == nil && projectDir != "" && projectDir != globalDir {
-			dirs = append(dirs, dirEntry{dir: projectDir, label: "grove"})
+			dirs = append(dirs, dirEntry{dir: projectDir, label: "project"})
 		}
 	}
 

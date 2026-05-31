@@ -195,7 +195,7 @@ func installLocally(name, sourcePath, projectPath string, force bool, harnessTyp
 			return fmt.Errorf("failed to resolve global directory: %w", err)
 		}
 		destDir = filepath.Join(globalDir, "harness-configs", name)
-		fmt.Fprintf(os.Stderr, "No grove found, installing to global: %s\n", destDir)
+		fmt.Fprintf(os.Stderr, "No project found, installing to global: %s\n", destDir)
 	}
 
 	if info, err := os.Stat(destDir); err == nil && info.IsDir() {
