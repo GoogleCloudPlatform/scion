@@ -304,13 +304,19 @@ export class ScionProfileNav extends LitElement {
       width: var(--scion-sidebar-collapsed-width, 64px);
     }
 
+    :host([collapsed]) .logo {
+      justify-content: center;
+      padding: 1.25rem 0.5rem;
+    }
+
     :host([collapsed]) .logo-text {
       display: none;
     }
 
     :host([collapsed]) .return-link {
       justify-content: center;
-      padding: 0.75rem;
+      padding: 0.5rem;
+      margin: 0.5rem;
       gap: 0;
     }
 
@@ -320,11 +326,15 @@ export class ScionProfileNav extends LitElement {
 
     :host([collapsed]) .user-info {
       justify-content: center;
-      padding: 0.75rem;
+      padding: 0.5rem;
     }
 
     :host([collapsed]) .user-details {
       display: none;
+    }
+
+    :host([collapsed]) .nav-container {
+      padding: 0.5rem 0.25rem;
     }
 
     :host([collapsed]) .nav-section-title {
@@ -333,7 +343,7 @@ export class ScionProfileNav extends LitElement {
 
     :host([collapsed]) .nav-link {
       justify-content: center;
-      padding: 0.75rem;
+      padding: 0.5rem;
     }
 
     :host([collapsed]) .nav-link-text {
@@ -342,7 +352,7 @@ export class ScionProfileNav extends LitElement {
 
     :host([collapsed]) .nav-link-external {
       justify-content: center;
-      padding: 0.75rem;
+      padding: 0.5rem;
     }
 
     :host([collapsed]) .nav-link-external .nav-link-text {
@@ -359,8 +369,8 @@ export class ScionProfileNav extends LitElement {
       align-items: center;
       justify-content: center;
       gap: 0.75rem;
-      margin: 0.75rem;
-      padding: 0.625rem 0.75rem;
+      margin: 0.5rem;
+      padding: 0.5rem 0.75rem;
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.5rem;
       background: transparent;

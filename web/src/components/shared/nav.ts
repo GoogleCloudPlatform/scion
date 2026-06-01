@@ -128,6 +128,11 @@ export class ScionNav extends LitElement {
       overflow: hidden;
     }
 
+    :host([collapsed]) .logo {
+      justify-content: center;
+      padding: 1.25rem 0.5rem;
+    }
+
     :host([collapsed]) .logo-text {
       display: none;
     }
@@ -179,6 +184,10 @@ export class ScionNav extends LitElement {
       padding: 0 0.75rem;
     }
 
+    :host([collapsed]) .nav-container {
+      padding: 0.5rem 0.25rem;
+    }
+
     :host([collapsed]) .nav-section-title {
       display: none;
     }
@@ -208,7 +217,7 @@ export class ScionNav extends LitElement {
 
     :host([collapsed]) .nav-link {
       justify-content: center;
-      padding: 0.75rem;
+      padding: 0.5rem;
     }
 
     .nav-link:hover {
@@ -245,8 +254,8 @@ export class ScionNav extends LitElement {
       align-items: center;
       justify-content: center;
       gap: 0.75rem;
-      margin: 0.75rem;
-      padding: 0.625rem 0.75rem;
+      margin: 0.5rem;
+      padding: 0.5rem 0.75rem;
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.5rem;
       background: transparent;

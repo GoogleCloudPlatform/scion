@@ -192,7 +192,11 @@ export class ScionApp extends LitElement {
     window.addEventListener('scion:access-denied', this._accessDeniedHandler as EventListener);
     this.addEventListener(PAGE_TITLE_EVENT, this._pageTitleHandler as EventListener);
     this.updateDocumentTitle();
-    this._sidebarCollapsed = localStorage.getItem('scion-sidebar-collapsed') === 'true';
+    try {
+      this._sidebarCollapsed = localStorage.getItem('scion-sidebar-collapsed') === 'true';
+    } catch {
+      // localStorage may be unavailable (SecurityError in restricted contexts)
+    }
   }
 
   override disconnectedCallback(): void {
@@ -348,7 +352,11 @@ export class ScionApp extends LitElement {
 
   private handleSidebarToggle(): void {
     this._sidebarCollapsed = !this._sidebarCollapsed;
-    localStorage.setItem('scion-sidebar-collapsed', String(this._sidebarCollapsed));
+    try {
+      localStorage.setItem('scion-sidebar-collapsed', String(this._sidebarCollapsed));
+    } catch {
+      // localStorage may be unavailable (SecurityError in restricted contexts)
+    }
   }
 
   private handleMobileMenuToggle(): void {

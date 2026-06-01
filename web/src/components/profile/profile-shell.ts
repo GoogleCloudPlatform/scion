@@ -130,7 +130,11 @@ export class ScionProfileShell extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    this._sidebarCollapsed = localStorage.getItem('scion-sidebar-collapsed') === 'true';
+    try {
+      this._sidebarCollapsed = localStorage.getItem('scion-sidebar-collapsed') === 'true';
+    } catch {
+      // localStorage may be unavailable (SecurityError in restricted contexts)
+    }
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
@@ -193,7 +197,11 @@ export class ScionProfileShell extends LitElement {
 
   private handleSidebarToggle(): void {
     this._sidebarCollapsed = !this._sidebarCollapsed;
-    localStorage.setItem('scion-sidebar-collapsed', String(this._sidebarCollapsed));
+    try {
+      localStorage.setItem('scion-sidebar-collapsed', String(this._sidebarCollapsed));
+    } catch {
+      // localStorage may be unavailable (SecurityError in restricted contexts)
+    }
   }
 
   private handleMobileMenuToggle(): void {
