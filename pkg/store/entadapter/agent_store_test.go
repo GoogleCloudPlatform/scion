@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,12 +35,9 @@ var agentTestProjectUID = uuid.MustParse("30000000-0000-0000-0000-0000000000a1")
 // in-memory SQLite backend serializes the transactional RMW paths.
 func newTestAgentStore(t *testing.T) (*AgentStore, string) {
 	t.Helper()
-	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{MaxOpenConns: 1})
-	require.NoError(t, err)
-	t.Cleanup(func() { client.Close() })
-	require.NoError(t, entc.AutoMigrate(context.Background(), client))
+	client := enttest.NewClient(t)
 
-	_, err = client.Project.Create().
+	_, err := client.Project.Create().
 		SetID(agentTestProjectUID).
 		SetName("test-project").
 		SetSlug("test-project").

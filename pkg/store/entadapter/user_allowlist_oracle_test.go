@@ -21,10 +21,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/storetest"
-	"github.com/stretchr/testify/require"
 )
 
 // entUserAllowStore is a test-only store that routes the user and
@@ -124,9 +123,7 @@ func (s *entUserAllowStore) GetInviteStats(ctx context.Context) (*store.InviteSt
 func entUserAllowFactory(t *testing.T) store.Store {
 	t.Helper()
 
-	entClient, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	require.NoError(t, entc.AutoMigrate(context.Background(), entClient))
+	entClient := enttest.NewClient(t)
 
 	cs := NewCompositeStore(entClient)
 	t.Cleanup(func() { _ = cs.Close() })

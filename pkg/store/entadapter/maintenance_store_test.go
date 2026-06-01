@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,10 +30,7 @@ import (
 
 func newTestMaintenanceStore(t *testing.T) *MaintenanceStore {
 	t.Helper()
-	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { client.Close() })
-	require.NoError(t, entc.AutoMigrate(context.Background(), client))
+	client := enttest.NewClient(t)
 	return NewMaintenanceStore(client)
 }
 

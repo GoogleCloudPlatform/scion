@@ -21,8 +21,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,10 +30,7 @@ import (
 
 func newTestNotificationStore(t *testing.T) *NotificationStore {
 	t.Helper()
-	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { client.Close() })
-	require.NoError(t, entc.AutoMigrate(context.Background(), client))
+	client := enttest.NewClient(t)
 	return NewNotificationStore(client)
 }
 
@@ -202,10 +199,7 @@ func TestNotificationStore_AcknowledgeAll(t *testing.T) {
 func TestNotificationStore_DispatchClaimIsExclusive(t *testing.T) {
 	ctx := context.Background()
 
-	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { client.Close() })
-	require.NoError(t, entc.AutoMigrate(ctx, client))
+	client := enttest.NewClient(t)
 
 	pub := &countingPublisher{}
 	s := NewNotificationStore(client).WithPublisher(pub)

@@ -22,8 +22,8 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,9 +34,7 @@ import (
 func newTestCompositeStore(t *testing.T) *CompositeStore {
 	t.Helper()
 
-	entClient, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	require.NoError(t, entc.AutoMigrate(context.Background(), entClient))
+	entClient := enttest.NewClient(t)
 
 	cs := NewCompositeStore(entClient)
 	t.Cleanup(func() { cs.Close() })
