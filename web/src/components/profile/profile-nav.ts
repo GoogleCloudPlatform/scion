@@ -107,6 +107,8 @@ export class ScionProfileNav extends LitElement {
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      opacity: 1;
+      transition: opacity var(--scion-transition-normal, 250ms ease);
     }
 
     .logo-text h1 {
@@ -149,6 +151,13 @@ export class ScionProfileNav extends LitElement {
       flex-shrink: 0;
     }
 
+    .return-link span {
+      overflow: hidden;
+      white-space: nowrap;
+      opacity: 1;
+      transition: opacity var(--scion-transition-normal, 250ms ease);
+    }
+
     .user-info {
       padding: 1rem;
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
@@ -177,6 +186,9 @@ export class ScionProfileNav extends LitElement {
       display: flex;
       flex-direction: column;
       min-width: 0;
+      overflow: hidden;
+      opacity: 1;
+      transition: opacity var(--scion-transition-normal, 250ms ease);
     }
 
     .user-name {
@@ -221,6 +233,10 @@ export class ScionProfileNav extends LitElement {
       color: var(--scion-text-muted, #64748b);
       margin-bottom: 0.5rem;
       padding: 0 0.75rem;
+      opacity: 1;
+      overflow: hidden;
+      white-space: nowrap;
+      transition: opacity var(--scion-transition-normal, 250ms ease);
     }
 
     .nav-list {
@@ -268,6 +284,8 @@ export class ScionProfileNav extends LitElement {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      opacity: 1;
+      transition: opacity var(--scion-transition-normal, 250ms ease);
     }
 
     .nav-link-external {
@@ -313,7 +331,9 @@ export class ScionProfileNav extends LitElement {
     }
 
     :host([collapsed]) .logo-text {
-      display: none;
+      opacity: 0;
+      width: 0;
+      pointer-events: none;
     }
 
     :host([collapsed]) .return-link {
@@ -324,7 +344,10 @@ export class ScionProfileNav extends LitElement {
     }
 
     :host([collapsed]) .return-link span {
-      display: none;
+      opacity: 0;
+      width: 0;
+      overflow: hidden;
+      pointer-events: none;
     }
 
     :host([collapsed]) .user-info {
@@ -333,7 +356,10 @@ export class ScionProfileNav extends LitElement {
     }
 
     :host([collapsed]) .user-details {
-      display: none;
+      opacity: 0;
+      width: 0;
+      overflow: hidden;
+      pointer-events: none;
     }
 
     :host([collapsed]) .nav-container {
@@ -341,7 +367,11 @@ export class ScionProfileNav extends LitElement {
     }
 
     :host([collapsed]) .nav-section-title {
-      display: none;
+      opacity: 0;
+      height: 0;
+      margin: 0;
+      padding: 0;
+      pointer-events: none;
     }
 
     :host([collapsed]) .nav-link {
@@ -350,7 +380,9 @@ export class ScionProfileNav extends LitElement {
     }
 
     :host([collapsed]) .nav-link-text {
-      display: none;
+      opacity: 0;
+      width: 0;
+      pointer-events: none;
     }
 
     :host([collapsed]) .nav-link-external {
@@ -359,11 +391,15 @@ export class ScionProfileNav extends LitElement {
     }
 
     :host([collapsed]) .nav-link-external .nav-link-text {
-      display: none;
+      opacity: 0;
+      width: 0;
+      pointer-events: none;
     }
 
     :host([collapsed]) .nav-link-external .external-icon {
-      display: none;
+      opacity: 0;
+      width: 0;
+      pointer-events: none;
     }
 
     /* Collapse toggle */
@@ -403,10 +439,14 @@ export class ScionProfileNav extends LitElement {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      opacity: 1;
+      transition: opacity var(--scion-transition-normal, 250ms ease);
     }
 
     :host([collapsed]) .collapse-toggle-text {
-      display: none;
+      opacity: 0;
+      width: 0;
+      pointer-events: none;
     }
   `;
 

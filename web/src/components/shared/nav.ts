@@ -132,6 +132,8 @@ export class ScionNav extends LitElement {
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      opacity: 1;
+      transition: opacity var(--scion-transition-normal, 250ms ease);
     }
 
     :host([collapsed]) .logo {
@@ -140,7 +142,9 @@ export class ScionNav extends LitElement {
     }
 
     :host([collapsed]) .logo-text {
-      display: none;
+      opacity: 0;
+      width: 0;
+      pointer-events: none;
     }
 
     .logo-text h1 {
@@ -188,6 +192,10 @@ export class ScionNav extends LitElement {
       color: var(--scion-text-muted, #64748b);
       margin-bottom: 0.5rem;
       padding: 0 0.75rem;
+      opacity: 1;
+      overflow: hidden;
+      white-space: nowrap;
+      transition: opacity var(--scion-transition-normal, 250ms ease);
     }
 
     :host([collapsed]) .nav-container {
@@ -195,7 +203,11 @@ export class ScionNav extends LitElement {
     }
 
     :host([collapsed]) .nav-section-title {
-      display: none;
+      opacity: 0;
+      height: 0;
+      margin: 0;
+      padding: 0;
+      pointer-events: none;
     }
 
     .nav-list {
@@ -248,10 +260,14 @@ export class ScionNav extends LitElement {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      opacity: 1;
+      transition: opacity var(--scion-transition-normal, 250ms ease);
     }
 
     :host([collapsed]) .nav-link-text {
-      display: none;
+      opacity: 0;
+      width: 0;
+      pointer-events: none;
     }
 
     /* Collapse toggle */
@@ -291,10 +307,14 @@ export class ScionNav extends LitElement {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      opacity: 1;
+      transition: opacity var(--scion-transition-normal, 250ms ease);
     }
 
     :host([collapsed]) .collapse-toggle-text {
-      display: none;
+      opacity: 0;
+      width: 0;
+      pointer-events: none;
     }
 
     /* Smooth width transition */
