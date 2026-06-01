@@ -28,6 +28,8 @@ type RuntimeBroker struct {
 	Mode string `json:"mode,omitempty"`
 	// Version holds the value of the "version" field.
 	Version string `json:"version,omitempty"`
+	// LockVersion holds the value of the "lock_version" field.
+	LockVersion int64 `json:"lock_version,omitempty"`
 	// Status holds the value of the "status" field.
 	Status string `json:"status,omitempty"`
 	// ConnectionState holds the value of the "connection_state" field.
@@ -66,6 +68,8 @@ func (*RuntimeBroker) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case runtimebroker.FieldAutoProvide:
 			values[i] = new(sql.NullBool)
+		case runtimebroker.FieldLockVersion:
+			values[i] = new(sql.NullInt64)
 		case runtimebroker.FieldName, runtimebroker.FieldSlug, runtimebroker.FieldType, runtimebroker.FieldMode, runtimebroker.FieldVersion, runtimebroker.FieldStatus, runtimebroker.FieldConnectionState, runtimebroker.FieldCapabilities, runtimebroker.FieldSupportedHarnesses, runtimebroker.FieldResources, runtimebroker.FieldRuntimes, runtimebroker.FieldLabels, runtimebroker.FieldAnnotations, runtimebroker.FieldEndpoint, runtimebroker.FieldCreatedBy:
 			values[i] = new(sql.NullString)
 		case runtimebroker.FieldLastHeartbeat, runtimebroker.FieldCreated, runtimebroker.FieldUpdated:
@@ -122,6 +126,12 @@ func (_m *RuntimeBroker) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field version", values[i])
 			} else if value.Valid {
 				_m.Version = value.String
+			}
+		case runtimebroker.FieldLockVersion:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field lock_version", values[i])
+			} else if value.Valid {
+				_m.LockVersion = value.Int64
 			}
 		case runtimebroker.FieldStatus:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -258,6 +268,9 @@ func (_m *RuntimeBroker) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("version=")
 	builder.WriteString(_m.Version)
+	builder.WriteString(", ")
+	builder.WriteString("lock_version=")
+	builder.WriteString(fmt.Sprintf("%v", _m.LockVersion))
 	builder.WriteString(", ")
 	builder.WriteString("status=")
 	builder.WriteString(_m.Status)

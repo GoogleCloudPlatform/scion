@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
@@ -19,6 +21,7 @@ type BrokerSecretCreate struct {
 	config
 	mutation *BrokerSecretMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetSecretKey sets the "secret_key" field.
@@ -202,6 +205,7 @@ func (_c *BrokerSecretCreate) createSpec() (*BrokerSecret, *sqlgraph.CreateSpec)
 		_node = &BrokerSecret{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(brokersecret.Table, sqlgraph.NewFieldSpec(brokersecret.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -233,11 +237,306 @@ func (_c *BrokerSecretCreate) createSpec() (*BrokerSecret, *sqlgraph.CreateSpec)
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.BrokerSecret.Create().
+//		SetSecretKey(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.BrokerSecretUpsert) {
+//			SetSecretKey(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *BrokerSecretCreate) OnConflict(opts ...sql.ConflictOption) *BrokerSecretUpsertOne {
+	_c.conflict = opts
+	return &BrokerSecretUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.BrokerSecret.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *BrokerSecretCreate) OnConflictColumns(columns ...string) *BrokerSecretUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &BrokerSecretUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// BrokerSecretUpsertOne is the builder for "upsert"-ing
+	//  one BrokerSecret node.
+	BrokerSecretUpsertOne struct {
+		create *BrokerSecretCreate
+	}
+
+	// BrokerSecretUpsert is the "OnConflict" setter.
+	BrokerSecretUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetSecretKey sets the "secret_key" field.
+func (u *BrokerSecretUpsert) SetSecretKey(v []byte) *BrokerSecretUpsert {
+	u.Set(brokersecret.FieldSecretKey, v)
+	return u
+}
+
+// UpdateSecretKey sets the "secret_key" field to the value that was provided on create.
+func (u *BrokerSecretUpsert) UpdateSecretKey() *BrokerSecretUpsert {
+	u.SetExcluded(brokersecret.FieldSecretKey)
+	return u
+}
+
+// SetAlgorithm sets the "algorithm" field.
+func (u *BrokerSecretUpsert) SetAlgorithm(v string) *BrokerSecretUpsert {
+	u.Set(brokersecret.FieldAlgorithm, v)
+	return u
+}
+
+// UpdateAlgorithm sets the "algorithm" field to the value that was provided on create.
+func (u *BrokerSecretUpsert) UpdateAlgorithm() *BrokerSecretUpsert {
+	u.SetExcluded(brokersecret.FieldAlgorithm)
+	return u
+}
+
+// SetRotatedAt sets the "rotated_at" field.
+func (u *BrokerSecretUpsert) SetRotatedAt(v time.Time) *BrokerSecretUpsert {
+	u.Set(brokersecret.FieldRotatedAt, v)
+	return u
+}
+
+// UpdateRotatedAt sets the "rotated_at" field to the value that was provided on create.
+func (u *BrokerSecretUpsert) UpdateRotatedAt() *BrokerSecretUpsert {
+	u.SetExcluded(brokersecret.FieldRotatedAt)
+	return u
+}
+
+// ClearRotatedAt clears the value of the "rotated_at" field.
+func (u *BrokerSecretUpsert) ClearRotatedAt() *BrokerSecretUpsert {
+	u.SetNull(brokersecret.FieldRotatedAt)
+	return u
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (u *BrokerSecretUpsert) SetExpiresAt(v time.Time) *BrokerSecretUpsert {
+	u.Set(brokersecret.FieldExpiresAt, v)
+	return u
+}
+
+// UpdateExpiresAt sets the "expires_at" field to the value that was provided on create.
+func (u *BrokerSecretUpsert) UpdateExpiresAt() *BrokerSecretUpsert {
+	u.SetExcluded(brokersecret.FieldExpiresAt)
+	return u
+}
+
+// ClearExpiresAt clears the value of the "expires_at" field.
+func (u *BrokerSecretUpsert) ClearExpiresAt() *BrokerSecretUpsert {
+	u.SetNull(brokersecret.FieldExpiresAt)
+	return u
+}
+
+// SetStatus sets the "status" field.
+func (u *BrokerSecretUpsert) SetStatus(v string) *BrokerSecretUpsert {
+	u.Set(brokersecret.FieldStatus, v)
+	return u
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *BrokerSecretUpsert) UpdateStatus() *BrokerSecretUpsert {
+	u.SetExcluded(brokersecret.FieldStatus)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.BrokerSecret.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(brokersecret.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *BrokerSecretUpsertOne) UpdateNewValues() *BrokerSecretUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(brokersecret.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(brokersecret.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.BrokerSecret.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *BrokerSecretUpsertOne) Ignore() *BrokerSecretUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *BrokerSecretUpsertOne) DoNothing() *BrokerSecretUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the BrokerSecretCreate.OnConflict
+// documentation for more info.
+func (u *BrokerSecretUpsertOne) Update(set func(*BrokerSecretUpsert)) *BrokerSecretUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&BrokerSecretUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetSecretKey sets the "secret_key" field.
+func (u *BrokerSecretUpsertOne) SetSecretKey(v []byte) *BrokerSecretUpsertOne {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.SetSecretKey(v)
+	})
+}
+
+// UpdateSecretKey sets the "secret_key" field to the value that was provided on create.
+func (u *BrokerSecretUpsertOne) UpdateSecretKey() *BrokerSecretUpsertOne {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.UpdateSecretKey()
+	})
+}
+
+// SetAlgorithm sets the "algorithm" field.
+func (u *BrokerSecretUpsertOne) SetAlgorithm(v string) *BrokerSecretUpsertOne {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.SetAlgorithm(v)
+	})
+}
+
+// UpdateAlgorithm sets the "algorithm" field to the value that was provided on create.
+func (u *BrokerSecretUpsertOne) UpdateAlgorithm() *BrokerSecretUpsertOne {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.UpdateAlgorithm()
+	})
+}
+
+// SetRotatedAt sets the "rotated_at" field.
+func (u *BrokerSecretUpsertOne) SetRotatedAt(v time.Time) *BrokerSecretUpsertOne {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.SetRotatedAt(v)
+	})
+}
+
+// UpdateRotatedAt sets the "rotated_at" field to the value that was provided on create.
+func (u *BrokerSecretUpsertOne) UpdateRotatedAt() *BrokerSecretUpsertOne {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.UpdateRotatedAt()
+	})
+}
+
+// ClearRotatedAt clears the value of the "rotated_at" field.
+func (u *BrokerSecretUpsertOne) ClearRotatedAt() *BrokerSecretUpsertOne {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.ClearRotatedAt()
+	})
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (u *BrokerSecretUpsertOne) SetExpiresAt(v time.Time) *BrokerSecretUpsertOne {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.SetExpiresAt(v)
+	})
+}
+
+// UpdateExpiresAt sets the "expires_at" field to the value that was provided on create.
+func (u *BrokerSecretUpsertOne) UpdateExpiresAt() *BrokerSecretUpsertOne {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.UpdateExpiresAt()
+	})
+}
+
+// ClearExpiresAt clears the value of the "expires_at" field.
+func (u *BrokerSecretUpsertOne) ClearExpiresAt() *BrokerSecretUpsertOne {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.ClearExpiresAt()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *BrokerSecretUpsertOne) SetStatus(v string) *BrokerSecretUpsertOne {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *BrokerSecretUpsertOne) UpdateStatus() *BrokerSecretUpsertOne {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// Exec executes the query.
+func (u *BrokerSecretUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for BrokerSecretCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *BrokerSecretUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *BrokerSecretUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: BrokerSecretUpsertOne.ID is not supported by MySQL driver. Use BrokerSecretUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *BrokerSecretUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // BrokerSecretCreateBulk is the builder for creating many BrokerSecret entities in bulk.
 type BrokerSecretCreateBulk struct {
 	config
 	err      error
 	builders []*BrokerSecretCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the BrokerSecret entities in the database.
@@ -267,6 +566,7 @@ func (_c *BrokerSecretCreateBulk) Save(ctx context.Context) ([]*BrokerSecret, er
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -313,6 +613,207 @@ func (_c *BrokerSecretCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *BrokerSecretCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.BrokerSecret.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.BrokerSecretUpsert) {
+//			SetSecretKey(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *BrokerSecretCreateBulk) OnConflict(opts ...sql.ConflictOption) *BrokerSecretUpsertBulk {
+	_c.conflict = opts
+	return &BrokerSecretUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.BrokerSecret.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *BrokerSecretCreateBulk) OnConflictColumns(columns ...string) *BrokerSecretUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &BrokerSecretUpsertBulk{
+		create: _c,
+	}
+}
+
+// BrokerSecretUpsertBulk is the builder for "upsert"-ing
+// a bulk of BrokerSecret nodes.
+type BrokerSecretUpsertBulk struct {
+	create *BrokerSecretCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.BrokerSecret.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(brokersecret.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *BrokerSecretUpsertBulk) UpdateNewValues() *BrokerSecretUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(brokersecret.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(brokersecret.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.BrokerSecret.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *BrokerSecretUpsertBulk) Ignore() *BrokerSecretUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *BrokerSecretUpsertBulk) DoNothing() *BrokerSecretUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the BrokerSecretCreateBulk.OnConflict
+// documentation for more info.
+func (u *BrokerSecretUpsertBulk) Update(set func(*BrokerSecretUpsert)) *BrokerSecretUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&BrokerSecretUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetSecretKey sets the "secret_key" field.
+func (u *BrokerSecretUpsertBulk) SetSecretKey(v []byte) *BrokerSecretUpsertBulk {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.SetSecretKey(v)
+	})
+}
+
+// UpdateSecretKey sets the "secret_key" field to the value that was provided on create.
+func (u *BrokerSecretUpsertBulk) UpdateSecretKey() *BrokerSecretUpsertBulk {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.UpdateSecretKey()
+	})
+}
+
+// SetAlgorithm sets the "algorithm" field.
+func (u *BrokerSecretUpsertBulk) SetAlgorithm(v string) *BrokerSecretUpsertBulk {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.SetAlgorithm(v)
+	})
+}
+
+// UpdateAlgorithm sets the "algorithm" field to the value that was provided on create.
+func (u *BrokerSecretUpsertBulk) UpdateAlgorithm() *BrokerSecretUpsertBulk {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.UpdateAlgorithm()
+	})
+}
+
+// SetRotatedAt sets the "rotated_at" field.
+func (u *BrokerSecretUpsertBulk) SetRotatedAt(v time.Time) *BrokerSecretUpsertBulk {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.SetRotatedAt(v)
+	})
+}
+
+// UpdateRotatedAt sets the "rotated_at" field to the value that was provided on create.
+func (u *BrokerSecretUpsertBulk) UpdateRotatedAt() *BrokerSecretUpsertBulk {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.UpdateRotatedAt()
+	})
+}
+
+// ClearRotatedAt clears the value of the "rotated_at" field.
+func (u *BrokerSecretUpsertBulk) ClearRotatedAt() *BrokerSecretUpsertBulk {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.ClearRotatedAt()
+	})
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (u *BrokerSecretUpsertBulk) SetExpiresAt(v time.Time) *BrokerSecretUpsertBulk {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.SetExpiresAt(v)
+	})
+}
+
+// UpdateExpiresAt sets the "expires_at" field to the value that was provided on create.
+func (u *BrokerSecretUpsertBulk) UpdateExpiresAt() *BrokerSecretUpsertBulk {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.UpdateExpiresAt()
+	})
+}
+
+// ClearExpiresAt clears the value of the "expires_at" field.
+func (u *BrokerSecretUpsertBulk) ClearExpiresAt() *BrokerSecretUpsertBulk {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.ClearExpiresAt()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *BrokerSecretUpsertBulk) SetStatus(v string) *BrokerSecretUpsertBulk {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *BrokerSecretUpsertBulk) UpdateStatus() *BrokerSecretUpsertBulk {
+	return u.Update(func(s *BrokerSecretUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// Exec executes the query.
+func (u *BrokerSecretUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the BrokerSecretCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for BrokerSecretCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *BrokerSecretUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectsyncstate"
@@ -19,6 +21,7 @@ type ProjectSyncStateCreate struct {
 	config
 	mutation *ProjectSyncStateMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetProjectID sets the "project_id" field.
@@ -209,6 +212,7 @@ func (_c *ProjectSyncStateCreate) createSpec() (*ProjectSyncState, *sqlgraph.Cre
 		_node = &ProjectSyncState{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(projectsyncstate.Table, sqlgraph.NewFieldSpec(projectsyncstate.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -240,11 +244,355 @@ func (_c *ProjectSyncStateCreate) createSpec() (*ProjectSyncState, *sqlgraph.Cre
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.ProjectSyncState.Create().
+//		SetProjectID(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.ProjectSyncStateUpsert) {
+//			SetProjectID(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *ProjectSyncStateCreate) OnConflict(opts ...sql.ConflictOption) *ProjectSyncStateUpsertOne {
+	_c.conflict = opts
+	return &ProjectSyncStateUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.ProjectSyncState.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *ProjectSyncStateCreate) OnConflictColumns(columns ...string) *ProjectSyncStateUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &ProjectSyncStateUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// ProjectSyncStateUpsertOne is the builder for "upsert"-ing
+	//  one ProjectSyncState node.
+	ProjectSyncStateUpsertOne struct {
+		create *ProjectSyncStateCreate
+	}
+
+	// ProjectSyncStateUpsert is the "OnConflict" setter.
+	ProjectSyncStateUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetProjectID sets the "project_id" field.
+func (u *ProjectSyncStateUpsert) SetProjectID(v uuid.UUID) *ProjectSyncStateUpsert {
+	u.Set(projectsyncstate.FieldProjectID, v)
+	return u
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *ProjectSyncStateUpsert) UpdateProjectID() *ProjectSyncStateUpsert {
+	u.SetExcluded(projectsyncstate.FieldProjectID)
+	return u
+}
+
+// SetBrokerID sets the "broker_id" field.
+func (u *ProjectSyncStateUpsert) SetBrokerID(v string) *ProjectSyncStateUpsert {
+	u.Set(projectsyncstate.FieldBrokerID, v)
+	return u
+}
+
+// UpdateBrokerID sets the "broker_id" field to the value that was provided on create.
+func (u *ProjectSyncStateUpsert) UpdateBrokerID() *ProjectSyncStateUpsert {
+	u.SetExcluded(projectsyncstate.FieldBrokerID)
+	return u
+}
+
+// SetLastSyncTime sets the "last_sync_time" field.
+func (u *ProjectSyncStateUpsert) SetLastSyncTime(v time.Time) *ProjectSyncStateUpsert {
+	u.Set(projectsyncstate.FieldLastSyncTime, v)
+	return u
+}
+
+// UpdateLastSyncTime sets the "last_sync_time" field to the value that was provided on create.
+func (u *ProjectSyncStateUpsert) UpdateLastSyncTime() *ProjectSyncStateUpsert {
+	u.SetExcluded(projectsyncstate.FieldLastSyncTime)
+	return u
+}
+
+// ClearLastSyncTime clears the value of the "last_sync_time" field.
+func (u *ProjectSyncStateUpsert) ClearLastSyncTime() *ProjectSyncStateUpsert {
+	u.SetNull(projectsyncstate.FieldLastSyncTime)
+	return u
+}
+
+// SetLastCommitSha sets the "last_commit_sha" field.
+func (u *ProjectSyncStateUpsert) SetLastCommitSha(v string) *ProjectSyncStateUpsert {
+	u.Set(projectsyncstate.FieldLastCommitSha, v)
+	return u
+}
+
+// UpdateLastCommitSha sets the "last_commit_sha" field to the value that was provided on create.
+func (u *ProjectSyncStateUpsert) UpdateLastCommitSha() *ProjectSyncStateUpsert {
+	u.SetExcluded(projectsyncstate.FieldLastCommitSha)
+	return u
+}
+
+// ClearLastCommitSha clears the value of the "last_commit_sha" field.
+func (u *ProjectSyncStateUpsert) ClearLastCommitSha() *ProjectSyncStateUpsert {
+	u.SetNull(projectsyncstate.FieldLastCommitSha)
+	return u
+}
+
+// SetFileCount sets the "file_count" field.
+func (u *ProjectSyncStateUpsert) SetFileCount(v int) *ProjectSyncStateUpsert {
+	u.Set(projectsyncstate.FieldFileCount, v)
+	return u
+}
+
+// UpdateFileCount sets the "file_count" field to the value that was provided on create.
+func (u *ProjectSyncStateUpsert) UpdateFileCount() *ProjectSyncStateUpsert {
+	u.SetExcluded(projectsyncstate.FieldFileCount)
+	return u
+}
+
+// AddFileCount adds v to the "file_count" field.
+func (u *ProjectSyncStateUpsert) AddFileCount(v int) *ProjectSyncStateUpsert {
+	u.Add(projectsyncstate.FieldFileCount, v)
+	return u
+}
+
+// SetTotalBytes sets the "total_bytes" field.
+func (u *ProjectSyncStateUpsert) SetTotalBytes(v int64) *ProjectSyncStateUpsert {
+	u.Set(projectsyncstate.FieldTotalBytes, v)
+	return u
+}
+
+// UpdateTotalBytes sets the "total_bytes" field to the value that was provided on create.
+func (u *ProjectSyncStateUpsert) UpdateTotalBytes() *ProjectSyncStateUpsert {
+	u.SetExcluded(projectsyncstate.FieldTotalBytes)
+	return u
+}
+
+// AddTotalBytes adds v to the "total_bytes" field.
+func (u *ProjectSyncStateUpsert) AddTotalBytes(v int64) *ProjectSyncStateUpsert {
+	u.Add(projectsyncstate.FieldTotalBytes, v)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.ProjectSyncState.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(projectsyncstate.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *ProjectSyncStateUpsertOne) UpdateNewValues() *ProjectSyncStateUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(projectsyncstate.FieldID)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.ProjectSyncState.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *ProjectSyncStateUpsertOne) Ignore() *ProjectSyncStateUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *ProjectSyncStateUpsertOne) DoNothing() *ProjectSyncStateUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the ProjectSyncStateCreate.OnConflict
+// documentation for more info.
+func (u *ProjectSyncStateUpsertOne) Update(set func(*ProjectSyncStateUpsert)) *ProjectSyncStateUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&ProjectSyncStateUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *ProjectSyncStateUpsertOne) SetProjectID(v uuid.UUID) *ProjectSyncStateUpsertOne {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *ProjectSyncStateUpsertOne) UpdateProjectID() *ProjectSyncStateUpsertOne {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// SetBrokerID sets the "broker_id" field.
+func (u *ProjectSyncStateUpsertOne) SetBrokerID(v string) *ProjectSyncStateUpsertOne {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.SetBrokerID(v)
+	})
+}
+
+// UpdateBrokerID sets the "broker_id" field to the value that was provided on create.
+func (u *ProjectSyncStateUpsertOne) UpdateBrokerID() *ProjectSyncStateUpsertOne {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.UpdateBrokerID()
+	})
+}
+
+// SetLastSyncTime sets the "last_sync_time" field.
+func (u *ProjectSyncStateUpsertOne) SetLastSyncTime(v time.Time) *ProjectSyncStateUpsertOne {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.SetLastSyncTime(v)
+	})
+}
+
+// UpdateLastSyncTime sets the "last_sync_time" field to the value that was provided on create.
+func (u *ProjectSyncStateUpsertOne) UpdateLastSyncTime() *ProjectSyncStateUpsertOne {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.UpdateLastSyncTime()
+	})
+}
+
+// ClearLastSyncTime clears the value of the "last_sync_time" field.
+func (u *ProjectSyncStateUpsertOne) ClearLastSyncTime() *ProjectSyncStateUpsertOne {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.ClearLastSyncTime()
+	})
+}
+
+// SetLastCommitSha sets the "last_commit_sha" field.
+func (u *ProjectSyncStateUpsertOne) SetLastCommitSha(v string) *ProjectSyncStateUpsertOne {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.SetLastCommitSha(v)
+	})
+}
+
+// UpdateLastCommitSha sets the "last_commit_sha" field to the value that was provided on create.
+func (u *ProjectSyncStateUpsertOne) UpdateLastCommitSha() *ProjectSyncStateUpsertOne {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.UpdateLastCommitSha()
+	})
+}
+
+// ClearLastCommitSha clears the value of the "last_commit_sha" field.
+func (u *ProjectSyncStateUpsertOne) ClearLastCommitSha() *ProjectSyncStateUpsertOne {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.ClearLastCommitSha()
+	})
+}
+
+// SetFileCount sets the "file_count" field.
+func (u *ProjectSyncStateUpsertOne) SetFileCount(v int) *ProjectSyncStateUpsertOne {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.SetFileCount(v)
+	})
+}
+
+// AddFileCount adds v to the "file_count" field.
+func (u *ProjectSyncStateUpsertOne) AddFileCount(v int) *ProjectSyncStateUpsertOne {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.AddFileCount(v)
+	})
+}
+
+// UpdateFileCount sets the "file_count" field to the value that was provided on create.
+func (u *ProjectSyncStateUpsertOne) UpdateFileCount() *ProjectSyncStateUpsertOne {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.UpdateFileCount()
+	})
+}
+
+// SetTotalBytes sets the "total_bytes" field.
+func (u *ProjectSyncStateUpsertOne) SetTotalBytes(v int64) *ProjectSyncStateUpsertOne {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.SetTotalBytes(v)
+	})
+}
+
+// AddTotalBytes adds v to the "total_bytes" field.
+func (u *ProjectSyncStateUpsertOne) AddTotalBytes(v int64) *ProjectSyncStateUpsertOne {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.AddTotalBytes(v)
+	})
+}
+
+// UpdateTotalBytes sets the "total_bytes" field to the value that was provided on create.
+func (u *ProjectSyncStateUpsertOne) UpdateTotalBytes() *ProjectSyncStateUpsertOne {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.UpdateTotalBytes()
+	})
+}
+
+// Exec executes the query.
+func (u *ProjectSyncStateUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for ProjectSyncStateCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *ProjectSyncStateUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *ProjectSyncStateUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: ProjectSyncStateUpsertOne.ID is not supported by MySQL driver. Use ProjectSyncStateUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *ProjectSyncStateUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // ProjectSyncStateCreateBulk is the builder for creating many ProjectSyncState entities in bulk.
 type ProjectSyncStateCreateBulk struct {
 	config
 	err      error
 	builders []*ProjectSyncStateCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the ProjectSyncState entities in the database.
@@ -274,6 +622,7 @@ func (_c *ProjectSyncStateCreateBulk) Save(ctx context.Context) ([]*ProjectSyncS
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -320,6 +669,232 @@ func (_c *ProjectSyncStateCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *ProjectSyncStateCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.ProjectSyncState.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.ProjectSyncStateUpsert) {
+//			SetProjectID(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *ProjectSyncStateCreateBulk) OnConflict(opts ...sql.ConflictOption) *ProjectSyncStateUpsertBulk {
+	_c.conflict = opts
+	return &ProjectSyncStateUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.ProjectSyncState.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *ProjectSyncStateCreateBulk) OnConflictColumns(columns ...string) *ProjectSyncStateUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &ProjectSyncStateUpsertBulk{
+		create: _c,
+	}
+}
+
+// ProjectSyncStateUpsertBulk is the builder for "upsert"-ing
+// a bulk of ProjectSyncState nodes.
+type ProjectSyncStateUpsertBulk struct {
+	create *ProjectSyncStateCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.ProjectSyncState.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(projectsyncstate.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *ProjectSyncStateUpsertBulk) UpdateNewValues() *ProjectSyncStateUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(projectsyncstate.FieldID)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.ProjectSyncState.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *ProjectSyncStateUpsertBulk) Ignore() *ProjectSyncStateUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *ProjectSyncStateUpsertBulk) DoNothing() *ProjectSyncStateUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the ProjectSyncStateCreateBulk.OnConflict
+// documentation for more info.
+func (u *ProjectSyncStateUpsertBulk) Update(set func(*ProjectSyncStateUpsert)) *ProjectSyncStateUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&ProjectSyncStateUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *ProjectSyncStateUpsertBulk) SetProjectID(v uuid.UUID) *ProjectSyncStateUpsertBulk {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *ProjectSyncStateUpsertBulk) UpdateProjectID() *ProjectSyncStateUpsertBulk {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// SetBrokerID sets the "broker_id" field.
+func (u *ProjectSyncStateUpsertBulk) SetBrokerID(v string) *ProjectSyncStateUpsertBulk {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.SetBrokerID(v)
+	})
+}
+
+// UpdateBrokerID sets the "broker_id" field to the value that was provided on create.
+func (u *ProjectSyncStateUpsertBulk) UpdateBrokerID() *ProjectSyncStateUpsertBulk {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.UpdateBrokerID()
+	})
+}
+
+// SetLastSyncTime sets the "last_sync_time" field.
+func (u *ProjectSyncStateUpsertBulk) SetLastSyncTime(v time.Time) *ProjectSyncStateUpsertBulk {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.SetLastSyncTime(v)
+	})
+}
+
+// UpdateLastSyncTime sets the "last_sync_time" field to the value that was provided on create.
+func (u *ProjectSyncStateUpsertBulk) UpdateLastSyncTime() *ProjectSyncStateUpsertBulk {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.UpdateLastSyncTime()
+	})
+}
+
+// ClearLastSyncTime clears the value of the "last_sync_time" field.
+func (u *ProjectSyncStateUpsertBulk) ClearLastSyncTime() *ProjectSyncStateUpsertBulk {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.ClearLastSyncTime()
+	})
+}
+
+// SetLastCommitSha sets the "last_commit_sha" field.
+func (u *ProjectSyncStateUpsertBulk) SetLastCommitSha(v string) *ProjectSyncStateUpsertBulk {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.SetLastCommitSha(v)
+	})
+}
+
+// UpdateLastCommitSha sets the "last_commit_sha" field to the value that was provided on create.
+func (u *ProjectSyncStateUpsertBulk) UpdateLastCommitSha() *ProjectSyncStateUpsertBulk {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.UpdateLastCommitSha()
+	})
+}
+
+// ClearLastCommitSha clears the value of the "last_commit_sha" field.
+func (u *ProjectSyncStateUpsertBulk) ClearLastCommitSha() *ProjectSyncStateUpsertBulk {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.ClearLastCommitSha()
+	})
+}
+
+// SetFileCount sets the "file_count" field.
+func (u *ProjectSyncStateUpsertBulk) SetFileCount(v int) *ProjectSyncStateUpsertBulk {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.SetFileCount(v)
+	})
+}
+
+// AddFileCount adds v to the "file_count" field.
+func (u *ProjectSyncStateUpsertBulk) AddFileCount(v int) *ProjectSyncStateUpsertBulk {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.AddFileCount(v)
+	})
+}
+
+// UpdateFileCount sets the "file_count" field to the value that was provided on create.
+func (u *ProjectSyncStateUpsertBulk) UpdateFileCount() *ProjectSyncStateUpsertBulk {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.UpdateFileCount()
+	})
+}
+
+// SetTotalBytes sets the "total_bytes" field.
+func (u *ProjectSyncStateUpsertBulk) SetTotalBytes(v int64) *ProjectSyncStateUpsertBulk {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.SetTotalBytes(v)
+	})
+}
+
+// AddTotalBytes adds v to the "total_bytes" field.
+func (u *ProjectSyncStateUpsertBulk) AddTotalBytes(v int64) *ProjectSyncStateUpsertBulk {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.AddTotalBytes(v)
+	})
+}
+
+// UpdateTotalBytes sets the "total_bytes" field to the value that was provided on create.
+func (u *ProjectSyncStateUpsertBulk) UpdateTotalBytes() *ProjectSyncStateUpsertBulk {
+	return u.Update(func(s *ProjectSyncStateUpsert) {
+		s.UpdateTotalBytes()
+	})
+}
+
+// Exec executes the query.
+func (u *ProjectSyncStateUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the ProjectSyncStateCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for ProjectSyncStateCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *ProjectSyncStateUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

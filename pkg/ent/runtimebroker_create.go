@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
@@ -19,6 +21,7 @@ type RuntimeBrokerCreate struct {
 	config
 	mutation *RuntimeBrokerMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetName sets the "name" field.
@@ -36,6 +39,14 @@ func (_c *RuntimeBrokerCreate) SetSlug(v string) *RuntimeBrokerCreate {
 // SetType sets the "type" field.
 func (_c *RuntimeBrokerCreate) SetType(v string) *RuntimeBrokerCreate {
 	_c.mutation.SetType(v)
+	return _c
+}
+
+// SetNillableType sets the "type" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableType(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetType(*v)
+	}
 	return _c
 }
 
@@ -63,6 +74,20 @@ func (_c *RuntimeBrokerCreate) SetVersion(v string) *RuntimeBrokerCreate {
 func (_c *RuntimeBrokerCreate) SetNillableVersion(v *string) *RuntimeBrokerCreate {
 	if v != nil {
 		_c.SetVersion(*v)
+	}
+	return _c
+}
+
+// SetLockVersion sets the "lock_version" field.
+func (_c *RuntimeBrokerCreate) SetLockVersion(v int64) *RuntimeBrokerCreate {
+	_c.mutation.SetLockVersion(v)
+	return _c
+}
+
+// SetNillableLockVersion sets the "lock_version" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableLockVersion(v *int64) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetLockVersion(*v)
 	}
 	return _c
 }
@@ -316,6 +341,10 @@ func (_c *RuntimeBrokerCreate) defaults() {
 		v := runtimebroker.DefaultMode
 		_c.mutation.SetMode(v)
 	}
+	if _, ok := _c.mutation.LockVersion(); !ok {
+		v := runtimebroker.DefaultLockVersion
+		_c.mutation.SetLockVersion(v)
+	}
 	if _, ok := _c.mutation.Status(); !ok {
 		v := runtimebroker.DefaultStatus
 		_c.mutation.SetStatus(v)
@@ -360,16 +389,11 @@ func (_c *RuntimeBrokerCreate) check() error {
 			return &ValidationError{Name: "slug", err: fmt.Errorf(`ent: validator failed for field "RuntimeBroker.slug": %w`, err)}
 		}
 	}
-	if _, ok := _c.mutation.GetType(); !ok {
-		return &ValidationError{Name: "type", err: errors.New(`ent: missing required field "RuntimeBroker.type"`)}
-	}
-	if v, ok := _c.mutation.GetType(); ok {
-		if err := runtimebroker.TypeValidator(v); err != nil {
-			return &ValidationError{Name: "type", err: fmt.Errorf(`ent: validator failed for field "RuntimeBroker.type": %w`, err)}
-		}
-	}
 	if _, ok := _c.mutation.Mode(); !ok {
 		return &ValidationError{Name: "mode", err: errors.New(`ent: missing required field "RuntimeBroker.mode"`)}
+	}
+	if _, ok := _c.mutation.LockVersion(); !ok {
+		return &ValidationError{Name: "lock_version", err: errors.New(`ent: missing required field "RuntimeBroker.lock_version"`)}
 	}
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "RuntimeBroker.status"`)}
@@ -417,6 +441,7 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 		_node = &RuntimeBroker{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(runtimebroker.Table, sqlgraph.NewFieldSpec(runtimebroker.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -440,6 +465,10 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.Version(); ok {
 		_spec.SetField(runtimebroker.FieldVersion, field.TypeString, value)
 		_node.Version = value
+	}
+	if value, ok := _c.mutation.LockVersion(); ok {
+		_spec.SetField(runtimebroker.FieldLockVersion, field.TypeInt64, value)
+		_node.LockVersion = value
 	}
 	if value, ok := _c.mutation.Status(); ok {
 		_spec.SetField(runtimebroker.FieldStatus, field.TypeString, value)
@@ -500,11 +529,800 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.RuntimeBroker.Create().
+//		SetName(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.RuntimeBrokerUpsert) {
+//			SetName(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *RuntimeBrokerCreate) OnConflict(opts ...sql.ConflictOption) *RuntimeBrokerUpsertOne {
+	_c.conflict = opts
+	return &RuntimeBrokerUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.RuntimeBroker.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *RuntimeBrokerCreate) OnConflictColumns(columns ...string) *RuntimeBrokerUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &RuntimeBrokerUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// RuntimeBrokerUpsertOne is the builder for "upsert"-ing
+	//  one RuntimeBroker node.
+	RuntimeBrokerUpsertOne struct {
+		create *RuntimeBrokerCreate
+	}
+
+	// RuntimeBrokerUpsert is the "OnConflict" setter.
+	RuntimeBrokerUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetName sets the "name" field.
+func (u *RuntimeBrokerUpsert) SetName(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldName, v)
+	return u
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateName() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldName)
+	return u
+}
+
+// SetSlug sets the "slug" field.
+func (u *RuntimeBrokerUpsert) SetSlug(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldSlug, v)
+	return u
+}
+
+// UpdateSlug sets the "slug" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateSlug() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldSlug)
+	return u
+}
+
+// SetType sets the "type" field.
+func (u *RuntimeBrokerUpsert) SetType(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldType, v)
+	return u
+}
+
+// UpdateType sets the "type" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateType() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldType)
+	return u
+}
+
+// ClearType clears the value of the "type" field.
+func (u *RuntimeBrokerUpsert) ClearType() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldType)
+	return u
+}
+
+// SetMode sets the "mode" field.
+func (u *RuntimeBrokerUpsert) SetMode(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldMode, v)
+	return u
+}
+
+// UpdateMode sets the "mode" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateMode() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldMode)
+	return u
+}
+
+// SetVersion sets the "version" field.
+func (u *RuntimeBrokerUpsert) SetVersion(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldVersion, v)
+	return u
+}
+
+// UpdateVersion sets the "version" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateVersion() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldVersion)
+	return u
+}
+
+// ClearVersion clears the value of the "version" field.
+func (u *RuntimeBrokerUpsert) ClearVersion() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldVersion)
+	return u
+}
+
+// SetLockVersion sets the "lock_version" field.
+func (u *RuntimeBrokerUpsert) SetLockVersion(v int64) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldLockVersion, v)
+	return u
+}
+
+// UpdateLockVersion sets the "lock_version" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateLockVersion() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldLockVersion)
+	return u
+}
+
+// AddLockVersion adds v to the "lock_version" field.
+func (u *RuntimeBrokerUpsert) AddLockVersion(v int64) *RuntimeBrokerUpsert {
+	u.Add(runtimebroker.FieldLockVersion, v)
+	return u
+}
+
+// SetStatus sets the "status" field.
+func (u *RuntimeBrokerUpsert) SetStatus(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldStatus, v)
+	return u
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateStatus() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldStatus)
+	return u
+}
+
+// SetConnectionState sets the "connection_state" field.
+func (u *RuntimeBrokerUpsert) SetConnectionState(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldConnectionState, v)
+	return u
+}
+
+// UpdateConnectionState sets the "connection_state" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateConnectionState() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldConnectionState)
+	return u
+}
+
+// SetLastHeartbeat sets the "last_heartbeat" field.
+func (u *RuntimeBrokerUpsert) SetLastHeartbeat(v time.Time) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldLastHeartbeat, v)
+	return u
+}
+
+// UpdateLastHeartbeat sets the "last_heartbeat" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateLastHeartbeat() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldLastHeartbeat)
+	return u
+}
+
+// ClearLastHeartbeat clears the value of the "last_heartbeat" field.
+func (u *RuntimeBrokerUpsert) ClearLastHeartbeat() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldLastHeartbeat)
+	return u
+}
+
+// SetCapabilities sets the "capabilities" field.
+func (u *RuntimeBrokerUpsert) SetCapabilities(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldCapabilities, v)
+	return u
+}
+
+// UpdateCapabilities sets the "capabilities" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateCapabilities() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldCapabilities)
+	return u
+}
+
+// ClearCapabilities clears the value of the "capabilities" field.
+func (u *RuntimeBrokerUpsert) ClearCapabilities() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldCapabilities)
+	return u
+}
+
+// SetSupportedHarnesses sets the "supported_harnesses" field.
+func (u *RuntimeBrokerUpsert) SetSupportedHarnesses(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldSupportedHarnesses, v)
+	return u
+}
+
+// UpdateSupportedHarnesses sets the "supported_harnesses" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateSupportedHarnesses() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldSupportedHarnesses)
+	return u
+}
+
+// ClearSupportedHarnesses clears the value of the "supported_harnesses" field.
+func (u *RuntimeBrokerUpsert) ClearSupportedHarnesses() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldSupportedHarnesses)
+	return u
+}
+
+// SetResources sets the "resources" field.
+func (u *RuntimeBrokerUpsert) SetResources(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldResources, v)
+	return u
+}
+
+// UpdateResources sets the "resources" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateResources() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldResources)
+	return u
+}
+
+// ClearResources clears the value of the "resources" field.
+func (u *RuntimeBrokerUpsert) ClearResources() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldResources)
+	return u
+}
+
+// SetRuntimes sets the "runtimes" field.
+func (u *RuntimeBrokerUpsert) SetRuntimes(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldRuntimes, v)
+	return u
+}
+
+// UpdateRuntimes sets the "runtimes" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateRuntimes() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldRuntimes)
+	return u
+}
+
+// ClearRuntimes clears the value of the "runtimes" field.
+func (u *RuntimeBrokerUpsert) ClearRuntimes() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldRuntimes)
+	return u
+}
+
+// SetLabels sets the "labels" field.
+func (u *RuntimeBrokerUpsert) SetLabels(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldLabels, v)
+	return u
+}
+
+// UpdateLabels sets the "labels" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateLabels() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldLabels)
+	return u
+}
+
+// ClearLabels clears the value of the "labels" field.
+func (u *RuntimeBrokerUpsert) ClearLabels() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldLabels)
+	return u
+}
+
+// SetAnnotations sets the "annotations" field.
+func (u *RuntimeBrokerUpsert) SetAnnotations(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldAnnotations, v)
+	return u
+}
+
+// UpdateAnnotations sets the "annotations" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateAnnotations() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldAnnotations)
+	return u
+}
+
+// ClearAnnotations clears the value of the "annotations" field.
+func (u *RuntimeBrokerUpsert) ClearAnnotations() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldAnnotations)
+	return u
+}
+
+// SetEndpoint sets the "endpoint" field.
+func (u *RuntimeBrokerUpsert) SetEndpoint(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldEndpoint, v)
+	return u
+}
+
+// UpdateEndpoint sets the "endpoint" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateEndpoint() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldEndpoint)
+	return u
+}
+
+// ClearEndpoint clears the value of the "endpoint" field.
+func (u *RuntimeBrokerUpsert) ClearEndpoint() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldEndpoint)
+	return u
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *RuntimeBrokerUpsert) SetCreatedBy(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldCreatedBy, v)
+	return u
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateCreatedBy() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldCreatedBy)
+	return u
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *RuntimeBrokerUpsert) ClearCreatedBy() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldCreatedBy)
+	return u
+}
+
+// SetAutoProvide sets the "auto_provide" field.
+func (u *RuntimeBrokerUpsert) SetAutoProvide(v bool) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldAutoProvide, v)
+	return u
+}
+
+// UpdateAutoProvide sets the "auto_provide" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateAutoProvide() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldAutoProvide)
+	return u
+}
+
+// SetUpdated sets the "updated" field.
+func (u *RuntimeBrokerUpsert) SetUpdated(v time.Time) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldUpdated, v)
+	return u
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateUpdated() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldUpdated)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.RuntimeBroker.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(runtimebroker.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *RuntimeBrokerUpsertOne) UpdateNewValues() *RuntimeBrokerUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(runtimebroker.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(runtimebroker.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.RuntimeBroker.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *RuntimeBrokerUpsertOne) Ignore() *RuntimeBrokerUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *RuntimeBrokerUpsertOne) DoNothing() *RuntimeBrokerUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the RuntimeBrokerCreate.OnConflict
+// documentation for more info.
+func (u *RuntimeBrokerUpsertOne) Update(set func(*RuntimeBrokerUpsert)) *RuntimeBrokerUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&RuntimeBrokerUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetName sets the "name" field.
+func (u *RuntimeBrokerUpsertOne) SetName(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetName(v)
+	})
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateName() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateName()
+	})
+}
+
+// SetSlug sets the "slug" field.
+func (u *RuntimeBrokerUpsertOne) SetSlug(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetSlug(v)
+	})
+}
+
+// UpdateSlug sets the "slug" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateSlug() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateSlug()
+	})
+}
+
+// SetType sets the "type" field.
+func (u *RuntimeBrokerUpsertOne) SetType(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetType(v)
+	})
+}
+
+// UpdateType sets the "type" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateType() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateType()
+	})
+}
+
+// ClearType clears the value of the "type" field.
+func (u *RuntimeBrokerUpsertOne) ClearType() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearType()
+	})
+}
+
+// SetMode sets the "mode" field.
+func (u *RuntimeBrokerUpsertOne) SetMode(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetMode(v)
+	})
+}
+
+// UpdateMode sets the "mode" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateMode() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateMode()
+	})
+}
+
+// SetVersion sets the "version" field.
+func (u *RuntimeBrokerUpsertOne) SetVersion(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetVersion(v)
+	})
+}
+
+// UpdateVersion sets the "version" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateVersion() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateVersion()
+	})
+}
+
+// ClearVersion clears the value of the "version" field.
+func (u *RuntimeBrokerUpsertOne) ClearVersion() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearVersion()
+	})
+}
+
+// SetLockVersion sets the "lock_version" field.
+func (u *RuntimeBrokerUpsertOne) SetLockVersion(v int64) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetLockVersion(v)
+	})
+}
+
+// AddLockVersion adds v to the "lock_version" field.
+func (u *RuntimeBrokerUpsertOne) AddLockVersion(v int64) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.AddLockVersion(v)
+	})
+}
+
+// UpdateLockVersion sets the "lock_version" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateLockVersion() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateLockVersion()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *RuntimeBrokerUpsertOne) SetStatus(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateStatus() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// SetConnectionState sets the "connection_state" field.
+func (u *RuntimeBrokerUpsertOne) SetConnectionState(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetConnectionState(v)
+	})
+}
+
+// UpdateConnectionState sets the "connection_state" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateConnectionState() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateConnectionState()
+	})
+}
+
+// SetLastHeartbeat sets the "last_heartbeat" field.
+func (u *RuntimeBrokerUpsertOne) SetLastHeartbeat(v time.Time) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetLastHeartbeat(v)
+	})
+}
+
+// UpdateLastHeartbeat sets the "last_heartbeat" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateLastHeartbeat() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateLastHeartbeat()
+	})
+}
+
+// ClearLastHeartbeat clears the value of the "last_heartbeat" field.
+func (u *RuntimeBrokerUpsertOne) ClearLastHeartbeat() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearLastHeartbeat()
+	})
+}
+
+// SetCapabilities sets the "capabilities" field.
+func (u *RuntimeBrokerUpsertOne) SetCapabilities(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetCapabilities(v)
+	})
+}
+
+// UpdateCapabilities sets the "capabilities" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateCapabilities() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateCapabilities()
+	})
+}
+
+// ClearCapabilities clears the value of the "capabilities" field.
+func (u *RuntimeBrokerUpsertOne) ClearCapabilities() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearCapabilities()
+	})
+}
+
+// SetSupportedHarnesses sets the "supported_harnesses" field.
+func (u *RuntimeBrokerUpsertOne) SetSupportedHarnesses(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetSupportedHarnesses(v)
+	})
+}
+
+// UpdateSupportedHarnesses sets the "supported_harnesses" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateSupportedHarnesses() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateSupportedHarnesses()
+	})
+}
+
+// ClearSupportedHarnesses clears the value of the "supported_harnesses" field.
+func (u *RuntimeBrokerUpsertOne) ClearSupportedHarnesses() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearSupportedHarnesses()
+	})
+}
+
+// SetResources sets the "resources" field.
+func (u *RuntimeBrokerUpsertOne) SetResources(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetResources(v)
+	})
+}
+
+// UpdateResources sets the "resources" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateResources() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateResources()
+	})
+}
+
+// ClearResources clears the value of the "resources" field.
+func (u *RuntimeBrokerUpsertOne) ClearResources() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearResources()
+	})
+}
+
+// SetRuntimes sets the "runtimes" field.
+func (u *RuntimeBrokerUpsertOne) SetRuntimes(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetRuntimes(v)
+	})
+}
+
+// UpdateRuntimes sets the "runtimes" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateRuntimes() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateRuntimes()
+	})
+}
+
+// ClearRuntimes clears the value of the "runtimes" field.
+func (u *RuntimeBrokerUpsertOne) ClearRuntimes() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearRuntimes()
+	})
+}
+
+// SetLabels sets the "labels" field.
+func (u *RuntimeBrokerUpsertOne) SetLabels(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetLabels(v)
+	})
+}
+
+// UpdateLabels sets the "labels" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateLabels() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateLabels()
+	})
+}
+
+// ClearLabels clears the value of the "labels" field.
+func (u *RuntimeBrokerUpsertOne) ClearLabels() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearLabels()
+	})
+}
+
+// SetAnnotations sets the "annotations" field.
+func (u *RuntimeBrokerUpsertOne) SetAnnotations(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetAnnotations(v)
+	})
+}
+
+// UpdateAnnotations sets the "annotations" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateAnnotations() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateAnnotations()
+	})
+}
+
+// ClearAnnotations clears the value of the "annotations" field.
+func (u *RuntimeBrokerUpsertOne) ClearAnnotations() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearAnnotations()
+	})
+}
+
+// SetEndpoint sets the "endpoint" field.
+func (u *RuntimeBrokerUpsertOne) SetEndpoint(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetEndpoint(v)
+	})
+}
+
+// UpdateEndpoint sets the "endpoint" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateEndpoint() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateEndpoint()
+	})
+}
+
+// ClearEndpoint clears the value of the "endpoint" field.
+func (u *RuntimeBrokerUpsertOne) ClearEndpoint() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearEndpoint()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *RuntimeBrokerUpsertOne) SetCreatedBy(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateCreatedBy() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *RuntimeBrokerUpsertOne) ClearCreatedBy() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// SetAutoProvide sets the "auto_provide" field.
+func (u *RuntimeBrokerUpsertOne) SetAutoProvide(v bool) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetAutoProvide(v)
+	})
+}
+
+// UpdateAutoProvide sets the "auto_provide" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateAutoProvide() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateAutoProvide()
+	})
+}
+
+// SetUpdated sets the "updated" field.
+func (u *RuntimeBrokerUpsertOne) SetUpdated(v time.Time) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetUpdated(v)
+	})
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateUpdated() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateUpdated()
+	})
+}
+
+// Exec executes the query.
+func (u *RuntimeBrokerUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for RuntimeBrokerCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *RuntimeBrokerUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *RuntimeBrokerUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: RuntimeBrokerUpsertOne.ID is not supported by MySQL driver. Use RuntimeBrokerUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *RuntimeBrokerUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // RuntimeBrokerCreateBulk is the builder for creating many RuntimeBroker entities in bulk.
 type RuntimeBrokerCreateBulk struct {
 	config
 	err      error
 	builders []*RuntimeBrokerCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the RuntimeBroker entities in the database.
@@ -534,6 +1352,7 @@ func (_c *RuntimeBrokerCreateBulk) Save(ctx context.Context) ([]*RuntimeBroker, 
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -580,6 +1399,473 @@ func (_c *RuntimeBrokerCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *RuntimeBrokerCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.RuntimeBroker.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.RuntimeBrokerUpsert) {
+//			SetName(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *RuntimeBrokerCreateBulk) OnConflict(opts ...sql.ConflictOption) *RuntimeBrokerUpsertBulk {
+	_c.conflict = opts
+	return &RuntimeBrokerUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.RuntimeBroker.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *RuntimeBrokerCreateBulk) OnConflictColumns(columns ...string) *RuntimeBrokerUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &RuntimeBrokerUpsertBulk{
+		create: _c,
+	}
+}
+
+// RuntimeBrokerUpsertBulk is the builder for "upsert"-ing
+// a bulk of RuntimeBroker nodes.
+type RuntimeBrokerUpsertBulk struct {
+	create *RuntimeBrokerCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.RuntimeBroker.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(runtimebroker.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *RuntimeBrokerUpsertBulk) UpdateNewValues() *RuntimeBrokerUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(runtimebroker.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(runtimebroker.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.RuntimeBroker.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *RuntimeBrokerUpsertBulk) Ignore() *RuntimeBrokerUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *RuntimeBrokerUpsertBulk) DoNothing() *RuntimeBrokerUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the RuntimeBrokerCreateBulk.OnConflict
+// documentation for more info.
+func (u *RuntimeBrokerUpsertBulk) Update(set func(*RuntimeBrokerUpsert)) *RuntimeBrokerUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&RuntimeBrokerUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetName sets the "name" field.
+func (u *RuntimeBrokerUpsertBulk) SetName(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetName(v)
+	})
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateName() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateName()
+	})
+}
+
+// SetSlug sets the "slug" field.
+func (u *RuntimeBrokerUpsertBulk) SetSlug(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetSlug(v)
+	})
+}
+
+// UpdateSlug sets the "slug" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateSlug() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateSlug()
+	})
+}
+
+// SetType sets the "type" field.
+func (u *RuntimeBrokerUpsertBulk) SetType(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetType(v)
+	})
+}
+
+// UpdateType sets the "type" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateType() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateType()
+	})
+}
+
+// ClearType clears the value of the "type" field.
+func (u *RuntimeBrokerUpsertBulk) ClearType() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearType()
+	})
+}
+
+// SetMode sets the "mode" field.
+func (u *RuntimeBrokerUpsertBulk) SetMode(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetMode(v)
+	})
+}
+
+// UpdateMode sets the "mode" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateMode() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateMode()
+	})
+}
+
+// SetVersion sets the "version" field.
+func (u *RuntimeBrokerUpsertBulk) SetVersion(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetVersion(v)
+	})
+}
+
+// UpdateVersion sets the "version" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateVersion() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateVersion()
+	})
+}
+
+// ClearVersion clears the value of the "version" field.
+func (u *RuntimeBrokerUpsertBulk) ClearVersion() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearVersion()
+	})
+}
+
+// SetLockVersion sets the "lock_version" field.
+func (u *RuntimeBrokerUpsertBulk) SetLockVersion(v int64) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetLockVersion(v)
+	})
+}
+
+// AddLockVersion adds v to the "lock_version" field.
+func (u *RuntimeBrokerUpsertBulk) AddLockVersion(v int64) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.AddLockVersion(v)
+	})
+}
+
+// UpdateLockVersion sets the "lock_version" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateLockVersion() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateLockVersion()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *RuntimeBrokerUpsertBulk) SetStatus(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateStatus() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// SetConnectionState sets the "connection_state" field.
+func (u *RuntimeBrokerUpsertBulk) SetConnectionState(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetConnectionState(v)
+	})
+}
+
+// UpdateConnectionState sets the "connection_state" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateConnectionState() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateConnectionState()
+	})
+}
+
+// SetLastHeartbeat sets the "last_heartbeat" field.
+func (u *RuntimeBrokerUpsertBulk) SetLastHeartbeat(v time.Time) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetLastHeartbeat(v)
+	})
+}
+
+// UpdateLastHeartbeat sets the "last_heartbeat" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateLastHeartbeat() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateLastHeartbeat()
+	})
+}
+
+// ClearLastHeartbeat clears the value of the "last_heartbeat" field.
+func (u *RuntimeBrokerUpsertBulk) ClearLastHeartbeat() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearLastHeartbeat()
+	})
+}
+
+// SetCapabilities sets the "capabilities" field.
+func (u *RuntimeBrokerUpsertBulk) SetCapabilities(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetCapabilities(v)
+	})
+}
+
+// UpdateCapabilities sets the "capabilities" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateCapabilities() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateCapabilities()
+	})
+}
+
+// ClearCapabilities clears the value of the "capabilities" field.
+func (u *RuntimeBrokerUpsertBulk) ClearCapabilities() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearCapabilities()
+	})
+}
+
+// SetSupportedHarnesses sets the "supported_harnesses" field.
+func (u *RuntimeBrokerUpsertBulk) SetSupportedHarnesses(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetSupportedHarnesses(v)
+	})
+}
+
+// UpdateSupportedHarnesses sets the "supported_harnesses" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateSupportedHarnesses() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateSupportedHarnesses()
+	})
+}
+
+// ClearSupportedHarnesses clears the value of the "supported_harnesses" field.
+func (u *RuntimeBrokerUpsertBulk) ClearSupportedHarnesses() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearSupportedHarnesses()
+	})
+}
+
+// SetResources sets the "resources" field.
+func (u *RuntimeBrokerUpsertBulk) SetResources(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetResources(v)
+	})
+}
+
+// UpdateResources sets the "resources" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateResources() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateResources()
+	})
+}
+
+// ClearResources clears the value of the "resources" field.
+func (u *RuntimeBrokerUpsertBulk) ClearResources() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearResources()
+	})
+}
+
+// SetRuntimes sets the "runtimes" field.
+func (u *RuntimeBrokerUpsertBulk) SetRuntimes(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetRuntimes(v)
+	})
+}
+
+// UpdateRuntimes sets the "runtimes" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateRuntimes() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateRuntimes()
+	})
+}
+
+// ClearRuntimes clears the value of the "runtimes" field.
+func (u *RuntimeBrokerUpsertBulk) ClearRuntimes() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearRuntimes()
+	})
+}
+
+// SetLabels sets the "labels" field.
+func (u *RuntimeBrokerUpsertBulk) SetLabels(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetLabels(v)
+	})
+}
+
+// UpdateLabels sets the "labels" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateLabels() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateLabels()
+	})
+}
+
+// ClearLabels clears the value of the "labels" field.
+func (u *RuntimeBrokerUpsertBulk) ClearLabels() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearLabels()
+	})
+}
+
+// SetAnnotations sets the "annotations" field.
+func (u *RuntimeBrokerUpsertBulk) SetAnnotations(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetAnnotations(v)
+	})
+}
+
+// UpdateAnnotations sets the "annotations" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateAnnotations() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateAnnotations()
+	})
+}
+
+// ClearAnnotations clears the value of the "annotations" field.
+func (u *RuntimeBrokerUpsertBulk) ClearAnnotations() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearAnnotations()
+	})
+}
+
+// SetEndpoint sets the "endpoint" field.
+func (u *RuntimeBrokerUpsertBulk) SetEndpoint(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetEndpoint(v)
+	})
+}
+
+// UpdateEndpoint sets the "endpoint" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateEndpoint() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateEndpoint()
+	})
+}
+
+// ClearEndpoint clears the value of the "endpoint" field.
+func (u *RuntimeBrokerUpsertBulk) ClearEndpoint() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearEndpoint()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *RuntimeBrokerUpsertBulk) SetCreatedBy(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateCreatedBy() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *RuntimeBrokerUpsertBulk) ClearCreatedBy() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// SetAutoProvide sets the "auto_provide" field.
+func (u *RuntimeBrokerUpsertBulk) SetAutoProvide(v bool) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetAutoProvide(v)
+	})
+}
+
+// UpdateAutoProvide sets the "auto_provide" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateAutoProvide() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateAutoProvide()
+	})
+}
+
+// SetUpdated sets the "updated" field.
+func (u *RuntimeBrokerUpsertBulk) SetUpdated(v time.Time) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetUpdated(v)
+	})
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateUpdated() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateUpdated()
+	})
+}
+
+// Exec executes the query.
+func (u *RuntimeBrokerUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the RuntimeBrokerCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for RuntimeBrokerCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *RuntimeBrokerUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

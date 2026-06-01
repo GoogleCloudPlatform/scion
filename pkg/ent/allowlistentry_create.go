@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
@@ -19,6 +21,7 @@ type AllowListEntryCreate struct {
 	config
 	mutation *AllowListEntryMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetEmail sets the "email" field.
@@ -193,6 +196,7 @@ func (_c *AllowListEntryCreate) createSpec() (*AllowListEntry, *sqlgraph.CreateS
 		_node = &AllowListEntry{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(allowlistentry.Table, sqlgraph.NewFieldSpec(allowlistentry.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -220,11 +224,267 @@ func (_c *AllowListEntryCreate) createSpec() (*AllowListEntry, *sqlgraph.CreateS
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.AllowListEntry.Create().
+//		SetEmail(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.AllowListEntryUpsert) {
+//			SetEmail(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *AllowListEntryCreate) OnConflict(opts ...sql.ConflictOption) *AllowListEntryUpsertOne {
+	_c.conflict = opts
+	return &AllowListEntryUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.AllowListEntry.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *AllowListEntryCreate) OnConflictColumns(columns ...string) *AllowListEntryUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &AllowListEntryUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// AllowListEntryUpsertOne is the builder for "upsert"-ing
+	//  one AllowListEntry node.
+	AllowListEntryUpsertOne struct {
+		create *AllowListEntryCreate
+	}
+
+	// AllowListEntryUpsert is the "OnConflict" setter.
+	AllowListEntryUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetEmail sets the "email" field.
+func (u *AllowListEntryUpsert) SetEmail(v string) *AllowListEntryUpsert {
+	u.Set(allowlistentry.FieldEmail, v)
+	return u
+}
+
+// UpdateEmail sets the "email" field to the value that was provided on create.
+func (u *AllowListEntryUpsert) UpdateEmail() *AllowListEntryUpsert {
+	u.SetExcluded(allowlistentry.FieldEmail)
+	return u
+}
+
+// SetNote sets the "note" field.
+func (u *AllowListEntryUpsert) SetNote(v string) *AllowListEntryUpsert {
+	u.Set(allowlistentry.FieldNote, v)
+	return u
+}
+
+// UpdateNote sets the "note" field to the value that was provided on create.
+func (u *AllowListEntryUpsert) UpdateNote() *AllowListEntryUpsert {
+	u.SetExcluded(allowlistentry.FieldNote)
+	return u
+}
+
+// SetAddedBy sets the "added_by" field.
+func (u *AllowListEntryUpsert) SetAddedBy(v string) *AllowListEntryUpsert {
+	u.Set(allowlistentry.FieldAddedBy, v)
+	return u
+}
+
+// UpdateAddedBy sets the "added_by" field to the value that was provided on create.
+func (u *AllowListEntryUpsert) UpdateAddedBy() *AllowListEntryUpsert {
+	u.SetExcluded(allowlistentry.FieldAddedBy)
+	return u
+}
+
+// SetInviteID sets the "invite_id" field.
+func (u *AllowListEntryUpsert) SetInviteID(v string) *AllowListEntryUpsert {
+	u.Set(allowlistentry.FieldInviteID, v)
+	return u
+}
+
+// UpdateInviteID sets the "invite_id" field to the value that was provided on create.
+func (u *AllowListEntryUpsert) UpdateInviteID() *AllowListEntryUpsert {
+	u.SetExcluded(allowlistentry.FieldInviteID)
+	return u
+}
+
+// ClearInviteID clears the value of the "invite_id" field.
+func (u *AllowListEntryUpsert) ClearInviteID() *AllowListEntryUpsert {
+	u.SetNull(allowlistentry.FieldInviteID)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.AllowListEntry.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(allowlistentry.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *AllowListEntryUpsertOne) UpdateNewValues() *AllowListEntryUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(allowlistentry.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(allowlistentry.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.AllowListEntry.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *AllowListEntryUpsertOne) Ignore() *AllowListEntryUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *AllowListEntryUpsertOne) DoNothing() *AllowListEntryUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the AllowListEntryCreate.OnConflict
+// documentation for more info.
+func (u *AllowListEntryUpsertOne) Update(set func(*AllowListEntryUpsert)) *AllowListEntryUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&AllowListEntryUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetEmail sets the "email" field.
+func (u *AllowListEntryUpsertOne) SetEmail(v string) *AllowListEntryUpsertOne {
+	return u.Update(func(s *AllowListEntryUpsert) {
+		s.SetEmail(v)
+	})
+}
+
+// UpdateEmail sets the "email" field to the value that was provided on create.
+func (u *AllowListEntryUpsertOne) UpdateEmail() *AllowListEntryUpsertOne {
+	return u.Update(func(s *AllowListEntryUpsert) {
+		s.UpdateEmail()
+	})
+}
+
+// SetNote sets the "note" field.
+func (u *AllowListEntryUpsertOne) SetNote(v string) *AllowListEntryUpsertOne {
+	return u.Update(func(s *AllowListEntryUpsert) {
+		s.SetNote(v)
+	})
+}
+
+// UpdateNote sets the "note" field to the value that was provided on create.
+func (u *AllowListEntryUpsertOne) UpdateNote() *AllowListEntryUpsertOne {
+	return u.Update(func(s *AllowListEntryUpsert) {
+		s.UpdateNote()
+	})
+}
+
+// SetAddedBy sets the "added_by" field.
+func (u *AllowListEntryUpsertOne) SetAddedBy(v string) *AllowListEntryUpsertOne {
+	return u.Update(func(s *AllowListEntryUpsert) {
+		s.SetAddedBy(v)
+	})
+}
+
+// UpdateAddedBy sets the "added_by" field to the value that was provided on create.
+func (u *AllowListEntryUpsertOne) UpdateAddedBy() *AllowListEntryUpsertOne {
+	return u.Update(func(s *AllowListEntryUpsert) {
+		s.UpdateAddedBy()
+	})
+}
+
+// SetInviteID sets the "invite_id" field.
+func (u *AllowListEntryUpsertOne) SetInviteID(v string) *AllowListEntryUpsertOne {
+	return u.Update(func(s *AllowListEntryUpsert) {
+		s.SetInviteID(v)
+	})
+}
+
+// UpdateInviteID sets the "invite_id" field to the value that was provided on create.
+func (u *AllowListEntryUpsertOne) UpdateInviteID() *AllowListEntryUpsertOne {
+	return u.Update(func(s *AllowListEntryUpsert) {
+		s.UpdateInviteID()
+	})
+}
+
+// ClearInviteID clears the value of the "invite_id" field.
+func (u *AllowListEntryUpsertOne) ClearInviteID() *AllowListEntryUpsertOne {
+	return u.Update(func(s *AllowListEntryUpsert) {
+		s.ClearInviteID()
+	})
+}
+
+// Exec executes the query.
+func (u *AllowListEntryUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for AllowListEntryCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *AllowListEntryUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *AllowListEntryUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: AllowListEntryUpsertOne.ID is not supported by MySQL driver. Use AllowListEntryUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *AllowListEntryUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // AllowListEntryCreateBulk is the builder for creating many AllowListEntry entities in bulk.
 type AllowListEntryCreateBulk struct {
 	config
 	err      error
 	builders []*AllowListEntryCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the AllowListEntry entities in the database.
@@ -254,6 +514,7 @@ func (_c *AllowListEntryCreateBulk) Save(ctx context.Context) ([]*AllowListEntry
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -300,6 +561,186 @@ func (_c *AllowListEntryCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *AllowListEntryCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.AllowListEntry.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.AllowListEntryUpsert) {
+//			SetEmail(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *AllowListEntryCreateBulk) OnConflict(opts ...sql.ConflictOption) *AllowListEntryUpsertBulk {
+	_c.conflict = opts
+	return &AllowListEntryUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.AllowListEntry.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *AllowListEntryCreateBulk) OnConflictColumns(columns ...string) *AllowListEntryUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &AllowListEntryUpsertBulk{
+		create: _c,
+	}
+}
+
+// AllowListEntryUpsertBulk is the builder for "upsert"-ing
+// a bulk of AllowListEntry nodes.
+type AllowListEntryUpsertBulk struct {
+	create *AllowListEntryCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.AllowListEntry.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(allowlistentry.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *AllowListEntryUpsertBulk) UpdateNewValues() *AllowListEntryUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(allowlistentry.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(allowlistentry.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.AllowListEntry.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *AllowListEntryUpsertBulk) Ignore() *AllowListEntryUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *AllowListEntryUpsertBulk) DoNothing() *AllowListEntryUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the AllowListEntryCreateBulk.OnConflict
+// documentation for more info.
+func (u *AllowListEntryUpsertBulk) Update(set func(*AllowListEntryUpsert)) *AllowListEntryUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&AllowListEntryUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetEmail sets the "email" field.
+func (u *AllowListEntryUpsertBulk) SetEmail(v string) *AllowListEntryUpsertBulk {
+	return u.Update(func(s *AllowListEntryUpsert) {
+		s.SetEmail(v)
+	})
+}
+
+// UpdateEmail sets the "email" field to the value that was provided on create.
+func (u *AllowListEntryUpsertBulk) UpdateEmail() *AllowListEntryUpsertBulk {
+	return u.Update(func(s *AllowListEntryUpsert) {
+		s.UpdateEmail()
+	})
+}
+
+// SetNote sets the "note" field.
+func (u *AllowListEntryUpsertBulk) SetNote(v string) *AllowListEntryUpsertBulk {
+	return u.Update(func(s *AllowListEntryUpsert) {
+		s.SetNote(v)
+	})
+}
+
+// UpdateNote sets the "note" field to the value that was provided on create.
+func (u *AllowListEntryUpsertBulk) UpdateNote() *AllowListEntryUpsertBulk {
+	return u.Update(func(s *AllowListEntryUpsert) {
+		s.UpdateNote()
+	})
+}
+
+// SetAddedBy sets the "added_by" field.
+func (u *AllowListEntryUpsertBulk) SetAddedBy(v string) *AllowListEntryUpsertBulk {
+	return u.Update(func(s *AllowListEntryUpsert) {
+		s.SetAddedBy(v)
+	})
+}
+
+// UpdateAddedBy sets the "added_by" field to the value that was provided on create.
+func (u *AllowListEntryUpsertBulk) UpdateAddedBy() *AllowListEntryUpsertBulk {
+	return u.Update(func(s *AllowListEntryUpsert) {
+		s.UpdateAddedBy()
+	})
+}
+
+// SetInviteID sets the "invite_id" field.
+func (u *AllowListEntryUpsertBulk) SetInviteID(v string) *AllowListEntryUpsertBulk {
+	return u.Update(func(s *AllowListEntryUpsert) {
+		s.SetInviteID(v)
+	})
+}
+
+// UpdateInviteID sets the "invite_id" field to the value that was provided on create.
+func (u *AllowListEntryUpsertBulk) UpdateInviteID() *AllowListEntryUpsertBulk {
+	return u.Update(func(s *AllowListEntryUpsert) {
+		s.UpdateInviteID()
+	})
+}
+
+// ClearInviteID clears the value of the "invite_id" field.
+func (u *AllowListEntryUpsertBulk) ClearInviteID() *AllowListEntryUpsertBulk {
+	return u.Update(func(s *AllowListEntryUpsert) {
+		s.ClearInviteID()
+	})
+}
+
+// Exec executes the query.
+func (u *AllowListEntryUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the AllowListEntryCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for AllowListEntryCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *AllowListEntryUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

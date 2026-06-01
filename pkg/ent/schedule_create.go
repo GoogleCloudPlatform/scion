@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
@@ -19,6 +21,7 @@ type ScheduleCreate struct {
 	config
 	mutation *ScheduleMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetProjectID sets the "project_id" field.
@@ -356,6 +359,7 @@ func (_c *ScheduleCreate) createSpec() (*Schedule, *sqlgraph.CreateSpec) {
 		_node = &Schedule{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(schedule.Table, sqlgraph.NewFieldSpec(schedule.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -423,11 +427,605 @@ func (_c *ScheduleCreate) createSpec() (*Schedule, *sqlgraph.CreateSpec) {
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.Schedule.Create().
+//		SetProjectID(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.ScheduleUpsert) {
+//			SetProjectID(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *ScheduleCreate) OnConflict(opts ...sql.ConflictOption) *ScheduleUpsertOne {
+	_c.conflict = opts
+	return &ScheduleUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.Schedule.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *ScheduleCreate) OnConflictColumns(columns ...string) *ScheduleUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &ScheduleUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// ScheduleUpsertOne is the builder for "upsert"-ing
+	//  one Schedule node.
+	ScheduleUpsertOne struct {
+		create *ScheduleCreate
+	}
+
+	// ScheduleUpsert is the "OnConflict" setter.
+	ScheduleUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetProjectID sets the "project_id" field.
+func (u *ScheduleUpsert) SetProjectID(v uuid.UUID) *ScheduleUpsert {
+	u.Set(schedule.FieldProjectID, v)
+	return u
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateProjectID() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldProjectID)
+	return u
+}
+
+// SetName sets the "name" field.
+func (u *ScheduleUpsert) SetName(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldName, v)
+	return u
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateName() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldName)
+	return u
+}
+
+// SetCronExpr sets the "cron_expr" field.
+func (u *ScheduleUpsert) SetCronExpr(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldCronExpr, v)
+	return u
+}
+
+// UpdateCronExpr sets the "cron_expr" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateCronExpr() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldCronExpr)
+	return u
+}
+
+// SetEventType sets the "event_type" field.
+func (u *ScheduleUpsert) SetEventType(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldEventType, v)
+	return u
+}
+
+// UpdateEventType sets the "event_type" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateEventType() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldEventType)
+	return u
+}
+
+// SetPayload sets the "payload" field.
+func (u *ScheduleUpsert) SetPayload(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldPayload, v)
+	return u
+}
+
+// UpdatePayload sets the "payload" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdatePayload() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldPayload)
+	return u
+}
+
+// SetStatus sets the "status" field.
+func (u *ScheduleUpsert) SetStatus(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldStatus, v)
+	return u
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateStatus() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldStatus)
+	return u
+}
+
+// SetNextRunAt sets the "next_run_at" field.
+func (u *ScheduleUpsert) SetNextRunAt(v time.Time) *ScheduleUpsert {
+	u.Set(schedule.FieldNextRunAt, v)
+	return u
+}
+
+// UpdateNextRunAt sets the "next_run_at" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateNextRunAt() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldNextRunAt)
+	return u
+}
+
+// ClearNextRunAt clears the value of the "next_run_at" field.
+func (u *ScheduleUpsert) ClearNextRunAt() *ScheduleUpsert {
+	u.SetNull(schedule.FieldNextRunAt)
+	return u
+}
+
+// SetLastRunAt sets the "last_run_at" field.
+func (u *ScheduleUpsert) SetLastRunAt(v time.Time) *ScheduleUpsert {
+	u.Set(schedule.FieldLastRunAt, v)
+	return u
+}
+
+// UpdateLastRunAt sets the "last_run_at" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateLastRunAt() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldLastRunAt)
+	return u
+}
+
+// ClearLastRunAt clears the value of the "last_run_at" field.
+func (u *ScheduleUpsert) ClearLastRunAt() *ScheduleUpsert {
+	u.SetNull(schedule.FieldLastRunAt)
+	return u
+}
+
+// SetLastRunStatus sets the "last_run_status" field.
+func (u *ScheduleUpsert) SetLastRunStatus(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldLastRunStatus, v)
+	return u
+}
+
+// UpdateLastRunStatus sets the "last_run_status" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateLastRunStatus() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldLastRunStatus)
+	return u
+}
+
+// ClearLastRunStatus clears the value of the "last_run_status" field.
+func (u *ScheduleUpsert) ClearLastRunStatus() *ScheduleUpsert {
+	u.SetNull(schedule.FieldLastRunStatus)
+	return u
+}
+
+// SetLastRunError sets the "last_run_error" field.
+func (u *ScheduleUpsert) SetLastRunError(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldLastRunError, v)
+	return u
+}
+
+// UpdateLastRunError sets the "last_run_error" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateLastRunError() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldLastRunError)
+	return u
+}
+
+// ClearLastRunError clears the value of the "last_run_error" field.
+func (u *ScheduleUpsert) ClearLastRunError() *ScheduleUpsert {
+	u.SetNull(schedule.FieldLastRunError)
+	return u
+}
+
+// SetRunCount sets the "run_count" field.
+func (u *ScheduleUpsert) SetRunCount(v int) *ScheduleUpsert {
+	u.Set(schedule.FieldRunCount, v)
+	return u
+}
+
+// UpdateRunCount sets the "run_count" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateRunCount() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldRunCount)
+	return u
+}
+
+// AddRunCount adds v to the "run_count" field.
+func (u *ScheduleUpsert) AddRunCount(v int) *ScheduleUpsert {
+	u.Add(schedule.FieldRunCount, v)
+	return u
+}
+
+// SetErrorCount sets the "error_count" field.
+func (u *ScheduleUpsert) SetErrorCount(v int) *ScheduleUpsert {
+	u.Set(schedule.FieldErrorCount, v)
+	return u
+}
+
+// UpdateErrorCount sets the "error_count" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateErrorCount() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldErrorCount)
+	return u
+}
+
+// AddErrorCount adds v to the "error_count" field.
+func (u *ScheduleUpsert) AddErrorCount(v int) *ScheduleUpsert {
+	u.Add(schedule.FieldErrorCount, v)
+	return u
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *ScheduleUpsert) SetCreatedBy(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldCreatedBy, v)
+	return u
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateCreatedBy() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldCreatedBy)
+	return u
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *ScheduleUpsert) ClearCreatedBy() *ScheduleUpsert {
+	u.SetNull(schedule.FieldCreatedBy)
+	return u
+}
+
+// SetUpdated sets the "updated" field.
+func (u *ScheduleUpsert) SetUpdated(v time.Time) *ScheduleUpsert {
+	u.Set(schedule.FieldUpdated, v)
+	return u
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateUpdated() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldUpdated)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.Schedule.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(schedule.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *ScheduleUpsertOne) UpdateNewValues() *ScheduleUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(schedule.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(schedule.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.Schedule.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *ScheduleUpsertOne) Ignore() *ScheduleUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *ScheduleUpsertOne) DoNothing() *ScheduleUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the ScheduleCreate.OnConflict
+// documentation for more info.
+func (u *ScheduleUpsertOne) Update(set func(*ScheduleUpsert)) *ScheduleUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&ScheduleUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *ScheduleUpsertOne) SetProjectID(v uuid.UUID) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateProjectID() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// SetName sets the "name" field.
+func (u *ScheduleUpsertOne) SetName(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetName(v)
+	})
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateName() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateName()
+	})
+}
+
+// SetCronExpr sets the "cron_expr" field.
+func (u *ScheduleUpsertOne) SetCronExpr(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetCronExpr(v)
+	})
+}
+
+// UpdateCronExpr sets the "cron_expr" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateCronExpr() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateCronExpr()
+	})
+}
+
+// SetEventType sets the "event_type" field.
+func (u *ScheduleUpsertOne) SetEventType(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetEventType(v)
+	})
+}
+
+// UpdateEventType sets the "event_type" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateEventType() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateEventType()
+	})
+}
+
+// SetPayload sets the "payload" field.
+func (u *ScheduleUpsertOne) SetPayload(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetPayload(v)
+	})
+}
+
+// UpdatePayload sets the "payload" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdatePayload() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdatePayload()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *ScheduleUpsertOne) SetStatus(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateStatus() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// SetNextRunAt sets the "next_run_at" field.
+func (u *ScheduleUpsertOne) SetNextRunAt(v time.Time) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetNextRunAt(v)
+	})
+}
+
+// UpdateNextRunAt sets the "next_run_at" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateNextRunAt() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateNextRunAt()
+	})
+}
+
+// ClearNextRunAt clears the value of the "next_run_at" field.
+func (u *ScheduleUpsertOne) ClearNextRunAt() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearNextRunAt()
+	})
+}
+
+// SetLastRunAt sets the "last_run_at" field.
+func (u *ScheduleUpsertOne) SetLastRunAt(v time.Time) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetLastRunAt(v)
+	})
+}
+
+// UpdateLastRunAt sets the "last_run_at" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateLastRunAt() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateLastRunAt()
+	})
+}
+
+// ClearLastRunAt clears the value of the "last_run_at" field.
+func (u *ScheduleUpsertOne) ClearLastRunAt() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearLastRunAt()
+	})
+}
+
+// SetLastRunStatus sets the "last_run_status" field.
+func (u *ScheduleUpsertOne) SetLastRunStatus(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetLastRunStatus(v)
+	})
+}
+
+// UpdateLastRunStatus sets the "last_run_status" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateLastRunStatus() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateLastRunStatus()
+	})
+}
+
+// ClearLastRunStatus clears the value of the "last_run_status" field.
+func (u *ScheduleUpsertOne) ClearLastRunStatus() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearLastRunStatus()
+	})
+}
+
+// SetLastRunError sets the "last_run_error" field.
+func (u *ScheduleUpsertOne) SetLastRunError(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetLastRunError(v)
+	})
+}
+
+// UpdateLastRunError sets the "last_run_error" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateLastRunError() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateLastRunError()
+	})
+}
+
+// ClearLastRunError clears the value of the "last_run_error" field.
+func (u *ScheduleUpsertOne) ClearLastRunError() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearLastRunError()
+	})
+}
+
+// SetRunCount sets the "run_count" field.
+func (u *ScheduleUpsertOne) SetRunCount(v int) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetRunCount(v)
+	})
+}
+
+// AddRunCount adds v to the "run_count" field.
+func (u *ScheduleUpsertOne) AddRunCount(v int) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.AddRunCount(v)
+	})
+}
+
+// UpdateRunCount sets the "run_count" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateRunCount() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateRunCount()
+	})
+}
+
+// SetErrorCount sets the "error_count" field.
+func (u *ScheduleUpsertOne) SetErrorCount(v int) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetErrorCount(v)
+	})
+}
+
+// AddErrorCount adds v to the "error_count" field.
+func (u *ScheduleUpsertOne) AddErrorCount(v int) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.AddErrorCount(v)
+	})
+}
+
+// UpdateErrorCount sets the "error_count" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateErrorCount() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateErrorCount()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *ScheduleUpsertOne) SetCreatedBy(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateCreatedBy() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *ScheduleUpsertOne) ClearCreatedBy() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// SetUpdated sets the "updated" field.
+func (u *ScheduleUpsertOne) SetUpdated(v time.Time) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetUpdated(v)
+	})
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateUpdated() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateUpdated()
+	})
+}
+
+// Exec executes the query.
+func (u *ScheduleUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for ScheduleCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *ScheduleUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *ScheduleUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: ScheduleUpsertOne.ID is not supported by MySQL driver. Use ScheduleUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *ScheduleUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // ScheduleCreateBulk is the builder for creating many Schedule entities in bulk.
 type ScheduleCreateBulk struct {
 	config
 	err      error
 	builders []*ScheduleCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the Schedule entities in the database.
@@ -457,6 +1055,7 @@ func (_c *ScheduleCreateBulk) Save(ctx context.Context) ([]*Schedule, error) {
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -503,6 +1102,368 @@ func (_c *ScheduleCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *ScheduleCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.Schedule.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.ScheduleUpsert) {
+//			SetProjectID(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *ScheduleCreateBulk) OnConflict(opts ...sql.ConflictOption) *ScheduleUpsertBulk {
+	_c.conflict = opts
+	return &ScheduleUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.Schedule.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *ScheduleCreateBulk) OnConflictColumns(columns ...string) *ScheduleUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &ScheduleUpsertBulk{
+		create: _c,
+	}
+}
+
+// ScheduleUpsertBulk is the builder for "upsert"-ing
+// a bulk of Schedule nodes.
+type ScheduleUpsertBulk struct {
+	create *ScheduleCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.Schedule.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(schedule.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *ScheduleUpsertBulk) UpdateNewValues() *ScheduleUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(schedule.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(schedule.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.Schedule.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *ScheduleUpsertBulk) Ignore() *ScheduleUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *ScheduleUpsertBulk) DoNothing() *ScheduleUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the ScheduleCreateBulk.OnConflict
+// documentation for more info.
+func (u *ScheduleUpsertBulk) Update(set func(*ScheduleUpsert)) *ScheduleUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&ScheduleUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *ScheduleUpsertBulk) SetProjectID(v uuid.UUID) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateProjectID() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// SetName sets the "name" field.
+func (u *ScheduleUpsertBulk) SetName(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetName(v)
+	})
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateName() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateName()
+	})
+}
+
+// SetCronExpr sets the "cron_expr" field.
+func (u *ScheduleUpsertBulk) SetCronExpr(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetCronExpr(v)
+	})
+}
+
+// UpdateCronExpr sets the "cron_expr" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateCronExpr() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateCronExpr()
+	})
+}
+
+// SetEventType sets the "event_type" field.
+func (u *ScheduleUpsertBulk) SetEventType(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetEventType(v)
+	})
+}
+
+// UpdateEventType sets the "event_type" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateEventType() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateEventType()
+	})
+}
+
+// SetPayload sets the "payload" field.
+func (u *ScheduleUpsertBulk) SetPayload(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetPayload(v)
+	})
+}
+
+// UpdatePayload sets the "payload" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdatePayload() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdatePayload()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *ScheduleUpsertBulk) SetStatus(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateStatus() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// SetNextRunAt sets the "next_run_at" field.
+func (u *ScheduleUpsertBulk) SetNextRunAt(v time.Time) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetNextRunAt(v)
+	})
+}
+
+// UpdateNextRunAt sets the "next_run_at" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateNextRunAt() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateNextRunAt()
+	})
+}
+
+// ClearNextRunAt clears the value of the "next_run_at" field.
+func (u *ScheduleUpsertBulk) ClearNextRunAt() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearNextRunAt()
+	})
+}
+
+// SetLastRunAt sets the "last_run_at" field.
+func (u *ScheduleUpsertBulk) SetLastRunAt(v time.Time) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetLastRunAt(v)
+	})
+}
+
+// UpdateLastRunAt sets the "last_run_at" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateLastRunAt() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateLastRunAt()
+	})
+}
+
+// ClearLastRunAt clears the value of the "last_run_at" field.
+func (u *ScheduleUpsertBulk) ClearLastRunAt() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearLastRunAt()
+	})
+}
+
+// SetLastRunStatus sets the "last_run_status" field.
+func (u *ScheduleUpsertBulk) SetLastRunStatus(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetLastRunStatus(v)
+	})
+}
+
+// UpdateLastRunStatus sets the "last_run_status" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateLastRunStatus() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateLastRunStatus()
+	})
+}
+
+// ClearLastRunStatus clears the value of the "last_run_status" field.
+func (u *ScheduleUpsertBulk) ClearLastRunStatus() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearLastRunStatus()
+	})
+}
+
+// SetLastRunError sets the "last_run_error" field.
+func (u *ScheduleUpsertBulk) SetLastRunError(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetLastRunError(v)
+	})
+}
+
+// UpdateLastRunError sets the "last_run_error" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateLastRunError() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateLastRunError()
+	})
+}
+
+// ClearLastRunError clears the value of the "last_run_error" field.
+func (u *ScheduleUpsertBulk) ClearLastRunError() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearLastRunError()
+	})
+}
+
+// SetRunCount sets the "run_count" field.
+func (u *ScheduleUpsertBulk) SetRunCount(v int) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetRunCount(v)
+	})
+}
+
+// AddRunCount adds v to the "run_count" field.
+func (u *ScheduleUpsertBulk) AddRunCount(v int) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.AddRunCount(v)
+	})
+}
+
+// UpdateRunCount sets the "run_count" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateRunCount() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateRunCount()
+	})
+}
+
+// SetErrorCount sets the "error_count" field.
+func (u *ScheduleUpsertBulk) SetErrorCount(v int) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetErrorCount(v)
+	})
+}
+
+// AddErrorCount adds v to the "error_count" field.
+func (u *ScheduleUpsertBulk) AddErrorCount(v int) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.AddErrorCount(v)
+	})
+}
+
+// UpdateErrorCount sets the "error_count" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateErrorCount() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateErrorCount()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *ScheduleUpsertBulk) SetCreatedBy(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateCreatedBy() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *ScheduleUpsertBulk) ClearCreatedBy() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// SetUpdated sets the "updated" field.
+func (u *ScheduleUpsertBulk) SetUpdated(v time.Time) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetUpdated(v)
+	})
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateUpdated() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateUpdated()
+	})
+}
+
+// Exec executes the query.
+func (u *ScheduleUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the ScheduleCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for ScheduleCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *ScheduleUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

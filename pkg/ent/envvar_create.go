@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
@@ -19,6 +21,7 @@ type EnvVarCreate struct {
 	config
 	mutation *EnvVarMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetKey sets the "key" field.
@@ -293,6 +296,7 @@ func (_c *EnvVarCreate) createSpec() (*EnvVar, *sqlgraph.CreateSpec) {
 		_node = &EnvVar{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(envvar.Table, sqlgraph.NewFieldSpec(envvar.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -344,11 +348,436 @@ func (_c *EnvVarCreate) createSpec() (*EnvVar, *sqlgraph.CreateSpec) {
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.EnvVar.Create().
+//		SetKey(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.EnvVarUpsert) {
+//			SetKey(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *EnvVarCreate) OnConflict(opts ...sql.ConflictOption) *EnvVarUpsertOne {
+	_c.conflict = opts
+	return &EnvVarUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.EnvVar.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *EnvVarCreate) OnConflictColumns(columns ...string) *EnvVarUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &EnvVarUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// EnvVarUpsertOne is the builder for "upsert"-ing
+	//  one EnvVar node.
+	EnvVarUpsertOne struct {
+		create *EnvVarCreate
+	}
+
+	// EnvVarUpsert is the "OnConflict" setter.
+	EnvVarUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetKey sets the "key" field.
+func (u *EnvVarUpsert) SetKey(v string) *EnvVarUpsert {
+	u.Set(envvar.FieldKey, v)
+	return u
+}
+
+// UpdateKey sets the "key" field to the value that was provided on create.
+func (u *EnvVarUpsert) UpdateKey() *EnvVarUpsert {
+	u.SetExcluded(envvar.FieldKey)
+	return u
+}
+
+// SetValue sets the "value" field.
+func (u *EnvVarUpsert) SetValue(v string) *EnvVarUpsert {
+	u.Set(envvar.FieldValue, v)
+	return u
+}
+
+// UpdateValue sets the "value" field to the value that was provided on create.
+func (u *EnvVarUpsert) UpdateValue() *EnvVarUpsert {
+	u.SetExcluded(envvar.FieldValue)
+	return u
+}
+
+// SetScope sets the "scope" field.
+func (u *EnvVarUpsert) SetScope(v string) *EnvVarUpsert {
+	u.Set(envvar.FieldScope, v)
+	return u
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *EnvVarUpsert) UpdateScope() *EnvVarUpsert {
+	u.SetExcluded(envvar.FieldScope)
+	return u
+}
+
+// SetScopeID sets the "scope_id" field.
+func (u *EnvVarUpsert) SetScopeID(v string) *EnvVarUpsert {
+	u.Set(envvar.FieldScopeID, v)
+	return u
+}
+
+// UpdateScopeID sets the "scope_id" field to the value that was provided on create.
+func (u *EnvVarUpsert) UpdateScopeID() *EnvVarUpsert {
+	u.SetExcluded(envvar.FieldScopeID)
+	return u
+}
+
+// SetDescription sets the "description" field.
+func (u *EnvVarUpsert) SetDescription(v string) *EnvVarUpsert {
+	u.Set(envvar.FieldDescription, v)
+	return u
+}
+
+// UpdateDescription sets the "description" field to the value that was provided on create.
+func (u *EnvVarUpsert) UpdateDescription() *EnvVarUpsert {
+	u.SetExcluded(envvar.FieldDescription)
+	return u
+}
+
+// ClearDescription clears the value of the "description" field.
+func (u *EnvVarUpsert) ClearDescription() *EnvVarUpsert {
+	u.SetNull(envvar.FieldDescription)
+	return u
+}
+
+// SetSensitive sets the "sensitive" field.
+func (u *EnvVarUpsert) SetSensitive(v bool) *EnvVarUpsert {
+	u.Set(envvar.FieldSensitive, v)
+	return u
+}
+
+// UpdateSensitive sets the "sensitive" field to the value that was provided on create.
+func (u *EnvVarUpsert) UpdateSensitive() *EnvVarUpsert {
+	u.SetExcluded(envvar.FieldSensitive)
+	return u
+}
+
+// SetInjectionMode sets the "injection_mode" field.
+func (u *EnvVarUpsert) SetInjectionMode(v envvar.InjectionMode) *EnvVarUpsert {
+	u.Set(envvar.FieldInjectionMode, v)
+	return u
+}
+
+// UpdateInjectionMode sets the "injection_mode" field to the value that was provided on create.
+func (u *EnvVarUpsert) UpdateInjectionMode() *EnvVarUpsert {
+	u.SetExcluded(envvar.FieldInjectionMode)
+	return u
+}
+
+// SetSecret sets the "secret" field.
+func (u *EnvVarUpsert) SetSecret(v bool) *EnvVarUpsert {
+	u.Set(envvar.FieldSecret, v)
+	return u
+}
+
+// UpdateSecret sets the "secret" field to the value that was provided on create.
+func (u *EnvVarUpsert) UpdateSecret() *EnvVarUpsert {
+	u.SetExcluded(envvar.FieldSecret)
+	return u
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *EnvVarUpsert) SetCreatedBy(v string) *EnvVarUpsert {
+	u.Set(envvar.FieldCreatedBy, v)
+	return u
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *EnvVarUpsert) UpdateCreatedBy() *EnvVarUpsert {
+	u.SetExcluded(envvar.FieldCreatedBy)
+	return u
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *EnvVarUpsert) ClearCreatedBy() *EnvVarUpsert {
+	u.SetNull(envvar.FieldCreatedBy)
+	return u
+}
+
+// SetUpdated sets the "updated" field.
+func (u *EnvVarUpsert) SetUpdated(v time.Time) *EnvVarUpsert {
+	u.Set(envvar.FieldUpdated, v)
+	return u
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *EnvVarUpsert) UpdateUpdated() *EnvVarUpsert {
+	u.SetExcluded(envvar.FieldUpdated)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.EnvVar.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(envvar.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *EnvVarUpsertOne) UpdateNewValues() *EnvVarUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(envvar.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(envvar.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.EnvVar.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *EnvVarUpsertOne) Ignore() *EnvVarUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *EnvVarUpsertOne) DoNothing() *EnvVarUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the EnvVarCreate.OnConflict
+// documentation for more info.
+func (u *EnvVarUpsertOne) Update(set func(*EnvVarUpsert)) *EnvVarUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&EnvVarUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetKey sets the "key" field.
+func (u *EnvVarUpsertOne) SetKey(v string) *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetKey(v)
+	})
+}
+
+// UpdateKey sets the "key" field to the value that was provided on create.
+func (u *EnvVarUpsertOne) UpdateKey() *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateKey()
+	})
+}
+
+// SetValue sets the "value" field.
+func (u *EnvVarUpsertOne) SetValue(v string) *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetValue(v)
+	})
+}
+
+// UpdateValue sets the "value" field to the value that was provided on create.
+func (u *EnvVarUpsertOne) UpdateValue() *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateValue()
+	})
+}
+
+// SetScope sets the "scope" field.
+func (u *EnvVarUpsertOne) SetScope(v string) *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetScope(v)
+	})
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *EnvVarUpsertOne) UpdateScope() *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateScope()
+	})
+}
+
+// SetScopeID sets the "scope_id" field.
+func (u *EnvVarUpsertOne) SetScopeID(v string) *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetScopeID(v)
+	})
+}
+
+// UpdateScopeID sets the "scope_id" field to the value that was provided on create.
+func (u *EnvVarUpsertOne) UpdateScopeID() *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateScopeID()
+	})
+}
+
+// SetDescription sets the "description" field.
+func (u *EnvVarUpsertOne) SetDescription(v string) *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetDescription(v)
+	})
+}
+
+// UpdateDescription sets the "description" field to the value that was provided on create.
+func (u *EnvVarUpsertOne) UpdateDescription() *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateDescription()
+	})
+}
+
+// ClearDescription clears the value of the "description" field.
+func (u *EnvVarUpsertOne) ClearDescription() *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.ClearDescription()
+	})
+}
+
+// SetSensitive sets the "sensitive" field.
+func (u *EnvVarUpsertOne) SetSensitive(v bool) *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetSensitive(v)
+	})
+}
+
+// UpdateSensitive sets the "sensitive" field to the value that was provided on create.
+func (u *EnvVarUpsertOne) UpdateSensitive() *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateSensitive()
+	})
+}
+
+// SetInjectionMode sets the "injection_mode" field.
+func (u *EnvVarUpsertOne) SetInjectionMode(v envvar.InjectionMode) *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetInjectionMode(v)
+	})
+}
+
+// UpdateInjectionMode sets the "injection_mode" field to the value that was provided on create.
+func (u *EnvVarUpsertOne) UpdateInjectionMode() *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateInjectionMode()
+	})
+}
+
+// SetSecret sets the "secret" field.
+func (u *EnvVarUpsertOne) SetSecret(v bool) *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetSecret(v)
+	})
+}
+
+// UpdateSecret sets the "secret" field to the value that was provided on create.
+func (u *EnvVarUpsertOne) UpdateSecret() *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateSecret()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *EnvVarUpsertOne) SetCreatedBy(v string) *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *EnvVarUpsertOne) UpdateCreatedBy() *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *EnvVarUpsertOne) ClearCreatedBy() *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// SetUpdated sets the "updated" field.
+func (u *EnvVarUpsertOne) SetUpdated(v time.Time) *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetUpdated(v)
+	})
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *EnvVarUpsertOne) UpdateUpdated() *EnvVarUpsertOne {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateUpdated()
+	})
+}
+
+// Exec executes the query.
+func (u *EnvVarUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for EnvVarCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *EnvVarUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *EnvVarUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: EnvVarUpsertOne.ID is not supported by MySQL driver. Use EnvVarUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *EnvVarUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // EnvVarCreateBulk is the builder for creating many EnvVar entities in bulk.
 type EnvVarCreateBulk struct {
 	config
 	err      error
 	builders []*EnvVarCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the EnvVar entities in the database.
@@ -378,6 +807,7 @@ func (_c *EnvVarCreateBulk) Save(ctx context.Context) ([]*EnvVar, error) {
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -424,6 +854,277 @@ func (_c *EnvVarCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *EnvVarCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.EnvVar.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.EnvVarUpsert) {
+//			SetKey(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *EnvVarCreateBulk) OnConflict(opts ...sql.ConflictOption) *EnvVarUpsertBulk {
+	_c.conflict = opts
+	return &EnvVarUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.EnvVar.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *EnvVarCreateBulk) OnConflictColumns(columns ...string) *EnvVarUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &EnvVarUpsertBulk{
+		create: _c,
+	}
+}
+
+// EnvVarUpsertBulk is the builder for "upsert"-ing
+// a bulk of EnvVar nodes.
+type EnvVarUpsertBulk struct {
+	create *EnvVarCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.EnvVar.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(envvar.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *EnvVarUpsertBulk) UpdateNewValues() *EnvVarUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(envvar.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(envvar.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.EnvVar.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *EnvVarUpsertBulk) Ignore() *EnvVarUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *EnvVarUpsertBulk) DoNothing() *EnvVarUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the EnvVarCreateBulk.OnConflict
+// documentation for more info.
+func (u *EnvVarUpsertBulk) Update(set func(*EnvVarUpsert)) *EnvVarUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&EnvVarUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetKey sets the "key" field.
+func (u *EnvVarUpsertBulk) SetKey(v string) *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetKey(v)
+	})
+}
+
+// UpdateKey sets the "key" field to the value that was provided on create.
+func (u *EnvVarUpsertBulk) UpdateKey() *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateKey()
+	})
+}
+
+// SetValue sets the "value" field.
+func (u *EnvVarUpsertBulk) SetValue(v string) *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetValue(v)
+	})
+}
+
+// UpdateValue sets the "value" field to the value that was provided on create.
+func (u *EnvVarUpsertBulk) UpdateValue() *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateValue()
+	})
+}
+
+// SetScope sets the "scope" field.
+func (u *EnvVarUpsertBulk) SetScope(v string) *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetScope(v)
+	})
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *EnvVarUpsertBulk) UpdateScope() *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateScope()
+	})
+}
+
+// SetScopeID sets the "scope_id" field.
+func (u *EnvVarUpsertBulk) SetScopeID(v string) *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetScopeID(v)
+	})
+}
+
+// UpdateScopeID sets the "scope_id" field to the value that was provided on create.
+func (u *EnvVarUpsertBulk) UpdateScopeID() *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateScopeID()
+	})
+}
+
+// SetDescription sets the "description" field.
+func (u *EnvVarUpsertBulk) SetDescription(v string) *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetDescription(v)
+	})
+}
+
+// UpdateDescription sets the "description" field to the value that was provided on create.
+func (u *EnvVarUpsertBulk) UpdateDescription() *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateDescription()
+	})
+}
+
+// ClearDescription clears the value of the "description" field.
+func (u *EnvVarUpsertBulk) ClearDescription() *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.ClearDescription()
+	})
+}
+
+// SetSensitive sets the "sensitive" field.
+func (u *EnvVarUpsertBulk) SetSensitive(v bool) *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetSensitive(v)
+	})
+}
+
+// UpdateSensitive sets the "sensitive" field to the value that was provided on create.
+func (u *EnvVarUpsertBulk) UpdateSensitive() *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateSensitive()
+	})
+}
+
+// SetInjectionMode sets the "injection_mode" field.
+func (u *EnvVarUpsertBulk) SetInjectionMode(v envvar.InjectionMode) *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetInjectionMode(v)
+	})
+}
+
+// UpdateInjectionMode sets the "injection_mode" field to the value that was provided on create.
+func (u *EnvVarUpsertBulk) UpdateInjectionMode() *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateInjectionMode()
+	})
+}
+
+// SetSecret sets the "secret" field.
+func (u *EnvVarUpsertBulk) SetSecret(v bool) *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetSecret(v)
+	})
+}
+
+// UpdateSecret sets the "secret" field to the value that was provided on create.
+func (u *EnvVarUpsertBulk) UpdateSecret() *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateSecret()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *EnvVarUpsertBulk) SetCreatedBy(v string) *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *EnvVarUpsertBulk) UpdateCreatedBy() *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *EnvVarUpsertBulk) ClearCreatedBy() *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// SetUpdated sets the "updated" field.
+func (u *EnvVarUpsertBulk) SetUpdated(v time.Time) *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.SetUpdated(v)
+	})
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *EnvVarUpsertBulk) UpdateUpdated() *EnvVarUpsertBulk {
+	return u.Update(func(s *EnvVarUpsert) {
+		s.UpdateUpdated()
+	})
+}
+
+// Exec executes the query.
+func (u *EnvVarUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the EnvVarCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for EnvVarCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *EnvVarUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

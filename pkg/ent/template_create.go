@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
@@ -19,6 +21,7 @@ type TemplateCreate struct {
 	config
 	mutation *TemplateMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetName sets the "name" field.
@@ -506,6 +509,7 @@ func (_c *TemplateCreate) createSpec() (*Template, *sqlgraph.CreateSpec) {
 		_node = &Template{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(template.Table, sqlgraph.NewFieldSpec(template.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -613,11 +617,982 @@ func (_c *TemplateCreate) createSpec() (*Template, *sqlgraph.CreateSpec) {
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.Template.Create().
+//		SetName(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.TemplateUpsert) {
+//			SetName(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *TemplateCreate) OnConflict(opts ...sql.ConflictOption) *TemplateUpsertOne {
+	_c.conflict = opts
+	return &TemplateUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.Template.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *TemplateCreate) OnConflictColumns(columns ...string) *TemplateUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &TemplateUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// TemplateUpsertOne is the builder for "upsert"-ing
+	//  one Template node.
+	TemplateUpsertOne struct {
+		create *TemplateCreate
+	}
+
+	// TemplateUpsert is the "OnConflict" setter.
+	TemplateUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetName sets the "name" field.
+func (u *TemplateUpsert) SetName(v string) *TemplateUpsert {
+	u.Set(template.FieldName, v)
+	return u
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateName() *TemplateUpsert {
+	u.SetExcluded(template.FieldName)
+	return u
+}
+
+// SetSlug sets the "slug" field.
+func (u *TemplateUpsert) SetSlug(v string) *TemplateUpsert {
+	u.Set(template.FieldSlug, v)
+	return u
+}
+
+// UpdateSlug sets the "slug" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateSlug() *TemplateUpsert {
+	u.SetExcluded(template.FieldSlug)
+	return u
+}
+
+// SetDisplayName sets the "display_name" field.
+func (u *TemplateUpsert) SetDisplayName(v string) *TemplateUpsert {
+	u.Set(template.FieldDisplayName, v)
+	return u
+}
+
+// UpdateDisplayName sets the "display_name" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateDisplayName() *TemplateUpsert {
+	u.SetExcluded(template.FieldDisplayName)
+	return u
+}
+
+// ClearDisplayName clears the value of the "display_name" field.
+func (u *TemplateUpsert) ClearDisplayName() *TemplateUpsert {
+	u.SetNull(template.FieldDisplayName)
+	return u
+}
+
+// SetDescription sets the "description" field.
+func (u *TemplateUpsert) SetDescription(v string) *TemplateUpsert {
+	u.Set(template.FieldDescription, v)
+	return u
+}
+
+// UpdateDescription sets the "description" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateDescription() *TemplateUpsert {
+	u.SetExcluded(template.FieldDescription)
+	return u
+}
+
+// ClearDescription clears the value of the "description" field.
+func (u *TemplateUpsert) ClearDescription() *TemplateUpsert {
+	u.SetNull(template.FieldDescription)
+	return u
+}
+
+// SetHarness sets the "harness" field.
+func (u *TemplateUpsert) SetHarness(v string) *TemplateUpsert {
+	u.Set(template.FieldHarness, v)
+	return u
+}
+
+// UpdateHarness sets the "harness" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateHarness() *TemplateUpsert {
+	u.SetExcluded(template.FieldHarness)
+	return u
+}
+
+// SetDefaultHarnessConfig sets the "default_harness_config" field.
+func (u *TemplateUpsert) SetDefaultHarnessConfig(v string) *TemplateUpsert {
+	u.Set(template.FieldDefaultHarnessConfig, v)
+	return u
+}
+
+// UpdateDefaultHarnessConfig sets the "default_harness_config" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateDefaultHarnessConfig() *TemplateUpsert {
+	u.SetExcluded(template.FieldDefaultHarnessConfig)
+	return u
+}
+
+// ClearDefaultHarnessConfig clears the value of the "default_harness_config" field.
+func (u *TemplateUpsert) ClearDefaultHarnessConfig() *TemplateUpsert {
+	u.SetNull(template.FieldDefaultHarnessConfig)
+	return u
+}
+
+// SetImage sets the "image" field.
+func (u *TemplateUpsert) SetImage(v string) *TemplateUpsert {
+	u.Set(template.FieldImage, v)
+	return u
+}
+
+// UpdateImage sets the "image" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateImage() *TemplateUpsert {
+	u.SetExcluded(template.FieldImage)
+	return u
+}
+
+// ClearImage clears the value of the "image" field.
+func (u *TemplateUpsert) ClearImage() *TemplateUpsert {
+	u.SetNull(template.FieldImage)
+	return u
+}
+
+// SetConfig sets the "config" field.
+func (u *TemplateUpsert) SetConfig(v string) *TemplateUpsert {
+	u.Set(template.FieldConfig, v)
+	return u
+}
+
+// UpdateConfig sets the "config" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateConfig() *TemplateUpsert {
+	u.SetExcluded(template.FieldConfig)
+	return u
+}
+
+// ClearConfig clears the value of the "config" field.
+func (u *TemplateUpsert) ClearConfig() *TemplateUpsert {
+	u.SetNull(template.FieldConfig)
+	return u
+}
+
+// SetContentHash sets the "content_hash" field.
+func (u *TemplateUpsert) SetContentHash(v string) *TemplateUpsert {
+	u.Set(template.FieldContentHash, v)
+	return u
+}
+
+// UpdateContentHash sets the "content_hash" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateContentHash() *TemplateUpsert {
+	u.SetExcluded(template.FieldContentHash)
+	return u
+}
+
+// ClearContentHash clears the value of the "content_hash" field.
+func (u *TemplateUpsert) ClearContentHash() *TemplateUpsert {
+	u.SetNull(template.FieldContentHash)
+	return u
+}
+
+// SetScope sets the "scope" field.
+func (u *TemplateUpsert) SetScope(v string) *TemplateUpsert {
+	u.Set(template.FieldScope, v)
+	return u
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateScope() *TemplateUpsert {
+	u.SetExcluded(template.FieldScope)
+	return u
+}
+
+// SetScopeID sets the "scope_id" field.
+func (u *TemplateUpsert) SetScopeID(v string) *TemplateUpsert {
+	u.Set(template.FieldScopeID, v)
+	return u
+}
+
+// UpdateScopeID sets the "scope_id" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateScopeID() *TemplateUpsert {
+	u.SetExcluded(template.FieldScopeID)
+	return u
+}
+
+// ClearScopeID clears the value of the "scope_id" field.
+func (u *TemplateUpsert) ClearScopeID() *TemplateUpsert {
+	u.SetNull(template.FieldScopeID)
+	return u
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *TemplateUpsert) SetProjectID(v string) *TemplateUpsert {
+	u.Set(template.FieldProjectID, v)
+	return u
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateProjectID() *TemplateUpsert {
+	u.SetExcluded(template.FieldProjectID)
+	return u
+}
+
+// ClearProjectID clears the value of the "project_id" field.
+func (u *TemplateUpsert) ClearProjectID() *TemplateUpsert {
+	u.SetNull(template.FieldProjectID)
+	return u
+}
+
+// SetStorageURI sets the "storage_uri" field.
+func (u *TemplateUpsert) SetStorageURI(v string) *TemplateUpsert {
+	u.Set(template.FieldStorageURI, v)
+	return u
+}
+
+// UpdateStorageURI sets the "storage_uri" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateStorageURI() *TemplateUpsert {
+	u.SetExcluded(template.FieldStorageURI)
+	return u
+}
+
+// ClearStorageURI clears the value of the "storage_uri" field.
+func (u *TemplateUpsert) ClearStorageURI() *TemplateUpsert {
+	u.SetNull(template.FieldStorageURI)
+	return u
+}
+
+// SetStorageBucket sets the "storage_bucket" field.
+func (u *TemplateUpsert) SetStorageBucket(v string) *TemplateUpsert {
+	u.Set(template.FieldStorageBucket, v)
+	return u
+}
+
+// UpdateStorageBucket sets the "storage_bucket" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateStorageBucket() *TemplateUpsert {
+	u.SetExcluded(template.FieldStorageBucket)
+	return u
+}
+
+// ClearStorageBucket clears the value of the "storage_bucket" field.
+func (u *TemplateUpsert) ClearStorageBucket() *TemplateUpsert {
+	u.SetNull(template.FieldStorageBucket)
+	return u
+}
+
+// SetStoragePath sets the "storage_path" field.
+func (u *TemplateUpsert) SetStoragePath(v string) *TemplateUpsert {
+	u.Set(template.FieldStoragePath, v)
+	return u
+}
+
+// UpdateStoragePath sets the "storage_path" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateStoragePath() *TemplateUpsert {
+	u.SetExcluded(template.FieldStoragePath)
+	return u
+}
+
+// ClearStoragePath clears the value of the "storage_path" field.
+func (u *TemplateUpsert) ClearStoragePath() *TemplateUpsert {
+	u.SetNull(template.FieldStoragePath)
+	return u
+}
+
+// SetFiles sets the "files" field.
+func (u *TemplateUpsert) SetFiles(v string) *TemplateUpsert {
+	u.Set(template.FieldFiles, v)
+	return u
+}
+
+// UpdateFiles sets the "files" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateFiles() *TemplateUpsert {
+	u.SetExcluded(template.FieldFiles)
+	return u
+}
+
+// ClearFiles clears the value of the "files" field.
+func (u *TemplateUpsert) ClearFiles() *TemplateUpsert {
+	u.SetNull(template.FieldFiles)
+	return u
+}
+
+// SetBaseTemplate sets the "base_template" field.
+func (u *TemplateUpsert) SetBaseTemplate(v string) *TemplateUpsert {
+	u.Set(template.FieldBaseTemplate, v)
+	return u
+}
+
+// UpdateBaseTemplate sets the "base_template" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateBaseTemplate() *TemplateUpsert {
+	u.SetExcluded(template.FieldBaseTemplate)
+	return u
+}
+
+// ClearBaseTemplate clears the value of the "base_template" field.
+func (u *TemplateUpsert) ClearBaseTemplate() *TemplateUpsert {
+	u.SetNull(template.FieldBaseTemplate)
+	return u
+}
+
+// SetLocked sets the "locked" field.
+func (u *TemplateUpsert) SetLocked(v bool) *TemplateUpsert {
+	u.Set(template.FieldLocked, v)
+	return u
+}
+
+// UpdateLocked sets the "locked" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateLocked() *TemplateUpsert {
+	u.SetExcluded(template.FieldLocked)
+	return u
+}
+
+// SetStatus sets the "status" field.
+func (u *TemplateUpsert) SetStatus(v template.Status) *TemplateUpsert {
+	u.Set(template.FieldStatus, v)
+	return u
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateStatus() *TemplateUpsert {
+	u.SetExcluded(template.FieldStatus)
+	return u
+}
+
+// SetOwnerID sets the "owner_id" field.
+func (u *TemplateUpsert) SetOwnerID(v string) *TemplateUpsert {
+	u.Set(template.FieldOwnerID, v)
+	return u
+}
+
+// UpdateOwnerID sets the "owner_id" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateOwnerID() *TemplateUpsert {
+	u.SetExcluded(template.FieldOwnerID)
+	return u
+}
+
+// ClearOwnerID clears the value of the "owner_id" field.
+func (u *TemplateUpsert) ClearOwnerID() *TemplateUpsert {
+	u.SetNull(template.FieldOwnerID)
+	return u
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *TemplateUpsert) SetCreatedBy(v string) *TemplateUpsert {
+	u.Set(template.FieldCreatedBy, v)
+	return u
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateCreatedBy() *TemplateUpsert {
+	u.SetExcluded(template.FieldCreatedBy)
+	return u
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *TemplateUpsert) ClearCreatedBy() *TemplateUpsert {
+	u.SetNull(template.FieldCreatedBy)
+	return u
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (u *TemplateUpsert) SetUpdatedBy(v string) *TemplateUpsert {
+	u.Set(template.FieldUpdatedBy, v)
+	return u
+}
+
+// UpdateUpdatedBy sets the "updated_by" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateUpdatedBy() *TemplateUpsert {
+	u.SetExcluded(template.FieldUpdatedBy)
+	return u
+}
+
+// ClearUpdatedBy clears the value of the "updated_by" field.
+func (u *TemplateUpsert) ClearUpdatedBy() *TemplateUpsert {
+	u.SetNull(template.FieldUpdatedBy)
+	return u
+}
+
+// SetVisibility sets the "visibility" field.
+func (u *TemplateUpsert) SetVisibility(v string) *TemplateUpsert {
+	u.Set(template.FieldVisibility, v)
+	return u
+}
+
+// UpdateVisibility sets the "visibility" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateVisibility() *TemplateUpsert {
+	u.SetExcluded(template.FieldVisibility)
+	return u
+}
+
+// SetUpdated sets the "updated" field.
+func (u *TemplateUpsert) SetUpdated(v time.Time) *TemplateUpsert {
+	u.Set(template.FieldUpdated, v)
+	return u
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateUpdated() *TemplateUpsert {
+	u.SetExcluded(template.FieldUpdated)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.Template.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(template.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *TemplateUpsertOne) UpdateNewValues() *TemplateUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(template.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(template.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.Template.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *TemplateUpsertOne) Ignore() *TemplateUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *TemplateUpsertOne) DoNothing() *TemplateUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the TemplateCreate.OnConflict
+// documentation for more info.
+func (u *TemplateUpsertOne) Update(set func(*TemplateUpsert)) *TemplateUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&TemplateUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetName sets the "name" field.
+func (u *TemplateUpsertOne) SetName(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetName(v)
+	})
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateName() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateName()
+	})
+}
+
+// SetSlug sets the "slug" field.
+func (u *TemplateUpsertOne) SetSlug(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetSlug(v)
+	})
+}
+
+// UpdateSlug sets the "slug" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateSlug() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateSlug()
+	})
+}
+
+// SetDisplayName sets the "display_name" field.
+func (u *TemplateUpsertOne) SetDisplayName(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetDisplayName(v)
+	})
+}
+
+// UpdateDisplayName sets the "display_name" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateDisplayName() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateDisplayName()
+	})
+}
+
+// ClearDisplayName clears the value of the "display_name" field.
+func (u *TemplateUpsertOne) ClearDisplayName() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearDisplayName()
+	})
+}
+
+// SetDescription sets the "description" field.
+func (u *TemplateUpsertOne) SetDescription(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetDescription(v)
+	})
+}
+
+// UpdateDescription sets the "description" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateDescription() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateDescription()
+	})
+}
+
+// ClearDescription clears the value of the "description" field.
+func (u *TemplateUpsertOne) ClearDescription() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearDescription()
+	})
+}
+
+// SetHarness sets the "harness" field.
+func (u *TemplateUpsertOne) SetHarness(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetHarness(v)
+	})
+}
+
+// UpdateHarness sets the "harness" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateHarness() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateHarness()
+	})
+}
+
+// SetDefaultHarnessConfig sets the "default_harness_config" field.
+func (u *TemplateUpsertOne) SetDefaultHarnessConfig(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetDefaultHarnessConfig(v)
+	})
+}
+
+// UpdateDefaultHarnessConfig sets the "default_harness_config" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateDefaultHarnessConfig() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateDefaultHarnessConfig()
+	})
+}
+
+// ClearDefaultHarnessConfig clears the value of the "default_harness_config" field.
+func (u *TemplateUpsertOne) ClearDefaultHarnessConfig() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearDefaultHarnessConfig()
+	})
+}
+
+// SetImage sets the "image" field.
+func (u *TemplateUpsertOne) SetImage(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetImage(v)
+	})
+}
+
+// UpdateImage sets the "image" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateImage() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateImage()
+	})
+}
+
+// ClearImage clears the value of the "image" field.
+func (u *TemplateUpsertOne) ClearImage() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearImage()
+	})
+}
+
+// SetConfig sets the "config" field.
+func (u *TemplateUpsertOne) SetConfig(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetConfig(v)
+	})
+}
+
+// UpdateConfig sets the "config" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateConfig() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateConfig()
+	})
+}
+
+// ClearConfig clears the value of the "config" field.
+func (u *TemplateUpsertOne) ClearConfig() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearConfig()
+	})
+}
+
+// SetContentHash sets the "content_hash" field.
+func (u *TemplateUpsertOne) SetContentHash(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetContentHash(v)
+	})
+}
+
+// UpdateContentHash sets the "content_hash" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateContentHash() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateContentHash()
+	})
+}
+
+// ClearContentHash clears the value of the "content_hash" field.
+func (u *TemplateUpsertOne) ClearContentHash() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearContentHash()
+	})
+}
+
+// SetScope sets the "scope" field.
+func (u *TemplateUpsertOne) SetScope(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetScope(v)
+	})
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateScope() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateScope()
+	})
+}
+
+// SetScopeID sets the "scope_id" field.
+func (u *TemplateUpsertOne) SetScopeID(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetScopeID(v)
+	})
+}
+
+// UpdateScopeID sets the "scope_id" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateScopeID() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateScopeID()
+	})
+}
+
+// ClearScopeID clears the value of the "scope_id" field.
+func (u *TemplateUpsertOne) ClearScopeID() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearScopeID()
+	})
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *TemplateUpsertOne) SetProjectID(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateProjectID() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// ClearProjectID clears the value of the "project_id" field.
+func (u *TemplateUpsertOne) ClearProjectID() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearProjectID()
+	})
+}
+
+// SetStorageURI sets the "storage_uri" field.
+func (u *TemplateUpsertOne) SetStorageURI(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetStorageURI(v)
+	})
+}
+
+// UpdateStorageURI sets the "storage_uri" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateStorageURI() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateStorageURI()
+	})
+}
+
+// ClearStorageURI clears the value of the "storage_uri" field.
+func (u *TemplateUpsertOne) ClearStorageURI() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearStorageURI()
+	})
+}
+
+// SetStorageBucket sets the "storage_bucket" field.
+func (u *TemplateUpsertOne) SetStorageBucket(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetStorageBucket(v)
+	})
+}
+
+// UpdateStorageBucket sets the "storage_bucket" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateStorageBucket() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateStorageBucket()
+	})
+}
+
+// ClearStorageBucket clears the value of the "storage_bucket" field.
+func (u *TemplateUpsertOne) ClearStorageBucket() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearStorageBucket()
+	})
+}
+
+// SetStoragePath sets the "storage_path" field.
+func (u *TemplateUpsertOne) SetStoragePath(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetStoragePath(v)
+	})
+}
+
+// UpdateStoragePath sets the "storage_path" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateStoragePath() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateStoragePath()
+	})
+}
+
+// ClearStoragePath clears the value of the "storage_path" field.
+func (u *TemplateUpsertOne) ClearStoragePath() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearStoragePath()
+	})
+}
+
+// SetFiles sets the "files" field.
+func (u *TemplateUpsertOne) SetFiles(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetFiles(v)
+	})
+}
+
+// UpdateFiles sets the "files" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateFiles() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateFiles()
+	})
+}
+
+// ClearFiles clears the value of the "files" field.
+func (u *TemplateUpsertOne) ClearFiles() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearFiles()
+	})
+}
+
+// SetBaseTemplate sets the "base_template" field.
+func (u *TemplateUpsertOne) SetBaseTemplate(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetBaseTemplate(v)
+	})
+}
+
+// UpdateBaseTemplate sets the "base_template" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateBaseTemplate() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateBaseTemplate()
+	})
+}
+
+// ClearBaseTemplate clears the value of the "base_template" field.
+func (u *TemplateUpsertOne) ClearBaseTemplate() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearBaseTemplate()
+	})
+}
+
+// SetLocked sets the "locked" field.
+func (u *TemplateUpsertOne) SetLocked(v bool) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetLocked(v)
+	})
+}
+
+// UpdateLocked sets the "locked" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateLocked() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateLocked()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *TemplateUpsertOne) SetStatus(v template.Status) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateStatus() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// SetOwnerID sets the "owner_id" field.
+func (u *TemplateUpsertOne) SetOwnerID(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetOwnerID(v)
+	})
+}
+
+// UpdateOwnerID sets the "owner_id" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateOwnerID() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateOwnerID()
+	})
+}
+
+// ClearOwnerID clears the value of the "owner_id" field.
+func (u *TemplateUpsertOne) ClearOwnerID() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearOwnerID()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *TemplateUpsertOne) SetCreatedBy(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateCreatedBy() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *TemplateUpsertOne) ClearCreatedBy() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (u *TemplateUpsertOne) SetUpdatedBy(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetUpdatedBy(v)
+	})
+}
+
+// UpdateUpdatedBy sets the "updated_by" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateUpdatedBy() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateUpdatedBy()
+	})
+}
+
+// ClearUpdatedBy clears the value of the "updated_by" field.
+func (u *TemplateUpsertOne) ClearUpdatedBy() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearUpdatedBy()
+	})
+}
+
+// SetVisibility sets the "visibility" field.
+func (u *TemplateUpsertOne) SetVisibility(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetVisibility(v)
+	})
+}
+
+// UpdateVisibility sets the "visibility" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateVisibility() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateVisibility()
+	})
+}
+
+// SetUpdated sets the "updated" field.
+func (u *TemplateUpsertOne) SetUpdated(v time.Time) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetUpdated(v)
+	})
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateUpdated() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateUpdated()
+	})
+}
+
+// Exec executes the query.
+func (u *TemplateUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for TemplateCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *TemplateUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *TemplateUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: TemplateUpsertOne.ID is not supported by MySQL driver. Use TemplateUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *TemplateUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // TemplateCreateBulk is the builder for creating many Template entities in bulk.
 type TemplateCreateBulk struct {
 	config
 	err      error
 	builders []*TemplateCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the Template entities in the database.
@@ -647,6 +1622,7 @@ func (_c *TemplateCreateBulk) Save(ctx context.Context) ([]*Template, error) {
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -693,6 +1669,571 @@ func (_c *TemplateCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *TemplateCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.Template.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.TemplateUpsert) {
+//			SetName(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *TemplateCreateBulk) OnConflict(opts ...sql.ConflictOption) *TemplateUpsertBulk {
+	_c.conflict = opts
+	return &TemplateUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.Template.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *TemplateCreateBulk) OnConflictColumns(columns ...string) *TemplateUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &TemplateUpsertBulk{
+		create: _c,
+	}
+}
+
+// TemplateUpsertBulk is the builder for "upsert"-ing
+// a bulk of Template nodes.
+type TemplateUpsertBulk struct {
+	create *TemplateCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.Template.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(template.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *TemplateUpsertBulk) UpdateNewValues() *TemplateUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(template.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(template.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.Template.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *TemplateUpsertBulk) Ignore() *TemplateUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *TemplateUpsertBulk) DoNothing() *TemplateUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the TemplateCreateBulk.OnConflict
+// documentation for more info.
+func (u *TemplateUpsertBulk) Update(set func(*TemplateUpsert)) *TemplateUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&TemplateUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetName sets the "name" field.
+func (u *TemplateUpsertBulk) SetName(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetName(v)
+	})
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateName() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateName()
+	})
+}
+
+// SetSlug sets the "slug" field.
+func (u *TemplateUpsertBulk) SetSlug(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetSlug(v)
+	})
+}
+
+// UpdateSlug sets the "slug" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateSlug() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateSlug()
+	})
+}
+
+// SetDisplayName sets the "display_name" field.
+func (u *TemplateUpsertBulk) SetDisplayName(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetDisplayName(v)
+	})
+}
+
+// UpdateDisplayName sets the "display_name" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateDisplayName() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateDisplayName()
+	})
+}
+
+// ClearDisplayName clears the value of the "display_name" field.
+func (u *TemplateUpsertBulk) ClearDisplayName() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearDisplayName()
+	})
+}
+
+// SetDescription sets the "description" field.
+func (u *TemplateUpsertBulk) SetDescription(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetDescription(v)
+	})
+}
+
+// UpdateDescription sets the "description" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateDescription() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateDescription()
+	})
+}
+
+// ClearDescription clears the value of the "description" field.
+func (u *TemplateUpsertBulk) ClearDescription() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearDescription()
+	})
+}
+
+// SetHarness sets the "harness" field.
+func (u *TemplateUpsertBulk) SetHarness(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetHarness(v)
+	})
+}
+
+// UpdateHarness sets the "harness" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateHarness() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateHarness()
+	})
+}
+
+// SetDefaultHarnessConfig sets the "default_harness_config" field.
+func (u *TemplateUpsertBulk) SetDefaultHarnessConfig(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetDefaultHarnessConfig(v)
+	})
+}
+
+// UpdateDefaultHarnessConfig sets the "default_harness_config" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateDefaultHarnessConfig() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateDefaultHarnessConfig()
+	})
+}
+
+// ClearDefaultHarnessConfig clears the value of the "default_harness_config" field.
+func (u *TemplateUpsertBulk) ClearDefaultHarnessConfig() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearDefaultHarnessConfig()
+	})
+}
+
+// SetImage sets the "image" field.
+func (u *TemplateUpsertBulk) SetImage(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetImage(v)
+	})
+}
+
+// UpdateImage sets the "image" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateImage() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateImage()
+	})
+}
+
+// ClearImage clears the value of the "image" field.
+func (u *TemplateUpsertBulk) ClearImage() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearImage()
+	})
+}
+
+// SetConfig sets the "config" field.
+func (u *TemplateUpsertBulk) SetConfig(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetConfig(v)
+	})
+}
+
+// UpdateConfig sets the "config" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateConfig() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateConfig()
+	})
+}
+
+// ClearConfig clears the value of the "config" field.
+func (u *TemplateUpsertBulk) ClearConfig() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearConfig()
+	})
+}
+
+// SetContentHash sets the "content_hash" field.
+func (u *TemplateUpsertBulk) SetContentHash(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetContentHash(v)
+	})
+}
+
+// UpdateContentHash sets the "content_hash" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateContentHash() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateContentHash()
+	})
+}
+
+// ClearContentHash clears the value of the "content_hash" field.
+func (u *TemplateUpsertBulk) ClearContentHash() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearContentHash()
+	})
+}
+
+// SetScope sets the "scope" field.
+func (u *TemplateUpsertBulk) SetScope(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetScope(v)
+	})
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateScope() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateScope()
+	})
+}
+
+// SetScopeID sets the "scope_id" field.
+func (u *TemplateUpsertBulk) SetScopeID(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetScopeID(v)
+	})
+}
+
+// UpdateScopeID sets the "scope_id" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateScopeID() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateScopeID()
+	})
+}
+
+// ClearScopeID clears the value of the "scope_id" field.
+func (u *TemplateUpsertBulk) ClearScopeID() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearScopeID()
+	})
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *TemplateUpsertBulk) SetProjectID(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateProjectID() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// ClearProjectID clears the value of the "project_id" field.
+func (u *TemplateUpsertBulk) ClearProjectID() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearProjectID()
+	})
+}
+
+// SetStorageURI sets the "storage_uri" field.
+func (u *TemplateUpsertBulk) SetStorageURI(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetStorageURI(v)
+	})
+}
+
+// UpdateStorageURI sets the "storage_uri" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateStorageURI() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateStorageURI()
+	})
+}
+
+// ClearStorageURI clears the value of the "storage_uri" field.
+func (u *TemplateUpsertBulk) ClearStorageURI() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearStorageURI()
+	})
+}
+
+// SetStorageBucket sets the "storage_bucket" field.
+func (u *TemplateUpsertBulk) SetStorageBucket(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetStorageBucket(v)
+	})
+}
+
+// UpdateStorageBucket sets the "storage_bucket" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateStorageBucket() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateStorageBucket()
+	})
+}
+
+// ClearStorageBucket clears the value of the "storage_bucket" field.
+func (u *TemplateUpsertBulk) ClearStorageBucket() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearStorageBucket()
+	})
+}
+
+// SetStoragePath sets the "storage_path" field.
+func (u *TemplateUpsertBulk) SetStoragePath(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetStoragePath(v)
+	})
+}
+
+// UpdateStoragePath sets the "storage_path" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateStoragePath() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateStoragePath()
+	})
+}
+
+// ClearStoragePath clears the value of the "storage_path" field.
+func (u *TemplateUpsertBulk) ClearStoragePath() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearStoragePath()
+	})
+}
+
+// SetFiles sets the "files" field.
+func (u *TemplateUpsertBulk) SetFiles(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetFiles(v)
+	})
+}
+
+// UpdateFiles sets the "files" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateFiles() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateFiles()
+	})
+}
+
+// ClearFiles clears the value of the "files" field.
+func (u *TemplateUpsertBulk) ClearFiles() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearFiles()
+	})
+}
+
+// SetBaseTemplate sets the "base_template" field.
+func (u *TemplateUpsertBulk) SetBaseTemplate(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetBaseTemplate(v)
+	})
+}
+
+// UpdateBaseTemplate sets the "base_template" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateBaseTemplate() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateBaseTemplate()
+	})
+}
+
+// ClearBaseTemplate clears the value of the "base_template" field.
+func (u *TemplateUpsertBulk) ClearBaseTemplate() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearBaseTemplate()
+	})
+}
+
+// SetLocked sets the "locked" field.
+func (u *TemplateUpsertBulk) SetLocked(v bool) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetLocked(v)
+	})
+}
+
+// UpdateLocked sets the "locked" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateLocked() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateLocked()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *TemplateUpsertBulk) SetStatus(v template.Status) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateStatus() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// SetOwnerID sets the "owner_id" field.
+func (u *TemplateUpsertBulk) SetOwnerID(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetOwnerID(v)
+	})
+}
+
+// UpdateOwnerID sets the "owner_id" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateOwnerID() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateOwnerID()
+	})
+}
+
+// ClearOwnerID clears the value of the "owner_id" field.
+func (u *TemplateUpsertBulk) ClearOwnerID() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearOwnerID()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *TemplateUpsertBulk) SetCreatedBy(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateCreatedBy() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *TemplateUpsertBulk) ClearCreatedBy() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (u *TemplateUpsertBulk) SetUpdatedBy(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetUpdatedBy(v)
+	})
+}
+
+// UpdateUpdatedBy sets the "updated_by" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateUpdatedBy() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateUpdatedBy()
+	})
+}
+
+// ClearUpdatedBy clears the value of the "updated_by" field.
+func (u *TemplateUpsertBulk) ClearUpdatedBy() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearUpdatedBy()
+	})
+}
+
+// SetVisibility sets the "visibility" field.
+func (u *TemplateUpsertBulk) SetVisibility(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetVisibility(v)
+	})
+}
+
+// UpdateVisibility sets the "visibility" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateVisibility() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateVisibility()
+	})
+}
+
+// SetUpdated sets the "updated" field.
+func (u *TemplateUpsertBulk) SetUpdated(v time.Time) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetUpdated(v)
+	})
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateUpdated() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateUpdated()
+	})
+}
+
+// Exec executes the query.
+func (u *TemplateUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the TemplateCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for TemplateCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *TemplateUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

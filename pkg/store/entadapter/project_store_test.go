@@ -22,8 +22,8 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,7 +31,10 @@ import (
 
 func newTestProjectStore(t *testing.T) *ProjectStore {
 	t.Helper()
-	client := enttest.NewClient(t)
+	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{})
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Close() })
+	require.NoError(t, entc.AutoMigrate(context.Background(), client))
 	return NewProjectStore(client)
 }
 
@@ -64,7 +67,7 @@ func TestProject_CreateGet(t *testing.T) {
 	assert.Equal(t, p.Slug, got.Slug)
 	assert.Equal(t, "https://github.com/acme/repo.git", got.GitRemote)
 	assert.Equal(t, store.VisibilityPrivate, got.Visibility)
-	assert.Equal(t, store.ProjectTypeHubManaged, got.ProjectType) // computed default
+	assert.Equal(t, store.ProjectTypeHubNative, got.ProjectType) // computed default
 }
 
 func TestProject_CreateDuplicateSlug(t *testing.T) {

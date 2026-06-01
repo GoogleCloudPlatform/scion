@@ -24,6 +24,8 @@ const (
 	FieldMode = "mode"
 	// FieldVersion holds the string denoting the version field in the database.
 	FieldVersion = "version"
+	// FieldLockVersion holds the string denoting the lock_version field in the database.
+	FieldLockVersion = "lock_version"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
 	// FieldConnectionState holds the string denoting the connection_state field in the database.
@@ -64,6 +66,7 @@ var Columns = []string{
 	FieldType,
 	FieldMode,
 	FieldVersion,
+	FieldLockVersion,
 	FieldStatus,
 	FieldConnectionState,
 	FieldLastHeartbeat,
@@ -95,10 +98,10 @@ var (
 	NameValidator func(string) error
 	// SlugValidator is a validator for the "slug" field. It is called by the builders before save.
 	SlugValidator func(string) error
-	// TypeValidator is a validator for the "type" field. It is called by the builders before save.
-	TypeValidator func(string) error
 	// DefaultMode holds the default value on creation for the "mode" field.
 	DefaultMode string
+	// DefaultLockVersion holds the default value on creation for the "lock_version" field.
+	DefaultLockVersion int64
 	// DefaultStatus holds the default value on creation for the "status" field.
 	DefaultStatus string
 	// DefaultConnectionState holds the default value on creation for the "connection_state" field.
@@ -146,6 +149,11 @@ func ByMode(opts ...sql.OrderTermOption) OrderOption {
 // ByVersion orders the results by the version field.
 func ByVersion(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldVersion, opts...).ToFunc()
+}
+
+// ByLockVersion orders the results by the lock_version field.
+func ByLockVersion(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLockVersion, opts...).ToFunc()
 }
 
 // ByStatus orders the results by the status field.
