@@ -119,7 +119,7 @@ func createTestTemplate(t *testing.T, s store.Store, stor *contentMockStorage, f
 	ctx := context.Background()
 
 	tmpl := &store.Template{
-		ID:            "tmpl-test-1",
+		ID:            tid("tmpl-test-1"),
 		Name:          "test-template",
 		Slug:          "test-template",
 		Harness:       "claude",

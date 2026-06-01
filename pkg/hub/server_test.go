@@ -561,7 +561,7 @@ func TestServer_SigningKeyEmptyValueFromStore(t *testing.T) {
 	// Insert a signing key row with empty EncryptedValue (as the GCP backend would)
 	ctx := context.Background()
 	emptySecret := &store.Secret{
-		ID:             "hub-" + hubID + "-" + SecretKeyUserSigningKey,
+		ID:             tid("hub-" + hubID + "-" + SecretKeyUserSigningKey),
 		Key:            SecretKeyUserSigningKey,
 		EncryptedValue: "",
 		SecretRef:      "gcpsm:projects/test/secrets/test-key",

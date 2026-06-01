@@ -925,7 +925,7 @@ func TestDispatcherPassesWorkspaceStoragePath(t *testing.T) {
 		ID:              "agent_with_storage_path",
 		Slug:            "storage-path-agent",
 		Name:            "Storage Path Agent",
-		ProjectID:       "project_test",
+		ProjectID:       tid("project_test"),
 		RuntimeBrokerID: "broker_test",
 		Phase:           string(state.PhaseProvisioning),
 		AppliedConfig: &store.AgentAppliedConfig{

@@ -644,7 +644,7 @@ func setupWorkspaceProject(t *testing.T, projectName string) (*Server, store.Sto
 	workspaceRoot := t.TempDir()
 
 	project := &store.Project{
-		ID:        "project-ws-" + projectName,
+		ID:        tid("project-ws-" + projectName),
 		Name:      projectName,
 		Slug:      projectName,
 		GitRemote: "https://github.com/test/" + projectName,
@@ -653,7 +653,7 @@ func setupWorkspaceProject(t *testing.T, projectName string) (*Server, store.Sto
 		t.Fatalf("failed to create project: %v", err)
 	}
 
-	brokerID := "broker-ws-" + projectName
+	brokerID := tid("broker-ws-" + projectName)
 	broker := &store.RuntimeBroker{
 		ID:       brokerID,
 		Name:     "ws-broker",
