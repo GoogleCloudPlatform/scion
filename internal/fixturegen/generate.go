@@ -22,9 +22,7 @@ import (
 	"sort"
 	"strings"
 
-	entsql "entgo.io/ent/dialect/sql"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 )
 
 // schemaMigrationsTable is the bookkeeping table excluded from coverage — it is
@@ -39,9 +37,9 @@ type TableCount struct {
 
 // Report summarizes a fixture generation run.
 type Report struct {
-	Path    string       // path to the generated .db
-	Counts  []TableCount // per-table row counts (sorted by table name)
-	Missing []string     // domain tables with zero rows (coverage failures)
+	Path   string       // path to the generated .db
+	Counts []TableCount // per-table row counts (sorted by table name)
+	Missing []string    // domain tables with zero rows (coverage failures)
 }
 
 // TotalTables returns the number of domain tables (excluding schema_migrations)
@@ -58,21 +56,17 @@ func Generate(ctx context.Context, path string) (*Report, error) {
 		return nil, fmt.Errorf("removing existing fixture %s: %w", path, err)
 	}
 
-	client, err := entc.OpenSQLite("file:"+path, entc.PoolConfig{})
+	s, err := sqlite.New(path)
 	if err != nil {
 		return nil, fmt.Errorf("opening fixture db: %w", err)
 	}
-	defer client.Close()
+	defer s.Close()
 
-	if err := entc.AutoMigrate(ctx, client); err != nil {
+	if err := s.Migrate(ctx); err != nil {
 		return nil, fmt.Errorf("migrating fixture db: %w", err)
 	}
 
-	drv, ok := client.Driver().(*entsql.Driver)
-	if !ok {
-		return nil, fmt.Errorf("ent client driver does not expose a *sql.DB")
-	}
-	db := drv.DB()
+	db := s.DB()
 	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
 		return nil, fmt.Errorf("disabling foreign keys: %w", err)
 	}
