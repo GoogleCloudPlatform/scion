@@ -43,6 +43,7 @@ func createTestAgent(t *testing.T, s store.Store) *store.Agent {
 	project := &store.Project{
 		ID:   api.NewUUID(),
 		Name: "test-project-" + api.NewUUID()[:8],
+		Slug: "test-project-" + api.NewUUID()[:8],
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -51,6 +52,7 @@ func createTestAgent(t *testing.T, s store.Store) *store.Agent {
 	agent := &store.Agent{
 		ID:        api.NewUUID(),
 		Name:      "test-agent-" + api.NewUUID()[:8],
+		Slug:      "test-agent-" + api.NewUUID()[:8],
 		ProjectID: project.ID,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {

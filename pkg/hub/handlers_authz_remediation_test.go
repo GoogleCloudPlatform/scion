@@ -111,6 +111,7 @@ func TestAuthzRemediation_ListEndpointsFilterUnauthorizedItems(t *testing.T) {
 	visibleBroker := &store.RuntimeBroker{
 		ID:        tid("broker-visible-authz"),
 		Name:      "Visible Broker",
+		Slug:      "broker-visible-authz",
 		Endpoint:  "http://broker-visible",
 		Status:    store.BrokerStatusOnline,
 		CreatedBy: tid("owner-outside-user"),
@@ -118,8 +119,9 @@ func TestAuthzRemediation_ListEndpointsFilterUnauthorizedItems(t *testing.T) {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, visibleBroker))
 
 	hiddenBroker := &store.RuntimeBroker{
-		ID:        "broker-hidden-authz",
+		ID:        tid("broker-hidden-authz"),
 		Name:      "Hidden Broker",
+		Slug:      "broker-hidden-authz",
 		Endpoint:  "http://broker-hidden",
 		Status:    store.BrokerStatusOnline,
 		CreatedBy: tid("owner-outside-user"),

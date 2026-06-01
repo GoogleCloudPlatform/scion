@@ -2165,6 +2165,7 @@ func TestHeartbeat_BackfillsProfile(t *testing.T) {
 	broker := &store.RuntimeBroker{
 		ID:     tid("broker-profile-hb"),
 		Name:   "Profile HB Broker",
+		Slug:   "profile-hb-broker",
 		Status: store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))

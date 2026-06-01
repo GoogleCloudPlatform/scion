@@ -110,7 +110,7 @@ func TestEnvGather_HubDispatch_AllSatisfied(t *testing.T) {
 	// Add provider so broker can serve this project
 	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID: tid("project-1"),
-		BrokerID:  tid("broker-1"),
+		BrokerID:  tid("broker-1"), BrokerName: "test-broker",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +273,7 @@ func TestEnvGather_HubHandler_202Response(t *testing.T) {
 
 	// Add provider with local path so template can be resolved locally
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: tid("project-gather"), BrokerID: tid("broker-gather"),
+		ProjectID: tid("project-gather"), BrokerID: tid("broker-gather"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -349,7 +349,7 @@ func TestEnvGather_HubHandler_ProjectRoute_202Response(t *testing.T) {
 
 	// Add provider with local path so template can be resolved locally
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: tid("project-gather-route"), BrokerID: tid("broker-gather-route"),
+		ProjectID: tid("project-gather-route"), BrokerID: tid("broker-gather-route"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -599,7 +599,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GlobalRoute(t *testing.T) {
 	}
 
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: tid("project-retry-global"), BrokerID: tid("broker-retry-global"),
+		ProjectID: tid("project-retry-global"), BrokerID: tid("broker-retry-global"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -770,7 +770,7 @@ func TestEnvGather_SecretInfoRelay(t *testing.T) {
 	}
 
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: tid("project-si-relay"), BrokerID: tid("broker-si-relay"),
+		ProjectID: tid("project-si-relay"), BrokerID: tid("broker-si-relay"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -849,7 +849,7 @@ func TestEnvGather_SecretInfoRelayType(t *testing.T) {
 	}
 
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: tid("project-si-type"), BrokerID: tid("broker-si-type"),
+		ProjectID: tid("project-si-type"), BrokerID: tid("broker-si-type"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -937,7 +937,7 @@ func TestNonGatherEnv_MissingEnvVars_Returns422(t *testing.T) {
 	}
 
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: tid("project-nogather-missing"), BrokerID: tid("broker-nogather-missing"),
+		ProjectID: tid("project-nogather-missing"), BrokerID: tid("broker-nogather-missing"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -1022,7 +1022,7 @@ func TestNonGatherEnv_MissingEnvVars_ProjectRoute_Returns422(t *testing.T) {
 	}
 
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: tid("project-nogather-route"), BrokerID: tid("broker-nogather-route"),
+		ProjectID: tid("project-nogather-route"), BrokerID: tid("broker-nogather-route"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -1092,7 +1092,7 @@ func TestNonGatherEnv_AllSatisfied_Returns201(t *testing.T) {
 	}
 
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: tid("project-nogather-ok"), BrokerID: tid("broker-nogather-ok"),
+		ProjectID: tid("project-nogather-ok"), BrokerID: tid("broker-nogather-ok"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -1160,7 +1160,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_ProjectRoute(t *testing.T) {
 	}
 
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: tid("project-retry-route"), BrokerID: tid("broker-retry-route"),
+		ProjectID: tid("project-retry-route"), BrokerID: tid("broker-retry-route"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -1262,7 +1262,7 @@ func TestProjectRoute_ResolvesUserScopedEnvVars(t *testing.T) {
 	}
 
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: tid("project-owner-env"), BrokerID: tid("broker-owner-env"),
+		ProjectID: tid("project-owner-env"), BrokerID: tid("broker-owner-env"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -1349,7 +1349,7 @@ func TestProjectRoute_ResolvesUserScopedSecrets(t *testing.T) {
 	}
 
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: tid("project-owner-secret"), BrokerID: tid("broker-owner-secret"),
+		ProjectID: tid("project-owner-secret"), BrokerID: tid("broker-owner-secret"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)

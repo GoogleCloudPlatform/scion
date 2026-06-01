@@ -76,6 +76,7 @@ func TestCreateAgent_SkipsGCSSyncForEmbeddedBroker(t *testing.T) {
 	broker := &store.RuntimeBroker{
 		ID:       brokerID,
 		Name:     "embedded-broker",
+		Slug:     "embedded-broker",
 		Endpoint: "http://localhost:9090",
 		Status:   store.BrokerStatusOnline,
 	}
