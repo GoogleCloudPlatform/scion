@@ -2325,10 +2325,11 @@ func TestCORSPreflight(t *testing.T) {
 func TestProjectCreateIdempotent(t *testing.T) {
 	srv, _ := testServer(t)
 
+	deterministicID := tid("deterministic-id-1234")
 	body := CreateProjectRequest{
-		ID:        "deterministic-id-1234",
+		ID:        deterministicID,
 		Name:      "My Project",
-		Slug:      tid("my-project"),
+		Slug:      "my-project",
 		GitRemote: "github.com/acme/widgets",
 	}
 
@@ -2342,8 +2343,8 @@ func TestProjectCreateIdempotent(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&project1); err != nil {
 		t.Fatalf("failed to decode first response: %v", err)
 	}
-	if project1.ID != "deterministic-id-1234" {
-		t.Errorf("expected ID %q, got %q", "deterministic-id-1234", project1.ID)
+	if project1.ID != deterministicID {
+		t.Errorf("expected ID %q, got %q", deterministicID, project1.ID)
 	}
 
 	// Second create with same ID — should return 200 with same project
