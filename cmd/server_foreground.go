@@ -37,9 +37,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/broker"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
@@ -231,7 +233,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 		if !enableWeb {
 			// Hub runs its own HTTP server (standalone mode).
-			eventPub := hub.NewChannelEventPublisher()
+			eventPub := newEventPublisher(ctx, cfg)
 			hubSrv.SetEventPublisher(eventPub)
 
 			log.Printf("Starting Hub API server on %s:%d", cfg.Hub.Host, cfg.Hub.Port)
@@ -631,41 +633,55 @@ func checkServerPorts(cfg *config.GlobalConfig) error {
 
 // initStore initializes the database store.
 func initStore(cfg *config.GlobalConfig) (store.Store, error) {
+	connMaxLifetime, err := cfg.Database.ConnMaxLifetimeDuration()
+	if err != nil {
+		return nil, fmt.Errorf("invalid database pool config: %w", err)
+	}
+
+	// The connection pool config is shared across backends. For SQLite,
+	// MaxOpenConns is forced to 1 by applyDatabasePoolDefaults to serialize
+	// writes; for Postgres it carries the larger pool sizing (default 20/5/30m)
+	// since Postgres handles concurrent connections natively.
+	pool := entc.PoolConfig{
+		MaxOpenConns:    cfg.Database.MaxOpenConns,
+		MaxIdleConns:    cfg.Database.MaxIdleConns,
+		ConnMaxLifetime: connMaxLifetime,
+	}
+
+	var entClient *ent.Client
 	switch cfg.Database.Driver {
 	case "sqlite":
-		connMaxLifetime, err := cfg.Database.ConnMaxLifetimeDuration()
-		if err != nil {
-			return nil, fmt.Errorf("invalid database pool config: %w", err)
-		}
-
 		// All Hub state lives in a single Ent-backed SQLite database.
-		entClient, err := entc.OpenSQLite("file:"+cfg.Database.URL+"?cache=shared", entc.PoolConfig{
-			MaxOpenConns:    cfg.Database.MaxOpenConns,
-			MaxIdleConns:    cfg.Database.MaxIdleConns,
-			ConnMaxLifetime: connMaxLifetime,
-		})
+		entClient, err = entc.OpenSQLite("file:"+cfg.Database.URL+"?cache=shared", pool)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open database: %w", err)
 		}
-
-		s := entadapter.NewCompositeStore(entClient)
-
-		// Migrate runs Ent's schema migration and seeds built-in maintenance
-		// operations (parity with the former raw-SQL store).
-		if err := s.Migrate(context.Background()); err != nil {
-			s.Close()
-			return nil, fmt.Errorf("failed to run migrations: %w", err)
+	case "postgres":
+		// Postgres uses the pgx stdlib driver. The URL is a standard
+		// connection string (e.g. "postgres://user:pass@host:5432/db?sslmode=require").
+		entClient, err = entc.OpenPostgres(cfg.Database.URL, pool)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open database: %w", err)
 		}
-
-		if err := s.Ping(context.Background()); err != nil {
-			s.Close()
-			return nil, fmt.Errorf("database ping failed: %w", err)
-		}
-
-		return s, nil
 	default:
 		return nil, fmt.Errorf("unsupported database driver: %s", cfg.Database.Driver)
 	}
+
+	s := entadapter.NewCompositeStore(entClient)
+
+	// Migrate runs Ent's schema migration and seeds built-in maintenance
+	// operations (parity with the former raw-SQL store).
+	if err := s.Migrate(context.Background()); err != nil {
+		s.Close()
+		return nil, fmt.Errorf("failed to run migrations: %w", err)
+	}
+
+	if err := s.Ping(context.Background()); err != nil {
+		s.Close()
+		return nil, fmt.Errorf("database ping failed: %w", err)
+	}
+
+	return s, nil
 }
 
 // initDevAuth initializes dev authentication and returns the token.
@@ -972,6 +988,27 @@ func initHubStorage(ctx context.Context, hubSrv *hub.Server, cfg *config.GlobalC
 	}
 }
 
+// newEventPublisher selects the event publisher backend based on the configured
+// database driver. With Postgres it returns a PostgresEventPublisher
+// (cross-replica LISTEN/NOTIFY); otherwise it returns the in-process
+// ChannelEventPublisher. If the Postgres publisher cannot be started it falls
+// back to the in-process publisher so a single instance still functions, logging
+// a prominent warning since cross-replica SSE delivery will be unavailable.
+func newEventPublisher(ctx context.Context, cfg *config.GlobalConfig) hub.EventPublisher {
+	if strings.EqualFold(cfg.Database.Driver, "postgres") {
+		// Metrics export is wired separately (see pkg/observability/dbmetrics);
+		// use a disabled recorder until a MeterProvider is configured.
+		pub, err := hub.NewPostgresEventPublisher(ctx, cfg.Database.URL, dbmetrics.NewDisabled(), logging.Subsystem("hub.events"))
+		if err != nil {
+			log.Printf("WARNING: failed to start Postgres event publisher (%v); falling back to in-process events. Cross-replica SSE will not work.", err)
+			return hub.NewChannelEventPublisher()
+		}
+		log.Printf("Using Postgres LISTEN/NOTIFY event publisher")
+		return pub
+	}
+	return hub.NewChannelEventPublisher()
+}
+
 // initWebServer creates and configures the Web server.
 func initWebServer(cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger *slog.Logger) *hub.WebServer {
 	webHost := cfg.Hub.Host
@@ -1027,7 +1064,7 @@ func initWebServer(cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken st
 	webSrv.SetRequestLogger(requestLogger)
 
 	// Create shared event publisher for real-time SSE
-	eventPub := hub.NewChannelEventPublisher()
+	eventPub := newEventPublisher(context.Background(), cfg)
 	webSrv.SetEventPublisher(eventPub)
 
 	// Wire Hub services into WebServer if Hub is enabled

@@ -33,7 +33,7 @@ import (
 // messages to subscriber agents.
 type NotificationDispatcher struct {
 	store           store.Store
-	events          *ChannelEventPublisher
+	events          EventPublisher
 	getDispatcher   func() AgentDispatcher // lazy getter; dispatcher may be set after startup
 	log             *slog.Logger
 	messageLog      *slog.Logger        // dedicated message audit logger (nil = disabled)
@@ -48,7 +48,7 @@ type NotificationDispatcher struct {
 // The getDispatcher function is called at dispatch time to resolve the current
 // AgentDispatcher, allowing the dispatcher to be set up after the notification
 // system starts (e.g. in combined hub+web mode).
-func NewNotificationDispatcher(s store.Store, events *ChannelEventPublisher, getDispatcher func() AgentDispatcher, log *slog.Logger) *NotificationDispatcher {
+func NewNotificationDispatcher(s store.Store, events EventPublisher, getDispatcher func() AgentDispatcher, log *slog.Logger) *NotificationDispatcher {
 	return &NotificationDispatcher{
 		store:         s,
 		events:        events,

@@ -147,7 +147,7 @@ type WebServer struct {
 	oauthService *OAuthService
 	store        store.Store
 	userTokenSvc *UserTokenService
-	events       *ChannelEventPublisher      // nil when no publisher configured
+	events       EventPublisher              // nil when no publisher configured
 	hubHandler   http.Handler                // mounted Hub API handler, or nil
 	hubShutdown  func(context.Context) error // Hub resource cleanup, or nil
 	maintenance  *MaintenanceState           // runtime maintenance mode state (shared with Hub)
@@ -492,7 +492,7 @@ func (ws *WebServer) SetUserTokenService(svc *UserTokenService) {
 }
 
 // SetEventPublisher sets the event publisher for real-time SSE streaming.
-func (ws *WebServer) SetEventPublisher(pub *ChannelEventPublisher) {
+func (ws *WebServer) SetEventPublisher(pub EventPublisher) {
 	ws.events = pub
 }
 
@@ -952,7 +952,7 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleSSE serves the Server-Sent Events endpoint. It subscribes to the
-// in-process ChannelEventPublisher and streams matching events to the browser.
+// configured EventPublisher and streams matching events to the browser.
 // Route: GET /events?sub=<pattern>&sub=<pattern>...
 func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	if ws.events == nil {
