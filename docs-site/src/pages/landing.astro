@@ -186,11 +186,71 @@ const base = import.meta.env.BASE_URL;
       font-weight: 300;
     }
 
-    /* Feature grid */
-    .features {
+    /* Pipeline section */
+    .pipeline {
       background: var(--bg-secondary);
       border-top: 1px solid var(--border-subtle);
       border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .pipeline-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 1rem;
+      position: relative;
+    }
+
+    .pipeline-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 1.5rem;
+      text-align: center;
+      transition: border-color 0.2s ease, transform 0.2s ease;
+      position: relative;
+    }
+
+    .pipeline-card:hover {
+      border-color: var(--accent-green-dim);
+      transform: translateY(-2px);
+    }
+
+    .pipeline-num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: var(--accent-green-dim);
+      color: var(--accent-green);
+      font-weight: 600;
+      font-size: 0.85rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .pipeline-card h3 {
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 0.25rem;
+    }
+
+    .pipeline-card .pipeline-label {
+      font-size: 0.8rem;
+      color: var(--accent-emerald);
+      margin-bottom: 0.5rem;
+    }
+
+    .pipeline-card p.pipeline-body {
+      font-size: 0.82rem;
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+
+    /* Feature grid */
+    .features {
+      background: var(--bg-primary);
     }
 
     .feature-grid {
@@ -233,9 +293,34 @@ const base = import.meta.env.BASE_URL;
       line-height: 1.6;
     }
 
+    .feature-card ul {
+      list-style: none;
+      padding: 0;
+      margin: 0.5rem 0 0;
+    }
+
+    .feature-card ul li {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      line-height: 1.6;
+      padding-left: 1.1rem;
+      position: relative;
+      margin-bottom: 0.3rem;
+    }
+
+    .feature-card ul li::before {
+      content: '›';
+      position: absolute;
+      left: 0;
+      color: var(--accent-green);
+      font-weight: 600;
+    }
+
     /* Video section */
     .video-section {
-      background: var(--bg-primary);
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border-subtle);
+      border-bottom: 1px solid var(--border-subtle);
     }
 
     .video-container {
@@ -261,9 +346,7 @@ const base = import.meta.env.BASE_URL;
 
     /* Slides section */
     .slides-section {
-      background: var(--bg-secondary);
-      border-top: 1px solid var(--border-subtle);
-      border-bottom: 1px solid var(--border-subtle);
+      background: var(--bg-primary);
     }
 
     .slides-container {
@@ -289,7 +372,9 @@ const base = import.meta.env.BASE_URL;
 
     /* How it works */
     .how-it-works {
-      background: var(--bg-primary);
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border-subtle);
+      border-bottom: 1px solid var(--border-subtle);
     }
 
     .steps {
@@ -342,8 +427,7 @@ const base = import.meta.env.BASE_URL;
 
     /* CTA */
     .cta {
-      background: var(--bg-secondary);
-      border-top: 1px solid var(--border-subtle);
+      background: var(--bg-primary);
       text-align: center;
       padding: 5rem 2rem;
     }
@@ -378,6 +462,12 @@ const base = import.meta.env.BASE_URL;
     }
 
     /* Responsive */
+    @media (max-width: 900px) {
+      .pipeline-grid {
+        grid-template-columns: repeat(3, 1fr);
+      }
+    }
+
     @media (max-width: 640px) {
       .hero {
         padding: 3rem 1.5rem 2rem;
@@ -387,6 +477,9 @@ const base = import.meta.env.BASE_URL;
       }
       .section-title {
         font-size: 1.5rem;
+      }
+      .pipeline-grid {
+        grid-template-columns: 1fr 1fr;
       }
       .feature-grid {
         grid-template-columns: 1fr;
@@ -401,7 +494,8 @@ const base = import.meta.env.BASE_URL;
     <img src={`${base}/scion-graphic.png`} alt="Scion" class="hero-graphic" />
     <p class="hero-tagline">sci·on /ˈsīən/ — a young shoot or twig, cut for grafting or rooting.</p>
     <p class="hero-subtitle">
-      Run multiple AI agents in parallel — each in its own container, with isolated workspaces —
+      A containerized orchestration system for multi-agent workflows.
+      Run multiple AI agents in parallel — each in its own sandbox, with isolated workspaces —
       collaborating on your code simultaneously.
     </p>
     <div class="hero-buttons">
@@ -420,41 +514,111 @@ const base = import.meta.env.BASE_URL;
     </div>
   </section>
 
-  <!-- Features -->
+  <!-- Scion Core Pipeline -->
+  <section class="pipeline">
+    <div class="section-inner">
+      <h2 class="section-title">Scion Core</h2>
+      <p class="section-subtitle">A five-part orchestration pipeline for containerized multi-agent workflows.</p>
+      <div class="pipeline-grid">
+        <div class="pipeline-card">
+          <div class="pipeline-num">01</div>
+          <h3>Define</h3>
+          <p class="pipeline-label">Agent Templates</p>
+          <p class="pipeline-body">Parses declarative agent templates containing system instructions, prompts, custom skills, and MCP configurations.</p>
+        </div>
+        <div class="pipeline-card">
+          <div class="pipeline-num">02</div>
+          <h3>Run</h3>
+          <p class="pipeline-label">Sandbox Runtimes</p>
+          <p class="pipeline-body">Launches standard execution sandboxes, isolating credentials, variables, and runtime boundaries dynamically.</p>
+        </div>
+        <div class="pipeline-card">
+          <div class="pipeline-num">03</div>
+          <h3>Spawn</h3>
+          <p class="pipeline-label">Swarm Hierarchies</p>
+          <p class="pipeline-body">Coordinates human actors and P2P agent hierarchies with lateral peer-to-peer messaging brokers.</p>
+        </div>
+        <div class="pipeline-card">
+          <div class="pipeline-num">04</div>
+          <h3>Notify</h3>
+          <p class="pipeline-label">Reactive Wakeups</p>
+          <p class="pipeline-body">Enforces reactive wakeup sleep cycles — suspends parent, wakes instantly on child completion notification.</p>
+        </div>
+        <div class="pipeline-card">
+          <div class="pipeline-num">05</div>
+          <h3>Sync</h3>
+          <p class="pipeline-label">Shared Filesystem</p>
+          <p class="pipeline-body">Shares folder filesystems concurrently to pass large context by reference and exchange shared progress notes.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features (detailed from slides) -->
   <section class="features">
     <div class="section-inner">
-      <h2 class="section-title">Why Scion?</h2>
-      <p class="section-subtitle">Orchestrate deep agents with true isolation, real parallelism, and zero conflicts.</p>
+      <h2 class="section-title">How It Works</h2>
+      <p class="section-subtitle">Each pillar of Scion addresses a core challenge in multi-agent orchestration.</p>
       <div class="feature-grid">
         <div class="feature-card">
-          <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg>
-          <h3>Harness Agnostic</h3>
-          <p>Works with Claude Code, Gemini CLI, OpenCode, and Codex. Adaptable to anything that runs in a container.</p>
+          <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+          <h3>Agent Definition</h3>
+          <p>Agents are defined declaratively through templates combining four layers:</p>
+          <ul>
+            <li><strong>System Instruction</strong> — the agent's primary purpose, persona, and core role.</li>
+            <li><strong>Agent Instructions</strong> — operational context, dynamically appended based on workspace.</li>
+            <li><strong>Agent Skills</strong> — deterministic CLI skills conforming to the Agent Skills Specification.</li>
+            <li><strong>MCP Servers</strong> — optional Model Context Protocol connections for external tools.</li>
+          </ul>
         </div>
         <div class="feature-card">
-          <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
-          <h3>True Isolation</h3>
-          <p>Each agent gets its own container, credentials, config, and a dedicated git worktree — no merge conflicts.</p>
-        </div>
-        <div class="feature-card">
-          <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-          <h3>Parallel Execution</h3>
-          <p>Run multiple agents concurrently as fully independent processes, on your laptop or across clusters.</p>
-        </div>
-        <div class="feature-card">
-          <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
-          <h3>Attach / Detach</h3>
-          <p>Agents run in tmux sessions for background operation. Attach for human-in-the-loop interaction anytime.</p>
+          <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+          <h3>Agent Runtime</h3>
+          <p>Scion abstracts complex system execution, managing secure, isolated processes across varied backends.</p>
+          <ul>
+            <li><strong>Lifecycle control</strong> — uniform <code>create</code>, <code>start</code>, <code>stop</code>, <code>attach</code>, <code>delete</code> commands.</li>
+            <li><strong>Container runtimes</strong> — Docker, Podman, Apple Virtualization, or Kubernetes.</li>
+            <li><strong>Env &amp; mounts</strong> — explicit environment variables, read-only secrets, and isolated tmpfs volumes.</li>
+            <li><strong>Federated identity</strong> — binds project-scoped identities to GCP service accounts or Agent Platform credentials.</li>
+          </ul>
         </div>
         <div class="feature-card">
           <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
-          <h3>Specialization via Templates</h3>
-          <p>Define agent roles like "Security Auditor" or "QA Tester" with custom system prompts and skill sets.</p>
+          <h3>Agent Collaborators</h3>
+          <p>Teams of humans working with teams of agents. Both are treated as actors in the system.</p>
+          <ul>
+            <li><strong>Actor interaction</strong> — humans and agents can query, message, or inspect any agent.</li>
+            <li><strong>Self-directed management</strong> — agents use the <code>scion</code> CLI to dynamically spawn or stop sub-agents.</li>
+            <li><strong>Async messaging</strong> — asynchronous communication across safe, pluggable brokers.</li>
+            <li><strong>Interactive inspection</strong> — attach or look at running agent processes via <code>tmux</code> or logs.</li>
+          </ul>
         </div>
         <div class="feature-card">
-          <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
-          <h3>Multi-Runtime</h3>
-          <p>Docker, Podman, Apple containers, and Kubernetes — manage execution across runtimes via named profiles.</p>
+          <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          <h3>Agent Notifications</h3>
+          <p>State and messages combine into notifications for robust asynchronous, event-driven orchestration.</p>
+          <ul>
+            <li><strong>State transitions</strong> — events fire when agents move between states (e.g. <code>working</code> to <code>waiting_for_input</code>).</li>
+            <li><strong>Suspend pattern</strong> — parent delegates a task, updates activity to <code>blocked</code>, and sleeps. No polling.</li>
+            <li><strong>Event-driven wakeup</strong> — notification hook automatically wakes the parent on child completion.</li>
+            <li><strong>Human alerts</strong> — triggers notifications to Slack, terminals, or dashboards when agents need help.</li>
+          </ul>
+        </div>
+        <div class="feature-card">
+          <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+          <h3>Shared Filesystem</h3>
+          <p>High-performance shared volumes enable frictionless code modification, test execution, and file exchange.</p>
+          <ul>
+            <li><strong>Shared volume mounts</strong> — agents share the same physical project directory, avoiding clone delays.</li>
+            <li><strong>Context by reference</strong> — pass file path references instead of bloating LLM payloads with large files.</li>
+            <li><strong>Shared learnings</strong> — sibling agents exchange progress summaries and execution logs in real time.</li>
+            <li><strong>Branch isolation</strong> — when needed, agents initialize local branches or isolated worktrees on shared storage.</li>
+          </ul>
+        </div>
+        <div class="feature-card">
+          <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg>
+          <h3>Harness Agnostic</h3>
+          <p>Works with Claude Code, Gemini CLI, OpenCode, and Codex. The underlying container harness is an optional execution detail — adaptable to anything that runs in a container.</p>
         </div>
       </div>
     </div>
@@ -483,7 +647,7 @@ const base = import.meta.env.BASE_URL;
       <p class="section-subtitle">Dive deeper into the architecture and design.</p>
       <div class="slides-container">
         <iframe
-          src="https://docs.google.com/presentation/d/1h2yS_LTqTKqSsQqqaNNt34yMtAybAaRUz1PgZScBMdw/embed?start=false&loop=false&delayms=3000"
+          src="https://storage.googleapis.com/scion-intro-slides/index.html"
           title="Scion Overview Deck"
           allowfullscreen
         ></iframe>
@@ -506,7 +670,7 @@ const base = import.meta.env.BASE_URL;
         <div class="step">
           <div class="step-number">2</div>
           <h3>Initialize</h3>
-          <p>Create a grove in your project.</p>
+          <p>Create a project in your repo.</p>
           <code>scion init</code>
         </div>
         <div class="step">
