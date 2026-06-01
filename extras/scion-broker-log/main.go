@@ -420,6 +420,14 @@ func writeHumanLine(topic string, msg *messages.StructuredMessage, fullMsg bool,
 		b.WriteByte('\n')
 	}
 
+	if msg.Channel != "" {
+		fmt.Fprintf(&b, "  channel=%s", msg.Channel)
+		if msg.ThreadID != "" {
+			fmt.Fprintf(&b, "  thread=%s", msg.ThreadID)
+		}
+		b.WriteByte('\n')
+	}
+
 	if includeField(fields, "msg") && msg.Msg != "" {
 		body := msg.Msg
 		bodyLen := len(body)
@@ -450,6 +458,8 @@ type jsonEntry struct {
 	Urgent      bool     `json:"urgent,omitempty"`
 	Broadcasted bool     `json:"broadcasted,omitempty"`
 	Status      string   `json:"status,omitempty"`
+	Channel     string   `json:"channel,omitempty"`
+	ThreadID    string   `json:"thread_id,omitempty"`
 	MsgLen      int      `json:"msg_len,omitempty"`
 	Msg         string   `json:"msg,omitempty"`
 	Attachments []string `json:"attachments,omitempty"`
@@ -481,6 +491,8 @@ func writeJSONLine(topic string, msg *messages.StructuredMessage, fullMsg bool, 
 	if includeField(fields, "status") {
 		e.Status = msg.Status
 	}
+	e.Channel = msg.Channel
+	e.ThreadID = msg.ThreadID
 	if includeField(fields, "msg") {
 		e.MsgLen = len(msg.Msg)
 		if fullMsg {

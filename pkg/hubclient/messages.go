@@ -17,6 +17,7 @@ package hubclient
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"strconv"
 	"time"
@@ -24,6 +25,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// MessageChannel describes a registered broker channel.
+type MessageChannel struct {
+	Name     string `json:"name"`
+	Status   string `json:"status"`
+	Observer bool   `json:"observer,omitempty"`
+}
 
 // MessageService provides operations on the user's message inbox.
 type MessageService interface {
@@ -38,6 +46,9 @@ type MessageService interface {
 
 	// MarkAllRead marks all messages as read.
 	MarkAllRead(ctx context.Context) error
+
+	// ListChannels returns the registered message broker channels.
+	ListChannels(ctx context.Context) ([]MessageChannel, error)
 }
 
 // messageService is the implementation of MessageService.
@@ -174,4 +185,23 @@ func (s *messageService) MarkAllRead(ctx context.Context) error {
 		return err
 	}
 	return apiclient.CheckResponse(resp)
+}
+
+// ListChannels returns the registered message broker channels.
+func (s *messageService) ListChannels(ctx context.Context) ([]MessageChannel, error) {
+	resp, err := s.c.get(ctx, "/api/v1/message-channels", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if err := apiclient.CheckResponse(resp); err != nil {
+		return nil, err
+	}
+	var result struct {
+		Channels []MessageChannel `json:"channels"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding message channels: %w", err)
+	}
+	return result.Channels, nil
 }

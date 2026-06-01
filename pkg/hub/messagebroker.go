@@ -442,6 +442,8 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		Urgent:      msg.Urgent,
 		Broadcasted: msg.Broadcasted,
 		AgentID:     agentID,
+		Channel:     msg.Channel,
+		ThreadID:    msg.ThreadID,
 		CreatedAt:   time.Now(),
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
@@ -524,6 +526,8 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		Urgent:      msg.Urgent,
 		Broadcasted: msg.Broadcasted,
 		AgentID:     agent.ID,
+		Channel:     msg.Channel,
+		ThreadID:    msg.ThreadID,
 		CreatedAt:   time.Now(),
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
@@ -590,6 +594,15 @@ func (p *MessageBrokerProxy) fanOutGlobal(ctx context.Context, msg *messages.Str
 		agentMsg.RecipientID = agent.ID
 		p.deliverToAgent(ctx, agent.ProjectID, agent.Slug, &agentMsg)
 	}
+}
+
+// ListChannels returns the names of registered bus channels. Returns nil if
+// the underlying bus does not support channel listing.
+func (p *MessageBrokerProxy) ListChannels() []eventbus.BusChannel {
+	if fb, ok := p.bus.(*eventbus.FanOutEventBus); ok {
+		return fb.BusChannels()
+	}
+	return nil
 }
 
 // recipientSlug extracts the slug from a recipient identity string.

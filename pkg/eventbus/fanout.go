@@ -17,11 +17,14 @@ package eventbus
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
+
+const InProcessBusName = "inprocess"
 
 // NamedEventBus pairs an EventBus with a name and an observer flag.
 // Observer event buses are fire-and-forget: publish errors are logged but
@@ -47,13 +50,31 @@ func NewFanOutEventBus(buses []NamedEventBus, log *slog.Logger) *FanOutEventBus 
 	}
 }
 
-// Publish fans out the message to all child event buses concurrently.
-// Observer event bus errors are logged but not returned.
-// Critical (non-observer) event bus errors are aggregated and returned.
 func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
+	if msg.Channel != "" {
+		var matched bool
+		for _, nb := range f.buses {
+			if nb.Name == InProcessBusName {
+				if err := nb.Bus.Publish(ctx, topic, msg); err != nil {
+					return fmt.Errorf("inprocess bus publish failed: %w", err)
+				}
+				continue
+			}
+			if nb.Name == msg.Channel {
+				matched = true
+				if err := nb.Bus.Publish(ctx, topic, msg); err != nil {
+					return fmt.Errorf("channel %q publish failed: %w", msg.Channel, err)
+				}
+			}
+		}
+		if !matched {
+			return fmt.Errorf("no broker registered for channel %q", msg.Channel)
+		}
+		return nil
+	}
+
 	var wg sync.WaitGroup
 	errs := make([]error, len(f.buses))
-
 	for i, nb := range f.buses {
 		wg.Add(1)
 		go func(idx int, b NamedEventBus) {
@@ -67,7 +88,6 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 			}
 		}(i, nb)
 	}
-
 	wg.Wait()
 	return errors.Join(errs...)
 }
@@ -100,6 +120,27 @@ func (f *FanOutEventBus) Close() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// BusChannel describes a registered event bus channel.
+type BusChannel struct {
+	Name     string
+	Observer bool
+}
+
+// BusChannels returns the list of registered bus names (excluding InProcessBus).
+func (f *FanOutEventBus) BusChannels() []BusChannel {
+	var channels []BusChannel
+	for _, nb := range f.buses {
+		if nb.Name == InProcessBusName {
+			continue
+		}
+		channels = append(channels, BusChannel{
+			Name:     nb.Name,
+			Observer: nb.Observer,
+		})
+	}
+	return channels
 }
 
 // fanOutSubscription aggregates subscriptions from all child event buses.

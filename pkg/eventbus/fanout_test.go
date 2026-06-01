@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -231,6 +232,120 @@ func TestFanOutEventBus_ConcurrentPublish(t *testing.T) {
 			t.Errorf("event bus %s: expected 1 message, got %d", name, len(sb.published))
 		}
 		sb.mu.Unlock()
+	}
+}
+
+func TestFanOutEventBus_ChannelRouting(t *testing.T) {
+	inproc := newStubEventBus()
+	telegram := newStubEventBus()
+	gchat := newStubEventBus()
+
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: InProcessBusName, Bus: inproc},
+		{Name: "telegram", Bus: telegram},
+		{Name: "gchat", Bus: gchat},
+	}, slog.Default())
+
+	msg := messages.NewInstruction("user:alice", "agent:bot", "hello")
+	msg.Channel = "telegram"
+
+	if err := fan.Publish(context.Background(), "test.topic", msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	inproc.mu.Lock()
+	if len(inproc.published) != 1 {
+		t.Errorf("inprocess bus: expected 1 message, got %d", len(inproc.published))
+	}
+	inproc.mu.Unlock()
+
+	telegram.mu.Lock()
+	if len(telegram.published) != 1 {
+		t.Errorf("telegram bus: expected 1 message, got %d", len(telegram.published))
+	}
+	telegram.mu.Unlock()
+
+	gchat.mu.Lock()
+	if len(gchat.published) != 0 {
+		t.Errorf("gchat bus: expected 0 messages, got %d", len(gchat.published))
+	}
+	gchat.mu.Unlock()
+}
+
+func TestFanOutEventBus_ChannelRoutingNoChannel(t *testing.T) {
+	inproc := newStubEventBus()
+	telegram := newStubEventBus()
+	gchat := newStubEventBus()
+
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: InProcessBusName, Bus: inproc},
+		{Name: "telegram", Bus: telegram},
+		{Name: "gchat", Bus: gchat},
+	}, slog.Default())
+
+	msg := messages.NewInstruction("user:alice", "agent:bot", "hello")
+
+	if err := fan.Publish(context.Background(), "test.topic", msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for name, sb := range map[string]*stubEventBus{"inprocess": inproc, "telegram": telegram, "gchat": gchat} {
+		sb.mu.Lock()
+		if len(sb.published) != 1 {
+			t.Errorf("bus %s: expected 1 message, got %d", name, len(sb.published))
+		}
+		sb.mu.Unlock()
+	}
+}
+
+func TestFanOutEventBus_ChannelRoutingUnmatchedChannel(t *testing.T) {
+	inproc := newStubEventBus()
+	telegram := newStubEventBus()
+
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: InProcessBusName, Bus: inproc},
+		{Name: "telegram", Bus: telegram},
+	}, slog.Default())
+
+	msg := messages.NewInstruction("user:alice", "agent:bot", "hello")
+	msg.Channel = "slack"
+
+	err := fan.Publish(context.Background(), "test.topic", msg)
+	if err == nil {
+		t.Fatal("expected error for unmatched channel")
+	}
+	if !strings.Contains(err.Error(), "no broker registered for channel") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	inproc.mu.Lock()
+	if len(inproc.published) != 1 {
+		t.Errorf("inprocess bus should still receive message, got %d", len(inproc.published))
+	}
+	inproc.mu.Unlock()
+}
+
+func TestFanOutEventBus_ChannelRoutingPublishError(t *testing.T) {
+	inproc := newStubEventBus()
+	failing := newStubEventBus()
+	failing.publishFunc = func(_ context.Context, _ string, _ *messages.StructuredMessage) error {
+		return errors.New("connection refused")
+	}
+
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: InProcessBusName, Bus: inproc},
+		{Name: "telegram", Bus: failing},
+	}, slog.Default())
+
+	msg := messages.NewInstruction("user:alice", "agent:bot", "hello")
+	msg.Channel = "telegram"
+
+	err := fan.Publish(context.Background(), "test.topic", msg)
+	if err == nil {
+		t.Fatal("expected error from failing channel bus")
+	}
+	if !strings.Contains(err.Error(), "telegram") {
+		t.Fatalf("error should mention channel name, got: %v", err)
 	}
 }
 

@@ -1934,6 +1934,8 @@ type OutboundMessageRequest struct {
 	Attachments []string          `json:"attachments,omitempty"`
 	Visibility  string            `json:"visibility,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
+	Channel     string            `json:"channel,omitempty"`
+	ThreadID    string            `json:"thread_id,omitempty"`
 }
 
 // handleAgentOutboundMessage handles POST /api/v1/agents/{id}/outbound-message.
@@ -2045,6 +2047,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Type:        req.Type,
 		Urgent:      req.Urgent,
 		AgentID:     agent.ID,
+		Channel:     req.Channel,
+		ThreadID:    req.ThreadID,
 		CreatedAt:   time.Now(),
 	}
 
@@ -2060,6 +2064,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Attachments: req.Attachments,
 		Visibility:  req.Visibility,
 		Metadata:    req.Metadata,
+		Channel:     req.Channel,
+		ThreadID:    req.ThreadID,
 	}
 
 	// Route through broker when available; otherwise persist and publish
@@ -2274,6 +2280,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if structuredMsg.Type == "" {
 			structuredMsg.Type = messages.TypeInstruction
 		}
+		if structuredMsg.Channel == "" && GetAgentIdentityFromContext(ctx) == nil {
+			structuredMsg.Channel = "web"
+		}
 	} else if req.Message != "" {
 		plainMessage = req.Message
 		// Build a structured message from the plain text so that downstream
@@ -2290,6 +2299,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 		structuredMsg = messages.NewInstruction(sender, "agent:"+id, plainMessage)
 		structuredMsg.SenderID = senderID
+		if GetAgentIdentityFromContext(ctx) == nil {
+			structuredMsg.Channel = "web"
+		}
 	} else {
 		ValidationError(w, "message or structured_message is required", nil)
 		return
@@ -9370,7 +9382,6 @@ func (s *Server) handleProjectImportTemplates(w http.ResponseWriter, r *http.Req
 		Count:     len(imported),
 	})
 }
-
 // ============================================================================
 // Project Harness-Config Import
 // ============================================================================
@@ -9474,4 +9485,36 @@ func (s *Server) handleProjectImportHarnessConfigs(w http.ResponseWriter, r *htt
 		HarnessConfigs: imported,
 		Count:          len(imported),
 	})
+}
+
+// handleMessageChannels handles GET /api/v1/message-channels.
+func (s *Server) handleMessageChannels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", nil)
+		return
+	}
+
+	type channelInfo struct {
+		Name     string `json:"name"`
+		Status   string `json:"status"`
+		Observer bool   `json:"observer,omitempty"`
+	}
+
+	bp := s.GetMessageBrokerProxy()
+	if bp == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"channels": []channelInfo{}})
+		return
+	}
+
+	channels := bp.ListChannels()
+	result := make([]channelInfo, 0, len(channels))
+	for _, ch := range channels {
+		result = append(result, channelInfo{
+			Name:     ch.Name,
+			Status:   "registered",
+			Observer: ch.Observer,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"channels": result})
 }

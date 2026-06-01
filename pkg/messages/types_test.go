@@ -125,6 +125,101 @@ func TestStructuredMessage_Validate(t *testing.T) {
 	})
 }
 
+func TestStructuredMessage_ValidateChannel(t *testing.T) {
+	validMsg := func() *StructuredMessage {
+		return &StructuredMessage{
+			Version:   Version,
+			Timestamp: "2026-03-07T14:30:00Z",
+			Sender:    "user:alice",
+			Recipient: "agent:backend-dev",
+			Msg:       "implement auth",
+			Type:      TypeInstruction,
+		}
+	}
+
+	t.Run("valid with channel", func(t *testing.T) {
+		m := validMsg()
+		m.Channel = "telegram"
+		if err := m.Validate(); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("valid with channel and thread_id", func(t *testing.T) {
+		m := validMsg()
+		m.Channel = "telegram"
+		m.ThreadID = "12345"
+		if err := m.Validate(); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("thread_id without channel", func(t *testing.T) {
+		m := validMsg()
+		m.ThreadID = "12345"
+		if err := m.Validate(); err == nil {
+			t.Error("expected error for thread_id without channel")
+		} else if err.Error() != "thread_id requires channel to be set" {
+			t.Errorf("unexpected error message: %v", err)
+		}
+	})
+
+	t.Run("channel with special characters", func(t *testing.T) {
+		m := validMsg()
+		m.Channel = "my_channel!"
+		if err := m.Validate(); err == nil {
+			t.Error("expected error for channel with special characters")
+		}
+	})
+
+	t.Run("channel with underscores", func(t *testing.T) {
+		m := validMsg()
+		m.Channel = "my_channel"
+		if err := m.Validate(); err == nil {
+			t.Error("expected error for channel with underscores")
+		}
+	})
+
+	t.Run("channel too long", func(t *testing.T) {
+		m := validMsg()
+		m.Channel = strings.Repeat("a", MaxChannelLength+1)
+		if err := m.Validate(); err == nil {
+			t.Error("expected error for channel exceeding max length")
+		}
+	})
+
+	t.Run("channel at max length", func(t *testing.T) {
+		m := validMsg()
+		m.Channel = strings.Repeat("a", MaxChannelLength)
+		if err := m.Validate(); err != nil {
+			t.Errorf("unexpected error for channel at max length: %v", err)
+		}
+	})
+
+	t.Run("empty channel and thread_id backward compat", func(t *testing.T) {
+		m := validMsg()
+		if err := m.Validate(); err != nil {
+			t.Errorf("unexpected error for empty channel and thread_id: %v", err)
+		}
+	})
+
+	t.Run("valid channel with hyphens", func(t *testing.T) {
+		m := validMsg()
+		m.Channel = "my-chat-channel"
+		if err := m.Validate(); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("channel with spaces", func(t *testing.T) {
+		m := validMsg()
+		m.Channel = "my channel"
+		if err := m.Validate(); err == nil {
+			t.Error("expected error for channel with spaces")
+		}
+	})
+}
+
 func TestNewInstruction(t *testing.T) {
 	m := NewInstruction("user:alice", "agent:dev", "do something")
 	if m.Version != Version {

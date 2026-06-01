@@ -2069,6 +2069,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/brokers/join", s.handleBrokerJoin)
 	s.mux.HandleFunc("/api/v1/brokers/", s.handleBrokerByIDRoutes)
 
+	// Message channel listing
+	s.mux.HandleFunc("/api/v1/message-channels", s.handleMessageChannels)
+
 	// Broker plugin inbound message delivery
 	s.mux.HandleFunc("/api/v1/broker/inbound", s.handleBrokerInbound)
 

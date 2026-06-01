@@ -87,6 +87,7 @@ type TGFile struct {
 // TGMessage represents a Telegram message.
 type TGMessage struct {
 	MessageID       int64           `json:"message_id"`
+	MessageThreadID int64           `json:"message_thread_id,omitempty"`
 	From            *TGUser         `json:"from,omitempty"`
 	Chat            TGChat          `json:"chat"`
 	Date            int64           `json:"date"`

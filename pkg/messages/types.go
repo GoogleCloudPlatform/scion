@@ -17,6 +17,7 @@ package messages
 
 import (
 	"fmt"
+	"regexp"
 	"time"
 )
 
@@ -37,6 +38,12 @@ const MaxMetadataKeySize = 256
 
 // Maximum size of a single metadata value in bytes.
 const MaxMetadataValueSize = 4 * 1024 // 4KB
+
+// Maximum length of the Channel field.
+const MaxChannelLength = 64
+
+// channelRegexp validates that a channel name contains only alphanumeric characters and hyphens.
+var channelRegexp = regexp.MustCompile(`^[a-zA-Z0-9-]+$`)
 
 // Message type constants (closed enum).
 const (
@@ -95,6 +102,8 @@ type StructuredMessage struct {
 	Status       string            `json:"status,omitempty"`
 	Attachments  []string          `json:"attachments,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
+	Channel      string            `json:"channel,omitempty"`
+	ThreadID     string            `json:"thread_id,omitempty"`
 
 	// Visibility controls which consumers see this message.
 	// One of VisibilityNormal, VisibilityVerbose, or VisibilityFull.
@@ -144,6 +153,17 @@ func (m *StructuredMessage) Validate() error {
 			return fmt.Errorf("metadata value for key %q exceeds maximum size of %d bytes", k, MaxMetadataValueSize)
 		}
 	}
+	if m.ThreadID != "" && m.Channel == "" {
+		return fmt.Errorf("thread_id requires channel to be set")
+	}
+	if m.Channel != "" {
+		if len(m.Channel) > MaxChannelLength {
+			return fmt.Errorf("channel exceeds maximum length of %d characters", MaxChannelLength)
+		}
+		if !channelRegexp.MatchString(m.Channel) {
+			return fmt.Errorf("channel %q contains invalid characters: must be alphanumeric or hyphens", m.Channel)
+		}
+	}
 	return nil
 }
 
@@ -191,6 +211,12 @@ func (m *StructuredMessage) LogAttrs() []any {
 	}
 	if m.Recipients != "" {
 		attrs = append(attrs, "recipients", m.Recipients)
+	}
+	if m.Channel != "" {
+		attrs = append(attrs, "channel", m.Channel)
+	}
+	if m.ThreadID != "" {
+		attrs = append(attrs, "thread_id", m.ThreadID)
 	}
 	return attrs
 }

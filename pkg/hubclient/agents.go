@@ -501,6 +501,8 @@ type OutboundMessageRequest struct {
 	Type        string   `json:"type,omitempty"`
 	Urgent      bool     `json:"urgent,omitempty"`
 	Attachments []string `json:"attachments,omitempty"`
+	Channel     string   `json:"channel,omitempty"`
+	ThreadID    string   `json:"thread_id,omitempty"`
 }
 
 // SendOutboundMessage sends a message from an agent to a human inbox.

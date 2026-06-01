@@ -1347,6 +1347,8 @@ type Message struct {
 	Read        bool      `json:"read"`    // Whether recipient has read/acknowledged
 	AgentID     string    `json:"agentId"` // The agent involved (sender or recipient)
 	GroupID     string    `json:"groupId,omitempty"`
+	Channel     string    `json:"channel,omitempty"`
+	ThreadID    string    `json:"threadId,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
 }
 

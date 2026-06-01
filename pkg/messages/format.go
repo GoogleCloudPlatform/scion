@@ -35,6 +35,8 @@ type deliveryMessage struct {
 	Urgent      bool     `json:"urgent,omitempty"`
 	Broadcasted bool     `json:"broadcasted,omitempty"`
 	Attachments []string `json:"attachments,omitempty"`
+	Channel     string   `json:"channel,omitempty"`
+	ThreadID    string   `json:"thread_id,omitempty"`
 }
 
 // FormatForDelivery formats a structured message for delivery to an agent via tmux.
@@ -54,6 +56,8 @@ func FormatForDelivery(msg *StructuredMessage) string {
 		Urgent:      msg.Urgent,
 		Broadcasted: msg.Broadcasted,
 		Attachments: msg.Attachments,
+		Channel:     msg.Channel,
+		ThreadID:    msg.ThreadID,
 	}
 
 	jsonBytes, err := json.MarshalIndent(dm, "", "  ")

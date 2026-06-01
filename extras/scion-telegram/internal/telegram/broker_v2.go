@@ -1732,11 +1732,16 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			Recipients: recipientsSet,
 			Msg:        msgText,
 			Type:       msgType,
+			Channel:    "telegram",
 			Metadata: map[string]string{
 				"telegram_chat_id":    strconv.FormatInt(chatID, 10),
 				"telegram_message_id": strconv.FormatInt(tgMsg.MessageID, 10),
 				"project_id":          link.ProjectID,
 			},
+		}
+
+		if tgMsg.MessageThreadID != 0 {
+			msg.ThreadID = strconv.FormatInt(tgMsg.MessageThreadID, 10)
 		}
 
 		if attachmentPath != "" {
@@ -1982,6 +1987,7 @@ func (b *TelegramBrokerV2) handleCallbackQuery(ctx context.Context, cb *Callback
 		Recipient: "agent:" + resp.AgentSlug,
 		Msg:       resp.Response,
 		Type:      messages.TypeInstruction,
+		Channel:   "telegram",
 		Metadata: map[string]string{
 			"telegram_chat_id": strconv.FormatInt(resp.ChatID, 10),
 			"ask_request_id":   resp.RequestID,

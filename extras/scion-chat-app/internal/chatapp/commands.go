@@ -1063,9 +1063,9 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 
 	// Use the hub user email with "user:" prefix so agents can address replies
 	msg := messages.NewInstruction("user:"+mapping.HubUserEmail, agentSlug, messageText)
+	msg.Channel = "gchat"
 	if threadID != "" {
-		// Include thread ID as part of the message metadata
-		msg.Msg = fmt.Sprintf("[thread:%s] %s", threadID, msg.Msg)
+		msg.ThreadID = threadID
 	}
 
 	if err := client.ProjectAgents(link.ProjectID).SendStructuredMessage(ctx, agentSlug, msg, false, false, false); err != nil {

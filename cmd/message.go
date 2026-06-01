@@ -20,6 +20,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"text/tabwriter"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -41,6 +42,8 @@ var msgRaw bool
 var msgAttach []string
 var msgNotify bool
 var msgWake bool
+var msgChannel string
+var msgThreadID string
 
 // messageCmd represents the message command
 var messageCmd = &cobra.Command{
@@ -105,6 +108,11 @@ Examples:
 		}
 		if (msgIn != "" || msgAt != "") && (msgBroadcast || msgAll) {
 			return fmt.Errorf("--in/--at cannot be combined with --broadcast or --all")
+		}
+
+		// Validate --thread-id requires --channel
+		if msgThreadID != "" && msgChannel == "" {
+			return fmt.Errorf("--thread-id requires --channel to be set")
 		}
 
 		// Validate --raw restrictions
@@ -362,6 +370,8 @@ func buildStructuredMessage(sender, recipient, message string) *messages.Structu
 	if len(msgAttach) > 0 {
 		msg.Attachments = msgAttach
 	}
+	msg.Channel = msgChannel
+	msg.ThreadID = msgThreadID
 	return msg
 }
 
@@ -520,6 +530,8 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		Type:        "instruction",
 		Urgent:      urgent,
 		Attachments: msgAttach,
+		Channel:     msgChannel,
+		ThreadID:    msgThreadID,
 	}
 
 	if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
@@ -603,6 +615,8 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 					Type:        "instruction",
 					Urgent:      interrupt,
 					Attachments: msgAttach,
+					Channel:     msgChannel,
+					ThreadID:    msgThreadID,
 				}
 				if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
 					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
@@ -679,6 +693,53 @@ func scheduleMessageViaHub(hubCtx *HubContext, agentName string, message string,
 	return nil
 }
 
+var messageChannelsCmd = &cobra.Command{
+	Use:   "channels",
+	Short: "List available message channels",
+	Long:  "Lists the registered message broker channels that can be targeted with --channel.",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+		if err != nil {
+			return err
+		}
+		if hubCtx == nil {
+			return fmt.Errorf("listing message channels requires Hub mode (use 'scion hub enable' first)")
+		}
+		if !isJSONOutput() {
+			PrintUsingHub(hubCtx.Endpoint)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		channels, err := hubCtx.Client.Messages().ListChannels(ctx)
+		if err != nil {
+			return wrapHubError(err)
+		}
+
+		if isJSONOutput() {
+			return outputJSON(channels)
+		}
+
+		if len(channels) == 0 {
+			fmt.Println("No message channels registered.")
+			return nil
+		}
+
+		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(tw, "NAME\tSTATUS\tTYPE")
+		for _, ch := range channels {
+			chType := "broker"
+			if ch.Observer {
+				chType = "observer"
+			}
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", ch.Name, ch.Status, chType)
+		}
+		return tw.Flush()
+	},
+}
+
 func init() {
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgBroadcast, "broadcast", "b", false, "Send the message to all running agents in the current project")
@@ -690,5 +751,8 @@ func init() {
 	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable")
 	messageCmd.Flags().BoolVar(&msgNotify, "notify", false, "Subscribe to notifications for the target agent (completed, waiting for input, etc.)")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
+	messageCmd.Flags().StringVar(&msgChannel, "channel", "", "Target a specific message channel (e.g. telegram, gchat, web)")
+	messageCmd.Flags().StringVar(&msgThreadID, "thread-id", "", "Target a specific thread within the channel")
+	messageCmd.AddCommand(messageChannelsCmd)
 	rootCmd.AddCommand(messageCmd)
 }
