@@ -80,7 +80,7 @@ func TestAgentStatusUpdate_Authorization(t *testing.T) {
 			Message:  "Waiting for user input",
 		}
 		body, _ := json.Marshal(status)
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/agent-1/status", bytes.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent1.ID+"/status", bytes.NewReader(body))
 		req.Header.Set("X-Scion-Agent-Token", token1)
 		req.Header.Set("Content-Type", "application/json")
 
@@ -101,7 +101,7 @@ func TestAgentStatusUpdate_Authorization(t *testing.T) {
 			Phase: "error",
 		}
 		body, _ := json.Marshal(status)
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/agent-2/status", bytes.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent2.ID+"/status", bytes.NewReader(body))
 		req.Header.Set("X-Scion-Agent-Token", token1)
 		req.Header.Set("Content-Type", "application/json")
 
@@ -112,7 +112,7 @@ func TestAgentStatusUpdate_Authorization(t *testing.T) {
 	})
 
 	t.Run("Agent 1 cannot perform lifecycle actions", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/agent-1/stop", nil)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent1.ID+"/stop", nil)
 		req.Header.Set("X-Scion-Agent-Token", token1)
 
 		rec := httptest.NewRecorder()
@@ -126,7 +126,7 @@ func TestAgentStatusUpdate_Authorization(t *testing.T) {
 			Phase: "running",
 		}
 		body, _ := json.Marshal(status)
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/agent-1/status", bytes.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent1.ID+"/status", bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+testDevToken)
 		req.Header.Set("Content-Type", "application/json")
 
@@ -177,7 +177,7 @@ func TestAgentStatusUpdate_Heartbeat(t *testing.T) {
 		Heartbeat: true,
 	}
 	body, _ := json.Marshal(status)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/agent-h/status", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/status", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testDevToken)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -451,7 +451,9 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 	project.DefaultRuntimeBrokerID = broker.ID
 	require.NoError(t, s.UpdateProject(ctx, project))
 
-	// Create the calling agent
+	// Create the calling agent. The created sub-agent's created_by/owner_id FK
+	// references the users table, so seed a user sharing the caller's ID.
+	permSeedUser(t, ctx, s, tid("agent-caller"))
 	callingAgent := &store.Agent{
 		ID:        tid("agent-caller"),
 		Slug:      tid("agent-caller"),
@@ -2627,7 +2629,9 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 	project.DefaultRuntimeBrokerID = broker.ID
 	require.NoError(t, s.UpdateProject(ctx, project))
 
-	// Create the calling agent (the one that will subscribe to notifications)
+	// Create the calling agent (the one that will subscribe to notifications).
+	// The created sub-agent's created_by/owner_id FK references the users table.
+	permSeedUser(t, ctx, s, tid("agent-lead"))
 	callingAgent := &store.Agent{
 		ID:        tid("agent-lead"),
 		Slug:      "lead-agent",
@@ -2765,6 +2769,7 @@ func TestCreateAgent_NotifySubscriptionCascadeOnDelete(t *testing.T) {
 	project.DefaultRuntimeBrokerID = broker.ID
 	require.NoError(t, s.UpdateProject(ctx, project))
 
+	permSeedUser(t, ctx, s, tid("agent-cascade-lead"))
 	callingAgent := &store.Agent{
 		ID:        tid("agent-cascade-lead"),
 		Slug:      "cascade-lead",
