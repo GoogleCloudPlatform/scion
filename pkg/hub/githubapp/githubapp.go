@@ -68,6 +68,7 @@ func DefaultTokenPermissions() TokenPermissions {
 	return TokenPermissions{
 		Contents:     "write",
 		PullRequests: "write",
+		Issues:       "write",
 		Metadata:     "read",
 	}
 }
