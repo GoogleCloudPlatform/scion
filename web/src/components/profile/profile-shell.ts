@@ -67,8 +67,6 @@ export class ScionProfileShell extends LitElement {
       position: sticky;
       top: 0;
       height: 100vh;
-      transition: width var(--scion-transition-normal, 250ms ease);
-      overflow: hidden;
     }
 
     @media (max-width: 768px) {
@@ -167,7 +165,7 @@ export class ScionProfileShell extends LitElement {
         placement="start"
         @sl-hide=${(): void => this.handleDrawerClose()}
       >
-        <scion-profile-nav .user=${this.user} .currentPath=${this.currentPath}></scion-profile-nav>
+        <scion-profile-nav .user=${this.user} .currentPath=${this.currentPath} .hideCollapse=${true}></scion-profile-nav>
       </sl-drawer>
 
       <main class="main">

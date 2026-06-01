@@ -93,8 +93,6 @@ export class ScionApp extends LitElement {
       position: sticky;
       top: 0;
       height: 100vh;
-      transition: width var(--scion-transition-normal, 250ms ease);
-      overflow: hidden;
     }
 
     @media (max-width: 768px) {
@@ -273,6 +271,7 @@ export class ScionApp extends LitElement {
         <scion-nav
           .user=${this.user}
           .currentPath=${this.currentPath}
+          .hideCollapse=${true}
           @nav-click=${(): void => this.handleNavClick()}
         ></scion-nav>
       </sl-drawer>

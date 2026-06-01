@@ -68,6 +68,9 @@ export class ScionProfileNav extends LitElement {
   @property({ type: Boolean, reflect: true })
   collapsed = false;
 
+  @property({ type: Boolean })
+  hideCollapse = false;
+
   @state()
   private githubAppUrl: string | null = null;
 
@@ -370,7 +373,7 @@ export class ScionProfileNav extends LitElement {
       justify-content: center;
       gap: 0.75rem;
       margin: 0.5rem;
-      padding: 0.5rem 0.75rem;
+      padding: 0.5rem;
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.5rem;
       background: transparent;
@@ -443,7 +446,7 @@ export class ScionProfileNav extends LitElement {
         </div>
       </div>
 
-      <a href="/" class="return-link">
+      <a href="/" class="return-link" aria-label="Return to Hub" title="Return to Hub">
         <sl-icon name="arrow-left-circle"></sl-icon>
         <span>Return to Hub</span>
       </a>
@@ -503,15 +506,19 @@ export class ScionProfileNav extends LitElement {
         )}
       </nav>
 
-      <button
-        class="collapse-toggle"
-        @click=${(): void => this.handleCollapseToggle()}
-        aria-label=${this.collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-        title=${this.collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-      >
-        <sl-icon name="chevron-left"></sl-icon>
-        <span class="collapse-toggle-text">Collapse</span>
-      </button>
+      ${this.hideCollapse
+        ? ''
+        : html`
+            <button
+              class="collapse-toggle"
+              @click=${(): void => this.handleCollapseToggle()}
+              aria-label=${this.collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              title=${this.collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            >
+              <sl-icon name="chevron-left"></sl-icon>
+              <span class="collapse-toggle-text">Collapse</span>
+            </button>
+          `}
     `;
   }
 

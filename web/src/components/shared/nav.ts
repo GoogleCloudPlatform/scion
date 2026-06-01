@@ -89,6 +89,12 @@ export class ScionNav extends LitElement {
   @property({ type: Boolean, reflect: true })
   collapsed = false;
 
+  /**
+   * Hide the collapse toggle (e.g. inside mobile drawer)
+   */
+  @property({ type: Boolean })
+  hideCollapse = false;
+
   static override styles = css`
     :host {
       display: flex;
@@ -255,7 +261,7 @@ export class ScionNav extends LitElement {
       justify-content: center;
       gap: 0.75rem;
       margin: 0.5rem;
-      padding: 0.5rem 0.75rem;
+      padding: 0.5rem;
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.5rem;
       background: transparent;
@@ -358,15 +364,19 @@ export class ScionNav extends LitElement {
           : ''}
       </nav>
 
-      <button
-        class="collapse-toggle"
-        @click=${(): void => this.handleCollapseToggle()}
-        aria-label=${this.collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-        title=${this.collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-      >
-        <sl-icon name="chevron-left"></sl-icon>
-        <span class="collapse-toggle-text">Collapse</span>
-      </button>
+      ${this.hideCollapse
+        ? ''
+        : html`
+            <button
+              class="collapse-toggle"
+              @click=${(): void => this.handleCollapseToggle()}
+              aria-label=${this.collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              title=${this.collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            >
+              <sl-icon name="chevron-left"></sl-icon>
+              <span class="collapse-toggle-text">Collapse</span>
+            </button>
+          `}
     `;
   }
 
