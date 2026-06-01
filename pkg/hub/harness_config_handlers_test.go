@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -88,7 +89,7 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 
 	// Create a project-scoped harness config for a different project
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
-		ID: "hc_project2", Slug: "other-project-hc", Name: "Other Project HC",
+		ID: tid("hc_project2"), Slug: "other-project-hc", Name: "Other Project HC",
 		Harness: "claude", Scope: "project", ScopeID: tid("project_xyz"),
 		Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
@@ -98,7 +99,7 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 
 	// Create a user-scoped harness config
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
-		ID: "hc_user1", Slug: "user-hc", Name: "User HC",
+		ID: tid("hc_user1"), Slug: "user-hc", Name: "User HC",
 		Harness: "claude", Scope: "user", ScopeID: tid("user_123"),
 		Visibility: store.VisibilityPrivate, Status: store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
@@ -107,7 +108,7 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 	}
 
 	// Query with projectId=project_abc should return global + project_abc configs only
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs?projectId=project_abc", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/harness-configs?projectId=%s", tid("project_abc")), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -132,10 +133,10 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 	if !ids[tid("hc_project1")] {
 		t.Error("expected project_abc harness config in results")
 	}
-	if ids["hc_project2"] {
+	if ids[tid("hc_project2")] {
 		t.Error("did not expect project_xyz harness config in results")
 	}
-	if ids["hc_user1"] {
+	if ids[tid("hc_user1")] {
 		t.Error("did not expect user harness config in results")
 	}
 }

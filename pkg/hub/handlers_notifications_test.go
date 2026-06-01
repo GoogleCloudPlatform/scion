@@ -233,7 +233,7 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 	// subscriber (simulating notifications sent TO the watched agent).
 	agent2 := &store.Agent{
 		ID:        tid("agent-other"),
-		Slug:      "other-agent",
+		Slug:      tid("other-agent"),
 		Name:      "Other Agent",
 		ProjectID: tid("project-notif-handler"),
 		Phase:     string(state.PhaseRunning),
@@ -324,7 +324,7 @@ func setupProjectWithBroker(t *testing.T, s store.Store, projectID, projectName 
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
-		ID:     "broker-" + projectID,
+		ID:     tid("broker-" + projectID),
 		Name:   "Test Broker",
 		Slug:   "test-broker-" + projectID,
 		Status: store.BrokerStatusOnline,
@@ -332,7 +332,7 @@ func setupProjectWithBroker(t *testing.T, s store.Store, projectID, projectName 
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
 	project := &store.Project{
-		ID:   projectID,
+		ID:   tid(projectID),
 		Name: projectName,
 		Slug: projectID,
 	}

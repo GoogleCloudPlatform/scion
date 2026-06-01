@@ -224,7 +224,7 @@ func TestEnvGather_HubDispatch_FinalizeEnv(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, true, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-3",
+		ID:              tid("agent-3"),
 		Name:            "test-agent-3",
 		Slug:            "test-agent-3",
 		ProjectID:       tid("project-1"),

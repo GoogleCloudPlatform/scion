@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -196,8 +197,8 @@ func TestAgentList(t *testing.T) {
 	// Create some test agents
 	for i := 0; i < 3; i++ {
 		agent := &store.Agent{
-			ID:           "agent_" + string(rune('a'+i)),
-			Slug:         "test-agent-" + string(rune('a'+i)),
+			ID:           tid("agent_" + string(rune('a'+i))),
+			Slug:         tid("test-agent-" + string(rune('a'+i))),
 			Name:         "Test Agent " + string(rune('A'+i)),
 			ProjectID:    project.ID,
 			Phase:        string(state.PhaseStopped),
@@ -852,8 +853,8 @@ func TestProjectList(t *testing.T) {
 
 	for i := 0; i < 2; i++ {
 		project := &store.Project{
-			ID:        "project_" + string(rune('a'+i)),
-			Slug:      "project-" + string(rune('a'+i)),
+			ID:        tid("project_" + string(rune('a'+i))),
+			Slug:      tid("project-" + string(rune('a'+i))),
 			Name:      "Project " + string(rune('A'+i)),
 			GitRemote: "https://github.com/test/repo" + string(rune('a'+i)),
 			Created:   time.Now(),
@@ -1856,7 +1857,7 @@ func TestRuntimeBrokerListWithProjectLocalPath(t *testing.T) {
 	}
 
 	// List runtime brokers filtered by project - should include localPath
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/runtime-brokers?projectId=project_localpath_test", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/runtime-brokers?projectId=%s", tid("project_localpath_test")), nil)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -2107,7 +2108,7 @@ func TestTemplateListByProjectID(t *testing.T) {
 
 	// Create a project-scoped template for a different project
 	if err := s.CreateTemplate(ctx, &store.Template{
-		ID: "tmpl_project2", Slug: "other-project-tmpl", Name: "Other Project Template",
+		ID: tid("tmpl_project2"), Slug: "other-project-tmpl", Name: "Other Project Template",
 		Harness: "claude", Scope: "project", ScopeID: tid("project_xyz"),
 		Visibility: store.VisibilityPublic, Status: "active",
 		Created: now, Updated: now,
@@ -2116,7 +2117,7 @@ func TestTemplateListByProjectID(t *testing.T) {
 	}
 
 	// Query with projectId=project_abc should return global + project_abc templates only
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/templates?projectId=project_abc", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/templates?projectId=%s", tid("project_abc")), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -2141,7 +2142,7 @@ func TestTemplateListByProjectID(t *testing.T) {
 	if !ids[tid("tmpl_project1")] {
 		t.Error("expected project_abc template in results")
 	}
-	if ids["tmpl_project2"] {
+	if ids[tid("tmpl_project2")] {
 		t.Error("did not expect project_xyz template in results")
 	}
 }
@@ -2454,7 +2455,7 @@ func TestAgentCreate_StoresTemplateSlug(t *testing.T) {
 
 	// Create a template with a known slug
 	tmpl := &store.Template{
-		ID:         "tmpl_uuid_123",
+		ID:         tid("tmpl_uuid_123"),
 		Slug:       "my-claude-template",
 		Name:       "My Claude Template",
 		Harness:    "claude",

@@ -601,7 +601,7 @@ func TestDeleteProject_DeleteAgents_DispatchesToBroker(t *testing.T) {
 
 	// Create a second agent in the same project
 	agent2 := &store.Agent{
-		ID:              "agent-online-project-del-2",
+		ID:              tid("agent-online-project-del-2"),
 		Slug:            "agent-online-project-del-2-slug",
 		Name:            "Agent Online project-del 2",
 		ProjectID:       project.ID,
