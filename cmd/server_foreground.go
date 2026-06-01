@@ -964,7 +964,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		SoftDeleteRetainFiles: cfg.Hub.SoftDeleteRetainFiles,
 		AdminMode:             adminMode,
 		MaintenanceMessage:    maintenanceMessage,
-		Workstation:           !productionMode,
+		Workstation:           !hostedMode,
 		DevUserConfig: hub.DevUserConfig{
 			Username:    cfg.Auth.Username,
 			DisplayName: cfg.Auth.DisplayName,

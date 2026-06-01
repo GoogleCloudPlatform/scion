@@ -16,14 +16,16 @@ package hub
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"golang.org/x/sync/errgroup"
-
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/templateimport"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -202,73 +204,220 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath,
 		hcScope = store.HarnessConfigScopeProject
 	}
 
-	// Each bundled harness-config is an independent DB row + storage prefix, so
-	// import them concurrently with a bounded pool (Phase 4). This runs inside a
-	// per-resource import goroutine, so the bound is kept small to limit nesting.
-	var g errgroup.Group
-	g.SetLimit(bundledHarnessConfigConcurrency)
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-		entry := entry
-		g.Go(func() error {
-			name := entry.Name()
-			dirPath := filepath.Join(hcDir, name)
-			slug := api.Slugify(name)
+		name := entry.Name()
+		dirPath := filepath.Join(hcDir, name)
+		slug := api.Slugify(name)
 
-			hcDirCfg, err := config.LoadHarnessConfigDir(dirPath)
-			if err != nil {
-				s.templateLog.Debug("template harness-config import: failed to load config, skipping",
+		hcDirCfg, err := config.LoadHarnessConfigDir(dirPath)
+		if err != nil {
+			s.templateLog.Debug("template harness-config import: failed to load config, skipping",
+				"config", name, "error", err)
+			continue
+		}
+
+		existing, err := s.store.GetHarnessConfigBySlug(ctx, slug, hcScope, scopeID)
+		if err != nil && err != store.ErrNotFound {
+			continue
+		}
+
+		if existing == nil {
+			if err := s.bootstrapSingleHarnessConfigScoped(ctx, name, dirPath, hcDirCfg, stor, hcScope, scopeID); err != nil {
+				s.templateLog.Warn("template harness-config import: failed to import, skipping",
 					"config", name, "error", err)
-				return nil
+				continue
 			}
-
-			existing, err := s.store.GetHarnessConfigBySlug(ctx, slug, hcScope, scopeID)
-			if err != nil && err != store.ErrNotFound {
-				return nil
+			s.templateLog.Info("template harness-config import: imported config",
+				"config", name, "harness", hcDirCfg.Config.Harness, "scope", hcScope)
+		} else {
+			if _, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDirCfg, stor, false); err != nil {
+				s.templateLog.Warn("template harness-config import: failed to sync, skipping",
+					"config", name, "error", err)
 			}
-
-			if existing == nil {
-				if err := s.bootstrapSingleHarnessConfigScoped(ctx, name, dirPath, hcDirCfg, stor, hcScope, scopeID); err != nil {
-					s.templateLog.Warn("template harness-config import: failed to import, skipping",
-						"config", name, "error", err)
-					return nil
-				}
-				s.templateLog.Info("template harness-config import: imported config",
-					"config", name, "harness", hcDirCfg.Config.Harness, "scope", hcScope)
-			} else {
-				if _, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDirCfg, stor, false); err != nil {
-					s.templateLog.Warn("template harness-config import: failed to sync, skipping",
-						"config", name, "error", err)
-				}
-			}
-			return nil
-		})
+		}
 	}
-	_ = g.Wait()
 }
-
-// bundledHarnessConfigConcurrency bounds how many harness-configs bundled inside
-// a template import in parallel (Phase 4). It is kept small because this loop
-// runs within a per-resource import goroutine (resourceImportConcurrency), so
-// the effective concurrency is the product of the two pools.
-const bundledHarnessConfigConcurrency = 4
 
 // importTemplatesFromRemote fetches a remote source URL, discovers scion
 // templates within it, and registers each one into the Hub store scoped
 // to the given project. Returns the names of all templates imported or updated.
-//
-// This is a thin wrapper over the shared import driver (resource_import.go).
 func (s *Server) importTemplatesFromRemote(ctx context.Context, projectID, sourceURL string) ([]string, error) {
-	return s.importFromRemote(ctx, projectID, sourceURL, store.TemplateScopeProject, s.templateImportKind(), nil)
+	if !config.IsRemoteURI(sourceURL) {
+		return nil, fmt.Errorf("source must be a remote URI (http://, https://, or rclone)")
+	}
+
+	stor := s.GetStorage()
+	if stor == nil {
+		return nil, fmt.Errorf("template storage is not configured")
+	}
+
+	// If the project has a GitHub App installation, mint a token for authenticated access
+	var authToken string
+	project, err := s.store.GetProject(ctx, projectID)
+	if err == nil && project != nil && project.GitHubInstallationID != nil {
+		if token, _, mintErr := s.MintGitHubAppTokenForProject(ctx, project); mintErr == nil && token != "" {
+			authToken = token
+		}
+	}
+
+	// Fall back to project GITHUB_TOKEN secret if no App token minted
+	if authToken == "" {
+		if sb := s.GetSecretBackend(); sb != nil {
+			sec, secErr := sb.Get(ctx, "GITHUB_TOKEN", secret.ScopeProject, projectID)
+			if secErr == nil && sec != nil && sec.Value != "" {
+				authToken = sec.Value
+				s.templateLog.Info("using project GITHUB_TOKEN for template import", "projectID", projectID)
+			} else if secErr != nil && !errors.Is(secErr, store.ErrNotFound) {
+				s.templateLog.Warn("Failed to retrieve GITHUB_TOKEN from secret backend", "projectID", projectID, "error", secErr)
+			}
+		}
+	}
+
+	// Fetch to a temporary directory
+	cachePath, err := config.FetchRemoteTemplate(ctx, sourceURL, authToken)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch remote templates: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(cachePath) }()
+
+	// Collect template directories to import
+	type templateDir struct{ name, path string }
+	var dirs []templateDir
+
+	if templateimport.IsScionTemplate(cachePath) {
+		// URL pointed directly at a single template directory
+		dirs = append(dirs, templateDir{filepath.Base(cachePath), cachePath})
+	} else {
+		entries, err := os.ReadDir(cachePath)
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			dir := filepath.Join(cachePath, entry.Name())
+			if templateimport.IsScionTemplate(dir) {
+				dirs = append(dirs, templateDir{entry.Name(), dir})
+			}
+		}
+	}
+
+	if len(dirs) == 0 {
+		return nil, fmt.Errorf("no scion templates found at %s", sourceURL)
+	}
+
+	var imported []string
+	for _, td := range dirs {
+		slug := api.Slugify(td.name)
+		existing, err := s.store.GetTemplateBySlug(ctx, slug, store.TemplateScopeProject, projectID)
+		if err != nil && err != store.ErrNotFound {
+			s.templateLog.Warn("template import: failed to look up template, skipping",
+				"name", td.name, "error", err)
+			continue
+		}
+		if existing == nil {
+			if err := s.bootstrapSingleTemplate(ctx, td.name, td.path, store.TemplateScopeProject, projectID); err != nil {
+				s.templateLog.Warn("template import: failed to import template, skipping",
+					"name", td.name, "error", err)
+				continue
+			}
+		} else {
+			if _, err := s.syncExistingTemplate(ctx, existing, td.path, true); err != nil {
+				s.templateLog.Warn("template import: failed to sync template, skipping",
+					"name", td.name, "error", err)
+				continue
+			}
+		}
+		imported = append(imported, td.name)
+	}
+	return imported, nil
 }
 
 // importTemplatesFromWorkspace imports templates from a path within the
 // project's workspace filesystem. The workspacePath is relative to the project's
 // workspace root (e.g. "/.scion/templates" or "/my/custom/path").
-//
-// This is a thin wrapper over the shared import driver (resource_import.go).
 func (s *Server) importTemplatesFromWorkspace(ctx context.Context, project *store.Project, workspacePath string) ([]string, error) {
-	return s.importFromWorkspace(ctx, project, workspacePath, store.TemplateScopeProject, s.templateImportKind(), nil)
+	stor := s.GetStorage()
+	if stor == nil {
+		return nil, fmt.Errorf("template storage is not configured")
+	}
+
+	// Resolve the project's workspace root on disk
+	projectRoot, err := s.resolveProjectWebDAVPath(ctx, project)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve project workspace: %w", err)
+	}
+
+	// Clean and join the workspace path to the project root.
+	// Strip leading slash so it joins correctly.
+	rel := strings.TrimPrefix(filepath.Clean(workspacePath), "/")
+	templatesDir := filepath.Join(projectRoot, rel)
+
+	// Validate the resolved path is within the project root
+	absRoot, _ := filepath.Abs(projectRoot)
+	absDir, _ := filepath.Abs(templatesDir)
+	if !strings.HasPrefix(absDir, absRoot) {
+		return nil, fmt.Errorf("workspace path must be within the project workspace")
+	}
+
+	info, err := os.Stat(templatesDir)
+	if err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("workspace path not found or not a directory: %s", workspacePath)
+	}
+
+	// Collect template directories to import (same logic as importTemplatesFromRemote)
+	type templateDir struct{ name, path string }
+	var dirs []templateDir
+
+	if templateimport.IsScionTemplate(templatesDir) {
+		dirs = append(dirs, templateDir{filepath.Base(templatesDir), templatesDir})
+	} else {
+		entries, readErr := os.ReadDir(templatesDir)
+		if readErr != nil {
+			return nil, readErr
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			dir := filepath.Join(templatesDir, entry.Name())
+			if templateimport.IsScionTemplate(dir) {
+				dirs = append(dirs, templateDir{entry.Name(), dir})
+			}
+		}
+	}
+
+	if len(dirs) == 0 {
+		return nil, fmt.Errorf("no scion templates found at workspace path %s", workspacePath)
+	}
+
+	var imported []string
+	for _, td := range dirs {
+		slug := api.Slugify(td.name)
+		existing, lookupErr := s.store.GetTemplateBySlug(ctx, slug, store.TemplateScopeProject, project.ID)
+		if lookupErr != nil && lookupErr != store.ErrNotFound {
+			s.templateLog.Warn("workspace template import: failed to look up template, skipping",
+				"name", td.name, "error", lookupErr)
+			continue
+		}
+		if existing == nil {
+			if bootstrapErr := s.bootstrapSingleTemplate(ctx, td.name, td.path, store.TemplateScopeProject, project.ID); bootstrapErr != nil {
+				s.templateLog.Warn("workspace template import: failed to import template, skipping",
+					"name", td.name, "error", bootstrapErr)
+				continue
+			}
+		} else {
+			if _, syncErr := s.syncExistingTemplate(ctx, existing, td.path, true); syncErr != nil {
+				s.templateLog.Warn("workspace template import: failed to sync template, skipping",
+					"name", td.name, "error", syncErr)
+				continue
+			}
+		}
+		imported = append(imported, td.name)
+	}
+	return imported, nil
 }
