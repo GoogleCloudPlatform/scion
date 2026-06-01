@@ -1461,7 +1461,7 @@ func TestSSEHandler_EventDelivery(t *testing.T) {
 	assert.Contains(t, frame, "event: update\n")
 	assert.Contains(t, frame, "data: ")
 	assert.Contains(t, frame, `"subject":"project.test123.agent.status"`)
-	assert.Contains(t, frame, `"agentId":tid("agent-1")`)
+	assert.Contains(t, frame, `"agentId":"`+tid("agent-1")+`"`)
 	assert.Contains(t, frame, `"phase":"running"`)
 }
 
@@ -1738,7 +1738,7 @@ func TestSPAShellHandler_ContainsInitialData(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// The __SCION_DATA__ should contain agent data
-	assert.Contains(t, html, `tid("agent-1")`)
+	assert.Contains(t, html, tid("agent-1"))
 	assert.Contains(t, html, `"test-agent"`)
 	assert.Contains(t, html, `"_capabilities"`)
 	assert.Contains(t, html, `"actions"`)
