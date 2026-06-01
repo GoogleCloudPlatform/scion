@@ -33,13 +33,22 @@ import (
 //
 //	SQLite:   EXISTS (SELECT 1 FROM json_each(ancestry)
 //	                  WHERE json_each.value = ?)
-//	Postgres: EXISTS (SELECT 1 FROM json_array_elements_text(ancestry) AS elem
-//	                  WHERE elem = ?)
+//	Postgres: EXISTS (SELECT 1 FROM jsonb_array_elements_text(ancestry) AS elem
+//	                  WHERE elem = $n)
 //
-// The Postgres form follows PR #289's translation catalogue
-// (json_each -> json_array_elements_text). The dialect is read from the live
-// selector via Builder.Dialect(), so the same store works against either
-// backend with no external configuration.
+// Two dialect details are load-bearing:
+//
+//   - Function name: Ent stores field.TypeJSON as `jsonb` on Postgres, so the
+//     set-returning function must be jsonb_array_elements_text (the json_*
+//     variant only accepts the `json` type).
+//   - Bind parameter: the fragment is emitted through Builder.Arg, not as a
+//     literal "?" via ExprP. ExprP writes raw text verbatim and does NOT rebind
+//     "?" to Postgres' "$n" syntax, which produced a syntax error against
+//     Postgres. Builder.Arg emits the dialect-correct placeholder ("?" on
+//     SQLite, "$n" on Postgres) and tracks the argument index.
+//
+// The dialect is read from the live selector via Builder.Dialect(), so the same
+// store works against either backend with no external configuration.
 //
 // The ancestry IS NOT NULL guard short-circuits agents with no recorded
 // lineage and keeps Postgres from invoking the set-returning function on a NULL
@@ -49,15 +58,23 @@ func ancestryContains(principalID string) predicate.Agent {
 		col := s.C(agent.FieldAncestry)
 		switch s.Dialect() {
 		case dialect.Postgres:
-			s.Where(entsql.ExprP(
-				col+" IS NOT NULL AND EXISTS (SELECT 1 FROM json_array_elements_text("+col+") AS elem WHERE elem = ?)",
-				principalID,
-			))
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString(col).
+					WriteString(" IS NOT NULL AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(").
+					WriteString(col).
+					WriteString(") AS elem WHERE elem = ").
+					Arg(principalID).
+					WriteString(")")
+			}))
 		default: // SQLite and any other backend providing json_each().
-			s.Where(entsql.ExprP(
-				col+" IS NOT NULL AND EXISTS (SELECT 1 FROM json_each("+col+") WHERE json_each.value = ?)",
-				principalID,
-			))
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString(col).
+					WriteString(" IS NOT NULL AND EXISTS (SELECT 1 FROM json_each(").
+					WriteString(col).
+					WriteString(") WHERE json_each.value = ").
+					Arg(principalID).
+					WriteString(")")
+			}))
 		}
 	}
 }
