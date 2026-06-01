@@ -130,6 +130,262 @@ func (_c *AgentCreate) SetNillableVisibility(v *string) *AgentCreate {
 	return _c
 }
 
+// SetLabels sets the "labels" field.
+func (_c *AgentCreate) SetLabels(v map[string]string) *AgentCreate {
+	_c.mutation.SetLabels(v)
+	return _c
+}
+
+// SetAnnotations sets the "annotations" field.
+func (_c *AgentCreate) SetAnnotations(v map[string]string) *AgentCreate {
+	_c.mutation.SetAnnotations(v)
+	return _c
+}
+
+// SetPhase sets the "phase" field.
+func (_c *AgentCreate) SetPhase(v string) *AgentCreate {
+	_c.mutation.SetPhase(v)
+	return _c
+}
+
+// SetNillablePhase sets the "phase" field if the given value is not nil.
+func (_c *AgentCreate) SetNillablePhase(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetPhase(*v)
+	}
+	return _c
+}
+
+// SetActivity sets the "activity" field.
+func (_c *AgentCreate) SetActivity(v string) *AgentCreate {
+	_c.mutation.SetActivity(v)
+	return _c
+}
+
+// SetNillableActivity sets the "activity" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableActivity(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetActivity(*v)
+	}
+	return _c
+}
+
+// SetToolName sets the "tool_name" field.
+func (_c *AgentCreate) SetToolName(v string) *AgentCreate {
+	_c.mutation.SetToolName(v)
+	return _c
+}
+
+// SetNillableToolName sets the "tool_name" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableToolName(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetToolName(*v)
+	}
+	return _c
+}
+
+// SetConnectionState sets the "connection_state" field.
+func (_c *AgentCreate) SetConnectionState(v string) *AgentCreate {
+	_c.mutation.SetConnectionState(v)
+	return _c
+}
+
+// SetNillableConnectionState sets the "connection_state" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableConnectionState(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetConnectionState(*v)
+	}
+	return _c
+}
+
+// SetContainerStatus sets the "container_status" field.
+func (_c *AgentCreate) SetContainerStatus(v string) *AgentCreate {
+	_c.mutation.SetContainerStatus(v)
+	return _c
+}
+
+// SetNillableContainerStatus sets the "container_status" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableContainerStatus(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetContainerStatus(*v)
+	}
+	return _c
+}
+
+// SetRuntimeState sets the "runtime_state" field.
+func (_c *AgentCreate) SetRuntimeState(v string) *AgentCreate {
+	_c.mutation.SetRuntimeState(v)
+	return _c
+}
+
+// SetNillableRuntimeState sets the "runtime_state" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableRuntimeState(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetRuntimeState(*v)
+	}
+	return _c
+}
+
+// SetStalledFromActivity sets the "stalled_from_activity" field.
+func (_c *AgentCreate) SetStalledFromActivity(v string) *AgentCreate {
+	_c.mutation.SetStalledFromActivity(v)
+	return _c
+}
+
+// SetNillableStalledFromActivity sets the "stalled_from_activity" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStalledFromActivity(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetStalledFromActivity(*v)
+	}
+	return _c
+}
+
+// SetCurrentTurns sets the "current_turns" field.
+func (_c *AgentCreate) SetCurrentTurns(v int) *AgentCreate {
+	_c.mutation.SetCurrentTurns(v)
+	return _c
+}
+
+// SetNillableCurrentTurns sets the "current_turns" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableCurrentTurns(v *int) *AgentCreate {
+	if v != nil {
+		_c.SetCurrentTurns(*v)
+	}
+	return _c
+}
+
+// SetCurrentModelCalls sets the "current_model_calls" field.
+func (_c *AgentCreate) SetCurrentModelCalls(v int) *AgentCreate {
+	_c.mutation.SetCurrentModelCalls(v)
+	return _c
+}
+
+// SetNillableCurrentModelCalls sets the "current_model_calls" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableCurrentModelCalls(v *int) *AgentCreate {
+	if v != nil {
+		_c.SetCurrentModelCalls(*v)
+	}
+	return _c
+}
+
+// SetImage sets the "image" field.
+func (_c *AgentCreate) SetImage(v string) *AgentCreate {
+	_c.mutation.SetImage(v)
+	return _c
+}
+
+// SetNillableImage sets the "image" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableImage(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetImage(*v)
+	}
+	return _c
+}
+
+// SetDetached sets the "detached" field.
+func (_c *AgentCreate) SetDetached(v bool) *AgentCreate {
+	_c.mutation.SetDetached(v)
+	return _c
+}
+
+// SetNillableDetached sets the "detached" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableDetached(v *bool) *AgentCreate {
+	if v != nil {
+		_c.SetDetached(*v)
+	}
+	return _c
+}
+
+// SetRuntime sets the "runtime" field.
+func (_c *AgentCreate) SetRuntime(v string) *AgentCreate {
+	_c.mutation.SetRuntime(v)
+	return _c
+}
+
+// SetNillableRuntime sets the "runtime" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableRuntime(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetRuntime(*v)
+	}
+	return _c
+}
+
+// SetRuntimeBrokerID sets the "runtime_broker_id" field.
+func (_c *AgentCreate) SetRuntimeBrokerID(v string) *AgentCreate {
+	_c.mutation.SetRuntimeBrokerID(v)
+	return _c
+}
+
+// SetNillableRuntimeBrokerID sets the "runtime_broker_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableRuntimeBrokerID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetRuntimeBrokerID(*v)
+	}
+	return _c
+}
+
+// SetWebPtyEnabled sets the "web_pty_enabled" field.
+func (_c *AgentCreate) SetWebPtyEnabled(v bool) *AgentCreate {
+	_c.mutation.SetWebPtyEnabled(v)
+	return _c
+}
+
+// SetNillableWebPtyEnabled sets the "web_pty_enabled" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableWebPtyEnabled(v *bool) *AgentCreate {
+	if v != nil {
+		_c.SetWebPtyEnabled(*v)
+	}
+	return _c
+}
+
+// SetTaskSummary sets the "task_summary" field.
+func (_c *AgentCreate) SetTaskSummary(v string) *AgentCreate {
+	_c.mutation.SetTaskSummary(v)
+	return _c
+}
+
+// SetNillableTaskSummary sets the "task_summary" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableTaskSummary(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetTaskSummary(*v)
+	}
+	return _c
+}
+
+// SetMessage sets the "message" field.
+func (_c *AgentCreate) SetMessage(v string) *AgentCreate {
+	_c.mutation.SetMessage(v)
+	return _c
+}
+
+// SetNillableMessage sets the "message" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableMessage(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetMessage(*v)
+	}
+	return _c
+}
+
+// SetAppliedConfig sets the "applied_config" field.
+func (_c *AgentCreate) SetAppliedConfig(v string) *AgentCreate {
+	_c.mutation.SetAppliedConfig(v)
+	return _c
+}
+
+// SetNillableAppliedConfig sets the "applied_config" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableAppliedConfig(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetAppliedConfig(*v)
+	}
+	return _c
+}
+
+// SetAncestry sets the "ancestry" field.
+func (_c *AgentCreate) SetAncestry(v []string) *AgentCreate {
+	_c.mutation.SetAncestry(v)
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *AgentCreate) SetCreated(v time.Time) *AgentCreate {
 	_c.mutation.SetCreated(v)
@@ -154,6 +410,76 @@ func (_c *AgentCreate) SetUpdated(v time.Time) *AgentCreate {
 func (_c *AgentCreate) SetNillableUpdated(v *time.Time) *AgentCreate {
 	if v != nil {
 		_c.SetUpdated(*v)
+	}
+	return _c
+}
+
+// SetLastSeen sets the "last_seen" field.
+func (_c *AgentCreate) SetLastSeen(v time.Time) *AgentCreate {
+	_c.mutation.SetLastSeen(v)
+	return _c
+}
+
+// SetNillableLastSeen sets the "last_seen" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLastSeen(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetLastSeen(*v)
+	}
+	return _c
+}
+
+// SetLastActivityEvent sets the "last_activity_event" field.
+func (_c *AgentCreate) SetLastActivityEvent(v time.Time) *AgentCreate {
+	_c.mutation.SetLastActivityEvent(v)
+	return _c
+}
+
+// SetNillableLastActivityEvent sets the "last_activity_event" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLastActivityEvent(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetLastActivityEvent(*v)
+	}
+	return _c
+}
+
+// SetStartedAt sets the "started_at" field.
+func (_c *AgentCreate) SetStartedAt(v time.Time) *AgentCreate {
+	_c.mutation.SetStartedAt(v)
+	return _c
+}
+
+// SetNillableStartedAt sets the "started_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStartedAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetStartedAt(*v)
+	}
+	return _c
+}
+
+// SetDeletedAt sets the "deleted_at" field.
+func (_c *AgentCreate) SetDeletedAt(v time.Time) *AgentCreate {
+	_c.mutation.SetDeletedAt(v)
+	return _c
+}
+
+// SetNillableDeletedAt sets the "deleted_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableDeletedAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetDeletedAt(*v)
+	}
+	return _c
+}
+
+// SetStateVersion sets the "state_version" field.
+func (_c *AgentCreate) SetStateVersion(v int64) *AgentCreate {
+	_c.mutation.SetStateVersion(v)
+	return _c
+}
+
+// SetNillableStateVersion sets the "state_version" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableStateVersion(v *int64) *AgentCreate {
+	if v != nil {
+		_c.SetStateVersion(*v)
 	}
 	return _c
 }
@@ -278,6 +604,22 @@ func (_c *AgentCreate) defaults() {
 		v := agent.DefaultVisibility
 		_c.mutation.SetVisibility(v)
 	}
+	if _, ok := _c.mutation.CurrentTurns(); !ok {
+		v := agent.DefaultCurrentTurns
+		_c.mutation.SetCurrentTurns(v)
+	}
+	if _, ok := _c.mutation.CurrentModelCalls(); !ok {
+		v := agent.DefaultCurrentModelCalls
+		_c.mutation.SetCurrentModelCalls(v)
+	}
+	if _, ok := _c.mutation.Detached(); !ok {
+		v := agent.DefaultDetached
+		_c.mutation.SetDetached(v)
+	}
+	if _, ok := _c.mutation.WebPtyEnabled(); !ok {
+		v := agent.DefaultWebPtyEnabled
+		_c.mutation.SetWebPtyEnabled(v)
+	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := agent.DefaultCreated()
 		_c.mutation.SetCreated(v)
@@ -285,6 +627,10 @@ func (_c *AgentCreate) defaults() {
 	if _, ok := _c.mutation.Updated(); !ok {
 		v := agent.DefaultUpdated()
 		_c.mutation.SetUpdated(v)
+	}
+	if _, ok := _c.mutation.StateVersion(); !ok {
+		v := agent.DefaultStateVersion
+		_c.mutation.SetStateVersion(v)
 	}
 	if _, ok := _c.mutation.ID(); !ok {
 		v := agent.DefaultID()
@@ -327,11 +673,26 @@ func (_c *AgentCreate) check() error {
 	if _, ok := _c.mutation.Visibility(); !ok {
 		return &ValidationError{Name: "visibility", err: errors.New(`ent: missing required field "Agent.visibility"`)}
 	}
+	if _, ok := _c.mutation.CurrentTurns(); !ok {
+		return &ValidationError{Name: "current_turns", err: errors.New(`ent: missing required field "Agent.current_turns"`)}
+	}
+	if _, ok := _c.mutation.CurrentModelCalls(); !ok {
+		return &ValidationError{Name: "current_model_calls", err: errors.New(`ent: missing required field "Agent.current_model_calls"`)}
+	}
+	if _, ok := _c.mutation.Detached(); !ok {
+		return &ValidationError{Name: "detached", err: errors.New(`ent: missing required field "Agent.detached"`)}
+	}
+	if _, ok := _c.mutation.WebPtyEnabled(); !ok {
+		return &ValidationError{Name: "web_pty_enabled", err: errors.New(`ent: missing required field "Agent.web_pty_enabled"`)}
+	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "Agent.created"`)}
 	}
 	if _, ok := _c.mutation.Updated(); !ok {
 		return &ValidationError{Name: "updated", err: errors.New(`ent: missing required field "Agent.updated"`)}
+	}
+	if _, ok := _c.mutation.StateVersion(); !ok {
+		return &ValidationError{Name: "state_version", err: errors.New(`ent: missing required field "Agent.state_version"`)}
 	}
 	if len(_c.mutation.ProjectIDs()) == 0 {
 		return &ValidationError{Name: "project", err: errors.New(`ent: missing required edge "Agent.project"`)}
@@ -396,6 +757,86 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldVisibility, field.TypeString, value)
 		_node.Visibility = value
 	}
+	if value, ok := _c.mutation.Labels(); ok {
+		_spec.SetField(agent.FieldLabels, field.TypeJSON, value)
+		_node.Labels = value
+	}
+	if value, ok := _c.mutation.Annotations(); ok {
+		_spec.SetField(agent.FieldAnnotations, field.TypeJSON, value)
+		_node.Annotations = value
+	}
+	if value, ok := _c.mutation.Phase(); ok {
+		_spec.SetField(agent.FieldPhase, field.TypeString, value)
+		_node.Phase = value
+	}
+	if value, ok := _c.mutation.Activity(); ok {
+		_spec.SetField(agent.FieldActivity, field.TypeString, value)
+		_node.Activity = value
+	}
+	if value, ok := _c.mutation.ToolName(); ok {
+		_spec.SetField(agent.FieldToolName, field.TypeString, value)
+		_node.ToolName = value
+	}
+	if value, ok := _c.mutation.ConnectionState(); ok {
+		_spec.SetField(agent.FieldConnectionState, field.TypeString, value)
+		_node.ConnectionState = value
+	}
+	if value, ok := _c.mutation.ContainerStatus(); ok {
+		_spec.SetField(agent.FieldContainerStatus, field.TypeString, value)
+		_node.ContainerStatus = value
+	}
+	if value, ok := _c.mutation.RuntimeState(); ok {
+		_spec.SetField(agent.FieldRuntimeState, field.TypeString, value)
+		_node.RuntimeState = value
+	}
+	if value, ok := _c.mutation.StalledFromActivity(); ok {
+		_spec.SetField(agent.FieldStalledFromActivity, field.TypeString, value)
+		_node.StalledFromActivity = value
+	}
+	if value, ok := _c.mutation.CurrentTurns(); ok {
+		_spec.SetField(agent.FieldCurrentTurns, field.TypeInt, value)
+		_node.CurrentTurns = value
+	}
+	if value, ok := _c.mutation.CurrentModelCalls(); ok {
+		_spec.SetField(agent.FieldCurrentModelCalls, field.TypeInt, value)
+		_node.CurrentModelCalls = value
+	}
+	if value, ok := _c.mutation.Image(); ok {
+		_spec.SetField(agent.FieldImage, field.TypeString, value)
+		_node.Image = value
+	}
+	if value, ok := _c.mutation.Detached(); ok {
+		_spec.SetField(agent.FieldDetached, field.TypeBool, value)
+		_node.Detached = value
+	}
+	if value, ok := _c.mutation.Runtime(); ok {
+		_spec.SetField(agent.FieldRuntime, field.TypeString, value)
+		_node.Runtime = value
+	}
+	if value, ok := _c.mutation.RuntimeBrokerID(); ok {
+		_spec.SetField(agent.FieldRuntimeBrokerID, field.TypeString, value)
+		_node.RuntimeBrokerID = value
+	}
+	if value, ok := _c.mutation.WebPtyEnabled(); ok {
+		_spec.SetField(agent.FieldWebPtyEnabled, field.TypeBool, value)
+		_node.WebPtyEnabled = value
+	}
+	if value, ok := _c.mutation.TaskSummary(); ok {
+		_spec.SetField(agent.FieldTaskSummary, field.TypeString, value)
+		_node.TaskSummary = value
+	}
+	if value, ok := _c.mutation.Message(); ok {
+		_spec.SetField(agent.FieldMessage, field.TypeString, value)
+		_node.Message = value
+	}
+	if value, ok := _c.mutation.AppliedConfig(); ok {
+		_spec.SetField(agent.FieldAppliedConfig, field.TypeString, value)
+		_node.AppliedConfig = value
+	}
+	if value, ok := _c.mutation.Ancestry(); ok {
+		_spec.SetField(agent.FieldAncestry, field.TypeJSON, value)
+		_node.Ancestry = value
+	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(agent.FieldCreated, field.TypeTime, value)
 		_node.Created = value
@@ -403,6 +844,26 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.Updated(); ok {
 		_spec.SetField(agent.FieldUpdated, field.TypeTime, value)
 		_node.Updated = value
+	}
+	if value, ok := _c.mutation.LastSeen(); ok {
+		_spec.SetField(agent.FieldLastSeen, field.TypeTime, value)
+		_node.LastSeen = &value
+	}
+	if value, ok := _c.mutation.LastActivityEvent(); ok {
+		_spec.SetField(agent.FieldLastActivityEvent, field.TypeTime, value)
+		_node.LastActivityEvent = &value
+	}
+	if value, ok := _c.mutation.StartedAt(); ok {
+		_spec.SetField(agent.FieldStartedAt, field.TypeTime, value)
+		_node.StartedAt = &value
+	}
+	if value, ok := _c.mutation.DeletedAt(); ok {
+		_spec.SetField(agent.FieldDeletedAt, field.TypeTime, value)
+		_node.DeletedAt = &value
+	}
+	if value, ok := _c.mutation.StateVersion(); ok {
+		_spec.SetField(agent.FieldStateVersion, field.TypeInt64, value)
+		_node.StateVersion = value
 	}
 	if nodes := _c.mutation.ProjectIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -665,6 +1126,354 @@ func (u *AgentUpsert) UpdateVisibility() *AgentUpsert {
 	return u
 }
 
+// SetLabels sets the "labels" field.
+func (u *AgentUpsert) SetLabels(v map[string]string) *AgentUpsert {
+	u.Set(agent.FieldLabels, v)
+	return u
+}
+
+// UpdateLabels sets the "labels" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLabels() *AgentUpsert {
+	u.SetExcluded(agent.FieldLabels)
+	return u
+}
+
+// ClearLabels clears the value of the "labels" field.
+func (u *AgentUpsert) ClearLabels() *AgentUpsert {
+	u.SetNull(agent.FieldLabels)
+	return u
+}
+
+// SetAnnotations sets the "annotations" field.
+func (u *AgentUpsert) SetAnnotations(v map[string]string) *AgentUpsert {
+	u.Set(agent.FieldAnnotations, v)
+	return u
+}
+
+// UpdateAnnotations sets the "annotations" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateAnnotations() *AgentUpsert {
+	u.SetExcluded(agent.FieldAnnotations)
+	return u
+}
+
+// ClearAnnotations clears the value of the "annotations" field.
+func (u *AgentUpsert) ClearAnnotations() *AgentUpsert {
+	u.SetNull(agent.FieldAnnotations)
+	return u
+}
+
+// SetPhase sets the "phase" field.
+func (u *AgentUpsert) SetPhase(v string) *AgentUpsert {
+	u.Set(agent.FieldPhase, v)
+	return u
+}
+
+// UpdatePhase sets the "phase" field to the value that was provided on create.
+func (u *AgentUpsert) UpdatePhase() *AgentUpsert {
+	u.SetExcluded(agent.FieldPhase)
+	return u
+}
+
+// ClearPhase clears the value of the "phase" field.
+func (u *AgentUpsert) ClearPhase() *AgentUpsert {
+	u.SetNull(agent.FieldPhase)
+	return u
+}
+
+// SetActivity sets the "activity" field.
+func (u *AgentUpsert) SetActivity(v string) *AgentUpsert {
+	u.Set(agent.FieldActivity, v)
+	return u
+}
+
+// UpdateActivity sets the "activity" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateActivity() *AgentUpsert {
+	u.SetExcluded(agent.FieldActivity)
+	return u
+}
+
+// ClearActivity clears the value of the "activity" field.
+func (u *AgentUpsert) ClearActivity() *AgentUpsert {
+	u.SetNull(agent.FieldActivity)
+	return u
+}
+
+// SetToolName sets the "tool_name" field.
+func (u *AgentUpsert) SetToolName(v string) *AgentUpsert {
+	u.Set(agent.FieldToolName, v)
+	return u
+}
+
+// UpdateToolName sets the "tool_name" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateToolName() *AgentUpsert {
+	u.SetExcluded(agent.FieldToolName)
+	return u
+}
+
+// ClearToolName clears the value of the "tool_name" field.
+func (u *AgentUpsert) ClearToolName() *AgentUpsert {
+	u.SetNull(agent.FieldToolName)
+	return u
+}
+
+// SetConnectionState sets the "connection_state" field.
+func (u *AgentUpsert) SetConnectionState(v string) *AgentUpsert {
+	u.Set(agent.FieldConnectionState, v)
+	return u
+}
+
+// UpdateConnectionState sets the "connection_state" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateConnectionState() *AgentUpsert {
+	u.SetExcluded(agent.FieldConnectionState)
+	return u
+}
+
+// ClearConnectionState clears the value of the "connection_state" field.
+func (u *AgentUpsert) ClearConnectionState() *AgentUpsert {
+	u.SetNull(agent.FieldConnectionState)
+	return u
+}
+
+// SetContainerStatus sets the "container_status" field.
+func (u *AgentUpsert) SetContainerStatus(v string) *AgentUpsert {
+	u.Set(agent.FieldContainerStatus, v)
+	return u
+}
+
+// UpdateContainerStatus sets the "container_status" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateContainerStatus() *AgentUpsert {
+	u.SetExcluded(agent.FieldContainerStatus)
+	return u
+}
+
+// ClearContainerStatus clears the value of the "container_status" field.
+func (u *AgentUpsert) ClearContainerStatus() *AgentUpsert {
+	u.SetNull(agent.FieldContainerStatus)
+	return u
+}
+
+// SetRuntimeState sets the "runtime_state" field.
+func (u *AgentUpsert) SetRuntimeState(v string) *AgentUpsert {
+	u.Set(agent.FieldRuntimeState, v)
+	return u
+}
+
+// UpdateRuntimeState sets the "runtime_state" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateRuntimeState() *AgentUpsert {
+	u.SetExcluded(agent.FieldRuntimeState)
+	return u
+}
+
+// ClearRuntimeState clears the value of the "runtime_state" field.
+func (u *AgentUpsert) ClearRuntimeState() *AgentUpsert {
+	u.SetNull(agent.FieldRuntimeState)
+	return u
+}
+
+// SetStalledFromActivity sets the "stalled_from_activity" field.
+func (u *AgentUpsert) SetStalledFromActivity(v string) *AgentUpsert {
+	u.Set(agent.FieldStalledFromActivity, v)
+	return u
+}
+
+// UpdateStalledFromActivity sets the "stalled_from_activity" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStalledFromActivity() *AgentUpsert {
+	u.SetExcluded(agent.FieldStalledFromActivity)
+	return u
+}
+
+// ClearStalledFromActivity clears the value of the "stalled_from_activity" field.
+func (u *AgentUpsert) ClearStalledFromActivity() *AgentUpsert {
+	u.SetNull(agent.FieldStalledFromActivity)
+	return u
+}
+
+// SetCurrentTurns sets the "current_turns" field.
+func (u *AgentUpsert) SetCurrentTurns(v int) *AgentUpsert {
+	u.Set(agent.FieldCurrentTurns, v)
+	return u
+}
+
+// UpdateCurrentTurns sets the "current_turns" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateCurrentTurns() *AgentUpsert {
+	u.SetExcluded(agent.FieldCurrentTurns)
+	return u
+}
+
+// AddCurrentTurns adds v to the "current_turns" field.
+func (u *AgentUpsert) AddCurrentTurns(v int) *AgentUpsert {
+	u.Add(agent.FieldCurrentTurns, v)
+	return u
+}
+
+// SetCurrentModelCalls sets the "current_model_calls" field.
+func (u *AgentUpsert) SetCurrentModelCalls(v int) *AgentUpsert {
+	u.Set(agent.FieldCurrentModelCalls, v)
+	return u
+}
+
+// UpdateCurrentModelCalls sets the "current_model_calls" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateCurrentModelCalls() *AgentUpsert {
+	u.SetExcluded(agent.FieldCurrentModelCalls)
+	return u
+}
+
+// AddCurrentModelCalls adds v to the "current_model_calls" field.
+func (u *AgentUpsert) AddCurrentModelCalls(v int) *AgentUpsert {
+	u.Add(agent.FieldCurrentModelCalls, v)
+	return u
+}
+
+// SetImage sets the "image" field.
+func (u *AgentUpsert) SetImage(v string) *AgentUpsert {
+	u.Set(agent.FieldImage, v)
+	return u
+}
+
+// UpdateImage sets the "image" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateImage() *AgentUpsert {
+	u.SetExcluded(agent.FieldImage)
+	return u
+}
+
+// ClearImage clears the value of the "image" field.
+func (u *AgentUpsert) ClearImage() *AgentUpsert {
+	u.SetNull(agent.FieldImage)
+	return u
+}
+
+// SetDetached sets the "detached" field.
+func (u *AgentUpsert) SetDetached(v bool) *AgentUpsert {
+	u.Set(agent.FieldDetached, v)
+	return u
+}
+
+// UpdateDetached sets the "detached" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateDetached() *AgentUpsert {
+	u.SetExcluded(agent.FieldDetached)
+	return u
+}
+
+// SetRuntime sets the "runtime" field.
+func (u *AgentUpsert) SetRuntime(v string) *AgentUpsert {
+	u.Set(agent.FieldRuntime, v)
+	return u
+}
+
+// UpdateRuntime sets the "runtime" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateRuntime() *AgentUpsert {
+	u.SetExcluded(agent.FieldRuntime)
+	return u
+}
+
+// ClearRuntime clears the value of the "runtime" field.
+func (u *AgentUpsert) ClearRuntime() *AgentUpsert {
+	u.SetNull(agent.FieldRuntime)
+	return u
+}
+
+// SetRuntimeBrokerID sets the "runtime_broker_id" field.
+func (u *AgentUpsert) SetRuntimeBrokerID(v string) *AgentUpsert {
+	u.Set(agent.FieldRuntimeBrokerID, v)
+	return u
+}
+
+// UpdateRuntimeBrokerID sets the "runtime_broker_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateRuntimeBrokerID() *AgentUpsert {
+	u.SetExcluded(agent.FieldRuntimeBrokerID)
+	return u
+}
+
+// ClearRuntimeBrokerID clears the value of the "runtime_broker_id" field.
+func (u *AgentUpsert) ClearRuntimeBrokerID() *AgentUpsert {
+	u.SetNull(agent.FieldRuntimeBrokerID)
+	return u
+}
+
+// SetWebPtyEnabled sets the "web_pty_enabled" field.
+func (u *AgentUpsert) SetWebPtyEnabled(v bool) *AgentUpsert {
+	u.Set(agent.FieldWebPtyEnabled, v)
+	return u
+}
+
+// UpdateWebPtyEnabled sets the "web_pty_enabled" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateWebPtyEnabled() *AgentUpsert {
+	u.SetExcluded(agent.FieldWebPtyEnabled)
+	return u
+}
+
+// SetTaskSummary sets the "task_summary" field.
+func (u *AgentUpsert) SetTaskSummary(v string) *AgentUpsert {
+	u.Set(agent.FieldTaskSummary, v)
+	return u
+}
+
+// UpdateTaskSummary sets the "task_summary" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateTaskSummary() *AgentUpsert {
+	u.SetExcluded(agent.FieldTaskSummary)
+	return u
+}
+
+// ClearTaskSummary clears the value of the "task_summary" field.
+func (u *AgentUpsert) ClearTaskSummary() *AgentUpsert {
+	u.SetNull(agent.FieldTaskSummary)
+	return u
+}
+
+// SetMessage sets the "message" field.
+func (u *AgentUpsert) SetMessage(v string) *AgentUpsert {
+	u.Set(agent.FieldMessage, v)
+	return u
+}
+
+// UpdateMessage sets the "message" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateMessage() *AgentUpsert {
+	u.SetExcluded(agent.FieldMessage)
+	return u
+}
+
+// ClearMessage clears the value of the "message" field.
+func (u *AgentUpsert) ClearMessage() *AgentUpsert {
+	u.SetNull(agent.FieldMessage)
+	return u
+}
+
+// SetAppliedConfig sets the "applied_config" field.
+func (u *AgentUpsert) SetAppliedConfig(v string) *AgentUpsert {
+	u.Set(agent.FieldAppliedConfig, v)
+	return u
+}
+
+// UpdateAppliedConfig sets the "applied_config" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateAppliedConfig() *AgentUpsert {
+	u.SetExcluded(agent.FieldAppliedConfig)
+	return u
+}
+
+// ClearAppliedConfig clears the value of the "applied_config" field.
+func (u *AgentUpsert) ClearAppliedConfig() *AgentUpsert {
+	u.SetNull(agent.FieldAppliedConfig)
+	return u
+}
+
+// SetAncestry sets the "ancestry" field.
+func (u *AgentUpsert) SetAncestry(v []string) *AgentUpsert {
+	u.Set(agent.FieldAncestry, v)
+	return u
+}
+
+// UpdateAncestry sets the "ancestry" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateAncestry() *AgentUpsert {
+	u.SetExcluded(agent.FieldAncestry)
+	return u
+}
+
+// ClearAncestry clears the value of the "ancestry" field.
+func (u *AgentUpsert) ClearAncestry() *AgentUpsert {
+	u.SetNull(agent.FieldAncestry)
+	return u
+}
+
 // SetUpdated sets the "updated" field.
 func (u *AgentUpsert) SetUpdated(v time.Time) *AgentUpsert {
 	u.Set(agent.FieldUpdated, v)
@@ -674,6 +1483,96 @@ func (u *AgentUpsert) SetUpdated(v time.Time) *AgentUpsert {
 // UpdateUpdated sets the "updated" field to the value that was provided on create.
 func (u *AgentUpsert) UpdateUpdated() *AgentUpsert {
 	u.SetExcluded(agent.FieldUpdated)
+	return u
+}
+
+// SetLastSeen sets the "last_seen" field.
+func (u *AgentUpsert) SetLastSeen(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldLastSeen, v)
+	return u
+}
+
+// UpdateLastSeen sets the "last_seen" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLastSeen() *AgentUpsert {
+	u.SetExcluded(agent.FieldLastSeen)
+	return u
+}
+
+// ClearLastSeen clears the value of the "last_seen" field.
+func (u *AgentUpsert) ClearLastSeen() *AgentUpsert {
+	u.SetNull(agent.FieldLastSeen)
+	return u
+}
+
+// SetLastActivityEvent sets the "last_activity_event" field.
+func (u *AgentUpsert) SetLastActivityEvent(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldLastActivityEvent, v)
+	return u
+}
+
+// UpdateLastActivityEvent sets the "last_activity_event" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLastActivityEvent() *AgentUpsert {
+	u.SetExcluded(agent.FieldLastActivityEvent)
+	return u
+}
+
+// ClearLastActivityEvent clears the value of the "last_activity_event" field.
+func (u *AgentUpsert) ClearLastActivityEvent() *AgentUpsert {
+	u.SetNull(agent.FieldLastActivityEvent)
+	return u
+}
+
+// SetStartedAt sets the "started_at" field.
+func (u *AgentUpsert) SetStartedAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldStartedAt, v)
+	return u
+}
+
+// UpdateStartedAt sets the "started_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStartedAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldStartedAt)
+	return u
+}
+
+// ClearStartedAt clears the value of the "started_at" field.
+func (u *AgentUpsert) ClearStartedAt() *AgentUpsert {
+	u.SetNull(agent.FieldStartedAt)
+	return u
+}
+
+// SetDeletedAt sets the "deleted_at" field.
+func (u *AgentUpsert) SetDeletedAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldDeletedAt, v)
+	return u
+}
+
+// UpdateDeletedAt sets the "deleted_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateDeletedAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldDeletedAt)
+	return u
+}
+
+// ClearDeletedAt clears the value of the "deleted_at" field.
+func (u *AgentUpsert) ClearDeletedAt() *AgentUpsert {
+	u.SetNull(agent.FieldDeletedAt)
+	return u
+}
+
+// SetStateVersion sets the "state_version" field.
+func (u *AgentUpsert) SetStateVersion(v int64) *AgentUpsert {
+	u.Set(agent.FieldStateVersion, v)
+	return u
+}
+
+// UpdateStateVersion sets the "state_version" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStateVersion() *AgentUpsert {
+	u.SetExcluded(agent.FieldStateVersion)
+	return u
+}
+
+// AddStateVersion adds v to the "state_version" field.
+func (u *AgentUpsert) AddStateVersion(v int64) *AgentUpsert {
+	u.Add(agent.FieldStateVersion, v)
 	return u
 }
 
@@ -875,6 +1774,412 @@ func (u *AgentUpsertOne) UpdateVisibility() *AgentUpsertOne {
 	})
 }
 
+// SetLabels sets the "labels" field.
+func (u *AgentUpsertOne) SetLabels(v map[string]string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLabels(v)
+	})
+}
+
+// UpdateLabels sets the "labels" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLabels() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLabels()
+	})
+}
+
+// ClearLabels clears the value of the "labels" field.
+func (u *AgentUpsertOne) ClearLabels() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLabels()
+	})
+}
+
+// SetAnnotations sets the "annotations" field.
+func (u *AgentUpsertOne) SetAnnotations(v map[string]string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetAnnotations(v)
+	})
+}
+
+// UpdateAnnotations sets the "annotations" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateAnnotations() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateAnnotations()
+	})
+}
+
+// ClearAnnotations clears the value of the "annotations" field.
+func (u *AgentUpsertOne) ClearAnnotations() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearAnnotations()
+	})
+}
+
+// SetPhase sets the "phase" field.
+func (u *AgentUpsertOne) SetPhase(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetPhase(v)
+	})
+}
+
+// UpdatePhase sets the "phase" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdatePhase() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdatePhase()
+	})
+}
+
+// ClearPhase clears the value of the "phase" field.
+func (u *AgentUpsertOne) ClearPhase() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearPhase()
+	})
+}
+
+// SetActivity sets the "activity" field.
+func (u *AgentUpsertOne) SetActivity(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetActivity(v)
+	})
+}
+
+// UpdateActivity sets the "activity" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateActivity() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateActivity()
+	})
+}
+
+// ClearActivity clears the value of the "activity" field.
+func (u *AgentUpsertOne) ClearActivity() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearActivity()
+	})
+}
+
+// SetToolName sets the "tool_name" field.
+func (u *AgentUpsertOne) SetToolName(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetToolName(v)
+	})
+}
+
+// UpdateToolName sets the "tool_name" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateToolName() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateToolName()
+	})
+}
+
+// ClearToolName clears the value of the "tool_name" field.
+func (u *AgentUpsertOne) ClearToolName() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearToolName()
+	})
+}
+
+// SetConnectionState sets the "connection_state" field.
+func (u *AgentUpsertOne) SetConnectionState(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetConnectionState(v)
+	})
+}
+
+// UpdateConnectionState sets the "connection_state" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateConnectionState() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateConnectionState()
+	})
+}
+
+// ClearConnectionState clears the value of the "connection_state" field.
+func (u *AgentUpsertOne) ClearConnectionState() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearConnectionState()
+	})
+}
+
+// SetContainerStatus sets the "container_status" field.
+func (u *AgentUpsertOne) SetContainerStatus(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetContainerStatus(v)
+	})
+}
+
+// UpdateContainerStatus sets the "container_status" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateContainerStatus() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateContainerStatus()
+	})
+}
+
+// ClearContainerStatus clears the value of the "container_status" field.
+func (u *AgentUpsertOne) ClearContainerStatus() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearContainerStatus()
+	})
+}
+
+// SetRuntimeState sets the "runtime_state" field.
+func (u *AgentUpsertOne) SetRuntimeState(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRuntimeState(v)
+	})
+}
+
+// UpdateRuntimeState sets the "runtime_state" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateRuntimeState() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRuntimeState()
+	})
+}
+
+// ClearRuntimeState clears the value of the "runtime_state" field.
+func (u *AgentUpsertOne) ClearRuntimeState() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRuntimeState()
+	})
+}
+
+// SetStalledFromActivity sets the "stalled_from_activity" field.
+func (u *AgentUpsertOne) SetStalledFromActivity(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStalledFromActivity(v)
+	})
+}
+
+// UpdateStalledFromActivity sets the "stalled_from_activity" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStalledFromActivity() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStalledFromActivity()
+	})
+}
+
+// ClearStalledFromActivity clears the value of the "stalled_from_activity" field.
+func (u *AgentUpsertOne) ClearStalledFromActivity() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStalledFromActivity()
+	})
+}
+
+// SetCurrentTurns sets the "current_turns" field.
+func (u *AgentUpsertOne) SetCurrentTurns(v int) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetCurrentTurns(v)
+	})
+}
+
+// AddCurrentTurns adds v to the "current_turns" field.
+func (u *AgentUpsertOne) AddCurrentTurns(v int) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.AddCurrentTurns(v)
+	})
+}
+
+// UpdateCurrentTurns sets the "current_turns" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateCurrentTurns() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateCurrentTurns()
+	})
+}
+
+// SetCurrentModelCalls sets the "current_model_calls" field.
+func (u *AgentUpsertOne) SetCurrentModelCalls(v int) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetCurrentModelCalls(v)
+	})
+}
+
+// AddCurrentModelCalls adds v to the "current_model_calls" field.
+func (u *AgentUpsertOne) AddCurrentModelCalls(v int) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.AddCurrentModelCalls(v)
+	})
+}
+
+// UpdateCurrentModelCalls sets the "current_model_calls" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateCurrentModelCalls() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateCurrentModelCalls()
+	})
+}
+
+// SetImage sets the "image" field.
+func (u *AgentUpsertOne) SetImage(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetImage(v)
+	})
+}
+
+// UpdateImage sets the "image" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateImage() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateImage()
+	})
+}
+
+// ClearImage clears the value of the "image" field.
+func (u *AgentUpsertOne) ClearImage() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearImage()
+	})
+}
+
+// SetDetached sets the "detached" field.
+func (u *AgentUpsertOne) SetDetached(v bool) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDetached(v)
+	})
+}
+
+// UpdateDetached sets the "detached" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateDetached() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDetached()
+	})
+}
+
+// SetRuntime sets the "runtime" field.
+func (u *AgentUpsertOne) SetRuntime(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRuntime(v)
+	})
+}
+
+// UpdateRuntime sets the "runtime" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateRuntime() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRuntime()
+	})
+}
+
+// ClearRuntime clears the value of the "runtime" field.
+func (u *AgentUpsertOne) ClearRuntime() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRuntime()
+	})
+}
+
+// SetRuntimeBrokerID sets the "runtime_broker_id" field.
+func (u *AgentUpsertOne) SetRuntimeBrokerID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRuntimeBrokerID(v)
+	})
+}
+
+// UpdateRuntimeBrokerID sets the "runtime_broker_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateRuntimeBrokerID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRuntimeBrokerID()
+	})
+}
+
+// ClearRuntimeBrokerID clears the value of the "runtime_broker_id" field.
+func (u *AgentUpsertOne) ClearRuntimeBrokerID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRuntimeBrokerID()
+	})
+}
+
+// SetWebPtyEnabled sets the "web_pty_enabled" field.
+func (u *AgentUpsertOne) SetWebPtyEnabled(v bool) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetWebPtyEnabled(v)
+	})
+}
+
+// UpdateWebPtyEnabled sets the "web_pty_enabled" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateWebPtyEnabled() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateWebPtyEnabled()
+	})
+}
+
+// SetTaskSummary sets the "task_summary" field.
+func (u *AgentUpsertOne) SetTaskSummary(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetTaskSummary(v)
+	})
+}
+
+// UpdateTaskSummary sets the "task_summary" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateTaskSummary() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateTaskSummary()
+	})
+}
+
+// ClearTaskSummary clears the value of the "task_summary" field.
+func (u *AgentUpsertOne) ClearTaskSummary() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearTaskSummary()
+	})
+}
+
+// SetMessage sets the "message" field.
+func (u *AgentUpsertOne) SetMessage(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetMessage(v)
+	})
+}
+
+// UpdateMessage sets the "message" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateMessage() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateMessage()
+	})
+}
+
+// ClearMessage clears the value of the "message" field.
+func (u *AgentUpsertOne) ClearMessage() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearMessage()
+	})
+}
+
+// SetAppliedConfig sets the "applied_config" field.
+func (u *AgentUpsertOne) SetAppliedConfig(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetAppliedConfig(v)
+	})
+}
+
+// UpdateAppliedConfig sets the "applied_config" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateAppliedConfig() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateAppliedConfig()
+	})
+}
+
+// ClearAppliedConfig clears the value of the "applied_config" field.
+func (u *AgentUpsertOne) ClearAppliedConfig() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearAppliedConfig()
+	})
+}
+
+// SetAncestry sets the "ancestry" field.
+func (u *AgentUpsertOne) SetAncestry(v []string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetAncestry(v)
+	})
+}
+
+// UpdateAncestry sets the "ancestry" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateAncestry() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateAncestry()
+	})
+}
+
+// ClearAncestry clears the value of the "ancestry" field.
+func (u *AgentUpsertOne) ClearAncestry() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearAncestry()
+	})
+}
+
 // SetUpdated sets the "updated" field.
 func (u *AgentUpsertOne) SetUpdated(v time.Time) *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
@@ -886,6 +2191,111 @@ func (u *AgentUpsertOne) SetUpdated(v time.Time) *AgentUpsertOne {
 func (u *AgentUpsertOne) UpdateUpdated() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.UpdateUpdated()
+	})
+}
+
+// SetLastSeen sets the "last_seen" field.
+func (u *AgentUpsertOne) SetLastSeen(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLastSeen(v)
+	})
+}
+
+// UpdateLastSeen sets the "last_seen" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLastSeen() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLastSeen()
+	})
+}
+
+// ClearLastSeen clears the value of the "last_seen" field.
+func (u *AgentUpsertOne) ClearLastSeen() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLastSeen()
+	})
+}
+
+// SetLastActivityEvent sets the "last_activity_event" field.
+func (u *AgentUpsertOne) SetLastActivityEvent(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLastActivityEvent(v)
+	})
+}
+
+// UpdateLastActivityEvent sets the "last_activity_event" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLastActivityEvent() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLastActivityEvent()
+	})
+}
+
+// ClearLastActivityEvent clears the value of the "last_activity_event" field.
+func (u *AgentUpsertOne) ClearLastActivityEvent() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLastActivityEvent()
+	})
+}
+
+// SetStartedAt sets the "started_at" field.
+func (u *AgentUpsertOne) SetStartedAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartedAt(v)
+	})
+}
+
+// UpdateStartedAt sets the "started_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStartedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartedAt()
+	})
+}
+
+// ClearStartedAt clears the value of the "started_at" field.
+func (u *AgentUpsertOne) ClearStartedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartedAt()
+	})
+}
+
+// SetDeletedAt sets the "deleted_at" field.
+func (u *AgentUpsertOne) SetDeletedAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletedAt(v)
+	})
+}
+
+// UpdateDeletedAt sets the "deleted_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateDeletedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletedAt()
+	})
+}
+
+// ClearDeletedAt clears the value of the "deleted_at" field.
+func (u *AgentUpsertOne) ClearDeletedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearDeletedAt()
+	})
+}
+
+// SetStateVersion sets the "state_version" field.
+func (u *AgentUpsertOne) SetStateVersion(v int64) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStateVersion(v)
+	})
+}
+
+// AddStateVersion adds v to the "state_version" field.
+func (u *AgentUpsertOne) AddStateVersion(v int64) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.AddStateVersion(v)
+	})
+}
+
+// UpdateStateVersion sets the "state_version" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStateVersion() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStateVersion()
 	})
 }
 
@@ -1254,6 +2664,412 @@ func (u *AgentUpsertBulk) UpdateVisibility() *AgentUpsertBulk {
 	})
 }
 
+// SetLabels sets the "labels" field.
+func (u *AgentUpsertBulk) SetLabels(v map[string]string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLabels(v)
+	})
+}
+
+// UpdateLabels sets the "labels" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLabels() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLabels()
+	})
+}
+
+// ClearLabels clears the value of the "labels" field.
+func (u *AgentUpsertBulk) ClearLabels() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLabels()
+	})
+}
+
+// SetAnnotations sets the "annotations" field.
+func (u *AgentUpsertBulk) SetAnnotations(v map[string]string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetAnnotations(v)
+	})
+}
+
+// UpdateAnnotations sets the "annotations" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateAnnotations() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateAnnotations()
+	})
+}
+
+// ClearAnnotations clears the value of the "annotations" field.
+func (u *AgentUpsertBulk) ClearAnnotations() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearAnnotations()
+	})
+}
+
+// SetPhase sets the "phase" field.
+func (u *AgentUpsertBulk) SetPhase(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetPhase(v)
+	})
+}
+
+// UpdatePhase sets the "phase" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdatePhase() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdatePhase()
+	})
+}
+
+// ClearPhase clears the value of the "phase" field.
+func (u *AgentUpsertBulk) ClearPhase() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearPhase()
+	})
+}
+
+// SetActivity sets the "activity" field.
+func (u *AgentUpsertBulk) SetActivity(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetActivity(v)
+	})
+}
+
+// UpdateActivity sets the "activity" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateActivity() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateActivity()
+	})
+}
+
+// ClearActivity clears the value of the "activity" field.
+func (u *AgentUpsertBulk) ClearActivity() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearActivity()
+	})
+}
+
+// SetToolName sets the "tool_name" field.
+func (u *AgentUpsertBulk) SetToolName(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetToolName(v)
+	})
+}
+
+// UpdateToolName sets the "tool_name" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateToolName() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateToolName()
+	})
+}
+
+// ClearToolName clears the value of the "tool_name" field.
+func (u *AgentUpsertBulk) ClearToolName() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearToolName()
+	})
+}
+
+// SetConnectionState sets the "connection_state" field.
+func (u *AgentUpsertBulk) SetConnectionState(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetConnectionState(v)
+	})
+}
+
+// UpdateConnectionState sets the "connection_state" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateConnectionState() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateConnectionState()
+	})
+}
+
+// ClearConnectionState clears the value of the "connection_state" field.
+func (u *AgentUpsertBulk) ClearConnectionState() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearConnectionState()
+	})
+}
+
+// SetContainerStatus sets the "container_status" field.
+func (u *AgentUpsertBulk) SetContainerStatus(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetContainerStatus(v)
+	})
+}
+
+// UpdateContainerStatus sets the "container_status" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateContainerStatus() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateContainerStatus()
+	})
+}
+
+// ClearContainerStatus clears the value of the "container_status" field.
+func (u *AgentUpsertBulk) ClearContainerStatus() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearContainerStatus()
+	})
+}
+
+// SetRuntimeState sets the "runtime_state" field.
+func (u *AgentUpsertBulk) SetRuntimeState(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRuntimeState(v)
+	})
+}
+
+// UpdateRuntimeState sets the "runtime_state" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateRuntimeState() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRuntimeState()
+	})
+}
+
+// ClearRuntimeState clears the value of the "runtime_state" field.
+func (u *AgentUpsertBulk) ClearRuntimeState() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRuntimeState()
+	})
+}
+
+// SetStalledFromActivity sets the "stalled_from_activity" field.
+func (u *AgentUpsertBulk) SetStalledFromActivity(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStalledFromActivity(v)
+	})
+}
+
+// UpdateStalledFromActivity sets the "stalled_from_activity" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStalledFromActivity() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStalledFromActivity()
+	})
+}
+
+// ClearStalledFromActivity clears the value of the "stalled_from_activity" field.
+func (u *AgentUpsertBulk) ClearStalledFromActivity() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStalledFromActivity()
+	})
+}
+
+// SetCurrentTurns sets the "current_turns" field.
+func (u *AgentUpsertBulk) SetCurrentTurns(v int) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetCurrentTurns(v)
+	})
+}
+
+// AddCurrentTurns adds v to the "current_turns" field.
+func (u *AgentUpsertBulk) AddCurrentTurns(v int) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.AddCurrentTurns(v)
+	})
+}
+
+// UpdateCurrentTurns sets the "current_turns" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateCurrentTurns() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateCurrentTurns()
+	})
+}
+
+// SetCurrentModelCalls sets the "current_model_calls" field.
+func (u *AgentUpsertBulk) SetCurrentModelCalls(v int) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetCurrentModelCalls(v)
+	})
+}
+
+// AddCurrentModelCalls adds v to the "current_model_calls" field.
+func (u *AgentUpsertBulk) AddCurrentModelCalls(v int) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.AddCurrentModelCalls(v)
+	})
+}
+
+// UpdateCurrentModelCalls sets the "current_model_calls" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateCurrentModelCalls() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateCurrentModelCalls()
+	})
+}
+
+// SetImage sets the "image" field.
+func (u *AgentUpsertBulk) SetImage(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetImage(v)
+	})
+}
+
+// UpdateImage sets the "image" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateImage() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateImage()
+	})
+}
+
+// ClearImage clears the value of the "image" field.
+func (u *AgentUpsertBulk) ClearImage() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearImage()
+	})
+}
+
+// SetDetached sets the "detached" field.
+func (u *AgentUpsertBulk) SetDetached(v bool) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDetached(v)
+	})
+}
+
+// UpdateDetached sets the "detached" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateDetached() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDetached()
+	})
+}
+
+// SetRuntime sets the "runtime" field.
+func (u *AgentUpsertBulk) SetRuntime(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRuntime(v)
+	})
+}
+
+// UpdateRuntime sets the "runtime" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateRuntime() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRuntime()
+	})
+}
+
+// ClearRuntime clears the value of the "runtime" field.
+func (u *AgentUpsertBulk) ClearRuntime() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRuntime()
+	})
+}
+
+// SetRuntimeBrokerID sets the "runtime_broker_id" field.
+func (u *AgentUpsertBulk) SetRuntimeBrokerID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRuntimeBrokerID(v)
+	})
+}
+
+// UpdateRuntimeBrokerID sets the "runtime_broker_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateRuntimeBrokerID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRuntimeBrokerID()
+	})
+}
+
+// ClearRuntimeBrokerID clears the value of the "runtime_broker_id" field.
+func (u *AgentUpsertBulk) ClearRuntimeBrokerID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRuntimeBrokerID()
+	})
+}
+
+// SetWebPtyEnabled sets the "web_pty_enabled" field.
+func (u *AgentUpsertBulk) SetWebPtyEnabled(v bool) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetWebPtyEnabled(v)
+	})
+}
+
+// UpdateWebPtyEnabled sets the "web_pty_enabled" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateWebPtyEnabled() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateWebPtyEnabled()
+	})
+}
+
+// SetTaskSummary sets the "task_summary" field.
+func (u *AgentUpsertBulk) SetTaskSummary(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetTaskSummary(v)
+	})
+}
+
+// UpdateTaskSummary sets the "task_summary" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateTaskSummary() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateTaskSummary()
+	})
+}
+
+// ClearTaskSummary clears the value of the "task_summary" field.
+func (u *AgentUpsertBulk) ClearTaskSummary() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearTaskSummary()
+	})
+}
+
+// SetMessage sets the "message" field.
+func (u *AgentUpsertBulk) SetMessage(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetMessage(v)
+	})
+}
+
+// UpdateMessage sets the "message" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateMessage() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateMessage()
+	})
+}
+
+// ClearMessage clears the value of the "message" field.
+func (u *AgentUpsertBulk) ClearMessage() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearMessage()
+	})
+}
+
+// SetAppliedConfig sets the "applied_config" field.
+func (u *AgentUpsertBulk) SetAppliedConfig(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetAppliedConfig(v)
+	})
+}
+
+// UpdateAppliedConfig sets the "applied_config" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateAppliedConfig() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateAppliedConfig()
+	})
+}
+
+// ClearAppliedConfig clears the value of the "applied_config" field.
+func (u *AgentUpsertBulk) ClearAppliedConfig() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearAppliedConfig()
+	})
+}
+
+// SetAncestry sets the "ancestry" field.
+func (u *AgentUpsertBulk) SetAncestry(v []string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetAncestry(v)
+	})
+}
+
+// UpdateAncestry sets the "ancestry" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateAncestry() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateAncestry()
+	})
+}
+
+// ClearAncestry clears the value of the "ancestry" field.
+func (u *AgentUpsertBulk) ClearAncestry() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearAncestry()
+	})
+}
+
 // SetUpdated sets the "updated" field.
 func (u *AgentUpsertBulk) SetUpdated(v time.Time) *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
@@ -1265,6 +3081,111 @@ func (u *AgentUpsertBulk) SetUpdated(v time.Time) *AgentUpsertBulk {
 func (u *AgentUpsertBulk) UpdateUpdated() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.UpdateUpdated()
+	})
+}
+
+// SetLastSeen sets the "last_seen" field.
+func (u *AgentUpsertBulk) SetLastSeen(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLastSeen(v)
+	})
+}
+
+// UpdateLastSeen sets the "last_seen" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLastSeen() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLastSeen()
+	})
+}
+
+// ClearLastSeen clears the value of the "last_seen" field.
+func (u *AgentUpsertBulk) ClearLastSeen() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLastSeen()
+	})
+}
+
+// SetLastActivityEvent sets the "last_activity_event" field.
+func (u *AgentUpsertBulk) SetLastActivityEvent(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLastActivityEvent(v)
+	})
+}
+
+// UpdateLastActivityEvent sets the "last_activity_event" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLastActivityEvent() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLastActivityEvent()
+	})
+}
+
+// ClearLastActivityEvent clears the value of the "last_activity_event" field.
+func (u *AgentUpsertBulk) ClearLastActivityEvent() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLastActivityEvent()
+	})
+}
+
+// SetStartedAt sets the "started_at" field.
+func (u *AgentUpsertBulk) SetStartedAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStartedAt(v)
+	})
+}
+
+// UpdateStartedAt sets the "started_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStartedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStartedAt()
+	})
+}
+
+// ClearStartedAt clears the value of the "started_at" field.
+func (u *AgentUpsertBulk) ClearStartedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearStartedAt()
+	})
+}
+
+// SetDeletedAt sets the "deleted_at" field.
+func (u *AgentUpsertBulk) SetDeletedAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDeletedAt(v)
+	})
+}
+
+// UpdateDeletedAt sets the "deleted_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateDeletedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDeletedAt()
+	})
+}
+
+// ClearDeletedAt clears the value of the "deleted_at" field.
+func (u *AgentUpsertBulk) ClearDeletedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearDeletedAt()
+	})
+}
+
+// SetStateVersion sets the "state_version" field.
+func (u *AgentUpsertBulk) SetStateVersion(v int64) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStateVersion(v)
+	})
+}
+
+// AddStateVersion adds v to the "state_version" field.
+func (u *AgentUpsertBulk) AddStateVersion(v int64) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.AddStateVersion(v)
+	})
+}
+
+// UpdateStateVersion sets the "state_version" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStateVersion() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStateVersion()
 	})
 }
 
