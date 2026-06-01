@@ -48,11 +48,12 @@ func RunStoreSuite(t *testing.T, factory Factory) {
 	RunDomain(t, factory, RuntimeBrokerDomain())
 	RunDomain(t, factory, BrokerSecretDomain())
 	RunDomain(t, factory, BrokerJoinTokenDomain())
+	RunDomain(t, factory, TemplateDomain())
+	RunDomain(t, factory, HarnessConfigDomain())
+	RunDomain(t, factory, SecretDomain())
+	RunDomain(t, factory, EnvVarDomain())
 }
 
-// listFrom wraps a plain slice from a non-paginated list method into a
-// ListResult so it can satisfy a FilterCase. TotalCount mirrors the slice
-// length, which is the contract the filter oracle checks.
 func listFrom[T any](items []T, err error) (*store.ListResult[T], error) {
 	if err != nil {
 		return nil, err
