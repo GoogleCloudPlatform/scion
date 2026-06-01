@@ -80,7 +80,7 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 	// Create a project-scoped harness config for project "project_abc"
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
 		ID: tid("hc_project1"), Slug: "project-hc", Name: "Project HC",
-		Harness: "gemini", Scope: "project", ScopeID: "project_abc",
+		Harness: "gemini", Scope: "project", ScopeID: tid("project_abc"),
 		Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
 	}); err != nil {

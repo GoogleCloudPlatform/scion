@@ -244,7 +244,7 @@ func TestScheduledEvent_Get(t *testing.T) {
 	}
 	require.NoError(t, s.CreateScheduledEvent(ctx, evt))
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events/get-evt-1", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events/"+tid("get-evt-1")+"", nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var got store.ScheduledEvent
@@ -304,7 +304,7 @@ func TestScheduledEvent_Cancel(t *testing.T) {
 	}
 	require.NoError(t, s.CreateScheduledEvent(ctx, evt))
 
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+projectID+"/scheduled-events/cancel-evt-1", nil)
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+projectID+"/scheduled-events/"+tid("cancel-evt-1")+"", nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Verify it was cancelled in the store

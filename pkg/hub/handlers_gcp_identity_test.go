@@ -46,7 +46,7 @@ func TestCreateGCPServiceAccount_Success(t *testing.T) {
 
 	body := map[string]string{
 		"email":     "agent@my-project.iam.gserviceaccount.com",
-		"projectId": tid("my-project"),
+		"projectId": "my-project",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
@@ -65,7 +65,7 @@ func TestCreateGCPServiceAccount_MissingEmail(t *testing.T) {
 	projectID := createTestProjectForSA(t, srv, s)
 
 	body := map[string]string{
-		"projectId": tid("my-project"),
+		"projectId": "my-project",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
@@ -134,7 +134,7 @@ func TestCreateGCPServiceAccount_ProjectNotFound(t *testing.T) {
 
 	body := map[string]string{
 		"email":     "agent@my-project.iam.gserviceaccount.com",
-		"projectId": tid("my-project"),
+		"projectId": "my-project",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
@@ -148,7 +148,7 @@ func TestCreateGCPServiceAccount_Duplicate(t *testing.T) {
 
 	body := map[string]string{
 		"email":     "agent@my-project.iam.gserviceaccount.com",
-		"projectId": tid("my-project"),
+		"projectId": "my-project",
 	}
 
 	// First create should succeed
@@ -432,7 +432,7 @@ func TestCreateGCPServiceAccount_AutoVerifySuccess(t *testing.T) {
 
 	body := map[string]string{
 		"email":     "agent@my-project.iam.gserviceaccount.com",
-		"projectId": tid("my-project"),
+		"projectId": "my-project",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
@@ -466,7 +466,7 @@ func TestCreateGCPServiceAccount_AutoVerifyFailure(t *testing.T) {
 
 	body := map[string]string{
 		"email":     "agent@my-project.iam.gserviceaccount.com",
-		"projectId": tid("my-project"),
+		"projectId": "my-project",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,

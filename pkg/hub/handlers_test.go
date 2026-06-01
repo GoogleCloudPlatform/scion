@@ -2099,7 +2099,7 @@ func TestTemplateListByProjectID(t *testing.T) {
 	// Create a project-scoped template for project "project_abc"
 	if err := s.CreateTemplate(ctx, &store.Template{
 		ID: tid("tmpl_project1"), Slug: "project-tmpl", Name: "Project Template",
-		Harness: "gemini", Scope: "project", ScopeID: "project_abc",
+		Harness: "gemini", Scope: "project", ScopeID: tid("project_abc"),
 		Visibility: store.VisibilityPublic, Status: "active",
 		Created: now, Updated: now,
 	}); err != nil {
