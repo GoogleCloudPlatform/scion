@@ -736,7 +736,7 @@ func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 	}
 
 	// Pre-populate the files in mock storage
-	storagePath := "workspaces/" + projectID + "/agent_bootstrap_finalize"
+	storagePath := "workspaces/" + projectID + "/" + tid("agent_bootstrap_finalize")
 	stor.objects[storagePath+"/files/main.go"] = &storage.Object{
 		Name: storagePath + "/files/main.go",
 	}
@@ -756,7 +756,7 @@ func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 		Manifest: manifest,
 	}
 
-	rec := doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents/agent_bootstrap_finalize/workspace/sync-to/finalize", finalizeReq)
+	rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_bootstrap_finalize")), finalizeReq)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -819,7 +819,7 @@ func TestSyncToFinalize_BootstrapMode_MissingFile(t *testing.T) {
 	}
 
 	// Only put one file in storage
-	storagePath := "workspaces/" + projectID + "/agent_bootstrap_missing"
+	storagePath := "workspaces/" + projectID + "/" + tid("agent_bootstrap_missing")
 	stor.objects[storagePath+"/files/main.go"] = &storage.Object{
 		Name: storagePath + "/files/main.go",
 	}
@@ -836,7 +836,7 @@ func TestSyncToFinalize_BootstrapMode_MissingFile(t *testing.T) {
 		Manifest: manifest,
 	}
 
-	rec := doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents/agent_bootstrap_missing/workspace/sync-to/finalize", finalizeReq)
+	rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_bootstrap_missing")), finalizeReq)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
@@ -868,7 +868,7 @@ func TestSyncToFinalize_RejectsStoppedAgent(t *testing.T) {
 	}
 	finalizeReq := SyncToFinalizeRequest{Manifest: manifest}
 
-	rec := doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents/agent_bootstrap_stopped/workspace/sync-to/finalize", finalizeReq)
+	rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_bootstrap_stopped")), finalizeReq)
 
 	if rec.Code != http.StatusConflict {
 		t.Errorf("expected status 409, got %d: %s", rec.Code, rec.Body.String())
@@ -912,7 +912,7 @@ func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	storagePath := "workspaces/" + projectID + "/agent_bootstrap_nodisp"
+	storagePath := "workspaces/" + projectID + "/" + tid("agent_bootstrap_nodisp")
 	stor.objects[storagePath+"/files/main.go"] = &storage.Object{
 		Name: storagePath + "/files/main.go",
 	}
@@ -923,7 +923,7 @@ func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 	}
 	finalizeReq := SyncToFinalizeRequest{Manifest: manifest}
 
-	rec := doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents/agent_bootstrap_nodisp/workspace/sync-to/finalize", finalizeReq)
+	rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_bootstrap_nodisp")), finalizeReq)
 
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("expected status 502, got %d: %s", rec.Code, rec.Body.String())
