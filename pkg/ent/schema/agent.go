@@ -25,9 +25,12 @@ import (
 )
 
 // Agent holds the schema definition for the Agent entity.
-// Only principal-relevant fields are included; operational fields
-// (ContainerStatus, RuntimeState, etc.) will be added when the
-// agent entity is fully migrated to Ent.
+//
+// The agent entity carries both the principal-relevant fields used by the
+// authorization layer (created_by, owner_id, delegation_enabled, visibility)
+// and the full set of operational fields required to back store.Agent through
+// the Ent adapter (P2-port-agent). Together they give the Ent-backed agent
+// store parity with the legacy raw-SQL implementation in pkg/store/sqlite.
 type Agent struct {
 	ent.Schema
 }
@@ -59,12 +62,90 @@ func (Agent) Fields() []ent.Field {
 			Default(false),
 		field.String("visibility").
 			Default("private"),
+
+		// --- Metadata (stored as JSON) ---
+		field.JSON("labels", map[string]string{}).
+			Optional(),
+		field.JSON("annotations", map[string]string{}).
+			Optional(),
+
+		// --- Runtime status ---
+		field.String("phase").
+			Optional(),
+		field.String("activity").
+			Optional(),
+		field.String("tool_name").
+			Optional(),
+		field.String("connection_state").
+			Optional(),
+		field.String("container_status").
+			Optional(),
+		field.String("runtime_state").
+			Optional(),
+		field.String("stalled_from_activity").
+			Optional(),
+
+		// --- Limits tracking ---
+		field.Int("current_turns").
+			Default(0),
+		field.Int("current_model_calls").
+			Default(0),
+
+		// --- Runtime configuration ---
+		field.String("image").
+			Optional(),
+		field.Bool("detached").
+			Default(false),
+		field.String("runtime").
+			Optional(),
+		field.String("runtime_broker_id").
+			Optional(),
+		field.Bool("web_pty_enabled").
+			Default(false),
+		field.String("task_summary").
+			Optional(),
+		field.String("message").
+			Optional(),
+
+		// applied_config is the agent's resolved configuration, persisted as a
+		// JSON document (store.AgentAppliedConfig). Stored as text to keep the
+		// Ent schema decoupled from the store package's struct definition.
+		field.Text("applied_config").
+			Optional(),
+
+		// ancestry is the ordered chain of ancestor principal IDs used for
+		// transitive access control. Stored as a JSON array so the dialect-aware
+		// json_each / json_array_elements_text membership filter can be applied.
+		field.JSON("ancestry", []string{}).
+			Optional(),
+
+		// --- Timestamps ---
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),
 		field.Time("updated").
 			Default(time.Now).
 			UpdateDefault(time.Now),
+		field.Time("last_seen").
+			Optional().
+			Nillable(),
+		field.Time("last_activity_event").
+			Optional().
+			Nillable(),
+		field.Time("started_at").
+			Optional().
+			Nillable(),
+		// deleted_at backs soft-delete: a non-nil value excludes the agent from
+		// default listings (filtered via the DeletedAtIsNil Ent predicate).
+		field.Time("deleted_at").
+			Optional().
+			Nillable(),
+
+		// --- Optimistic locking ---
+		// state_version is incremented on every UpdateAgent and used as a CAS
+		// guard to detect concurrent modifications under multi-replica Postgres.
+		field.Int64("state_version").
+			Default(1),
 	}
 }
 
