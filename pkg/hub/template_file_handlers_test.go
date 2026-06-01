@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -353,7 +354,7 @@ func TestHandleTemplateFileWrite_ConflictHash(t *testing.T) {
 	})
 
 	body := `{"content": "new", "expectedHash": "sha256:wronghash"}`
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/tmpl-test-1/files/CLAUDE.md",
+	req := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/api/v1/templates/%s/files/CLAUDE.md", tid("tmpl-test-1")),
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+testDevToken)
