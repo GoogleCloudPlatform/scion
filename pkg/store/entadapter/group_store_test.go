@@ -821,9 +821,7 @@ func TestCompositeStoreDelegation(t *testing.T) {
 	t.Cleanup(func() { client.Close() })
 	require.NoError(t, entc.AutoMigrate(context.Background(), client))
 
-	// We use nil as the base store since we're only testing group methods
-	// and they should all go to the Ent adapter.
-	composite := NewCompositeStore(nil, client)
+	composite := NewCompositeStore(client)
 
 	ctx := context.Background()
 	g := &store.Group{

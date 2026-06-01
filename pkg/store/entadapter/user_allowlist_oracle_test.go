@@ -23,7 +23,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/storetest"
 	"github.com/stretchr/testify/require"
 )
@@ -125,15 +124,11 @@ func (s *entUserAllowStore) GetInviteStats(ctx context.Context) (*store.InviteSt
 func entUserAllowFactory(t *testing.T) store.Store {
 	t.Helper()
 
-	base, err := sqlite.New(":memory:")
-	require.NoError(t, err)
-	require.NoError(t, base.Migrate(context.Background()))
-
 	entClient, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{})
 	require.NoError(t, err)
 	require.NoError(t, entc.AutoMigrate(context.Background(), entClient))
 
-	cs := NewCompositeStore(base, entClient)
+	cs := NewCompositeStore(entClient)
 	t.Cleanup(func() { _ = cs.Close() })
 
 	return &entUserAllowStore{
