@@ -94,9 +94,14 @@ func (c *CompositeStore) Ping(ctx context.Context) error {
 	return drv.DB().PingContext(ctx)
 }
 
-// Migrate runs Ent's automatic schema migration against the shared client.
+// Migrate runs Ent's automatic schema migration against the shared client and
+// seeds the built-in maintenance operations, matching the behavior of the
+// former raw-SQL store (which seeded these as part of its migrations).
 func (c *CompositeStore) Migrate(ctx context.Context) error {
-	return entc.AutoMigrate(ctx, c.client)
+	if err := entc.AutoMigrate(ctx, c.client); err != nil {
+		return err
+	}
+	return c.MaintenanceStore.SeedMaintenanceOperations(ctx)
 }
 
 // DB returns the underlying *sql.DB, or nil if the client is not backed by a
