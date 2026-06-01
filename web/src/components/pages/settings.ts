@@ -28,6 +28,7 @@ import { customElement, state } from 'lit/decorators.js';
 import '../shared/env-var-list.js';
 import '../shared/secret-list.js';
 import '../shared/resource-list.js';
+import '../shared/resource-import.js';
 
 @customElement('scion-page-settings')
 export class ScionPageSettings extends LitElement {
@@ -110,6 +111,14 @@ export class ScionPageSettings extends LitElement {
     }
   }
 
+  /** Refresh a resource list (by element id) after an import. */
+  private refreshList(id: string): void {
+    const list = this.shadowRoot?.querySelector(`#${id}`) as
+      | import('../shared/resource-list.js').ScionResourceList
+      | null;
+    void list?.load();
+  }
+
   override render() {
     return html`
       <div class="header">
@@ -147,7 +156,14 @@ export class ScionPageSettings extends LitElement {
 
           <sl-tab-panel name="templates">
             <p class="tab-intro">Global agent templates. Open one to browse and edit its files.</p>
+            <scion-resource-import
+              kind="template"
+              scope="global"
+              canImport
+              @resource-imported=${() => this.refreshList('templates-list')}
+            ></scion-resource-import>
             <scion-resource-list
+              id="templates-list"
               kind="template"
               scope="global"
               detailBasePath="/settings"
@@ -158,7 +174,14 @@ export class ScionPageSettings extends LitElement {
             <p class="tab-intro">
               Global harness configurations. Open one to browse and edit its files.
             </p>
+            <scion-resource-import
+              kind="harness-config"
+              scope="global"
+              canImport
+              @resource-imported=${() => this.refreshList('harness-configs-list')}
+            ></scion-resource-import>
             <scion-resource-list
+              id="harness-configs-list"
               kind="harness-config"
               scope="global"
               detailBasePath="/settings"

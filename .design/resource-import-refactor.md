@@ -524,10 +524,47 @@ Ordered so each phase is independently shippable and the user-visible fixes land
 - Note: `pkg/config` has pre-existing env-dependent test failures in this sandbox
   (hub-context env vars set); unrelated to this phase, which touches only `pkg/hub`.
 
-### Phase 2 — Hub-level import (backend + UI)
+### Phase 2 — Hub-level import (backend + UI) — **Status: DONE**
 - Add the hub import endpoint(s) (shape per Q4) with admin authz, URL-only.
 - Factor the project-settings import form into a shared `<scion-resource-import>`
   component; mount it in the Hub Resources tabs with scope=global.
+
+**Implementation notes (Phase 2):**
+- New unified endpoint `POST /api/v1/resources/import` (`handleResourcesImport`
+  in `pkg/hub/handlers.go`, registered in `server.go`) with body
+  `{ kind, scope, scopeId, sourceUrl }` per Q4→B. It resolves the kind to the
+  shared `resourceImportKind` (template / harness-config) and runs the Phase-1
+  `importFromRemote` driver. URL is the only source mode (no workspace) — matching
+  the hub-level import design.
+  - **Global scope** (`scope=global`, `scopeId=""`) is hub-admin-only: it runs
+    `authzService.CheckAccess` on an ownerless/parentless `{Type: template |
+    harness_config}` resource with `ActionCreate`, which grants only on the admin
+    bypass (or an explicit hub-wide policy). projectID is `""`, so no project
+    GitHub auth is attempted.
+  - **Project scope** is also supported (the endpoint is genuinely unified, per
+    the "future import into project X" note): `scopeId` is required and authz
+    mirrors the per-project import handlers via the shared `authorizeProjectImport`
+    helper. The existing per-project endpoints (which still own workspace-mode
+    import) are unchanged.
+- `fetchRemoteForImport` now treats `projectID == ""` as an unauthenticated
+  (global) fetch — it skips both the GitHub App token mint and the project
+  `GITHUB_TOKEN` secret fallback, which are project-scoped.
+- Web: new shared `web/src/components/shared/resource-import.ts`
+  (`<scion-resource-import>`) renders the mode toggle + source input + button +
+  status, posting to the per-project endpoint (project scope, URL/workspace) or
+  the unified endpoint (global scope, URL-only), and emits a `resource-imported`
+  event so the host refreshes its list. It replaces the two inline import blocks
+  in `project-settings.ts` (removing the now-dead sync/hcImport state + handlers)
+  and is mounted in the Hub Resources tabs (`settings.ts`) with `scope=global`.
+  The Hub Resources page is already admin-gated at the router level
+  (`ADMIN_ROUTES`), so the import UI shows there unconditionally; the backend
+  still enforces admin.
+- Tests: `pkg/hub/resource_import_handler_test.go` covers global import as admin
+  (lands a global-scoped template), global forbidden for a member (403, nothing
+  imported), invalid kind (400), and missing sourceUrl (400). Web typecheck +
+  build pass.
+- Note: progress UX is intentionally still the simple spinner/success/error model
+  here — per-resource streaming progress is Phase 3.
 
 ### Phase 3 — Progress UX
 - Server emits per-resource progress events (mechanism per Q6).

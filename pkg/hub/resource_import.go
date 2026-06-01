@@ -160,19 +160,24 @@ func (s *Server) importFromWorkspace(ctx context.Context, project *store.Project
 // GITHUB_TOKEN secret. The fallback applies to both resource kinds — closing the
 // gap where harness-config remote import previously skipped the secret fallback.
 // The caller owns the returned cache path and must remove it.
+//
+// projectID may be "" for global-scope (hub-level) imports, which have no project
+// to authenticate against; in that case the fetch is unauthenticated.
 func (s *Server) fetchRemoteForImport(ctx context.Context, projectID, sourceURL string) (string, error) {
 	var authToken string
 
-	// Prefer a GitHub App installation token if the project has one.
-	project, err := s.store.GetProject(ctx, projectID)
-	if err == nil && project != nil && project.GitHubInstallationID != nil {
-		if token, _, mintErr := s.MintGitHubAppTokenForProject(ctx, project); mintErr == nil && token != "" {
-			authToken = token
+	if projectID != "" {
+		// Prefer a GitHub App installation token if the project has one.
+		project, err := s.store.GetProject(ctx, projectID)
+		if err == nil && project != nil && project.GitHubInstallationID != nil {
+			if token, _, mintErr := s.MintGitHubAppTokenForProject(ctx, project); mintErr == nil && token != "" {
+				authToken = token
+			}
 		}
 	}
 
 	// Fall back to the project GITHUB_TOKEN secret if no App token was minted.
-	if authToken == "" {
+	if authToken == "" && projectID != "" {
 		if sb := s.GetSecretBackend(); sb != nil {
 			sec, secErr := sb.Get(ctx, "GITHUB_TOKEN", secret.ScopeProject, projectID)
 			if secErr == nil && sec != nil && sec.Value != "" {

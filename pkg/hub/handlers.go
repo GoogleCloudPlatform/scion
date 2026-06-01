@@ -9495,6 +9495,170 @@ func (s *Server) handleProjectImportHarnessConfigs(w http.ResponseWriter, r *htt
 	})
 }
 
+// ============================================================================
+// Unified Resource Import (kind/scope-generic)
+// ============================================================================
+
+// ImportResourcesRequest is the body for the unified import endpoint
+// (POST /api/v1/resources/import). It imports a single kind of resource from a
+// remote source URL into the given scope.
+type ImportResourcesRequest struct {
+	// Kind is the resource kind: "template" or "harness-config".
+	Kind string `json:"kind"`
+	// Scope is "global" (hub-level) or "project".
+	Scope string `json:"scope"`
+	// ScopeID is the project id for project scope; empty for global scope.
+	ScopeID string `json:"scopeId"`
+	// SourceURL is the remote URL to import from. Workspace-path import is not
+	// available on this endpoint (see the per-project endpoints for that).
+	SourceURL string `json:"sourceUrl"`
+}
+
+// ImportResourcesResponse reports the result of a unified import.
+type ImportResourcesResponse struct {
+	Kind     string   `json:"kind"`
+	Imported []string `json:"imported"`
+	Count    int      `json:"count"`
+}
+
+// handleResourcesImport handles POST /api/v1/resources/import: a single,
+// kind/scope-generic import endpoint sitting over the shared import driver
+// (resource_import.go). Global-scope import requires hub-admin; project-scope
+// import requires create access in the target project. URL is the only source
+// (no workspace mode) — matching the hub-level import design.
+func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	var req ImportResourcesRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Invalid request body", nil)
+		return
+	}
+
+	// Resolve the kind knobs and the authz resource type for the kind.
+	var kind resourceImportKind
+	var authzType string
+	switch storage.ResourceKind(req.Kind) {
+	case storage.ResourceKindTemplate:
+		kind = s.templateImportKind()
+		authzType = "template"
+	case storage.ResourceKindHarnessConfig:
+		kind = s.harnessConfigImportKind()
+		authzType = "harness_config"
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_request",
+			"kind must be 'template' or 'harness-config'", nil)
+		return
+	}
+
+	if req.SourceURL == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "sourceUrl is required", nil)
+		return
+	}
+
+	if s.GetStorage() == nil {
+		writeError(w, http.StatusServiceUnavailable, "storage_unavailable",
+			"Resource storage is not configured", nil)
+		return
+	}
+
+	sourceURL := config.NormalizeTemplateSourceURL(req.SourceURL)
+
+	var imported []string
+	var err error
+	switch req.Scope {
+	case "global", "":
+		// Global import is hub-admin only. CheckAccess on an ownerless,
+		// parentless global resource grants only on admin bypass (or an explicit
+		// hub-wide policy), which is exactly the hub-admin gate we want.
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return
+		}
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: authzType}, ActionCreate)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You don't have permission to import global "+kind.noun, nil)
+			return
+		}
+		imported, err = s.importFromRemote(ctx, "", sourceURL, "global", kind)
+
+	case "project":
+		if req.ScopeID == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request",
+				"scopeId (project id) is required for project scope", nil)
+			return
+		}
+		if !s.authorizeProjectImport(ctx, w, req.ScopeID, kind.noun) {
+			return
+		}
+		// Verify project exists before fetching.
+		if _, perr := s.store.GetProject(ctx, req.ScopeID); perr != nil {
+			if perr == store.ErrNotFound {
+				NotFound(w, "Project")
+				return
+			}
+			writeErrorFromErr(w, perr, "")
+			return
+		}
+		imported, err = s.importFromRemote(ctx, req.ScopeID, sourceURL, "project", kind)
+
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_request",
+			"scope must be 'global' or 'project'", nil)
+		return
+	}
+
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, ImportResourcesResponse{
+		Kind:     req.Kind,
+		Imported: imported,
+		Count:    len(imported),
+	})
+}
+
+// authorizeProjectImport checks that the caller may import resources into the
+// given project, mirroring the per-project import handlers. It writes the error
+// response and returns false when access is denied.
+func (s *Server) authorizeProjectImport(ctx context.Context, w http.ResponseWriter, projectID, noun string) bool {
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if !agentIdent.HasScope(ScopeAgentCreate) {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: project:agent:create", nil)
+			return false
+		}
+		if projectID != agentIdent.ProjectID() {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only import "+noun+" within their own project", nil)
+			return false
+		}
+		return true
+	}
+	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+			Type:       "agent",
+			ParentType: "project",
+			ParentID:   projectID,
+		}, ActionCreate)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You don't have permission to import "+noun+" in this project", nil)
+			return false
+		}
+		return true
+	}
+	writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+	return false
+}
+
 // handleMessageChannels handles GET /api/v1/message-channels.
 func (s *Server) handleMessageChannels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

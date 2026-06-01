@@ -2045,6 +2045,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/harness-configs", s.handleHarnessConfigs)
 	s.mux.HandleFunc("/api/v1/harness-configs/", s.handleHarnessConfigByID)
 
+	// Unified, kind/scope-generic resource import (templates + harness-configs).
+	s.mux.HandleFunc("/api/v1/resources/import", s.handleResourcesImport)
+
 	s.mux.HandleFunc("/api/v1/users", s.handleUsers)
 	s.mux.HandleFunc("/api/v1/users/", s.handleUserByID)
 

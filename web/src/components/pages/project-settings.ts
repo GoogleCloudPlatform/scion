@@ -36,6 +36,7 @@ import '../shared/scheduled-event-list.js';
 import '../shared/subscription-manager.js';
 import '../shared/schedule-list.js';
 import '../shared/resource-list.js';
+import '../shared/resource-import.js';
 
 
 interface ProjectResourceSpec {
@@ -89,37 +90,6 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private deleteLoading = false;
-
-
-  @state()
-  private syncLoading = false;
-
-  @state()
-  private syncError: string | null = null;
-
-  @state()
-  private syncSuccess: string | null = null;
-
-  @state()
-  private syncRepoUrl = '';
-
-  @state()
-  private importMode: 'url' | 'workspace' = 'url';
-
-  @state()
-  private hcImportLoading = false;
-
-  @state()
-  private hcImportError: string | null = null;
-
-  @state()
-  private hcImportSuccess: string | null = null;
-
-  @state()
-  private hcImportUrl = '';
-
-  @state()
-  private hcImportMode: 'url' | 'workspace' = 'url';
 
   @state()
   private membersGroup: AdminGroup | null = null;
@@ -783,10 +753,8 @@ export class ScionPageProjectSettings extends LitElement {
 
       this.project = (await response.json()) as Project;
       dispatchPageTitle(this, 'Settings', this.project.name || this.projectId);
-      // Pre-populate template import URL with the project's git remote when set
-      if (this.project.gitRemote && !this.syncRepoUrl) {
-        this.syncRepoUrl = this.project.gitRemote;
-      }
+      // The template/harness-config import forms prefill their URL from the
+      // project's git remote (passed as the gitRemote property).
       // Populate GitHub App fields from project data
       this.githubAppInstallationId = this.project.githubInstallationId ?? null;
       this.githubAppStatus = this.project.githubAppStatus ?? null;
@@ -1019,71 +987,6 @@ export class ScionPageProjectSettings extends LitElement {
       this.settingsError = err instanceof Error ? err.message : 'Failed to save settings';
     } finally {
       this.settingsSaving = false;
-    }
-  }
-
-  private async handleSyncTemplates(): Promise<void> {
-    this.syncLoading = true;
-    this.syncError = null;
-    this.syncSuccess = null;
-
-    try {
-      const body =
-        this.importMode === 'workspace'
-          ? { workspacePath: this.syncRepoUrl || '/.scion/templates' }
-          : { sourceUrl: this.syncRepoUrl };
-      const response = await apiFetch(`/api/v1/projects/${this.projectId}/import-templates`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-
-      if (!response.ok) {
-        throw new Error(await extractApiError(response, `Failed to import templates: HTTP ${response.status}`));
-      }
-
-      const data = (await response.json()) as { templates: string[]; count: number };
-      this.refreshTemplatesList();
-      await this.loadDropdownTemplates();
-      this.syncSuccess = `${data.count} template${data.count !== 1 ? 's' : ''} imported successfully.`;
-    } catch (err) {
-      console.error('Failed to import templates:', err);
-      this.syncError = err instanceof Error ? err.message : 'Failed to import templates';
-    } finally {
-      this.syncLoading = false;
-    }
-  }
-
-  private async handleImportHarnessConfigs(): Promise<void> {
-    this.hcImportLoading = true;
-    this.hcImportError = null;
-    this.hcImportSuccess = null;
-
-    try {
-      const body =
-        this.hcImportMode === 'workspace'
-          ? { workspacePath: this.hcImportUrl || '/.scion/harness-configs' }
-          : { sourceUrl: this.hcImportUrl };
-      const response = await apiFetch(`/api/v1/projects/${this.projectId}/import-harness-configs`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-
-      if (!response.ok) {
-        throw new Error(
-          await extractApiError(response, `Failed to import harness-configs: HTTP ${response.status}`)
-        );
-      }
-
-      const data = (await response.json()) as { harnessConfigs: string[]; count: number };
-      this.refreshHarnessConfigsList();
-      this.hcImportSuccess = `${data.count} harness-config${data.count !== 1 ? 's' : ''} imported successfully.`;
-    } catch (err) {
-      console.error('Failed to import harness-configs:', err);
-      this.hcImportError = err instanceof Error ? err.message : 'Failed to import harness-configs';
-    } finally {
-      this.hcImportLoading = false;
     }
   }
 
@@ -1857,93 +1760,19 @@ export class ScionPageProjectSettings extends LitElement {
         <div class="section-header-text">
           <p style="margin: 0;">Project-scoped agent templates imported into the Hub.</p>
         </div>
-        ${canSync
-          ? html`
-              <sl-button
-                size="small"
-                variant="default"
-                ?loading=${this.syncLoading}
-                ?disabled=${this.syncLoading || (this.importMode === 'url' && !this.syncRepoUrl)}
-                @click=${() => this.handleSyncTemplates()}
-              >
-                <sl-icon slot="prefix" name="download"></sl-icon>
-                Import Templates
-              </sl-button>
-            `
-          : ''}
       </div>
-      ${canSync
-        ? html`
-            <div style="margin-bottom: 1rem;">
-              <sl-radio-group
-                size="small"
-                value=${this.importMode}
-                style="margin-bottom: 0.5rem;"
-                @sl-change=${(e: Event) => {
-                  this.importMode = (e.target as HTMLInputElement).value as 'url' | 'workspace';
-                  this.syncRepoUrl = '';
-                  this.syncError = null;
-                  this.syncSuccess = null;
-                  if (this.importMode === 'url' && this.project?.gitRemote) {
-                    this.syncRepoUrl = this.project.gitRemote;
-                  }
-                }}
-              >
-                <sl-radio-button value="url">Import from URL</sl-radio-button>
-                <sl-radio-button value="workspace">Import from workspace</sl-radio-button>
-              </sl-radio-group>
-              <sl-input
-                placeholder=${this.importMode === 'workspace'
-                  ? '/.scion/templates'
-                  : 'https://github.com/org/repo/tree/main/.scion/templates'}
-                size="small"
-                clearable
-                .value=${this.syncRepoUrl}
-                ?disabled=${this.syncLoading}
-                @sl-input=${(e: Event) => {
-                  this.syncRepoUrl = (e.target as HTMLInputElement).value;
-                }}
-                @sl-clear=${() => {
-                  this.syncRepoUrl = '';
-                }}
-              >
-                <sl-icon slot="prefix" name=${this.importMode === 'workspace' ? 'folder' : 'github'}></sl-icon>
-              </sl-input>
-              <div style="margin-top: 0.25rem; font-size: 0.75rem; color: var(--sl-color-neutral-500);">
-                ${this.importMode === 'workspace'
-                  ? 'Path within the project workspace — the default will be used if no path is provided'
-                  : 'GitHub URL to a template or templates directory — supports arbitrary deep paths'}
-              </div>
-            </div>
-          `
-        : ''}
-
-      ${this.syncLoading
-        ? html`
-            <div class="sync-status syncing">
-              <sl-spinner style="font-size: 0.875rem;"></sl-spinner>
-              ${this.importMode === 'workspace'
-                ? `Importing templates from workspace ${this.syncRepoUrl || '/.scion/templates'}...`
-                : `Importing templates from ${this.syncRepoUrl}...`}
-            </div>
-          `
-        : ''}
-      ${this.syncError
-        ? html`
-            <div class="sync-status error">
-              <sl-icon name="exclamation-triangle"></sl-icon>
-              ${this.syncError}
-            </div>
-          `
-        : ''}
-      ${this.syncSuccess
-        ? html`
-            <div class="sync-status success">
-              <sl-icon name="check-circle"></sl-icon>
-              ${this.syncSuccess}
-            </div>
-          `
-        : ''}
+      <scion-resource-import
+        kind="template"
+        scope="project"
+        .scopeId=${this.projectId}
+        ?canImport=${canSync}
+        allowWorkspace
+        gitRemote=${this.project?.gitRemote ?? ''}
+        @resource-imported=${() => {
+          this.refreshTemplatesList();
+          void this.loadDropdownTemplates();
+        }}
+      ></scion-resource-import>
       <scion-resource-list
         id="templates-resource-list"
         kind="template"
@@ -1964,93 +1793,16 @@ export class ScionPageProjectSettings extends LitElement {
             and edit its files.
           </p>
         </div>
-        ${canSync
-          ? html`
-              <sl-button
-                size="small"
-                variant="default"
-                ?loading=${this.hcImportLoading}
-                ?disabled=${this.hcImportLoading || (this.hcImportMode === 'url' && !this.hcImportUrl)}
-                @click=${() => this.handleImportHarnessConfigs()}
-              >
-                <sl-icon slot="prefix" name="download"></sl-icon>
-                Import Harness Configs
-              </sl-button>
-            `
-          : ''}
       </div>
-      ${canSync
-        ? html`
-            <div style="margin-bottom: 1rem;">
-              <sl-radio-group
-                size="small"
-                value=${this.hcImportMode}
-                style="margin-bottom: 0.5rem;"
-                @sl-change=${(e: Event) => {
-                  this.hcImportMode = (e.target as HTMLInputElement).value as 'url' | 'workspace';
-                  this.hcImportUrl = '';
-                  this.hcImportError = null;
-                  this.hcImportSuccess = null;
-                  if (this.hcImportMode === 'url' && this.project?.gitRemote) {
-                    this.hcImportUrl = this.project.gitRemote;
-                  }
-                }}
-              >
-                <sl-radio-button value="url">Import from URL</sl-radio-button>
-                <sl-radio-button value="workspace">Import from workspace</sl-radio-button>
-              </sl-radio-group>
-              <sl-input
-                placeholder=${this.hcImportMode === 'workspace'
-                  ? '/.scion/harness-configs'
-                  : 'https://github.com/org/repo/tree/main/.scion/harness-configs'}
-                size="small"
-                clearable
-                .value=${this.hcImportUrl}
-                ?disabled=${this.hcImportLoading}
-                @sl-input=${(e: Event) => {
-                  this.hcImportUrl = (e.target as HTMLInputElement).value;
-                }}
-                @sl-clear=${() => {
-                  this.hcImportUrl = '';
-                }}
-              >
-                <sl-icon slot="prefix" name=${this.hcImportMode === 'workspace' ? 'folder' : 'github'}></sl-icon>
-              </sl-input>
-              <div style="margin-top: 0.25rem; font-size: 0.75rem; color: var(--sl-color-neutral-500);">
-                ${this.hcImportMode === 'workspace'
-                  ? 'Path within the project workspace — the default will be used if no path is provided'
-                  : 'GitHub URL to a harness-config or harness-configs directory — supports arbitrary deep paths'}
-              </div>
-            </div>
-          `
-        : ''}
-
-      ${this.hcImportLoading
-        ? html`
-            <div class="sync-status syncing">
-              <sl-spinner style="font-size: 0.875rem;"></sl-spinner>
-              ${this.hcImportMode === 'workspace'
-                ? `Importing harness-configs from workspace ${this.hcImportUrl || '/.scion/harness-configs'}...`
-                : `Importing harness-configs from ${this.hcImportUrl}...`}
-            </div>
-          `
-        : ''}
-      ${this.hcImportError
-        ? html`
-            <div class="sync-status error">
-              <sl-icon name="exclamation-triangle"></sl-icon>
-              ${this.hcImportError}
-            </div>
-          `
-        : ''}
-      ${this.hcImportSuccess
-        ? html`
-            <div class="sync-status success">
-              <sl-icon name="check-circle"></sl-icon>
-              ${this.hcImportSuccess}
-            </div>
-          `
-        : ''}
+      <scion-resource-import
+        kind="harness-config"
+        scope="project"
+        .scopeId=${this.projectId}
+        ?canImport=${canSync}
+        allowWorkspace
+        gitRemote=${this.project?.gitRemote ?? ''}
+        @resource-imported=${() => this.refreshHarnessConfigsList()}
+      ></scion-resource-import>
       <scion-resource-list
         id="harness-configs-resource-list"
         kind="harness-config"
