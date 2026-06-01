@@ -51,11 +51,13 @@ func createTestLinkedProject(t *testing.T, srv *Server, s store.Store, name, rem
 	broker := &store.RuntimeBroker{
 		ID:   tid("test-broker-remote"),
 		Name: "remote-broker",
+		Slug: "remote-broker",
 	}
 	require.NoError(t, s.CreateRuntimeBroker(context.Background(), broker))
 	require.NoError(t, s.AddProjectProvider(context.Background(), &store.ProjectProvider{
-		ProjectID: project.ID,
-		BrokerID:  broker.ID,
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
 		// LocalPath is set to simulate a linked project with workspace on broker
 		LocalPath: brokerLocalPath,
 	}))
@@ -107,11 +109,13 @@ func TestResolveProjectWebDAVPath_LinkedProject_EmbeddedBroker(t *testing.T) {
 	broker := &store.RuntimeBroker{
 		ID:   embeddedBrokerID,
 		Name: "embedded-broker",
+		Slug: "embedded-broker",
 	}
 	require.NoError(t, s.CreateRuntimeBroker(context.Background(), broker))
 	require.NoError(t, s.AddProjectProvider(context.Background(), &store.ProjectProvider{
-		ProjectID: project.ID,
-		BrokerID:  embeddedBrokerID,
+		ProjectID:  project.ID,
+		BrokerID:   embeddedBrokerID,
+		BrokerName: broker.Name,
 		LocalPath: embeddedPath,
 	}))
 
@@ -146,11 +150,12 @@ func TestIsLinkedProject_EmbeddedBrokerOnly(t *testing.T) {
 	embeddedBrokerID := tid("embedded-only")
 	srv.SetEmbeddedBrokerID(embeddedBrokerID)
 
-	broker := &store.RuntimeBroker{ID: embeddedBrokerID, Name: "emb"}
+	broker := &store.RuntimeBroker{ID: embeddedBrokerID, Name: "emb", Slug: "emb"}
 	require.NoError(t, s.CreateRuntimeBroker(context.Background(), broker))
 	require.NoError(t, s.AddProjectProvider(context.Background(), &store.ProjectProvider{
-		ProjectID: project.ID,
-		BrokerID:  embeddedBrokerID,
+		ProjectID:  project.ID,
+		BrokerID:   embeddedBrokerID,
+		BrokerName: broker.Name,
 		LocalPath: "/some/path",
 	}))
 
