@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -35,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/broker"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -524,6 +526,14 @@ type Server struct {
 
 	// GCP token metrics tracker (nil = disabled)
 	gcpTokenMetrics *GCPTokenMetrics
+
+	// Database connection-pool / notify metrics recorder (P0-5). Defaults to a
+	// disabled no-op recorder; SetDBMetrics wires a real exporter. Drives the
+	// connection-pool sampler started in StartBackgroundServices.
+	dbMetrics dbmetrics.Recorder
+
+	// stopPoolSampler stops the DB pool-stats sampling goroutine on shutdown.
+	stopPoolSampler func()
 
 	// Message broker proxy for pub/sub message routing (nil = disabled)
 	messageBrokerProxy *MessageBrokerProxy
@@ -1239,6 +1249,16 @@ func (s *Server) SetMetrics(m MetricsRecorder) {
 	s.metrics = m
 }
 
+// SetDBMetrics wires the database connection-pool / notify metrics recorder
+// (P0-5). When set to an enabled recorder before StartBackgroundServices, the
+// hub starts sampling the DB connection pool into the pool gauges. Passing a
+// disabled recorder (or never calling this) leaves pool sampling off.
+func (s *Server) SetDBMetrics(rec dbmetrics.Recorder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dbMetrics = rec
+}
+
 // GetMaintenanceState returns the runtime maintenance state.
 func (s *Server) GetMaintenanceState() *MaintenanceState {
 	return s.maintenance
@@ -1832,14 +1852,19 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 
 	// Initialize and start the scheduler
 	s.scheduler = NewScheduler(s.store, logging.Subsystem("hub.scheduler"))
-	s.scheduler.RegisterRecurring("agent-heartbeat-timeout", 1, s.agentHeartbeatTimeoutHandler())
-	s.scheduler.RegisterRecurring("agent-stalled-detection", 1, s.agentStalledDetectionHandler())
+	// Recurring sweeps are cluster-wide-once work: under multi-replica Postgres
+	// they must run on a single replica per tick (gated by an advisory lock),
+	// otherwise every replica would publish duplicate offline/stalled events and
+	// race on the schedule claim. On SQLite the lock is a no-op. See
+	// CONCURRENCY-AUDIT.md §"Singleton / leader".
+	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 1, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
+	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 1, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())
 	if s.config.SoftDeleteRetention > 0 {
-		s.scheduler.RegisterRecurring("soft-delete-purge", 60, s.purgeHandler())
+		s.scheduler.RegisterRecurringSingleton("soft-delete-purge", 60, store.LockSoftDeletePurge, s.purgeHandler())
 	}
 	s.scheduler.RegisterEventHandler("message", s.messageEventHandler())
 	s.scheduler.RegisterEventHandler("dispatch_agent", s.dispatchAgentEventHandler())
-	s.scheduler.RegisterRecurring("schedule-evaluator", 1, s.evaluateSchedulesHandler())
+	s.scheduler.RegisterRecurringSingleton("schedule-evaluator", 1, store.LockScheduleEvaluator, s.evaluateSchedulesHandler())
 
 	// Register GitHub App health check if the app is configured
 	s.mu.RLock()
@@ -1851,10 +1876,20 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 		if ghWebhooksEnabled {
 			interval = 1440 // 24 hours when webhooks are enabled
 		}
-		s.scheduler.RegisterRecurring("github-app-health-check", interval, s.githubAppHealthCheckHandler())
+		s.scheduler.RegisterRecurringSingleton("github-app-health-check", interval, store.LockGitHubAppHealthCheck, s.githubAppHealthCheckHandler())
 	}
 
 	s.scheduler.Start(ctx)
+
+	// Start the DB connection-pool stats sampler (P3-6 -> P0-5 gauges). It is a
+	// no-op unless an enabled recorder was wired via SetDBMetrics and the store
+	// exposes its *sql.DB; this keeps connection-budget saturation observable
+	// under multi-replica Postgres (see CONNECTION-BUDGET.md).
+	if rec := s.dbMetrics; rec != nil {
+		if dbp, ok := s.store.(interface{ DB() *sql.DB }); ok {
+			s.stopPoolSampler = dbmetrics.StartPoolSampler(ctx, rec, dbp.DB(), 0)
+		}
+	}
 
 	// Start rate limiter cleanup goroutine (exits when ctx is cancelled).
 	if s.gcpTokenRateLimiter != nil {
@@ -1927,6 +1962,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// Stop scheduler
 	if s.scheduler != nil {
 		s.scheduler.Stop()
+	}
+
+	// Stop the DB pool-stats sampler.
+	if s.stopPoolSampler != nil {
+		s.stopPoolSampler()
 	}
 
 	// Stop notification dispatcher before closing event publisher
