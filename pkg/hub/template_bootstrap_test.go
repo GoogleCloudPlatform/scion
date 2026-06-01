@@ -657,6 +657,7 @@ func setupWorkspaceProject(t *testing.T, projectName string) (*Server, store.Sto
 	broker := &store.RuntimeBroker{
 		ID:       brokerID,
 		Name:     "ws-broker",
+		Slug:     "ws-broker",
 		Endpoint: "http://localhost:9090",
 		Status:   store.BrokerStatusOnline,
 	}
