@@ -607,7 +607,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GlobalRoute(t *testing.T) {
 
 	// Simulate a previous cancelled env-gather: agent exists in "provisioning" status
 	staleAgent := &store.Agent{
-		ID:              "stale-agent-global",
+		ID:              tid("stale-agent-global"),
 		Name:            "retry-agent",
 		Slug:            "retry-agent",
 		ProjectID:       tid("project-retry-global"),
@@ -669,7 +669,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GlobalRoute(t *testing.T) {
 	if resp.Agent == nil {
 		t.Fatal("expected agent in response")
 	}
-	if resp.Agent.ID == "stale-agent-global" {
+	if resp.Agent.ID == tid("stale-agent-global") {
 		t.Error("expected a new agent ID, got the stale agent ID")
 	}
 	if resp.Agent.Phase != string(state.PhaseProvisioning) {
@@ -677,7 +677,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GlobalRoute(t *testing.T) {
 	}
 
 	// The old agent should no longer exist in the store
-	_, err := st.GetAgent(ctx, "stale-agent-global")
+	_, err := st.GetAgent(ctx, tid("stale-agent-global"))
 	if err != store.ErrNotFound {
 		t.Errorf("expected stale agent to be deleted, got err=%v", err)
 	}
@@ -1168,7 +1168,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_ProjectRoute(t *testing.T) {
 
 	// Simulate a previous cancelled env-gather: agent exists in "provisioning" status
 	staleAgent := &store.Agent{
-		ID:              "stale-agent-route",
+		ID:              tid("stale-agent-route"),
 		Name:            "retry-route-agent",
 		Slug:            "retry-route-agent",
 		ProjectID:       tid("project-retry-route"),
@@ -1225,7 +1225,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_ProjectRoute(t *testing.T) {
 	if resp.Agent == nil {
 		t.Fatal("expected agent in response")
 	}
-	if resp.Agent.ID == "stale-agent-route" {
+	if resp.Agent.ID == tid("stale-agent-route") {
 		t.Error("expected a new agent ID, got the stale agent ID")
 	}
 	if resp.Agent.Phase != string(state.PhaseProvisioning) {
@@ -1233,7 +1233,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_ProjectRoute(t *testing.T) {
 	}
 
 	// The old agent should no longer exist in the store
-	_, err := st.GetAgent(ctx, "stale-agent-route")
+	_, err := st.GetAgent(ctx, tid("stale-agent-route"))
 	if err != store.ErrNotFound {
 		t.Errorf("expected stale agent to be deleted, got err=%v", err)
 	}
@@ -1270,7 +1270,7 @@ func TestProjectRoute_ResolvesUserScopedEnvVars(t *testing.T) {
 
 	// Store a user-scoped env var for the dev-user (dev auth identity)
 	if err := st.CreateEnvVar(ctx, &store.EnvVar{
-		ID:      "env-owner-1",
+		ID:      tid("env-owner-1"),
 		Key:     "GEMINI_API_KEY",
 		Value:   "user-scoped-gemini-key",
 		Scope:   "user",
