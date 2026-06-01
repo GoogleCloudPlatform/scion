@@ -76,6 +76,8 @@ var (
 	ScopeIDValidator func(string) error
 	// EmailValidator is a validator for the "email" field. It is called by the builders before save.
 	EmailValidator func(string) error
+	// ProjectIDValidator is a validator for the "project_id" field. It is called by the builders before save.
+	ProjectIDValidator func(string) error
 	// DefaultDisplayName holds the default value on creation for the "display_name" field.
 	DefaultDisplayName string
 	// DefaultDefaultScopes holds the default value on creation for the "default_scopes" field.
