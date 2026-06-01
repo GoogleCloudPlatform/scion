@@ -54,7 +54,7 @@ func entGCPToStore(e *ent.GCPServiceAccount) *store.GCPServiceAccount {
 		Scope:       e.Scope,
 		ScopeID:     e.ScopeID,
 		Email:       e.Email,
-		ProjectID:   e.ProjectID,
+		ProjectID:   e.ProjectID.String(),
 		DisplayName: e.DisplayName,
 		Verified:    e.Verified,
 		CreatedBy:   e.CreatedBy,
@@ -78,6 +78,11 @@ func (s *ExternalStore) CreateGCPServiceAccount(ctx context.Context, sa *store.G
 	if err != nil {
 		return err
 	}
+	projectUID, err := parseUUID(sa.ProjectID)
+	if err != nil {
+		return err
+	}
+
 	if sa.CreatedAt.IsZero() {
 		sa.CreatedAt = time.Now()
 	}
@@ -87,7 +92,7 @@ func (s *ExternalStore) CreateGCPServiceAccount(ctx context.Context, sa *store.G
 		SetScope(sa.Scope).
 		SetScopeID(sa.ScopeID).
 		SetEmail(sa.Email).
-		SetProjectID(sa.ProjectID).
+		SetProjectID(projectUID).
 		SetDisplayName(sa.DisplayName).
 		SetDefaultScopes(strings.Join(sa.DefaultScopes, ",")).
 		SetVerified(sa.Verified).
@@ -108,7 +113,7 @@ func (s *ExternalStore) CreateGCPServiceAccount(ctx context.Context, sa *store.G
 
 // GetGCPServiceAccount retrieves a GCP service account by ID.
 func (s *ExternalStore) GetGCPServiceAccount(ctx context.Context, id string) (*store.GCPServiceAccount, error) {
-	uid, err := parseGetID(id)
+	uid, err := parseUUID(id)
 	if err != nil {
 		return nil, err
 	}
@@ -125,9 +130,14 @@ func (s *ExternalStore) UpdateGCPServiceAccount(ctx context.Context, sa *store.G
 	if err != nil {
 		return err
 	}
+	projectUID, err := parseUUID(sa.ProjectID)
+	if err != nil {
+		return err
+	}
+
 	update := s.client.GCPServiceAccount.UpdateOneID(id).
 		SetEmail(sa.Email).
-		SetProjectID(sa.ProjectID).
+		SetProjectID(projectUID).
 		SetDisplayName(sa.DisplayName).
 		SetDefaultScopes(strings.Join(sa.DefaultScopes, ",")).
 		SetVerified(sa.Verified).
@@ -446,7 +456,7 @@ func (s *ExternalStore) CreateUserAccessToken(ctx context.Context, token *store.
 
 // GetUserAccessToken retrieves a user access token by ID.
 func (s *ExternalStore) GetUserAccessToken(ctx context.Context, id string) (*store.UserAccessToken, error) {
-	uid, err := parseGetID(id)
+	uid, err := parseUUID(id)
 	if err != nil {
 		return nil, err
 	}
