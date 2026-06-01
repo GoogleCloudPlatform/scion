@@ -43,24 +43,6 @@ func TestParseSQLiteSourceDSN(t *testing.T) {
 			wantPath: "/tmp/hub.db",
 		},
 		{
-			name:     "file triple-slash absolute url",
-			in:       "file:///var/lib/scion/hub.db",
-			wantDSN:  "file:/var/lib/scion/hub.db?cache=shared",
-			wantPath: "/var/lib/scion/hub.db",
-		},
-		{
-			name:     "file double-slash relative url",
-			in:       "file://data/hub.db",
-			wantDSN:  "file:data/hub.db?cache=shared",
-			wantPath: "data/hub.db",
-		},
-		{
-			name:     "file triple-slash with query",
-			in:       "file:///tmp/hub.db?mode=ro",
-			wantDSN:  "file:/tmp/hub.db?cache=shared",
-			wantPath: "/tmp/hub.db",
-		},
-		{
 			name:     "file url with query",
 			in:       "file:/tmp/hub.db?cache=shared",
 			wantDSN:  "file:/tmp/hub.db?cache=shared",

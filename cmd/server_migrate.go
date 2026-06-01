@@ -162,12 +162,6 @@ func parseSQLiteSourceDSN(raw string) (dsn, path string, err error) {
 		// sqlite:///abs -> "/abs"; an extra leading slash denotes an absolute path.
 	case strings.HasPrefix(raw, "sqlite:"):
 		path = strings.TrimPrefix(raw, "sqlite:")
-	case strings.HasPrefix(raw, "file://"):
-		path = strings.TrimPrefix(raw, "file://")
-		// file:///abs -> "/abs"; the third slash begins the absolute path.
-		if i := strings.IndexByte(path, '?'); i >= 0 {
-			path = path[:i]
-		}
 	case strings.HasPrefix(raw, "file:"):
 		path = strings.TrimPrefix(raw, "file:")
 		// Strip any query parameters from the extracted path.
