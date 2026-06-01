@@ -647,12 +647,15 @@ func initStore(cfg *config.GlobalConfig) (store.Store, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to open database: %w", err)
 		}
-		if err := entc.AutoMigrate(context.Background(), entClient); err != nil {
-			entClient.Close()
-			return nil, fmt.Errorf("failed to run migrations: %w", err)
-		}
 
 		s := entadapter.NewCompositeStore(entClient)
+
+		// Migrate runs Ent's schema migration and seeds built-in maintenance
+		// operations (parity with the former raw-SQL store).
+		if err := s.Migrate(context.Background()); err != nil {
+			s.Close()
+			return nil, fmt.Errorf("failed to run migrations: %w", err)
+		}
 
 		if err := s.Ping(context.Background()); err != nil {
 			s.Close()

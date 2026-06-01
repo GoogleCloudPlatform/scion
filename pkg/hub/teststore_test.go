@@ -58,9 +58,10 @@ func newTestStore(url string) (store.Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := entc.AutoMigrate(context.Background(), client); err != nil {
-		_ = client.Close()
+	s := entadapter.NewCompositeStore(client)
+	if err := s.Migrate(context.Background()); err != nil {
+		_ = s.Close()
 		return nil, err
 	}
-	return entadapter.NewCompositeStore(client), nil
+	return s, nil
 }
