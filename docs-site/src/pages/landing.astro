@@ -24,9 +24,14 @@ const base = import.meta.env.BASE_URL;
   <title>Scion — Multi-Agent Orchestration for Deep Agents</title>
   <meta name="description" content="Run multiple AI agents in parallel, each in its own container with isolated workspaces. Orchestrate Claude Code, Gemini CLI, Codex, and more." />
   <link rel="icon" type="image/svg+xml" href={`${base}/favicon.svg`} />
-  <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
+  <!-- Fonts for both landing page and integrated slideshow -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@400;500;600;700;800&display=swap" />
+
+  <style>
+    /* ========================================================================
+       Landing Page Base Styles
+       ======================================================================== */
     *, *::before, *::after {
       box-sizing: border-box;
       margin: 0;
@@ -48,9 +53,7 @@ const base = import.meta.env.BASE_URL;
       --gradient-end: #06b6d4;
     }
 
-    html {
-      scroll-behavior: smooth;
-    }
+    html { scroll-behavior: smooth; }
 
     body {
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -152,13 +155,10 @@ const base = import.meta.env.BASE_URL;
       transform: translateY(-1px);
     }
 
-    .btn svg {
-      width: 18px;
-      height: 18px;
-    }
+    .btn svg { width: 18px; height: 18px; }
 
     /* Section layout */
-    section {
+    .landing-section {
       padding: 5rem 2rem;
     }
 
@@ -184,68 +184,6 @@ const base = import.meta.env.BASE_URL;
       max-width: 600px;
       margin: 0 auto 3rem;
       font-weight: 300;
-    }
-
-    /* Pipeline section */
-    .pipeline {
-      background: var(--bg-secondary);
-      border-top: 1px solid var(--border-subtle);
-      border-bottom: 1px solid var(--border-subtle);
-    }
-
-    .pipeline-grid {
-      display: grid;
-      grid-template-columns: repeat(5, 1fr);
-      gap: 1rem;
-      position: relative;
-    }
-
-    .pipeline-card {
-      background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
-      border-radius: 12px;
-      padding: 1.5rem;
-      text-align: center;
-      transition: border-color 0.2s ease, transform 0.2s ease;
-      position: relative;
-    }
-
-    .pipeline-card:hover {
-      border-color: var(--accent-green-dim);
-      transform: translateY(-2px);
-    }
-
-    .pipeline-num {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 32px;
-      height: 32px;
-      border-radius: 50%;
-      background: var(--accent-green-dim);
-      color: var(--accent-green);
-      font-weight: 600;
-      font-size: 0.85rem;
-      margin-bottom: 0.75rem;
-    }
-
-    .pipeline-card h3 {
-      font-size: 1.05rem;
-      font-weight: 600;
-      color: var(--text-primary);
-      margin-bottom: 0.25rem;
-    }
-
-    .pipeline-card .pipeline-label {
-      font-size: 0.8rem;
-      color: var(--accent-emerald);
-      margin-bottom: 0.5rem;
-    }
-
-    .pipeline-card p.pipeline-body {
-      font-size: 0.82rem;
-      color: var(--text-secondary);
-      line-height: 1.5;
     }
 
     /* Feature grid */
@@ -309,7 +247,7 @@ const base = import.meta.env.BASE_URL;
     }
 
     .feature-card ul li::before {
-      content: '›';
+      content: '\203A';
       position: absolute;
       left: 0;
       color: var(--accent-green);
@@ -344,37 +282,9 @@ const base = import.meta.env.BASE_URL;
       border: none;
     }
 
-    /* Slides section */
-    .slides-section {
-      background: var(--bg-primary);
-    }
-
-    .slides-container {
-      position: relative;
-      width: 100%;
-      max-width: 960px;
-      margin: 0 auto;
-      padding-top: 59.4%;
-      border-radius: 12px;
-      overflow: hidden;
-      border: 1px solid var(--border-subtle);
-      box-shadow: 0 8px 40px rgba(0, 0, 0, 0.4);
-    }
-
-    .slides-container iframe {
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      border: none;
-    }
-
     /* How it works */
     .how-it-works {
-      background: var(--bg-secondary);
-      border-top: 1px solid var(--border-subtle);
-      border-bottom: 1px solid var(--border-subtle);
+      background: var(--bg-primary);
     }
 
     .steps {
@@ -385,9 +295,7 @@ const base = import.meta.env.BASE_URL;
       margin: 0 auto;
     }
 
-    .step {
-      text-align: center;
-    }
+    .step { text-align: center; }
 
     .step-number {
       display: inline-flex;
@@ -403,16 +311,8 @@ const base = import.meta.env.BASE_URL;
       margin-bottom: 1rem;
     }
 
-    .step h3 {
-      font-size: 1rem;
-      margin-bottom: 0.4rem;
-      color: var(--text-primary);
-    }
-
-    .step p {
-      font-size: 0.85rem;
-      color: var(--text-secondary);
-    }
+    .step h3 { font-size: 1rem; margin-bottom: 0.4rem; color: var(--text-primary); }
+    .step p { font-size: 0.85rem; color: var(--text-secondary); }
 
     .step code {
       display: block;
@@ -432,9 +332,7 @@ const base = import.meta.env.BASE_URL;
       padding: 5rem 2rem;
     }
 
-    .cta .section-title {
-      margin-bottom: 1.5rem;
-    }
+    .cta .section-title { margin-bottom: 1.5rem; }
 
     .cta-links {
       display: flex;
@@ -444,7 +342,7 @@ const base = import.meta.env.BASE_URL;
     }
 
     /* Footer */
-    footer {
+    .landing-footer {
       padding: 2rem;
       text-align: center;
       color: var(--text-muted);
@@ -452,38 +350,898 @@ const base = import.meta.env.BASE_URL;
       border-top: 1px solid var(--border-subtle);
     }
 
-    footer a {
-      color: var(--text-secondary);
-      text-decoration: none;
+    .landing-footer a { color: var(--text-secondary); text-decoration: none; }
+    .landing-footer a:hover { color: var(--accent-green); }
+
+    /* Deep dive link */
+    .deep-dive-link {
+      text-align: center;
+      margin-top: 1.5rem;
+      font-size: 0.9rem;
     }
 
-    footer a:hover {
+    .deep-dive-link a {
+      color: var(--text-secondary);
+      text-decoration: none;
+      transition: color 0.2s;
+    }
+
+    .deep-dive-link a:hover {
       color: var(--accent-green);
     }
 
     /* Responsive */
-    @media (max-width: 900px) {
-      .pipeline-grid {
-        grid-template-columns: repeat(3, 1fr);
-      }
+    @media (max-width: 640px) {
+      .hero { padding: 3rem 1.5rem 2rem; }
+      .hero-subtitle { font-size: 1.1rem; }
+      .section-title { font-size: 1.5rem; }
+      .feature-grid { grid-template-columns: 1fr; }
     }
 
-    @media (max-width: 640px) {
-      .hero {
-        padding: 3rem 1.5rem 2rem;
-      }
-      .hero-subtitle {
-        font-size: 1.1rem;
-      }
-      .section-title {
-        font-size: 1.5rem;
-      }
-      .pipeline-grid {
-        grid-template-columns: 1fr 1fr;
-      }
-      .feature-grid {
-        grid-template-columns: 1fr;
-      }
+    /* ========================================================================
+       Integrated Slideshow (scoped under .scion-deck)
+       ======================================================================== */
+    .scion-deck {
+      --scion-bg: #0f172a;
+      --scion-bg-subtle: #1e293b;
+      --scion-surface: #1e293b;
+      --scion-surface-raised: #334155;
+      --scion-border: #334155;
+      --scion-border-hover: #475569;
+      --scion-primary: #60a5fa;
+      --scion-primary-hover: #93c5fd;
+      --scion-primary-active: #3b82f6;
+      --scion-primary-muted: rgba(96, 165, 250, 0.15);
+      --scion-success: #22c55e;
+      --scion-warning: #f59e0b;
+      --scion-danger: #ef4444;
+      --scion-info: #60a5fa;
+      --scion-text: #f1f5f9;
+      --scion-text-secondary: #cbd5e1;
+      --scion-text-muted: #94a3b8;
+      --scion-text-disabled: #64748b;
+      --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+      --font-header: 'Outfit', var(--font-sans);
+      --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+      --scion-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.3), 0 2px 4px -2px rgb(0 0 0 / 0.3);
+      --scion-shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.4), 0 4px 6px -4px rgb(0 0 0 / 0.4);
+      --scion-radius-sm: 0.25rem;
+      --scion-radius: 0.5rem;
+      --scion-radius-lg: 0.75rem;
+      --scion-radius-xl: 1rem;
+      --transition-fast: 150ms ease;
+      --transition-normal: 300ms cubic-bezier(0.4, 0, 0.2, 1);
+      --transition-slow: 500ms cubic-bezier(0.4, 0, 0.2, 1);
+
+      position: relative;
+      width: 100%;
+      max-width: 1200px;
+      margin: 0 auto;
+      aspect-ratio: 16 / 9;
+      background-color: var(--scion-bg);
+      border: 1px solid var(--scion-border);
+      border-radius: var(--scion-radius-xl);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      font-family: var(--font-sans);
+      color: var(--scion-text);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Background glows inside the deck */
+    .scion-deck .bg-glows {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      overflow: hidden;
+      z-index: 1;
+      pointer-events: none;
+    }
+
+    .scion-deck .bg-glow-1 {
+      position: absolute;
+      top: -10%; right: -10%;
+      width: 50%; height: 50%;
+      background: radial-gradient(circle, rgba(96, 165, 250, 0.08) 0%, transparent 70%);
+      filter: blur(80px);
+    }
+
+    .scion-deck .bg-glow-2 {
+      position: absolute;
+      bottom: -10%; left: -10%;
+      width: 60%; height: 60%;
+      background: radial-gradient(circle, rgba(99, 102, 241, 0.06) 0%, transparent 70%);
+      filter: blur(100px);
+    }
+
+    /* Deck header */
+    .scion-deck .presentation-header {
+      height: 42px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 1.5rem;
+      border-bottom: 1px solid var(--scion-border);
+      background-color: rgba(15, 23, 42, 0.8);
+      backdrop-filter: blur(12px);
+      z-index: 10;
+      flex-shrink: 0;
+    }
+
+    .scion-deck .logo-container {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .scion-deck .logo-text {
+      font-family: var(--font-header);
+      font-weight: 800;
+      font-size: 1.2rem;
+      letter-spacing: -0.025em;
+      color: var(--scion-text);
+    }
+
+    .scion-deck .logo-text span { color: var(--scion-primary); }
+
+    .scion-deck .deck-title {
+      font-family: var(--font-header);
+      font-weight: 500;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted);
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    /* Slides wrapper */
+    .scion-deck .slides-wrapper {
+      flex: 1;
+      position: relative;
+      width: 100%;
+      min-height: 0;
+      z-index: 2;
+    }
+
+    .scion-deck .slide {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      display: grid;
+      grid-template-columns: 45% 55%;
+      padding: 0.75rem 1.5rem;
+      gap: 1.5rem;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateX(60px);
+      transition: opacity var(--transition-slow), transform var(--transition-slow);
+      z-index: 5;
+    }
+
+    .scion-deck .slide.active {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateX(0);
+      z-index: 6;
+    }
+
+    .scion-deck .slide.previous {
+      opacity: 0;
+      pointer-events: none;
+      transform: translateX(-60px);
+    }
+
+    .scion-deck .slide.slide-full {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+    }
+
+    /* Slide content */
+    .scion-deck .slide-content {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      height: 100%;
+      overflow-y: auto;
+    }
+
+    .scion-deck .slide-title {
+      font-family: var(--font-header);
+      font-size: 1.6rem;
+      font-weight: 700;
+      line-height: 1.15;
+      color: var(--scion-text);
+      margin-bottom: 0.5rem;
+      letter-spacing: -0.02em;
+    }
+
+    .scion-deck .slide-desc {
+      font-size: 0.85rem;
+      color: var(--scion-text-secondary);
+      line-height: 1.5;
+      margin-bottom: 0.75rem;
+    }
+
+    .scion-deck .slide-bullets {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .scion-deck .slide-bullets li {
+      position: relative;
+      padding-left: 1.5rem;
+      font-size: 0.82rem;
+      color: var(--scion-text-secondary);
+      line-height: 1.5;
+    }
+
+    .scion-deck .slide-bullets li::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0.4rem;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background-color: var(--scion-primary);
+      box-shadow: 0 0 4px var(--scion-primary);
+    }
+
+    .scion-deck .slide-bullets li strong {
+      color: var(--scion-text);
+      font-weight: 600;
+    }
+
+    .scion-deck .slide-bullets li ul {
+      list-style: none;
+      padding: 0.25rem 0 0 0;
+    }
+
+    .scion-deck .slide-bullets li ul li {
+      padding-left: 0;
+      font-size: 0.78rem;
+    }
+
+    .scion-deck .slide-bullets li ul li::before {
+      display: none;
+    }
+
+    /* Slide visual (right panel) */
+    .scion-deck .slide-visual {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+    }
+
+    .scion-deck .visual-panel {
+      width: 100%;
+      height: 90%;
+      background: rgba(30, 41, 59, 0.4);
+      border: 1px solid var(--scion-border);
+      border-radius: var(--scion-radius-xl);
+      backdrop-filter: blur(12px);
+      padding: 1rem;
+      box-shadow: var(--scion-shadow-lg);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .scion-deck .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.75rem;
+      border-bottom: 1px solid rgba(51, 65, 85, 0.5);
+      padding-bottom: 0.5rem;
+    }
+
+    .scion-deck .panel-title {
+      font-family: var(--font-header);
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--scion-text-secondary);
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .scion-deck .panel-title svg {
+      width: 14px; height: 14px;
+      color: var(--scion-primary);
+    }
+
+    .scion-deck .panel-controls {
+      display: flex;
+      gap: 0.35rem;
+    }
+
+    .scion-deck .window-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background-color: #334155;
+    }
+
+    .scion-deck .window-dot.red { background-color: var(--scion-danger); opacity: 0.7; }
+    .scion-deck .window-dot.yellow { background-color: var(--scion-warning); opacity: 0.7; }
+    .scion-deck .window-dot.green { background-color: var(--scion-success); opacity: 0.7; }
+
+    /* Footer nav */
+    .scion-deck .presentation-footer {
+      height: 36px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 1.5rem;
+      border-top: 1px solid var(--scion-border);
+      background-color: rgba(15, 23, 42, 0.9);
+      backdrop-filter: blur(12px);
+      z-index: 10;
+      flex-shrink: 0;
+    }
+
+    .scion-deck .footer-instructions {
+      font-size: 0.65rem;
+      color: var(--scion-text-muted);
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .scion-deck .key-badge {
+      background-color: var(--scion-surface);
+      border: 1px solid var(--scion-border);
+      padding: 0.1rem 0.3rem;
+      border-radius: var(--scion-radius-sm);
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      color: var(--scion-text-secondary);
+    }
+
+    .scion-deck .footer-nav {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .scion-deck .progress-dots {
+      display: flex;
+      gap: 0.35rem;
+    }
+
+    .scion-deck .progress-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background-color: var(--scion-border);
+      cursor: pointer;
+      transition: background-color var(--transition-fast), transform var(--transition-fast);
+    }
+
+    .scion-deck .progress-dot.active {
+      background-color: var(--scion-primary);
+      transform: scale(1.3);
+      box-shadow: 0 0 6px var(--scion-primary);
+    }
+
+    .scion-deck .nav-buttons {
+      display: flex;
+      gap: 0.35rem;
+    }
+
+    .scion-deck .nav-btn {
+      background: var(--scion-surface);
+      border: 1px solid var(--scion-border);
+      color: var(--scion-text);
+      padding: 0.3rem;
+      border-radius: var(--scion-radius);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all var(--transition-fast);
+    }
+
+    .scion-deck .nav-btn:hover:not(:disabled) {
+      border-color: var(--scion-primary);
+      color: var(--scion-primary);
+      background: var(--scion-primary-muted);
+    }
+
+    .scion-deck .nav-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+    .scion-deck .nav-btn svg { width: 14px; height: 14px; }
+
+    /* Progress bar */
+    .scion-deck .bottom-progress-bar {
+      position: absolute;
+      bottom: 0; left: 0;
+      height: 2px;
+      background-color: var(--scion-primary);
+      width: 0%;
+      transition: width var(--transition-normal);
+      z-index: 100;
+      box-shadow: 0 0 6px var(--scion-primary);
+    }
+
+    /* Agenda slide (slide 0) */
+    .scion-deck .agenda-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 0.75rem;
+      width: 95%;
+      max-width: 1000px;
+      margin: 0 auto;
+    }
+
+    .scion-deck .agenda-card {
+      background: rgba(30, 41, 59, 0.25);
+      border: 1px solid var(--scion-border);
+      border-radius: var(--scion-radius-lg);
+      padding: 1.25rem 0.75rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      transition: transform var(--transition-normal), border-color var(--transition-normal), box-shadow var(--transition-normal), background var(--transition-normal);
+      text-align: center;
+      cursor: pointer;
+    }
+
+    .scion-deck .agenda-card .agenda-num {
+      font-family: var(--font-header);
+      font-size: 2rem;
+      font-weight: 800;
+      line-height: 1;
+      transition: transform var(--transition-normal);
+    }
+
+    .scion-deck .agenda-card .agenda-title {
+      font-family: var(--font-header);
+      font-size: 1rem;
+      font-weight: 700;
+      margin: 0;
+      color: var(--scion-text);
+    }
+
+    .scion-deck .agenda-card .agenda-subtitle {
+      font-size: 0.7rem;
+      color: var(--scion-text-muted);
+      margin: 0;
+    }
+
+    .scion-deck .agenda-card:nth-child(1) { border-color: rgba(245, 158, 11, 0.25); }
+    .scion-deck .agenda-card:nth-child(1) .agenda-num { color: #f59e0b; }
+    .scion-deck .agenda-card:nth-child(1):hover { border-color: #f59e0b; box-shadow: 0 4px 16px rgba(245, 158, 11, 0.2); }
+
+    .scion-deck .agenda-card:nth-child(2) { border-color: rgba(168, 85, 247, 0.25); }
+    .scion-deck .agenda-card:nth-child(2) .agenda-num { color: #a855f7; }
+    .scion-deck .agenda-card:nth-child(2):hover { border-color: #a855f7; box-shadow: 0 4px 16px rgba(168, 85, 247, 0.2); }
+
+    .scion-deck .agenda-card:nth-child(3) { border-color: rgba(59, 130, 246, 0.25); }
+    .scion-deck .agenda-card:nth-child(3) .agenda-num { color: #3b82f6; }
+    .scion-deck .agenda-card:nth-child(3):hover { border-color: #3b82f6; box-shadow: 0 4px 16px rgba(59, 130, 246, 0.2); }
+
+    .scion-deck .agenda-card:nth-child(4) { border-color: rgba(6, 182, 212, 0.25); }
+    .scion-deck .agenda-card:nth-child(4) .agenda-num { color: #06b6d4; }
+    .scion-deck .agenda-card:nth-child(4):hover { border-color: #06b6d4; box-shadow: 0 4px 16px rgba(6, 182, 212, 0.2); }
+
+    .scion-deck .agenda-card:nth-child(5) { border-color: rgba(234, 179, 8, 0.25); }
+    .scion-deck .agenda-card:nth-child(5) .agenda-num { color: #eab308; }
+    .scion-deck .agenda-card:nth-child(5):hover { border-color: #eab308; box-shadow: 0 4px 16px rgba(234, 179, 8, 0.2); }
+
+    .scion-deck .agenda-card:hover { transform: translateY(-4px); }
+
+    /* Agent definition cards (slide 1) */
+    .scion-deck .agent-definition-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 0.75rem;
+      width: 100%;
+      max-width: 900px;
+    }
+
+    .scion-deck .def-card {
+      position: relative;
+      overflow: hidden;
+      background: rgba(30, 41, 59, 0.4);
+      border: 1px solid var(--scion-border);
+      border-radius: var(--scion-radius-lg);
+      padding: 1rem 1.25rem;
+      text-align: left;
+      backdrop-filter: blur(12px);
+      box-shadow: var(--scion-shadow);
+      transition: all var(--transition-normal);
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    .scion-deck .def-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0;
+      width: 3px;
+      height: 100%;
+      background-color: var(--scion-border);
+      transition: background-color var(--transition-normal);
+    }
+
+    .scion-deck .def-card:hover, .scion-deck .def-card.active {
+      background: rgba(30, 41, 59, 0.7);
+      border-color: var(--scion-primary);
+      transform: translateY(-2px);
+      box-shadow: 0 4px 16px rgba(96, 165, 250, 0.15);
+    }
+
+    .scion-deck .def-card:hover::before, .scion-deck .def-card.active::before {
+      background-color: var(--scion-primary);
+    }
+
+    .scion-deck .def-card-icon {
+      width: 32px; height: 32px;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--scion-border);
+      border-radius: var(--scion-radius);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--scion-text-muted);
+      transition: all var(--transition-normal);
+    }
+
+    .scion-deck .def-card:hover .def-card-icon {
+      color: var(--scion-primary);
+      border-color: var(--scion-primary);
+      background: var(--scion-primary-muted);
+    }
+
+    .scion-deck .def-card-icon svg { width: 18px; height: 18px; }
+
+    .scion-deck .def-card-title {
+      font-family: var(--font-header);
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--scion-text);
+    }
+
+    .scion-deck .def-card-body {
+      font-size: 0.75rem;
+      color: var(--scion-text-secondary);
+      line-height: 1.5;
+    }
+
+    /* State simulator (slide 2) */
+    .scion-deck .state-simulator {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      gap: 0.5rem;
+    }
+
+    .scion-deck .sim-visualizer {
+      flex: 1;
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      background: rgba(15, 23, 42, 0.5);
+      border: 1px solid var(--scion-border);
+      border-radius: var(--scion-radius);
+      padding: 0.75rem;
+      gap: 0.75rem;
+    }
+
+    .scion-deck .sim-row {
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+    }
+
+    .scion-deck .sim-label {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--scion-text-muted);
+    }
+
+    .scion-deck .sim-state-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+    }
+
+    .scion-deck .state-badge {
+      background: var(--scion-bg-subtle);
+      border: 1px solid var(--scion-border);
+      padding: 0.2rem 0.5rem;
+      border-radius: 9999px;
+      font-size: 0.7rem;
+      color: var(--scion-text-secondary);
+      transition: all var(--transition-normal);
+    }
+
+    .scion-deck .state-badge.active-phase {
+      background: rgba(59, 130, 246, 0.15);
+      border-color: var(--scion-primary);
+      color: var(--scion-primary);
+    }
+
+    .scion-deck .state-badge.active-activity {
+      background: rgba(34, 197, 94, 0.1);
+      border-color: var(--scion-success);
+      color: var(--scion-success);
+    }
+
+    .scion-deck .state-badge.active-activity.blocked {
+      background: rgba(245, 158, 11, 0.1);
+      border-color: var(--scion-warning);
+      color: var(--scion-warning);
+    }
+
+    .scion-deck .sim-detail-box {
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid var(--scion-border);
+      border-radius: var(--scion-radius);
+      padding: 0.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+    }
+
+    .scion-deck .detail-line {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      color: var(--scion-text-secondary);
+      line-height: 1.4;
+    }
+
+    .scion-deck .detail-line span { color: var(--scion-primary); }
+
+    .scion-deck .sim-controls {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .scion-deck .sim-btn {
+      background: var(--scion-primary);
+      color: var(--scion-bg);
+      border: none;
+      padding: 0.35rem 0.75rem;
+      font-family: var(--font-header);
+      font-weight: 600;
+      font-size: 0.75rem;
+      border-radius: var(--scion-radius);
+      cursor: pointer;
+      transition: all var(--transition-fast);
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+
+    .scion-deck .sim-btn:hover { background: var(--scion-primary-hover); transform: translateY(-1px); }
+    .scion-deck .sim-btn svg { width: 12px; height: 12px; }
+
+    /* Collaborators graph (slide 3) */
+    .scion-deck .collaborators-svg { display: block; overflow: visible; }
+
+    .scion-deck .graph-edge { stroke: var(--scion-border); stroke-width: 2; stroke-linecap: round; fill: none; }
+
+    .scion-deck .graph-edge-pulse {
+      stroke: var(--scion-primary); stroke-width: 2; stroke-linecap: round;
+      stroke-dasharray: 8 32; fill: none;
+      animation: deck-laser-fwd 3s linear infinite;
+    }
+
+    .scion-deck .graph-edge-pulse-reverse {
+      stroke: var(--scion-success); stroke-width: 2; stroke-linecap: round;
+      stroke-dasharray: 8 32; fill: none;
+      animation: deck-laser-bwd 3s linear infinite;
+    }
+
+    .scion-deck .graph-edge-lateral {
+      stroke: rgba(148, 163, 184, 0.15); stroke-width: 1.5; fill: none;
+    }
+
+    .scion-deck .graph-node-circle {
+      fill: rgba(15, 23, 42, 0.9);
+      stroke: var(--scion-border);
+      stroke-width: 2;
+      transition: all var(--transition-fast);
+    }
+
+    .scion-deck .graph-node-circle.rect-human { stroke: var(--scion-primary); stroke-width: 2.5; }
+    .scion-deck .graph-node-circle.rect-parent { stroke: var(--scion-primary); stroke-width: 2; }
+    .scion-deck .graph-node-circle.rect-child-left { stroke: var(--scion-success); stroke-width: 2; }
+    .scion-deck .graph-node-circle.rect-child-right { stroke: var(--scion-info); stroke-width: 2; }
+
+    .scion-deck .node-emoji-text { font-size: 1.1rem; fill: var(--scion-text); }
+
+    .scion-deck .dynamic-node, .scion-deck .dynamic-edge {
+      opacity: 0;
+      transition: opacity 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .scion-deck .dynamic-node.active, .scion-deck .dynamic-edge.active { opacity: 1; }
+
+    .scion-deck .graph-node-group { cursor: pointer; transition: all var(--transition-fast); }
+    .scion-deck .graph-node-group:hover { filter: brightness(1.3) drop-shadow(0 0 8px rgba(96, 165, 250, 0.4)); }
+
+    @keyframes deck-laser-fwd { from { stroke-dashoffset: 80; } to { stroke-dashoffset: 0; } }
+    @keyframes deck-laser-bwd { from { stroke-dashoffset: -80; } to { stroke-dashoffset: 0; } }
+
+    /* Notification flow (slide 4) */
+    .scion-deck .notif-node-group { transition: opacity 0.5s cubic-bezier(0.4, 0, 0.2, 1); }
+    .scion-deck .notif-node-group.idle { opacity: 0; pointer-events: none; }
+    .scion-deck .notif-node-group.running,
+    .scion-deck .notif-node-group.blocked,
+    .scion-deck .notif-node-group.waiting,
+    .scion-deck .notif-node-group.completed { opacity: 1; }
+
+    .scion-deck .notif-node-circle { transition: stroke 0.4s, fill 0.4s, opacity 0.4s, filter 0.4s; }
+    .scion-deck .notif-node-circle.idle { stroke: #334155 !important; fill: #0f172a !important; opacity: 0.4; }
+    .scion-deck .notif-node-circle.running { stroke: var(--scion-primary) !important; fill: rgba(96, 165, 250, 0.1) !important; opacity: 1 !important; filter: drop-shadow(0 0 6px rgba(96, 165, 250, 0.5)); }
+    .scion-deck .notif-node-circle.blocked { stroke: var(--scion-warning) !important; fill: rgba(245, 158, 11, 0.05) !important; opacity: 1 !important; filter: drop-shadow(0 0 6px rgba(245, 158, 11, 0.5)); animation: deck-pulse-blocked 1.5s infinite alternate; }
+    .scion-deck .notif-node-circle.waiting { stroke: #d946ef !important; fill: rgba(217, 70, 239, 0.1) !important; opacity: 1 !important; filter: drop-shadow(0 0 8px rgba(217, 70, 239, 0.6)); animation: deck-pulse-waiting 1s infinite alternate; }
+    .scion-deck .notif-node-circle.completed { stroke: var(--scion-success) !important; fill: rgba(34, 197, 94, 0.1) !important; opacity: 1 !important; filter: drop-shadow(0 0 6px rgba(34, 197, 94, 0.5)); }
+
+    .scion-deck .notif-edge { stroke: var(--scion-border); stroke-width: 1.5; fill: none; transition: stroke 0.4s; }
+    .scion-deck .notif-edge-pulse { stroke-width: 2; stroke-linecap: round; fill: none; transition: opacity 0.3s; }
+    .scion-deck .state-emoji-overlay { transition: opacity 0.25s ease-out; pointer-events: none; }
+    .scion-deck .notif-node-label { transition: opacity 0.4s; }
+    .scion-deck .pulse-reverse { animation: deck-laser-bwd 2s linear infinite !important; }
+
+    .scion-deck .secondary-btn:hover:not(:disabled) {
+      border-color: var(--scion-primary) !important;
+      color: var(--scion-primary) !important;
+      background: rgba(96, 165, 250, 0.05) !important;
+    }
+
+    @keyframes deck-pulse-blocked { from { filter: drop-shadow(0 0 4px rgba(245, 158, 11, 0.2)); } to { filter: drop-shadow(0 0 10px rgba(245, 158, 11, 0.6)); } }
+    @keyframes deck-pulse-waiting { from { filter: drop-shadow(0 0 4px rgba(217, 70, 239, 0.3)); } to { filter: drop-shadow(0 0 12px rgba(217, 70, 239, 0.7)); } }
+
+    /* Shared filesystem (slide 5) */
+    .scion-deck .fs-simulator-widget {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      gap: 0.5rem;
+    }
+
+    .scion-deck .fs-diagram-container {
+      flex: 1;
+      background: rgba(15, 23, 42, 0.4);
+      border: 1px solid var(--scion-border);
+      border-radius: var(--scion-radius);
+      padding: 0.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .scion-deck .fs-svg { width: 100%; height: 100%; max-height: 200px; display: block; }
+    .scion-deck .fs-tree-edge { stroke: var(--scion-border); stroke-width: 1.5; stroke-linecap: round; opacity: 0.6; }
+    .scion-deck .fs-op-edge { stroke: var(--scion-border); stroke-width: 1.5; stroke-dasharray: 4 4; opacity: 0.3; transition: opacity var(--transition-normal); }
+    .scion-deck .fs-op-edge-pulse { stroke-width: 2.5; stroke-dasharray: 6 12; opacity: 0; fill: none; transition: opacity var(--transition-normal); }
+    .scion-deck .fs-op-edge-pulse.write { stroke: var(--scion-warning); }
+    .scion-deck .fs-op-edge-pulse.read { stroke: var(--scion-primary); }
+
+    @keyframes deck-fs-dash { to { stroke-dashoffset: -36; } }
+    .scion-deck .fs-op-edge-pulse.active { opacity: 1; animation: deck-fs-dash 1.5s linear infinite; }
+
+    .scion-deck .fs-node-circle { fill: var(--scion-bg); stroke-width: 2; transition: all var(--transition-normal); }
+    .scion-deck .fs-node-circle.dir-node { stroke: #475569; fill: rgba(30, 41, 59, 0.9); }
+    .scion-deck .fs-node-circle.file-node { stroke: #334155; fill: rgba(15, 23, 42, 0.85); }
+    .scion-deck .fs-node-circle.file-node.locked { stroke: var(--scion-warning); fill: rgba(245, 158, 11, 0.08); filter: drop-shadow(0 0 8px rgba(245, 158, 11, 0.3)); }
+    .scion-deck .fs-node-circle.file-node.reading { stroke: var(--scion-primary); fill: rgba(96, 165, 250, 0.08); filter: drop-shadow(0 0 8px rgba(96, 165, 250, 0.3)); }
+    .scion-deck .fs-node-circle.agent-node { stroke: var(--scion-border); }
+    .scion-deck .fs-node-circle.agent-node.a1 { stroke: #f59e0b; }
+    .scion-deck .fs-node-circle.agent-node.a2 { stroke: #06b6d4; }
+
+    .scion-deck .fs-node-label { font-family: var(--font-header); font-size: 0.55rem; font-weight: 600; fill: var(--scion-text-muted); pointer-events: none; }
+    .scion-deck .lock-overlay { font-size: 0.6rem; opacity: 0; transition: opacity var(--transition-normal); pointer-events: none; filter: drop-shadow(0 0 2px black); }
+    .scion-deck .lock-overlay.active { opacity: 1; }
+
+    .scion-deck .fs-status-card {
+      background: rgba(30, 41, 59, 0.6);
+      border: 1px solid var(--scion-border);
+      border-radius: var(--scion-radius);
+      padding: 0.4rem 0.75rem;
+      font-family: var(--font-header);
+      font-size: 0.7rem;
+      color: var(--scion-text-secondary);
+      text-align: center;
+      transition: border-color var(--transition-normal), box-shadow var(--transition-normal);
+      min-height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .scion-deck .fs-status-card.active-write { border-color: var(--scion-warning); box-shadow: 0 0 8px rgba(245, 158, 11, 0.15); }
+    .scion-deck .fs-status-card.active-read { border-color: var(--scion-primary); box-shadow: 0 0 8px rgba(96, 165, 250, 0.15); }
+    .scion-deck .fs-status-card.active-done { border-color: var(--scion-success); box-shadow: 0 0 8px rgba(34, 197, 94, 0.15); }
+
+    /* Summary (slide 6) */
+    .scion-deck .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 0.75rem;
+      width: 95%;
+      max-width: 1000px;
+      margin: 0 auto;
+    }
+
+    .scion-deck .summary-card {
+      background: rgba(30, 41, 59, 0.35);
+      border: 1px solid var(--scion-border);
+      border-radius: var(--scion-radius-lg);
+      padding: 1rem 0.75rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.4rem;
+      transition: transform var(--transition-normal), border-color var(--transition-normal), box-shadow var(--transition-normal);
+      text-align: center;
+    }
+
+    .scion-deck .summary-card:nth-child(1) { border-color: rgba(245, 158, 11, 0.35); }
+    .scion-deck .summary-card:nth-child(1) .pipeline-card-title { color: #f59e0b; }
+    .scion-deck .summary-card:nth-child(1):hover { border-color: #f59e0b; box-shadow: 0 4px 16px rgba(245, 158, 11, 0.15); }
+    .scion-deck .summary-card:nth-child(2) { border-color: rgba(168, 85, 247, 0.35); }
+    .scion-deck .summary-card:nth-child(2) .pipeline-card-title { color: #a855f7; }
+    .scion-deck .summary-card:nth-child(2):hover { border-color: #a855f7; box-shadow: 0 4px 16px rgba(168, 85, 247, 0.15); }
+    .scion-deck .summary-card:nth-child(3) { border-color: rgba(59, 130, 246, 0.35); }
+    .scion-deck .summary-card:nth-child(3) .pipeline-card-title { color: #3b82f6; }
+    .scion-deck .summary-card:nth-child(3):hover { border-color: #3b82f6; box-shadow: 0 4px 16px rgba(59, 130, 246, 0.15); }
+    .scion-deck .summary-card:nth-child(4) { border-color: rgba(6, 182, 212, 0.35); }
+    .scion-deck .summary-card:nth-child(4) .pipeline-card-title { color: #06b6d4; }
+    .scion-deck .summary-card:nth-child(4):hover { border-color: #06b6d4; box-shadow: 0 4px 16px rgba(6, 182, 212, 0.15); }
+    .scion-deck .summary-card:nth-child(5) { border-color: rgba(234, 179, 8, 0.35); }
+    .scion-deck .summary-card:nth-child(5) .pipeline-card-title { color: #eab308; }
+    .scion-deck .summary-card:nth-child(5):hover { border-color: #eab308; box-shadow: 0 4px 16px rgba(234, 179, 8, 0.15); }
+
+    .scion-deck .summary-card:hover { transform: translateY(-3px); }
+
+    .scion-deck .summary-card .pipeline-card-icon {
+      height: 36px; width: 100%;
+      display: flex; align-items: center; justify-content: center;
+      overflow: visible;
+      transition: transform var(--transition-normal);
+    }
+
+    .scion-deck .summary-card .pipeline-card-icon svg { width: 100%; height: 100%; overflow: visible; }
+    .scion-deck .summary-card:hover .pipeline-card-icon { transform: scale(1.08); }
+
+    .scion-deck .summary-card .pipeline-card-title {
+      font-family: var(--font-header);
+      font-size: 0.9rem;
+      font-weight: 700;
+      margin: 0;
+    }
+
+    .scion-deck .summary-card .pipeline-card-body {
+      font-size: 0.7rem;
+      line-height: 1.5;
+      color: var(--scion-text-secondary);
+      margin: 0;
+    }
+
+    @keyframes deck-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+    /* Responsive for the deck */
+    @media (max-width: 900px) {
+      .scion-deck { aspect-ratio: auto; min-height: 500px; }
+      .scion-deck .slide { grid-template-columns: 1fr; grid-template-rows: auto 1fr; overflow-y: auto; padding: 1rem; gap: 1rem; }
+      .scion-deck .slide-visual { height: 300px; }
+      .scion-deck .agenda-grid { grid-template-columns: repeat(3, 1fr); }
+      .scion-deck .summary-grid { grid-template-columns: repeat(3, 1fr); }
+      .scion-deck .agent-definition-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -514,48 +1272,473 @@ const base = import.meta.env.BASE_URL;
     </div>
   </section>
 
-  <!-- Scion Core Pipeline -->
-  <section class="pipeline">
-    <div class="section-inner">
+  <!-- Integrated Scion Core Slideshow -->
+  <section class="landing-section" style="background: var(--bg-secondary); border-top: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle);">
+    <div class="section-inner" style="max-width: 1200px;">
       <h2 class="section-title">Scion Core</h2>
-      <p class="section-subtitle">A five-part orchestration pipeline for containerized multi-agent workflows.</p>
-      <div class="pipeline-grid">
-        <div class="pipeline-card">
-          <div class="pipeline-num">01</div>
-          <h3>Define</h3>
-          <p class="pipeline-label">Agent Templates</p>
-          <p class="pipeline-body">Parses declarative agent templates containing system instructions, prompts, custom skills, and MCP configurations.</p>
+      <p class="section-subtitle">A five-part containerized orchestration system for multi-agent workflows.</p>
+
+      <div class="scion-deck" id="scion-deck">
+        <!-- Background glows -->
+        <div class="bg-glows">
+          <div class="bg-glow-1"></div>
+          <div class="bg-glow-2"></div>
         </div>
-        <div class="pipeline-card">
-          <div class="pipeline-num">02</div>
-          <h3>Run</h3>
-          <p class="pipeline-label">Sandbox Runtimes</p>
-          <p class="pipeline-body">Launches standard execution sandboxes, isolating credentials, variables, and runtime boundaries dynamically.</p>
-        </div>
-        <div class="pipeline-card">
-          <div class="pipeline-num">03</div>
-          <h3>Spawn</h3>
-          <p class="pipeline-label">Swarm Hierarchies</p>
-          <p class="pipeline-body">Coordinates human actors and P2P agent hierarchies with lateral peer-to-peer messaging brokers.</p>
-        </div>
-        <div class="pipeline-card">
-          <div class="pipeline-num">04</div>
-          <h3>Notify</h3>
-          <p class="pipeline-label">Reactive Wakeups</p>
-          <p class="pipeline-body">Enforces reactive wakeup sleep cycles — suspends parent, wakes instantly on child completion notification.</p>
-        </div>
-        <div class="pipeline-card">
-          <div class="pipeline-num">05</div>
-          <h3>Sync</h3>
-          <p class="pipeline-label">Shared Filesystem</p>
-          <p class="pipeline-body">Shares folder filesystems concurrently to pass large context by reference and exchange shared progress notes.</p>
-        </div>
+
+        <!-- Header -->
+        <header class="presentation-header">
+          <div class="logo-container">
+            <span style="font-size: 1.2rem; filter: drop-shadow(0 0 4px rgba(96, 165, 250, 0.2));">🌱</span>
+            <h1 class="logo-text">SCION<span>.</span></h1>
+          </div>
+          <div class="deck-title">Multi-Agent Orchestration Explainer</div>
+        </header>
+
+        <!-- Slides -->
+        <main class="slides-wrapper" id="deck-slides-wrapper">
+
+          <!-- Slide 0: Agenda -->
+          <section class="slide active slide-full" id="deck-slide-0">
+            <h2 class="slide-title" style="font-size: 1.8rem; margin-bottom: 0.3rem;">Scion Core</h2>
+            <p class="slide-desc" style="max-width: 600px; margin-bottom: 1.5rem; text-align: center; font-size: 0.9rem;">
+              A five-part containerized orchestration system for multi-agent workflows.
+            </p>
+            <div class="agenda-grid">
+              <div class="agenda-card" data-target-slide="1">
+                <div class="agenda-num">01</div>
+                <h3 class="agenda-title">Define</h3>
+                <p class="agenda-subtitle">Agent Templates</p>
+              </div>
+              <div class="agenda-card" data-target-slide="2">
+                <div class="agenda-num">02</div>
+                <h3 class="agenda-title">Run</h3>
+                <p class="agenda-subtitle">Sandbox Runtimes</p>
+              </div>
+              <div class="agenda-card" data-target-slide="3">
+                <div class="agenda-num">03</div>
+                <h3 class="agenda-title">Spawn</h3>
+                <p class="agenda-subtitle">Swarm Hierarchies</p>
+              </div>
+              <div class="agenda-card" data-target-slide="4">
+                <div class="agenda-num">04</div>
+                <h3 class="agenda-title">Notify</h3>
+                <p class="agenda-subtitle">Reactive Wakeups</p>
+              </div>
+              <div class="agenda-card" data-target-slide="5">
+                <div class="agenda-num">05</div>
+                <h3 class="agenda-title">Sync</h3>
+                <p class="agenda-subtitle">Shared Filesystem</p>
+              </div>
+            </div>
+          </section>
+
+          <!-- Slide 1: Agent Definition -->
+          <section class="slide slide-full" id="deck-slide-1">
+            <h2 class="slide-title" style="font-size: 1.5rem; margin-bottom: 0.25rem;">Agent Definition</h2>
+            <p class="slide-desc" style="max-width: 600px; margin-bottom: 0.75rem; text-align: center;">
+              In Scion, an agent is defined by a structured template consisting of four core layers.
+            </p>
+            <div class="agent-definition-grid">
+              <div class="def-card">
+                <div class="def-card-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                </div>
+                <h3 class="def-card-title">1. System Instruction</h3>
+                <p class="def-card-body">A system instruction defining the agent's primary purpose, persona, and core role. Configured as the foundational LLM boundary.</p>
+              </div>
+              <div class="def-card">
+                <div class="def-card-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                </div>
+                <h3 class="def-card-title">2. Agent Instructions</h3>
+                <p class="def-card-body">Detailing how the agent gets its work done. Scion dynamically appends contextual instructions based on its workspace.</p>
+              </div>
+              <div class="def-card">
+                <div class="def-card-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                </div>
+                <h3 class="def-card-title">3. Agent Skills</h3>
+                <p class="def-card-body">A set of specialized skills conforming to the Agent Skills Specification to perform deterministic CLI tasks.</p>
+              </div>
+              <div class="def-card">
+                <div class="def-card-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+                </div>
+                <h3 class="def-card-title">4. Model Context Protocol (MCP)</h3>
+                <p class="def-card-body">Optionally configures MCP server connections to dynamically expose external tools, with container harnesses as optional execution details.</p>
+              </div>
+            </div>
+          </section>
+
+          <!-- Slide 2: Agent Runtime -->
+          <section class="slide" id="deck-slide-2">
+            <div class="slide-content">
+              <h2 class="slide-title">Agent Runtime</h2>
+              <p class="slide-desc">Scion abstracts complex system execution, managing secure, isolated processes across varied backends under a managed control plane.</p>
+              <ul class="slide-bullets">
+                <li><strong>Agent Lifecycle:</strong> Uniform control commands (<code>create</code>, <code>start</code>, <code>stop</code>, <code>attach</code>, <code>delete</code>) regardless of the underlying agent implementation.</li>
+                <li><strong>Container Runtimes:</strong> Seamlessly executes sandboxed processes across <strong>Docker</strong>, <strong>Podman</strong>, macOS native <strong>Apple Virtualization</strong>, or remote <strong>Kubernetes</strong>.</li>
+                <li><strong>Env &amp; Volume Mounts:</strong> Projects explicitly defined environment variables, mounts read-only secrets/credentials, and maps isolated <code>tmpfs</code> shadow volumes.</li>
+                <li><strong>Native &amp; Federated Identity:</strong> Binds native project-scoped identities to federated systems like GCP service accounts or Agent Platform credentials.</li>
+              </ul>
+            </div>
+            <div class="slide-visual">
+              <div class="visual-panel">
+                <div class="panel-header">
+                  <div class="panel-title">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+                    Agent State Model Simulator
+                  </div>
+                  <div class="panel-controls">
+                    <div class="window-dot red"></div>
+                    <div class="window-dot yellow"></div>
+                    <div class="window-dot green"></div>
+                  </div>
+                </div>
+                <div class="state-simulator">
+                  <div class="sim-visualizer">
+                    <div class="sim-row">
+                      <div class="sim-label">Dimension 1: Infrastructure Phase</div>
+                      <div class="sim-state-badges" id="deck-phase-badges">
+                        <span class="state-badge active-phase" data-phase="provisioning">provisioning</span>
+                        <span class="state-badge" data-phase="running">running</span>
+                        <span class="state-badge" data-phase="stopping">stopping</span>
+                        <span class="state-badge" data-phase="stopped">stopped</span>
+                      </div>
+                    </div>
+                    <div class="sim-row">
+                      <div class="sim-label">Dimension 2: Cognitive Activity</div>
+                      <div class="sim-state-badges" id="deck-activity-badges">
+                        <span class="state-badge" data-activity="offline">offline</span>
+                        <span class="state-badge" data-activity="working">working</span>
+                        <span class="state-badge" data-activity="thinking">thinking</span>
+                        <span class="state-badge" data-activity="waiting_for_input">waiting_for_input</span>
+                        <span class="state-badge" data-activity="blocked">blocked</span>
+                      </div>
+                    </div>
+                    <div class="sim-row">
+                      <div class="sim-label">Dimension 3: Detail Stream</div>
+                      <div class="sim-detail-box">
+                        <div class="detail-line">Phase: <span id="deck-detail-phase">provisioning</span></div>
+                        <div class="detail-line">Activity: <span id="deck-detail-activity">offline</span></div>
+                        <div class="detail-line">Status log: <span id="deck-detail-text" style="color: var(--scion-text-muted);">Allocating container sandbox...</span></div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="sim-controls">
+                    <button class="sim-btn" id="deck-next-state-btn">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                      Step Simulator Stage
+                    </button>
+                    <div class="detail-line" style="font-size: 0.6rem; color: var(--scion-text-muted);">Click to trigger transitions</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Slide 3: Agent Collaborators -->
+          <section class="slide" id="deck-slide-3">
+            <div class="slide-content">
+              <h2 class="slide-title">Agent Collaborators</h2>
+              <p class="slide-desc">Scion supports teams of humans working with teams of agents. Both are treated as actors in the system, enabling dynamic, self-directed collaboration instead of rigid, hard-coded orchestration graphs.</p>
+              <ul class="slide-bullets">
+                <li><strong>Actor Interaction:</strong> Both humans and agents can query, message, or inspect Agents.</li>
+                <li><strong>Self-Directed Management:</strong> Agents are equipped with access to the <code>scion</code> CLI, letting agents themselves dynamically spawn, query, or stop sub-agents.</li>
+                <li><strong>Asynchronous Messaging:</strong> Collaborators communicate asynchronously, sending messages and delegating work across safe, pluggable brokers.</li>
+                <li><strong>Interactive Inspection:</strong> Humans and parent agents can attach or "look" at running agent processes (via <code>tmux</code>) or view logs.</li>
+              </ul>
+            </div>
+            <div class="slide-visual">
+              <div class="visual-panel">
+                <div class="panel-header" style="justify-content: flex-end; border-bottom: none; margin-bottom: 0.25rem;">
+                  <div class="panel-controls">
+                    <div class="window-dot red"></div>
+                    <div class="window-dot yellow"></div>
+                    <div class="window-dot green"></div>
+                  </div>
+                </div>
+                <div style="flex: 1; position: relative; width: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden;">
+                  <svg class="collaborators-svg" viewBox="0 0 500 320" style="width: 100%; height: 100%; fill: none; overflow: visible;">
+                    <defs>
+                      <filter id="glow-primary" x="-20%" y="-20%" width="140%" height="140%">
+                        <feGaussianBlur stdDeviation="3" result="blur" />
+                        <feComposite in="SourceGraphic" in2="blur" operator="over" />
+                      </filter>
+                    </defs>
+                    <!-- Static edges -->
+                    <path class="graph-edge" d="M 170 60 L 100 150" />
+                    <path class="graph-edge-pulse" d="M 170 60 L 100 150" />
+                    <path class="graph-edge" d="M 170 60 L 250 150" />
+                    <path class="graph-edge-pulse" d="M 170 60 L 250 150" />
+                    <path class="graph-edge" d="M 330 60 L 250 150" />
+                    <path class="graph-edge-pulse-reverse" d="M 330 60 L 250 150" />
+                    <path class="graph-edge" d="M 330 60 L 400 150" />
+                    <path class="graph-edge-pulse" d="M 330 60 L 400 150" />
+                    <!-- Lateral peer edges -->
+                    <path class="graph-edge-lateral" d="M 100 150 L 250 150" stroke-dasharray="4,4" />
+                    <path class="graph-edge-lateral" d="M 250 150 L 400 150" stroke-dasharray="4,4" />
+                    <!-- Message dots -->
+                    <circle r="3.5" fill="var(--scion-primary)" filter="url(#glow-primary)">
+                      <animateMotion dur="3s" repeatCount="indefinite" path="M 100 150 L 250 150" />
+                      <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.2;0.8;1" dur="3s" repeatCount="indefinite" />
+                    </circle>
+                    <circle r="2.5" fill="var(--scion-success)" filter="url(#glow-primary)">
+                      <animateMotion dur="4s" begin="1.5s" repeatCount="indefinite" path="M 250 150 L 100 150" />
+                      <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.2;0.8;1" dur="4s" begin="1.5s" repeatCount="indefinite" />
+                    </circle>
+                    <circle r="3.5" fill="var(--scion-primary)" filter="url(#glow-primary)">
+                      <animateMotion dur="3.5s" begin="0.5s" repeatCount="indefinite" path="M 250 150 L 400 150" />
+                      <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.2;0.8;1" dur="3.5s" begin="0.5s" repeatCount="indefinite" />
+                    </circle>
+                    <circle r="2.5" fill="var(--scion-success)" filter="url(#glow-primary)">
+                      <animateMotion dur="3s" begin="2s" repeatCount="indefinite" path="M 400 150 L 250 150" />
+                      <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.2;0.8;1" dur="3s" begin="2s" repeatCount="indefinite" />
+                    </circle>
+                    <!-- Dynamic edges -->
+                    <path class="graph-edge dynamic-edge" id="deck-edge-a1-c1a" d="M 100 150 L 60 250" />
+                    <path class="graph-edge-pulse dynamic-edge" id="deck-pulse-a1-c1a" d="M 100 150 L 60 250" />
+                    <path class="graph-edge dynamic-edge" id="deck-edge-a1-c1b" d="M 100 150 L 140 250" />
+                    <path class="graph-edge-pulse dynamic-edge" id="deck-pulse-a1-c1b" d="M 100 150 L 140 250" />
+                    <path class="graph-edge dynamic-edge" id="deck-edge-a2-c2a" d="M 250 150 L 250 250" />
+                    <path class="graph-edge-pulse dynamic-edge" id="deck-pulse-a2-c2a" d="M 250 150 L 250 250" />
+                    <path class="graph-edge dynamic-edge" id="deck-edge-a3-c3a" d="M 400 150 L 400 250" />
+                    <path class="graph-edge-pulse dynamic-edge" id="deck-pulse-a3-c3a" d="M 400 150 L 400 250" />
+                    <!-- Nodes -->
+                    <g class="graph-node-group" transform="translate(170, 60)"><circle class="graph-node-circle rect-human" r="22" fill="#0f172a" /><text text-anchor="middle" dominant-baseline="central" fill="var(--scion-text)" class="node-emoji-text" y="1">🧑‍💻</text></g>
+                    <g class="graph-node-group" transform="translate(330, 60)"><circle class="graph-node-circle rect-human" r="22" fill="#0f172a" /><text text-anchor="middle" dominant-baseline="central" fill="var(--scion-text)" class="node-emoji-text" y="1">👤</text></g>
+                    <g class="graph-node-group" transform="translate(100, 150)"><circle class="graph-node-circle rect-parent" r="20" fill="#0f172a" /><text text-anchor="middle" dominant-baseline="central" fill="var(--scion-text)" class="node-emoji-text" y="1">🤖</text></g>
+                    <g class="graph-node-group" transform="translate(250, 150)"><circle class="graph-node-circle rect-parent" r="20" fill="#0f172a" /><text text-anchor="middle" dominant-baseline="central" fill="var(--scion-text)" class="node-emoji-text" y="1">🤖</text></g>
+                    <g class="graph-node-group" transform="translate(400, 150)"><circle class="graph-node-circle rect-parent" r="20" fill="#0f172a" /><text text-anchor="middle" dominant-baseline="central" fill="var(--scion-text)" class="node-emoji-text" y="1">🤖</text></g>
+                    <!-- Dynamic child nodes -->
+                    <g class="graph-node-group dynamic-node" id="deck-node-child-1a" transform="translate(60, 250)"><circle class="graph-node-circle rect-child-left" r="18" fill="#0f172a" /><text text-anchor="middle" dominant-baseline="central" fill="var(--scion-text)" class="node-emoji-text" style="font-size:0.85rem;" y="1">🤖</text></g>
+                    <g class="graph-node-group dynamic-node" id="deck-node-child-1b" transform="translate(140, 250)"><circle class="graph-node-circle rect-child-left" r="18" fill="#0f172a" /><text text-anchor="middle" dominant-baseline="central" fill="var(--scion-text)" class="node-emoji-text" style="font-size:0.85rem;" y="1">🤖</text></g>
+                    <g class="graph-node-group dynamic-node" id="deck-node-child-2a" transform="translate(250, 250)"><circle class="graph-node-circle rect-child-right" r="18" fill="#0f172a" /><text text-anchor="middle" dominant-baseline="central" fill="var(--scion-text)" class="node-emoji-text" style="font-size:0.85rem;" y="1">🤖</text></g>
+                    <g class="graph-node-group dynamic-node" id="deck-node-child-3a" transform="translate(400, 250)"><circle class="graph-node-circle rect-child-right" r="18" fill="#0f172a" /><text text-anchor="middle" dominant-baseline="central" fill="var(--scion-text)" class="node-emoji-text" style="font-size:0.85rem;" y="1">🤖</text></g>
+                  </svg>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Slide 4: Agent Notifications -->
+          <section class="slide" id="deck-slide-4">
+            <div class="slide-content">
+              <h2 class="slide-title">Agent Notifications</h2>
+              <p class="slide-desc">Scion combines state and messages into notifications to provide robust asynchronous event driven orchestration patterns.</p>
+              <ul class="slide-bullets">
+                <li><strong>State &amp; Message Intersection:</strong> Notifications represent events triggered when an agent transitions state (e.g. from <code>working</code> to <code>waiting_for_input</code>).</li>
+                <li><strong>Sub-Agent Suspend Pattern:</strong> When an agent delegates a task, it invokes a child, updates its activity to <code>blocked</code>, and sleeps. No active polling occurs.</li>
+                <li><strong>Event-Driven Wakeup:</strong> Once the sub-agent completes, stalls, or needs input, a notification hook automatically wakes the parent agent up.</li>
+                <li><strong>Human Attention Alerts:</strong> Triggers notifications to Slack, terminals, or dashboards the instant an agent gets stuck or requires human confirmation.</li>
+              </ul>
+            </div>
+            <div class="slide-visual">
+              <div class="visual-panel">
+                <div class="panel-header">
+                  <div class="panel-title">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                    Reactive Notification Wakeup
+                  </div>
+                  <div class="panel-controls">
+                    <div class="window-dot red"></div>
+                    <div class="window-dot yellow"></div>
+                    <div class="window-dot green"></div>
+                  </div>
+                </div>
+                <div class="wakeup-diagram" style="display: flex; flex-direction: column; height: 100%; gap: 0.5rem;">
+                  <div style="flex: 1; background: rgba(15, 23, 42, 0.3); border: 1px solid var(--scion-border); border-radius: var(--scion-radius-lg); padding: 0.25rem; display: flex; align-items: center; justify-content: center; position: relative;">
+                    <svg class="notif-svg" viewBox="0 0 500 240" style="width: 100%; height: 100%; fill: none; overflow: visible;">
+                      <defs><filter id="glow-notif" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="3" result="blur" /><feComposite in="SourceGraphic" in2="blur" operator="over" /></filter></defs>
+                      <!-- Edges -->
+                      <path class="notif-edge" id="deck-edge-c-l" d="M 250 30 L 120 100" stroke="var(--scion-border)" stroke-width="2" style="opacity: 0;" />
+                      <path class="notif-edge-pulse" id="deck-pulse-c-l" d="M 250 30 L 120 100" stroke="var(--scion-primary)" stroke-width="2" stroke-dasharray="6 20" style="opacity: 0;" />
+                      <path class="notif-edge" id="deck-edge-c-r" d="M 250 30 L 380 100" stroke="var(--scion-border)" stroke-width="2" style="opacity: 0;" />
+                      <path class="notif-edge-pulse" id="deck-pulse-c-r" d="M 250 30 L 380 100" stroke="var(--scion-primary)" stroke-width="2" stroke-dasharray="6 20" style="opacity: 0;" />
+                      <path class="notif-edge" id="deck-edge-l-lc1" d="M 120 100 L 60 175" stroke="var(--scion-border)" stroke-width="1.5" style="opacity: 0;" />
+                      <path class="notif-edge-pulse" id="deck-pulse-l-lc1" d="M 120 100 L 60 175" stroke="var(--scion-success)" stroke-width="1.5" stroke-dasharray="6 20" style="opacity: 0;" />
+                      <path class="notif-edge" id="deck-edge-l-lc2" d="M 120 100 L 120 175" stroke="var(--scion-border)" stroke-width="1.5" style="opacity: 0;" />
+                      <path class="notif-edge-pulse" id="deck-pulse-l-lc2" d="M 120 100 L 120 175" stroke="var(--scion-success)" stroke-width="1.5" stroke-dasharray="6 20" style="opacity: 0;" />
+                      <path class="notif-edge" id="deck-edge-l-lc3" d="M 120 100 L 180 175" stroke="var(--scion-border)" stroke-width="1.5" style="opacity: 0;" />
+                      <path class="notif-edge-pulse" id="deck-pulse-l-lc3" d="M 120 100 L 180 175" stroke="var(--scion-success)" stroke-width="1.5" stroke-dasharray="6 20" style="opacity: 0;" />
+                      <path class="notif-edge" id="deck-edge-r-rc1" d="M 380 100 L 380 175" stroke="var(--scion-border)" stroke-width="1.5" style="opacity: 0;" />
+                      <path class="notif-edge-pulse" id="deck-pulse-r-rc1" d="M 380 100 L 380 175" stroke="var(--scion-primary)" stroke-width="1.5" stroke-dasharray="6 20" style="opacity: 0;" />
+                      <!-- Nodes -->
+                      <g class="notif-node-group running" id="deck-node-coord" transform="translate(250, 30)"><circle class="notif-node-circle rect-coord running" r="20" fill="#0f172a" stroke="var(--scion-primary)" stroke-width="2.5" /><text text-anchor="middle" dominant-baseline="central" class="node-emoji-text" y="1">🤖</text><text class="state-emoji-overlay" x="-22" y="1" text-anchor="middle" dominant-baseline="central" style="font-size: 0.65rem; opacity: 0;"></text><text class="notif-node-label" text-anchor="middle" y="32" fill="var(--scion-text-muted)" style="font-size: 0.55rem; font-family: var(--font-header);">COORDINATOR</text></g>
+                      <g class="notif-node-group idle" id="deck-node-left" transform="translate(120, 100)"><circle class="notif-node-circle rect-parent-l idle" r="18" fill="#0f172a" stroke="#334155" stroke-width="2" /><text text-anchor="middle" dominant-baseline="central" class="node-emoji-text" style="font-size: 0.95rem;" y="1">🤖</text><text class="state-emoji-overlay" x="-20" y="1" text-anchor="middle" dominant-baseline="central" style="font-size: 0.65rem; opacity: 0;"></text></g>
+                      <g class="notif-node-group idle" id="deck-node-right" transform="translate(380, 100)"><circle class="notif-node-circle rect-parent-r idle" r="18" fill="#0f172a" stroke="#334155" stroke-width="2" /><text text-anchor="middle" dominant-baseline="central" class="node-emoji-text" style="font-size: 0.95rem;" y="1">🤖</text><text class="state-emoji-overlay" x="-20" y="1" text-anchor="middle" dominant-baseline="central" style="font-size: 0.65rem; opacity: 0;"></text></g>
+                      <g class="notif-node-group idle" id="deck-node-lc1" transform="translate(60, 175)"><circle class="notif-node-circle rect-child idle" r="14" fill="#0f172a" stroke="#334155" stroke-width="1.5" /><text text-anchor="middle" dominant-baseline="central" class="node-emoji-text" style="font-size: 0.7rem;" y="1">🤖</text><text class="state-emoji-overlay" x="-16" y="1" text-anchor="middle" dominant-baseline="central" style="font-size: 0.6rem; opacity: 0;"></text></g>
+                      <g class="notif-node-group idle" id="deck-node-lc2" transform="translate(120, 175)"><circle class="notif-node-circle rect-child idle" r="14" fill="#0f172a" stroke="#334155" stroke-width="1.5" /><text text-anchor="middle" dominant-baseline="central" class="node-emoji-text" style="font-size: 0.7rem;" y="1">🤖</text><text class="state-emoji-overlay" x="-16" y="1" text-anchor="middle" dominant-baseline="central" style="font-size: 0.6rem; opacity: 0;"></text></g>
+                      <g class="notif-node-group idle" id="deck-node-lc3" transform="translate(180, 175)"><circle class="notif-node-circle rect-child idle" r="14" fill="#0f172a" stroke="#334155" stroke-width="1.5" /><text text-anchor="middle" dominant-baseline="central" class="node-emoji-text" style="font-size: 0.7rem;" y="1">🤖</text><text class="state-emoji-overlay" x="-16" y="1" text-anchor="middle" dominant-baseline="central" style="font-size: 0.6rem; opacity: 0;"></text></g>
+                      <g class="notif-node-group idle" id="deck-node-rc1" transform="translate(380, 175)"><circle class="notif-node-circle rect-child idle" r="14" fill="#0f172a" stroke="#334155" stroke-width="1.5" /><text text-anchor="middle" dominant-baseline="central" class="node-emoji-text" style="font-size: 0.7rem;" y="1">🤖</text><text class="state-emoji-overlay" x="-16" y="1" text-anchor="middle" dominant-baseline="central" style="font-size: 0.6rem; opacity: 0;"></text></g>
+                    </svg>
+                  </div>
+                  <div style="display: flex; gap: 0.5rem; justify-content: center; align-items: center;">
+                    <button class="sim-btn" id="deck-notif-play-btn" style="min-width: 140px;">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 12px; height: 12px;"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                      Run Orchestration
+                    </button>
+                    <button class="sim-btn secondary-btn" id="deck-notif-reset-btn" disabled style="opacity: 0.5; cursor: not-allowed; border: 1px solid var(--scion-border); padding: 0.35rem 0.75rem; font-weight: 600; font-family: var(--font-header); font-size: 0.75rem; color: var(--scion-text-muted); background: transparent;">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 12px; height: 12px;"><path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                      Reset Flow
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Slide 5: Shared Filesystem -->
+          <section class="slide" id="deck-slide-5">
+            <div class="slide-content">
+              <h2 class="slide-title">Shared Filesystem</h2>
+              <p class="slide-desc">For multi-agent workflows, sharing a high-performance filesystem provides frictionless code modification, test execution, and file exchanges. Scion manages concurrent file access safely.</p>
+              <ul class="slide-bullets">
+                <li><strong>Shared File Volume Mounts:</strong><ul><li>Agent workspaces share the same physical project directory, avoiding heavy git clone replication delays and preserving disk space.</li></ul></li>
+                <li><strong>Pass Context by Reference:</strong><ul><li>Instead of bloating LLM payloads with massive files or logs, agents pass a file path reference on the shared volume, drastically saving token bandwidth.</li></ul></li>
+                <li><strong>Shared Learnings &amp; Progress Notes:</strong><ul><li>Sibling agents read and write shared folders to exchange progress summaries and execution logs in real time.</li></ul></li>
+                <li><strong>Workspace Branch Isolation:</strong><ul><li>If Git isolation is needed, agents can initialize local branches or isolated worktrees, but they still operate on the shared disk storage.</li></ul></li>
+              </ul>
+            </div>
+            <div class="slide-visual">
+              <div class="visual-panel">
+                <div class="panel-header">
+                  <div class="panel-title">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                    Shared Filesystem Simulator
+                  </div>
+                  <div class="panel-controls">
+                    <div class="window-dot red"></div>
+                    <div class="window-dot yellow"></div>
+                    <div class="window-dot green"></div>
+                  </div>
+                </div>
+                <div class="fs-simulator-widget">
+                  <div class="fs-diagram-container">
+                    <svg viewBox="0 0 500 230" class="fs-svg">
+                      <defs>
+                        <linearGradient id="writeGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="var(--scion-warning)" /><stop offset="100%" stop-color="#ea580c" /></linearGradient>
+                        <linearGradient id="readGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="var(--scion-primary)" /><stop offset="100%" stop-color="#1d4ed8" /></linearGradient>
+                      </defs>
+                      <line x1="280" y1="30" x2="240" y2="95" class="fs-tree-edge" /><line x1="280" y1="30" x2="370" y2="95" class="fs-tree-edge" /><line x1="240" y1="95" x2="200" y2="165" class="fs-tree-edge" /><line x1="240" y1="95" x2="280" y2="165" class="fs-tree-edge" /><line x1="370" y1="95" x2="370" y2="165" class="fs-tree-edge" />
+                      <path class="fs-op-edge" id="deck-edge-a1-auth" d="M 60 70 L 200 165" /><path class="fs-op-edge-pulse write" id="deck-pulse-a1-auth" d="M 60 70 L 200 165" />
+                      <path class="fs-op-edge" id="deck-edge-a2-server" d="M 60 160 L 280 165" /><path class="fs-op-edge-pulse read" id="deck-pulse-a2-server" d="M 60 160 L 280 165" />
+                      <path class="fs-op-edge" id="deck-edge-a2-test" d="M 60 160 L 370 165" /><path class="fs-op-edge-pulse write" id="deck-pulse-a2-test" d="M 60 160 L 370 165" />
+                      <circle id="deck-dot-a1-auth" r="3.5" fill="var(--scion-warning)" opacity="0"><animateMotion id="deck-anim-a1-auth" dur="1.4s" begin="indefinite" repeatCount="indefinite" path="M 60 70 L 200 165" /></circle>
+                      <circle id="deck-dot-a2-server" r="3.5" fill="var(--scion-primary)" opacity="0"><animateMotion id="deck-anim-a2-server" dur="1.4s" begin="indefinite" repeatCount="indefinite" path="M 60 160 L 280 165" /></circle>
+                      <circle id="deck-dot-a2-test" r="3.5" fill="var(--scion-warning)" opacity="0"><animateMotion id="deck-anim-a2-test" dur="1.4s" begin="indefinite" repeatCount="indefinite" path="M 60 160 L 370 165" /></circle>
+                      <g transform="translate(60, 70)"><circle class="fs-node-circle agent-node a1" r="18" /><text text-anchor="middle" dominant-baseline="central" class="node-emoji-text" y="1">🤖</text><text class="fs-node-label" text-anchor="middle" y="28">Agent 1</text></g>
+                      <g transform="translate(60, 160)"><circle class="fs-node-circle agent-node a2" r="18" /><text text-anchor="middle" dominant-baseline="central" class="node-emoji-text" y="1">🤖</text><text class="fs-node-label" text-anchor="middle" y="28">Agent 2</text></g>
+                      <g transform="translate(280, 30)"><circle class="fs-node-circle dir-node" r="18" /><text text-anchor="middle" dominant-baseline="central" class="node-emoji-text" y="1">📁</text><text class="fs-node-label" text-anchor="middle" y="28">scion/</text></g>
+                      <g transform="translate(240, 95)"><circle class="fs-node-circle dir-node" r="16" /><text text-anchor="middle" dominant-baseline="central" class="node-emoji-text" y="0">📁</text><text class="fs-node-label" text-anchor="middle" y="26">src/</text></g>
+                      <g transform="translate(370, 95)"><circle class="fs-node-circle dir-node" r="16" /><text text-anchor="middle" dominant-baseline="central" class="node-emoji-text" y="0">📁</text><text class="fs-node-label" text-anchor="middle" y="26">tests/</text></g>
+                      <g transform="translate(200, 165)"><circle class="fs-node-circle file-node" id="deck-circle-auth" r="14" /><text text-anchor="middle" dominant-baseline="central" class="node-emoji-text file" y="0">📄</text><text class="fs-node-label" text-anchor="middle" y="24">auth.py</text><text class="lock-overlay" id="deck-lock-auth" x="12" y="-12" text-anchor="middle" dominant-baseline="central">🔒</text></g>
+                      <g transform="translate(280, 165)"><circle class="fs-node-circle file-node" id="deck-circle-server" r="14" /><text text-anchor="middle" dominant-baseline="central" class="node-emoji-text file" y="0">📄</text><text class="fs-node-label" text-anchor="middle" y="24">server.py</text><text class="lock-overlay" id="deck-lock-server" x="12" y="-12" text-anchor="middle" dominant-baseline="central">🔒</text></g>
+                      <g transform="translate(370, 165)"><circle class="fs-node-circle file-node" id="deck-circle-test" r="14" /><text text-anchor="middle" dominant-baseline="central" class="node-emoji-text file" y="0">📄</text><text class="fs-node-label" text-anchor="middle" y="24">test_auth.py</text><text class="lock-overlay" id="deck-lock-test" x="12" y="-12" text-anchor="middle" dominant-baseline="central">🔒</text></g>
+                    </svg>
+                  </div>
+                  <div class="fs-status-card" id="deck-fs-status-card">Click "Run Simulation" to observe concurrent filesystem operations.</div>
+                  <div style="display: flex; gap: 0.5rem; justify-content: center; align-items: center;">
+                    <button class="sim-btn" id="deck-fs-play-btn" style="min-width: 140px;">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 12px; height: 12px;"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                      Run Simulation
+                    </button>
+                    <button class="sim-btn secondary-btn" id="deck-fs-reset-btn" disabled style="opacity: 0.5; cursor: not-allowed; border: 1px solid var(--scion-border); padding: 0.35rem 0.75rem; font-weight: 600; font-family: var(--font-header); font-size: 0.75rem; color: var(--scion-text-muted); background: transparent;">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 12px; height: 12px;"><path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                      Reset
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Slide 6: Summary -->
+          <section class="slide slide-full" id="deck-slide-6">
+            <h2 class="slide-title" style="text-align: center; margin-bottom: 0.25rem; font-size: 1.5rem;">Scion Orchestration Review</h2>
+            <p class="slide-desc" style="max-width: 700px; margin-bottom: 1.25rem; text-align: center; font-size: 0.85rem;">
+              From declarative template definitions to secure, low-latency filesystem execution, Scion coordinates complex agentic workflows in five key stages.
+            </p>
+            <div class="pipeline-grid summary-grid">
+              <div class="pipeline-card summary-card">
+                <div class="pipeline-card-icon">
+                  <svg viewBox="0 0 80 50" style="width: 100%; height: 36px;"><rect x="20" y="5" width="40" height="40" rx="3" fill="rgba(245, 158, 11, 0.03)" stroke="var(--scion-border)" stroke-width="1.5" /><rect x="25" y="10" width="18" height="3" rx="0.5" fill="#f59e0b" opacity="0.8" /><line x1="25" y1="18" x2="55" y2="18" stroke="var(--scion-text-secondary)" stroke-width="1.5" stroke-linecap="round" opacity="0.5" /><line x1="25" y1="24" x2="48" y2="24" stroke="var(--scion-text-secondary)" stroke-width="1.5" stroke-linecap="round" opacity="0.5" /><line x1="25" y1="30" x2="52" y2="30" stroke="var(--scion-text-secondary)" stroke-width="1.5" stroke-linecap="round" opacity="0.5" /></svg>
+                </div>
+                <h3 class="pipeline-card-title">1. Define</h3>
+                <p class="pipeline-card-body">Parses declarative agent templates containing system instructions, prompts, custom skills, and MCP configurations.</p>
+              </div>
+              <div class="pipeline-card summary-card">
+                <div class="pipeline-card-icon">
+                  <svg viewBox="0 0 80 50" style="width: 100%; height: 36px;"><rect x="22" y="12" width="36" height="26" rx="4" fill="rgba(168, 85, 247, 0.03)" stroke="#a855f7" stroke-width="1.5" /><circle cx="40" cy="25" r="5" fill="#a855f7" opacity="0.15" /><circle cx="40" cy="25" r="2.5" fill="#a855f7" /></svg>
+                </div>
+                <h3 class="pipeline-card-title">2. Run</h3>
+                <p class="pipeline-card-body">Launches standard execution sandboxes, isolating credentials, variables, and runtime boundaries dynamically.</p>
+              </div>
+              <div class="pipeline-card summary-card">
+                <div class="pipeline-card-icon">
+                  <svg viewBox="0 0 80 50" style="width: 100%; height: 36px;"><circle cx="40" cy="11" r="5" fill="rgba(59, 130, 246, 0.15)" stroke="#3b82f6" stroke-width="1.5" /><circle cx="22" cy="38" r="4.5" fill="none" stroke="var(--scion-border)" stroke-width="1.5" /><circle cx="40" cy="38" r="4.5" fill="none" stroke="var(--scion-border)" stroke-width="1.5" /><circle cx="58" cy="38" r="4.5" fill="none" stroke="var(--scion-border)" stroke-width="1.5" /><line x1="36" y1="15" x2="25" y2="33" stroke="var(--scion-border)" stroke-width="1" stroke-dasharray="2 2" /><line x1="40" y1="16" x2="40" y2="33" stroke="var(--scion-border)" stroke-width="1" stroke-dasharray="2 2" /><line x1="44" y1="15" x2="55" y2="33" stroke="var(--scion-border)" stroke-width="1" stroke-dasharray="2 2" /></svg>
+                </div>
+                <h3 class="pipeline-card-title">3. Spawn</h3>
+                <p class="pipeline-card-body">Coordinates human actors and P2P agent hierarchies with lateral peer-to-peer messaging brokers.</p>
+              </div>
+              <div class="pipeline-card summary-card">
+                <div class="pipeline-card-icon">
+                  <svg viewBox="0 0 80 50" style="width: 100%; height: 36px;"><path d="M 52 32 C 52 32 52 26 56 26 C 60 26 60 32 60 32 L 63 32 L 61 34 L 51 34 L 49 32 Z" fill="rgba(6, 182, 212, 0.1)" stroke="#06b6d4" stroke-width="1.5" /><circle cx="56" cy="36" r="1.5" fill="#06b6d4" /><path d="M 64 23 C 66 25 66 29 64 31" fill="none" stroke="#06b6d4" stroke-width="1" stroke-linecap="round" /><path d="M 36 25 C 41 21 44 29 49 25" fill="none" stroke="#06b6d4" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="1.5 2" /></svg>
+                </div>
+                <h3 class="pipeline-card-title">4. Notify</h3>
+                <p class="pipeline-card-body">Enforces reactive wakeup sleep cycles (suspends parent, wakes instantly on child completion notification).</p>
+              </div>
+              <div class="pipeline-card summary-card">
+                <div class="pipeline-card-icon">
+                  <svg viewBox="0 0 80 50" style="width: 100%; height: 36px;"><rect x="30" y="20" width="20" height="24" rx="2" fill="rgba(234, 179, 8, 0.03)" stroke="var(--scion-border)" stroke-width="1.2" /><line x1="35" y1="26" x2="45" y2="26" stroke="var(--scion-text-secondary)" stroke-width="1" opacity="0.5" /><line x1="35" y1="32" x2="45" y2="32" stroke="var(--scion-text-secondary)" stroke-width="1" opacity="0.5" /><circle cx="53" cy="16" r="5" fill="var(--scion-bg)" stroke="#eab308" stroke-width="1.2" /><path d="M 12 25 L 26 25" fill="none" stroke="#eab308" stroke-width="1.2" stroke-linecap="round" /><polygon points="26 25 22 22 22 28" fill="#eab308" /></svg>
+                </div>
+                <h3 class="pipeline-card-title">5. Sync</h3>
+                <p class="pipeline-card-body">Shares folder filesystems concurrently to pass large context by reference and exchange shared progress notes.</p>
+              </div>
+            </div>
+          </section>
+
+        </main>
+
+        <!-- Footer Controls -->
+        <footer class="presentation-footer">
+          <div class="footer-instructions">
+            <span>Use <span class="key-badge">&larr;</span> <span class="key-badge">&rarr;</span> or click to navigate</span>
+          </div>
+          <div class="footer-nav">
+            <div class="progress-dots" id="deck-progress-dots">
+              <span class="progress-dot active" data-slide="1"></span>
+              <span class="progress-dot" data-slide="2"></span>
+              <span class="progress-dot" data-slide="3"></span>
+              <span class="progress-dot" data-slide="4"></span>
+              <span class="progress-dot" data-slide="5"></span>
+              <span class="progress-dot" data-slide="6"></span>
+              <span class="progress-dot" data-slide="7"></span>
+            </div>
+            <div class="nav-buttons">
+              <button class="nav-btn" id="deck-prev-btn" aria-label="Previous Slide" disabled>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+              </button>
+              <button class="nav-btn" id="deck-next-btn" aria-label="Next Slide">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+              </button>
+            </div>
+          </div>
+        </footer>
+
+        <div class="bottom-progress-bar" id="deck-progress-bar"></div>
       </div>
+
+      <p class="deep-dive-link">
+        <a href="https://docs.google.com/presentation/d/1h2yS_LTqTKqSsQqqaNNt34yMtAybAaRUz1PgZScBMdw/embed?start=false&loop=false&delayms=3000" target="_blank" rel="noopener">
+          View the technical deep-dive deck &rarr;
+        </a>
+      </p>
     </div>
   </section>
 
-  <!-- Features (detailed from slides) -->
-  <section class="features">
+  <!-- Features (detailed breakdown) -->
+  <section class="landing-section features">
     <div class="section-inner">
       <h2 class="section-title">How It Works</h2>
       <p class="section-subtitle">Each pillar of Scion addresses a core challenge in multi-agent orchestration.</p>
@@ -598,7 +1781,7 @@ const base = import.meta.env.BASE_URL;
           <h3>Agent Notifications</h3>
           <p>State and messages combine into notifications for robust asynchronous, event-driven orchestration.</p>
           <ul>
-            <li><strong>State transitions</strong> — events fire when agents move between states (e.g. <code>working</code> to <code>waiting_for_input</code>).</li>
+            <li><strong>State transitions</strong> — events fire when agents move between states.</li>
             <li><strong>Suspend pattern</strong> — parent delegates a task, updates activity to <code>blocked</code>, and sleeps. No polling.</li>
             <li><strong>Event-driven wakeup</strong> — notification hook automatically wakes the parent on child completion.</li>
             <li><strong>Human alerts</strong> — triggers notifications to Slack, terminals, or dashboards when agents need help.</li>
@@ -625,7 +1808,7 @@ const base = import.meta.env.BASE_URL;
   </section>
 
   <!-- Tour Video -->
-  <section class="video-section">
+  <section class="landing-section video-section">
     <div class="section-inner">
       <h2 class="section-title">See It In Action</h2>
       <p class="section-subtitle">Watch a guided tour of Scion's capabilities.</p>
@@ -640,23 +1823,8 @@ const base = import.meta.env.BASE_URL;
     </div>
   </section>
 
-  <!-- Overview Deck -->
-  <section class="slides-section">
-    <div class="section-inner">
-      <h2 class="section-title">Overview Deck</h2>
-      <p class="section-subtitle">Dive deeper into the architecture and design.</p>
-      <div class="slides-container">
-        <iframe
-          src="https://storage.googleapis.com/scion-intro-slides/index.html"
-          title="Scion Overview Deck"
-          allowfullscreen
-        ></iframe>
-      </div>
-    </div>
-  </section>
-
   <!-- How it works -->
-  <section class="how-it-works">
+  <section class="landing-section how-it-works">
     <div class="section-inner">
       <h2 class="section-title">Get Running in Minutes</h2>
       <p class="section-subtitle">From install to your first parallel agent session.</p>
@@ -706,10 +1874,323 @@ const base = import.meta.env.BASE_URL;
   </section>
 
   <!-- Footer -->
-  <footer>
+  <footer class="landing-footer">
     <p>Scion is an open-source project by <a href="https://cloud.google.com">Google Cloud</a>. Not an officially supported Google product.</p>
     <p style="margin-top: 0.5rem;">Apache License 2.0 &middot; <a href="https://github.com/GoogleCloudPlatform/scion">GitHub</a></p>
   </footer>
+
+  <!-- Slideshow Controller Script -->
+  <script is:inline>
+  document.addEventListener('DOMContentLoaded', () => {
+    const deck = document.getElementById('scion-deck');
+    if (!deck) return;
+
+    // Navigation
+    const slides = deck.querySelectorAll('.slide');
+    const dots = deck.querySelectorAll('.progress-dot');
+    const prevBtn = document.getElementById('deck-prev-btn');
+    const nextBtn = document.getElementById('deck-next-btn');
+    const progressBar = document.getElementById('deck-progress-bar');
+    let currentSlideIndex = 0;
+    const totalSlides = slides.length;
+
+    function updateNavigation() {
+      slides.forEach((slide, idx) => {
+        slide.classList.remove('active', 'previous');
+        if (idx === currentSlideIndex) slide.classList.add('active');
+        else if (idx < currentSlideIndex) slide.classList.add('previous');
+      });
+      dots.forEach((dot, idx) => dot.classList.toggle('active', idx === currentSlideIndex));
+      progressBar.style.width = ((currentSlideIndex / (totalSlides - 1)) * 100) + '%';
+      prevBtn.disabled = currentSlideIndex === 0;
+      nextBtn.disabled = currentSlideIndex === totalSlides - 1;
+    }
+
+    function goToSlide(index) {
+      if (index >= 0 && index < totalSlides) { currentSlideIndex = index; updateNavigation(); }
+    }
+
+    prevBtn.addEventListener('click', () => { if (currentSlideIndex > 0) goToSlide(currentSlideIndex - 1); });
+    nextBtn.addEventListener('click', () => { if (currentSlideIndex < totalSlides - 1) goToSlide(currentSlideIndex + 1); });
+    dots.forEach(dot => dot.addEventListener('click', () => goToSlide(parseInt(dot.getAttribute('data-slide')) - 1)));
+    deck.querySelectorAll('.agenda-card').forEach(card => card.addEventListener('click', () => goToSlide(parseInt(card.getAttribute('data-target-slide')))));
+
+    // Keyboard nav (only when deck is in viewport)
+    window.addEventListener('keydown', (e) => {
+      const rect = deck.getBoundingClientRect();
+      const inView = rect.top < window.innerHeight && rect.bottom > 0;
+      if (!inView) return;
+      if (e.key === 'ArrowRight') { e.preventDefault(); if (currentSlideIndex < totalSlides - 1) goToSlide(currentSlideIndex + 1); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); if (currentSlideIndex > 0) goToSlide(currentSlideIndex - 1); }
+    });
+
+    // Touch swipe
+    let touchStartX = 0;
+    deck.addEventListener('touchstart', (e) => { touchStartX = e.changedTouches[0].screenX; }, { passive: true });
+    deck.addEventListener('touchend', (e) => {
+      const diff = e.changedTouches[0].screenX - touchStartX;
+      if (diff < -50 && currentSlideIndex < totalSlides - 1) goToSlide(currentSlideIndex + 1);
+      if (diff > 50 && currentSlideIndex > 0) goToSlide(currentSlideIndex - 1);
+    }, { passive: true });
+
+    updateNavigation();
+
+    // Slide 1: Definition card active toggle
+    deck.querySelectorAll('.def-card').forEach(card => {
+      card.addEventListener('click', () => {
+        deck.querySelectorAll('.def-card').forEach(c => c.classList.remove('active'));
+        card.classList.add('active');
+      });
+    });
+
+    // Slide 2: State simulator
+    const phaseBadges = deck.querySelectorAll('#deck-phase-badges .state-badge');
+    const activityBadges = deck.querySelectorAll('#deck-activity-badges .state-badge');
+    const detailPhase = document.getElementById('deck-detail-phase');
+    const detailActivity = document.getElementById('deck-detail-activity');
+    const detailText = document.getElementById('deck-detail-text');
+    const stepBtn = document.getElementById('deck-next-state-btn');
+
+    const simSteps = [
+      { phase: 'provisioning', activity: 'offline', text: 'Allocating sandbox container namespace & credentials...' },
+      { phase: 'provisioning', activity: 'offline', text: 'Workspace provisioning: mounting secure environment vars...' },
+      { phase: 'running', activity: 'working', text: 'Checking workspace files. Reading package.json...' },
+      { phase: 'running', activity: 'thinking', text: 'Thinking... Analyzing import structures...' },
+      { phase: 'running', activity: 'working', text: 'Writing fix changes. Initiating local test suite...' },
+      { phase: 'running', activity: 'blocked', text: 'Suspended parent execution. Child task delegated: waiting on qa-agent...' },
+      { phase: 'running', activity: 'waiting_for_input', text: 'Human interaction required: waiting for merge approval...' },
+      { phase: 'running', activity: 'working', text: 'Action approved! Merging branch to main...' },
+      { phase: 'stopping', activity: 'offline', text: 'Stopping agent execution loop. Unmounting shadow volumes...' },
+      { phase: 'stopped', activity: 'offline', text: 'Agent offline. Workspace archived. Container safely deleted.' }
+    ];
+    let simIndex = 0;
+
+    function runStateStep() {
+      const step = simSteps[simIndex];
+      phaseBadges.forEach(b => b.classList.toggle('active-phase', b.getAttribute('data-phase') === step.phase));
+      activityBadges.forEach(b => {
+        b.classList.remove('active-activity', 'blocked');
+        if (b.getAttribute('data-activity') === step.activity) {
+          b.classList.add('active-activity');
+          if (step.activity === 'blocked' || step.activity === 'waiting_for_input') b.classList.add('blocked');
+        }
+      });
+      detailPhase.textContent = step.phase;
+      detailActivity.textContent = step.activity;
+      detailText.textContent = step.text;
+      simIndex = (simIndex + 1) % simSteps.length;
+    }
+
+    stepBtn.addEventListener('click', runStateStep);
+    runStateStep();
+
+    // Slide 3: Collaborators graph loop
+    const dynNodes = { '1a': 'deck-node-child-1a', '1b': 'deck-node-child-1b', '2a': 'deck-node-child-2a', '3a': 'deck-node-child-3a' };
+    const dynEdges = {
+      '1a': ['deck-edge-a1-c1a', 'deck-pulse-a1-c1a'], '1b': ['deck-edge-a1-c1b', 'deck-pulse-a1-c1b'],
+      '2a': ['deck-edge-a2-c2a', 'deck-pulse-a2-c2a'], '3a': ['deck-edge-a3-c3a', 'deck-pulse-a3-c3a']
+    };
+
+    function setDynState(id, visible) {
+      const node = document.getElementById(dynNodes[id]);
+      if (node) node.classList.toggle('active', visible);
+      dynEdges[id].forEach(eid => { const el = document.getElementById(eid); if (el) el.classList.toggle('active', visible); });
+    }
+
+    let loopStep = 0;
+    function runCollabLoop() {
+      switch (loopStep) {
+        case 0: setDynState('1a',false); setDynState('1b',false); setDynState('2a',false); setDynState('3a',false); loopStep=1; break;
+        case 1: setDynState('1a',true); setDynState('1b',true); loopStep=2; break;
+        case 2: setDynState('3a',true); loopStep=3; break;
+        case 3: setDynState('2a',true); setDynState('1b',false); loopStep=4; break;
+        case 4: setDynState('1a',false); setDynState('3a',false); loopStep=5; break;
+        case 5: setDynState('2a',false); loopStep=0; break;
+      }
+    }
+    setInterval(runCollabLoop, 2000);
+    runCollabLoop();
+
+    // Slide 4: Notification flow
+    const nCircles = {};
+    const nOverlays = {};
+    const nPulses = {};
+    const nEdges = {};
+    ['coord','left','right','lc1','lc2','lc3','rc1'].forEach(k => {
+      nCircles[k] = document.getElementById('deck-node-' + k);
+      nOverlays[k] = nCircles[k] ? nCircles[k].querySelector('.state-emoji-overlay') : null;
+    });
+    ({cl:'deck-pulse-c-l', cr:'deck-pulse-c-r', l1:'deck-pulse-l-lc1', l2:'deck-pulse-l-lc2', l3:'deck-pulse-l-lc3', r1:'deck-pulse-r-rc1'}).constructor;
+    ['cl','cr','l1','l2','l3','r1'].forEach(k => {
+      const map = {cl:'c-l', cr:'c-r', l1:'l-lc1', l2:'l-lc2', l3:'l-lc3', r1:'r-rc1'};
+      nPulses[k] = document.getElementById('deck-pulse-' + map[k]);
+      nEdges[k] = document.getElementById('deck-edge-' + map[k]);
+    });
+
+    const nPlayBtn = document.getElementById('deck-notif-play-btn');
+    const nResetBtn = document.getElementById('deck-notif-reset-btn');
+    let nTimeouts = [];
+
+    function setNState(key, state, emoji) {
+      const g = nCircles[key]; if (!g) return;
+      g.classList.remove('idle','running','blocked','waiting','completed'); g.classList.add(state);
+      const c = g.querySelector('circle'); if (c) { c.classList.remove('idle','running','blocked','waiting','completed'); c.classList.add(state); }
+      const o = nOverlays[key]; if (o) { if (emoji) { o.textContent = emoji; o.style.opacity = '1'; } else { o.style.opacity = '0'; } }
+    }
+
+    function setNPulse(key, active, reverse) {
+      const el = nPulses[key]; if (!el) return;
+      el.style.opacity = active ? '1' : '0';
+      if (active) { el.classList.remove('pulse-reverse'); if (reverse) el.classList.add('pulse-reverse'); }
+    }
+
+    function setNEdge(key, active) { const el = nEdges[key]; if (el) el.style.opacity = active ? '1' : '0'; }
+
+    function resetNotif() {
+      nTimeouts.forEach(clearTimeout); nTimeouts = [];
+      setNState('coord','running'); setNState('left','idle'); setNState('right','idle');
+      setNState('lc1','idle'); setNState('lc2','idle'); setNState('lc3','idle'); setNState('rc1','idle');
+      Object.keys(nPulses).forEach(p => setNPulse(p, false));
+      Object.keys(nEdges).forEach(e => setNEdge(e, false));
+      nPlayBtn.disabled = false; nPlayBtn.style.opacity = '1'; nPlayBtn.style.cursor = 'pointer';
+      nPlayBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:12px;height:12px;"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Orchestration';
+      nResetBtn.disabled = true; nResetBtn.style.opacity = '0.5'; nResetBtn.style.cursor = 'not-allowed';
+    }
+
+    function startNotif() {
+      nPlayBtn.disabled = true; nPlayBtn.style.opacity = '0.5'; nPlayBtn.style.cursor = 'not-allowed';
+      nPlayBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:12px;height:12px;"><circle cx="12" cy="12" r="10"/></svg> Running...';
+      nResetBtn.disabled = true; nResetBtn.style.opacity = '0.5'; nResetBtn.style.cursor = 'not-allowed';
+      nTimeouts.forEach(clearTimeout); nTimeouts = [];
+
+      setNState('coord','running','🧠'); setNPulse('cl',true); setNPulse('cr',true);
+      nTimeouts.push(setTimeout(() => {
+        setNPulse('cl',false); setNPulse('cr',false); setNState('coord','running');
+        setNState('left','running','🧠'); setNState('right','running','🧠');
+        setNEdge('cl',true); setNEdge('cr',true);
+      }, 900));
+      nTimeouts.push(setTimeout(() => {
+        setNState('left','blocked','🚧'); setNState('right','blocked','🚧');
+        nTimeouts.push(setTimeout(() => { setNState('lc1','running'); setNEdge('l1',true); setNPulse('l1',true); nTimeouts.push(setTimeout(() => setNPulse('l1',false), 700)); }, 100));
+        nTimeouts.push(setTimeout(() => { setNState('lc2','running'); setNEdge('l2',true); setNPulse('l2',true); nTimeouts.push(setTimeout(() => setNPulse('l2',false), 700)); }, 400));
+        nTimeouts.push(setTimeout(() => { setNState('lc3','running'); setNEdge('l3',true); setNPulse('l3',true); nTimeouts.push(setTimeout(() => setNPulse('l3',false), 700)); }, 700));
+        nTimeouts.push(setTimeout(() => { setNState('rc1','running'); setNEdge('r1',true); setNPulse('r1',true); nTimeouts.push(setTimeout(() => setNPulse('r1',false), 700)); }, 350));
+      }, 2000));
+      nTimeouts.push(setTimeout(() => {
+        setNState('lc2','completed','✅'); setNState('left','running','🧠');
+        setNState('rc1','waiting','❓'); setNState('right','running','🧠');
+        nTimeouts.push(setTimeout(() => { setNState('left','running'); setNState('right','running'); }, 800));
+      }, 4000));
+      nTimeouts.push(setTimeout(() => setNState('lc1','completed','✅'), 5000));
+      nTimeouts.push(setTimeout(() => {
+        setNState('rc1','completed','✅'); setNState('right','completed','✅');
+        setNPulse('cr',true,true); nTimeouts.push(setTimeout(() => setNPulse('cr',false), 700));
+      }, 5300));
+      nTimeouts.push(setTimeout(() => {
+        setNState('lc3','completed','✅'); setNState('left','completed','✅');
+        setNPulse('cl',true,true); nTimeouts.push(setTimeout(() => setNPulse('cl',false), 700));
+      }, 6500));
+      nTimeouts.push(setTimeout(() => {
+        setNState('coord','completed','✅');
+        nPlayBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:12px;height:12px;"><polyline points="20 6 9 17 4 12"/></svg> Flow Completed';
+        nResetBtn.disabled = false; nResetBtn.style.opacity = '1'; nResetBtn.style.cursor = 'pointer';
+      }, 7500));
+    }
+
+    nPlayBtn.addEventListener('click', startNotif);
+    nResetBtn.addEventListener('click', resetNotif);
+
+    // Slide 5: Filesystem simulator
+    const fsPlayBtn = document.getElementById('deck-fs-play-btn');
+    const fsResetBtn = document.getElementById('deck-fs-reset-btn');
+    const fsStatus = document.getElementById('deck-fs-status-card');
+    const fsPulseAuth = document.getElementById('deck-pulse-a1-auth');
+    const fsPulseServer = document.getElementById('deck-pulse-a2-server');
+    const fsPulseTest = document.getElementById('deck-pulse-a2-test');
+    const fsEdgeAuth = document.getElementById('deck-edge-a1-auth');
+    const fsEdgeServer = document.getElementById('deck-edge-a2-server');
+    const fsEdgeTest = document.getElementById('deck-edge-a2-test');
+    const fsCircleAuth = document.getElementById('deck-circle-auth');
+    const fsCircleServer = document.getElementById('deck-circle-server');
+    const fsCircleTest = document.getElementById('deck-circle-test');
+    const fsLockAuth = document.getElementById('deck-lock-auth');
+    const fsLockServer = document.getElementById('deck-lock-server');
+    const fsLockTest = document.getElementById('deck-lock-test');
+    const fsDotAuth = document.getElementById('deck-dot-a1-auth');
+    const fsDotServer = document.getElementById('deck-dot-a2-server');
+    const fsDotTest = document.getElementById('deck-dot-a2-test');
+    const fsAnimAuth = document.getElementById('deck-anim-a1-auth');
+    const fsAnimServer = document.getElementById('deck-anim-a2-server');
+    const fsAnimTest = document.getElementById('deck-anim-a2-test');
+    let fsTimeouts = [];
+
+    function resetFs() {
+      fsTimeouts.forEach(clearTimeout); fsTimeouts = [];
+      [fsPulseAuth, fsPulseServer, fsPulseTest].forEach(el => el.classList.remove('active'));
+      [fsEdgeAuth, fsEdgeServer, fsEdgeTest].forEach(el => { el.style.opacity = '0.3'; });
+      [fsCircleAuth, fsCircleServer, fsCircleTest].forEach(el => el.classList.remove('locked','reading'));
+      [fsLockAuth, fsLockServer, fsLockTest].forEach(el => el.classList.remove('active'));
+      [fsDotAuth, fsDotServer, fsDotTest].forEach(el => el.setAttribute('opacity','0'));
+      [fsAnimAuth, fsAnimServer, fsAnimTest].forEach(el => { try { el.endElement(); } catch(e){} });
+      fsStatus.className = 'fs-status-card';
+      fsStatus.textContent = 'Click "Run Simulation" to observe concurrent filesystem operations.';
+      fsPlayBtn.disabled = false; fsPlayBtn.style.opacity = '1'; fsPlayBtn.style.cursor = 'pointer';
+      fsPlayBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:12px;height:12px;"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Simulation';
+      fsResetBtn.disabled = true; fsResetBtn.style.opacity = '0.5'; fsResetBtn.style.cursor = 'not-allowed';
+    }
+
+    function startFs() {
+      fsPlayBtn.disabled = true; fsPlayBtn.style.opacity = '0.5'; fsPlayBtn.style.cursor = 'not-allowed';
+      fsPlayBtn.innerHTML = 'Simulating...';
+      fsResetBtn.disabled = false; fsResetBtn.style.opacity = '1'; fsResetBtn.style.cursor = 'pointer';
+
+      fsTimeouts.push(setTimeout(() => {
+        fsPulseAuth.classList.add('active'); fsEdgeAuth.style.opacity = '1';
+        fsCircleAuth.classList.add('locked'); fsLockAuth.classList.add('active');
+        fsDotAuth.setAttribute('opacity','1'); try { fsAnimAuth.beginElement(); } catch(e){}
+        fsStatus.className = 'fs-status-card active-write';
+        fsStatus.textContent = 'Agent 1 acquired write lease for src/auth.py. Lock active.';
+      }, 0));
+
+      fsTimeouts.push(setTimeout(() => {
+        fsPulseServer.classList.add('active'); fsEdgeServer.style.opacity = '1';
+        fsCircleServer.classList.add('reading');
+        fsDotServer.setAttribute('opacity','1'); try { fsAnimServer.beginElement(); } catch(e){}
+        fsStatus.className = 'fs-status-card active-read';
+        fsStatus.textContent = 'Agent 2 reading src/server.py concurrently. Safe shared file access.';
+      }, 2000));
+
+      fsTimeouts.push(setTimeout(() => {
+        fsPulseAuth.classList.remove('active'); fsEdgeAuth.style.opacity = '0.3';
+        fsCircleAuth.classList.remove('locked'); fsLockAuth.classList.remove('active');
+        fsDotAuth.setAttribute('opacity','0'); try { fsAnimAuth.endElement(); } catch(e){}
+        fsPulseServer.classList.remove('active'); fsEdgeServer.style.opacity = '0.3';
+        fsCircleServer.classList.remove('reading'); fsDotServer.setAttribute('opacity','0');
+        try { fsAnimServer.endElement(); } catch(e){}
+        fsPulseTest.classList.add('active'); fsEdgeTest.style.opacity = '1';
+        fsCircleTest.classList.add('locked'); fsLockTest.classList.add('active');
+        fsDotTest.setAttribute('opacity','1'); try { fsAnimTest.beginElement(); } catch(e){}
+        fsStatus.className = 'fs-status-card active-write';
+        fsStatus.textContent = 'Agent 2 acquired write lease for tests/test_auth.py. Lock active.';
+      }, 4200));
+
+      fsTimeouts.push(setTimeout(() => {
+        fsPulseTest.classList.remove('active'); fsEdgeTest.style.opacity = '0.3';
+        fsCircleTest.classList.remove('locked'); fsLockTest.classList.remove('active');
+        fsDotTest.setAttribute('opacity','0'); try { fsAnimTest.endElement(); } catch(e){}
+        fsStatus.className = 'fs-status-card active-done';
+        fsStatus.textContent = 'All locks released. Filesystem synchronized.';
+      }, 6200));
+
+      fsTimeouts.push(setTimeout(() => {
+        fsPlayBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:12px;height:12px;"><polyline points="20 6 9 17 4 12"/></svg> Simulation Finished';
+      }, 7500));
+    }
+
+    fsPlayBtn.addEventListener('click', startFs);
+    fsResetBtn.addEventListener('click', resetFs);
+  });
+  </script>
 
 </body>
 </html>
