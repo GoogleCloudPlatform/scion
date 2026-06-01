@@ -53,7 +53,7 @@ type MessageBrokerProxy struct {
 	mu                  sync.Mutex
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
 	pluginSubscriptions map[string]eventbus.Subscription   // pattern -> plugin-initiated subscription
-	subscribedTopics    map[string]bool                  // dedup guard for project-level subscriptions
+	subscribedTopics    map[string]bool                    // dedup guard for project-level subscriptions
 	stopCh              chan struct{}
 	stopOnce            sync.Once
 	wg                  sync.WaitGroup

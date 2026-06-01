@@ -115,11 +115,11 @@ type Dialect interface {
 
 // ContentBlockType constants for classifying content blocks.
 const (
-	ContentBlockText      = "text"
-	ContentBlockThinking  = "thinking"
-	ContentBlockToolUse   = "tool_use"
+	ContentBlockText       = "text"
+	ContentBlockThinking   = "thinking"
+	ContentBlockToolUse    = "tool_use"
 	ContentBlockToolResult = "tool_result"
-	ContentBlockError     = "error"
+	ContentBlockError      = "error"
 )
 
 // ContentBlock represents a single classified block from an assistant response.
@@ -127,8 +127,8 @@ const (
 // user-facing, "thinking" blocks are reasoning traces, and "tool_use" /
 // "tool_result" blocks capture tool interactions.
 type ContentBlock struct {
-	Type string `json:"type"`            // ContentBlockText, ContentBlockThinking, etc.
-	Text string `json:"text,omitempty"`  // Content payload
+	Type string `json:"type"`           // ContentBlockText, ContentBlockThinking, etc.
+	Text string `json:"text,omitempty"` // Content payload
 }
 
 // AssistantContent holds the classified content blocks from an assistant
