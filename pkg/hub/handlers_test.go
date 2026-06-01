@@ -764,7 +764,7 @@ func TestAgentGetByID(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/agent_test1", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/agents/%s", tid("agent_test1")), nil)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -830,7 +830,7 @@ func TestAgentDelete(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/agent_delete", nil)
+	rec := doRequest(t, srv, http.MethodDelete, fmt.Sprintf("/api/v1/agents/%s", tid("agent_delete")), nil)
 
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("expected status 204, got %d: %s", rec.Code, rec.Body.String())
@@ -1363,7 +1363,7 @@ func TestProjectGetByID(t *testing.T) {
 		t.Fatalf("failed to create project: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/project_gettest", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s", tid("project_gettest")), nil)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -1611,7 +1611,7 @@ func TestRuntimeBrokerGetByID(t *testing.T) {
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/runtime-brokers/host_gettest", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/runtime-brokers/%s", tid("host_gettest")), nil)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -1656,7 +1656,7 @@ func TestRuntimeBrokerGetByID_CreatedByName(t *testing.T) {
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/runtime-brokers/broker_createdby_test", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/runtime-brokers/%s", tid("broker_createdby_test")), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1714,7 +1714,7 @@ func TestRuntimeBrokerGetByID_CreatedByNameFallsBackToEmail(t *testing.T) {
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/runtime-brokers/broker_email_fallback", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/runtime-brokers/%s", tid("broker_email_fallback")), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}

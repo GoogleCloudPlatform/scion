@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -81,25 +82,25 @@ func TestWorkspaceRoutesParsing(t *testing.T) {
 	}{
 		{
 			name:           "workspace status",
-			url:            "/api/v1/agents/agent-123/workspace",
+			url:            fmt.Sprintf("/api/v1/agents/%s/workspace", tid("agent-123")),
 			expectedID:     "agent-123",
 			expectedAction: "workspace",
 		},
 		{
 			name:           "workspace sync-from",
-			url:            "/api/v1/agents/agent-123/workspace/sync-from",
+			url:            fmt.Sprintf("/api/v1/agents/%s/workspace/sync-from", tid("agent-123")),
 			expectedID:     "agent-123",
 			expectedAction: "workspace/sync-from",
 		},
 		{
 			name:           "workspace sync-to",
-			url:            "/api/v1/agents/agent-123/workspace/sync-to",
+			url:            fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to", tid("agent-123")),
 			expectedID:     "agent-123",
 			expectedAction: "workspace/sync-to",
 		},
 		{
 			name:           "workspace sync-to finalize",
-			url:            "/api/v1/agents/agent-123/workspace/sync-to/finalize",
+			url:            fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent-123")),
 			expectedID:     "agent-123",
 			expectedAction: "workspace/sync-to/finalize",
 		},
@@ -145,7 +146,7 @@ func TestWorkspaceStatusHandler(t *testing.T) {
 	}
 
 	// Test workspace status endpoint
-	req := httptest.NewRequest("GET", "/api/v1/agents/agent_workspace_test_1/workspace", nil)
+	req := httptest.NewRequest("GET", fmt.Sprintf("/api/v1/agents/%s/workspace", tid("agent_workspace_test_1")), nil)
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	rec := httptest.NewRecorder()
 
@@ -205,7 +206,7 @@ func TestWorkspaceSyncFromHandler_AgentNotRunning(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	req := httptest.NewRequest("POST", "/api/v1/agents/agent_stopped_1/workspace/sync-from", nil)
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-from", tid("agent_stopped_1")), nil)
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	rec := httptest.NewRecorder()
 
@@ -241,7 +242,7 @@ func TestWorkspaceSyncToHandler_EmptyFiles(t *testing.T) {
 
 	// Send request with empty files list
 	body := `{"files": []}`
-	req := httptest.NewRequest("POST", "/api/v1/agents/agent_syncto_test/workspace/sync-to", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to", tid("agent_syncto_test")), strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -278,7 +279,7 @@ func TestWorkspaceSyncToFinalizeHandler_MissingManifest(t *testing.T) {
 
 	// Send request without manifest
 	body := `{}`
-	req := httptest.NewRequest("POST", "/api/v1/agents/agent_finalize_test/workspace/sync-to/finalize", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_finalize_test")), strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -318,10 +319,10 @@ func TestWorkspaceRoutesRequireAuth(t *testing.T) {
 		method string
 		url    string
 	}{
-		{"workspace status", "GET", "/api/v1/agents/agent_auth_test/workspace"},
-		{"sync-from", "POST", "/api/v1/agents/agent_auth_test/workspace/sync-from"},
-		{"sync-to", "POST", "/api/v1/agents/agent_auth_test/workspace/sync-to"},
-		{"sync-to finalize", "POST", "/api/v1/agents/agent_auth_test/workspace/sync-to/finalize"},
+		{"workspace status", "GET", fmt.Sprintf("/api/v1/agents/%s/workspace", tid("agent_auth_test"))},
+		{"sync-from", "POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-from", tid("agent_auth_test"))},
+		{"sync-to", "POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to", tid("agent_auth_test"))},
+		{"sync-to finalize", "POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_auth_test"))},
 	}
 
 	for _, tt := range tests {
@@ -477,7 +478,7 @@ func TestWorkspaceSyncToHandler_StorageNotConfigured(t *testing.T) {
 
 	// Send request with files but no storage configured
 	body := `{"files": [{"path": "test.txt", "size": 100, "hash": "sha256:abc123"}]}`
-	req := httptest.NewRequest("POST", "/api/v1/agents/agent_syncto_no_storage/workspace/sync-to", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to", tid("agent_syncto_no_storage")), strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -514,7 +515,7 @@ func TestWorkspaceSyncToFinalizeHandler_StorageNotConfigured(t *testing.T) {
 
 	// Send request with manifest but no storage configured
 	body := `{"manifest": {"version": "1.0", "files": [{"path": "test.txt", "size": 100, "hash": "sha256:abc123"}]}}`
-	req := httptest.NewRequest("POST", "/api/v1/agents/agent_finalize_no_storage/workspace/sync-to/finalize", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_finalize_no_storage")), strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -551,7 +552,7 @@ func TestWorkspaceSyncToFinalizeHandler_AgentNotRunning(t *testing.T) {
 	}
 
 	body := `{"manifest": {"version": "1.0", "files": [{"path": "test.txt", "size": 100, "hash": "sha256:abc123"}]}}`
-	req := httptest.NewRequest("POST", "/api/v1/agents/agent_finalize_stopped/workspace/sync-to/finalize", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_finalize_stopped")), strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -593,24 +594,24 @@ func TestWorkspaceMethodNotAllowed(t *testing.T) {
 		expectedStatus int
 	}{
 		// workspace status - GET only
-		{"workspace status with POST", "POST", "/api/v1/agents/agent_method_test/workspace", http.StatusMethodNotAllowed},
-		{"workspace status with PUT", "PUT", "/api/v1/agents/agent_method_test/workspace", http.StatusMethodNotAllowed},
-		{"workspace status with DELETE", "DELETE", "/api/v1/agents/agent_method_test/workspace", http.StatusMethodNotAllowed},
+		{"workspace status with POST", "POST", fmt.Sprintf("/api/v1/agents/%s/workspace", tid("agent_method_test")), http.StatusMethodNotAllowed},
+		{"workspace status with PUT", "PUT", fmt.Sprintf("/api/v1/agents/%s/workspace", tid("agent_method_test")), http.StatusMethodNotAllowed},
+		{"workspace status with DELETE", "DELETE", fmt.Sprintf("/api/v1/agents/%s/workspace", tid("agent_method_test")), http.StatusMethodNotAllowed},
 
 		// sync-from - POST only
-		{"sync-from with GET", "GET", "/api/v1/agents/agent_method_test/workspace/sync-from", http.StatusMethodNotAllowed},
-		{"sync-from with PUT", "PUT", "/api/v1/agents/agent_method_test/workspace/sync-from", http.StatusMethodNotAllowed},
-		{"sync-from with DELETE", "DELETE", "/api/v1/agents/agent_method_test/workspace/sync-from", http.StatusMethodNotAllowed},
+		{"sync-from with GET", "GET", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-from", tid("agent_method_test")), http.StatusMethodNotAllowed},
+		{"sync-from with PUT", "PUT", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-from", tid("agent_method_test")), http.StatusMethodNotAllowed},
+		{"sync-from with DELETE", "DELETE", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-from", tid("agent_method_test")), http.StatusMethodNotAllowed},
 
 		// sync-to - POST only
-		{"sync-to with GET", "GET", "/api/v1/agents/agent_method_test/workspace/sync-to", http.StatusMethodNotAllowed},
-		{"sync-to with PUT", "PUT", "/api/v1/agents/agent_method_test/workspace/sync-to", http.StatusMethodNotAllowed},
-		{"sync-to with DELETE", "DELETE", "/api/v1/agents/agent_method_test/workspace/sync-to", http.StatusMethodNotAllowed},
+		{"sync-to with GET", "GET", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to", tid("agent_method_test")), http.StatusMethodNotAllowed},
+		{"sync-to with PUT", "PUT", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to", tid("agent_method_test")), http.StatusMethodNotAllowed},
+		{"sync-to with DELETE", "DELETE", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to", tid("agent_method_test")), http.StatusMethodNotAllowed},
 
 		// sync-to/finalize - POST only
-		{"finalize with GET", "GET", "/api/v1/agents/agent_method_test/workspace/sync-to/finalize", http.StatusMethodNotAllowed},
-		{"finalize with PUT", "PUT", "/api/v1/agents/agent_method_test/workspace/sync-to/finalize", http.StatusMethodNotAllowed},
-		{"finalize with DELETE", "DELETE", "/api/v1/agents/agent_method_test/workspace/sync-to/finalize", http.StatusMethodNotAllowed},
+		{"finalize with GET", "GET", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_method_test")), http.StatusMethodNotAllowed},
+		{"finalize with PUT", "PUT", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_method_test")), http.StatusMethodNotAllowed},
+		{"finalize with DELETE", "DELETE", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_method_test")), http.StatusMethodNotAllowed},
 	}
 
 	for _, tt := range tests {
@@ -652,7 +653,7 @@ func TestWorkspaceSyncToHandler_InvalidJSON(t *testing.T) {
 
 	// Send invalid JSON
 	body := `{invalid json`
-	req := httptest.NewRequest("POST", "/api/v1/agents/agent_invalid_json/workspace/sync-to", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to", tid("agent_invalid_json")), strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -689,7 +690,7 @@ func TestWorkspaceSyncToFinalizeHandler_InvalidJSON(t *testing.T) {
 
 	// Send invalid JSON
 	body := `{not valid`
-	req := httptest.NewRequest("POST", "/api/v1/agents/agent_finalize_invalid/workspace/sync-to/finalize", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_finalize_invalid")), strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -802,7 +803,7 @@ func TestWorkspaceUnknownAction(t *testing.T) {
 	}
 
 	// Request with unknown workspace action
-	req := httptest.NewRequest("POST", "/api/v1/agents/agent_unknown_action/workspace/unknown-action", nil)
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/agents/%s/workspace/unknown-action", tid("agent_unknown_action")), nil)
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	rec := httptest.NewRecorder()
 

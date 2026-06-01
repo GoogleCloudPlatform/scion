@@ -199,7 +199,7 @@ func TestHarnessConfigGet(t *testing.T) {
 		t.Fatalf("failed to create harness config: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs/hc_get1", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/harness-configs/%s", tid("hc_get1")), nil)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -237,13 +237,13 @@ func TestHarnessConfigDelete(t *testing.T) {
 		t.Fatalf("failed to create harness config: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/harness-configs/hc_del1", nil)
+	rec := doRequest(t, srv, http.MethodDelete, fmt.Sprintf("/api/v1/harness-configs/%s", tid("hc_del1")), nil)
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("expected status 204, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// Verify deleted
-	rec = doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs/hc_del1", nil)
+	rec = doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/harness-configs/%s", tid("hc_del1")), nil)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected status 404 after delete, got %d", rec.Code)
 	}
@@ -273,7 +273,7 @@ func TestHarnessConfigPatch(t *testing.T) {
 		"description": "Updated description",
 	}
 
-	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/harness-configs/hc_patch1", body)
+	rec := doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/harness-configs/%s", tid("hc_patch1")), body)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
