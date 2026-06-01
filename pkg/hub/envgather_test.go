@@ -455,7 +455,7 @@ func TestEnvGather_HubHandler_SubmitEnv(t *testing.T) {
 		},
 	}
 
-	path := "/api/v1/projects/project-submit/agents/submit-agent/env"
+	path := fmt.Sprintf("/api/v1/projects/%s/agents/submit-agent/env", tid("project-submit"))
 	rec := doRequest(t, srv, http.MethodPost, path, reqBody)
 
 	if rec.Code != http.StatusOK {
@@ -508,7 +508,7 @@ func TestEnvGather_HubHandler_SubmitEnv_InvalidState(t *testing.T) {
 		"env": map[string]string{"KEY": "value"},
 	}
 
-	path := "/api/v1/projects/project-invalid/agents/invalid-agent/env"
+	path := fmt.Sprintf("/api/v1/projects/%s/agents/invalid-agent/env", tid("project-invalid"))
 	rec := doRequest(t, srv, http.MethodPost, path, reqBody)
 
 	if rec.Code != http.StatusConflict {
