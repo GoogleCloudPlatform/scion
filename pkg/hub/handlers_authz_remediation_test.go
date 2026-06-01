@@ -34,7 +34,7 @@ func grantUserActionOnResource(t *testing.T, s store.Store, userID, resourceType
 	ctx := context.Background()
 
 	policy := &store.Policy{
-		ID:           "policy-" + userID + "-" + resourceType + "-" + resourceID + "-" + string(action),
+		ID:           tid("policy-" + userID + "-" + resourceType + "-" + resourceID + "-" + string(action)),
 		Name:         "Allow " + string(action) + " on " + resourceType + " " + resourceID,
 		ScopeType:    store.PolicyScopeHub,
 		ResourceType: resourceType,
@@ -65,6 +65,10 @@ func TestAuthzRemediation_ListEndpointsFilterUnauthorizedItems(t *testing.T) {
 		Created:     time.Now(),
 	}
 	require.NoError(t, s.CreateUser(ctx, member))
+
+	// The projects/agents below are owned by this user; agent owner_id is an FK
+	// to the users table, so the owner must exist.
+	permSeedUser(t, ctx, s, tid("owner-outside-user"))
 
 	visibleUser := &store.User{
 		ID:          tid("visible-user-authz"),
@@ -139,8 +143,8 @@ func TestAuthzRemediation_ListEndpointsFilterUnauthorizedItems(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, visibleAgent))
 
 	hiddenAgent := &store.Agent{
-		ID:        "agent-hidden-authz",
-		Slug:      "agent-hidden-authz",
+		ID:        tid("agent-hidden-authz"),
+		Slug:      tid("agent-hidden-authz"),
 		Name:      "Hidden Agent",
 		ProjectID: hiddenProject.ID,
 		OwnerID:   tid("owner-outside-user"),
@@ -199,6 +203,10 @@ func TestAuthzRemediation_AgentAndWorkspaceRoutesEnforceResourcePermissions(t *t
 		Created:     time.Now(),
 	}
 	require.NoError(t, s.CreateUser(ctx, member))
+
+	// The project/agent below are owned by this user; agent owner_id is an FK
+	// to the users table, so the owner must exist.
+	permSeedUser(t, ctx, s, tid("owner-outside-user"))
 
 	project := &store.Project{
 		ID:        tid("project-workspace-authz"),

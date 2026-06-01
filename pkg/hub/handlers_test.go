@@ -1701,7 +1701,7 @@ func TestRuntimeBrokerGetByID_CreatedByNameFallsBackToEmail(t *testing.T) {
 	}
 
 	broker := &store.RuntimeBroker{
-		ID:            "broker_email_fallback",
+		ID:            tid("broker_email_fallback"),
 		Name:          "Email Fallback Broker",
 		Slug:          "email-fallback-broker",
 		Status:        store.BrokerStatusOnline,
