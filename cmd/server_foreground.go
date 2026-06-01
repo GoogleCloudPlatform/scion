@@ -693,10 +693,14 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, erro
 		if err != nil {
 			return nil, fmt.Errorf("failed to open database: %w", err)
 		}
-	case "postgres":
-		// Postgres uses the pgx stdlib driver. The URL is a standard
-		// connection string (e.g. "postgres://user:pass@host:5432/db?sslmode=require").
-		entClient, err = entc.OpenPostgres(cfg.Database.URL, pool)
+
+		if err := sqliteStore.Migrate(context.Background()); err != nil {
+			sqliteStore.Close()
+			return nil, fmt.Errorf("failed to run migrations: %w", err)
+		}
+
+		entDSN := cfg.Database.URL + "_ent"
+		entClient, err := entc.OpenSQLite("file:"+entDSN+"?cache=shared", entc.PoolConfig{})
 		if err != nil {
 			return nil, fmt.Errorf("failed to open database: %w", err)
 		}

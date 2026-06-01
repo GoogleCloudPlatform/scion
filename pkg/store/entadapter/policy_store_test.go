@@ -37,7 +37,10 @@ var (
 
 func newTestPolicyStore(t *testing.T) *PolicyStore {
 	t.Helper()
-	client := enttest.NewClient(t)
+	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{})
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Close() })
+	require.NoError(t, entc.AutoMigrate(context.Background(), client))
 
 	ctx := context.Background()
 
