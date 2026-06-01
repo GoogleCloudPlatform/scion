@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,7 +42,12 @@ const testBootstrapDevToken = "scion_dev_bootstrap_test_token_1234567890"
 
 // mockStorage implements storage.Storage for testing.
 type mockStorage struct {
-	bucket  string
+	bucket string
+	// mu guards objects: the Phase-4 import path uploads files and resources
+	// concurrently, so real backends (GCS / local FS) are exercised concurrently
+	// and the mock must be safe for concurrent access too (and race-clean under
+	// `go test -race`).
+	mu      sync.Mutex
 	objects map[string]*storage.Object // objectPath -> Object
 }
 
@@ -65,6 +71,8 @@ func (m *mockStorage) GenerateSignedURL(_ context.Context, objectPath string, op
 }
 
 func (m *mockStorage) GetObject(_ context.Context, objectPath string) (*storage.Object, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	obj, ok := m.objects[objectPath]
 	if !ok {
 		return nil, fmt.Errorf("object not found: %s", objectPath)
@@ -73,6 +81,8 @@ func (m *mockStorage) GetObject(_ context.Context, objectPath string) (*storage.
 }
 
 func (m *mockStorage) Exists(_ context.Context, objectPath string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	_, ok := m.objects[objectPath]
 	return ok, nil
 }
@@ -82,7 +92,9 @@ func (m *mockStorage) Upload(_ context.Context, objectPath string, _ io.Reader, 
 		Name:     objectPath,
 		Metadata: opts.Metadata,
 	}
+	m.mu.Lock()
 	m.objects[objectPath] = obj
+	m.mu.Unlock()
 	return obj, nil
 }
 
@@ -91,12 +103,16 @@ func (m *mockStorage) Download(_ context.Context, _ string) (io.ReadCloser, *sto
 }
 
 func (m *mockStorage) Delete(_ context.Context, objectPath string) error {
+	m.mu.Lock()
 	delete(m.objects, objectPath)
+	m.mu.Unlock()
 	return nil
 }
 
 func (m *mockStorage) DeletePrefix(_ context.Context, _ string) error { return nil }
 func (m *mockStorage) List(_ context.Context, opts storage.ListOptions) (*storage.ListResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	res := &storage.ListResult{}
 	for path, obj := range m.objects {
 		if opts.Prefix != "" && !strings.HasPrefix(path, opts.Prefix) {

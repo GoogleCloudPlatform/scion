@@ -948,6 +948,67 @@ func TestImportTemplatesFromWorkspace_MultipleTemplates(t *testing.T) {
 	}
 }
 
+// TestImportTemplatesFromWorkspace_ParallelManyTemplates exercises the Phase-4
+// bounded-pool parallelism: importing more templates than the per-resource
+// worker bound, each with several files, must import every resource exactly
+// once, preserve discovery order in the returned list, and upload all files.
+// Run under `go test -race` this also guards the storage/store concurrency
+// assumptions the parallel loop relies on.
+func TestImportTemplatesFromWorkspace_ParallelManyTemplates(t *testing.T) {
+	srv, s, project, wsRoot := setupWorkspaceProject(t, "ws-parallel")
+	ctx := context.Background()
+
+	// More templates than resourceImportConcurrency so the bounded pool actually
+	// queues work; os.ReadDir returns entries sorted by name, so zero-padded
+	// names give a deterministic discovery order to assert against.
+	const n = 12
+	want := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("tmpl-%02d", i)
+		want = append(want, name)
+		dir := filepath.Join(wsRoot, "templates", name)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "scion-agent.yaml"), []byte("harness: claude\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		// A few files each, to also exercise per-file upload parallelism.
+		for _, f := range []string{"README.md", "home/.bashrc", "system-prompt.md"} {
+			full := filepath.Join(dir, f)
+			if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(full, []byte(name+":"+f), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	imported, err := srv.importTemplatesFromWorkspace(ctx, project, "/templates")
+	if err != nil {
+		t.Fatalf("import failed: %v", err)
+	}
+
+	// Every template imported exactly once, in discovery order.
+	if len(imported) != n {
+		t.Fatalf("expected %d imported, got %d: %v", n, len(imported), imported)
+	}
+	for i := range want {
+		if imported[i] != want[i] {
+			t.Fatalf("imported order mismatch at %d: got %q want %q (full: %v)", i, imported[i], want[i], imported)
+		}
+	}
+
+	result, err := s.ListTemplates(ctx, store.TemplateFilter{ProjectID: project.ID}, store.ListOptions{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TotalCount != n {
+		t.Fatalf("expected %d templates in store, got %d", n, result.TotalCount)
+	}
+}
+
 func TestBootstrapTemplatesFromDir_ImportsDefaultHarnessConfig(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()

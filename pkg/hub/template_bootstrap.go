@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -200,42 +202,58 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath,
 		hcScope = store.HarnessConfigScopeProject
 	}
 
+	// Each bundled harness-config is an independent DB row + storage prefix, so
+	// import them concurrently with a bounded pool (Phase 4). This runs inside a
+	// per-resource import goroutine, so the bound is kept small to limit nesting.
+	var g errgroup.Group
+	g.SetLimit(bundledHarnessConfigConcurrency)
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-		name := entry.Name()
-		dirPath := filepath.Join(hcDir, name)
-		slug := api.Slugify(name)
+		entry := entry
+		g.Go(func() error {
+			name := entry.Name()
+			dirPath := filepath.Join(hcDir, name)
+			slug := api.Slugify(name)
 
-		hcDirCfg, err := config.LoadHarnessConfigDir(dirPath)
-		if err != nil {
-			s.templateLog.Debug("template harness-config import: failed to load config, skipping",
-				"config", name, "error", err)
-			continue
-		}
-
-		existing, err := s.store.GetHarnessConfigBySlug(ctx, slug, hcScope, scopeID)
-		if err != nil && err != store.ErrNotFound {
-			continue
-		}
-
-		if existing == nil {
-			if err := s.bootstrapSingleHarnessConfigScoped(ctx, name, dirPath, hcDirCfg, stor, hcScope, scopeID); err != nil {
-				s.templateLog.Warn("template harness-config import: failed to import, skipping",
+			hcDirCfg, err := config.LoadHarnessConfigDir(dirPath)
+			if err != nil {
+				s.templateLog.Debug("template harness-config import: failed to load config, skipping",
 					"config", name, "error", err)
-				continue
+				return nil
 			}
-			s.templateLog.Info("template harness-config import: imported config",
-				"config", name, "harness", hcDirCfg.Config.Harness, "scope", hcScope)
-		} else {
-			if _, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDirCfg, stor, false); err != nil {
-				s.templateLog.Warn("template harness-config import: failed to sync, skipping",
-					"config", name, "error", err)
+
+			existing, err := s.store.GetHarnessConfigBySlug(ctx, slug, hcScope, scopeID)
+			if err != nil && err != store.ErrNotFound {
+				return nil
 			}
-		}
+
+			if existing == nil {
+				if err := s.bootstrapSingleHarnessConfigScoped(ctx, name, dirPath, hcDirCfg, stor, hcScope, scopeID); err != nil {
+					s.templateLog.Warn("template harness-config import: failed to import, skipping",
+						"config", name, "error", err)
+					return nil
+				}
+				s.templateLog.Info("template harness-config import: imported config",
+					"config", name, "harness", hcDirCfg.Config.Harness, "scope", hcScope)
+			} else {
+				if _, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDirCfg, stor, false); err != nil {
+					s.templateLog.Warn("template harness-config import: failed to sync, skipping",
+						"config", name, "error", err)
+				}
+			}
+			return nil
+		})
 	}
+	_ = g.Wait()
 }
+
+// bundledHarnessConfigConcurrency bounds how many harness-configs bundled inside
+// a template import in parallel (Phase 4). It is kept small because this loop
+// runs within a per-resource import goroutine (resourceImportConcurrency), so
+// the effective concurrency is the product of the two pools.
+const bundledHarnessConfigConcurrency = 4
 
 // importTemplatesFromRemote fetches a remote source URL, discovers scion
 // templates within it, and registers each one into the Hub store scoped

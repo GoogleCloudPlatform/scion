@@ -606,10 +606,58 @@ Ordered so each phase is independently shippable and the user-visible fixes land
   HTTP error). Full `pkg/hub` suite + `go vet` + `go build ./...` pass; web
   typecheck + build pass.
 
-### Phase 4 — Performance
+### Phase 4 — Performance — **Status: DONE**
 - Parallelize the per-resource import loop (bounded pool), then per-file uploads.
 - Optional: cache `FetchRemoteTemplate` by commit SHA / ETag.
 - Validate against a multi-template repo; record before/after timings.
+
+**Implementation notes (Phase 4):**
+- **Per-resource loop parallelized** (`importResourceDirs`, `pkg/hub/resource_import.go`):
+  the discovered dirs now import through a bounded `errgroup` pool
+  (`resourceImportConcurrency = 6`). Each worker writes its outcome into a
+  per-index slot, so the returned/reported `imported` and `failed` lists stay in
+  discovery order (compacted via the new `compactNames`); the monotonic
+  `completed` counter is an `atomic.Int64` so the aggregate carried on each
+  progress event is consistent across workers. This is exactly the model Phase 3
+  set up (single mutex-serialized event sink + monotonic counter), so no progress
+  changes were needed — the streaming handler's mutex already makes
+  `importProgressFunc` goroutine-safe.
+- **Per-file uploads parallelized** (`uploadResourceFiles`,
+  `pkg/hub/storage_helpers.go`): files upload through a bounded `errgroup` pool
+  (`fileUploadConcurrency = 8`), each writing its manifest entry into its own slot
+  so the manifest preserves input order without locking. Storage backends (GCS /
+  local FS) are safe for concurrent uploads to distinct object paths. This speeds
+  up the single-large-resource case and, because every import path (templates,
+  harness-configs, bundled, project + global) routes through
+  `ResourceStore.Bootstrap → uploadResourceFiles`, all of them benefit.
+- **Bundled harness-config loop parallelized** (`importTemplateHarnessConfigs`,
+  `pkg/hub/template_bootstrap.go`): a bounded `errgroup`
+  (`bundledHarnessConfigConcurrency = 4`, kept small because this runs *inside* a
+  per-resource import goroutine, so effective concurrency is the product of the
+  two pools).
+- **Test infra:** `mockStorage` (`pkg/hub/bootstrap_test.go`) gained a mutex
+  guarding its `objects` map, since the import path now exercises storage
+  concurrently (and must be clean under `go test -race`).
+- **Concurrency bounds rationale (Q7):** imports are ≤ ~a dozen items, so small
+  bounds are both safe and sufficient; the SQLite store already runs WAL +
+  `busy_timeout(5000)` + a 4-conn pool, so concurrent DB writes serialize
+  gracefully, and real backends (Postgres / GCS) are concurrency-safe.
+- **Tests:** added `TestImportTemplatesFromWorkspace_ParallelManyTemplates`
+  (12 templates × multiple files, asserts every resource imported exactly once,
+  order preserved, all files uploaded). The import-path tests pass under
+  `go test -race`; the full `pkg/hub` suite passes (the full suite under `-race`
+  exceeds the default 10-min binary timeout, so race-cleanliness was verified on
+  the import-path subset).
+- **Validation / timings:** measured with a latency-injecting storage wrapper
+  (25 ms/upload) importing 12 templates × 4 files = 48 uploads. Sequential lower
+  bound ≈ 1.2 s; parallel actual ≈ 63 ms — a **~19× speedup** for the
+  multi-resource case the user reported as slow. (Measured with a throwaway
+  timing test; not committed to avoid a flaky wall-clock assertion in CI.)
+- **Deferred (optional):** caching `FetchRemoteTemplate` by commit SHA / ETag was
+  left out. It is explicitly optional and lower-priority in §4.5 (the user's
+  slowness is dominated by uploads, now parallelized), and a content/ETag cache
+  touches the fetch signature + invalidation semantics with little expected
+  payoff here. Tracked as a follow-up if repeated same-URL imports become common.
 
 ---
 

@@ -21,12 +21,23 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/templateimport"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// resourceImportConcurrency bounds how many resources import in parallel within
+// one request (Phase 4). Each resource is an independent DB row + storage
+// prefix, so the per-resource loop is embarrassingly parallel; imports are
+// rarely more than ~a dozen items (design Q7), so a small bound is both safe and
+// sufficient. Per-resource file uploads parallelize independently
+// (fileUploadConcurrency).
+const resourceImportConcurrency = 6
 
 // resource_import.go is the Phase-1 landing of the resource-import refactor: a
 // single kind-generic, source-generic import driver that sits *above* the
@@ -320,8 +331,16 @@ func discoverResourceDirs(root, sourceURL string, kind resourceImportKind) ([]re
 // not-yet-existing resource the force flag is irrelevant — Bootstrap creates it.
 //
 // The progress model separates the aggregate (a monotonic completed counter over
-// total) from per-item detail so it stays correct once the loop is parallelized
-// (Phase 4): completed is assigned as each item finishes, independent of order.
+// total) from per-item detail so it stays correct under parallelism (Phase 4):
+// completed is assigned as each item finishes, independent of order.
+//
+// The per-resource loop runs concurrently with a bounded worker pool
+// (resourceImportConcurrency). Each worker writes its outcome into per-index
+// slots, so the returned (and reported) imported/failed lists stay in discovery
+// order; the completed counter is an atomic so the aggregate reported on each
+// event is consistent across workers. Progress events themselves are serialized
+// by the streaming handler's mutex (importProgressFunc is documented
+// goroutine-safe), so emit may be called from any worker.
 func (s *Server) importResourceDirs(ctx context.Context, dirs []resourceDir, skipped []skippedDir, scope, scopeID string, kind resourceImportKind, progress importProgressFunc) []string {
 	total := len(dirs)
 	names := make([]string, 0, total)
@@ -336,36 +355,61 @@ func (s *Server) importResourceDirs(ctx context.Context, dirs []resourceDir, ski
 		emit(progress, ResourceImportEvent{Type: ImportEventSkipped, Name: sd.name, Reason: sd.reason})
 	}
 
-	var imported []string
-	var failed []string
-	completed := 0
-	for _, rd := range dirs {
-		emit(progress, ResourceImportEvent{Type: ImportEventStarted, Name: rd.name})
+	importedSlots := make([]string, total)
+	failedSlots := make([]string, total)
+	var completed atomic.Int64
 
-		rstore, err := kind.newStore(rd.path)
-		if err == nil {
-			_, err = rstore.Bootstrap(ctx, rd.name, rd.path, scope, scopeID, true)
-		}
-		completed++
-		if err != nil {
-			s.templateLog.Warn(kind.noun+" import: failed to import resource, skipping",
-				"name", rd.name, "error", err)
-			failed = append(failed, rd.name)
+	var g errgroup.Group
+	g.SetLimit(resourceImportConcurrency)
+	for i, rd := range dirs {
+		i, rd := i, rd
+		g.Go(func() error {
+			emit(progress, ResourceImportEvent{Type: ImportEventStarted, Name: rd.name})
+
+			rstore, err := kind.newStore(rd.path)
+			if err == nil {
+				_, err = rstore.Bootstrap(ctx, rd.name, rd.path, scope, scopeID, true)
+			}
+			done := int(completed.Add(1))
+			if err != nil {
+				s.templateLog.Warn(kind.noun+" import: failed to import resource, skipping",
+					"name", rd.name, "error", err)
+				failedSlots[i] = rd.name
+				emit(progress, ResourceImportEvent{
+					Type: ImportEventFailed, Name: rd.name, Reason: err.Error(),
+					Completed: done, Total: total,
+				})
+				return nil
+			}
+			importedSlots[i] = rd.name
 			emit(progress, ResourceImportEvent{
-				Type: ImportEventFailed, Name: rd.name, Reason: err.Error(),
-				Completed: completed, Total: total,
+				Type: ImportEventCompleted, Name: rd.name,
+				Completed: done, Total: total,
 			})
-			continue
-		}
-		imported = append(imported, rd.name)
-		emit(progress, ResourceImportEvent{
-			Type: ImportEventCompleted, Name: rd.name,
-			Completed: completed, Total: total,
+			return nil
 		})
 	}
+	_ = g.Wait()
+
+	imported := compactNames(importedSlots)
+	failed := compactNames(failedSlots)
 
 	emit(progress, ResourceImportEvent{
 		Type: ImportEventDone, Imported: imported, Skipped: skippedNames, Failed: failed,
 	})
 	return imported
+}
+
+// compactNames returns the non-empty entries of slots, preserving order. The
+// parallel import loop writes each resource's name into its own slot (empty if
+// it took the other branch), so compacting yields the imported/failed lists in
+// discovery order.
+func compactNames(slots []string) []string {
+	out := make([]string, 0, len(slots))
+	for _, n := range slots {
+		if n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
 }
