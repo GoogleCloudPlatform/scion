@@ -122,7 +122,7 @@ func TestStopAllAgents_ProjectScoped(t *testing.T) {
 	}))
 
 	t.Run("stops only agents in scoped project", func(t *testing.T) {
-		rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/project-1/agents/stop-all", nil)
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project1.ID+"/agents/stop-all", nil)
 		assert.Equal(t, http.StatusOK, rec.Code)
 
 		var resp StopAllAgentsResponse
@@ -166,6 +166,7 @@ func TestStopAllAgents_ProjectOwner_StopsAllAgents(t *testing.T) {
 	ctx := context.Background()
 
 	// Create running agents owned by different users
+	permSeedUser(t, ctx, s, tid("user-other"))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: tid("alice-agent"), Slug: tid("alice-agent"), Name: "Alice Agent",
 		ProjectID: project.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
