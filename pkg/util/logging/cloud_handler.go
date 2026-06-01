@@ -37,6 +37,16 @@ const (
 	EnvGoogleCloudProject = "GOOGLE_CLOUD_PROJECT"
 )
 
+// Default buffer limits for Cloud Logging.
+const (
+	// DefaultBufferedByteLimit is the maximum bytes the Cloud Logging
+	// client will buffer before dropping entries (8 MiB).
+	DefaultBufferedByteLimit = 8 << 20
+	// DefaultClientTimeout is the timeout for creating a Cloud Logging
+	// client (covers initial connection and credential fetch).
+	DefaultClientTimeout = 15 * time.Second
+)
+
 // CloudLoggingConfig holds configuration for direct Cloud Logging.
 type CloudLoggingConfig struct {
 	// ProjectID is the GCP project ID.
@@ -45,6 +55,13 @@ type CloudLoggingConfig struct {
 	LogID string
 	// Component is the server component name (e.g., "scion-hub").
 	Component string
+	// BufferedByteLimit is the maximum bytes the Cloud Logging client
+	// will buffer. Prevents unbounded memory growth when Cloud Logging
+	// is temporarily unavailable. Default: 8 MiB.
+	BufferedByteLimit int
+	// ClientTimeout is the timeout for creating the Cloud Logging client.
+	// Default: 15s.
+	ClientTimeout time.Duration
 }
 
 // CloudHandler is a slog.Handler that sends log entries directly to
@@ -76,12 +93,27 @@ func NewCloudHandler(ctx context.Context, config CloudLoggingConfig, level slog.
 		logID = resolveLogID()
 	}
 
-	client, err := gcplog.NewClient(ctx, projectID)
+	// Apply a timeout to client creation so we don't hang indefinitely
+	// when the GCP metadata service is unreachable.
+	clientTimeout := config.ClientTimeout
+	if clientTimeout <= 0 {
+		clientTimeout = DefaultClientTimeout
+	}
+	clientCtx, clientCancel := context.WithTimeout(ctx, clientTimeout)
+	defer clientCancel()
+
+	client, err := gcplog.NewClient(clientCtx, projectID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating Cloud Logging client: %w", err)
 	}
 
-	logger := client.Logger(logID)
+	// Apply a bounded buffer to prevent unbounded memory growth when
+	// Cloud Logging is temporarily unavailable.
+	bufLimit := config.BufferedByteLimit
+	if bufLimit <= 0 {
+		bufLimit = DefaultBufferedByteLimit
+	}
+	logger := client.Logger(logID, gcplog.BufferedByteLimit(bufLimit))
 
 	hostname, _ := os.Hostname()
 

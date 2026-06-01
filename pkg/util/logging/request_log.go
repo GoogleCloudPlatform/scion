@@ -159,13 +159,14 @@ func SetRequestBrokerID(ctx context.Context, brokerID string) {
 
 // RequestLoggerConfig configures the dedicated request logger.
 type RequestLoggerConfig struct {
-	FilePath    string         // From SCION_SERVER_REQUEST_LOG_PATH
-	CloudClient *gcplog.Client // Shared GCP client (nil if not enabled)
-	ProjectID   string         // For trace URL formatting
-	Component   string         // "scion-server", "scion-hub", "scion-broker"
-	UseGCP      bool           // Format output as GCP-compatible JSON
-	Foreground  bool           // If true, suppress stdout output
-	Level       slog.Level
+	FilePath     string         // From SCION_SERVER_REQUEST_LOG_PATH
+	CloudClient  *gcplog.Client // Shared GCP client (nil if not enabled)
+	CircuitOpen  func() bool    // Returns true when circuit breaker is open (nil = never open)
+	ProjectID    string         // For trace URL formatting
+	Component    string         // "scion-server", "scion-hub", "scion-broker"
+	UseGCP       bool           // Format output as GCP-compatible JSON
+	Foreground   bool           // If true, suppress stdout output
+	Level        slog.Level
 }
 
 // NewRequestLogger creates a dedicated request logger with the configured outputs.
@@ -192,7 +193,11 @@ func NewRequestLogger(cfg RequestLoggerConfig) (*slog.Logger, func(), error) {
 	// Cloud handler
 	if cfg.CloudClient != nil {
 		ch := NewCloudHandlerFromClient(cfg.CloudClient, RequestLogID, cfg.Component, cfg.Level)
-		handlers = append(handlers, ch)
+		var cloudHandler slog.Handler = ch
+		if cfg.CircuitOpen != nil {
+			cloudHandler = &circuitGatedHandler{inner: ch, circuitOpen: cfg.CircuitOpen}
+		}
+		handlers = append(handlers, cloudHandler)
 		cleanups = append(cleanups, func() {
 			ch.logger.Flush()
 		})

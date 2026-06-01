@@ -449,7 +449,10 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 		cleanups = append(cleanups, logCleanup)
 	}
 
-	// Initialize direct Cloud Logging
+	// Initialize direct Cloud Logging with circuit breaker protection.
+	// If Cloud Logging becomes unavailable (e.g. during a metadata
+	// service outage), the circuit breaker opens and the hub falls back to
+	// local-only logging automatically.
 	var cloudHandler slog.Handler
 	if logging.IsCloudLoggingEnabled() {
 		logLevel := logging.ResolveLogLevel(enableDebug)
@@ -460,9 +463,14 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 		if cloudErr != nil {
 			log.Printf("Warning: failed to initialize Cloud Logging: %v", cloudErr)
 		} else {
-			cloudHandler = ch
+			// Wrap with resilient handler for circuit breaker protection.
+			resilientHandler, resilientCleanup := logging.NewResilientCloudHandler(
+				ch, logging.ResilientCloudHandlerConfig{},
+			)
+			cloudHandler = resilientHandler
 			cleanups = append(cleanups, cloudLogCleanup)
-			log.Printf("Cloud Logging enabled (logId=%s, project=%s)", logging.FormatLogID(), logging.FormatProjectID())
+			cleanups = append(cleanups, resilientCleanup)
+			log.Printf("Cloud Logging enabled with circuit breaker (logId=%s, project=%s)", logging.FormatLogID(), logging.FormatProjectID())
 		}
 	}
 
@@ -476,8 +484,9 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 		Foreground: serverStartForeground,
 		Level:      logging.ResolveLogLevel(enableDebug),
 	}
-	if ch, ok := cloudHandler.(*logging.CloudHandler); ok && ch != nil {
+	if ch, ok := cloudHandler.(*logging.ResilientCloudHandler); ok && ch != nil {
 		reqLogCfg.CloudClient = ch.Client()
+		reqLogCfg.CircuitOpen = ch.CircuitOpen
 		reqLogCfg.ProjectID = logging.FormatProjectID()
 	}
 	requestLogger, reqLogCleanup, reqErr := logging.NewRequestLogger(reqLogCfg)
@@ -495,8 +504,9 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 		UseGCP:    useGCP,
 		Level:     logging.ResolveLogLevel(enableDebug),
 	}
-	if ch, ok := cloudHandler.(*logging.CloudHandler); ok && ch != nil {
+	if ch, ok := cloudHandler.(*logging.ResilientCloudHandler); ok && ch != nil {
 		msgLogCfg.CloudClient = ch.Client()
+		msgLogCfg.CircuitOpen = ch.CircuitOpen
 	}
 	messageLogger, msgLogCleanup, msgErr := logging.NewMessageLogger(msgLogCfg)
 	if msgErr != nil {

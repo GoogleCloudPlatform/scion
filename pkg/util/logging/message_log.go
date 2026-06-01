@@ -38,6 +38,7 @@ const (
 // MessageLoggerConfig configures the dedicated message logger.
 type MessageLoggerConfig struct {
 	CloudClient *gcplog.Client // Shared GCP client (nil if not enabled)
+	CircuitOpen func() bool    // Returns true when circuit breaker is open (nil = never open)
 	Component   string         // "scion-server", "scion-hub", "scion-broker"
 	UseGCP      bool           // Format output as GCP-compatible JSON
 	Level       slog.Level
@@ -56,7 +57,11 @@ func NewMessageLogger(cfg MessageLoggerConfig) (*slog.Logger, func(), error) {
 	// Cloud handler with dedicated log ID and message-aware label promotion
 	if cfg.CloudClient != nil {
 		ch := newMessageCloudHandler(cfg.CloudClient, MessageLogID, cfg.Component, cfg.Level)
-		handlers = append(handlers, ch)
+		var cloudHandler slog.Handler = ch
+		if cfg.CircuitOpen != nil {
+			cloudHandler = &circuitGatedHandler{inner: ch, circuitOpen: cfg.CircuitOpen}
+		}
+		handlers = append(handlers, cloudHandler)
 		cleanups = append(cleanups, func() {
 			ch.logger.Flush()
 		})
