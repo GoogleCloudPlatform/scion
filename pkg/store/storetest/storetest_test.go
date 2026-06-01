@@ -23,37 +23,32 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/storetest"
 	"github.com/stretchr/testify/require"
 )
 
 // compositeFactory returns a Factory that builds the production-shaped
-// CompositeStore: a SQLite base store plus a separate Ent-managed database for
-// the group and policy domains. This is exactly the dual-database layout used
-// by the hub today (see cmd/server_foreground.go:initStore), so a green run
-// proves the oracle works against the current backend.
+// CompositeStore: a single Ent-managed database serving every domain. This is
+// exactly the single-database layout used by the hub today (see
+// cmd/server_foreground.go:initStore), so a green run proves the oracle works
+// against the current backend.
 //
 // When Postgres lands (P3-2), an analogous postgresFactory can be passed to the
 // same RunStoreSuite to assert identical observable behavior.
 func compositeFactory(t *testing.T) store.Store {
 	t.Helper()
 
-	base, err := sqlite.New(":memory:")
-	require.NoError(t, err)
-	require.NoError(t, base.Migrate(context.Background()))
-
 	entClient, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{})
 	require.NoError(t, err)
 	require.NoError(t, entc.AutoMigrate(context.Background(), entClient))
 
-	cs := entadapter.NewCompositeStore(base, entClient)
+	cs := entadapter.NewCompositeStore(entClient)
 	t.Cleanup(func() { _ = cs.Close() })
 	return cs
 }
 
 // TestCompositeStore_CRUDParity runs the full CRUD-parity oracle against the
-// current CompositeStore for the already-ported group and policy domains.
+// current CompositeStore across all ported domains.
 func TestCompositeStore_CRUDParity(t *testing.T) {
 	storetest.RunStoreSuite(t, compositeFactory)
 }

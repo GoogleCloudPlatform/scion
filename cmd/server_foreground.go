@@ -47,7 +47,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/spf13/cobra"
@@ -634,47 +633,29 @@ func checkServerPorts(cfg *config.GlobalConfig) error {
 func initStore(cfg *config.GlobalConfig) (store.Store, error) {
 	switch cfg.Database.Driver {
 	case "sqlite":
-		sqliteStore, err := sqlite.New(cfg.Database.URL)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open database: %w", err)
-		}
-
-		if err := sqliteStore.Migrate(context.Background()); err != nil {
-			sqliteStore.Close()
-			return nil, fmt.Errorf("failed to run migrations: %w", err)
-		}
-
-		entDSN := cfg.Database.URL + "_ent"
 		connMaxLifetime, err := cfg.Database.ConnMaxLifetimeDuration()
 		if err != nil {
-			sqliteStore.Close()
 			return nil, fmt.Errorf("invalid database pool config: %w", err)
 		}
-		entClient, err := entc.OpenSQLite("file:"+entDSN+"?cache=shared", entc.PoolConfig{
+
+		// All Hub state lives in a single Ent-backed SQLite database.
+		entClient, err := entc.OpenSQLite("file:"+cfg.Database.URL+"?cache=shared", entc.PoolConfig{
 			MaxOpenConns:    cfg.Database.MaxOpenConns,
 			MaxIdleConns:    cfg.Database.MaxIdleConns,
 			ConnMaxLifetime: connMaxLifetime,
 		})
 		if err != nil {
-			sqliteStore.Close()
-			return nil, fmt.Errorf("failed to open ent database: %w", err)
+			return nil, fmt.Errorf("failed to open database: %w", err)
 		}
 		if err := entc.AutoMigrate(context.Background(), entClient); err != nil {
 			entClient.Close()
-			sqliteStore.Close()
-			return nil, fmt.Errorf("failed to run ent migrations: %w", err)
+			return nil, fmt.Errorf("failed to run migrations: %w", err)
 		}
 
-		if err := entc.MigrateGroveToProjectData(context.Background(), entDSN, sqliteStore); err != nil {
-			entClient.Close()
-			sqliteStore.Close()
-			return nil, fmt.Errorf("failed to migrate ent data: %w", err)
-		}
-
-		s := entadapter.NewCompositeStore(sqliteStore, entClient)
+		s := entadapter.NewCompositeStore(entClient)
 
 		if err := s.Ping(context.Background()); err != nil {
-			sqliteStore.Close()
+			s.Close()
 			return nil, fmt.Errorf("database ping failed: %w", err)
 		}
 
