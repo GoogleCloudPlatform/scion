@@ -307,12 +307,18 @@ func (r *CommandRouter) handleDialogSubmit(ctx context.Context, event *ChatEvent
 			return r.reply(ctx, event, "This space is not linked to a project.")
 		}
 
-		client, err := r.clientForUser(ctx, event)
-		if err != nil {
+		mapping, err := r.idMapper.ResolveOrAutoRegister(ctx, &eventUserLookup{event}, event.UserID, event.Platform)
+		if err != nil || mapping == nil {
 			return r.reply(ctx, event, "Authentication required. Use `/scionAdmin register` first.")
 		}
+		client, err := r.idMapper.ClientFor(ctx, mapping)
+		if err != nil {
+			return r.reply(ctx, event, fmt.Sprintf("Failed to create client: %v", err))
+		}
 
-		if err := client.ProjectAgents(link.ProjectID).SendMessage(ctx, agentID, responseText, false); err != nil {
+		msg := messages.NewInstruction("user:"+mapping.HubUserEmail, agentID, responseText)
+		msg.Channel = "gchat"
+		if err := client.ProjectAgents(link.ProjectID).SendStructuredMessage(ctx, agentID, msg, false, false, false); err != nil {
 			return r.reply(ctx, event, fmt.Sprintf("Failed to send response to agent: %v", err))
 		}
 		return r.reply(ctx, event, fmt.Sprintf("Response sent to agent `%s`.", agentID))
