@@ -505,11 +505,6 @@ func (_u *TemplateUpdate) check() error {
 			return &ValidationError{Name: "slug", err: fmt.Errorf(`ent: validator failed for field "Template.slug": %w`, err)}
 		}
 	}
-	if v, ok := _u.mutation.Harness(); ok {
-		if err := template.HarnessValidator(v); err != nil {
-			return &ValidationError{Name: "harness", err: fmt.Errorf(`ent: validator failed for field "Template.harness": %w`, err)}
-		}
-	}
 	if v, ok := _u.mutation.Status(); ok {
 		if err := template.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "Template.status": %w`, err)}
@@ -1158,11 +1153,6 @@ func (_u *TemplateUpdateOne) check() error {
 	if v, ok := _u.mutation.Slug(); ok {
 		if err := template.SlugValidator(v); err != nil {
 			return &ValidationError{Name: "slug", err: fmt.Errorf(`ent: validator failed for field "Template.slug": %w`, err)}
-		}
-	}
-	if v, ok := _u.mutation.Harness(); ok {
-		if err := template.HarnessValidator(v); err != nil {
-			return &ValidationError{Name: "harness", err: fmt.Errorf(`ent: validator failed for field "Template.harness": %w`, err)}
 		}
 	}
 	if v, ok := _u.mutation.Status(); ok {
