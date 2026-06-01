@@ -20,6 +20,7 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
+	"entgo.io/ent/schema/index"
 	"github.com/google/uuid"
 )
 
@@ -34,6 +35,15 @@ func (User) Fields() []ent.Field {
 		field.UUID("id", uuid.UUID{}).
 			Default(uuid.New).
 			Immutable(),
+		// email was UNIQUE COLLATE NOCASE in the legacy SQLite schema. Postgres
+		// has no NOCASE collation, so case-insensitive uniqueness and lookup are
+		// enforced at the port layer (entadapter): emails are normalized to
+		// lower case on write and matched with EmailEqualFold (lower(email) =
+		// lower($1)) on read. The Unique() index below therefore enforces
+		// case-insensitive uniqueness because every stored value is normalized.
+		// This is equivalent to a lower(email) functional unique index without
+		// requiring an expression index, which ent codegen + AutoMigrate cannot
+		// emit for both SQLite (tests) and Postgres.
 		field.String("email").
 			Unique().
 			NotEmpty(),
@@ -55,6 +65,17 @@ func (User) Fields() []ent.Field {
 		field.Time("last_login").
 			Optional().
 			Nillable(),
+		field.Time("last_seen").
+			Optional().
+			Nillable(),
+	}
+}
+
+// Indexes of the User.
+func (User) Indexes() []ent.Index {
+	return []ent.Index{
+		// Supports the lastSeen sort option in ListUsers.
+		index.Fields("last_seen"),
 	}
 }
 
