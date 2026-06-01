@@ -153,7 +153,7 @@ func TestEventPublisher_DeleteAgentEmitsEvent(t *testing.T) {
 	defer unsub()
 
 	// Delete agent via API
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/agent-evt-del", nil)
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code)
 
 	select {
