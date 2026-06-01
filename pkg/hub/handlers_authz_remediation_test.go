@@ -129,8 +129,8 @@ func TestAuthzRemediation_ListEndpointsFilterUnauthorizedItems(t *testing.T) {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, hiddenBroker))
 
 	visibleAgent := &store.Agent{
-		ID:        "agent-visible-authz",
-		Slug:      "agent-visible-authz",
+		ID:        tid("agent-visible-authz"),
+		Slug:      tid("agent-visible-authz"),
 		Name:      "Visible Agent",
 		ProjectID: visibleProject.ID,
 		OwnerID:   tid("owner-outside-user"),

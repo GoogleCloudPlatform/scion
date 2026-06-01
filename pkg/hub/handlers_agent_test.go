@@ -2171,7 +2171,7 @@ func TestHeartbeat_BackfillsProfile(t *testing.T) {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
 	agent := &store.Agent{
-		ID:              "agent-profile-hb",
+		ID:              tid("agent-profile-hb"),
 		Slug:            "profile-hb-agent",
 		Name:            "Profile HB Agent",
 		ProjectID:       project.ID,
