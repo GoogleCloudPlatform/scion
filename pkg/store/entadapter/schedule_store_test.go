@@ -22,9 +22,8 @@ import (
 	"testing"
 	"time"
 
-	"entgo.io/ent/dialect"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,7 +31,10 @@ import (
 
 func newTestScheduleStore(t *testing.T) *ScheduleStore {
 	t.Helper()
-	client := enttest.NewClient(t)
+	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{})
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Close() })
+	require.NoError(t, entc.AutoMigrate(context.Background(), client))
 	return NewScheduleStore(client)
 }
 
@@ -220,17 +222,7 @@ func TestListDueSchedulesClaimPath(t *testing.T) {
 	assert.Equal(t, dueEarly.ID, due[0].ID, "ordered by next_run_at ascending")
 	assert.Equal(t, dueLate.ID, due[1].ID)
 
-	// Concurrent claims must not race or error. The expected per-call count is
-	// backend-dependent:
-	//   - SQLite has no SELECT ... FOR UPDATE SKIP LOCKED, and the test store
-	//     pins MaxOpenConns=1, so the claim path serializes and every caller
-	//     observes both due schedules.
-	//   - Postgres uses FOR UPDATE SKIP LOCKED inside a transaction that holds
-	//     the row locks until commit, so a concurrent caller skips rows locked
-	//     by a sibling and may observe a disjoint subset (0..2). The cross-call
-	//     invariant is only that no caller errors or observes more than the two
-	//     due rows.
-	isPostgres := s.client.Driver().Dialect() == dialect.Postgres
+	// Concurrent claims must not race or error.
 	var wg sync.WaitGroup
 	errs := make(chan error, 8)
 	for i := 0; i < 8; i++ {
@@ -242,11 +234,7 @@ func TestListDueSchedulesClaimPath(t *testing.T) {
 				errs <- err
 				return
 			}
-			if isPostgres {
-				if len(res) > 2 {
-					errs <- assert.AnError
-				}
-			} else if len(res) != 2 {
+			if len(res) != 2 {
 				errs <- assert.AnError
 			}
 		}()
