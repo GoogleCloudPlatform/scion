@@ -54,6 +54,9 @@ func RunStoreSuite(t *testing.T, factory Factory) {
 	RunDomain(t, factory, SecretDomain())
 	RunDomain(t, factory, EnvVarDomain())
 	RunDomain(t, factory, AgentDomain())
+	RunDomain(t, factory, UserDomain())
+	RunDomain(t, factory, AllowListDomain())
+	RunDomain(t, factory, InviteCodeDomain())
 
 	// Agent optimistic locking is not expressible through the generic CRUD
 	// categories, so it gets a dedicated backend-agnostic check.

@@ -669,43 +669,13 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, erro
 	var entClient *ent.Client
 	switch cfg.Database.Driver {
 	case "sqlite":
-		// Migration α: upgrade a legacy raw-SQL hub.db (the former
-		// pkg/store/sqlite schema) to the consolidated Ent schema before opening
-		// it. Detection is conservative and the whole step is a no-op for an
-		// already-Ent file, so it is safe to run on every boot.
-		if err := maybeMigrateLegacySQLite(ctx, cfg.Database.URL); err != nil {
-			return nil, err
+		connMaxLifetime, err := cfg.Database.ConnMaxLifetimeDuration()
+		if err != nil {
+			return nil, fmt.Errorf("invalid database pool config: %w", err)
 		}
 
 		// All Hub state lives in a single Ent-backed SQLite database.
-		// Guard against a double "file:" prefix when the operator already
-		// supplies "file:/path/hub.db" in their config.
-		sqliteDSN := cfg.Database.URL
-		if !strings.HasPrefix(sqliteDSN, "file:") {
-			sqliteDSN = "file:" + sqliteDSN
-		}
-		if !strings.Contains(sqliteDSN, "?") {
-			sqliteDSN += "?cache=shared"
-		} else if !strings.Contains(sqliteDSN, "cache=") {
-			sqliteDSN += "&cache=shared"
-		}
-		entClient, err = entc.OpenSQLite(sqliteDSN, pool)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open database: %w", err)
-		}
-
-		if err := sqliteStore.Migrate(context.Background()); err != nil {
-			sqliteStore.Close()
-			return nil, fmt.Errorf("failed to run migrations: %w", err)
-		}
-
-		entDSN := cfg.Database.URL + "_ent"
-		connMaxLifetime, err := cfg.Database.ConnMaxLifetimeDuration()
-		if err != nil {
-			sqliteStore.Close()
-			return nil, fmt.Errorf("invalid database pool config: %w", err)
-		}
-		entClient, err := entc.OpenSQLite("file:"+entDSN+"?cache=shared", entc.PoolConfig{
+		entClient, err := entc.OpenSQLite("file:"+cfg.Database.URL+"?cache=shared", entc.PoolConfig{
 			MaxOpenConns:    cfg.Database.MaxOpenConns,
 			MaxIdleConns:    cfg.Database.MaxIdleConns,
 			ConnMaxLifetime: connMaxLifetime,
@@ -713,6 +683,19 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, erro
 		if err != nil {
 			return nil, fmt.Errorf("failed to open database: %w", err)
 		}
+		if err := entc.AutoMigrate(context.Background(), entClient); err != nil {
+			entClient.Close()
+			return nil, fmt.Errorf("failed to run migrations: %w", err)
+		}
+
+		s := entadapter.NewCompositeStore(entClient)
+
+		if err := s.Ping(context.Background()); err != nil {
+			s.Close()
+			return nil, fmt.Errorf("database ping failed: %w", err)
+		}
+
+		return s, nil
 	default:
 		return nil, fmt.Errorf("unsupported database driver: %s", cfg.Database.Driver)
 	}
