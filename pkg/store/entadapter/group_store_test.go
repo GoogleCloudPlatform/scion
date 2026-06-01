@@ -29,10 +29,7 @@ import (
 
 func newTestGroupStore(t *testing.T) *GroupStore {
 	t.Helper()
-	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { client.Close() })
-	require.NoError(t, entc.AutoMigrate(context.Background(), client))
+	client := enttest.NewClient(t)
 
 	// Create a test user for membership tests
 	_, err := client.User.Create().
@@ -816,10 +813,7 @@ func TestGetEffectiveGroupsNoMemberships(t *testing.T) {
 
 func TestCompositeStoreDelegation(t *testing.T) {
 	// Verify the CompositeStore properly delegates group operations
-	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{})
-	require.NoError(t, err)
-	t.Cleanup(func() { client.Close() })
-	require.NoError(t, entc.AutoMigrate(context.Background(), client))
+	client := enttest.NewClient(t)
 
 	composite := NewCompositeStore(client)
 
