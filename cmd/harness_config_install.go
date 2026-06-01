@@ -17,9 +17,7 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 
@@ -232,32 +230,11 @@ func installLocally(name, sourcePath, projectPath string, force bool, harnessTyp
 	return nil
 }
 
-// deriveHarnessConfigName extracts a harness-config name from a source URL or path.
+// deriveHarnessConfigName extracts a harness-config name from a source URL or
+// path. It delegates to the shared config.DeriveResourceName so the CLI and the
+// Hub import path use exactly one name-derivation rule.
 func deriveHarnessConfigName(source string) string {
-	if strings.HasPrefix(source, "file://") {
-		localPath := strings.TrimPrefix(source, "file://")
-		return filepath.Base(filepath.Clean(localPath))
-	}
-
-	if strings.HasPrefix(source, ":") {
-		parts := strings.SplitN(source, ":", 3)
-		if len(parts) == 3 {
-			return path.Base(strings.TrimRight(parts[2], "/"))
-		}
-		return ""
-	}
-
-	normalized := normalizeHarnessConfigSourceURL(source)
-	u, err := url.Parse(normalized)
-	if err != nil {
-		return filepath.Base(filepath.Clean(source))
-	}
-
-	cleanPath := strings.TrimRight(u.Path, "/")
-	if cleanPath == "" {
-		return filepath.Base(filepath.Clean(source))
-	}
-	return path.Base(cleanPath)
+	return config.DeriveResourceName(source)
 }
 
 func init() {

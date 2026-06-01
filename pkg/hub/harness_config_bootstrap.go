@@ -153,7 +153,7 @@ func (s *Server) importHarnessConfigsFromRemote(ctx context.Context, projectID, 
 	}
 	defer func() { _ = os.RemoveAll(cachePath) }()
 
-	dirs, err := discoverHarnessConfigDirs(cachePath)
+	dirs, err := discoverHarnessConfigDirs(cachePath, sourceURL)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +196,7 @@ func (s *Server) importHarnessConfigsFromWorkspace(ctx context.Context, project 
 		return nil, fmt.Errorf("workspace path not found or not a directory: %s", workspacePath)
 	}
 
-	dirs, err := discoverHarnessConfigDirs(configsDir)
+	dirs, err := discoverHarnessConfigDirs(configsDir, "")
 	if err != nil {
 		return nil, err
 	}
@@ -213,9 +213,20 @@ type harnessConfigDir struct{ name, path string }
 // discoverHarnessConfigDirs returns the harness-config directories at root. If
 // root itself is a harness-config it is returned directly; otherwise its
 // immediate subdirectories are scanned.
-func discoverHarnessConfigDirs(root string) ([]harnessConfigDir, error) {
+//
+// sourceURL is the original remote source (if any). When root is a single
+// harness-config fetched from a remote URL, root is a content-hash cache dir, so
+// the name is derived from the URL's leaf segment instead. For workspace imports
+// pass "" so the real directory's base name is used.
+func discoverHarnessConfigDirs(root, sourceURL string) ([]harnessConfigDir, error) {
 	if isHarnessConfigDir(root) {
-		return []harnessConfigDir{{filepath.Base(root), root}}, nil
+		name := filepath.Base(root)
+		if sourceURL != "" {
+			if derived := config.DeriveResourceName(sourceURL); derived != "" {
+				name = derived
+			}
+		}
+		return []harnessConfigDir{{name, root}}, nil
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {

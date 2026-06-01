@@ -288,8 +288,14 @@ func (s *Server) importTemplatesFromRemote(ctx context.Context, projectID, sourc
 	var dirs []templateDir
 
 	if templateimport.IsScionTemplate(cachePath) {
-		// URL pointed directly at a single template directory
-		dirs = append(dirs, templateDir{filepath.Base(cachePath), cachePath})
+		// URL pointed directly at a single template directory. The cache dir is a
+		// content hash, so derive the name from the source URL's leaf segment
+		// (e.g. ".../tree/main/antigravity" -> "antigravity").
+		name := config.DeriveResourceName(sourceURL)
+		if name == "" {
+			name = filepath.Base(cachePath)
+		}
+		dirs = append(dirs, templateDir{name, cachePath})
 	} else {
 		entries, err := os.ReadDir(cachePath)
 		if err != nil {
