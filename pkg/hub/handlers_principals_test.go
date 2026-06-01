@@ -82,7 +82,7 @@ func TestAgentGroups(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/agent-1/groups", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+tid("agent-1")+"/groups", nil)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 
@@ -112,7 +112,7 @@ func TestPrincipalResolve_User(t *testing.T) {
 	}
 	require.NoError(t, s.CreateUser(ctx, user))
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/principals/user/user-1", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/principals/user/"+tid("user-1"), nil)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 
@@ -145,7 +145,7 @@ func TestPrincipalResolve_Agent(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/principals/agent/agent-1", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/principals/agent/"+tid("agent-1"), nil)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 
@@ -171,7 +171,7 @@ func TestPrincipalResolve_Group(t *testing.T) {
 	}
 	require.NoError(t, s.CreateGroup(ctx, group))
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/principals/group/group-1", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/principals/group/"+tid("group-1"), nil)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 
@@ -248,7 +248,7 @@ func TestPrincipalResolve_AgentWithCreator(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/principals/agent/agent-deleg", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/principals/agent/"+tid("agent-deleg"), nil)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 
