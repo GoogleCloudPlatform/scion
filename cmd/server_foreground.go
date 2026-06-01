@@ -198,6 +198,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+		if hostedMode {
+			log.Println("WARNING: Development authentication enabled - not for production use")
+		}
 	}
 
 	// 10. Resolve hub endpoint
@@ -843,7 +846,6 @@ func initDevAuth(cfg *config.GlobalConfig, globalDir string) (string, error) {
 	os.Setenv("SCION_DEV_TOKEN", devAuthToken)
 	os.Setenv("SCION_AUTH_TOKEN", devAuthToken)
 
-	log.Println("WARNING: Development authentication enabled - not for production use")
 	log.Printf("Developer token: %s", devAuthToken)
 	log.Printf("To authenticate CLI commands, run:")
 	log.Printf("  export SCION_DEV_TOKEN=%s", devAuthToken)
