@@ -42,12 +42,82 @@ import (
 // resourceDir pairs a derived resource name with its on-disk directory.
 type resourceDir struct{ name, path string }
 
+// skippedDir pairs a child directory name with the reason it was skipped during
+// discovery (e.g. it lacks the kind's marker file, so it is not a resource).
+type skippedDir struct{ name, reason string }
+
+// ResourceImportEventType enumerates the lifecycle events emitted during an
+// import (see ResourceImportEvent).
+type ResourceImportEventType string
+
+const (
+	// ImportEventDiscovered is emitted once after discovery with the total count
+	// and the names of all resources that will be imported.
+	ImportEventDiscovered ResourceImportEventType = "discovered"
+	// ImportEventStarted is emitted when a worker begins importing a resource.
+	ImportEventStarted ResourceImportEventType = "started"
+	// ImportEventCompleted is emitted when a resource finishes importing.
+	ImportEventCompleted ResourceImportEventType = "completed"
+	// ImportEventFailed is emitted when a discovered resource fails to import.
+	ImportEventFailed ResourceImportEventType = "failed"
+	// ImportEventSkipped is emitted for a child folder that is not a resource of
+	// the kind (no marker file); these do not count toward the total.
+	ImportEventSkipped ResourceImportEventType = "skipped"
+	// ImportEventDone is the final event carrying the imported/skipped/failed
+	// name lists.
+	ImportEventDone ResourceImportEventType = "done"
+	// ImportEventError is emitted when the import fails before reaching the
+	// per-resource phase (e.g. fetch failure, nothing found). Carries Reason.
+	ImportEventError ResourceImportEventType = "error"
+)
+
+// ResourceImportEvent is one progress event emitted during a resource import.
+// Events are serialized to NDJSON on the streaming import endpoints; the field
+// set used depends on Type (see the constants above).
+type ResourceImportEvent struct {
+	Type ResourceImportEventType `json:"type"`
+	// Name is the resource (or skipped folder) the event concerns; unset on
+	// discovered/done/error.
+	Name string `json:"name,omitempty"`
+	// Reason carries the failure/skip explanation on failed/skipped/error.
+	Reason string `json:"reason,omitempty"`
+	// Completed is the monotonic count of finished resources (any terminal
+	// status) at the time of the event; set on completed/failed.
+	Completed int `json:"completed,omitempty"`
+	// Total is the number of resources to import (excludes skipped folders); set
+	// on discovered/completed/failed.
+	Total int `json:"total,omitempty"`
+	// Names lists the resources to import; set on discovered.
+	Names []string `json:"names,omitempty"`
+	// Imported/Skipped/Failed are the final name lists; set on done.
+	Imported []string `json:"imported,omitempty"`
+	Skipped  []string `json:"skipped,omitempty"`
+	Failed   []string `json:"failed,omitempty"`
+}
+
+// importProgressFunc receives import progress events. It may be nil (the
+// non-streaming JSON callers pass nil and rely on the returned name slice).
+// Implementations must be safe to call from multiple goroutines, since the
+// per-resource loop may run concurrently (the streaming handler serializes
+// writes through a mutex).
+type importProgressFunc func(ResourceImportEvent)
+
+// emit invokes progress if it is non-nil.
+func emit(progress importProgressFunc, ev ResourceImportEvent) {
+	if progress != nil {
+		progress(ev)
+	}
+}
+
 // resourceImportKind bundles the per-kind knobs the shared import driver needs.
 // Construct one via Server.templateImportKind / Server.harnessConfigImportKind.
 type resourceImportKind struct {
 	// noun names the kind in log lines and "no scion <noun> found" errors
 	// (e.g. "templates", "harness-configs").
 	noun string
+	// marker names the kind's marker file (scion-agent.yaml / config.yaml); used
+	// in skipped-folder reasons.
+	marker string
 	// isResourceDir reports whether a directory is a resource of this kind, by
 	// checking for the kind's marker file (scion-agent.yaml / config.yaml).
 	isResourceDir func(dir string) bool
@@ -61,6 +131,7 @@ type resourceImportKind struct {
 func (s *Server) templateImportKind() resourceImportKind {
 	return resourceImportKind{
 		noun:          "templates",
+		marker:        "scion-agent.yaml",
 		isResourceDir: templateimport.IsScionTemplate,
 		newStore:      func(string) (*ResourceStore, error) { return s.templateStore(), nil },
 	}
@@ -70,6 +141,7 @@ func (s *Server) templateImportKind() resourceImportKind {
 func (s *Server) harnessConfigImportKind() resourceImportKind {
 	return resourceImportKind{
 		noun:          "harness-configs",
+		marker:        "config.yaml",
 		isResourceDir: isHarnessConfigDir,
 		newStore: func(dir string) (*ResourceStore, error) {
 			hcDir, err := config.LoadHarnessConfigDir(dir)
@@ -83,8 +155,9 @@ func (s *Server) harnessConfigImportKind() resourceImportKind {
 
 // importFromRemote fetches a remote source URL, discovers resources of the given
 // kind within it, and create-or-syncs each into the store under the project
-// scope. Returns the names of all resources imported or updated.
-func (s *Server) importFromRemote(ctx context.Context, projectID, sourceURL, scope string, kind resourceImportKind) ([]string, error) {
+// scope. Returns the names of all resources imported or updated. When progress
+// is non-nil, lifecycle events are emitted as the import proceeds.
+func (s *Server) importFromRemote(ctx context.Context, projectID, sourceURL, scope string, kind resourceImportKind, progress importProgressFunc) ([]string, error) {
 	if !config.IsRemoteURI(sourceURL) {
 		return nil, fmt.Errorf("source must be a remote URI (http://, https://, or rclone)")
 	}
@@ -98,7 +171,7 @@ func (s *Server) importFromRemote(ctx context.Context, projectID, sourceURL, sco
 	}
 	defer func() { _ = os.RemoveAll(cachePath) }()
 
-	dirs, err := discoverResourceDirs(cachePath, sourceURL, kind.isResourceDir)
+	dirs, skipped, err := discoverResourceDirs(cachePath, sourceURL, kind)
 	if err != nil {
 		return nil, err
 	}
@@ -106,13 +179,14 @@ func (s *Server) importFromRemote(ctx context.Context, projectID, sourceURL, sco
 		return nil, fmt.Errorf("no scion %s found at %s", kind.noun, sourceURL)
 	}
 
-	return s.importResourceDirs(ctx, dirs, scope, projectID, kind), nil
+	return s.importResourceDirs(ctx, dirs, skipped, scope, projectID, kind, progress), nil
 }
 
 // importFromWorkspace imports resources of the given kind from a path within the
 // project's workspace filesystem. workspacePath is relative to the project's
-// workspace root (e.g. "/.scion/templates").
-func (s *Server) importFromWorkspace(ctx context.Context, project *store.Project, workspacePath, scope string, kind resourceImportKind) ([]string, error) {
+// workspace root (e.g. "/.scion/templates"). When progress is non-nil,
+// lifecycle events are emitted as the import proceeds.
+func (s *Server) importFromWorkspace(ctx context.Context, project *store.Project, workspacePath, scope string, kind resourceImportKind, progress importProgressFunc) ([]string, error) {
 	if s.GetStorage() == nil {
 		return nil, fmt.Errorf("%s storage is not configured", kind.noun)
 	}
@@ -143,7 +217,7 @@ func (s *Server) importFromWorkspace(ctx context.Context, project *store.Project
 
 	// Workspace dirs are real directories, so pass "" as sourceURL: the leaf's
 	// own base name is correct (no content-hash cache directory in play).
-	dirs, err := discoverResourceDirs(resourcesDir, "", kind.isResourceDir)
+	dirs, skipped, err := discoverResourceDirs(resourcesDir, "", kind)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +225,7 @@ func (s *Server) importFromWorkspace(ctx context.Context, project *store.Project
 		return nil, fmt.Errorf("no scion %s found at workspace path %s", kind.noun, workspacePath)
 	}
 
-	return s.importResourceDirs(ctx, dirs, scope, project.ID, kind), nil
+	return s.importResourceDirs(ctx, dirs, skipped, scope, project.ID, kind, progress), nil
 }
 
 // fetchRemoteForImport fetches a remote source URL to a local cache directory,
@@ -202,58 +276,96 @@ func (s *Server) fetchRemoteForImport(ctx context.Context, projectID, sourceURL 
 //     sourceURL == "" so the real directory's base name is used.
 //   - Parent: root's immediate children are scanned; each child that is a
 //     resource is named by its own directory name. Children without the marker
-//     file are skipped.
-func discoverResourceDirs(root, sourceURL string, isResourceDir func(string) bool) ([]resourceDir, error) {
-	if isResourceDir(root) {
+//     file are returned as skipped (reported to the user) rather than imported.
+func discoverResourceDirs(root, sourceURL string, kind resourceImportKind) ([]resourceDir, []skippedDir, error) {
+	if kind.isResourceDir(root) {
 		name := filepath.Base(root)
 		if sourceURL != "" {
 			if derived := config.DeriveResourceName(sourceURL); derived != "" {
 				name = derived
 			}
 		}
-		return []resourceDir{{name, root}}, nil
+		return []resourceDir{{name, root}}, nil, nil
 	}
 
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var dirs []resourceDir
+	var skipped []skippedDir
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 		dir := filepath.Join(root, entry.Name())
-		if isResourceDir(dir) {
+		if kind.isResourceDir(dir) {
 			dirs = append(dirs, resourceDir{entry.Name(), dir})
+		} else {
+			skipped = append(skipped, skippedDir{entry.Name(), "no " + kind.marker})
 		}
 	}
-	return dirs, nil
+	return dirs, skipped, nil
 }
 
 // importResourceDirs create-or-syncs each discovered directory into the store
-// under the given scope. Directories that fail to build a store (e.g. an
-// unreadable harness config.yaml) or fail to import are logged and skipped.
-// Returns the names successfully imported or updated.
+// under the given scope, emitting progress events. Directories that fail to
+// build a store (e.g. an unreadable harness config.yaml) or fail to import are
+// logged and reported as failed; child folders lacking the marker file
+// (skippedDirs from discovery) are reported as skipped. Returns the names
+// successfully imported or updated.
 //
 // Each directory is force-synced (force=true): a re-import always re-uploads and
 // reconciles storage, matching the prior direct-import behavior. For a
 // not-yet-existing resource the force flag is irrelevant — Bootstrap creates it.
-func (s *Server) importResourceDirs(ctx context.Context, dirs []resourceDir, scope, scopeID string, kind resourceImportKind) []string {
-	var imported []string
+//
+// The progress model separates the aggregate (a monotonic completed counter over
+// total) from per-item detail so it stays correct once the loop is parallelized
+// (Phase 4): completed is assigned as each item finishes, independent of order.
+func (s *Server) importResourceDirs(ctx context.Context, dirs []resourceDir, skipped []skippedDir, scope, scopeID string, kind resourceImportKind, progress importProgressFunc) []string {
+	total := len(dirs)
+	names := make([]string, 0, total)
 	for _, rd := range dirs {
+		names = append(names, rd.name)
+	}
+	emit(progress, ResourceImportEvent{Type: ImportEventDiscovered, Total: total, Names: names})
+
+	skippedNames := make([]string, 0, len(skipped))
+	for _, sd := range skipped {
+		skippedNames = append(skippedNames, sd.name)
+		emit(progress, ResourceImportEvent{Type: ImportEventSkipped, Name: sd.name, Reason: sd.reason})
+	}
+
+	var imported []string
+	var failed []string
+	completed := 0
+	for _, rd := range dirs {
+		emit(progress, ResourceImportEvent{Type: ImportEventStarted, Name: rd.name})
+
 		rstore, err := kind.newStore(rd.path)
-		if err != nil {
-			s.templateLog.Warn(kind.noun+" import: failed to load resource, skipping",
-				"name", rd.name, "error", err)
-			continue
+		if err == nil {
+			_, err = rstore.Bootstrap(ctx, rd.name, rd.path, scope, scopeID, true)
 		}
-		if _, err := rstore.Bootstrap(ctx, rd.name, rd.path, scope, scopeID, true); err != nil {
+		completed++
+		if err != nil {
 			s.templateLog.Warn(kind.noun+" import: failed to import resource, skipping",
 				"name", rd.name, "error", err)
+			failed = append(failed, rd.name)
+			emit(progress, ResourceImportEvent{
+				Type: ImportEventFailed, Name: rd.name, Reason: err.Error(),
+				Completed: completed, Total: total,
+			})
 			continue
 		}
 		imported = append(imported, rd.name)
+		emit(progress, ResourceImportEvent{
+			Type: ImportEventCompleted, Name: rd.name,
+			Completed: completed, Total: total,
+		})
 	}
+
+	emit(progress, ResourceImportEvent{
+		Type: ImportEventDone, Imported: imported, Skipped: skippedNames, Failed: failed,
+	})
 	return imported
 }

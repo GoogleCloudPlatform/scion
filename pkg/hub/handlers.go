@@ -9372,13 +9372,25 @@ func (s *Server) handleProjectImportTemplates(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	var imported []string
+	kind := s.templateImportKind()
+	var run func(progress importProgressFunc) ([]string, error)
 	if req.WorkspacePath != "" {
-		imported, err = s.importTemplatesFromWorkspace(ctx, project, req.WorkspacePath)
+		run = func(progress importProgressFunc) ([]string, error) {
+			return s.importFromWorkspace(ctx, project, req.WorkspacePath, store.TemplateScopeProject, kind, progress)
+		}
 	} else {
-		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
-		imported, err = s.importTemplatesFromRemote(ctx, projectID, req.SourceURL)
+		sourceURL := config.NormalizeTemplateSourceURL(req.SourceURL)
+		run = func(progress importProgressFunc) ([]string, error) {
+			return s.importFromRemote(ctx, projectID, sourceURL, store.TemplateScopeProject, kind, progress)
+		}
 	}
+
+	if importAcceptsNDJSON(r) {
+		s.streamImport(w, run)
+		return
+	}
+
+	imported, err := run(nil)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
 		return
@@ -9477,13 +9489,25 @@ func (s *Server) handleProjectImportHarnessConfigs(w http.ResponseWriter, r *htt
 		return
 	}
 
-	var imported []string
+	kind := s.harnessConfigImportKind()
+	var run func(progress importProgressFunc) ([]string, error)
 	if req.WorkspacePath != "" {
-		imported, err = s.importHarnessConfigsFromWorkspace(ctx, project, req.WorkspacePath)
+		run = func(progress importProgressFunc) ([]string, error) {
+			return s.importFromWorkspace(ctx, project, req.WorkspacePath, store.HarnessConfigScopeProject, kind, progress)
+		}
 	} else {
-		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
-		imported, err = s.importHarnessConfigsFromRemote(ctx, projectID, req.SourceURL)
+		sourceURL := config.NormalizeTemplateSourceURL(req.SourceURL)
+		run = func(progress importProgressFunc) ([]string, error) {
+			return s.importFromRemote(ctx, projectID, sourceURL, store.HarnessConfigScopeProject, kind, progress)
+		}
 	}
+
+	if importAcceptsNDJSON(r) {
+		s.streamImport(w, run)
+		return
+	}
+
+	imported, err := run(nil)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
 		return
@@ -9569,8 +9593,11 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 
 	sourceURL := config.NormalizeTemplateSourceURL(req.SourceURL)
 
-	var imported []string
-	var err error
+	// Resolve scope-specific authz and bind the import call. All pre-flight
+	// checks (authz, project existence) run here, before any response is
+	// committed, so they can still return proper HTTP status codes even on the
+	// streaming path.
+	var projectID, scope string
 	switch req.Scope {
 	case "global", "":
 		// Global import is hub-admin only. CheckAccess on an ownerless,
@@ -9587,7 +9614,7 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 				"You don't have permission to import global "+kind.noun, nil)
 			return
 		}
-		imported, err = s.importFromRemote(ctx, "", sourceURL, "global", kind)
+		projectID, scope = "", "global"
 
 	case "project":
 		if req.ScopeID == "" {
@@ -9607,7 +9634,7 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 			writeErrorFromErr(w, perr, "")
 			return
 		}
-		imported, err = s.importFromRemote(ctx, req.ScopeID, sourceURL, "project", kind)
+		projectID, scope = req.ScopeID, "project"
 
 	default:
 		writeError(w, http.StatusBadRequest, "invalid_request",
@@ -9615,16 +9642,68 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	run := func(progress importProgressFunc) ([]string, error) {
+		return s.importFromRemote(ctx, projectID, sourceURL, scope, kind, progress)
+	}
+
+	if importAcceptsNDJSON(r) {
+		s.streamImport(w, run)
+		return
+	}
+
+	imported, err := run(nil)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
 		return
 	}
-
 	writeJSON(w, http.StatusOK, ImportResourcesResponse{
 		Kind:     req.Kind,
 		Imported: imported,
 		Count:    len(imported),
 	})
+}
+
+// importAcceptsNDJSON reports whether the client opted into a streaming
+// per-resource progress response via the Accept header.
+func importAcceptsNDJSON(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Accept"), "application/x-ndjson")
+}
+
+// streamImport runs an import that may emit progress events, streaming them to
+// the client as newline-delimited JSON (NDJSON). It writes a 200 and the stream
+// headers up front, so per-resource and fetch errors are reported as an `error`
+// event in-band rather than via HTTP status (the caller must do all pre-flight
+// validation/authz before calling this). Events are serialized through a mutex
+// so they remain correct once the per-resource loop is parallelized (Phase 4).
+func (s *Server) streamImport(w http.ResponseWriter, run func(progress importProgressFunc) ([]string, error)) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming_unsupported", "streaming not supported", nil)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	var mu sync.Mutex
+	enc := json.NewEncoder(w)
+	progress := func(ev ResourceImportEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		_ = enc.Encode(ev) // Encode appends a newline → NDJSON framing.
+		flusher.Flush()
+	}
+
+	if _, err := run(progress); err != nil {
+		// The import failed before reaching the per-resource phase (e.g. fetch
+		// failure or nothing found); report it in-band since the status line is
+		// already committed.
+		progress(ResourceImportEvent{Type: ImportEventError, Reason: err.Error()})
+	}
 }
 
 // authorizeProjectImport checks that the caller may import resources into the

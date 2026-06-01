@@ -38,6 +38,33 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 
 export type ResourceImportKind = 'template' | 'harness-config';
 
+/** One progress event from the streaming (NDJSON) import endpoints. */
+interface ImportEvent {
+  type: 'discovered' | 'started' | 'completed' | 'failed' | 'skipped' | 'done' | 'error';
+  name?: string;
+  reason?: string;
+  completed?: number;
+  total?: number;
+  names?: string[];
+  imported?: string[];
+  skipped?: string[];
+  failed?: string[];
+}
+
+/** Live progress state rendered while a streaming import is in flight. */
+interface ImportProgress {
+  total: number;
+  completed: number;
+  inFlight: string[];
+}
+
+/** Final per-resource summary after a streaming import completes. */
+interface ImportSummary {
+  imported: string[];
+  skipped: string[];
+  failed: string[];
+}
+
 @customElement('scion-resource-import')
 export class ScionResourceImport extends LitElement {
   /** Which resource type to import. */
@@ -69,6 +96,8 @@ export class ScionResourceImport extends LitElement {
   @state() private loading = false;
   @state() private error: string | null = null;
   @state() private success: string | null = null;
+  @state() private progress: ImportProgress | null = null;
+  @state() private summary: ImportSummary | null = null;
 
   static override styles = css`
     :host {
@@ -115,6 +144,24 @@ export class ScionResourceImport extends LitElement {
     .sync-status.success {
       color: var(--sl-color-success-600, #16a34a);
     }
+
+    .progress {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      padding: 0.5rem 0;
+    }
+
+    .progress-label {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.875rem;
+    }
+
+    sl-progress-bar {
+      --height: 6px;
+    }
   `;
 
   private get noun(): string {
@@ -146,12 +193,16 @@ export class ScionResourceImport extends LitElement {
     this.source = mode === 'url' && this.gitRemote ? this.gitRemote : '';
     this.error = null;
     this.success = null;
+    this.progress = null;
+    this.summary = null;
   }
 
   private async handleImport(): Promise<void> {
     this.loading = true;
     this.error = null;
     this.success = null;
+    this.progress = null;
+    this.summary = null;
 
     try {
       let endpoint: string;
@@ -169,9 +220,11 @@ export class ScionResourceImport extends LitElement {
             : { sourceUrl: this.source };
       }
 
+      // Opt into streaming NDJSON progress; the server falls back to a single
+      // JSON summary for clients that don't ask for it.
       const response = await apiFetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' },
         body: JSON.stringify(body),
       });
 
@@ -181,23 +234,98 @@ export class ScionResourceImport extends LitElement {
         );
       }
 
-      const data = (await response.json()) as { count: number };
-      const count = data.count ?? 0;
-      const singular = this.kind === 'template' ? 'template' : 'harness-config';
-      this.success = `${count} ${singular}${count !== 1 ? 's' : ''} imported successfully.`;
-      this.dispatchEvent(
-        new CustomEvent('resource-imported', {
-          detail: { count },
-          bubbles: true,
-          composed: true,
-        })
-      );
+      const contentType = response.headers.get('Content-Type') ?? '';
+      if (contentType.includes('application/x-ndjson') && response.body) {
+        await this.consumeStream(response.body);
+      } else {
+        // Non-streaming fallback: single JSON summary.
+        const data = (await response.json()) as { count?: number; imported?: string[] };
+        this.finishSummary({ imported: data.imported ?? [], skipped: [], failed: [] }, data.count);
+      }
     } catch (err) {
       console.error(`Failed to import ${this.noun}:`, err);
       this.error = err instanceof Error ? err.message : `Failed to import ${this.noun}`;
     } finally {
       this.loading = false;
+      this.progress = null;
     }
+  }
+
+  /** Read an NDJSON stream of {@link ImportEvent}s, updating progress state. */
+  private async consumeStream(stream: ReadableStream<Uint8Array>): Promise<void> {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    const dispatchLine = (line: string): void => {
+      const trimmed = line.trim();
+      if (trimmed) this.handleEvent(JSON.parse(trimmed) as ImportEvent);
+    };
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buffer.indexOf('\n')) >= 0) {
+        dispatchLine(buffer.slice(0, nl));
+        buffer = buffer.slice(nl + 1);
+      }
+    }
+    dispatchLine(buffer);
+  }
+
+  /** Fold one streamed import event into the live progress / summary state. */
+  private handleEvent(ev: ImportEvent): void {
+    switch (ev.type) {
+      case 'discovered':
+        this.progress = { total: ev.total ?? 0, completed: 0, inFlight: [] };
+        break;
+      case 'started':
+        if (this.progress && ev.name) {
+          this.progress = { ...this.progress, inFlight: [...this.progress.inFlight, ev.name] };
+        }
+        break;
+      case 'completed':
+      case 'failed':
+        if (this.progress) {
+          this.progress = {
+            ...this.progress,
+            completed: ev.completed ?? this.progress.completed,
+            inFlight: this.progress.inFlight.filter((n) => n !== ev.name),
+          };
+        }
+        break;
+      case 'done':
+        this.finishSummary({
+          imported: ev.imported ?? [],
+          skipped: ev.skipped ?? [],
+          failed: ev.failed ?? [],
+        });
+        break;
+      case 'error':
+        this.error = ev.reason ?? `Failed to import ${this.noun}`;
+        break;
+      // 'skipped' is folded into the final summary's `skipped` list via 'done'.
+    }
+  }
+
+  /** Record the final summary and notify the host to refresh its list. */
+  private finishSummary(summary: ImportSummary, countOverride?: number): void {
+    this.summary = summary;
+    const count = countOverride ?? summary.imported.length;
+    const singular = this.kind === 'template' ? 'template' : 'harness-config';
+    let msg = `${count} ${singular}${count !== 1 ? 's' : ''} imported successfully.`;
+    if (summary.skipped.length > 0) msg += ` ${summary.skipped.length} skipped.`;
+    if (summary.failed.length > 0) msg += ` ${summary.failed.length} failed.`;
+    this.success = msg;
+    this.dispatchEvent(
+      new CustomEvent('resource-imported', {
+        detail: { count },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   override render() {
@@ -256,24 +384,56 @@ export class ScionResourceImport extends LitElement {
         </div>
       </div>
 
-      ${this.loading
-        ? html`<div class="sync-status">
-            <sl-spinner style="font-size: 0.875rem;"></sl-spinner>
-            ${this.mode === 'workspace'
-              ? `Importing ${this.noun} from workspace ${this.source || this.defaultWorkspacePath}...`
-              : `Importing ${this.noun} from ${this.source}...`}
-          </div>`
-        : ''}
+      ${this.loading ? this.renderProgress() : ''}
       ${this.error
         ? html`<div class="sync-status error">
             <sl-icon name="exclamation-triangle"></sl-icon>${this.error}
           </div>`
         : ''}
-      ${this.success
+      ${!this.loading && this.success
         ? html`<div class="sync-status success">
-            <sl-icon name="check-circle"></sl-icon>${this.success}
-          </div>`
+              <sl-icon name="check-circle"></sl-icon>${this.success}
+            </div>
+            ${this.renderSummaryDetail()}`
         : ''}
+    `;
+  }
+
+  /** Render the skipped/failed resource names from the final summary, if any. */
+  private renderSummaryDetail() {
+    const s = this.summary;
+    if (!s || (s.skipped.length === 0 && s.failed.length === 0)) return '';
+    return html`
+      <div class="hint">
+        ${s.failed.length > 0 ? html`<div>Failed: ${s.failed.join(', ')}</div>` : ''}
+        ${s.skipped.length > 0 ? html`<div>Skipped: ${s.skipped.join(', ')}</div>` : ''}
+      </div>
+    `;
+  }
+
+  /** Render the in-flight import status: a per-resource progress bar once the
+   * resource list is known, or an indeterminate spinner during fetch/discovery. */
+  private renderProgress() {
+    const p = this.progress;
+    if (!p || p.total === 0) {
+      return html`<div class="sync-status">
+        <sl-spinner style="font-size: 0.875rem;"></sl-spinner>
+        ${this.mode === 'workspace'
+          ? `Importing ${this.noun} from workspace ${this.source || this.defaultWorkspacePath}...`
+          : `Fetching ${this.noun} from ${this.source}...`}
+      </div>`;
+    }
+
+    const pct = Math.round((p.completed / p.total) * 100);
+    const current = p.inFlight.length > 0 ? p.inFlight.join(', ') : '…';
+    return html`
+      <div class="progress">
+        <div class="progress-label">
+          <sl-spinner style="font-size: 0.875rem;"></sl-spinner>
+          <span>Importing ${current} (${p.completed}/${p.total})…</span>
+        </div>
+        <sl-progress-bar value=${pct}></sl-progress-bar>
+      </div>
     `;
   }
 }

@@ -566,10 +566,45 @@ Ordered so each phase is independently shippable and the user-visible fixes land
 - Note: progress UX is intentionally still the simple spinner/success/error model
   here — per-resource streaming progress is Phase 3.
 
-### Phase 3 — Progress UX
+### Phase 3 — Progress UX — **Status: DONE**
 - Server emits per-resource progress events (mechanism per Q6).
 - Client renders "Importing <name> (i/N)…" and a final imported/skipped/failed summary,
   in both project and hub import surfaces.
+
+**Implementation notes (Phase 3):**
+- Server progress model (`pkg/hub/resource_import.go`): added `ResourceImportEvent`
+  (+ `ResourceImportEventType` constants `discovered`/`started`/`completed`/`failed`/
+  `skipped`/`done`/`error`) and an `importProgressFunc` callback threaded through
+  `importFromRemote` / `importFromWorkspace` / `importResourceDirs`. `discoverResourceDirs`
+  now also returns the child folders it skipped (those lacking the kind's marker file)
+  so they can be reported. The per-resource loop emits `discovered` (total + names),
+  a `skipped` event per non-marker folder, `started` per resource, then `completed`/
+  `failed` with a **monotonic completed counter** (assigned as each item finishes, so it
+  stays correct once Phase 4 parallelizes the loop), and a final `done` summary. The
+  marker filename moved onto `resourceImportKind.marker` for skip reasons. The four thin
+  `import*From*` wrappers pass `nil` progress, preserving their signatures (and all
+  existing tests).
+- Streaming transport (`pkg/hub/handlers.go`): new `streamImport` helper writes NDJSON
+  (one JSON event per line via `json.Encoder`, flushed) behind an `http.Flusher`, with
+  events serialized through a mutex (parallel-safe for Phase 4). It is **content-
+  negotiated**: `handleResourcesImport` and both per-project import handlers stream only
+  when the client sends `Accept: application/x-ndjson`; otherwise they return the
+  existing buffered JSON summary (keeping the CLI / existing tests working). All
+  pre-flight validation + authz runs before the stream is committed, so those still
+  return proper HTTP status codes; failures reached after the stream starts (fetch
+  failure, nothing found) surface as an in-band `error` event.
+- Web (`web/src/components/shared/resource-import.ts`): the shared import component now
+  requests NDJSON, reads the stream, and renders an `<sl-progress-bar>` driven by
+  `completed/total` plus the in-flight resource name(s) ("Importing antigravity
+  (2/5)…"), then a final "Imported X, skipped Y, failed Z" summary with the skipped/
+  failed name lists. Falls back to the single-JSON path when the response isn't streamed.
+  Registered `sl-progress-bar` in `web/src/client/main.ts`. Works for both the project
+  settings and Hub Resources surfaces (same component).
+- Tests: `pkg/hub/resource_import_handler_test.go` gains `…_StreamsProgress` (asserts the
+  discovered→completed→done sequence and that the resource still lands) and
+  `…_StreamErrorEvent` (a post-stream failure is reported as an `error` event, not an
+  HTTP error). Full `pkg/hub` suite + `go vet` + `go build ./...` pass; web
+  typecheck + build pass.
 
 ### Phase 4 — Performance
 - Parallelize the per-resource import loop (bounded pool), then per-file uploads.

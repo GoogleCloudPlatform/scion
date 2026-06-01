@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -104,6 +106,178 @@ func TestHandleResourcesImport_GlobalAsAdmin(t *testing.T) {
 	}
 	if result.Items[0].Scope != store.TemplateScopeGlobal {
 		t.Errorf("expected global scope, got %q", result.Items[0].Scope)
+	}
+}
+
+// doStreamRequestAsUser issues a request as user with Accept:
+// application/x-ndjson so the import endpoint streams progress events, and
+// returns the recorder for parsing.
+func doStreamRequestAsUser(t *testing.T, srv *Server, user *store.User, method, path string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(
+		user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var bodyBytes []byte
+	if body != nil {
+		bodyBytes, err = json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/x-ndjson")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// parseImportEvents splits an NDJSON body into ResourceImportEvents.
+func parseImportEvents(t *testing.T, body string) []ResourceImportEvent {
+	t.Helper()
+	var events []ResourceImportEvent
+	for _, line := range strings.Split(strings.TrimSpace(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var ev ResourceImportEvent
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("failed to parse event line %q: %v", line, err)
+		}
+		events = append(events, ev)
+	}
+	return events
+}
+
+// TestHandleResourcesImport_StreamsProgress verifies the unified endpoint emits
+// NDJSON progress events (discovered → started → completed → done) when the
+// client opts in via Accept: application/x-ndjson.
+func TestHandleResourcesImport_StreamsProgress(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	admin := &store.User{ID: "user-admin", Email: "admin@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
+	if err := s.CreateUser(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	ensureHubMembership(ctx, s, admin.ID)
+
+	defer mockTemplateTarball(t)()
+
+	rec := doStreamRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{
+		Kind:      "template",
+		Scope:     "global",
+		SourceURL: "https://github.com/acme/repo/tree/main/templates",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/x-ndjson") {
+		t.Fatalf("expected NDJSON content type, got %q", ct)
+	}
+
+	events := parseImportEvents(t, rec.Body.String())
+	if len(events) == 0 {
+		t.Fatal("expected progress events, got none")
+	}
+
+	var discovered, done *ResourceImportEvent
+	var completedNames []string
+	for i := range events {
+		switch events[i].Type {
+		case ImportEventDiscovered:
+			discovered = &events[i]
+		case ImportEventCompleted:
+			completedNames = append(completedNames, events[i].Name)
+		case ImportEventError:
+			t.Fatalf("unexpected error event: %s", events[i].Reason)
+		case ImportEventDone:
+			done = &events[i]
+		}
+	}
+
+	if discovered == nil {
+		t.Fatal("missing discovered event")
+	}
+	if discovered.Total != 1 || len(discovered.Names) != 1 || discovered.Names[0] != "my-template" {
+		t.Fatalf("unexpected discovered event: %+v", discovered)
+	}
+	if len(completedNames) != 1 || completedNames[0] != "my-template" {
+		t.Fatalf("expected my-template completed, got %v", completedNames)
+	}
+	if done == nil {
+		t.Fatal("missing done event")
+	}
+	if len(done.Imported) != 1 || done.Imported[0] != "my-template" {
+		t.Fatalf("unexpected done summary: %+v", done)
+	}
+
+	// The import still lands in the store.
+	result, err := s.ListTemplates(ctx, store.TemplateFilter{Scope: store.TemplateScopeGlobal}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TotalCount != 1 {
+		t.Fatalf("expected 1 global template, got %d", result.TotalCount)
+	}
+}
+
+// TestHandleResourcesImport_StreamErrorEvent verifies that a failure reached
+// after the stream has started (here: nothing found at the URL) is reported as
+// an in-band error event rather than an HTTP error status.
+func TestHandleResourcesImport_StreamErrorEvent(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	admin := &store.User{ID: "user-admin", Email: "admin@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
+	if err := s.CreateUser(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	ensureHubMembership(ctx, s, admin.ID)
+
+	// Serve an empty tarball: no resource dirs are discovered.
+	old := http.DefaultClient.Transport
+	http.DefaultClient.Transport = &mockRoundTripper{
+		roundTrip: func(req *http.Request) (*http.Response, error) {
+			var buf bytes.Buffer
+			gzw := gzip.NewWriter(&buf)
+			tw := tar.NewWriter(gzw)
+			_ = tw.WriteHeader(&tar.Header{Name: "repo-main/", Mode: 0700, Typeflag: tar.TypeDir})
+			_ = tw.Close()
+			_ = gzw.Close()
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(buf.Bytes()))}, nil
+		},
+	}
+	defer func() { http.DefaultClient.Transport = old }()
+
+	rec := doStreamRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{
+		Kind:      "template",
+		Scope:     "global",
+		SourceURL: "https://github.com/acme/repo/tree/main/templates",
+	})
+	// Stream already committed a 200; the failure surfaces as an error event.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 (stream started), got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	events := parseImportEvents(t, rec.Body.String())
+	var sawError bool
+	for _, ev := range events {
+		if ev.Type == ImportEventError {
+			sawError = true
+		}
+	}
+	if !sawError {
+		t.Fatalf("expected an error event, got events: %+v", events)
 	}
 }
 
