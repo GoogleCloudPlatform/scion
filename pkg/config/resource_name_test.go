@@ -82,6 +82,26 @@ func TestDeriveResourceName(t *testing.T) {
 			source: "https://github.com/org/repo/tree/main/antigravity/",
 			want:   "antigravity",
 		},
+		{
+			name:   "empty string",
+			source: "",
+			want:   "",
+		},
+		{
+			name:   "whitespace only",
+			source: "   ",
+			want:   "",
+		},
+		{
+			name:   "root path",
+			source: "/",
+			want:   "",
+		},
+		{
+			name:   "dot",
+			source: ".",
+			want:   "",
+		},
 	}
 
 	for _, tt := range tests {

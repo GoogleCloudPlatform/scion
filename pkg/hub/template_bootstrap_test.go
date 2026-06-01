@@ -1009,6 +1009,51 @@ func TestImportTemplatesFromWorkspace_ParallelManyTemplates(t *testing.T) {
 	}
 }
 
+// TestImportTemplatesFromWorkspace_SkipsHiddenDirs verifies discovery ignores
+// hidden/system directories (.git, .github, .scion) when scanning a parent
+// directory for resources, importing only the real template and not reporting
+// the hidden dirs as skipped.
+func TestImportTemplatesFromWorkspace_SkipsHiddenDirs(t *testing.T) {
+	srv, s, project, wsRoot := setupWorkspaceProject(t, "ws-hidden")
+	ctx := context.Background()
+
+	base := filepath.Join(wsRoot, "templates")
+	// A real template plus hidden/system dirs that must be ignored.
+	tmpl := filepath.Join(base, "real-template")
+	if err := os.MkdirAll(tmpl, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpl, "scion-agent.yaml"), []byte("harness: claude\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, hidden := range []string{".git", ".github", ".scion"} {
+		d := filepath.Join(base, hidden)
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+		// Put a file inside so the dir is non-empty (e.g. .git/config).
+		if err := os.WriteFile(filepath.Join(d, "config"), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	imported, err := srv.importTemplatesFromWorkspace(ctx, project, "/templates")
+	if err != nil {
+		t.Fatalf("import failed: %v", err)
+	}
+	if len(imported) != 1 || imported[0] != "real-template" {
+		t.Fatalf("expected [real-template], got %v", imported)
+	}
+
+	result, err := s.ListTemplates(ctx, store.TemplateFilter{ProjectID: project.ID}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TotalCount != 1 {
+		t.Fatalf("expected 1 template, got %d", result.TotalCount)
+	}
+}
+
 func TestBootstrapTemplatesFromDir_ImportsDefaultHarnessConfig(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()

@@ -309,6 +309,12 @@ func discoverResourceDirs(root, sourceURL string, kind resourceImportKind) ([]re
 		if !entry.IsDir() {
 			continue
 		}
+		// Skip hidden/system directories (e.g. .git, .github, .scion). These are
+		// never resources and reporting them as "skipped (no marker)" would be
+		// noise, so drop them silently.
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
 		dir := filepath.Join(root, entry.Name())
 		if kind.isResourceDir(dir) {
 			dirs = append(dirs, resourceDir{entry.Name(), dir})
@@ -364,6 +370,19 @@ func (s *Server) importResourceDirs(ctx context.Context, dirs []resourceDir, ski
 	for i, rd := range dirs {
 		i, rd := i, rd
 		g.Go(func() error {
+			// Stop starting new imports once the request is cancelled (e.g. the
+			// client disconnected mid-stream); report the rest as failed so the
+			// completed counter still reaches total.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				done := int(completed.Add(1))
+				failedSlots[i] = rd.name
+				emit(progress, ResourceImportEvent{
+					Type: ImportEventFailed, Name: rd.name, Reason: ctxErr.Error(),
+					Completed: done, Total: total,
+				})
+				return nil
+			}
+
 			emit(progress, ResourceImportEvent{Type: ImportEventStarted, Name: rd.name})
 
 			rstore, err := kind.newStore(rd.path)

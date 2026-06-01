@@ -151,6 +151,15 @@ func uploadResourceFiles(ctx context.Context, stor storage.Storage, storagePath 
 	for i, fi := range files {
 		i, fi := i, fi
 		g.Go(func() error {
+			// Abort early if the group's context is already cancelled — either the
+			// request was cancelled (client disconnected) or a sibling upload
+			// failed. Returning the error keeps the fail-fast contract: a cancelled
+			// upload must not produce a partial manifest. (g.Wait reports the first
+			// error, so the original upload failure still wins over this Canceled.)
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+
 			objectPath := storagePath + "/" + fi.Path
 
 			f, err := os.Open(fi.FullPath)

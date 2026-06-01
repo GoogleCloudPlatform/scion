@@ -36,16 +36,21 @@ import (
 // that a deep URL such as ".../tree/main/antigravity" yields "antigravity"
 // rather than the cache-hash directory name.
 func DeriveResourceName(source string) string {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return ""
+	}
+
 	if strings.HasPrefix(source, "file://") {
 		localPath := strings.TrimPrefix(source, "file://")
-		return filepath.Base(filepath.Clean(localPath))
+		return sanitizeDerivedName(filepath.Base(filepath.Clean(localPath)))
 	}
 
 	// rclone connection string, e.g. ":gcs:bucket/path".
 	if strings.HasPrefix(source, ":") {
 		parts := strings.SplitN(source, ":", 3)
 		if len(parts) == 3 {
-			return path.Base(strings.TrimRight(parts[2], "/"))
+			return sanitizeDerivedName(path.Base(strings.TrimRight(parts[2], "/")))
 		}
 		return ""
 	}
@@ -53,14 +58,26 @@ func DeriveResourceName(source string) string {
 	normalized := normalizeResourceSourceURL(source)
 	u, err := url.Parse(normalized)
 	if err != nil {
-		return filepath.Base(filepath.Clean(source))
+		return sanitizeDerivedName(filepath.Base(filepath.Clean(source)))
 	}
 
 	cleanPath := strings.TrimRight(u.Path, "/")
 	if cleanPath == "" {
-		return filepath.Base(filepath.Clean(source))
+		return sanitizeDerivedName(filepath.Base(filepath.Clean(source)))
 	}
-	return path.Base(cleanPath)
+	return sanitizeDerivedName(path.Base(cleanPath))
+}
+
+// sanitizeDerivedName drops base-name results that carry no real name —
+// filepath.Base/path.Base yield "." for empty/relative input and "/" (or the
+// platform separator) for a root path. Returning those as a resource name would
+// produce a nonsense slug, so collapse them to "" (callers treat "" as "no name
+// derived" and fall back to the on-disk directory name).
+func sanitizeDerivedName(name string) string {
+	if name == "." || name == "/" || name == `\` {
+		return ""
+	}
+	return name
 }
 
 // normalizeResourceSourceURL prepends "https://" for bare hostnames (e.g.

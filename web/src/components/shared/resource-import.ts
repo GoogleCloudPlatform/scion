@@ -272,6 +272,9 @@ export class ScionResourceImport extends LitElement {
         buffer = buffer.slice(nl + 1);
       }
     }
+    // Flush any bytes still held inside the decoder (e.g. a trailing multi-byte
+    // UTF-8 sequence split across reads) before dispatching the final line.
+    buffer += decoder.decode();
     dispatchLine(buffer);
   }
 
