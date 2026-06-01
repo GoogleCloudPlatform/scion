@@ -40,6 +40,12 @@ type EventPublisher interface {
 	PublishUserMessage(ctx context.Context, msg *store.Message)
 	PublishAllowListChanged(ctx context.Context, action string, email string)
 	PublishInviteChanged(ctx context.Context, action string, inviteID string, codePrefix string)
+	// Subscribe returns a channel that receives events matching the given
+	// subject patterns, along with an unsubscribe function. Patterns use
+	// NATS-style wildcards: '*' matches a single token, '>' matches the
+	// remainder. The returned channel is buffered; implementations may drop
+	// events on a full buffer (backpressure).
+	Subscribe(patterns ...string) (<-chan Event, func())
 	Close()
 }
 
@@ -61,6 +67,13 @@ func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message
 func (noopEventPublisher) PublishAllowListChanged(_ context.Context, _, _ string)            {}
 func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _, _ string)            {}
 func (noopEventPublisher) Close()                                                            {}
+
+// Subscribe on the no-op publisher returns a nil channel (which blocks forever
+// on receive) and a no-op unsubscribe. Callers that need real subscriptions
+// must wire a ChannelEventPublisher or PostgresEventPublisher.
+func (noopEventPublisher) Subscribe(_ ...string) (<-chan Event, func()) {
+	return nil, func() {}
+}
 
 // Event is a published event with a subject and JSON-encoded data.
 type Event struct {
@@ -199,9 +212,20 @@ type InviteChangedEvent struct {
 	CodePrefix string `json:"codePrefix,omitempty"`
 }
 
+// eventBuilder holds the EventPublisher Publish* method implementations shared
+// by every publisher backend. Each method marshals a typed event struct and
+// hands the (subject, event) pair to sink, which the embedding publisher wires
+// to its own delivery mechanism (in-process fan-out for ChannelEventPublisher,
+// Postgres NOTIFY for PostgresEventPublisher). Keeping the subject taxonomy in
+// one place guarantees both backends publish identical subjects and payloads.
+type eventBuilder struct {
+	sink func(subject string, event interface{})
+}
+
 // ChannelEventPublisher is an in-process event publisher that fans out events
 // to Go channel subscribers using NATS-style subject matching.
 type ChannelEventPublisher struct {
+	eventBuilder
 	mu          sync.RWMutex
 	subscribers map[string][]chan Event
 	closed      bool
@@ -209,9 +233,11 @@ type ChannelEventPublisher struct {
 
 // NewChannelEventPublisher creates a new ChannelEventPublisher.
 func NewChannelEventPublisher() *ChannelEventPublisher {
-	return &ChannelEventPublisher{
+	p := &ChannelEventPublisher{
 		subscribers: make(map[string][]chan Event),
 	}
+	p.sink = p.publish
+	return p
 }
 
 // Subscribe returns a channel that receives events matching the given patterns,
@@ -298,7 +324,7 @@ func (p *ChannelEventPublisher) Close() {
 
 // PublishAgentStatus publishes an agent status event to both agent-specific
 // and project-scoped subjects (dual-publish pattern).
-func (p *ChannelEventPublisher) PublishAgentStatus(_ context.Context, agent *store.Agent) {
+func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent) {
 	evt := AgentStatusEvent{
 		AgentID:         agent.ID,
 		ProjectID:       agent.ProjectID,
@@ -321,16 +347,16 @@ func (p *ChannelEventPublisher) PublishAgentStatus(_ context.Context, agent *sto
 	if detail != (AgentDetail{}) {
 		evt.Detail = &detail
 	}
-	p.publish("agent."+agent.ID+".status", evt)
+	p.sink("agent."+agent.ID+".status", evt)
 	if agent.ProjectID != "" {
-		p.publish("project."+agent.ProjectID+".agent.status", evt)
-		p.publish("grove."+agent.ProjectID+".agent.status", evt)
+		p.sink("project."+agent.ProjectID+".agent.status", evt)
+		p.sink("grove."+agent.ProjectID+".agent.status", evt)
 	}
 }
 
 // PublishAgentCreated publishes an agent created event to both agent-specific
 // and project-scoped subjects (dual-publish pattern).
-func (p *ChannelEventPublisher) PublishAgentCreated(_ context.Context, agent *store.Agent) {
+func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent) {
 	evt := AgentCreatedEvent{
 		AgentID:         agent.ID,
 		ProjectID:       agent.ProjectID,
@@ -351,63 +377,63 @@ func (p *ChannelEventPublisher) PublishAgentCreated(_ context.Context, agent *st
 	if !agent.Created.IsZero() {
 		evt.Created = agent.Created.Format("2006-01-02T15:04:05Z07:00")
 	}
-	p.publish("agent."+agent.ID+".created", evt)
+	p.sink("agent."+agent.ID+".created", evt)
 	if agent.ProjectID != "" {
-		p.publish("project."+agent.ProjectID+".agent.created", evt)
-		p.publish("grove."+agent.ProjectID+".agent.created", evt)
+		p.sink("project."+agent.ProjectID+".agent.created", evt)
+		p.sink("grove."+agent.ProjectID+".agent.created", evt)
 	}
 }
 
 // PublishAgentDeleted publishes an agent deleted event to both agent-specific
 // and project-scoped subjects (dual-publish pattern).
-func (p *ChannelEventPublisher) PublishAgentDeleted(_ context.Context, agentID, projectID string) {
+func (p *eventBuilder) PublishAgentDeleted(_ context.Context, agentID, projectID string) {
 	evt := AgentDeletedEvent{
 		AgentID:   agentID,
 		ProjectID: projectID,
 		GroveID:   projectID,
 	}
-	p.publish("agent."+agentID+".deleted", evt)
+	p.sink("agent."+agentID+".deleted", evt)
 	if projectID != "" {
-		p.publish("project."+projectID+".agent.deleted", evt)
-		p.publish("grove."+projectID+".agent.deleted", evt)
+		p.sink("project."+projectID+".agent.deleted", evt)
+		p.sink("grove."+projectID+".agent.deleted", evt)
 	}
 }
 
 // PublishProjectCreated publishes a project created event.
-func (p *ChannelEventPublisher) PublishProjectCreated(_ context.Context, project *store.Project) {
+func (p *eventBuilder) PublishProjectCreated(_ context.Context, project *store.Project) {
 	evt := ProjectCreatedEvent{
 		ProjectID: project.ID,
 		GroveID:   project.ID,
 		Name:      project.Name,
 		Slug:      project.Slug,
 	}
-	p.publish("project."+project.ID+".created", evt)
-	p.publish("grove."+project.ID+".created", evt)
+	p.sink("project."+project.ID+".created", evt)
+	p.sink("grove."+project.ID+".created", evt)
 }
 
 // PublishProjectUpdated publishes a project updated event.
-func (p *ChannelEventPublisher) PublishProjectUpdated(_ context.Context, project *store.Project) {
+func (p *eventBuilder) PublishProjectUpdated(_ context.Context, project *store.Project) {
 	evt := ProjectUpdatedEvent{
 		ProjectID: project.ID,
 		GroveID:   project.ID,
 		Name:      project.Name,
 	}
-	p.publish("project."+project.ID+".updated", evt)
-	p.publish("grove."+project.ID+".updated", evt)
+	p.sink("project."+project.ID+".updated", evt)
+	p.sink("grove."+project.ID+".updated", evt)
 }
 
 // PublishProjectDeleted publishes a project deleted event.
-func (p *ChannelEventPublisher) PublishProjectDeleted(_ context.Context, projectID string) {
+func (p *eventBuilder) PublishProjectDeleted(_ context.Context, projectID string) {
 	evt := ProjectDeletedEvent{
 		ProjectID: projectID,
 		GroveID:   projectID,
 	}
-	p.publish("project."+projectID+".deleted", evt)
-	p.publish("grove."+projectID+".deleted", evt)
+	p.sink("project."+projectID+".deleted", evt)
+	p.sink("grove."+projectID+".deleted", evt)
 }
 
 // PublishBrokerConnected publishes broker connection events, one per project the broker serves.
-func (p *ChannelEventPublisher) PublishBrokerConnected(_ context.Context, brokerID, brokerName string, projectIDs []string) {
+func (p *eventBuilder) PublishBrokerConnected(_ context.Context, brokerID, brokerName string, projectIDs []string) {
 	for _, pid := range projectIDs {
 		evt := BrokerProjectEvent{
 			BrokerID:   brokerID,
@@ -416,13 +442,13 @@ func (p *ChannelEventPublisher) PublishBrokerConnected(_ context.Context, broker
 			GroveID:    pid,
 			Status:     "online",
 		}
-		p.publish("project."+pid+".broker.status", evt)
-		p.publish("grove."+pid+".broker.status", evt)
+		p.sink("project."+pid+".broker.status", evt)
+		p.sink("grove."+pid+".broker.status", evt)
 	}
 }
 
 // PublishBrokerDisconnected publishes broker disconnection events, one per project the broker serves.
-func (p *ChannelEventPublisher) PublishBrokerDisconnected(_ context.Context, brokerID string, projectIDs []string) {
+func (p *eventBuilder) PublishBrokerDisconnected(_ context.Context, brokerID string, projectIDs []string) {
 	for _, pid := range projectIDs {
 		evt := BrokerProjectEvent{
 			BrokerID:  brokerID,
@@ -430,22 +456,22 @@ func (p *ChannelEventPublisher) PublishBrokerDisconnected(_ context.Context, bro
 			GroveID:   pid,
 			Status:    "offline",
 		}
-		p.publish("project."+pid+".broker.status", evt)
-		p.publish("grove."+pid+".broker.status", evt)
+		p.sink("project."+pid+".broker.status", evt)
+		p.sink("grove."+pid+".broker.status", evt)
 	}
 }
 
 // PublishBrokerStatus publishes a general broker status event.
-func (p *ChannelEventPublisher) PublishBrokerStatus(_ context.Context, brokerID, status string) {
+func (p *eventBuilder) PublishBrokerStatus(_ context.Context, brokerID, status string) {
 	evt := BrokerStatusEvent{
 		BrokerID: brokerID,
 		Status:   status,
 	}
-	p.publish("broker."+brokerID+".status", evt)
+	p.sink("broker."+brokerID+".status", evt)
 }
 
 // PublishNotification publishes a user notification event.
-func (p *ChannelEventPublisher) PublishNotification(_ context.Context, notif *store.Notification) {
+func (p *eventBuilder) PublishNotification(_ context.Context, notif *store.Notification) {
 	evt := NotificationCreatedEvent{
 		ID:        notif.ID,
 		AgentID:   notif.AgentID,
@@ -455,30 +481,30 @@ func (p *ChannelEventPublisher) PublishNotification(_ context.Context, notif *st
 		Message:   notif.Message,
 		CreatedAt: notif.CreatedAt.Format("2006-01-02T15:04:05.000Z"),
 	}
-	p.publish("notification.created", evt)
+	p.sink("notification.created", evt)
 	if notif.ProjectID != "" {
-		p.publish("project."+notif.ProjectID+".notification", evt)
-		p.publish("grove."+notif.ProjectID+".notification", evt)
+		p.sink("project."+notif.ProjectID+".notification", evt)
+		p.sink("grove."+notif.ProjectID+".notification", evt)
 	}
 }
 
 // PublishAllowListChanged publishes an allow list change event.
 // Email is intentionally omitted from the event to avoid PII leak via SSE.
-func (p *ChannelEventPublisher) PublishAllowListChanged(_ context.Context, action, _ string) {
+func (p *eventBuilder) PublishAllowListChanged(_ context.Context, action, _ string) {
 	evt := AllowListChangedEvent{
 		Action: action,
 	}
-	p.publish("admin.allowlist.changed", evt)
+	p.sink("admin.allowlist.changed", evt)
 }
 
 // PublishInviteChanged publishes an invite code change event.
-func (p *ChannelEventPublisher) PublishInviteChanged(_ context.Context, action, inviteID, codePrefix string) {
+func (p *eventBuilder) PublishInviteChanged(_ context.Context, action, inviteID, codePrefix string) {
 	evt := InviteChangedEvent{
 		Action:     action,
 		InviteID:   inviteID,
 		CodePrefix: codePrefix,
 	}
-	p.publish("admin.invite.changed", evt)
+	p.sink("admin.invite.changed", evt)
 }
 
 // PublishUserMessage publishes a user.message event when a message involving
@@ -493,7 +519,7 @@ func (p *ChannelEventPublisher) PublishInviteChanged(_ context.Context, action, 
 //     (only when the recipient is a user)
 //   - agent.<agentID>.message — per-agent conversation streams (both
 //     directions; subscribers filter by user participation themselves)
-func (p *ChannelEventPublisher) PublishUserMessage(_ context.Context, msg *store.Message) {
+func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message) {
 	evt := UserMessageEvent{
 		ID:          msg.ID,
 		ProjectID:   msg.ProjectID,
@@ -516,14 +542,14 @@ func (p *ChannelEventPublisher) PublishUserMessage(_ context.Context, msg *store
 	// count by mixing user→agent prompts with agent→user replies.
 	recipientIsUser := strings.HasPrefix(msg.Recipient, "user:")
 	if recipientIsUser && msg.RecipientID != "" {
-		p.publish("user."+msg.RecipientID+".message", evt)
+		p.sink("user."+msg.RecipientID+".message", evt)
 	}
 	if recipientIsUser && msg.ProjectID != "" {
-		p.publish("project."+msg.ProjectID+".user.message", evt)
-		p.publish("grove."+msg.ProjectID+".user.message", evt)
+		p.sink("project."+msg.ProjectID+".user.message", evt)
+		p.sink("grove."+msg.ProjectID+".user.message", evt)
 	}
 	if msg.AgentID != "" {
-		p.publish("agent."+msg.AgentID+".message", evt)
+		p.sink("agent."+msg.AgentID+".message", evt)
 	}
 }
 

@@ -45,7 +45,7 @@ const brokerCallbackTimeout = 30 * time.Second
 type MessageBrokerProxy struct {
 	bus           eventbus.EventBus
 	store         store.Store
-	events        *ChannelEventPublisher
+	events        EventPublisher
 	getDispatcher func() AgentDispatcher
 	log           *slog.Logger
 	messageLog    *slog.Logger
@@ -63,7 +63,7 @@ type MessageBrokerProxy struct {
 func NewMessageBrokerProxy(
 	b eventbus.EventBus,
 	s store.Store,
-	events *ChannelEventPublisher,
+	events EventPublisher,
 	getDispatcher func() AgentDispatcher,
 	log *slog.Logger,
 ) *MessageBrokerProxy {
