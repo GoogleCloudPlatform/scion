@@ -133,7 +133,7 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 
 // GetMessage returns a single message by ID.
 func (s *MessageStore) GetMessage(ctx context.Context, id string) (*store.Message, error) {
-	uid, err := parseUUID(id)
+	uid, err := parseGetID(id)
 	if err != nil {
 		return nil, err
 	}

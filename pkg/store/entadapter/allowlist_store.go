@@ -406,7 +406,7 @@ func (s *AllowListStore) GetInviteCodeByHash(ctx context.Context, codeHash strin
 
 // GetInviteCode retrieves an invite code by ID.
 func (s *AllowListStore) GetInviteCode(ctx context.Context, id string) (*store.InviteCode, error) {
-	uid, err := parseUUID(id)
+	uid, err := parseGetID(id)
 	if err != nil {
 		return nil, err
 	}

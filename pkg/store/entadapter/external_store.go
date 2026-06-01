@@ -113,7 +113,7 @@ func (s *ExternalStore) CreateGCPServiceAccount(ctx context.Context, sa *store.G
 
 // GetGCPServiceAccount retrieves a GCP service account by ID.
 func (s *ExternalStore) GetGCPServiceAccount(ctx context.Context, id string) (*store.GCPServiceAccount, error) {
-	uid, err := parseUUID(id)
+	uid, err := parseGetID(id)
 	if err != nil {
 		return nil, err
 	}
@@ -456,7 +456,7 @@ func (s *ExternalStore) CreateUserAccessToken(ctx context.Context, token *store.
 
 // GetUserAccessToken retrieves a user access token by ID.
 func (s *ExternalStore) GetUserAccessToken(ctx context.Context, id string) (*store.UserAccessToken, error) {
-	uid, err := parseUUID(id)
+	uid, err := parseGetID(id)
 	if err != nil {
 		return nil, err
 	}

@@ -151,7 +151,7 @@ func (s *UserStore) CreateUser(ctx context.Context, u *store.User) error {
 
 // GetUser retrieves a user by ID.
 func (s *UserStore) GetUser(ctx context.Context, id string) (*store.User, error) {
-	uid, err := parseUUID(id)
+	uid, err := parseGetID(id)
 	if err != nil {
 		return nil, err
 	}
