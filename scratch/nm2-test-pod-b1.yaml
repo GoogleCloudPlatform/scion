@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nm2-test-agent-b1
+  namespace: scion-agents
+  labels:
+    test: nm2-scenario-b
+    scion.dev/project-id: test-project-beta
+spec:
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  initContainers:
+  - name: workspace-provision
+    image: alpine/git:latest
+    command:
+    - sh
+    - -c
+    - |
+      set -e
+      SENTINEL="/workspace/.scion-provisioned"
+      if [ -f "$SENTINEL" ]; then
+        echo "PROVISION: sentinel found at $(cat $SENTINEL), skipping clone"
+        exit 0
+      fi
+      echo "PROVISION: cloning workspace for project-beta (agent b1)..."
+      git clone --depth 1 https://github.com/ptone/scion.git /workspace
+      echo "b1:$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$SENTINEL"
+      echo "PROVISION: clone complete, sentinel written by b1"
+    volumeMounts:
+    - name: workspace
+      mountPath: /workspace
+      subPath: projects/test-project-beta/workspace
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+  containers:
+  - name: agent
+    image: busybox:1.36
+    command:
+    - sh
+    - -c
+    - |
+      echo "=== AGENT B1 WORKSPACE ==="
+      ls -la /workspace/
+      echo "=== SENTINEL ==="
+      cat /workspace/.scion-provisioned
+      echo "=== go.mod (identity check) ==="
+      head -3 /workspace/go.mod 2>/dev/null || echo "go.mod not found"
+      echo "=== TEST COMPLETE (b1) ==="
+      sleep 60
+    volumeMounts:
+    - name: workspace
+      mountPath: /workspace
+      subPath: projects/test-project-beta/workspace
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+  volumes:
+  - name: workspace
+    persistentVolumeClaim:
+      claimName: scion-workspaces
+  restartPolicy: Never
+  tolerations:
+  - key: "kubernetes.io/arch"
+    operator: "Equal"
+    value: "amd64"
+    effect: "NoSchedule"
