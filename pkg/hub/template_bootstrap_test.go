@@ -27,7 +27,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -1024,11 +1023,11 @@ func TestImportTemplatesFromRemote_WithProjectGithubToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Hijack the HTTP client's Transport to mock the tarball fetch
+	// Hijack the HTTP client's Transport to mock the tarball fetch.
+	// NOTE: This test mutates http.DefaultClient.Transport globally and MUST NOT be run in parallel (t.Parallel()).
 	oldTransport := http.DefaultClient.Transport
 	defer func() { http.DefaultClient.Transport = oldTransport }()
 
-	var mu sync.Mutex
 	var capturedAuthHeader string
 	http.DefaultClient.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
@@ -1036,9 +1035,7 @@ func TestImportTemplatesFromRemote_WithProjectGithubToken(t *testing.T) {
 				return nil, fmt.Errorf("unexpected request to host: %s", req.URL.Host)
 			}
 
-			mu.Lock()
 			capturedAuthHeader = req.Header.Get("Authorization")
-			mu.Unlock()
 
 			// Write a simple dummy tar.gz containing a test template directory structure
 			var buf bytes.Buffer
@@ -1094,11 +1091,8 @@ system_prompt: system-prompt.md
 		t.Errorf("expected imported templates [my-template], got %v", imported)
 	}
 
-	mu.Lock()
-	headerVal := capturedAuthHeader
-	mu.Unlock()
-	if headerVal != "Bearer my-secret-token-12345" {
-		t.Errorf("expected Authorization header 'Bearer my-secret-token-12345', got %q", headerVal)
+	if capturedAuthHeader != "Bearer my-secret-token-12345" {
+		t.Errorf("expected Authorization header 'Bearer my-secret-token-12345', got %q", capturedAuthHeader)
 	}
 
 	// Verify template was saved to store
