@@ -259,6 +259,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStop(t *testing.T) {
 	broker := &store.RuntimeBroker{
 		ID:       tid("host-1"),
 		Name:     "test-host",
+		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
 		Status:   store.BrokerStatusOnline,
 	}
@@ -296,6 +297,7 @@ func TestHTTPAgentDispatcher_DispatchAgentDelete(t *testing.T) {
 	broker := &store.RuntimeBroker{
 		ID:       tid("host-1"),
 		Name:     "test-host",
+		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
 		Status:   store.BrokerStatusOnline,
 	}
@@ -336,6 +338,7 @@ func TestHTTPAgentDispatcher_DispatchAgentMessage(t *testing.T) {
 	broker := &store.RuntimeBroker{
 		ID:       tid("host-1"),
 		Name:     "test-host",
+		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
 		Status:   store.BrokerStatusOnline,
 	}
