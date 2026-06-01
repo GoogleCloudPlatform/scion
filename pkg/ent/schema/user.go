@@ -47,8 +47,12 @@ func (User) Fields() []ent.Field {
 		field.String("email").
 			Unique().
 			NotEmpty(),
-		field.String("display_name").
-			NotEmpty(),
+		// display_name is required (NOT NULL) but may be empty, matching the
+		// former raw-SQL store (display_name TEXT NOT NULL). Some identity
+		// providers omit a display name; the broker/user handlers fall back to
+		// the email in that case, so empty values must be storable. A stricter
+		// NotEmpty() here would reject those users and break the fallback.
+		field.String("display_name"),
 		field.String("avatar_url").
 			Optional(),
 		field.Enum("role").

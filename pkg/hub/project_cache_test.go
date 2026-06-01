@@ -116,7 +116,7 @@ func TestResolveProjectWebDAVPath_LinkedProject_EmbeddedBroker(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   embeddedBrokerID,
 		BrokerName: broker.Name,
-		LocalPath: embeddedPath,
+		LocalPath:  embeddedPath,
 	}))
 
 	// For embedded broker, should serve directly from local path
@@ -156,7 +156,7 @@ func TestIsLinkedProject_EmbeddedBrokerOnly(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   embeddedBrokerID,
 		BrokerName: broker.Name,
-		LocalPath: "/some/path",
+		LocalPath:  "/some/path",
 	}))
 
 	// Embedded broker with local path should NOT be considered "linked" (it's co-located)
