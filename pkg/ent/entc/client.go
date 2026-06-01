@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
@@ -27,11 +28,37 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/migrate"
 )
 
+// PoolConfig holds connection pool settings applied to the underlying
+// *sql.DB after it is opened. A zero value leaves the corresponding pool
+// setting at the database/sql default (i.e. the field is only applied when
+// it is greater than zero).
+//
+// NOTE: for SQLite, MaxOpenConns must be 1 to serialize writes and avoid
+// "database is locked" errors; callers are responsible for supplying that.
+type PoolConfig struct {
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+}
+
+// apply sets the pool parameters on db, skipping any unset (non-positive) field.
+func (p PoolConfig) apply(db *sql.DB) {
+	if p.MaxOpenConns > 0 {
+		db.SetMaxOpenConns(p.MaxOpenConns)
+	}
+	if p.MaxIdleConns > 0 {
+		db.SetMaxIdleConns(p.MaxIdleConns)
+	}
+	if p.ConnMaxLifetime > 0 {
+		db.SetConnMaxLifetime(p.ConnMaxLifetime)
+	}
+}
+
 // OpenSQLite creates an Ent client backed by SQLite.
 // The dsn should be a SQLite connection string (e.g. "file:ent?mode=memory&cache=shared").
 // Foreign keys and WAL journal mode are enabled automatically.
 // This uses the modernc.org/sqlite pure-Go driver which registers as "sqlite".
-func OpenSQLite(dsn string, opts ...ent.Option) (*ent.Client, error) {
+func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, error) {
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite connection: %w", err)
@@ -45,6 +72,7 @@ func OpenSQLite(dsn string, opts ...ent.Option) (*ent.Client, error) {
 		db.Close()
 		return nil, fmt.Errorf("enabling WAL mode: %w", err)
 	}
+	pool.apply(db)
 	drv := entsql.OpenDB(dialect.SQLite, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
 	return client, nil
@@ -53,11 +81,17 @@ func OpenSQLite(dsn string, opts ...ent.Option) (*ent.Client, error) {
 // OpenPostgres creates an Ent client backed by PostgreSQL.
 // The dsn should be a PostgreSQL connection string
 // (e.g. "host=localhost port=5432 user=scion dbname=scion sslmode=disable").
-func OpenPostgres(dsn string, opts ...ent.Option) (*ent.Client, error) {
-	client, err := ent.Open(dialect.Postgres, dsn, opts...)
+func OpenPostgres(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, error) {
+	// Use the pgx stdlib driver, which registers itself as "pgx" via the
+	// blank import in driver_postgres.go. It accepts both keyword/value DSNs
+	// ("host=... port=...") and URL-style ("postgres://...") connection strings.
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("opening postgres connection: %w", err)
 	}
+	pool.apply(db)
+	drv := entsql.OpenDB(dialect.Postgres, db)
+	client := ent.NewClient(append(opts, ent.Driver(drv))...)
 	return client, nil
 }
 
