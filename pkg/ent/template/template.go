@@ -114,8 +114,6 @@ var (
 	NameValidator func(string) error
 	// SlugValidator is a validator for the "slug" field. It is called by the builders before save.
 	SlugValidator func(string) error
-	// HarnessValidator is a validator for the "harness" field. It is called by the builders before save.
-	HarnessValidator func(string) error
 	// DefaultScope holds the default value on creation for the "scope" field.
 	DefaultScope string
 	// DefaultLocked holds the default value on creation for the "locked" field.

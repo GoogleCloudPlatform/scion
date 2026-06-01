@@ -823,10 +823,6 @@ func init() {
 	templateDescSlug := templateFields[2].Descriptor()
 	// template.SlugValidator is a validator for the "slug" field. It is called by the builders before save.
 	template.SlugValidator = templateDescSlug.Validators[0].(func(string) error)
-	// templateDescHarness is the schema descriptor for harness field.
-	templateDescHarness := templateFields[5].Descriptor()
-	// template.HarnessValidator is a validator for the "harness" field. It is called by the builders before save.
-	template.HarnessValidator = templateDescHarness.Validators[0].(func(string) error)
 	// templateDescScope is the schema descriptor for scope field.
 	templateDescScope := templateFields[10].Descriptor()
 	// template.DefaultScope holds the default value on creation for the scope field.

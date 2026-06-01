@@ -450,11 +450,6 @@ func (_c *TemplateCreate) check() error {
 	if _, ok := _c.mutation.Harness(); !ok {
 		return &ValidationError{Name: "harness", err: errors.New(`ent: missing required field "Template.harness"`)}
 	}
-	if v, ok := _c.mutation.Harness(); ok {
-		if err := template.HarnessValidator(v); err != nil {
-			return &ValidationError{Name: "harness", err: fmt.Errorf(`ent: validator failed for field "Template.harness": %w`, err)}
-		}
-	}
 	if _, ok := _c.mutation.Scope(); !ok {
 		return &ValidationError{Name: "scope", err: errors.New(`ent: missing required field "Template.scope"`)}
 	}
