@@ -18,6 +18,7 @@ package entadapter
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
@@ -69,6 +70,16 @@ func mapError(err error) error {
 		return store.ErrNotFound
 	}
 	if ent.IsConstraintError(err) {
+		// Both unique-constraint and foreign-key violations surface as Ent
+		// constraint errors, but they mean very different things: a unique
+		// violation is a duplicate (ErrAlreadyExists), while a foreign-key
+		// violation is a reference to a row that does not exist (ErrInvalidInput).
+		// Mapping both to ErrAlreadyExists produced a misleading "already exists"
+		// (HTTP 409) for what is really a bad reference.
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "foreign key") || strings.Contains(msg, "sqlstate 23503") {
+			return fmt.Errorf("%w: %v", store.ErrInvalidInput, err)
+		}
 		return store.ErrAlreadyExists
 	}
 	return err

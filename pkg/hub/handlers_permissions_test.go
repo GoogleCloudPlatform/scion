@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -27,6 +28,62 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// permSeedUser ensures a user row exists so that group-membership / policy-binding
+// foreign keys resolve. The Ent store enforces user/agent FK edges that the
+// former raw-SQL store did not, so fixtures must create referenced principals.
+func permSeedUser(t *testing.T, ctx context.Context, s store.Store, id string) {
+	t.Helper()
+	err := s.CreateUser(ctx, &store.User{
+		ID: id, Email: id + "@example.com", DisplayName: "Seed User",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	})
+	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		t.Fatalf("seed user %s: %v", id, err)
+	}
+}
+
+// permSeedAgent ensures an agent (and its required project) exists so that
+// membership / binding foreign keys resolve.
+func permSeedAgent(t *testing.T, ctx context.Context, s store.Store, id string) {
+	t.Helper()
+	projectID := tid("perm-agent-project")
+	_ = s.CreateProject(ctx, &store.Project{ID: projectID, Name: "Perm Agent Project", Slug: "perm-agent-project"})
+	err := s.CreateAgent(ctx, &store.Agent{
+		ID: id, Name: "Seed Agent", Slug: "seed-agent-" + id[:8],
+		ProjectID: projectID, Phase: "stopped", Visibility: store.VisibilityPrivate,
+	})
+	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		t.Fatalf("seed agent %s: %v", id, err)
+	}
+}
+
+// permSeedMember seeds the user or agent referenced by a group membership.
+func permSeedMember(t *testing.T, ctx context.Context, s store.Store, m *store.GroupMember) {
+	t.Helper()
+	if m.MemberID == "" {
+		return
+	}
+	if m.MemberType == store.GroupMemberTypeAgent {
+		permSeedAgent(t, ctx, s, m.MemberID)
+	} else {
+		permSeedUser(t, ctx, s, m.MemberID)
+	}
+}
+
+// permSeedPrincipal seeds the user or agent referenced by a policy binding.
+// Group principals are created by the test itself, so they are skipped.
+func permSeedPrincipal(t *testing.T, ctx context.Context, s store.Store, principalType, principalID string) {
+	t.Helper()
+	if principalID == "" || principalType == "group" {
+		return
+	}
+	if principalType == "agent" {
+		permSeedAgent(t, ctx, s, principalID)
+	} else {
+		permSeedUser(t, ctx, s, principalID)
+	}
+}
 
 // ============================================================================
 // Group Endpoint Tests
@@ -44,6 +101,9 @@ func TestGroupList(t *testing.T) {
 			Slug:    tid("test-group-" + string(rune('a'+i))),
 			Created: time.Now(),
 			Updated: time.Now(),
+		}
+		if group.OwnerID != "" {
+			permSeedUser(t, ctx, s, group.OwnerID)
 		}
 		if err := s.CreateGroup(ctx, group); err != nil {
 			t.Fatalf("failed to create group: %v", err)
@@ -127,6 +187,9 @@ func TestGroupGet(t *testing.T) {
 		Created:     time.Now(),
 		Updated:     time.Now(),
 	}
+	if group.OwnerID != "" {
+		permSeedUser(t, ctx, s, group.OwnerID)
+	}
 	if err := s.CreateGroup(ctx, group); err != nil {
 		t.Fatalf("failed to create group: %v", err)
 	}
@@ -165,6 +228,9 @@ func TestGroupUpdate(t *testing.T) {
 		Slug:    "original-name",
 		Created: time.Now(),
 		Updated: time.Now(),
+	}
+	if group.OwnerID != "" {
+		permSeedUser(t, ctx, s, group.OwnerID)
 	}
 	if err := s.CreateGroup(ctx, group); err != nil {
 		t.Fatalf("failed to create group: %v", err)
@@ -205,6 +271,9 @@ func TestGroupDelete(t *testing.T) {
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
+	if group.OwnerID != "" {
+		permSeedUser(t, ctx, s, group.OwnerID)
+	}
 	if err := s.CreateGroup(ctx, group); err != nil {
 		t.Fatalf("failed to create group: %v", err)
 	}
@@ -232,6 +301,9 @@ func TestGroupMembersAdd(t *testing.T) {
 		Slug:    "test-group",
 		Created: time.Now(),
 		Updated: time.Now(),
+	}
+	if group.OwnerID != "" {
+		permSeedUser(t, ctx, s, group.OwnerID)
 	}
 	if err := s.CreateGroup(ctx, group); err != nil {
 		t.Fatalf("failed to create group: %v", err)
@@ -285,6 +357,9 @@ func TestGroupMembersAddByEmail(t *testing.T) {
 		Slug:    "test-group-email",
 		Created: time.Now(),
 		Updated: time.Now(),
+	}
+	if group.OwnerID != "" {
+		permSeedUser(t, ctx, s, group.OwnerID)
 	}
 	if err := s.CreateGroup(ctx, group); err != nil {
 		t.Fatalf("failed to create group: %v", err)
@@ -341,6 +416,9 @@ func TestGroupMembersAddByEmail_NotFound(t *testing.T) {
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
+	if group.OwnerID != "" {
+		permSeedUser(t, ctx, s, group.OwnerID)
+	}
 	if err := s.CreateGroup(ctx, group); err != nil {
 		t.Fatalf("failed to create group: %v", err)
 	}
@@ -376,8 +454,14 @@ func TestGroupMembersAddGroupBySlug(t *testing.T) {
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
+	if parentGroup.OwnerID != "" {
+		permSeedUser(t, ctx, s, parentGroup.OwnerID)
+	}
 	if err := s.CreateGroup(ctx, parentGroup); err != nil {
 		t.Fatalf("failed to create parent group: %v", err)
+	}
+	if childGroup.OwnerID != "" {
+		permSeedUser(t, ctx, s, childGroup.OwnerID)
 	}
 	if err := s.CreateGroup(ctx, childGroup); err != nil {
 		t.Fatalf("failed to create child group: %v", err)
@@ -421,6 +505,9 @@ func TestGroupMembersList(t *testing.T) {
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
+	if group.OwnerID != "" {
+		permSeedUser(t, ctx, s, group.OwnerID)
+	}
 	if err := s.CreateGroup(ctx, group); err != nil {
 		t.Fatalf("failed to create group: %v", err)
 	}
@@ -434,6 +521,7 @@ func TestGroupMembersList(t *testing.T) {
 			Role:       "member",
 			AddedAt:    time.Now(),
 		}
+		permSeedMember(t, ctx, s, member)
 		if err := s.AddGroupMember(ctx, member); err != nil {
 			t.Fatalf("failed to add member: %v", err)
 		}
@@ -466,6 +554,9 @@ func TestGroupMemberRemove(t *testing.T) {
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
+	if group.OwnerID != "" {
+		permSeedUser(t, ctx, s, group.OwnerID)
+	}
 	if err := s.CreateGroup(ctx, group); err != nil {
 		t.Fatalf("failed to create group: %v", err)
 	}
@@ -477,11 +568,12 @@ func TestGroupMemberRemove(t *testing.T) {
 		Role:       "member",
 		AddedAt:    time.Now(),
 	}
+	permSeedMember(t, ctx, s, member)
 	if err := s.AddGroupMember(ctx, member); err != nil {
 		t.Fatalf("failed to add member: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/groups/"+group.ID+"/members/user/user_remove", nil)
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/groups/"+group.ID+"/members/user/"+tid("user_remove"), nil)
 
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("expected status 204, got %d: %s", rec.Code, rec.Body.String())
@@ -513,8 +605,14 @@ func TestGroupCycleDetection(t *testing.T) {
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
+	if groupA.OwnerID != "" {
+		permSeedUser(t, ctx, s, groupA.OwnerID)
+	}
 	if err := s.CreateGroup(ctx, groupA); err != nil {
 		t.Fatalf("failed to create group A: %v", err)
+	}
+	if groupB.OwnerID != "" {
+		permSeedUser(t, ctx, s, groupB.OwnerID)
 	}
 	if err := s.CreateGroup(ctx, groupB); err != nil {
 		t.Fatalf("failed to create group B: %v", err)
@@ -561,6 +659,7 @@ func TestGroupMembersAddAgent(t *testing.T) {
 	agent := &store.Agent{
 		ID:        tid("agent_abc123"),
 		Name:      "Test Agent",
+		Slug:      "test-agent-abc123",
 		ProjectID: project.ID,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
@@ -568,11 +667,14 @@ func TestGroupMembersAddAgent(t *testing.T) {
 	}
 
 	group := &store.Group{
-		ID:      "group_agent123",
+		ID:      tid("group_agent123"),
 		Name:    "Test Group",
 		Slug:    "test-group-agent",
 		Created: time.Now(),
 		Updated: time.Now(),
+	}
+	if group.OwnerID != "" {
+		permSeedUser(t, ctx, s, group.OwnerID)
 	}
 	if err := s.CreateGroup(ctx, group); err != nil {
 		t.Fatalf("failed to create group: %v", err)
@@ -617,6 +719,9 @@ func TestGroupMemberRemoveAgent(t *testing.T) {
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
+	if group.OwnerID != "" {
+		permSeedUser(t, ctx, s, group.OwnerID)
+	}
 	if err := s.CreateGroup(ctx, group); err != nil {
 		t.Fatalf("failed to create group: %v", err)
 	}
@@ -628,11 +733,12 @@ func TestGroupMemberRemoveAgent(t *testing.T) {
 		Role:       "member",
 		AddedAt:    time.Now(),
 	}
+	permSeedMember(t, ctx, s, member)
 	if err := s.AddGroupMember(ctx, member); err != nil {
 		t.Fatalf("failed to add member: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/groups/"+group.ID+"/members/agent/agent_remove", nil)
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/groups/"+group.ID+"/members/agent/"+tid("agent_remove"), nil)
 
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("expected status 204, got %d: %s", rec.Code, rec.Body.String())
@@ -717,6 +823,9 @@ func TestGroupListWithGroupTypeFilter(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	for _, g := range []*store.Group{g1, g2} {
+		if g.OwnerID != "" {
+			permSeedUser(t, ctx, s, g.OwnerID)
+		}
 		if err := s.CreateGroup(ctx, g); err != nil {
 			t.Fatalf("failed to create group: %v", err)
 		}
@@ -805,6 +914,9 @@ func TestGroupUpdateAuthz_OwnerAllowed(t *testing.T) {
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
+	if group.OwnerID != "" {
+		permSeedUser(t, ctx, s, group.OwnerID)
+	}
 	if err := s.CreateGroup(ctx, group); err != nil {
 		t.Fatalf("failed to create group: %v", err)
 	}
@@ -841,6 +953,9 @@ func TestGroupUpdateAuthz_NonOwnerDenied(t *testing.T) {
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
+	if group.OwnerID != "" {
+		permSeedUser(t, ctx, s, group.OwnerID)
+	}
 	if err := s.CreateGroup(ctx, group); err != nil {
 		t.Fatalf("failed to create group: %v", err)
 	}
@@ -876,6 +991,9 @@ func TestGroupDeleteAuthz_NonOwnerDenied(t *testing.T) {
 		OwnerID: tid("user_someone_else"),
 		Created: time.Now(),
 		Updated: time.Now(),
+	}
+	if group.OwnerID != "" {
+		permSeedUser(t, ctx, s, group.OwnerID)
 	}
 	if err := s.CreateGroup(ctx, group); err != nil {
 		t.Fatalf("failed to create group: %v", err)
@@ -922,6 +1040,9 @@ func TestGroupAddMemberAuthz_OwnerAllowed(t *testing.T) {
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
+	if group.OwnerID != "" {
+		permSeedUser(t, ctx, s, group.OwnerID)
+	}
 	if err := s.CreateGroup(ctx, group); err != nil {
 		t.Fatalf("failed to create group: %v", err)
 	}
@@ -961,6 +1082,9 @@ func TestGroupAddMemberAuthz_NonOwnerDenied(t *testing.T) {
 		OwnerID: tid("user_someone_else"),
 		Created: time.Now(),
 		Updated: time.Now(),
+	}
+	if group.OwnerID != "" {
+		permSeedUser(t, ctx, s, group.OwnerID)
 	}
 	if err := s.CreateGroup(ctx, group); err != nil {
 		t.Fatalf("failed to create group: %v", err)
@@ -1002,6 +1126,9 @@ func TestGroupRemoveMemberAuthz_NonOwnerDenied(t *testing.T) {
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
+	if group.OwnerID != "" {
+		permSeedUser(t, ctx, s, group.OwnerID)
+	}
 	if err := s.CreateGroup(ctx, group); err != nil {
 		t.Fatalf("failed to create group: %v", err)
 	}
@@ -1010,15 +1137,16 @@ func TestGroupRemoveMemberAuthz_NonOwnerDenied(t *testing.T) {
 	member := &store.GroupMember{
 		GroupID:    group.ID,
 		MemberType: "user",
-		MemberID:   "user_existing",
+		MemberID:   tid("user_existing"),
 		Role:       "member",
 		AddedAt:    time.Now(),
 	}
+	permSeedMember(t, ctx, s, member)
 	if err := s.AddGroupMember(ctx, member); err != nil {
 		t.Fatalf("failed to add member: %v", err)
 	}
 
-	rec := doGroupRequestAsUser(t, srv, other, http.MethodDelete, "/api/v1/groups/"+group.ID+"/members/user/user_existing", nil)
+	rec := doGroupRequestAsUser(t, srv, other, http.MethodDelete, "/api/v1/groups/"+group.ID+"/members/user/"+tid("user_existing"), nil)
 
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("expected 403 for non-owner remove member, got %d: %s", rec.Code, rec.Body.String())
@@ -1049,6 +1177,9 @@ func TestGroupRemoveMemberAuthz_OwnerAllowed(t *testing.T) {
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
+	if group.OwnerID != "" {
+		permSeedUser(t, ctx, s, group.OwnerID)
+	}
 	if err := s.CreateGroup(ctx, group); err != nil {
 		t.Fatalf("failed to create group: %v", err)
 	}
@@ -1060,11 +1191,12 @@ func TestGroupRemoveMemberAuthz_OwnerAllowed(t *testing.T) {
 		Role:       "member",
 		AddedAt:    time.Now(),
 	}
+	permSeedMember(t, ctx, s, member)
 	if err := s.AddGroupMember(ctx, member); err != nil {
 		t.Fatalf("failed to add member: %v", err)
 	}
 
-	rec := doGroupRequestAsUser(t, srv, owner, http.MethodDelete, "/api/v1/groups/"+group.ID+"/members/user/user_to_remove", nil)
+	rec := doGroupRequestAsUser(t, srv, owner, http.MethodDelete, "/api/v1/groups/"+group.ID+"/members/user/"+tid("user_to_remove"), nil)
 
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("expected 204 for owner remove member, got %d: %s", rec.Code, rec.Body.String())
@@ -1327,6 +1459,7 @@ func TestPolicyBindingsAdd(t *testing.T) {
 		PrincipalType: "user",
 		PrincipalID:   tid("user_abc123"),
 	}
+	permSeedUser(t, ctx, s, tid("user_abc123"))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies/"+policy.ID+"/bindings", body)
 
@@ -1369,6 +1502,7 @@ func TestPolicyBindingsList(t *testing.T) {
 			PrincipalType: "user",
 			PrincipalID:   tid("user_" + string(rune('a'+i))),
 		}
+		permSeedPrincipal(t, ctx, s, binding.PrincipalType, binding.PrincipalID)
 		if err := s.AddPolicyBinding(ctx, binding); err != nil {
 			t.Fatalf("failed to add binding: %v", err)
 		}
@@ -1413,11 +1547,12 @@ func TestPolicyBindingRemove(t *testing.T) {
 		PrincipalType: "user",
 		PrincipalID:   tid("user_remove"),
 	}
+	permSeedPrincipal(t, ctx, s, binding.PrincipalType, binding.PrincipalID)
 	if err := s.AddPolicyBinding(ctx, binding); err != nil {
 		t.Fatalf("failed to add binding: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/policies/"+policy.ID+"/bindings/user/user_remove", nil)
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/policies/"+policy.ID+"/bindings/user/"+tid("user_remove"), nil)
 
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("expected status 204, got %d: %s", rec.Code, rec.Body.String())
@@ -1467,6 +1602,9 @@ func TestGetEffectiveGroups(t *testing.T) {
 	}
 
 	for _, g := range []*store.Group{groupA, groupB, groupC} {
+		if g.OwnerID != "" {
+			permSeedUser(t, ctx, s, g.OwnerID)
+		}
 		if err := s.CreateGroup(ctx, g); err != nil {
 			t.Fatalf("failed to create group %s: %v", g.ID, err)
 		}
@@ -1495,6 +1633,13 @@ func TestGetEffectiveGroups(t *testing.T) {
 	}
 
 	// User is member of C
+	permSeedMember(t, ctx, s, &store.GroupMember{
+		GroupID:    groupC.ID,
+		MemberType: "user",
+		MemberID:   tid("test_user"),
+		Role:       "member",
+		AddedAt:    time.Now(),
+	})
 	if err := s.AddGroupMember(ctx, &store.GroupMember{
 		GroupID:    groupC.ID,
 		MemberType: "user",
@@ -1549,6 +1694,7 @@ func TestGetPoliciesForPrincipal(t *testing.T) {
 	}
 
 	// Bind to user
+	permSeedPrincipal(t, ctx, s, "user", tid("test_user"))
 	if err := s.AddPolicyBinding(ctx, &store.PolicyBinding{
 		PolicyID:      policy.ID,
 		PrincipalType: "user",
