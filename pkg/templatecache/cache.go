@@ -178,17 +178,17 @@ func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error)
 	for relativePath, content := range files {
 		filePath := filepath.Join(tmpPath, relativePath)
 		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-			os.RemoveAll(tmpPath)
+			_ = os.RemoveAll(tmpPath)
 			return "", fmt.Errorf("failed to create directory for %s: %w", relativePath, err)
 		}
 		if err := os.WriteFile(filePath, content, 0644); err != nil {
-			os.RemoveAll(tmpPath)
+			_ = os.RemoveAll(tmpPath)
 			return "", fmt.Errorf("failed to write file %s: %w", relativePath, err)
 		}
 	}
 
 	if err := os.Rename(tmpPath, templatePath); err != nil {
-		os.RemoveAll(tmpPath)
+		_ = os.RemoveAll(tmpPath)
 		return "", fmt.Errorf("failed to commit cached template: %w", err)
 	}
 

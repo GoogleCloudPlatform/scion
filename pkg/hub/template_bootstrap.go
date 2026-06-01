@@ -266,7 +266,7 @@ func (s *Server) importTemplatesFromRemote(ctx context.Context, projectID, sourc
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch remote templates: %w", err)
 	}
-	defer os.RemoveAll(cachePath)
+	defer func() { _ = os.RemoveAll(cachePath) }()
 
 	// Collect template directories to import
 	type templateDir struct{ name, path string }

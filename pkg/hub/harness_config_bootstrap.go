@@ -151,7 +151,7 @@ func (s *Server) importHarnessConfigsFromRemote(ctx context.Context, projectID, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch remote harness-configs: %w", err)
 	}
-	defer os.RemoveAll(cachePath)
+	defer func() { _ = os.RemoveAll(cachePath) }()
 
 	dirs, err := discoverHarnessConfigDirs(cachePath)
 	if err != nil {
