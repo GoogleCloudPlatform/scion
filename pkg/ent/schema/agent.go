@@ -30,7 +30,7 @@ import (
 // authorization layer (created_by, owner_id, delegation_enabled, visibility)
 // and the full set of operational fields required to back store.Agent through
 // the Ent adapter (P2-port-agent). Together they give the Ent-backed agent
-// store parity with the legacy raw-SQL implementation in pkg/store/sqlite.
+// store parity with the former raw-SQL store implementation.
 type Agent struct {
 	ent.Schema
 }
