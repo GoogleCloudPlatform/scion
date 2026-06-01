@@ -8075,7 +8075,7 @@ type GCPServiceAccountMutation struct {
 	scope          *string
 	scope_id       *string
 	email          *string
-	project_id     *uuid.UUID
+	project_id     *string
 	display_name   *string
 	default_scopes *string
 	verified       *bool
@@ -8303,12 +8303,12 @@ func (m *GCPServiceAccountMutation) ResetEmail() {
 }
 
 // SetProjectID sets the "project_id" field.
-func (m *GCPServiceAccountMutation) SetProjectID(u uuid.UUID) {
-	m.project_id = &u
+func (m *GCPServiceAccountMutation) SetProjectID(s string) {
+	m.project_id = &s
 }
 
 // ProjectID returns the value of the "project_id" field in the mutation.
-func (m *GCPServiceAccountMutation) ProjectID() (r uuid.UUID, exists bool) {
+func (m *GCPServiceAccountMutation) ProjectID() (r string, exists bool) {
 	v := m.project_id
 	if v == nil {
 		return
@@ -8319,7 +8319,7 @@ func (m *GCPServiceAccountMutation) ProjectID() (r uuid.UUID, exists bool) {
 // OldProjectID returns the old "project_id" field's value of the GCPServiceAccount entity.
 // If the GCPServiceAccount object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *GCPServiceAccountMutation) OldProjectID(ctx context.Context) (v uuid.UUID, err error) {
+func (m *GCPServiceAccountMutation) OldProjectID(ctx context.Context) (v string, err error) {
 	if !m.op.Is(OpUpdateOne) {
 		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
 	}
@@ -8806,7 +8806,7 @@ func (m *GCPServiceAccountMutation) SetField(name string, value ent.Value) error
 		m.SetEmail(v)
 		return nil
 	case gcpserviceaccount.FieldProjectID:
-		v, ok := value.(uuid.UUID)
+		v, ok := value.(string)
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}

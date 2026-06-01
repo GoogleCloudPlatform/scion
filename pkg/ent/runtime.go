@@ -241,6 +241,10 @@ func init() {
 	gcpserviceaccountDescEmail := gcpserviceaccountFields[3].Descriptor()
 	// gcpserviceaccount.EmailValidator is a validator for the "email" field. It is called by the builders before save.
 	gcpserviceaccount.EmailValidator = gcpserviceaccountDescEmail.Validators[0].(func(string) error)
+	// gcpserviceaccountDescProjectID is the schema descriptor for project_id field.
+	gcpserviceaccountDescProjectID := gcpserviceaccountFields[4].Descriptor()
+	// gcpserviceaccount.ProjectIDValidator is a validator for the "project_id" field. It is called by the builders before save.
+	gcpserviceaccount.ProjectIDValidator = gcpserviceaccountDescProjectID.Validators[0].(func(string) error)
 	// gcpserviceaccountDescDisplayName is the schema descriptor for display_name field.
 	gcpserviceaccountDescDisplayName := gcpserviceaccountFields[5].Descriptor()
 	// gcpserviceaccount.DefaultDisplayName holds the default value on creation for the display_name field.

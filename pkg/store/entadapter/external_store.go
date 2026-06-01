@@ -54,7 +54,7 @@ func entGCPToStore(e *ent.GCPServiceAccount) *store.GCPServiceAccount {
 		Scope:       e.Scope,
 		ScopeID:     e.ScopeID,
 		Email:       e.Email,
-		ProjectID:   e.ProjectID.String(),
+		ProjectID:   e.ProjectID,
 		DisplayName: e.DisplayName,
 		Verified:    e.Verified,
 		CreatedBy:   e.CreatedBy,
@@ -78,11 +78,6 @@ func (s *ExternalStore) CreateGCPServiceAccount(ctx context.Context, sa *store.G
 	if err != nil {
 		return err
 	}
-	projectUID, err := parseUUID(sa.ProjectID)
-	if err != nil {
-		return err
-	}
-
 	if sa.CreatedAt.IsZero() {
 		sa.CreatedAt = time.Now()
 	}
@@ -92,7 +87,7 @@ func (s *ExternalStore) CreateGCPServiceAccount(ctx context.Context, sa *store.G
 		SetScope(sa.Scope).
 		SetScopeID(sa.ScopeID).
 		SetEmail(sa.Email).
-		SetProjectID(projectUID).
+		SetProjectID(sa.ProjectID).
 		SetDisplayName(sa.DisplayName).
 		SetDefaultScopes(strings.Join(sa.DefaultScopes, ",")).
 		SetVerified(sa.Verified).
@@ -130,14 +125,9 @@ func (s *ExternalStore) UpdateGCPServiceAccount(ctx context.Context, sa *store.G
 	if err != nil {
 		return err
 	}
-	projectUID, err := parseUUID(sa.ProjectID)
-	if err != nil {
-		return err
-	}
-
 	update := s.client.GCPServiceAccount.UpdateOneID(id).
 		SetEmail(sa.Email).
-		SetProjectID(projectUID).
+		SetProjectID(sa.ProjectID).
 		SetDisplayName(sa.DisplayName).
 		SetDefaultScopes(strings.Join(sa.DefaultScopes, ",")).
 		SetVerified(sa.Verified).
