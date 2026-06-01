@@ -51,8 +51,10 @@ func (Template) Fields() []ent.Field {
 			Optional(),
 		field.String("description").
 			Optional(),
-		field.String("harness").
-			NotEmpty(),
+		// harness may be empty: a directory template that declares no harness type
+		// leaves this blank; the raw-SQL store allowed it and BootstrapTemplatesFromDir
+		// relies on storing such templates rather than skipping them.
+		field.String("harness"),
 		field.String("default_harness_config").
 			Optional(),
 		field.String("image").
