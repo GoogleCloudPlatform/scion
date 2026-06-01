@@ -68,7 +68,7 @@ func TestChannelEventPublisher_PublishAgentStatus(t *testing.T) {
 
 	agent := &store.Agent{
 		ID:        "a1",
-		ProjectID: tid("g1"),
+		ProjectID: "g1",
 		Phase:     "running",
 	}
 
@@ -84,7 +84,7 @@ func TestChannelEventPublisher_PublishAgentStatus(t *testing.T) {
 		if err := json.Unmarshal(evt.Data, &data); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if data.AgentID != "a1" || data.Phase != "running" || data.ProjectID != tid("g1") {
+		if data.AgentID != "a1" || data.Phase != "running" || data.ProjectID != "g1" {
 			t.Errorf("unexpected event data: %+v", data)
 		}
 	case <-time.After(time.Second):
@@ -111,7 +111,7 @@ func TestChannelEventPublisher_PublishAgentStatus_IncludesTurnCounts(t *testing.
 
 	agent := &store.Agent{
 		ID:                "a1",
-		ProjectID:         tid("g1"),
+		ProjectID:         "g1",
 		Phase:             "running",
 		Activity:          "thinking",
 		CurrentTurns:      5,
@@ -155,7 +155,7 @@ func TestChannelEventPublisher_PublishAgentCreated(t *testing.T) {
 
 	agent := &store.Agent{
 		ID:              "a1",
-		ProjectID:       tid("g1"),
+		ProjectID:       "g1",
 		Name:            "test-agent",
 		Slug:            "test-agent",
 		Template:        "claude",
@@ -209,7 +209,7 @@ func TestChannelEventPublisher_PublishAgentDeleted(t *testing.T) {
 	projectCh, unsub2 := pub.Subscribe("project.g1.agent.deleted")
 	defer unsub2()
 
-	pub.PublishAgentDeleted(context.Background(), "a1", tid("g1"))
+	pub.PublishAgentDeleted(context.Background(), "a1", "g1")
 
 	select {
 	case evt := <-agentCh:
@@ -217,7 +217,7 @@ func TestChannelEventPublisher_PublishAgentDeleted(t *testing.T) {
 		if err := json.Unmarshal(evt.Data, &data); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if data.AgentID != "a1" || data.ProjectID != tid("g1") {
+		if data.AgentID != "a1" || data.ProjectID != "g1" {
 			t.Errorf("unexpected event data: %+v", data)
 		}
 	case <-time.After(time.Second):
@@ -242,9 +242,9 @@ func TestChannelEventPublisher_PublishProjectCreated(t *testing.T) {
 	defer unsub()
 
 	project := &store.Project{
-		ID:   tid("g1"),
+		ID:   "g1",
 		Name: "My Project",
-		Slug: tid("my-project"),
+		Slug: "my-project",
 	}
 
 	pub.PublishProjectCreated(context.Background(), project)
@@ -258,7 +258,7 @@ func TestChannelEventPublisher_PublishProjectCreated(t *testing.T) {
 		if err := json.Unmarshal(evt.Data, &data); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if data.ProjectID != tid("g1") || data.Name != "My Project" || data.Slug != tid("my-project") {
+		if data.ProjectID != "g1" || data.Name != "My Project" || data.Slug != "my-project" {
 			t.Errorf("unexpected event data: %+v", data)
 		}
 	case <-time.After(time.Second):
@@ -283,7 +283,7 @@ func TestChannelEventPublisher_PublishUserMessage_FanOut(t *testing.T) {
 
 	msg := &store.Message{
 		ID:          "m1",
-		ProjectID:   tid("g1"),
+		ProjectID:   "g1",
 		Sender:      "agent:coder",
 		SenderID:    "a1",
 		Recipient:   "user:alice",
@@ -333,7 +333,7 @@ func TestChannelEventPublisher_PublishUserMessage_UserToAgent(t *testing.T) {
 
 	msg := &store.Message{
 		ID:          "m2",
-		ProjectID:   tid("g1"),
+		ProjectID:   "g1",
 		Sender:      "user:alice",
 		SenderID:    "u1",
 		Recipient:   "agent:coder",
@@ -385,7 +385,7 @@ func TestChannelEventPublisher_PublishUserMessage_Broadcasted(t *testing.T) {
 
 	msg := &store.Message{
 		ID:          "m3",
-		ProjectID:   tid("g1"),
+		ProjectID:   "g1",
 		Sender:      "user:alice",
 		SenderID:    "u1",
 		Recipient:   "agent:coder",
@@ -422,14 +422,14 @@ func TestChannelEventPublisher_PublishBrokerConnected(t *testing.T) {
 	ch2, unsub2 := pub.Subscribe("project.g2.broker.status")
 	defer unsub2()
 
-	pub.PublishBrokerConnected(context.Background(), "b1", tid("broker-1"), []string{tid("g1"), tid("g2")})
+	pub.PublishBrokerConnected(context.Background(), "b1", "broker-1", []string{"g1", "g2"})
 
 	for _, tc := range []struct {
 		ch        <-chan Event
 		projectID string
 	}{
-		{ch1, tid("g1")},
-		{ch2, tid("g2")},
+		{ch1, "g1"},
+		{ch2, "g2"},
 	} {
 		select {
 		case evt := <-tc.ch:
@@ -437,7 +437,7 @@ func TestChannelEventPublisher_PublishBrokerConnected(t *testing.T) {
 			if err := json.Unmarshal(evt.Data, &data); err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
-			if data.BrokerID != "b1" || data.ProjectID != tc.projectID || data.Status != "online" || data.BrokerName != tid("broker-1") {
+			if data.BrokerID != "b1" || data.ProjectID != tc.projectID || data.Status != "online" || data.BrokerName != "broker-1" {
 				t.Errorf("unexpected event data for project %s: %+v", tc.projectID, data)
 			}
 		case <-time.After(time.Second):
@@ -455,7 +455,7 @@ func TestChannelEventPublisher_Backpressure(t *testing.T) {
 
 	agent := &store.Agent{
 		ID:        "a1",
-		ProjectID: tid("g1"),
+		ProjectID: "g1",
 		Phase:     "running",
 	}
 
@@ -496,7 +496,7 @@ func TestChannelEventPublisher_SubscribeUnsubscribe(t *testing.T) {
 
 	agent := &store.Agent{
 		ID:        "a1",
-		ProjectID: tid("g1"),
+		ProjectID: "g1",
 		Phase:     "running",
 	}
 
@@ -551,7 +551,7 @@ func TestChannelEventPublisher_WildcardSubscription(t *testing.T) {
 	defer unsub()
 
 	project := &store.Project{
-		ID:   tid("g1"),
+		ID:   "g1",
 		Name: "Test",
 		Slug: "test",
 	}
@@ -578,7 +578,7 @@ func TestChannelEventPublisher_PublishNotification(t *testing.T) {
 	notif := &store.Notification{
 		ID:        "n1",
 		AgentID:   "a1",
-		ProjectID: tid("g1"),
+		ProjectID: "g1",
 		Status:    "COMPLETED",
 		Message:   "test-agent has reached a state of COMPLETED",
 		CreatedAt: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC),
@@ -601,8 +601,8 @@ func TestChannelEventPublisher_PublishNotification(t *testing.T) {
 		if data.AgentID != "a1" {
 			t.Errorf("got AgentID %q, want %q", data.AgentID, "a1")
 		}
-		if data.ProjectID != tid("g1") {
-			t.Errorf("got ProjectID %q, want %q", data.ProjectID, tid("g1"))
+		if data.ProjectID != "g1" {
+			t.Errorf("got ProjectID %q, want %q", data.ProjectID, "g1")
 		}
 		if data.Status != "COMPLETED" {
 			t.Errorf("got Status %q, want %q", data.Status, "COMPLETED")
