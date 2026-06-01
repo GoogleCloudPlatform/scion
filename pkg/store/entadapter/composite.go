@@ -23,6 +23,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/notificationsubscription"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -78,6 +80,33 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		PolicyStore:       NewPolicyStore(client),
 		client:            client,
 	}
+}
+
+// DeleteAgent hard-deletes an agent and cascade-deletes its notification
+// subscriptions and notifications. The former raw-SQL store enforced this via
+// ON DELETE CASCADE foreign keys (notification_subscriptions.agent_id ->
+// agents(id), notifications.subscription_id -> notification_subscriptions(id)).
+// In the Ent schema agent_id is a plain field with no edge, so the cascade is
+// performed explicitly here to preserve store parity. Soft delete goes through
+// UpdateAgent and is unaffected, so subscriptions are retained for soft-deleted
+// agents.
+func (c *CompositeStore) DeleteAgent(ctx context.Context, id string) error {
+	if err := c.AgentStore.DeleteAgent(ctx, id); err != nil {
+		return err
+	}
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	if _, err := c.client.Notification.Delete().
+		Where(notification.AgentIDEQ(uid)).Exec(ctx); err != nil {
+		return err
+	}
+	if _, err := c.client.NotificationSubscription.Delete().
+		Where(notificationsubscription.AgentIDEQ(uid)).Exec(ctx); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Close closes the underlying Ent client.

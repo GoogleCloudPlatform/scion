@@ -115,6 +115,10 @@ func setupIntegrationTest(t *testing.T) *integrationTestEnv {
 func (env *integrationTestEnv) createAgentWithNotify(t *testing.T, callingAgent *store.Agent, subAgentName string) *store.Agent {
 	t.Helper()
 
+	// The created sub-agent's created_by/owner_id FK references the users table,
+	// so seed a user sharing the calling agent's ID.
+	permSeedUser(t, context.Background(), env.store, callingAgent.ID)
+
 	token, err := env.tokenSvc.GenerateAgentToken(callingAgent.ID, env.project.ID, []AgentTokenScope{
 		ScopeAgentStatusUpdate,
 		ScopeAgentCreate,
@@ -756,7 +760,7 @@ func TestIntegration_MultipleSubscribers_AgentAndUser(t *testing.T) {
 
 	// User also subscribes to the same child (manually, since the API doesn't support this yet)
 	userSub := &store.NotificationSubscription{
-		ID:                "user-sub-multi",
+		ID:                tid("user-sub-multi"),
 		AgentID:           child.ID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      DevUserID,
@@ -811,6 +815,9 @@ func TestIntegration_NoNotifyFlag_NoSubscription(t *testing.T) {
 		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, env.store.CreateAgent(ctx, parent))
+
+	// The created sub-agent's created_by/owner_id FK references the users table.
+	permSeedUser(t, ctx, env.store, parent.ID)
 
 	// Create sub-agent WITHOUT notify
 	token, err := env.tokenSvc.GenerateAgentToken(parent.ID, env.project.ID, []AgentTokenScope{
