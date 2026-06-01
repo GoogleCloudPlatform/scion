@@ -1159,6 +1159,100 @@ system_prompt: system-prompt.md
 	}
 }
 
+// TestImportHarnessConfigsFromRemote_WithProjectGithubToken exercises the
+// GITHUB_TOKEN secret fallback for harness-config remote import. Before the
+// Phase-1 refactor routed both kinds through the shared fetch path, the
+// harness-config remote import skipped this fallback (it only minted GitHub App
+// tokens). This test guards that the fallback is now applied.
+func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
+	srv, s, stor := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	projectID := "test-project-id"
+	project := &store.Project{
+		ID:        projectID,
+		Name:      "test-project",
+		Slug:      "test-project",
+		GitRemote: "https://github.com/chiefkarlin/scion-experiments",
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+
+	// Save GITHUB_TOKEN secret via local secret backend.
+	srv.SetSecretBackend(secret.NewLocalBackend(s, ""))
+	if _, _, err := srv.GetSecretBackend().Set(ctx, &secret.SetSecretInput{
+		Name:       "GITHUB_TOKEN",
+		Value:      "my-secret-token-12345",
+		SecretType: secret.TypeEnvironment,
+		Scope:      secret.ScopeProject,
+		ScopeID:    projectID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hijack the HTTP client's Transport to mock the tarball fetch.
+	// NOTE: mutates http.DefaultClient.Transport globally; MUST NOT run in parallel.
+	oldTransport := http.DefaultClient.Transport
+	defer func() { http.DefaultClient.Transport = oldTransport }()
+
+	var capturedAuthHeader string
+	http.DefaultClient.Transport = &mockRoundTripper{
+		roundTrip: func(req *http.Request) (*http.Response, error) {
+			if req.URL.Host != "github.com" {
+				return nil, fmt.Errorf("unexpected request to host: %s", req.URL.Host)
+			}
+			capturedAuthHeader = req.Header.Get("Authorization")
+
+			var buf bytes.Buffer
+			gzw := gzip.NewWriter(&buf)
+			tw := tar.NewWriter(gzw)
+			files := map[string]string{
+				"scion-experiments-main/harness-configs/my-config/config.yaml": "harness: claude\n",
+				"scion-experiments-main/harness-configs/my-config/CLAUDE.md":   "# Claude instructions",
+			}
+			for name, body := range files {
+				if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0600, Size: int64(len(body))}); err != nil {
+					return nil, err
+				}
+				if _, err := tw.Write([]byte(body)); err != nil {
+					return nil, err
+				}
+			}
+			if err := tw.Close(); err != nil {
+				return nil, err
+			}
+			if err := gzw.Close(); err != nil {
+				return nil, err
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(buf.Bytes()))}, nil
+		},
+	}
+
+	imported, err := srv.importHarnessConfigsFromRemote(ctx, projectID, "https://github.com/chiefkarlin/scion-experiments/tree/main/harness-configs")
+	if err != nil {
+		t.Fatalf("importHarnessConfigsFromRemote failed: %v", err)
+	}
+
+	if len(imported) != 1 || imported[0] != "my-config" {
+		t.Errorf("expected imported harness-configs [my-config], got %v", imported)
+	}
+	if capturedAuthHeader != "Bearer my-secret-token-12345" {
+		t.Errorf("expected Authorization header 'Bearer my-secret-token-12345', got %q", capturedAuthHeader)
+	}
+
+	existing, err := s.GetHarnessConfigBySlug(ctx, "my-config", store.HarnessConfigScopeProject, projectID)
+	if err != nil {
+		t.Fatalf("expected harness-config saved to store: %v", err)
+	}
+	if existing.Harness != "claude" {
+		t.Errorf("expected harness 'claude', got %q", existing.Harness)
+	}
+	if len(stor.objects) != 2 {
+		t.Errorf("expected 2 files uploaded to storage, got %d", len(stor.objects))
+	}
+}
+
 type mockRoundTripper struct {
 	roundTrip func(req *http.Request) (*http.Response, error)
 }

@@ -489,11 +489,40 @@ Ordered so each phase is independently shippable and the user-visible fixes land
 - Drive-by: removed a pre-existing unused `storage` import in `template_bootstrap.go`
   that was breaking `go build ./...` on the branch.
 
-### Phase 1 — Factor the import pipeline
+### Phase 1 — Factor the import pipeline — **Status: DONE**
 - Add `pkg/hub/resource_import.go` shared driver (discover + fetch/auth + loop).
 - Collapse the four `import*From*` functions into kind-parameterized wrappers.
 - Fix the harness-config `GITHUB_TOKEN` auth gap by sharing the fetch path.
 - Pure refactor: behavior-preserving, covered by existing + new tests.
+
+**Implementation notes (Phase 1):**
+- New `pkg/hub/resource_import.go` holds the shared, kind/source-generic driver:
+  - `resourceImportKind` bundles the per-kind knobs (`noun` for logs/errors,
+    `isResourceDir` marker check, `newStore` factory). Built via
+    `Server.templateImportKind()` / `Server.harnessConfigImportKind()`. The
+    harness-config `newStore` loads `config.yaml` to resolve the harness type and
+    skips a dir if that fails.
+  - `importFromRemote` / `importFromWorkspace` are the two source-generic entry
+    points; `fetchRemoteForImport` does the GitHub-App-token → `GITHUB_TOKEN`-secret
+    fallback once for **both** kinds (closing the harness-config auth gap);
+    `discoverResourceDirs` owns the leaf-vs-parent decision + naming (leaf →
+    `DeriveResourceName(URL)`, workspace leaf → real `filepath.Base`, parent →
+    child dir names, non-marker children skipped); `importResourceDirs` runs the
+    create-or-sync loop.
+- The loop now calls `ResourceStore.Bootstrap(..., force=true)` directly per dir,
+  dropping the redundant pre-loop `GetBySlug` + create-vs-sync branch (Bootstrap
+  already does that internally; for a re-import the prior code always force-synced).
+- The four `import*From*` methods in `template_bootstrap.go` /
+  `harness_config_bootstrap.go` are now one-line wrappers over the shared driver.
+  Removed the now-dead `discoverHarnessConfigDirs`, `importHarnessConfigDirs`, and
+  the `harnessConfigDir` type, plus the duplicated three-times inline discovery.
+  Workspace path validation is unified on the stricter `filepath.Rel` check
+  (the template path previously used a looser `strings.HasPrefix`).
+- Tests: existing template/harness-config import + workspace tests still pass;
+  added `TestImportHarnessConfigsFromRemote_WithProjectGithubToken` guarding the
+  newly-shared `GITHUB_TOKEN` fallback for harness-config remote import.
+- Note: `pkg/config` has pre-existing env-dependent test failures in this sandbox
+  (hub-context env vars set); unrelated to this phase, which touches only `pkg/hub`.
 
 ### Phase 2 — Hub-level import (backend + UI)
 - Add the hub import endpoint(s) (shape per Q4) with admin authz, URL-only.
