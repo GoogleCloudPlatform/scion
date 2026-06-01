@@ -22,7 +22,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
+	entsql "entgo.io/ent/dialect/sql"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 )
 
 // schemaMigrationsTable is the bookkeeping table excluded from coverage — it is
@@ -56,17 +58,21 @@ func Generate(ctx context.Context, path string) (*Report, error) {
 		return nil, fmt.Errorf("removing existing fixture %s: %w", path, err)
 	}
 
-	s, err := sqlite.New(path)
+	client, err := entc.OpenSQLite("file:"+path, entc.PoolConfig{})
 	if err != nil {
 		return nil, fmt.Errorf("opening fixture db: %w", err)
 	}
-	defer s.Close()
+	defer client.Close()
 
-	if err := s.Migrate(ctx); err != nil {
+	if err := entc.AutoMigrate(ctx, client); err != nil {
 		return nil, fmt.Errorf("migrating fixture db: %w", err)
 	}
 
-	db := s.DB()
+	drv, ok := client.Driver().(*entsql.Driver)
+	if !ok {
+		return nil, fmt.Errorf("ent client driver does not expose a *sql.DB")
+	}
+	db := drv.DB()
 	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
 		return nil, fmt.Errorf("disabling foreign keys: %w", err)
 	}
