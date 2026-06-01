@@ -78,6 +78,26 @@ func (_u *ProjectUpdate) ClearGitRemote() *ProjectUpdate {
 	return _u
 }
 
+// SetDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field.
+func (_u *ProjectUpdate) SetDefaultRuntimeBrokerID(v string) *ProjectUpdate {
+	_u.mutation.SetDefaultRuntimeBrokerID(v)
+	return _u
+}
+
+// SetNillableDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field if the given value is not nil.
+func (_u *ProjectUpdate) SetNillableDefaultRuntimeBrokerID(v *string) *ProjectUpdate {
+	if v != nil {
+		_u.SetDefaultRuntimeBrokerID(*v)
+	}
+	return _u
+}
+
+// ClearDefaultRuntimeBrokerID clears the value of the "default_runtime_broker_id" field.
+func (_u *ProjectUpdate) ClearDefaultRuntimeBrokerID() *ProjectUpdate {
+	_u.mutation.ClearDefaultRuntimeBrokerID()
+	return _u
+}
+
 // SetLabels sets the "labels" field.
 func (_u *ProjectUpdate) SetLabels(v map[string]string) *ProjectUpdate {
 	_u.mutation.SetLabels(v)
@@ -99,6 +119,26 @@ func (_u *ProjectUpdate) SetAnnotations(v map[string]string) *ProjectUpdate {
 // ClearAnnotations clears the value of the "annotations" field.
 func (_u *ProjectUpdate) ClearAnnotations() *ProjectUpdate {
 	_u.mutation.ClearAnnotations()
+	return _u
+}
+
+// SetSharedDirs sets the "shared_dirs" field.
+func (_u *ProjectUpdate) SetSharedDirs(v string) *ProjectUpdate {
+	_u.mutation.SetSharedDirs(v)
+	return _u
+}
+
+// SetNillableSharedDirs sets the "shared_dirs" field if the given value is not nil.
+func (_u *ProjectUpdate) SetNillableSharedDirs(v *string) *ProjectUpdate {
+	if v != nil {
+		_u.SetSharedDirs(*v)
+	}
+	return _u
+}
+
+// ClearSharedDirs clears the value of the "shared_dirs" field.
+func (_u *ProjectUpdate) ClearSharedDirs() *ProjectUpdate {
+	_u.mutation.ClearSharedDirs()
 	return _u
 }
 
@@ -159,6 +199,93 @@ func (_u *ProjectUpdate) SetNillableVisibility(v *string) *ProjectUpdate {
 	if v != nil {
 		_u.SetVisibility(*v)
 	}
+	return _u
+}
+
+// SetGithubInstallationID sets the "github_installation_id" field.
+func (_u *ProjectUpdate) SetGithubInstallationID(v int64) *ProjectUpdate {
+	_u.mutation.ResetGithubInstallationID()
+	_u.mutation.SetGithubInstallationID(v)
+	return _u
+}
+
+// SetNillableGithubInstallationID sets the "github_installation_id" field if the given value is not nil.
+func (_u *ProjectUpdate) SetNillableGithubInstallationID(v *int64) *ProjectUpdate {
+	if v != nil {
+		_u.SetGithubInstallationID(*v)
+	}
+	return _u
+}
+
+// AddGithubInstallationID adds value to the "github_installation_id" field.
+func (_u *ProjectUpdate) AddGithubInstallationID(v int64) *ProjectUpdate {
+	_u.mutation.AddGithubInstallationID(v)
+	return _u
+}
+
+// ClearGithubInstallationID clears the value of the "github_installation_id" field.
+func (_u *ProjectUpdate) ClearGithubInstallationID() *ProjectUpdate {
+	_u.mutation.ClearGithubInstallationID()
+	return _u
+}
+
+// SetGithubPermissions sets the "github_permissions" field.
+func (_u *ProjectUpdate) SetGithubPermissions(v string) *ProjectUpdate {
+	_u.mutation.SetGithubPermissions(v)
+	return _u
+}
+
+// SetNillableGithubPermissions sets the "github_permissions" field if the given value is not nil.
+func (_u *ProjectUpdate) SetNillableGithubPermissions(v *string) *ProjectUpdate {
+	if v != nil {
+		_u.SetGithubPermissions(*v)
+	}
+	return _u
+}
+
+// ClearGithubPermissions clears the value of the "github_permissions" field.
+func (_u *ProjectUpdate) ClearGithubPermissions() *ProjectUpdate {
+	_u.mutation.ClearGithubPermissions()
+	return _u
+}
+
+// SetGithubAppStatus sets the "github_app_status" field.
+func (_u *ProjectUpdate) SetGithubAppStatus(v string) *ProjectUpdate {
+	_u.mutation.SetGithubAppStatus(v)
+	return _u
+}
+
+// SetNillableGithubAppStatus sets the "github_app_status" field if the given value is not nil.
+func (_u *ProjectUpdate) SetNillableGithubAppStatus(v *string) *ProjectUpdate {
+	if v != nil {
+		_u.SetGithubAppStatus(*v)
+	}
+	return _u
+}
+
+// ClearGithubAppStatus clears the value of the "github_app_status" field.
+func (_u *ProjectUpdate) ClearGithubAppStatus() *ProjectUpdate {
+	_u.mutation.ClearGithubAppStatus()
+	return _u
+}
+
+// SetGitIdentity sets the "git_identity" field.
+func (_u *ProjectUpdate) SetGitIdentity(v string) *ProjectUpdate {
+	_u.mutation.SetGitIdentity(v)
+	return _u
+}
+
+// SetNillableGitIdentity sets the "git_identity" field if the given value is not nil.
+func (_u *ProjectUpdate) SetNillableGitIdentity(v *string) *ProjectUpdate {
+	if v != nil {
+		_u.SetGitIdentity(*v)
+	}
+	return _u
+}
+
+// ClearGitIdentity clears the value of the "git_identity" field.
+func (_u *ProjectUpdate) ClearGitIdentity() *ProjectUpdate {
+	_u.mutation.ClearGitIdentity()
 	return _u
 }
 
@@ -278,6 +405,12 @@ func (_u *ProjectUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.GitRemoteCleared() {
 		_spec.ClearField(project.FieldGitRemote, field.TypeString)
 	}
+	if value, ok := _u.mutation.DefaultRuntimeBrokerID(); ok {
+		_spec.SetField(project.FieldDefaultRuntimeBrokerID, field.TypeString, value)
+	}
+	if _u.mutation.DefaultRuntimeBrokerIDCleared() {
+		_spec.ClearField(project.FieldDefaultRuntimeBrokerID, field.TypeString)
+	}
 	if value, ok := _u.mutation.Labels(); ok {
 		_spec.SetField(project.FieldLabels, field.TypeJSON, value)
 	}
@@ -289,6 +422,12 @@ func (_u *ProjectUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.AnnotationsCleared() {
 		_spec.ClearField(project.FieldAnnotations, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.SharedDirs(); ok {
+		_spec.SetField(project.FieldSharedDirs, field.TypeString, value)
+	}
+	if _u.mutation.SharedDirsCleared() {
+		_spec.ClearField(project.FieldSharedDirs, field.TypeString)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(project.FieldUpdated, field.TypeTime, value)
@@ -307,6 +446,33 @@ func (_u *ProjectUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.Visibility(); ok {
 		_spec.SetField(project.FieldVisibility, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.GithubInstallationID(); ok {
+		_spec.SetField(project.FieldGithubInstallationID, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedGithubInstallationID(); ok {
+		_spec.AddField(project.FieldGithubInstallationID, field.TypeInt64, value)
+	}
+	if _u.mutation.GithubInstallationIDCleared() {
+		_spec.ClearField(project.FieldGithubInstallationID, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.GithubPermissions(); ok {
+		_spec.SetField(project.FieldGithubPermissions, field.TypeString, value)
+	}
+	if _u.mutation.GithubPermissionsCleared() {
+		_spec.ClearField(project.FieldGithubPermissions, field.TypeString)
+	}
+	if value, ok := _u.mutation.GithubAppStatus(); ok {
+		_spec.SetField(project.FieldGithubAppStatus, field.TypeString, value)
+	}
+	if _u.mutation.GithubAppStatusCleared() {
+		_spec.ClearField(project.FieldGithubAppStatus, field.TypeString)
+	}
+	if value, ok := _u.mutation.GitIdentity(); ok {
+		_spec.SetField(project.FieldGitIdentity, field.TypeString, value)
+	}
+	if _u.mutation.GitIdentityCleared() {
+		_spec.ClearField(project.FieldGitIdentity, field.TypeString)
 	}
 	if _u.mutation.AgentsCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -421,6 +587,26 @@ func (_u *ProjectUpdateOne) ClearGitRemote() *ProjectUpdateOne {
 	return _u
 }
 
+// SetDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field.
+func (_u *ProjectUpdateOne) SetDefaultRuntimeBrokerID(v string) *ProjectUpdateOne {
+	_u.mutation.SetDefaultRuntimeBrokerID(v)
+	return _u
+}
+
+// SetNillableDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field if the given value is not nil.
+func (_u *ProjectUpdateOne) SetNillableDefaultRuntimeBrokerID(v *string) *ProjectUpdateOne {
+	if v != nil {
+		_u.SetDefaultRuntimeBrokerID(*v)
+	}
+	return _u
+}
+
+// ClearDefaultRuntimeBrokerID clears the value of the "default_runtime_broker_id" field.
+func (_u *ProjectUpdateOne) ClearDefaultRuntimeBrokerID() *ProjectUpdateOne {
+	_u.mutation.ClearDefaultRuntimeBrokerID()
+	return _u
+}
+
 // SetLabels sets the "labels" field.
 func (_u *ProjectUpdateOne) SetLabels(v map[string]string) *ProjectUpdateOne {
 	_u.mutation.SetLabels(v)
@@ -442,6 +628,26 @@ func (_u *ProjectUpdateOne) SetAnnotations(v map[string]string) *ProjectUpdateOn
 // ClearAnnotations clears the value of the "annotations" field.
 func (_u *ProjectUpdateOne) ClearAnnotations() *ProjectUpdateOne {
 	_u.mutation.ClearAnnotations()
+	return _u
+}
+
+// SetSharedDirs sets the "shared_dirs" field.
+func (_u *ProjectUpdateOne) SetSharedDirs(v string) *ProjectUpdateOne {
+	_u.mutation.SetSharedDirs(v)
+	return _u
+}
+
+// SetNillableSharedDirs sets the "shared_dirs" field if the given value is not nil.
+func (_u *ProjectUpdateOne) SetNillableSharedDirs(v *string) *ProjectUpdateOne {
+	if v != nil {
+		_u.SetSharedDirs(*v)
+	}
+	return _u
+}
+
+// ClearSharedDirs clears the value of the "shared_dirs" field.
+func (_u *ProjectUpdateOne) ClearSharedDirs() *ProjectUpdateOne {
+	_u.mutation.ClearSharedDirs()
 	return _u
 }
 
@@ -502,6 +708,93 @@ func (_u *ProjectUpdateOne) SetNillableVisibility(v *string) *ProjectUpdateOne {
 	if v != nil {
 		_u.SetVisibility(*v)
 	}
+	return _u
+}
+
+// SetGithubInstallationID sets the "github_installation_id" field.
+func (_u *ProjectUpdateOne) SetGithubInstallationID(v int64) *ProjectUpdateOne {
+	_u.mutation.ResetGithubInstallationID()
+	_u.mutation.SetGithubInstallationID(v)
+	return _u
+}
+
+// SetNillableGithubInstallationID sets the "github_installation_id" field if the given value is not nil.
+func (_u *ProjectUpdateOne) SetNillableGithubInstallationID(v *int64) *ProjectUpdateOne {
+	if v != nil {
+		_u.SetGithubInstallationID(*v)
+	}
+	return _u
+}
+
+// AddGithubInstallationID adds value to the "github_installation_id" field.
+func (_u *ProjectUpdateOne) AddGithubInstallationID(v int64) *ProjectUpdateOne {
+	_u.mutation.AddGithubInstallationID(v)
+	return _u
+}
+
+// ClearGithubInstallationID clears the value of the "github_installation_id" field.
+func (_u *ProjectUpdateOne) ClearGithubInstallationID() *ProjectUpdateOne {
+	_u.mutation.ClearGithubInstallationID()
+	return _u
+}
+
+// SetGithubPermissions sets the "github_permissions" field.
+func (_u *ProjectUpdateOne) SetGithubPermissions(v string) *ProjectUpdateOne {
+	_u.mutation.SetGithubPermissions(v)
+	return _u
+}
+
+// SetNillableGithubPermissions sets the "github_permissions" field if the given value is not nil.
+func (_u *ProjectUpdateOne) SetNillableGithubPermissions(v *string) *ProjectUpdateOne {
+	if v != nil {
+		_u.SetGithubPermissions(*v)
+	}
+	return _u
+}
+
+// ClearGithubPermissions clears the value of the "github_permissions" field.
+func (_u *ProjectUpdateOne) ClearGithubPermissions() *ProjectUpdateOne {
+	_u.mutation.ClearGithubPermissions()
+	return _u
+}
+
+// SetGithubAppStatus sets the "github_app_status" field.
+func (_u *ProjectUpdateOne) SetGithubAppStatus(v string) *ProjectUpdateOne {
+	_u.mutation.SetGithubAppStatus(v)
+	return _u
+}
+
+// SetNillableGithubAppStatus sets the "github_app_status" field if the given value is not nil.
+func (_u *ProjectUpdateOne) SetNillableGithubAppStatus(v *string) *ProjectUpdateOne {
+	if v != nil {
+		_u.SetGithubAppStatus(*v)
+	}
+	return _u
+}
+
+// ClearGithubAppStatus clears the value of the "github_app_status" field.
+func (_u *ProjectUpdateOne) ClearGithubAppStatus() *ProjectUpdateOne {
+	_u.mutation.ClearGithubAppStatus()
+	return _u
+}
+
+// SetGitIdentity sets the "git_identity" field.
+func (_u *ProjectUpdateOne) SetGitIdentity(v string) *ProjectUpdateOne {
+	_u.mutation.SetGitIdentity(v)
+	return _u
+}
+
+// SetNillableGitIdentity sets the "git_identity" field if the given value is not nil.
+func (_u *ProjectUpdateOne) SetNillableGitIdentity(v *string) *ProjectUpdateOne {
+	if v != nil {
+		_u.SetGitIdentity(*v)
+	}
+	return _u
+}
+
+// ClearGitIdentity clears the value of the "git_identity" field.
+func (_u *ProjectUpdateOne) ClearGitIdentity() *ProjectUpdateOne {
+	_u.mutation.ClearGitIdentity()
 	return _u
 }
 
@@ -651,6 +944,12 @@ func (_u *ProjectUpdateOne) sqlSave(ctx context.Context) (_node *Project, err er
 	if _u.mutation.GitRemoteCleared() {
 		_spec.ClearField(project.FieldGitRemote, field.TypeString)
 	}
+	if value, ok := _u.mutation.DefaultRuntimeBrokerID(); ok {
+		_spec.SetField(project.FieldDefaultRuntimeBrokerID, field.TypeString, value)
+	}
+	if _u.mutation.DefaultRuntimeBrokerIDCleared() {
+		_spec.ClearField(project.FieldDefaultRuntimeBrokerID, field.TypeString)
+	}
 	if value, ok := _u.mutation.Labels(); ok {
 		_spec.SetField(project.FieldLabels, field.TypeJSON, value)
 	}
@@ -662,6 +961,12 @@ func (_u *ProjectUpdateOne) sqlSave(ctx context.Context) (_node *Project, err er
 	}
 	if _u.mutation.AnnotationsCleared() {
 		_spec.ClearField(project.FieldAnnotations, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.SharedDirs(); ok {
+		_spec.SetField(project.FieldSharedDirs, field.TypeString, value)
+	}
+	if _u.mutation.SharedDirsCleared() {
+		_spec.ClearField(project.FieldSharedDirs, field.TypeString)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(project.FieldUpdated, field.TypeTime, value)
@@ -680,6 +985,33 @@ func (_u *ProjectUpdateOne) sqlSave(ctx context.Context) (_node *Project, err er
 	}
 	if value, ok := _u.mutation.Visibility(); ok {
 		_spec.SetField(project.FieldVisibility, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.GithubInstallationID(); ok {
+		_spec.SetField(project.FieldGithubInstallationID, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedGithubInstallationID(); ok {
+		_spec.AddField(project.FieldGithubInstallationID, field.TypeInt64, value)
+	}
+	if _u.mutation.GithubInstallationIDCleared() {
+		_spec.ClearField(project.FieldGithubInstallationID, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.GithubPermissions(); ok {
+		_spec.SetField(project.FieldGithubPermissions, field.TypeString, value)
+	}
+	if _u.mutation.GithubPermissionsCleared() {
+		_spec.ClearField(project.FieldGithubPermissions, field.TypeString)
+	}
+	if value, ok := _u.mutation.GithubAppStatus(); ok {
+		_spec.SetField(project.FieldGithubAppStatus, field.TypeString, value)
+	}
+	if _u.mutation.GithubAppStatusCleared() {
+		_spec.ClearField(project.FieldGithubAppStatus, field.TypeString)
+	}
+	if value, ok := _u.mutation.GitIdentity(); ok {
+		_spec.SetField(project.FieldGitIdentity, field.TypeString, value)
+	}
+	if _u.mutation.GitIdentityCleared() {
+		_spec.ClearField(project.FieldGitIdentity, field.TypeString)
 	}
 	if _u.mutation.AgentsCleared() {
 		edge := &sqlgraph.EdgeSpec{

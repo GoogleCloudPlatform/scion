@@ -36,6 +36,8 @@ type User struct {
 	Created time.Time `json:"created,omitempty"`
 	// LastLogin holds the value of the "last_login" field.
 	LastLogin *time.Time `json:"last_login,omitempty"`
+	// LastSeen holds the value of the "last_seen" field.
+	LastSeen *time.Time `json:"last_seen,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the UserQuery when eager-loading is set.
 	Edges        UserEdges `json:"edges"`
@@ -113,7 +115,7 @@ func (*User) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case user.FieldEmail, user.FieldDisplayName, user.FieldAvatarURL, user.FieldRole, user.FieldStatus:
 			values[i] = new(sql.NullString)
-		case user.FieldCreated, user.FieldLastLogin:
+		case user.FieldCreated, user.FieldLastLogin, user.FieldLastSeen:
 			values[i] = new(sql.NullTime)
 		case user.FieldID:
 			values[i] = new(uuid.UUID)
@@ -188,6 +190,13 @@ func (_m *User) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.LastLogin = new(time.Time)
 				*_m.LastLogin = value.Time
+			}
+		case user.FieldLastSeen:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field last_seen", values[i])
+			} else if value.Valid {
+				_m.LastSeen = new(time.Time)
+				*_m.LastSeen = value.Time
 			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
@@ -273,6 +282,11 @@ func (_m *User) String() string {
 	builder.WriteString(", ")
 	if v := _m.LastLogin; v != nil {
 		builder.WriteString("last_login=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.LastSeen; v != nil {
+		builder.WriteString("last_seen=")
 		builder.WriteString(v.Format(time.ANSIC))
 	}
 	builder.WriteByte(')')

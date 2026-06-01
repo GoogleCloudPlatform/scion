@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/invitecode"
@@ -19,6 +21,7 @@ type InviteCodeCreate struct {
 	config
 	mutation *InviteCodeMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetCodeHash sets the "code_hash" field.
@@ -265,6 +268,7 @@ func (_c *InviteCodeCreate) createSpec() (*InviteCode, *sqlgraph.CreateSpec) {
 		_node = &InviteCode{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(invitecode.Table, sqlgraph.NewFieldSpec(invitecode.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -308,11 +312,384 @@ func (_c *InviteCodeCreate) createSpec() (*InviteCode, *sqlgraph.CreateSpec) {
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.InviteCode.Create().
+//		SetCodeHash(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.InviteCodeUpsert) {
+//			SetCodeHash(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *InviteCodeCreate) OnConflict(opts ...sql.ConflictOption) *InviteCodeUpsertOne {
+	_c.conflict = opts
+	return &InviteCodeUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.InviteCode.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *InviteCodeCreate) OnConflictColumns(columns ...string) *InviteCodeUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &InviteCodeUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// InviteCodeUpsertOne is the builder for "upsert"-ing
+	//  one InviteCode node.
+	InviteCodeUpsertOne struct {
+		create *InviteCodeCreate
+	}
+
+	// InviteCodeUpsert is the "OnConflict" setter.
+	InviteCodeUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetCodeHash sets the "code_hash" field.
+func (u *InviteCodeUpsert) SetCodeHash(v string) *InviteCodeUpsert {
+	u.Set(invitecode.FieldCodeHash, v)
+	return u
+}
+
+// UpdateCodeHash sets the "code_hash" field to the value that was provided on create.
+func (u *InviteCodeUpsert) UpdateCodeHash() *InviteCodeUpsert {
+	u.SetExcluded(invitecode.FieldCodeHash)
+	return u
+}
+
+// SetCodePrefix sets the "code_prefix" field.
+func (u *InviteCodeUpsert) SetCodePrefix(v string) *InviteCodeUpsert {
+	u.Set(invitecode.FieldCodePrefix, v)
+	return u
+}
+
+// UpdateCodePrefix sets the "code_prefix" field to the value that was provided on create.
+func (u *InviteCodeUpsert) UpdateCodePrefix() *InviteCodeUpsert {
+	u.SetExcluded(invitecode.FieldCodePrefix)
+	return u
+}
+
+// SetMaxUses sets the "max_uses" field.
+func (u *InviteCodeUpsert) SetMaxUses(v int) *InviteCodeUpsert {
+	u.Set(invitecode.FieldMaxUses, v)
+	return u
+}
+
+// UpdateMaxUses sets the "max_uses" field to the value that was provided on create.
+func (u *InviteCodeUpsert) UpdateMaxUses() *InviteCodeUpsert {
+	u.SetExcluded(invitecode.FieldMaxUses)
+	return u
+}
+
+// AddMaxUses adds v to the "max_uses" field.
+func (u *InviteCodeUpsert) AddMaxUses(v int) *InviteCodeUpsert {
+	u.Add(invitecode.FieldMaxUses, v)
+	return u
+}
+
+// SetUseCount sets the "use_count" field.
+func (u *InviteCodeUpsert) SetUseCount(v int) *InviteCodeUpsert {
+	u.Set(invitecode.FieldUseCount, v)
+	return u
+}
+
+// UpdateUseCount sets the "use_count" field to the value that was provided on create.
+func (u *InviteCodeUpsert) UpdateUseCount() *InviteCodeUpsert {
+	u.SetExcluded(invitecode.FieldUseCount)
+	return u
+}
+
+// AddUseCount adds v to the "use_count" field.
+func (u *InviteCodeUpsert) AddUseCount(v int) *InviteCodeUpsert {
+	u.Add(invitecode.FieldUseCount, v)
+	return u
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (u *InviteCodeUpsert) SetExpiresAt(v time.Time) *InviteCodeUpsert {
+	u.Set(invitecode.FieldExpiresAt, v)
+	return u
+}
+
+// UpdateExpiresAt sets the "expires_at" field to the value that was provided on create.
+func (u *InviteCodeUpsert) UpdateExpiresAt() *InviteCodeUpsert {
+	u.SetExcluded(invitecode.FieldExpiresAt)
+	return u
+}
+
+// SetRevoked sets the "revoked" field.
+func (u *InviteCodeUpsert) SetRevoked(v bool) *InviteCodeUpsert {
+	u.Set(invitecode.FieldRevoked, v)
+	return u
+}
+
+// UpdateRevoked sets the "revoked" field to the value that was provided on create.
+func (u *InviteCodeUpsert) UpdateRevoked() *InviteCodeUpsert {
+	u.SetExcluded(invitecode.FieldRevoked)
+	return u
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *InviteCodeUpsert) SetCreatedBy(v string) *InviteCodeUpsert {
+	u.Set(invitecode.FieldCreatedBy, v)
+	return u
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *InviteCodeUpsert) UpdateCreatedBy() *InviteCodeUpsert {
+	u.SetExcluded(invitecode.FieldCreatedBy)
+	return u
+}
+
+// SetNote sets the "note" field.
+func (u *InviteCodeUpsert) SetNote(v string) *InviteCodeUpsert {
+	u.Set(invitecode.FieldNote, v)
+	return u
+}
+
+// UpdateNote sets the "note" field to the value that was provided on create.
+func (u *InviteCodeUpsert) UpdateNote() *InviteCodeUpsert {
+	u.SetExcluded(invitecode.FieldNote)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.InviteCode.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(invitecode.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *InviteCodeUpsertOne) UpdateNewValues() *InviteCodeUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(invitecode.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(invitecode.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.InviteCode.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *InviteCodeUpsertOne) Ignore() *InviteCodeUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *InviteCodeUpsertOne) DoNothing() *InviteCodeUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the InviteCodeCreate.OnConflict
+// documentation for more info.
+func (u *InviteCodeUpsertOne) Update(set func(*InviteCodeUpsert)) *InviteCodeUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&InviteCodeUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetCodeHash sets the "code_hash" field.
+func (u *InviteCodeUpsertOne) SetCodeHash(v string) *InviteCodeUpsertOne {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.SetCodeHash(v)
+	})
+}
+
+// UpdateCodeHash sets the "code_hash" field to the value that was provided on create.
+func (u *InviteCodeUpsertOne) UpdateCodeHash() *InviteCodeUpsertOne {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.UpdateCodeHash()
+	})
+}
+
+// SetCodePrefix sets the "code_prefix" field.
+func (u *InviteCodeUpsertOne) SetCodePrefix(v string) *InviteCodeUpsertOne {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.SetCodePrefix(v)
+	})
+}
+
+// UpdateCodePrefix sets the "code_prefix" field to the value that was provided on create.
+func (u *InviteCodeUpsertOne) UpdateCodePrefix() *InviteCodeUpsertOne {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.UpdateCodePrefix()
+	})
+}
+
+// SetMaxUses sets the "max_uses" field.
+func (u *InviteCodeUpsertOne) SetMaxUses(v int) *InviteCodeUpsertOne {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.SetMaxUses(v)
+	})
+}
+
+// AddMaxUses adds v to the "max_uses" field.
+func (u *InviteCodeUpsertOne) AddMaxUses(v int) *InviteCodeUpsertOne {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.AddMaxUses(v)
+	})
+}
+
+// UpdateMaxUses sets the "max_uses" field to the value that was provided on create.
+func (u *InviteCodeUpsertOne) UpdateMaxUses() *InviteCodeUpsertOne {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.UpdateMaxUses()
+	})
+}
+
+// SetUseCount sets the "use_count" field.
+func (u *InviteCodeUpsertOne) SetUseCount(v int) *InviteCodeUpsertOne {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.SetUseCount(v)
+	})
+}
+
+// AddUseCount adds v to the "use_count" field.
+func (u *InviteCodeUpsertOne) AddUseCount(v int) *InviteCodeUpsertOne {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.AddUseCount(v)
+	})
+}
+
+// UpdateUseCount sets the "use_count" field to the value that was provided on create.
+func (u *InviteCodeUpsertOne) UpdateUseCount() *InviteCodeUpsertOne {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.UpdateUseCount()
+	})
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (u *InviteCodeUpsertOne) SetExpiresAt(v time.Time) *InviteCodeUpsertOne {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.SetExpiresAt(v)
+	})
+}
+
+// UpdateExpiresAt sets the "expires_at" field to the value that was provided on create.
+func (u *InviteCodeUpsertOne) UpdateExpiresAt() *InviteCodeUpsertOne {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.UpdateExpiresAt()
+	})
+}
+
+// SetRevoked sets the "revoked" field.
+func (u *InviteCodeUpsertOne) SetRevoked(v bool) *InviteCodeUpsertOne {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.SetRevoked(v)
+	})
+}
+
+// UpdateRevoked sets the "revoked" field to the value that was provided on create.
+func (u *InviteCodeUpsertOne) UpdateRevoked() *InviteCodeUpsertOne {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.UpdateRevoked()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *InviteCodeUpsertOne) SetCreatedBy(v string) *InviteCodeUpsertOne {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *InviteCodeUpsertOne) UpdateCreatedBy() *InviteCodeUpsertOne {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// SetNote sets the "note" field.
+func (u *InviteCodeUpsertOne) SetNote(v string) *InviteCodeUpsertOne {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.SetNote(v)
+	})
+}
+
+// UpdateNote sets the "note" field to the value that was provided on create.
+func (u *InviteCodeUpsertOne) UpdateNote() *InviteCodeUpsertOne {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.UpdateNote()
+	})
+}
+
+// Exec executes the query.
+func (u *InviteCodeUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for InviteCodeCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *InviteCodeUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *InviteCodeUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: InviteCodeUpsertOne.ID is not supported by MySQL driver. Use InviteCodeUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *InviteCodeUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // InviteCodeCreateBulk is the builder for creating many InviteCode entities in bulk.
 type InviteCodeCreateBulk struct {
 	config
 	err      error
 	builders []*InviteCodeCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the InviteCode entities in the database.
@@ -342,6 +719,7 @@ func (_c *InviteCodeCreateBulk) Save(ctx context.Context) ([]*InviteCode, error)
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -388,6 +766,249 @@ func (_c *InviteCodeCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *InviteCodeCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.InviteCode.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.InviteCodeUpsert) {
+//			SetCodeHash(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *InviteCodeCreateBulk) OnConflict(opts ...sql.ConflictOption) *InviteCodeUpsertBulk {
+	_c.conflict = opts
+	return &InviteCodeUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.InviteCode.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *InviteCodeCreateBulk) OnConflictColumns(columns ...string) *InviteCodeUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &InviteCodeUpsertBulk{
+		create: _c,
+	}
+}
+
+// InviteCodeUpsertBulk is the builder for "upsert"-ing
+// a bulk of InviteCode nodes.
+type InviteCodeUpsertBulk struct {
+	create *InviteCodeCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.InviteCode.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(invitecode.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *InviteCodeUpsertBulk) UpdateNewValues() *InviteCodeUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(invitecode.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(invitecode.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.InviteCode.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *InviteCodeUpsertBulk) Ignore() *InviteCodeUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *InviteCodeUpsertBulk) DoNothing() *InviteCodeUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the InviteCodeCreateBulk.OnConflict
+// documentation for more info.
+func (u *InviteCodeUpsertBulk) Update(set func(*InviteCodeUpsert)) *InviteCodeUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&InviteCodeUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetCodeHash sets the "code_hash" field.
+func (u *InviteCodeUpsertBulk) SetCodeHash(v string) *InviteCodeUpsertBulk {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.SetCodeHash(v)
+	})
+}
+
+// UpdateCodeHash sets the "code_hash" field to the value that was provided on create.
+func (u *InviteCodeUpsertBulk) UpdateCodeHash() *InviteCodeUpsertBulk {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.UpdateCodeHash()
+	})
+}
+
+// SetCodePrefix sets the "code_prefix" field.
+func (u *InviteCodeUpsertBulk) SetCodePrefix(v string) *InviteCodeUpsertBulk {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.SetCodePrefix(v)
+	})
+}
+
+// UpdateCodePrefix sets the "code_prefix" field to the value that was provided on create.
+func (u *InviteCodeUpsertBulk) UpdateCodePrefix() *InviteCodeUpsertBulk {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.UpdateCodePrefix()
+	})
+}
+
+// SetMaxUses sets the "max_uses" field.
+func (u *InviteCodeUpsertBulk) SetMaxUses(v int) *InviteCodeUpsertBulk {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.SetMaxUses(v)
+	})
+}
+
+// AddMaxUses adds v to the "max_uses" field.
+func (u *InviteCodeUpsertBulk) AddMaxUses(v int) *InviteCodeUpsertBulk {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.AddMaxUses(v)
+	})
+}
+
+// UpdateMaxUses sets the "max_uses" field to the value that was provided on create.
+func (u *InviteCodeUpsertBulk) UpdateMaxUses() *InviteCodeUpsertBulk {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.UpdateMaxUses()
+	})
+}
+
+// SetUseCount sets the "use_count" field.
+func (u *InviteCodeUpsertBulk) SetUseCount(v int) *InviteCodeUpsertBulk {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.SetUseCount(v)
+	})
+}
+
+// AddUseCount adds v to the "use_count" field.
+func (u *InviteCodeUpsertBulk) AddUseCount(v int) *InviteCodeUpsertBulk {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.AddUseCount(v)
+	})
+}
+
+// UpdateUseCount sets the "use_count" field to the value that was provided on create.
+func (u *InviteCodeUpsertBulk) UpdateUseCount() *InviteCodeUpsertBulk {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.UpdateUseCount()
+	})
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (u *InviteCodeUpsertBulk) SetExpiresAt(v time.Time) *InviteCodeUpsertBulk {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.SetExpiresAt(v)
+	})
+}
+
+// UpdateExpiresAt sets the "expires_at" field to the value that was provided on create.
+func (u *InviteCodeUpsertBulk) UpdateExpiresAt() *InviteCodeUpsertBulk {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.UpdateExpiresAt()
+	})
+}
+
+// SetRevoked sets the "revoked" field.
+func (u *InviteCodeUpsertBulk) SetRevoked(v bool) *InviteCodeUpsertBulk {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.SetRevoked(v)
+	})
+}
+
+// UpdateRevoked sets the "revoked" field to the value that was provided on create.
+func (u *InviteCodeUpsertBulk) UpdateRevoked() *InviteCodeUpsertBulk {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.UpdateRevoked()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *InviteCodeUpsertBulk) SetCreatedBy(v string) *InviteCodeUpsertBulk {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *InviteCodeUpsertBulk) UpdateCreatedBy() *InviteCodeUpsertBulk {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// SetNote sets the "note" field.
+func (u *InviteCodeUpsertBulk) SetNote(v string) *InviteCodeUpsertBulk {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.SetNote(v)
+	})
+}
+
+// UpdateNote sets the "note" field to the value that was provided on create.
+func (u *InviteCodeUpsertBulk) UpdateNote() *InviteCodeUpsertBulk {
+	return u.Update(func(s *InviteCodeUpsert) {
+		s.UpdateNote()
+	})
+}
+
+// Exec executes the query.
+func (u *InviteCodeUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the InviteCodeCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for InviteCodeCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *InviteCodeUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

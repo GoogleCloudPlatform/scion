@@ -45,12 +45,22 @@ func (RuntimeBroker) Fields() []ent.Field {
 			NotEmpty(),
 		field.String("slug").
 			NotEmpty(),
+		// type/mode are vestigial columns in the legacy store (the SQLite store
+		// always writes ""); kept Optional for column parity rather than required.
 		field.String("type").
-			NotEmpty(),
+			Optional(),
 		field.String("mode").
 			Default("connected"),
 		field.String("version").
 			Optional(),
+		// lock_version is an internal optimistic-concurrency token (not surfaced
+		// on store.RuntimeBroker, which already uses "version" for the broker
+		// software version). The heartbeat and full-update paths compare-and-set
+		// this column to serialize concurrent writers without SELECT ... FOR
+		// UPDATE, so the same logic is correct on both SQLite (tests) and
+		// Postgres (production).
+		field.Int64("lock_version").
+			Default(0),
 		field.String("status").
 			Default("offline"),
 		field.String("connection_state").

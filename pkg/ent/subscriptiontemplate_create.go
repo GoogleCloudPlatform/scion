@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
@@ -18,6 +20,7 @@ type SubscriptionTemplateCreate struct {
 	config
 	mutation *SubscriptionTemplateMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetName sets the "name" field.
@@ -185,6 +188,7 @@ func (_c *SubscriptionTemplateCreate) createSpec() (*SubscriptionTemplate, *sqlg
 		_node = &SubscriptionTemplate{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(subscriptiontemplate.Table, sqlgraph.NewFieldSpec(subscriptiontemplate.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -212,11 +216,290 @@ func (_c *SubscriptionTemplateCreate) createSpec() (*SubscriptionTemplate, *sqlg
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.SubscriptionTemplate.Create().
+//		SetName(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.SubscriptionTemplateUpsert) {
+//			SetName(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *SubscriptionTemplateCreate) OnConflict(opts ...sql.ConflictOption) *SubscriptionTemplateUpsertOne {
+	_c.conflict = opts
+	return &SubscriptionTemplateUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.SubscriptionTemplate.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *SubscriptionTemplateCreate) OnConflictColumns(columns ...string) *SubscriptionTemplateUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &SubscriptionTemplateUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// SubscriptionTemplateUpsertOne is the builder for "upsert"-ing
+	//  one SubscriptionTemplate node.
+	SubscriptionTemplateUpsertOne struct {
+		create *SubscriptionTemplateCreate
+	}
+
+	// SubscriptionTemplateUpsert is the "OnConflict" setter.
+	SubscriptionTemplateUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetName sets the "name" field.
+func (u *SubscriptionTemplateUpsert) SetName(v string) *SubscriptionTemplateUpsert {
+	u.Set(subscriptiontemplate.FieldName, v)
+	return u
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *SubscriptionTemplateUpsert) UpdateName() *SubscriptionTemplateUpsert {
+	u.SetExcluded(subscriptiontemplate.FieldName)
+	return u
+}
+
+// SetScope sets the "scope" field.
+func (u *SubscriptionTemplateUpsert) SetScope(v string) *SubscriptionTemplateUpsert {
+	u.Set(subscriptiontemplate.FieldScope, v)
+	return u
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *SubscriptionTemplateUpsert) UpdateScope() *SubscriptionTemplateUpsert {
+	u.SetExcluded(subscriptiontemplate.FieldScope)
+	return u
+}
+
+// SetTriggerActivities sets the "trigger_activities" field.
+func (u *SubscriptionTemplateUpsert) SetTriggerActivities(v string) *SubscriptionTemplateUpsert {
+	u.Set(subscriptiontemplate.FieldTriggerActivities, v)
+	return u
+}
+
+// UpdateTriggerActivities sets the "trigger_activities" field to the value that was provided on create.
+func (u *SubscriptionTemplateUpsert) UpdateTriggerActivities() *SubscriptionTemplateUpsert {
+	u.SetExcluded(subscriptiontemplate.FieldTriggerActivities)
+	return u
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *SubscriptionTemplateUpsert) SetProjectID(v uuid.UUID) *SubscriptionTemplateUpsert {
+	u.Set(subscriptiontemplate.FieldProjectID, v)
+	return u
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *SubscriptionTemplateUpsert) UpdateProjectID() *SubscriptionTemplateUpsert {
+	u.SetExcluded(subscriptiontemplate.FieldProjectID)
+	return u
+}
+
+// ClearProjectID clears the value of the "project_id" field.
+func (u *SubscriptionTemplateUpsert) ClearProjectID() *SubscriptionTemplateUpsert {
+	u.SetNull(subscriptiontemplate.FieldProjectID)
+	return u
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *SubscriptionTemplateUpsert) SetCreatedBy(v string) *SubscriptionTemplateUpsert {
+	u.Set(subscriptiontemplate.FieldCreatedBy, v)
+	return u
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *SubscriptionTemplateUpsert) UpdateCreatedBy() *SubscriptionTemplateUpsert {
+	u.SetExcluded(subscriptiontemplate.FieldCreatedBy)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.SubscriptionTemplate.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(subscriptiontemplate.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *SubscriptionTemplateUpsertOne) UpdateNewValues() *SubscriptionTemplateUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(subscriptiontemplate.FieldID)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.SubscriptionTemplate.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *SubscriptionTemplateUpsertOne) Ignore() *SubscriptionTemplateUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *SubscriptionTemplateUpsertOne) DoNothing() *SubscriptionTemplateUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the SubscriptionTemplateCreate.OnConflict
+// documentation for more info.
+func (u *SubscriptionTemplateUpsertOne) Update(set func(*SubscriptionTemplateUpsert)) *SubscriptionTemplateUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&SubscriptionTemplateUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetName sets the "name" field.
+func (u *SubscriptionTemplateUpsertOne) SetName(v string) *SubscriptionTemplateUpsertOne {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.SetName(v)
+	})
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *SubscriptionTemplateUpsertOne) UpdateName() *SubscriptionTemplateUpsertOne {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.UpdateName()
+	})
+}
+
+// SetScope sets the "scope" field.
+func (u *SubscriptionTemplateUpsertOne) SetScope(v string) *SubscriptionTemplateUpsertOne {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.SetScope(v)
+	})
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *SubscriptionTemplateUpsertOne) UpdateScope() *SubscriptionTemplateUpsertOne {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.UpdateScope()
+	})
+}
+
+// SetTriggerActivities sets the "trigger_activities" field.
+func (u *SubscriptionTemplateUpsertOne) SetTriggerActivities(v string) *SubscriptionTemplateUpsertOne {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.SetTriggerActivities(v)
+	})
+}
+
+// UpdateTriggerActivities sets the "trigger_activities" field to the value that was provided on create.
+func (u *SubscriptionTemplateUpsertOne) UpdateTriggerActivities() *SubscriptionTemplateUpsertOne {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.UpdateTriggerActivities()
+	})
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *SubscriptionTemplateUpsertOne) SetProjectID(v uuid.UUID) *SubscriptionTemplateUpsertOne {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *SubscriptionTemplateUpsertOne) UpdateProjectID() *SubscriptionTemplateUpsertOne {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// ClearProjectID clears the value of the "project_id" field.
+func (u *SubscriptionTemplateUpsertOne) ClearProjectID() *SubscriptionTemplateUpsertOne {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.ClearProjectID()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *SubscriptionTemplateUpsertOne) SetCreatedBy(v string) *SubscriptionTemplateUpsertOne {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *SubscriptionTemplateUpsertOne) UpdateCreatedBy() *SubscriptionTemplateUpsertOne {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// Exec executes the query.
+func (u *SubscriptionTemplateUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for SubscriptionTemplateCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *SubscriptionTemplateUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *SubscriptionTemplateUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: SubscriptionTemplateUpsertOne.ID is not supported by MySQL driver. Use SubscriptionTemplateUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *SubscriptionTemplateUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // SubscriptionTemplateCreateBulk is the builder for creating many SubscriptionTemplate entities in bulk.
 type SubscriptionTemplateCreateBulk struct {
 	config
 	err      error
 	builders []*SubscriptionTemplateCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the SubscriptionTemplate entities in the database.
@@ -246,6 +529,7 @@ func (_c *SubscriptionTemplateCreateBulk) Save(ctx context.Context) ([]*Subscrip
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -292,6 +576,197 @@ func (_c *SubscriptionTemplateCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *SubscriptionTemplateCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.SubscriptionTemplate.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.SubscriptionTemplateUpsert) {
+//			SetName(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *SubscriptionTemplateCreateBulk) OnConflict(opts ...sql.ConflictOption) *SubscriptionTemplateUpsertBulk {
+	_c.conflict = opts
+	return &SubscriptionTemplateUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.SubscriptionTemplate.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *SubscriptionTemplateCreateBulk) OnConflictColumns(columns ...string) *SubscriptionTemplateUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &SubscriptionTemplateUpsertBulk{
+		create: _c,
+	}
+}
+
+// SubscriptionTemplateUpsertBulk is the builder for "upsert"-ing
+// a bulk of SubscriptionTemplate nodes.
+type SubscriptionTemplateUpsertBulk struct {
+	create *SubscriptionTemplateCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.SubscriptionTemplate.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(subscriptiontemplate.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *SubscriptionTemplateUpsertBulk) UpdateNewValues() *SubscriptionTemplateUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(subscriptiontemplate.FieldID)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.SubscriptionTemplate.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *SubscriptionTemplateUpsertBulk) Ignore() *SubscriptionTemplateUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *SubscriptionTemplateUpsertBulk) DoNothing() *SubscriptionTemplateUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the SubscriptionTemplateCreateBulk.OnConflict
+// documentation for more info.
+func (u *SubscriptionTemplateUpsertBulk) Update(set func(*SubscriptionTemplateUpsert)) *SubscriptionTemplateUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&SubscriptionTemplateUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetName sets the "name" field.
+func (u *SubscriptionTemplateUpsertBulk) SetName(v string) *SubscriptionTemplateUpsertBulk {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.SetName(v)
+	})
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *SubscriptionTemplateUpsertBulk) UpdateName() *SubscriptionTemplateUpsertBulk {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.UpdateName()
+	})
+}
+
+// SetScope sets the "scope" field.
+func (u *SubscriptionTemplateUpsertBulk) SetScope(v string) *SubscriptionTemplateUpsertBulk {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.SetScope(v)
+	})
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *SubscriptionTemplateUpsertBulk) UpdateScope() *SubscriptionTemplateUpsertBulk {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.UpdateScope()
+	})
+}
+
+// SetTriggerActivities sets the "trigger_activities" field.
+func (u *SubscriptionTemplateUpsertBulk) SetTriggerActivities(v string) *SubscriptionTemplateUpsertBulk {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.SetTriggerActivities(v)
+	})
+}
+
+// UpdateTriggerActivities sets the "trigger_activities" field to the value that was provided on create.
+func (u *SubscriptionTemplateUpsertBulk) UpdateTriggerActivities() *SubscriptionTemplateUpsertBulk {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.UpdateTriggerActivities()
+	})
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *SubscriptionTemplateUpsertBulk) SetProjectID(v uuid.UUID) *SubscriptionTemplateUpsertBulk {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *SubscriptionTemplateUpsertBulk) UpdateProjectID() *SubscriptionTemplateUpsertBulk {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// ClearProjectID clears the value of the "project_id" field.
+func (u *SubscriptionTemplateUpsertBulk) ClearProjectID() *SubscriptionTemplateUpsertBulk {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.ClearProjectID()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *SubscriptionTemplateUpsertBulk) SetCreatedBy(v string) *SubscriptionTemplateUpsertBulk {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *SubscriptionTemplateUpsertBulk) UpdateCreatedBy() *SubscriptionTemplateUpsertBulk {
+	return u.Update(func(s *SubscriptionTemplateUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// Exec executes the query.
+func (u *SubscriptionTemplateUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the SubscriptionTemplateCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for SubscriptionTemplateCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *SubscriptionTemplateUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

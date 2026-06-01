@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
@@ -21,6 +23,7 @@ type AccessPolicyCreate struct {
 	config
 	mutation *AccessPolicyMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetName sets the "name" field.
@@ -325,6 +328,7 @@ func (_c *AccessPolicyCreate) createSpec() (*AccessPolicy, *sqlgraph.CreateSpec)
 		_node = &AccessPolicy{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(accesspolicy.Table, sqlgraph.NewFieldSpec(accesspolicy.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -408,11 +412,631 @@ func (_c *AccessPolicyCreate) createSpec() (*AccessPolicy, *sqlgraph.CreateSpec)
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.AccessPolicy.Create().
+//		SetName(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.AccessPolicyUpsert) {
+//			SetName(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *AccessPolicyCreate) OnConflict(opts ...sql.ConflictOption) *AccessPolicyUpsertOne {
+	_c.conflict = opts
+	return &AccessPolicyUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.AccessPolicy.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *AccessPolicyCreate) OnConflictColumns(columns ...string) *AccessPolicyUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &AccessPolicyUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// AccessPolicyUpsertOne is the builder for "upsert"-ing
+	//  one AccessPolicy node.
+	AccessPolicyUpsertOne struct {
+		create *AccessPolicyCreate
+	}
+
+	// AccessPolicyUpsert is the "OnConflict" setter.
+	AccessPolicyUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetName sets the "name" field.
+func (u *AccessPolicyUpsert) SetName(v string) *AccessPolicyUpsert {
+	u.Set(accesspolicy.FieldName, v)
+	return u
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *AccessPolicyUpsert) UpdateName() *AccessPolicyUpsert {
+	u.SetExcluded(accesspolicy.FieldName)
+	return u
+}
+
+// SetDescription sets the "description" field.
+func (u *AccessPolicyUpsert) SetDescription(v string) *AccessPolicyUpsert {
+	u.Set(accesspolicy.FieldDescription, v)
+	return u
+}
+
+// UpdateDescription sets the "description" field to the value that was provided on create.
+func (u *AccessPolicyUpsert) UpdateDescription() *AccessPolicyUpsert {
+	u.SetExcluded(accesspolicy.FieldDescription)
+	return u
+}
+
+// ClearDescription clears the value of the "description" field.
+func (u *AccessPolicyUpsert) ClearDescription() *AccessPolicyUpsert {
+	u.SetNull(accesspolicy.FieldDescription)
+	return u
+}
+
+// SetScopeType sets the "scope_type" field.
+func (u *AccessPolicyUpsert) SetScopeType(v accesspolicy.ScopeType) *AccessPolicyUpsert {
+	u.Set(accesspolicy.FieldScopeType, v)
+	return u
+}
+
+// UpdateScopeType sets the "scope_type" field to the value that was provided on create.
+func (u *AccessPolicyUpsert) UpdateScopeType() *AccessPolicyUpsert {
+	u.SetExcluded(accesspolicy.FieldScopeType)
+	return u
+}
+
+// SetScopeID sets the "scope_id" field.
+func (u *AccessPolicyUpsert) SetScopeID(v string) *AccessPolicyUpsert {
+	u.Set(accesspolicy.FieldScopeID, v)
+	return u
+}
+
+// UpdateScopeID sets the "scope_id" field to the value that was provided on create.
+func (u *AccessPolicyUpsert) UpdateScopeID() *AccessPolicyUpsert {
+	u.SetExcluded(accesspolicy.FieldScopeID)
+	return u
+}
+
+// ClearScopeID clears the value of the "scope_id" field.
+func (u *AccessPolicyUpsert) ClearScopeID() *AccessPolicyUpsert {
+	u.SetNull(accesspolicy.FieldScopeID)
+	return u
+}
+
+// SetResourceType sets the "resource_type" field.
+func (u *AccessPolicyUpsert) SetResourceType(v string) *AccessPolicyUpsert {
+	u.Set(accesspolicy.FieldResourceType, v)
+	return u
+}
+
+// UpdateResourceType sets the "resource_type" field to the value that was provided on create.
+func (u *AccessPolicyUpsert) UpdateResourceType() *AccessPolicyUpsert {
+	u.SetExcluded(accesspolicy.FieldResourceType)
+	return u
+}
+
+// SetResourceID sets the "resource_id" field.
+func (u *AccessPolicyUpsert) SetResourceID(v string) *AccessPolicyUpsert {
+	u.Set(accesspolicy.FieldResourceID, v)
+	return u
+}
+
+// UpdateResourceID sets the "resource_id" field to the value that was provided on create.
+func (u *AccessPolicyUpsert) UpdateResourceID() *AccessPolicyUpsert {
+	u.SetExcluded(accesspolicy.FieldResourceID)
+	return u
+}
+
+// ClearResourceID clears the value of the "resource_id" field.
+func (u *AccessPolicyUpsert) ClearResourceID() *AccessPolicyUpsert {
+	u.SetNull(accesspolicy.FieldResourceID)
+	return u
+}
+
+// SetActions sets the "actions" field.
+func (u *AccessPolicyUpsert) SetActions(v []string) *AccessPolicyUpsert {
+	u.Set(accesspolicy.FieldActions, v)
+	return u
+}
+
+// UpdateActions sets the "actions" field to the value that was provided on create.
+func (u *AccessPolicyUpsert) UpdateActions() *AccessPolicyUpsert {
+	u.SetExcluded(accesspolicy.FieldActions)
+	return u
+}
+
+// ClearActions clears the value of the "actions" field.
+func (u *AccessPolicyUpsert) ClearActions() *AccessPolicyUpsert {
+	u.SetNull(accesspolicy.FieldActions)
+	return u
+}
+
+// SetEffect sets the "effect" field.
+func (u *AccessPolicyUpsert) SetEffect(v accesspolicy.Effect) *AccessPolicyUpsert {
+	u.Set(accesspolicy.FieldEffect, v)
+	return u
+}
+
+// UpdateEffect sets the "effect" field to the value that was provided on create.
+func (u *AccessPolicyUpsert) UpdateEffect() *AccessPolicyUpsert {
+	u.SetExcluded(accesspolicy.FieldEffect)
+	return u
+}
+
+// SetConditions sets the "conditions" field.
+func (u *AccessPolicyUpsert) SetConditions(v *schema.PolicyConditions) *AccessPolicyUpsert {
+	u.Set(accesspolicy.FieldConditions, v)
+	return u
+}
+
+// UpdateConditions sets the "conditions" field to the value that was provided on create.
+func (u *AccessPolicyUpsert) UpdateConditions() *AccessPolicyUpsert {
+	u.SetExcluded(accesspolicy.FieldConditions)
+	return u
+}
+
+// ClearConditions clears the value of the "conditions" field.
+func (u *AccessPolicyUpsert) ClearConditions() *AccessPolicyUpsert {
+	u.SetNull(accesspolicy.FieldConditions)
+	return u
+}
+
+// SetPriority sets the "priority" field.
+func (u *AccessPolicyUpsert) SetPriority(v int) *AccessPolicyUpsert {
+	u.Set(accesspolicy.FieldPriority, v)
+	return u
+}
+
+// UpdatePriority sets the "priority" field to the value that was provided on create.
+func (u *AccessPolicyUpsert) UpdatePriority() *AccessPolicyUpsert {
+	u.SetExcluded(accesspolicy.FieldPriority)
+	return u
+}
+
+// AddPriority adds v to the "priority" field.
+func (u *AccessPolicyUpsert) AddPriority(v int) *AccessPolicyUpsert {
+	u.Add(accesspolicy.FieldPriority, v)
+	return u
+}
+
+// SetLabels sets the "labels" field.
+func (u *AccessPolicyUpsert) SetLabels(v map[string]string) *AccessPolicyUpsert {
+	u.Set(accesspolicy.FieldLabels, v)
+	return u
+}
+
+// UpdateLabels sets the "labels" field to the value that was provided on create.
+func (u *AccessPolicyUpsert) UpdateLabels() *AccessPolicyUpsert {
+	u.SetExcluded(accesspolicy.FieldLabels)
+	return u
+}
+
+// ClearLabels clears the value of the "labels" field.
+func (u *AccessPolicyUpsert) ClearLabels() *AccessPolicyUpsert {
+	u.SetNull(accesspolicy.FieldLabels)
+	return u
+}
+
+// SetAnnotations sets the "annotations" field.
+func (u *AccessPolicyUpsert) SetAnnotations(v map[string]string) *AccessPolicyUpsert {
+	u.Set(accesspolicy.FieldAnnotations, v)
+	return u
+}
+
+// UpdateAnnotations sets the "annotations" field to the value that was provided on create.
+func (u *AccessPolicyUpsert) UpdateAnnotations() *AccessPolicyUpsert {
+	u.SetExcluded(accesspolicy.FieldAnnotations)
+	return u
+}
+
+// ClearAnnotations clears the value of the "annotations" field.
+func (u *AccessPolicyUpsert) ClearAnnotations() *AccessPolicyUpsert {
+	u.SetNull(accesspolicy.FieldAnnotations)
+	return u
+}
+
+// SetUpdated sets the "updated" field.
+func (u *AccessPolicyUpsert) SetUpdated(v time.Time) *AccessPolicyUpsert {
+	u.Set(accesspolicy.FieldUpdated, v)
+	return u
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *AccessPolicyUpsert) UpdateUpdated() *AccessPolicyUpsert {
+	u.SetExcluded(accesspolicy.FieldUpdated)
+	return u
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *AccessPolicyUpsert) SetCreatedBy(v string) *AccessPolicyUpsert {
+	u.Set(accesspolicy.FieldCreatedBy, v)
+	return u
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *AccessPolicyUpsert) UpdateCreatedBy() *AccessPolicyUpsert {
+	u.SetExcluded(accesspolicy.FieldCreatedBy)
+	return u
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *AccessPolicyUpsert) ClearCreatedBy() *AccessPolicyUpsert {
+	u.SetNull(accesspolicy.FieldCreatedBy)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.AccessPolicy.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(accesspolicy.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *AccessPolicyUpsertOne) UpdateNewValues() *AccessPolicyUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(accesspolicy.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(accesspolicy.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.AccessPolicy.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *AccessPolicyUpsertOne) Ignore() *AccessPolicyUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *AccessPolicyUpsertOne) DoNothing() *AccessPolicyUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the AccessPolicyCreate.OnConflict
+// documentation for more info.
+func (u *AccessPolicyUpsertOne) Update(set func(*AccessPolicyUpsert)) *AccessPolicyUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&AccessPolicyUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetName sets the "name" field.
+func (u *AccessPolicyUpsertOne) SetName(v string) *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetName(v)
+	})
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *AccessPolicyUpsertOne) UpdateName() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateName()
+	})
+}
+
+// SetDescription sets the "description" field.
+func (u *AccessPolicyUpsertOne) SetDescription(v string) *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetDescription(v)
+	})
+}
+
+// UpdateDescription sets the "description" field to the value that was provided on create.
+func (u *AccessPolicyUpsertOne) UpdateDescription() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateDescription()
+	})
+}
+
+// ClearDescription clears the value of the "description" field.
+func (u *AccessPolicyUpsertOne) ClearDescription() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.ClearDescription()
+	})
+}
+
+// SetScopeType sets the "scope_type" field.
+func (u *AccessPolicyUpsertOne) SetScopeType(v accesspolicy.ScopeType) *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetScopeType(v)
+	})
+}
+
+// UpdateScopeType sets the "scope_type" field to the value that was provided on create.
+func (u *AccessPolicyUpsertOne) UpdateScopeType() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateScopeType()
+	})
+}
+
+// SetScopeID sets the "scope_id" field.
+func (u *AccessPolicyUpsertOne) SetScopeID(v string) *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetScopeID(v)
+	})
+}
+
+// UpdateScopeID sets the "scope_id" field to the value that was provided on create.
+func (u *AccessPolicyUpsertOne) UpdateScopeID() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateScopeID()
+	})
+}
+
+// ClearScopeID clears the value of the "scope_id" field.
+func (u *AccessPolicyUpsertOne) ClearScopeID() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.ClearScopeID()
+	})
+}
+
+// SetResourceType sets the "resource_type" field.
+func (u *AccessPolicyUpsertOne) SetResourceType(v string) *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetResourceType(v)
+	})
+}
+
+// UpdateResourceType sets the "resource_type" field to the value that was provided on create.
+func (u *AccessPolicyUpsertOne) UpdateResourceType() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateResourceType()
+	})
+}
+
+// SetResourceID sets the "resource_id" field.
+func (u *AccessPolicyUpsertOne) SetResourceID(v string) *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetResourceID(v)
+	})
+}
+
+// UpdateResourceID sets the "resource_id" field to the value that was provided on create.
+func (u *AccessPolicyUpsertOne) UpdateResourceID() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateResourceID()
+	})
+}
+
+// ClearResourceID clears the value of the "resource_id" field.
+func (u *AccessPolicyUpsertOne) ClearResourceID() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.ClearResourceID()
+	})
+}
+
+// SetActions sets the "actions" field.
+func (u *AccessPolicyUpsertOne) SetActions(v []string) *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetActions(v)
+	})
+}
+
+// UpdateActions sets the "actions" field to the value that was provided on create.
+func (u *AccessPolicyUpsertOne) UpdateActions() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateActions()
+	})
+}
+
+// ClearActions clears the value of the "actions" field.
+func (u *AccessPolicyUpsertOne) ClearActions() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.ClearActions()
+	})
+}
+
+// SetEffect sets the "effect" field.
+func (u *AccessPolicyUpsertOne) SetEffect(v accesspolicy.Effect) *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetEffect(v)
+	})
+}
+
+// UpdateEffect sets the "effect" field to the value that was provided on create.
+func (u *AccessPolicyUpsertOne) UpdateEffect() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateEffect()
+	})
+}
+
+// SetConditions sets the "conditions" field.
+func (u *AccessPolicyUpsertOne) SetConditions(v *schema.PolicyConditions) *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetConditions(v)
+	})
+}
+
+// UpdateConditions sets the "conditions" field to the value that was provided on create.
+func (u *AccessPolicyUpsertOne) UpdateConditions() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateConditions()
+	})
+}
+
+// ClearConditions clears the value of the "conditions" field.
+func (u *AccessPolicyUpsertOne) ClearConditions() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.ClearConditions()
+	})
+}
+
+// SetPriority sets the "priority" field.
+func (u *AccessPolicyUpsertOne) SetPriority(v int) *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetPriority(v)
+	})
+}
+
+// AddPriority adds v to the "priority" field.
+func (u *AccessPolicyUpsertOne) AddPriority(v int) *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.AddPriority(v)
+	})
+}
+
+// UpdatePriority sets the "priority" field to the value that was provided on create.
+func (u *AccessPolicyUpsertOne) UpdatePriority() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdatePriority()
+	})
+}
+
+// SetLabels sets the "labels" field.
+func (u *AccessPolicyUpsertOne) SetLabels(v map[string]string) *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetLabels(v)
+	})
+}
+
+// UpdateLabels sets the "labels" field to the value that was provided on create.
+func (u *AccessPolicyUpsertOne) UpdateLabels() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateLabels()
+	})
+}
+
+// ClearLabels clears the value of the "labels" field.
+func (u *AccessPolicyUpsertOne) ClearLabels() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.ClearLabels()
+	})
+}
+
+// SetAnnotations sets the "annotations" field.
+func (u *AccessPolicyUpsertOne) SetAnnotations(v map[string]string) *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetAnnotations(v)
+	})
+}
+
+// UpdateAnnotations sets the "annotations" field to the value that was provided on create.
+func (u *AccessPolicyUpsertOne) UpdateAnnotations() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateAnnotations()
+	})
+}
+
+// ClearAnnotations clears the value of the "annotations" field.
+func (u *AccessPolicyUpsertOne) ClearAnnotations() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.ClearAnnotations()
+	})
+}
+
+// SetUpdated sets the "updated" field.
+func (u *AccessPolicyUpsertOne) SetUpdated(v time.Time) *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetUpdated(v)
+	})
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *AccessPolicyUpsertOne) UpdateUpdated() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateUpdated()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *AccessPolicyUpsertOne) SetCreatedBy(v string) *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *AccessPolicyUpsertOne) UpdateCreatedBy() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *AccessPolicyUpsertOne) ClearCreatedBy() *AccessPolicyUpsertOne {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// Exec executes the query.
+func (u *AccessPolicyUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for AccessPolicyCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *AccessPolicyUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *AccessPolicyUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: AccessPolicyUpsertOne.ID is not supported by MySQL driver. Use AccessPolicyUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *AccessPolicyUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // AccessPolicyCreateBulk is the builder for creating many AccessPolicy entities in bulk.
 type AccessPolicyCreateBulk struct {
 	config
 	err      error
 	builders []*AccessPolicyCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the AccessPolicy entities in the database.
@@ -442,6 +1066,7 @@ func (_c *AccessPolicyCreateBulk) Save(ctx context.Context) ([]*AccessPolicy, er
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -488,6 +1113,382 @@ func (_c *AccessPolicyCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *AccessPolicyCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.AccessPolicy.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.AccessPolicyUpsert) {
+//			SetName(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *AccessPolicyCreateBulk) OnConflict(opts ...sql.ConflictOption) *AccessPolicyUpsertBulk {
+	_c.conflict = opts
+	return &AccessPolicyUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.AccessPolicy.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *AccessPolicyCreateBulk) OnConflictColumns(columns ...string) *AccessPolicyUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &AccessPolicyUpsertBulk{
+		create: _c,
+	}
+}
+
+// AccessPolicyUpsertBulk is the builder for "upsert"-ing
+// a bulk of AccessPolicy nodes.
+type AccessPolicyUpsertBulk struct {
+	create *AccessPolicyCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.AccessPolicy.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(accesspolicy.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *AccessPolicyUpsertBulk) UpdateNewValues() *AccessPolicyUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(accesspolicy.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(accesspolicy.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.AccessPolicy.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *AccessPolicyUpsertBulk) Ignore() *AccessPolicyUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *AccessPolicyUpsertBulk) DoNothing() *AccessPolicyUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the AccessPolicyCreateBulk.OnConflict
+// documentation for more info.
+func (u *AccessPolicyUpsertBulk) Update(set func(*AccessPolicyUpsert)) *AccessPolicyUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&AccessPolicyUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetName sets the "name" field.
+func (u *AccessPolicyUpsertBulk) SetName(v string) *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetName(v)
+	})
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *AccessPolicyUpsertBulk) UpdateName() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateName()
+	})
+}
+
+// SetDescription sets the "description" field.
+func (u *AccessPolicyUpsertBulk) SetDescription(v string) *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetDescription(v)
+	})
+}
+
+// UpdateDescription sets the "description" field to the value that was provided on create.
+func (u *AccessPolicyUpsertBulk) UpdateDescription() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateDescription()
+	})
+}
+
+// ClearDescription clears the value of the "description" field.
+func (u *AccessPolicyUpsertBulk) ClearDescription() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.ClearDescription()
+	})
+}
+
+// SetScopeType sets the "scope_type" field.
+func (u *AccessPolicyUpsertBulk) SetScopeType(v accesspolicy.ScopeType) *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetScopeType(v)
+	})
+}
+
+// UpdateScopeType sets the "scope_type" field to the value that was provided on create.
+func (u *AccessPolicyUpsertBulk) UpdateScopeType() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateScopeType()
+	})
+}
+
+// SetScopeID sets the "scope_id" field.
+func (u *AccessPolicyUpsertBulk) SetScopeID(v string) *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetScopeID(v)
+	})
+}
+
+// UpdateScopeID sets the "scope_id" field to the value that was provided on create.
+func (u *AccessPolicyUpsertBulk) UpdateScopeID() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateScopeID()
+	})
+}
+
+// ClearScopeID clears the value of the "scope_id" field.
+func (u *AccessPolicyUpsertBulk) ClearScopeID() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.ClearScopeID()
+	})
+}
+
+// SetResourceType sets the "resource_type" field.
+func (u *AccessPolicyUpsertBulk) SetResourceType(v string) *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetResourceType(v)
+	})
+}
+
+// UpdateResourceType sets the "resource_type" field to the value that was provided on create.
+func (u *AccessPolicyUpsertBulk) UpdateResourceType() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateResourceType()
+	})
+}
+
+// SetResourceID sets the "resource_id" field.
+func (u *AccessPolicyUpsertBulk) SetResourceID(v string) *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetResourceID(v)
+	})
+}
+
+// UpdateResourceID sets the "resource_id" field to the value that was provided on create.
+func (u *AccessPolicyUpsertBulk) UpdateResourceID() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateResourceID()
+	})
+}
+
+// ClearResourceID clears the value of the "resource_id" field.
+func (u *AccessPolicyUpsertBulk) ClearResourceID() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.ClearResourceID()
+	})
+}
+
+// SetActions sets the "actions" field.
+func (u *AccessPolicyUpsertBulk) SetActions(v []string) *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetActions(v)
+	})
+}
+
+// UpdateActions sets the "actions" field to the value that was provided on create.
+func (u *AccessPolicyUpsertBulk) UpdateActions() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateActions()
+	})
+}
+
+// ClearActions clears the value of the "actions" field.
+func (u *AccessPolicyUpsertBulk) ClearActions() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.ClearActions()
+	})
+}
+
+// SetEffect sets the "effect" field.
+func (u *AccessPolicyUpsertBulk) SetEffect(v accesspolicy.Effect) *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetEffect(v)
+	})
+}
+
+// UpdateEffect sets the "effect" field to the value that was provided on create.
+func (u *AccessPolicyUpsertBulk) UpdateEffect() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateEffect()
+	})
+}
+
+// SetConditions sets the "conditions" field.
+func (u *AccessPolicyUpsertBulk) SetConditions(v *schema.PolicyConditions) *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetConditions(v)
+	})
+}
+
+// UpdateConditions sets the "conditions" field to the value that was provided on create.
+func (u *AccessPolicyUpsertBulk) UpdateConditions() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateConditions()
+	})
+}
+
+// ClearConditions clears the value of the "conditions" field.
+func (u *AccessPolicyUpsertBulk) ClearConditions() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.ClearConditions()
+	})
+}
+
+// SetPriority sets the "priority" field.
+func (u *AccessPolicyUpsertBulk) SetPriority(v int) *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetPriority(v)
+	})
+}
+
+// AddPriority adds v to the "priority" field.
+func (u *AccessPolicyUpsertBulk) AddPriority(v int) *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.AddPriority(v)
+	})
+}
+
+// UpdatePriority sets the "priority" field to the value that was provided on create.
+func (u *AccessPolicyUpsertBulk) UpdatePriority() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdatePriority()
+	})
+}
+
+// SetLabels sets the "labels" field.
+func (u *AccessPolicyUpsertBulk) SetLabels(v map[string]string) *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetLabels(v)
+	})
+}
+
+// UpdateLabels sets the "labels" field to the value that was provided on create.
+func (u *AccessPolicyUpsertBulk) UpdateLabels() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateLabels()
+	})
+}
+
+// ClearLabels clears the value of the "labels" field.
+func (u *AccessPolicyUpsertBulk) ClearLabels() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.ClearLabels()
+	})
+}
+
+// SetAnnotations sets the "annotations" field.
+func (u *AccessPolicyUpsertBulk) SetAnnotations(v map[string]string) *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetAnnotations(v)
+	})
+}
+
+// UpdateAnnotations sets the "annotations" field to the value that was provided on create.
+func (u *AccessPolicyUpsertBulk) UpdateAnnotations() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateAnnotations()
+	})
+}
+
+// ClearAnnotations clears the value of the "annotations" field.
+func (u *AccessPolicyUpsertBulk) ClearAnnotations() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.ClearAnnotations()
+	})
+}
+
+// SetUpdated sets the "updated" field.
+func (u *AccessPolicyUpsertBulk) SetUpdated(v time.Time) *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetUpdated(v)
+	})
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *AccessPolicyUpsertBulk) UpdateUpdated() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateUpdated()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *AccessPolicyUpsertBulk) SetCreatedBy(v string) *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *AccessPolicyUpsertBulk) UpdateCreatedBy() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *AccessPolicyUpsertBulk) ClearCreatedBy() *AccessPolicyUpsertBulk {
+	return u.Update(func(s *AccessPolicyUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// Exec executes the query.
+func (u *AccessPolicyUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the AccessPolicyCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for AccessPolicyCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *AccessPolicyUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

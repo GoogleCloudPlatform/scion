@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notificationsubscription"
@@ -19,6 +21,7 @@ type NotificationSubscriptionCreate struct {
 	config
 	mutation *NotificationSubscriptionMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetScope sets the "scope" field.
@@ -237,6 +240,7 @@ func (_c *NotificationSubscriptionCreate) createSpec() (*NotificationSubscriptio
 		_node = &NotificationSubscription{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(notificationsubscription.Table, sqlgraph.NewFieldSpec(notificationsubscription.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -276,11 +280,345 @@ func (_c *NotificationSubscriptionCreate) createSpec() (*NotificationSubscriptio
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.NotificationSubscription.Create().
+//		SetScope(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.NotificationSubscriptionUpsert) {
+//			SetScope(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *NotificationSubscriptionCreate) OnConflict(opts ...sql.ConflictOption) *NotificationSubscriptionUpsertOne {
+	_c.conflict = opts
+	return &NotificationSubscriptionUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.NotificationSubscription.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *NotificationSubscriptionCreate) OnConflictColumns(columns ...string) *NotificationSubscriptionUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &NotificationSubscriptionUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// NotificationSubscriptionUpsertOne is the builder for "upsert"-ing
+	//  one NotificationSubscription node.
+	NotificationSubscriptionUpsertOne struct {
+		create *NotificationSubscriptionCreate
+	}
+
+	// NotificationSubscriptionUpsert is the "OnConflict" setter.
+	NotificationSubscriptionUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetScope sets the "scope" field.
+func (u *NotificationSubscriptionUpsert) SetScope(v string) *NotificationSubscriptionUpsert {
+	u.Set(notificationsubscription.FieldScope, v)
+	return u
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsert) UpdateScope() *NotificationSubscriptionUpsert {
+	u.SetExcluded(notificationsubscription.FieldScope)
+	return u
+}
+
+// SetAgentID sets the "agent_id" field.
+func (u *NotificationSubscriptionUpsert) SetAgentID(v uuid.UUID) *NotificationSubscriptionUpsert {
+	u.Set(notificationsubscription.FieldAgentID, v)
+	return u
+}
+
+// UpdateAgentID sets the "agent_id" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsert) UpdateAgentID() *NotificationSubscriptionUpsert {
+	u.SetExcluded(notificationsubscription.FieldAgentID)
+	return u
+}
+
+// ClearAgentID clears the value of the "agent_id" field.
+func (u *NotificationSubscriptionUpsert) ClearAgentID() *NotificationSubscriptionUpsert {
+	u.SetNull(notificationsubscription.FieldAgentID)
+	return u
+}
+
+// SetSubscriberType sets the "subscriber_type" field.
+func (u *NotificationSubscriptionUpsert) SetSubscriberType(v string) *NotificationSubscriptionUpsert {
+	u.Set(notificationsubscription.FieldSubscriberType, v)
+	return u
+}
+
+// UpdateSubscriberType sets the "subscriber_type" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsert) UpdateSubscriberType() *NotificationSubscriptionUpsert {
+	u.SetExcluded(notificationsubscription.FieldSubscriberType)
+	return u
+}
+
+// SetSubscriberID sets the "subscriber_id" field.
+func (u *NotificationSubscriptionUpsert) SetSubscriberID(v string) *NotificationSubscriptionUpsert {
+	u.Set(notificationsubscription.FieldSubscriberID, v)
+	return u
+}
+
+// UpdateSubscriberID sets the "subscriber_id" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsert) UpdateSubscriberID() *NotificationSubscriptionUpsert {
+	u.SetExcluded(notificationsubscription.FieldSubscriberID)
+	return u
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *NotificationSubscriptionUpsert) SetProjectID(v uuid.UUID) *NotificationSubscriptionUpsert {
+	u.Set(notificationsubscription.FieldProjectID, v)
+	return u
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsert) UpdateProjectID() *NotificationSubscriptionUpsert {
+	u.SetExcluded(notificationsubscription.FieldProjectID)
+	return u
+}
+
+// SetTriggerActivities sets the "trigger_activities" field.
+func (u *NotificationSubscriptionUpsert) SetTriggerActivities(v string) *NotificationSubscriptionUpsert {
+	u.Set(notificationsubscription.FieldTriggerActivities, v)
+	return u
+}
+
+// UpdateTriggerActivities sets the "trigger_activities" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsert) UpdateTriggerActivities() *NotificationSubscriptionUpsert {
+	u.SetExcluded(notificationsubscription.FieldTriggerActivities)
+	return u
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *NotificationSubscriptionUpsert) SetCreatedBy(v string) *NotificationSubscriptionUpsert {
+	u.Set(notificationsubscription.FieldCreatedBy, v)
+	return u
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsert) UpdateCreatedBy() *NotificationSubscriptionUpsert {
+	u.SetExcluded(notificationsubscription.FieldCreatedBy)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.NotificationSubscription.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(notificationsubscription.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *NotificationSubscriptionUpsertOne) UpdateNewValues() *NotificationSubscriptionUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(notificationsubscription.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(notificationsubscription.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.NotificationSubscription.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *NotificationSubscriptionUpsertOne) Ignore() *NotificationSubscriptionUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *NotificationSubscriptionUpsertOne) DoNothing() *NotificationSubscriptionUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the NotificationSubscriptionCreate.OnConflict
+// documentation for more info.
+func (u *NotificationSubscriptionUpsertOne) Update(set func(*NotificationSubscriptionUpsert)) *NotificationSubscriptionUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&NotificationSubscriptionUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetScope sets the "scope" field.
+func (u *NotificationSubscriptionUpsertOne) SetScope(v string) *NotificationSubscriptionUpsertOne {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.SetScope(v)
+	})
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsertOne) UpdateScope() *NotificationSubscriptionUpsertOne {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.UpdateScope()
+	})
+}
+
+// SetAgentID sets the "agent_id" field.
+func (u *NotificationSubscriptionUpsertOne) SetAgentID(v uuid.UUID) *NotificationSubscriptionUpsertOne {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.SetAgentID(v)
+	})
+}
+
+// UpdateAgentID sets the "agent_id" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsertOne) UpdateAgentID() *NotificationSubscriptionUpsertOne {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.UpdateAgentID()
+	})
+}
+
+// ClearAgentID clears the value of the "agent_id" field.
+func (u *NotificationSubscriptionUpsertOne) ClearAgentID() *NotificationSubscriptionUpsertOne {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.ClearAgentID()
+	})
+}
+
+// SetSubscriberType sets the "subscriber_type" field.
+func (u *NotificationSubscriptionUpsertOne) SetSubscriberType(v string) *NotificationSubscriptionUpsertOne {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.SetSubscriberType(v)
+	})
+}
+
+// UpdateSubscriberType sets the "subscriber_type" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsertOne) UpdateSubscriberType() *NotificationSubscriptionUpsertOne {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.UpdateSubscriberType()
+	})
+}
+
+// SetSubscriberID sets the "subscriber_id" field.
+func (u *NotificationSubscriptionUpsertOne) SetSubscriberID(v string) *NotificationSubscriptionUpsertOne {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.SetSubscriberID(v)
+	})
+}
+
+// UpdateSubscriberID sets the "subscriber_id" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsertOne) UpdateSubscriberID() *NotificationSubscriptionUpsertOne {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.UpdateSubscriberID()
+	})
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *NotificationSubscriptionUpsertOne) SetProjectID(v uuid.UUID) *NotificationSubscriptionUpsertOne {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsertOne) UpdateProjectID() *NotificationSubscriptionUpsertOne {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// SetTriggerActivities sets the "trigger_activities" field.
+func (u *NotificationSubscriptionUpsertOne) SetTriggerActivities(v string) *NotificationSubscriptionUpsertOne {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.SetTriggerActivities(v)
+	})
+}
+
+// UpdateTriggerActivities sets the "trigger_activities" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsertOne) UpdateTriggerActivities() *NotificationSubscriptionUpsertOne {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.UpdateTriggerActivities()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *NotificationSubscriptionUpsertOne) SetCreatedBy(v string) *NotificationSubscriptionUpsertOne {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsertOne) UpdateCreatedBy() *NotificationSubscriptionUpsertOne {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// Exec executes the query.
+func (u *NotificationSubscriptionUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for NotificationSubscriptionCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *NotificationSubscriptionUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *NotificationSubscriptionUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: NotificationSubscriptionUpsertOne.ID is not supported by MySQL driver. Use NotificationSubscriptionUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *NotificationSubscriptionUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // NotificationSubscriptionCreateBulk is the builder for creating many NotificationSubscription entities in bulk.
 type NotificationSubscriptionCreateBulk struct {
 	config
 	err      error
 	builders []*NotificationSubscriptionCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the NotificationSubscription entities in the database.
@@ -310,6 +648,7 @@ func (_c *NotificationSubscriptionCreateBulk) Save(ctx context.Context) ([]*Noti
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -356,6 +695,228 @@ func (_c *NotificationSubscriptionCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *NotificationSubscriptionCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.NotificationSubscription.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.NotificationSubscriptionUpsert) {
+//			SetScope(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *NotificationSubscriptionCreateBulk) OnConflict(opts ...sql.ConflictOption) *NotificationSubscriptionUpsertBulk {
+	_c.conflict = opts
+	return &NotificationSubscriptionUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.NotificationSubscription.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *NotificationSubscriptionCreateBulk) OnConflictColumns(columns ...string) *NotificationSubscriptionUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &NotificationSubscriptionUpsertBulk{
+		create: _c,
+	}
+}
+
+// NotificationSubscriptionUpsertBulk is the builder for "upsert"-ing
+// a bulk of NotificationSubscription nodes.
+type NotificationSubscriptionUpsertBulk struct {
+	create *NotificationSubscriptionCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.NotificationSubscription.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(notificationsubscription.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *NotificationSubscriptionUpsertBulk) UpdateNewValues() *NotificationSubscriptionUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(notificationsubscription.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(notificationsubscription.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.NotificationSubscription.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *NotificationSubscriptionUpsertBulk) Ignore() *NotificationSubscriptionUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *NotificationSubscriptionUpsertBulk) DoNothing() *NotificationSubscriptionUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the NotificationSubscriptionCreateBulk.OnConflict
+// documentation for more info.
+func (u *NotificationSubscriptionUpsertBulk) Update(set func(*NotificationSubscriptionUpsert)) *NotificationSubscriptionUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&NotificationSubscriptionUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetScope sets the "scope" field.
+func (u *NotificationSubscriptionUpsertBulk) SetScope(v string) *NotificationSubscriptionUpsertBulk {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.SetScope(v)
+	})
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsertBulk) UpdateScope() *NotificationSubscriptionUpsertBulk {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.UpdateScope()
+	})
+}
+
+// SetAgentID sets the "agent_id" field.
+func (u *NotificationSubscriptionUpsertBulk) SetAgentID(v uuid.UUID) *NotificationSubscriptionUpsertBulk {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.SetAgentID(v)
+	})
+}
+
+// UpdateAgentID sets the "agent_id" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsertBulk) UpdateAgentID() *NotificationSubscriptionUpsertBulk {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.UpdateAgentID()
+	})
+}
+
+// ClearAgentID clears the value of the "agent_id" field.
+func (u *NotificationSubscriptionUpsertBulk) ClearAgentID() *NotificationSubscriptionUpsertBulk {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.ClearAgentID()
+	})
+}
+
+// SetSubscriberType sets the "subscriber_type" field.
+func (u *NotificationSubscriptionUpsertBulk) SetSubscriberType(v string) *NotificationSubscriptionUpsertBulk {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.SetSubscriberType(v)
+	})
+}
+
+// UpdateSubscriberType sets the "subscriber_type" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsertBulk) UpdateSubscriberType() *NotificationSubscriptionUpsertBulk {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.UpdateSubscriberType()
+	})
+}
+
+// SetSubscriberID sets the "subscriber_id" field.
+func (u *NotificationSubscriptionUpsertBulk) SetSubscriberID(v string) *NotificationSubscriptionUpsertBulk {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.SetSubscriberID(v)
+	})
+}
+
+// UpdateSubscriberID sets the "subscriber_id" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsertBulk) UpdateSubscriberID() *NotificationSubscriptionUpsertBulk {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.UpdateSubscriberID()
+	})
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *NotificationSubscriptionUpsertBulk) SetProjectID(v uuid.UUID) *NotificationSubscriptionUpsertBulk {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsertBulk) UpdateProjectID() *NotificationSubscriptionUpsertBulk {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// SetTriggerActivities sets the "trigger_activities" field.
+func (u *NotificationSubscriptionUpsertBulk) SetTriggerActivities(v string) *NotificationSubscriptionUpsertBulk {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.SetTriggerActivities(v)
+	})
+}
+
+// UpdateTriggerActivities sets the "trigger_activities" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsertBulk) UpdateTriggerActivities() *NotificationSubscriptionUpsertBulk {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.UpdateTriggerActivities()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *NotificationSubscriptionUpsertBulk) SetCreatedBy(v string) *NotificationSubscriptionUpsertBulk {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *NotificationSubscriptionUpsertBulk) UpdateCreatedBy() *NotificationSubscriptionUpsertBulk {
+	return u.Update(func(s *NotificationSubscriptionUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// Exec executes the query.
+func (u *NotificationSubscriptionUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the NotificationSubscriptionCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for NotificationSubscriptionCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *NotificationSubscriptionUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

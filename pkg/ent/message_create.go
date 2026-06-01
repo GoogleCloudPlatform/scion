@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
@@ -19,6 +21,7 @@ type MessageCreate struct {
 	config
 	mutation *MessageMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetProjectID sets the "project_id" field.
@@ -321,6 +324,7 @@ func (_c *MessageCreate) createSpec() (*Message, *sqlgraph.CreateSpec) {
 		_node = &Message{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(message.Table, sqlgraph.NewFieldSpec(message.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -380,11 +384,514 @@ func (_c *MessageCreate) createSpec() (*Message, *sqlgraph.CreateSpec) {
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.Message.Create().
+//		SetProjectID(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.MessageUpsert) {
+//			SetProjectID(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *MessageCreate) OnConflict(opts ...sql.ConflictOption) *MessageUpsertOne {
+	_c.conflict = opts
+	return &MessageUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.Message.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *MessageCreate) OnConflictColumns(columns ...string) *MessageUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &MessageUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// MessageUpsertOne is the builder for "upsert"-ing
+	//  one Message node.
+	MessageUpsertOne struct {
+		create *MessageCreate
+	}
+
+	// MessageUpsert is the "OnConflict" setter.
+	MessageUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetProjectID sets the "project_id" field.
+func (u *MessageUpsert) SetProjectID(v uuid.UUID) *MessageUpsert {
+	u.Set(message.FieldProjectID, v)
+	return u
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateProjectID() *MessageUpsert {
+	u.SetExcluded(message.FieldProjectID)
+	return u
+}
+
+// SetSender sets the "sender" field.
+func (u *MessageUpsert) SetSender(v string) *MessageUpsert {
+	u.Set(message.FieldSender, v)
+	return u
+}
+
+// UpdateSender sets the "sender" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateSender() *MessageUpsert {
+	u.SetExcluded(message.FieldSender)
+	return u
+}
+
+// SetSenderID sets the "sender_id" field.
+func (u *MessageUpsert) SetSenderID(v string) *MessageUpsert {
+	u.Set(message.FieldSenderID, v)
+	return u
+}
+
+// UpdateSenderID sets the "sender_id" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateSenderID() *MessageUpsert {
+	u.SetExcluded(message.FieldSenderID)
+	return u
+}
+
+// ClearSenderID clears the value of the "sender_id" field.
+func (u *MessageUpsert) ClearSenderID() *MessageUpsert {
+	u.SetNull(message.FieldSenderID)
+	return u
+}
+
+// SetRecipient sets the "recipient" field.
+func (u *MessageUpsert) SetRecipient(v string) *MessageUpsert {
+	u.Set(message.FieldRecipient, v)
+	return u
+}
+
+// UpdateRecipient sets the "recipient" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateRecipient() *MessageUpsert {
+	u.SetExcluded(message.FieldRecipient)
+	return u
+}
+
+// SetRecipientID sets the "recipient_id" field.
+func (u *MessageUpsert) SetRecipientID(v string) *MessageUpsert {
+	u.Set(message.FieldRecipientID, v)
+	return u
+}
+
+// UpdateRecipientID sets the "recipient_id" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateRecipientID() *MessageUpsert {
+	u.SetExcluded(message.FieldRecipientID)
+	return u
+}
+
+// ClearRecipientID clears the value of the "recipient_id" field.
+func (u *MessageUpsert) ClearRecipientID() *MessageUpsert {
+	u.SetNull(message.FieldRecipientID)
+	return u
+}
+
+// SetMsg sets the "msg" field.
+func (u *MessageUpsert) SetMsg(v string) *MessageUpsert {
+	u.Set(message.FieldMsg, v)
+	return u
+}
+
+// UpdateMsg sets the "msg" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateMsg() *MessageUpsert {
+	u.SetExcluded(message.FieldMsg)
+	return u
+}
+
+// SetType sets the "type" field.
+func (u *MessageUpsert) SetType(v string) *MessageUpsert {
+	u.Set(message.FieldType, v)
+	return u
+}
+
+// UpdateType sets the "type" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateType() *MessageUpsert {
+	u.SetExcluded(message.FieldType)
+	return u
+}
+
+// SetUrgent sets the "urgent" field.
+func (u *MessageUpsert) SetUrgent(v bool) *MessageUpsert {
+	u.Set(message.FieldUrgent, v)
+	return u
+}
+
+// UpdateUrgent sets the "urgent" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateUrgent() *MessageUpsert {
+	u.SetExcluded(message.FieldUrgent)
+	return u
+}
+
+// SetBroadcasted sets the "broadcasted" field.
+func (u *MessageUpsert) SetBroadcasted(v bool) *MessageUpsert {
+	u.Set(message.FieldBroadcasted, v)
+	return u
+}
+
+// UpdateBroadcasted sets the "broadcasted" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateBroadcasted() *MessageUpsert {
+	u.SetExcluded(message.FieldBroadcasted)
+	return u
+}
+
+// SetRead sets the "read" field.
+func (u *MessageUpsert) SetRead(v bool) *MessageUpsert {
+	u.Set(message.FieldRead, v)
+	return u
+}
+
+// UpdateRead sets the "read" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateRead() *MessageUpsert {
+	u.SetExcluded(message.FieldRead)
+	return u
+}
+
+// SetAgentID sets the "agent_id" field.
+func (u *MessageUpsert) SetAgentID(v string) *MessageUpsert {
+	u.Set(message.FieldAgentID, v)
+	return u
+}
+
+// UpdateAgentID sets the "agent_id" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateAgentID() *MessageUpsert {
+	u.SetExcluded(message.FieldAgentID)
+	return u
+}
+
+// ClearAgentID clears the value of the "agent_id" field.
+func (u *MessageUpsert) ClearAgentID() *MessageUpsert {
+	u.SetNull(message.FieldAgentID)
+	return u
+}
+
+// SetGroupID sets the "group_id" field.
+func (u *MessageUpsert) SetGroupID(v string) *MessageUpsert {
+	u.Set(message.FieldGroupID, v)
+	return u
+}
+
+// UpdateGroupID sets the "group_id" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateGroupID() *MessageUpsert {
+	u.SetExcluded(message.FieldGroupID)
+	return u
+}
+
+// ClearGroupID clears the value of the "group_id" field.
+func (u *MessageUpsert) ClearGroupID() *MessageUpsert {
+	u.SetNull(message.FieldGroupID)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.Message.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(message.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *MessageUpsertOne) UpdateNewValues() *MessageUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(message.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(message.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.Message.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *MessageUpsertOne) Ignore() *MessageUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *MessageUpsertOne) DoNothing() *MessageUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the MessageCreate.OnConflict
+// documentation for more info.
+func (u *MessageUpsertOne) Update(set func(*MessageUpsert)) *MessageUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&MessageUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *MessageUpsertOne) SetProjectID(v uuid.UUID) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateProjectID() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// SetSender sets the "sender" field.
+func (u *MessageUpsertOne) SetSender(v string) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetSender(v)
+	})
+}
+
+// UpdateSender sets the "sender" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateSender() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateSender()
+	})
+}
+
+// SetSenderID sets the "sender_id" field.
+func (u *MessageUpsertOne) SetSenderID(v string) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetSenderID(v)
+	})
+}
+
+// UpdateSenderID sets the "sender_id" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateSenderID() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateSenderID()
+	})
+}
+
+// ClearSenderID clears the value of the "sender_id" field.
+func (u *MessageUpsertOne) ClearSenderID() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearSenderID()
+	})
+}
+
+// SetRecipient sets the "recipient" field.
+func (u *MessageUpsertOne) SetRecipient(v string) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetRecipient(v)
+	})
+}
+
+// UpdateRecipient sets the "recipient" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateRecipient() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateRecipient()
+	})
+}
+
+// SetRecipientID sets the "recipient_id" field.
+func (u *MessageUpsertOne) SetRecipientID(v string) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetRecipientID(v)
+	})
+}
+
+// UpdateRecipientID sets the "recipient_id" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateRecipientID() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateRecipientID()
+	})
+}
+
+// ClearRecipientID clears the value of the "recipient_id" field.
+func (u *MessageUpsertOne) ClearRecipientID() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearRecipientID()
+	})
+}
+
+// SetMsg sets the "msg" field.
+func (u *MessageUpsertOne) SetMsg(v string) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetMsg(v)
+	})
+}
+
+// UpdateMsg sets the "msg" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateMsg() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateMsg()
+	})
+}
+
+// SetType sets the "type" field.
+func (u *MessageUpsertOne) SetType(v string) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetType(v)
+	})
+}
+
+// UpdateType sets the "type" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateType() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateType()
+	})
+}
+
+// SetUrgent sets the "urgent" field.
+func (u *MessageUpsertOne) SetUrgent(v bool) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetUrgent(v)
+	})
+}
+
+// UpdateUrgent sets the "urgent" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateUrgent() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateUrgent()
+	})
+}
+
+// SetBroadcasted sets the "broadcasted" field.
+func (u *MessageUpsertOne) SetBroadcasted(v bool) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetBroadcasted(v)
+	})
+}
+
+// UpdateBroadcasted sets the "broadcasted" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateBroadcasted() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateBroadcasted()
+	})
+}
+
+// SetRead sets the "read" field.
+func (u *MessageUpsertOne) SetRead(v bool) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetRead(v)
+	})
+}
+
+// UpdateRead sets the "read" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateRead() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateRead()
+	})
+}
+
+// SetAgentID sets the "agent_id" field.
+func (u *MessageUpsertOne) SetAgentID(v string) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetAgentID(v)
+	})
+}
+
+// UpdateAgentID sets the "agent_id" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateAgentID() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateAgentID()
+	})
+}
+
+// ClearAgentID clears the value of the "agent_id" field.
+func (u *MessageUpsertOne) ClearAgentID() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearAgentID()
+	})
+}
+
+// SetGroupID sets the "group_id" field.
+func (u *MessageUpsertOne) SetGroupID(v string) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetGroupID(v)
+	})
+}
+
+// UpdateGroupID sets the "group_id" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateGroupID() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateGroupID()
+	})
+}
+
+// ClearGroupID clears the value of the "group_id" field.
+func (u *MessageUpsertOne) ClearGroupID() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearGroupID()
+	})
+}
+
+// Exec executes the query.
+func (u *MessageUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for MessageCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *MessageUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *MessageUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: MessageUpsertOne.ID is not supported by MySQL driver. Use MessageUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *MessageUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // MessageCreateBulk is the builder for creating many Message entities in bulk.
 type MessageCreateBulk struct {
 	config
 	err      error
 	builders []*MessageCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the Message entities in the database.
@@ -414,6 +921,7 @@ func (_c *MessageCreateBulk) Save(ctx context.Context) ([]*Message, error) {
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -460,6 +968,319 @@ func (_c *MessageCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *MessageCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.Message.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.MessageUpsert) {
+//			SetProjectID(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *MessageCreateBulk) OnConflict(opts ...sql.ConflictOption) *MessageUpsertBulk {
+	_c.conflict = opts
+	return &MessageUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.Message.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *MessageCreateBulk) OnConflictColumns(columns ...string) *MessageUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &MessageUpsertBulk{
+		create: _c,
+	}
+}
+
+// MessageUpsertBulk is the builder for "upsert"-ing
+// a bulk of Message nodes.
+type MessageUpsertBulk struct {
+	create *MessageCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.Message.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(message.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *MessageUpsertBulk) UpdateNewValues() *MessageUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(message.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(message.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.Message.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *MessageUpsertBulk) Ignore() *MessageUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *MessageUpsertBulk) DoNothing() *MessageUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the MessageCreateBulk.OnConflict
+// documentation for more info.
+func (u *MessageUpsertBulk) Update(set func(*MessageUpsert)) *MessageUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&MessageUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *MessageUpsertBulk) SetProjectID(v uuid.UUID) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateProjectID() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// SetSender sets the "sender" field.
+func (u *MessageUpsertBulk) SetSender(v string) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetSender(v)
+	})
+}
+
+// UpdateSender sets the "sender" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateSender() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateSender()
+	})
+}
+
+// SetSenderID sets the "sender_id" field.
+func (u *MessageUpsertBulk) SetSenderID(v string) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetSenderID(v)
+	})
+}
+
+// UpdateSenderID sets the "sender_id" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateSenderID() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateSenderID()
+	})
+}
+
+// ClearSenderID clears the value of the "sender_id" field.
+func (u *MessageUpsertBulk) ClearSenderID() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearSenderID()
+	})
+}
+
+// SetRecipient sets the "recipient" field.
+func (u *MessageUpsertBulk) SetRecipient(v string) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetRecipient(v)
+	})
+}
+
+// UpdateRecipient sets the "recipient" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateRecipient() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateRecipient()
+	})
+}
+
+// SetRecipientID sets the "recipient_id" field.
+func (u *MessageUpsertBulk) SetRecipientID(v string) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetRecipientID(v)
+	})
+}
+
+// UpdateRecipientID sets the "recipient_id" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateRecipientID() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateRecipientID()
+	})
+}
+
+// ClearRecipientID clears the value of the "recipient_id" field.
+func (u *MessageUpsertBulk) ClearRecipientID() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearRecipientID()
+	})
+}
+
+// SetMsg sets the "msg" field.
+func (u *MessageUpsertBulk) SetMsg(v string) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetMsg(v)
+	})
+}
+
+// UpdateMsg sets the "msg" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateMsg() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateMsg()
+	})
+}
+
+// SetType sets the "type" field.
+func (u *MessageUpsertBulk) SetType(v string) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetType(v)
+	})
+}
+
+// UpdateType sets the "type" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateType() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateType()
+	})
+}
+
+// SetUrgent sets the "urgent" field.
+func (u *MessageUpsertBulk) SetUrgent(v bool) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetUrgent(v)
+	})
+}
+
+// UpdateUrgent sets the "urgent" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateUrgent() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateUrgent()
+	})
+}
+
+// SetBroadcasted sets the "broadcasted" field.
+func (u *MessageUpsertBulk) SetBroadcasted(v bool) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetBroadcasted(v)
+	})
+}
+
+// UpdateBroadcasted sets the "broadcasted" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateBroadcasted() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateBroadcasted()
+	})
+}
+
+// SetRead sets the "read" field.
+func (u *MessageUpsertBulk) SetRead(v bool) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetRead(v)
+	})
+}
+
+// UpdateRead sets the "read" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateRead() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateRead()
+	})
+}
+
+// SetAgentID sets the "agent_id" field.
+func (u *MessageUpsertBulk) SetAgentID(v string) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetAgentID(v)
+	})
+}
+
+// UpdateAgentID sets the "agent_id" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateAgentID() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateAgentID()
+	})
+}
+
+// ClearAgentID clears the value of the "agent_id" field.
+func (u *MessageUpsertBulk) ClearAgentID() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearAgentID()
+	})
+}
+
+// SetGroupID sets the "group_id" field.
+func (u *MessageUpsertBulk) SetGroupID(v string) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetGroupID(v)
+	})
+}
+
+// UpdateGroupID sets the "group_id" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateGroupID() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateGroupID()
+	})
+}
+
+// ClearGroupID clears the value of the "group_id" field.
+func (u *MessageUpsertBulk) ClearGroupID() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearGroupID()
+	})
+}
+
+// Exec executes the query.
+func (u *MessageUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the MessageCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for MessageCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *MessageUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

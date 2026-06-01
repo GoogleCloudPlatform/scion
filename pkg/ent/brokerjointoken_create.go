@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
@@ -19,6 +21,7 @@ type BrokerJoinTokenCreate struct {
 	config
 	mutation *BrokerJoinTokenMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetTokenHash sets the "token_hash" field.
@@ -155,6 +158,7 @@ func (_c *BrokerJoinTokenCreate) createSpec() (*BrokerJoinToken, *sqlgraph.Creat
 		_node = &BrokerJoinToken{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(brokerjointoken.Table, sqlgraph.NewFieldSpec(brokerjointoken.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -178,11 +182,228 @@ func (_c *BrokerJoinTokenCreate) createSpec() (*BrokerJoinToken, *sqlgraph.Creat
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.BrokerJoinToken.Create().
+//		SetTokenHash(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.BrokerJoinTokenUpsert) {
+//			SetTokenHash(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *BrokerJoinTokenCreate) OnConflict(opts ...sql.ConflictOption) *BrokerJoinTokenUpsertOne {
+	_c.conflict = opts
+	return &BrokerJoinTokenUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.BrokerJoinToken.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *BrokerJoinTokenCreate) OnConflictColumns(columns ...string) *BrokerJoinTokenUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &BrokerJoinTokenUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// BrokerJoinTokenUpsertOne is the builder for "upsert"-ing
+	//  one BrokerJoinToken node.
+	BrokerJoinTokenUpsertOne struct {
+		create *BrokerJoinTokenCreate
+	}
+
+	// BrokerJoinTokenUpsert is the "OnConflict" setter.
+	BrokerJoinTokenUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetTokenHash sets the "token_hash" field.
+func (u *BrokerJoinTokenUpsert) SetTokenHash(v string) *BrokerJoinTokenUpsert {
+	u.Set(brokerjointoken.FieldTokenHash, v)
+	return u
+}
+
+// UpdateTokenHash sets the "token_hash" field to the value that was provided on create.
+func (u *BrokerJoinTokenUpsert) UpdateTokenHash() *BrokerJoinTokenUpsert {
+	u.SetExcluded(brokerjointoken.FieldTokenHash)
+	return u
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (u *BrokerJoinTokenUpsert) SetExpiresAt(v time.Time) *BrokerJoinTokenUpsert {
+	u.Set(brokerjointoken.FieldExpiresAt, v)
+	return u
+}
+
+// UpdateExpiresAt sets the "expires_at" field to the value that was provided on create.
+func (u *BrokerJoinTokenUpsert) UpdateExpiresAt() *BrokerJoinTokenUpsert {
+	u.SetExcluded(brokerjointoken.FieldExpiresAt)
+	return u
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *BrokerJoinTokenUpsert) SetCreatedBy(v string) *BrokerJoinTokenUpsert {
+	u.Set(brokerjointoken.FieldCreatedBy, v)
+	return u
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *BrokerJoinTokenUpsert) UpdateCreatedBy() *BrokerJoinTokenUpsert {
+	u.SetExcluded(brokerjointoken.FieldCreatedBy)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.BrokerJoinToken.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(brokerjointoken.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *BrokerJoinTokenUpsertOne) UpdateNewValues() *BrokerJoinTokenUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(brokerjointoken.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(brokerjointoken.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.BrokerJoinToken.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *BrokerJoinTokenUpsertOne) Ignore() *BrokerJoinTokenUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *BrokerJoinTokenUpsertOne) DoNothing() *BrokerJoinTokenUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the BrokerJoinTokenCreate.OnConflict
+// documentation for more info.
+func (u *BrokerJoinTokenUpsertOne) Update(set func(*BrokerJoinTokenUpsert)) *BrokerJoinTokenUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&BrokerJoinTokenUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetTokenHash sets the "token_hash" field.
+func (u *BrokerJoinTokenUpsertOne) SetTokenHash(v string) *BrokerJoinTokenUpsertOne {
+	return u.Update(func(s *BrokerJoinTokenUpsert) {
+		s.SetTokenHash(v)
+	})
+}
+
+// UpdateTokenHash sets the "token_hash" field to the value that was provided on create.
+func (u *BrokerJoinTokenUpsertOne) UpdateTokenHash() *BrokerJoinTokenUpsertOne {
+	return u.Update(func(s *BrokerJoinTokenUpsert) {
+		s.UpdateTokenHash()
+	})
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (u *BrokerJoinTokenUpsertOne) SetExpiresAt(v time.Time) *BrokerJoinTokenUpsertOne {
+	return u.Update(func(s *BrokerJoinTokenUpsert) {
+		s.SetExpiresAt(v)
+	})
+}
+
+// UpdateExpiresAt sets the "expires_at" field to the value that was provided on create.
+func (u *BrokerJoinTokenUpsertOne) UpdateExpiresAt() *BrokerJoinTokenUpsertOne {
+	return u.Update(func(s *BrokerJoinTokenUpsert) {
+		s.UpdateExpiresAt()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *BrokerJoinTokenUpsertOne) SetCreatedBy(v string) *BrokerJoinTokenUpsertOne {
+	return u.Update(func(s *BrokerJoinTokenUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *BrokerJoinTokenUpsertOne) UpdateCreatedBy() *BrokerJoinTokenUpsertOne {
+	return u.Update(func(s *BrokerJoinTokenUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// Exec executes the query.
+func (u *BrokerJoinTokenUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for BrokerJoinTokenCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *BrokerJoinTokenUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *BrokerJoinTokenUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: BrokerJoinTokenUpsertOne.ID is not supported by MySQL driver. Use BrokerJoinTokenUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *BrokerJoinTokenUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // BrokerJoinTokenCreateBulk is the builder for creating many BrokerJoinToken entities in bulk.
 type BrokerJoinTokenCreateBulk struct {
 	config
 	err      error
 	builders []*BrokerJoinTokenCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the BrokerJoinToken entities in the database.
@@ -212,6 +433,7 @@ func (_c *BrokerJoinTokenCreateBulk) Save(ctx context.Context) ([]*BrokerJoinTok
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -258,6 +480,165 @@ func (_c *BrokerJoinTokenCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *BrokerJoinTokenCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.BrokerJoinToken.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.BrokerJoinTokenUpsert) {
+//			SetTokenHash(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *BrokerJoinTokenCreateBulk) OnConflict(opts ...sql.ConflictOption) *BrokerJoinTokenUpsertBulk {
+	_c.conflict = opts
+	return &BrokerJoinTokenUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.BrokerJoinToken.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *BrokerJoinTokenCreateBulk) OnConflictColumns(columns ...string) *BrokerJoinTokenUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &BrokerJoinTokenUpsertBulk{
+		create: _c,
+	}
+}
+
+// BrokerJoinTokenUpsertBulk is the builder for "upsert"-ing
+// a bulk of BrokerJoinToken nodes.
+type BrokerJoinTokenUpsertBulk struct {
+	create *BrokerJoinTokenCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.BrokerJoinToken.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(brokerjointoken.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *BrokerJoinTokenUpsertBulk) UpdateNewValues() *BrokerJoinTokenUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(brokerjointoken.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(brokerjointoken.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.BrokerJoinToken.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *BrokerJoinTokenUpsertBulk) Ignore() *BrokerJoinTokenUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *BrokerJoinTokenUpsertBulk) DoNothing() *BrokerJoinTokenUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the BrokerJoinTokenCreateBulk.OnConflict
+// documentation for more info.
+func (u *BrokerJoinTokenUpsertBulk) Update(set func(*BrokerJoinTokenUpsert)) *BrokerJoinTokenUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&BrokerJoinTokenUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetTokenHash sets the "token_hash" field.
+func (u *BrokerJoinTokenUpsertBulk) SetTokenHash(v string) *BrokerJoinTokenUpsertBulk {
+	return u.Update(func(s *BrokerJoinTokenUpsert) {
+		s.SetTokenHash(v)
+	})
+}
+
+// UpdateTokenHash sets the "token_hash" field to the value that was provided on create.
+func (u *BrokerJoinTokenUpsertBulk) UpdateTokenHash() *BrokerJoinTokenUpsertBulk {
+	return u.Update(func(s *BrokerJoinTokenUpsert) {
+		s.UpdateTokenHash()
+	})
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (u *BrokerJoinTokenUpsertBulk) SetExpiresAt(v time.Time) *BrokerJoinTokenUpsertBulk {
+	return u.Update(func(s *BrokerJoinTokenUpsert) {
+		s.SetExpiresAt(v)
+	})
+}
+
+// UpdateExpiresAt sets the "expires_at" field to the value that was provided on create.
+func (u *BrokerJoinTokenUpsertBulk) UpdateExpiresAt() *BrokerJoinTokenUpsertBulk {
+	return u.Update(func(s *BrokerJoinTokenUpsert) {
+		s.UpdateExpiresAt()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *BrokerJoinTokenUpsertBulk) SetCreatedBy(v string) *BrokerJoinTokenUpsertBulk {
+	return u.Update(func(s *BrokerJoinTokenUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *BrokerJoinTokenUpsertBulk) UpdateCreatedBy() *BrokerJoinTokenUpsertBulk {
+	return u.Update(func(s *BrokerJoinTokenUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// Exec executes the query.
+func (u *BrokerJoinTokenUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the BrokerJoinTokenCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for BrokerJoinTokenCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *BrokerJoinTokenUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

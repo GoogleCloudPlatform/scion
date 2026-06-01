@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
@@ -19,6 +21,7 @@ type UserAccessTokenCreate struct {
 	config
 	mutation *UserAccessTokenMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetUserID sets the "user_id" field.
@@ -253,6 +256,7 @@ func (_c *UserAccessTokenCreate) createSpec() (*UserAccessToken, *sqlgraph.Creat
 		_node = &UserAccessToken{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(useraccesstoken.Table, sqlgraph.NewFieldSpec(useraccesstoken.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -300,11 +304,410 @@ func (_c *UserAccessTokenCreate) createSpec() (*UserAccessToken, *sqlgraph.Creat
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.UserAccessToken.Create().
+//		SetUserID(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.UserAccessTokenUpsert) {
+//			SetUserID(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *UserAccessTokenCreate) OnConflict(opts ...sql.ConflictOption) *UserAccessTokenUpsertOne {
+	_c.conflict = opts
+	return &UserAccessTokenUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.UserAccessToken.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *UserAccessTokenCreate) OnConflictColumns(columns ...string) *UserAccessTokenUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &UserAccessTokenUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// UserAccessTokenUpsertOne is the builder for "upsert"-ing
+	//  one UserAccessToken node.
+	UserAccessTokenUpsertOne struct {
+		create *UserAccessTokenCreate
+	}
+
+	// UserAccessTokenUpsert is the "OnConflict" setter.
+	UserAccessTokenUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetUserID sets the "user_id" field.
+func (u *UserAccessTokenUpsert) SetUserID(v uuid.UUID) *UserAccessTokenUpsert {
+	u.Set(useraccesstoken.FieldUserID, v)
+	return u
+}
+
+// UpdateUserID sets the "user_id" field to the value that was provided on create.
+func (u *UserAccessTokenUpsert) UpdateUserID() *UserAccessTokenUpsert {
+	u.SetExcluded(useraccesstoken.FieldUserID)
+	return u
+}
+
+// SetName sets the "name" field.
+func (u *UserAccessTokenUpsert) SetName(v string) *UserAccessTokenUpsert {
+	u.Set(useraccesstoken.FieldName, v)
+	return u
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *UserAccessTokenUpsert) UpdateName() *UserAccessTokenUpsert {
+	u.SetExcluded(useraccesstoken.FieldName)
+	return u
+}
+
+// SetPrefix sets the "prefix" field.
+func (u *UserAccessTokenUpsert) SetPrefix(v string) *UserAccessTokenUpsert {
+	u.Set(useraccesstoken.FieldPrefix, v)
+	return u
+}
+
+// UpdatePrefix sets the "prefix" field to the value that was provided on create.
+func (u *UserAccessTokenUpsert) UpdatePrefix() *UserAccessTokenUpsert {
+	u.SetExcluded(useraccesstoken.FieldPrefix)
+	return u
+}
+
+// SetKeyHash sets the "key_hash" field.
+func (u *UserAccessTokenUpsert) SetKeyHash(v string) *UserAccessTokenUpsert {
+	u.Set(useraccesstoken.FieldKeyHash, v)
+	return u
+}
+
+// UpdateKeyHash sets the "key_hash" field to the value that was provided on create.
+func (u *UserAccessTokenUpsert) UpdateKeyHash() *UserAccessTokenUpsert {
+	u.SetExcluded(useraccesstoken.FieldKeyHash)
+	return u
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *UserAccessTokenUpsert) SetProjectID(v uuid.UUID) *UserAccessTokenUpsert {
+	u.Set(useraccesstoken.FieldProjectID, v)
+	return u
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *UserAccessTokenUpsert) UpdateProjectID() *UserAccessTokenUpsert {
+	u.SetExcluded(useraccesstoken.FieldProjectID)
+	return u
+}
+
+// SetScopes sets the "scopes" field.
+func (u *UserAccessTokenUpsert) SetScopes(v string) *UserAccessTokenUpsert {
+	u.Set(useraccesstoken.FieldScopes, v)
+	return u
+}
+
+// UpdateScopes sets the "scopes" field to the value that was provided on create.
+func (u *UserAccessTokenUpsert) UpdateScopes() *UserAccessTokenUpsert {
+	u.SetExcluded(useraccesstoken.FieldScopes)
+	return u
+}
+
+// SetRevoked sets the "revoked" field.
+func (u *UserAccessTokenUpsert) SetRevoked(v bool) *UserAccessTokenUpsert {
+	u.Set(useraccesstoken.FieldRevoked, v)
+	return u
+}
+
+// UpdateRevoked sets the "revoked" field to the value that was provided on create.
+func (u *UserAccessTokenUpsert) UpdateRevoked() *UserAccessTokenUpsert {
+	u.SetExcluded(useraccesstoken.FieldRevoked)
+	return u
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (u *UserAccessTokenUpsert) SetExpiresAt(v time.Time) *UserAccessTokenUpsert {
+	u.Set(useraccesstoken.FieldExpiresAt, v)
+	return u
+}
+
+// UpdateExpiresAt sets the "expires_at" field to the value that was provided on create.
+func (u *UserAccessTokenUpsert) UpdateExpiresAt() *UserAccessTokenUpsert {
+	u.SetExcluded(useraccesstoken.FieldExpiresAt)
+	return u
+}
+
+// ClearExpiresAt clears the value of the "expires_at" field.
+func (u *UserAccessTokenUpsert) ClearExpiresAt() *UserAccessTokenUpsert {
+	u.SetNull(useraccesstoken.FieldExpiresAt)
+	return u
+}
+
+// SetLastUsed sets the "last_used" field.
+func (u *UserAccessTokenUpsert) SetLastUsed(v time.Time) *UserAccessTokenUpsert {
+	u.Set(useraccesstoken.FieldLastUsed, v)
+	return u
+}
+
+// UpdateLastUsed sets the "last_used" field to the value that was provided on create.
+func (u *UserAccessTokenUpsert) UpdateLastUsed() *UserAccessTokenUpsert {
+	u.SetExcluded(useraccesstoken.FieldLastUsed)
+	return u
+}
+
+// ClearLastUsed clears the value of the "last_used" field.
+func (u *UserAccessTokenUpsert) ClearLastUsed() *UserAccessTokenUpsert {
+	u.SetNull(useraccesstoken.FieldLastUsed)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.UserAccessToken.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(useraccesstoken.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *UserAccessTokenUpsertOne) UpdateNewValues() *UserAccessTokenUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(useraccesstoken.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(useraccesstoken.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.UserAccessToken.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *UserAccessTokenUpsertOne) Ignore() *UserAccessTokenUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *UserAccessTokenUpsertOne) DoNothing() *UserAccessTokenUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the UserAccessTokenCreate.OnConflict
+// documentation for more info.
+func (u *UserAccessTokenUpsertOne) Update(set func(*UserAccessTokenUpsert)) *UserAccessTokenUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&UserAccessTokenUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetUserID sets the "user_id" field.
+func (u *UserAccessTokenUpsertOne) SetUserID(v uuid.UUID) *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetUserID(v)
+	})
+}
+
+// UpdateUserID sets the "user_id" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertOne) UpdateUserID() *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateUserID()
+	})
+}
+
+// SetName sets the "name" field.
+func (u *UserAccessTokenUpsertOne) SetName(v string) *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetName(v)
+	})
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertOne) UpdateName() *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateName()
+	})
+}
+
+// SetPrefix sets the "prefix" field.
+func (u *UserAccessTokenUpsertOne) SetPrefix(v string) *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetPrefix(v)
+	})
+}
+
+// UpdatePrefix sets the "prefix" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertOne) UpdatePrefix() *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdatePrefix()
+	})
+}
+
+// SetKeyHash sets the "key_hash" field.
+func (u *UserAccessTokenUpsertOne) SetKeyHash(v string) *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetKeyHash(v)
+	})
+}
+
+// UpdateKeyHash sets the "key_hash" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertOne) UpdateKeyHash() *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateKeyHash()
+	})
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *UserAccessTokenUpsertOne) SetProjectID(v uuid.UUID) *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertOne) UpdateProjectID() *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// SetScopes sets the "scopes" field.
+func (u *UserAccessTokenUpsertOne) SetScopes(v string) *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetScopes(v)
+	})
+}
+
+// UpdateScopes sets the "scopes" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertOne) UpdateScopes() *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateScopes()
+	})
+}
+
+// SetRevoked sets the "revoked" field.
+func (u *UserAccessTokenUpsertOne) SetRevoked(v bool) *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetRevoked(v)
+	})
+}
+
+// UpdateRevoked sets the "revoked" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertOne) UpdateRevoked() *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateRevoked()
+	})
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (u *UserAccessTokenUpsertOne) SetExpiresAt(v time.Time) *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetExpiresAt(v)
+	})
+}
+
+// UpdateExpiresAt sets the "expires_at" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertOne) UpdateExpiresAt() *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateExpiresAt()
+	})
+}
+
+// ClearExpiresAt clears the value of the "expires_at" field.
+func (u *UserAccessTokenUpsertOne) ClearExpiresAt() *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.ClearExpiresAt()
+	})
+}
+
+// SetLastUsed sets the "last_used" field.
+func (u *UserAccessTokenUpsertOne) SetLastUsed(v time.Time) *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetLastUsed(v)
+	})
+}
+
+// UpdateLastUsed sets the "last_used" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertOne) UpdateLastUsed() *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateLastUsed()
+	})
+}
+
+// ClearLastUsed clears the value of the "last_used" field.
+func (u *UserAccessTokenUpsertOne) ClearLastUsed() *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.ClearLastUsed()
+	})
+}
+
+// Exec executes the query.
+func (u *UserAccessTokenUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for UserAccessTokenCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *UserAccessTokenUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *UserAccessTokenUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: UserAccessTokenUpsertOne.ID is not supported by MySQL driver. Use UserAccessTokenUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *UserAccessTokenUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // UserAccessTokenCreateBulk is the builder for creating many UserAccessToken entities in bulk.
 type UserAccessTokenCreateBulk struct {
 	config
 	err      error
 	builders []*UserAccessTokenCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the UserAccessToken entities in the database.
@@ -334,6 +737,7 @@ func (_c *UserAccessTokenCreateBulk) Save(ctx context.Context) ([]*UserAccessTok
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -380,6 +784,263 @@ func (_c *UserAccessTokenCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *UserAccessTokenCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.UserAccessToken.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.UserAccessTokenUpsert) {
+//			SetUserID(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *UserAccessTokenCreateBulk) OnConflict(opts ...sql.ConflictOption) *UserAccessTokenUpsertBulk {
+	_c.conflict = opts
+	return &UserAccessTokenUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.UserAccessToken.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *UserAccessTokenCreateBulk) OnConflictColumns(columns ...string) *UserAccessTokenUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &UserAccessTokenUpsertBulk{
+		create: _c,
+	}
+}
+
+// UserAccessTokenUpsertBulk is the builder for "upsert"-ing
+// a bulk of UserAccessToken nodes.
+type UserAccessTokenUpsertBulk struct {
+	create *UserAccessTokenCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.UserAccessToken.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(useraccesstoken.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *UserAccessTokenUpsertBulk) UpdateNewValues() *UserAccessTokenUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(useraccesstoken.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(useraccesstoken.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.UserAccessToken.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *UserAccessTokenUpsertBulk) Ignore() *UserAccessTokenUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *UserAccessTokenUpsertBulk) DoNothing() *UserAccessTokenUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the UserAccessTokenCreateBulk.OnConflict
+// documentation for more info.
+func (u *UserAccessTokenUpsertBulk) Update(set func(*UserAccessTokenUpsert)) *UserAccessTokenUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&UserAccessTokenUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetUserID sets the "user_id" field.
+func (u *UserAccessTokenUpsertBulk) SetUserID(v uuid.UUID) *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetUserID(v)
+	})
+}
+
+// UpdateUserID sets the "user_id" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertBulk) UpdateUserID() *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateUserID()
+	})
+}
+
+// SetName sets the "name" field.
+func (u *UserAccessTokenUpsertBulk) SetName(v string) *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetName(v)
+	})
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertBulk) UpdateName() *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateName()
+	})
+}
+
+// SetPrefix sets the "prefix" field.
+func (u *UserAccessTokenUpsertBulk) SetPrefix(v string) *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetPrefix(v)
+	})
+}
+
+// UpdatePrefix sets the "prefix" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertBulk) UpdatePrefix() *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdatePrefix()
+	})
+}
+
+// SetKeyHash sets the "key_hash" field.
+func (u *UserAccessTokenUpsertBulk) SetKeyHash(v string) *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetKeyHash(v)
+	})
+}
+
+// UpdateKeyHash sets the "key_hash" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertBulk) UpdateKeyHash() *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateKeyHash()
+	})
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *UserAccessTokenUpsertBulk) SetProjectID(v uuid.UUID) *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertBulk) UpdateProjectID() *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// SetScopes sets the "scopes" field.
+func (u *UserAccessTokenUpsertBulk) SetScopes(v string) *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetScopes(v)
+	})
+}
+
+// UpdateScopes sets the "scopes" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertBulk) UpdateScopes() *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateScopes()
+	})
+}
+
+// SetRevoked sets the "revoked" field.
+func (u *UserAccessTokenUpsertBulk) SetRevoked(v bool) *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetRevoked(v)
+	})
+}
+
+// UpdateRevoked sets the "revoked" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertBulk) UpdateRevoked() *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateRevoked()
+	})
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (u *UserAccessTokenUpsertBulk) SetExpiresAt(v time.Time) *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetExpiresAt(v)
+	})
+}
+
+// UpdateExpiresAt sets the "expires_at" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertBulk) UpdateExpiresAt() *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateExpiresAt()
+	})
+}
+
+// ClearExpiresAt clears the value of the "expires_at" field.
+func (u *UserAccessTokenUpsertBulk) ClearExpiresAt() *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.ClearExpiresAt()
+	})
+}
+
+// SetLastUsed sets the "last_used" field.
+func (u *UserAccessTokenUpsertBulk) SetLastUsed(v time.Time) *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetLastUsed(v)
+	})
+}
+
+// UpdateLastUsed sets the "last_used" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertBulk) UpdateLastUsed() *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateLastUsed()
+	})
+}
+
+// ClearLastUsed clears the value of the "last_used" field.
+func (u *UserAccessTokenUpsertBulk) ClearLastUsed() *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.ClearLastUsed()
+	})
+}
+
+// Exec executes the query.
+func (u *UserAccessTokenUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the UserAccessTokenCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for UserAccessTokenCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *UserAccessTokenUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

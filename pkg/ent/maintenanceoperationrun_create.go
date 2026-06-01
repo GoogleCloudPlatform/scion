@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperationrun"
@@ -19,6 +21,7 @@ type MaintenanceOperationRunCreate struct {
 	config
 	mutation *MaintenanceOperationRunMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetOperationKey sets the "operation_key" field.
@@ -228,6 +231,7 @@ func (_c *MaintenanceOperationRunCreate) createSpec() (*MaintenanceOperationRun,
 		_node = &MaintenanceOperationRun{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(maintenanceoperationrun.Table, sqlgraph.NewFieldSpec(maintenanceoperationrun.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -263,11 +267,345 @@ func (_c *MaintenanceOperationRunCreate) createSpec() (*MaintenanceOperationRun,
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.MaintenanceOperationRun.Create().
+//		SetOperationKey(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.MaintenanceOperationRunUpsert) {
+//			SetOperationKey(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *MaintenanceOperationRunCreate) OnConflict(opts ...sql.ConflictOption) *MaintenanceOperationRunUpsertOne {
+	_c.conflict = opts
+	return &MaintenanceOperationRunUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.MaintenanceOperationRun.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *MaintenanceOperationRunCreate) OnConflictColumns(columns ...string) *MaintenanceOperationRunUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &MaintenanceOperationRunUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// MaintenanceOperationRunUpsertOne is the builder for "upsert"-ing
+	//  one MaintenanceOperationRun node.
+	MaintenanceOperationRunUpsertOne struct {
+		create *MaintenanceOperationRunCreate
+	}
+
+	// MaintenanceOperationRunUpsert is the "OnConflict" setter.
+	MaintenanceOperationRunUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetOperationKey sets the "operation_key" field.
+func (u *MaintenanceOperationRunUpsert) SetOperationKey(v string) *MaintenanceOperationRunUpsert {
+	u.Set(maintenanceoperationrun.FieldOperationKey, v)
+	return u
+}
+
+// UpdateOperationKey sets the "operation_key" field to the value that was provided on create.
+func (u *MaintenanceOperationRunUpsert) UpdateOperationKey() *MaintenanceOperationRunUpsert {
+	u.SetExcluded(maintenanceoperationrun.FieldOperationKey)
+	return u
+}
+
+// SetStatus sets the "status" field.
+func (u *MaintenanceOperationRunUpsert) SetStatus(v string) *MaintenanceOperationRunUpsert {
+	u.Set(maintenanceoperationrun.FieldStatus, v)
+	return u
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *MaintenanceOperationRunUpsert) UpdateStatus() *MaintenanceOperationRunUpsert {
+	u.SetExcluded(maintenanceoperationrun.FieldStatus)
+	return u
+}
+
+// SetCompletedAt sets the "completed_at" field.
+func (u *MaintenanceOperationRunUpsert) SetCompletedAt(v time.Time) *MaintenanceOperationRunUpsert {
+	u.Set(maintenanceoperationrun.FieldCompletedAt, v)
+	return u
+}
+
+// UpdateCompletedAt sets the "completed_at" field to the value that was provided on create.
+func (u *MaintenanceOperationRunUpsert) UpdateCompletedAt() *MaintenanceOperationRunUpsert {
+	u.SetExcluded(maintenanceoperationrun.FieldCompletedAt)
+	return u
+}
+
+// ClearCompletedAt clears the value of the "completed_at" field.
+func (u *MaintenanceOperationRunUpsert) ClearCompletedAt() *MaintenanceOperationRunUpsert {
+	u.SetNull(maintenanceoperationrun.FieldCompletedAt)
+	return u
+}
+
+// SetStartedBy sets the "started_by" field.
+func (u *MaintenanceOperationRunUpsert) SetStartedBy(v string) *MaintenanceOperationRunUpsert {
+	u.Set(maintenanceoperationrun.FieldStartedBy, v)
+	return u
+}
+
+// UpdateStartedBy sets the "started_by" field to the value that was provided on create.
+func (u *MaintenanceOperationRunUpsert) UpdateStartedBy() *MaintenanceOperationRunUpsert {
+	u.SetExcluded(maintenanceoperationrun.FieldStartedBy)
+	return u
+}
+
+// ClearStartedBy clears the value of the "started_by" field.
+func (u *MaintenanceOperationRunUpsert) ClearStartedBy() *MaintenanceOperationRunUpsert {
+	u.SetNull(maintenanceoperationrun.FieldStartedBy)
+	return u
+}
+
+// SetResult sets the "result" field.
+func (u *MaintenanceOperationRunUpsert) SetResult(v string) *MaintenanceOperationRunUpsert {
+	u.Set(maintenanceoperationrun.FieldResult, v)
+	return u
+}
+
+// UpdateResult sets the "result" field to the value that was provided on create.
+func (u *MaintenanceOperationRunUpsert) UpdateResult() *MaintenanceOperationRunUpsert {
+	u.SetExcluded(maintenanceoperationrun.FieldResult)
+	return u
+}
+
+// ClearResult clears the value of the "result" field.
+func (u *MaintenanceOperationRunUpsert) ClearResult() *MaintenanceOperationRunUpsert {
+	u.SetNull(maintenanceoperationrun.FieldResult)
+	return u
+}
+
+// SetLog sets the "log" field.
+func (u *MaintenanceOperationRunUpsert) SetLog(v string) *MaintenanceOperationRunUpsert {
+	u.Set(maintenanceoperationrun.FieldLog, v)
+	return u
+}
+
+// UpdateLog sets the "log" field to the value that was provided on create.
+func (u *MaintenanceOperationRunUpsert) UpdateLog() *MaintenanceOperationRunUpsert {
+	u.SetExcluded(maintenanceoperationrun.FieldLog)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.MaintenanceOperationRun.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(maintenanceoperationrun.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *MaintenanceOperationRunUpsertOne) UpdateNewValues() *MaintenanceOperationRunUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(maintenanceoperationrun.FieldID)
+		}
+		if _, exists := u.create.mutation.StartedAt(); exists {
+			s.SetIgnore(maintenanceoperationrun.FieldStartedAt)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.MaintenanceOperationRun.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *MaintenanceOperationRunUpsertOne) Ignore() *MaintenanceOperationRunUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *MaintenanceOperationRunUpsertOne) DoNothing() *MaintenanceOperationRunUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the MaintenanceOperationRunCreate.OnConflict
+// documentation for more info.
+func (u *MaintenanceOperationRunUpsertOne) Update(set func(*MaintenanceOperationRunUpsert)) *MaintenanceOperationRunUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&MaintenanceOperationRunUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetOperationKey sets the "operation_key" field.
+func (u *MaintenanceOperationRunUpsertOne) SetOperationKey(v string) *MaintenanceOperationRunUpsertOne {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.SetOperationKey(v)
+	})
+}
+
+// UpdateOperationKey sets the "operation_key" field to the value that was provided on create.
+func (u *MaintenanceOperationRunUpsertOne) UpdateOperationKey() *MaintenanceOperationRunUpsertOne {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.UpdateOperationKey()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *MaintenanceOperationRunUpsertOne) SetStatus(v string) *MaintenanceOperationRunUpsertOne {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *MaintenanceOperationRunUpsertOne) UpdateStatus() *MaintenanceOperationRunUpsertOne {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// SetCompletedAt sets the "completed_at" field.
+func (u *MaintenanceOperationRunUpsertOne) SetCompletedAt(v time.Time) *MaintenanceOperationRunUpsertOne {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.SetCompletedAt(v)
+	})
+}
+
+// UpdateCompletedAt sets the "completed_at" field to the value that was provided on create.
+func (u *MaintenanceOperationRunUpsertOne) UpdateCompletedAt() *MaintenanceOperationRunUpsertOne {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.UpdateCompletedAt()
+	})
+}
+
+// ClearCompletedAt clears the value of the "completed_at" field.
+func (u *MaintenanceOperationRunUpsertOne) ClearCompletedAt() *MaintenanceOperationRunUpsertOne {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.ClearCompletedAt()
+	})
+}
+
+// SetStartedBy sets the "started_by" field.
+func (u *MaintenanceOperationRunUpsertOne) SetStartedBy(v string) *MaintenanceOperationRunUpsertOne {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.SetStartedBy(v)
+	})
+}
+
+// UpdateStartedBy sets the "started_by" field to the value that was provided on create.
+func (u *MaintenanceOperationRunUpsertOne) UpdateStartedBy() *MaintenanceOperationRunUpsertOne {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.UpdateStartedBy()
+	})
+}
+
+// ClearStartedBy clears the value of the "started_by" field.
+func (u *MaintenanceOperationRunUpsertOne) ClearStartedBy() *MaintenanceOperationRunUpsertOne {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.ClearStartedBy()
+	})
+}
+
+// SetResult sets the "result" field.
+func (u *MaintenanceOperationRunUpsertOne) SetResult(v string) *MaintenanceOperationRunUpsertOne {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.SetResult(v)
+	})
+}
+
+// UpdateResult sets the "result" field to the value that was provided on create.
+func (u *MaintenanceOperationRunUpsertOne) UpdateResult() *MaintenanceOperationRunUpsertOne {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.UpdateResult()
+	})
+}
+
+// ClearResult clears the value of the "result" field.
+func (u *MaintenanceOperationRunUpsertOne) ClearResult() *MaintenanceOperationRunUpsertOne {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.ClearResult()
+	})
+}
+
+// SetLog sets the "log" field.
+func (u *MaintenanceOperationRunUpsertOne) SetLog(v string) *MaintenanceOperationRunUpsertOne {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.SetLog(v)
+	})
+}
+
+// UpdateLog sets the "log" field to the value that was provided on create.
+func (u *MaintenanceOperationRunUpsertOne) UpdateLog() *MaintenanceOperationRunUpsertOne {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.UpdateLog()
+	})
+}
+
+// Exec executes the query.
+func (u *MaintenanceOperationRunUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for MaintenanceOperationRunCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *MaintenanceOperationRunUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *MaintenanceOperationRunUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: MaintenanceOperationRunUpsertOne.ID is not supported by MySQL driver. Use MaintenanceOperationRunUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *MaintenanceOperationRunUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // MaintenanceOperationRunCreateBulk is the builder for creating many MaintenanceOperationRun entities in bulk.
 type MaintenanceOperationRunCreateBulk struct {
 	config
 	err      error
 	builders []*MaintenanceOperationRunCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the MaintenanceOperationRun entities in the database.
@@ -297,6 +635,7 @@ func (_c *MaintenanceOperationRunCreateBulk) Save(ctx context.Context) ([]*Maint
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -343,6 +682,228 @@ func (_c *MaintenanceOperationRunCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *MaintenanceOperationRunCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.MaintenanceOperationRun.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.MaintenanceOperationRunUpsert) {
+//			SetOperationKey(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *MaintenanceOperationRunCreateBulk) OnConflict(opts ...sql.ConflictOption) *MaintenanceOperationRunUpsertBulk {
+	_c.conflict = opts
+	return &MaintenanceOperationRunUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.MaintenanceOperationRun.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *MaintenanceOperationRunCreateBulk) OnConflictColumns(columns ...string) *MaintenanceOperationRunUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &MaintenanceOperationRunUpsertBulk{
+		create: _c,
+	}
+}
+
+// MaintenanceOperationRunUpsertBulk is the builder for "upsert"-ing
+// a bulk of MaintenanceOperationRun nodes.
+type MaintenanceOperationRunUpsertBulk struct {
+	create *MaintenanceOperationRunCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.MaintenanceOperationRun.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(maintenanceoperationrun.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *MaintenanceOperationRunUpsertBulk) UpdateNewValues() *MaintenanceOperationRunUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(maintenanceoperationrun.FieldID)
+			}
+			if _, exists := b.mutation.StartedAt(); exists {
+				s.SetIgnore(maintenanceoperationrun.FieldStartedAt)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.MaintenanceOperationRun.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *MaintenanceOperationRunUpsertBulk) Ignore() *MaintenanceOperationRunUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *MaintenanceOperationRunUpsertBulk) DoNothing() *MaintenanceOperationRunUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the MaintenanceOperationRunCreateBulk.OnConflict
+// documentation for more info.
+func (u *MaintenanceOperationRunUpsertBulk) Update(set func(*MaintenanceOperationRunUpsert)) *MaintenanceOperationRunUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&MaintenanceOperationRunUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetOperationKey sets the "operation_key" field.
+func (u *MaintenanceOperationRunUpsertBulk) SetOperationKey(v string) *MaintenanceOperationRunUpsertBulk {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.SetOperationKey(v)
+	})
+}
+
+// UpdateOperationKey sets the "operation_key" field to the value that was provided on create.
+func (u *MaintenanceOperationRunUpsertBulk) UpdateOperationKey() *MaintenanceOperationRunUpsertBulk {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.UpdateOperationKey()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *MaintenanceOperationRunUpsertBulk) SetStatus(v string) *MaintenanceOperationRunUpsertBulk {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *MaintenanceOperationRunUpsertBulk) UpdateStatus() *MaintenanceOperationRunUpsertBulk {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// SetCompletedAt sets the "completed_at" field.
+func (u *MaintenanceOperationRunUpsertBulk) SetCompletedAt(v time.Time) *MaintenanceOperationRunUpsertBulk {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.SetCompletedAt(v)
+	})
+}
+
+// UpdateCompletedAt sets the "completed_at" field to the value that was provided on create.
+func (u *MaintenanceOperationRunUpsertBulk) UpdateCompletedAt() *MaintenanceOperationRunUpsertBulk {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.UpdateCompletedAt()
+	})
+}
+
+// ClearCompletedAt clears the value of the "completed_at" field.
+func (u *MaintenanceOperationRunUpsertBulk) ClearCompletedAt() *MaintenanceOperationRunUpsertBulk {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.ClearCompletedAt()
+	})
+}
+
+// SetStartedBy sets the "started_by" field.
+func (u *MaintenanceOperationRunUpsertBulk) SetStartedBy(v string) *MaintenanceOperationRunUpsertBulk {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.SetStartedBy(v)
+	})
+}
+
+// UpdateStartedBy sets the "started_by" field to the value that was provided on create.
+func (u *MaintenanceOperationRunUpsertBulk) UpdateStartedBy() *MaintenanceOperationRunUpsertBulk {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.UpdateStartedBy()
+	})
+}
+
+// ClearStartedBy clears the value of the "started_by" field.
+func (u *MaintenanceOperationRunUpsertBulk) ClearStartedBy() *MaintenanceOperationRunUpsertBulk {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.ClearStartedBy()
+	})
+}
+
+// SetResult sets the "result" field.
+func (u *MaintenanceOperationRunUpsertBulk) SetResult(v string) *MaintenanceOperationRunUpsertBulk {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.SetResult(v)
+	})
+}
+
+// UpdateResult sets the "result" field to the value that was provided on create.
+func (u *MaintenanceOperationRunUpsertBulk) UpdateResult() *MaintenanceOperationRunUpsertBulk {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.UpdateResult()
+	})
+}
+
+// ClearResult clears the value of the "result" field.
+func (u *MaintenanceOperationRunUpsertBulk) ClearResult() *MaintenanceOperationRunUpsertBulk {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.ClearResult()
+	})
+}
+
+// SetLog sets the "log" field.
+func (u *MaintenanceOperationRunUpsertBulk) SetLog(v string) *MaintenanceOperationRunUpsertBulk {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.SetLog(v)
+	})
+}
+
+// UpdateLog sets the "log" field to the value that was provided on create.
+func (u *MaintenanceOperationRunUpsertBulk) UpdateLog() *MaintenanceOperationRunUpsertBulk {
+	return u.Update(func(s *MaintenanceOperationRunUpsert) {
+		s.UpdateLog()
+	})
+}
+
+// Exec executes the query.
+func (u *MaintenanceOperationRunUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the MaintenanceOperationRunCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for MaintenanceOperationRunCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *MaintenanceOperationRunUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

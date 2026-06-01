@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
@@ -20,6 +22,7 @@ type ProjectCreate struct {
 	config
 	mutation *ProjectMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetName sets the "name" field.
@@ -48,6 +51,20 @@ func (_c *ProjectCreate) SetNillableGitRemote(v *string) *ProjectCreate {
 	return _c
 }
 
+// SetDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field.
+func (_c *ProjectCreate) SetDefaultRuntimeBrokerID(v string) *ProjectCreate {
+	_c.mutation.SetDefaultRuntimeBrokerID(v)
+	return _c
+}
+
+// SetNillableDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field if the given value is not nil.
+func (_c *ProjectCreate) SetNillableDefaultRuntimeBrokerID(v *string) *ProjectCreate {
+	if v != nil {
+		_c.SetDefaultRuntimeBrokerID(*v)
+	}
+	return _c
+}
+
 // SetLabels sets the "labels" field.
 func (_c *ProjectCreate) SetLabels(v map[string]string) *ProjectCreate {
 	_c.mutation.SetLabels(v)
@@ -57,6 +74,20 @@ func (_c *ProjectCreate) SetLabels(v map[string]string) *ProjectCreate {
 // SetAnnotations sets the "annotations" field.
 func (_c *ProjectCreate) SetAnnotations(v map[string]string) *ProjectCreate {
 	_c.mutation.SetAnnotations(v)
+	return _c
+}
+
+// SetSharedDirs sets the "shared_dirs" field.
+func (_c *ProjectCreate) SetSharedDirs(v string) *ProjectCreate {
+	_c.mutation.SetSharedDirs(v)
+	return _c
+}
+
+// SetNillableSharedDirs sets the "shared_dirs" field if the given value is not nil.
+func (_c *ProjectCreate) SetNillableSharedDirs(v *string) *ProjectCreate {
+	if v != nil {
+		_c.SetSharedDirs(*v)
+	}
 	return _c
 }
 
@@ -126,6 +157,62 @@ func (_c *ProjectCreate) SetVisibility(v string) *ProjectCreate {
 func (_c *ProjectCreate) SetNillableVisibility(v *string) *ProjectCreate {
 	if v != nil {
 		_c.SetVisibility(*v)
+	}
+	return _c
+}
+
+// SetGithubInstallationID sets the "github_installation_id" field.
+func (_c *ProjectCreate) SetGithubInstallationID(v int64) *ProjectCreate {
+	_c.mutation.SetGithubInstallationID(v)
+	return _c
+}
+
+// SetNillableGithubInstallationID sets the "github_installation_id" field if the given value is not nil.
+func (_c *ProjectCreate) SetNillableGithubInstallationID(v *int64) *ProjectCreate {
+	if v != nil {
+		_c.SetGithubInstallationID(*v)
+	}
+	return _c
+}
+
+// SetGithubPermissions sets the "github_permissions" field.
+func (_c *ProjectCreate) SetGithubPermissions(v string) *ProjectCreate {
+	_c.mutation.SetGithubPermissions(v)
+	return _c
+}
+
+// SetNillableGithubPermissions sets the "github_permissions" field if the given value is not nil.
+func (_c *ProjectCreate) SetNillableGithubPermissions(v *string) *ProjectCreate {
+	if v != nil {
+		_c.SetGithubPermissions(*v)
+	}
+	return _c
+}
+
+// SetGithubAppStatus sets the "github_app_status" field.
+func (_c *ProjectCreate) SetGithubAppStatus(v string) *ProjectCreate {
+	_c.mutation.SetGithubAppStatus(v)
+	return _c
+}
+
+// SetNillableGithubAppStatus sets the "github_app_status" field if the given value is not nil.
+func (_c *ProjectCreate) SetNillableGithubAppStatus(v *string) *ProjectCreate {
+	if v != nil {
+		_c.SetGithubAppStatus(*v)
+	}
+	return _c
+}
+
+// SetGitIdentity sets the "git_identity" field.
+func (_c *ProjectCreate) SetGitIdentity(v string) *ProjectCreate {
+	_c.mutation.SetGitIdentity(v)
+	return _c
+}
+
+// SetNillableGitIdentity sets the "git_identity" field if the given value is not nil.
+func (_c *ProjectCreate) SetNillableGitIdentity(v *string) *ProjectCreate {
+	if v != nil {
+		_c.SetGitIdentity(*v)
 	}
 	return _c
 }
@@ -270,6 +357,7 @@ func (_c *ProjectCreate) createSpec() (*Project, *sqlgraph.CreateSpec) {
 		_node = &Project{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(project.Table, sqlgraph.NewFieldSpec(project.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -286,6 +374,10 @@ func (_c *ProjectCreate) createSpec() (*Project, *sqlgraph.CreateSpec) {
 		_spec.SetField(project.FieldGitRemote, field.TypeString, value)
 		_node.GitRemote = &value
 	}
+	if value, ok := _c.mutation.DefaultRuntimeBrokerID(); ok {
+		_spec.SetField(project.FieldDefaultRuntimeBrokerID, field.TypeString, value)
+		_node.DefaultRuntimeBrokerID = &value
+	}
 	if value, ok := _c.mutation.Labels(); ok {
 		_spec.SetField(project.FieldLabels, field.TypeJSON, value)
 		_node.Labels = value
@@ -293,6 +385,10 @@ func (_c *ProjectCreate) createSpec() (*Project, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.Annotations(); ok {
 		_spec.SetField(project.FieldAnnotations, field.TypeJSON, value)
 		_node.Annotations = value
+	}
+	if value, ok := _c.mutation.SharedDirs(); ok {
+		_spec.SetField(project.FieldSharedDirs, field.TypeString, value)
+		_node.SharedDirs = value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(project.FieldCreated, field.TypeTime, value)
@@ -314,6 +410,22 @@ func (_c *ProjectCreate) createSpec() (*Project, *sqlgraph.CreateSpec) {
 		_spec.SetField(project.FieldVisibility, field.TypeString, value)
 		_node.Visibility = value
 	}
+	if value, ok := _c.mutation.GithubInstallationID(); ok {
+		_spec.SetField(project.FieldGithubInstallationID, field.TypeInt64, value)
+		_node.GithubInstallationID = &value
+	}
+	if value, ok := _c.mutation.GithubPermissions(); ok {
+		_spec.SetField(project.FieldGithubPermissions, field.TypeString, value)
+		_node.GithubPermissions = value
+	}
+	if value, ok := _c.mutation.GithubAppStatus(); ok {
+		_spec.SetField(project.FieldGithubAppStatus, field.TypeString, value)
+		_node.GithubAppStatus = value
+	}
+	if value, ok := _c.mutation.GitIdentity(); ok {
+		_spec.SetField(project.FieldGitIdentity, field.TypeString, value)
+		_node.GitIdentity = value
+	}
 	if nodes := _c.mutation.AgentsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2M,
@@ -333,11 +445,696 @@ func (_c *ProjectCreate) createSpec() (*Project, *sqlgraph.CreateSpec) {
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.Project.Create().
+//		SetName(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.ProjectUpsert) {
+//			SetName(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *ProjectCreate) OnConflict(opts ...sql.ConflictOption) *ProjectUpsertOne {
+	_c.conflict = opts
+	return &ProjectUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.Project.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *ProjectCreate) OnConflictColumns(columns ...string) *ProjectUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &ProjectUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// ProjectUpsertOne is the builder for "upsert"-ing
+	//  one Project node.
+	ProjectUpsertOne struct {
+		create *ProjectCreate
+	}
+
+	// ProjectUpsert is the "OnConflict" setter.
+	ProjectUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetName sets the "name" field.
+func (u *ProjectUpsert) SetName(v string) *ProjectUpsert {
+	u.Set(project.FieldName, v)
+	return u
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateName() *ProjectUpsert {
+	u.SetExcluded(project.FieldName)
+	return u
+}
+
+// SetSlug sets the "slug" field.
+func (u *ProjectUpsert) SetSlug(v string) *ProjectUpsert {
+	u.Set(project.FieldSlug, v)
+	return u
+}
+
+// UpdateSlug sets the "slug" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateSlug() *ProjectUpsert {
+	u.SetExcluded(project.FieldSlug)
+	return u
+}
+
+// SetGitRemote sets the "git_remote" field.
+func (u *ProjectUpsert) SetGitRemote(v string) *ProjectUpsert {
+	u.Set(project.FieldGitRemote, v)
+	return u
+}
+
+// UpdateGitRemote sets the "git_remote" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateGitRemote() *ProjectUpsert {
+	u.SetExcluded(project.FieldGitRemote)
+	return u
+}
+
+// ClearGitRemote clears the value of the "git_remote" field.
+func (u *ProjectUpsert) ClearGitRemote() *ProjectUpsert {
+	u.SetNull(project.FieldGitRemote)
+	return u
+}
+
+// SetDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field.
+func (u *ProjectUpsert) SetDefaultRuntimeBrokerID(v string) *ProjectUpsert {
+	u.Set(project.FieldDefaultRuntimeBrokerID, v)
+	return u
+}
+
+// UpdateDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateDefaultRuntimeBrokerID() *ProjectUpsert {
+	u.SetExcluded(project.FieldDefaultRuntimeBrokerID)
+	return u
+}
+
+// ClearDefaultRuntimeBrokerID clears the value of the "default_runtime_broker_id" field.
+func (u *ProjectUpsert) ClearDefaultRuntimeBrokerID() *ProjectUpsert {
+	u.SetNull(project.FieldDefaultRuntimeBrokerID)
+	return u
+}
+
+// SetLabels sets the "labels" field.
+func (u *ProjectUpsert) SetLabels(v map[string]string) *ProjectUpsert {
+	u.Set(project.FieldLabels, v)
+	return u
+}
+
+// UpdateLabels sets the "labels" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateLabels() *ProjectUpsert {
+	u.SetExcluded(project.FieldLabels)
+	return u
+}
+
+// ClearLabels clears the value of the "labels" field.
+func (u *ProjectUpsert) ClearLabels() *ProjectUpsert {
+	u.SetNull(project.FieldLabels)
+	return u
+}
+
+// SetAnnotations sets the "annotations" field.
+func (u *ProjectUpsert) SetAnnotations(v map[string]string) *ProjectUpsert {
+	u.Set(project.FieldAnnotations, v)
+	return u
+}
+
+// UpdateAnnotations sets the "annotations" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateAnnotations() *ProjectUpsert {
+	u.SetExcluded(project.FieldAnnotations)
+	return u
+}
+
+// ClearAnnotations clears the value of the "annotations" field.
+func (u *ProjectUpsert) ClearAnnotations() *ProjectUpsert {
+	u.SetNull(project.FieldAnnotations)
+	return u
+}
+
+// SetSharedDirs sets the "shared_dirs" field.
+func (u *ProjectUpsert) SetSharedDirs(v string) *ProjectUpsert {
+	u.Set(project.FieldSharedDirs, v)
+	return u
+}
+
+// UpdateSharedDirs sets the "shared_dirs" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateSharedDirs() *ProjectUpsert {
+	u.SetExcluded(project.FieldSharedDirs)
+	return u
+}
+
+// ClearSharedDirs clears the value of the "shared_dirs" field.
+func (u *ProjectUpsert) ClearSharedDirs() *ProjectUpsert {
+	u.SetNull(project.FieldSharedDirs)
+	return u
+}
+
+// SetUpdated sets the "updated" field.
+func (u *ProjectUpsert) SetUpdated(v time.Time) *ProjectUpsert {
+	u.Set(project.FieldUpdated, v)
+	return u
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateUpdated() *ProjectUpsert {
+	u.SetExcluded(project.FieldUpdated)
+	return u
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *ProjectUpsert) SetCreatedBy(v string) *ProjectUpsert {
+	u.Set(project.FieldCreatedBy, v)
+	return u
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateCreatedBy() *ProjectUpsert {
+	u.SetExcluded(project.FieldCreatedBy)
+	return u
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *ProjectUpsert) ClearCreatedBy() *ProjectUpsert {
+	u.SetNull(project.FieldCreatedBy)
+	return u
+}
+
+// SetOwnerID sets the "owner_id" field.
+func (u *ProjectUpsert) SetOwnerID(v string) *ProjectUpsert {
+	u.Set(project.FieldOwnerID, v)
+	return u
+}
+
+// UpdateOwnerID sets the "owner_id" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateOwnerID() *ProjectUpsert {
+	u.SetExcluded(project.FieldOwnerID)
+	return u
+}
+
+// ClearOwnerID clears the value of the "owner_id" field.
+func (u *ProjectUpsert) ClearOwnerID() *ProjectUpsert {
+	u.SetNull(project.FieldOwnerID)
+	return u
+}
+
+// SetVisibility sets the "visibility" field.
+func (u *ProjectUpsert) SetVisibility(v string) *ProjectUpsert {
+	u.Set(project.FieldVisibility, v)
+	return u
+}
+
+// UpdateVisibility sets the "visibility" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateVisibility() *ProjectUpsert {
+	u.SetExcluded(project.FieldVisibility)
+	return u
+}
+
+// SetGithubInstallationID sets the "github_installation_id" field.
+func (u *ProjectUpsert) SetGithubInstallationID(v int64) *ProjectUpsert {
+	u.Set(project.FieldGithubInstallationID, v)
+	return u
+}
+
+// UpdateGithubInstallationID sets the "github_installation_id" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateGithubInstallationID() *ProjectUpsert {
+	u.SetExcluded(project.FieldGithubInstallationID)
+	return u
+}
+
+// AddGithubInstallationID adds v to the "github_installation_id" field.
+func (u *ProjectUpsert) AddGithubInstallationID(v int64) *ProjectUpsert {
+	u.Add(project.FieldGithubInstallationID, v)
+	return u
+}
+
+// ClearGithubInstallationID clears the value of the "github_installation_id" field.
+func (u *ProjectUpsert) ClearGithubInstallationID() *ProjectUpsert {
+	u.SetNull(project.FieldGithubInstallationID)
+	return u
+}
+
+// SetGithubPermissions sets the "github_permissions" field.
+func (u *ProjectUpsert) SetGithubPermissions(v string) *ProjectUpsert {
+	u.Set(project.FieldGithubPermissions, v)
+	return u
+}
+
+// UpdateGithubPermissions sets the "github_permissions" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateGithubPermissions() *ProjectUpsert {
+	u.SetExcluded(project.FieldGithubPermissions)
+	return u
+}
+
+// ClearGithubPermissions clears the value of the "github_permissions" field.
+func (u *ProjectUpsert) ClearGithubPermissions() *ProjectUpsert {
+	u.SetNull(project.FieldGithubPermissions)
+	return u
+}
+
+// SetGithubAppStatus sets the "github_app_status" field.
+func (u *ProjectUpsert) SetGithubAppStatus(v string) *ProjectUpsert {
+	u.Set(project.FieldGithubAppStatus, v)
+	return u
+}
+
+// UpdateGithubAppStatus sets the "github_app_status" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateGithubAppStatus() *ProjectUpsert {
+	u.SetExcluded(project.FieldGithubAppStatus)
+	return u
+}
+
+// ClearGithubAppStatus clears the value of the "github_app_status" field.
+func (u *ProjectUpsert) ClearGithubAppStatus() *ProjectUpsert {
+	u.SetNull(project.FieldGithubAppStatus)
+	return u
+}
+
+// SetGitIdentity sets the "git_identity" field.
+func (u *ProjectUpsert) SetGitIdentity(v string) *ProjectUpsert {
+	u.Set(project.FieldGitIdentity, v)
+	return u
+}
+
+// UpdateGitIdentity sets the "git_identity" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateGitIdentity() *ProjectUpsert {
+	u.SetExcluded(project.FieldGitIdentity)
+	return u
+}
+
+// ClearGitIdentity clears the value of the "git_identity" field.
+func (u *ProjectUpsert) ClearGitIdentity() *ProjectUpsert {
+	u.SetNull(project.FieldGitIdentity)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.Project.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(project.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *ProjectUpsertOne) UpdateNewValues() *ProjectUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(project.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(project.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.Project.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *ProjectUpsertOne) Ignore() *ProjectUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *ProjectUpsertOne) DoNothing() *ProjectUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the ProjectCreate.OnConflict
+// documentation for more info.
+func (u *ProjectUpsertOne) Update(set func(*ProjectUpsert)) *ProjectUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&ProjectUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetName sets the "name" field.
+func (u *ProjectUpsertOne) SetName(v string) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetName(v)
+	})
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateName() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateName()
+	})
+}
+
+// SetSlug sets the "slug" field.
+func (u *ProjectUpsertOne) SetSlug(v string) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetSlug(v)
+	})
+}
+
+// UpdateSlug sets the "slug" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateSlug() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateSlug()
+	})
+}
+
+// SetGitRemote sets the "git_remote" field.
+func (u *ProjectUpsertOne) SetGitRemote(v string) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetGitRemote(v)
+	})
+}
+
+// UpdateGitRemote sets the "git_remote" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateGitRemote() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateGitRemote()
+	})
+}
+
+// ClearGitRemote clears the value of the "git_remote" field.
+func (u *ProjectUpsertOne) ClearGitRemote() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearGitRemote()
+	})
+}
+
+// SetDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field.
+func (u *ProjectUpsertOne) SetDefaultRuntimeBrokerID(v string) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetDefaultRuntimeBrokerID(v)
+	})
+}
+
+// UpdateDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateDefaultRuntimeBrokerID() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateDefaultRuntimeBrokerID()
+	})
+}
+
+// ClearDefaultRuntimeBrokerID clears the value of the "default_runtime_broker_id" field.
+func (u *ProjectUpsertOne) ClearDefaultRuntimeBrokerID() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearDefaultRuntimeBrokerID()
+	})
+}
+
+// SetLabels sets the "labels" field.
+func (u *ProjectUpsertOne) SetLabels(v map[string]string) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetLabels(v)
+	})
+}
+
+// UpdateLabels sets the "labels" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateLabels() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateLabels()
+	})
+}
+
+// ClearLabels clears the value of the "labels" field.
+func (u *ProjectUpsertOne) ClearLabels() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearLabels()
+	})
+}
+
+// SetAnnotations sets the "annotations" field.
+func (u *ProjectUpsertOne) SetAnnotations(v map[string]string) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetAnnotations(v)
+	})
+}
+
+// UpdateAnnotations sets the "annotations" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateAnnotations() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateAnnotations()
+	})
+}
+
+// ClearAnnotations clears the value of the "annotations" field.
+func (u *ProjectUpsertOne) ClearAnnotations() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearAnnotations()
+	})
+}
+
+// SetSharedDirs sets the "shared_dirs" field.
+func (u *ProjectUpsertOne) SetSharedDirs(v string) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetSharedDirs(v)
+	})
+}
+
+// UpdateSharedDirs sets the "shared_dirs" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateSharedDirs() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateSharedDirs()
+	})
+}
+
+// ClearSharedDirs clears the value of the "shared_dirs" field.
+func (u *ProjectUpsertOne) ClearSharedDirs() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearSharedDirs()
+	})
+}
+
+// SetUpdated sets the "updated" field.
+func (u *ProjectUpsertOne) SetUpdated(v time.Time) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetUpdated(v)
+	})
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateUpdated() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateUpdated()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *ProjectUpsertOne) SetCreatedBy(v string) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateCreatedBy() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *ProjectUpsertOne) ClearCreatedBy() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// SetOwnerID sets the "owner_id" field.
+func (u *ProjectUpsertOne) SetOwnerID(v string) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetOwnerID(v)
+	})
+}
+
+// UpdateOwnerID sets the "owner_id" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateOwnerID() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateOwnerID()
+	})
+}
+
+// ClearOwnerID clears the value of the "owner_id" field.
+func (u *ProjectUpsertOne) ClearOwnerID() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearOwnerID()
+	})
+}
+
+// SetVisibility sets the "visibility" field.
+func (u *ProjectUpsertOne) SetVisibility(v string) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetVisibility(v)
+	})
+}
+
+// UpdateVisibility sets the "visibility" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateVisibility() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateVisibility()
+	})
+}
+
+// SetGithubInstallationID sets the "github_installation_id" field.
+func (u *ProjectUpsertOne) SetGithubInstallationID(v int64) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetGithubInstallationID(v)
+	})
+}
+
+// AddGithubInstallationID adds v to the "github_installation_id" field.
+func (u *ProjectUpsertOne) AddGithubInstallationID(v int64) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.AddGithubInstallationID(v)
+	})
+}
+
+// UpdateGithubInstallationID sets the "github_installation_id" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateGithubInstallationID() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateGithubInstallationID()
+	})
+}
+
+// ClearGithubInstallationID clears the value of the "github_installation_id" field.
+func (u *ProjectUpsertOne) ClearGithubInstallationID() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearGithubInstallationID()
+	})
+}
+
+// SetGithubPermissions sets the "github_permissions" field.
+func (u *ProjectUpsertOne) SetGithubPermissions(v string) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetGithubPermissions(v)
+	})
+}
+
+// UpdateGithubPermissions sets the "github_permissions" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateGithubPermissions() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateGithubPermissions()
+	})
+}
+
+// ClearGithubPermissions clears the value of the "github_permissions" field.
+func (u *ProjectUpsertOne) ClearGithubPermissions() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearGithubPermissions()
+	})
+}
+
+// SetGithubAppStatus sets the "github_app_status" field.
+func (u *ProjectUpsertOne) SetGithubAppStatus(v string) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetGithubAppStatus(v)
+	})
+}
+
+// UpdateGithubAppStatus sets the "github_app_status" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateGithubAppStatus() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateGithubAppStatus()
+	})
+}
+
+// ClearGithubAppStatus clears the value of the "github_app_status" field.
+func (u *ProjectUpsertOne) ClearGithubAppStatus() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearGithubAppStatus()
+	})
+}
+
+// SetGitIdentity sets the "git_identity" field.
+func (u *ProjectUpsertOne) SetGitIdentity(v string) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetGitIdentity(v)
+	})
+}
+
+// UpdateGitIdentity sets the "git_identity" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateGitIdentity() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateGitIdentity()
+	})
+}
+
+// ClearGitIdentity clears the value of the "git_identity" field.
+func (u *ProjectUpsertOne) ClearGitIdentity() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearGitIdentity()
+	})
+}
+
+// Exec executes the query.
+func (u *ProjectUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for ProjectCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *ProjectUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *ProjectUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: ProjectUpsertOne.ID is not supported by MySQL driver. Use ProjectUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *ProjectUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // ProjectCreateBulk is the builder for creating many Project entities in bulk.
 type ProjectCreateBulk struct {
 	config
 	err      error
 	builders []*ProjectCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the Project entities in the database.
@@ -367,6 +1164,7 @@ func (_c *ProjectCreateBulk) Save(ctx context.Context) ([]*Project, error) {
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -413,6 +1211,417 @@ func (_c *ProjectCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *ProjectCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.Project.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.ProjectUpsert) {
+//			SetName(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *ProjectCreateBulk) OnConflict(opts ...sql.ConflictOption) *ProjectUpsertBulk {
+	_c.conflict = opts
+	return &ProjectUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.Project.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *ProjectCreateBulk) OnConflictColumns(columns ...string) *ProjectUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &ProjectUpsertBulk{
+		create: _c,
+	}
+}
+
+// ProjectUpsertBulk is the builder for "upsert"-ing
+// a bulk of Project nodes.
+type ProjectUpsertBulk struct {
+	create *ProjectCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.Project.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(project.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *ProjectUpsertBulk) UpdateNewValues() *ProjectUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(project.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(project.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.Project.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *ProjectUpsertBulk) Ignore() *ProjectUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *ProjectUpsertBulk) DoNothing() *ProjectUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the ProjectCreateBulk.OnConflict
+// documentation for more info.
+func (u *ProjectUpsertBulk) Update(set func(*ProjectUpsert)) *ProjectUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&ProjectUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetName sets the "name" field.
+func (u *ProjectUpsertBulk) SetName(v string) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetName(v)
+	})
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateName() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateName()
+	})
+}
+
+// SetSlug sets the "slug" field.
+func (u *ProjectUpsertBulk) SetSlug(v string) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetSlug(v)
+	})
+}
+
+// UpdateSlug sets the "slug" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateSlug() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateSlug()
+	})
+}
+
+// SetGitRemote sets the "git_remote" field.
+func (u *ProjectUpsertBulk) SetGitRemote(v string) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetGitRemote(v)
+	})
+}
+
+// UpdateGitRemote sets the "git_remote" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateGitRemote() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateGitRemote()
+	})
+}
+
+// ClearGitRemote clears the value of the "git_remote" field.
+func (u *ProjectUpsertBulk) ClearGitRemote() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearGitRemote()
+	})
+}
+
+// SetDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field.
+func (u *ProjectUpsertBulk) SetDefaultRuntimeBrokerID(v string) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetDefaultRuntimeBrokerID(v)
+	})
+}
+
+// UpdateDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateDefaultRuntimeBrokerID() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateDefaultRuntimeBrokerID()
+	})
+}
+
+// ClearDefaultRuntimeBrokerID clears the value of the "default_runtime_broker_id" field.
+func (u *ProjectUpsertBulk) ClearDefaultRuntimeBrokerID() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearDefaultRuntimeBrokerID()
+	})
+}
+
+// SetLabels sets the "labels" field.
+func (u *ProjectUpsertBulk) SetLabels(v map[string]string) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetLabels(v)
+	})
+}
+
+// UpdateLabels sets the "labels" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateLabels() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateLabels()
+	})
+}
+
+// ClearLabels clears the value of the "labels" field.
+func (u *ProjectUpsertBulk) ClearLabels() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearLabels()
+	})
+}
+
+// SetAnnotations sets the "annotations" field.
+func (u *ProjectUpsertBulk) SetAnnotations(v map[string]string) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetAnnotations(v)
+	})
+}
+
+// UpdateAnnotations sets the "annotations" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateAnnotations() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateAnnotations()
+	})
+}
+
+// ClearAnnotations clears the value of the "annotations" field.
+func (u *ProjectUpsertBulk) ClearAnnotations() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearAnnotations()
+	})
+}
+
+// SetSharedDirs sets the "shared_dirs" field.
+func (u *ProjectUpsertBulk) SetSharedDirs(v string) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetSharedDirs(v)
+	})
+}
+
+// UpdateSharedDirs sets the "shared_dirs" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateSharedDirs() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateSharedDirs()
+	})
+}
+
+// ClearSharedDirs clears the value of the "shared_dirs" field.
+func (u *ProjectUpsertBulk) ClearSharedDirs() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearSharedDirs()
+	})
+}
+
+// SetUpdated sets the "updated" field.
+func (u *ProjectUpsertBulk) SetUpdated(v time.Time) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetUpdated(v)
+	})
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateUpdated() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateUpdated()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *ProjectUpsertBulk) SetCreatedBy(v string) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateCreatedBy() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *ProjectUpsertBulk) ClearCreatedBy() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// SetOwnerID sets the "owner_id" field.
+func (u *ProjectUpsertBulk) SetOwnerID(v string) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetOwnerID(v)
+	})
+}
+
+// UpdateOwnerID sets the "owner_id" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateOwnerID() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateOwnerID()
+	})
+}
+
+// ClearOwnerID clears the value of the "owner_id" field.
+func (u *ProjectUpsertBulk) ClearOwnerID() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearOwnerID()
+	})
+}
+
+// SetVisibility sets the "visibility" field.
+func (u *ProjectUpsertBulk) SetVisibility(v string) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetVisibility(v)
+	})
+}
+
+// UpdateVisibility sets the "visibility" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateVisibility() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateVisibility()
+	})
+}
+
+// SetGithubInstallationID sets the "github_installation_id" field.
+func (u *ProjectUpsertBulk) SetGithubInstallationID(v int64) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetGithubInstallationID(v)
+	})
+}
+
+// AddGithubInstallationID adds v to the "github_installation_id" field.
+func (u *ProjectUpsertBulk) AddGithubInstallationID(v int64) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.AddGithubInstallationID(v)
+	})
+}
+
+// UpdateGithubInstallationID sets the "github_installation_id" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateGithubInstallationID() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateGithubInstallationID()
+	})
+}
+
+// ClearGithubInstallationID clears the value of the "github_installation_id" field.
+func (u *ProjectUpsertBulk) ClearGithubInstallationID() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearGithubInstallationID()
+	})
+}
+
+// SetGithubPermissions sets the "github_permissions" field.
+func (u *ProjectUpsertBulk) SetGithubPermissions(v string) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetGithubPermissions(v)
+	})
+}
+
+// UpdateGithubPermissions sets the "github_permissions" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateGithubPermissions() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateGithubPermissions()
+	})
+}
+
+// ClearGithubPermissions clears the value of the "github_permissions" field.
+func (u *ProjectUpsertBulk) ClearGithubPermissions() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearGithubPermissions()
+	})
+}
+
+// SetGithubAppStatus sets the "github_app_status" field.
+func (u *ProjectUpsertBulk) SetGithubAppStatus(v string) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetGithubAppStatus(v)
+	})
+}
+
+// UpdateGithubAppStatus sets the "github_app_status" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateGithubAppStatus() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateGithubAppStatus()
+	})
+}
+
+// ClearGithubAppStatus clears the value of the "github_app_status" field.
+func (u *ProjectUpsertBulk) ClearGithubAppStatus() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearGithubAppStatus()
+	})
+}
+
+// SetGitIdentity sets the "git_identity" field.
+func (u *ProjectUpsertBulk) SetGitIdentity(v string) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetGitIdentity(v)
+	})
+}
+
+// UpdateGitIdentity sets the "git_identity" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateGitIdentity() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateGitIdentity()
+	})
+}
+
+// ClearGitIdentity clears the value of the "git_identity" field.
+func (u *ProjectUpsertBulk) ClearGitIdentity() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearGitIdentity()
+	})
+}
+
+// Exec executes the query.
+func (u *ProjectUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the ProjectCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for ProjectCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *ProjectUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

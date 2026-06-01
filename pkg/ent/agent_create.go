@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
@@ -23,6 +25,7 @@ type AgentCreate struct {
 	config
 	mutation *AgentMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetSlug sets the "slug" field.
@@ -364,6 +367,7 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_node = &Agent{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(agent.Table, sqlgraph.NewFieldSpec(agent.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -486,11 +490,449 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.Agent.Create().
+//		SetSlug(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.AgentUpsert) {
+//			SetSlug(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *AgentCreate) OnConflict(opts ...sql.ConflictOption) *AgentUpsertOne {
+	_c.conflict = opts
+	return &AgentUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.Agent.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *AgentCreate) OnConflictColumns(columns ...string) *AgentUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &AgentUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// AgentUpsertOne is the builder for "upsert"-ing
+	//  one Agent node.
+	AgentUpsertOne struct {
+		create *AgentCreate
+	}
+
+	// AgentUpsert is the "OnConflict" setter.
+	AgentUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetSlug sets the "slug" field.
+func (u *AgentUpsert) SetSlug(v string) *AgentUpsert {
+	u.Set(agent.FieldSlug, v)
+	return u
+}
+
+// UpdateSlug sets the "slug" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateSlug() *AgentUpsert {
+	u.SetExcluded(agent.FieldSlug)
+	return u
+}
+
+// SetName sets the "name" field.
+func (u *AgentUpsert) SetName(v string) *AgentUpsert {
+	u.Set(agent.FieldName, v)
+	return u
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateName() *AgentUpsert {
+	u.SetExcluded(agent.FieldName)
+	return u
+}
+
+// SetTemplate sets the "template" field.
+func (u *AgentUpsert) SetTemplate(v string) *AgentUpsert {
+	u.Set(agent.FieldTemplate, v)
+	return u
+}
+
+// UpdateTemplate sets the "template" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateTemplate() *AgentUpsert {
+	u.SetExcluded(agent.FieldTemplate)
+	return u
+}
+
+// ClearTemplate clears the value of the "template" field.
+func (u *AgentUpsert) ClearTemplate() *AgentUpsert {
+	u.SetNull(agent.FieldTemplate)
+	return u
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *AgentUpsert) SetProjectID(v uuid.UUID) *AgentUpsert {
+	u.Set(agent.FieldProjectID, v)
+	return u
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateProjectID() *AgentUpsert {
+	u.SetExcluded(agent.FieldProjectID)
+	return u
+}
+
+// SetStatus sets the "status" field.
+func (u *AgentUpsert) SetStatus(v agent.Status) *AgentUpsert {
+	u.Set(agent.FieldStatus, v)
+	return u
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateStatus() *AgentUpsert {
+	u.SetExcluded(agent.FieldStatus)
+	return u
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *AgentUpsert) SetCreatedBy(v uuid.UUID) *AgentUpsert {
+	u.Set(agent.FieldCreatedBy, v)
+	return u
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateCreatedBy() *AgentUpsert {
+	u.SetExcluded(agent.FieldCreatedBy)
+	return u
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *AgentUpsert) ClearCreatedBy() *AgentUpsert {
+	u.SetNull(agent.FieldCreatedBy)
+	return u
+}
+
+// SetOwnerID sets the "owner_id" field.
+func (u *AgentUpsert) SetOwnerID(v uuid.UUID) *AgentUpsert {
+	u.Set(agent.FieldOwnerID, v)
+	return u
+}
+
+// UpdateOwnerID sets the "owner_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateOwnerID() *AgentUpsert {
+	u.SetExcluded(agent.FieldOwnerID)
+	return u
+}
+
+// ClearOwnerID clears the value of the "owner_id" field.
+func (u *AgentUpsert) ClearOwnerID() *AgentUpsert {
+	u.SetNull(agent.FieldOwnerID)
+	return u
+}
+
+// SetDelegationEnabled sets the "delegation_enabled" field.
+func (u *AgentUpsert) SetDelegationEnabled(v bool) *AgentUpsert {
+	u.Set(agent.FieldDelegationEnabled, v)
+	return u
+}
+
+// UpdateDelegationEnabled sets the "delegation_enabled" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateDelegationEnabled() *AgentUpsert {
+	u.SetExcluded(agent.FieldDelegationEnabled)
+	return u
+}
+
+// SetVisibility sets the "visibility" field.
+func (u *AgentUpsert) SetVisibility(v string) *AgentUpsert {
+	u.Set(agent.FieldVisibility, v)
+	return u
+}
+
+// UpdateVisibility sets the "visibility" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateVisibility() *AgentUpsert {
+	u.SetExcluded(agent.FieldVisibility)
+	return u
+}
+
+// SetUpdated sets the "updated" field.
+func (u *AgentUpsert) SetUpdated(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldUpdated, v)
+	return u
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateUpdated() *AgentUpsert {
+	u.SetExcluded(agent.FieldUpdated)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.Agent.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(agent.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *AgentUpsertOne) UpdateNewValues() *AgentUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(agent.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(agent.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.Agent.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *AgentUpsertOne) Ignore() *AgentUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *AgentUpsertOne) DoNothing() *AgentUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the AgentCreate.OnConflict
+// documentation for more info.
+func (u *AgentUpsertOne) Update(set func(*AgentUpsert)) *AgentUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&AgentUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetSlug sets the "slug" field.
+func (u *AgentUpsertOne) SetSlug(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSlug(v)
+	})
+}
+
+// UpdateSlug sets the "slug" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateSlug() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSlug()
+	})
+}
+
+// SetName sets the "name" field.
+func (u *AgentUpsertOne) SetName(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetName(v)
+	})
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateName() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateName()
+	})
+}
+
+// SetTemplate sets the "template" field.
+func (u *AgentUpsertOne) SetTemplate(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetTemplate(v)
+	})
+}
+
+// UpdateTemplate sets the "template" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateTemplate() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateTemplate()
+	})
+}
+
+// ClearTemplate clears the value of the "template" field.
+func (u *AgentUpsertOne) ClearTemplate() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearTemplate()
+	})
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *AgentUpsertOne) SetProjectID(v uuid.UUID) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateProjectID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *AgentUpsertOne) SetStatus(v agent.Status) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateStatus() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *AgentUpsertOne) SetCreatedBy(v uuid.UUID) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateCreatedBy() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *AgentUpsertOne) ClearCreatedBy() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// SetOwnerID sets the "owner_id" field.
+func (u *AgentUpsertOne) SetOwnerID(v uuid.UUID) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetOwnerID(v)
+	})
+}
+
+// UpdateOwnerID sets the "owner_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateOwnerID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateOwnerID()
+	})
+}
+
+// ClearOwnerID clears the value of the "owner_id" field.
+func (u *AgentUpsertOne) ClearOwnerID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearOwnerID()
+	})
+}
+
+// SetDelegationEnabled sets the "delegation_enabled" field.
+func (u *AgentUpsertOne) SetDelegationEnabled(v bool) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDelegationEnabled(v)
+	})
+}
+
+// UpdateDelegationEnabled sets the "delegation_enabled" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateDelegationEnabled() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDelegationEnabled()
+	})
+}
+
+// SetVisibility sets the "visibility" field.
+func (u *AgentUpsertOne) SetVisibility(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetVisibility(v)
+	})
+}
+
+// UpdateVisibility sets the "visibility" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateVisibility() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateVisibility()
+	})
+}
+
+// SetUpdated sets the "updated" field.
+func (u *AgentUpsertOne) SetUpdated(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetUpdated(v)
+	})
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateUpdated() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateUpdated()
+	})
+}
+
+// Exec executes the query.
+func (u *AgentUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for AgentCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *AgentUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *AgentUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: AgentUpsertOne.ID is not supported by MySQL driver. Use AgentUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *AgentUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // AgentCreateBulk is the builder for creating many Agent entities in bulk.
 type AgentCreateBulk struct {
 	config
 	err      error
 	builders []*AgentCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the Agent entities in the database.
@@ -520,6 +962,7 @@ func (_c *AgentCreateBulk) Save(ctx context.Context) ([]*Agent, error) {
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -566,6 +1009,284 @@ func (_c *AgentCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *AgentCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.Agent.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.AgentUpsert) {
+//			SetSlug(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *AgentCreateBulk) OnConflict(opts ...sql.ConflictOption) *AgentUpsertBulk {
+	_c.conflict = opts
+	return &AgentUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.Agent.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *AgentCreateBulk) OnConflictColumns(columns ...string) *AgentUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &AgentUpsertBulk{
+		create: _c,
+	}
+}
+
+// AgentUpsertBulk is the builder for "upsert"-ing
+// a bulk of Agent nodes.
+type AgentUpsertBulk struct {
+	create *AgentCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.Agent.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(agent.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *AgentUpsertBulk) UpdateNewValues() *AgentUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(agent.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(agent.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.Agent.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *AgentUpsertBulk) Ignore() *AgentUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *AgentUpsertBulk) DoNothing() *AgentUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the AgentCreateBulk.OnConflict
+// documentation for more info.
+func (u *AgentUpsertBulk) Update(set func(*AgentUpsert)) *AgentUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&AgentUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetSlug sets the "slug" field.
+func (u *AgentUpsertBulk) SetSlug(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSlug(v)
+	})
+}
+
+// UpdateSlug sets the "slug" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateSlug() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSlug()
+	})
+}
+
+// SetName sets the "name" field.
+func (u *AgentUpsertBulk) SetName(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetName(v)
+	})
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateName() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateName()
+	})
+}
+
+// SetTemplate sets the "template" field.
+func (u *AgentUpsertBulk) SetTemplate(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetTemplate(v)
+	})
+}
+
+// UpdateTemplate sets the "template" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateTemplate() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateTemplate()
+	})
+}
+
+// ClearTemplate clears the value of the "template" field.
+func (u *AgentUpsertBulk) ClearTemplate() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearTemplate()
+	})
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *AgentUpsertBulk) SetProjectID(v uuid.UUID) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateProjectID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *AgentUpsertBulk) SetStatus(v agent.Status) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateStatus() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *AgentUpsertBulk) SetCreatedBy(v uuid.UUID) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateCreatedBy() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *AgentUpsertBulk) ClearCreatedBy() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// SetOwnerID sets the "owner_id" field.
+func (u *AgentUpsertBulk) SetOwnerID(v uuid.UUID) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetOwnerID(v)
+	})
+}
+
+// UpdateOwnerID sets the "owner_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateOwnerID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateOwnerID()
+	})
+}
+
+// ClearOwnerID clears the value of the "owner_id" field.
+func (u *AgentUpsertBulk) ClearOwnerID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearOwnerID()
+	})
+}
+
+// SetDelegationEnabled sets the "delegation_enabled" field.
+func (u *AgentUpsertBulk) SetDelegationEnabled(v bool) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetDelegationEnabled(v)
+	})
+}
+
+// UpdateDelegationEnabled sets the "delegation_enabled" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateDelegationEnabled() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateDelegationEnabled()
+	})
+}
+
+// SetVisibility sets the "visibility" field.
+func (u *AgentUpsertBulk) SetVisibility(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetVisibility(v)
+	})
+}
+
+// UpdateVisibility sets the "visibility" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateVisibility() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateVisibility()
+	})
+}
+
+// SetUpdated sets the "updated" field.
+func (u *AgentUpsertBulk) SetUpdated(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetUpdated(v)
+	})
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateUpdated() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateUpdated()
+	})
+}
+
+// Exec executes the query.
+func (u *AgentUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the AgentCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for AgentCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *AgentUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

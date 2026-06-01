@@ -25,9 +25,15 @@ import (
 	"github.com/google/uuid"
 )
 
-// Project holds the schema definition for the Project entity.
-// This is a minimal schema for edge compilation; operational fields
-// will be added when the project entity is fully migrated to Ent.
+// Project holds the schema definition for the Project entity, mapping the legacy
+// SQLite `projects` table (groves).
+//
+// JSON-bearing operational columns (shared_dirs, github_permissions,
+// github_app_status, git_identity) are kept as raw JSON strings to stay
+// dialect-neutral and to avoid importing the store/api model types into the
+// schema package, matching the RuntimeBroker convention. The port layer
+// (entadapter) marshals/unmarshals them. Computed fields on store.Project
+// (AgentCount, ActiveBrokerCount, ProjectType, OwnerName) are not persisted.
 type Project struct {
 	ent.Schema
 }
@@ -46,9 +52,14 @@ func (Project) Fields() []ent.Field {
 		field.String("git_remote").
 			Optional().
 			Nillable(),
+		field.String("default_runtime_broker_id").
+			Optional().
+			Nillable(),
 		field.JSON("labels", map[string]string{}).
 			Optional(),
 		field.JSON("annotations", map[string]string{}).
+			Optional(),
+		field.String("shared_dirs").
 			Optional(),
 		field.Time("created").
 			Default(time.Now).
@@ -62,6 +73,15 @@ func (Project) Fields() []ent.Field {
 			Optional(),
 		field.String("visibility").
 			Default("private"),
+		field.Int64("github_installation_id").
+			Optional().
+			Nillable(),
+		field.String("github_permissions").
+			Optional(),
+		field.String("github_app_status").
+			Optional(),
+		field.String("git_identity").
+			Optional(),
 	}
 }
 

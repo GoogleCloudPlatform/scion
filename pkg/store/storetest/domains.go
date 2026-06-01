@@ -44,6 +44,10 @@ func RunStoreSuite(t *testing.T, factory Factory) {
 	RunDomain(t, factory, GCPServiceAccountDomain())
 	RunDomain(t, factory, SubscriptionTemplateDomain())
 	RunDomain(t, factory, NotificationSubscriptionDomain())
+	RunDomain(t, factory, ProjectDomain())
+	RunDomain(t, factory, RuntimeBrokerDomain())
+	RunDomain(t, factory, BrokerSecretDomain())
+	RunDomain(t, factory, BrokerJoinTokenDomain())
 }
 
 // listFrom wraps a plain slice from a non-paginated list method into a

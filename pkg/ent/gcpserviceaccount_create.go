@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
@@ -19,6 +21,7 @@ type GCPServiceAccountCreate struct {
 	config
 	mutation *GCPServiceAccountMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetScope sets the "scope" field.
@@ -321,6 +324,7 @@ func (_c *GCPServiceAccountCreate) createSpec() (*GCPServiceAccount, *sqlgraph.C
 		_node = &GCPServiceAccount{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(gcpserviceaccount.Table, sqlgraph.NewFieldSpec(gcpserviceaccount.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -376,11 +380,449 @@ func (_c *GCPServiceAccountCreate) createSpec() (*GCPServiceAccount, *sqlgraph.C
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.GCPServiceAccount.Create().
+//		SetScope(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.GCPServiceAccountUpsert) {
+//			SetScope(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *GCPServiceAccountCreate) OnConflict(opts ...sql.ConflictOption) *GCPServiceAccountUpsertOne {
+	_c.conflict = opts
+	return &GCPServiceAccountUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.GCPServiceAccount.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *GCPServiceAccountCreate) OnConflictColumns(columns ...string) *GCPServiceAccountUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &GCPServiceAccountUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// GCPServiceAccountUpsertOne is the builder for "upsert"-ing
+	//  one GCPServiceAccount node.
+	GCPServiceAccountUpsertOne struct {
+		create *GCPServiceAccountCreate
+	}
+
+	// GCPServiceAccountUpsert is the "OnConflict" setter.
+	GCPServiceAccountUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetScope sets the "scope" field.
+func (u *GCPServiceAccountUpsert) SetScope(v string) *GCPServiceAccountUpsert {
+	u.Set(gcpserviceaccount.FieldScope, v)
+	return u
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsert) UpdateScope() *GCPServiceAccountUpsert {
+	u.SetExcluded(gcpserviceaccount.FieldScope)
+	return u
+}
+
+// SetScopeID sets the "scope_id" field.
+func (u *GCPServiceAccountUpsert) SetScopeID(v string) *GCPServiceAccountUpsert {
+	u.Set(gcpserviceaccount.FieldScopeID, v)
+	return u
+}
+
+// UpdateScopeID sets the "scope_id" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsert) UpdateScopeID() *GCPServiceAccountUpsert {
+	u.SetExcluded(gcpserviceaccount.FieldScopeID)
+	return u
+}
+
+// SetEmail sets the "email" field.
+func (u *GCPServiceAccountUpsert) SetEmail(v string) *GCPServiceAccountUpsert {
+	u.Set(gcpserviceaccount.FieldEmail, v)
+	return u
+}
+
+// UpdateEmail sets the "email" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsert) UpdateEmail() *GCPServiceAccountUpsert {
+	u.SetExcluded(gcpserviceaccount.FieldEmail)
+	return u
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *GCPServiceAccountUpsert) SetProjectID(v uuid.UUID) *GCPServiceAccountUpsert {
+	u.Set(gcpserviceaccount.FieldProjectID, v)
+	return u
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsert) UpdateProjectID() *GCPServiceAccountUpsert {
+	u.SetExcluded(gcpserviceaccount.FieldProjectID)
+	return u
+}
+
+// SetDisplayName sets the "display_name" field.
+func (u *GCPServiceAccountUpsert) SetDisplayName(v string) *GCPServiceAccountUpsert {
+	u.Set(gcpserviceaccount.FieldDisplayName, v)
+	return u
+}
+
+// UpdateDisplayName sets the "display_name" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsert) UpdateDisplayName() *GCPServiceAccountUpsert {
+	u.SetExcluded(gcpserviceaccount.FieldDisplayName)
+	return u
+}
+
+// SetDefaultScopes sets the "default_scopes" field.
+func (u *GCPServiceAccountUpsert) SetDefaultScopes(v string) *GCPServiceAccountUpsert {
+	u.Set(gcpserviceaccount.FieldDefaultScopes, v)
+	return u
+}
+
+// UpdateDefaultScopes sets the "default_scopes" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsert) UpdateDefaultScopes() *GCPServiceAccountUpsert {
+	u.SetExcluded(gcpserviceaccount.FieldDefaultScopes)
+	return u
+}
+
+// SetVerified sets the "verified" field.
+func (u *GCPServiceAccountUpsert) SetVerified(v bool) *GCPServiceAccountUpsert {
+	u.Set(gcpserviceaccount.FieldVerified, v)
+	return u
+}
+
+// UpdateVerified sets the "verified" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsert) UpdateVerified() *GCPServiceAccountUpsert {
+	u.SetExcluded(gcpserviceaccount.FieldVerified)
+	return u
+}
+
+// SetVerifiedAt sets the "verified_at" field.
+func (u *GCPServiceAccountUpsert) SetVerifiedAt(v time.Time) *GCPServiceAccountUpsert {
+	u.Set(gcpserviceaccount.FieldVerifiedAt, v)
+	return u
+}
+
+// UpdateVerifiedAt sets the "verified_at" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsert) UpdateVerifiedAt() *GCPServiceAccountUpsert {
+	u.SetExcluded(gcpserviceaccount.FieldVerifiedAt)
+	return u
+}
+
+// ClearVerifiedAt clears the value of the "verified_at" field.
+func (u *GCPServiceAccountUpsert) ClearVerifiedAt() *GCPServiceAccountUpsert {
+	u.SetNull(gcpserviceaccount.FieldVerifiedAt)
+	return u
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *GCPServiceAccountUpsert) SetCreatedBy(v string) *GCPServiceAccountUpsert {
+	u.Set(gcpserviceaccount.FieldCreatedBy, v)
+	return u
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsert) UpdateCreatedBy() *GCPServiceAccountUpsert {
+	u.SetExcluded(gcpserviceaccount.FieldCreatedBy)
+	return u
+}
+
+// SetManaged sets the "managed" field.
+func (u *GCPServiceAccountUpsert) SetManaged(v bool) *GCPServiceAccountUpsert {
+	u.Set(gcpserviceaccount.FieldManaged, v)
+	return u
+}
+
+// UpdateManaged sets the "managed" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsert) UpdateManaged() *GCPServiceAccountUpsert {
+	u.SetExcluded(gcpserviceaccount.FieldManaged)
+	return u
+}
+
+// SetManagedBy sets the "managed_by" field.
+func (u *GCPServiceAccountUpsert) SetManagedBy(v string) *GCPServiceAccountUpsert {
+	u.Set(gcpserviceaccount.FieldManagedBy, v)
+	return u
+}
+
+// UpdateManagedBy sets the "managed_by" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsert) UpdateManagedBy() *GCPServiceAccountUpsert {
+	u.SetExcluded(gcpserviceaccount.FieldManagedBy)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.GCPServiceAccount.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(gcpserviceaccount.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *GCPServiceAccountUpsertOne) UpdateNewValues() *GCPServiceAccountUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(gcpserviceaccount.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(gcpserviceaccount.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.GCPServiceAccount.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *GCPServiceAccountUpsertOne) Ignore() *GCPServiceAccountUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *GCPServiceAccountUpsertOne) DoNothing() *GCPServiceAccountUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the GCPServiceAccountCreate.OnConflict
+// documentation for more info.
+func (u *GCPServiceAccountUpsertOne) Update(set func(*GCPServiceAccountUpsert)) *GCPServiceAccountUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&GCPServiceAccountUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetScope sets the "scope" field.
+func (u *GCPServiceAccountUpsertOne) SetScope(v string) *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetScope(v)
+	})
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertOne) UpdateScope() *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateScope()
+	})
+}
+
+// SetScopeID sets the "scope_id" field.
+func (u *GCPServiceAccountUpsertOne) SetScopeID(v string) *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetScopeID(v)
+	})
+}
+
+// UpdateScopeID sets the "scope_id" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertOne) UpdateScopeID() *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateScopeID()
+	})
+}
+
+// SetEmail sets the "email" field.
+func (u *GCPServiceAccountUpsertOne) SetEmail(v string) *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetEmail(v)
+	})
+}
+
+// UpdateEmail sets the "email" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertOne) UpdateEmail() *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateEmail()
+	})
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *GCPServiceAccountUpsertOne) SetProjectID(v uuid.UUID) *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertOne) UpdateProjectID() *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// SetDisplayName sets the "display_name" field.
+func (u *GCPServiceAccountUpsertOne) SetDisplayName(v string) *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetDisplayName(v)
+	})
+}
+
+// UpdateDisplayName sets the "display_name" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertOne) UpdateDisplayName() *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateDisplayName()
+	})
+}
+
+// SetDefaultScopes sets the "default_scopes" field.
+func (u *GCPServiceAccountUpsertOne) SetDefaultScopes(v string) *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetDefaultScopes(v)
+	})
+}
+
+// UpdateDefaultScopes sets the "default_scopes" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertOne) UpdateDefaultScopes() *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateDefaultScopes()
+	})
+}
+
+// SetVerified sets the "verified" field.
+func (u *GCPServiceAccountUpsertOne) SetVerified(v bool) *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetVerified(v)
+	})
+}
+
+// UpdateVerified sets the "verified" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertOne) UpdateVerified() *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateVerified()
+	})
+}
+
+// SetVerifiedAt sets the "verified_at" field.
+func (u *GCPServiceAccountUpsertOne) SetVerifiedAt(v time.Time) *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetVerifiedAt(v)
+	})
+}
+
+// UpdateVerifiedAt sets the "verified_at" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertOne) UpdateVerifiedAt() *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateVerifiedAt()
+	})
+}
+
+// ClearVerifiedAt clears the value of the "verified_at" field.
+func (u *GCPServiceAccountUpsertOne) ClearVerifiedAt() *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.ClearVerifiedAt()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *GCPServiceAccountUpsertOne) SetCreatedBy(v string) *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertOne) UpdateCreatedBy() *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// SetManaged sets the "managed" field.
+func (u *GCPServiceAccountUpsertOne) SetManaged(v bool) *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetManaged(v)
+	})
+}
+
+// UpdateManaged sets the "managed" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertOne) UpdateManaged() *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateManaged()
+	})
+}
+
+// SetManagedBy sets the "managed_by" field.
+func (u *GCPServiceAccountUpsertOne) SetManagedBy(v string) *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetManagedBy(v)
+	})
+}
+
+// UpdateManagedBy sets the "managed_by" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertOne) UpdateManagedBy() *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateManagedBy()
+	})
+}
+
+// Exec executes the query.
+func (u *GCPServiceAccountUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for GCPServiceAccountCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *GCPServiceAccountUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *GCPServiceAccountUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: GCPServiceAccountUpsertOne.ID is not supported by MySQL driver. Use GCPServiceAccountUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *GCPServiceAccountUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // GCPServiceAccountCreateBulk is the builder for creating many GCPServiceAccount entities in bulk.
 type GCPServiceAccountCreateBulk struct {
 	config
 	err      error
 	builders []*GCPServiceAccountCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the GCPServiceAccount entities in the database.
@@ -410,6 +852,7 @@ func (_c *GCPServiceAccountCreateBulk) Save(ctx context.Context) ([]*GCPServiceA
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -456,6 +899,284 @@ func (_c *GCPServiceAccountCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *GCPServiceAccountCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.GCPServiceAccount.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.GCPServiceAccountUpsert) {
+//			SetScope(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *GCPServiceAccountCreateBulk) OnConflict(opts ...sql.ConflictOption) *GCPServiceAccountUpsertBulk {
+	_c.conflict = opts
+	return &GCPServiceAccountUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.GCPServiceAccount.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *GCPServiceAccountCreateBulk) OnConflictColumns(columns ...string) *GCPServiceAccountUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &GCPServiceAccountUpsertBulk{
+		create: _c,
+	}
+}
+
+// GCPServiceAccountUpsertBulk is the builder for "upsert"-ing
+// a bulk of GCPServiceAccount nodes.
+type GCPServiceAccountUpsertBulk struct {
+	create *GCPServiceAccountCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.GCPServiceAccount.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(gcpserviceaccount.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *GCPServiceAccountUpsertBulk) UpdateNewValues() *GCPServiceAccountUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(gcpserviceaccount.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(gcpserviceaccount.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.GCPServiceAccount.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *GCPServiceAccountUpsertBulk) Ignore() *GCPServiceAccountUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *GCPServiceAccountUpsertBulk) DoNothing() *GCPServiceAccountUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the GCPServiceAccountCreateBulk.OnConflict
+// documentation for more info.
+func (u *GCPServiceAccountUpsertBulk) Update(set func(*GCPServiceAccountUpsert)) *GCPServiceAccountUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&GCPServiceAccountUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetScope sets the "scope" field.
+func (u *GCPServiceAccountUpsertBulk) SetScope(v string) *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetScope(v)
+	})
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertBulk) UpdateScope() *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateScope()
+	})
+}
+
+// SetScopeID sets the "scope_id" field.
+func (u *GCPServiceAccountUpsertBulk) SetScopeID(v string) *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetScopeID(v)
+	})
+}
+
+// UpdateScopeID sets the "scope_id" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertBulk) UpdateScopeID() *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateScopeID()
+	})
+}
+
+// SetEmail sets the "email" field.
+func (u *GCPServiceAccountUpsertBulk) SetEmail(v string) *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetEmail(v)
+	})
+}
+
+// UpdateEmail sets the "email" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertBulk) UpdateEmail() *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateEmail()
+	})
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *GCPServiceAccountUpsertBulk) SetProjectID(v uuid.UUID) *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertBulk) UpdateProjectID() *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// SetDisplayName sets the "display_name" field.
+func (u *GCPServiceAccountUpsertBulk) SetDisplayName(v string) *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetDisplayName(v)
+	})
+}
+
+// UpdateDisplayName sets the "display_name" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertBulk) UpdateDisplayName() *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateDisplayName()
+	})
+}
+
+// SetDefaultScopes sets the "default_scopes" field.
+func (u *GCPServiceAccountUpsertBulk) SetDefaultScopes(v string) *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetDefaultScopes(v)
+	})
+}
+
+// UpdateDefaultScopes sets the "default_scopes" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertBulk) UpdateDefaultScopes() *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateDefaultScopes()
+	})
+}
+
+// SetVerified sets the "verified" field.
+func (u *GCPServiceAccountUpsertBulk) SetVerified(v bool) *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetVerified(v)
+	})
+}
+
+// UpdateVerified sets the "verified" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertBulk) UpdateVerified() *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateVerified()
+	})
+}
+
+// SetVerifiedAt sets the "verified_at" field.
+func (u *GCPServiceAccountUpsertBulk) SetVerifiedAt(v time.Time) *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetVerifiedAt(v)
+	})
+}
+
+// UpdateVerifiedAt sets the "verified_at" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertBulk) UpdateVerifiedAt() *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateVerifiedAt()
+	})
+}
+
+// ClearVerifiedAt clears the value of the "verified_at" field.
+func (u *GCPServiceAccountUpsertBulk) ClearVerifiedAt() *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.ClearVerifiedAt()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *GCPServiceAccountUpsertBulk) SetCreatedBy(v string) *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertBulk) UpdateCreatedBy() *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// SetManaged sets the "managed" field.
+func (u *GCPServiceAccountUpsertBulk) SetManaged(v bool) *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetManaged(v)
+	})
+}
+
+// UpdateManaged sets the "managed" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertBulk) UpdateManaged() *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateManaged()
+	})
+}
+
+// SetManagedBy sets the "managed_by" field.
+func (u *GCPServiceAccountUpsertBulk) SetManagedBy(v string) *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetManagedBy(v)
+	})
+}
+
+// UpdateManagedBy sets the "managed_by" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertBulk) UpdateManagedBy() *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateManagedBy()
+	})
+}
+
+// Exec executes the query.
+func (u *GCPServiceAccountUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the GCPServiceAccountCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for GCPServiceAccountCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *GCPServiceAccountUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

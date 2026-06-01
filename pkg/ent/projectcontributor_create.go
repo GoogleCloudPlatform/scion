@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
@@ -19,6 +21,7 @@ type ProjectContributorCreate struct {
 	config
 	mutation *ProjectContributorMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetProjectID sets the "project_id" field.
@@ -253,6 +256,7 @@ func (_c *ProjectContributorCreate) createSpec() (*ProjectContributor, *sqlgraph
 		_node = &ProjectContributor{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(projectcontributor.Table, sqlgraph.NewFieldSpec(projectcontributor.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -300,11 +304,472 @@ func (_c *ProjectContributorCreate) createSpec() (*ProjectContributor, *sqlgraph
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.ProjectContributor.Create().
+//		SetProjectID(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.ProjectContributorUpsert) {
+//			SetProjectID(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *ProjectContributorCreate) OnConflict(opts ...sql.ConflictOption) *ProjectContributorUpsertOne {
+	_c.conflict = opts
+	return &ProjectContributorUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.ProjectContributor.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *ProjectContributorCreate) OnConflictColumns(columns ...string) *ProjectContributorUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &ProjectContributorUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// ProjectContributorUpsertOne is the builder for "upsert"-ing
+	//  one ProjectContributor node.
+	ProjectContributorUpsertOne struct {
+		create *ProjectContributorCreate
+	}
+
+	// ProjectContributorUpsert is the "OnConflict" setter.
+	ProjectContributorUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetProjectID sets the "project_id" field.
+func (u *ProjectContributorUpsert) SetProjectID(v uuid.UUID) *ProjectContributorUpsert {
+	u.Set(projectcontributor.FieldProjectID, v)
+	return u
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *ProjectContributorUpsert) UpdateProjectID() *ProjectContributorUpsert {
+	u.SetExcluded(projectcontributor.FieldProjectID)
+	return u
+}
+
+// SetBrokerID sets the "broker_id" field.
+func (u *ProjectContributorUpsert) SetBrokerID(v uuid.UUID) *ProjectContributorUpsert {
+	u.Set(projectcontributor.FieldBrokerID, v)
+	return u
+}
+
+// UpdateBrokerID sets the "broker_id" field to the value that was provided on create.
+func (u *ProjectContributorUpsert) UpdateBrokerID() *ProjectContributorUpsert {
+	u.SetExcluded(projectcontributor.FieldBrokerID)
+	return u
+}
+
+// SetBrokerName sets the "broker_name" field.
+func (u *ProjectContributorUpsert) SetBrokerName(v string) *ProjectContributorUpsert {
+	u.Set(projectcontributor.FieldBrokerName, v)
+	return u
+}
+
+// UpdateBrokerName sets the "broker_name" field to the value that was provided on create.
+func (u *ProjectContributorUpsert) UpdateBrokerName() *ProjectContributorUpsert {
+	u.SetExcluded(projectcontributor.FieldBrokerName)
+	return u
+}
+
+// SetMode sets the "mode" field.
+func (u *ProjectContributorUpsert) SetMode(v string) *ProjectContributorUpsert {
+	u.Set(projectcontributor.FieldMode, v)
+	return u
+}
+
+// UpdateMode sets the "mode" field to the value that was provided on create.
+func (u *ProjectContributorUpsert) UpdateMode() *ProjectContributorUpsert {
+	u.SetExcluded(projectcontributor.FieldMode)
+	return u
+}
+
+// SetStatus sets the "status" field.
+func (u *ProjectContributorUpsert) SetStatus(v string) *ProjectContributorUpsert {
+	u.Set(projectcontributor.FieldStatus, v)
+	return u
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *ProjectContributorUpsert) UpdateStatus() *ProjectContributorUpsert {
+	u.SetExcluded(projectcontributor.FieldStatus)
+	return u
+}
+
+// SetProfiles sets the "profiles" field.
+func (u *ProjectContributorUpsert) SetProfiles(v string) *ProjectContributorUpsert {
+	u.Set(projectcontributor.FieldProfiles, v)
+	return u
+}
+
+// UpdateProfiles sets the "profiles" field to the value that was provided on create.
+func (u *ProjectContributorUpsert) UpdateProfiles() *ProjectContributorUpsert {
+	u.SetExcluded(projectcontributor.FieldProfiles)
+	return u
+}
+
+// ClearProfiles clears the value of the "profiles" field.
+func (u *ProjectContributorUpsert) ClearProfiles() *ProjectContributorUpsert {
+	u.SetNull(projectcontributor.FieldProfiles)
+	return u
+}
+
+// SetLastSeen sets the "last_seen" field.
+func (u *ProjectContributorUpsert) SetLastSeen(v time.Time) *ProjectContributorUpsert {
+	u.Set(projectcontributor.FieldLastSeen, v)
+	return u
+}
+
+// UpdateLastSeen sets the "last_seen" field to the value that was provided on create.
+func (u *ProjectContributorUpsert) UpdateLastSeen() *ProjectContributorUpsert {
+	u.SetExcluded(projectcontributor.FieldLastSeen)
+	return u
+}
+
+// ClearLastSeen clears the value of the "last_seen" field.
+func (u *ProjectContributorUpsert) ClearLastSeen() *ProjectContributorUpsert {
+	u.SetNull(projectcontributor.FieldLastSeen)
+	return u
+}
+
+// SetLocalPath sets the "local_path" field.
+func (u *ProjectContributorUpsert) SetLocalPath(v string) *ProjectContributorUpsert {
+	u.Set(projectcontributor.FieldLocalPath, v)
+	return u
+}
+
+// UpdateLocalPath sets the "local_path" field to the value that was provided on create.
+func (u *ProjectContributorUpsert) UpdateLocalPath() *ProjectContributorUpsert {
+	u.SetExcluded(projectcontributor.FieldLocalPath)
+	return u
+}
+
+// ClearLocalPath clears the value of the "local_path" field.
+func (u *ProjectContributorUpsert) ClearLocalPath() *ProjectContributorUpsert {
+	u.SetNull(projectcontributor.FieldLocalPath)
+	return u
+}
+
+// SetLinkedBy sets the "linked_by" field.
+func (u *ProjectContributorUpsert) SetLinkedBy(v string) *ProjectContributorUpsert {
+	u.Set(projectcontributor.FieldLinkedBy, v)
+	return u
+}
+
+// UpdateLinkedBy sets the "linked_by" field to the value that was provided on create.
+func (u *ProjectContributorUpsert) UpdateLinkedBy() *ProjectContributorUpsert {
+	u.SetExcluded(projectcontributor.FieldLinkedBy)
+	return u
+}
+
+// ClearLinkedBy clears the value of the "linked_by" field.
+func (u *ProjectContributorUpsert) ClearLinkedBy() *ProjectContributorUpsert {
+	u.SetNull(projectcontributor.FieldLinkedBy)
+	return u
+}
+
+// SetLinkedAt sets the "linked_at" field.
+func (u *ProjectContributorUpsert) SetLinkedAt(v time.Time) *ProjectContributorUpsert {
+	u.Set(projectcontributor.FieldLinkedAt, v)
+	return u
+}
+
+// UpdateLinkedAt sets the "linked_at" field to the value that was provided on create.
+func (u *ProjectContributorUpsert) UpdateLinkedAt() *ProjectContributorUpsert {
+	u.SetExcluded(projectcontributor.FieldLinkedAt)
+	return u
+}
+
+// ClearLinkedAt clears the value of the "linked_at" field.
+func (u *ProjectContributorUpsert) ClearLinkedAt() *ProjectContributorUpsert {
+	u.SetNull(projectcontributor.FieldLinkedAt)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.ProjectContributor.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(projectcontributor.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *ProjectContributorUpsertOne) UpdateNewValues() *ProjectContributorUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(projectcontributor.FieldID)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.ProjectContributor.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *ProjectContributorUpsertOne) Ignore() *ProjectContributorUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *ProjectContributorUpsertOne) DoNothing() *ProjectContributorUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the ProjectContributorCreate.OnConflict
+// documentation for more info.
+func (u *ProjectContributorUpsertOne) Update(set func(*ProjectContributorUpsert)) *ProjectContributorUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&ProjectContributorUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *ProjectContributorUpsertOne) SetProjectID(v uuid.UUID) *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *ProjectContributorUpsertOne) UpdateProjectID() *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// SetBrokerID sets the "broker_id" field.
+func (u *ProjectContributorUpsertOne) SetBrokerID(v uuid.UUID) *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetBrokerID(v)
+	})
+}
+
+// UpdateBrokerID sets the "broker_id" field to the value that was provided on create.
+func (u *ProjectContributorUpsertOne) UpdateBrokerID() *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateBrokerID()
+	})
+}
+
+// SetBrokerName sets the "broker_name" field.
+func (u *ProjectContributorUpsertOne) SetBrokerName(v string) *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetBrokerName(v)
+	})
+}
+
+// UpdateBrokerName sets the "broker_name" field to the value that was provided on create.
+func (u *ProjectContributorUpsertOne) UpdateBrokerName() *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateBrokerName()
+	})
+}
+
+// SetMode sets the "mode" field.
+func (u *ProjectContributorUpsertOne) SetMode(v string) *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetMode(v)
+	})
+}
+
+// UpdateMode sets the "mode" field to the value that was provided on create.
+func (u *ProjectContributorUpsertOne) UpdateMode() *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateMode()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *ProjectContributorUpsertOne) SetStatus(v string) *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *ProjectContributorUpsertOne) UpdateStatus() *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// SetProfiles sets the "profiles" field.
+func (u *ProjectContributorUpsertOne) SetProfiles(v string) *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetProfiles(v)
+	})
+}
+
+// UpdateProfiles sets the "profiles" field to the value that was provided on create.
+func (u *ProjectContributorUpsertOne) UpdateProfiles() *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateProfiles()
+	})
+}
+
+// ClearProfiles clears the value of the "profiles" field.
+func (u *ProjectContributorUpsertOne) ClearProfiles() *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.ClearProfiles()
+	})
+}
+
+// SetLastSeen sets the "last_seen" field.
+func (u *ProjectContributorUpsertOne) SetLastSeen(v time.Time) *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetLastSeen(v)
+	})
+}
+
+// UpdateLastSeen sets the "last_seen" field to the value that was provided on create.
+func (u *ProjectContributorUpsertOne) UpdateLastSeen() *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateLastSeen()
+	})
+}
+
+// ClearLastSeen clears the value of the "last_seen" field.
+func (u *ProjectContributorUpsertOne) ClearLastSeen() *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.ClearLastSeen()
+	})
+}
+
+// SetLocalPath sets the "local_path" field.
+func (u *ProjectContributorUpsertOne) SetLocalPath(v string) *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetLocalPath(v)
+	})
+}
+
+// UpdateLocalPath sets the "local_path" field to the value that was provided on create.
+func (u *ProjectContributorUpsertOne) UpdateLocalPath() *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateLocalPath()
+	})
+}
+
+// ClearLocalPath clears the value of the "local_path" field.
+func (u *ProjectContributorUpsertOne) ClearLocalPath() *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.ClearLocalPath()
+	})
+}
+
+// SetLinkedBy sets the "linked_by" field.
+func (u *ProjectContributorUpsertOne) SetLinkedBy(v string) *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetLinkedBy(v)
+	})
+}
+
+// UpdateLinkedBy sets the "linked_by" field to the value that was provided on create.
+func (u *ProjectContributorUpsertOne) UpdateLinkedBy() *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateLinkedBy()
+	})
+}
+
+// ClearLinkedBy clears the value of the "linked_by" field.
+func (u *ProjectContributorUpsertOne) ClearLinkedBy() *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.ClearLinkedBy()
+	})
+}
+
+// SetLinkedAt sets the "linked_at" field.
+func (u *ProjectContributorUpsertOne) SetLinkedAt(v time.Time) *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetLinkedAt(v)
+	})
+}
+
+// UpdateLinkedAt sets the "linked_at" field to the value that was provided on create.
+func (u *ProjectContributorUpsertOne) UpdateLinkedAt() *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateLinkedAt()
+	})
+}
+
+// ClearLinkedAt clears the value of the "linked_at" field.
+func (u *ProjectContributorUpsertOne) ClearLinkedAt() *ProjectContributorUpsertOne {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.ClearLinkedAt()
+	})
+}
+
+// Exec executes the query.
+func (u *ProjectContributorUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for ProjectContributorCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *ProjectContributorUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *ProjectContributorUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: ProjectContributorUpsertOne.ID is not supported by MySQL driver. Use ProjectContributorUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *ProjectContributorUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // ProjectContributorCreateBulk is the builder for creating many ProjectContributor entities in bulk.
 type ProjectContributorCreateBulk struct {
 	config
 	err      error
 	builders []*ProjectContributorCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the ProjectContributor entities in the database.
@@ -334,6 +799,7 @@ func (_c *ProjectContributorCreateBulk) Save(ctx context.Context) ([]*ProjectCon
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -380,6 +846,295 @@ func (_c *ProjectContributorCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *ProjectContributorCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.ProjectContributor.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.ProjectContributorUpsert) {
+//			SetProjectID(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *ProjectContributorCreateBulk) OnConflict(opts ...sql.ConflictOption) *ProjectContributorUpsertBulk {
+	_c.conflict = opts
+	return &ProjectContributorUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.ProjectContributor.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *ProjectContributorCreateBulk) OnConflictColumns(columns ...string) *ProjectContributorUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &ProjectContributorUpsertBulk{
+		create: _c,
+	}
+}
+
+// ProjectContributorUpsertBulk is the builder for "upsert"-ing
+// a bulk of ProjectContributor nodes.
+type ProjectContributorUpsertBulk struct {
+	create *ProjectContributorCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.ProjectContributor.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(projectcontributor.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *ProjectContributorUpsertBulk) UpdateNewValues() *ProjectContributorUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(projectcontributor.FieldID)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.ProjectContributor.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *ProjectContributorUpsertBulk) Ignore() *ProjectContributorUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *ProjectContributorUpsertBulk) DoNothing() *ProjectContributorUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the ProjectContributorCreateBulk.OnConflict
+// documentation for more info.
+func (u *ProjectContributorUpsertBulk) Update(set func(*ProjectContributorUpsert)) *ProjectContributorUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&ProjectContributorUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *ProjectContributorUpsertBulk) SetProjectID(v uuid.UUID) *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *ProjectContributorUpsertBulk) UpdateProjectID() *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// SetBrokerID sets the "broker_id" field.
+func (u *ProjectContributorUpsertBulk) SetBrokerID(v uuid.UUID) *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetBrokerID(v)
+	})
+}
+
+// UpdateBrokerID sets the "broker_id" field to the value that was provided on create.
+func (u *ProjectContributorUpsertBulk) UpdateBrokerID() *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateBrokerID()
+	})
+}
+
+// SetBrokerName sets the "broker_name" field.
+func (u *ProjectContributorUpsertBulk) SetBrokerName(v string) *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetBrokerName(v)
+	})
+}
+
+// UpdateBrokerName sets the "broker_name" field to the value that was provided on create.
+func (u *ProjectContributorUpsertBulk) UpdateBrokerName() *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateBrokerName()
+	})
+}
+
+// SetMode sets the "mode" field.
+func (u *ProjectContributorUpsertBulk) SetMode(v string) *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetMode(v)
+	})
+}
+
+// UpdateMode sets the "mode" field to the value that was provided on create.
+func (u *ProjectContributorUpsertBulk) UpdateMode() *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateMode()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *ProjectContributorUpsertBulk) SetStatus(v string) *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *ProjectContributorUpsertBulk) UpdateStatus() *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// SetProfiles sets the "profiles" field.
+func (u *ProjectContributorUpsertBulk) SetProfiles(v string) *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetProfiles(v)
+	})
+}
+
+// UpdateProfiles sets the "profiles" field to the value that was provided on create.
+func (u *ProjectContributorUpsertBulk) UpdateProfiles() *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateProfiles()
+	})
+}
+
+// ClearProfiles clears the value of the "profiles" field.
+func (u *ProjectContributorUpsertBulk) ClearProfiles() *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.ClearProfiles()
+	})
+}
+
+// SetLastSeen sets the "last_seen" field.
+func (u *ProjectContributorUpsertBulk) SetLastSeen(v time.Time) *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetLastSeen(v)
+	})
+}
+
+// UpdateLastSeen sets the "last_seen" field to the value that was provided on create.
+func (u *ProjectContributorUpsertBulk) UpdateLastSeen() *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateLastSeen()
+	})
+}
+
+// ClearLastSeen clears the value of the "last_seen" field.
+func (u *ProjectContributorUpsertBulk) ClearLastSeen() *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.ClearLastSeen()
+	})
+}
+
+// SetLocalPath sets the "local_path" field.
+func (u *ProjectContributorUpsertBulk) SetLocalPath(v string) *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetLocalPath(v)
+	})
+}
+
+// UpdateLocalPath sets the "local_path" field to the value that was provided on create.
+func (u *ProjectContributorUpsertBulk) UpdateLocalPath() *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateLocalPath()
+	})
+}
+
+// ClearLocalPath clears the value of the "local_path" field.
+func (u *ProjectContributorUpsertBulk) ClearLocalPath() *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.ClearLocalPath()
+	})
+}
+
+// SetLinkedBy sets the "linked_by" field.
+func (u *ProjectContributorUpsertBulk) SetLinkedBy(v string) *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetLinkedBy(v)
+	})
+}
+
+// UpdateLinkedBy sets the "linked_by" field to the value that was provided on create.
+func (u *ProjectContributorUpsertBulk) UpdateLinkedBy() *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateLinkedBy()
+	})
+}
+
+// ClearLinkedBy clears the value of the "linked_by" field.
+func (u *ProjectContributorUpsertBulk) ClearLinkedBy() *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.ClearLinkedBy()
+	})
+}
+
+// SetLinkedAt sets the "linked_at" field.
+func (u *ProjectContributorUpsertBulk) SetLinkedAt(v time.Time) *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.SetLinkedAt(v)
+	})
+}
+
+// UpdateLinkedAt sets the "linked_at" field to the value that was provided on create.
+func (u *ProjectContributorUpsertBulk) UpdateLinkedAt() *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.UpdateLinkedAt()
+	})
+}
+
+// ClearLinkedAt clears the value of the "linked_at" field.
+func (u *ProjectContributorUpsertBulk) ClearLinkedAt() *ProjectContributorUpsertBulk {
+	return u.Update(func(s *ProjectContributorUpsert) {
+		s.ClearLinkedAt()
+	})
+}
+
+// Exec executes the query.
+func (u *ProjectContributorUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the ProjectContributorCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for ProjectContributorCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *ProjectContributorUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }
