@@ -16,6 +16,7 @@ package telegram
 
 import (
 	"fmt"
+	"log/slog"
 	"strconv"
 )
 
@@ -90,7 +91,7 @@ func buildDefaultAgentKeyboard(agents []string, currentDefault string, threadID 
 	if suffix != "" {
 		for i, row := range kb.InlineKeyboard {
 			for j, btn := range row {
-				kb.InlineKeyboard[i][j].CallbackData = truncateCallback(btn.CallbackData + suffix)
+				kb.InlineKeyboard[i][j].CallbackData = fitCallback(btn.CallbackData, suffix)
 			}
 		}
 	}
@@ -106,7 +107,7 @@ func buildDefaultAgentKeyboard(agents []string, currentDefault string, threadID 
 		}
 	}
 	kb.InlineKeyboard = append(kb.InlineKeyboard, []InlineKeyboardButton{
-		{Text: noneLabel, CallbackData: truncateCallback("dflt:__none__" + suffix)},
+		{Text: noneLabel, CallbackData: fitCallback("dflt:__none__", suffix)},
 	})
 	return kb
 }
@@ -262,5 +263,25 @@ func truncateCallback(data string) string {
 	if len(data) <= maxCallbackData {
 		return data
 	}
+	slog.Warn("callback_data exceeds 64-byte Telegram limit, truncating",
+		"len", len(data), "data", data)
 	return data[:maxCallbackData]
+}
+
+// fitCallback truncates the prefix portion of callback data to make room for
+// a required suffix (e.g. a threadID) that must not be corrupted. If the
+// prefix alone already exceeds the limit, it falls back to simple truncation
+// of the combined string.
+func fitCallback(prefix, suffix string) string {
+	combined := prefix + suffix
+	if len(combined) <= maxCallbackData {
+		return combined
+	}
+	maxPrefix := maxCallbackData - len(suffix)
+	if maxPrefix > 0 {
+		slog.Warn("callback_data exceeds 64-byte Telegram limit, truncating prefix to preserve suffix",
+			"len", len(combined), "prefix", prefix, "suffix", suffix)
+		return prefix[:maxPrefix] + suffix
+	}
+	return truncateCallback(combined)
 }

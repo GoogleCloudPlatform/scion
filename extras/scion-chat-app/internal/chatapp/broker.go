@@ -91,11 +91,13 @@ func (b *BrokerServer) Publish(ctx context.Context, topic string, msg *messages.
 		}
 	}
 
-	b.log.Debug("received message via broker",
-		"topic", topic,
-		"sender", msg.Sender,
-		"type", msg.Type,
-	)
+	if msg != nil {
+		b.log.Debug("received message via broker",
+			"topic", topic,
+			"sender", msg.Sender,
+			"type", msg.Type,
+		)
+	}
 	if b.handler != nil {
 		return b.handler(ctx, topic, msg)
 	}
