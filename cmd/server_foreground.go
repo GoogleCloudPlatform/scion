@@ -642,63 +642,38 @@ func checkServerPorts(cfg *config.GlobalConfig) error {
 	return nil
 }
 
-// initStore initializes the database store. The provided context is used for
-// schema migration and the initial health-check ping so that a Ctrl+C during
-// startup cancels those operations gracefully.
-func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, error) {
+// initStore initializes the database store.
+func initStore(cfg *config.GlobalConfig) (store.Store, error) {
 	connMaxLifetime, err := cfg.Database.ConnMaxLifetimeDuration()
-	if err != nil {
-		return nil, fmt.Errorf("invalid database pool config: %w", err)
-	}
-	connMaxIdleTime, err := cfg.Database.ConnMaxIdleTimeDuration()
 	if err != nil {
 		return nil, fmt.Errorf("invalid database pool config: %w", err)
 	}
 
 	// The connection pool config is shared across backends. For SQLite,
 	// MaxOpenConns is forced to 1 by applyDatabasePoolDefaults to serialize
-	// writes; for Postgres it carries the larger pool sizing (default 10/5/30m
-	// lifetime, 5m idle) since Postgres handles concurrent connections natively.
+	// writes; for Postgres it carries the larger pool sizing (default 20/5/30m)
+	// since Postgres handles concurrent connections natively.
 	pool := entc.PoolConfig{
 		MaxOpenConns:    cfg.Database.MaxOpenConns,
 		MaxIdleConns:    cfg.Database.MaxIdleConns,
 		ConnMaxLifetime: connMaxLifetime,
-		ConnMaxIdleTime: connMaxIdleTime,
 	}
 
 	var entClient *ent.Client
 	switch cfg.Database.Driver {
 	case "sqlite":
-		connMaxLifetime, err := cfg.Database.ConnMaxLifetimeDuration()
-		if err != nil {
-			return nil, fmt.Errorf("invalid database pool config: %w", err)
-		}
-
 		// All Hub state lives in a single Ent-backed SQLite database.
-		entClient, err := entc.OpenSQLite("file:"+cfg.Database.URL+"?cache=shared", entc.PoolConfig{
-			MaxOpenConns:    cfg.Database.MaxOpenConns,
-			MaxIdleConns:    cfg.Database.MaxIdleConns,
-			ConnMaxLifetime: connMaxLifetime,
-		})
+		entClient, err = entc.OpenSQLite("file:"+cfg.Database.URL+"?cache=shared", pool)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open database: %w", err)
 		}
-
-		s := entadapter.NewCompositeStore(entClient)
-
-		// Migrate runs Ent's schema migration and seeds built-in maintenance
-		// operations (parity with the former raw-SQL store).
-		if err := s.Migrate(context.Background()); err != nil {
-			s.Close()
-			return nil, fmt.Errorf("failed to run migrations: %w", err)
+	case "postgres":
+		// Postgres uses the pgx stdlib driver. The URL is a standard
+		// connection string (e.g. "postgres://user:pass@host:5432/db?sslmode=require").
+		entClient, err = entc.OpenPostgres(cfg.Database.URL, pool)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open database: %w", err)
 		}
-
-		if err := s.Ping(context.Background()); err != nil {
-			s.Close()
-			return nil, fmt.Errorf("database ping failed: %w", err)
-		}
-
-		return s, nil
 	default:
 		return nil, fmt.Errorf("unsupported database driver: %s", cfg.Database.Driver)
 	}
@@ -707,54 +682,17 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, erro
 
 	// Migrate runs Ent's schema migration and seeds built-in maintenance
 	// operations (parity with the former raw-SQL store).
-	if err := s.Migrate(ctx); err != nil {
+	if err := s.Migrate(context.Background()); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
 
-	if err := s.Ping(ctx); err != nil {
+	if err := s.Ping(context.Background()); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("database ping failed: %w", err)
 	}
 
 	return s, nil
-}
-
-// maybeMigrateLegacySQLite detects a legacy raw-SQL hub.db at path and, unless
-// the operator opted out with --no-auto-migrate, upgrades it in-process to the
-// consolidated Ent schema (after taking an automatic backup). It is a no-op when
-// the file is already the Ent schema, empty, or absent. The provided context
-// allows the migration to be cancelled (e.g. Ctrl+C during first boot).
-func maybeMigrateLegacySQLite(ctx context.Context, path string) error {
-	legacy, err := entc.IsLegacyRawSQLSchema(path)
-	if err != nil {
-		return fmt.Errorf("detecting database schema: %w", err)
-	}
-	if !legacy {
-		return nil
-	}
-
-	if noAutoMigrate {
-		// The operator opted out, but the file is a legacy schema the Ent store
-		// cannot open. Fail loudly with guidance rather than crash later.
-		return fmt.Errorf("detected a legacy raw-SQL hub database at %s but --no-auto-migrate is set; "+
-			"remove the flag to upgrade it in place (a backup is taken automatically), "+
-			"or point --db at an already-migrated database", path)
-	}
-
-	log.Printf("Detected legacy raw-SQL hub database at %s. Backing up and migrating to the Ent schema...", path)
-	report, err := entc.MigrateAlphaSQLite(ctx, path, entc.AlphaOptions{
-		Logf: func(format string, args ...any) { log.Printf(format, args...) },
-	})
-	if err != nil {
-		return fmt.Errorf("migrating legacy database (original left untouched): %w", err)
-	}
-	if report.Skipped {
-		return nil
-	}
-	log.Printf("Migration α complete: %d tables, %d rows migrated. Backup: %s",
-		len(report.Tables), report.TotalRows(), report.BackupPath)
-	return nil
 }
 
 // initDevAuth initializes dev authentication and returns the token.
@@ -1082,10 +1020,8 @@ func newEventPublisher(ctx context.Context, cfg *config.GlobalConfig) hub.EventP
 	return hub.NewChannelEventPublisher()
 }
 
-// initWebServer creates and configures the Web server. The provided context is
-// threaded to the event publisher so that the Postgres LISTEN/NOTIFY goroutine
-// is cancelled cleanly on shutdown, preventing connection leaks.
-func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger *slog.Logger) *hub.WebServer {
+// initWebServer creates and configures the Web server.
+func initWebServer(cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger *slog.Logger) *hub.WebServer {
 	webHost := cfg.Hub.Host
 	if webHost == "" {
 		webHost = "0.0.0.0"
@@ -1139,7 +1075,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	webSrv.SetRequestLogger(requestLogger)
 
 	// Create shared event publisher for real-time SSE
-	eventPub := newEventPublisher(ctx, cfg)
+	eventPub := newEventPublisher(context.Background(), cfg)
 	webSrv.SetEventPublisher(eventPub)
 
 	// Wire Hub services into WebServer if Hub is enabled
