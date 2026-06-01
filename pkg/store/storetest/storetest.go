@@ -26,9 +26,9 @@
 //   - Read:          get by ID, verify all fields; missing ID -> ErrNotFound.
 //   - Update:        modify fields, verify the change is persisted.
 //   - Delete:        delete an entity, verify it is excluded from the default
-//                    list and Get returns ErrNotFound. For domains that support
-//                    soft-delete, additionally verify it is still returned when
-//                    deleted entities are explicitly included.
+//     list and Get returns ErrNotFound. For domains that support
+//     soft-delete, additionally verify it is still returned when
+//     deleted entities are explicitly included.
 //   - List-paginate: insert N entities, verify limit/pagination behavior.
 //   - List-filter:   verify filtering returns only matching entities.
 //
@@ -68,6 +68,12 @@ type Domain[T any] struct {
 
 	// GetID returns the primary identifier used for Get/Delete.
 	GetID func(*T) string
+
+	// Prepare, when non-nil, runs once against each fresh store before a test
+	// category exercises it. It seeds prerequisite rows that entities of this
+	// domain depend on (e.g. the project an agent references via a required
+	// foreign key). It must be idempotent with respect to a fresh store.
+	Prepare func(t *testing.T, ctx context.Context, s store.Store)
 
 	// Create persists a new entity.
 	Create func(ctx context.Context, s store.Store, e *T) error
@@ -154,9 +160,17 @@ func RunDomain[T any](t *testing.T, factory Factory, d Domain[T]) {
 	})
 }
 
+// prepareStore runs the domain's Prepare hook (if any) against a fresh store.
+func prepareStore[T any](t *testing.T, ctx context.Context, s store.Store, d Domain[T]) {
+	if d.Prepare != nil {
+		d.Prepare(t, ctx, s)
+	}
+}
+
 func testCreate[T any](t *testing.T, factory Factory, d Domain[T]) {
 	ctx := context.Background()
 	s := factory(t)
+	prepareStore(t, ctx, s, d)
 
 	e := d.Make(1)
 	require.NoError(t, d.Create(ctx, s, e), "Create should succeed")
@@ -170,6 +184,7 @@ func testCreate[T any](t *testing.T, factory Factory, d Domain[T]) {
 func testRead[T any](t *testing.T, factory Factory, d Domain[T]) {
 	ctx := context.Background()
 	s := factory(t)
+	prepareStore(t, ctx, s, d)
 
 	e := d.Make(1)
 	require.NoError(t, d.Create(ctx, s, e))
@@ -186,6 +201,7 @@ func testRead[T any](t *testing.T, factory Factory, d Domain[T]) {
 func testUpdate[T any](t *testing.T, factory Factory, d Domain[T]) {
 	ctx := context.Background()
 	s := factory(t)
+	prepareStore(t, ctx, s, d)
 
 	e := d.Make(1)
 	require.NoError(t, d.Create(ctx, s, e))
@@ -201,6 +217,7 @@ func testUpdate[T any](t *testing.T, factory Factory, d Domain[T]) {
 func testDelete[T any](t *testing.T, factory Factory, d Domain[T]) {
 	ctx := context.Background()
 	s := factory(t)
+	prepareStore(t, ctx, s, d)
 
 	e := d.Make(1)
 	require.NoError(t, d.Create(ctx, s, e))
@@ -231,6 +248,7 @@ func testDelete[T any](t *testing.T, factory Factory, d Domain[T]) {
 func testPaginate[T any](t *testing.T, factory Factory, d Domain[T]) {
 	ctx := context.Background()
 	s := factory(t)
+	prepareStore(t, ctx, s, d)
 
 	const n = 5
 	for i := 0; i < n; i++ {
@@ -257,6 +275,7 @@ func testFilter[T any](t *testing.T, factory Factory, d Domain[T]) {
 		fc := fc
 		t.Run(fc.Name, func(t *testing.T) {
 			s := factory(t)
+			prepareStore(t, ctx, s, d)
 			fc.Seed(t, ctx, s)
 			res, err := fc.List(ctx, s)
 			require.NoError(t, err)

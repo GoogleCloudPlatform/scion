@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -48,11 +49,17 @@ func RunStoreSuite(t *testing.T, factory Factory) {
 	RunDomain(t, factory, RuntimeBrokerDomain())
 	RunDomain(t, factory, BrokerSecretDomain())
 	RunDomain(t, factory, BrokerJoinTokenDomain())
+	RunDomain(t, factory, TemplateDomain())
+	RunDomain(t, factory, HarnessConfigDomain())
+	RunDomain(t, factory, SecretDomain())
+	RunDomain(t, factory, EnvVarDomain())
+	RunDomain(t, factory, AgentDomain())
+
+	// Agent optimistic locking is not expressible through the generic CRUD
+	// categories, so it gets a dedicated backend-agnostic check.
+	t.Run("agent/OptimisticLock", func(t *testing.T) { runAgentOptimisticLock(t, factory) })
 }
 
-// listFrom wraps a plain slice from a non-paginated list method into a
-// ListResult so it can satisfy a FilterCase. TotalCount mirrors the slice
-// length, which is the contract the filter oracle checks.
 func listFrom[T any](items []T, err error) (*store.ListResult[T], error) {
 	if err != nil {
 		return nil, err
@@ -404,4 +411,180 @@ func NotificationSubscriptionDomain() Domain[store.NotificationSubscription] {
 			},
 		},
 	}
+}
+
+// agentDomainProjectID is the project every agent oracle entity references. It
+// is seeded by AgentDomain.Prepare so the required project foreign key resolves
+// across backends.
+const agentDomainProjectID = "30000000-0000-0000-0000-0000000000d1"
+
+// seedAgentProject creates the shared project agents reference. It is called
+// once per fresh store before the agent categories run.
+func seedAgentProject(t *testing.T, ctx context.Context, s store.Store) {
+	t.Helper()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID:         agentDomainProjectID,
+		Name:       "agent-oracle-project",
+		Slug:       "agent-oracle-" + agentDomainProjectID[:8],
+		Visibility: "private",
+	}))
+}
+
+// newOracleAgent builds a minimal valid agent referencing the seeded project.
+func newOracleAgent(slug string) *store.Agent {
+	id := uuid.NewString()
+	return &store.Agent{
+		ID:         id,
+		Slug:       slug + "-" + id[:8],
+		Name:       slug,
+		Template:   "default",
+		ProjectID:  agentDomainProjectID,
+		Phase:      "running",
+		Visibility: "private",
+	}
+}
+
+// seedLiveAndDeleted inserts one live agent and one soft-deleted agent.
+func seedLiveAndDeleted(t *testing.T, ctx context.Context, s store.Store) {
+	t.Helper()
+	live := newOracleAgent("live")
+	require.NoError(t, s.CreateAgent(ctx, live))
+
+	gone := newOracleAgent("gone")
+	require.NoError(t, s.CreateAgent(ctx, gone))
+	gone.DeletedAt = time.Now()
+	require.NoError(t, s.UpdateAgent(ctx, gone))
+}
+
+// AgentDomain describes the agent entity for the CRUD-parity oracle. Beyond the
+// standard categories it covers the agent-specific behaviors that must hold
+// identically across backends: the ancestry membership filter, soft-delete
+// exclusion, and (via runAgentOptimisticLock) state_version conflict handling.
+func AgentDomain() Domain[store.Agent] {
+	return Domain[store.Agent]{
+		Name: "agent",
+		Prepare: func(t *testing.T, ctx context.Context, s store.Store) {
+			seedAgentProject(t, ctx, s)
+		},
+		Make: func(seq int) *store.Agent {
+			id := uuid.NewString()
+			return &store.Agent{
+				ID:         id,
+				Slug:       fmt.Sprintf("agent-%d-%s", seq, id[:8]),
+				Name:       fmt.Sprintf("Agent %d", seq),
+				Template:   "default",
+				ProjectID:  agentDomainProjectID,
+				Phase:      "running",
+				Activity:   "thinking",
+				Visibility: "private",
+				Labels:     map[string]string{"seq": fmt.Sprintf("%d", seq)},
+			}
+		},
+		GetID: func(a *store.Agent) string { return a.ID },
+		Create: func(ctx context.Context, s store.Store, a *store.Agent) error {
+			return s.CreateAgent(ctx, a)
+		},
+		Get: func(ctx context.Context, s store.Store, id string) (*store.Agent, error) {
+			return s.GetAgent(ctx, id)
+		},
+		List: func(ctx context.Context, s store.Store, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
+			return s.ListAgents(ctx, store.AgentFilter{}, opts)
+		},
+		VerifyEqual: func(t *testing.T, want, got *store.Agent) {
+			assert.Equal(t, want.ID, got.ID)
+			assert.Equal(t, want.Slug, got.Slug)
+			assert.Equal(t, want.Name, got.Name)
+			assert.Equal(t, want.ProjectID, got.ProjectID)
+			assert.Equal(t, want.Phase, got.Phase)
+			assert.Equal(t, int64(1), got.StateVersion, "CreateAgent should initialize state_version to 1")
+			assert.False(t, got.Created.IsZero(), "Created timestamp should be set")
+		},
+		Mutate: func(a *store.Agent) {
+			a.Name = "Renamed " + a.Name
+			a.Phase = "stopped"
+		},
+		Update: func(ctx context.Context, s store.Store, a *store.Agent) error {
+			return s.UpdateAgent(ctx, a)
+		},
+		VerifyMutated: func(t *testing.T, got *store.Agent) {
+			assert.Contains(t, got.Name, "Renamed ")
+			assert.Equal(t, "stopped", got.Phase)
+			assert.Equal(t, int64(2), got.StateVersion, "UpdateAgent should bump state_version")
+		},
+		// DeleteAgent is a hard delete; soft-delete (deleted_at via UpdateAgent)
+		// is covered by the filter cases below.
+		Delete: func(ctx context.Context, s store.Store, id string) error {
+			return s.DeleteAgent(ctx, id)
+		},
+		Filters: []FilterCase[store.Agent]{
+			{
+				// Ancestry membership: only agents whose ancestry chain contains
+				// the queried principal are returned.
+				Name: "ByAncestor",
+				Seed: func(t *testing.T, ctx context.Context, s store.Store) {
+					child := newOracleAgent("child")
+					child.Ancestry = []string{"root-user", "mid-agent"}
+					require.NoError(t, s.CreateAgent(ctx, child))
+
+					sibling := newOracleAgent("sibling")
+					sibling.Ancestry = []string{"root-user"}
+					require.NoError(t, s.CreateAgent(ctx, sibling))
+
+					orphan := newOracleAgent("orphan")
+					require.NoError(t, s.CreateAgent(ctx, orphan))
+				},
+				List: func(ctx context.Context, s store.Store) (*store.ListResult[store.Agent], error) {
+					return s.ListAgents(ctx, store.AgentFilter{AncestorID: "root-user"}, store.ListOptions{})
+				},
+				WantCount: 2,
+			},
+			{
+				// Soft-deleted agents are excluded from the default listing.
+				Name: "ExcludeSoftDeleted",
+				Seed: seedLiveAndDeleted,
+				List: func(ctx context.Context, s store.Store) (*store.ListResult[store.Agent], error) {
+					return s.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{})
+				},
+				WantCount: 1,
+			},
+			{
+				// ... but reappear when explicitly included.
+				Name: "IncludeSoftDeleted",
+				Seed: seedLiveAndDeleted,
+				List: func(ctx context.Context, s store.Store) (*store.ListResult[store.Agent], error) {
+					return s.ListAgents(ctx, store.AgentFilter{IncludeDeleted: true}, store.ListOptions{})
+				},
+				WantCount: 2,
+			},
+		},
+	}
+}
+
+// runAgentOptimisticLock verifies that a stale UpdateAgent (one carrying an
+// out-of-date StateVersion) is rejected with ErrVersionConflict rather than
+// silently overwriting a concurrent winner.
+func runAgentOptimisticLock(t *testing.T, factory Factory) {
+	ctx := context.Background()
+	s := factory(t)
+	seedAgentProject(t, ctx, s)
+
+	a := newOracleAgent("locked")
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	first, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	second, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+
+	// First writer wins, advancing the version.
+	first.Name = "Winner"
+	require.NoError(t, s.UpdateAgent(ctx, first))
+
+	// Second writer holds the now-stale version and must conflict.
+	second.Name = "Loser"
+	assert.ErrorIs(t, s.UpdateAgent(ctx, second), store.ErrVersionConflict)
+
+	final, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Winner", final.Name)
 }
