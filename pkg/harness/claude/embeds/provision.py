@@ -202,14 +202,19 @@ def _select_auth_method(
         return "oauth-token", "CLAUDE_CODE_OAUTH_TOKEN"
     if has_authfile:
         return "auth-file", ""
-    if has_adc and has_gcp_project and has_gcp_region:
+    if has_gcp_project and has_gcp_region:
+        # Accept vertex-ai when project + region are set, even without a local
+        # ADC file — in GCP environments (GKE, Cloud Run, Compute Engine) the
+        # metadata server provides credentials via the attached service account.
+        # The GCP SDK / Vertex AI client handles this fallback natively.
         return "vertex-ai", ""
 
     raise ValueError(
         "claude: no valid auth method found; set ANTHROPIC_API_KEY for direct API "
         "access, CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) or "
-        f"{CLAUDE_AUTH_FILE} for subscription auth, or provide ADC + "
-        "GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_REGION for Vertex AI"
+        f"{CLAUDE_AUTH_FILE} for subscription auth, or provide "
+        "GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_REGION (with ADC or GCP service "
+        "account) for Vertex AI"
     )
 
 

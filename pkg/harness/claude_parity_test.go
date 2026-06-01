@@ -690,6 +690,100 @@ func TestClaudeProvisionScript_Integration_VertexAI(t *testing.T) {
 	}
 }
 
+// TestClaudeProvisionScript_Integration_VertexAI_NoADC verifies the script
+// auto-detects vertex-ai auth even without a local ADC file — in GCP
+// environments (GKE, Cloud Run, Compute Engine) the metadata server provides
+// credentials via the attached service account.
+func TestClaudeProvisionScript_Integration_VertexAI_NoADC(t *testing.T) {
+	pyPath, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available; skipping script integration test")
+	}
+
+	dir := seedClaudeDir(t)
+	scriptPath := filepath.Join(dir, "provision.py")
+
+	home := t.TempDir()
+	bundle := filepath.Join(home, ".scion", "harness")
+	if err := os.MkdirAll(filepath.Join(bundle, "inputs"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(bundle, "outputs"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed .claude.json but do NOT create ADC file — simulates GCP SA auth.
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"projects":{}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest := map[string]any{
+		"schema_version":     1,
+		"command":            "provision",
+		"agent_name":         "test-agent",
+		"agent_home":         home,
+		"agent_workspace":    "/workspace",
+		"harness_bundle_dir": bundle,
+		"harness_config":     map[string]any{"harness": "claude"},
+		"inputs":             map[string]any{},
+		"outputs": map[string]any{
+			"env":           filepath.Join(bundle, "outputs", "env.json"),
+			"resolved_auth": filepath.Join(bundle, "outputs", "resolved-auth.json"),
+		},
+		"platform": map[string]any{"goos": "linux", "goarch": "amd64"},
+	}
+	manifestPath := filepath.Join(bundle, "manifest.json")
+	manifestBytes, _ := json.MarshalIndent(manifest, "", "  ")
+	if err := os.WriteFile(manifestPath, manifestBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// No explicit type, no ADC file — just project + region. Auto-detect
+	// should resolve to vertex-ai via metadata server fallback.
+	candidates := map[string]any{
+		"schema_version":  1,
+		"explicit_type":   "",
+		"resolved_method": "container-script",
+		"env_vars":        []string{"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"},
+		"files":           []any{},
+	}
+	candBytes, _ := json.MarshalIndent(candidates, "", "  ")
+	if err := os.WriteFile(filepath.Join(bundle, "inputs", "auth-candidates.json"), candBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(pyPath, scriptPath, "--manifest", manifestPath)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("provision script failed (GCP SA / no ADC): %v\noutput: %s", err, out)
+	}
+
+	resolvedBytes, err := os.ReadFile(filepath.Join(bundle, "outputs", "resolved-auth.json"))
+	if err != nil {
+		t.Fatalf("resolved-auth.json missing: %v", err)
+	}
+	var resolved map[string]any
+	if err := json.Unmarshal(resolvedBytes, &resolved); err != nil {
+		t.Fatalf("resolved-auth.json invalid: %v", err)
+	}
+	if resolved["method"] != "vertex-ai" {
+		t.Errorf("method=%v want vertex-ai (auto-detected from project+region without ADC)", resolved["method"])
+	}
+
+	envBytes, err := os.ReadFile(filepath.Join(bundle, "outputs", "env.json"))
+	if err != nil {
+		t.Fatalf("env.json missing: %v", err)
+	}
+	var envOverlay map[string]any
+	if err := json.Unmarshal(envBytes, &envOverlay); err != nil {
+		t.Fatalf("env.json invalid: %v", err)
+	}
+	if envOverlay["CLAUDE_CODE_USE_VERTEX"] != "1" {
+		t.Errorf("CLAUDE_CODE_USE_VERTEX=%v want 1", envOverlay["CLAUDE_CODE_USE_VERTEX"])
+	}
+}
+
 // TestClaudeProvisionScript_Integration_MCP runs the script with a staged
 // mcp-servers.json input and asserts it translates entries into Claude Code's
 // native mcpServers shape in .claude.json.
