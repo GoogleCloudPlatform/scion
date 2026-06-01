@@ -239,6 +239,53 @@ export class ScionNav extends LitElement {
       display: none;
     }
 
+    /* Collapse toggle */
+    .collapse-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.75rem;
+      margin: 0.75rem;
+      padding: 0.625rem 0.75rem;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.5rem;
+      background: transparent;
+      color: var(--scion-text-muted, #64748b);
+      cursor: pointer;
+      font-size: 0.875rem;
+      font-weight: 500;
+      transition: all 0.15s ease;
+    }
+
+    .collapse-toggle:hover {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      color: var(--scion-text, #1e293b);
+    }
+
+    .collapse-toggle sl-icon {
+      font-size: 1.125rem;
+      flex-shrink: 0;
+      transition: transform var(--scion-transition-normal, 250ms ease);
+    }
+
+    :host([collapsed]) .collapse-toggle sl-icon {
+      transform: rotate(180deg);
+    }
+
+    .collapse-toggle-text {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    :host([collapsed]) .collapse-toggle-text {
+      display: none;
+    }
+
+    /* Smooth width transition */
+    :host {
+      transition: width var(--scion-transition-normal, 250ms ease);
+    }
   `;
 
   override render() {
@@ -301,6 +348,16 @@ export class ScionNav extends LitElement {
             `
           : ''}
       </nav>
+
+      <button
+        class="collapse-toggle"
+        @click=${(): void => this.handleCollapseToggle()}
+        aria-label=${this.collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        title=${this.collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+      >
+        <sl-icon name="chevron-left"></sl-icon>
+        <span class="collapse-toggle-text">Collapse</span>
+      </button>
     `;
   }
 
@@ -314,11 +371,15 @@ export class ScionNav extends LitElement {
     return this.currentPath.startsWith(path);
   }
 
-  /**
-   * Handle navigation link click.
-   * Prevents default browser navigation and dispatches a custom event
-   * so the client-side router can handle it without a full page reload.
-   */
+  private handleCollapseToggle(): void {
+    this.dispatchEvent(
+      new CustomEvent('sidebar-toggle', {
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
   private handleNavClick(e: Event, path: string): void {
     e.preventDefault();
     // Dispatch a custom event for the app shell and router to handle

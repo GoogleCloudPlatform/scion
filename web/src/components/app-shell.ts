@@ -71,6 +71,9 @@ export class ScionApp extends LitElement {
   @state()
   _drawerOpen = false;
 
+  @state()
+  _sidebarCollapsed = false;
+
   /** Bound listener references for cleanup */
   private _accessDeniedHandler = this.handleAccessDenied.bind(this);
   private _pageTitleHandler = this.handlePageTitle.bind(this);
@@ -90,6 +93,8 @@ export class ScionApp extends LitElement {
       position: sticky;
       top: 0;
       height: 100vh;
+      transition: width var(--scion-transition-normal, 250ms ease);
+      overflow: hidden;
     }
 
     @media (max-width: 768px) {
@@ -187,6 +192,7 @@ export class ScionApp extends LitElement {
     window.addEventListener('scion:access-denied', this._accessDeniedHandler as EventListener);
     this.addEventListener(PAGE_TITLE_EVENT, this._pageTitleHandler as EventListener);
     this.updateDocumentTitle();
+    this._sidebarCollapsed = localStorage.getItem('scion-sidebar-collapsed') === 'true';
   }
 
   override disconnectedCallback(): void {
@@ -245,7 +251,12 @@ export class ScionApp extends LitElement {
     return html`
       <!-- Desktop Sidebar -->
       <aside class="sidebar">
-        <scion-nav .user=${this.user} .currentPath=${this.currentPath}></scion-nav>
+        <scion-nav
+          .user=${this.user}
+          .currentPath=${this.currentPath}
+          ?collapsed=${this._sidebarCollapsed}
+          @sidebar-toggle=${(): void => this.handleSidebarToggle()}
+        ></scion-nav>
       </aside>
 
       <!-- Mobile Drawer -->
@@ -335,9 +346,11 @@ export class ScionApp extends LitElement {
     return 'Page Not Found';
   }
 
-  /**
-   * Handle mobile menu toggle
-   */
+  private handleSidebarToggle(): void {
+    this._sidebarCollapsed = !this._sidebarCollapsed;
+    localStorage.setItem('scion-sidebar-collapsed', String(this._sidebarCollapsed));
+  }
+
   private handleMobileMenuToggle(): void {
     this._drawerOpen = !this._drawerOpen;
   }

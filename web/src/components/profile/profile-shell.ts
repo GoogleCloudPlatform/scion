@@ -50,6 +50,9 @@ export class ScionProfileShell extends LitElement {
   @state()
   _drawerOpen = false;
 
+  @state()
+  _sidebarCollapsed = false;
+
   static override styles = css`
     :host {
       display: flex;
@@ -64,6 +67,8 @@ export class ScionProfileShell extends LitElement {
       position: sticky;
       top: 0;
       height: 100vh;
+      transition: width var(--scion-transition-normal, 250ms ease);
+      overflow: hidden;
     }
 
     @media (max-width: 768px) {
@@ -123,6 +128,11 @@ export class ScionProfileShell extends LitElement {
     }
   `;
 
+  override connectedCallback(): void {
+    super.connectedCallback();
+    this._sidebarCollapsed = localStorage.getItem('scion-sidebar-collapsed') === 'true';
+  }
+
   override updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('currentPath')) {
       this.updateDocumentTitle();
@@ -139,7 +149,12 @@ export class ScionProfileShell extends LitElement {
 
     return html`
       <aside class="sidebar">
-        <scion-profile-nav .user=${this.user} .currentPath=${this.currentPath}></scion-profile-nav>
+        <scion-profile-nav
+          .user=${this.user}
+          .currentPath=${this.currentPath}
+          ?collapsed=${this._sidebarCollapsed}
+          @sidebar-toggle=${(): void => this.handleSidebarToggle()}
+        ></scion-profile-nav>
       </aside>
 
       <sl-drawer
@@ -174,6 +189,11 @@ export class ScionProfileShell extends LitElement {
 
   private getPageTitle(): string {
     return PROFILE_TITLES[this.currentPath] || 'Profile';
+  }
+
+  private handleSidebarToggle(): void {
+    this._sidebarCollapsed = !this._sidebarCollapsed;
+    localStorage.setItem('scion-sidebar-collapsed', String(this._sidebarCollapsed));
   }
 
   private handleMobileMenuToggle(): void {

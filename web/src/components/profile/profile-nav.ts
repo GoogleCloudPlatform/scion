@@ -65,6 +65,9 @@ export class ScionProfileNav extends LitElement {
   @property({ type: String })
   currentPath = '/profile';
 
+  @property({ type: Boolean, reflect: true })
+  collapsed = false;
+
   @state()
   private githubAppUrl: string | null = null;
 
@@ -291,6 +294,107 @@ export class ScionProfileNav extends LitElement {
       margin-left: auto;
       opacity: 0.6;
     }
+
+    /* Collapsed state */
+    :host {
+      transition: width var(--scion-transition-normal, 250ms ease);
+    }
+
+    :host([collapsed]) {
+      width: var(--scion-sidebar-collapsed-width, 64px);
+    }
+
+    :host([collapsed]) .logo-text {
+      display: none;
+    }
+
+    :host([collapsed]) .return-link {
+      justify-content: center;
+      padding: 0.75rem;
+      gap: 0;
+    }
+
+    :host([collapsed]) .return-link span {
+      display: none;
+    }
+
+    :host([collapsed]) .user-info {
+      justify-content: center;
+      padding: 0.75rem;
+    }
+
+    :host([collapsed]) .user-details {
+      display: none;
+    }
+
+    :host([collapsed]) .nav-section-title {
+      display: none;
+    }
+
+    :host([collapsed]) .nav-link {
+      justify-content: center;
+      padding: 0.75rem;
+    }
+
+    :host([collapsed]) .nav-link-text {
+      display: none;
+    }
+
+    :host([collapsed]) .nav-link-external {
+      justify-content: center;
+      padding: 0.75rem;
+    }
+
+    :host([collapsed]) .nav-link-external .nav-link-text {
+      display: none;
+    }
+
+    :host([collapsed]) .nav-link-external .external-icon {
+      display: none;
+    }
+
+    /* Collapse toggle */
+    .collapse-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.75rem;
+      margin: 0.75rem;
+      padding: 0.625rem 0.75rem;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.5rem;
+      background: transparent;
+      color: var(--scion-text-muted, #64748b);
+      cursor: pointer;
+      font-size: 0.875rem;
+      font-weight: 500;
+      transition: all 0.15s ease;
+    }
+
+    .collapse-toggle:hover {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      color: var(--scion-text, #1e293b);
+    }
+
+    .collapse-toggle sl-icon {
+      font-size: 1.125rem;
+      flex-shrink: 0;
+      transition: transform var(--scion-transition-normal, 250ms ease);
+    }
+
+    :host([collapsed]) .collapse-toggle sl-icon {
+      transform: rotate(180deg);
+    }
+
+    .collapse-toggle-text {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    :host([collapsed]) .collapse-toggle-text {
+      display: none;
+    }
   `;
 
   override connectedCallback(): void {
@@ -331,7 +435,7 @@ export class ScionProfileNav extends LitElement {
 
       <a href="/" class="return-link">
         <sl-icon name="arrow-left-circle"></sl-icon>
-        Return to Hub
+        <span>Return to Hub</span>
       </a>
 
       ${this.user
@@ -388,7 +492,26 @@ export class ScionProfileNav extends LitElement {
           `
         )}
       </nav>
+
+      <button
+        class="collapse-toggle"
+        @click=${(): void => this.handleCollapseToggle()}
+        aria-label=${this.collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        title=${this.collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+      >
+        <sl-icon name="chevron-left"></sl-icon>
+        <span class="collapse-toggle-text">Collapse</span>
+      </button>
     `;
+  }
+
+  private handleCollapseToggle(): void {
+    this.dispatchEvent(
+      new CustomEvent('sidebar-toggle', {
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   private isActive(path: string): boolean {
