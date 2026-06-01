@@ -235,7 +235,7 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 
 // GetAgent retrieves an agent by ID.
 func (s *AgentStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
-	uid, err := parseUUID(id)
+	uid, err := parseGetID(id)
 	if err != nil {
 		return nil, err
 	}

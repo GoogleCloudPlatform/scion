@@ -190,7 +190,7 @@ func (s *ProjectStore) CreateProject(ctx context.Context, p *store.Project) erro
 
 // GetProject retrieves a project by ID, including computed fields.
 func (s *ProjectStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
-	uid, err := parseUUID(id)
+	uid, err := parseGetID(id)
 	if err != nil {
 		return nil, err
 	}
@@ -598,7 +598,7 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 
 // GetRuntimeBroker retrieves a runtime broker by ID.
 func (s *ProjectStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
-	uid, err := parseUUID(id)
+	uid, err := parseGetID(id)
 	if err != nil {
 		return nil, err
 	}

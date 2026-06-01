@@ -150,7 +150,7 @@ func (s *ScheduleStore) CreateSchedule(ctx context.Context, sc *store.Schedule) 
 
 // GetSchedule retrieves a schedule by ID.
 func (s *ScheduleStore) GetSchedule(ctx context.Context, id string) (*store.Schedule, error) {
-	uid, err := parseUUID(id)
+	uid, err := parseGetID(id)
 	if err != nil {
 		return nil, err
 	}
@@ -405,7 +405,7 @@ func (s *ScheduleStore) CreateScheduledEvent(ctx context.Context, event *store.S
 
 // GetScheduledEvent retrieves a scheduled event by ID.
 func (s *ScheduleStore) GetScheduledEvent(ctx context.Context, id string) (*store.ScheduledEvent, error) {
-	uid, err := parseUUID(id)
+	uid, err := parseGetID(id)
 	if err != nil {
 		return nil, err
 	}

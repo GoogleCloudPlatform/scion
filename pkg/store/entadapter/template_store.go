@@ -154,7 +154,7 @@ func (s *TemplateStore) CreateTemplate(ctx context.Context, template *store.Temp
 
 // GetTemplate retrieves a template by ID.
 func (s *TemplateStore) GetTemplate(ctx context.Context, id string) (*store.Template, error) {
-	uid, err := parseUUID(id)
+	uid, err := parseGetID(id)
 	if err != nil {
 		return nil, err
 	}
@@ -421,7 +421,7 @@ func (s *TemplateStore) CreateHarnessConfig(ctx context.Context, hc *store.Harne
 
 // GetHarnessConfig retrieves a harness config by ID.
 func (s *TemplateStore) GetHarnessConfig(ctx context.Context, id string) (*store.HarnessConfig, error) {
-	uid, err := parseUUID(id)
+	uid, err := parseGetID(id)
 	if err != nil {
 		return nil, err
 	}
