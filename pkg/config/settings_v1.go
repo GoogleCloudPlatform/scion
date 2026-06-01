@@ -380,7 +380,6 @@ type V1DatabaseConfig struct {
 	MaxOpenConns    int    `json:"max_open_conns,omitempty" yaml:"max_open_conns,omitempty" koanf:"max_open_conns"`
 	MaxIdleConns    int    `json:"max_idle_conns,omitempty" yaml:"max_idle_conns,omitempty" koanf:"max_idle_conns"`
 	ConnMaxLifetime string `json:"conn_max_lifetime,omitempty" yaml:"conn_max_lifetime,omitempty" koanf:"conn_max_lifetime"`
-	ConnMaxIdleTime string `json:"conn_max_idle_time,omitempty" yaml:"conn_max_idle_time,omitempty" koanf:"conn_max_idle_time"`
 }
 
 // V1AuthConfig holds development authentication settings.
@@ -1153,9 +1152,6 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Database.ConnMaxLifetime != "" {
 			gc.Database.ConnMaxLifetime = v1.Database.ConnMaxLifetime
 		}
-		if v1.Database.ConnMaxIdleTime != "" {
-			gc.Database.ConnMaxIdleTime = v1.Database.ConnMaxIdleTime
-		}
 	}
 
 	// Auth config
@@ -1312,7 +1308,6 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		MaxOpenConns:    gc.Database.MaxOpenConns,
 		MaxIdleConns:    gc.Database.MaxIdleConns,
 		ConnMaxLifetime: gc.Database.ConnMaxLifetime,
-		ConnMaxIdleTime: gc.Database.ConnMaxIdleTime,
 	}
 
 	// Auth config

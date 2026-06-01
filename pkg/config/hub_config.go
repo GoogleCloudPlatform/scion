@@ -147,14 +147,6 @@ type DatabaseConfig struct {
 	// ConnMaxLifetime is the maximum amount of time a connection may be
 	// reused, parsed as a Go duration string (e.g. "30m"). Empty means unlimited.
 	ConnMaxLifetime string `json:"conn_max_lifetime" yaml:"conn_max_lifetime" koanf:"conn_max_lifetime"`
-	// ConnMaxIdleTime is the maximum amount of time a connection may sit idle
-	// in the pool before being closed, parsed as a Go duration string (e.g.
-	// "5m"). This must be shorter than the server-side / proxy idle timeout
-	// (CloudSQL drops idle connections after ~10m) so the pool recycles a
-	// connection before the remote silently closes it — otherwise the first
-	// request after an idle period stalls waiting for a dead connection to time
-	// out. Empty means no idle limit.
-	ConnMaxIdleTime string `json:"conn_max_idle_time" yaml:"conn_max_idle_time" koanf:"conn_max_idle_time"`
 }
 
 // ConnMaxLifetimeDuration parses ConnMaxLifetime into a time.Duration.
@@ -166,19 +158,6 @@ func (d DatabaseConfig) ConnMaxLifetimeDuration() (time.Duration, error) {
 	dur, err := time.ParseDuration(d.ConnMaxLifetime)
 	if err != nil {
 		return 0, fmt.Errorf("invalid conn_max_lifetime %q: %w", d.ConnMaxLifetime, err)
-	}
-	return dur, nil
-}
-
-// ConnMaxIdleTimeDuration parses ConnMaxIdleTime into a time.Duration.
-// An empty value yields 0 (no idle limit). A malformed value returns an error.
-func (d DatabaseConfig) ConnMaxIdleTimeDuration() (time.Duration, error) {
-	if d.ConnMaxIdleTime == "" {
-		return 0, nil
-	}
-	dur, err := time.ParseDuration(d.ConnMaxIdleTime)
-	if err != nil {
-		return 0, fmt.Errorf("invalid conn_max_idle_time %q: %w", d.ConnMaxIdleTime, err)
 	}
 	return dur, nil
 }
@@ -341,7 +320,6 @@ func DefaultGlobalConfig() GlobalConfig {
 			MaxOpenConns:    1,
 			MaxIdleConns:    1,
 			ConnMaxLifetime: "0",
-			ConnMaxIdleTime: "0",
 		},
 		Auth: DevAuthConfig{
 			Enabled:   false,
@@ -369,45 +347,20 @@ func DefaultGlobalConfig() GlobalConfig {
 func applyDatabasePoolDefaults(db *DatabaseConfig) {
 	switch db.Driver {
 	case "postgres":
-		// NOTE: the struct-level default for these fields is 1 (the value SQLite
-		// REQUIRES to serialize writes — see DefaultGlobalConfig). For a postgres
-		// deployment configured purely via env/driver override, that 1 leaks
-		// through unchanged, and a plain `<= 0` guard would leave the pool at a
-		// single connection. A pool of 1 is pathological for postgres: a
-		// singleton scheduler handler that checks out the lone connection to hold
-		// an advisory lock then self-deadlocks waiting for a second connection to
-		// do its work, and every API request serializes behind it (~55s context
-		// deadlines). Treat the leaked SQLite default (<= 1) as "unset" so
-		// postgres always gets a real pool. An operator who genuinely wants a
-		// tiny pool can still request 2+.
-		if db.MaxOpenConns <= 1 {
-			// Conservative per-replica default so several replicas fit within a
-			// modest Postgres connection budget. The connection ceiling for N
-			// replicas is roughly N × (MaxOpenConns + event pool + 1 listener +
-			// brokers); see CONNECTION-BUDGET.md. Raise this only when the
-			// instance's max_connections (and any pooler) has headroom.
-			db.MaxOpenConns = 10
+		if db.MaxOpenConns <= 0 {
+			db.MaxOpenConns = 20
 		}
-		if db.MaxIdleConns <= 1 {
+		if db.MaxIdleConns <= 0 {
 			db.MaxIdleConns = 5
 		}
 		if db.ConnMaxLifetime == "" {
 			db.ConnMaxLifetime = "30m"
-		}
-		if db.ConnMaxIdleTime == "" {
-			// Shorter than CloudSQL's ~10m idle timeout so the pool recycles a
-			// connection before the remote silently drops it.
-			db.ConnMaxIdleTime = "5m"
 		}
 	case "sqlite":
 		// Load-bearing: SQLite must use a single open connection.
 		db.MaxOpenConns = 1
 		if db.MaxIdleConns <= 0 {
 			db.MaxIdleConns = 1
-		}
-		// No idle recycling for the single local SQLite connection.
-		if db.ConnMaxIdleTime == "" {
-			db.ConnMaxIdleTime = "0"
 		}
 	}
 }
