@@ -231,7 +231,7 @@ var (
 		{Name: "scope", Type: field.TypeString},
 		{Name: "scope_id", Type: field.TypeString},
 		{Name: "email", Type: field.TypeString},
-		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeString},
 		{Name: "display_name", Type: field.TypeString, Default: ""},
 		{Name: "default_scopes", Type: field.TypeString, Default: ""},
 		{Name: "verified", Type: field.TypeBool, Default: false},

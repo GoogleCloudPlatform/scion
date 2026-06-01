@@ -43,7 +43,7 @@ func (_c *GCPServiceAccountCreate) SetEmail(v string) *GCPServiceAccountCreate {
 }
 
 // SetProjectID sets the "project_id" field.
-func (_c *GCPServiceAccountCreate) SetProjectID(v uuid.UUID) *GCPServiceAccountCreate {
+func (_c *GCPServiceAccountCreate) SetProjectID(v string) *GCPServiceAccountCreate {
 	_c.mutation.SetProjectID(v)
 	return _c
 }
@@ -272,6 +272,11 @@ func (_c *GCPServiceAccountCreate) check() error {
 	if _, ok := _c.mutation.ProjectID(); !ok {
 		return &ValidationError{Name: "project_id", err: errors.New(`ent: missing required field "GCPServiceAccount.project_id"`)}
 	}
+	if v, ok := _c.mutation.ProjectID(); ok {
+		if err := gcpserviceaccount.ProjectIDValidator(v); err != nil {
+			return &ValidationError{Name: "project_id", err: fmt.Errorf(`ent: validator failed for field "GCPServiceAccount.project_id": %w`, err)}
+		}
+	}
 	if _, ok := _c.mutation.DisplayName(); !ok {
 		return &ValidationError{Name: "display_name", err: errors.New(`ent: missing required field "GCPServiceAccount.display_name"`)}
 	}
@@ -342,7 +347,7 @@ func (_c *GCPServiceAccountCreate) createSpec() (*GCPServiceAccount, *sqlgraph.C
 		_node.Email = value
 	}
 	if value, ok := _c.mutation.ProjectID(); ok {
-		_spec.SetField(gcpserviceaccount.FieldProjectID, field.TypeUUID, value)
+		_spec.SetField(gcpserviceaccount.FieldProjectID, field.TypeString, value)
 		_node.ProjectID = value
 	}
 	if value, ok := _c.mutation.DisplayName(); ok {
@@ -466,7 +471,7 @@ func (u *GCPServiceAccountUpsert) UpdateEmail() *GCPServiceAccountUpsert {
 }
 
 // SetProjectID sets the "project_id" field.
-func (u *GCPServiceAccountUpsert) SetProjectID(v uuid.UUID) *GCPServiceAccountUpsert {
+func (u *GCPServiceAccountUpsert) SetProjectID(v string) *GCPServiceAccountUpsert {
 	u.Set(gcpserviceaccount.FieldProjectID, v)
 	return u
 }
@@ -661,7 +666,7 @@ func (u *GCPServiceAccountUpsertOne) UpdateEmail() *GCPServiceAccountUpsertOne {
 }
 
 // SetProjectID sets the "project_id" field.
-func (u *GCPServiceAccountUpsertOne) SetProjectID(v uuid.UUID) *GCPServiceAccountUpsertOne {
+func (u *GCPServiceAccountUpsertOne) SetProjectID(v string) *GCPServiceAccountUpsertOne {
 	return u.Update(func(s *GCPServiceAccountUpsert) {
 		s.SetProjectID(v)
 	})
@@ -1040,7 +1045,7 @@ func (u *GCPServiceAccountUpsertBulk) UpdateEmail() *GCPServiceAccountUpsertBulk
 }
 
 // SetProjectID sets the "project_id" field.
-func (u *GCPServiceAccountUpsertBulk) SetProjectID(v uuid.UUID) *GCPServiceAccountUpsertBulk {
+func (u *GCPServiceAccountUpsertBulk) SetProjectID(v string) *GCPServiceAccountUpsertBulk {
 	return u.Update(func(s *GCPServiceAccountUpsert) {
 		s.SetProjectID(v)
 	})

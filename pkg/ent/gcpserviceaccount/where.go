@@ -71,7 +71,7 @@ func Email(v string) predicate.GCPServiceAccount {
 }
 
 // ProjectID applies equality check predicate on the "project_id" field. It's identical to ProjectIDEQ.
-func ProjectID(v uuid.UUID) predicate.GCPServiceAccount {
+func ProjectID(v string) predicate.GCPServiceAccount {
 	return predicate.GCPServiceAccount(sql.FieldEQ(FieldProjectID, v))
 }
 
@@ -311,43 +311,68 @@ func EmailContainsFold(v string) predicate.GCPServiceAccount {
 }
 
 // ProjectIDEQ applies the EQ predicate on the "project_id" field.
-func ProjectIDEQ(v uuid.UUID) predicate.GCPServiceAccount {
+func ProjectIDEQ(v string) predicate.GCPServiceAccount {
 	return predicate.GCPServiceAccount(sql.FieldEQ(FieldProjectID, v))
 }
 
 // ProjectIDNEQ applies the NEQ predicate on the "project_id" field.
-func ProjectIDNEQ(v uuid.UUID) predicate.GCPServiceAccount {
+func ProjectIDNEQ(v string) predicate.GCPServiceAccount {
 	return predicate.GCPServiceAccount(sql.FieldNEQ(FieldProjectID, v))
 }
 
 // ProjectIDIn applies the In predicate on the "project_id" field.
-func ProjectIDIn(vs ...uuid.UUID) predicate.GCPServiceAccount {
+func ProjectIDIn(vs ...string) predicate.GCPServiceAccount {
 	return predicate.GCPServiceAccount(sql.FieldIn(FieldProjectID, vs...))
 }
 
 // ProjectIDNotIn applies the NotIn predicate on the "project_id" field.
-func ProjectIDNotIn(vs ...uuid.UUID) predicate.GCPServiceAccount {
+func ProjectIDNotIn(vs ...string) predicate.GCPServiceAccount {
 	return predicate.GCPServiceAccount(sql.FieldNotIn(FieldProjectID, vs...))
 }
 
 // ProjectIDGT applies the GT predicate on the "project_id" field.
-func ProjectIDGT(v uuid.UUID) predicate.GCPServiceAccount {
+func ProjectIDGT(v string) predicate.GCPServiceAccount {
 	return predicate.GCPServiceAccount(sql.FieldGT(FieldProjectID, v))
 }
 
 // ProjectIDGTE applies the GTE predicate on the "project_id" field.
-func ProjectIDGTE(v uuid.UUID) predicate.GCPServiceAccount {
+func ProjectIDGTE(v string) predicate.GCPServiceAccount {
 	return predicate.GCPServiceAccount(sql.FieldGTE(FieldProjectID, v))
 }
 
 // ProjectIDLT applies the LT predicate on the "project_id" field.
-func ProjectIDLT(v uuid.UUID) predicate.GCPServiceAccount {
+func ProjectIDLT(v string) predicate.GCPServiceAccount {
 	return predicate.GCPServiceAccount(sql.FieldLT(FieldProjectID, v))
 }
 
 // ProjectIDLTE applies the LTE predicate on the "project_id" field.
-func ProjectIDLTE(v uuid.UUID) predicate.GCPServiceAccount {
+func ProjectIDLTE(v string) predicate.GCPServiceAccount {
 	return predicate.GCPServiceAccount(sql.FieldLTE(FieldProjectID, v))
+}
+
+// ProjectIDContains applies the Contains predicate on the "project_id" field.
+func ProjectIDContains(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldContains(FieldProjectID, v))
+}
+
+// ProjectIDHasPrefix applies the HasPrefix predicate on the "project_id" field.
+func ProjectIDHasPrefix(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldHasPrefix(FieldProjectID, v))
+}
+
+// ProjectIDHasSuffix applies the HasSuffix predicate on the "project_id" field.
+func ProjectIDHasSuffix(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldHasSuffix(FieldProjectID, v))
+}
+
+// ProjectIDEqualFold applies the EqualFold predicate on the "project_id" field.
+func ProjectIDEqualFold(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldEqualFold(FieldProjectID, v))
+}
+
+// ProjectIDContainsFold applies the ContainsFold predicate on the "project_id" field.
+func ProjectIDContainsFold(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldContainsFold(FieldProjectID, v))
 }
 
 // DisplayNameEQ applies the EQ predicate on the "display_name" field.

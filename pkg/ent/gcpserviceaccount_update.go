@@ -13,7 +13,6 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
-	"github.com/google/uuid"
 )
 
 // GCPServiceAccountUpdate is the builder for updating GCPServiceAccount entities.
@@ -72,13 +71,13 @@ func (_u *GCPServiceAccountUpdate) SetNillableEmail(v *string) *GCPServiceAccoun
 }
 
 // SetProjectID sets the "project_id" field.
-func (_u *GCPServiceAccountUpdate) SetProjectID(v uuid.UUID) *GCPServiceAccountUpdate {
+func (_u *GCPServiceAccountUpdate) SetProjectID(v string) *GCPServiceAccountUpdate {
 	_u.mutation.SetProjectID(v)
 	return _u
 }
 
 // SetNillableProjectID sets the "project_id" field if the given value is not nil.
-func (_u *GCPServiceAccountUpdate) SetNillableProjectID(v *uuid.UUID) *GCPServiceAccountUpdate {
+func (_u *GCPServiceAccountUpdate) SetNillableProjectID(v *string) *GCPServiceAccountUpdate {
 	if v != nil {
 		_u.SetProjectID(*v)
 	}
@@ -238,6 +237,11 @@ func (_u *GCPServiceAccountUpdate) check() error {
 			return &ValidationError{Name: "email", err: fmt.Errorf(`ent: validator failed for field "GCPServiceAccount.email": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.ProjectID(); ok {
+		if err := gcpserviceaccount.ProjectIDValidator(v); err != nil {
+			return &ValidationError{Name: "project_id", err: fmt.Errorf(`ent: validator failed for field "GCPServiceAccount.project_id": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -263,7 +267,7 @@ func (_u *GCPServiceAccountUpdate) sqlSave(ctx context.Context) (_node int, err 
 		_spec.SetField(gcpserviceaccount.FieldEmail, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.ProjectID(); ok {
-		_spec.SetField(gcpserviceaccount.FieldProjectID, field.TypeUUID, value)
+		_spec.SetField(gcpserviceaccount.FieldProjectID, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.DisplayName(); ok {
 		_spec.SetField(gcpserviceaccount.FieldDisplayName, field.TypeString, value)
@@ -352,13 +356,13 @@ func (_u *GCPServiceAccountUpdateOne) SetNillableEmail(v *string) *GCPServiceAcc
 }
 
 // SetProjectID sets the "project_id" field.
-func (_u *GCPServiceAccountUpdateOne) SetProjectID(v uuid.UUID) *GCPServiceAccountUpdateOne {
+func (_u *GCPServiceAccountUpdateOne) SetProjectID(v string) *GCPServiceAccountUpdateOne {
 	_u.mutation.SetProjectID(v)
 	return _u
 }
 
 // SetNillableProjectID sets the "project_id" field if the given value is not nil.
-func (_u *GCPServiceAccountUpdateOne) SetNillableProjectID(v *uuid.UUID) *GCPServiceAccountUpdateOne {
+func (_u *GCPServiceAccountUpdateOne) SetNillableProjectID(v *string) *GCPServiceAccountUpdateOne {
 	if v != nil {
 		_u.SetProjectID(*v)
 	}
@@ -531,6 +535,11 @@ func (_u *GCPServiceAccountUpdateOne) check() error {
 			return &ValidationError{Name: "email", err: fmt.Errorf(`ent: validator failed for field "GCPServiceAccount.email": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.ProjectID(); ok {
+		if err := gcpserviceaccount.ProjectIDValidator(v); err != nil {
+			return &ValidationError{Name: "project_id", err: fmt.Errorf(`ent: validator failed for field "GCPServiceAccount.project_id": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -573,7 +582,7 @@ func (_u *GCPServiceAccountUpdateOne) sqlSave(ctx context.Context) (_node *GCPSe
 		_spec.SetField(gcpserviceaccount.FieldEmail, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.ProjectID(); ok {
-		_spec.SetField(gcpserviceaccount.FieldProjectID, field.TypeUUID, value)
+		_spec.SetField(gcpserviceaccount.FieldProjectID, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.DisplayName(); ok {
 		_spec.SetField(gcpserviceaccount.FieldDisplayName, field.TypeString, value)
