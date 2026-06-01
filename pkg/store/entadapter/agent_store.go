@@ -40,8 +40,8 @@ const (
 
 // AgentStore implements the store.AgentStore sub-interface using the Ent ORM.
 //
-// It supersedes the former raw-SQL store implementation and is designed for
-// multi-replica Postgres deployments:
+// It is the Ent counterpart of the raw-SQL implementation in pkg/store/sqlite
+// and is designed for multi-replica Postgres deployments:
 //   - UpdateAgent guards writes with a state_version compare-and-swap so
 //     concurrent updates surface store.ErrVersionConflict rather than silently
 //     clobbering each other.
@@ -235,7 +235,7 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 
 // GetAgent retrieves an agent by ID.
 func (s *AgentStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
-	uid, err := parseGetID(id)
+	uid, err := parseUUID(id)
 	if err != nil {
 		return nil, err
 	}
