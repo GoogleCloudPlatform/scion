@@ -597,7 +597,7 @@ func TestDeleteProject_DeleteAgents_DispatchesToBroker(t *testing.T) {
 	disp := &deleteDispatcher{}
 	srv.SetDispatcher(disp)
 
-	project, _, _ := setupOnlineBrokerAgent(t, s, "project-del")
+	project, broker, agent1 := setupOnlineBrokerAgent(t, s, "project-del")
 
 	// Create a second agent in the same project
 	agent2 := &store.Agent{
@@ -605,7 +605,7 @@ func TestDeleteProject_DeleteAgents_DispatchesToBroker(t *testing.T) {
 		Slug:            "agent-online-project-del-2-slug",
 		Name:            "Agent Online project-del 2",
 		ProjectID:       project.ID,
-		RuntimeBrokerID: "broker-online-project-del",
+		RuntimeBrokerID: broker.ID,
 		Phase:           string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2))
@@ -624,7 +624,7 @@ func TestDeleteProject_DeleteAgents_DispatchesToBroker(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 
 	// Verify agents cascade-deleted from database
-	_, err = s.GetAgent(ctx, "agent-online-project-del")
+	_, err = s.GetAgent(ctx, agent1.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 	_, err = s.GetAgent(ctx, agent2.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
@@ -790,14 +790,16 @@ func TestDeleteProject_HubNative_DispatchesCleanupToBrokers(t *testing.T) {
 
 	// Link both as providers
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: project.ID,
-		BrokerID:  broker1.ID,
-		LinkedBy:  "test",
+		ProjectID:  project.ID,
+		BrokerID:   broker1.ID,
+		BrokerName: broker1.Name,
+		LinkedBy:   "test",
 	}))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: project.ID,
-		BrokerID:  broker2.ID,
-		LinkedBy:  "test",
+		ProjectID:  project.ID,
+		BrokerID:   broker2.ID,
+		BrokerName: broker2.Name,
+		LinkedBy:   "test",
 	}))
 
 	// Set up a mock client and dispatcher
@@ -852,14 +854,16 @@ func TestDeleteProject_HubNative_SkipsEmbeddedBroker(t *testing.T) {
 
 	// Link both as providers
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: project.ID,
-		BrokerID:  embeddedBroker.ID,
-		LinkedBy:  "test",
+		ProjectID:  project.ID,
+		BrokerID:   embeddedBroker.ID,
+		BrokerName: embeddedBroker.Name,
+		LinkedBy:   "test",
 	}))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: project.ID,
-		BrokerID:  remoteBroker.ID,
-		LinkedBy:  "test",
+		ProjectID:  project.ID,
+		BrokerID:   remoteBroker.ID,
+		BrokerName: remoteBroker.Name,
+		LinkedBy:   "test",
 	}))
 
 	// Mark embedded broker
@@ -904,9 +908,10 @@ func TestDeleteProject_GitBacked_NoCleanupDispatched(t *testing.T) {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: project.ID,
-		BrokerID:  broker.ID,
-		LinkedBy:  "test",
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		LinkedBy:   "test",
 	}))
 
 	// Set up mock client and dispatcher
@@ -1279,13 +1284,16 @@ func TestProjectRegister_ExistingProject_CreatesMembershipGroup(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a project directly in the store (simulating one created before
-	// membership group support was added — no group exists yet).
+	// membership group support was added — no group exists yet). The creator is
+	// backfilled as a group owner, so it must reference an existing user.
+	creatorID := tid("original-creator-id")
+	permSeedUser(t, ctx, s, creatorID)
 	project := &store.Project{
 		ID:        api.NewUUID(),
 		Name:      "Pre-Existing Project",
 		Slug:      "pre-existing-project",
 		GitRemote: "github.com/test/pre-existing",
-		CreatedBy: "original-creator-id",
+		CreatedBy: creatorID,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
@@ -1320,7 +1328,7 @@ func TestProjectRegister_ExistingProject_CreatesMembershipGroup(t *testing.T) {
 			ownerIDs[m.MemberID] = true
 		}
 	}
-	assert.True(t, ownerIDs["original-creator-id"], "original creator should be an owner")
+	assert.True(t, ownerIDs[creatorID], "original creator should be an owner")
 	assert.True(t, ownerIDs[DevUserID], "linking user should be an owner")
 }
 
@@ -1820,19 +1828,19 @@ func TestCreateProject_ExplicitSlug_Unique(t *testing.T) {
 	// Create first project with an explicit slug.
 	body1 := CreateProjectRequest{
 		Name: "My Project",
-		Slug: tid("my-project"),
+		Slug: "my-project",
 	}
 	rec1 := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body1)
 	require.Equal(t, http.StatusCreated, rec1.Code, "body: %s", rec1.Body.String())
 
 	var project1 store.Project
 	require.NoError(t, json.NewDecoder(rec1.Body).Decode(&project1))
-	assert.Equal(t, tid("my-project"), project1.Slug)
+	assert.Equal(t, "my-project", project1.Slug)
 
 	// Create second project with the same explicit slug — should get serial suffix.
 	body2 := CreateProjectRequest{
 		Name: "My Project",
-		Slug: tid("my-project"),
+		Slug: "my-project",
 	}
 	rec2 := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body2)
 	require.Equal(t, http.StatusCreated, rec2.Code, "body: %s", rec2.Body.String())
