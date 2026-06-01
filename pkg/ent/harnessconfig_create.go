@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
@@ -19,6 +21,7 @@ type HarnessConfigCreate struct {
 	config
 	mutation *HarnessConfigMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetName sets the "name" field.
@@ -450,6 +453,7 @@ func (_c *HarnessConfigCreate) createSpec() (*HarnessConfig, *sqlgraph.CreateSpe
 		_node = &HarnessConfig{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(harnessconfig.Table, sqlgraph.NewFieldSpec(harnessconfig.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -541,11 +545,826 @@ func (_c *HarnessConfigCreate) createSpec() (*HarnessConfig, *sqlgraph.CreateSpe
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.HarnessConfig.Create().
+//		SetName(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.HarnessConfigUpsert) {
+//			SetName(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *HarnessConfigCreate) OnConflict(opts ...sql.ConflictOption) *HarnessConfigUpsertOne {
+	_c.conflict = opts
+	return &HarnessConfigUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.HarnessConfig.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *HarnessConfigCreate) OnConflictColumns(columns ...string) *HarnessConfigUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &HarnessConfigUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// HarnessConfigUpsertOne is the builder for "upsert"-ing
+	//  one HarnessConfig node.
+	HarnessConfigUpsertOne struct {
+		create *HarnessConfigCreate
+	}
+
+	// HarnessConfigUpsert is the "OnConflict" setter.
+	HarnessConfigUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetName sets the "name" field.
+func (u *HarnessConfigUpsert) SetName(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldName, v)
+	return u
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateName() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldName)
+	return u
+}
+
+// SetSlug sets the "slug" field.
+func (u *HarnessConfigUpsert) SetSlug(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldSlug, v)
+	return u
+}
+
+// UpdateSlug sets the "slug" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateSlug() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldSlug)
+	return u
+}
+
+// SetDisplayName sets the "display_name" field.
+func (u *HarnessConfigUpsert) SetDisplayName(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldDisplayName, v)
+	return u
+}
+
+// UpdateDisplayName sets the "display_name" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateDisplayName() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldDisplayName)
+	return u
+}
+
+// ClearDisplayName clears the value of the "display_name" field.
+func (u *HarnessConfigUpsert) ClearDisplayName() *HarnessConfigUpsert {
+	u.SetNull(harnessconfig.FieldDisplayName)
+	return u
+}
+
+// SetDescription sets the "description" field.
+func (u *HarnessConfigUpsert) SetDescription(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldDescription, v)
+	return u
+}
+
+// UpdateDescription sets the "description" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateDescription() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldDescription)
+	return u
+}
+
+// ClearDescription clears the value of the "description" field.
+func (u *HarnessConfigUpsert) ClearDescription() *HarnessConfigUpsert {
+	u.SetNull(harnessconfig.FieldDescription)
+	return u
+}
+
+// SetHarness sets the "harness" field.
+func (u *HarnessConfigUpsert) SetHarness(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldHarness, v)
+	return u
+}
+
+// UpdateHarness sets the "harness" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateHarness() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldHarness)
+	return u
+}
+
+// SetConfig sets the "config" field.
+func (u *HarnessConfigUpsert) SetConfig(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldConfig, v)
+	return u
+}
+
+// UpdateConfig sets the "config" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateConfig() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldConfig)
+	return u
+}
+
+// ClearConfig clears the value of the "config" field.
+func (u *HarnessConfigUpsert) ClearConfig() *HarnessConfigUpsert {
+	u.SetNull(harnessconfig.FieldConfig)
+	return u
+}
+
+// SetContentHash sets the "content_hash" field.
+func (u *HarnessConfigUpsert) SetContentHash(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldContentHash, v)
+	return u
+}
+
+// UpdateContentHash sets the "content_hash" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateContentHash() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldContentHash)
+	return u
+}
+
+// ClearContentHash clears the value of the "content_hash" field.
+func (u *HarnessConfigUpsert) ClearContentHash() *HarnessConfigUpsert {
+	u.SetNull(harnessconfig.FieldContentHash)
+	return u
+}
+
+// SetScope sets the "scope" field.
+func (u *HarnessConfigUpsert) SetScope(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldScope, v)
+	return u
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateScope() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldScope)
+	return u
+}
+
+// SetScopeID sets the "scope_id" field.
+func (u *HarnessConfigUpsert) SetScopeID(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldScopeID, v)
+	return u
+}
+
+// UpdateScopeID sets the "scope_id" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateScopeID() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldScopeID)
+	return u
+}
+
+// ClearScopeID clears the value of the "scope_id" field.
+func (u *HarnessConfigUpsert) ClearScopeID() *HarnessConfigUpsert {
+	u.SetNull(harnessconfig.FieldScopeID)
+	return u
+}
+
+// SetStorageURI sets the "storage_uri" field.
+func (u *HarnessConfigUpsert) SetStorageURI(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldStorageURI, v)
+	return u
+}
+
+// UpdateStorageURI sets the "storage_uri" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateStorageURI() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldStorageURI)
+	return u
+}
+
+// ClearStorageURI clears the value of the "storage_uri" field.
+func (u *HarnessConfigUpsert) ClearStorageURI() *HarnessConfigUpsert {
+	u.SetNull(harnessconfig.FieldStorageURI)
+	return u
+}
+
+// SetStorageBucket sets the "storage_bucket" field.
+func (u *HarnessConfigUpsert) SetStorageBucket(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldStorageBucket, v)
+	return u
+}
+
+// UpdateStorageBucket sets the "storage_bucket" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateStorageBucket() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldStorageBucket)
+	return u
+}
+
+// ClearStorageBucket clears the value of the "storage_bucket" field.
+func (u *HarnessConfigUpsert) ClearStorageBucket() *HarnessConfigUpsert {
+	u.SetNull(harnessconfig.FieldStorageBucket)
+	return u
+}
+
+// SetStoragePath sets the "storage_path" field.
+func (u *HarnessConfigUpsert) SetStoragePath(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldStoragePath, v)
+	return u
+}
+
+// UpdateStoragePath sets the "storage_path" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateStoragePath() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldStoragePath)
+	return u
+}
+
+// ClearStoragePath clears the value of the "storage_path" field.
+func (u *HarnessConfigUpsert) ClearStoragePath() *HarnessConfigUpsert {
+	u.SetNull(harnessconfig.FieldStoragePath)
+	return u
+}
+
+// SetFiles sets the "files" field.
+func (u *HarnessConfigUpsert) SetFiles(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldFiles, v)
+	return u
+}
+
+// UpdateFiles sets the "files" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateFiles() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldFiles)
+	return u
+}
+
+// ClearFiles clears the value of the "files" field.
+func (u *HarnessConfigUpsert) ClearFiles() *HarnessConfigUpsert {
+	u.SetNull(harnessconfig.FieldFiles)
+	return u
+}
+
+// SetLocked sets the "locked" field.
+func (u *HarnessConfigUpsert) SetLocked(v bool) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldLocked, v)
+	return u
+}
+
+// UpdateLocked sets the "locked" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateLocked() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldLocked)
+	return u
+}
+
+// SetStatus sets the "status" field.
+func (u *HarnessConfigUpsert) SetStatus(v harnessconfig.Status) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldStatus, v)
+	return u
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateStatus() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldStatus)
+	return u
+}
+
+// SetOwnerID sets the "owner_id" field.
+func (u *HarnessConfigUpsert) SetOwnerID(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldOwnerID, v)
+	return u
+}
+
+// UpdateOwnerID sets the "owner_id" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateOwnerID() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldOwnerID)
+	return u
+}
+
+// ClearOwnerID clears the value of the "owner_id" field.
+func (u *HarnessConfigUpsert) ClearOwnerID() *HarnessConfigUpsert {
+	u.SetNull(harnessconfig.FieldOwnerID)
+	return u
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *HarnessConfigUpsert) SetCreatedBy(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldCreatedBy, v)
+	return u
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateCreatedBy() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldCreatedBy)
+	return u
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *HarnessConfigUpsert) ClearCreatedBy() *HarnessConfigUpsert {
+	u.SetNull(harnessconfig.FieldCreatedBy)
+	return u
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (u *HarnessConfigUpsert) SetUpdatedBy(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldUpdatedBy, v)
+	return u
+}
+
+// UpdateUpdatedBy sets the "updated_by" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateUpdatedBy() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldUpdatedBy)
+	return u
+}
+
+// ClearUpdatedBy clears the value of the "updated_by" field.
+func (u *HarnessConfigUpsert) ClearUpdatedBy() *HarnessConfigUpsert {
+	u.SetNull(harnessconfig.FieldUpdatedBy)
+	return u
+}
+
+// SetVisibility sets the "visibility" field.
+func (u *HarnessConfigUpsert) SetVisibility(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldVisibility, v)
+	return u
+}
+
+// UpdateVisibility sets the "visibility" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateVisibility() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldVisibility)
+	return u
+}
+
+// SetUpdated sets the "updated" field.
+func (u *HarnessConfigUpsert) SetUpdated(v time.Time) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldUpdated, v)
+	return u
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateUpdated() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldUpdated)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.HarnessConfig.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(harnessconfig.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *HarnessConfigUpsertOne) UpdateNewValues() *HarnessConfigUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(harnessconfig.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(harnessconfig.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.HarnessConfig.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *HarnessConfigUpsertOne) Ignore() *HarnessConfigUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *HarnessConfigUpsertOne) DoNothing() *HarnessConfigUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the HarnessConfigCreate.OnConflict
+// documentation for more info.
+func (u *HarnessConfigUpsertOne) Update(set func(*HarnessConfigUpsert)) *HarnessConfigUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&HarnessConfigUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetName sets the "name" field.
+func (u *HarnessConfigUpsertOne) SetName(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetName(v)
+	})
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateName() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateName()
+	})
+}
+
+// SetSlug sets the "slug" field.
+func (u *HarnessConfigUpsertOne) SetSlug(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetSlug(v)
+	})
+}
+
+// UpdateSlug sets the "slug" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateSlug() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateSlug()
+	})
+}
+
+// SetDisplayName sets the "display_name" field.
+func (u *HarnessConfigUpsertOne) SetDisplayName(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetDisplayName(v)
+	})
+}
+
+// UpdateDisplayName sets the "display_name" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateDisplayName() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateDisplayName()
+	})
+}
+
+// ClearDisplayName clears the value of the "display_name" field.
+func (u *HarnessConfigUpsertOne) ClearDisplayName() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearDisplayName()
+	})
+}
+
+// SetDescription sets the "description" field.
+func (u *HarnessConfigUpsertOne) SetDescription(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetDescription(v)
+	})
+}
+
+// UpdateDescription sets the "description" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateDescription() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateDescription()
+	})
+}
+
+// ClearDescription clears the value of the "description" field.
+func (u *HarnessConfigUpsertOne) ClearDescription() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearDescription()
+	})
+}
+
+// SetHarness sets the "harness" field.
+func (u *HarnessConfigUpsertOne) SetHarness(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetHarness(v)
+	})
+}
+
+// UpdateHarness sets the "harness" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateHarness() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateHarness()
+	})
+}
+
+// SetConfig sets the "config" field.
+func (u *HarnessConfigUpsertOne) SetConfig(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetConfig(v)
+	})
+}
+
+// UpdateConfig sets the "config" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateConfig() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateConfig()
+	})
+}
+
+// ClearConfig clears the value of the "config" field.
+func (u *HarnessConfigUpsertOne) ClearConfig() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearConfig()
+	})
+}
+
+// SetContentHash sets the "content_hash" field.
+func (u *HarnessConfigUpsertOne) SetContentHash(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetContentHash(v)
+	})
+}
+
+// UpdateContentHash sets the "content_hash" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateContentHash() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateContentHash()
+	})
+}
+
+// ClearContentHash clears the value of the "content_hash" field.
+func (u *HarnessConfigUpsertOne) ClearContentHash() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearContentHash()
+	})
+}
+
+// SetScope sets the "scope" field.
+func (u *HarnessConfigUpsertOne) SetScope(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetScope(v)
+	})
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateScope() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateScope()
+	})
+}
+
+// SetScopeID sets the "scope_id" field.
+func (u *HarnessConfigUpsertOne) SetScopeID(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetScopeID(v)
+	})
+}
+
+// UpdateScopeID sets the "scope_id" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateScopeID() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateScopeID()
+	})
+}
+
+// ClearScopeID clears the value of the "scope_id" field.
+func (u *HarnessConfigUpsertOne) ClearScopeID() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearScopeID()
+	})
+}
+
+// SetStorageURI sets the "storage_uri" field.
+func (u *HarnessConfigUpsertOne) SetStorageURI(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetStorageURI(v)
+	})
+}
+
+// UpdateStorageURI sets the "storage_uri" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateStorageURI() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateStorageURI()
+	})
+}
+
+// ClearStorageURI clears the value of the "storage_uri" field.
+func (u *HarnessConfigUpsertOne) ClearStorageURI() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearStorageURI()
+	})
+}
+
+// SetStorageBucket sets the "storage_bucket" field.
+func (u *HarnessConfigUpsertOne) SetStorageBucket(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetStorageBucket(v)
+	})
+}
+
+// UpdateStorageBucket sets the "storage_bucket" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateStorageBucket() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateStorageBucket()
+	})
+}
+
+// ClearStorageBucket clears the value of the "storage_bucket" field.
+func (u *HarnessConfigUpsertOne) ClearStorageBucket() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearStorageBucket()
+	})
+}
+
+// SetStoragePath sets the "storage_path" field.
+func (u *HarnessConfigUpsertOne) SetStoragePath(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetStoragePath(v)
+	})
+}
+
+// UpdateStoragePath sets the "storage_path" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateStoragePath() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateStoragePath()
+	})
+}
+
+// ClearStoragePath clears the value of the "storage_path" field.
+func (u *HarnessConfigUpsertOne) ClearStoragePath() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearStoragePath()
+	})
+}
+
+// SetFiles sets the "files" field.
+func (u *HarnessConfigUpsertOne) SetFiles(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetFiles(v)
+	})
+}
+
+// UpdateFiles sets the "files" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateFiles() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateFiles()
+	})
+}
+
+// ClearFiles clears the value of the "files" field.
+func (u *HarnessConfigUpsertOne) ClearFiles() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearFiles()
+	})
+}
+
+// SetLocked sets the "locked" field.
+func (u *HarnessConfigUpsertOne) SetLocked(v bool) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetLocked(v)
+	})
+}
+
+// UpdateLocked sets the "locked" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateLocked() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateLocked()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *HarnessConfigUpsertOne) SetStatus(v harnessconfig.Status) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateStatus() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// SetOwnerID sets the "owner_id" field.
+func (u *HarnessConfigUpsertOne) SetOwnerID(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetOwnerID(v)
+	})
+}
+
+// UpdateOwnerID sets the "owner_id" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateOwnerID() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateOwnerID()
+	})
+}
+
+// ClearOwnerID clears the value of the "owner_id" field.
+func (u *HarnessConfigUpsertOne) ClearOwnerID() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearOwnerID()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *HarnessConfigUpsertOne) SetCreatedBy(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateCreatedBy() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *HarnessConfigUpsertOne) ClearCreatedBy() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (u *HarnessConfigUpsertOne) SetUpdatedBy(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetUpdatedBy(v)
+	})
+}
+
+// UpdateUpdatedBy sets the "updated_by" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateUpdatedBy() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateUpdatedBy()
+	})
+}
+
+// ClearUpdatedBy clears the value of the "updated_by" field.
+func (u *HarnessConfigUpsertOne) ClearUpdatedBy() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearUpdatedBy()
+	})
+}
+
+// SetVisibility sets the "visibility" field.
+func (u *HarnessConfigUpsertOne) SetVisibility(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetVisibility(v)
+	})
+}
+
+// UpdateVisibility sets the "visibility" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateVisibility() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateVisibility()
+	})
+}
+
+// SetUpdated sets the "updated" field.
+func (u *HarnessConfigUpsertOne) SetUpdated(v time.Time) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetUpdated(v)
+	})
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateUpdated() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateUpdated()
+	})
+}
+
+// Exec executes the query.
+func (u *HarnessConfigUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for HarnessConfigCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *HarnessConfigUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *HarnessConfigUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: HarnessConfigUpsertOne.ID is not supported by MySQL driver. Use HarnessConfigUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *HarnessConfigUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // HarnessConfigCreateBulk is the builder for creating many HarnessConfig entities in bulk.
 type HarnessConfigCreateBulk struct {
 	config
 	err      error
 	builders []*HarnessConfigCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the HarnessConfig entities in the database.
@@ -575,6 +1394,7 @@ func (_c *HarnessConfigCreateBulk) Save(ctx context.Context) ([]*HarnessConfig, 
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -621,6 +1441,487 @@ func (_c *HarnessConfigCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *HarnessConfigCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.HarnessConfig.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.HarnessConfigUpsert) {
+//			SetName(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *HarnessConfigCreateBulk) OnConflict(opts ...sql.ConflictOption) *HarnessConfigUpsertBulk {
+	_c.conflict = opts
+	return &HarnessConfigUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.HarnessConfig.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *HarnessConfigCreateBulk) OnConflictColumns(columns ...string) *HarnessConfigUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &HarnessConfigUpsertBulk{
+		create: _c,
+	}
+}
+
+// HarnessConfigUpsertBulk is the builder for "upsert"-ing
+// a bulk of HarnessConfig nodes.
+type HarnessConfigUpsertBulk struct {
+	create *HarnessConfigCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.HarnessConfig.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(harnessconfig.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *HarnessConfigUpsertBulk) UpdateNewValues() *HarnessConfigUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(harnessconfig.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(harnessconfig.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.HarnessConfig.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *HarnessConfigUpsertBulk) Ignore() *HarnessConfigUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *HarnessConfigUpsertBulk) DoNothing() *HarnessConfigUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the HarnessConfigCreateBulk.OnConflict
+// documentation for more info.
+func (u *HarnessConfigUpsertBulk) Update(set func(*HarnessConfigUpsert)) *HarnessConfigUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&HarnessConfigUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetName sets the "name" field.
+func (u *HarnessConfigUpsertBulk) SetName(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetName(v)
+	})
+}
+
+// UpdateName sets the "name" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateName() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateName()
+	})
+}
+
+// SetSlug sets the "slug" field.
+func (u *HarnessConfigUpsertBulk) SetSlug(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetSlug(v)
+	})
+}
+
+// UpdateSlug sets the "slug" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateSlug() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateSlug()
+	})
+}
+
+// SetDisplayName sets the "display_name" field.
+func (u *HarnessConfigUpsertBulk) SetDisplayName(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetDisplayName(v)
+	})
+}
+
+// UpdateDisplayName sets the "display_name" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateDisplayName() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateDisplayName()
+	})
+}
+
+// ClearDisplayName clears the value of the "display_name" field.
+func (u *HarnessConfigUpsertBulk) ClearDisplayName() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearDisplayName()
+	})
+}
+
+// SetDescription sets the "description" field.
+func (u *HarnessConfigUpsertBulk) SetDescription(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetDescription(v)
+	})
+}
+
+// UpdateDescription sets the "description" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateDescription() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateDescription()
+	})
+}
+
+// ClearDescription clears the value of the "description" field.
+func (u *HarnessConfigUpsertBulk) ClearDescription() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearDescription()
+	})
+}
+
+// SetHarness sets the "harness" field.
+func (u *HarnessConfigUpsertBulk) SetHarness(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetHarness(v)
+	})
+}
+
+// UpdateHarness sets the "harness" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateHarness() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateHarness()
+	})
+}
+
+// SetConfig sets the "config" field.
+func (u *HarnessConfigUpsertBulk) SetConfig(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetConfig(v)
+	})
+}
+
+// UpdateConfig sets the "config" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateConfig() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateConfig()
+	})
+}
+
+// ClearConfig clears the value of the "config" field.
+func (u *HarnessConfigUpsertBulk) ClearConfig() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearConfig()
+	})
+}
+
+// SetContentHash sets the "content_hash" field.
+func (u *HarnessConfigUpsertBulk) SetContentHash(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetContentHash(v)
+	})
+}
+
+// UpdateContentHash sets the "content_hash" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateContentHash() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateContentHash()
+	})
+}
+
+// ClearContentHash clears the value of the "content_hash" field.
+func (u *HarnessConfigUpsertBulk) ClearContentHash() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearContentHash()
+	})
+}
+
+// SetScope sets the "scope" field.
+func (u *HarnessConfigUpsertBulk) SetScope(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetScope(v)
+	})
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateScope() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateScope()
+	})
+}
+
+// SetScopeID sets the "scope_id" field.
+func (u *HarnessConfigUpsertBulk) SetScopeID(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetScopeID(v)
+	})
+}
+
+// UpdateScopeID sets the "scope_id" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateScopeID() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateScopeID()
+	})
+}
+
+// ClearScopeID clears the value of the "scope_id" field.
+func (u *HarnessConfigUpsertBulk) ClearScopeID() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearScopeID()
+	})
+}
+
+// SetStorageURI sets the "storage_uri" field.
+func (u *HarnessConfigUpsertBulk) SetStorageURI(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetStorageURI(v)
+	})
+}
+
+// UpdateStorageURI sets the "storage_uri" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateStorageURI() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateStorageURI()
+	})
+}
+
+// ClearStorageURI clears the value of the "storage_uri" field.
+func (u *HarnessConfigUpsertBulk) ClearStorageURI() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearStorageURI()
+	})
+}
+
+// SetStorageBucket sets the "storage_bucket" field.
+func (u *HarnessConfigUpsertBulk) SetStorageBucket(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetStorageBucket(v)
+	})
+}
+
+// UpdateStorageBucket sets the "storage_bucket" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateStorageBucket() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateStorageBucket()
+	})
+}
+
+// ClearStorageBucket clears the value of the "storage_bucket" field.
+func (u *HarnessConfigUpsertBulk) ClearStorageBucket() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearStorageBucket()
+	})
+}
+
+// SetStoragePath sets the "storage_path" field.
+func (u *HarnessConfigUpsertBulk) SetStoragePath(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetStoragePath(v)
+	})
+}
+
+// UpdateStoragePath sets the "storage_path" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateStoragePath() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateStoragePath()
+	})
+}
+
+// ClearStoragePath clears the value of the "storage_path" field.
+func (u *HarnessConfigUpsertBulk) ClearStoragePath() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearStoragePath()
+	})
+}
+
+// SetFiles sets the "files" field.
+func (u *HarnessConfigUpsertBulk) SetFiles(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetFiles(v)
+	})
+}
+
+// UpdateFiles sets the "files" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateFiles() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateFiles()
+	})
+}
+
+// ClearFiles clears the value of the "files" field.
+func (u *HarnessConfigUpsertBulk) ClearFiles() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearFiles()
+	})
+}
+
+// SetLocked sets the "locked" field.
+func (u *HarnessConfigUpsertBulk) SetLocked(v bool) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetLocked(v)
+	})
+}
+
+// UpdateLocked sets the "locked" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateLocked() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateLocked()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *HarnessConfigUpsertBulk) SetStatus(v harnessconfig.Status) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateStatus() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// SetOwnerID sets the "owner_id" field.
+func (u *HarnessConfigUpsertBulk) SetOwnerID(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetOwnerID(v)
+	})
+}
+
+// UpdateOwnerID sets the "owner_id" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateOwnerID() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateOwnerID()
+	})
+}
+
+// ClearOwnerID clears the value of the "owner_id" field.
+func (u *HarnessConfigUpsertBulk) ClearOwnerID() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearOwnerID()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *HarnessConfigUpsertBulk) SetCreatedBy(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateCreatedBy() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *HarnessConfigUpsertBulk) ClearCreatedBy() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (u *HarnessConfigUpsertBulk) SetUpdatedBy(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetUpdatedBy(v)
+	})
+}
+
+// UpdateUpdatedBy sets the "updated_by" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateUpdatedBy() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateUpdatedBy()
+	})
+}
+
+// ClearUpdatedBy clears the value of the "updated_by" field.
+func (u *HarnessConfigUpsertBulk) ClearUpdatedBy() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearUpdatedBy()
+	})
+}
+
+// SetVisibility sets the "visibility" field.
+func (u *HarnessConfigUpsertBulk) SetVisibility(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetVisibility(v)
+	})
+}
+
+// UpdateVisibility sets the "visibility" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateVisibility() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateVisibility()
+	})
+}
+
+// SetUpdated sets the "updated" field.
+func (u *HarnessConfigUpsertBulk) SetUpdated(v time.Time) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetUpdated(v)
+	})
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateUpdated() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateUpdated()
+	})
+}
+
+// Exec executes the query.
+func (u *HarnessConfigUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the HarnessConfigCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for HarnessConfigCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *HarnessConfigUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

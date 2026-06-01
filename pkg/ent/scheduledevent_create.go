@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
@@ -19,6 +21,7 @@ type ScheduledEventCreate struct {
 	config
 	mutation *ScheduledEventMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetProjectID sets the "project_id" field.
@@ -253,6 +256,7 @@ func (_c *ScheduledEventCreate) createSpec() (*ScheduledEvent, *sqlgraph.CreateS
 		_node = &ScheduledEvent{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(scheduledevent.Table, sqlgraph.NewFieldSpec(scheduledevent.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -300,11 +304,436 @@ func (_c *ScheduledEventCreate) createSpec() (*ScheduledEvent, *sqlgraph.CreateS
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.ScheduledEvent.Create().
+//		SetProjectID(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.ScheduledEventUpsert) {
+//			SetProjectID(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *ScheduledEventCreate) OnConflict(opts ...sql.ConflictOption) *ScheduledEventUpsertOne {
+	_c.conflict = opts
+	return &ScheduledEventUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.ScheduledEvent.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *ScheduledEventCreate) OnConflictColumns(columns ...string) *ScheduledEventUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &ScheduledEventUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// ScheduledEventUpsertOne is the builder for "upsert"-ing
+	//  one ScheduledEvent node.
+	ScheduledEventUpsertOne struct {
+		create *ScheduledEventCreate
+	}
+
+	// ScheduledEventUpsert is the "OnConflict" setter.
+	ScheduledEventUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetProjectID sets the "project_id" field.
+func (u *ScheduledEventUpsert) SetProjectID(v uuid.UUID) *ScheduledEventUpsert {
+	u.Set(scheduledevent.FieldProjectID, v)
+	return u
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *ScheduledEventUpsert) UpdateProjectID() *ScheduledEventUpsert {
+	u.SetExcluded(scheduledevent.FieldProjectID)
+	return u
+}
+
+// SetEventType sets the "event_type" field.
+func (u *ScheduledEventUpsert) SetEventType(v string) *ScheduledEventUpsert {
+	u.Set(scheduledevent.FieldEventType, v)
+	return u
+}
+
+// UpdateEventType sets the "event_type" field to the value that was provided on create.
+func (u *ScheduledEventUpsert) UpdateEventType() *ScheduledEventUpsert {
+	u.SetExcluded(scheduledevent.FieldEventType)
+	return u
+}
+
+// SetFireAt sets the "fire_at" field.
+func (u *ScheduledEventUpsert) SetFireAt(v time.Time) *ScheduledEventUpsert {
+	u.Set(scheduledevent.FieldFireAt, v)
+	return u
+}
+
+// UpdateFireAt sets the "fire_at" field to the value that was provided on create.
+func (u *ScheduledEventUpsert) UpdateFireAt() *ScheduledEventUpsert {
+	u.SetExcluded(scheduledevent.FieldFireAt)
+	return u
+}
+
+// SetPayload sets the "payload" field.
+func (u *ScheduledEventUpsert) SetPayload(v string) *ScheduledEventUpsert {
+	u.Set(scheduledevent.FieldPayload, v)
+	return u
+}
+
+// UpdatePayload sets the "payload" field to the value that was provided on create.
+func (u *ScheduledEventUpsert) UpdatePayload() *ScheduledEventUpsert {
+	u.SetExcluded(scheduledevent.FieldPayload)
+	return u
+}
+
+// SetStatus sets the "status" field.
+func (u *ScheduledEventUpsert) SetStatus(v string) *ScheduledEventUpsert {
+	u.Set(scheduledevent.FieldStatus, v)
+	return u
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *ScheduledEventUpsert) UpdateStatus() *ScheduledEventUpsert {
+	u.SetExcluded(scheduledevent.FieldStatus)
+	return u
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *ScheduledEventUpsert) SetCreatedBy(v string) *ScheduledEventUpsert {
+	u.Set(scheduledevent.FieldCreatedBy, v)
+	return u
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *ScheduledEventUpsert) UpdateCreatedBy() *ScheduledEventUpsert {
+	u.SetExcluded(scheduledevent.FieldCreatedBy)
+	return u
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *ScheduledEventUpsert) ClearCreatedBy() *ScheduledEventUpsert {
+	u.SetNull(scheduledevent.FieldCreatedBy)
+	return u
+}
+
+// SetFiredAt sets the "fired_at" field.
+func (u *ScheduledEventUpsert) SetFiredAt(v time.Time) *ScheduledEventUpsert {
+	u.Set(scheduledevent.FieldFiredAt, v)
+	return u
+}
+
+// UpdateFiredAt sets the "fired_at" field to the value that was provided on create.
+func (u *ScheduledEventUpsert) UpdateFiredAt() *ScheduledEventUpsert {
+	u.SetExcluded(scheduledevent.FieldFiredAt)
+	return u
+}
+
+// ClearFiredAt clears the value of the "fired_at" field.
+func (u *ScheduledEventUpsert) ClearFiredAt() *ScheduledEventUpsert {
+	u.SetNull(scheduledevent.FieldFiredAt)
+	return u
+}
+
+// SetError sets the "error" field.
+func (u *ScheduledEventUpsert) SetError(v string) *ScheduledEventUpsert {
+	u.Set(scheduledevent.FieldError, v)
+	return u
+}
+
+// UpdateError sets the "error" field to the value that was provided on create.
+func (u *ScheduledEventUpsert) UpdateError() *ScheduledEventUpsert {
+	u.SetExcluded(scheduledevent.FieldError)
+	return u
+}
+
+// ClearError clears the value of the "error" field.
+func (u *ScheduledEventUpsert) ClearError() *ScheduledEventUpsert {
+	u.SetNull(scheduledevent.FieldError)
+	return u
+}
+
+// SetScheduleID sets the "schedule_id" field.
+func (u *ScheduledEventUpsert) SetScheduleID(v string) *ScheduledEventUpsert {
+	u.Set(scheduledevent.FieldScheduleID, v)
+	return u
+}
+
+// UpdateScheduleID sets the "schedule_id" field to the value that was provided on create.
+func (u *ScheduledEventUpsert) UpdateScheduleID() *ScheduledEventUpsert {
+	u.SetExcluded(scheduledevent.FieldScheduleID)
+	return u
+}
+
+// ClearScheduleID clears the value of the "schedule_id" field.
+func (u *ScheduledEventUpsert) ClearScheduleID() *ScheduledEventUpsert {
+	u.SetNull(scheduledevent.FieldScheduleID)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.ScheduledEvent.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(scheduledevent.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *ScheduledEventUpsertOne) UpdateNewValues() *ScheduledEventUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(scheduledevent.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(scheduledevent.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.ScheduledEvent.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *ScheduledEventUpsertOne) Ignore() *ScheduledEventUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *ScheduledEventUpsertOne) DoNothing() *ScheduledEventUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the ScheduledEventCreate.OnConflict
+// documentation for more info.
+func (u *ScheduledEventUpsertOne) Update(set func(*ScheduledEventUpsert)) *ScheduledEventUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&ScheduledEventUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *ScheduledEventUpsertOne) SetProjectID(v uuid.UUID) *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *ScheduledEventUpsertOne) UpdateProjectID() *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// SetEventType sets the "event_type" field.
+func (u *ScheduledEventUpsertOne) SetEventType(v string) *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetEventType(v)
+	})
+}
+
+// UpdateEventType sets the "event_type" field to the value that was provided on create.
+func (u *ScheduledEventUpsertOne) UpdateEventType() *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdateEventType()
+	})
+}
+
+// SetFireAt sets the "fire_at" field.
+func (u *ScheduledEventUpsertOne) SetFireAt(v time.Time) *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetFireAt(v)
+	})
+}
+
+// UpdateFireAt sets the "fire_at" field to the value that was provided on create.
+func (u *ScheduledEventUpsertOne) UpdateFireAt() *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdateFireAt()
+	})
+}
+
+// SetPayload sets the "payload" field.
+func (u *ScheduledEventUpsertOne) SetPayload(v string) *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetPayload(v)
+	})
+}
+
+// UpdatePayload sets the "payload" field to the value that was provided on create.
+func (u *ScheduledEventUpsertOne) UpdatePayload() *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdatePayload()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *ScheduledEventUpsertOne) SetStatus(v string) *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *ScheduledEventUpsertOne) UpdateStatus() *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *ScheduledEventUpsertOne) SetCreatedBy(v string) *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *ScheduledEventUpsertOne) UpdateCreatedBy() *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *ScheduledEventUpsertOne) ClearCreatedBy() *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// SetFiredAt sets the "fired_at" field.
+func (u *ScheduledEventUpsertOne) SetFiredAt(v time.Time) *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetFiredAt(v)
+	})
+}
+
+// UpdateFiredAt sets the "fired_at" field to the value that was provided on create.
+func (u *ScheduledEventUpsertOne) UpdateFiredAt() *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdateFiredAt()
+	})
+}
+
+// ClearFiredAt clears the value of the "fired_at" field.
+func (u *ScheduledEventUpsertOne) ClearFiredAt() *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.ClearFiredAt()
+	})
+}
+
+// SetError sets the "error" field.
+func (u *ScheduledEventUpsertOne) SetError(v string) *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetError(v)
+	})
+}
+
+// UpdateError sets the "error" field to the value that was provided on create.
+func (u *ScheduledEventUpsertOne) UpdateError() *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdateError()
+	})
+}
+
+// ClearError clears the value of the "error" field.
+func (u *ScheduledEventUpsertOne) ClearError() *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.ClearError()
+	})
+}
+
+// SetScheduleID sets the "schedule_id" field.
+func (u *ScheduledEventUpsertOne) SetScheduleID(v string) *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetScheduleID(v)
+	})
+}
+
+// UpdateScheduleID sets the "schedule_id" field to the value that was provided on create.
+func (u *ScheduledEventUpsertOne) UpdateScheduleID() *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdateScheduleID()
+	})
+}
+
+// ClearScheduleID clears the value of the "schedule_id" field.
+func (u *ScheduledEventUpsertOne) ClearScheduleID() *ScheduledEventUpsertOne {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.ClearScheduleID()
+	})
+}
+
+// Exec executes the query.
+func (u *ScheduledEventUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for ScheduledEventCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *ScheduledEventUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *ScheduledEventUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: ScheduledEventUpsertOne.ID is not supported by MySQL driver. Use ScheduledEventUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *ScheduledEventUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // ScheduledEventCreateBulk is the builder for creating many ScheduledEvent entities in bulk.
 type ScheduledEventCreateBulk struct {
 	config
 	err      error
 	builders []*ScheduledEventCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the ScheduledEvent entities in the database.
@@ -334,6 +763,7 @@ func (_c *ScheduledEventCreateBulk) Save(ctx context.Context) ([]*ScheduledEvent
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -380,6 +810,277 @@ func (_c *ScheduledEventCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *ScheduledEventCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.ScheduledEvent.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.ScheduledEventUpsert) {
+//			SetProjectID(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *ScheduledEventCreateBulk) OnConflict(opts ...sql.ConflictOption) *ScheduledEventUpsertBulk {
+	_c.conflict = opts
+	return &ScheduledEventUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.ScheduledEvent.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *ScheduledEventCreateBulk) OnConflictColumns(columns ...string) *ScheduledEventUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &ScheduledEventUpsertBulk{
+		create: _c,
+	}
+}
+
+// ScheduledEventUpsertBulk is the builder for "upsert"-ing
+// a bulk of ScheduledEvent nodes.
+type ScheduledEventUpsertBulk struct {
+	create *ScheduledEventCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.ScheduledEvent.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(scheduledevent.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *ScheduledEventUpsertBulk) UpdateNewValues() *ScheduledEventUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(scheduledevent.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(scheduledevent.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.ScheduledEvent.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *ScheduledEventUpsertBulk) Ignore() *ScheduledEventUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *ScheduledEventUpsertBulk) DoNothing() *ScheduledEventUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the ScheduledEventCreateBulk.OnConflict
+// documentation for more info.
+func (u *ScheduledEventUpsertBulk) Update(set func(*ScheduledEventUpsert)) *ScheduledEventUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&ScheduledEventUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetProjectID sets the "project_id" field.
+func (u *ScheduledEventUpsertBulk) SetProjectID(v uuid.UUID) *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetProjectID(v)
+	})
+}
+
+// UpdateProjectID sets the "project_id" field to the value that was provided on create.
+func (u *ScheduledEventUpsertBulk) UpdateProjectID() *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdateProjectID()
+	})
+}
+
+// SetEventType sets the "event_type" field.
+func (u *ScheduledEventUpsertBulk) SetEventType(v string) *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetEventType(v)
+	})
+}
+
+// UpdateEventType sets the "event_type" field to the value that was provided on create.
+func (u *ScheduledEventUpsertBulk) UpdateEventType() *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdateEventType()
+	})
+}
+
+// SetFireAt sets the "fire_at" field.
+func (u *ScheduledEventUpsertBulk) SetFireAt(v time.Time) *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetFireAt(v)
+	})
+}
+
+// UpdateFireAt sets the "fire_at" field to the value that was provided on create.
+func (u *ScheduledEventUpsertBulk) UpdateFireAt() *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdateFireAt()
+	})
+}
+
+// SetPayload sets the "payload" field.
+func (u *ScheduledEventUpsertBulk) SetPayload(v string) *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetPayload(v)
+	})
+}
+
+// UpdatePayload sets the "payload" field to the value that was provided on create.
+func (u *ScheduledEventUpsertBulk) UpdatePayload() *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdatePayload()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *ScheduledEventUpsertBulk) SetStatus(v string) *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *ScheduledEventUpsertBulk) UpdateStatus() *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *ScheduledEventUpsertBulk) SetCreatedBy(v string) *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *ScheduledEventUpsertBulk) UpdateCreatedBy() *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *ScheduledEventUpsertBulk) ClearCreatedBy() *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// SetFiredAt sets the "fired_at" field.
+func (u *ScheduledEventUpsertBulk) SetFiredAt(v time.Time) *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetFiredAt(v)
+	})
+}
+
+// UpdateFiredAt sets the "fired_at" field to the value that was provided on create.
+func (u *ScheduledEventUpsertBulk) UpdateFiredAt() *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdateFiredAt()
+	})
+}
+
+// ClearFiredAt clears the value of the "fired_at" field.
+func (u *ScheduledEventUpsertBulk) ClearFiredAt() *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.ClearFiredAt()
+	})
+}
+
+// SetError sets the "error" field.
+func (u *ScheduledEventUpsertBulk) SetError(v string) *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetError(v)
+	})
+}
+
+// UpdateError sets the "error" field to the value that was provided on create.
+func (u *ScheduledEventUpsertBulk) UpdateError() *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdateError()
+	})
+}
+
+// ClearError clears the value of the "error" field.
+func (u *ScheduledEventUpsertBulk) ClearError() *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.ClearError()
+	})
+}
+
+// SetScheduleID sets the "schedule_id" field.
+func (u *ScheduledEventUpsertBulk) SetScheduleID(v string) *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.SetScheduleID(v)
+	})
+}
+
+// UpdateScheduleID sets the "schedule_id" field to the value that was provided on create.
+func (u *ScheduledEventUpsertBulk) UpdateScheduleID() *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.UpdateScheduleID()
+	})
+}
+
+// ClearScheduleID clears the value of the "schedule_id" field.
+func (u *ScheduledEventUpsertBulk) ClearScheduleID() *ScheduledEventUpsertBulk {
+	return u.Update(func(s *ScheduledEventUpsert) {
+		s.ClearScheduleID()
+	})
+}
+
+// Exec executes the query.
+func (u *ScheduledEventUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the ScheduledEventCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for ScheduledEventCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *ScheduledEventUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

@@ -17743,26 +17743,33 @@ func (m *PolicyBindingMutation) ResetEdge(name string) error {
 // ProjectMutation represents an operation that mutates the Project nodes in the graph.
 type ProjectMutation struct {
 	config
-	op            Op
-	typ           string
-	id            *uuid.UUID
-	name          *string
-	slug          *string
-	git_remote    *string
-	labels        *map[string]string
-	annotations   *map[string]string
-	created       *time.Time
-	updated       *time.Time
-	created_by    *string
-	owner_id      *string
-	visibility    *string
-	clearedFields map[string]struct{}
-	agents        map[uuid.UUID]struct{}
-	removedagents map[uuid.UUID]struct{}
-	clearedagents bool
-	done          bool
-	oldValue      func(context.Context) (*Project, error)
-	predicates    []predicate.Project
+	op                        Op
+	typ                       string
+	id                        *uuid.UUID
+	name                      *string
+	slug                      *string
+	git_remote                *string
+	default_runtime_broker_id *string
+	labels                    *map[string]string
+	annotations               *map[string]string
+	shared_dirs               *string
+	created                   *time.Time
+	updated                   *time.Time
+	created_by                *string
+	owner_id                  *string
+	visibility                *string
+	github_installation_id    *int64
+	addgithub_installation_id *int64
+	github_permissions        *string
+	github_app_status         *string
+	git_identity              *string
+	clearedFields             map[string]struct{}
+	agents                    map[uuid.UUID]struct{}
+	removedagents             map[uuid.UUID]struct{}
+	clearedagents             bool
+	done                      bool
+	oldValue                  func(context.Context) (*Project, error)
+	predicates                []predicate.Project
 }
 
 var _ ent.Mutation = (*ProjectMutation)(nil)
@@ -17990,6 +17997,55 @@ func (m *ProjectMutation) ResetGitRemote() {
 	delete(m.clearedFields, project.FieldGitRemote)
 }
 
+// SetDefaultRuntimeBrokerID sets the "default_runtime_broker_id" field.
+func (m *ProjectMutation) SetDefaultRuntimeBrokerID(s string) {
+	m.default_runtime_broker_id = &s
+}
+
+// DefaultRuntimeBrokerID returns the value of the "default_runtime_broker_id" field in the mutation.
+func (m *ProjectMutation) DefaultRuntimeBrokerID() (r string, exists bool) {
+	v := m.default_runtime_broker_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDefaultRuntimeBrokerID returns the old "default_runtime_broker_id" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldDefaultRuntimeBrokerID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDefaultRuntimeBrokerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDefaultRuntimeBrokerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDefaultRuntimeBrokerID: %w", err)
+	}
+	return oldValue.DefaultRuntimeBrokerID, nil
+}
+
+// ClearDefaultRuntimeBrokerID clears the value of the "default_runtime_broker_id" field.
+func (m *ProjectMutation) ClearDefaultRuntimeBrokerID() {
+	m.default_runtime_broker_id = nil
+	m.clearedFields[project.FieldDefaultRuntimeBrokerID] = struct{}{}
+}
+
+// DefaultRuntimeBrokerIDCleared returns if the "default_runtime_broker_id" field was cleared in this mutation.
+func (m *ProjectMutation) DefaultRuntimeBrokerIDCleared() bool {
+	_, ok := m.clearedFields[project.FieldDefaultRuntimeBrokerID]
+	return ok
+}
+
+// ResetDefaultRuntimeBrokerID resets all changes to the "default_runtime_broker_id" field.
+func (m *ProjectMutation) ResetDefaultRuntimeBrokerID() {
+	m.default_runtime_broker_id = nil
+	delete(m.clearedFields, project.FieldDefaultRuntimeBrokerID)
+}
+
 // SetLabels sets the "labels" field.
 func (m *ProjectMutation) SetLabels(value map[string]string) {
 	m.labels = &value
@@ -18086,6 +18142,55 @@ func (m *ProjectMutation) AnnotationsCleared() bool {
 func (m *ProjectMutation) ResetAnnotations() {
 	m.annotations = nil
 	delete(m.clearedFields, project.FieldAnnotations)
+}
+
+// SetSharedDirs sets the "shared_dirs" field.
+func (m *ProjectMutation) SetSharedDirs(s string) {
+	m.shared_dirs = &s
+}
+
+// SharedDirs returns the value of the "shared_dirs" field in the mutation.
+func (m *ProjectMutation) SharedDirs() (r string, exists bool) {
+	v := m.shared_dirs
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSharedDirs returns the old "shared_dirs" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldSharedDirs(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSharedDirs is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSharedDirs requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSharedDirs: %w", err)
+	}
+	return oldValue.SharedDirs, nil
+}
+
+// ClearSharedDirs clears the value of the "shared_dirs" field.
+func (m *ProjectMutation) ClearSharedDirs() {
+	m.shared_dirs = nil
+	m.clearedFields[project.FieldSharedDirs] = struct{}{}
+}
+
+// SharedDirsCleared returns if the "shared_dirs" field was cleared in this mutation.
+func (m *ProjectMutation) SharedDirsCleared() bool {
+	_, ok := m.clearedFields[project.FieldSharedDirs]
+	return ok
+}
+
+// ResetSharedDirs resets all changes to the "shared_dirs" field.
+func (m *ProjectMutation) ResetSharedDirs() {
+	m.shared_dirs = nil
+	delete(m.clearedFields, project.FieldSharedDirs)
 }
 
 // SetCreated sets the "created" field.
@@ -18294,6 +18399,223 @@ func (m *ProjectMutation) ResetVisibility() {
 	m.visibility = nil
 }
 
+// SetGithubInstallationID sets the "github_installation_id" field.
+func (m *ProjectMutation) SetGithubInstallationID(i int64) {
+	m.github_installation_id = &i
+	m.addgithub_installation_id = nil
+}
+
+// GithubInstallationID returns the value of the "github_installation_id" field in the mutation.
+func (m *ProjectMutation) GithubInstallationID() (r int64, exists bool) {
+	v := m.github_installation_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGithubInstallationID returns the old "github_installation_id" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldGithubInstallationID(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGithubInstallationID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGithubInstallationID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGithubInstallationID: %w", err)
+	}
+	return oldValue.GithubInstallationID, nil
+}
+
+// AddGithubInstallationID adds i to the "github_installation_id" field.
+func (m *ProjectMutation) AddGithubInstallationID(i int64) {
+	if m.addgithub_installation_id != nil {
+		*m.addgithub_installation_id += i
+	} else {
+		m.addgithub_installation_id = &i
+	}
+}
+
+// AddedGithubInstallationID returns the value that was added to the "github_installation_id" field in this mutation.
+func (m *ProjectMutation) AddedGithubInstallationID() (r int64, exists bool) {
+	v := m.addgithub_installation_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearGithubInstallationID clears the value of the "github_installation_id" field.
+func (m *ProjectMutation) ClearGithubInstallationID() {
+	m.github_installation_id = nil
+	m.addgithub_installation_id = nil
+	m.clearedFields[project.FieldGithubInstallationID] = struct{}{}
+}
+
+// GithubInstallationIDCleared returns if the "github_installation_id" field was cleared in this mutation.
+func (m *ProjectMutation) GithubInstallationIDCleared() bool {
+	_, ok := m.clearedFields[project.FieldGithubInstallationID]
+	return ok
+}
+
+// ResetGithubInstallationID resets all changes to the "github_installation_id" field.
+func (m *ProjectMutation) ResetGithubInstallationID() {
+	m.github_installation_id = nil
+	m.addgithub_installation_id = nil
+	delete(m.clearedFields, project.FieldGithubInstallationID)
+}
+
+// SetGithubPermissions sets the "github_permissions" field.
+func (m *ProjectMutation) SetGithubPermissions(s string) {
+	m.github_permissions = &s
+}
+
+// GithubPermissions returns the value of the "github_permissions" field in the mutation.
+func (m *ProjectMutation) GithubPermissions() (r string, exists bool) {
+	v := m.github_permissions
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGithubPermissions returns the old "github_permissions" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldGithubPermissions(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGithubPermissions is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGithubPermissions requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGithubPermissions: %w", err)
+	}
+	return oldValue.GithubPermissions, nil
+}
+
+// ClearGithubPermissions clears the value of the "github_permissions" field.
+func (m *ProjectMutation) ClearGithubPermissions() {
+	m.github_permissions = nil
+	m.clearedFields[project.FieldGithubPermissions] = struct{}{}
+}
+
+// GithubPermissionsCleared returns if the "github_permissions" field was cleared in this mutation.
+func (m *ProjectMutation) GithubPermissionsCleared() bool {
+	_, ok := m.clearedFields[project.FieldGithubPermissions]
+	return ok
+}
+
+// ResetGithubPermissions resets all changes to the "github_permissions" field.
+func (m *ProjectMutation) ResetGithubPermissions() {
+	m.github_permissions = nil
+	delete(m.clearedFields, project.FieldGithubPermissions)
+}
+
+// SetGithubAppStatus sets the "github_app_status" field.
+func (m *ProjectMutation) SetGithubAppStatus(s string) {
+	m.github_app_status = &s
+}
+
+// GithubAppStatus returns the value of the "github_app_status" field in the mutation.
+func (m *ProjectMutation) GithubAppStatus() (r string, exists bool) {
+	v := m.github_app_status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGithubAppStatus returns the old "github_app_status" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldGithubAppStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGithubAppStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGithubAppStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGithubAppStatus: %w", err)
+	}
+	return oldValue.GithubAppStatus, nil
+}
+
+// ClearGithubAppStatus clears the value of the "github_app_status" field.
+func (m *ProjectMutation) ClearGithubAppStatus() {
+	m.github_app_status = nil
+	m.clearedFields[project.FieldGithubAppStatus] = struct{}{}
+}
+
+// GithubAppStatusCleared returns if the "github_app_status" field was cleared in this mutation.
+func (m *ProjectMutation) GithubAppStatusCleared() bool {
+	_, ok := m.clearedFields[project.FieldGithubAppStatus]
+	return ok
+}
+
+// ResetGithubAppStatus resets all changes to the "github_app_status" field.
+func (m *ProjectMutation) ResetGithubAppStatus() {
+	m.github_app_status = nil
+	delete(m.clearedFields, project.FieldGithubAppStatus)
+}
+
+// SetGitIdentity sets the "git_identity" field.
+func (m *ProjectMutation) SetGitIdentity(s string) {
+	m.git_identity = &s
+}
+
+// GitIdentity returns the value of the "git_identity" field in the mutation.
+func (m *ProjectMutation) GitIdentity() (r string, exists bool) {
+	v := m.git_identity
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGitIdentity returns the old "git_identity" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldGitIdentity(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGitIdentity is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGitIdentity requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGitIdentity: %w", err)
+	}
+	return oldValue.GitIdentity, nil
+}
+
+// ClearGitIdentity clears the value of the "git_identity" field.
+func (m *ProjectMutation) ClearGitIdentity() {
+	m.git_identity = nil
+	m.clearedFields[project.FieldGitIdentity] = struct{}{}
+}
+
+// GitIdentityCleared returns if the "git_identity" field was cleared in this mutation.
+func (m *ProjectMutation) GitIdentityCleared() bool {
+	_, ok := m.clearedFields[project.FieldGitIdentity]
+	return ok
+}
+
+// ResetGitIdentity resets all changes to the "git_identity" field.
+func (m *ProjectMutation) ResetGitIdentity() {
+	m.git_identity = nil
+	delete(m.clearedFields, project.FieldGitIdentity)
+}
+
 // AddAgentIDs adds the "agents" edge to the Agent entity by ids.
 func (m *ProjectMutation) AddAgentIDs(ids ...uuid.UUID) {
 	if m.agents == nil {
@@ -18382,7 +18704,7 @@ func (m *ProjectMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ProjectMutation) Fields() []string {
-	fields := make([]string, 0, 10)
+	fields := make([]string, 0, 16)
 	if m.name != nil {
 		fields = append(fields, project.FieldName)
 	}
@@ -18392,11 +18714,17 @@ func (m *ProjectMutation) Fields() []string {
 	if m.git_remote != nil {
 		fields = append(fields, project.FieldGitRemote)
 	}
+	if m.default_runtime_broker_id != nil {
+		fields = append(fields, project.FieldDefaultRuntimeBrokerID)
+	}
 	if m.labels != nil {
 		fields = append(fields, project.FieldLabels)
 	}
 	if m.annotations != nil {
 		fields = append(fields, project.FieldAnnotations)
+	}
+	if m.shared_dirs != nil {
+		fields = append(fields, project.FieldSharedDirs)
 	}
 	if m.created != nil {
 		fields = append(fields, project.FieldCreated)
@@ -18413,6 +18741,18 @@ func (m *ProjectMutation) Fields() []string {
 	if m.visibility != nil {
 		fields = append(fields, project.FieldVisibility)
 	}
+	if m.github_installation_id != nil {
+		fields = append(fields, project.FieldGithubInstallationID)
+	}
+	if m.github_permissions != nil {
+		fields = append(fields, project.FieldGithubPermissions)
+	}
+	if m.github_app_status != nil {
+		fields = append(fields, project.FieldGithubAppStatus)
+	}
+	if m.git_identity != nil {
+		fields = append(fields, project.FieldGitIdentity)
+	}
 	return fields
 }
 
@@ -18427,10 +18767,14 @@ func (m *ProjectMutation) Field(name string) (ent.Value, bool) {
 		return m.Slug()
 	case project.FieldGitRemote:
 		return m.GitRemote()
+	case project.FieldDefaultRuntimeBrokerID:
+		return m.DefaultRuntimeBrokerID()
 	case project.FieldLabels:
 		return m.Labels()
 	case project.FieldAnnotations:
 		return m.Annotations()
+	case project.FieldSharedDirs:
+		return m.SharedDirs()
 	case project.FieldCreated:
 		return m.Created()
 	case project.FieldUpdated:
@@ -18441,6 +18785,14 @@ func (m *ProjectMutation) Field(name string) (ent.Value, bool) {
 		return m.OwnerID()
 	case project.FieldVisibility:
 		return m.Visibility()
+	case project.FieldGithubInstallationID:
+		return m.GithubInstallationID()
+	case project.FieldGithubPermissions:
+		return m.GithubPermissions()
+	case project.FieldGithubAppStatus:
+		return m.GithubAppStatus()
+	case project.FieldGitIdentity:
+		return m.GitIdentity()
 	}
 	return nil, false
 }
@@ -18456,10 +18808,14 @@ func (m *ProjectMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldSlug(ctx)
 	case project.FieldGitRemote:
 		return m.OldGitRemote(ctx)
+	case project.FieldDefaultRuntimeBrokerID:
+		return m.OldDefaultRuntimeBrokerID(ctx)
 	case project.FieldLabels:
 		return m.OldLabels(ctx)
 	case project.FieldAnnotations:
 		return m.OldAnnotations(ctx)
+	case project.FieldSharedDirs:
+		return m.OldSharedDirs(ctx)
 	case project.FieldCreated:
 		return m.OldCreated(ctx)
 	case project.FieldUpdated:
@@ -18470,6 +18826,14 @@ func (m *ProjectMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldOwnerID(ctx)
 	case project.FieldVisibility:
 		return m.OldVisibility(ctx)
+	case project.FieldGithubInstallationID:
+		return m.OldGithubInstallationID(ctx)
+	case project.FieldGithubPermissions:
+		return m.OldGithubPermissions(ctx)
+	case project.FieldGithubAppStatus:
+		return m.OldGithubAppStatus(ctx)
+	case project.FieldGitIdentity:
+		return m.OldGitIdentity(ctx)
 	}
 	return nil, fmt.Errorf("unknown Project field %s", name)
 }
@@ -18500,6 +18864,13 @@ func (m *ProjectMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetGitRemote(v)
 		return nil
+	case project.FieldDefaultRuntimeBrokerID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDefaultRuntimeBrokerID(v)
+		return nil
 	case project.FieldLabels:
 		v, ok := value.(map[string]string)
 		if !ok {
@@ -18513,6 +18884,13 @@ func (m *ProjectMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetAnnotations(v)
+		return nil
+	case project.FieldSharedDirs:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSharedDirs(v)
 		return nil
 	case project.FieldCreated:
 		v, ok := value.(time.Time)
@@ -18549,6 +18927,34 @@ func (m *ProjectMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetVisibility(v)
 		return nil
+	case project.FieldGithubInstallationID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGithubInstallationID(v)
+		return nil
+	case project.FieldGithubPermissions:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGithubPermissions(v)
+		return nil
+	case project.FieldGithubAppStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGithubAppStatus(v)
+		return nil
+	case project.FieldGitIdentity:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGitIdentity(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Project field %s", name)
 }
@@ -18556,13 +18962,21 @@ func (m *ProjectMutation) SetField(name string, value ent.Value) error {
 // AddedFields returns all numeric fields that were incremented/decremented during
 // this mutation.
 func (m *ProjectMutation) AddedFields() []string {
-	return nil
+	var fields []string
+	if m.addgithub_installation_id != nil {
+		fields = append(fields, project.FieldGithubInstallationID)
+	}
+	return fields
 }
 
 // AddedField returns the numeric value that was incremented/decremented on a field
 // with the given name. The second boolean return value indicates that this field
 // was not set, or was not defined in the schema.
 func (m *ProjectMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case project.FieldGithubInstallationID:
+		return m.AddedGithubInstallationID()
+	}
 	return nil, false
 }
 
@@ -18571,6 +18985,13 @@ func (m *ProjectMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *ProjectMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case project.FieldGithubInstallationID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddGithubInstallationID(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Project numeric field %s", name)
 }
@@ -18582,17 +19003,35 @@ func (m *ProjectMutation) ClearedFields() []string {
 	if m.FieldCleared(project.FieldGitRemote) {
 		fields = append(fields, project.FieldGitRemote)
 	}
+	if m.FieldCleared(project.FieldDefaultRuntimeBrokerID) {
+		fields = append(fields, project.FieldDefaultRuntimeBrokerID)
+	}
 	if m.FieldCleared(project.FieldLabels) {
 		fields = append(fields, project.FieldLabels)
 	}
 	if m.FieldCleared(project.FieldAnnotations) {
 		fields = append(fields, project.FieldAnnotations)
 	}
+	if m.FieldCleared(project.FieldSharedDirs) {
+		fields = append(fields, project.FieldSharedDirs)
+	}
 	if m.FieldCleared(project.FieldCreatedBy) {
 		fields = append(fields, project.FieldCreatedBy)
 	}
 	if m.FieldCleared(project.FieldOwnerID) {
 		fields = append(fields, project.FieldOwnerID)
+	}
+	if m.FieldCleared(project.FieldGithubInstallationID) {
+		fields = append(fields, project.FieldGithubInstallationID)
+	}
+	if m.FieldCleared(project.FieldGithubPermissions) {
+		fields = append(fields, project.FieldGithubPermissions)
+	}
+	if m.FieldCleared(project.FieldGithubAppStatus) {
+		fields = append(fields, project.FieldGithubAppStatus)
+	}
+	if m.FieldCleared(project.FieldGitIdentity) {
+		fields = append(fields, project.FieldGitIdentity)
 	}
 	return fields
 }
@@ -18611,17 +19050,35 @@ func (m *ProjectMutation) ClearField(name string) error {
 	case project.FieldGitRemote:
 		m.ClearGitRemote()
 		return nil
+	case project.FieldDefaultRuntimeBrokerID:
+		m.ClearDefaultRuntimeBrokerID()
+		return nil
 	case project.FieldLabels:
 		m.ClearLabels()
 		return nil
 	case project.FieldAnnotations:
 		m.ClearAnnotations()
 		return nil
+	case project.FieldSharedDirs:
+		m.ClearSharedDirs()
+		return nil
 	case project.FieldCreatedBy:
 		m.ClearCreatedBy()
 		return nil
 	case project.FieldOwnerID:
 		m.ClearOwnerID()
+		return nil
+	case project.FieldGithubInstallationID:
+		m.ClearGithubInstallationID()
+		return nil
+	case project.FieldGithubPermissions:
+		m.ClearGithubPermissions()
+		return nil
+	case project.FieldGithubAppStatus:
+		m.ClearGithubAppStatus()
+		return nil
+	case project.FieldGitIdentity:
+		m.ClearGitIdentity()
 		return nil
 	}
 	return fmt.Errorf("unknown Project nullable field %s", name)
@@ -18640,11 +19097,17 @@ func (m *ProjectMutation) ResetField(name string) error {
 	case project.FieldGitRemote:
 		m.ResetGitRemote()
 		return nil
+	case project.FieldDefaultRuntimeBrokerID:
+		m.ResetDefaultRuntimeBrokerID()
+		return nil
 	case project.FieldLabels:
 		m.ResetLabels()
 		return nil
 	case project.FieldAnnotations:
 		m.ResetAnnotations()
+		return nil
+	case project.FieldSharedDirs:
+		m.ResetSharedDirs()
 		return nil
 	case project.FieldCreated:
 		m.ResetCreated()
@@ -18660,6 +19123,18 @@ func (m *ProjectMutation) ResetField(name string) error {
 		return nil
 	case project.FieldVisibility:
 		m.ResetVisibility()
+		return nil
+	case project.FieldGithubInstallationID:
+		m.ResetGithubInstallationID()
+		return nil
+	case project.FieldGithubPermissions:
+		m.ResetGithubPermissions()
+		return nil
+	case project.FieldGithubAppStatus:
+		m.ResetGithubAppStatus()
+		return nil
+	case project.FieldGitIdentity:
+		m.ResetGitIdentity()
 		return nil
 	}
 	return fmt.Errorf("unknown Project field %s", name)
@@ -20388,6 +20863,8 @@ type RuntimeBrokerMutation struct {
 	_type               *string
 	mode                *string
 	version             *string
+	lock_version        *int64
+	addlock_version     *int64
 	status              *string
 	connection_state    *string
 	last_heartbeat      *time.Time
@@ -20615,9 +21092,22 @@ func (m *RuntimeBrokerMutation) OldType(ctx context.Context) (v string, err erro
 	return oldValue.Type, nil
 }
 
+// ClearType clears the value of the "type" field.
+func (m *RuntimeBrokerMutation) ClearType() {
+	m._type = nil
+	m.clearedFields[runtimebroker.FieldType] = struct{}{}
+}
+
+// TypeCleared returns if the "type" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) TypeCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldType]
+	return ok
+}
+
 // ResetType resets all changes to the "type" field.
 func (m *RuntimeBrokerMutation) ResetType() {
 	m._type = nil
+	delete(m.clearedFields, runtimebroker.FieldType)
 }
 
 // SetMode sets the "mode" field.
@@ -20703,6 +21193,62 @@ func (m *RuntimeBrokerMutation) VersionCleared() bool {
 func (m *RuntimeBrokerMutation) ResetVersion() {
 	m.version = nil
 	delete(m.clearedFields, runtimebroker.FieldVersion)
+}
+
+// SetLockVersion sets the "lock_version" field.
+func (m *RuntimeBrokerMutation) SetLockVersion(i int64) {
+	m.lock_version = &i
+	m.addlock_version = nil
+}
+
+// LockVersion returns the value of the "lock_version" field in the mutation.
+func (m *RuntimeBrokerMutation) LockVersion() (r int64, exists bool) {
+	v := m.lock_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLockVersion returns the old "lock_version" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldLockVersion(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLockVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLockVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLockVersion: %w", err)
+	}
+	return oldValue.LockVersion, nil
+}
+
+// AddLockVersion adds i to the "lock_version" field.
+func (m *RuntimeBrokerMutation) AddLockVersion(i int64) {
+	if m.addlock_version != nil {
+		*m.addlock_version += i
+	} else {
+		m.addlock_version = &i
+	}
+}
+
+// AddedLockVersion returns the value that was added to the "lock_version" field in this mutation.
+func (m *RuntimeBrokerMutation) AddedLockVersion() (r int64, exists bool) {
+	v := m.addlock_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetLockVersion resets all changes to the "lock_version" field.
+func (m *RuntimeBrokerMutation) ResetLockVersion() {
+	m.lock_version = nil
+	m.addlock_version = nil
 }
 
 // SetStatus sets the "status" field.
@@ -21360,7 +21906,7 @@ func (m *RuntimeBrokerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RuntimeBrokerMutation) Fields() []string {
-	fields := make([]string, 0, 19)
+	fields := make([]string, 0, 20)
 	if m.name != nil {
 		fields = append(fields, runtimebroker.FieldName)
 	}
@@ -21375,6 +21921,9 @@ func (m *RuntimeBrokerMutation) Fields() []string {
 	}
 	if m.version != nil {
 		fields = append(fields, runtimebroker.FieldVersion)
+	}
+	if m.lock_version != nil {
+		fields = append(fields, runtimebroker.FieldLockVersion)
 	}
 	if m.status != nil {
 		fields = append(fields, runtimebroker.FieldStatus)
@@ -21436,6 +21985,8 @@ func (m *RuntimeBrokerMutation) Field(name string) (ent.Value, bool) {
 		return m.Mode()
 	case runtimebroker.FieldVersion:
 		return m.Version()
+	case runtimebroker.FieldLockVersion:
+		return m.LockVersion()
 	case runtimebroker.FieldStatus:
 		return m.Status()
 	case runtimebroker.FieldConnectionState:
@@ -21483,6 +22034,8 @@ func (m *RuntimeBrokerMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldMode(ctx)
 	case runtimebroker.FieldVersion:
 		return m.OldVersion(ctx)
+	case runtimebroker.FieldLockVersion:
+		return m.OldLockVersion(ctx)
 	case runtimebroker.FieldStatus:
 		return m.OldStatus(ctx)
 	case runtimebroker.FieldConnectionState:
@@ -21554,6 +22107,13 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetVersion(v)
+		return nil
+	case runtimebroker.FieldLockVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLockVersion(v)
 		return nil
 	case runtimebroker.FieldStatus:
 		v, ok := value.(string)
@@ -21660,13 +22220,21 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 // AddedFields returns all numeric fields that were incremented/decremented during
 // this mutation.
 func (m *RuntimeBrokerMutation) AddedFields() []string {
-	return nil
+	var fields []string
+	if m.addlock_version != nil {
+		fields = append(fields, runtimebroker.FieldLockVersion)
+	}
+	return fields
 }
 
 // AddedField returns the numeric value that was incremented/decremented on a field
 // with the given name. The second boolean return value indicates that this field
 // was not set, or was not defined in the schema.
 func (m *RuntimeBrokerMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case runtimebroker.FieldLockVersion:
+		return m.AddedLockVersion()
+	}
 	return nil, false
 }
 
@@ -21675,6 +22243,13 @@ func (m *RuntimeBrokerMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *RuntimeBrokerMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case runtimebroker.FieldLockVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddLockVersion(v)
+		return nil
 	}
 	return fmt.Errorf("unknown RuntimeBroker numeric field %s", name)
 }
@@ -21683,6 +22258,9 @@ func (m *RuntimeBrokerMutation) AddField(name string, value ent.Value) error {
 // mutation.
 func (m *RuntimeBrokerMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(runtimebroker.FieldType) {
+		fields = append(fields, runtimebroker.FieldType)
+	}
 	if m.FieldCleared(runtimebroker.FieldVersion) {
 		fields = append(fields, runtimebroker.FieldVersion)
 	}
@@ -21727,6 +22305,9 @@ func (m *RuntimeBrokerMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *RuntimeBrokerMutation) ClearField(name string) error {
 	switch name {
+	case runtimebroker.FieldType:
+		m.ClearType()
+		return nil
 	case runtimebroker.FieldVersion:
 		m.ClearVersion()
 		return nil
@@ -21779,6 +22360,9 @@ func (m *RuntimeBrokerMutation) ResetField(name string) error {
 		return nil
 	case runtimebroker.FieldVersion:
 		m.ResetVersion()
+		return nil
+	case runtimebroker.FieldLockVersion:
+		m.ResetLockVersion()
 		return nil
 	case runtimebroker.FieldStatus:
 		m.ResetStatus()
@@ -27767,6 +28351,7 @@ type UserMutation struct {
 	preferences            **schema.UserPreferences
 	created                *time.Time
 	last_login             *time.Time
+	last_seen              *time.Time
 	clearedFields          map[string]struct{}
 	created_agents         map[uuid.UUID]struct{}
 	removedcreated_agents  map[uuid.UUID]struct{}
@@ -28219,6 +28804,55 @@ func (m *UserMutation) ResetLastLogin() {
 	delete(m.clearedFields, user.FieldLastLogin)
 }
 
+// SetLastSeen sets the "last_seen" field.
+func (m *UserMutation) SetLastSeen(t time.Time) {
+	m.last_seen = &t
+}
+
+// LastSeen returns the value of the "last_seen" field in the mutation.
+func (m *UserMutation) LastSeen() (r time.Time, exists bool) {
+	v := m.last_seen
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastSeen returns the old "last_seen" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldLastSeen(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastSeen is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastSeen requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastSeen: %w", err)
+	}
+	return oldValue.LastSeen, nil
+}
+
+// ClearLastSeen clears the value of the "last_seen" field.
+func (m *UserMutation) ClearLastSeen() {
+	m.last_seen = nil
+	m.clearedFields[user.FieldLastSeen] = struct{}{}
+}
+
+// LastSeenCleared returns if the "last_seen" field was cleared in this mutation.
+func (m *UserMutation) LastSeenCleared() bool {
+	_, ok := m.clearedFields[user.FieldLastSeen]
+	return ok
+}
+
+// ResetLastSeen resets all changes to the "last_seen" field.
+func (m *UserMutation) ResetLastSeen() {
+	m.last_seen = nil
+	delete(m.clearedFields, user.FieldLastSeen)
+}
+
 // AddCreatedAgentIDs adds the "created_agents" edge to the Agent entity by ids.
 func (m *UserMutation) AddCreatedAgentIDs(ids ...uuid.UUID) {
 	if m.created_agents == nil {
@@ -28523,7 +29157,7 @@ func (m *UserMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UserMutation) Fields() []string {
-	fields := make([]string, 0, 8)
+	fields := make([]string, 0, 9)
 	if m.email != nil {
 		fields = append(fields, user.FieldEmail)
 	}
@@ -28547,6 +29181,9 @@ func (m *UserMutation) Fields() []string {
 	}
 	if m.last_login != nil {
 		fields = append(fields, user.FieldLastLogin)
+	}
+	if m.last_seen != nil {
+		fields = append(fields, user.FieldLastSeen)
 	}
 	return fields
 }
@@ -28572,6 +29209,8 @@ func (m *UserMutation) Field(name string) (ent.Value, bool) {
 		return m.Created()
 	case user.FieldLastLogin:
 		return m.LastLogin()
+	case user.FieldLastSeen:
+		return m.LastSeen()
 	}
 	return nil, false
 }
@@ -28597,6 +29236,8 @@ func (m *UserMutation) OldField(ctx context.Context, name string) (ent.Value, er
 		return m.OldCreated(ctx)
 	case user.FieldLastLogin:
 		return m.OldLastLogin(ctx)
+	case user.FieldLastSeen:
+		return m.OldLastSeen(ctx)
 	}
 	return nil, fmt.Errorf("unknown User field %s", name)
 }
@@ -28662,6 +29303,13 @@ func (m *UserMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetLastLogin(v)
 		return nil
+	case user.FieldLastSeen:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastSeen(v)
+		return nil
 	}
 	return fmt.Errorf("unknown User field %s", name)
 }
@@ -28701,6 +29349,9 @@ func (m *UserMutation) ClearedFields() []string {
 	if m.FieldCleared(user.FieldLastLogin) {
 		fields = append(fields, user.FieldLastLogin)
 	}
+	if m.FieldCleared(user.FieldLastSeen) {
+		fields = append(fields, user.FieldLastSeen)
+	}
 	return fields
 }
 
@@ -28723,6 +29374,9 @@ func (m *UserMutation) ClearField(name string) error {
 		return nil
 	case user.FieldLastLogin:
 		m.ClearLastLogin()
+		return nil
+	case user.FieldLastSeen:
+		m.ClearLastSeen()
 		return nil
 	}
 	return fmt.Errorf("unknown User nullable field %s", name)
@@ -28755,6 +29409,9 @@ func (m *UserMutation) ResetField(name string) error {
 		return nil
 	case user.FieldLastLogin:
 		m.ResetLastLogin()
+		return nil
+	case user.FieldLastSeen:
+		m.ResetLastSeen()
 		return nil
 	}
 	return fmt.Errorf("unknown User field %s", name)

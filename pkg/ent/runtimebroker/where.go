@@ -80,6 +80,11 @@ func Version(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldVersion, v))
 }
 
+// LockVersion applies equality check predicate on the "lock_version" field. It's identical to LockVersionEQ.
+func LockVersion(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldLockVersion, v))
+}
+
 // Status applies equality check predicate on the "status" field. It's identical to StatusEQ.
 func Status(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldStatus, v))
@@ -335,6 +340,16 @@ func TypeHasSuffix(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldType, v))
 }
 
+// TypeIsNil applies the IsNil predicate on the "type" field.
+func TypeIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldType))
+}
+
+// TypeNotNil applies the NotNil predicate on the "type" field.
+func TypeNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldType))
+}
+
 // TypeEqualFold applies the EqualFold predicate on the "type" field.
 func TypeEqualFold(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldType, v))
@@ -483,6 +498,46 @@ func VersionEqualFold(v string) predicate.RuntimeBroker {
 // VersionContainsFold applies the ContainsFold predicate on the "version" field.
 func VersionContainsFold(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldVersion, v))
+}
+
+// LockVersionEQ applies the EQ predicate on the "lock_version" field.
+func LockVersionEQ(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldLockVersion, v))
+}
+
+// LockVersionNEQ applies the NEQ predicate on the "lock_version" field.
+func LockVersionNEQ(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldLockVersion, v))
+}
+
+// LockVersionIn applies the In predicate on the "lock_version" field.
+func LockVersionIn(vs ...int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldLockVersion, vs...))
+}
+
+// LockVersionNotIn applies the NotIn predicate on the "lock_version" field.
+func LockVersionNotIn(vs ...int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldLockVersion, vs...))
+}
+
+// LockVersionGT applies the GT predicate on the "lock_version" field.
+func LockVersionGT(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldLockVersion, v))
+}
+
+// LockVersionGTE applies the GTE predicate on the "lock_version" field.
+func LockVersionGTE(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldLockVersion, v))
+}
+
+// LockVersionLT applies the LT predicate on the "lock_version" field.
+func LockVersionLT(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldLockVersion, v))
+}
+
+// LockVersionLTE applies the LTE predicate on the "lock_version" field.
+func LockVersionLTE(v int64) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldLockVersion, v))
 }
 
 // StatusEQ applies the EQ predicate on the "status" field.

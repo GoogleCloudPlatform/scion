@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
@@ -18,6 +19,7 @@ type GithubInstallationCreate struct {
 	config
 	mutation *GithubInstallationMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetAccountLogin sets the "account_login" field.
@@ -221,6 +223,7 @@ func (_c *GithubInstallationCreate) createSpec() (*GithubInstallation, *sqlgraph
 		_node = &GithubInstallation{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(githubinstallation.Table, sqlgraph.NewFieldSpec(githubinstallation.FieldID, field.TypeInt64))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = id
@@ -256,11 +259,314 @@ func (_c *GithubInstallationCreate) createSpec() (*GithubInstallation, *sqlgraph
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.GithubInstallation.Create().
+//		SetAccountLogin(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.GithubInstallationUpsert) {
+//			SetAccountLogin(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *GithubInstallationCreate) OnConflict(opts ...sql.ConflictOption) *GithubInstallationUpsertOne {
+	_c.conflict = opts
+	return &GithubInstallationUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.GithubInstallation.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *GithubInstallationCreate) OnConflictColumns(columns ...string) *GithubInstallationUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &GithubInstallationUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// GithubInstallationUpsertOne is the builder for "upsert"-ing
+	//  one GithubInstallation node.
+	GithubInstallationUpsertOne struct {
+		create *GithubInstallationCreate
+	}
+
+	// GithubInstallationUpsert is the "OnConflict" setter.
+	GithubInstallationUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetAccountLogin sets the "account_login" field.
+func (u *GithubInstallationUpsert) SetAccountLogin(v string) *GithubInstallationUpsert {
+	u.Set(githubinstallation.FieldAccountLogin, v)
+	return u
+}
+
+// UpdateAccountLogin sets the "account_login" field to the value that was provided on create.
+func (u *GithubInstallationUpsert) UpdateAccountLogin() *GithubInstallationUpsert {
+	u.SetExcluded(githubinstallation.FieldAccountLogin)
+	return u
+}
+
+// SetAccountType sets the "account_type" field.
+func (u *GithubInstallationUpsert) SetAccountType(v string) *GithubInstallationUpsert {
+	u.Set(githubinstallation.FieldAccountType, v)
+	return u
+}
+
+// UpdateAccountType sets the "account_type" field to the value that was provided on create.
+func (u *GithubInstallationUpsert) UpdateAccountType() *GithubInstallationUpsert {
+	u.SetExcluded(githubinstallation.FieldAccountType)
+	return u
+}
+
+// SetAppID sets the "app_id" field.
+func (u *GithubInstallationUpsert) SetAppID(v int64) *GithubInstallationUpsert {
+	u.Set(githubinstallation.FieldAppID, v)
+	return u
+}
+
+// UpdateAppID sets the "app_id" field to the value that was provided on create.
+func (u *GithubInstallationUpsert) UpdateAppID() *GithubInstallationUpsert {
+	u.SetExcluded(githubinstallation.FieldAppID)
+	return u
+}
+
+// AddAppID adds v to the "app_id" field.
+func (u *GithubInstallationUpsert) AddAppID(v int64) *GithubInstallationUpsert {
+	u.Add(githubinstallation.FieldAppID, v)
+	return u
+}
+
+// SetRepositories sets the "repositories" field.
+func (u *GithubInstallationUpsert) SetRepositories(v string) *GithubInstallationUpsert {
+	u.Set(githubinstallation.FieldRepositories, v)
+	return u
+}
+
+// UpdateRepositories sets the "repositories" field to the value that was provided on create.
+func (u *GithubInstallationUpsert) UpdateRepositories() *GithubInstallationUpsert {
+	u.SetExcluded(githubinstallation.FieldRepositories)
+	return u
+}
+
+// SetStatus sets the "status" field.
+func (u *GithubInstallationUpsert) SetStatus(v string) *GithubInstallationUpsert {
+	u.Set(githubinstallation.FieldStatus, v)
+	return u
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *GithubInstallationUpsert) UpdateStatus() *GithubInstallationUpsert {
+	u.SetExcluded(githubinstallation.FieldStatus)
+	return u
+}
+
+// SetUpdated sets the "updated" field.
+func (u *GithubInstallationUpsert) SetUpdated(v time.Time) *GithubInstallationUpsert {
+	u.Set(githubinstallation.FieldUpdated, v)
+	return u
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *GithubInstallationUpsert) UpdateUpdated() *GithubInstallationUpsert {
+	u.SetExcluded(githubinstallation.FieldUpdated)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.GithubInstallation.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(githubinstallation.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *GithubInstallationUpsertOne) UpdateNewValues() *GithubInstallationUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(githubinstallation.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(githubinstallation.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.GithubInstallation.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *GithubInstallationUpsertOne) Ignore() *GithubInstallationUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *GithubInstallationUpsertOne) DoNothing() *GithubInstallationUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the GithubInstallationCreate.OnConflict
+// documentation for more info.
+func (u *GithubInstallationUpsertOne) Update(set func(*GithubInstallationUpsert)) *GithubInstallationUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&GithubInstallationUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetAccountLogin sets the "account_login" field.
+func (u *GithubInstallationUpsertOne) SetAccountLogin(v string) *GithubInstallationUpsertOne {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.SetAccountLogin(v)
+	})
+}
+
+// UpdateAccountLogin sets the "account_login" field to the value that was provided on create.
+func (u *GithubInstallationUpsertOne) UpdateAccountLogin() *GithubInstallationUpsertOne {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.UpdateAccountLogin()
+	})
+}
+
+// SetAccountType sets the "account_type" field.
+func (u *GithubInstallationUpsertOne) SetAccountType(v string) *GithubInstallationUpsertOne {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.SetAccountType(v)
+	})
+}
+
+// UpdateAccountType sets the "account_type" field to the value that was provided on create.
+func (u *GithubInstallationUpsertOne) UpdateAccountType() *GithubInstallationUpsertOne {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.UpdateAccountType()
+	})
+}
+
+// SetAppID sets the "app_id" field.
+func (u *GithubInstallationUpsertOne) SetAppID(v int64) *GithubInstallationUpsertOne {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.SetAppID(v)
+	})
+}
+
+// AddAppID adds v to the "app_id" field.
+func (u *GithubInstallationUpsertOne) AddAppID(v int64) *GithubInstallationUpsertOne {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.AddAppID(v)
+	})
+}
+
+// UpdateAppID sets the "app_id" field to the value that was provided on create.
+func (u *GithubInstallationUpsertOne) UpdateAppID() *GithubInstallationUpsertOne {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.UpdateAppID()
+	})
+}
+
+// SetRepositories sets the "repositories" field.
+func (u *GithubInstallationUpsertOne) SetRepositories(v string) *GithubInstallationUpsertOne {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.SetRepositories(v)
+	})
+}
+
+// UpdateRepositories sets the "repositories" field to the value that was provided on create.
+func (u *GithubInstallationUpsertOne) UpdateRepositories() *GithubInstallationUpsertOne {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.UpdateRepositories()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *GithubInstallationUpsertOne) SetStatus(v string) *GithubInstallationUpsertOne {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *GithubInstallationUpsertOne) UpdateStatus() *GithubInstallationUpsertOne {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// SetUpdated sets the "updated" field.
+func (u *GithubInstallationUpsertOne) SetUpdated(v time.Time) *GithubInstallationUpsertOne {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.SetUpdated(v)
+	})
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *GithubInstallationUpsertOne) UpdateUpdated() *GithubInstallationUpsertOne {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.UpdateUpdated()
+	})
+}
+
+// Exec executes the query.
+func (u *GithubInstallationUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for GithubInstallationCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *GithubInstallationUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *GithubInstallationUpsertOne) ID(ctx context.Context) (id int64, err error) {
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *GithubInstallationUpsertOne) IDX(ctx context.Context) int64 {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // GithubInstallationCreateBulk is the builder for creating many GithubInstallation entities in bulk.
 type GithubInstallationCreateBulk struct {
 	config
 	err      error
 	builders []*GithubInstallationCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the GithubInstallation entities in the database.
@@ -290,6 +596,7 @@ func (_c *GithubInstallationCreateBulk) Save(ctx context.Context) ([]*GithubInst
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -340,6 +647,214 @@ func (_c *GithubInstallationCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *GithubInstallationCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.GithubInstallation.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.GithubInstallationUpsert) {
+//			SetAccountLogin(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *GithubInstallationCreateBulk) OnConflict(opts ...sql.ConflictOption) *GithubInstallationUpsertBulk {
+	_c.conflict = opts
+	return &GithubInstallationUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.GithubInstallation.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *GithubInstallationCreateBulk) OnConflictColumns(columns ...string) *GithubInstallationUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &GithubInstallationUpsertBulk{
+		create: _c,
+	}
+}
+
+// GithubInstallationUpsertBulk is the builder for "upsert"-ing
+// a bulk of GithubInstallation nodes.
+type GithubInstallationUpsertBulk struct {
+	create *GithubInstallationCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.GithubInstallation.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(githubinstallation.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *GithubInstallationUpsertBulk) UpdateNewValues() *GithubInstallationUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(githubinstallation.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(githubinstallation.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.GithubInstallation.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *GithubInstallationUpsertBulk) Ignore() *GithubInstallationUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *GithubInstallationUpsertBulk) DoNothing() *GithubInstallationUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the GithubInstallationCreateBulk.OnConflict
+// documentation for more info.
+func (u *GithubInstallationUpsertBulk) Update(set func(*GithubInstallationUpsert)) *GithubInstallationUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&GithubInstallationUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetAccountLogin sets the "account_login" field.
+func (u *GithubInstallationUpsertBulk) SetAccountLogin(v string) *GithubInstallationUpsertBulk {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.SetAccountLogin(v)
+	})
+}
+
+// UpdateAccountLogin sets the "account_login" field to the value that was provided on create.
+func (u *GithubInstallationUpsertBulk) UpdateAccountLogin() *GithubInstallationUpsertBulk {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.UpdateAccountLogin()
+	})
+}
+
+// SetAccountType sets the "account_type" field.
+func (u *GithubInstallationUpsertBulk) SetAccountType(v string) *GithubInstallationUpsertBulk {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.SetAccountType(v)
+	})
+}
+
+// UpdateAccountType sets the "account_type" field to the value that was provided on create.
+func (u *GithubInstallationUpsertBulk) UpdateAccountType() *GithubInstallationUpsertBulk {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.UpdateAccountType()
+	})
+}
+
+// SetAppID sets the "app_id" field.
+func (u *GithubInstallationUpsertBulk) SetAppID(v int64) *GithubInstallationUpsertBulk {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.SetAppID(v)
+	})
+}
+
+// AddAppID adds v to the "app_id" field.
+func (u *GithubInstallationUpsertBulk) AddAppID(v int64) *GithubInstallationUpsertBulk {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.AddAppID(v)
+	})
+}
+
+// UpdateAppID sets the "app_id" field to the value that was provided on create.
+func (u *GithubInstallationUpsertBulk) UpdateAppID() *GithubInstallationUpsertBulk {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.UpdateAppID()
+	})
+}
+
+// SetRepositories sets the "repositories" field.
+func (u *GithubInstallationUpsertBulk) SetRepositories(v string) *GithubInstallationUpsertBulk {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.SetRepositories(v)
+	})
+}
+
+// UpdateRepositories sets the "repositories" field to the value that was provided on create.
+func (u *GithubInstallationUpsertBulk) UpdateRepositories() *GithubInstallationUpsertBulk {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.UpdateRepositories()
+	})
+}
+
+// SetStatus sets the "status" field.
+func (u *GithubInstallationUpsertBulk) SetStatus(v string) *GithubInstallationUpsertBulk {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.SetStatus(v)
+	})
+}
+
+// UpdateStatus sets the "status" field to the value that was provided on create.
+func (u *GithubInstallationUpsertBulk) UpdateStatus() *GithubInstallationUpsertBulk {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.UpdateStatus()
+	})
+}
+
+// SetUpdated sets the "updated" field.
+func (u *GithubInstallationUpsertBulk) SetUpdated(v time.Time) *GithubInstallationUpsertBulk {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.SetUpdated(v)
+	})
+}
+
+// UpdateUpdated sets the "updated" field to the value that was provided on create.
+func (u *GithubInstallationUpsertBulk) UpdateUpdated() *GithubInstallationUpsertBulk {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.UpdateUpdated()
+	})
+}
+
+// Exec executes the query.
+func (u *GithubInstallationUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the GithubInstallationCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for GithubInstallationCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *GithubInstallationUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

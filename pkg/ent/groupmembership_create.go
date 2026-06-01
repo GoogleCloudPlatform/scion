@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
@@ -22,6 +24,7 @@ type GroupMembershipCreate struct {
 	config
 	mutation *GroupMembershipMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetRole sets the "role" field.
@@ -228,6 +231,7 @@ func (_c *GroupMembershipCreate) createSpec() (*GroupMembership, *sqlgraph.Creat
 		_node = &GroupMembership{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(groupmembership.Table, sqlgraph.NewFieldSpec(groupmembership.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -298,11 +302,319 @@ func (_c *GroupMembershipCreate) createSpec() (*GroupMembership, *sqlgraph.Creat
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.GroupMembership.Create().
+//		SetRole(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.GroupMembershipUpsert) {
+//			SetRole(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *GroupMembershipCreate) OnConflict(opts ...sql.ConflictOption) *GroupMembershipUpsertOne {
+	_c.conflict = opts
+	return &GroupMembershipUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.GroupMembership.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *GroupMembershipCreate) OnConflictColumns(columns ...string) *GroupMembershipUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &GroupMembershipUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// GroupMembershipUpsertOne is the builder for "upsert"-ing
+	//  one GroupMembership node.
+	GroupMembershipUpsertOne struct {
+		create *GroupMembershipCreate
+	}
+
+	// GroupMembershipUpsert is the "OnConflict" setter.
+	GroupMembershipUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetRole sets the "role" field.
+func (u *GroupMembershipUpsert) SetRole(v groupmembership.Role) *GroupMembershipUpsert {
+	u.Set(groupmembership.FieldRole, v)
+	return u
+}
+
+// UpdateRole sets the "role" field to the value that was provided on create.
+func (u *GroupMembershipUpsert) UpdateRole() *GroupMembershipUpsert {
+	u.SetExcluded(groupmembership.FieldRole)
+	return u
+}
+
+// SetAddedBy sets the "added_by" field.
+func (u *GroupMembershipUpsert) SetAddedBy(v string) *GroupMembershipUpsert {
+	u.Set(groupmembership.FieldAddedBy, v)
+	return u
+}
+
+// UpdateAddedBy sets the "added_by" field to the value that was provided on create.
+func (u *GroupMembershipUpsert) UpdateAddedBy() *GroupMembershipUpsert {
+	u.SetExcluded(groupmembership.FieldAddedBy)
+	return u
+}
+
+// ClearAddedBy clears the value of the "added_by" field.
+func (u *GroupMembershipUpsert) ClearAddedBy() *GroupMembershipUpsert {
+	u.SetNull(groupmembership.FieldAddedBy)
+	return u
+}
+
+// SetGroupID sets the "group_id" field.
+func (u *GroupMembershipUpsert) SetGroupID(v uuid.UUID) *GroupMembershipUpsert {
+	u.Set(groupmembership.FieldGroupID, v)
+	return u
+}
+
+// UpdateGroupID sets the "group_id" field to the value that was provided on create.
+func (u *GroupMembershipUpsert) UpdateGroupID() *GroupMembershipUpsert {
+	u.SetExcluded(groupmembership.FieldGroupID)
+	return u
+}
+
+// SetUserID sets the "user_id" field.
+func (u *GroupMembershipUpsert) SetUserID(v uuid.UUID) *GroupMembershipUpsert {
+	u.Set(groupmembership.FieldUserID, v)
+	return u
+}
+
+// UpdateUserID sets the "user_id" field to the value that was provided on create.
+func (u *GroupMembershipUpsert) UpdateUserID() *GroupMembershipUpsert {
+	u.SetExcluded(groupmembership.FieldUserID)
+	return u
+}
+
+// ClearUserID clears the value of the "user_id" field.
+func (u *GroupMembershipUpsert) ClearUserID() *GroupMembershipUpsert {
+	u.SetNull(groupmembership.FieldUserID)
+	return u
+}
+
+// SetAgentID sets the "agent_id" field.
+func (u *GroupMembershipUpsert) SetAgentID(v uuid.UUID) *GroupMembershipUpsert {
+	u.Set(groupmembership.FieldAgentID, v)
+	return u
+}
+
+// UpdateAgentID sets the "agent_id" field to the value that was provided on create.
+func (u *GroupMembershipUpsert) UpdateAgentID() *GroupMembershipUpsert {
+	u.SetExcluded(groupmembership.FieldAgentID)
+	return u
+}
+
+// ClearAgentID clears the value of the "agent_id" field.
+func (u *GroupMembershipUpsert) ClearAgentID() *GroupMembershipUpsert {
+	u.SetNull(groupmembership.FieldAgentID)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.GroupMembership.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(groupmembership.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *GroupMembershipUpsertOne) UpdateNewValues() *GroupMembershipUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(groupmembership.FieldID)
+		}
+		if _, exists := u.create.mutation.AddedAt(); exists {
+			s.SetIgnore(groupmembership.FieldAddedAt)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.GroupMembership.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *GroupMembershipUpsertOne) Ignore() *GroupMembershipUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *GroupMembershipUpsertOne) DoNothing() *GroupMembershipUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the GroupMembershipCreate.OnConflict
+// documentation for more info.
+func (u *GroupMembershipUpsertOne) Update(set func(*GroupMembershipUpsert)) *GroupMembershipUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&GroupMembershipUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetRole sets the "role" field.
+func (u *GroupMembershipUpsertOne) SetRole(v groupmembership.Role) *GroupMembershipUpsertOne {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.SetRole(v)
+	})
+}
+
+// UpdateRole sets the "role" field to the value that was provided on create.
+func (u *GroupMembershipUpsertOne) UpdateRole() *GroupMembershipUpsertOne {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.UpdateRole()
+	})
+}
+
+// SetAddedBy sets the "added_by" field.
+func (u *GroupMembershipUpsertOne) SetAddedBy(v string) *GroupMembershipUpsertOne {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.SetAddedBy(v)
+	})
+}
+
+// UpdateAddedBy sets the "added_by" field to the value that was provided on create.
+func (u *GroupMembershipUpsertOne) UpdateAddedBy() *GroupMembershipUpsertOne {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.UpdateAddedBy()
+	})
+}
+
+// ClearAddedBy clears the value of the "added_by" field.
+func (u *GroupMembershipUpsertOne) ClearAddedBy() *GroupMembershipUpsertOne {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.ClearAddedBy()
+	})
+}
+
+// SetGroupID sets the "group_id" field.
+func (u *GroupMembershipUpsertOne) SetGroupID(v uuid.UUID) *GroupMembershipUpsertOne {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.SetGroupID(v)
+	})
+}
+
+// UpdateGroupID sets the "group_id" field to the value that was provided on create.
+func (u *GroupMembershipUpsertOne) UpdateGroupID() *GroupMembershipUpsertOne {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.UpdateGroupID()
+	})
+}
+
+// SetUserID sets the "user_id" field.
+func (u *GroupMembershipUpsertOne) SetUserID(v uuid.UUID) *GroupMembershipUpsertOne {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.SetUserID(v)
+	})
+}
+
+// UpdateUserID sets the "user_id" field to the value that was provided on create.
+func (u *GroupMembershipUpsertOne) UpdateUserID() *GroupMembershipUpsertOne {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.UpdateUserID()
+	})
+}
+
+// ClearUserID clears the value of the "user_id" field.
+func (u *GroupMembershipUpsertOne) ClearUserID() *GroupMembershipUpsertOne {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.ClearUserID()
+	})
+}
+
+// SetAgentID sets the "agent_id" field.
+func (u *GroupMembershipUpsertOne) SetAgentID(v uuid.UUID) *GroupMembershipUpsertOne {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.SetAgentID(v)
+	})
+}
+
+// UpdateAgentID sets the "agent_id" field to the value that was provided on create.
+func (u *GroupMembershipUpsertOne) UpdateAgentID() *GroupMembershipUpsertOne {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.UpdateAgentID()
+	})
+}
+
+// ClearAgentID clears the value of the "agent_id" field.
+func (u *GroupMembershipUpsertOne) ClearAgentID() *GroupMembershipUpsertOne {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.ClearAgentID()
+	})
+}
+
+// Exec executes the query.
+func (u *GroupMembershipUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for GroupMembershipCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *GroupMembershipUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *GroupMembershipUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: GroupMembershipUpsertOne.ID is not supported by MySQL driver. Use GroupMembershipUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *GroupMembershipUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // GroupMembershipCreateBulk is the builder for creating many GroupMembership entities in bulk.
 type GroupMembershipCreateBulk struct {
 	config
 	err      error
 	builders []*GroupMembershipCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the GroupMembership entities in the database.
@@ -332,6 +644,7 @@ func (_c *GroupMembershipCreateBulk) Save(ctx context.Context) ([]*GroupMembersh
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -378,6 +691,214 @@ func (_c *GroupMembershipCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *GroupMembershipCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.GroupMembership.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.GroupMembershipUpsert) {
+//			SetRole(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *GroupMembershipCreateBulk) OnConflict(opts ...sql.ConflictOption) *GroupMembershipUpsertBulk {
+	_c.conflict = opts
+	return &GroupMembershipUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.GroupMembership.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *GroupMembershipCreateBulk) OnConflictColumns(columns ...string) *GroupMembershipUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &GroupMembershipUpsertBulk{
+		create: _c,
+	}
+}
+
+// GroupMembershipUpsertBulk is the builder for "upsert"-ing
+// a bulk of GroupMembership nodes.
+type GroupMembershipUpsertBulk struct {
+	create *GroupMembershipCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.GroupMembership.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(groupmembership.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *GroupMembershipUpsertBulk) UpdateNewValues() *GroupMembershipUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(groupmembership.FieldID)
+			}
+			if _, exists := b.mutation.AddedAt(); exists {
+				s.SetIgnore(groupmembership.FieldAddedAt)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.GroupMembership.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *GroupMembershipUpsertBulk) Ignore() *GroupMembershipUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *GroupMembershipUpsertBulk) DoNothing() *GroupMembershipUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the GroupMembershipCreateBulk.OnConflict
+// documentation for more info.
+func (u *GroupMembershipUpsertBulk) Update(set func(*GroupMembershipUpsert)) *GroupMembershipUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&GroupMembershipUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetRole sets the "role" field.
+func (u *GroupMembershipUpsertBulk) SetRole(v groupmembership.Role) *GroupMembershipUpsertBulk {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.SetRole(v)
+	})
+}
+
+// UpdateRole sets the "role" field to the value that was provided on create.
+func (u *GroupMembershipUpsertBulk) UpdateRole() *GroupMembershipUpsertBulk {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.UpdateRole()
+	})
+}
+
+// SetAddedBy sets the "added_by" field.
+func (u *GroupMembershipUpsertBulk) SetAddedBy(v string) *GroupMembershipUpsertBulk {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.SetAddedBy(v)
+	})
+}
+
+// UpdateAddedBy sets the "added_by" field to the value that was provided on create.
+func (u *GroupMembershipUpsertBulk) UpdateAddedBy() *GroupMembershipUpsertBulk {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.UpdateAddedBy()
+	})
+}
+
+// ClearAddedBy clears the value of the "added_by" field.
+func (u *GroupMembershipUpsertBulk) ClearAddedBy() *GroupMembershipUpsertBulk {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.ClearAddedBy()
+	})
+}
+
+// SetGroupID sets the "group_id" field.
+func (u *GroupMembershipUpsertBulk) SetGroupID(v uuid.UUID) *GroupMembershipUpsertBulk {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.SetGroupID(v)
+	})
+}
+
+// UpdateGroupID sets the "group_id" field to the value that was provided on create.
+func (u *GroupMembershipUpsertBulk) UpdateGroupID() *GroupMembershipUpsertBulk {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.UpdateGroupID()
+	})
+}
+
+// SetUserID sets the "user_id" field.
+func (u *GroupMembershipUpsertBulk) SetUserID(v uuid.UUID) *GroupMembershipUpsertBulk {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.SetUserID(v)
+	})
+}
+
+// UpdateUserID sets the "user_id" field to the value that was provided on create.
+func (u *GroupMembershipUpsertBulk) UpdateUserID() *GroupMembershipUpsertBulk {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.UpdateUserID()
+	})
+}
+
+// ClearUserID clears the value of the "user_id" field.
+func (u *GroupMembershipUpsertBulk) ClearUserID() *GroupMembershipUpsertBulk {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.ClearUserID()
+	})
+}
+
+// SetAgentID sets the "agent_id" field.
+func (u *GroupMembershipUpsertBulk) SetAgentID(v uuid.UUID) *GroupMembershipUpsertBulk {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.SetAgentID(v)
+	})
+}
+
+// UpdateAgentID sets the "agent_id" field to the value that was provided on create.
+func (u *GroupMembershipUpsertBulk) UpdateAgentID() *GroupMembershipUpsertBulk {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.UpdateAgentID()
+	})
+}
+
+// ClearAgentID clears the value of the "agent_id" field.
+func (u *GroupMembershipUpsertBulk) ClearAgentID() *GroupMembershipUpsertBulk {
+	return u.Update(func(s *GroupMembershipUpsert) {
+		s.ClearAgentID()
+	})
+}
+
+// Exec executes the query.
+func (u *GroupMembershipUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the GroupMembershipCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for GroupMembershipCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *GroupMembershipUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

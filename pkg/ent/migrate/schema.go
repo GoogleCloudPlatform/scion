@@ -603,13 +603,19 @@ var (
 		{Name: "name", Type: field.TypeString},
 		{Name: "slug", Type: field.TypeString, Unique: true},
 		{Name: "git_remote", Type: field.TypeString, Nullable: true},
+		{Name: "default_runtime_broker_id", Type: field.TypeString, Nullable: true},
 		{Name: "labels", Type: field.TypeJSON, Nullable: true},
 		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
+		{Name: "shared_dirs", Type: field.TypeString, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
 		{Name: "owner_id", Type: field.TypeString, Nullable: true},
 		{Name: "visibility", Type: field.TypeString, Default: "private"},
+		{Name: "github_installation_id", Type: field.TypeInt64, Nullable: true},
+		{Name: "github_permissions", Type: field.TypeString, Nullable: true},
+		{Name: "github_app_status", Type: field.TypeString, Nullable: true},
+		{Name: "git_identity", Type: field.TypeString, Nullable: true},
 	}
 	// ProjectsTable holds the schema information for the "projects" table.
 	ProjectsTable = &schema.Table{
@@ -677,9 +683,10 @@ var (
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "name", Type: field.TypeString},
 		{Name: "slug", Type: field.TypeString},
-		{Name: "type", Type: field.TypeString},
+		{Name: "type", Type: field.TypeString, Nullable: true},
 		{Name: "mode", Type: field.TypeString, Default: "connected"},
 		{Name: "version", Type: field.TypeString, Nullable: true},
+		{Name: "lock_version", Type: field.TypeInt64, Default: 0},
 		{Name: "status", Type: field.TypeString, Default: "offline"},
 		{Name: "connection_state", Type: field.TypeString, Default: "disconnected"},
 		{Name: "last_heartbeat", Type: field.TypeTime, Nullable: true},
@@ -709,7 +716,7 @@ var (
 			{
 				Name:    "runtimebroker_status",
 				Unique:  false,
-				Columns: []*schema.Column{RuntimeBrokersColumns[6]},
+				Columns: []*schema.Column{RuntimeBrokersColumns[7]},
 			},
 		},
 	}
@@ -914,12 +921,20 @@ var (
 		{Name: "preferences", Type: field.TypeJSON, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "last_login", Type: field.TypeTime, Nullable: true},
+		{Name: "last_seen", Type: field.TypeTime, Nullable: true},
 	}
 	// UsersTable holds the schema information for the "users" table.
 	UsersTable = &schema.Table{
 		Name:       "users",
 		Columns:    UsersColumns,
 		PrimaryKey: []*schema.Column{UsersColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "user_last_seen",
+				Unique:  false,
+				Columns: []*schema.Column{UsersColumns[9]},
+			},
+		},
 	}
 	// UserAccessTokensColumns holds the columns for the "user_access_tokens" table.
 	UserAccessTokensColumns = []*schema.Column{
