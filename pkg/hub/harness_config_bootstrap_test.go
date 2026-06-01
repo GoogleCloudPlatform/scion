@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -323,5 +324,207 @@ func TestBootstrapHarnessConfigsFromDir_SkipsNonDirectories(t *testing.T) {
 	}
 	if result.TotalCount != 1 {
 		t.Fatalf("expected 1 harness config (skipping non-dir), got %d", result.TotalCount)
+	}
+}
+
+// ============================================================================
+// Project harness-config import (workspace path) — mirrors the template
+// import tests in template_bootstrap_test.go.
+// ============================================================================
+
+// writeHarnessConfigDir creates a harness-config directory at
+// <root>/<rel>/<name> containing a minimal valid config.yaml.
+func writeHarnessConfigDir(t *testing.T, root, rel, name, harness string) {
+	t.Helper()
+	dir := filepath.Join(root, filepath.FromSlash(rel), name)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("harness: "+harness+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestImportHarnessConfigsFromWorkspace_ImportsConfig(t *testing.T) {
+	srv, s, project, wsRoot := setupWorkspaceProject(t, "hc-import")
+	ctx := context.Background()
+
+	writeHarnessConfigDir(t, wsRoot, ".scion/harness-configs", "my-config", "claude")
+	// A bonus non-yaml file to make sure extra files are walked fine.
+	if err := os.WriteFile(filepath.Join(wsRoot, ".scion", "harness-configs", "my-config", "README.md"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	imported, err := srv.importHarnessConfigsFromWorkspace(ctx, project, "/.scion/harness-configs")
+	if err != nil {
+		t.Fatalf("import failed: %v", err)
+	}
+	if len(imported) != 1 || imported[0] != "my-config" {
+		t.Fatalf("expected [my-config], got %v", imported)
+	}
+
+	result, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+		Scope:     store.HarnessConfigScopeProject,
+		ProjectID: project.ID,
+	}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TotalCount != 1 {
+		t.Fatalf("expected 1 project-scoped harness-config, got %d", result.TotalCount)
+	}
+	if result.Items[0].Scope != store.HarnessConfigScopeProject {
+		t.Errorf("expected project scope, got %q", result.Items[0].Scope)
+	}
+	if result.Items[0].Harness != "claude" {
+		t.Errorf("expected harness 'claude', got %q", result.Items[0].Harness)
+	}
+}
+
+func TestImportHarnessConfigsFromWorkspace_DefaultPath(t *testing.T) {
+	srv, s, project, wsRoot := setupWorkspaceProject(t, "hc-default")
+	ctx := context.Background()
+
+	writeHarnessConfigDir(t, wsRoot, ".scion/harness-configs", "default-hc", "gemini")
+
+	imported, err := srv.importHarnessConfigsFromWorkspace(ctx, project, "/.scion/harness-configs")
+	if err != nil {
+		t.Fatalf("import failed: %v", err)
+	}
+	if len(imported) != 1 {
+		t.Fatalf("expected 1 harness-config, got %d", len(imported))
+	}
+
+	result, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{ProjectID: project.ID}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TotalCount != 1 {
+		t.Fatalf("expected 1 harness-config, got %d", result.TotalCount)
+	}
+}
+
+func TestImportHarnessConfigsFromWorkspace_NonexistentPath(t *testing.T) {
+	srv, _, project, _ := setupWorkspaceProject(t, "hc-nopath")
+	ctx := context.Background()
+
+	_, err := srv.importHarnessConfigsFromWorkspace(ctx, project, "/does/not/exist")
+	if err == nil {
+		t.Fatal("expected error for nonexistent path")
+	}
+}
+
+func TestImportHarnessConfigsFromWorkspace_NoConfigsFound(t *testing.T) {
+	srv, _, project, wsRoot := setupWorkspaceProject(t, "hc-empty")
+	ctx := context.Background()
+
+	emptyDir := filepath.Join(wsRoot, "empty-configs")
+	if err := os.MkdirAll(emptyDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := srv.importHarnessConfigsFromWorkspace(ctx, project, "/empty-configs")
+	if err == nil {
+		t.Fatal("expected error for directory with no harness-configs")
+	}
+	if !strings.Contains(err.Error(), "no scion harness-configs found") {
+		t.Fatalf("expected 'no scion harness-configs found' error, got: %v", err)
+	}
+}
+
+func TestImportHarnessConfigsFromWorkspace_PathTraversal(t *testing.T) {
+	srv, _, project, _ := setupWorkspaceProject(t, "hc-traversal")
+	ctx := context.Background()
+
+	_, err := srv.importHarnessConfigsFromWorkspace(ctx, project, "../../../etc")
+	if err == nil {
+		t.Fatal("expected error for path traversal attempt")
+	}
+	if !strings.Contains(err.Error(), "must be within") {
+		t.Fatalf("expected 'must be within' error, got: %v", err)
+	}
+}
+
+func TestImportHarnessConfigsFromWorkspace_MultipleConfigs(t *testing.T) {
+	srv, s, project, wsRoot := setupWorkspaceProject(t, "hc-multi")
+	ctx := context.Background()
+
+	writeHarnessConfigDir(t, wsRoot, "configs", "hc-a", "claude")
+	writeHarnessConfigDir(t, wsRoot, "configs", "hc-b", "gemini")
+
+	imported, err := srv.importHarnessConfigsFromWorkspace(ctx, project, "/configs")
+	if err != nil {
+		t.Fatalf("import failed: %v", err)
+	}
+	if len(imported) != 2 {
+		t.Fatalf("expected 2 harness-configs, got %v", imported)
+	}
+
+	result, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+		Scope:     store.HarnessConfigScopeProject,
+		ProjectID: project.ID,
+	}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TotalCount != 2 {
+		t.Fatalf("expected 2 project-scoped harness-configs, got %d", result.TotalCount)
+	}
+}
+
+// TestImportHarnessConfigsFromWorkspace_SingleConfigAtRoot verifies that
+// pointing directly at one harness-config directory (rather than a parent of
+// configs) imports it.
+func TestImportHarnessConfigsFromWorkspace_SingleConfigAtRoot(t *testing.T) {
+	srv, s, project, wsRoot := setupWorkspaceProject(t, "hc-single")
+	ctx := context.Background()
+
+	writeHarnessConfigDir(t, wsRoot, "", "solo-config", "claude")
+
+	imported, err := srv.importHarnessConfigsFromWorkspace(ctx, project, "/solo-config")
+	if err != nil {
+		t.Fatalf("import failed: %v", err)
+	}
+	if len(imported) != 1 || imported[0] != "solo-config" {
+		t.Fatalf("expected [solo-config], got %v", imported)
+	}
+
+	result, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{ProjectID: project.ID}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TotalCount != 1 {
+		t.Fatalf("expected 1 harness-config, got %d", result.TotalCount)
+	}
+}
+
+// TestImportHarnessConfigsFromWorkspace_Reimport verifies a second import of the
+// same config force-syncs without error and does not create duplicates.
+func TestImportHarnessConfigsFromWorkspace_Reimport(t *testing.T) {
+	srv, s, project, wsRoot := setupWorkspaceProject(t, "hc-reimport")
+	ctx := context.Background()
+
+	writeHarnessConfigDir(t, wsRoot, ".scion/harness-configs", "repeat", "claude")
+
+	if _, err := srv.importHarnessConfigsFromWorkspace(ctx, project, "/.scion/harness-configs"); err != nil {
+		t.Fatalf("first import failed: %v", err)
+	}
+	imported, err := srv.importHarnessConfigsFromWorkspace(ctx, project, "/.scion/harness-configs")
+	if err != nil {
+		t.Fatalf("second import failed: %v", err)
+	}
+	if len(imported) != 1 {
+		t.Fatalf("expected 1 harness-config re-imported, got %v", imported)
+	}
+
+	result, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+		Scope:     store.HarnessConfigScopeProject,
+		ProjectID: project.ID,
+	}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TotalCount != 1 {
+		t.Fatalf("expected 1 harness-config after re-import, got %d", result.TotalCount)
 	}
 }

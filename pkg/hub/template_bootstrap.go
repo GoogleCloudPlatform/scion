@@ -231,7 +231,7 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, templatePath,
 			s.templateLog.Info("template harness-config import: imported config",
 				"config", name, "harness", hcDirCfg.Config.Harness, "scope", hcScope)
 		} else {
-			if _, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDirCfg, stor); err != nil {
+			if _, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDirCfg, stor, false); err != nil {
 				s.templateLog.Warn("template harness-config import: failed to sync, skipping",
 					"config", name, "error", err)
 			}

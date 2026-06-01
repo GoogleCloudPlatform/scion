@@ -6,15 +6,14 @@ The single, ordered work plan — and the **only** place status is tracked — i
 **§8 (Work plan & status)**. Sections 7.1–7.4 give the *design rationale* for
 each item and link to its step in §8; they no longer track status themselves.
 
-**We are here:** steps 1–4 have **landed** (single read path, thin
+**We are here:** steps 1–4 have **landed in full** (single read path, thin
 content-addressed cache, the shared resource-store/resolver abstraction, the
-harness-config consume path, and the harness-config web UI — see step 4b).
-**Step 5 (onboard skills) is deferred** — skills are now subsumed by a larger
-forthcoming "skill bank" feature, which will decide skill scope/precedence/sharing
-semantics on its own terms; this refactor will be revisited only to adopt whatever
-resource shape that feature settles on. Remaining in scope here: **step 4c**
-(harness-config import, deferred to a future session) and **step 6** (optional
-identifier/layout cleanup).
+harness-config consume path, the harness-config web UI — see step 4b — and
+harness-config import — see step 4c). **Step 5 (onboard skills) is deferred** —
+skills are now subsumed by a larger forthcoming "skill bank" feature, which will
+decide skill scope/precedence/sharing semantics on its own terms; this refactor
+will be revisited only to adopt whatever resource shape that feature settles on.
+Remaining in scope here: only **step 6** (optional identifier/layout cleanup).
 
 ## 1. Purpose
 
@@ -458,15 +457,19 @@ status tracker. Each step links to its design rationale in §7.
      `_capabilities`). Also fixed a harness-config store-filter gap so
      `scope=project`+`projectId` narrows to one project (it previously matched all
      projects, unlike the template filter).
-   - ⏳ **4c. Harness-config import (next session).** Templates can be **imported**
-     into the Hub from a Git URL or workspace path (`import-templates` endpoint +
-     the import UI in Project Settings); harness-configs have **no equivalent
-     import path**, so today they can only be created via CLI/bootstrap and the web
-     UI offers *list + edit only* (no create/import). Add an
-     `import-harness-configs` hub endpoint mirroring `import-templates`
-     (`pkg/hub/handlers.go` import handler + bootstrap reuse) and the matching
-     import controls on the Harness Configs tab, to close the last
-     template/harness-config parity gap. **Deferred to a future session.**
+   - ✅ **4c. Harness-config import.** Closed the last template/harness-config
+     parity gap: an `import-harness-configs` hub endpoint mirrors
+     `import-templates` (`handleProjectImportHarnessConfigs` +
+     `importHarnessConfigsFromRemote`/`importHarnessConfigsFromWorkspace` in
+     `pkg/hub/harness_config_bootstrap.go`, reusing the shared
+     `harnessConfigStore(...).Bootstrap`; `syncExistingHarnessConfig` gained a
+     `force` param for reconcile-on-import), and the Harness Configs tab in
+     Project Settings now offers the same URL/workspace import controls as
+     templates (`renderHarnessConfigsContent` + `handleImportHarnessConfigs`).
+     Workspace-import unit tests added in
+     `pkg/hub/harness_config_bootstrap_test.go`; `make ci` is green. (Same as
+     templates: import is hub-handler-only — no `hubclient` method or CLI
+     command.)
 5. ⏸️ **Onboard skills** as the third `kind` — **deferred.** Skills are now
    folded into a larger forthcoming **"skill bank"** feature, which owns the
    open skills scope/precedence/sharing semantics (see §9) and will define its
