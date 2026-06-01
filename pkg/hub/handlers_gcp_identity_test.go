@@ -56,7 +56,7 @@ func TestCreateGCPServiceAccount_Success(t *testing.T) {
 	var sa store.GCPServiceAccount
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sa))
 	assert.Equal(t, "agent@my-project.iam.gserviceaccount.com", sa.Email)
-	assert.Equal(t, tid("my-project"), sa.ProjectID)
+	assert.Equal(t, "my-project", sa.ProjectID)
 	assert.NotEmpty(t, sa.ID)
 }
 
@@ -92,7 +92,7 @@ func TestCreateGCPServiceAccount_InferProjectIDFromEmail(t *testing.T) {
 
 	var sa store.GCPServiceAccount
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sa))
-	assert.Equal(t, tid("my-project"), sa.ProjectID)
+	assert.Equal(t, "my-project", sa.ProjectID)
 }
 
 func TestCreateGCPServiceAccount_CannotInferProjectID(t *testing.T) {
