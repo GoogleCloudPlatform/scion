@@ -27,7 +27,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
@@ -37,7 +36,7 @@ const testWorkspaceDevToken = "scion_dev_workspace_test_token_1234567890"
 // testWorkspaceServer creates a test server for workspace handler tests.
 func testWorkspaceServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}

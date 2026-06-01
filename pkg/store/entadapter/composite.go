@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	entsql "entgo.io/ent/dialect/sql"
@@ -96,4 +97,14 @@ func (c *CompositeStore) Ping(ctx context.Context) error {
 // Migrate runs Ent's automatic schema migration against the shared client.
 func (c *CompositeStore) Migrate(ctx context.Context) error {
 	return entc.AutoMigrate(ctx, c.client)
+}
+
+// DB returns the underlying *sql.DB, or nil if the client is not backed by a
+// database/sql driver. It is an escape hatch for diagnostics and tests that
+// need raw SQL access; production code should use the typed store methods.
+func (c *CompositeStore) DB() *sql.DB {
+	if drv, ok := c.client.Driver().(*entsql.Driver); ok {
+		return drv.DB()
+	}
+	return nil
 }

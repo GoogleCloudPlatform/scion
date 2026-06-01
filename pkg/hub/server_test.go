@@ -28,14 +28,13 @@ import (
 	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
 func TestServer_PersistentSigningKeys(t *testing.T) {
 	// Create an in-memory SQLite store
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -88,7 +87,7 @@ func TestServer_PersistentSigningKeys(t *testing.T) {
 }
 
 func TestServer_PersistentSigningKeys_WithHubID(t *testing.T) {
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -154,7 +153,7 @@ func TestServer_PersistentSigningKeys_WithHubID(t *testing.T) {
 }
 
 func TestServer_SigningKeysExcludedFromResolve(t *testing.T) {
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -188,7 +187,7 @@ func TestServer_UserTokenSurvivesRestart(t *testing.T) {
 	// Simulate the exact production scenario: sign in, restart server, validate token.
 	// Uses a file-based SQLite DB to match production behavior.
 	dbPath := filepath.Join(t.TempDir(), "test-hub.db")
-	s, err := sqlite.New(dbPath)
+	s, err := newTestStore(dbPath)
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -225,7 +224,7 @@ func TestServer_UserTokenSurvivesRestart(t *testing.T) {
 
 	// Close the store and reopen from the same file (simulates process restart)
 	s.Close()
-	s2, err := sqlite.New(dbPath)
+	s2, err := newTestStore(dbPath)
 	if err != nil {
 		t.Fatalf("failed to reopen test store: %v", err)
 	}
@@ -264,7 +263,7 @@ func TestServer_SigningKeyMigration_LegacyHubScopeID(t *testing.T) {
 	// Simulate the pre-hubID-namespacing scenario where keys were stored
 	// with ScopeID="hub". A new server with a real hubID should find them
 	// via the migration fallback.
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -346,7 +345,7 @@ func TestServer_SigningKeyMigration_DeletesLegacyFromBackend(t *testing.T) {
 	// When migrating signing keys from legacy scope IDs, the old secret
 	// should also be deleted from the secret backend to prevent stale secrets
 	// from confusing label-based auto-discovery by external consumers.
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -425,7 +424,7 @@ func TestServer_SigningKeyMigration_DeletesLegacyFromBackend(t *testing.T) {
 func TestServer_SigningKeyBootstrapWithSecretBackend(t *testing.T) {
 	// Verify that when SecretBackend is set in ServerConfig, signing keys
 	// are loaded through it and synced from SQLite to the backend.
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -495,7 +494,7 @@ func TestServer_SigningKeyBootstrapWithSecretBackend(t *testing.T) {
 func TestServer_SigningKeySyncFromStoreToBackend(t *testing.T) {
 	// Verify that keys pre-existing in SQLite are synced to the secret backend
 	// when the backend is newly configured (migration from no-backend to backend).
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -549,7 +548,7 @@ func TestServer_SigningKeyEmptyValueFromStore(t *testing.T) {
 	// EncryptedValue="" in SQLite (using SecretRef instead). If GCP SM
 	// later becomes unavailable, ensureSigningKey must not silently return
 	// a nil key — it should generate a new one.
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -614,7 +613,7 @@ func TestServer_SigningKeyEmptyValueFromStore(t *testing.T) {
 func TestServer_SigningKeyBackupAfterBackendSet(t *testing.T) {
 	// Verify that after persisting a key through the secret backend,
 	// the actual key value remains in SQLite as a backup.
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -658,7 +657,7 @@ func TestServer_SigningKeyBackupAfterBackendSet(t *testing.T) {
 }
 
 func TestServer_GenerateAgentToken_DevAuthAutoGrantsScopes(t *testing.T) {
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -706,7 +705,7 @@ func TestServer_GenerateAgentToken_DevAuthAutoGrantsScopes(t *testing.T) {
 }
 
 func TestServer_GenerateAgentToken_DevAuthDeduplicatesScopes(t *testing.T) {
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -757,7 +756,7 @@ func TestServer_GenerateAgentToken_DevAuthDeduplicatesScopes(t *testing.T) {
 }
 
 func TestServer_GenerateAgentToken_NoDevAuthDoesNotAutoGrant(t *testing.T) {
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -830,7 +829,7 @@ func (f *failingSMClient) Close() error { return nil }
 func TestServer_GCPBackendFailureIsFatal(t *testing.T) {
 	// When GCPBackend is configured but GCP SM is unavailable, hub.New() should
 	// return an error rather than silently generating an ephemeral key.
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -858,7 +857,7 @@ func TestServer_SigningKeyBackupPreservesSecretRef(t *testing.T) {
 	// Verify that after loading a signing key from the secret backend and
 	// backing it up to SQLite, the SecretRef is preserved so the UI shows
 	// the secret as SM-backed.
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}

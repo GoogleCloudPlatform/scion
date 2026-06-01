@@ -39,9 +39,9 @@ type TableCount struct {
 
 // Report summarizes a fixture generation run.
 type Report struct {
-	Path   string       // path to the generated .db
-	Counts []TableCount // per-table row counts (sorted by table name)
-	Missing []string    // domain tables with zero rows (coverage failures)
+	Path    string       // path to the generated .db
+	Counts  []TableCount // per-table row counts (sorted by table name)
+	Missing []string     // domain tables with zero rows (coverage failures)
 }
 
 // TotalTables returns the number of domain tables (excluding schema_migrations)

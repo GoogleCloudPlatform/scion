@@ -92,7 +92,7 @@ func Spec() []TableFixture {
 				"preferences": `{"theme":"dark"}`, "created_at": baseTime,
 			},
 			{ // max-length display_name edge case + NULL avatar_url
-				"id": "22222222-2222-2222-2222-2222222222aa",
+				"id":    "22222222-2222-2222-2222-2222222222aa",
 				"email": "long@example.com", "display_name": maxLenString,
 			},
 		}},
