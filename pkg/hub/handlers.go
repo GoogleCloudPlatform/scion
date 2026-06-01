@@ -9381,6 +9381,11 @@ func (s *Server) handleProjectImportHarnessConfigs(w http.ResponseWriter, r *htt
 		return
 	}
 
+	if req.SourceURL != "" && req.WorkspacePath != "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Exactly one of sourceUrl or workspacePath must be provided", nil)
+		return
+	}
+
 	if req.SourceURL == "" && req.WorkspacePath == "" {
 		// Default workspace path when neither is provided
 		req.WorkspacePath = "/.scion/harness-configs"

@@ -85,6 +85,9 @@ func templateResource(t *store.Template) Resource {
 
 // harnessConfigResource constructs a Resource from a store.HarnessConfig for capability computation.
 func harnessConfigResource(hc *store.HarnessConfig) Resource {
+	if hc == nil {
+		return Resource{}
+	}
 	r := Resource{
 		Type:    "harness_config",
 		ID:      hc.ID,

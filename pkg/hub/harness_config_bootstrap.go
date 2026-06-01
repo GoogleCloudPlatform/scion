@@ -186,7 +186,8 @@ func (s *Server) importHarnessConfigsFromWorkspace(ctx context.Context, project 
 	// Validate the resolved path is within the project root.
 	absRoot, _ := filepath.Abs(projectRoot)
 	absDir, _ := filepath.Abs(configsDir)
-	if !strings.HasPrefix(absDir, absRoot) {
+	relPath, err := filepath.Rel(absRoot, absDir)
+	if err != nil || strings.HasPrefix(relPath, "..") {
 		return nil, fmt.Errorf("workspace path must be within the project workspace")
 	}
 

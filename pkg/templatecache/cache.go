@@ -118,21 +118,22 @@ func (c *Cache) Get(contentHash string) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	templatePath := filepath.Join(c.basePath, contentHash)
-	if _, err := os.Stat(templatePath); err != nil {
-		// Files missing: drop any stale index entry so accounting stays honest.
-		if entry, ok := c.index.Entries[contentHash]; ok {
-			delete(c.index.Entries, contentHash)
-			c.index.TotalSize -= entry.Size
-			_ = c.saveIndex()
-		}
+	entry, ok := c.index.Entries[contentHash]
+	if !ok {
 		return "", false
 	}
 
-	if entry, ok := c.index.Entries[contentHash]; ok {
-		entry.LastUsed = time.Now()
+	templatePath := filepath.Join(c.basePath, contentHash)
+	if _, err := os.Stat(templatePath); err != nil {
+		// Files missing: drop stale index entry so accounting stays honest.
+		delete(c.index.Entries, contentHash)
+		c.index.TotalSize -= entry.Size
 		_ = c.saveIndex()
+		return "", false
 	}
+
+	entry.LastUsed = time.Now()
+	_ = c.saveIndex()
 
 	return templatePath, true
 }
@@ -169,20 +170,26 @@ func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error)
 		return "", fmt.Errorf("failed to make room in cache: %w", err)
 	}
 
-	if err := os.MkdirAll(templatePath, 0755); err != nil {
+	tmpPath := templatePath + ".tmp"
+	if err := os.MkdirAll(tmpPath, 0755); err != nil {
 		return "", fmt.Errorf("failed to create template directory: %w", err)
 	}
 
 	for relativePath, content := range files {
-		filePath := filepath.Join(templatePath, relativePath)
+		filePath := filepath.Join(tmpPath, relativePath)
 		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-			os.RemoveAll(templatePath)
+			os.RemoveAll(tmpPath)
 			return "", fmt.Errorf("failed to create directory for %s: %w", relativePath, err)
 		}
 		if err := os.WriteFile(filePath, content, 0644); err != nil {
-			os.RemoveAll(templatePath)
+			os.RemoveAll(tmpPath)
 			return "", fmt.Errorf("failed to write file %s: %w", relativePath, err)
 		}
+	}
+
+	if err := os.Rename(tmpPath, templatePath); err != nil {
+		os.RemoveAll(tmpPath)
+		return "", fmt.Errorf("failed to commit cached template: %w", err)
 	}
 
 	c.index.Entries[contentHash] = &CacheEntry{

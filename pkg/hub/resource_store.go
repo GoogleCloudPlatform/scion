@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -122,6 +123,9 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 	p := rs.pers
 	kind := p.Kind()
 	stor := srv.GetStorage()
+	if stor == nil {
+		return false, fmt.Errorf("storage backend is not configured")
+	}
 
 	files, err := transfer.CollectFiles(dir, nil)
 	if err != nil {
@@ -289,6 +293,9 @@ func (p *templatePersistence) PostFinalize(ctx context.Context, rec *ResourceRec
 }
 
 func templateToRecord(t *store.Template) *ResourceRecord {
+	if t == nil {
+		return nil
+	}
 	return &ResourceRecord{
 		Kind:          storage.ResourceKindTemplate,
 		ID:            t.ID,
@@ -370,6 +377,9 @@ func (p *harnessConfigPersistence) PostFinalize(ctx context.Context, rec *Resour
 }
 
 func harnessConfigToRecord(hc *store.HarnessConfig) *ResourceRecord {
+	if hc == nil {
+		return nil
+	}
 	return &ResourceRecord{
 		Kind:          storage.ResourceKindHarnessConfig,
 		ID:            hc.ID,

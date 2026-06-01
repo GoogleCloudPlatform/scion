@@ -92,7 +92,7 @@ func (r *Resolver) Resolve(ctx context.Context, ref string) (string, error) {
 		}
 		return "", fmt.Errorf("failed to get download URLs: %w", err)
 	}
-	if len(downloadResp.Files) == 0 {
+	if downloadResp == nil || len(downloadResp.Files) == 0 {
 		return "", fmt.Errorf("%s has no files: %s", r.label, ref)
 	}
 
