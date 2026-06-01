@@ -27,7 +27,6 @@ import (
 
 	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -138,7 +137,7 @@ func (m *mockSMClient) Close() error {
 
 func createTestGCPBackend(t *testing.T) (*GCPBackend, *mockSMClient) {
 	t.Helper()
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -156,7 +155,7 @@ func TestGCPBackend_GetRecoverFromGCPSM_NoDBRecord(t *testing.T) {
 	ctx := context.Background()
 
 	// Create first backend, store a secret via Set (populates both GCP SM and DB)
-	s1, err := sqlite.New(":memory:")
+	s1, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -180,7 +179,7 @@ func TestGCPBackend_GetRecoverFromGCPSM_NoDBRecord(t *testing.T) {
 
 	// Create a second backend with a FRESH database (simulating DB reset)
 	// but sharing the same mock GCP SM client (secrets still exist there)
-	s2, err := sqlite.New(":memory:")
+	s2, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store 2: %v", err)
 	}

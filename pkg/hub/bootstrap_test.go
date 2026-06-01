@@ -32,7 +32,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
@@ -168,7 +167,7 @@ func (d *mockDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, 
 // testBootstrapServer creates a test server with storage and dispatcher configured.
 func testBootstrapServer(t *testing.T) (*Server, store.Store, *mockStorage, *mockDispatcher) {
 	t.Helper()
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -394,7 +393,7 @@ func TestCreateAgentWithWorkspaceBootstrap_ExistingFiles(t *testing.T) {
 
 func TestCreateAgentWithWorkspaceBootstrap_NoStorage(t *testing.T) {
 	// Create server without storage
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -862,7 +861,7 @@ func TestSyncToFinalize_RejectsStoppedAgent(t *testing.T) {
 
 func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 	// Create server without dispatcher
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}

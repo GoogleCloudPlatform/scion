@@ -27,12 +27,11 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 )
 
 func TestAuthenticatedBrokerClient_CreateAgent(t *testing.T) {
 	// Create a test store with a broker secret
-	db, err := sqlite.New(":memory:")
+	db, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -146,7 +145,7 @@ func TestAuthenticatedBrokerClient_CreateAgent(t *testing.T) {
 
 func TestAuthenticatedBrokerClient_StartAgent(t *testing.T) {
 	// Create a test store with a broker secret
-	db, err := sqlite.New(":memory:")
+	db, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -235,7 +234,7 @@ func TestAuthenticatedBrokerClient_StartAgent(t *testing.T) {
 
 func TestAuthenticatedBrokerClient_MissingSecretFailsClosed(t *testing.T) {
 	// Create a test store without a secret
-	db, err := sqlite.New(":memory:")
+	db, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -293,7 +292,7 @@ func TestAuthenticatedBrokerClient_MissingSecretFailsClosed(t *testing.T) {
 
 func TestAuthenticatedBrokerClient_ExpiredSecretFailsClosed(t *testing.T) {
 	// Create a test store with an expired secret
-	db, err := sqlite.New(":memory:")
+	db, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -363,7 +362,7 @@ func TestAuthenticatedBrokerClient_ExpiredSecretFailsClosed(t *testing.T) {
 }
 
 func TestAuthenticatedBrokerClient_StartAgent_InvalidJSONFails(t *testing.T) {
-	db, err := sqlite.New(":memory:")
+	db, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -416,7 +415,7 @@ func TestAuthenticatedBrokerClient_StartAgent_InvalidJSONFails(t *testing.T) {
 
 func TestAuthenticatedBrokerClient_AllOperations(t *testing.T) {
 	// Create a test store with a broker secret
-	db, err := sqlite.New(":memory:")
+	db, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}

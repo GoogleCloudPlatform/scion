@@ -29,7 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/broker"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -149,7 +148,7 @@ type notificationTestEnv struct {
 func setupNotificationTest(t *testing.T) *notificationTestEnv {
 	t.Helper()
 
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}

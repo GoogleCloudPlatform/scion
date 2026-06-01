@@ -30,7 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -2922,7 +2922,7 @@ func TestBrokerHeartbeat_RepeatedActivityDoesNotRefreshLastActivityEvent(t *test
 
 	// Backdate last_activity_event to simulate time passing
 	pastTime := time.Now().Add(-10 * time.Minute)
-	db := s.(*sqlite.SQLiteStore).DB()
+	db := s.(*entadapter.CompositeStore).DB()
 	_, err = db.ExecContext(ctx, "UPDATE agents SET last_activity_event = ? WHERE id = ?", pastTime, agent.ID)
 	require.NoError(t, err)
 
@@ -3001,7 +3001,7 @@ func TestBrokerHeartbeat_StalledAgentNotOverwrittenBySameActivity(t *testing.T) 
 	}))
 
 	// Simulate stalled detection: mark agent stalled with stalled_from_activity = thinking
-	db := s.(*sqlite.SQLiteStore).DB()
+	db := s.(*entadapter.CompositeStore).DB()
 	staleActivity := time.Now().Add(-10 * time.Minute)
 	_, err := db.ExecContext(ctx,
 		"UPDATE agents SET activity = 'stalled', stalled_from_activity = 'thinking', last_activity_event = ?, last_seen = ? WHERE id = ?",
@@ -3059,7 +3059,7 @@ func TestBrokerHeartbeat_StalledAgentRecoveredByNewActivity(t *testing.T) {
 	}))
 
 	// Simulate stalled detection: mark agent stalled with stalled_from_activity = thinking
-	db := s.(*sqlite.SQLiteStore).DB()
+	db := s.(*entadapter.CompositeStore).DB()
 	staleActivity := time.Now().Add(-10 * time.Minute)
 	_, err := db.ExecContext(ctx,
 		"UPDATE agents SET activity = 'stalled', stalled_from_activity = 'thinking', last_activity_event = ?, last_seen = ? WHERE id = ?",
@@ -3116,7 +3116,7 @@ func TestBrokerHeartbeat_StalledWorkingAgentNotOverwrittenBySameActivity(t *test
 	}))
 
 	// Simulate stalled detection: mark agent stalled with stalled_from_activity = working
-	db := s.(*sqlite.SQLiteStore).DB()
+	db := s.(*entadapter.CompositeStore).DB()
 	staleActivity := time.Now().Add(-10 * time.Minute)
 	_, err := db.ExecContext(ctx,
 		"UPDATE agents SET activity = 'stalled', stalled_from_activity = 'working', last_activity_event = ?, last_seen = ? WHERE id = ?",

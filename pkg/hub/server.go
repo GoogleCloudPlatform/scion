@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 )
 
@@ -1035,11 +1036,13 @@ func (s *Server) backupSigningKeyToStore(ctx context.Context, keyName, encodedVa
 
 // signingKeySecretID returns a deterministic primary key for a signing key record,
 // scoped to the hub instance to avoid PK collisions during migration.
+// signingKeySecretID derives a stable surrogate primary key for the signing-key
+// backup secret. The store keys secrets by the (key, scope, scope_id) triple, so
+// the ID is only a surrogate; it is generated deterministically as a UUIDv5 so
+// the value is valid for the UUID-typed primary key while remaining stable
+// across restarts.
 func signingKeySecretID(keyName, hubID string) string {
-	if hubID == "" {
-		return fmt.Sprintf("hub-%s", keyName)
-	}
-	return fmt.Sprintf("hub-%s-%s", hubID, keyName)
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("hub-signing-key:"+hubID+":"+keyName)).String()
 }
 
 // SetDispatcher sets the agent dispatcher for co-located runtime broker operations.

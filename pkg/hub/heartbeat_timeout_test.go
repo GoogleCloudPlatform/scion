@@ -26,7 +26,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 )
 
 // trackingEventPublisher records PublishAgentStatus calls for test assertions.
@@ -59,7 +58,7 @@ func (t *trackingEventPublisher) reset() {
 func setupHeartbeatTestServer(t *testing.T) (*Server, store.Store, *trackingEventPublisher) {
 	t.Helper()
 
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}

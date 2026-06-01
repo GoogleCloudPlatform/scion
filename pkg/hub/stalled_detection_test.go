@@ -25,13 +25,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
 
 func setupStalledTestServer(t *testing.T) (*Server, store.Store, *trackingEventPublisher) {
 	t.Helper()
 
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestAgentStalledDetectionHandler_MarksStalledAgents(t *testing.T) {
 	// Make activity stale but keep heartbeat recent
 	staleActivity := time.Now().Add(-10 * time.Minute)
 	recentHB := time.Now().Add(-30 * time.Second)
-	db := s.(*sqlite.SQLiteStore).DB()
+	db := s.(*entadapter.CompositeStore).DB()
 	if _, err := db.ExecContext(ctx,
 		"UPDATE agents SET last_activity_event = ?, last_seen = ? WHERE id = ?",
 		staleActivity, recentHB, agent.ID); err != nil {
@@ -238,7 +238,7 @@ func TestAgentStalledDetectionHandler_StalledFromActivityIsPreserved(t *testing.
 	// Make activity stale but keep heartbeat recent
 	staleActivity := time.Now().Add(-10 * time.Minute)
 	recentHB := time.Now().Add(-30 * time.Second)
-	db := s.(*sqlite.SQLiteStore).DB()
+	db := s.(*entadapter.CompositeStore).DB()
 	if _, err := db.ExecContext(ctx,
 		"UPDATE agents SET last_activity_event = ?, last_seen = ? WHERE id = ?",
 		staleActivity, recentHB, agent.ID); err != nil {
@@ -319,7 +319,7 @@ func TestAgentStalledDetectionHandler_BlockedAgentNotStalled(t *testing.T) {
 	// Make activity stale but keep heartbeat recent (simulates long wait for child agent)
 	staleActivity := time.Now().Add(-10 * time.Minute)
 	recentHB := time.Now().Add(-30 * time.Second)
-	db := s.(*sqlite.SQLiteStore).DB()
+	db := s.(*entadapter.CompositeStore).DB()
 	if _, err := db.ExecContext(ctx,
 		"UPDATE agents SET last_activity_event = ?, last_seen = ? WHERE id = ?",
 		staleActivity, recentHB, agent.ID); err != nil {
@@ -383,7 +383,7 @@ func TestAgentStalledDetectionHandler_IdleAgentMarkedStalled(t *testing.T) {
 	// Make activity stale but keep heartbeat recent (process alive but stuck at working)
 	staleActivity := time.Now().Add(-10 * time.Minute)
 	recentHB := time.Now().Add(-30 * time.Second)
-	db := s.(*sqlite.SQLiteStore).DB()
+	db := s.(*entadapter.CompositeStore).DB()
 	if _, err := db.ExecContext(ctx,
 		"UPDATE agents SET last_activity_event = ?, last_seen = ? WHERE id = ?",
 		staleActivity, recentHB, agent.ID); err != nil {
@@ -416,7 +416,7 @@ func TestAgentStalledDetectionHandler_IdleAgentMarkedStalled(t *testing.T) {
 }
 
 func TestNew_DefaultsStalledThresholdWhenZero(t *testing.T) {
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}

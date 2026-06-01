@@ -21,17 +21,19 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func newTestStore(t *testing.T) store.Store {
 	t.Helper()
-	s, err := sqlite.New(":memory:")
+	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{})
 	require.NoError(t, err)
-	require.NoError(t, s.Migrate(context.Background()))
+	require.NoError(t, entc.AutoMigrate(context.Background(), client))
+	s := entadapter.NewCompositeStore(client)
 	t.Cleanup(func() { s.Close() })
 	return s
 }

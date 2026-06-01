@@ -31,14 +31,13 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 	"github.com/google/uuid"
 )
 
 func setupTestBrokerAuthService(t *testing.T) (*BrokerAuthService, store.Store) {
 	t.Helper()
 
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
@@ -149,7 +148,7 @@ func TestJoinWithInvalidToken(t *testing.T) {
 
 func TestJoinWithExpiredToken(t *testing.T) {
 	// Create service with short token expiry
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
@@ -329,7 +328,7 @@ func TestValidateBrokerSignature_InvalidSignature(t *testing.T) {
 
 func TestValidateBrokerSignature_ClockSkew(t *testing.T) {
 	// Create service with short clock skew tolerance
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}

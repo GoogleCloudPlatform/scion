@@ -30,7 +30,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 )
 
 // contentMockStorage extends mockStorage to also store file content for
@@ -88,7 +87,7 @@ func (m *contentMockStorage) Exists(_ context.Context, objectPath string) (bool,
 // testTemplateFileServer creates a Server with content-aware mock storage.
 func testTemplateFileServer(t *testing.T) (*Server, store.Store, *contentMockStorage) {
 	t.Helper()
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping: sqlite driver not registered")

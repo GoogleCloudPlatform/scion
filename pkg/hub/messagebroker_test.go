@@ -27,7 +27,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/broker"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 )
 
 // brokerMockDispatcher records dispatched messages for test assertions.
@@ -98,7 +97,7 @@ func (d *brokerMockDispatcher) getMessages() []brokerDispatchedMsg {
 
 func newBrokerTestStore(t *testing.T) store.Store {
 	t.Helper()
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
