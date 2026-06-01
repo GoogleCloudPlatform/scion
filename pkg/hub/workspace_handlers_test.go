@@ -82,25 +82,25 @@ func TestWorkspaceRoutesParsing(t *testing.T) {
 	}{
 		{
 			name:           "workspace status",
-			url:            fmt.Sprintf("/api/v1/agents/%s/workspace", tid("agent-123")),
+			url:            fmt.Sprintf("/api/v1/agents/%s/workspace", "agent-123"),
 			expectedID:     "agent-123",
 			expectedAction: "workspace",
 		},
 		{
 			name:           "workspace sync-from",
-			url:            fmt.Sprintf("/api/v1/agents/%s/workspace/sync-from", tid("agent-123")),
+			url:            fmt.Sprintf("/api/v1/agents/%s/workspace/sync-from", "agent-123"),
 			expectedID:     "agent-123",
 			expectedAction: "workspace/sync-from",
 		},
 		{
 			name:           "workspace sync-to",
-			url:            fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to", tid("agent-123")),
+			url:            fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to", "agent-123"),
 			expectedID:     "agent-123",
 			expectedAction: "workspace/sync-to",
 		},
 		{
 			name:           "workspace sync-to finalize",
-			url:            fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent-123")),
+			url:            fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", "agent-123"),
 			expectedID:     "agent-123",
 			expectedAction: "workspace/sync-to/finalize",
 		},

@@ -1237,7 +1237,7 @@ func TestUpdateNotificationSubscriptionTriggers_NotFound(t *testing.T) {
 	env := setupNotificationTest(t)
 	ctx := context.Background()
 
-	err := env.store.UpdateNotificationSubscriptionTriggers(ctx, "nonexistent-id", []string{"COMPLETED"})
+	err := env.store.UpdateNotificationSubscriptionTriggers(ctx, tid("nonexistent-id"), []string{"COMPLETED"})
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 

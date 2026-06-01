@@ -175,7 +175,7 @@ func TestHandleNotifications_AcknowledgeAll(t *testing.T) {
 func TestHandleNotifications_AcknowledgeNotFound(t *testing.T) {
 	srv, _, _ := setupNotificationHandlerTest(t)
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/notifications/nonexistent-id/ack", nil)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/notifications/"+tid("nonexistent-id")+"/ack", nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
