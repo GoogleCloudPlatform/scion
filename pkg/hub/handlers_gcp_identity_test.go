@@ -46,7 +46,7 @@ func TestCreateGCPServiceAccount_Success(t *testing.T) {
 
 	body := map[string]string{
 		"email":     "agent@my-project.iam.gserviceaccount.com",
-		"projectId": "my-project",
+		"projectId": tid("my-project"),
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
@@ -56,7 +56,7 @@ func TestCreateGCPServiceAccount_Success(t *testing.T) {
 	var sa store.GCPServiceAccount
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sa))
 	assert.Equal(t, "agent@my-project.iam.gserviceaccount.com", sa.Email)
-	assert.Equal(t, "my-project", sa.ProjectID)
+	assert.Equal(t, tid("my-project"), sa.ProjectID)
 	assert.NotEmpty(t, sa.ID)
 }
 
@@ -65,7 +65,7 @@ func TestCreateGCPServiceAccount_MissingEmail(t *testing.T) {
 	projectID := createTestProjectForSA(t, srv, s)
 
 	body := map[string]string{
-		"projectId": "my-project",
+		"projectId": tid("my-project"),
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
@@ -92,7 +92,7 @@ func TestCreateGCPServiceAccount_InferProjectIDFromEmail(t *testing.T) {
 
 	var sa store.GCPServiceAccount
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sa))
-	assert.Equal(t, "my-project", sa.ProjectID)
+	assert.Equal(t, tid("my-project"), sa.ProjectID)
 }
 
 func TestCreateGCPServiceAccount_CannotInferProjectID(t *testing.T) {
@@ -134,7 +134,7 @@ func TestCreateGCPServiceAccount_ProjectNotFound(t *testing.T) {
 
 	body := map[string]string{
 		"email":     "agent@my-project.iam.gserviceaccount.com",
-		"projectId": "my-project",
+		"projectId": tid("my-project"),
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
@@ -148,7 +148,7 @@ func TestCreateGCPServiceAccount_Duplicate(t *testing.T) {
 
 	body := map[string]string{
 		"email":     "agent@my-project.iam.gserviceaccount.com",
-		"projectId": "my-project",
+		"projectId": tid("my-project"),
 	}
 
 	// First create should succeed
@@ -432,7 +432,7 @@ func TestCreateGCPServiceAccount_AutoVerifySuccess(t *testing.T) {
 
 	body := map[string]string{
 		"email":     "agent@my-project.iam.gserviceaccount.com",
-		"projectId": "my-project",
+		"projectId": tid("my-project"),
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
@@ -466,7 +466,7 @@ func TestCreateGCPServiceAccount_AutoVerifyFailure(t *testing.T) {
 
 	body := map[string]string{
 		"email":     "agent@my-project.iam.gserviceaccount.com",
-		"projectId": "my-project",
+		"projectId": tid("my-project"),
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
@@ -788,7 +788,7 @@ func TestProjectIDFromServiceAccountEmail(t *testing.T) {
 		email string
 		want  string
 	}{
-		{"agent@my-project.iam.gserviceaccount.com", "my-project"},
+		{"agent@my-project.iam.gserviceaccount.com", tid("my-project")},
 		{"fold-run-infra@foldrun-ptone-argolis.iam.gserviceaccount.com", "foldrun-ptone-argolis"},
 		{"sa@example.com", ""},
 		{"no-at-sign", ""},

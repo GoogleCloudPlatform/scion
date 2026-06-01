@@ -133,10 +133,10 @@ func TestPopulateAgentConfig_HubManagedProject_SetsWorkspace(t *testing.T) {
 	srv, _ := testServer(t)
 
 	project := &store.Project{
-		ID:   tid("project-hub-managed"),
-		Name: "Hub Managed",
-		Slug: "hub-managed",
-		// No GitRemote — hub-managed project
+		ID:   tid("project-hub-native"),
+		Name: "Hub Native",
+		Slug: "hub-native",
+		// No GitRemote — hub-native project
 	}
 
 	agent := &store.Agent{
@@ -1904,19 +1904,19 @@ func TestCreateProject_ExplicitSlug_Unique(t *testing.T) {
 	// Create first project with an explicit slug.
 	body1 := CreateProjectRequest{
 		Name: "My Project",
-		Slug: "my-project",
+		Slug: tid("my-project"),
 	}
 	rec1 := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body1)
 	require.Equal(t, http.StatusCreated, rec1.Code, "body: %s", rec1.Body.String())
 
 	var project1 store.Project
 	require.NoError(t, json.NewDecoder(rec1.Body).Decode(&project1))
-	assert.Equal(t, "my-project", project1.Slug)
+	assert.Equal(t, tid("my-project"), project1.Slug)
 
 	// Create second project with the same explicit slug — should get serial suffix.
 	body2 := CreateProjectRequest{
 		Name: "My Project",
-		Slug: "my-project",
+		Slug: tid("my-project"),
 	}
 	rec2 := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body2)
 	require.Equal(t, http.StatusCreated, rec2.Code, "body: %s", rec2.Body.String())

@@ -1838,10 +1838,10 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProjectSlug_HubManage
 
 	// Create a hub-managed project (no GitRemote)
 	project := &store.Project{
-		ID:   tid("project-hub-managed"),
-		Name: "Hub Managed Project",
-		Slug: "hub-managed-project",
-		// No GitRemote = hub-managed
+		ID:   tid("project-hub-native"),
+		Name: "Hub Native Project",
+		Slug: "hub-native-project",
+		// No GitRemote = hub-native
 	}
 	if err := memStore.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -1865,7 +1865,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProjectSlug_HubManage
 		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       tid("project-hub-managed"),
+		ProjectID:       tid("project-hub-native"),
 		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",

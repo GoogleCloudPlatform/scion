@@ -2099,7 +2099,7 @@ func TestTemplateListByProjectID(t *testing.T) {
 	// Create a project-scoped template for project "project_abc"
 	if err := s.CreateTemplate(ctx, &store.Template{
 		ID: tid("tmpl_project1"), Slug: "project-tmpl", Name: "Project Template",
-		Harness: "gemini", Scope: "project", ScopeID: tid("project_abc"),
+		Harness: "gemini", Scope: "project", ScopeID: "project_abc",
 		Visibility: store.VisibilityPublic, Status: "active",
 		Created: now, Updated: now,
 	}); err != nil {
@@ -2108,7 +2108,7 @@ func TestTemplateListByProjectID(t *testing.T) {
 
 	// Create a project-scoped template for a different project
 	if err := s.CreateTemplate(ctx, &store.Template{
-		ID: tid("tmpl_project2"), Slug: "other-project-tmpl", Name: "Other Project Template",
+		ID: "tmpl_project2", Slug: "other-project-tmpl", Name: "Other Project Template",
 		Harness: "claude", Scope: "project", ScopeID: tid("project_xyz"),
 		Visibility: store.VisibilityPublic, Status: "active",
 		Created: now, Updated: now,
@@ -2329,7 +2329,7 @@ func TestProjectCreateIdempotent(t *testing.T) {
 	body := CreateProjectRequest{
 		ID:        deterministicID,
 		Name:      "My Project",
-		Slug:      "my-project",
+		Slug:      tid("my-project"),
 		GitRemote: "github.com/acme/widgets",
 	}
 

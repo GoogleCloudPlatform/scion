@@ -233,7 +233,7 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 	// subscriber (simulating notifications sent TO the watched agent).
 	agent2 := &store.Agent{
 		ID:        tid("agent-other"),
-		Slug:      tid("other-agent"),
+		Slug:      "other-agent",
 		Name:      "Other Agent",
 		ProjectID: tid("project-notif-handler"),
 		Phase:     string(state.PhaseRunning),
@@ -285,7 +285,7 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 	assert.Equal(t, "COMPLETED", resp.UserNotifications[0].Status)
 
 	// Agent notifications: notifications sent TO agent-watched
-	require.Len(t, resp.AgentNotifications, 1)
+	assert.Len(t, resp.AgentNotifications, 1)
 	assert.Equal(t, tid("agent-watched"), resp.AgentNotifications[0].SubscriberID)
 }
 

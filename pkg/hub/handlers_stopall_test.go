@@ -42,7 +42,7 @@ func TestStopAllAgents_Global(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create running agents
-	for i, name := range []string{tid("agent-1"), tid("agent-2"), tid("agent-3")} {
+	for i, name := range []string{tid("agent-1"), tid("agent-2"), "agent-3"} {
 		agent := &store.Agent{
 			ID:        name,
 			Slug:      name,
@@ -231,7 +231,7 @@ func TestStopAllAgents_ProjectMember_StopsOnlyOwnAgents(t *testing.T) {
 		ProjectID: project.ID, OwnerID: carol.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: tid("alice-agent"), Slug: tid("alice-agent"), Name: "Alice Agent",
+		ID: "alice-agent", Slug: "alice-agent", Name: "Alice Agent",
 		ProjectID: project.ID, OwnerID: tid("user-alice"), Phase: string(state.PhaseRunning),
 	}))
 
