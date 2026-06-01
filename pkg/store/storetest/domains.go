@@ -41,6 +41,10 @@ func RunStoreSuite(t *testing.T, factory Factory) {
 	t.Helper()
 	RunDomain(t, factory, GroupDomain())
 	RunDomain(t, factory, PolicyDomain())
+	RunDomain(t, factory, TemplateDomain())
+	RunDomain(t, factory, HarnessConfigDomain())
+	RunDomain(t, factory, SecretDomain())
+	RunDomain(t, factory, EnvVarDomain())
 }
 
 // GroupDomain describes the group entity for the CRUD-parity oracle.
