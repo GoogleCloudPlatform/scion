@@ -2329,7 +2329,7 @@ func TestProjectCreateIdempotent(t *testing.T) {
 	body := CreateProjectRequest{
 		ID:        deterministicID,
 		Name:      "My Project",
-		Slug:      tid("my-project"),
+		Slug:      "my-project",
 		GitRemote: "github.com/acme/widgets",
 	}
 
