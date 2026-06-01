@@ -418,7 +418,7 @@ func TestGetOperationRun(t *testing.T) {
 	}
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/maintenance/operations/pull-images/runs/run-detail-1", nil)
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/admin/maintenance/operations/pull-images/runs/%s", tid("run-detail-1")), nil)
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminMaintenanceOps(rr, req)

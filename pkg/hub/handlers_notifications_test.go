@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -270,7 +271,7 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 	require.NoError(t, s.CreateNotification(ctx, agentNotif))
 
 	// GET with agentId filter
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/notifications?agentId=agent-watched", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/notifications?agentId=%s", tid("agent-watched")), nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var resp struct {
@@ -280,11 +281,11 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
 	// User notifications: 1 unacknowledged for this agent (notif1 from setup)
-	assert.Len(t, resp.UserNotifications, 1)
+	require.Len(t, resp.UserNotifications, 1)
 	assert.Equal(t, "COMPLETED", resp.UserNotifications[0].Status)
 
 	// Agent notifications: notifications sent TO agent-watched
-	assert.Len(t, resp.AgentNotifications, 1)
+	require.Len(t, resp.AgentNotifications, 1)
 	assert.Equal(t, tid("agent-watched"), resp.AgentNotifications[0].SubscriberID)
 }
 
@@ -292,7 +293,7 @@ func TestHandleNotifications_FilterByAgent_NoResults(t *testing.T) {
 	srv, _, _ := setupNotificationHandlerTest(t)
 
 	// Query for an agent with no notifications
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/notifications?agentId=nonexistent-agent", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/notifications?agentId=%s", tid("nonexistent-agent")), nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var resp struct {
