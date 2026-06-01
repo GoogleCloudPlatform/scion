@@ -1,4 +1,4 @@
-# Docs Landing Page: Slide Content Integration
+# Docs Landing Page: Inline Slideshow Integration
 
 **Date:** 2026-06-01
 **PR:** https://github.com/ptone/scion/pull/117
@@ -6,20 +6,25 @@
 
 ## What Changed
 
-Updated the docs-site landing page (`docs-site/src/pages/landing.astro`) to incorporate content from the Scion explainer slide deck at `https://storage.googleapis.com/scion-intro-slides/index.html`.
+Integrated the full Scion explainer slide deck directly into the docs-site landing page (`docs-site/src/pages/landing.astro`) as an interactive inline slideshow component, replacing the previous iframe embed approach.
 
 ### Key Changes
 
-1. **New "Scion Core" pipeline section** — A five-card grid showing the orchestration pipeline: Define → Run → Spawn → Notify → Sync. Each card includes a step number, title, subtitle, and description pulled from the slides.
+1. **Inline slideshow component** — All 7 slides from the hosted deck at `https://storage.googleapis.com/scion-intro-slides/index.html` are now rendered directly in the page. Includes keyboard/touch/click navigation, progress dots, and smooth CSS transitions. The slideshow is contained in a 16:9 aspect-ratio container scoped under `.scion-deck`.
 
-2. **Expanded feature cards** — Replaced the original six generic feature cards with detailed, slide-sourced descriptions for Agent Definition, Agent Runtime, Agent Collaborators, Agent Notifications, Shared Filesystem, and Harness Agnostic. Each card now includes bullet-pointed sub-features.
+2. **Interactive widgets recreated inline** — The State Model Simulator, Collaborators Graph (with dynamic agent spawn/delete loop), Reactive Notification Wakeup flow, and Shared Filesystem Simulator are all fully functional with inline JS.
 
-3. **Terminology update** — All instances of "Boot" from the slides replaced with "Run". Also updated "grove" to "project" in the quickstart steps.
+3. **Scoped CSS** — All slideshow styles are namespaced under `.scion-deck` to avoid conflicts with the landing page's own design system (which uses different CSS variables).
 
-4. **Slides embed update** — Replaced the old Google Slides embed iframe with the interactive HTML slides deck URL.
+4. **Expanded feature cards** — Below the slideshow, detailed feature cards provide the text content from each slide topic (Agent Definition, Runtime, Collaborators, Notifications, Shared Filesystem, Harness Agnostic).
+
+5. **Terminology update** — All instances of "Boot" replaced with "Run". Also updated "grove" to "project" in the quickstart steps.
+
+6. **Section reordering** — Removed the Overview Deck iframe section. Added a "technical deep dive" link to the Google Slides deck. Moved the quickstart section below the video section.
 
 ## Process Notes
 
-- The slides were fetched via curl since the WebFetch tool had model availability issues.
-- Node.js 22+ was required for the Astro build, which wasn't available in the sandbox. Validated the file structure (frontmatter syntax, balanced HTML tags) programmatically instead.
-- The landing page is a standalone Astro page (not a Starlight content doc), so it uses raw HTML/CSS rather than MDX components.
+- The slides HTML/CSS/JS were fetched via curl (WebFetch tool had model availability issues) and carefully adapted for inline embedding.
+- Node.js 22+ was required for the Astro build, which wasn't available in the sandbox. Validated file structure (balanced HTML tags, frontmatter syntax) programmatically.
+- The landing page is a standalone Astro page (not a Starlight content doc), so it uses raw HTML/CSS and an `is:inline` script tag.
+- The slideshow CSS was significantly adapted from the original (viewport-based sizing → container-based, proportionally scaled typography).
