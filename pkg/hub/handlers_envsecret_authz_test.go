@@ -85,7 +85,7 @@ func TestEnvVar_UserScope_MemberAccess(t *testing.T) {
 	ctx := context.Background()
 
 	member := &store.User{
-		ID:          "member-env-1",
+		ID:          tid("member-env-1"),
 		Email:       "member-env@example.com",
 		DisplayName: "Test Member",
 		Role:        store.UserRoleMember,
@@ -107,7 +107,7 @@ func TestEnvVar_UserScope_MemberAccess(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if resp.ScopeID != "member-env-1" {
+	if resp.ScopeID != tid("member-env-1") {
 		t.Errorf("expected scopeId 'member-env-1', got %q", resp.ScopeID)
 	}
 }
@@ -177,11 +177,11 @@ func TestEnvVar_UserScope_MemberIsolation(t *testing.T) {
 	ctx := context.Background()
 
 	userA := &store.User{
-		ID: "user-iso-a", Email: "a@example.com", DisplayName: "User A",
+		ID: tid("user-iso-a"), Email: "a@example.com", DisplayName: "User A",
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 	}
 	userB := &store.User{
-		ID: "user-iso-b", Email: "b@example.com", DisplayName: "User B",
+		ID: tid("user-iso-b"), Email: "b@example.com", DisplayName: "User B",
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 	}
 	if err := s.CreateUser(ctx, userA); err != nil {
@@ -230,7 +230,7 @@ func TestEnvVar_ProjectScope_OwnerAccess(t *testing.T) {
 	ctx := context.Background()
 
 	owner := &store.User{
-		ID: "project-owner-1", Email: "owner@example.com", DisplayName: "Owner",
+		ID: tid("project-owner-1"), Email: "owner@example.com", DisplayName: "Owner",
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 	}
 	if err := s.CreateUser(ctx, owner); err != nil {
@@ -238,10 +238,10 @@ func TestEnvVar_ProjectScope_OwnerAccess(t *testing.T) {
 	}
 
 	project := &store.Project{
-		ID:      "project_env_owner",
+		ID:      tid("project_env_owner"),
 		Name:    "Owner Test Project",
 		Slug:    "owner-test-project",
-		OwnerID: "project-owner-1",
+		OwnerID: tid("project-owner-1"),
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
@@ -268,7 +268,7 @@ func TestEnvVar_ProjectScope_NonOwnerDenied(t *testing.T) {
 	ctx := context.Background()
 
 	nonOwner := &store.User{
-		ID: "non-owner-1", Email: "nonowner@example.com", DisplayName: "Non-Owner",
+		ID: tid("non-owner-1"), Email: "nonowner@example.com", DisplayName: "Non-Owner",
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 	}
 	if err := s.CreateUser(ctx, nonOwner); err != nil {
@@ -276,7 +276,7 @@ func TestEnvVar_ProjectScope_NonOwnerDenied(t *testing.T) {
 	}
 
 	project := &store.Project{
-		ID:      "project_env_notown",
+		ID:      tid("project_env_notown"),
 		Name:    "Not Owned Project",
 		Slug:    "not-owned-project",
 		OwnerID: "someone-else",
@@ -299,7 +299,7 @@ func TestEnvVar_ProjectScope_AdminAccess(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:      "project_env_admin",
+		ID:      tid("project_env_admin"),
 		Name:    "Admin Test Project",
 		Slug:    "admin-test-project",
 		OwnerID: "someone-else",
@@ -322,7 +322,7 @@ func TestEnvVar_ProjectScope_AgentReadOwnProject(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:      "project_agent_env",
+		ID:      tid("project_agent_env"),
 		Name:    "Agent Project",
 		Slug:    "agent-project",
 		Created: time.Now(),
@@ -333,7 +333,7 @@ func TestEnvVar_ProjectScope_AgentReadOwnProject(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:           "agent_env_test",
+		ID:           tid("agent_env_test"),
 		Slug:         "env-test-agent",
 		Name:         "Env Test Agent",
 		ProjectID:    project.ID,
@@ -363,11 +363,11 @@ func TestEnvVar_ProjectScope_AgentOtherProjectDenied(t *testing.T) {
 	ctx := context.Background()
 
 	project1 := &store.Project{
-		ID: "project_agent_own", Name: "Agent's Project", Slug: "agents-project",
+		ID: tid("project_agent_own"), Name: "Agent's Project", Slug: "agents-project",
 		Created: time.Now(), Updated: time.Now(),
 	}
 	project2 := &store.Project{
-		ID: "project_agent_other", Name: "Other Project", Slug: "other-project",
+		ID: tid("project_agent_other"), Name: "Other Project", Slug: "other-project",
 		Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateProject(ctx, project1); err != nil {
@@ -378,7 +378,7 @@ func TestEnvVar_ProjectScope_AgentOtherProjectDenied(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID: "agent_other_project", Slug: "other-project-agent", Name: "Other Project Agent",
+		ID: tid("agent_other_project"), Slug: "other-project-agent", Name: "Other Project Agent",
 		ProjectID: project1.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
 		Created: time.Now(), Updated: time.Now(),
 	}
@@ -403,7 +403,7 @@ func TestEnvVar_ProjectScope_AgentWriteDenied(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID: "project_agent_nowrite", Name: "Agent No Write Project", Slug: "agent-nowrite-project",
+		ID: tid("project_agent_nowrite"), Name: "Agent No Write Project", Slug: "agent-nowrite-project",
 		Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
@@ -411,7 +411,7 @@ func TestEnvVar_ProjectScope_AgentWriteDenied(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID: "agent_nowrite", Slug: "nowrite-agent", Name: "No Write Agent",
+		ID: tid("agent_nowrite"), Slug: "nowrite-agent", Name: "No Write Agent",
 		ProjectID: project.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
 		Created: time.Now(), Updated: time.Now(),
 	}
@@ -441,7 +441,7 @@ func TestEnvVar_BrokerScope_AdminAccess(t *testing.T) {
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
-		ID: "broker_env_admin", Name: "Env Admin Broker", Slug: "env-admin-broker",
+		ID: tid("broker_env_admin"), Name: "Env Admin Broker", Slug: "env-admin-broker",
 		Status: store.BrokerStatusOnline, Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -486,7 +486,7 @@ func TestSecret_UserScope_AdminDoesNotSeeOtherUserSecrets(t *testing.T) {
 
 	// Create a member user and store a secret scoped to them.
 	member := &store.User{
-		ID: "member-other-1", Email: "other@example.com", DisplayName: "Other User",
+		ID: tid("member-other-1"), Email: "other@example.com", DisplayName: "Other User",
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 	}
 	if err := s.CreateUser(ctx, member); err != nil {
@@ -495,7 +495,7 @@ func TestSecret_UserScope_AdminDoesNotSeeOtherUserSecrets(t *testing.T) {
 
 	// Store a secret as the member.
 	if err := s.CreateSecret(ctx, &store.Secret{
-		ID: "sec-other-1", Key: "MEMBER_KEY", Scope: store.ScopeUser,
+		ID: tid("sec-other-1"), Key: "MEMBER_KEY", Scope: store.ScopeUser,
 		ScopeID: member.ID, SecretType: store.SecretTypeEnvironment,
 		EncryptedValue: "val", Version: 1, Created: time.Now(), Updated: time.Now(),
 	}); err != nil {
@@ -526,7 +526,7 @@ func TestSecret_UserScope_MemberAccess(t *testing.T) {
 	ctx := context.Background()
 
 	member := &store.User{
-		ID: "member-sec-1", Email: "member-sec@example.com", DisplayName: "Test Member",
+		ID: tid("member-sec-1"), Email: "member-sec@example.com", DisplayName: "Test Member",
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 	}
 	if err := s.CreateUser(ctx, member); err != nil {
@@ -543,7 +543,7 @@ func TestSecret_UserScope_MemberAccess(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if resp.ScopeID != "member-sec-1" {
+	if resp.ScopeID != tid("member-sec-1") {
 		t.Errorf("expected scopeId 'member-sec-1', got %q", resp.ScopeID)
 	}
 }
@@ -590,7 +590,7 @@ func TestSecret_ProjectScope_OwnerAccess(t *testing.T) {
 	ctx := context.Background()
 
 	owner := &store.User{
-		ID: "project-sec-owner", Email: "secowner@example.com", DisplayName: "Owner",
+		ID: tid("project-sec-owner"), Email: "secowner@example.com", DisplayName: "Owner",
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 	}
 	if err := s.CreateUser(ctx, owner); err != nil {
@@ -598,8 +598,8 @@ func TestSecret_ProjectScope_OwnerAccess(t *testing.T) {
 	}
 
 	project := &store.Project{
-		ID: "project_sec_owner", Name: "Secret Owner Project", Slug: "secret-owner-project",
-		OwnerID: "project-sec-owner", Created: time.Now(), Updated: time.Now(),
+		ID: tid("project_sec_owner"), Name: "Secret Owner Project", Slug: "secret-owner-project",
+		OwnerID: tid("project-sec-owner"), Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
@@ -617,7 +617,7 @@ func TestSecret_ProjectScope_NonOwnerDenied(t *testing.T) {
 	ctx := context.Background()
 
 	nonOwner := &store.User{
-		ID: "non-sec-owner", Email: "nonsecowner@example.com", DisplayName: "Non-Owner",
+		ID: tid("non-sec-owner"), Email: "nonsecowner@example.com", DisplayName: "Non-Owner",
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 	}
 	if err := s.CreateUser(ctx, nonOwner); err != nil {
@@ -625,7 +625,7 @@ func TestSecret_ProjectScope_NonOwnerDenied(t *testing.T) {
 	}
 
 	project := &store.Project{
-		ID: "project_sec_notown", Name: "Not Owned Secret Project", Slug: "not-owned-secret-project",
+		ID: tid("project_sec_notown"), Name: "Not Owned Secret Project", Slug: "not-owned-secret-project",
 		OwnerID: "someone-else", Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
@@ -644,7 +644,7 @@ func TestSecret_ProjectScope_AgentReadOwnProject(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID: "project_agent_sec", Name: "Agent Secret Project", Slug: "agent-secret-project",
+		ID: tid("project_agent_sec"), Name: "Agent Secret Project", Slug: "agent-secret-project",
 		Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
@@ -652,7 +652,7 @@ func TestSecret_ProjectScope_AgentReadOwnProject(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID: "agent_sec_test", Slug: "sec-test-agent", Name: "Secret Test Agent",
+		ID: tid("agent_sec_test"), Slug: "sec-test-agent", Name: "Secret Test Agent",
 		ProjectID: project.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
 		Created: time.Now(), Updated: time.Now(),
 	}
@@ -677,7 +677,7 @@ func TestSecret_ProjectScope_AgentWriteDenied(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID: "project_agent_sec_nowrite", Name: "Agent Secret No Write", Slug: "agent-sec-nowrite-project",
+		ID: tid("project_agent_sec_nowrite"), Name: "Agent Secret No Write", Slug: "agent-sec-nowrite-project",
 		Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
@@ -685,7 +685,7 @@ func TestSecret_ProjectScope_AgentWriteDenied(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID: "agent_sec_nowrite", Slug: "sec-nowrite-agent", Name: "Secret No Write Agent",
+		ID: tid("agent_sec_nowrite"), Slug: "sec-nowrite-agent", Name: "Secret No Write Agent",
 		ProjectID: project.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
 		Created: time.Now(), Updated: time.Now(),
 	}
@@ -714,7 +714,7 @@ func TestEnvVar_HubEndpoint_ProjectScope_Authorized(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID: "project_hub_env", Name: "Hub Env Project", Slug: "hub-env-project",
+		ID: tid("project_hub_env"), Name: "Hub Env Project", Slug: "hub-env-project",
 		Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
@@ -733,7 +733,7 @@ func TestEnvVar_HubEndpoint_ProjectScope_NonOwnerDenied(t *testing.T) {
 	ctx := context.Background()
 
 	member := &store.User{
-		ID: "hub-env-member", Email: "hubenvmember@example.com", DisplayName: "Member",
+		ID: tid("hub-env-member"), Email: "hubenvmember@example.com", DisplayName: "Member",
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 	}
 	if err := s.CreateUser(ctx, member); err != nil {
@@ -741,7 +741,7 @@ func TestEnvVar_HubEndpoint_ProjectScope_NonOwnerDenied(t *testing.T) {
 	}
 
 	project := &store.Project{
-		ID: "project_hub_env_deny", Name: "Hub Env Deny Project", Slug: "hub-env-deny-project",
+		ID: tid("project_hub_env_deny"), Name: "Hub Env Deny Project", Slug: "hub-env-deny-project",
 		OwnerID: "someone-else", Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
@@ -801,7 +801,7 @@ func TestEnvVar_UnifiedList_MergesSecrets(t *testing.T) {
 
 	// Create a secret directly in the store with type "environment"
 	if err := s.CreateSecret(ctx, &store.Secret{
-		ID:             "sec-env-1",
+		ID:             tid("sec-env-1"),
 		Key:            "SECRET_ENV_VAR",
 		EncryptedValue: "encrypted-val",
 		SecretType:     store.SecretTypeEnvironment,
@@ -864,7 +864,7 @@ func TestEnvVar_UnifiedList_Deduplication(t *testing.T) {
 
 	// Also create a secret with the same key
 	if err := s.CreateSecret(ctx, &store.Secret{
-		ID:             "sec-dup-1",
+		ID:             tid("sec-dup-1"),
 		Key:            "DUPED_KEY",
 		EncryptedValue: "secret-value",
 		SecretType:     store.SecretTypeEnvironment,
@@ -905,7 +905,7 @@ func TestEnvVar_FallbackGet_FromSecretBackend(t *testing.T) {
 
 	// Create a secret (no plain env var)
 	if err := s.CreateSecret(ctx, &store.Secret{
-		ID:             "sec-get-1",
+		ID:             tid("sec-get-1"),
 		Key:            "ONLY_SECRET",
 		EncryptedValue: "secret-val",
 		SecretType:     store.SecretTypeEnvironment,
@@ -946,7 +946,7 @@ func TestEnvVar_FallbackDelete_FromSecretBackend(t *testing.T) {
 
 	// Create a secret (no plain env var)
 	if err := s.CreateSecret(ctx, &store.Secret{
-		ID:             "sec-del-1",
+		ID:             tid("sec-del-1"),
 		Key:            "DEL_SECRET",
 		EncryptedValue: "secret-val",
 		SecretType:     store.SecretTypeEnvironment,
@@ -1010,7 +1010,7 @@ func TestEnvVar_NonEnvironmentSecrets_NotMerged(t *testing.T) {
 
 	// Create a secret with type "variable" (not "environment")
 	if err := s.CreateSecret(ctx, &store.Secret{
-		ID:             "sec-var-1",
+		ID:             tid("sec-var-1"),
 		Key:            "VARIABLE_SECRET",
 		EncryptedValue: "var-val",
 		SecretType:     store.SecretTypeVariable,
@@ -1043,7 +1043,7 @@ func TestEnvVar_ProjectScope_SecretPromotion_Succeeds(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID: "project_promo_test", Name: "Promo Project", Slug: "promo-project",
+		ID: tid("project_promo_test"), Name: "Promo Project", Slug: "promo-project",
 		OwnerID: DevUserID, Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
@@ -1063,7 +1063,7 @@ func TestEnvVar_ProjectScope_UnifiedList(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID: "project_unified_list", Name: "Unified Project", Slug: "unified-project",
+		ID: tid("project_unified_list"), Name: "Unified Project", Slug: "unified-project",
 		OwnerID: DevUserID, Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
@@ -1079,7 +1079,7 @@ func TestEnvVar_ProjectScope_UnifiedList(t *testing.T) {
 
 	// Create an environment secret in the project scope directly
 	if err := s.CreateSecret(ctx, &store.Secret{
-		ID:             "sec-project-env-1",
+		ID:             tid("sec-project-env-1"),
 		Key:            "GROVE_SECRET_VAR",
 		EncryptedValue: "project-secret-val",
 		SecretType:     store.SecretTypeEnvironment,
@@ -1123,7 +1123,7 @@ func TestEnvVar_ProjectScope_FallbackGet(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID: "project_fallback_get", Name: "Fallback Get Project", Slug: "fallback-get-project",
+		ID: tid("project_fallback_get"), Name: "Fallback Get Project", Slug: "fallback-get-project",
 		OwnerID: DevUserID, Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
@@ -1131,7 +1131,7 @@ func TestEnvVar_ProjectScope_FallbackGet(t *testing.T) {
 	}
 
 	if err := s.CreateSecret(ctx, &store.Secret{
-		ID:             "sec-project-fb-1",
+		ID:             tid("sec-project-fb-1"),
 		Key:            "GROVE_ONLY_SEC",
 		EncryptedValue: "secret-val",
 		SecretType:     store.SecretTypeEnvironment,
@@ -1160,7 +1160,7 @@ func TestEnvVar_ProjectScope_FallbackDelete(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID: "project_fallback_del", Name: "Fallback Del Project", Slug: "fallback-del-project",
+		ID: tid("project_fallback_del"), Name: "Fallback Del Project", Slug: "fallback-del-project",
 		OwnerID: DevUserID, Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
@@ -1168,7 +1168,7 @@ func TestEnvVar_ProjectScope_FallbackDelete(t *testing.T) {
 	}
 
 	if err := s.CreateSecret(ctx, &store.Secret{
-		ID:             "sec-project-del-1",
+		ID:             tid("sec-project-del-1"),
 		Key:            "GROVE_DEL_SEC",
 		EncryptedValue: "secret-val",
 		SecretType:     store.SecretTypeEnvironment,
@@ -1260,7 +1260,7 @@ func TestEnvVar_HubScope_MemberReadForbidden(t *testing.T) {
 	ctx := context.Background()
 
 	member := &store.User{
-		ID: "hub-env-member-1", Email: "hub-member@example.com", DisplayName: "Hub Member",
+		ID: tid("hub-env-member-1"), Email: "hub-member@example.com", DisplayName: "Hub Member",
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 	}
 	if err := s.CreateUser(ctx, member); err != nil {
@@ -1286,7 +1286,7 @@ func TestEnvVar_HubScope_MemberWriteForbidden(t *testing.T) {
 	ctx := context.Background()
 
 	member := &store.User{
-		ID: "hub-env-member-2", Email: "hub-member2@example.com", DisplayName: "Hub Member 2",
+		ID: tid("hub-env-member-2"), Email: "hub-member2@example.com", DisplayName: "Hub Member 2",
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 	}
 	if err := s.CreateUser(ctx, member); err != nil {
@@ -1306,7 +1306,7 @@ func TestEnvVar_HubScope_MemberDeleteForbidden(t *testing.T) {
 	ctx := context.Background()
 
 	member := &store.User{
-		ID: "hub-env-member-3", Email: "hub-member3@example.com", DisplayName: "Hub Member 3",
+		ID: tid("hub-env-member-3"), Email: "hub-member3@example.com", DisplayName: "Hub Member 3",
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 	}
 	if err := s.CreateUser(ctx, member); err != nil {
@@ -1332,7 +1332,7 @@ func TestEnvVar_HubScope_AgentCanRead(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID: "project_hub_agent", Name: "Hub Agent Project", Slug: "hub-agent-project",
+		ID: tid("project_hub_agent"), Name: "Hub Agent Project", Slug: "hub-agent-project",
 		Created: time.Now(), Updated: time.Now(),
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
@@ -1340,7 +1340,7 @@ func TestEnvVar_HubScope_AgentCanRead(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID: "agent_hub_read", Slug: "hub-read-agent", Name: "Hub Read Agent",
+		ID: tid("agent_hub_read"), Slug: "hub-read-agent", Name: "Hub Read Agent",
 		ProjectID: project.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
 		Created: time.Now(), Updated: time.Now(),
 	}
@@ -1405,7 +1405,7 @@ func TestSecret_HubScope_MemberReadForbidden(t *testing.T) {
 	ctx := context.Background()
 
 	member := &store.User{
-		ID: "hub-sec-member-1", Email: "hubsecmember@example.com", DisplayName: "Hub Sec Member",
+		ID: tid("hub-sec-member-1"), Email: "hubsecmember@example.com", DisplayName: "Hub Sec Member",
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 	}
 	if err := s.CreateUser(ctx, member); err != nil {
@@ -1432,7 +1432,7 @@ func TestSecret_HubScope_MemberWriteForbidden(t *testing.T) {
 	ctx := context.Background()
 
 	member := &store.User{
-		ID: "hub-sec-member-2", Email: "hubsecmember2@example.com", DisplayName: "Hub Sec Member 2",
+		ID: tid("hub-sec-member-2"), Email: "hubsecmember2@example.com", DisplayName: "Hub Sec Member 2",
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 	}
 	if err := s.CreateUser(ctx, member); err != nil {

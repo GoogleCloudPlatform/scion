@@ -127,7 +127,7 @@ func TestGetAgent_CustomHarnessTypeFromHarnessConfig(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         "hc-custom",
+		ID:         tid("hc-custom"),
 		Name:       "custom-harness",
 		Slug:       "custom-harness",
 		Harness:    "custom-harness",

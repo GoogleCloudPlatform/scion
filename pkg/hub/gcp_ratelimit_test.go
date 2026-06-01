@@ -25,18 +25,18 @@ func TestGCPTokenRateLimiter_Allow(t *testing.T) {
 
 	// First 5 requests should be allowed (burst)
 	for i := 0; i < 5; i++ {
-		if !rl.Allow("agent-1") {
+		if !rl.Allow(tid("agent-1")) {
 			t.Fatalf("request %d should be allowed", i)
 		}
 	}
 
 	// 6th request should be denied (burst exhausted)
-	if rl.Allow("agent-1") {
+	if rl.Allow(tid("agent-1")) {
 		t.Fatal("6th request should be denied")
 	}
 
 	// Different agent should still be allowed
-	if !rl.Allow("agent-2") {
+	if !rl.Allow(tid("agent-2")) {
 		t.Fatal("different agent should be allowed")
 	}
 }
@@ -44,18 +44,18 @@ func TestGCPTokenRateLimiter_Allow(t *testing.T) {
 func TestGCPTokenRateLimiter_Refill(t *testing.T) {
 	rl := NewGCPTokenRateLimiter(100, 1) // 100/sec, burst 1
 
-	if !rl.Allow("agent-1") {
+	if !rl.Allow(tid("agent-1")) {
 		t.Fatal("first request should be allowed")
 	}
 
-	if rl.Allow("agent-1") {
+	if rl.Allow(tid("agent-1")) {
 		t.Fatal("second request should be denied")
 	}
 
 	// Wait for refill
 	time.Sleep(20 * time.Millisecond)
 
-	if !rl.Allow("agent-1") {
+	if !rl.Allow(tid("agent-1")) {
 		t.Fatal("request after refill should be allowed")
 	}
 }
@@ -68,14 +68,14 @@ func TestGCPTokenRateLimiter_CleanupExitsOnCancel(t *testing.T) {
 	rl.StartCleanup(ctx)
 
 	// Use the limiter
-	rl.Allow("agent-1")
+	rl.Allow(tid("agent-1"))
 
 	// Cancel and verify goroutine exits (no hang)
 	cancel()
 	time.Sleep(100 * time.Millisecond)
 
 	// Limiter should still work after cleanup goroutine exits
-	if !rl.Allow("agent-2") {
+	if !rl.Allow(tid("agent-2")) {
 		t.Fatal("limiter should still work after cleanup exits")
 	}
 }

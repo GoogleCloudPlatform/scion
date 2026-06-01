@@ -114,7 +114,7 @@ func setupBrokerTestProject(t *testing.T, s store.Store) string {
 
 	// Create a runtime broker for agent FK constraints
 	rb := &store.RuntimeBroker{
-		ID:       "broker-1",
+		ID:       tid("broker-1"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -145,7 +145,7 @@ func setupBrokerTestAgent(t *testing.T, s store.Store, projectID, slug, phase st
 		Slug:            slug,
 		ProjectID:       projectID,
 		Phase:           phase,
-		RuntimeBrokerID: "broker-1",
+		RuntimeBrokerID: tid("broker-1"),
 		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(context.Background(), agent); err != nil {

@@ -209,7 +209,7 @@ func TestServer_UserTokenSurvivesRestart(t *testing.T) {
 	}
 
 	accessToken, _, _, err := srv1.userTokenService.GenerateTokenPair(
-		"user-1", "test@example.com", "Test User", store.UserRoleAdmin, ClientTypeWeb,
+		tid("user-1"), "test@example.com", "Test User", store.UserRoleAdmin, ClientTypeWeb,
 	)
 	if err != nil {
 		t.Fatalf("GenerateTokenPair failed: %v", err)
@@ -282,14 +282,14 @@ func TestServer_SigningKeyMigration_LegacyHubScopeID(t *testing.T) {
 	userEncoded := base64.StdEncoding.EncodeToString(legacyUserKey)
 
 	if err := s.CreateSecret(ctx, &store.Secret{
-		ID: "hub-agent_signing_key", Key: SecretKeyAgentSigningKey,
+		ID: tid("hub-agent_signing_key"), Key: SecretKeyAgentSigningKey,
 		EncryptedValue: agentEncoded, Scope: store.ScopeHub, ScopeID: "hub",
 		Description: "Hub signing key for agent_signing_key",
 	}); err != nil {
 		t.Fatalf("failed to create legacy agent key: %v", err)
 	}
 	if err := s.CreateSecret(ctx, &store.Secret{
-		ID: "hub-user_signing_key", Key: SecretKeyUserSigningKey,
+		ID: tid("hub-user_signing_key"), Key: SecretKeyUserSigningKey,
 		EncryptedValue: userEncoded, Scope: store.ScopeHub, ScopeID: "hub",
 		Description: "Hub signing key for user_signing_key",
 	}); err != nil {
@@ -366,7 +366,7 @@ func TestServer_SigningKeyMigration_DeletesLegacyFromBackend(t *testing.T) {
 	encoded := base64.StdEncoding.EncodeToString(legacyKey)
 
 	if err := s.CreateSecret(ctx, &store.Secret{
-		ID: "hub-user_signing_key", Key: SecretKeyUserSigningKey,
+		ID: tid("hub-user_signing_key"), Key: SecretKeyUserSigningKey,
 		EncryptedValue: encoded, Scope: store.ScopeHub, ScopeID: legacyScopeID,
 		Description: "legacy user signing key",
 	}); err != nil {
@@ -453,7 +453,7 @@ func TestServer_SigningKeyBootstrapWithSecretBackend(t *testing.T) {
 
 	// Generate a token with this key
 	accessToken, _, _, err := srv1.userTokenService.GenerateTokenPair(
-		"user-1", "test@example.com", "Test", store.UserRoleAdmin, ClientTypeWeb,
+		tid("user-1"), "test@example.com", "Test", store.UserRoleAdmin, ClientTypeWeb,
 	)
 	if err != nil {
 		t.Fatalf("GenerateTokenPair failed: %v", err)
@@ -596,7 +596,7 @@ func TestServer_SigningKeyEmptyValueFromStore(t *testing.T) {
 
 	// Verify the new key actually works for token operations
 	accessToken, _, _, err := srv.userTokenService.GenerateTokenPair(
-		"user-1", "test@example.com", "Test", store.UserRoleAdmin, ClientTypeWeb,
+		tid("user-1"), "test@example.com", "Test", store.UserRoleAdmin, ClientTypeWeb,
 	)
 	if err != nil {
 		t.Fatalf("GenerateTokenPair failed: %v", err)
@@ -679,7 +679,7 @@ func TestServer_GenerateAgentToken_DevAuthAutoGrantsScopes(t *testing.T) {
 	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	// Generate token without any additional scopes
-	token, err := srv.GenerateAgentToken("agent-1", "project-1", nil)
+	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil)
 	if err != nil {
 		t.Fatalf("GenerateAgentToken failed: %v", err)
 	}
@@ -727,7 +727,7 @@ func TestServer_GenerateAgentToken_DevAuthDeduplicatesScopes(t *testing.T) {
 	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	// Generate token with explicit scopes that overlap with auto-granted ones
-	token, err := srv.GenerateAgentToken("agent-1", "project-1", nil,
+	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil,
 		ScopeAgentCreate, ScopeAgentLifecycle, ScopeProjectSecretRead)
 	if err != nil {
 		t.Fatalf("GenerateAgentToken failed: %v", err)
@@ -777,7 +777,7 @@ func TestServer_GenerateAgentToken_NoDevAuthDoesNotAutoGrant(t *testing.T) {
 	}
 	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
-	token, err := srv.GenerateAgentToken("agent-1", "project-1", nil)
+	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil)
 	if err != nil {
 		t.Fatalf("GenerateAgentToken failed: %v", err)
 	}

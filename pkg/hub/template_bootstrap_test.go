@@ -125,7 +125,7 @@ func TestBootstrapTemplatesFromDir_ImportsNewAlongsideExisting(t *testing.T) {
 
 	// Pre-create a template in the store
 	existing := &store.Template{
-		ID:     "existing-id",
+		ID:     tid("existing-id"),
 		Name:   "existing",
 		Slug:   "existing",
 		Scope:  store.TemplateScopeGlobal,

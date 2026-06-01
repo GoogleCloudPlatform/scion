@@ -39,7 +39,7 @@ func setupScheduledEventTest(t *testing.T) (*Server, store.Store, string) {
 	srv.scheduler.RegisterEventHandler("message", srv.messageEventHandler())
 
 	project := &store.Project{
-		ID:   "project-sched-test",
+		ID:   tid("project-sched-test"),
 		Name: "Scheduler Test Project",
 		Slug: "sched-test-project",
 	}
@@ -234,7 +234,7 @@ func TestScheduledEvent_Get(t *testing.T) {
 	ctx := context.Background()
 
 	evt := &store.ScheduledEvent{
-		ID:        "get-evt-1",
+		ID:        tid("get-evt-1"),
 		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour),
@@ -249,7 +249,7 @@ func TestScheduledEvent_Get(t *testing.T) {
 
 	var got store.ScheduledEvent
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
-	assert.Equal(t, "get-evt-1", got.ID)
+	assert.Equal(t, tid("get-evt-1"), got.ID)
 	assert.Equal(t, "message", got.EventType)
 }
 
@@ -266,7 +266,7 @@ func TestScheduledEvent_GetWrongProject(t *testing.T) {
 
 	// Create a second project
 	project2 := &store.Project{
-		ID:   "project-sched-other",
+		ID:   tid("project-sched-other"),
 		Name: "Other Project",
 		Slug: "other-project",
 	}
@@ -274,7 +274,7 @@ func TestScheduledEvent_GetWrongProject(t *testing.T) {
 
 	// Create event in first project
 	evt := &store.ScheduledEvent{
-		ID:        "wrong-project-evt",
+		ID:        tid("wrong-project-evt"),
 		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour),
@@ -294,7 +294,7 @@ func TestScheduledEvent_Cancel(t *testing.T) {
 	ctx := context.Background()
 
 	evt := &store.ScheduledEvent{
-		ID:        "cancel-evt-1",
+		ID:        tid("cancel-evt-1"),
 		ProjectID: projectID,
 		EventType: "message",
 		FireAt:    time.Now().Add(1 * time.Hour),
@@ -308,7 +308,7 @@ func TestScheduledEvent_Cancel(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// Verify it was cancelled in the store
-	got, err := s.GetScheduledEvent(ctx, "cancel-evt-1")
+	got, err := s.GetScheduledEvent(ctx, tid("cancel-evt-1"))
 	require.NoError(t, err)
 	assert.Equal(t, store.ScheduledEventCancelled, got.Status)
 }

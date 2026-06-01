@@ -49,7 +49,7 @@ func createTestLinkedProject(t *testing.T, srv *Server, s store.Store, name, rem
 	// Create a provider broker record with a local path
 	brokerLocalPath := t.TempDir()
 	broker := &store.RuntimeBroker{
-		ID:   "test-broker-remote",
+		ID:   tid("test-broker-remote"),
 		Name: "remote-broker",
 	}
 	require.NoError(t, s.CreateRuntimeBroker(context.Background(), broker))
@@ -101,7 +101,7 @@ func TestResolveProjectWebDAVPath_LinkedProject_EmbeddedBroker(t *testing.T) {
 	project := createTestGitProject(t, srv, "WebDAV Embedded", "https://github.com/org/embedded-repo.git")
 
 	embeddedPath := t.TempDir()
-	embeddedBrokerID := "test-embedded-broker"
+	embeddedBrokerID := tid("test-embedded-broker")
 	srv.SetEmbeddedBrokerID(embeddedBrokerID)
 
 	broker := &store.RuntimeBroker{
@@ -143,7 +143,7 @@ func TestIsLinkedProject_EmbeddedBrokerOnly(t *testing.T) {
 	srv, s := testServer(t)
 	project := createTestGitProject(t, srv, "IsLinked Embedded", "https://github.com/org/emb.git")
 
-	embeddedBrokerID := "embedded-only"
+	embeddedBrokerID := tid("embedded-only")
 	srv.SetEmbeddedBrokerID(embeddedBrokerID)
 
 	broker := &store.RuntimeBroker{ID: embeddedBrokerID, Name: "emb"}

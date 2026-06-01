@@ -133,7 +133,7 @@ func TestPopulateAgentConfig_HubNativeProject_SetsWorkspace(t *testing.T) {
 	srv, _ := testServer(t)
 
 	project := &store.Project{
-		ID:   "project-hub-native",
+		ID:   tid("project-hub-native"),
 		Name: "Hub Native",
 		Slug: "hub-native",
 		// No GitRemote — hub-native project
@@ -183,7 +183,7 @@ func TestPopulateAgentConfig_GitProject_NoWorkspace(t *testing.T) {
 	srv, _ := testServer(t)
 
 	project := &store.Project{
-		ID:        "project-git",
+		ID:        tid("project-git"),
 		Name:      "Git Project",
 		Slug:      "git-project",
 		GitRemote: "github.com/test/repo",
@@ -441,7 +441,7 @@ func TestCreateAgent_HubNativeProject_ExplicitBroker_AutoLinks(t *testing.T) {
 
 	// Create a runtime broker
 	broker := &store.RuntimeBroker{
-		ID:     "broker-hub-autolink",
+		ID:     tid("broker-hub-autolink"),
 		Slug:   "hub-autolink-broker",
 		Name:   "Hub Autolink Broker",
 		Status: store.BrokerStatusOnline,
@@ -450,7 +450,7 @@ func TestCreateAgent_HubNativeProject_ExplicitBroker_AutoLinks(t *testing.T) {
 
 	// Create a hub-native project (no git remote, no default broker, no providers)
 	project := &store.Project{
-		ID:   "project-hub-autolink",
+		ID:   tid("project-hub-autolink"),
 		Slug: "hub-autolink",
 		Name: "Hub Autolink Project",
 		// No GitRemote — hub-native
@@ -496,7 +496,7 @@ func TestCreateProject_HubNative_AutoProvide(t *testing.T) {
 
 	// Create a broker with auto_provide enabled
 	broker := &store.RuntimeBroker{
-		ID:          "broker-autoprovide",
+		ID:          tid("broker-autoprovide"),
 		Slug:        "autoprovide-broker",
 		Name:        "Auto Provide Broker",
 		Status:      store.BrokerStatusOnline,
@@ -658,7 +658,7 @@ func TestCreateAgent_HubNativeProject_NoProviders_NoBroker(t *testing.T) {
 
 	// Create a hub-native project with no providers
 	project := &store.Project{
-		ID:   "project-hub-noproviders",
+		ID:   tid("project-hub-noproviders"),
 		Slug: "hub-noproviders",
 		Name: "No Providers Project",
 	}
@@ -685,7 +685,7 @@ func TestAutoLinkProviders_HubNativeProject_NoLocalPath(t *testing.T) {
 
 	// Create a broker with auto_provide enabled
 	broker := &store.RuntimeBroker{
-		ID:          "broker-localpath-auto",
+		ID:          tid("broker-localpath-auto"),
 		Slug:        "localpath-auto-broker",
 		Name:        "LocalPath Auto Broker",
 		Status:      store.BrokerStatusOnline,
@@ -727,7 +727,7 @@ func TestAutoLinkProviders_GitProject_NoLocalPath(t *testing.T) {
 
 	// Create a broker with auto_provide enabled
 	broker := &store.RuntimeBroker{
-		ID:          "broker-localpath-git",
+		ID:          tid("broker-localpath-git"),
 		Slug:        "localpath-git-broker",
 		Name:        "LocalPath Git Broker",
 		Status:      store.BrokerStatusOnline,
@@ -763,7 +763,7 @@ func TestDeleteProject_HubNative_DispatchesCleanupToBrokers(t *testing.T) {
 
 	// Create a hub-native project
 	project := &store.Project{
-		ID:   "project-cleanup-dispatch",
+		ID:   tid("project-cleanup-dispatch"),
 		Slug: "cleanup-dispatch",
 		Name: "Cleanup Dispatch Project",
 		// No GitRemote — hub-native
@@ -772,14 +772,14 @@ func TestDeleteProject_HubNative_DispatchesCleanupToBrokers(t *testing.T) {
 
 	// Create two brokers
 	broker1 := &store.RuntimeBroker{
-		ID:       "broker-cleanup-1",
+		ID:       tid("broker-cleanup-1"),
 		Slug:     "cleanup-broker-1",
 		Name:     "Cleanup Broker 1",
 		Status:   store.BrokerStatusOnline,
 		Endpoint: "http://broker1:9800",
 	}
 	broker2 := &store.RuntimeBroker{
-		ID:       "broker-cleanup-2",
+		ID:       tid("broker-cleanup-2"),
 		Slug:     "cleanup-broker-2",
 		Name:     "Cleanup Broker 2",
 		Status:   store.BrokerStatusOnline,
@@ -826,7 +826,7 @@ func TestDeleteProject_HubNative_SkipsEmbeddedBroker(t *testing.T) {
 
 	// Create a hub-native project
 	project := &store.Project{
-		ID:   "project-cleanup-embedded",
+		ID:   tid("project-cleanup-embedded"),
 		Slug: "cleanup-embedded",
 		Name: "Cleanup Embedded Project",
 	}
@@ -834,14 +834,14 @@ func TestDeleteProject_HubNative_SkipsEmbeddedBroker(t *testing.T) {
 
 	// Create embedded and remote brokers
 	embeddedBroker := &store.RuntimeBroker{
-		ID:       "broker-embedded",
+		ID:       tid("broker-embedded"),
 		Slug:     "embedded-broker",
 		Name:     "Embedded Broker",
 		Status:   store.BrokerStatusOnline,
 		Endpoint: "http://localhost:9800",
 	}
 	remoteBroker := &store.RuntimeBroker{
-		ID:       "broker-remote",
+		ID:       tid("broker-remote"),
 		Slug:     "remote-broker",
 		Name:     "Remote Broker",
 		Status:   store.BrokerStatusOnline,
@@ -887,7 +887,7 @@ func TestDeleteProject_GitBacked_NoCleanupDispatched(t *testing.T) {
 
 	// Create a git-backed project
 	project := &store.Project{
-		ID:        "project-git-nocleanup",
+		ID:        tid("project-git-nocleanup"),
 		Slug:      "git-nocleanup",
 		Name:      "Git No Cleanup Project",
 		GitRemote: "github.com/test/nocleanup",
@@ -896,7 +896,7 @@ func TestDeleteProject_GitBacked_NoCleanupDispatched(t *testing.T) {
 
 	// Create a broker and link as provider
 	broker := &store.RuntimeBroker{
-		ID:       "broker-git-nocleanup",
+		ID:       tid("broker-git-nocleanup"),
 		Slug:     "git-nocleanup-broker",
 		Name:     "Git NoCleanup Broker",
 		Status:   store.BrokerStatusOnline,
@@ -931,7 +931,7 @@ func TestResolveRuntimeBroker_HubNativeProject_NoLocalPath(t *testing.T) {
 
 	// Create a runtime broker (not auto-provide — will be explicitly selected)
 	broker := &store.RuntimeBroker{
-		ID:     "broker-resolve-localpath",
+		ID:     tid("broker-resolve-localpath"),
 		Slug:   "resolve-localpath-broker",
 		Name:   "Resolve LocalPath Broker",
 		Status: store.BrokerStatusOnline,
@@ -940,7 +940,7 @@ func TestResolveRuntimeBroker_HubNativeProject_NoLocalPath(t *testing.T) {
 
 	// Create a hub-native project with no providers
 	project := &store.Project{
-		ID:   "project-resolve-localpath",
+		ID:   tid("project-resolve-localpath"),
 		Slug: "resolve-localpath",
 		Name: "Resolve LocalPath Project",
 	}
@@ -974,7 +974,7 @@ func TestProjectRegisterPreservesProviderLocalPath(t *testing.T) {
 
 	// Create a broker
 	broker := &store.RuntimeBroker{
-		ID:     "broker-preserve-path",
+		ID:     tid("broker-preserve-path"),
 		Name:   "Preserve Path Broker",
 		Slug:   "preserve-path-broker",
 		Status: store.BrokerStatusOnline,
@@ -1401,7 +1401,7 @@ func TestPopulateAgentConfig_SharedWorkspace_SetsWorkspaceNotClone(t *testing.T)
 	srv, _ := testServer(t)
 
 	project := &store.Project{
-		ID:        "project-shared-ws",
+		ID:        tid("project-shared-ws"),
 		Name:      "Shared WS",
 		Slug:      "shared-ws",
 		GitRemote: "github.com/test/shared",
@@ -1596,7 +1596,7 @@ func TestResolveCloneToken_FallsBackToCreatorUserToken(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, st.CreateSecret(ctx, &store.Secret{
-		ID:             "sec-user-gh",
+		ID:             tid("sec-user-gh"),
 		Key:            "GITHUB_TOKEN",
 		EncryptedValue: "ghp_user_token_123",
 		SecretType:     store.SecretTypeEnvironment,
@@ -1623,7 +1623,7 @@ func TestResolveCloneToken_PrefersProjectTokenOverUserToken(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, st.CreateSecret(ctx, &store.Secret{
-		ID:             "sec-project-gh",
+		ID:             tid("sec-project-gh"),
 		Key:            "GITHUB_TOKEN",
 		EncryptedValue: "ghp_project_token",
 		SecretType:     store.SecretTypeEnvironment,
@@ -1632,7 +1632,7 @@ func TestResolveCloneToken_PrefersProjectTokenOverUserToken(t *testing.T) {
 		ScopeID:        "project-with-both",
 	}))
 	require.NoError(t, st.CreateSecret(ctx, &store.Secret{
-		ID:             "sec-user-gh-2",
+		ID:             tid("sec-user-gh-2"),
 		Key:            "GITHUB_TOKEN",
 		EncryptedValue: "ghp_user_token",
 		SecretType:     store.SecretTypeEnvironment,
@@ -1728,7 +1728,7 @@ func TestAutoAssociateGitHubInstallation_NoMatch(t *testing.T) {
 	require.NoError(t, st.CreateGitHubInstallation(ctx, inst))
 
 	project := &store.Project{
-		ID:        "project-no-match",
+		ID:        tid("project-no-match"),
 		Name:      "No Match",
 		Slug:      "no-match",
 		GitRemote: "github.com/myorg/myrepo",
@@ -1757,7 +1757,7 @@ func TestAutoAssociateGitHubInstallation_SkipsSuspended(t *testing.T) {
 	require.NoError(t, st.CreateGitHubInstallation(ctx, inst))
 
 	project := &store.Project{
-		ID:        "project-suspended",
+		ID:        tid("project-suspended"),
 		Name:      "Suspended",
 		Slug:      "suspended",
 		GitRemote: "github.com/myorg/myrepo",
@@ -1820,19 +1820,19 @@ func TestCreateProject_ExplicitSlug_Unique(t *testing.T) {
 	// Create first project with an explicit slug.
 	body1 := CreateProjectRequest{
 		Name: "My Project",
-		Slug: "my-project",
+		Slug: tid("my-project"),
 	}
 	rec1 := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body1)
 	require.Equal(t, http.StatusCreated, rec1.Code, "body: %s", rec1.Body.String())
 
 	var project1 store.Project
 	require.NoError(t, json.NewDecoder(rec1.Body).Decode(&project1))
-	assert.Equal(t, "my-project", project1.Slug)
+	assert.Equal(t, tid("my-project"), project1.Slug)
 
 	// Create second project with the same explicit slug — should get serial suffix.
 	body2 := CreateProjectRequest{
 		Name: "My Project",
-		Slug: "my-project",
+		Slug: tid("my-project"),
 	}
 	rec2 := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body2)
 	require.Equal(t, http.StatusCreated, rec2.Code, "body: %s", rec2.Body.String())
@@ -1848,8 +1848,8 @@ func TestCreateProject_ListByGitRemote_ReturnsMultiple(t *testing.T) {
 
 	// Pre-create two projects for the same git remote.
 	for _, g := range []*store.Project{
-		{ID: "g1", Name: "widgets", Slug: "widgets", GitRemote: "github.com/acme/widgets"},
-		{ID: "g2", Name: "widgets (1)", Slug: "widgets-1", GitRemote: "github.com/acme/widgets"},
+		{ID: tid("g1"), Name: "widgets", Slug: "widgets", GitRemote: "github.com/acme/widgets"},
+		{ID: tid("g2"), Name: "widgets (1)", Slug: "widgets-1", GitRemote: "github.com/acme/widgets"},
 	} {
 		require.NoError(t, s.CreateProject(ctx, g))
 	}

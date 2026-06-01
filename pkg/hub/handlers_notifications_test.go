@@ -39,14 +39,14 @@ func setupNotificationHandlerTest(t *testing.T) (*Server, store.Store, string) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:   "project-notif-handler",
+		ID:   tid("project-notif-handler"),
 		Name: "Notif Handler Project",
 		Slug: "notif-handler-project",
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:        "agent-watched",
+		ID:        tid("agent-watched"),
 		Slug:      "watched-agent",
 		Name:      "Watched Agent",
 		ProjectID: project.ID,
@@ -184,14 +184,14 @@ func TestHandleNotifications_RejectAgentToken(t *testing.T) {
 
 	// Create an agent and generate a token for it
 	project := &store.Project{
-		ID:   "project-agent-auth",
+		ID:   tid("project-agent-auth"),
 		Name: "Agent Auth Project",
 		Slug: "agent-auth-project",
 	}
 	_ = s.CreateProject(ctx, project)
 
 	agent := &store.Agent{
-		ID:        "agent-auth-test",
+		ID:        tid("agent-auth-test"),
 		Slug:      "auth-agent",
 		Name:      "Auth Agent",
 		ProjectID: project.ID,
@@ -227,14 +227,14 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 	srv, s, _ := setupNotificationHandlerTest(t)
 	ctx := context.Background()
 
-	// The setup already created "agent-watched" with user notifications for DevUserID.
-	// Create a second agent that watches "agent-watched", so "agent-watched" is the
+	// The setup already created tid("agent-watched") with user notifications for DevUserID.
+	// Create a second agent that watches tid("agent-watched"), so tid("agent-watched") is the
 	// subscriber (simulating notifications sent TO the watched agent).
 	agent2 := &store.Agent{
-		ID:        "agent-other",
+		ID:        tid("agent-other"),
 		Slug:      "other-agent",
 		Name:      "Other Agent",
-		ProjectID: "project-notif-handler",
+		ProjectID: tid("project-notif-handler"),
 		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2))
@@ -243,10 +243,10 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 	sub2 := &store.NotificationSubscription{
 		ID:                api.NewUUID(),
 		Scope:             store.SubscriptionScopeAgent,
-		AgentID:           "agent-other",
+		AgentID:           tid("agent-other"),
 		SubscriberType:    store.SubscriberTypeAgent,
-		SubscriberID:      "agent-watched",
-		ProjectID:         "project-notif-handler",
+		SubscriberID:      tid("agent-watched"),
+		ProjectID:         tid("project-notif-handler"),
 		TriggerActivities: []string{"COMPLETED"},
 		CreatedAt:         time.Now(),
 		CreatedBy:         "test",
@@ -257,10 +257,10 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 	agentNotif := &store.Notification{
 		ID:             api.NewUUID(),
 		SubscriptionID: sub2.ID,
-		AgentID:        "agent-other",
-		ProjectID:      "project-notif-handler",
+		AgentID:        tid("agent-other"),
+		ProjectID:      tid("project-notif-handler"),
 		SubscriberType: store.SubscriberTypeAgent,
-		SubscriberID:   "agent-watched",
+		SubscriberID:   tid("agent-watched"),
 		Status:         "COMPLETED",
 		Message:        "agent-other completed (to agent-watched)",
 		Dispatched:     true,
@@ -285,7 +285,7 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 
 	// Agent notifications: notifications sent TO agent-watched
 	assert.Len(t, resp.AgentNotifications, 1)
-	assert.Equal(t, "agent-watched", resp.AgentNotifications[0].SubscriberID)
+	assert.Equal(t, tid("agent-watched"), resp.AgentNotifications[0].SubscriberID)
 }
 
 func TestHandleNotifications_FilterByAgent_NoResults(t *testing.T) {
@@ -416,8 +416,8 @@ func TestHandleSubscriptions_CreateAgentScoped(t *testing.T) {
 
 	req := createSubscriptionRequest{
 		Scope:             "agent",
-		AgentID:           "agent-watched",
-		ProjectID:         "project-notif-handler",
+		AgentID:           tid("agent-watched"),
+		ProjectID:         tid("project-notif-handler"),
 		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT"},
 	}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions", req)
@@ -429,8 +429,8 @@ func TestHandleSubscriptions_CreateAgentScoped(t *testing.T) {
 	var sub store.NotificationSubscription
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sub))
 	assert.Equal(t, "agent", sub.Scope)
-	assert.Equal(t, "agent-watched", sub.AgentID)
-	assert.Equal(t, "project-notif-handler", sub.ProjectID)
+	assert.Equal(t, tid("agent-watched"), sub.AgentID)
+	assert.Equal(t, tid("project-notif-handler"), sub.ProjectID)
 
 	// Verify in store
 	subs, err := s.GetSubscriptionsForSubscriber(context.Background(), store.SubscriberTypeUser, DevUserID)
@@ -443,7 +443,7 @@ func TestHandleSubscriptions_CreateProjectScoped(t *testing.T) {
 
 	req := createSubscriptionRequest{
 		Scope:             "project",
-		ProjectID:         "project-notif-handler",
+		ProjectID:         tid("project-notif-handler"),
 		TriggerActivities: []string{"COMPLETED"},
 	}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions", req)
@@ -453,7 +453,7 @@ func TestHandleSubscriptions_CreateProjectScoped(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sub))
 	assert.Equal(t, "project", sub.Scope)
 	assert.Empty(t, sub.AgentID)
-	assert.Equal(t, "project-notif-handler", sub.ProjectID)
+	assert.Equal(t, tid("project-notif-handler"), sub.ProjectID)
 }
 
 func TestHandleSubscriptions_CreateValidation(t *testing.T) {
@@ -484,7 +484,7 @@ func TestHandleSubscriptions_List(t *testing.T) {
 	// Create a project-scoped subscription
 	createReq := createSubscriptionRequest{
 		Scope:             "project",
-		ProjectID:         "project-notif-handler",
+		ProjectID:         tid("project-notif-handler"),
 		TriggerActivities: []string{"COMPLETED"},
 	}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions", createReq)
@@ -515,7 +515,7 @@ func TestHandleSubscriptions_Delete(t *testing.T) {
 	// Create a new subscription to delete
 	createReq := createSubscriptionRequest{
 		Scope:             "project",
-		ProjectID:         "project-notif-handler",
+		ProjectID:         tid("project-notif-handler"),
 		TriggerActivities: []string{"COMPLETED"},
 	}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions", createReq)

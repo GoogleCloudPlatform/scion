@@ -120,7 +120,7 @@ func TestGroupGet(t *testing.T) {
 	ctx := context.Background()
 
 	group := &store.Group{
-		ID:          "group_xyz123",
+		ID:          tid("group_xyz123"),
 		Name:        "Test Group",
 		Slug:        "test-group",
 		Description: "A test group",
@@ -160,7 +160,7 @@ func TestGroupUpdate(t *testing.T) {
 	ctx := context.Background()
 
 	group := &store.Group{
-		ID:      "group_upd123",
+		ID:      tid("group_upd123"),
 		Name:    "Original Name",
 		Slug:    "original-name",
 		Created: time.Now(),
@@ -199,7 +199,7 @@ func TestGroupDelete(t *testing.T) {
 	ctx := context.Background()
 
 	group := &store.Group{
-		ID:      "group_del123",
+		ID:      tid("group_del123"),
 		Name:    "Delete Me",
 		Slug:    "delete-me",
 		Created: time.Now(),
@@ -227,7 +227,7 @@ func TestGroupMembersAdd(t *testing.T) {
 	ctx := context.Background()
 
 	group := &store.Group{
-		ID:      "group_mem123",
+		ID:      tid("group_mem123"),
 		Name:    "Test Group",
 		Slug:    "test-group",
 		Created: time.Now(),
@@ -239,7 +239,7 @@ func TestGroupMembersAdd(t *testing.T) {
 
 	// Create the user to be added as a member
 	user := &store.User{
-		ID:          "user_abc123",
+		ID:          tid("user_abc123"),
 		Email:       "user@example.com",
 		DisplayName: "Test User",
 		Role:        "member",
@@ -252,7 +252,7 @@ func TestGroupMembersAdd(t *testing.T) {
 
 	body := AddGroupMemberRequest{
 		MemberType: "user",
-		MemberID:   "user_abc123",
+		MemberID:   tid("user_abc123"),
 		Role:       "member",
 	}
 
@@ -267,7 +267,7 @@ func TestGroupMembersAdd(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if resp.MemberID != "user_abc123" {
+	if resp.MemberID != tid("user_abc123") {
 		t.Errorf("expected memberId 'user_abc123', got %q", resp.MemberID)
 	}
 	if resp.DisplayName != "Test User" {
@@ -280,7 +280,7 @@ func TestGroupMembersAddByEmail(t *testing.T) {
 	ctx := context.Background()
 
 	group := &store.Group{
-		ID:      "group_email123",
+		ID:      tid("group_email123"),
 		Name:    "Test Group Email",
 		Slug:    "test-group-email",
 		Created: time.Now(),
@@ -292,7 +292,7 @@ func TestGroupMembersAddByEmail(t *testing.T) {
 
 	// Create the user
 	user := &store.User{
-		ID:          "user_email_test",
+		ID:          tid("user_email_test"),
 		Email:       "alice@example.com",
 		DisplayName: "Alice",
 		Role:        "member",
@@ -322,7 +322,7 @@ func TestGroupMembersAddByEmail(t *testing.T) {
 	}
 
 	// Should resolve email to user ID
-	if resp.MemberID != "user_email_test" {
+	if resp.MemberID != tid("user_email_test") {
 		t.Errorf("expected memberId 'user_email_test', got %q", resp.MemberID)
 	}
 	if resp.DisplayName != "Alice" {
@@ -335,7 +335,7 @@ func TestGroupMembersAddByEmail_NotFound(t *testing.T) {
 	ctx := context.Background()
 
 	group := &store.Group{
-		ID:      "group_email_nf",
+		ID:      tid("group_email_nf"),
 		Name:    "Test Group",
 		Slug:    "test-group-email-nf",
 		Created: time.Now(),
@@ -363,14 +363,14 @@ func TestGroupMembersAddGroupBySlug(t *testing.T) {
 	ctx := context.Background()
 
 	parentGroup := &store.Group{
-		ID:      "parent_grp",
+		ID:      tid("parent_grp"),
 		Name:    "Parent Group",
 		Slug:    "parent-group",
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
 	childGroup := &store.Group{
-		ID:      "child_grp",
+		ID:      tid("child_grp"),
 		Name:    "Child Group",
 		Slug:    "child-group",
 		Created: time.Now(),
@@ -402,7 +402,7 @@ func TestGroupMembersAddGroupBySlug(t *testing.T) {
 	}
 
 	// Should resolve slug to group ID
-	if resp.MemberID != "child_grp" {
+	if resp.MemberID != tid("child_grp") {
 		t.Errorf("expected memberId 'child_grp', got %q", resp.MemberID)
 	}
 	if resp.DisplayName != "Child Group" {
@@ -415,7 +415,7 @@ func TestGroupMembersList(t *testing.T) {
 	ctx := context.Background()
 
 	group := &store.Group{
-		ID:      "group_lst123",
+		ID:      tid("group_lst123"),
 		Name:    "Test Group",
 		Slug:    "test-group-list",
 		Created: time.Now(),
@@ -460,7 +460,7 @@ func TestGroupMemberRemove(t *testing.T) {
 	ctx := context.Background()
 
 	group := &store.Group{
-		ID:      "group_rem123",
+		ID:      tid("group_rem123"),
 		Name:    "Test Group",
 		Slug:    "test-group-remove",
 		Created: time.Now(),
@@ -473,7 +473,7 @@ func TestGroupMemberRemove(t *testing.T) {
 	member := &store.GroupMember{
 		GroupID:    group.ID,
 		MemberType: "user",
-		MemberID:   "user_remove",
+		MemberID:   tid("user_remove"),
 		Role:       "member",
 		AddedAt:    time.Now(),
 	}
@@ -488,7 +488,7 @@ func TestGroupMemberRemove(t *testing.T) {
 	}
 
 	// Verify removed
-	_, err := s.GetGroupMembership(ctx, group.ID, "user", "user_remove")
+	_, err := s.GetGroupMembership(ctx, group.ID, "user", tid("user_remove"))
 	if err != store.ErrNotFound {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
@@ -500,14 +500,14 @@ func TestGroupCycleDetection(t *testing.T) {
 
 	// Create two groups
 	groupA := &store.Group{
-		ID:      "group_a",
+		ID:      tid("group_a"),
 		Name:    "Group A",
 		Slug:    "group-a",
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
 	groupB := &store.Group{
-		ID:      "group_b",
+		ID:      tid("group_b"),
 		Name:    "Group B",
 		Slug:    "group-b",
 		Created: time.Now(),
@@ -549,7 +549,7 @@ func TestGroupMembersAddAgent(t *testing.T) {
 
 	// Create a project for the agent
 	project := &store.Project{
-		ID:   "project_agent_test",
+		ID:   tid("project_agent_test"),
 		Name: "Test Project",
 		Slug: "test-project-agent",
 	}
@@ -559,7 +559,7 @@ func TestGroupMembersAddAgent(t *testing.T) {
 
 	// Create the agent
 	agent := &store.Agent{
-		ID:        "agent_abc123",
+		ID:        tid("agent_abc123"),
 		Name:      "Test Agent",
 		ProjectID: project.ID,
 	}
@@ -580,7 +580,7 @@ func TestGroupMembersAddAgent(t *testing.T) {
 
 	body := AddGroupMemberRequest{
 		MemberType: "agent",
-		MemberID:   "agent_abc123",
+		MemberID:   tid("agent_abc123"),
 		Role:       "member",
 	}
 
@@ -598,7 +598,7 @@ func TestGroupMembersAddAgent(t *testing.T) {
 	if resp.MemberType != "agent" {
 		t.Errorf("expected memberType 'agent', got %q", resp.MemberType)
 	}
-	if resp.MemberID != "agent_abc123" {
+	if resp.MemberID != tid("agent_abc123") {
 		t.Errorf("expected memberId 'agent_abc123', got %q", resp.MemberID)
 	}
 	if resp.DisplayName != "Test Agent" {
@@ -611,7 +611,7 @@ func TestGroupMemberRemoveAgent(t *testing.T) {
 	ctx := context.Background()
 
 	group := &store.Group{
-		ID:      "group_rmagent",
+		ID:      tid("group_rmagent"),
 		Name:    "Test Group",
 		Slug:    "test-group-rm-agent",
 		Created: time.Now(),
@@ -624,7 +624,7 @@ func TestGroupMemberRemoveAgent(t *testing.T) {
 	member := &store.GroupMember{
 		GroupID:    group.ID,
 		MemberType: "agent",
-		MemberID:   "agent_remove",
+		MemberID:   tid("agent_remove"),
 		Role:       "member",
 		AddedAt:    time.Now(),
 	}
@@ -639,7 +639,7 @@ func TestGroupMemberRemoveAgent(t *testing.T) {
 	}
 
 	// Verify removed
-	_, err := s.GetGroupMembership(ctx, group.ID, "agent", "agent_remove")
+	_, err := s.GetGroupMembership(ctx, group.ID, "agent", tid("agent_remove"))
 	if err != store.ErrNotFound {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
@@ -701,7 +701,7 @@ func TestGroupListWithGroupTypeFilter(t *testing.T) {
 
 	// Create groups with different (or default) types
 	g1 := &store.Group{
-		ID:        "group_explicit_1",
+		ID:        tid("group_explicit_1"),
 		Name:      "Explicit 1",
 		Slug:      "explicit-1",
 		GroupType: "explicit",
@@ -709,7 +709,7 @@ func TestGroupListWithGroupTypeFilter(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	g2 := &store.Group{
-		ID:        "group_explicit_2",
+		ID:        tid("group_explicit_2"),
 		Name:      "Explicit 2",
 		Slug:      "explicit-2",
 		GroupType: "explicit",
@@ -786,7 +786,7 @@ func TestGroupUpdateAuthz_OwnerAllowed(t *testing.T) {
 	ctx := context.Background()
 
 	owner := &store.User{
-		ID:          "user_owner_upd",
+		ID:          tid("user_owner_upd"),
 		Email:       "owner@example.com",
 		DisplayName: "Owner",
 		Role:        "member",
@@ -798,7 +798,7 @@ func TestGroupUpdateAuthz_OwnerAllowed(t *testing.T) {
 	}
 
 	group := &store.Group{
-		ID:      "group_authz_upd",
+		ID:      tid("group_authz_upd"),
 		Name:    "Owned Group",
 		Slug:    "owned-group-upd",
 		OwnerID: owner.ID,
@@ -822,7 +822,7 @@ func TestGroupUpdateAuthz_NonOwnerDenied(t *testing.T) {
 	ctx := context.Background()
 
 	other := &store.User{
-		ID:          "user_other_upd",
+		ID:          tid("user_other_upd"),
 		Email:       "other@example.com",
 		DisplayName: "Other",
 		Role:        "member",
@@ -834,10 +834,10 @@ func TestGroupUpdateAuthz_NonOwnerDenied(t *testing.T) {
 	}
 
 	group := &store.Group{
-		ID:      "group_authz_upd2",
+		ID:      tid("group_authz_upd2"),
 		Name:    "Someone Else Group",
 		Slug:    "someone-else-upd",
-		OwnerID: "user_someone_else",
+		OwnerID: tid("user_someone_else"),
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
@@ -858,7 +858,7 @@ func TestGroupDeleteAuthz_NonOwnerDenied(t *testing.T) {
 	ctx := context.Background()
 
 	other := &store.User{
-		ID:          "user_other_del",
+		ID:          tid("user_other_del"),
 		Email:       "other-del@example.com",
 		DisplayName: "Other",
 		Role:        "member",
@@ -870,10 +870,10 @@ func TestGroupDeleteAuthz_NonOwnerDenied(t *testing.T) {
 	}
 
 	group := &store.Group{
-		ID:      "group_authz_del",
+		ID:      tid("group_authz_del"),
 		Name:    "Protected Group",
 		Slug:    "protected-group",
-		OwnerID: "user_someone_else",
+		OwnerID: tid("user_someone_else"),
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
@@ -893,7 +893,7 @@ func TestGroupAddMemberAuthz_OwnerAllowed(t *testing.T) {
 	ctx := context.Background()
 
 	owner := &store.User{
-		ID:          "user_owner_add",
+		ID:          tid("user_owner_add"),
 		Email:       "owner-add@example.com",
 		DisplayName: "Owner",
 		Role:        "member",
@@ -901,7 +901,7 @@ func TestGroupAddMemberAuthz_OwnerAllowed(t *testing.T) {
 		Created:     time.Now(),
 	}
 	memberUser := &store.User{
-		ID:          "user_to_add",
+		ID:          tid("user_to_add"),
 		Email:       "toadd@example.com",
 		DisplayName: "To Add",
 		Role:        "member",
@@ -915,7 +915,7 @@ func TestGroupAddMemberAuthz_OwnerAllowed(t *testing.T) {
 	}
 
 	group := &store.Group{
-		ID:      "group_authz_add",
+		ID:      tid("group_authz_add"),
 		Name:    "Owned Group",
 		Slug:    "owned-group-add",
 		OwnerID: owner.ID,
@@ -943,7 +943,7 @@ func TestGroupAddMemberAuthz_NonOwnerDenied(t *testing.T) {
 	ctx := context.Background()
 
 	other := &store.User{
-		ID:          "user_other_add",
+		ID:          tid("user_other_add"),
 		Email:       "other-add@example.com",
 		DisplayName: "Other",
 		Role:        "member",
@@ -955,10 +955,10 @@ func TestGroupAddMemberAuthz_NonOwnerDenied(t *testing.T) {
 	}
 
 	group := &store.Group{
-		ID:      "group_authz_add2",
+		ID:      tid("group_authz_add2"),
 		Name:    "Protected Group",
 		Slug:    "protected-group-add",
-		OwnerID: "user_someone_else",
+		OwnerID: tid("user_someone_else"),
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
@@ -983,7 +983,7 @@ func TestGroupRemoveMemberAuthz_NonOwnerDenied(t *testing.T) {
 	ctx := context.Background()
 
 	other := &store.User{
-		ID:          "user_other_rm",
+		ID:          tid("user_other_rm"),
 		Email:       "other-rm@example.com",
 		DisplayName: "Other",
 		Role:        "member",
@@ -995,10 +995,10 @@ func TestGroupRemoveMemberAuthz_NonOwnerDenied(t *testing.T) {
 	}
 
 	group := &store.Group{
-		ID:      "group_authz_rm",
+		ID:      tid("group_authz_rm"),
 		Name:    "Protected Group",
 		Slug:    "protected-group-rm",
-		OwnerID: "user_someone_else",
+		OwnerID: tid("user_someone_else"),
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
@@ -1030,7 +1030,7 @@ func TestGroupRemoveMemberAuthz_OwnerAllowed(t *testing.T) {
 	ctx := context.Background()
 
 	owner := &store.User{
-		ID:          "user_owner_rm",
+		ID:          tid("user_owner_rm"),
 		Email:       "owner-rm@example.com",
 		DisplayName: "Owner",
 		Role:        "member",
@@ -1042,7 +1042,7 @@ func TestGroupRemoveMemberAuthz_OwnerAllowed(t *testing.T) {
 	}
 
 	group := &store.Group{
-		ID:      "group_authz_rm2",
+		ID:      tid("group_authz_rm2"),
 		Name:    "Owned Group",
 		Slug:    "owned-group-rm",
 		OwnerID: owner.ID,
@@ -1056,7 +1056,7 @@ func TestGroupRemoveMemberAuthz_OwnerAllowed(t *testing.T) {
 	member := &store.GroupMember{
 		GroupID:    group.ID,
 		MemberType: "user",
-		MemberID:   "user_to_remove",
+		MemberID:   tid("user_to_remove"),
 		Role:       "member",
 		AddedAt:    time.Now(),
 	}
@@ -1196,7 +1196,7 @@ func TestPolicyGet(t *testing.T) {
 	ctx := context.Background()
 
 	policy := &store.Policy{
-		ID:           "policy_get123",
+		ID:           tid("policy_get123"),
 		Name:         "Test Policy",
 		ScopeType:    "hub",
 		ResourceType: "*",
@@ -1230,7 +1230,7 @@ func TestPolicyUpdate(t *testing.T) {
 	ctx := context.Background()
 
 	policy := &store.Policy{
-		ID:           "policy_upd123",
+		ID:           tid("policy_upd123"),
 		Name:         "Original Policy",
 		ScopeType:    "hub",
 		ResourceType: "*",
@@ -1279,7 +1279,7 @@ func TestPolicyDelete(t *testing.T) {
 	ctx := context.Background()
 
 	policy := &store.Policy{
-		ID:           "policy_del123",
+		ID:           tid("policy_del123"),
 		Name:         "Delete Me",
 		ScopeType:    "hub",
 		ResourceType: "*",
@@ -1310,7 +1310,7 @@ func TestPolicyBindingsAdd(t *testing.T) {
 	ctx := context.Background()
 
 	policy := &store.Policy{
-		ID:           "policy_bind123",
+		ID:           tid("policy_bind123"),
 		Name:         "Test Policy",
 		ScopeType:    "hub",
 		ResourceType: "*",
@@ -1325,7 +1325,7 @@ func TestPolicyBindingsAdd(t *testing.T) {
 
 	body := AddPolicyBindingRequest{
 		PrincipalType: "user",
-		PrincipalID:   "user_abc123",
+		PrincipalID:   tid("user_abc123"),
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies/"+policy.ID+"/bindings", body)
@@ -1339,7 +1339,7 @@ func TestPolicyBindingsAdd(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if resp.PrincipalID != "user_abc123" {
+	if resp.PrincipalID != tid("user_abc123") {
 		t.Errorf("expected principalId 'user_abc123', got %q", resp.PrincipalID)
 	}
 }
@@ -1349,7 +1349,7 @@ func TestPolicyBindingsList(t *testing.T) {
 	ctx := context.Background()
 
 	policy := &store.Policy{
-		ID:           "policy_blst123",
+		ID:           tid("policy_blst123"),
 		Name:         "Test Policy",
 		ScopeType:    "hub",
 		ResourceType: "*",
@@ -1395,7 +1395,7 @@ func TestPolicyBindingRemove(t *testing.T) {
 	ctx := context.Background()
 
 	policy := &store.Policy{
-		ID:           "policy_brem123",
+		ID:           tid("policy_brem123"),
 		Name:         "Test Policy",
 		ScopeType:    "hub",
 		ResourceType: "*",
@@ -1411,7 +1411,7 @@ func TestPolicyBindingRemove(t *testing.T) {
 	binding := &store.PolicyBinding{
 		PolicyID:      policy.ID,
 		PrincipalType: "user",
-		PrincipalID:   "user_remove",
+		PrincipalID:   tid("user_remove"),
 	}
 	if err := s.AddPolicyBinding(ctx, binding); err != nil {
 		t.Fatalf("failed to add binding: %v", err)
@@ -1445,21 +1445,21 @@ func TestGetEffectiveGroups(t *testing.T) {
 	// Create a group hierarchy: A contains B, B contains C
 	// User is a member of C, should also be effective member of B and A
 	groupA := &store.Group{
-		ID:      "group_eff_a",
+		ID:      tid("group_eff_a"),
 		Name:    "Group A",
 		Slug:    "group-eff-a",
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
 	groupB := &store.Group{
-		ID:      "group_eff_b",
+		ID:      tid("group_eff_b"),
 		Name:    "Group B",
 		Slug:    "group-eff-b",
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
 	groupC := &store.Group{
-		ID:      "group_eff_c",
+		ID:      tid("group_eff_c"),
 		Name:    "Group C",
 		Slug:    "group-eff-c",
 		Created: time.Now(),
@@ -1498,7 +1498,7 @@ func TestGetEffectiveGroups(t *testing.T) {
 	if err := s.AddGroupMember(ctx, &store.GroupMember{
 		GroupID:    groupC.ID,
 		MemberType: "user",
-		MemberID:   "test_user",
+		MemberID:   tid("test_user"),
 		Role:       "member",
 		AddedAt:    time.Now(),
 	}); err != nil {
@@ -1506,7 +1506,7 @@ func TestGetEffectiveGroups(t *testing.T) {
 	}
 
 	// Get effective groups for user
-	effectiveGroups, err := s.GetEffectiveGroups(ctx, "test_user")
+	effectiveGroups, err := s.GetEffectiveGroups(ctx, tid("test_user"))
 	if err != nil {
 		t.Fatalf("failed to get effective groups: %v", err)
 	}
@@ -1535,7 +1535,7 @@ func TestGetPoliciesForPrincipal(t *testing.T) {
 
 	// Create a policy
 	policy := &store.Policy{
-		ID:           "policy_forprinc",
+		ID:           tid("policy_forprinc"),
 		Name:         "Test Policy",
 		ScopeType:    "hub",
 		ResourceType: "*",
@@ -1552,13 +1552,13 @@ func TestGetPoliciesForPrincipal(t *testing.T) {
 	if err := s.AddPolicyBinding(ctx, &store.PolicyBinding{
 		PolicyID:      policy.ID,
 		PrincipalType: "user",
-		PrincipalID:   "test_user",
+		PrincipalID:   tid("test_user"),
 	}); err != nil {
 		t.Fatalf("failed to add binding: %v", err)
 	}
 
 	// Get policies for user
-	policies, err := s.GetPoliciesForPrincipal(ctx, "user", "test_user")
+	policies, err := s.GetPoliciesForPrincipal(ctx, "user", tid("test_user"))
 	if err != nil {
 		t.Fatalf("failed to get policies: %v", err)
 	}

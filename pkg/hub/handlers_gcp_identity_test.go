@@ -46,7 +46,7 @@ func TestCreateGCPServiceAccount_Success(t *testing.T) {
 
 	body := map[string]string{
 		"email":     "agent@my-project.iam.gserviceaccount.com",
-		"projectId": "my-project",
+		"projectId": tid("my-project"),
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
@@ -56,7 +56,7 @@ func TestCreateGCPServiceAccount_Success(t *testing.T) {
 	var sa store.GCPServiceAccount
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sa))
 	assert.Equal(t, "agent@my-project.iam.gserviceaccount.com", sa.Email)
-	assert.Equal(t, "my-project", sa.ProjectID)
+	assert.Equal(t, tid("my-project"), sa.ProjectID)
 	assert.NotEmpty(t, sa.ID)
 }
 
@@ -65,7 +65,7 @@ func TestCreateGCPServiceAccount_MissingEmail(t *testing.T) {
 	projectID := createTestProjectForSA(t, srv, s)
 
 	body := map[string]string{
-		"projectId": "my-project",
+		"projectId": tid("my-project"),
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
@@ -92,7 +92,7 @@ func TestCreateGCPServiceAccount_InferProjectIDFromEmail(t *testing.T) {
 
 	var sa store.GCPServiceAccount
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sa))
-	assert.Equal(t, "my-project", sa.ProjectID)
+	assert.Equal(t, tid("my-project"), sa.ProjectID)
 }
 
 func TestCreateGCPServiceAccount_CannotInferProjectID(t *testing.T) {
@@ -134,7 +134,7 @@ func TestCreateGCPServiceAccount_ProjectNotFound(t *testing.T) {
 
 	body := map[string]string{
 		"email":     "agent@my-project.iam.gserviceaccount.com",
-		"projectId": "my-project",
+		"projectId": tid("my-project"),
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
@@ -148,7 +148,7 @@ func TestCreateGCPServiceAccount_Duplicate(t *testing.T) {
 
 	body := map[string]string{
 		"email":     "agent@my-project.iam.gserviceaccount.com",
-		"projectId": "my-project",
+		"projectId": tid("my-project"),
 	}
 
 	// First create should succeed
@@ -432,7 +432,7 @@ func TestCreateGCPServiceAccount_AutoVerifySuccess(t *testing.T) {
 
 	body := map[string]string{
 		"email":     "agent@my-project.iam.gserviceaccount.com",
-		"projectId": "my-project",
+		"projectId": tid("my-project"),
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
@@ -466,7 +466,7 @@ func TestCreateGCPServiceAccount_AutoVerifyFailure(t *testing.T) {
 
 	body := map[string]string{
 		"email":     "agent@my-project.iam.gserviceaccount.com",
-		"projectId": "my-project",
+		"projectId": tid("my-project"),
 	}
 
 	rec := doRequest(t, srv, http.MethodPost,
@@ -562,7 +562,7 @@ func setupGCPAuthzTest(t *testing.T) (*Server, store.Store, *store.User, *store.
 	ctx := context.Background()
 
 	owner := &store.User{
-		ID:          "user-gcp-owner",
+		ID:          tid("user-gcp-owner"),
 		Email:       "gcp-owner@test.com",
 		DisplayName: "GCP Owner",
 		Role:        store.UserRoleMember,
@@ -570,7 +570,7 @@ func setupGCPAuthzTest(t *testing.T) (*Server, store.Store, *store.User, *store.
 		Created:     time.Now(),
 	}
 	member := &store.User{
-		ID:          "user-gcp-member",
+		ID:          tid("user-gcp-member"),
 		Email:       "gcp-member@test.com",
 		DisplayName: "GCP Member",
 		Role:        store.UserRoleMember,
@@ -578,7 +578,7 @@ func setupGCPAuthzTest(t *testing.T) (*Server, store.Store, *store.User, *store.
 		Created:     time.Now(),
 	}
 	outsider := &store.User{
-		ID:          "user-gcp-outsider",
+		ID:          tid("user-gcp-outsider"),
 		Email:       "gcp-outsider@test.com",
 		DisplayName: "GCP Outsider",
 		Role:        store.UserRoleMember,
@@ -591,7 +591,7 @@ func setupGCPAuthzTest(t *testing.T) (*Server, store.Store, *store.User, *store.
 	}
 
 	project := &store.Project{
-		ID:        "project-gcp-authz",
+		ID:        tid("project-gcp-authz"),
 		Name:      "GCP Authz Project",
 		Slug:      "gcp-authz-project",
 		OwnerID:   owner.ID,
@@ -622,7 +622,7 @@ func TestGCPSA_Create_ProjectOwnerAllowed(t *testing.T) {
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", project.ID),
-		map[string]string{"email": "sa@proj.iam.gserviceaccount.com", "projectId": "proj"})
+		map[string]string{"email": "sa@proj.iam.gserviceaccount.com", "projectId": tid("proj")})
 	require.Equal(t, http.StatusCreated, rec.Code,
 		"project owner should be able to create SA; got: %s", rec.Body.String())
 }
@@ -632,7 +632,7 @@ func TestGCPSA_Create_MemberDenied(t *testing.T) {
 
 	rec := doRequestAsUser(t, srv, member, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", project.ID),
-		map[string]string{"email": "sa@proj.iam.gserviceaccount.com", "projectId": "proj"})
+		map[string]string{"email": "sa@proj.iam.gserviceaccount.com", "projectId": tid("proj")})
 	require.Equal(t, http.StatusForbidden, rec.Code,
 		"project member should not be able to create SA; got: %s", rec.Body.String())
 }
@@ -642,7 +642,7 @@ func TestGCPSA_Create_OutsiderDenied(t *testing.T) {
 
 	rec := doRequestAsUser(t, srv, outsider, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", project.ID),
-		map[string]string{"email": "sa@proj.iam.gserviceaccount.com", "projectId": "proj"})
+		map[string]string{"email": "sa@proj.iam.gserviceaccount.com", "projectId": tid("proj")})
 	require.Equal(t, http.StatusForbidden, rec.Code,
 		"outsider should not be able to create SA; got: %s", rec.Body.String())
 }
@@ -652,11 +652,11 @@ func TestGCPSA_Delete_ProjectOwnerAllowed(t *testing.T) {
 	ctx := context.Background()
 
 	sa := &store.GCPServiceAccount{
-		ID:        "sa-del-owner",
+		ID:        tid("sa-del-owner"),
 		Scope:     store.ScopeProject,
 		ScopeID:   project.ID,
 		Email:     "del-owner@proj.iam.gserviceaccount.com",
-		ProjectID: "proj",
+		ProjectID: tid("proj"),
 		CreatedBy: owner.ID,
 		CreatedAt: time.Now(),
 	}
@@ -673,11 +673,11 @@ func TestGCPSA_Delete_MemberDenied(t *testing.T) {
 	ctx := context.Background()
 
 	sa := &store.GCPServiceAccount{
-		ID:        "sa-del-member",
+		ID:        tid("sa-del-member"),
 		Scope:     store.ScopeProject,
 		ScopeID:   project.ID,
 		Email:     "del-member@proj.iam.gserviceaccount.com",
-		ProjectID: "proj",
+		ProjectID: tid("proj"),
 		CreatedBy: owner.ID,
 		CreatedAt: time.Now(),
 	}
@@ -724,11 +724,11 @@ func TestGCPSA_Verify_ProjectOwnerAllowed(t *testing.T) {
 	ctx := context.Background()
 
 	sa := &store.GCPServiceAccount{
-		ID:        "sa-verify-owner",
+		ID:        tid("sa-verify-owner"),
 		Scope:     store.ScopeProject,
 		ScopeID:   project.ID,
 		Email:     "verify@proj.iam.gserviceaccount.com",
-		ProjectID: "proj",
+		ProjectID: tid("proj"),
 		CreatedBy: owner.ID,
 		CreatedAt: time.Now(),
 	}
@@ -746,11 +746,11 @@ func TestGCPSA_Verify_MemberDenied(t *testing.T) {
 	ctx := context.Background()
 
 	sa := &store.GCPServiceAccount{
-		ID:        "sa-verify-member",
+		ID:        tid("sa-verify-member"),
 		Scope:     store.ScopeProject,
 		ScopeID:   project.ID,
 		Email:     "verify-m@proj.iam.gserviceaccount.com",
-		ProjectID: "proj",
+		ProjectID: tid("proj"),
 		CreatedBy: owner.ID,
 		CreatedAt: time.Now(),
 	}
@@ -788,7 +788,7 @@ func TestProjectIDFromServiceAccountEmail(t *testing.T) {
 		email string
 		want  string
 	}{
-		{"agent@my-project.iam.gserviceaccount.com", "my-project"},
+		{"agent@my-project.iam.gserviceaccount.com", tid("my-project")},
 		{"fold-run-infra@foldrun-ptone-argolis.iam.gserviceaccount.com", "foldrun-ptone-argolis"},
 		{"sa@example.com", ""},
 		{"no-at-sign", ""},

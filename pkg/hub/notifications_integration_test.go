@@ -67,7 +67,7 @@ func setupIntegrationTest(t *testing.T) *integrationTestEnv {
 	srv.SetDispatcher(recorder)
 
 	project := &store.Project{
-		ID:         "project-integ",
+		ID:         tid("project-integ"),
 		Name:       "Integration Project",
 		Slug:       "integration-project",
 		Visibility: store.VisibilityPrivate,
@@ -75,7 +75,7 @@ func setupIntegrationTest(t *testing.T) *integrationTestEnv {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	broker := &store.RuntimeBroker{
-		ID:     "broker-integ",
+		ID:     tid("broker-integ"),
 		Name:   "Integration Broker",
 		Slug:   "integration-broker",
 		Status: store.BrokerStatusOnline,

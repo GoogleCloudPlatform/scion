@@ -40,10 +40,10 @@ func TestControlChannelManager_OnDisconnectCallback(t *testing.T) {
 
 	// Manually add a connection entry so removeConnection has something to remove
 	mgr.mu.Lock()
-	mgr.connections["broker-1"] = &BrokerConnection{brokerID: "broker-1"}
+	mgr.connections[tid("broker-1")] = &BrokerConnection{brokerID: tid("broker-1")}
 	mgr.mu.Unlock()
 
-	mgr.removeConnection("broker-1")
+	mgr.removeConnection(tid("broker-1"))
 
 	// Wait for async callback
 	select {
@@ -54,10 +54,10 @@ func TestControlChannelManager_OnDisconnectCallback(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Equal(t, "broker-1", receivedBrokerID)
+	assert.Equal(t, tid("broker-1"), receivedBrokerID)
 
 	// Verify connection was removed
-	require.False(t, mgr.IsConnected("broker-1"))
+	require.False(t, mgr.IsConnected(tid("broker-1")))
 }
 
 func TestControlChannelManager_OnDisconnectCallback_NilSafe(t *testing.T) {
@@ -65,11 +65,11 @@ func TestControlChannelManager_OnDisconnectCallback_NilSafe(t *testing.T) {
 
 	// Don't set any callback - verify removeConnection doesn't panic
 	mgr.mu.Lock()
-	mgr.connections["broker-2"] = &BrokerConnection{brokerID: "broker-2"}
+	mgr.connections[tid("broker-2")] = &BrokerConnection{brokerID: tid("broker-2")}
 	mgr.mu.Unlock()
 
 	// This should not panic
-	mgr.removeConnection("broker-2")
+	mgr.removeConnection(tid("broker-2"))
 
-	require.False(t, mgr.IsConnected("broker-2"))
+	require.False(t, mgr.IsConnected(tid("broker-2")))
 }

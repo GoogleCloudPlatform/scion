@@ -171,7 +171,7 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	broker := &store.RuntimeBroker{
-		ID:     "broker-1",
+		ID:     tid("broker-1"),
 		Name:   "Test Broker",
 		Slug:   "test-broker",
 		Status: store.BrokerStatusOnline,
@@ -185,7 +185,7 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 		Template:        "claude",
 		ProjectID:       project.ID,
 		Phase:           string(state.PhaseRunning),
-		RuntimeBrokerID: "broker-1",
+		RuntimeBrokerID: tid("broker-1"),
 		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, watched))
@@ -197,7 +197,7 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 		Template:        "claude",
 		ProjectID:       project.ID,
 		Phase:           string(state.PhaseRunning),
-		RuntimeBrokerID: "broker-1",
+		RuntimeBrokerID: tid("broker-1"),
 		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, subscriber))

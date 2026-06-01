@@ -31,7 +31,7 @@ func TestHarnessConfigList(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         "hc_test1",
+		ID:         tid("hc_test1"),
 		Slug:       "test-hc",
 		Name:       "Test HC",
 		Harness:    "claude",
@@ -68,7 +68,7 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 
 	// Create a global harness config
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
-		ID: "hc_global1", Slug: "global-hc", Name: "Global HC",
+		ID: tid("hc_global1"), Slug: "global-hc", Name: "Global HC",
 		Harness: "claude", Scope: "global",
 		Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
@@ -78,7 +78,7 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 
 	// Create a project-scoped harness config for project "project_abc"
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
-		ID: "hc_project1", Slug: "project-hc", Name: "Project HC",
+		ID: tid("hc_project1"), Slug: "project-hc", Name: "Project HC",
 		Harness: "gemini", Scope: "project", ScopeID: "project_abc",
 		Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
@@ -89,7 +89,7 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 	// Create a project-scoped harness config for a different project
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
 		ID: "hc_project2", Slug: "other-project-hc", Name: "Other Project HC",
-		Harness: "claude", Scope: "project", ScopeID: "project_xyz",
+		Harness: "claude", Scope: "project", ScopeID: tid("project_xyz"),
 		Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
 	}); err != nil {
@@ -99,7 +99,7 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 	// Create a user-scoped harness config
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
 		ID: "hc_user1", Slug: "user-hc", Name: "User HC",
-		Harness: "claude", Scope: "user", ScopeID: "user_123",
+		Harness: "claude", Scope: "user", ScopeID: tid("user_123"),
 		Visibility: store.VisibilityPrivate, Status: store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
 	}); err != nil {
@@ -126,10 +126,10 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 	for _, hc := range resp.HarnessConfigs {
 		ids[hc.ID] = true
 	}
-	if !ids["hc_global1"] {
+	if !ids[tid("hc_global1")] {
 		t.Error("expected global harness config in results")
 	}
-	if !ids["hc_project1"] {
+	if !ids[tid("hc_project1")] {
 		t.Error("expected project_abc harness config in results")
 	}
 	if ids["hc_project2"] {
@@ -184,7 +184,7 @@ func TestHarnessConfigGet(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         "hc_get1",
+		ID:         tid("hc_get1"),
 		Slug:       "get-test",
 		Name:       "Get Test",
 		Harness:    "gemini",
@@ -222,7 +222,7 @@ func TestHarnessConfigDelete(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         "hc_del1",
+		ID:         tid("hc_del1"),
 		Slug:       "del-test",
 		Name:       "Del Test",
 		Harness:    "claude",
@@ -253,7 +253,7 @@ func TestHarnessConfigPatch(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         "hc_patch1",
+		ID:         tid("hc_patch1"),
 		Slug:       "patch-test",
 		Name:       "Patch Test",
 		Harness:    "claude",
