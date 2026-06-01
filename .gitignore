@@ -49,3 +49,9 @@ Thumbs.db
 
 # local tools
 .antigravitycli/
+
+# Generated test fixtures (reproducible via `go run ./internal/fixturegen`,
+# shared via the scratchpad mount — not committed as binary blobs).
+testdata/hub-v46-fixture.db
+testdata/hub-v46-fixture.db-wal
+testdata/hub-v46-fixture.db-shm
