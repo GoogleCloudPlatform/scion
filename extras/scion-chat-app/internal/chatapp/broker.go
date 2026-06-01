@@ -67,6 +67,9 @@ func (b *BrokerServer) Configure(config map[string]string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.configured = true
+	if b.channelName == "" {
+		b.channelName = "gchat"
+	}
 	if v, ok := config["plugin_name"]; ok && v != "" {
 		b.channelName = v
 	}
@@ -128,6 +131,7 @@ func (b *BrokerServer) GetInfo() (*plugin.PluginInfo, error) {
 	return &plugin.PluginInfo{
 		Name:         "scion-chat-app",
 		Version:      "1.0.0",
+		ChannelID:    "gchat",
 		Capabilities: []string{"chat-bridge", "notification-relay"},
 	}, nil
 }

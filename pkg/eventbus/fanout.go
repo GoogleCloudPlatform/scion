@@ -33,6 +33,12 @@ type NamedEventBus struct {
 	Name     string
 	Bus      EventBus
 	Observer bool
+	// ChannelID overrides Name for channel-based message routing. When a
+	// message has msg.Channel set, the FanOutEventBus matches it against
+	// ChannelID (if non-empty) or Name. This allows a plugin registered
+	// under one name (e.g. "chat-app") to handle a different channel
+	// identifier (e.g. "gchat").
+	ChannelID string
 }
 
 // FanOutEventBus implements EventBus by delegating to N child event buses.
@@ -58,10 +64,15 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 
 		var inproc, target *NamedEventBus
 		for i := range f.buses {
-			switch f.buses[i].Name {
-			case InProcessBusName:
+			if f.buses[i].Name == InProcessBusName {
 				inproc = &f.buses[i]
-			case msg.Channel:
+				continue
+			}
+			channelKey := f.buses[i].ChannelID
+			if channelKey == "" {
+				channelKey = f.buses[i].Name
+			}
+			if channelKey == msg.Channel {
 				target = &f.buses[i]
 			}
 		}
@@ -147,8 +158,9 @@ func (f *FanOutEventBus) Close() error {
 
 // BusChannel describes a registered event bus channel.
 type BusChannel struct {
-	Name     string
-	Observer bool
+	Name      string
+	Observer  bool
+	ChannelID string
 }
 
 // BusChannels returns the list of registered bus names (excluding InProcessBus).
@@ -159,8 +171,9 @@ func (f *FanOutEventBus) BusChannels() []BusChannel {
 			continue
 		}
 		channels = append(channels, BusChannel{
-			Name:     nb.Name,
-			Observer: nb.Observer,
+			Name:      nb.Name,
+			Observer:  nb.Observer,
+			ChannelID: nb.ChannelID,
 		})
 	}
 	return channels

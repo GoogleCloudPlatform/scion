@@ -389,6 +389,35 @@ func TestFanOutEventBus_ChannelRoutingObserverError(t *testing.T) {
 	}
 }
 
+func TestFanOutEventBus_ChannelRoutingWithChannelID(t *testing.T) {
+	inproc := newStubEventBus()
+	chatApp := newStubEventBus()
+
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: InProcessBusName, Bus: inproc},
+		{Name: "chat-app", Bus: chatApp, ChannelID: "gchat"},
+	}, slog.Default())
+
+	msg := messages.NewInstruction("agent:bot", "user:alice", "hello")
+	msg.Channel = "gchat"
+
+	if err := fan.Publish(context.Background(), "test.topic", msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	inproc.mu.Lock()
+	if len(inproc.published) != 1 {
+		t.Errorf("inprocess bus: expected 1 message, got %d", len(inproc.published))
+	}
+	inproc.mu.Unlock()
+
+	chatApp.mu.Lock()
+	if len(chatApp.published) != 1 {
+		t.Errorf("chat-app bus: expected 1 message (routed via ChannelID), got %d", len(chatApp.published))
+	}
+	chatApp.mu.Unlock()
+}
+
 func TestFanOutEventBus_Subscribe(t *testing.T) {
 	b1 := newStubEventBus()
 	b2 := newStubEventBus()

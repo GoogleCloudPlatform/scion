@@ -378,10 +378,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 				}
 
 				observer := isObserverBroker(pluginMgr, bt)
+				channelID := pluginChannelID(pluginMgr, bt)
 				namedBuses = append(namedBuses, eventbus.NamedEventBus{
-					Name: bt, Bus: b, Observer: observer,
+					Name: bt, Bus: b, Observer: observer, ChannelID: channelID,
 				})
-				log.Printf("Message broker spoke added: name=%s observer=%v", bt, observer)
+				log.Printf("Message broker spoke added: name=%s channel_id=%s observer=%v", bt, channelID, observer)
 			}
 
 			fanout := eventbus.NewFanOutEventBus(namedBuses, logging.Subsystem("hub.eventbus.fanout"))
@@ -1249,6 +1250,25 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	}
 
 	return nil
+}
+
+// pluginChannelID returns the channel identifier reported by a broker plugin
+// via GetInfo().ChannelID. Returns "" if the plugin does not report one, in
+// which case the bus Name is used for channel routing.
+func pluginChannelID(pluginMgr *scionplugin.Manager, name string) string {
+	raw, err := pluginMgr.Get(scionplugin.PluginTypeBroker, name)
+	if err != nil {
+		return ""
+	}
+	rpc, ok := raw.(*scionplugin.BrokerRPCClient)
+	if !ok {
+		return ""
+	}
+	info, err := rpc.GetInfo()
+	if err != nil || info == nil {
+		return ""
+	}
+	return info.ChannelID
 }
 
 // isObserverBroker determines whether a broker plugin should be treated as an

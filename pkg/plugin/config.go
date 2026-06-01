@@ -74,6 +74,14 @@ type PluginInfo struct {
 	// Scion logs a warning if the plugin targets a newer version.
 	MinScionVersion string
 
+	// ChannelID is the message channel identifier this broker plugin handles.
+	// When set, the FanOutEventBus uses this value (instead of the plugin's
+	// registered name) to route outbound messages with a matching
+	// msg.Channel field. For example, a plugin registered as "chat-app" can
+	// set ChannelID to "gchat" so that messages with Channel="gchat" are
+	// routed to it.
+	ChannelID string
+
 	// Capabilities lists optional capabilities the plugin supports.
 	Capabilities []string
 }
