@@ -233,7 +233,7 @@ func TestHandleNotifications_FilterByAgent(t *testing.T) {
 	// subscriber (simulating notifications sent TO the watched agent).
 	agent2 := &store.Agent{
 		ID:        tid("agent-other"),
-		Slug:      "other-agent",
+		Slug:      tid("other-agent"),
 		Name:      "Other Agent",
 		ProjectID: tid("project-notif-handler"),
 		Phase:     string(state.PhaseRunning),

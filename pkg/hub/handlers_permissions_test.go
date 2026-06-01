@@ -592,7 +592,7 @@ func TestGroupCycleDetection(t *testing.T) {
 
 	// Create two groups
 	groupA := &store.Group{
-		ID:      tid("group_a"),
+		ID:      tid(tid(tid("group_a"))),
 		Name:    "Group A",
 		Slug:    "group-a",
 		Created: time.Now(),

@@ -2108,7 +2108,7 @@ func TestTemplateListByProjectID(t *testing.T) {
 
 	// Create a project-scoped template for a different project
 	if err := s.CreateTemplate(ctx, &store.Template{
-		ID: "tmpl_project2", Slug: "other-project-tmpl", Name: "Other Project Template",
+		ID: tid("tmpl_project2"), Slug: "other-project-tmpl", Name: "Other Project Template",
 		Harness: "claude", Scope: "project", ScopeID: tid("project_xyz"),
 		Visibility: store.VisibilityPublic, Status: "active",
 		Created: now, Updated: now,

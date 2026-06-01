@@ -99,7 +99,7 @@ func TestComputeCapabilitiesBatch_AdminGetsAll(t *testing.T) {
 	resources := []Resource{
 		{Type: "agent", ID: tid("agent-1")},
 		{Type: "agent", ID: tid("agent-2")},
-		{Type: "agent", ID: "agent-3"},
+		{Type: "agent", ID: tid("agent-3")},
 	}
 
 	caps := srv.authzService.ComputeCapabilitiesBatch(ctx, admin, resources, "agent")
