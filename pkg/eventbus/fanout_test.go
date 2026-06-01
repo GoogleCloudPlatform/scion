@@ -368,6 +368,27 @@ func TestFanOutEventBus_ChannelRoutingPublishError(t *testing.T) {
 	}
 }
 
+func TestFanOutEventBus_ChannelRoutingObserverError(t *testing.T) {
+	inproc := newStubEventBus()
+	observer := newStubEventBus()
+	observer.publishFunc = func(_ context.Context, _ string, _ *messages.StructuredMessage) error {
+		return errors.New("observer failed")
+	}
+
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: InProcessBusName, Bus: inproc},
+		{Name: "broker-log", Bus: observer, Observer: true},
+	}, slog.Default())
+
+	msg := messages.NewInstruction("user:alice", "agent:bot", "hello")
+	msg.Channel = "broker-log"
+
+	err := fan.Publish(context.Background(), "test.topic", msg)
+	if err != nil {
+		t.Fatalf("observer error should not be returned in channel-targeted path, got: %v", err)
+	}
+}
+
 func TestFanOutEventBus_Subscribe(t *testing.T) {
 	b1 := newStubEventBus()
 	b2 := newStubEventBus()

@@ -2054,6 +2054,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 
 	// Build a structured message for external dispatch paths.
 	structuredMsg := &messages.StructuredMessage{
+		Version:     messages.Version,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 		Sender:      storeMsg.Sender,
 		SenderID:    storeMsg.SenderID,
 		Recipient:   storeMsg.Recipient,
@@ -2066,6 +2068,11 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Metadata:    req.Metadata,
 		Channel:     req.Channel,
 		ThreadID:    req.ThreadID,
+	}
+
+	if err := structuredMsg.Validate(); err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
 	}
 
 	// Route through broker when available; otherwise persist and publish

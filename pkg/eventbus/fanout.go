@@ -84,7 +84,12 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 		go func() {
 			defer wg.Done()
 			if err := target.Bus.Publish(ctx, topic, msg); err != nil {
-				errs[1] = fmt.Errorf("channel %q publish failed: %w", msg.Channel, err)
+				if target.Observer {
+					f.log.Error("channel publish failed (observer)",
+						"channel", msg.Channel, "topic", topic, "error", err)
+				} else {
+					errs[1] = fmt.Errorf("channel %q publish failed: %w", msg.Channel, err)
+				}
 			}
 		}()
 		wg.Wait()
