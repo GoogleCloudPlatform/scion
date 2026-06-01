@@ -474,6 +474,39 @@ func (s *ScheduleStore) UpdateScheduledEventStatus(ctx context.Context, id strin
 	return err
 }
 
+// ClaimScheduledEvent atomically transitions a scheduled event from "pending" to
+// claimedStatus, returning whether this caller won the claim. It is the
+// multi-replica dedup primitive (store.ScheduledEventClaimer): several hub
+// replicas may each recover the same pending event from the database on startup
+// and arm an in-memory timer for it, but the conditional
+// UPDATE ... WHERE status = 'pending' is atomic, so exactly one replica observes
+// affected == 1 and is allowed to execute the event's side effect. Losers
+// observe affected == 0 and skip execution.
+//
+// The same atomicity holds on SQLite (a conditional UPDATE is atomic there too);
+// it is simply never contended because there is a single writer.
+func (s *ScheduleStore) ClaimScheduledEvent(ctx context.Context, id string, claimedStatus string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	if claimedStatus == "" {
+		claimedStatus = store.ScheduledEventFired
+	}
+	affected, err := s.client.ScheduledEvent.Update().
+		Where(
+			scheduledevent.IDEQ(uid),
+			scheduledevent.StatusEQ(store.ScheduledEventPending),
+		).
+		SetStatus(claimedStatus).
+		SetFiredAt(time.Now()).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return affected == 1, nil
+}
+
 // CancelScheduledEvent marks a pending event as cancelled. Returns ErrNotFound
 // if the event doesn't exist or is not pending.
 func (s *ScheduleStore) CancelScheduledEvent(ctx context.Context, id string) error {
