@@ -197,7 +197,7 @@ func TestSendMessageViaHub_Broadcast(t *testing.T) {
 
 	projectID := "grove-msg-broadcast"
 	agents := []hubclient.Agent{
-		{Name: "agent-1", Status: "running"},
+		{Name: tid("agent-1"), Status: "running"},
 		{Name: "agent-2", Status: "running"},
 		{Name: "agent-3", Status: "running"},
 	}
@@ -230,7 +230,7 @@ func TestSendMessageViaHub_Broadcast(t *testing.T) {
 		require.NotNil(t, s.StructuredMsg)
 		assert.True(t, s.StructuredMsg.Broadcasted)
 	}
-	assert.ElementsMatch(t, []string{"agent-1", "agent-2", "agent-3"}, names)
+	assert.ElementsMatch(t, []string{tid("agent-1"), "agent-2", "agent-3"}, names)
 }
 
 func TestSendMessageViaHub_BroadcastNoAgents(t *testing.T) {

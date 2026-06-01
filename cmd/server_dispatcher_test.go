@@ -79,13 +79,13 @@ func TestDispatchAgentStart(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	mgr := &mockAgentManager{}
-	brokerID := "test-broker"
+	brokerID := tid("test-broker")
 
 	adapter := newAgentDispatcherAdapter(mgr, s, brokerID)
 
 	// Create test grove and broker
 	grove := &store.Project{
-		ID:   "grove-1",
+		ID:   tid("grove-1"),
 		Slug: "test-grove",
 		Name: "Test Project",
 	}
@@ -95,21 +95,23 @@ func TestDispatchAgentStart(t *testing.T) {
 	broker := &store.RuntimeBroker{
 		ID:   brokerID,
 		Name: "test-broker",
+		Slug: "test-broker",
 	}
 	err = s.CreateRuntimeBroker(ctx, broker)
 	require.NoError(t, err)
 
 	provider := &store.ProjectProvider{
-		ProjectID: grove.ID,
-		BrokerID:  brokerID,
-		LocalPath: "/tmp/fake/grove",
+		ProjectID:  grove.ID,
+		BrokerID:   brokerID,
+		BrokerName: "test-broker",
+		LocalPath:  "/tmp/fake/grove",
 	}
 	err = s.AddProjectProvider(ctx, provider)
 	require.NoError(t, err)
 
 	// Create agent
 	agent := &store.Agent{
-		ID:        "agent-1",
+		ID:        tid("agent-1"),
 		Slug:      "test-agent",
 		Name:      "test-agent",
 		ProjectID: grove.ID,
@@ -149,13 +151,13 @@ func TestDispatchAgentRestart(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	mgr := &mockAgentManager{}
-	brokerID := "test-broker"
+	brokerID := tid("test-broker")
 
 	adapter := newAgentDispatcherAdapter(mgr, s, brokerID)
 
 	// Create test grove and agent
 	grove := &store.Project{
-		ID:   "grove-1",
+		ID:   tid("grove-1"),
 		Slug: "test-grove",
 		Name: "Test Project",
 	}
@@ -163,7 +165,7 @@ func TestDispatchAgentRestart(t *testing.T) {
 	require.NoError(t, err)
 
 	agent := &store.Agent{
-		ID:        "agent-1",
+		ID:        tid("agent-1"),
 		Slug:      "test-agent",
 		Name:      "test-agent",
 		ProjectID: grove.ID,
