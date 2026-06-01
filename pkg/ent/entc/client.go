@@ -78,6 +78,38 @@ func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, e
 	return client, nil
 }
 
+// OpenSQLiteReadOnly creates an Ent client backed by a read-only SQLite
+// database. It is used by the migration tool to read from a source SQLite file
+// without mutating it: the connection is opened with `PRAGMA query_only = ON`
+// so any accidental write fails loudly, and—unlike OpenSQLite—it does NOT
+// switch the journal to WAL mode (doing so would write to the database header
+// and fail on a query-only connection).
+//
+// MaxOpenConns is forced to 1 because the query_only and foreign_keys pragmas
+// are connection-scoped; with a larger pool, unprimed connections would not
+// inherit them.
+func OpenSQLiteReadOnly(dsn string, opts ...ent.Option) (*ent.Client, error) {
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("opening sqlite connection: %w", err)
+	}
+	// Pin to a single connection so the pragmas below apply to every query.
+	db.SetMaxOpenConns(1)
+	// Foreign keys on for read consistency; query_only to guarantee the source
+	// is never modified during migration.
+	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("enabling foreign keys: %w", err)
+	}
+	if _, err := db.Exec("PRAGMA query_only = ON"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("enabling query_only mode: %w", err)
+	}
+	drv := entsql.OpenDB(dialect.SQLite, db)
+	client := ent.NewClient(append(opts, ent.Driver(drv))...)
+	return client, nil
+}
+
 // OpenPostgres creates an Ent client backed by PostgreSQL.
 // The dsn should be a PostgreSQL connection string
 // (e.g. "host=localhost port=5432 user=scion dbname=scion sslmode=disable").
