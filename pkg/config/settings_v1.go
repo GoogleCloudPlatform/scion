@@ -376,8 +376,11 @@ type V1BrokerConfig struct {
 
 // V1DatabaseConfig holds database settings.
 type V1DatabaseConfig struct {
-	Driver string `json:"driver,omitempty" yaml:"driver,omitempty" koanf:"driver"`
-	URL    string `json:"url,omitempty" yaml:"url,omitempty" koanf:"url"`
+	Driver          string `json:"driver,omitempty" yaml:"driver,omitempty" koanf:"driver"`
+	URL             string `json:"url,omitempty" yaml:"url,omitempty" koanf:"url"`
+	MaxOpenConns    int    `json:"max_open_conns,omitempty" yaml:"max_open_conns,omitempty" koanf:"max_open_conns"`
+	MaxIdleConns    int    `json:"max_idle_conns,omitempty" yaml:"max_idle_conns,omitempty" koanf:"max_idle_conns"`
+	ConnMaxLifetime string `json:"conn_max_lifetime,omitempty" yaml:"conn_max_lifetime,omitempty" koanf:"conn_max_lifetime"`
 }
 
 // V1AuthConfig holds development authentication settings.
@@ -1136,6 +1139,15 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Database.URL != "" {
 			gc.Database.URL = v1.Database.URL
 		}
+		if v1.Database.MaxOpenConns != 0 {
+			gc.Database.MaxOpenConns = v1.Database.MaxOpenConns
+		}
+		if v1.Database.MaxIdleConns != 0 {
+			gc.Database.MaxIdleConns = v1.Database.MaxIdleConns
+		}
+		if v1.Database.ConnMaxLifetime != "" {
+			gc.Database.ConnMaxLifetime = v1.Database.ConnMaxLifetime
+		}
 	}
 
 	// Auth config
@@ -1287,8 +1299,11 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 
 	// Database config
 	v1.Database = &V1DatabaseConfig{
-		Driver: gc.Database.Driver,
-		URL:    gc.Database.URL,
+		Driver:          gc.Database.Driver,
+		URL:             gc.Database.URL,
+		MaxOpenConns:    gc.Database.MaxOpenConns,
+		MaxIdleConns:    gc.Database.MaxIdleConns,
+		ConnMaxLifetime: gc.Database.ConnMaxLifetime,
 	}
 
 	// Auth config

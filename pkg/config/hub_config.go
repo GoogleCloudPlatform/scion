@@ -137,6 +137,29 @@ type RuntimeBrokerConfig struct {
 type DatabaseConfig struct {
 	Driver string `json:"driver" yaml:"driver" koanf:"driver"` // sqlite, postgres
 	URL    string `json:"url" yaml:"url" koanf:"url"`          // Connection URL/path
+
+	// Connection pool settings (applied to the underlying *sql.DB).
+	// MaxOpenConns is the maximum number of open connections to the database.
+	// For sqlite this MUST be 1 to serialize writes (load-bearing).
+	MaxOpenConns int `json:"max_open_conns" yaml:"max_open_conns" koanf:"max_open_conns"`
+	// MaxIdleConns is the maximum number of idle connections in the pool.
+	MaxIdleConns int `json:"max_idle_conns" yaml:"max_idle_conns" koanf:"max_idle_conns"`
+	// ConnMaxLifetime is the maximum amount of time a connection may be
+	// reused, parsed as a Go duration string (e.g. "30m"). Empty means unlimited.
+	ConnMaxLifetime string `json:"conn_max_lifetime" yaml:"conn_max_lifetime" koanf:"conn_max_lifetime"`
+}
+
+// ConnMaxLifetimeDuration parses ConnMaxLifetime into a time.Duration.
+// An empty value yields 0 (unlimited). A malformed value returns an error.
+func (d DatabaseConfig) ConnMaxLifetimeDuration() (time.Duration, error) {
+	if d.ConnMaxLifetime == "" {
+		return 0, nil
+	}
+	dur, err := time.ParseDuration(d.ConnMaxLifetime)
+	if err != nil {
+		return 0, fmt.Errorf("invalid conn_max_lifetime %q: %w", d.ConnMaxLifetime, err)
+	}
+	return dur, nil
 }
 
 // DevAuthConfig holds development authentication settings.
@@ -290,6 +313,12 @@ func DefaultGlobalConfig() GlobalConfig {
 		Database: DatabaseConfig{
 			Driver: "sqlite",
 			URL:    "", // Will be set to default path if empty
+			// SQLite pool defaults. MaxOpenConns MUST stay 1 to serialize
+			// writes; postgres pool defaults are applied in
+			// applyDatabasePoolDefaults when Driver == "postgres".
+			MaxOpenConns:    1,
+			MaxIdleConns:    1,
+			ConnMaxLifetime: "0",
 		},
 		Auth: DevAuthConfig{
 			Enabled:   false,
@@ -304,6 +333,34 @@ func DefaultGlobalConfig() GlobalConfig {
 		},
 		LogLevel:  "info",
 		LogFormat: "text",
+	}
+}
+
+// applyDatabasePoolDefaults fills in driver-appropriate connection pool
+// defaults for any pool field left unset. It is applied after config loading
+// so that postgres deployments get sensible pool sizing without requiring
+// every config file to specify it.
+//
+// For sqlite, MaxOpenConns is forced to 1: more than one open connection
+// breaks write serialization and causes "database is locked" errors.
+func applyDatabasePoolDefaults(db *DatabaseConfig) {
+	switch db.Driver {
+	case "postgres":
+		if db.MaxOpenConns <= 0 {
+			db.MaxOpenConns = 20
+		}
+		if db.MaxIdleConns <= 0 {
+			db.MaxIdleConns = 5
+		}
+		if db.ConnMaxLifetime == "" {
+			db.ConnMaxLifetime = "30m"
+		}
+	case "sqlite":
+		// Load-bearing: SQLite must use a single open connection.
+		db.MaxOpenConns = 1
+		if db.MaxIdleConns <= 0 {
+			db.MaxIdleConns = 1
+		}
 	}
 }
 
@@ -380,6 +437,7 @@ func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
 	if gc.Database.URL == "" && gc.Database.Driver == "sqlite" {
 		gc.Database.URL = filepath.Join(globalDir, "hub.db")
 	}
+	applyDatabasePoolDefaults(&gc.Database)
 
 	return gc, true
 }
@@ -510,6 +568,7 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 			config.Database.URL = "hub.db"
 		}
 	}
+	applyDatabasePoolDefaults(&config.Database)
 
 	// Fixup for list fields that might be loaded as a single comma-separated string from env vars.
 	// This happens because koanf's env provider doesn't automatically split strings for slice fields.

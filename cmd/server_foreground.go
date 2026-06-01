@@ -645,7 +645,16 @@ func initStore(cfg *config.GlobalConfig) (store.Store, error) {
 		}
 
 		entDSN := cfg.Database.URL + "_ent"
-		entClient, err := entc.OpenSQLite("file:"+entDSN+"?cache=shared", entc.PoolConfig{})
+		connMaxLifetime, err := cfg.Database.ConnMaxLifetimeDuration()
+		if err != nil {
+			sqliteStore.Close()
+			return nil, fmt.Errorf("invalid database pool config: %w", err)
+		}
+		entClient, err := entc.OpenSQLite("file:"+entDSN+"?cache=shared", entc.PoolConfig{
+			MaxOpenConns:    cfg.Database.MaxOpenConns,
+			MaxIdleConns:    cfg.Database.MaxIdleConns,
+			ConnMaxLifetime: connMaxLifetime,
+		})
 		if err != nil {
 			sqliteStore.Close()
 			return nil, fmt.Errorf("failed to open ent database: %w", err)
