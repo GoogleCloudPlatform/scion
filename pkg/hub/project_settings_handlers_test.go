@@ -283,7 +283,7 @@ func TestProjectSettings_NotFound(t *testing.T) {
 func createTestProjectForSettings(t *testing.T, s store.Store) *store.Project {
 	t.Helper()
 	project := &store.Project{
-		ID:         "test-project-settings-" + t.Name(),
+		ID:         tid("test-project-settings-" + t.Name()),
 		Name:       "Test Project",
 		Slug:       "test-project-settings",
 		Visibility: "private",
