@@ -20,8 +20,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,7 +29,10 @@ import (
 
 func newTestSecretStore(t *testing.T) *SecretStore {
 	t.Helper()
-	client := enttest.NewClient(t)
+	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{})
+	require.NoError(t, err)
+	t.Cleanup(func() { client.Close() })
+	require.NoError(t, entc.AutoMigrate(context.Background(), client))
 	return NewSecretStore(client)
 }
 
