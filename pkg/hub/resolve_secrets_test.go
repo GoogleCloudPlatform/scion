@@ -50,7 +50,7 @@ func TestResolveSecrets(t *testing.T) {
 	}
 	// Project-level override of user API_KEY
 	projectOverride := &store.Secret{
-		ID:             "s3",
+		ID:             tid("s3"),
 		Key:            "API_KEY",
 		EncryptedValue: "project-api-key",
 		SecretType:     store.SecretTypeEnvironment,
@@ -59,7 +59,7 @@ func TestResolveSecrets(t *testing.T) {
 		ScopeID:        tid("project-1"),
 	}
 	fileSecret := &store.Secret{
-		ID:             "s4",
+		ID:             tid("s4"),
 		Key:            "TLS_CERT",
 		EncryptedValue: "cert-data",
 		SecretType:     store.SecretTypeFile,
@@ -68,7 +68,7 @@ func TestResolveSecrets(t *testing.T) {
 		ScopeID:        tid("user-1"),
 	}
 	varSecret := &store.Secret{
-		ID:             "s5",
+		ID:             tid("s5"),
 		Key:            "CONFIG",
 		EncryptedValue: `{"key":"val"}`,
 		SecretType:     store.SecretTypeVariable,
@@ -183,7 +183,7 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 			ScopeID:        tid("project-1"),
 		},
 		{
-			ID:             "s3",
+			ID:             tid("s3"),
 			Key:            "DB_PASS",
 			EncryptedValue: "db-password",
 			SecretType:     store.SecretTypeEnvironment,
@@ -296,7 +296,7 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 	}
 	// Create user secret that overrides hub
 	userSecret := &store.Secret{
-		ID:             "su1",
+		ID:             tid("su1"),
 		Key:            "API_KEY",
 		EncryptedValue: "user-personal-api-key",
 		SecretType:     store.SecretTypeEnvironment,
@@ -306,7 +306,7 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 	}
 	// Create a hub secret overridden by project scope
 	hubProjectOverridden := &store.Secret{
-		ID:             "sh3",
+		ID:             tid("sh3"),
 		Key:            "DB_PASS",
 		EncryptedValue: "hub-default-db-pass",
 		SecretType:     store.SecretTypeEnvironment,
@@ -315,7 +315,7 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 		ScopeID:        "test-hub-id",
 	}
 	projectSecret := &store.Secret{
-		ID:             "sg1",
+		ID:             tid("sg1"),
 		Key:            "DB_PASS",
 		EncryptedValue: "project-db-pass",
 		SecretType:     store.SecretTypeEnvironment,

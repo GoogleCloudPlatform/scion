@@ -238,7 +238,7 @@ func TestMessageBrokerProxy_BroadcastSkipsSender(t *testing.T) {
 	s := newBrokerTestStore(t)
 	projectID := setupBrokerTestProject(t, s)
 	setupBrokerTestAgent(t, s, projectID, "sender-agent", "running")
-	setupBrokerTestAgent(t, s, projectID, "other-agent", "running")
+	setupBrokerTestAgent(t, s, projectID, tid("other-agent"), "running")
 
 	events := NewChannelEventPublisher()
 	defer events.Close()
@@ -264,7 +264,7 @@ func TestMessageBrokerProxy_BroadcastSkipsSender(t *testing.T) {
 	if len(dispatched) != 1 {
 		t.Fatalf("expected 1 message (sender excluded), got %d", len(dispatched))
 	}
-	if dispatched[0].agentSlug != "other-agent" {
+	if dispatched[0].agentSlug != tid("other-agent") {
 		t.Errorf("expected message delivered to 'other-agent', got %q", dispatched[0].agentSlug)
 	}
 }

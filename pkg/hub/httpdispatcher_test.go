@@ -1320,7 +1320,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 
 	// Store an env var in project scope (simulating API key stored in hub)
 	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
-		ID:      "ev-project-1",
+		ID:      tid("ev-project-1"),
 		Key:     "GEMINI_API_KEY",
 		Value:   "test-api-key-123",
 		Scope:   "project",
@@ -1331,7 +1331,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 
 	// Store a user-scoped env var
 	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
-		ID:      "ev-user-1",
+		ID:      tid("ev-user-1"),
 		Key:     "CUSTOM_VAR",
 		Value:   "user-value",
 		Scope:   "user",
@@ -1413,7 +1413,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ConfigEnvTakesPrecedence(t *test
 
 	// Store an env var that conflicts with config env
 	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
-		ID:      "ev-prec-1",
+		ID:      tid("ev-prec-1"),
 		Key:     "API_KEY",
 		Value:   "storage-value",
 		Scope:   "project",
@@ -1476,7 +1476,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_StorageOverridesEmptyConfigEnv(t
 
 	// Store an env var that should override the empty config value
 	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
-		ID:      "ev-empty-1",
+		ID:      tid("ev-empty-1"),
 		Key:     "GEMINI_API_KEY",
 		Value:   "stored-api-key",
 		Scope:   "project",
@@ -2320,7 +2320,7 @@ func TestBuildCreateRequest_ResolvesProjectAndUserScopes(t *testing.T) {
 
 	// Store a user-scoped env var with the same key (higher precedence)
 	userEnv := &store.EnvVar{
-		ID:      "ev-user",
+		ID:      tid("ev-user"),
 		Key:     "SHARED_KEY",
 		Value:   "user-value",
 		Scope:   "user",
@@ -2332,7 +2332,7 @@ func TestBuildCreateRequest_ResolvesProjectAndUserScopes(t *testing.T) {
 
 	// Store a project-only env var
 	projectOnly := &store.EnvVar{
-		ID:      "ev-project-only",
+		ID:      tid("ev-project-only"),
 		Key:     "GROVE_ONLY_KEY",
 		Value:   "project-only-value",
 		Scope:   "project",

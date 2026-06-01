@@ -39,9 +39,9 @@ func TestGroupList(t *testing.T) {
 	// Create some test groups
 	for i := 0; i < 3; i++ {
 		group := &store.Group{
-			ID:      "group_" + string(rune('a'+i)),
+			ID:      tid("group_" + string(rune('a'+i))),
 			Name:    "Test Group " + string(rune('A'+i)),
-			Slug:    "test-group-" + string(rune('a'+i)),
+			Slug:    tid("test-group-" + string(rune('a'+i))),
 			Created: time.Now(),
 			Updated: time.Now(),
 		}
@@ -430,7 +430,7 @@ func TestGroupMembersList(t *testing.T) {
 		member := &store.GroupMember{
 			GroupID:    group.ID,
 			MemberType: "user",
-			MemberID:   "user_" + string(rune('a'+i)),
+			MemberID:   tid("user_" + string(rune('a'+i))),
 			Role:       "member",
 			AddedAt:    time.Now(),
 		}
@@ -500,7 +500,7 @@ func TestGroupCycleDetection(t *testing.T) {
 
 	// Create two groups
 	groupA := &store.Group{
-		ID:      tid("group_a"),
+		ID:      tid(tid(tid("group_a"))),
 		Name:    "Group A",
 		Slug:    "group-a",
 		Created: time.Now(),
@@ -1082,7 +1082,7 @@ func TestPolicyList(t *testing.T) {
 	// Create some test policies
 	for i := 0; i < 3; i++ {
 		policy := &store.Policy{
-			ID:           "policy_" + string(rune('a'+i)),
+			ID:           tid("policy_" + string(rune('a'+i))),
 			Name:         "Test Policy " + string(rune('A'+i)),
 			ScopeType:    "hub",
 			ResourceType: "*",
@@ -1367,7 +1367,7 @@ func TestPolicyBindingsList(t *testing.T) {
 		binding := &store.PolicyBinding{
 			PolicyID:      policy.ID,
 			PrincipalType: "user",
-			PrincipalID:   "user_" + string(rune('a'+i)),
+			PrincipalID:   tid("user_" + string(rune('a'+i))),
 		}
 		if err := s.AddPolicyBinding(ctx, binding); err != nil {
 			t.Fatalf("failed to add binding: %v", err)

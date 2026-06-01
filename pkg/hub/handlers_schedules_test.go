@@ -251,7 +251,7 @@ func TestSchedule_History(t *testing.T) {
 	// Create some events linked to this schedule
 	for i := 0; i < 3; i++ {
 		evt := &store.ScheduledEvent{
-			ID:         "hist-evt-" + string(rune('a'+i)),
+			ID:         tid("hist-evt-" + string(rune('a'+i))),
 			ProjectID:  projectID,
 			EventType:  "message",
 			FireAt:     created.CreatedAt,

@@ -42,7 +42,7 @@ func TestStopAllAgents_Global(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create running agents
-	for i, name := range []string{tid("agent-1"), tid("agent-2"), "agent-3"} {
+	for i, name := range []string{tid("agent-1"), tid("agent-2"), tid("agent-3")} {
 		agent := &store.Agent{
 			ID:        name,
 			Slug:      name,
@@ -113,11 +113,11 @@ func TestStopAllAgents_ProjectScoped(t *testing.T) {
 		ProjectID: project1.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "g1-agent-2", Slug: "g1-agent-2", Name: "G1 Agent 2",
+		ID: tid("g1-agent-2"), Slug: tid("g1-agent-2"), Name: "G1 Agent 2",
 		ProjectID: project1.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "g2-agent-1", Slug: "g2-agent-1", Name: "G2 Agent 1",
+		ID: tid("g2-agent-1"), Slug: tid("g2-agent-1"), Name: "G2 Agent 1",
 		ProjectID: project2.ID, Phase: string(state.PhaseRunning),
 	}))
 
@@ -137,7 +137,7 @@ func TestStopAllAgents_ProjectScoped(t *testing.T) {
 		assert.Equal(t, string(state.PhaseStopped), a1.Phase)
 
 		// Verify project-2 agent is still running
-		a2, _ := s.GetAgent(ctx, "g2-agent-1")
+		a2, _ := s.GetAgent(ctx, tid("g2-agent-1"))
 		assert.Equal(t, string(state.PhaseRunning), a2.Phase)
 	})
 }
@@ -167,12 +167,12 @@ func TestStopAllAgents_ProjectOwner_StopsAllAgents(t *testing.T) {
 
 	// Create running agents owned by different users
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "alice-agent", Slug: "alice-agent", Name: "Alice Agent",
+		ID: tid("alice-agent"), Slug: tid("alice-agent"), Name: "Alice Agent",
 		ProjectID: project.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "other-agent", Slug: "other-agent", Name: "Other Agent",
-		ProjectID: project.ID, OwnerID: "user-other", Phase: string(state.PhaseRunning),
+		ID: tid("other-agent"), Slug: tid("other-agent"), Name: "Other Agent",
+		ProjectID: project.ID, OwnerID: tid("user-other"), Phase: string(state.PhaseRunning),
 	}))
 
 	// Alice is project owner — should stop ALL agents, scope = "all"
@@ -188,9 +188,9 @@ func TestStopAllAgents_ProjectOwner_StopsAllAgents(t *testing.T) {
 	assert.Equal(t, "all", resp.Scope)
 
 	// Verify both agents are stopped
-	a1, _ := s.GetAgent(ctx, "alice-agent")
+	a1, _ := s.GetAgent(ctx, tid("alice-agent"))
 	assert.Equal(t, string(state.PhaseStopped), a1.Phase)
-	a2, _ := s.GetAgent(ctx, "other-agent")
+	a2, _ := s.GetAgent(ctx, tid("other-agent"))
 	assert.Equal(t, string(state.PhaseStopped), a2.Phase)
 }
 
@@ -200,7 +200,7 @@ func TestStopAllAgents_ProjectMember_StopsOnlyOwnAgents(t *testing.T) {
 
 	// Create a third user "carol" as a regular project member
 	carol := &store.User{
-		ID:          "user-carol",
+		ID:          tid("user-carol"),
 		Email:       "carol@test.com",
 		DisplayName: "Carol",
 		Role:        store.UserRoleMember,
@@ -222,15 +222,15 @@ func TestStopAllAgents_ProjectMember_StopsOnlyOwnAgents(t *testing.T) {
 
 	// Create agents owned by carol and by alice
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "carol-agent-1", Slug: "carol-agent-1", Name: "Carol Agent 1",
+		ID: tid("carol-agent-1"), Slug: tid("carol-agent-1"), Name: "Carol Agent 1",
 		ProjectID: project.ID, OwnerID: carol.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "carol-agent-2", Slug: "carol-agent-2", Name: "Carol Agent 2",
+		ID: tid("carol-agent-2"), Slug: tid("carol-agent-2"), Name: "Carol Agent 2",
 		ProjectID: project.ID, OwnerID: carol.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "alice-agent", Slug: "alice-agent", Name: "Alice Agent",
+		ID: tid("alice-agent"), Slug: tid("alice-agent"), Name: "Alice Agent",
 		ProjectID: project.ID, OwnerID: tid("user-alice"), Phase: string(state.PhaseRunning),
 	}))
 
@@ -247,13 +247,13 @@ func TestStopAllAgents_ProjectMember_StopsOnlyOwnAgents(t *testing.T) {
 	assert.Equal(t, "own", resp.Scope)
 
 	// Verify carol's agents are stopped
-	c1, _ := s.GetAgent(ctx, "carol-agent-1")
+	c1, _ := s.GetAgent(ctx, tid("carol-agent-1"))
 	assert.Equal(t, string(state.PhaseStopped), c1.Phase)
-	c2, _ := s.GetAgent(ctx, "carol-agent-2")
+	c2, _ := s.GetAgent(ctx, tid("carol-agent-2"))
 	assert.Equal(t, string(state.PhaseStopped), c2.Phase)
 
 	// Verify alice's agent is still running
-	a1, _ := s.GetAgent(ctx, "alice-agent")
+	a1, _ := s.GetAgent(ctx, tid("alice-agent"))
 	assert.Equal(t, string(state.PhaseRunning), a1.Phase)
 }
 

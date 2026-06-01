@@ -200,7 +200,7 @@ func TestScheduledEvent_List(t *testing.T) {
 	// Create a couple of events directly in the store
 	for i, status := range []string{store.ScheduledEventPending, store.ScheduledEventFired} {
 		evt := &store.ScheduledEvent{
-			ID:        "list-evt-" + string(rune('a'+i)),
+			ID:        tid("list-evt-" + string(rune('a'+i))),
 			ProjectID: projectID,
 			EventType: "message",
 			FireAt:    time.Now().Add(time.Duration(i+1) * time.Hour),

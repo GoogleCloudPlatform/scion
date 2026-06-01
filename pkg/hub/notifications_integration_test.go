@@ -186,7 +186,7 @@ func TestIntegration_AgentCreatesAgentWithNotify_FullFlow(t *testing.T) {
 
 	// Create the parent agent (subscriber)
 	parent := &store.Agent{
-		ID:              "agent-parent",
+		ID:              tid("agent-parent"),
 		Slug:            "parent-agent",
 		Name:            "Parent Agent",
 		ProjectID:       env.project.ID,
@@ -242,7 +242,7 @@ func TestIntegration_AgentCreatesAgentWithNotify_WaitingForInput(t *testing.T) {
 	ctx := context.Background()
 
 	parent := &store.Agent{
-		ID:              "agent-parent-wfi",
+		ID:              tid("agent-parent-wfi"),
 		Slug:            "parent-agent-wfi",
 		Name:            "Parent Agent WFI",
 		ProjectID:       env.project.ID,
@@ -290,7 +290,7 @@ func TestIntegration_AgentCreatesAgentWithNotify_MultipleStatusChanges(t *testin
 	ctx := context.Background()
 
 	parent := &store.Agent{
-		ID:              "agent-parent-multi",
+		ID:              tid("agent-parent-multi"),
 		Slug:            "parent-multi",
 		Name:            "Parent Multi",
 		ProjectID:       env.project.ID,
@@ -348,7 +348,7 @@ func TestIntegration_StatusNormalization_LowercaseEventMatchesUppercaseTrigger(t
 	ctx := context.Background()
 
 	parent := &store.Agent{
-		ID:              "agent-parent-case",
+		ID:              tid("agent-parent-case"),
 		Slug:            "parent-case",
 		Name:            "Parent Case",
 		ProjectID:       env.project.ID,
@@ -385,7 +385,7 @@ func TestIntegration_StatusNormalization_DedupAcrossCaseBoundaries(t *testing.T)
 	ctx := context.Background()
 
 	parent := &store.Agent{
-		ID:              "agent-parent-dedup",
+		ID:              tid("agent-parent-dedup"),
 		Slug:            "parent-dedup",
 		Name:            "Parent Dedup",
 		ProjectID:       env.project.ID,
@@ -426,7 +426,7 @@ func TestIntegration_StatusNormalization_NonTriggerStatusNoNotification(t *testi
 	ctx := context.Background()
 
 	parent := &store.Agent{
-		ID:              "agent-parent-nontrig",
+		ID:              tid("agent-parent-nontrig"),
 		Slug:            "parent-nontrig",
 		Name:            "Parent NonTrig",
 		ProjectID:       env.project.ID,
@@ -476,7 +476,7 @@ func TestIntegration_SubscriptionCleanup_HardDeleteCascades(t *testing.T) {
 	ctx := context.Background()
 
 	parent := &store.Agent{
-		ID:              "agent-parent-hdel",
+		ID:              tid("agent-parent-hdel"),
 		Slug:            "parent-hdel",
 		Name:            "Parent Hard Delete",
 		ProjectID:       env.project.ID,
@@ -528,7 +528,7 @@ func TestIntegration_SubscriptionCleanup_SoftDeleteRetainsSubscriptions(t *testi
 	env.srv.config.SoftDeleteRetention = 24 * time.Hour
 
 	parent := &store.Agent{
-		ID:              "agent-parent-sdel",
+		ID:              tid("agent-parent-sdel"),
 		Slug:            "parent-sdel",
 		Name:            "Parent Soft Delete",
 		ProjectID:       env.project.ID,
@@ -741,7 +741,7 @@ func TestIntegration_MultipleSubscribers_AgentAndUser(t *testing.T) {
 
 	// Create parent agent
 	parent := &store.Agent{
-		ID:              "agent-parent-multi-sub",
+		ID:              tid("agent-parent-multi-sub"),
 		Slug:            "parent-multi-sub",
 		Name:            "Parent Multi Sub",
 		ProjectID:       env.project.ID,
@@ -802,7 +802,7 @@ func TestIntegration_NoNotifyFlag_NoSubscription(t *testing.T) {
 	ctx := context.Background()
 
 	parent := &store.Agent{
-		ID:              "agent-parent-no-notify",
+		ID:              tid("agent-parent-no-notify"),
 		Slug:            "parent-no-notify",
 		Name:            "Parent No Notify",
 		ProjectID:       env.project.ID,
@@ -860,7 +860,7 @@ func TestIntegration_PATCHSubscriptionTriggers(t *testing.T) {
 
 	// Create a subscription via store (SubscriberID must match DevUserID)
 	sub := &store.NotificationSubscription{
-		ID:                "sub-patch-test",
+		ID:                tid("sub-patch-test"),
 		Scope:             store.SubscriptionScopeProject,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      DevUserID,
