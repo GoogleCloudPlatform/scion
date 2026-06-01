@@ -318,6 +318,9 @@ func (r *CommandRouter) handleDialogSubmit(ctx context.Context, event *ChatEvent
 
 		msg := messages.NewInstruction("user:"+mapping.HubUserEmail, agentID, responseText)
 		msg.Channel = "gchat"
+		if event.ThreadID != "" {
+			msg.ThreadID = event.ThreadID
+		}
 		if err := client.ProjectAgents(link.ProjectID).SendStructuredMessage(ctx, agentID, msg, false, false, false); err != nil {
 			return r.reply(ctx, event, fmt.Sprintf("Failed to send response to agent: %v", err))
 		}
@@ -1072,6 +1075,8 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 	msg.Channel = "gchat"
 	if threadID != "" {
 		msg.ThreadID = threadID
+	} else if event.ThreadID != "" {
+		msg.ThreadID = event.ThreadID
 	}
 
 	if err := client.ProjectAgents(link.ProjectID).SendStructuredMessage(ctx, agentSlug, msg, false, false, false); err != nil {

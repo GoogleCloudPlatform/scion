@@ -181,9 +181,10 @@ func (n *NotificationRelay) handleUserMessage(ctx context.Context, projectID str
 		mentions := n.buildMentions(mapping.PlatformUserID, agentSlug, link)
 
 		if _, err := n.messenger.SendMessage(ctx, SendMessageRequest{
-			SpaceID: link.SpaceID,
-			Text:    mentions,
-			Card:    &card,
+			SpaceID:  link.SpaceID,
+			ThreadID: msg.ThreadID,
+			Text:     mentions,
+			Card:     &card,
 		}); err != nil {
 			n.log.Error("failed to relay user message",
 				"space_id", link.SpaceID,
