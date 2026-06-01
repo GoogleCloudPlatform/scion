@@ -51,12 +51,13 @@ type chatQueue struct {
 
 // outboundMessage represents a message waiting to be sent through the queue.
 type outboundMessage struct {
-	chatID    int64
-	text      string
-	parseMode string
-	keyboard  *InlineKeyboardMarkup
-	replyTo   int64
-	result    chan<- *sendResult // caller blocks on this to receive the outcome
+	chatID          int64
+	text            string
+	parseMode       string
+	keyboard        *InlineKeyboardMarkup
+	replyTo         int64
+	messageThreadID int64
+	result          chan<- *sendResult // caller blocks on this to receive the outcome
 }
 
 // sendResult carries the outcome of a queued send back to the caller.
@@ -88,7 +89,7 @@ func NewSendQueue(api *TelegramAPIClient, log *slog.Logger, maxSize int, minDela
 
 // Send enqueues a message and blocks until it is sent (or fails).
 // It returns the Telegram API response or an error.
-func (sq *SendQueue) Send(ctx context.Context, chatID int64, text, parseMode string, keyboard *InlineKeyboardMarkup, replyTo int64) (*TGMessage, error) {
+func (sq *SendQueue) Send(ctx context.Context, chatID int64, text, parseMode string, keyboard *InlineKeyboardMarkup, replyTo int64, opts ...SendOption) (*TGMessage, error) {
 	resultCh := make(chan *sendResult, 1)
 
 	om := &outboundMessage{
@@ -98,6 +99,9 @@ func (sq *SendQueue) Send(ctx context.Context, chatID int64, text, parseMode str
 		keyboard:  keyboard,
 		replyTo:   replyTo,
 		result:    resultCh,
+	}
+	for _, o := range opts {
+		om.messageThreadID = o.MessageThreadID
 	}
 
 	ch, err := sq.enqueue(chatID, om)
@@ -235,10 +239,15 @@ func (sq *SendQueue) sendOne(om *outboundMessage) (*TGMessage, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if om.keyboard != nil || om.replyTo > 0 {
-		return sq.api.SendMessageWithKeyboard(ctx, om.chatID, om.text, om.parseMode, om.keyboard, om.replyTo)
+	var opts []SendOption
+	if om.messageThreadID != 0 {
+		opts = append(opts, SendOption{MessageThreadID: om.messageThreadID})
 	}
-	return sq.api.SendMessage(ctx, om.chatID, om.text, om.parseMode)
+
+	if om.keyboard != nil || om.replyTo > 0 {
+		return sq.api.SendMessageWithKeyboard(ctx, om.chatID, om.text, om.parseMode, om.keyboard, om.replyTo, opts...)
+	}
+	return sq.api.SendMessage(ctx, om.chatID, om.text, om.parseMode, opts...)
 }
 
 // removeQueue removes the per-chat queue from the map when the worker exits.

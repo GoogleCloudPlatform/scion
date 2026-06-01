@@ -486,6 +486,13 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		return fmt.Errorf("telegram v2 broker not configured")
 	}
 
+	// Channel filter: skip messages explicitly targeted at a different channel.
+	if msg != nil && msg.Channel != "" && msg.Channel != b.pluginName {
+		b.log.Debug("Skipping message for different channel",
+			"channel", msg.Channel, "plugin", b.pluginName)
+		return nil
+	}
+
 	// Dedup check.
 	dedupKey := msgDedupKey(msg)
 	if dedupKey != "" {
@@ -689,21 +696,28 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		}
 	}
 
+	// Determine thread ID for Telegram forum topics.
+	var threadOpts []SendOption
+	if msg != nil && msg.ThreadID != "" {
+		if tid, err := strconv.ParseInt(msg.ThreadID, 10, 64); err == nil && tid != 0 {
+			threadOpts = append(threadOpts, SendOption{MessageThreadID: tid})
+		}
+	}
+
 	var errs []error
 	for _, chatID := range chatIDs {
 		var err error
 		if sq != nil {
 			var keyboard *InlineKeyboardMarkup
 			if replyToMsgID > 0 {
-				// Pass nil keyboard but use replyTo.
-				_, err = sq.Send(ctx, chatID, text, "", keyboard, replyToMsgID)
+				_, err = sq.Send(ctx, chatID, text, "", keyboard, replyToMsgID, threadOpts...)
 			} else {
-				_, err = sq.Send(ctx, chatID, text, "", nil, 0)
+				_, err = sq.Send(ctx, chatID, text, "", nil, 0, threadOpts...)
 			}
 		} else if replyToMsgID > 0 {
-			_, err = api.SendMessageWithKeyboard(ctx, chatID, text, "", nil, replyToMsgID)
+			_, err = api.SendMessageWithKeyboard(ctx, chatID, text, "", nil, replyToMsgID, threadOpts...)
 		} else {
-			_, err = api.SendMessage(ctx, chatID, text, "")
+			_, err = api.SendMessage(ctx, chatID, text, "", threadOpts...)
 		}
 		if err != nil {
 			var apiErr *APIError

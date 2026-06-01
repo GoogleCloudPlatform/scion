@@ -187,9 +187,10 @@ type CallbackQuery struct {
 
 // sendMessageRequest is the JSON body for the sendMessage API call.
 type sendMessageRequest struct {
-	ChatID    int64  `json:"chat_id"`
-	Text      string `json:"text"`
-	ParseMode string `json:"parse_mode,omitempty"`
+	ChatID          int64  `json:"chat_id"`
+	Text            string `json:"text"`
+	ParseMode       string `json:"parse_mode,omitempty"`
+	MessageThreadID int64  `json:"message_thread_id,omitempty"`
 }
 
 // sendMessageWithKeyboardRequest is the JSON body for sendMessage with an inline keyboard.
@@ -199,6 +200,7 @@ type sendMessageWithKeyboardRequest struct {
 	ParseMode        string                `json:"parse_mode,omitempty"`
 	ReplyMarkup      *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
 	ReplyToMessageID int64                 `json:"reply_to_message_id,omitempty"`
+	MessageThreadID  int64                 `json:"message_thread_id,omitempty"`
 }
 
 // ForceReply instructs Telegram clients to display a reply interface to the
@@ -211,10 +213,11 @@ type ForceReply struct {
 // sendMessageForceReplyRequest is the JSON body for sendMessage with
 // ForceReply markup and an optional inline keyboard.
 type sendMessageForceReplyRequest struct {
-	ChatID      int64           `json:"chat_id"`
-	Text        string          `json:"text"`
-	ParseMode   string          `json:"parse_mode,omitempty"`
-	ReplyMarkup json.RawMessage `json:"reply_markup,omitempty"`
+	ChatID          int64           `json:"chat_id"`
+	Text            string          `json:"text"`
+	ParseMode       string          `json:"parse_mode,omitempty"`
+	ReplyMarkup     json.RawMessage `json:"reply_markup,omitempty"`
+	MessageThreadID int64           `json:"message_thread_id,omitempty"`
 }
 
 // editMessageTextRequest is the JSON body for the editMessageText API call.
@@ -458,12 +461,20 @@ func (c *TelegramAPIClient) GetUpdates(ctx context.Context, offset int64, timeou
 	return updates, nil
 }
 
+// SendOption provides optional parameters for send methods.
+type SendOption struct {
+	MessageThreadID int64
+}
+
 // SendMessage sends a text message to the specified chat.
-func (c *TelegramAPIClient) SendMessage(ctx context.Context, chatID int64, text, parseMode string) (*TGMessage, error) {
+func (c *TelegramAPIClient) SendMessage(ctx context.Context, chatID int64, text, parseMode string, opts ...SendOption) (*TGMessage, error) {
 	body := sendMessageRequest{
 		ChatID:    chatID,
 		Text:      text,
 		ParseMode: parseMode,
+	}
+	for _, o := range opts {
+		body.MessageThreadID = o.MessageThreadID
 	}
 
 	jsonBody, err := json.Marshal(body)
@@ -506,13 +517,16 @@ func (c *TelegramAPIClient) SendMessage(ctx context.Context, chatID int64, text,
 }
 
 // SendMessageWithKeyboard sends a text message with an inline keyboard and optional reply.
-func (c *TelegramAPIClient) SendMessageWithKeyboard(ctx context.Context, chatID int64, text, parseMode string, keyboard *InlineKeyboardMarkup, replyToMessageID int64) (*TGMessage, error) {
+func (c *TelegramAPIClient) SendMessageWithKeyboard(ctx context.Context, chatID int64, text, parseMode string, keyboard *InlineKeyboardMarkup, replyToMessageID int64, opts ...SendOption) (*TGMessage, error) {
 	body := sendMessageWithKeyboardRequest{
 		ChatID:           chatID,
 		Text:             text,
 		ParseMode:        parseMode,
 		ReplyMarkup:      keyboard,
 		ReplyToMessageID: replyToMessageID,
+	}
+	for _, o := range opts {
+		body.MessageThreadID = o.MessageThreadID
 	}
 
 	jsonBody, err := json.Marshal(body)

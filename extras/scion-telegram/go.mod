@@ -1,6 +1,6 @@
 module github.com/GoogleCloudPlatform/scion/extras/scion-telegram
 
-go 1.25.4
+go 1.26.1
 
 require (
 	github.com/GoogleCloudPlatform/scion v0.0.0-00010101000000-000000000000

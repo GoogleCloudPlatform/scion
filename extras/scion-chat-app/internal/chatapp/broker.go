@@ -40,6 +40,7 @@ type BrokerServer struct {
 	mu            sync.RWMutex
 	subscriptions map[string]bool
 	configured    bool
+	channelName   string
 }
 
 // Compile-time interface checks.
@@ -66,12 +67,27 @@ func (b *BrokerServer) Configure(config map[string]string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.configured = true
+	if v, ok := config["plugin_name"]; ok && v != "" {
+		b.channelName = v
+	}
 	b.log.Info("broker plugin configured", "config_keys", len(config))
 	return nil
 }
 
 // Publish receives a message from the Hub and routes it to the handler.
 func (b *BrokerServer) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
+	// Skip messages explicitly targeted at a different channel.
+	if msg != nil && msg.Channel != "" {
+		b.mu.RLock()
+		name := b.channelName
+		b.mu.RUnlock()
+		if name != "" && msg.Channel != name {
+			b.log.Debug("skipping message for different channel",
+				"channel", msg.Channel, "plugin", name, "topic", topic)
+			return nil
+		}
+	}
+
 	b.log.Debug("received message via broker",
 		"topic", topic,
 		"sender", msg.Sender,

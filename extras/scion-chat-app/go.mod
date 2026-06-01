@@ -1,6 +1,6 @@
 module github.com/GoogleCloudPlatform/scion/extras/scion-chat-app
 
-go 1.25.4
+go 1.26.1
 
 require (
 	cloud.google.com/go/secretmanager v1.16.0

@@ -348,9 +348,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 							log.Printf("Warning: failed to generate secret for broker plugin %q: %v", bt, secretErr)
 						} else {
 							hubCreds := map[string]string{
-								"hub_url":   hubEndpoint,
-								"hmac_key":  secretKey,
-								"broker_id": brokerID,
+								"hub_url":     hubEndpoint,
+								"hmac_key":    secretKey,
+								"broker_id":   brokerID,
+								"plugin_name": bt,
 							}
 							// Inject project slug map so hub-managed plugins can resolve
 							// human-readable project names without user-level API access.
