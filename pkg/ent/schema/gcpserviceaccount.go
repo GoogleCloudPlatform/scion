@@ -46,10 +46,7 @@ func (GCPServiceAccount) Fields() []ent.Field {
 			NotEmpty(),
 		field.String("email").
 			NotEmpty(),
-		// project_id holds the GCP *cloud project* identifier (e.g.
-		// "my-project-123"), which is a free-form string, not a UUID.
-		field.String("project_id").
-			NotEmpty(),
+		field.UUID("project_id", uuid.UUID{}),
 		field.String("display_name").
 			Default(""),
 		field.String("default_scopes").

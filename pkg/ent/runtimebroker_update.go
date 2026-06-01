@@ -70,12 +70,6 @@ func (_u *RuntimeBrokerUpdate) SetNillableType(v *string) *RuntimeBrokerUpdate {
 	return _u
 }
 
-// ClearType clears the value of the "type" field.
-func (_u *RuntimeBrokerUpdate) ClearType() *RuntimeBrokerUpdate {
-	_u.mutation.ClearType()
-	return _u
-}
-
 // SetMode sets the "mode" field.
 func (_u *RuntimeBrokerUpdate) SetMode(v string) *RuntimeBrokerUpdate {
 	_u.mutation.SetMode(v)
@@ -107,27 +101,6 @@ func (_u *RuntimeBrokerUpdate) SetNillableVersion(v *string) *RuntimeBrokerUpdat
 // ClearVersion clears the value of the "version" field.
 func (_u *RuntimeBrokerUpdate) ClearVersion() *RuntimeBrokerUpdate {
 	_u.mutation.ClearVersion()
-	return _u
-}
-
-// SetLockVersion sets the "lock_version" field.
-func (_u *RuntimeBrokerUpdate) SetLockVersion(v int64) *RuntimeBrokerUpdate {
-	_u.mutation.ResetLockVersion()
-	_u.mutation.SetLockVersion(v)
-	return _u
-}
-
-// SetNillableLockVersion sets the "lock_version" field if the given value is not nil.
-func (_u *RuntimeBrokerUpdate) SetNillableLockVersion(v *int64) *RuntimeBrokerUpdate {
-	if v != nil {
-		_u.SetLockVersion(*v)
-	}
-	return _u
-}
-
-// AddLockVersion adds value to the "lock_version" field.
-func (_u *RuntimeBrokerUpdate) AddLockVersion(v int64) *RuntimeBrokerUpdate {
-	_u.mutation.AddLockVersion(v)
 	return _u
 }
 
@@ -412,6 +385,11 @@ func (_u *RuntimeBrokerUpdate) check() error {
 			return &ValidationError{Name: "slug", err: fmt.Errorf(`ent: validator failed for field "RuntimeBroker.slug": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.GetType(); ok {
+		if err := runtimebroker.TypeValidator(v); err != nil {
+			return &ValidationError{Name: "type", err: fmt.Errorf(`ent: validator failed for field "RuntimeBroker.type": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -436,9 +414,6 @@ func (_u *RuntimeBrokerUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	if value, ok := _u.mutation.GetType(); ok {
 		_spec.SetField(runtimebroker.FieldType, field.TypeString, value)
 	}
-	if _u.mutation.TypeCleared() {
-		_spec.ClearField(runtimebroker.FieldType, field.TypeString)
-	}
 	if value, ok := _u.mutation.Mode(); ok {
 		_spec.SetField(runtimebroker.FieldMode, field.TypeString, value)
 	}
@@ -447,12 +422,6 @@ func (_u *RuntimeBrokerUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if _u.mutation.VersionCleared() {
 		_spec.ClearField(runtimebroker.FieldVersion, field.TypeString)
-	}
-	if value, ok := _u.mutation.LockVersion(); ok {
-		_spec.SetField(runtimebroker.FieldLockVersion, field.TypeInt64, value)
-	}
-	if value, ok := _u.mutation.AddedLockVersion(); ok {
-		_spec.AddField(runtimebroker.FieldLockVersion, field.TypeInt64, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(runtimebroker.FieldStatus, field.TypeString, value)
@@ -582,12 +551,6 @@ func (_u *RuntimeBrokerUpdateOne) SetNillableType(v *string) *RuntimeBrokerUpdat
 	return _u
 }
 
-// ClearType clears the value of the "type" field.
-func (_u *RuntimeBrokerUpdateOne) ClearType() *RuntimeBrokerUpdateOne {
-	_u.mutation.ClearType()
-	return _u
-}
-
 // SetMode sets the "mode" field.
 func (_u *RuntimeBrokerUpdateOne) SetMode(v string) *RuntimeBrokerUpdateOne {
 	_u.mutation.SetMode(v)
@@ -619,27 +582,6 @@ func (_u *RuntimeBrokerUpdateOne) SetNillableVersion(v *string) *RuntimeBrokerUp
 // ClearVersion clears the value of the "version" field.
 func (_u *RuntimeBrokerUpdateOne) ClearVersion() *RuntimeBrokerUpdateOne {
 	_u.mutation.ClearVersion()
-	return _u
-}
-
-// SetLockVersion sets the "lock_version" field.
-func (_u *RuntimeBrokerUpdateOne) SetLockVersion(v int64) *RuntimeBrokerUpdateOne {
-	_u.mutation.ResetLockVersion()
-	_u.mutation.SetLockVersion(v)
-	return _u
-}
-
-// SetNillableLockVersion sets the "lock_version" field if the given value is not nil.
-func (_u *RuntimeBrokerUpdateOne) SetNillableLockVersion(v *int64) *RuntimeBrokerUpdateOne {
-	if v != nil {
-		_u.SetLockVersion(*v)
-	}
-	return _u
-}
-
-// AddLockVersion adds value to the "lock_version" field.
-func (_u *RuntimeBrokerUpdateOne) AddLockVersion(v int64) *RuntimeBrokerUpdateOne {
-	_u.mutation.AddLockVersion(v)
 	return _u
 }
 
@@ -937,6 +879,11 @@ func (_u *RuntimeBrokerUpdateOne) check() error {
 			return &ValidationError{Name: "slug", err: fmt.Errorf(`ent: validator failed for field "RuntimeBroker.slug": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.GetType(); ok {
+		if err := runtimebroker.TypeValidator(v); err != nil {
+			return &ValidationError{Name: "type", err: fmt.Errorf(`ent: validator failed for field "RuntimeBroker.type": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -978,9 +925,6 @@ func (_u *RuntimeBrokerUpdateOne) sqlSave(ctx context.Context) (_node *RuntimeBr
 	if value, ok := _u.mutation.GetType(); ok {
 		_spec.SetField(runtimebroker.FieldType, field.TypeString, value)
 	}
-	if _u.mutation.TypeCleared() {
-		_spec.ClearField(runtimebroker.FieldType, field.TypeString)
-	}
 	if value, ok := _u.mutation.Mode(); ok {
 		_spec.SetField(runtimebroker.FieldMode, field.TypeString, value)
 	}
@@ -989,12 +933,6 @@ func (_u *RuntimeBrokerUpdateOne) sqlSave(ctx context.Context) (_node *RuntimeBr
 	}
 	if _u.mutation.VersionCleared() {
 		_spec.ClearField(runtimebroker.FieldVersion, field.TypeString)
-	}
-	if value, ok := _u.mutation.LockVersion(); ok {
-		_spec.SetField(runtimebroker.FieldLockVersion, field.TypeInt64, value)
-	}
-	if value, ok := _u.mutation.AddedLockVersion(); ok {
-		_spec.AddField(runtimebroker.FieldLockVersion, field.TypeInt64, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(runtimebroker.FieldStatus, field.TypeString, value)

@@ -25,7 +25,7 @@ type GCPServiceAccount struct {
 	// Email holds the value of the "email" field.
 	Email string `json:"email,omitempty"`
 	// ProjectID holds the value of the "project_id" field.
-	ProjectID string `json:"project_id,omitempty"`
+	ProjectID uuid.UUID `json:"project_id,omitempty"`
 	// DisplayName holds the value of the "display_name" field.
 	DisplayName string `json:"display_name,omitempty"`
 	// DefaultScopes holds the value of the "default_scopes" field.
@@ -52,11 +52,11 @@ func (*GCPServiceAccount) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case gcpserviceaccount.FieldVerified, gcpserviceaccount.FieldManaged:
 			values[i] = new(sql.NullBool)
-		case gcpserviceaccount.FieldScope, gcpserviceaccount.FieldScopeID, gcpserviceaccount.FieldEmail, gcpserviceaccount.FieldProjectID, gcpserviceaccount.FieldDisplayName, gcpserviceaccount.FieldDefaultScopes, gcpserviceaccount.FieldCreatedBy, gcpserviceaccount.FieldManagedBy:
+		case gcpserviceaccount.FieldScope, gcpserviceaccount.FieldScopeID, gcpserviceaccount.FieldEmail, gcpserviceaccount.FieldDisplayName, gcpserviceaccount.FieldDefaultScopes, gcpserviceaccount.FieldCreatedBy, gcpserviceaccount.FieldManagedBy:
 			values[i] = new(sql.NullString)
 		case gcpserviceaccount.FieldVerifiedAt, gcpserviceaccount.FieldCreated:
 			values[i] = new(sql.NullTime)
-		case gcpserviceaccount.FieldID:
+		case gcpserviceaccount.FieldID, gcpserviceaccount.FieldProjectID:
 			values[i] = new(uuid.UUID)
 		default:
 			values[i] = new(sql.UnknownType)
@@ -98,10 +98,10 @@ func (_m *GCPServiceAccount) assignValues(columns []string, values []any) error 
 				_m.Email = value.String
 			}
 		case gcpserviceaccount.FieldProjectID:
-			if value, ok := values[i].(*sql.NullString); !ok {
+			if value, ok := values[i].(*uuid.UUID); !ok {
 				return fmt.Errorf("unexpected type %T for field project_id", values[i])
-			} else if value.Valid {
-				_m.ProjectID = value.String
+			} else if value != nil {
+				_m.ProjectID = *value
 			}
 		case gcpserviceaccount.FieldDisplayName:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -198,7 +198,7 @@ func (_m *GCPServiceAccount) String() string {
 	builder.WriteString(_m.Email)
 	builder.WriteString(", ")
 	builder.WriteString("project_id=")
-	builder.WriteString(_m.ProjectID)
+	builder.WriteString(fmt.Sprintf("%v", _m.ProjectID))
 	builder.WriteString(", ")
 	builder.WriteString("display_name=")
 	builder.WriteString(_m.DisplayName)

@@ -231,7 +231,7 @@ var (
 		{Name: "scope", Type: field.TypeString},
 		{Name: "scope_id", Type: field.TypeString},
 		{Name: "email", Type: field.TypeString},
-		{Name: "project_id", Type: field.TypeString},
+		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "display_name", Type: field.TypeString, Default: ""},
 		{Name: "default_scopes", Type: field.TypeString, Default: ""},
 		{Name: "verified", Type: field.TypeBool, Default: false},
@@ -708,10 +708,9 @@ var (
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "name", Type: field.TypeString},
 		{Name: "slug", Type: field.TypeString},
-		{Name: "type", Type: field.TypeString, Nullable: true},
+		{Name: "type", Type: field.TypeString},
 		{Name: "mode", Type: field.TypeString, Default: "connected"},
 		{Name: "version", Type: field.TypeString, Nullable: true},
-		{Name: "lock_version", Type: field.TypeInt64, Default: 0},
 		{Name: "status", Type: field.TypeString, Default: "offline"},
 		{Name: "connection_state", Type: field.TypeString, Default: "disconnected"},
 		{Name: "last_heartbeat", Type: field.TypeTime, Nullable: true},
@@ -741,7 +740,7 @@ var (
 			{
 				Name:    "runtimebroker_status",
 				Unique:  false,
-				Columns: []*schema.Column{RuntimeBrokersColumns[7]},
+				Columns: []*schema.Column{RuntimeBrokersColumns[6]},
 			},
 		},
 	}
@@ -958,6 +957,38 @@ var (
 				Name:    "user_last_seen",
 				Unique:  false,
 				Columns: []*schema.Column{UsersColumns[9]},
+			},
+		},
+	}
+	// UserAccessTokensColumns holds the columns for the "user_access_tokens" table.
+	UserAccessTokensColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "user_id", Type: field.TypeUUID},
+		{Name: "name", Type: field.TypeString},
+		{Name: "prefix", Type: field.TypeString},
+		{Name: "key_hash", Type: field.TypeString, Unique: true},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "scopes", Type: field.TypeString},
+		{Name: "revoked", Type: field.TypeBool, Default: false},
+		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "last_used", Type: field.TypeTime, Nullable: true},
+		{Name: "created", Type: field.TypeTime},
+	}
+	// UserAccessTokensTable holds the schema information for the "user_access_tokens" table.
+	UserAccessTokensTable = &schema.Table{
+		Name:       "user_access_tokens",
+		Columns:    UserAccessTokensColumns,
+		PrimaryKey: []*schema.Column{UserAccessTokensColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "useraccesstoken_user_id",
+				Unique:  false,
+				Columns: []*schema.Column{UserAccessTokensColumns[1]},
+			},
+			{
+				Name:    "useraccesstoken_project_id",
+				Unique:  false,
+				Columns: []*schema.Column{UserAccessTokensColumns[5]},
 			},
 		},
 	}

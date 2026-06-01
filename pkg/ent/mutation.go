@@ -8075,7 +8075,7 @@ type GCPServiceAccountMutation struct {
 	scope          *string
 	scope_id       *string
 	email          *string
-	project_id     *string
+	project_id     *uuid.UUID
 	display_name   *string
 	default_scopes *string
 	verified       *bool
@@ -8303,12 +8303,12 @@ func (m *GCPServiceAccountMutation) ResetEmail() {
 }
 
 // SetProjectID sets the "project_id" field.
-func (m *GCPServiceAccountMutation) SetProjectID(s string) {
-	m.project_id = &s
+func (m *GCPServiceAccountMutation) SetProjectID(u uuid.UUID) {
+	m.project_id = &u
 }
 
 // ProjectID returns the value of the "project_id" field in the mutation.
-func (m *GCPServiceAccountMutation) ProjectID() (r string, exists bool) {
+func (m *GCPServiceAccountMutation) ProjectID() (r uuid.UUID, exists bool) {
 	v := m.project_id
 	if v == nil {
 		return
@@ -8319,7 +8319,7 @@ func (m *GCPServiceAccountMutation) ProjectID() (r string, exists bool) {
 // OldProjectID returns the old "project_id" field's value of the GCPServiceAccount entity.
 // If the GCPServiceAccount object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *GCPServiceAccountMutation) OldProjectID(ctx context.Context) (v string, err error) {
+func (m *GCPServiceAccountMutation) OldProjectID(ctx context.Context) (v uuid.UUID, err error) {
 	if !m.op.Is(OpUpdateOne) {
 		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
 	}
@@ -8806,7 +8806,7 @@ func (m *GCPServiceAccountMutation) SetField(name string, value ent.Value) error
 		m.SetEmail(v)
 		return nil
 	case gcpserviceaccount.FieldProjectID:
-		v, ok := value.(string)
+		v, ok := value.(uuid.UUID)
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
@@ -22712,8 +22712,6 @@ type RuntimeBrokerMutation struct {
 	_type               *string
 	mode                *string
 	version             *string
-	lock_version        *int64
-	addlock_version     *int64
 	status              *string
 	connection_state    *string
 	last_heartbeat      *time.Time
@@ -22941,22 +22939,9 @@ func (m *RuntimeBrokerMutation) OldType(ctx context.Context) (v string, err erro
 	return oldValue.Type, nil
 }
 
-// ClearType clears the value of the "type" field.
-func (m *RuntimeBrokerMutation) ClearType() {
-	m._type = nil
-	m.clearedFields[runtimebroker.FieldType] = struct{}{}
-}
-
-// TypeCleared returns if the "type" field was cleared in this mutation.
-func (m *RuntimeBrokerMutation) TypeCleared() bool {
-	_, ok := m.clearedFields[runtimebroker.FieldType]
-	return ok
-}
-
 // ResetType resets all changes to the "type" field.
 func (m *RuntimeBrokerMutation) ResetType() {
 	m._type = nil
-	delete(m.clearedFields, runtimebroker.FieldType)
 }
 
 // SetMode sets the "mode" field.
@@ -23042,62 +23027,6 @@ func (m *RuntimeBrokerMutation) VersionCleared() bool {
 func (m *RuntimeBrokerMutation) ResetVersion() {
 	m.version = nil
 	delete(m.clearedFields, runtimebroker.FieldVersion)
-}
-
-// SetLockVersion sets the "lock_version" field.
-func (m *RuntimeBrokerMutation) SetLockVersion(i int64) {
-	m.lock_version = &i
-	m.addlock_version = nil
-}
-
-// LockVersion returns the value of the "lock_version" field in the mutation.
-func (m *RuntimeBrokerMutation) LockVersion() (r int64, exists bool) {
-	v := m.lock_version
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldLockVersion returns the old "lock_version" field's value of the RuntimeBroker entity.
-// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *RuntimeBrokerMutation) OldLockVersion(ctx context.Context) (v int64, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldLockVersion is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldLockVersion requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldLockVersion: %w", err)
-	}
-	return oldValue.LockVersion, nil
-}
-
-// AddLockVersion adds i to the "lock_version" field.
-func (m *RuntimeBrokerMutation) AddLockVersion(i int64) {
-	if m.addlock_version != nil {
-		*m.addlock_version += i
-	} else {
-		m.addlock_version = &i
-	}
-}
-
-// AddedLockVersion returns the value that was added to the "lock_version" field in this mutation.
-func (m *RuntimeBrokerMutation) AddedLockVersion() (r int64, exists bool) {
-	v := m.addlock_version
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// ResetLockVersion resets all changes to the "lock_version" field.
-func (m *RuntimeBrokerMutation) ResetLockVersion() {
-	m.lock_version = nil
-	m.addlock_version = nil
 }
 
 // SetStatus sets the "status" field.
@@ -23755,7 +23684,7 @@ func (m *RuntimeBrokerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RuntimeBrokerMutation) Fields() []string {
-	fields := make([]string, 0, 20)
+	fields := make([]string, 0, 19)
 	if m.name != nil {
 		fields = append(fields, runtimebroker.FieldName)
 	}
@@ -23770,9 +23699,6 @@ func (m *RuntimeBrokerMutation) Fields() []string {
 	}
 	if m.version != nil {
 		fields = append(fields, runtimebroker.FieldVersion)
-	}
-	if m.lock_version != nil {
-		fields = append(fields, runtimebroker.FieldLockVersion)
 	}
 	if m.status != nil {
 		fields = append(fields, runtimebroker.FieldStatus)
@@ -23834,8 +23760,6 @@ func (m *RuntimeBrokerMutation) Field(name string) (ent.Value, bool) {
 		return m.Mode()
 	case runtimebroker.FieldVersion:
 		return m.Version()
-	case runtimebroker.FieldLockVersion:
-		return m.LockVersion()
 	case runtimebroker.FieldStatus:
 		return m.Status()
 	case runtimebroker.FieldConnectionState:
@@ -23883,8 +23807,6 @@ func (m *RuntimeBrokerMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldMode(ctx)
 	case runtimebroker.FieldVersion:
 		return m.OldVersion(ctx)
-	case runtimebroker.FieldLockVersion:
-		return m.OldLockVersion(ctx)
 	case runtimebroker.FieldStatus:
 		return m.OldStatus(ctx)
 	case runtimebroker.FieldConnectionState:
@@ -23956,13 +23878,6 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetVersion(v)
-		return nil
-	case runtimebroker.FieldLockVersion:
-		v, ok := value.(int64)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetLockVersion(v)
 		return nil
 	case runtimebroker.FieldStatus:
 		v, ok := value.(string)
@@ -24069,21 +23984,13 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 // AddedFields returns all numeric fields that were incremented/decremented during
 // this mutation.
 func (m *RuntimeBrokerMutation) AddedFields() []string {
-	var fields []string
-	if m.addlock_version != nil {
-		fields = append(fields, runtimebroker.FieldLockVersion)
-	}
-	return fields
+	return nil
 }
 
 // AddedField returns the numeric value that was incremented/decremented on a field
 // with the given name. The second boolean return value indicates that this field
 // was not set, or was not defined in the schema.
 func (m *RuntimeBrokerMutation) AddedField(name string) (ent.Value, bool) {
-	switch name {
-	case runtimebroker.FieldLockVersion:
-		return m.AddedLockVersion()
-	}
 	return nil, false
 }
 
@@ -24092,13 +23999,6 @@ func (m *RuntimeBrokerMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *RuntimeBrokerMutation) AddField(name string, value ent.Value) error {
 	switch name {
-	case runtimebroker.FieldLockVersion:
-		v, ok := value.(int64)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.AddLockVersion(v)
-		return nil
 	}
 	return fmt.Errorf("unknown RuntimeBroker numeric field %s", name)
 }
@@ -24107,9 +24007,6 @@ func (m *RuntimeBrokerMutation) AddField(name string, value ent.Value) error {
 // mutation.
 func (m *RuntimeBrokerMutation) ClearedFields() []string {
 	var fields []string
-	if m.FieldCleared(runtimebroker.FieldType) {
-		fields = append(fields, runtimebroker.FieldType)
-	}
 	if m.FieldCleared(runtimebroker.FieldVersion) {
 		fields = append(fields, runtimebroker.FieldVersion)
 	}
@@ -24154,9 +24051,6 @@ func (m *RuntimeBrokerMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *RuntimeBrokerMutation) ClearField(name string) error {
 	switch name {
-	case runtimebroker.FieldType:
-		m.ClearType()
-		return nil
 	case runtimebroker.FieldVersion:
 		m.ClearVersion()
 		return nil
@@ -24209,9 +24103,6 @@ func (m *RuntimeBrokerMutation) ResetField(name string) error {
 		return nil
 	case runtimebroker.FieldVersion:
 		m.ResetVersion()
-		return nil
-	case runtimebroker.FieldLockVersion:
-		m.ResetLockVersion()
 		return nil
 	case runtimebroker.FieldStatus:
 		m.ResetStatus()
