@@ -14,7 +14,10 @@
 
 package telegram
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+)
 
 // ProjectOption represents a project choice for keyboard selection.
 type ProjectOption struct {
@@ -76,15 +79,34 @@ func buildAgentSelectionKeyboard(agents []string, currentDefault string) *Inline
 }
 
 // buildDefaultAgentKeyboard creates an inline keyboard for /default command.
-// Callback data format: dflt:<agentSlug>
-func buildDefaultAgentKeyboard(agents []string, currentDefault string) *InlineKeyboardMarkup {
-	kb := buildAgentKeyboard(agents, currentDefault, "dflt")
+// Callback data format: dflt:<agentSlug> or dflt:<agentSlug>:<threadID> for topic-scoped defaults.
+func buildDefaultAgentKeyboard(agents []string, currentDefault string, threadID int64) *InlineKeyboardMarkup {
+	suffix := ""
+	if threadID != 0 {
+		suffix = ":" + strconv.FormatInt(threadID, 10)
+	}
+	prefix := "dflt"
+	kb := buildAgentKeyboard(agents, currentDefault, prefix)
+	if suffix != "" {
+		for i, row := range kb.InlineKeyboard {
+			for j, btn := range row {
+				kb.InlineKeyboard[i][j].CallbackData = truncateCallback(btn.CallbackData + suffix)
+			}
+		}
+	}
 	noneLabel := "No default agent"
+	if threadID != 0 {
+		noneLabel = "No default agent (use chat default)"
+	}
 	if currentDefault == "" {
-		noneLabel = "✓ No default agent (current)"
+		if threadID != 0 {
+			noneLabel = "✓ No default agent (current, using chat default)"
+		} else {
+			noneLabel = "✓ No default agent (current)"
+		}
 	}
 	kb.InlineKeyboard = append(kb.InlineKeyboard, []InlineKeyboardButton{
-		{Text: noneLabel, CallbackData: "dflt:__none__"},
+		{Text: noneLabel, CallbackData: truncateCallback("dflt:__none__" + suffix)},
 	})
 	return kb
 }

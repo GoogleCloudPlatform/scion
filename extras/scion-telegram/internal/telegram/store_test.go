@@ -779,6 +779,77 @@ func TestStore_GroupLink_NotifyInGroup(t *testing.T) {
 	assert.False(t, got.NotifyInGroup)
 }
 
+// --- TopicDefault ---
+
+func TestStore_TopicDefault_SetAndGet(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Not found returns empty string.
+	slug, err := store.GetTopicDefault(ctx, -100, 42)
+	require.NoError(t, err)
+	assert.Equal(t, "", slug)
+
+	// Set and retrieve.
+	require.NoError(t, store.SetTopicDefault(ctx, -100, 42, "coder"))
+	slug, err = store.GetTopicDefault(ctx, -100, 42)
+	require.NoError(t, err)
+	assert.Equal(t, "coder", slug)
+
+	// Different thread returns empty.
+	slug, err = store.GetTopicDefault(ctx, -100, 99)
+	require.NoError(t, err)
+	assert.Equal(t, "", slug)
+}
+
+func TestStore_TopicDefault_Upsert(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.SetTopicDefault(ctx, -100, 42, "coder"))
+	require.NoError(t, store.SetTopicDefault(ctx, -100, 42, "reviewer"))
+
+	slug, err := store.GetTopicDefault(ctx, -100, 42)
+	require.NoError(t, err)
+	assert.Equal(t, "reviewer", slug)
+}
+
+func TestStore_TopicDefault_Delete(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.SetTopicDefault(ctx, -100, 42, "coder"))
+	require.NoError(t, store.DeleteTopicDefault(ctx, -100, 42))
+
+	slug, err := store.GetTopicDefault(ctx, -100, 42)
+	require.NoError(t, err)
+	assert.Equal(t, "", slug)
+
+	// Delete non-existent is not an error.
+	require.NoError(t, store.DeleteTopicDefault(ctx, -100, 99))
+}
+
+func TestStore_TopicDefault_MultipleTopics(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.SetTopicDefault(ctx, -100, 1, "coder"))
+	require.NoError(t, store.SetTopicDefault(ctx, -100, 2, "reviewer"))
+	require.NoError(t, store.SetTopicDefault(ctx, -200, 1, "designer"))
+
+	slug, err := store.GetTopicDefault(ctx, -100, 1)
+	require.NoError(t, err)
+	assert.Equal(t, "coder", slug)
+
+	slug, err = store.GetTopicDefault(ctx, -100, 2)
+	require.NoError(t, err)
+	assert.Equal(t, "reviewer", slug)
+
+	slug, err = store.GetTopicDefault(ctx, -200, 1)
+	require.NoError(t, err)
+	assert.Equal(t, "designer", slug)
+}
+
 // --- Store lifecycle ---
 
 func TestStore_OpenInvalidPath(t *testing.T) {

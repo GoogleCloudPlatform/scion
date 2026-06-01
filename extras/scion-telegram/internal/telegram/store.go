@@ -67,6 +67,11 @@ type Store interface {
 	GetNotificationPrefs(ctx context.Context, telegramUserID string) ([]*NotificationPref, error)
 	GetNotificationPref(ctx context.Context, telegramUserID, projectID, agentSlug string) (*NotificationPref, error)
 
+	// TopicDefault — per-topic default agent overrides for forum groups
+	GetTopicDefault(ctx context.Context, chatID int64, threadID int64) (string, error)
+	SetTopicDefault(ctx context.Context, chatID int64, threadID int64, agentSlug string) error
+	DeleteTopicDefault(ctx context.Context, chatID int64, threadID int64) error
+
 	// Lifecycle
 	Close() error
 }
@@ -233,6 +238,13 @@ CREATE TABLE IF NOT EXISTS notification_prefs (
 	agent_slug       TEXT NOT NULL,
 	enabled          INTEGER NOT NULL DEFAULT 1,
 	PRIMARY KEY (telegram_user_id, project_id, agent_slug)
+);
+
+CREATE TABLE IF NOT EXISTS topic_defaults (
+	chat_id    INTEGER NOT NULL,
+	thread_id  INTEGER NOT NULL,
+	agent_slug TEXT NOT NULL,
+	PRIMARY KEY (chat_id, thread_id)
 );
 `
 	if _, err := s.db.Exec(ddl); err != nil {
@@ -609,6 +621,32 @@ func (s *sqliteStore) GetNotificationPref(ctx context.Context, telegramUserID, p
 	}
 	p.Enabled = enabled != 0
 	return &p, nil
+}
+
+// --- TopicDefault ---
+
+func (s *sqliteStore) GetTopicDefault(ctx context.Context, chatID int64, threadID int64) (string, error) {
+	const q = `SELECT agent_slug FROM topic_defaults WHERE chat_id = ? AND thread_id = ?`
+	var agentSlug string
+	err := s.db.QueryRowContext(ctx, q, chatID, threadID).Scan(&agentSlug)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return agentSlug, err
+}
+
+func (s *sqliteStore) SetTopicDefault(ctx context.Context, chatID int64, threadID int64, agentSlug string) error {
+	const q = `
+INSERT INTO topic_defaults (chat_id, thread_id, agent_slug)
+VALUES (?, ?, ?)
+ON CONFLICT(chat_id, thread_id) DO UPDATE SET agent_slug=excluded.agent_slug`
+	_, err := s.db.ExecContext(ctx, q, chatID, threadID, agentSlug)
+	return err
+}
+
+func (s *sqliteStore) DeleteTopicDefault(ctx context.Context, chatID int64, threadID int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM topic_defaults WHERE chat_id = ? AND thread_id = ?`, chatID, threadID)
+	return err
 }
 
 // --- scan helpers ---

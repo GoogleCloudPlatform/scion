@@ -324,10 +324,20 @@ func (h *CallbackHandler) handleDefaultCallback(ctx context.Context, cb *Callbac
 		messageID = cb.Message.MessageID
 	}
 
+	// Parse optional thread ID for topic-scoped defaults.
+	var threadID int64
+	if len(parts) >= 2 {
+		threadID, _ = strconv.ParseInt(parts[1], 10, 64)
+	}
+
 	link, err := h.store.GetGroupLink(ctx, chatID)
 	if err != nil || link == nil {
 		h.answerCallback(ctx, cb.ID, "Group is not linked to a project.", false)
 		return err
+	}
+
+	if threadID != 0 {
+		return h.handleTopicDefaultCallback(ctx, cb, chatID, messageID, threadID, agentSlug, link)
 	}
 
 	if agentSlug == "__none__" {
@@ -348,6 +358,32 @@ func (h *CallbackHandler) handleDefaultCallback(ctx context.Context, cb *Callbac
 		h.editMessage(ctx, chatID, messageID,
 			fmt.Sprintf("Default agent set to @%s.", agentSlug), nil)
 		h.answerCallback(ctx, cb.ID, fmt.Sprintf("Default: @%s", agentSlug), false)
+	}
+	return nil
+}
+
+func (h *CallbackHandler) handleTopicDefaultCallback(ctx context.Context, cb *CallbackQuery, chatID, messageID, threadID int64, agentSlug string, link *GroupLink) error {
+	if agentSlug == "__none__" {
+		if err := h.store.DeleteTopicDefault(ctx, chatID, threadID); err != nil {
+			h.log.Error("Failed to delete topic default", "chat_id", chatID, "thread_id", threadID, "error", err)
+			h.answerCallback(ctx, cb.ID, "Failed to update topic default.", false)
+			return err
+		}
+		fallbackMsg := "Topic default removed."
+		if link.DefaultAgent != "" {
+			fallbackMsg += fmt.Sprintf(" Messages will use the chat default (@%s).", link.DefaultAgent)
+		}
+		h.editMessage(ctx, chatID, messageID, fallbackMsg, nil)
+		h.answerCallback(ctx, cb.ID, "Topic default: none", false)
+	} else {
+		if err := h.store.SetTopicDefault(ctx, chatID, threadID, agentSlug); err != nil {
+			h.log.Error("Failed to set topic default", "chat_id", chatID, "thread_id", threadID, "error", err)
+			h.answerCallback(ctx, cb.ID, "Failed to update topic default.", false)
+			return err
+		}
+		h.editMessage(ctx, chatID, messageID,
+			fmt.Sprintf("Default agent for this topic set to @%s.", agentSlug), nil)
+		h.answerCallback(ctx, cb.ID, fmt.Sprintf("Topic default: @%s", agentSlug), false)
 	}
 	return nil
 }

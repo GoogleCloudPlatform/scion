@@ -1549,8 +1549,16 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	}
 	b.mu.RUnlock()
 
+	// Resolve effective default agent: topic-level override first, then chat-level.
+	effectiveDefault := link.DefaultAgent
+	if tgMsg.MessageThreadID != 0 {
+		if topicDefault, _ := b.store.GetTopicDefault(ctx, chatID, tgMsg.MessageThreadID); topicDefault != "" {
+			effectiveDefault = topicDefault
+		}
+	}
+
 	// Resolve target agents from @-mentions.
-	targets, isAll := resolveTargetAgents(tgMsg, botUsername, link.DefaultAgent, agents)
+	targets, isAll := resolveTargetAgents(tgMsg, botUsername, effectiveDefault, agents)
 
 	// Fallback 1: reply-to-bot-message — extract the agent from the replied-to message.
 	if len(targets) == 0 && tgMsg.ReplyToMessage != nil {
@@ -1604,13 +1612,13 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	// Telegram user — that's a user-to-user message. Mentions embedded
 	// later (offset>0) do not block default routing; resolveUserMentions
 	// injects the resolved scion identity for those.
-	if len(targets) == 0 && link.DefaultAgent != "" {
+	if len(targets) == 0 && effectiveDefault != "" {
 		hasAttachment := tgMsg.Photo != nil || tgMsg.Document != nil
 		text := strings.TrimSpace(tgMsg.Text)
 		textRoutes := text != "" && !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "@") && !hasNonBotUserMention(tgMsg, botUsername, agents)
 		if textRoutes || hasAttachment {
-			b.log.Debug("Using default agent", "agent", link.DefaultAgent)
-			targets = []string{link.DefaultAgent}
+			b.log.Debug("Using default agent", "agent", effectiveDefault)
+			targets = []string{effectiveDefault}
 		}
 	}
 

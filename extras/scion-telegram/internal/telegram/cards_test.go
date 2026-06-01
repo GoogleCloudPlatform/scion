@@ -96,11 +96,22 @@ func TestBuildAgentSelectionKeyboard_NoDefault(t *testing.T) {
 }
 
 func TestBuildDefaultAgentKeyboard_CallbackFormat(t *testing.T) {
-	kb := buildDefaultAgentKeyboard([]string{"coder", "reviewer"}, "coder")
+	kb := buildDefaultAgentKeyboard([]string{"coder", "reviewer"}, "coder", 0)
 	assert.Equal(t, "dflt:coder", kb.InlineKeyboard[0][0].CallbackData)
 	assert.Equal(t, "✓ coder (current)", kb.InlineKeyboard[0][0].Text)
 	assert.Equal(t, "dflt:reviewer", kb.InlineKeyboard[0][1].CallbackData)
 	assert.Equal(t, "reviewer", kb.InlineKeyboard[0][1].Text)
+}
+
+func TestBuildDefaultAgentKeyboard_TopicScoped(t *testing.T) {
+	kb := buildDefaultAgentKeyboard([]string{"coder", "reviewer"}, "coder", 42)
+	assert.Equal(t, "dflt:coder:42", kb.InlineKeyboard[0][0].CallbackData)
+	assert.Equal(t, "✓ coder (current)", kb.InlineKeyboard[0][0].Text)
+	assert.Equal(t, "dflt:reviewer:42", kb.InlineKeyboard[0][1].CallbackData)
+
+	lastRow := kb.InlineKeyboard[len(kb.InlineKeyboard)-1]
+	assert.Equal(t, "dflt:__none__:42", lastRow[0].CallbackData)
+	assert.Contains(t, lastRow[0].Text, "use chat default")
 }
 
 func TestBuildAskUserKeyboard_WithChoices(t *testing.T) {

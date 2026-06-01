@@ -193,6 +193,7 @@ func (h *CommandHandler) handleSetup(msg *TGMessage) {
 
 func (h *CommandHandler) handleDefault(msg *TGMessage) {
 	chatID := msg.Chat.ID
+	threadID := msg.MessageThreadID
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -222,8 +223,22 @@ func (h *CommandHandler) handleDefault(msg *TGMessage) {
 		return
 	}
 
-	kb := buildDefaultAgentKeyboard(agentSlugs(agents), link.DefaultAgent)
-	h.replyWithKeyboard(chatID, "Select the default agent for @-mentions:", kb)
+	promptText := "Select the default agent for @-mentions:"
+	currentDefault := link.DefaultAgent
+
+	if threadID != 0 {
+		topicDefault, _ := h.store.GetTopicDefault(ctx, chatID, threadID)
+		if topicDefault != "" {
+			currentDefault = topicDefault
+		}
+		promptText = "Select the default agent for this topic:"
+		if link.DefaultAgent != "" {
+			promptText += fmt.Sprintf("\nChat-wide default: @%s", link.DefaultAgent)
+		}
+	}
+
+	kb := buildDefaultAgentKeyboard(agentSlugs(agents), currentDefault, threadID)
+	h.replyWithKeyboardInThread(chatID, threadID, promptText, kb)
 }
 
 func (h *CommandHandler) handleAgents(msg *TGMessage) {
@@ -571,6 +586,18 @@ func (h *CommandHandler) replyWithKeyboard(chatID int64, text string, kb *Inline
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if _, err := h.api.SendMessageWithKeyboard(ctx, chatID, text, "", kb, 0); err != nil {
+		h.log.Error("Failed to send reply with keyboard", "chat_id", chatID, "error", err)
+	}
+}
+
+func (h *CommandHandler) replyWithKeyboardInThread(chatID int64, threadID int64, text string, kb *InlineKeyboardMarkup) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var opts []SendOption
+	if threadID != 0 {
+		opts = append(opts, SendOption{MessageThreadID: threadID})
+	}
+	if _, err := h.api.SendMessageWithKeyboard(ctx, chatID, text, "", kb, 0, opts...); err != nil {
 		h.log.Error("Failed to send reply with keyboard", "chat_id", chatID, "error", err)
 	}
 }
