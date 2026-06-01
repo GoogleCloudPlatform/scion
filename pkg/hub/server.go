@@ -1302,7 +1302,7 @@ func (s *Server) SetEventPublisher(ep EventPublisher) {
 }
 
 // StartNotificationDispatcher creates and starts the notification dispatcher
-// if a ChannelEventPublisher is available. It uses a lazy getter for the
+// if a subscription-capable EventPublisher is available. It uses a lazy getter for the
 // AgentDispatcher so it works even if SetDispatcher is called later.
 // Safe to call multiple times; subsequent calls are no-ops.
 func (s *Server) StartNotificationDispatcher() {
@@ -1313,13 +1313,12 @@ func (s *Server) StartNotificationDispatcher() {
 		return // already started
 	}
 
-	ep, ok := s.events.(*ChannelEventPublisher)
-	if !ok {
+	if _, isNoop := s.events.(noopEventPublisher); isNoop || s.events == nil {
 		slog.Warn("Event publisher does not support subscriptions, notification dispatcher not started")
 		return
 	}
 
-	nd := NewNotificationDispatcher(s.store, ep, s.GetDispatcher, logging.Subsystem("hub.notifications"))
+	nd := NewNotificationDispatcher(s.store, s.events, s.GetDispatcher, logging.Subsystem("hub.notifications"))
 	nd.messageLog = s.dedicatedMessageLog
 	nd.channelRegistry = s.channelRegistry
 	s.notificationDispatcher = nd
@@ -1327,7 +1326,7 @@ func (s *Server) StartNotificationDispatcher() {
 }
 
 // StartMessageBroker creates and starts the message broker proxy if a
-// ChannelEventPublisher is available. The broker enables pub/sub message
+// subscription-capable EventPublisher is available. The broker enables pub/sub message
 // routing with topic-based subscriptions and broadcast fan-out.
 // Safe to call multiple times; subsequent calls are no-ops.
 func (s *Server) StartMessageBroker(b eventbus.EventBus) {
@@ -1338,13 +1337,12 @@ func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 		return // already started
 	}
 
-	ep, ok := s.events.(*ChannelEventPublisher)
-	if !ok {
+	if _, isNoop := s.events.(noopEventPublisher); isNoop || s.events == nil {
 		slog.Warn("Event publisher does not support subscriptions, message broker proxy not started")
 		return
 	}
 
-	proxy := NewMessageBrokerProxy(b, s.store, ep, s.GetDispatcher, logging.Subsystem("hub.broker"))
+	proxy := NewMessageBrokerProxy(b, s.store, s.events, s.GetDispatcher, logging.Subsystem("hub.broker"))
 	proxy.messageLog = s.dedicatedMessageLog
 	s.messageBrokerProxy = proxy
 	proxy.Start()
