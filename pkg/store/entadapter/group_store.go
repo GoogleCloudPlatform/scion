@@ -47,6 +47,19 @@ func parseUUID(s string) (uuid.UUID, error) {
 	return uid, nil
 }
 
+// parseGetID parses a primary-key identifier for a get-by-id lookup. A malformed
+// identifier cannot match any UUID primary key, so it is reported as
+// store.ErrNotFound — matching the raw-SQL store, where such a lookup simply
+// returned no row (callers like resolveTemplate rely on ErrNotFound to fall back
+// to slug-based resolution).
+func parseGetID(s string) (uuid.UUID, error) {
+	uid, err := uuid.Parse(s)
+	if err != nil {
+		return uuid.Nil, store.ErrNotFound
+	}
+	return uid, nil
+}
+
 // mapError converts Ent errors to store errors.
 func mapError(err error) error {
 	if err == nil {
@@ -164,7 +177,7 @@ func (s *GroupStore) CreateGroup(ctx context.Context, g *store.Group) error {
 
 // GetGroup retrieves a group by ID.
 func (s *GroupStore) GetGroup(ctx context.Context, id string) (*store.Group, error) {
-	uid, err := parseUUID(id)
+	uid, err := parseGetID(id)
 	if err != nil {
 		return nil, err
 	}

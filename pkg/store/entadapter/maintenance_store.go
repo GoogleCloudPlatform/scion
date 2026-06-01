@@ -281,7 +281,7 @@ func (s *MaintenanceStore) UpdateMaintenanceRun(ctx context.Context, run *store.
 
 // GetMaintenanceRun returns a single run by ID.
 func (s *MaintenanceStore) GetMaintenanceRun(ctx context.Context, id string) (*store.MaintenanceOperationRun, error) {
-	uid, err := parseUUID(id)
+	uid, err := parseGetID(id)
 	if err != nil {
 		return nil, err
 	}

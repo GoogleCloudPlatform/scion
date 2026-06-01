@@ -234,7 +234,7 @@ func (s *NotificationStore) CreateNotificationSubscription(ctx context.Context, 
 
 // GetNotificationSubscription returns a single subscription by ID.
 func (s *NotificationStore) GetNotificationSubscription(ctx context.Context, id string) (*store.NotificationSubscription, error) {
-	uid, err := parseUUID(id)
+	uid, err := parseGetID(id)
 	if err != nil {
 		return nil, err
 	}
@@ -613,7 +613,7 @@ func (s *NotificationStore) CreateSubscriptionTemplate(ctx context.Context, tmpl
 
 // GetSubscriptionTemplate returns a template by ID.
 func (s *NotificationStore) GetSubscriptionTemplate(ctx context.Context, id string) (*store.SubscriptionTemplate, error) {
-	uid, err := parseUUID(id)
+	uid, err := parseGetID(id)
 	if err != nil {
 		return nil, err
 	}
