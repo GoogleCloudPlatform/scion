@@ -44,18 +44,13 @@ func newTestStore(url string) (store.Store, error) {
 		dsn = "file:" + url + "?cache=shared"
 	}
 
-	// MaxOpenConns must be 1 for SQLite to serialize writes and avoid
-	// "database is locked" errors under concurrent access (e.g. the parallel
-	// per-agent writes in stop-all). This mirrors the production pool config in
-	// cmd/server_foreground.go / pkg/config.
-	client, err := entc.OpenSQLite(dsn, entc.PoolConfig{MaxOpenConns: 1})
+	client, err := entc.OpenSQLite(dsn, entc.PoolConfig{})
 	if err != nil {
 		return nil, err
 	}
-	s := entadapter.NewCompositeStore(client)
-	if err := s.Migrate(context.Background()); err != nil {
-		_ = s.Close()
+	if err := entc.AutoMigrate(context.Background(), client); err != nil {
+		_ = client.Close()
 		return nil, err
 	}
-	return s, nil
+	return entadapter.NewCompositeStore(client), nil
 }

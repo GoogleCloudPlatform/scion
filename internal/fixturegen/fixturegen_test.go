@@ -21,7 +21,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
+	entsql "entgo.io/ent/dialect/sql"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -57,19 +59,20 @@ func TestFixtureLoadable(t *testing.T) {
 	_, err := Generate(ctx, path)
 	require.NoError(t, err)
 
-	// Reopen as a fresh store and confirm connectivity + seeded rows.
-	s, err := sqlite.New(path)
+	// Reopen as a fresh Ent client and confirm connectivity + seeded rows.
+	client, err := entc.OpenSQLite("file:"+path, entc.PoolConfig{})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = s.Close() })
-	require.NoError(t, s.Ping(ctx))
+	t.Cleanup(func() { _ = client.Close() })
+	db := client.Driver().(*entsql.Driver).DB()
+	require.NoError(t, db.PingContext(ctx))
 
 	var users int
-	require.NoError(t, s.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM users").Scan(&users))
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM users").Scan(&users))
 	assert.Positive(t, users, "users table should have seeded rows")
 
 	// The soft-deleted agent edge case must be present.
 	var deletedAgents int
-	require.NoError(t, s.DB().QueryRowContext(ctx,
+	require.NoError(t, db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM agents WHERE deleted_at IS NOT NULL").Scan(&deletedAgents))
 	assert.Positive(t, deletedAgents, "fixture should include a soft-deleted agent")
 }
