@@ -788,7 +788,7 @@ func TestProjectIDFromServiceAccountEmail(t *testing.T) {
 		email string
 		want  string
 	}{
-		{"agent@my-project.iam.gserviceaccount.com", tid("my-project")},
+		{"agent@my-project.iam.gserviceaccount.com", "my-project"},
 		{"fold-run-infra@foldrun-ptone-argolis.iam.gserviceaccount.com", "foldrun-ptone-argolis"},
 		{"sa@example.com", ""},
 		{"no-at-sign", ""},
