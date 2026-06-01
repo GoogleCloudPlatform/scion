@@ -45,7 +45,7 @@ func TestResolution_PlainEnvVar(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: tid("project-res-1"), BrokerID: tid("broker-res-1"),
+		ProjectID: tid("project-res-1"), BrokerID: tid("broker-res-1"), BrokerName: "test-broker",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestResolution_SecretUserScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: tid("project-res-2"), BrokerID: tid("broker-res-2"),
+		ProjectID: tid("project-res-2"), BrokerID: tid("broker-res-2"), BrokerName: "test-broker",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestResolution_ProjectEnvVar(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: tid("project-res-3"), BrokerID: tid("broker-res-3"),
+		ProjectID: tid("project-res-3"), BrokerID: tid("broker-res-3"), BrokerName: "test-broker",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestResolution_SecretPromotedEnvVar(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: tid("project-res-4"), BrokerID: tid("broker-res-4"),
+		ProjectID: tid("project-res-4"), BrokerID: tid("broker-res-4"), BrokerName: "test-broker",
 	}); err != nil {
 		t.Fatal(err)
 	}
