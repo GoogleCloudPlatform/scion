@@ -52,25 +52,43 @@ func NewFanOutEventBus(buses []NamedEventBus, log *slog.Logger) *FanOutEventBus 
 
 func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	if msg.Channel != "" {
-		var matched bool
-		for _, nb := range f.buses {
-			if nb.Name == InProcessBusName {
-				if err := nb.Bus.Publish(ctx, topic, msg); err != nil {
-					return fmt.Errorf("inprocess bus publish failed: %w", err)
-				}
-				continue
-			}
-			if nb.Name == msg.Channel {
-				matched = true
-				if err := nb.Bus.Publish(ctx, topic, msg); err != nil {
-					return fmt.Errorf("channel %q publish failed: %w", msg.Channel, err)
-				}
+		if msg.Channel == InProcessBusName {
+			return fmt.Errorf("channel %q is reserved for internal use", InProcessBusName)
+		}
+
+		var inproc, target *NamedEventBus
+		for i := range f.buses {
+			switch f.buses[i].Name {
+			case InProcessBusName:
+				inproc = &f.buses[i]
+			case msg.Channel:
+				target = &f.buses[i]
 			}
 		}
-		if !matched {
+		if target == nil {
 			return fmt.Errorf("no broker registered for channel %q", msg.Channel)
 		}
-		return nil
+
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		if inproc != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := inproc.Bus.Publish(ctx, topic, msg); err != nil {
+					errs[0] = fmt.Errorf("inprocess bus publish failed: %w", err)
+				}
+			}()
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := target.Bus.Publish(ctx, topic, msg); err != nil {
+				errs[1] = fmt.Errorf("channel %q publish failed: %w", msg.Channel, err)
+			}
+		}()
+		wg.Wait()
+		return errors.Join(errs...)
 	}
 
 	var wg sync.WaitGroup

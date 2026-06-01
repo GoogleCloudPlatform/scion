@@ -318,11 +318,30 @@ func TestFanOutEventBus_ChannelRoutingUnmatchedChannel(t *testing.T) {
 		t.Fatalf("unexpected error message: %v", err)
 	}
 
+	// Unmatched channel fails fast — nothing is published.
 	inproc.mu.Lock()
-	if len(inproc.published) != 1 {
-		t.Errorf("inprocess bus should still receive message, got %d", len(inproc.published))
+	if len(inproc.published) != 0 {
+		t.Errorf("inprocess bus should not receive message on unmatched channel, got %d", len(inproc.published))
 	}
 	inproc.mu.Unlock()
+}
+
+func TestFanOutEventBus_ChannelRoutingReservedInprocess(t *testing.T) {
+	inproc := newStubEventBus()
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: InProcessBusName, Bus: inproc},
+	}, slog.Default())
+
+	msg := messages.NewInstruction("user:alice", "agent:bot", "hello")
+	msg.Channel = "inprocess"
+
+	err := fan.Publish(context.Background(), "test.topic", msg)
+	if err == nil {
+		t.Fatal("expected error for reserved inprocess channel")
+	}
+	if !strings.Contains(err.Error(), "reserved for internal use") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
 }
 
 func TestFanOutEventBus_ChannelRoutingPublishError(t *testing.T) {
