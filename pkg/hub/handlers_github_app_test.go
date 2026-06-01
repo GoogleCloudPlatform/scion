@@ -213,7 +213,7 @@ func TestHandleProjectGitHubInstallation(t *testing.T) {
 	}
 
 	// Associate project with installation
-	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/project_gh_test/github-installation", map[string]interface{}{
+	rec := doRequest(t, srv, http.MethodPut, fmt.Sprintf("/api/v1/projects/%s/github-installation", tid("project_gh_test")), map[string]interface{}{
 		"installation_id": 54321,
 	})
 	if rec.Code != http.StatusOK {
@@ -233,13 +233,13 @@ func TestHandleProjectGitHubInstallation(t *testing.T) {
 	}
 
 	// Get status
-	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/project_gh_test/github-status", nil)
+	rec = doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/github-status", tid("project_gh_test")), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// Remove association
-	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/projects/project_gh_test/github-installation", nil)
+	rec = doRequest(t, srv, http.MethodDelete, fmt.Sprintf("/api/v1/projects/%s/github-installation", tid("project_gh_test")), nil)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -268,7 +268,7 @@ func TestHandleProjectGitHubStatus_PostNoInstallation(t *testing.T) {
 	}
 
 	// POST without installation should return 400
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/project_gh_status_check/github-status", nil)
+	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/github-status", tid("project_gh_status_check")), nil)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for project without installation, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -308,7 +308,7 @@ func TestHandleProjectGitHubStatus_PostWithInstallation(t *testing.T) {
 	// POST should succeed (though minting will fail because no GitHub App
 	// is configured — the endpoint should still return 200 with the error
 	// captured in the response and project status updated to error)
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/project_gh_status_check2/github-status", nil)
+	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/github-status", tid("project_gh_status_check2")), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -345,7 +345,7 @@ func TestHandleProjectGitHubInstallation_NotFoundInstallation(t *testing.T) {
 		t.Fatalf("failed to create project: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/project_gh_notfound/github-installation", map[string]interface{}{
+	rec := doRequest(t, srv, http.MethodPut, fmt.Sprintf("/api/v1/projects/%s/github-installation", tid("project_gh_notfound")), map[string]interface{}{
 		"installation_id": 99999,
 	})
 	if rec.Code != http.StatusNotFound {
@@ -370,7 +370,7 @@ func TestHandleProjectGitHubPermissions(t *testing.T) {
 	}
 
 	// Get defaults
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/project_gh_perms/github-permissions", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/github-permissions", tid("project_gh_perms")), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
@@ -384,7 +384,7 @@ func TestHandleProjectGitHubPermissions(t *testing.T) {
 	}
 
 	// Set custom permissions
-	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/project_gh_perms/github-permissions", map[string]interface{}{
+	rec = doRequest(t, srv, http.MethodPut, fmt.Sprintf("/api/v1/projects/%s/github-permissions", tid("project_gh_perms")), map[string]interface{}{
 		"contents": "read",
 		"metadata": "read",
 	})
@@ -402,7 +402,7 @@ func TestHandleProjectGitHubPermissions(t *testing.T) {
 	}
 
 	// Reset to defaults
-	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/projects/project_gh_perms/github-permissions", nil)
+	rec = doRequest(t, srv, http.MethodDelete, fmt.Sprintf("/api/v1/projects/%s/github-permissions", tid("project_gh_perms")), nil)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", rec.Code)
 	}
