@@ -14,11 +14,34 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/apikey"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/invitecode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperationrun"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/notificationsubscription"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectsyncstate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
 )
 
 // ent aliases to avoid import conflicts in user's code.
@@ -79,13 +102,36 @@ var (
 func checkColumn(t, c string) error {
 	initCheck.Do(func() {
 		columnCheck = sql.NewColumnCheck(map[string]func(string) bool{
-			accesspolicy.Table:    accesspolicy.ValidColumn,
-			agent.Table:           agent.ValidColumn,
-			group.Table:           group.ValidColumn,
-			groupmembership.Table: groupmembership.ValidColumn,
-			policybinding.Table:   policybinding.ValidColumn,
-			project.Table:         project.ValidColumn,
-			user.Table:            user.ValidColumn,
+			accesspolicy.Table:             accesspolicy.ValidColumn,
+			agent.Table:                    agent.ValidColumn,
+			allowlistentry.Table:           allowlistentry.ValidColumn,
+			apikey.Table:                   apikey.ValidColumn,
+			brokerjointoken.Table:          brokerjointoken.ValidColumn,
+			brokersecret.Table:             brokersecret.ValidColumn,
+			envvar.Table:                   envvar.ValidColumn,
+			gcpserviceaccount.Table:        gcpserviceaccount.ValidColumn,
+			githubinstallation.Table:       githubinstallation.ValidColumn,
+			group.Table:                    group.ValidColumn,
+			groupmembership.Table:          groupmembership.ValidColumn,
+			harnessconfig.Table:            harnessconfig.ValidColumn,
+			invitecode.Table:               invitecode.ValidColumn,
+			maintenanceoperation.Table:     maintenanceoperation.ValidColumn,
+			maintenanceoperationrun.Table:  maintenanceoperationrun.ValidColumn,
+			message.Table:                  message.ValidColumn,
+			notification.Table:             notification.ValidColumn,
+			notificationsubscription.Table: notificationsubscription.ValidColumn,
+			policybinding.Table:            policybinding.ValidColumn,
+			project.Table:                  project.ValidColumn,
+			projectcontributor.Table:       projectcontributor.ValidColumn,
+			projectsyncstate.Table:         projectsyncstate.ValidColumn,
+			runtimebroker.Table:            runtimebroker.ValidColumn,
+			schedule.Table:                 schedule.ValidColumn,
+			scheduledevent.Table:           scheduledevent.ValidColumn,
+			secret.Table:                   secret.ValidColumn,
+			subscriptiontemplate.Table:     subscriptiontemplate.ValidColumn,
+			template.Table:                 template.ValidColumn,
+			user.Table:                     user.ValidColumn,
+			useraccesstoken.Table:          useraccesstoken.ValidColumn,
 		})
 	})
 	return columnCheck(t, c)
