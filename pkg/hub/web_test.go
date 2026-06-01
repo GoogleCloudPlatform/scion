@@ -1426,7 +1426,7 @@ func TestSSEHandler_EventDelivery(t *testing.T) {
 			select {
 			case <-ticker.C:
 				pub.publish("project.test123.agent.status", AgentStatusEvent{
-					AgentID:   "agent-1",
+					AgentID:   tid("agent-1"),
 					ProjectID: "test123",
 					Phase:     "running",
 				})
@@ -1461,7 +1461,7 @@ func TestSSEHandler_EventDelivery(t *testing.T) {
 	assert.Contains(t, frame, "event: update\n")
 	assert.Contains(t, frame, "data: ")
 	assert.Contains(t, frame, `"subject":"project.test123.agent.status"`)
-	assert.Contains(t, frame, `"agentId":"agent-1"`)
+	assert.Contains(t, frame, `"agentId":tid("agent-1")`)
 	assert.Contains(t, frame, `"phase":"running"`)
 }
 
@@ -1708,7 +1708,7 @@ func TestSPAShellHandler_ContainsInitialData(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"agents": []map[string]interface{}{
 				{
-					"id":     "agent-1",
+					"id":     tid("agent-1"),
 					"name":   "test-agent",
 					"status": "running",
 					"_capabilities": map[string]interface{}{
@@ -1738,7 +1738,7 @@ func TestSPAShellHandler_ContainsInitialData(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// The __SCION_DATA__ should contain agent data
-	assert.Contains(t, html, `"agent-1"`)
+	assert.Contains(t, html, `tid("agent-1")`)
 	assert.Contains(t, html, `"test-agent"`)
 	assert.Contains(t, html, `"_capabilities"`)
 	assert.Contains(t, html, `"actions"`)

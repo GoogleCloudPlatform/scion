@@ -58,7 +58,7 @@ func TestUserActivityTracker_ThrottlesWrites(t *testing.T) {
 	tracker := NewUserActivityTracker(rec, time.Hour)
 
 	// First touch should write
-	tracker.Touch("user-1")
+	tracker.Touch(tid("user-1"))
 
 	// Wait for async goroutine
 	time.Sleep(50 * time.Millisecond)
@@ -67,12 +67,12 @@ func TestUserActivityTracker_ThrottlesWrites(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("expected 1 call after first touch, got %d", len(calls))
 	}
-	if calls[0].id != "user-1" {
+	if calls[0].id != tid("user-1") {
 		t.Errorf("expected user-1, got %s", calls[0].id)
 	}
 
 	// Second touch within the interval should be throttled
-	tracker.Touch("user-1")
+	tracker.Touch(tid("user-1"))
 	time.Sleep(50 * time.Millisecond)
 
 	calls = rec.getCalls()
@@ -85,7 +85,7 @@ func TestUserActivityTracker_DifferentUsers(t *testing.T) {
 	rec := &lastSeenRecorder{}
 	tracker := NewUserActivityTracker(rec, time.Hour)
 
-	tracker.Touch("user-1")
+	tracker.Touch(tid("user-1"))
 	tracker.Touch("user-2")
 
 	time.Sleep(50 * time.Millisecond)
@@ -101,11 +101,11 @@ func TestUserActivityTracker_WritesAfterInterval(t *testing.T) {
 	// Use a very short interval for testing
 	tracker := NewUserActivityTracker(rec, 10*time.Millisecond)
 
-	tracker.Touch("user-1")
+	tracker.Touch(tid("user-1"))
 	time.Sleep(50 * time.Millisecond)
 
 	// After interval has passed, a second touch should write again
-	tracker.Touch("user-1")
+	tracker.Touch(tid("user-1"))
 	time.Sleep(50 * time.Millisecond)
 
 	calls := rec.getCalls()

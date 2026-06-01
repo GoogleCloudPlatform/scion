@@ -188,7 +188,7 @@ func TestHandleProjectGitHubInstallation(t *testing.T) {
 
 	// Create a project
 	project := &store.Project{
-		ID:         "project_gh_test",
+		ID:         tid("project_gh_test"),
 		Slug:       "gh-test-project",
 		Name:       "GH Test Project",
 		GitRemote:  "https://github.com/acme/widgets",
@@ -221,7 +221,7 @@ func TestHandleProjectGitHubInstallation(t *testing.T) {
 	}
 
 	// Verify project has installation ID
-	updatedProject, err := s.GetProject(ctx, "project_gh_test")
+	updatedProject, err := s.GetProject(ctx, tid("project_gh_test"))
 	if err != nil {
 		t.Fatalf("failed to get project: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestHandleProjectGitHubInstallation(t *testing.T) {
 	}
 
 	// Verify removed
-	clearedProject, err := s.GetProject(ctx, "project_gh_test")
+	clearedProject, err := s.GetProject(ctx, tid("project_gh_test"))
 	if err != nil {
 		t.Fatalf("failed to get project: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestHandleProjectGitHubStatus_PostNoInstallation(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID: "project_gh_status_check", Slug: "gh-status-check", Name: "GH Status Check",
+		ID: tid("project_gh_status_check"), Slug: "gh-status-check", Name: "GH Status Check",
 		GitRemote: "https://github.com/acme/widgets",
 		Created:   time.Now(), Updated: time.Now(), Visibility: "private",
 	}
@@ -292,7 +292,7 @@ func TestHandleProjectGitHubStatus_PostWithInstallation(t *testing.T) {
 	}
 
 	project := &store.Project{
-		ID: "project_gh_status_check2", Slug: "gh-status-check2", Name: "GH Status Check 2",
+		ID: tid("project_gh_status_check2"), Slug: "gh-status-check2", Name: "GH Status Check 2",
 		GitRemote: "https://github.com/acme/widgets",
 		Created:   time.Now(), Updated: time.Now(), Visibility: "private",
 	}
@@ -338,7 +338,7 @@ func TestHandleProjectGitHubInstallation_NotFoundInstallation(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID: "project_gh_notfound", Slug: "gh-nf", Name: "GH NF",
+		ID: tid("project_gh_notfound"), Slug: "gh-nf", Name: "GH NF",
 		Created: time.Now(), Updated: time.Now(), Visibility: "private",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
@@ -362,7 +362,7 @@ func TestHandleProjectGitHubPermissions(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID: "project_gh_perms", Slug: "gh-perms", Name: "GH Perms",
+		ID: tid("project_gh_perms"), Slug: "gh-perms", Name: "GH Perms",
 		Created: time.Now(), Updated: time.Now(), Visibility: "private",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
@@ -393,7 +393,7 @@ func TestHandleProjectGitHubPermissions(t *testing.T) {
 	}
 
 	// Verify stored
-	updatedProject, err := s.GetProject(ctx, "project_gh_perms")
+	updatedProject, err := s.GetProject(ctx, tid("project_gh_perms"))
 	if err != nil {
 		t.Fatalf("failed to get project: %v", err)
 	}
@@ -407,7 +407,7 @@ func TestHandleProjectGitHubPermissions(t *testing.T) {
 		t.Fatalf("expected 204, got %d", rec.Code)
 	}
 
-	clearedProject, err := s.GetProject(ctx, "project_gh_perms")
+	clearedProject, err := s.GetProject(ctx, tid("project_gh_perms"))
 	if err != nil {
 		t.Fatalf("failed to get project: %v", err)
 	}
@@ -449,7 +449,7 @@ func TestHandleAgentGitHubTokenRefresh_NoAuth(t *testing.T) {
 
 	// Create a project and agent
 	project := &store.Project{
-		ID:   "project_gh_refresh",
+		ID:   tid("project_gh_refresh"),
 		Name: "Test Project",
 		Slug: "test-project",
 	}
@@ -458,7 +458,7 @@ func TestHandleAgentGitHubTokenRefresh_NoAuth(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:        "agent_gh_refresh",
+		ID:        tid("agent_gh_refresh"),
 		Name:      "test-agent",
 		Slug:      "test-agent",
 		ProjectID: project.ID,
@@ -481,7 +481,7 @@ func TestHandleAgentGitHubTokenRefresh_DevAuth(t *testing.T) {
 
 	// Create a project and agent
 	project := &store.Project{
-		ID:   "project_gh_refresh2",
+		ID:   tid("project_gh_refresh2"),
 		Name: "Test Project 2",
 		Slug: "test-project-2",
 	}
@@ -490,7 +490,7 @@ func TestHandleAgentGitHubTokenRefresh_DevAuth(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:        "agent_gh_refresh2",
+		ID:        tid("agent_gh_refresh2"),
 		Name:      "test-agent-2",
 		Slug:      "test-agent-2",
 		ProjectID: project.ID,
@@ -513,7 +513,7 @@ func TestHandleAgentGitHubTokenRefresh_SelfAccess(t *testing.T) {
 
 	// Create a project and agent
 	project := &store.Project{
-		ID:   "project_gh_refresh3",
+		ID:   tid("project_gh_refresh3"),
 		Name: "Test Project 3",
 		Slug: "test-project-3",
 	}
@@ -522,7 +522,7 @@ func TestHandleAgentGitHubTokenRefresh_SelfAccess(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:        "agent_gh_refresh3",
+		ID:        tid("agent_gh_refresh3"),
 		Name:      "test-agent-3",
 		Slug:      "test-agent-3",
 		ProjectID: project.ID,
@@ -537,7 +537,7 @@ func TestHandleAgentGitHubTokenRefresh_SelfAccess(t *testing.T) {
 
 	// Generate an agent token with refresh scope
 	agentToken, err := srv.agentTokenService.GenerateAgentToken(
-		"agent_gh_refresh3", project.ID,
+		tid("agent_gh_refresh3"), project.ID,
 		[]AgentTokenScope{ScopeAgentTokenRefresh}, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
@@ -557,7 +557,7 @@ func TestHandleAgentGitHubTokenRefresh_NoInstallation(t *testing.T) {
 
 	// Create a project WITHOUT a GitHub App installation
 	project := &store.Project{
-		ID:   "project_gh_refresh4",
+		ID:   tid("project_gh_refresh4"),
 		Name: "Test Project 4",
 		Slug: "test-project-4",
 	}
@@ -566,7 +566,7 @@ func TestHandleAgentGitHubTokenRefresh_NoInstallation(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:        "agent_gh_refresh4",
+		ID:        tid("agent_gh_refresh4"),
 		Name:      "test-agent-4",
 		Slug:      "test-agent-4",
 		ProjectID: project.ID,
@@ -580,7 +580,7 @@ func TestHandleAgentGitHubTokenRefresh_NoInstallation(t *testing.T) {
 	}
 
 	agentToken, err := srv.agentTokenService.GenerateAgentToken(
-		"agent_gh_refresh4", project.ID,
+		tid("agent_gh_refresh4"), project.ID,
 		[]AgentTokenScope{ScopeAgentTokenRefresh}, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)

@@ -348,7 +348,7 @@ func TestListOperationRuns(t *testing.T) {
 	completed := time.Now().Add(10 * time.Second)
 	for i, status := range []string{"completed", "failed"} {
 		run := &store.MaintenanceOperationRun{
-			ID:           fmt.Sprintf("run-%d", i),
+			ID:           tid(fmt.Sprintf("run-%d", i)),
 			OperationKey: "pull-images",
 			Status:       status,
 			StartedAt:    now,
@@ -405,7 +405,7 @@ func TestGetOperationRun(t *testing.T) {
 	now := time.Now()
 	completed := now.Add(10 * time.Second)
 	run := &store.MaintenanceOperationRun{
-		ID:           "run-detail-1",
+		ID:           tid("run-detail-1"),
 		OperationKey: "pull-images",
 		Status:       "completed",
 		StartedAt:    now,
@@ -431,7 +431,7 @@ func TestGetOperationRun(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if resp["id"] != "run-detail-1" {
+	if resp["id"] != tid("run-detail-1") {
 		t.Errorf("expected id=run-detail-1, got %v", resp["id"])
 	}
 	if resp["log"] != "Pulling images...\nDone." {

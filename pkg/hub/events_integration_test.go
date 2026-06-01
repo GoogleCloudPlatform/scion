@@ -77,7 +77,7 @@ func setupEventTestServer(t *testing.T) (*Server, store.Store, *ChannelEventPubl
 	t.Cleanup(func() { pub.Close() })
 
 	project := &store.Project{
-		ID:         "project-evt",
+		ID:         tid("project-evt"),
 		Name:       "Event Test Project",
 		Slug:       "event-test-project",
 		Visibility: store.VisibilityPrivate,
@@ -85,7 +85,7 @@ func setupEventTestServer(t *testing.T) (*Server, store.Store, *ChannelEventPubl
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	broker := &store.RuntimeBroker{
-		ID:     "broker-evt",
+		ID:     tid("broker-evt"),
 		Name:   "Event Test Broker",
 		Slug:   "event-test-broker",
 		Status: store.BrokerStatusOnline,
@@ -140,8 +140,8 @@ func TestEventPublisher_DeleteAgentEmitsEvent(t *testing.T) {
 	ctx := context.Background()
 
 	agent := &store.Agent{
-		ID:        "agent-evt-del",
-		Slug:      "agent-evt-del",
+		ID:        tid("agent-evt-del"),
+		Slug:      tid("agent-evt-del"),
 		Name:      "Delete Me",
 		ProjectID: project.ID,
 		Phase:     string(state.PhaseRunning),
@@ -161,7 +161,7 @@ func TestEventPublisher_DeleteAgentEmitsEvent(t *testing.T) {
 		assert.Equal(t, "project."+project.ID+".agent.deleted", evt.Subject)
 		var data AgentDeletedEvent
 		require.NoError(t, json.Unmarshal(evt.Data, &data))
-		assert.Equal(t, "agent-evt-del", data.AgentID)
+		assert.Equal(t, tid("agent-evt-del"), data.AgentID)
 		assert.Equal(t, project.ID, data.ProjectID)
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for agent deleted event")

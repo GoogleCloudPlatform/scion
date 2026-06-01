@@ -238,7 +238,7 @@ func setupProjectAndBroker(t *testing.T, s store.Store) (string, string) {
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
-		ID:     "broker_bootstrap_test",
+		ID:     tid("broker_bootstrap_test"),
 		Slug:   "bootstrap-host",
 		Name:   "Bootstrap Host",
 		Status: store.BrokerStatusOnline,
@@ -248,7 +248,7 @@ func setupProjectAndBroker(t *testing.T, s store.Store) (string, string) {
 	}
 
 	project := &store.Project{
-		ID:                     "project_bootstrap_test",
+		ID:                     tid("project_bootstrap_test"),
 		Slug:                   "bootstrap-project",
 		Name:                   "Bootstrap Project",
 		GitRemote:              "https://github.com/test/bootstrap",
@@ -488,7 +488,7 @@ func TestCreateAgentWithWorkspaceBootstrap_LocalProvider(t *testing.T) {
 
 	// Create broker and project
 	broker := &store.RuntimeBroker{
-		ID:     "broker_local_path_test",
+		ID:     tid("broker_local_path_test"),
 		Slug:   "local-path-host",
 		Name:   "Local Path Host",
 		Status: store.BrokerStatusOnline,
@@ -498,7 +498,7 @@ func TestCreateAgentWithWorkspaceBootstrap_LocalProvider(t *testing.T) {
 	}
 
 	project := &store.Project{
-		ID:                     "project_local_path_test",
+		ID:                     tid("project_local_path_test"),
 		Slug:                   "local-path-project",
 		Name:                   "Local Path Project",
 		GitRemote:              "https://github.com/test/local-path",
@@ -720,11 +720,11 @@ func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 
 	// Create an agent in provisioning status (simulating post-bootstrap-create)
 	agent := &store.Agent{
-		ID:              "agent_bootstrap_finalize",
+		ID:              tid("agent_bootstrap_finalize"),
 		Slug:            "bootstrap-finalize",
 		Name:            "Bootstrap Finalize",
 		ProjectID:       projectID,
-		RuntimeBrokerID: "broker_bootstrap_test",
+		RuntimeBrokerID: tid("broker_bootstrap_test"),
 		Phase:           string(state.PhaseProvisioning),
 		Visibility:      store.VisibilityPrivate,
 		AppliedConfig: &store.AgentAppliedConfig{
@@ -786,7 +786,7 @@ func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 	}
 
 	dispatched := disp.dispatchedAgents[0]
-	if dispatched.ID != "agent_bootstrap_finalize" {
+	if dispatched.ID != tid("agent_bootstrap_finalize") {
 		t.Errorf("expected dispatched agent ID 'agent_bootstrap_finalize', got %q", dispatched.ID)
 	}
 
@@ -806,11 +806,11 @@ func TestSyncToFinalize_BootstrapMode_MissingFile(t *testing.T) {
 
 	// Create an agent in provisioning status
 	agent := &store.Agent{
-		ID:              "agent_bootstrap_missing",
+		ID:              tid("agent_bootstrap_missing"),
 		Slug:            "bootstrap-missing",
 		Name:            "Bootstrap Missing",
 		ProjectID:       projectID,
-		RuntimeBrokerID: "broker_bootstrap_test",
+		RuntimeBrokerID: tid("broker_bootstrap_test"),
 		Phase:           string(state.PhaseProvisioning),
 		Visibility:      store.VisibilityPrivate,
 	}
@@ -850,11 +850,11 @@ func TestSyncToFinalize_RejectsStoppedAgent(t *testing.T) {
 
 	// Create an agent in stopped status
 	agent := &store.Agent{
-		ID:              "agent_bootstrap_stopped",
+		ID:              tid("agent_bootstrap_stopped"),
 		Slug:            "bootstrap-stopped",
 		Name:            "Bootstrap Stopped",
 		ProjectID:       projectID,
-		RuntimeBrokerID: "broker_bootstrap_test",
+		RuntimeBrokerID: tid("broker_bootstrap_test"),
 		Phase:           string(state.PhaseStopped),
 		Visibility:      store.VisibilityPrivate,
 	}
@@ -900,11 +900,11 @@ func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 	ctx := context.Background()
 
 	agent := &store.Agent{
-		ID:              "agent_bootstrap_nodisp",
+		ID:              tid("agent_bootstrap_nodisp"),
 		Slug:            "bootstrap-nodisp",
 		Name:            "Bootstrap No Dispatcher",
 		ProjectID:       projectID,
-		RuntimeBrokerID: "broker_bootstrap_test",
+		RuntimeBrokerID: tid("broker_bootstrap_test"),
 		Phase:           string(state.PhaseProvisioning),
 		Visibility:      store.VisibilityPrivate,
 	}

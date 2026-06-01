@@ -161,7 +161,7 @@ func TestAuthMe(t *testing.T) {
 
 	// Create a user
 	user := &store.User{
-		ID:          "user_123",
+		ID:          tid("user_123"),
 		Email:       "me@example.com",
 		DisplayName: "Me",
 		Role:        "admin",

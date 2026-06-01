@@ -26,8 +26,8 @@ import (
 func TestAgentWithCapabilities_MarshalJSON(t *testing.T) {
 	agent := AgentWithCapabilities{
 		Agent: store.Agent{
-			ID:        "agent-1",
-			ProjectID: "project-1",
+			ID:        tid("agent-1"),
+			ProjectID: tid("project-1"),
 			Name:      "my-agent",
 		},
 		Cap: &Capabilities{
@@ -45,8 +45,8 @@ func TestAgentWithCapabilities_MarshalJSON(t *testing.T) {
 	require.NoError(t, err)
 
 	// Check embedded Agent fields
-	assert.Equal(t, "agent-1", m["id"])
-	assert.Equal(t, "project-1", m["projectId"])
+	assert.Equal(t, tid("agent-1"), m["id"])
+	assert.Equal(t, tid("project-1"), m["projectId"])
 	assert.Equal(t, "my-agent", m["name"])
 
 	// Check capability fields
@@ -56,7 +56,7 @@ func TestAgentWithCapabilities_MarshalJSON(t *testing.T) {
 	assert.Equal(t, true, m["cloudLogging"])
 
 	// Check legacy fields
-	assert.Equal(t, "project-1", m["groveId"])
+	assert.Equal(t, tid("project-1"), m["groveId"])
 }
 
 func TestProjectWithCapabilities_MarshalJSON(t *testing.T) {
@@ -64,7 +64,7 @@ func TestProjectWithCapabilities_MarshalJSON(t *testing.T) {
 		Project: store.Project{
 			ID:   "p-1",
 			Name: "Project 1",
-			Slug: "project-1",
+			Slug: tid("project-1"),
 		},
 		Cap: &Capabilities{
 			Actions: []string{"write"},
@@ -82,7 +82,7 @@ func TestProjectWithCapabilities_MarshalJSON(t *testing.T) {
 	// Check embedded Project fields
 	assert.Equal(t, "p-1", m["id"])
 	assert.Equal(t, "Project 1", m["name"])
-	assert.Equal(t, "project-1", m["slug"])
+	assert.Equal(t, tid("project-1"), m["slug"])
 
 	// Check capability fields
 	assert.NotNil(t, m["_capabilities"])
@@ -92,7 +92,7 @@ func TestProjectWithCapabilities_MarshalJSON(t *testing.T) {
 	// Check legacy fields
 	assert.Equal(t, "p-1", m["groveId"])
 	assert.Equal(t, "Project 1", m["groveName"])
-	assert.Equal(t, "project-1", m["grove"])
+	assert.Equal(t, tid("project-1"), m["grove"])
 }
 
 func TestTemplateWithCapabilities_MarshalJSON(t *testing.T) {

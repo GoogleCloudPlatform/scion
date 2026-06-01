@@ -31,22 +31,22 @@ func TestResolveSecrets(t *testing.T) {
 
 	// Create test secrets across multiple scopes
 	userSecret := &store.Secret{
-		ID:             "s1",
+		ID:             tid("s1"),
 		Key:            "API_KEY",
 		EncryptedValue: "user-api-key",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "API_KEY",
 		Scope:          store.ScopeUser,
-		ScopeID:        "user-1",
+		ScopeID:        tid("user-1"),
 	}
 	projectSecret := &store.Secret{
-		ID:             "s2",
+		ID:             tid("s2"),
 		Key:            "DB_PASS",
 		EncryptedValue: "project-db-pass",
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "DATABASE_PASSWORD",
 		Scope:          store.ScopeProject,
-		ScopeID:        "project-1",
+		ScopeID:        tid("project-1"),
 	}
 	// Project-level override of user API_KEY
 	projectOverride := &store.Secret{
@@ -56,7 +56,7 @@ func TestResolveSecrets(t *testing.T) {
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "API_KEY",
 		Scope:          store.ScopeProject,
-		ScopeID:        "project-1",
+		ScopeID:        tid("project-1"),
 	}
 	fileSecret := &store.Secret{
 		ID:             "s4",
@@ -65,7 +65,7 @@ func TestResolveSecrets(t *testing.T) {
 		SecretType:     store.SecretTypeFile,
 		Target:         "/etc/ssl/cert.pem",
 		Scope:          store.ScopeUser,
-		ScopeID:        "user-1",
+		ScopeID:        tid("user-1"),
 	}
 	varSecret := &store.Secret{
 		ID:             "s5",
@@ -74,7 +74,7 @@ func TestResolveSecrets(t *testing.T) {
 		SecretType:     store.SecretTypeVariable,
 		Target:         "config",
 		Scope:          store.ScopeUser,
-		ScopeID:        "user-1",
+		ScopeID:        tid("user-1"),
 	}
 
 	for _, s := range []*store.Secret{userSecret, projectSecret, projectOverride, fileSecret, varSecret} {
@@ -90,10 +90,10 @@ func TestResolveSecrets(t *testing.T) {
 	dispatcher.SetSecretBackend(backend)
 
 	agent := &store.Agent{
-		ID:        "agent-1",
+		ID:        tid("agent-1"),
 		Name:      "test-agent",
-		OwnerID:   "user-1",
-		ProjectID: "project-1",
+		OwnerID:   tid("user-1"),
+		ProjectID: tid("project-1"),
 	}
 
 	resolved, err := dispatcher.resolveSecrets(ctx, agent)
@@ -165,22 +165,22 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 	// Seed secrets directly through the store
 	for _, s := range []*store.Secret{
 		{
-			ID:             "s1",
+			ID:             tid("s1"),
 			Key:            "API_KEY",
 			EncryptedValue: "user-api-key",
 			SecretType:     store.SecretTypeEnvironment,
 			Target:         "API_KEY",
 			Scope:          store.ScopeUser,
-			ScopeID:        "user-1",
+			ScopeID:        tid("user-1"),
 		},
 		{
-			ID:             "s2",
+			ID:             tid("s2"),
 			Key:            "API_KEY",
 			EncryptedValue: "project-api-key",
 			SecretType:     store.SecretTypeEnvironment,
 			Target:         "API_KEY",
 			Scope:          store.ScopeProject,
-			ScopeID:        "project-1",
+			ScopeID:        tid("project-1"),
 		},
 		{
 			ID:             "s3",
@@ -189,7 +189,7 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 			SecretType:     store.SecretTypeEnvironment,
 			Target:         "DATABASE_PASSWORD",
 			Scope:          store.ScopeProject,
-			ScopeID:        "project-1",
+			ScopeID:        tid("project-1"),
 		},
 	} {
 		if err := memStore.CreateSecret(ctx, s); err != nil {
@@ -204,10 +204,10 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 	dispatcher.SetSecretBackend(backend)
 
 	agent := &store.Agent{
-		ID:        "agent-1",
+		ID:        tid("agent-1"),
 		Name:      "test-agent",
-		OwnerID:   "user-1",
-		ProjectID: "project-1",
+		OwnerID:   tid("user-1"),
+		ProjectID: tid("project-1"),
 	}
 
 	resolved, err := dispatcher.resolveSecrets(ctx, agent)
@@ -256,7 +256,7 @@ func TestResolveSecrets_NoOwner(t *testing.T) {
 	dispatcher.SetSecretBackend(backend)
 
 	agent := &store.Agent{
-		ID:   "agent-1",
+		ID:   tid("agent-1"),
 		Name: "test-agent",
 	}
 
@@ -276,7 +276,7 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 
 	// Create hub-scoped secrets
 	hubSecret := &store.Secret{
-		ID:             "sh1",
+		ID:             tid("sh1"),
 		Key:            "ORG_API_KEY",
 		EncryptedValue: "hub-org-api-key",
 		SecretType:     store.SecretTypeEnvironment,
@@ -286,7 +286,7 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 	}
 	// Create a hub secret that will be overridden by user scope
 	hubOverridden := &store.Secret{
-		ID:             "sh2",
+		ID:             tid("sh2"),
 		Key:            "API_KEY",
 		EncryptedValue: "hub-default-api-key",
 		SecretType:     store.SecretTypeEnvironment,
@@ -302,7 +302,7 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "API_KEY",
 		Scope:          store.ScopeUser,
-		ScopeID:        "user-1",
+		ScopeID:        tid("user-1"),
 	}
 	// Create a hub secret overridden by project scope
 	hubProjectOverridden := &store.Secret{
@@ -321,7 +321,7 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "DB_PASS",
 		Scope:          store.ScopeProject,
-		ScopeID:        "project-1",
+		ScopeID:        tid("project-1"),
 	}
 
 	for _, s := range []*store.Secret{hubSecret, hubOverridden, userSecret, hubProjectOverridden, projectSecret} {
@@ -338,8 +338,8 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 	agent := &store.Agent{
 		ID:        "agent-hub-1",
 		Name:      "hub-test-agent",
-		OwnerID:   "user-1",
-		ProjectID: "project-1",
+		OwnerID:   tid("user-1"),
+		ProjectID: tid("project-1"),
 	}
 
 	resolved, err := dispatcher.resolveSecrets(ctx, agent)
@@ -403,10 +403,10 @@ func TestResolveSecrets_NoBackend(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:        "agent-1",
+		ID:        tid("agent-1"),
 		Name:      "test-agent",
-		OwnerID:   "user-1",
-		ProjectID: "project-1",
+		OwnerID:   tid("user-1"),
+		ProjectID: tid("project-1"),
 	}
 
 	resolved, err := dispatcher.resolveSecrets(ctx, agent)

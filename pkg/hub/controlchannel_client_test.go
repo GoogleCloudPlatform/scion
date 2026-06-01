@@ -62,7 +62,7 @@ func TestControlChannelBrokerClient_DeleteAgentSignsTunneledRequest(t *testing.T
 		signer:  signer,
 	}
 
-	err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "", true, false, false, time.Time{})
+	err := client.DeleteAgent(context.Background(), tid("broker-1"), "unused", tid("agent-1"), "", true, false, false, time.Time{})
 	if err != nil {
 		t.Fatalf("DeleteAgent returned error: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestControlChannelBrokerClient_DeleteAgentSignsTunneledRequest(t *testing.T
 	if tunnel.lastRequest == nil {
 		t.Fatal("expected tunneled request to be captured")
 	}
-	if got := headerValue(tunnel.lastRequest.Headers, apiclient.HeaderBrokerID); got != "broker-1" {
+	if got := headerValue(tunnel.lastRequest.Headers, apiclient.HeaderBrokerID); got != tid("broker-1") {
 		t.Fatalf("expected %s header to be set, got %q", apiclient.HeaderBrokerID, got)
 	}
 	if got := headerValue(tunnel.lastRequest.Headers, apiclient.HeaderTimestamp); got == "" {
@@ -103,9 +103,9 @@ func TestControlChannelBrokerClient_StartAgentSignsTunneledRequest(t *testing.T)
 
 	_, err := client.StartAgent(
 		context.Background(),
-		"broker-1",
+		tid("broker-1"),
 		"unused",
-		"agent-1",
+		tid("agent-1"),
 		"project-id-1",
 		"run task",
 		"/tmp/project",
@@ -127,7 +127,7 @@ func TestControlChannelBrokerClient_StartAgentSignsTunneledRequest(t *testing.T)
 	if tunnel.lastRequest == nil {
 		t.Fatal("expected tunneled request to be captured")
 	}
-	if got := headerValue(tunnel.lastRequest.Headers, apiclient.HeaderBrokerID); got != "broker-1" {
+	if got := headerValue(tunnel.lastRequest.Headers, apiclient.HeaderBrokerID); got != tid("broker-1") {
 		t.Fatalf("expected %s header to be set, got %q", apiclient.HeaderBrokerID, got)
 	}
 	if got := tunnel.lastRequest.Method; got != http.MethodPost {
