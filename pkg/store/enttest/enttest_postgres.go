@@ -38,6 +38,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 
@@ -218,8 +219,15 @@ func hexID() string {
 	return strings.ReplaceAll(uuid.NewString(), "-", "")
 }
 
-// rewriteDatabase returns rawURL with its database path replaced by dbName.
+// rewriteDatabase returns rawURL with its database name replaced by dbName.
+// It accepts both URL-style ("postgres://...") and libpq keyword/value
+// ("host=... dbname=...") DSNs, mirroring what entc.OpenPostgres accepts.
 func rewriteDatabase(rawURL, dbName string) (string, error) {
+	if isKeywordValueDSN(rawURL) {
+		m := parseKeywordValueDSN(rawURL)
+		m["dbname"] = dbName
+		return buildKeywordValueDSN(m), nil
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return "", err
@@ -230,8 +238,16 @@ func rewriteDatabase(rawURL, dbName string) (string, error) {
 
 // withSearchPath returns rawURL pointing at dbName with the connection
 // search_path set to schema, so unqualified table creation/queries resolve to
-// that schema.
+// that schema. It accepts both URL-style and libpq keyword/value DSNs. In both
+// forms search_path is carried as a connection runtime parameter (pgx sends any
+// unrecognized keyword/query param as a startup GUC).
 func withSearchPath(rawURL, dbName, schema string) (string, error) {
+	if isKeywordValueDSN(rawURL) {
+		m := parseKeywordValueDSN(rawURL)
+		m["dbname"] = dbName
+		m["search_path"] = schema
+		return buildKeywordValueDSN(m), nil
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return "", err
@@ -241,4 +257,60 @@ func withSearchPath(rawURL, dbName, schema string) (string, error) {
 	q.Set("search_path", schema)
 	u.RawQuery = q.Encode()
 	return u.String(), nil
+}
+
+// WithConnParam returns dsn with the connection parameter key set to value,
+// accepting both URL-style and libpq keyword/value DSNs. It is used by tests that
+// need to attach an extra parameter (e.g. application_name) to the DSN returned by
+// NewSchemaURL without assuming a particular DSN format.
+func WithConnParam(dsn, key, value string) (string, error) {
+	if isKeywordValueDSN(dsn) {
+		m := parseKeywordValueDSN(dsn)
+		m[key] = value
+		return buildKeywordValueDSN(m), nil
+	}
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set(key, value)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+// isKeywordValueDSN reports whether dsn is a libpq keyword/value connection
+// string rather than a URL. URL DSNs contain a scheme separator ("://"); the
+// keyword/value form ("host=... dbname=...") does not.
+func isKeywordValueDSN(dsn string) bool {
+	return !strings.Contains(dsn, "://")
+}
+
+// parseKeywordValueDSN parses a libpq keyword/value DSN into a map. It handles
+// the unquoted form used by these tests (no spaces inside values); quoting of
+// values is not required for the simple host/port/user/password/dbname tokens in
+// the test connection string.
+func parseKeywordValueDSN(dsn string) map[string]string {
+	m := make(map[string]string)
+	for _, field := range strings.Fields(dsn) {
+		if i := strings.IndexByte(field, '='); i >= 0 {
+			m[field[:i]] = field[i+1:]
+		}
+	}
+	return m
+}
+
+// buildKeywordValueDSN serializes a keyword/value map back into a libpq DSN.
+// Keys are emitted in a stable order so the result is deterministic.
+func buildKeywordValueDSN(m map[string]string) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+m[k])
+	}
+	return strings.Join(parts, " ")
 }
