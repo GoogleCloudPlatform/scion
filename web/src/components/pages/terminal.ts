@@ -234,6 +234,29 @@ export class ScionPageTerminal extends LitElement {
       overflow: hidden;
     }
 
+    .disconnected-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.5);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    .disconnected-overlay .overlay-text {
+      color: #ef4444;
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: 0.15em;
+      text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+    }
+
     .loading-state,
     .error-state {
       display: flex;
@@ -809,7 +832,13 @@ export class ScionPageTerminal extends LitElement {
             </div>
           `
         : ''}
-      <div class="terminal-container"></div>
+      <div class="terminal-container">
+        ${!this.connected && this.terminal
+          ? html`<div class="disconnected-overlay">
+              <span class="overlay-text">DISCONNECTED</span>
+            </div>`
+          : ''}
+      </div>
     `;
   }
 }
