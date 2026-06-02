@@ -18,12 +18,14 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel/attribute"
 
@@ -625,6 +627,59 @@ func TestPostgresIntegration_TransactionalRollback(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("committed event not delivered")
+	}
+}
+
+// TestPostgresIntegration_HandlerCreateProjectEmitsNotify exercises the full
+// production publish path end-to-end: an HTTP project-create request handled by
+// the Hub server calls s.events.PublishProjectCreated on a real
+// PostgresEventPublisher, which must emit a pg_notify observable by an
+// independent raw LISTEN connection. This is the exact capability the
+// multi-replica live test probed with psql (create project => NOTIFY on
+// scion_ev_global); it guards against regressions in the cmd-level wiring that
+// connects the handler's s.events to the Postgres backend.
+func TestPostgresIntegration_HandlerCreateProjectEmitsNotify(t *testing.T) {
+	dsn := requirePostgres(t)
+	ctx := context.Background()
+
+	srv, _ := testServer(t)
+	pub, err := NewPostgresEventPublisher(ctx, dsn, dbmetrics.NewDisabled(), nil)
+	if err != nil {
+		t.Fatalf("publisher: %v", err)
+	}
+	defer pub.Close()
+	srv.SetEventPublisher(pub)
+
+	// Independent raw LISTEN on the global channel — bypasses the publisher's own
+	// listener/subscription machinery, mirroring the psql probe from the live test.
+	lconn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("listen conn: %v", err)
+	}
+	defer lconn.Close(context.Background())
+	if _, err := lconn.Exec(ctx, `LISTEN scion_ev_global`); err != nil {
+		t.Fatalf("LISTEN: %v", err)
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", map[string]interface{}{
+		"name": "pg-notify-wiring-" + strings.ReplaceAll(time.Now().Format("150405.000000"), ".", ""),
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create project: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Expect a project.<id>.created NOTIFY on the global channel.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		wctx, cancel := context.WithTimeout(ctx, time.Until(deadline))
+		n, werr := lconn.WaitForNotification(wctx)
+		cancel()
+		if werr != nil {
+			t.Fatalf("no NOTIFY observed for handler-driven project create (publish path not wired): %v", werr)
+		}
+		if strings.Contains(n.Payload, ".created") {
+			return // success: handler -> s.events -> pg_notify works
+		}
 	}
 }
 
