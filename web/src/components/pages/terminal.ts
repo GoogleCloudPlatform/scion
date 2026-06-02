@@ -228,10 +228,18 @@ export class ScionPageTerminal extends LitElement {
       opacity: 0.4;
     }
 
-    .terminal-container {
+    .terminal-wrapper {
       flex: 1;
       position: relative;
       overflow: hidden;
+    }
+
+    .terminal-container {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
     }
 
     .disconnected-overlay {
@@ -832,7 +840,8 @@ export class ScionPageTerminal extends LitElement {
             </div>
           `
         : ''}
-      <div class="terminal-container">
+      <div class="terminal-wrapper">
+        <div class="terminal-container"></div>
         ${!this.connected && this.terminal
           ? html`<div class="disconnected-overlay">
               <span class="overlay-text">DISCONNECTED</span>
