@@ -55,6 +55,7 @@ type RunConfig struct {
 	NetworkMode          string   // Container network mode (e.g. "host" for --network=host)
 	Project              string   // Project name (e.g., "global" or "my-project")
 	ProjectID            string   // Project ID (e.g., "550e8400-e29b-41d4-a716-446655440000")
+<<<<<<< HEAD
 
 	// WorkspaceBackendName is "local" or "nfs", set by the workspace backend
 	// selector. Used to branch UID/GID injection and skip per-start chown
@@ -101,6 +102,9 @@ type RunConfig struct {
 	// wait-for-sentinel init container instead of the cloning one.
 	// Callers should not set this field.
 	nfsProvisionLockLost bool
+
+	AllocatedPorts       []int    // Host ports allocated from the port pool, published as -p and injected as env vars
+	PortHostURL          string   // Base URL for constructing agent port URLs (e.g. "http://35.232.118.211")
 }
 
 type Runtime interface {

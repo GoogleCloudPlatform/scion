@@ -360,6 +360,15 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 	}
 
+	for i, port := range config.AllocatedPorts {
+		suffix := string(rune('A' + i))
+		addEnv(fmt.Sprintf("AVAILABLE_LOCALHOST_PORT_%s", suffix), fmt.Sprintf("%d", port))
+		addArg("-p", fmt.Sprintf("%d:%d", port, port))
+		if config.PortHostURL != "" {
+			addEnv(fmt.Sprintf("AVAILABLE_LOCALHOST_URL_%s", suffix), fmt.Sprintf("%s:%d", config.PortHostURL, port))
+		}
+	}
+
 	// Inject environment-type resolved secrets
 	for _, s := range config.ResolvedSecrets {
 		if s.Type == "environment" || s.Type == "" {

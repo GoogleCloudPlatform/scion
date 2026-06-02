@@ -990,6 +990,20 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 	}
 
+	for i, port := range config.AllocatedPorts {
+		suffix := string(rune('A' + i))
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  fmt.Sprintf("AVAILABLE_LOCALHOST_PORT_%s", suffix),
+			Value: fmt.Sprintf("%d", port),
+		})
+		if config.PortHostURL != "" {
+			envVars = append(envVars, corev1.EnvVar{
+				Name:  fmt.Sprintf("AVAILABLE_LOCALHOST_URL_%s", suffix),
+				Value: fmt.Sprintf("%s:%d", config.PortHostURL, port),
+			})
+		}
+	}
+
 	// Secret mounting: determine strategy and inject secrets
 	var extraVolumes []corev1.Volume
 	var extraVolumeMounts []corev1.VolumeMount

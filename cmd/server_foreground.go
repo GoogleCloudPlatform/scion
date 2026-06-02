@@ -2000,6 +2000,31 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	statelessCloudRunBroker := enableHub && !simulateRemoteBroker && rt != nil && rt.Name() == "cloudrun"
 
 	mgr := agent.NewManager(rt)
+
+	// Initialize port pool from broker settings
+	if versionedSettings, _, err := config.LoadEffectiveSettings(""); err == nil &&
+		versionedSettings != nil && versionedSettings.Server != nil &&
+		versionedSettings.Server.Broker != nil && versionedSettings.Server.Broker.PortPool != nil {
+		pp := versionedSettings.Server.Broker.PortPool
+		if pp.Enabled == nil || *pp.Enabled {
+			portRange := pp.Range
+			if portRange == "" {
+				portRange = "8000-9000"
+			}
+			perAgent := pp.PortsPerAgent
+			if perAgent <= 0 {
+				perAgent = 2
+			}
+			pMin, pMax, err := api.ParsePortRange(portRange)
+			if err != nil {
+				log.Printf("Warning: invalid port_pool range %q: %v", portRange, err)
+			} else {
+				mgr.PortPool = runtime.NewPortPool(pMin, pMax, perAgent, pp.HostURL)
+				log.Printf("Port pool initialized: range %d-%d, %d ports per agent, host_url=%q", pMin, pMax, perAgent, pp.HostURL)
+			}
+		}
+	}
+
 	settings := brokerSettings
 
 	// Try loading versioned settings to get broker identity from server.broker

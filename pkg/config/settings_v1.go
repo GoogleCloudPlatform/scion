@@ -471,6 +471,15 @@ type V1BrokerConfig struct {
 	// dispatch agents whose harness-config declares container-script
 	// provisioning. Defaults to true; set false to block container-script dispatches.
 	AllowContainerScriptHarnesses *bool `json:"allow_container_script_harnesses,omitempty" yaml:"allow_container_script_harnesses,omitempty" koanf:"allow_container_script_harnesses"`
+
+	PortPool *V1PortPoolConfig `json:"port_pool,omitempty" yaml:"port_pool,omitempty" koanf:"port_pool"`
+}
+
+type V1PortPoolConfig struct {
+	Enabled       *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+	Range         string `json:"range,omitempty" yaml:"range,omitempty" koanf:"range"`
+	PortsPerAgent int    `json:"ports_per_agent,omitempty" yaml:"ports_per_agent,omitempty" koanf:"ports_per_agent"`
+	HostURL       string `json:"host_url,omitempty" yaml:"host_url,omitempty" koanf:"host_url"`
 }
 
 // V1DatabaseConfig holds database settings.

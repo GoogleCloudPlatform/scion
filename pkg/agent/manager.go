@@ -67,6 +67,7 @@ type Manager interface {
 
 type AgentManager struct {
 	Runtime   runtime.Runtime
+	PortPool  *runtime.PortPool
 	msgBuffer *MessageBuffer
 }
 
@@ -74,7 +75,7 @@ type AgentManager struct {
 // Messages arriving within this window are coalesced into a single delivery.
 const defaultBufferDelay = 2 * time.Second
 
-func NewManager(rt runtime.Runtime) Manager {
+func NewManager(rt runtime.Runtime) *AgentManager {
 	mgr := &AgentManager{
 		Runtime: rt,
 	}
@@ -113,13 +114,25 @@ func (m *AgentManager) Stop(ctx context.Context, agentID string, projectPath str
 				if stopProjectName != "" && !matchAgentProject(a, stopProjectName, "") {
 					continue
 				}
-				return m.Runtime.Stop(ctx, a.ContainerID)
+				if stopErr := m.Runtime.Stop(ctx, a.ContainerID); stopErr != nil {
+					return stopErr
+				}
+				if m.PortPool != nil {
+					m.PortPool.Release(a.Name)
+				}
+				return nil
 			}
 		}
 	}
 	// Fallback: agentID may already be a container ID, or the list
 	// failed — pass it through directly.
-	return m.Runtime.Stop(ctx, agentID)
+	if stopErr := m.Runtime.Stop(ctx, agentID); stopErr != nil {
+		return stopErr
+	}
+	if m.PortPool != nil {
+		m.PortPool.Release(agentID)
+	}
+	return nil
 }
 
 func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
@@ -171,6 +184,9 @@ func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles b
 			return false, fmt.Errorf("failed to delete container: %w", err)
 		}
 		util.Debugf("delete: runtime delete completed for container %s", targetID)
+		if m.PortPool != nil {
+			m.PortPool.Release(agentID)
+		}
 	}
 
 	if deleteFiles {

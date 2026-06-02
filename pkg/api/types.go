@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -352,6 +353,37 @@ type ResourceList struct {
 	Memory string `json:"memory,omitempty" yaml:"memory,omitempty"`
 }
 
+// PortPoolConfig controls the hub-managed port pool that allocates unique host
+// ports for agent containers.
+type PortPoolConfig struct {
+	Enabled       *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Range         string `json:"range,omitempty" yaml:"range,omitempty"` // e.g. "8000-9000"
+	PortsPerAgent int    `json:"ports_per_agent,omitempty" yaml:"ports_per_agent,omitempty"`
+}
+
+// ParsePortRange parses a "min-max" range string into its integer bounds.
+func ParsePortRange(s string) (min, max int, err error) {
+	parts := strings.SplitN(s, "-", 2)
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("invalid port range %q: expected format \"min-max\"", s)
+	}
+	min, err = strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid port range %q: bad min: %w", s, err)
+	}
+	max, err = strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid port range %q: bad max: %w", s, err)
+	}
+	if min < 1 || max > 65535 {
+		return 0, 0, fmt.Errorf("invalid port range %q: ports must be between 1 and 65535", s)
+	}
+	if min > max {
+		return 0, 0, fmt.Errorf("invalid port range %q: min (%d) > max (%d)", s, min, max)
+	}
+	return min, max, nil
+}
+
 // AgentHubConfig holds hub connection settings that can be specified per-agent
 // or per-template in scion-agent.yaml. When set, these take highest priority
 // for the agent's hub endpoint, overriding project settings and server config.
@@ -462,7 +494,8 @@ type ScionConfig struct {
 	Hub           *AgentHubConfig            `json:"hub,omitempty" yaml:"hub,omitempty"`
 	Telemetry     *TelemetryConfig           `json:"telemetry,omitempty" yaml:"telemetry,omitempty"`
 
-	Secrets []RequiredSecret `json:"secrets,omitempty" yaml:"secrets,omitempty"`
+	PortPool *PortPoolConfig  `json:"port_pool,omitempty" yaml:"port_pool,omitempty"`
+	Secrets  []RequiredSecret `json:"secrets,omitempty" yaml:"secrets,omitempty"`
 
 	// Skills declares skill references to resolve at provision time.
 	Skills []SkillReference `json:"skills,omitempty" yaml:"skills,omitempty" koanf:"skills"`
