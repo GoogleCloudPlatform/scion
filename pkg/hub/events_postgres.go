@@ -155,7 +155,13 @@ func NewPostgresEventPublisher(ctx context.Context, dsn string, metrics dbmetric
 		log = slog.Default()
 	}
 
-	pool, err := pgxpool.New(ctx, dsn)
+	poolCfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("parsing postgres event dsn: %w", err)
+	}
+	applyEventPoolKeepalives(poolCfg)
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return nil, fmt.Errorf("creating postgres event pool: %w", err)
 	}
@@ -383,7 +389,7 @@ func (p *PostgresEventPublisher) runListener() {
 			return
 		}
 
-		conn, err := pgx.Connect(p.ctx, p.dsn)
+		conn, err := p.connectListener(p.ctx)
 		if err != nil {
 			if p.ctx.Err() != nil {
 				return
@@ -418,6 +424,19 @@ func (p *PostgresEventPublisher) runListener() {
 		}
 		backoff = nextBackoff(backoff, maxBackoff)
 	}
+}
+
+// connectListener opens the dedicated listener connection with TCP keepalives and
+// a connect timeout applied, so the long-lived (mostly idle) LISTEN connection
+// detects a silently dropped peer instead of blocking forever in
+// WaitForNotification on a dead socket.
+func (p *PostgresEventPublisher) connectListener(ctx context.Context) (*pgx.Conn, error) {
+	cc, err := pgx.ParseConfig(p.dsn)
+	if err != nil {
+		return nil, fmt.Errorf("parsing listener dsn: %w", err)
+	}
+	applyConnKeepalives(cc)
+	return pgx.ConnectConfig(ctx, cc)
 }
 
 // listenLoop applies pending subscription changes and waits for notifications on
@@ -581,6 +600,54 @@ func (p *PostgresEventPublisher) sleep(d time.Duration) bool {
 		return false
 	case <-t.C:
 		return true
+	}
+}
+
+// eventConnectTimeout bounds a single connection attempt for the event pool and
+// listener, so a network black-hole surfaces as a retryable error instead of a
+// hang.
+const eventConnectTimeout = 10 * time.Second
+
+// applyEventPoolKeepalives attaches TCP keepalive GUCs and a connect timeout to
+// the event pool's per-connection config, and bounds idle/total connection age.
+// CloudSQL (and NAT gateways) silently drop idle connections; keepalives let the
+// kernel detect a dead peer and the idle/lifetime caps recycle connections before
+// the remote does, so the listener and publishers don't stall on a dead socket.
+func applyEventPoolKeepalives(cfg *pgxpool.Config) {
+	applyConnKeepalives(cfg.ConnConfig)
+	// Recycle idle event-pool connections well before CloudSQL's ~10m idle
+	// timeout, and bound total connection age.
+	if cfg.MaxConnIdleTime == 0 {
+		cfg.MaxConnIdleTime = 5 * time.Minute
+	}
+	if cfg.MaxConnLifetime == 0 {
+		cfg.MaxConnLifetime = 30 * time.Minute
+	}
+}
+
+// applyConnKeepalives sets the connect timeout and server-side TCP keepalive GUCs
+// on a single pgx connection config. Existing RuntimeParams are not overwritten so
+// an explicit DSN setting wins. Values: probe after 60s idle, every 15s, give up
+// after 4 missed probes (~2 min to detect a dead peer).
+func applyConnKeepalives(cc *pgx.ConnConfig) {
+	if cc == nil {
+		return
+	}
+	if cc.ConnectTimeout == 0 {
+		cc.ConnectTimeout = eventConnectTimeout
+	}
+	if cc.RuntimeParams == nil {
+		cc.RuntimeParams = make(map[string]string)
+	}
+	defaults := map[string]string{
+		"tcp_keepalives_idle":     "60",
+		"tcp_keepalives_interval": "15",
+		"tcp_keepalives_count":    "4",
+	}
+	for k, v := range defaults {
+		if _, ok := cc.RuntimeParams[k]; !ok {
+			cc.RuntimeParams[k] = v
+		}
 	}
 }
 

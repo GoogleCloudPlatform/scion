@@ -637,15 +637,20 @@ func initStore(cfg *config.GlobalConfig) (store.Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid database pool config: %w", err)
 	}
+	connMaxIdleTime, err := cfg.Database.ConnMaxIdleTimeDuration()
+	if err != nil {
+		return nil, fmt.Errorf("invalid database pool config: %w", err)
+	}
 
 	// The connection pool config is shared across backends. For SQLite,
 	// MaxOpenConns is forced to 1 by applyDatabasePoolDefaults to serialize
-	// writes; for Postgres it carries the larger pool sizing (default 10/5/30m)
-	// since Postgres handles concurrent connections natively.
+	// writes; for Postgres it carries the larger pool sizing (default 10/5/30m
+	// lifetime, 5m idle) since Postgres handles concurrent connections natively.
 	pool := entc.PoolConfig{
 		MaxOpenConns:    cfg.Database.MaxOpenConns,
 		MaxIdleConns:    cfg.Database.MaxIdleConns,
 		ConnMaxLifetime: connMaxLifetime,
+		ConnMaxIdleTime: connMaxIdleTime,
 	}
 
 	var entClient *ent.Client

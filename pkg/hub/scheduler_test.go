@@ -1265,3 +1265,83 @@ func TestDispatchAgentEventHandler_CreatesAgentNoDispatcher(t *testing.T) {
 		t.Error("agent was not created in the store")
 	}
 }
+
+// ============================================================================
+// Singleton Guard Tests (advisory-lock leader election)
+// ============================================================================
+
+// lockerStore is a minimal store that also implements store.AdvisoryLocker so
+// the singleton guard's lock-acquisition branches can be exercised in isolation.
+type lockerStore struct {
+	store.Store // embedded; unused methods panic if called
+
+	acquired bool
+	err      error
+	released *atomic.Int32
+}
+
+func (l *lockerStore) TryAdvisoryLock(_ context.Context, _ store.AdvisoryLockKey) (bool, func() error, error) {
+	if l.err != nil {
+		return false, func() error { return nil }, l.err
+	}
+	return l.acquired, func() error {
+		if l.released != nil {
+			l.released.Add(1)
+		}
+		return nil
+	}, nil
+}
+
+// TestSingletonGuard_SkipsTickOnLockError verifies that a lock-acquisition error
+// (e.g. a connection timeout) causes the tick to be SKIPPED rather than running
+// the handler unguarded — running unguarded would let multiple replicas execute
+// the same singleton work concurrently.
+func TestSingletonGuard_SkipsTickOnLockError(t *testing.T) {
+	s := NewScheduler(&lockerStore{err: fmt.Errorf("connection timeout")}, slog.Default())
+
+	var ran atomic.Int32
+	guarded := s.singletonGuard("test", store.LockSoftDeletePurge, func(_ context.Context) {
+		ran.Add(1)
+	})
+	guarded(context.Background())
+
+	if got := ran.Load(); got != 0 {
+		t.Fatalf("handler ran %d times on lock error; expected 0 (tick must be skipped, not run unguarded)", got)
+	}
+}
+
+// TestSingletonGuard_RunsWhenAcquired verifies the handler runs and the lock is
+// released when acquisition succeeds.
+func TestSingletonGuard_RunsWhenAcquired(t *testing.T) {
+	var released atomic.Int32
+	s := NewScheduler(&lockerStore{acquired: true, released: &released}, slog.Default())
+
+	var ran atomic.Int32
+	guarded := s.singletonGuard("test", store.LockSoftDeletePurge, func(_ context.Context) {
+		ran.Add(1)
+	})
+	guarded(context.Background())
+
+	if got := ran.Load(); got != 1 {
+		t.Fatalf("handler ran %d times; expected 1", got)
+	}
+	if got := released.Load(); got != 1 {
+		t.Fatalf("lock released %d times; expected 1", got)
+	}
+}
+
+// TestSingletonGuard_SkipsWhenHeldByAnother verifies the handler does NOT run
+// when another replica holds the lock (acquired=false, no error).
+func TestSingletonGuard_SkipsWhenHeldByAnother(t *testing.T) {
+	s := NewScheduler(&lockerStore{acquired: false}, slog.Default())
+
+	var ran atomic.Int32
+	guarded := s.singletonGuard("test", store.LockSoftDeletePurge, func(_ context.Context) {
+		ran.Add(1)
+	})
+	guarded(context.Background())
+
+	if got := ran.Load(); got != 0 {
+		t.Fatalf("handler ran %d times while lock held by another replica; expected 0", got)
+	}
+}
