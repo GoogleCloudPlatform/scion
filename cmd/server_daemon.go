@@ -178,6 +178,11 @@ func runServerStop(cmd *cobra.Command, args []string) error {
 	}
 
 	running, pid, _ := daemon.StatusComponent(serverDaemonComponent, globalDir)
+
+	if stopForce {
+		return runServerStopForce(globalDir, running, pid)
+	}
+
 	if !running {
 		return fmt.Errorf("server daemon is not running")
 	}
@@ -196,6 +201,49 @@ func runServerStop(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println("Server daemon stopped.")
+	return nil
+}
+
+func runServerStopForce(globalDir string, pidRunning bool, pid int) error {
+	killed := false
+
+	// If PID file exists and process is running, stop it normally first.
+	if pidRunning {
+		fmt.Printf("Stopping server daemon (PID: %d)...\n", pid)
+		if err := daemon.StopComponent(serverDaemonComponent, globalDir); err == nil {
+			time.Sleep(500 * time.Millisecond)
+			killed = true
+		}
+	}
+
+	// Probe default server ports and kill any process holding them.
+	ports := []int{8080, 9800, 9810}
+	occupied := daemon.DetectOccupiedPorts(ports)
+	if len(occupied) == 0 && !killed {
+		fmt.Println("No running server found.")
+		return nil
+	}
+
+	for _, port := range occupied {
+		killedPID, err := daemon.ForceKillPort(port)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to kill process on port %d: %v\n", port, err)
+			continue
+		}
+		if killedPID > 0 {
+			fmt.Printf("Killed process %d on port %d\n", killedPID, port)
+			killed = true
+		}
+	}
+
+	// Clean up stale PID file
+	_ = daemon.RemovePIDComponent(serverDaemonComponent, globalDir)
+
+	if killed {
+		fmt.Println("Server stopped (forced).")
+	} else {
+		fmt.Println("No running server found.")
+	}
 	return nil
 }
 

@@ -58,6 +58,7 @@ var (
 
 	// Server daemon flags
 	serverStartForeground bool
+	stopForce             bool
 
 	// Hosted mode flag (replaces former "production" mode)
 	hostedMode bool
@@ -276,6 +277,9 @@ func init() {
 
 	// Admin bootstrap flags
 	serverStartCmd.Flags().StringVar(&adminEmails, "admin-emails", "", "Comma-separated list of email addresses to auto-promote to admin role")
+
+	// Stop flags
+	serverStopCmd.Flags().BoolVar(&stopForce, "force", false, "Kill any process listening on the server ports, even without a PID file")
 
 	// Status flags
 	serverStatusCmd.Flags().BoolVar(&serverStatusJSON, "json", false, "Output in JSON format")
