@@ -19,11 +19,35 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"entgo.io/ent/dialect"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// advisoryLockTimeout bounds the two short, non-blocking database operations the
+// advisory lock performs: checking a connection out of the pool + running
+// pg_try_advisory_lock on acquire, and running pg_advisory_unlock on release.
+//
+// It is deliberately MUCH shorter than the scheduler's 55s per-handler timeout.
+// Both operations are expected to complete in milliseconds: pg_try_advisory_lock
+// never waits on the lock (it returns immediately), and checking out a
+// connection only blocks when the pool has no usable connection to hand back.
+//
+// Binding acquire to a short deadline keeps a single bad tick cheap. If the pool
+// cannot produce a healthy connection quickly we want to fail this tick fast and
+// retry on the next one, NOT block a scheduler goroutine (and its pending pool
+// connection request) for nearly the whole 55s window. Letting acquisition hang
+// for ~55s lets slow ticks overlap across the 60s scheduler interval and across
+// the several singleton handlers that fire each minute, which compounds pool
+// pressure instead of shedding it.
+//
+// Binding release with its own fresh deadline (rather than context.Background)
+// guarantees the unlock cannot hang forever on a connection that died while the
+// lock was held, which would otherwise prevent conn.Close() from ever running
+// and leak the connection out of the pool permanently.
+const advisoryLockTimeout = 5 * time.Second
 
 // This file implements the dialect-aware cluster-coordination primitives that
 // let N stateless hub processes share one database safely (multi-replica
@@ -74,7 +98,14 @@ func (c *CompositeStore) TryAdvisoryLock(ctx context.Context, key store.Advisory
 		return true, noopRelease, nil
 	}
 
-	conn, err := db.Conn(ctx)
+	// Bound connection checkout + the try-lock query to a short deadline derived
+	// from ctx (but never longer than advisoryLockTimeout). A healthy pool serves
+	// these in milliseconds; if it cannot, we fail this tick fast and let the next
+	// one retry rather than parking a scheduler goroutine for the full 55s.
+	acquireCtx, cancelAcquire := context.WithTimeout(ctx, advisoryLockTimeout)
+	defer cancelAcquire()
+
+	conn, err := db.Conn(acquireCtx)
 	if err != nil {
 		return false, noopRelease, fmt.Errorf("advisory lock: acquiring connection: %w", err)
 	}
@@ -82,7 +113,7 @@ func (c *CompositeStore) TryAdvisoryLock(ctx context.Context, key store.Advisory
 	var acquired bool
 	// pg_try_advisory_lock returns immediately: true if the lock was granted,
 	// false if it is already held (by this or another session).
-	if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", int64(key)).Scan(&acquired); err != nil {
+	if err := conn.QueryRowContext(acquireCtx, "SELECT pg_try_advisory_lock($1)", int64(key)).Scan(&acquired); err != nil {
 		_ = conn.Close()
 		return false, noopRelease, fmt.Errorf("advisory lock: pg_try_advisory_lock(%d): %w", int64(key), err)
 	}
@@ -94,12 +125,20 @@ func (c *CompositeStore) TryAdvisoryLock(ctx context.Context, key store.Advisory
 	}
 
 	// We own the lock. release unlocks on the same connection, then frees it.
+	// cancelAcquire above only tears down acquireCtx; it does NOT close conn, so
+	// the session (and therefore the lock) stays alive until release runs.
 	release := func() error {
-		// Use a background context so the unlock still runs even if the
-		// critical section's ctx has been cancelled. Closing the connection
-		// would also drop the session lock, but unlocking explicitly is
-		// cleaner and lets the connection be reused.
-		_, unlockErr := conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", int64(key))
+		// Use a fresh, bounded context detached from the critical section's ctx
+		// so the unlock still runs even if that ctx was cancelled, but cannot
+		// hang forever on a connection that silently died while we held the
+		// lock. Without the bound, a dead connection would block this Exec
+		// indefinitely, conn.Close() below would never run, and the connection
+		// would leak out of the pool permanently. Closing the connection would
+		// also drop the session lock, but unlocking explicitly is cleaner and
+		// lets the connection be reused.
+		unlockCtx, cancel := context.WithTimeout(context.Background(), advisoryLockTimeout)
+		defer cancel()
+		_, unlockErr := conn.ExecContext(unlockCtx, "SELECT pg_advisory_unlock($1)", int64(key))
 		closeErr := conn.Close()
 		if unlockErr != nil {
 			return fmt.Errorf("advisory lock: pg_advisory_unlock(%d): %w", int64(key), unlockErr)
