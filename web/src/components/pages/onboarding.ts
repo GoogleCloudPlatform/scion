@@ -82,6 +82,7 @@ export class ScionPageOnboarding extends LitElement {
   @state() private buildLogs: string[] = [];
   @state() private buildExpanded = false;
   @state() private runtimeAvailable = false;
+  @state() private buildAvailable = false;
   private imageEventSource: EventSource | null = null;
 
   // Step 5: Workspace
@@ -897,7 +898,7 @@ export class ScionPageOnboarding extends LitElement {
           @click=${this.handlePullImages}
         >Pull images</sl-button>
 
-        ${this.runtimeAvailable ? html`
+        ${this.buildAvailable ? html`
           <sl-button
             variant="default"
             size="small"
@@ -905,7 +906,11 @@ export class ScionPageOnboarding extends LitElement {
             ?disabled=${this.imagePulling || this.imageBuilding}
             @click=${this.handleBuildImages}
           >Build locally</sl-button>
-        ` : nothing}
+        ` : html`
+          <p style="font-size:0.8125rem;color:var(--scion-text-muted,#64748b);margin:0;">
+            Pre-built images are available via pull. Local builds require a source checkout.
+          </p>
+        `}
       </div>
 
       ${this.buildLogs.length > 0 ? html`
@@ -1075,6 +1080,13 @@ export class ScionPageOnboarding extends LitElement {
       if (res.ok) {
         const data = (await res.json()) as RuntimeResponse;
         this.runtimeAvailable = data.available;
+      }
+    } catch { /* ignore */ }
+    try {
+      const res = await apiFetch('/api/v1/system/status');
+      if (res.ok) {
+        const data = (await res.json()) as OnboardingStatus;
+        this.buildAvailable = data.buildAvailable ?? false;
       }
     } catch { /* ignore */ }
   }

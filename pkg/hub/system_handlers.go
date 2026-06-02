@@ -226,6 +226,7 @@ type OnboardingStatus struct {
 	Complete         bool   `json:"complete"`
 	EmbeddedBrokerID string `json:"embeddedBrokerID,omitempty"`
 	ImageRegistry    string `json:"imageRegistry,omitempty"`
+	BuildAvailable   bool   `json:"buildAvailable"`
 }
 
 func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
@@ -285,6 +286,9 @@ func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 	if vs, loadErr := config.LoadSingleFileVersioned(globalDir); loadErr == nil && vs != nil {
 		status.ImageRegistry = vs.ResolveImageRegistry("")
 	}
+
+	// BuildAvailable: true only if the build script can be resolved
+	status.BuildAvailable = resolveBuildScript() != ""
 
 	return status
 }
@@ -448,6 +452,22 @@ type imageBuildLogEvent struct {
 	Line string `json:"line"`
 }
 
+func resolveBuildScript() string {
+	var path string
+	if root := os.Getenv("SCION_ROOT"); root != "" {
+		path = filepath.Join(root, "image-build", "scripts", "build-images.sh")
+	} else if exe, err := os.Executable(); err == nil {
+		path = filepath.Join(filepath.Dir(exe), "..", "image-build", "scripts", "build-images.sh")
+	}
+	if path == "" {
+		return ""
+	}
+	if _, err := os.Stat(path); err != nil {
+		return ""
+	}
+	return path
+}
+
 func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
@@ -495,17 +515,9 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	var buildScript string
-	if root := os.Getenv("SCION_ROOT"); root != "" {
-		buildScript = filepath.Join(root, "image-build", "scripts", "build-images.sh")
-	} else if exe, err := os.Executable(); err == nil {
-		buildScript = filepath.Join(filepath.Dir(exe), "..", "image-build", "scripts", "build-images.sh")
-	} else {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "cannot determine install location: set SCION_ROOT or ensure the binary path is resolvable", nil)
-		return
-	}
-	if _, err := os.Stat(buildScript); err != nil {
-		writeError(w, http.StatusNotFound, ErrCodeNotFound, "build script not found at "+buildScript, nil)
+	buildScript := resolveBuildScript()
+	if buildScript == "" {
+		http.Error(w, `{"error":"local builds require a source checkout; use image pull instead","buildUnavailable":true}`, http.StatusUnprocessableEntity)
 		return
 	}
 
