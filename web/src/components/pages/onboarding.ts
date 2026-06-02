@@ -498,8 +498,9 @@ export class ScionPageOnboarding extends LitElement {
         }
       }
 
-      // Resume: advance past completed steps
-      if (status) {
+      // Resume: advance past completed steps only if user has previously started
+      const previouslyStarted = sessionStorage.getItem('onboardingStarted') === 'true';
+      if (status && previouslyStarted) {
         if (status.identitySet && this.currentStep === 0) this.currentStep = 1;
         if (status.runtimeOK && this.currentStep <= 2) this.currentStep = Math.max(this.currentStep, 3);
         if (status.harnessesSeeded && this.currentStep <= 3) this.currentStep = Math.max(this.currentStep, 4);
@@ -617,6 +618,7 @@ export class ScionPageOnboarding extends LitElement {
         this.error = await extractApiError(res, 'Failed to save identity');
         return;
       }
+      sessionStorage.setItem('onboardingStarted', 'true');
       this.currentStep = 1;
       void this.loadSystemCheck();
     } finally {
@@ -1305,6 +1307,7 @@ export class ScionPageOnboarding extends LitElement {
   private renderDone() {
     sessionStorage.setItem('onboardingComplete', 'true');
     sessionStorage.removeItem(ONBOARDING_STATUS_KEY);
+    sessionStorage.removeItem('onboardingStarted');
 
     return html`
       <div class="done-content">
